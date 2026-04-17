@@ -100,22 +100,25 @@ def _eval_value(node, morsel):
                 vector_from_arrow,
                 vector_from_sequence,
             )
+            from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
             from opteryx.expression.binary_operators import MapAccessOp
 
-            # Use type discriminator instead of hasattr check
-            source = left_vec.to_arrow() if hasattr(left_vec, "to_arrow") else left_vec
-            result = MapAccessOp(source, [right_val])
+            # Keep MapAccess in native vector space where possible to avoid
+            # costly Arrow <-> Draken round-trips.
+            key_vec = Int64Vector.from_constant(int(right_val), 1)
+            result = MapAccessOp(left_vec, key_vec)
+            if is_draken_vector(result):
+                return result
             if hasattr(result, "to_arrow"):
                 return vector_from_arrow(result.to_arrow())
             return vector_from_sequence(result)
 
         if op in ("Arrow", "LongArrow"):
-            from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+            from opteryx.compiled.draken.vectors.string_vector import StringVector
             from opteryx.expression.binary_operators import ArrowOp, LongArrowOp
 
-            docs = left_vec.to_pylist()
-            result = ArrowOp(docs, [right_val]) if op == "Arrow" else LongArrowOp(docs, [right_val])
-            return vector_from_arrow(result)
+            key_vec = StringVector.from_constant(right_val, 1)
+            return ArrowOp(left_vec, key_vec) if op == "Arrow" else LongArrowOp(left_vec, key_vec)
 
         raise NotImplementedError(
             f"_eval_value: EXTRACTION_OPERATOR {op!r} not supported in Draken path"

@@ -6,9 +6,12 @@
         "depends": [
             "src/cpp/hllpp.h",
             "src/cpp/simd_hash.h",
+            "third_party/mabel/carchar/carchar_common.hpp",
             "third_party/mabel/carchar/carchar_index.hpp",
             "third_party/mabel/carchar/carchar_set.hpp",
+            "third_party/mabel/carchar/carchar_simd.hpp",
             "third_party/mabel/draken/core/buffers.h",
+            "third_party/mabel/parvi/parvi.hpp",
             "third_party/tdigest-c/src/tdigest.h"
         ],
         "extra_compile_args": [
@@ -28,6 +31,7 @@
             "src/c",
             "third_party/mabel/draken",
             "third_party/mabel/carchar",
+            "third_party/mabel/parvi",
             "third_party/abseil",
             "third_party/fastfloat",
             "third_party/fastfloat/fast_float",
@@ -1202,6 +1206,7 @@ static int __Pyx_init_co_variables(void) {
 #include "tdigest.h"
 #include "time.h"
 #include "carchar_index.hpp"
+#include "parvi.hpp"
 #include "pythread.h"
 #ifdef _OPENMP
 #include <omp.h>
@@ -2449,7 +2454,7 @@ struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_A
 };
 
 
-/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":49
+/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":66
  * 
  * 
  * cdef class GroupHashEngine:             # <<<<<<<<<<<<<<
@@ -2460,6 +2465,10 @@ struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_G
   PyObject_HEAD
   struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *__pyx_vtab;
   opteryx::carchar::CarcharIndex *_index;
+  opteryx::parvi::ParviMap *_parvi;
+  int _use_parvi;
+  int _promoted_from_parvi;
+  int64_t _parvi_final_size;
   struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_KeyStore *_key_store;
   PyObject *_collectors;
   PyObject *_key_kinds;
@@ -2533,7 +2542,7 @@ struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__
 };
 
 
-/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":217
+/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":293
  *             self._time_resolve_ns += _now_ns() - start_ns
  * 
  *     def finalize_morsels(self, Py_ssize_t chunk_size=65536, filter_fn=None):             # <<<<<<<<<<<<<<
@@ -2581,7 +2590,7 @@ struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__
 };
 
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":101
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":103
  *         self._having_condition = parameters.get("having_condition")
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -2594,7 +2603,7 @@ struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__
 };
 
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":105
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":107
  *         from opteryx.expression import format_expression
  *         return (
  *             f"AGGREGATE ({', '.join(format_expression(col) for col in self.aggregates)}) "             # <<<<<<<<<<<<<<
@@ -2609,7 +2618,7 @@ struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__
 };
 
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":106
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":108
  *         return (
  *             f"AGGREGATE ({', '.join(format_expression(col) for col in self.aggregates)}) "
  *             f"GROUP BY ({', '.join(format_expression(col) for col in self.groups)})"             # <<<<<<<<<<<<<<
@@ -2624,7 +2633,7 @@ struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__
 };
 
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":142
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":144
  *         return specs
  * 
  *     def _build_required_columns(self):             # <<<<<<<<<<<<<<
@@ -2637,7 +2646,7 @@ struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__
 };
 
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":145
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":147
  *         required = list(self.group_by_columns)
  *         required.extend(
  *             ident for ident in self.all_identifiers if ident not in required             # <<<<<<<<<<<<<<
@@ -2655,7 +2664,7 @@ struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__
 };
 
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":237
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":239
  *         return morsel.filter_mask(mask)
  * 
  *     def execute(self, morsel):             # <<<<<<<<<<<<<<
@@ -2670,7 +2679,7 @@ struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__
 };
 
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":259
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":261
  *         yield EMPTY
  * 
  *     def _finalize(self):             # <<<<<<<<<<<<<<
@@ -3264,7 +3273,7 @@ struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_groupe
 static struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_ArrayAggCollector *__pyx_vtabptr_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_ArrayAggCollector;
 
 
-/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":49
+/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":66
  * 
  * 
  * cdef class GroupHashEngine:             # <<<<<<<<<<<<<<
@@ -3274,6 +3283,7 @@ static struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12
 
 struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine {
   void (*set_telemetry_enabled)(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *, int, int __pyx_skip_dispatch);
+  void (*_promote_parvi_to_carchar)(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *);
   void (*_resolve_on_first_morsel)(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *, PyObject *);
   void (*ingest)(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *, PyObject *, int __pyx_skip_dispatch);
   PyObject *(*telemetry)(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *, int __pyx_skip_dispatch);
@@ -5208,6 +5218,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_17ArrayAggCollector_accumulate(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_ArrayAggCollector *__pyx_v_self, PyObject *__pyx_v_morsel, int64_t const *__pyx_v_state_indices, Py_ssize_t __pyx_v_n_rows); /* proto*/
 static struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_6vector_Vector *__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_17ArrayAggCollector_finalize(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_ArrayAggCollector *__pyx_v_self, int64_t __pyx_v_num_groups, int __pyx_skip_dispatch); /* proto*/
 static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_set_telemetry_enabled(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *__pyx_v_self, int __pyx_v_enabled, int __pyx_skip_dispatch); /* proto*/
+static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine__promote_parvi_to_carchar(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *__pyx_v_self); /* proto*/
 static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine__resolve_on_first_morsel(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *__pyx_v_self, PyObject *__pyx_v_morsel); /* proto*/
 static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_ingest(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *__pyx_v_self, PyObject *__pyx_v_morsel, int __pyx_skip_dispatch); /* proto*/
 static PyObject *__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_telemetry(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *__pyx_v_self, int __pyx_skip_dispatch); /* proto*/
@@ -5267,6 +5278,7 @@ static int __pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg
 static int __pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__DISPATCH_STRING;
 static double __pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__CARCHAR_LOAD_FACTOR;
 static size_t __pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__INITIAL_INDEX_CAPACITY;
+static size_t __pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__PARVI_CAPACITY;
 static PyObject *__pyx_collections_abc_Sequence = 0;
 static PyObject *generic = 0;
 static PyObject *strided = 0;
@@ -5509,7 +5521,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_17ArrayAggCollector_2finalize(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_ArrayAggCollector *__pyx_v_self, int64_t __pyx_v_num_groups); /* proto */
 static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_17ArrayAggCollector_4__reduce_cython__(CYTHON_UNUSED struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_ArrayAggCollector *__pyx_v_self); /* proto */
 static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_17ArrayAggCollector_6__setstate_cython__(CYTHON_UNUSED struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_ArrayAggCollector *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v___pyx_state); /* proto */
-static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine___cinit__(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *__pyx_v_self, PyObject *__pyx_v_group_columns, PyObject *__pyx_v_collectors, int __pyx_v_telemetry_enabled); /* proto */
+static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine___cinit__(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *__pyx_v_self, PyObject *__pyx_v_group_columns, PyObject *__pyx_v_collectors, int __pyx_v_telemetry_enabled, int __pyx_v_use_parvi); /* proto */
 static void __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_2__dealloc__(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *__pyx_v_self); /* proto */
 static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_4set_telemetry_enabled(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *__pyx_v_self, int __pyx_v_enabled); /* proto */
 static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_6ingest(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *__pyx_v_self, PyObject *__pyx_v_morsel); /* proto */
@@ -5692,7 +5704,7 @@ typedef struct {
   PyObject *__pyx_slice[2];
   PyObject *__pyx_tuple[7];
   PyObject *__pyx_codeobj_tab[98];
-  PyObject *__pyx_string_tab[540];
+  PyObject *__pyx_string_tab[548];
   PyObject *__pyx_number_tab[7];
 /* #### Code section: module_state_contents ### */
 /* CommonTypesMetaclass.module_state_decls */
@@ -6021,312 +6033,320 @@ static __pyx_mstatetype * const __pyx_mstate_global = &__pyx_mstate_global_stati
 #define __pyx_n_u_build_aggregation_specs __pyx_string_tab[231]
 #define __pyx_n_u_build_required_columns __pyx_string_tab[232]
 #define __pyx_n_u_c __pyx_string_tab[233]
-#define __pyx_n_u_chunk __pyx_string_tab[234]
-#define __pyx_n_u_chunk_size __pyx_string_tab[235]
-#define __pyx_n_u_class __pyx_string_tab[236]
-#define __pyx_n_u_class_getitem __pyx_string_tab[237]
-#define __pyx_n_u_cline_in_traceback __pyx_string_tab[238]
-#define __pyx_n_u_close __pyx_string_tab[239]
-#define __pyx_n_u_col __pyx_string_tab[240]
-#define __pyx_n_u_collector __pyx_string_tab[241]
-#define __pyx_n_u_collectors __pyx_string_tab[242]
-#define __pyx_n_u_column __pyx_string_tab[243]
-#define __pyx_n_u_column_names __pyx_string_tab[244]
-#define __pyx_n_u_combine_chunks __pyx_string_tab[245]
-#define __pyx_n_u_config __pyx_string_tab[246]
-#define __pyx_n_u_constant_from_scalar __pyx_string_tab[247]
-#define __pyx_n_u_count __pyx_string_tab[248]
-#define __pyx_n_u_count_distinct __pyx_string_tab[249]
-#define __pyx_n_u_create_collectors __pyx_string_tab[250]
-#define __pyx_n_u_dataclass __pyx_string_tab[251]
-#define __pyx_n_u_dataclasses __pyx_string_tab[252]
-#define __pyx_n_u_decode __pyx_string_tab[253]
-#define __pyx_n_u_descending __pyx_string_tab[254]
-#define __pyx_n_u_dict __pyx_string_tab[255]
-#define __pyx_n_u_dict_2 __pyx_string_tab[256]
-#define __pyx_n_u_dict_3 __pyx_string_tab[257]
-#define __pyx_n_u_distinct __pyx_string_tab[258]
-#define __pyx_n_u_doc __pyx_string_tab[259]
-#define __pyx_n_u_dtype __pyx_string_tab[260]
-#define __pyx_n_u_dtype_is_object __pyx_string_tab[261]
-#define __pyx_n_u_duplicate_treatment __pyx_string_tab[262]
-#define __pyx_n_u_enabled __pyx_string_tab[263]
-#define __pyx_n_u_encode __pyx_string_tab[264]
-#define __pyx_n_u_engine __pyx_string_tab[265]
-#define __pyx_n_u_engine_telemetry __pyx_string_tab[266]
-#define __pyx_n_u_enumerate __pyx_string_tab[267]
-#define __pyx_n_u_err __pyx_string_tab[268]
-#define __pyx_n_u_error __pyx_string_tab[269]
-#define __pyx_n_u_eval_start __pyx_string_tab[270]
-#define __pyx_n_u_evaluatable_nodes __pyx_string_tab[271]
-#define __pyx_n_u_evaluate_and_append_draken __pyx_string_tab[272]
-#define __pyx_n_u_evaluate_draken __pyx_string_tab[273]
-#define __pyx_n_u_execute __pyx_string_tab[274]
-#define __pyx_n_u_extract_array_agg_options __pyx_string_tab[275]
-#define __pyx_n_u_extract_evaluations __pyx_string_tab[276]
-#define __pyx_n_u_extract_percentile_option __pyx_string_tab[277]
-#define __pyx_n_u_field_node __pyx_string_tab[278]
-#define __pyx_n_u_filter_fn __pyx_string_tab[279]
-#define __pyx_n_u_filter_mask __pyx_string_tab[280]
-#define __pyx_n_u_finalize __pyx_string_tab[281]
-#define __pyx_n_u_finalize_2 __pyx_string_tab[282]
-#define __pyx_n_u_finalize_morsels __pyx_string_tab[283]
-#define __pyx_n_u_finalize_slice __pyx_string_tab[284]
-#define __pyx_n_u_finalize_start __pyx_string_tab[285]
-#define __pyx_n_u_flags __pyx_string_tab[286]
-#define __pyx_n_u_float __pyx_string_tab[287]
-#define __pyx_n_u_fn __pyx_string_tab[288]
-#define __pyx_n_u_format __pyx_string_tab[289]
-#define __pyx_n_u_format_expression __pyx_string_tab[290]
-#define __pyx_n_u_fortran __pyx_string_tab[291]
-#define __pyx_n_u_from_arrow __pyx_string_tab[292]
-#define __pyx_n_u_from_scalar __pyx_string_tab[293]
-#define __pyx_n_u_from_vectors __pyx_string_tab[294]
-#define __pyx_n_u_fromkeys __pyx_string_tab[295]
-#define __pyx_n_u_frozen __pyx_string_tab[296]
-#define __pyx_n_u_full_morsel __pyx_string_tab[297]
-#define __pyx_n_u_func __pyx_string_tab[298]
-#define __pyx_n_u_function __pyx_string_tab[299]
-#define __pyx_n_u_genexpr __pyx_string_tab[300]
-#define __pyx_n_u_get __pyx_string_tab[301]
-#define __pyx_n_u_get_all_nodes_of_type __pyx_string_tab[302]
-#define __pyx_n_u_getstate __pyx_string_tab[303]
-#define __pyx_n_u_group __pyx_string_tab[304]
-#define __pyx_n_u_group_by_columns __pyx_string_tab[305]
-#define __pyx_n_u_group_columns __pyx_string_tab[306]
-#define __pyx_n_u_groups __pyx_string_tab[307]
-#define __pyx_n_u_hash __pyx_string_tab[308]
-#define __pyx_n_u_hash_list __pyx_string_tab[309]
-#define __pyx_n_u_having_condition __pyx_string_tab[310]
-#define __pyx_n_u_having_condition_2 __pyx_string_tab[311]
-#define __pyx_n_u_id __pyx_string_tab[312]
-#define __pyx_n_u_ident __pyx_string_tab[313]
-#define __pyx_n_u_identity __pyx_string_tab[314]
-#define __pyx_n_u_implicit_count_added __pyx_string_tab[315]
-#define __pyx_n_u_import __pyx_string_tab[316]
-#define __pyx_n_u_index __pyx_string_tab[317]
-#define __pyx_n_u_ingest __pyx_string_tab[318]
-#define __pyx_n_u_ingest_start __pyx_string_tab[319]
-#define __pyx_n_u_init __pyx_string_tab[320]
-#define __pyx_n_u_int8 __pyx_string_tab[321]
-#define __pyx_n_u_is_coroutine __pyx_string_tab[322]
-#define __pyx_n_u_items __pyx_string_tab[323]
-#define __pyx_n_u_itemsize __pyx_string_tab[324]
-#define __pyx_n_u_key_kinds __pyx_string_tab[325]
-#define __pyx_n_u_key_kinds_placeholder __pyx_string_tab[326]
-#define __pyx_n_u_key_names __pyx_string_tab[327]
-#define __pyx_n_u_key_vecs __pyx_string_tab[328]
-#define __pyx_n_u_length __pyx_string_tab[329]
-#define __pyx_n_u_limit __pyx_string_tab[330]
-#define __pyx_n_u_lower __pyx_string_tab[331]
-#define __pyx_n_u_main __pyx_string_tab[332]
-#define __pyx_n_u_mask __pyx_string_tab[333]
-#define __pyx_n_u_max __pyx_string_tab[334]
-#define __pyx_n_u_mean __pyx_string_tab[335]
-#define __pyx_n_u_memview __pyx_string_tab[336]
-#define __pyx_n_u_metaclass __pyx_string_tab[337]
-#define __pyx_n_u_min __pyx_string_tab[338]
-#define __pyx_n_u_mode __pyx_string_tab[339]
-#define __pyx_n_u_module __pyx_string_tab[340]
-#define __pyx_n_u_monotonic_ns __pyx_string_tab[341]
-#define __pyx_n_u_morsel __pyx_string_tab[342]
-#define __pyx_n_u_mro_entries __pyx_string_tab[343]
-#define __pyx_n_u_name __pyx_string_tab[344]
-#define __pyx_n_u_name_2 __pyx_string_tab[345]
-#define __pyx_n_u_ndim __pyx_string_tab[346]
-#define __pyx_n_u_needs_expression_eval __pyx_string_tab[347]
-#define __pyx_n_u_new __pyx_string_tab[348]
-#define __pyx_n_u_next __pyx_string_tab[349]
-#define __pyx_n_u_node __pyx_string_tab[350]
-#define __pyx_n_u_node_type __pyx_string_tab[351]
-#define __pyx_n_u_normalize_aggregate_function __pyx_string_tab[352]
-#define __pyx_n_u_normalize_column_name __pyx_string_tab[353]
-#define __pyx_n_u_normalized_group_cols __pyx_string_tab[354]
-#define __pyx_n_u_num_groups __pyx_string_tab[355]
-#define __pyx_n_u_num_rows __pyx_string_tab[356]
-#define __pyx_n_u_obj __pyx_string_tab[357]
-#define __pyx_n_u_opteryx __pyx_string_tab[358]
-#define __pyx_n_u_opteryx_compiled_draken_interop __pyx_string_tab[359]
-#define __pyx_n_u_opteryx_compiled_draken_morsels __pyx_string_tab[360]
-#define __pyx_n_u_opteryx_compiled_draken_vectors __pyx_string_tab[361]
-#define __pyx_n_u_opteryx_exceptions __pyx_string_tab[362]
-#define __pyx_n_u_opteryx_expression __pyx_string_tab[363]
-#define __pyx_n_u_opteryx_expression_evaluator __pyx_string_tab[364]
-#define __pyx_n_u_opteryx_models __pyx_string_tab[365]
-#define __pyx_n_u_opteryx_operators __pyx_string_tab[366]
-#define __pyx_n_u_opteryx_operators_aggregate_help __pyx_string_tab[367]
-#define __pyx_n_u_opteryx_operators_grouped_aggreg __pyx_string_tab[368]
-#define __pyx_n_u_options __pyx_string_tab[369]
-#define __pyx_n_u_order __pyx_string_tab[370]
-#define __pyx_n_u_ordered __pyx_string_tab[371]
-#define __pyx_n_u_pack __pyx_string_tab[372]
-#define __pyx_n_u_parameters __pyx_string_tab[373]
-#define __pyx_n_u_percentile __pyx_string_tab[374]
-#define __pyx_n_u_percentile_node __pyx_string_tab[375]
-#define __pyx_n_u_phase_start __pyx_string_tab[376]
-#define __pyx_n_u_pop __pyx_string_tab[377]
-#define __pyx_n_u_prepare __pyx_string_tab[378]
-#define __pyx_n_u_prepare_chunk __pyx_string_tab[379]
-#define __pyx_n_u_projection __pyx_string_tab[380]
-#define __pyx_n_u_properties __pyx_string_tab[381]
-#define __pyx_n_u_property __pyx_string_tab[382]
-#define __pyx_n_u_pyx_checksum __pyx_string_tab[383]
-#define __pyx_n_u_pyx_result __pyx_string_tab[384]
-#define __pyx_n_u_pyx_state __pyx_string_tab[385]
-#define __pyx_n_u_pyx_type __pyx_string_tab[386]
-#define __pyx_n_u_pyx_unpickle_AnyValueFloat64Co __pyx_string_tab[387]
-#define __pyx_n_u_pyx_unpickle_AnyValueInt64Coll __pyx_string_tab[388]
-#define __pyx_n_u_pyx_unpickle_BaseCollector __pyx_string_tab[389]
-#define __pyx_n_u_pyx_unpickle_Enum __pyx_string_tab[390]
-#define __pyx_n_u_pyx_unpickle__DeferredAnyValue __pyx_string_tab[391]
-#define __pyx_n_u_pyx_unpickle__DeferredMaxColle __pyx_string_tab[392]
-#define __pyx_n_u_pyx_unpickle__DeferredMinColle __pyx_string_tab[393]
-#define __pyx_n_u_pyx_unpickle__DeferredSumColle __pyx_string_tab[394]
-#define __pyx_n_u_pyx_vtable __pyx_string_tab[395]
-#define __pyx_n_u_qualname __pyx_string_tab[396]
-#define __pyx_n_u_readings __pyx_string_tab[397]
-#define __pyx_n_u_recon_elapsed __pyx_string_tab[398]
-#define __pyx_n_u_reduce __pyx_string_tab[399]
-#define __pyx_n_u_reduce_cython __pyx_string_tab[400]
-#define __pyx_n_u_reduce_ex __pyx_string_tab[401]
-#define __pyx_n_u_register __pyx_string_tab[402]
-#define __pyx_n_u_required __pyx_string_tab[403]
-#define __pyx_n_u_required_columns __pyx_string_tab[404]
-#define __pyx_n_u_resolve_deferred_collectors __pyx_string_tab[405]
-#define __pyx_n_u_result_rows __pyx_string_tab[406]
-#define __pyx_n_u_return __pyx_string_tab[407]
-#define __pyx_n_u_reverse __pyx_string_tab[408]
-#define __pyx_n_u_root __pyx_string_tab[409]
-#define __pyx_n_u_schema_column __pyx_string_tab[410]
-#define __pyx_n_u_select __pyx_string_tab[411]
-#define __pyx_n_u_select_nodes __pyx_string_tab[412]
-#define __pyx_n_u_self __pyx_string_tab[413]
-#define __pyx_n_u_send __pyx_string_tab[414]
-#define __pyx_n_u_set_name __pyx_string_tab[415]
-#define __pyx_n_u_set_telemetry_enabled __pyx_string_tab[416]
-#define __pyx_n_u_setdefault __pyx_string_tab[417]
-#define __pyx_n_u_setstate __pyx_string_tab[418]
-#define __pyx_n_u_setstate_cython __pyx_string_tab[419]
-#define __pyx_n_u_shape __pyx_string_tab[420]
-#define __pyx_n_u_size __pyx_string_tab[421]
-#define __pyx_n_u_slice __pyx_string_tab[422]
-#define __pyx_n_u_sort __pyx_string_tab[423]
-#define __pyx_n_u_specs __pyx_string_tab[424]
-#define __pyx_n_u_star_vector __pyx_string_tab[425]
-#define __pyx_n_u_start __pyx_string_tab[426]
-#define __pyx_n_u_start_ns __pyx_string_tab[427]
-#define __pyx_n_u_state __pyx_string_tab[428]
-#define __pyx_n_u_staticmethod __pyx_string_tab[429]
-#define __pyx_n_u_step __pyx_string_tab[430]
-#define __pyx_n_u_stop __pyx_string_tab[431]
-#define __pyx_n_u_str __pyx_string_tab[432]
-#define __pyx_n_u_struct __pyx_string_tab[433]
-#define __pyx_n_u_sum __pyx_string_tab[434]
-#define __pyx_n_u_super __pyx_string_tab[435]
-#define __pyx_n_u_t0 __pyx_string_tab[436]
-#define __pyx_n_u_t1 __pyx_string_tab[437]
-#define __pyx_n_u_telemetry __pyx_string_tab[438]
-#define __pyx_n_u_telemetry_enabled __pyx_string_tab[439]
-#define __pyx_n_u_test __pyx_string_tab[440]
-#define __pyx_n_u_throw __pyx_string_tab[441]
-#define __pyx_n_u_time __pyx_string_tab[442]
-#define __pyx_n_u_time_accumulate_ns __pyx_string_tab[443]
-#define __pyx_n_u_time_aggregate_accumulate __pyx_string_tab[444]
-#define __pyx_n_u_time_aggregate_build_morsel __pyx_string_tab[445]
-#define __pyx_n_u_time_aggregate_evaluations __pyx_string_tab[446]
-#define __pyx_n_u_time_aggregate_finalize __pyx_string_tab[447]
-#define __pyx_n_u_time_aggregate_grow __pyx_string_tab[448]
-#define __pyx_n_u_time_aggregate_hash __pyx_string_tab[449]
-#define __pyx_n_u_time_aggregate_ingest __pyx_string_tab[450]
-#define __pyx_n_u_time_aggregate_lookup __pyx_string_tab[451]
-#define __pyx_n_u_time_aggregate_reconstruct __pyx_string_tab[452]
-#define __pyx_n_u_time_aggregate_reconstruct_multi __pyx_string_tab[453]
-#define __pyx_n_u_time_aggregate_reconstruct_singl __pyx_string_tab[454]
-#define __pyx_n_u_time_aggregate_reconstruct_singl_2 __pyx_string_tab[455]
-#define __pyx_n_u_time_aggregate_resolve __pyx_string_tab[456]
-#define __pyx_n_u_time_aggregate_slice_output __pyx_string_tab[457]
-#define __pyx_n_u_time_aggregate_store_keys __pyx_string_tab[458]
-#define __pyx_n_u_time_build_morsel_ns __pyx_string_tab[459]
-#define __pyx_n_u_time_finalize_ns __pyx_string_tab[460]
-#define __pyx_n_u_time_grow_ns __pyx_string_tab[461]
-#define __pyx_n_u_time_hash_ns __pyx_string_tab[462]
-#define __pyx_n_u_time_lookup_ns __pyx_string_tab[463]
-#define __pyx_n_u_time_reconstruct_multi_ns __pyx_string_tab[464]
-#define __pyx_n_u_time_reconstruct_ns __pyx_string_tab[465]
-#define __pyx_n_u_time_reconstruct_single_fixed_ns __pyx_string_tab[466]
-#define __pyx_n_u_time_reconstruct_single_string_n __pyx_string_tab[467]
-#define __pyx_n_u_time_resolve_ns __pyx_string_tab[468]
-#define __pyx_n_u_time_slice_output_ns __pyx_string_tab[469]
-#define __pyx_n_u_time_store_keys_ns __pyx_string_tab[470]
-#define __pyx_n_u_to_pylist __pyx_string_tab[471]
-#define __pyx_n_u_type __pyx_string_tab[472]
-#define __pyx_n_u_unpack __pyx_string_tab[473]
-#define __pyx_n_u_update __pyx_string_tab[474]
-#define __pyx_n_u_use_setstate __pyx_string_tab[475]
-#define __pyx_n_u_value __pyx_string_tab[476]
-#define __pyx_n_u_values __pyx_string_tab[477]
-#define __pyx_n_u_vector_from_sequence __pyx_string_tab[478]
-#define __pyx_n_u_x __pyx_string_tab[479]
-#define __pyx_kp_b__6 __pyx_string_tab[480]
-#define __pyx_kp_b_iso88591_1F __pyx_string_tab[481]
-#define __pyx_kp_b_iso88591_1_Ry_N_Jd_Qa_N_az_T_AQ_Ja_89D_U __pyx_string_tab[482]
-#define __pyx_kp_b_iso88591_1_T_1_wa_Qd_1_Q_uKq_gQl_AT_Q_3c __pyx_string_tab[483]
-#define __pyx_kp_b_iso88591_31F __pyx_string_tab[484]
-#define __pyx_kp_b_iso88591_4AV1 __pyx_string_tab[485]
-#define __pyx_kp_b_iso88591_55Fa __pyx_string_tab[486]
-#define __pyx_kp_b_iso88591_6avQ __pyx_string_tab[487]
-#define __pyx_kp_b_iso88591_8_q __pyx_string_tab[488]
-#define __pyx_kp_b_iso88591_A __pyx_string_tab[489]
-#define __pyx_kp_b_iso88591_A23_q_3az_c_q_Kq_S_q_U_5_C_Q_q_q __pyx_string_tab[490]
-#define __pyx_kp_b_iso88591_A23_q_az_Q_Q_s_XS_31_T_F_2Qa_Jc __pyx_string_tab[491]
-#define __pyx_kp_b_iso88591_A56_5_a_9Cxt_B_Q_1_9D_wa_1_9D_C1 __pyx_string_tab[492]
-#define __pyx_kp_b_iso88591_A_1D __pyx_string_tab[493]
-#define __pyx_kp_b_iso88591_A_1_D_Qa_D_Yd_a_t1D_QnA_T_it1L_E __pyx_string_tab[494]
-#define __pyx_kp_b_iso88591_A_1_at_7q_v __pyx_string_tab[495]
-#define __pyx_kp_b_iso88591_A_2 __pyx_string_tab[496]
-#define __pyx_kp_b_iso88591_A_3 __pyx_string_tab[497]
-#define __pyx_kp_b_iso88591_A_4 __pyx_string_tab[498]
-#define __pyx_kp_b_iso88591_A_4q_A_q_HD_D_a_vWA_q_HD_t_c_N_6 __pyx_string_tab[499]
-#define __pyx_kp_b_iso88591_A_4q_E_Q_5_uN_d_a_as_q_Q_T_a_t1 __pyx_string_tab[500]
-#define __pyx_kp_b_iso88591_A_5 __pyx_string_tab[501]
-#define __pyx_kp_b_iso88591_A_E_aq_G1A_was_Q_G1A_G1Kq_4q_1A __pyx_string_tab[502]
-#define __pyx_kp_b_iso88591_A_E_aq_q_HAV4vQha_Ba_1A __pyx_string_tab[503]
-#define __pyx_kp_b_iso88591_A_E_aq_q_V1Be1_1A __pyx_string_tab[504]
-#define __pyx_kp_b_iso88591_A_E_aq_q_Zq_1_1A __pyx_string_tab[505]
-#define __pyx_kp_b_iso88591_A_Qd_A_Ba_q __pyx_string_tab[506]
-#define __pyx_kp_b_iso88591_A_Qd_G1_Ba_q __pyx_string_tab[507]
-#define __pyx_kp_b_iso88591_A_d_Q_Q_JfA_XQ_E_aq_3b_y_Bk_q_Qc __pyx_string_tab[508]
-#define __pyx_kp_b_iso88591_A_d_Q_Q_JfA_XT_E_at1_3b_y_Bk_q_Q __pyx_string_tab[509]
-#define __pyx_kp_b_iso88591_A_d_T_XQ_5_1_U_1_4_q_a_1_I_q_8_1 __pyx_string_tab[510]
-#define __pyx_kp_b_iso88591_A_d_T_XQ_5_1_U_1_4_q_a_1_I_q_c_I __pyx_string_tab[511]
-#define __pyx_kp_b_iso88591_A_d_T_XQ_5_1_U_1_4_q_a_1_K_1_IQ __pyx_string_tab[512]
-#define __pyx_kp_b_iso88591_A_d_T_XQ_5_1_U_1_4_q_a_1_K_Q_IQ __pyx_string_tab[513]
-#define __pyx_kp_b_iso88591_A_d_T_XT_3m3e4uCq_U_4q_4_q_a_1_u __pyx_string_tab[514]
-#define __pyx_kp_b_iso88591_A_d_T_XT_3m3e4uCq_U_4q_4_q_a_1_u_2 __pyx_string_tab[515]
-#define __pyx_kp_b_iso88591_A_d_T_XT_3m3e4uCq_U_4q_4_q_a_1_u_3 __pyx_string_tab[516]
-#define __pyx_kp_b_iso88591_A_q __pyx_string_tab[517]
-#define __pyx_kp_b_iso88591_A_q_7_Q_4q_wa_4t1_4q_F_q_A_4q_Ba __pyx_string_tab[518]
-#define __pyx_kp_b_iso88591_A_q_HA_31F_PQ_T_7q_Z_1_3c_d_Qa_1 __pyx_string_tab[519]
-#define __pyx_kp_b_iso88591_A_q_e_5Q_U_4A __pyx_string_tab[520]
-#define __pyx_kp_b_iso88591_A_t1_D_d_a_D_a_A_4q_0_A_1_Q_Q_D __pyx_string_tab[521]
-#define __pyx_kp_b_iso88591_A_t_3a __pyx_string_tab[522]
-#define __pyx_kp_b_iso88591_A_t_3a_2 __pyx_string_tab[523]
-#define __pyx_kp_b_iso88591_Q __pyx_string_tab[524]
-#define __pyx_kp_b_iso88591_Q_2 __pyx_string_tab[525]
-#define __pyx_kp_b_iso88591_T_1_Zt_QUUccgg_A_G1F_a_vWE_Q_q __pyx_string_tab[526]
-#define __pyx_kp_b_iso88591_T_1_Zt_QUUccgg_A_G1F_a_vWE_Q_q_2 __pyx_string_tab[527]
-#define __pyx_kp_b_iso88591_T_t_5I_Q_G1F_a_vWE_Q_q_t_uCt_q __pyx_string_tab[528]
-#define __pyx_kp_b_iso88591_T_t_5I_Q_G1F_a_vWE_Q_q_t_uCt_q_2 __pyx_string_tab[529]
-#define __pyx_kp_b_iso88591_T_t_5I_Q_G1F_a_vWE_Q_q_t_uCt_q_3 __pyx_string_tab[530]
-#define __pyx_kp_b_iso88591_U_3aq_O_Qa_Qc_q_z_q_1_Q_1_1_auA __pyx_string_tab[531]
-#define __pyx_kp_b_iso88591_q_0_kQR_7_7q8PP___1 __pyx_string_tab[532]
-#define __pyx_kp_b_iso88591_q_0_kQR_7_8_9RR_a_1 __pyx_string_tab[533]
-#define __pyx_kp_b_iso88591_q_0_kQR_7_q0_a_1 __pyx_string_tab[534]
-#define __pyx_kp_b_iso88591_q_0_kQR_81A_7_VVdde_1 __pyx_string_tab[535]
-#define __pyx_kp_b_iso88591_q_0_kQR_XQa_7_A_ZZhhi_1 __pyx_string_tab[536]
-#define __pyx_kp_b_iso88591_z_q_3awgQa __pyx_string_tab[537]
-#define __pyx_kp_b_uint64_t_const_MIX_HASH_CONSTANT __pyx_string_tab[538]
-#define __pyx_n_b_O __pyx_string_tab[539]
+#define __pyx_n_u_carchar __pyx_string_tab[234]
+#define __pyx_n_u_chunk __pyx_string_tab[235]
+#define __pyx_n_u_chunk_size __pyx_string_tab[236]
+#define __pyx_n_u_class __pyx_string_tab[237]
+#define __pyx_n_u_class_getitem __pyx_string_tab[238]
+#define __pyx_n_u_cline_in_traceback __pyx_string_tab[239]
+#define __pyx_n_u_close __pyx_string_tab[240]
+#define __pyx_n_u_col __pyx_string_tab[241]
+#define __pyx_n_u_collector __pyx_string_tab[242]
+#define __pyx_n_u_collectors __pyx_string_tab[243]
+#define __pyx_n_u_column __pyx_string_tab[244]
+#define __pyx_n_u_column_names __pyx_string_tab[245]
+#define __pyx_n_u_combine_chunks __pyx_string_tab[246]
+#define __pyx_n_u_config __pyx_string_tab[247]
+#define __pyx_n_u_constant_from_scalar __pyx_string_tab[248]
+#define __pyx_n_u_count __pyx_string_tab[249]
+#define __pyx_n_u_count_distinct __pyx_string_tab[250]
+#define __pyx_n_u_create_collectors __pyx_string_tab[251]
+#define __pyx_n_u_dataclass __pyx_string_tab[252]
+#define __pyx_n_u_dataclasses __pyx_string_tab[253]
+#define __pyx_n_u_decode __pyx_string_tab[254]
+#define __pyx_n_u_descending __pyx_string_tab[255]
+#define __pyx_n_u_dict __pyx_string_tab[256]
+#define __pyx_n_u_dict_2 __pyx_string_tab[257]
+#define __pyx_n_u_dict_3 __pyx_string_tab[258]
+#define __pyx_n_u_distinct __pyx_string_tab[259]
+#define __pyx_n_u_doc __pyx_string_tab[260]
+#define __pyx_n_u_dtype __pyx_string_tab[261]
+#define __pyx_n_u_dtype_is_object __pyx_string_tab[262]
+#define __pyx_n_u_duplicate_treatment __pyx_string_tab[263]
+#define __pyx_n_u_enabled __pyx_string_tab[264]
+#define __pyx_n_u_encode __pyx_string_tab[265]
+#define __pyx_n_u_engine __pyx_string_tab[266]
+#define __pyx_n_u_engine_telemetry __pyx_string_tab[267]
+#define __pyx_n_u_enumerate __pyx_string_tab[268]
+#define __pyx_n_u_err __pyx_string_tab[269]
+#define __pyx_n_u_error __pyx_string_tab[270]
+#define __pyx_n_u_eval_start __pyx_string_tab[271]
+#define __pyx_n_u_evaluatable_nodes __pyx_string_tab[272]
+#define __pyx_n_u_evaluate_and_append_draken __pyx_string_tab[273]
+#define __pyx_n_u_evaluate_draken __pyx_string_tab[274]
+#define __pyx_n_u_execute __pyx_string_tab[275]
+#define __pyx_n_u_extract_array_agg_options __pyx_string_tab[276]
+#define __pyx_n_u_extract_evaluations __pyx_string_tab[277]
+#define __pyx_n_u_extract_percentile_option __pyx_string_tab[278]
+#define __pyx_n_u_field_node __pyx_string_tab[279]
+#define __pyx_n_u_filter_fn __pyx_string_tab[280]
+#define __pyx_n_u_filter_mask __pyx_string_tab[281]
+#define __pyx_n_u_finalize __pyx_string_tab[282]
+#define __pyx_n_u_finalize_2 __pyx_string_tab[283]
+#define __pyx_n_u_finalize_morsels __pyx_string_tab[284]
+#define __pyx_n_u_finalize_slice __pyx_string_tab[285]
+#define __pyx_n_u_finalize_start __pyx_string_tab[286]
+#define __pyx_n_u_flags __pyx_string_tab[287]
+#define __pyx_n_u_float __pyx_string_tab[288]
+#define __pyx_n_u_fn __pyx_string_tab[289]
+#define __pyx_n_u_format __pyx_string_tab[290]
+#define __pyx_n_u_format_expression __pyx_string_tab[291]
+#define __pyx_n_u_fortran __pyx_string_tab[292]
+#define __pyx_n_u_from_arrow __pyx_string_tab[293]
+#define __pyx_n_u_from_scalar __pyx_string_tab[294]
+#define __pyx_n_u_from_vectors __pyx_string_tab[295]
+#define __pyx_n_u_fromkeys __pyx_string_tab[296]
+#define __pyx_n_u_frozen __pyx_string_tab[297]
+#define __pyx_n_u_full_morsel __pyx_string_tab[298]
+#define __pyx_n_u_func __pyx_string_tab[299]
+#define __pyx_n_u_function __pyx_string_tab[300]
+#define __pyx_n_u_genexpr __pyx_string_tab[301]
+#define __pyx_n_u_get __pyx_string_tab[302]
+#define __pyx_n_u_get_all_nodes_of_type __pyx_string_tab[303]
+#define __pyx_n_u_getstate __pyx_string_tab[304]
+#define __pyx_n_u_group __pyx_string_tab[305]
+#define __pyx_n_u_group_by_columns __pyx_string_tab[306]
+#define __pyx_n_u_group_columns __pyx_string_tab[307]
+#define __pyx_n_u_group_map_variant __pyx_string_tab[308]
+#define __pyx_n_u_groups __pyx_string_tab[309]
+#define __pyx_n_u_hash __pyx_string_tab[310]
+#define __pyx_n_u_hash_list __pyx_string_tab[311]
+#define __pyx_n_u_having_condition __pyx_string_tab[312]
+#define __pyx_n_u_having_condition_2 __pyx_string_tab[313]
+#define __pyx_n_u_id __pyx_string_tab[314]
+#define __pyx_n_u_ident __pyx_string_tab[315]
+#define __pyx_n_u_identity __pyx_string_tab[316]
+#define __pyx_n_u_implicit_count_added __pyx_string_tab[317]
+#define __pyx_n_u_import __pyx_string_tab[318]
+#define __pyx_n_u_index __pyx_string_tab[319]
+#define __pyx_n_u_ingest __pyx_string_tab[320]
+#define __pyx_n_u_ingest_start __pyx_string_tab[321]
+#define __pyx_n_u_init __pyx_string_tab[322]
+#define __pyx_n_u_int8 __pyx_string_tab[323]
+#define __pyx_n_u_is_coroutine __pyx_string_tab[324]
+#define __pyx_n_u_items __pyx_string_tab[325]
+#define __pyx_n_u_itemsize __pyx_string_tab[326]
+#define __pyx_n_u_key_kinds __pyx_string_tab[327]
+#define __pyx_n_u_key_kinds_placeholder __pyx_string_tab[328]
+#define __pyx_n_u_key_names __pyx_string_tab[329]
+#define __pyx_n_u_key_vecs __pyx_string_tab[330]
+#define __pyx_n_u_length __pyx_string_tab[331]
+#define __pyx_n_u_limit __pyx_string_tab[332]
+#define __pyx_n_u_lower __pyx_string_tab[333]
+#define __pyx_n_u_main __pyx_string_tab[334]
+#define __pyx_n_u_mask __pyx_string_tab[335]
+#define __pyx_n_u_max __pyx_string_tab[336]
+#define __pyx_n_u_mean __pyx_string_tab[337]
+#define __pyx_n_u_memview __pyx_string_tab[338]
+#define __pyx_n_u_metaclass __pyx_string_tab[339]
+#define __pyx_n_u_min __pyx_string_tab[340]
+#define __pyx_n_u_mode __pyx_string_tab[341]
+#define __pyx_n_u_module __pyx_string_tab[342]
+#define __pyx_n_u_monotonic_ns __pyx_string_tab[343]
+#define __pyx_n_u_morsel __pyx_string_tab[344]
+#define __pyx_n_u_mro_entries __pyx_string_tab[345]
+#define __pyx_n_u_name __pyx_string_tab[346]
+#define __pyx_n_u_name_2 __pyx_string_tab[347]
+#define __pyx_n_u_ndim __pyx_string_tab[348]
+#define __pyx_n_u_needs_expression_eval __pyx_string_tab[349]
+#define __pyx_n_u_new __pyx_string_tab[350]
+#define __pyx_n_u_next __pyx_string_tab[351]
+#define __pyx_n_u_node __pyx_string_tab[352]
+#define __pyx_n_u_node_type __pyx_string_tab[353]
+#define __pyx_n_u_normalize_aggregate_function __pyx_string_tab[354]
+#define __pyx_n_u_normalize_column_name __pyx_string_tab[355]
+#define __pyx_n_u_normalized_group_cols __pyx_string_tab[356]
+#define __pyx_n_u_num_groups __pyx_string_tab[357]
+#define __pyx_n_u_num_rows __pyx_string_tab[358]
+#define __pyx_n_u_obj __pyx_string_tab[359]
+#define __pyx_n_u_opteryx __pyx_string_tab[360]
+#define __pyx_n_u_opteryx_compiled_draken_interop __pyx_string_tab[361]
+#define __pyx_n_u_opteryx_compiled_draken_morsels __pyx_string_tab[362]
+#define __pyx_n_u_opteryx_compiled_draken_vectors __pyx_string_tab[363]
+#define __pyx_n_u_opteryx_exceptions __pyx_string_tab[364]
+#define __pyx_n_u_opteryx_expression __pyx_string_tab[365]
+#define __pyx_n_u_opteryx_expression_evaluator __pyx_string_tab[366]
+#define __pyx_n_u_opteryx_models __pyx_string_tab[367]
+#define __pyx_n_u_opteryx_operators __pyx_string_tab[368]
+#define __pyx_n_u_opteryx_operators_aggregate_help __pyx_string_tab[369]
+#define __pyx_n_u_opteryx_operators_grouped_aggreg __pyx_string_tab[370]
+#define __pyx_n_u_options __pyx_string_tab[371]
+#define __pyx_n_u_order __pyx_string_tab[372]
+#define __pyx_n_u_ordered __pyx_string_tab[373]
+#define __pyx_n_u_pack __pyx_string_tab[374]
+#define __pyx_n_u_parameters __pyx_string_tab[375]
+#define __pyx_n_u_parvi __pyx_string_tab[376]
+#define __pyx_n_u_parvi_final_size __pyx_string_tab[377]
+#define __pyx_n_u_percentile __pyx_string_tab[378]
+#define __pyx_n_u_percentile_node __pyx_string_tab[379]
+#define __pyx_n_u_phase_start __pyx_string_tab[380]
+#define __pyx_n_u_pop __pyx_string_tab[381]
+#define __pyx_n_u_prepare __pyx_string_tab[382]
+#define __pyx_n_u_prepare_chunk __pyx_string_tab[383]
+#define __pyx_n_u_projection __pyx_string_tab[384]
+#define __pyx_n_u_promoted_from_parvi __pyx_string_tab[385]
+#define __pyx_n_u_properties __pyx_string_tab[386]
+#define __pyx_n_u_property __pyx_string_tab[387]
+#define __pyx_n_u_pyx_checksum __pyx_string_tab[388]
+#define __pyx_n_u_pyx_result __pyx_string_tab[389]
+#define __pyx_n_u_pyx_state __pyx_string_tab[390]
+#define __pyx_n_u_pyx_type __pyx_string_tab[391]
+#define __pyx_n_u_pyx_unpickle_AnyValueFloat64Co __pyx_string_tab[392]
+#define __pyx_n_u_pyx_unpickle_AnyValueInt64Coll __pyx_string_tab[393]
+#define __pyx_n_u_pyx_unpickle_BaseCollector __pyx_string_tab[394]
+#define __pyx_n_u_pyx_unpickle_Enum __pyx_string_tab[395]
+#define __pyx_n_u_pyx_unpickle__DeferredAnyValue __pyx_string_tab[396]
+#define __pyx_n_u_pyx_unpickle__DeferredMaxColle __pyx_string_tab[397]
+#define __pyx_n_u_pyx_unpickle__DeferredMinColle __pyx_string_tab[398]
+#define __pyx_n_u_pyx_unpickle__DeferredSumColle __pyx_string_tab[399]
+#define __pyx_n_u_pyx_vtable __pyx_string_tab[400]
+#define __pyx_n_u_qualname __pyx_string_tab[401]
+#define __pyx_n_u_readings __pyx_string_tab[402]
+#define __pyx_n_u_recon_elapsed __pyx_string_tab[403]
+#define __pyx_n_u_reduce __pyx_string_tab[404]
+#define __pyx_n_u_reduce_cython __pyx_string_tab[405]
+#define __pyx_n_u_reduce_ex __pyx_string_tab[406]
+#define __pyx_n_u_register __pyx_string_tab[407]
+#define __pyx_n_u_required __pyx_string_tab[408]
+#define __pyx_n_u_required_columns __pyx_string_tab[409]
+#define __pyx_n_u_resolve_deferred_collectors __pyx_string_tab[410]
+#define __pyx_n_u_result_rows __pyx_string_tab[411]
+#define __pyx_n_u_return __pyx_string_tab[412]
+#define __pyx_n_u_reverse __pyx_string_tab[413]
+#define __pyx_n_u_root __pyx_string_tab[414]
+#define __pyx_n_u_schema_column __pyx_string_tab[415]
+#define __pyx_n_u_select __pyx_string_tab[416]
+#define __pyx_n_u_select_nodes __pyx_string_tab[417]
+#define __pyx_n_u_self __pyx_string_tab[418]
+#define __pyx_n_u_send __pyx_string_tab[419]
+#define __pyx_n_u_set_name __pyx_string_tab[420]
+#define __pyx_n_u_set_telemetry_enabled __pyx_string_tab[421]
+#define __pyx_n_u_setdefault __pyx_string_tab[422]
+#define __pyx_n_u_setstate __pyx_string_tab[423]
+#define __pyx_n_u_setstate_cython __pyx_string_tab[424]
+#define __pyx_n_u_shape __pyx_string_tab[425]
+#define __pyx_n_u_size __pyx_string_tab[426]
+#define __pyx_n_u_slice __pyx_string_tab[427]
+#define __pyx_n_u_sort __pyx_string_tab[428]
+#define __pyx_n_u_specs __pyx_string_tab[429]
+#define __pyx_n_u_star_vector __pyx_string_tab[430]
+#define __pyx_n_u_start __pyx_string_tab[431]
+#define __pyx_n_u_start_ns __pyx_string_tab[432]
+#define __pyx_n_u_state __pyx_string_tab[433]
+#define __pyx_n_u_staticmethod __pyx_string_tab[434]
+#define __pyx_n_u_step __pyx_string_tab[435]
+#define __pyx_n_u_stop __pyx_string_tab[436]
+#define __pyx_n_u_str __pyx_string_tab[437]
+#define __pyx_n_u_struct __pyx_string_tab[438]
+#define __pyx_n_u_sum __pyx_string_tab[439]
+#define __pyx_n_u_super __pyx_string_tab[440]
+#define __pyx_n_u_t0 __pyx_string_tab[441]
+#define __pyx_n_u_t1 __pyx_string_tab[442]
+#define __pyx_n_u_telemetry __pyx_string_tab[443]
+#define __pyx_n_u_telemetry_enabled __pyx_string_tab[444]
+#define __pyx_n_u_test __pyx_string_tab[445]
+#define __pyx_n_u_throw __pyx_string_tab[446]
+#define __pyx_n_u_time __pyx_string_tab[447]
+#define __pyx_n_u_time_accumulate_ns __pyx_string_tab[448]
+#define __pyx_n_u_time_aggregate_accumulate __pyx_string_tab[449]
+#define __pyx_n_u_time_aggregate_build_morsel __pyx_string_tab[450]
+#define __pyx_n_u_time_aggregate_evaluations __pyx_string_tab[451]
+#define __pyx_n_u_time_aggregate_finalize __pyx_string_tab[452]
+#define __pyx_n_u_time_aggregate_grow __pyx_string_tab[453]
+#define __pyx_n_u_time_aggregate_hash __pyx_string_tab[454]
+#define __pyx_n_u_time_aggregate_ingest __pyx_string_tab[455]
+#define __pyx_n_u_time_aggregate_lookup __pyx_string_tab[456]
+#define __pyx_n_u_time_aggregate_reconstruct __pyx_string_tab[457]
+#define __pyx_n_u_time_aggregate_reconstruct_multi __pyx_string_tab[458]
+#define __pyx_n_u_time_aggregate_reconstruct_singl __pyx_string_tab[459]
+#define __pyx_n_u_time_aggregate_reconstruct_singl_2 __pyx_string_tab[460]
+#define __pyx_n_u_time_aggregate_resolve __pyx_string_tab[461]
+#define __pyx_n_u_time_aggregate_slice_output __pyx_string_tab[462]
+#define __pyx_n_u_time_aggregate_store_keys __pyx_string_tab[463]
+#define __pyx_n_u_time_build_morsel_ns __pyx_string_tab[464]
+#define __pyx_n_u_time_finalize_ns __pyx_string_tab[465]
+#define __pyx_n_u_time_grow_ns __pyx_string_tab[466]
+#define __pyx_n_u_time_hash_ns __pyx_string_tab[467]
+#define __pyx_n_u_time_lookup_ns __pyx_string_tab[468]
+#define __pyx_n_u_time_reconstruct_multi_ns __pyx_string_tab[469]
+#define __pyx_n_u_time_reconstruct_ns __pyx_string_tab[470]
+#define __pyx_n_u_time_reconstruct_single_fixed_ns __pyx_string_tab[471]
+#define __pyx_n_u_time_reconstruct_single_string_n __pyx_string_tab[472]
+#define __pyx_n_u_time_resolve_ns __pyx_string_tab[473]
+#define __pyx_n_u_time_slice_output_ns __pyx_string_tab[474]
+#define __pyx_n_u_time_store_keys_ns __pyx_string_tab[475]
+#define __pyx_n_u_to_pylist __pyx_string_tab[476]
+#define __pyx_n_u_type __pyx_string_tab[477]
+#define __pyx_n_u_unpack __pyx_string_tab[478]
+#define __pyx_n_u_update __pyx_string_tab[479]
+#define __pyx_n_u_use_parvi __pyx_string_tab[480]
+#define __pyx_n_u_use_setstate __pyx_string_tab[481]
+#define __pyx_n_u_used_parvi __pyx_string_tab[482]
+#define __pyx_n_u_value __pyx_string_tab[483]
+#define __pyx_n_u_values __pyx_string_tab[484]
+#define __pyx_n_u_variant __pyx_string_tab[485]
+#define __pyx_n_u_vector_from_sequence __pyx_string_tab[486]
+#define __pyx_n_u_x __pyx_string_tab[487]
+#define __pyx_kp_b__6 __pyx_string_tab[488]
+#define __pyx_kp_b_iso88591_1F __pyx_string_tab[489]
+#define __pyx_kp_b_iso88591_1_Ry_N_Jd_Qa_N_az_T_AQ_Ja_89D_U __pyx_string_tab[490]
+#define __pyx_kp_b_iso88591_1_T_1_wa_Qd_1_Q_uKq_gQl_AT_Q_3c __pyx_string_tab[491]
+#define __pyx_kp_b_iso88591_31F __pyx_string_tab[492]
+#define __pyx_kp_b_iso88591_4AV1 __pyx_string_tab[493]
+#define __pyx_kp_b_iso88591_55Fa __pyx_string_tab[494]
+#define __pyx_kp_b_iso88591_6avQ __pyx_string_tab[495]
+#define __pyx_kp_b_iso88591_8_q __pyx_string_tab[496]
+#define __pyx_kp_b_iso88591_A __pyx_string_tab[497]
+#define __pyx_kp_b_iso88591_A23_q_3az_c_q_Kq_S_q_U_5_C_Q_q_q __pyx_string_tab[498]
+#define __pyx_kp_b_iso88591_A23_q_az_Q_Q_s_XS_31_T_F_2Qa_Jc __pyx_string_tab[499]
+#define __pyx_kp_b_iso88591_A56_5_a_9Cxt_B_Q_1_9D_wa_1_9D_C1 __pyx_string_tab[500]
+#define __pyx_kp_b_iso88591_A_1D __pyx_string_tab[501]
+#define __pyx_kp_b_iso88591_A_1_D_Qa_D_Yd_a_t1D_QnA_T_it1L_E __pyx_string_tab[502]
+#define __pyx_kp_b_iso88591_A_1_at_7q_v __pyx_string_tab[503]
+#define __pyx_kp_b_iso88591_A_2 __pyx_string_tab[504]
+#define __pyx_kp_b_iso88591_A_3 __pyx_string_tab[505]
+#define __pyx_kp_b_iso88591_A_4 __pyx_string_tab[506]
+#define __pyx_kp_b_iso88591_A_4q_A_q_HD_D_a_vWA_q_HD_t_c_N_6 __pyx_string_tab[507]
+#define __pyx_kp_b_iso88591_A_4q_E_Q_5_uN_d_a_as_q_Q_T_a_t1 __pyx_string_tab[508]
+#define __pyx_kp_b_iso88591_A_5 __pyx_string_tab[509]
+#define __pyx_kp_b_iso88591_A_E_aq_G1A_was_Q_G1A_G1Kq_4q_1A __pyx_string_tab[510]
+#define __pyx_kp_b_iso88591_A_E_aq_q_HAV4vQha_Ba_1A __pyx_string_tab[511]
+#define __pyx_kp_b_iso88591_A_E_aq_q_V1Be1_1A __pyx_string_tab[512]
+#define __pyx_kp_b_iso88591_A_E_aq_q_Zq_1_1A __pyx_string_tab[513]
+#define __pyx_kp_b_iso88591_A_Qd_A_Ba_q __pyx_string_tab[514]
+#define __pyx_kp_b_iso88591_A_Qd_G1_Ba_q __pyx_string_tab[515]
+#define __pyx_kp_b_iso88591_A_d_Q_Q_JfA_XQ_E_aq_3b_y_Bk_q_Qc __pyx_string_tab[516]
+#define __pyx_kp_b_iso88591_A_d_Q_Q_JfA_XT_E_at1_3b_y_Bk_q_Q __pyx_string_tab[517]
+#define __pyx_kp_b_iso88591_A_d_T_XQ_5_1_U_1_4_q_a_1_I_q_8_1 __pyx_string_tab[518]
+#define __pyx_kp_b_iso88591_A_d_T_XQ_5_1_U_1_4_q_a_1_I_q_c_I __pyx_string_tab[519]
+#define __pyx_kp_b_iso88591_A_d_T_XQ_5_1_U_1_4_q_a_1_K_1_IQ __pyx_string_tab[520]
+#define __pyx_kp_b_iso88591_A_d_T_XQ_5_1_U_1_4_q_a_1_K_Q_IQ __pyx_string_tab[521]
+#define __pyx_kp_b_iso88591_A_d_T_XT_3m3e4uCq_U_4q_4_q_a_1_u __pyx_string_tab[522]
+#define __pyx_kp_b_iso88591_A_d_T_XT_3m3e4uCq_U_4q_4_q_a_1_u_2 __pyx_string_tab[523]
+#define __pyx_kp_b_iso88591_A_d_T_XT_3m3e4uCq_U_4q_4_q_a_1_u_3 __pyx_string_tab[524]
+#define __pyx_kp_b_iso88591_A_q __pyx_string_tab[525]
+#define __pyx_kp_b_iso88591_A_q_7_Q_4q_wa_4t1_4q_F_q_A_4q_Ba __pyx_string_tab[526]
+#define __pyx_kp_b_iso88591_A_q_HA_31F_PQ_T_7q_Z_1_3c_d_Qa_1 __pyx_string_tab[527]
+#define __pyx_kp_b_iso88591_A_q_e_5Q_U_4A __pyx_string_tab[528]
+#define __pyx_kp_b_iso88591_A_t1_D_d_a_D_a_A_4q_0_A_1_Q_Q_D __pyx_string_tab[529]
+#define __pyx_kp_b_iso88591_A_t_3a __pyx_string_tab[530]
+#define __pyx_kp_b_iso88591_A_t_3a_2 __pyx_string_tab[531]
+#define __pyx_kp_b_iso88591_Q __pyx_string_tab[532]
+#define __pyx_kp_b_iso88591_Q_2 __pyx_string_tab[533]
+#define __pyx_kp_b_iso88591_T_1_Zt_QUUccgg_A_G1F_a_vWE_Q_q __pyx_string_tab[534]
+#define __pyx_kp_b_iso88591_T_1_Zt_QUUccgg_A_G1F_a_vWE_Q_q_2 __pyx_string_tab[535]
+#define __pyx_kp_b_iso88591_T_t_5I_Q_G1F_a_vWE_Q_q_t_uCt_q __pyx_string_tab[536]
+#define __pyx_kp_b_iso88591_T_t_5I_Q_G1F_a_vWE_Q_q_t_uCt_q_2 __pyx_string_tab[537]
+#define __pyx_kp_b_iso88591_T_t_5I_Q_G1F_a_vWE_Q_q_t_uCt_q_3 __pyx_string_tab[538]
+#define __pyx_kp_b_iso88591_U_3aq_O_Qa_Qc_q_z_q_1_Q_1_1_auA __pyx_string_tab[539]
+#define __pyx_kp_b_iso88591_q_0_kQR_7_7q8PP___1 __pyx_string_tab[540]
+#define __pyx_kp_b_iso88591_q_0_kQR_7_8_9RR_a_1 __pyx_string_tab[541]
+#define __pyx_kp_b_iso88591_q_0_kQR_7_q0_a_1 __pyx_string_tab[542]
+#define __pyx_kp_b_iso88591_q_0_kQR_81A_7_VVdde_1 __pyx_string_tab[543]
+#define __pyx_kp_b_iso88591_q_0_kQR_XQa_7_A_ZZhhi_1 __pyx_string_tab[544]
+#define __pyx_kp_b_iso88591_z_q_3awgQa __pyx_string_tab[545]
+#define __pyx_kp_b_uint64_t_const_MIX_HASH_CONSTANT __pyx_string_tab[546]
+#define __pyx_n_b_O __pyx_string_tab[547]
 #define __pyx_int_0 __pyx_number_tab[0]
 #define __pyx_int_neg_1 __pyx_number_tab[1]
 #define __pyx_int_1 __pyx_number_tab[2]
@@ -6430,7 +6450,7 @@ static CYTHON_SMALL_CODE int __pyx_m_clear(PyObject *m) {
   for (int i=0; i<2; ++i) { Py_CLEAR(clear_module_state->__pyx_slice[i]); }
   for (int i=0; i<7; ++i) { Py_CLEAR(clear_module_state->__pyx_tuple[i]); }
   for (int i=0; i<98; ++i) { Py_CLEAR(clear_module_state->__pyx_codeobj_tab[i]); }
-  for (int i=0; i<540; ++i) { Py_CLEAR(clear_module_state->__pyx_string_tab[i]); }
+  for (int i=0; i<548; ++i) { Py_CLEAR(clear_module_state->__pyx_string_tab[i]); }
   for (int i=0; i<7; ++i) { Py_CLEAR(clear_module_state->__pyx_number_tab[i]); }
 /* #### Code section: module_state_clear_contents ### */
 /* CommonTypesMetaclass.module_state_clear */
@@ -6539,7 +6559,7 @@ static CYTHON_SMALL_CODE int __pyx_m_traverse(PyObject *m, visitproc visit, void
   for (int i=0; i<2; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_slice[i]); }
   for (int i=0; i<7; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_tuple[i]); }
   for (int i=0; i<98; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_codeobj_tab[i]); }
-  for (int i=0; i<540; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_string_tab[i]); }
+  for (int i=0; i<548; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_string_tab[i]); }
   for (int i=0; i<7; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_number_tab[i]); }
 /* #### Code section: module_state_traverse_contents ### */
 /* CommonTypesMetaclass.module_state_traverse */
@@ -51067,7 +51087,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   return __pyx_r;
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":42
+/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":59
  * 
  * 
  * cdef inline long long _now_ns() noexcept nogil:             # <<<<<<<<<<<<<<
@@ -51080,7 +51100,7 @@ static CYTHON_INLINE PY_LONG_LONG __pyx_f_7opteryx_9operators_24grouped_aggregat
   PY_LONG_LONG __pyx_r;
   int __pyx_t_1;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":44
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":61
  * cdef inline long long _now_ns() noexcept nogil:
  *     cdef timespec ts
  *     if clock_gettime(CLOCK_MONOTONIC, &ts) != 0:             # <<<<<<<<<<<<<<
@@ -51090,7 +51110,7 @@ static CYTHON_INLINE PY_LONG_LONG __pyx_f_7opteryx_9operators_24grouped_aggregat
   __pyx_t_1 = (clock_gettime(CLOCK_MONOTONIC, (&__pyx_v_ts)) != 0);
   if (__pyx_t_1) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":45
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":62
  *     cdef timespec ts
  *     if clock_gettime(CLOCK_MONOTONIC, &ts) != 0:
  *         return 0             # <<<<<<<<<<<<<<
@@ -51100,7 +51120,7 @@ static CYTHON_INLINE PY_LONG_LONG __pyx_f_7opteryx_9operators_24grouped_aggregat
     __pyx_r = 0;
     goto __pyx_L0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":44
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":61
  * cdef inline long long _now_ns() noexcept nogil:
  *     cdef timespec ts
  *     if clock_gettime(CLOCK_MONOTONIC, &ts) != 0:             # <<<<<<<<<<<<<<
@@ -51109,7 +51129,7 @@ static CYTHON_INLINE PY_LONG_LONG __pyx_f_7opteryx_9operators_24grouped_aggregat
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":46
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":63
  *     if clock_gettime(CLOCK_MONOTONIC, &ts) != 0:
  *         return 0
  *     return <long long>ts.tv_sec * 1000000000 + <long long>ts.tv_nsec             # <<<<<<<<<<<<<<
@@ -51119,7 +51139,7 @@ static CYTHON_INLINE PY_LONG_LONG __pyx_f_7opteryx_9operators_24grouped_aggregat
   __pyx_r = ((((PY_LONG_LONG)__pyx_v_ts.tv_sec) * 0x3B9ACA00) + ((PY_LONG_LONG)__pyx_v_ts.tv_nsec));
   goto __pyx_L0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":42
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":59
  * 
  * 
  * cdef inline long long _now_ns() noexcept nogil:             # <<<<<<<<<<<<<<
@@ -51132,7 +51152,7 @@ static CYTHON_INLINE PY_LONG_LONG __pyx_f_7opteryx_9operators_24grouped_aggregat
   return __pyx_r;
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":84
+/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":105
  *     cdef long long _time_slice_output_ns
  * 
  *     def __cinit__(             # <<<<<<<<<<<<<<
@@ -51146,9 +51166,10 @@ static int __pyx_pw_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   PyObject *__pyx_v_group_columns = 0;
   PyObject *__pyx_v_collectors = 0;
   int __pyx_v_telemetry_enabled;
+  int __pyx_v_use_parvi;
   CYTHON_UNUSED Py_ssize_t __pyx_nargs;
   CYTHON_UNUSED PyObject *const *__pyx_kwvalues;
-  PyObject* values[3] = {0,0,0};
+  PyObject* values[4] = {0,0,0,0};
   int __pyx_lineno = 0;
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
@@ -51162,42 +51183,50 @@ static int __pyx_pw_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   #endif
   __pyx_kwvalues = __Pyx_KwValues_VARARGS(__pyx_args, __pyx_nargs);
   {
-    PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_group_columns,&__pyx_mstate_global->__pyx_n_u_collectors,&__pyx_mstate_global->__pyx_n_u_telemetry_enabled,0};
+    PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_group_columns,&__pyx_mstate_global->__pyx_n_u_collectors,&__pyx_mstate_global->__pyx_n_u_telemetry_enabled,&__pyx_mstate_global->__pyx_n_u_use_parvi,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_VARARGS(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(10, 84, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(10, 105, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
+        case  4:
+        values[3] = __Pyx_ArgRef_VARARGS(__pyx_args, 3);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[3])) __PYX_ERR(10, 105, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
         case  3:
         values[2] = __Pyx_ArgRef_VARARGS(__pyx_args, 2);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(10, 84, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(10, 105, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  2:
         values[1] = __Pyx_ArgRef_VARARGS(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(10, 84, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(10, 105, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_VARARGS(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(10, 84, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(10, 105, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "__cinit__", 0) < (0)) __PYX_ERR(10, 84, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "__cinit__", 0) < (0)) __PYX_ERR(10, 105, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("__cinit__", 0, 2, 3, i); __PYX_ERR(10, 84, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("__cinit__", 0, 2, 4, i); __PYX_ERR(10, 105, __pyx_L3_error) }
       }
     } else {
       switch (__pyx_nargs) {
+        case  4:
+        values[3] = __Pyx_ArgRef_VARARGS(__pyx_args, 3);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[3])) __PYX_ERR(10, 105, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
         case  3:
         values[2] = __Pyx_ArgRef_VARARGS(__pyx_args, 2);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(10, 84, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(10, 105, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  2:
         values[1] = __Pyx_ArgRef_VARARGS(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(10, 84, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(10, 105, __pyx_L3_error)
         values[0] = __Pyx_ArgRef_VARARGS(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(10, 84, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(10, 105, __pyx_L3_error)
         break;
         default: goto __pyx_L5_argtuple_error;
       }
@@ -51205,22 +51234,35 @@ static int __pyx_pw_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
     __pyx_v_group_columns = ((PyObject*)values[0]);
     __pyx_v_collectors = ((PyObject*)values[1]);
     if (values[2]) {
-      __pyx_v_telemetry_enabled = __Pyx_PyObject_IsTrue(values[2]); if (unlikely((__pyx_v_telemetry_enabled == (int)-1) && PyErr_Occurred())) __PYX_ERR(10, 88, __pyx_L3_error)
+      __pyx_v_telemetry_enabled = __Pyx_PyObject_IsTrue(values[2]); if (unlikely((__pyx_v_telemetry_enabled == (int)-1) && PyErr_Occurred())) __PYX_ERR(10, 109, __pyx_L3_error)
     } else {
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":88
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":109
  *         list group_columns,
  *         list collectors,
  *         bint telemetry_enabled=False,             # <<<<<<<<<<<<<<
+ *         bint use_parvi=False,
+ *     ):
+*/
+      __pyx_v_telemetry_enabled = ((int)0);
+    }
+    if (values[3]) {
+      __pyx_v_use_parvi = __Pyx_PyObject_IsTrue(values[3]); if (unlikely((__pyx_v_use_parvi == (int)-1) && PyErr_Occurred())) __PYX_ERR(10, 110, __pyx_L3_error)
+    } else {
+
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":110
+ *         list collectors,
+ *         bint telemetry_enabled=False,
+ *         bint use_parvi=False,             # <<<<<<<<<<<<<<
  *     ):
  *         self._group_columns = group_columns
 */
-      __pyx_v_telemetry_enabled = ((int)0);
+      __pyx_v_use_parvi = ((int)0);
     }
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("__cinit__", 0, 2, 3, __pyx_nargs); __PYX_ERR(10, 84, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("__cinit__", 0, 2, 4, __pyx_nargs); __PYX_ERR(10, 105, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -51231,11 +51273,11 @@ static int __pyx_pw_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   __Pyx_RefNannyFinishContext();
   return -1;
   __pyx_L4_argument_unpacking_done:;
-  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_group_columns), (&PyList_Type), 1, "group_columns", 1))) __PYX_ERR(10, 86, __pyx_L1_error)
-  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_collectors), (&PyList_Type), 1, "collectors", 1))) __PYX_ERR(10, 87, __pyx_L1_error)
-  __pyx_r = __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine___cinit__(((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *)__pyx_v_self), __pyx_v_group_columns, __pyx_v_collectors, __pyx_v_telemetry_enabled);
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_group_columns), (&PyList_Type), 1, "group_columns", 1))) __PYX_ERR(10, 107, __pyx_L1_error)
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_collectors), (&PyList_Type), 1, "collectors", 1))) __PYX_ERR(10, 108, __pyx_L1_error)
+  __pyx_r = __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine___cinit__(((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *)__pyx_v_self), __pyx_v_group_columns, __pyx_v_collectors, __pyx_v_telemetry_enabled, __pyx_v_use_parvi);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":84
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":105
  *     cdef long long _time_slice_output_ns
  * 
  *     def __cinit__(             # <<<<<<<<<<<<<<
@@ -51260,7 +51302,7 @@ static int __pyx_pw_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   return __pyx_r;
 }
 
-static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine___cinit__(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *__pyx_v_self, PyObject *__pyx_v_group_columns, PyObject *__pyx_v_collectors, int __pyx_v_telemetry_enabled) {
+static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine___cinit__(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *__pyx_v_self, PyObject *__pyx_v_group_columns, PyObject *__pyx_v_collectors, int __pyx_v_telemetry_enabled, int __pyx_v_use_parvi) {
   int __pyx_r;
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
@@ -51271,8 +51313,8 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__cinit__", 0);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":90
- *         bint telemetry_enabled=False,
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":112
+ *         bint use_parvi=False,
  *     ):
  *         self._group_columns = group_columns             # <<<<<<<<<<<<<<
  *         self._collectors = collectors
@@ -51284,7 +51326,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   __Pyx_DECREF(__pyx_v_self->_group_columns);
   __pyx_v_self->_group_columns = __pyx_v_group_columns;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":91
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":113
  *     ):
  *         self._group_columns = group_columns
  *         self._collectors = collectors             # <<<<<<<<<<<<<<
@@ -51297,7 +51339,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   __Pyx_DECREF(__pyx_v_self->_collectors);
   __pyx_v_self->_collectors = __pyx_v_collectors;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":92
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":114
  *         self._group_columns = group_columns
  *         self._collectors = collectors
  *         self._num_groups = 0             # <<<<<<<<<<<<<<
@@ -51306,35 +51348,71 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_self->_num_groups = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":93
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":115
  *         self._collectors = collectors
  *         self._num_groups = 0
  *         self._resolved = False             # <<<<<<<<<<<<<<
  *         self._telemetry_enabled = telemetry_enabled
- *         self._time_resolve_ns = 0
+ *         self._use_parvi = use_parvi
 */
   __pyx_v_self->_resolved = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":94
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":116
  *         self._num_groups = 0
  *         self._resolved = False
  *         self._telemetry_enabled = telemetry_enabled             # <<<<<<<<<<<<<<
- *         self._time_resolve_ns = 0
- *         self._time_hash_ns = 0
+ *         self._use_parvi = use_parvi
+ *         self._promoted_from_parvi = False
 */
   __pyx_v_self->_telemetry_enabled = __pyx_v_telemetry_enabled;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":95
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":117
  *         self._resolved = False
  *         self._telemetry_enabled = telemetry_enabled
+ *         self._use_parvi = use_parvi             # <<<<<<<<<<<<<<
+ *         self._promoted_from_parvi = False
+ *         self._parvi_final_size = 0
+*/
+  __pyx_v_self->_use_parvi = __pyx_v_use_parvi;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":118
+ *         self._telemetry_enabled = telemetry_enabled
+ *         self._use_parvi = use_parvi
+ *         self._promoted_from_parvi = False             # <<<<<<<<<<<<<<
+ *         self._parvi_final_size = 0
+ *         self._parvi = NULL
+*/
+  __pyx_v_self->_promoted_from_parvi = 0;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":119
+ *         self._use_parvi = use_parvi
+ *         self._promoted_from_parvi = False
+ *         self._parvi_final_size = 0             # <<<<<<<<<<<<<<
+ *         self._parvi = NULL
+ *         self._time_resolve_ns = 0
+*/
+  __pyx_v_self->_parvi_final_size = 0;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":120
+ *         self._promoted_from_parvi = False
+ *         self._parvi_final_size = 0
+ *         self._parvi = NULL             # <<<<<<<<<<<<<<
+ *         self._time_resolve_ns = 0
+ *         self._time_hash_ns = 0
+*/
+  __pyx_v_self->_parvi = NULL;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":121
+ *         self._parvi_final_size = 0
+ *         self._parvi = NULL
  *         self._time_resolve_ns = 0             # <<<<<<<<<<<<<<
  *         self._time_hash_ns = 0
  *         self._time_lookup_ns = 0
 */
   __pyx_v_self->_time_resolve_ns = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":96
- *         self._telemetry_enabled = telemetry_enabled
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":122
+ *         self._parvi = NULL
  *         self._time_resolve_ns = 0
  *         self._time_hash_ns = 0             # <<<<<<<<<<<<<<
  *         self._time_lookup_ns = 0
@@ -51342,7 +51420,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_self->_time_hash_ns = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":97
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":123
  *         self._time_resolve_ns = 0
  *         self._time_hash_ns = 0
  *         self._time_lookup_ns = 0             # <<<<<<<<<<<<<<
@@ -51351,7 +51429,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_self->_time_lookup_ns = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":98
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":124
  *         self._time_hash_ns = 0
  *         self._time_lookup_ns = 0
  *         self._time_store_keys_ns = 0             # <<<<<<<<<<<<<<
@@ -51360,7 +51438,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_self->_time_store_keys_ns = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":99
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":125
  *         self._time_lookup_ns = 0
  *         self._time_store_keys_ns = 0
  *         self._time_grow_ns = 0             # <<<<<<<<<<<<<<
@@ -51369,7 +51447,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_self->_time_grow_ns = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":100
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":126
  *         self._time_store_keys_ns = 0
  *         self._time_grow_ns = 0
  *         self._time_accumulate_ns = 0             # <<<<<<<<<<<<<<
@@ -51378,7 +51456,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_self->_time_accumulate_ns = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":101
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":127
  *         self._time_grow_ns = 0
  *         self._time_accumulate_ns = 0
  *         self._time_finalize_ns = 0             # <<<<<<<<<<<<<<
@@ -51387,7 +51465,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_self->_time_finalize_ns = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":102
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":128
  *         self._time_accumulate_ns = 0
  *         self._time_finalize_ns = 0
  *         self._time_reconstruct_ns = 0             # <<<<<<<<<<<<<<
@@ -51396,7 +51474,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_self->_time_reconstruct_ns = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":103
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":129
  *         self._time_finalize_ns = 0
  *         self._time_reconstruct_ns = 0
  *         self._time_reconstruct_single_fixed_ns = 0             # <<<<<<<<<<<<<<
@@ -51405,7 +51483,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_self->_time_reconstruct_single_fixed_ns = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":104
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":130
  *         self._time_reconstruct_ns = 0
  *         self._time_reconstruct_single_fixed_ns = 0
  *         self._time_reconstruct_single_string_ns = 0             # <<<<<<<<<<<<<<
@@ -51414,7 +51492,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_self->_time_reconstruct_single_string_ns = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":105
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":131
  *         self._time_reconstruct_single_fixed_ns = 0
  *         self._time_reconstruct_single_string_ns = 0
  *         self._time_reconstruct_multi_ns = 0             # <<<<<<<<<<<<<<
@@ -51423,7 +51501,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_self->_time_reconstruct_multi_ns = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":106
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":132
  *         self._time_reconstruct_single_string_ns = 0
  *         self._time_reconstruct_multi_ns = 0
  *         self._time_build_morsel_ns = 0             # <<<<<<<<<<<<<<
@@ -51432,7 +51510,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_self->_time_build_morsel_ns = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":107
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":133
  *         self._time_reconstruct_multi_ns = 0
  *         self._time_build_morsel_ns = 0
  *         self._time_slice_output_ns = 0             # <<<<<<<<<<<<<<
@@ -51441,7 +51519,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_self->_time_slice_output_ns = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":109
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":135
  *         self._time_slice_output_ns = 0
  *         # key_kinds and KeyStore are initialized after first-morsel resolution
  *         self._index = NULL             # <<<<<<<<<<<<<<
@@ -51450,27 +51528,27 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_self->_index = NULL;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":110
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":136
  *         # key_kinds and KeyStore are initialized after first-morsel resolution
  *         self._index = NULL
  *         self._key_kinds = [KEY_MULTI_FIXED_INT] * len(group_columns)             # <<<<<<<<<<<<<<
  * 
  *     def __dealloc__(self):
 */
-  __pyx_t_1 = __Pyx_PyLong_From_int(__pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_KEY_MULTI_FIXED_INT); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 110, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyLong_From_int(__pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_KEY_MULTI_FIXED_INT); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 136, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   if (unlikely(__pyx_v_group_columns == Py_None)) {
     PyErr_SetString(PyExc_TypeError, "object of type 'NoneType' has no len()");
-    __PYX_ERR(10, 110, __pyx_L1_error)
+    __PYX_ERR(10, 136, __pyx_L1_error)
   }
-  __pyx_t_2 = __Pyx_PyList_GET_SIZE(__pyx_v_group_columns); if (unlikely(__pyx_t_2 == ((Py_ssize_t)-1))) __PYX_ERR(10, 110, __pyx_L1_error)
-  __pyx_t_3 = PyList_New(1 * ((__pyx_t_2<0) ? 0:__pyx_t_2)); if (unlikely(!__pyx_t_3)) __PYX_ERR(10, 110, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyList_GET_SIZE(__pyx_v_group_columns); if (unlikely(__pyx_t_2 == ((Py_ssize_t)-1))) __PYX_ERR(10, 136, __pyx_L1_error)
+  __pyx_t_3 = PyList_New(1 * ((__pyx_t_2<0) ? 0:__pyx_t_2)); if (unlikely(!__pyx_t_3)) __PYX_ERR(10, 136, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   { Py_ssize_t __pyx_temp;
     for (__pyx_temp=0; __pyx_temp < __pyx_t_2; __pyx_temp++) {
       __Pyx_INCREF(__pyx_t_1);
       __Pyx_GIVEREF(__pyx_t_1);
-      if (__Pyx_PyList_SET_ITEM(__pyx_t_3, __pyx_temp, __pyx_t_1) != (0)) __PYX_ERR(10, 110, __pyx_L1_error);
+      if (__Pyx_PyList_SET_ITEM(__pyx_t_3, __pyx_temp, __pyx_t_1) != (0)) __PYX_ERR(10, 136, __pyx_L1_error);
     }
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
@@ -51480,7 +51558,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   __pyx_v_self->_key_kinds = ((PyObject*)__pyx_t_3);
   __pyx_t_3 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":84
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":105
  *     cdef long long _time_slice_output_ns
  * 
  *     def __cinit__(             # <<<<<<<<<<<<<<
@@ -51501,7 +51579,7 @@ static int __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   return __pyx_r;
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":112
+/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":138
  *         self._key_kinds = [KEY_MULTI_FIXED_INT] * len(group_columns)
  * 
  *     def __dealloc__(self):             # <<<<<<<<<<<<<<
@@ -51525,7 +51603,7 @@ static void __pyx_pw_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_a
 static void __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_2__dealloc__(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *__pyx_v_self) {
   int __pyx_t_1;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":113
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":139
  * 
  *     def __dealloc__(self):
  *         if self._index != NULL:             # <<<<<<<<<<<<<<
@@ -51535,25 +51613,25 @@ static void __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_a
   __pyx_t_1 = (__pyx_v_self->_index != NULL);
   if (__pyx_t_1) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":114
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":140
  *     def __dealloc__(self):
  *         if self._index != NULL:
  *             del self._index             # <<<<<<<<<<<<<<
  *             self._index = NULL
- * 
+ *         if self._parvi != NULL:
 */
     delete __pyx_v_self->_index;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":115
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":141
  *         if self._index != NULL:
  *             del self._index
  *             self._index = NULL             # <<<<<<<<<<<<<<
- * 
- *     cpdef void set_telemetry_enabled(self, bint enabled):
+ *         if self._parvi != NULL:
+ *             del self._parvi
 */
     __pyx_v_self->_index = NULL;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":113
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":139
  * 
  *     def __dealloc__(self):
  *         if self._index != NULL:             # <<<<<<<<<<<<<<
@@ -51562,7 +51640,44 @@ static void __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_a
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":112
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":142
+ *             del self._index
+ *             self._index = NULL
+ *         if self._parvi != NULL:             # <<<<<<<<<<<<<<
+ *             del self._parvi
+ *             self._parvi = NULL
+*/
+  __pyx_t_1 = (__pyx_v_self->_parvi != NULL);
+  if (__pyx_t_1) {
+
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":143
+ *             self._index = NULL
+ *         if self._parvi != NULL:
+ *             del self._parvi             # <<<<<<<<<<<<<<
+ *             self._parvi = NULL
+ * 
+*/
+    delete __pyx_v_self->_parvi;
+
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":144
+ *         if self._parvi != NULL:
+ *             del self._parvi
+ *             self._parvi = NULL             # <<<<<<<<<<<<<<
+ * 
+ *     cpdef void set_telemetry_enabled(self, bint enabled):
+*/
+    __pyx_v_self->_parvi = NULL;
+
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":142
+ *             del self._index
+ *             self._index = NULL
+ *         if self._parvi != NULL:             # <<<<<<<<<<<<<<
+ *             del self._parvi
+ *             self._parvi = NULL
+*/
+  }
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":138
  *         self._key_kinds = [KEY_MULTI_FIXED_INT] * len(group_columns)
  * 
  *     def __dealloc__(self):             # <<<<<<<<<<<<<<
@@ -51573,8 +51688,8 @@ static void __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_a
   /* function exit code */
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":117
- *             self._index = NULL
+/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":146
+ *             self._parvi = NULL
  * 
  *     cpdef void set_telemetry_enabled(self, bint enabled):             # <<<<<<<<<<<<<<
  *         self._telemetry_enabled = enabled
@@ -51616,13 +51731,13 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
     if (unlikely(!__Pyx_object_dict_version_matches(((PyObject *)__pyx_v_self), __pyx_tp_dict_version, __pyx_obj_dict_version))) {
       PY_UINT64_T __pyx_typedict_guard = __Pyx_get_tp_dict_version(((PyObject *)__pyx_v_self));
       #endif
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_set_telemetry_enabled); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 117, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_set_telemetry_enabled); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 146, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
       if (!__Pyx_IsSameCFunction(__pyx_t_1, (void(*)(void)) __pyx_pw_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_5set_telemetry_enabled)) {
         __pyx_t_3 = NULL;
         __Pyx_INCREF(__pyx_t_1);
         __pyx_t_4 = __pyx_t_1; 
-        __pyx_t_5 = __Pyx_PyBool_FromLong(__pyx_v_enabled); if (unlikely(!__pyx_t_5)) __PYX_ERR(10, 117, __pyx_L1_error)
+        __pyx_t_5 = __Pyx_PyBool_FromLong(__pyx_v_enabled); if (unlikely(!__pyx_t_5)) __PYX_ERR(10, 146, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_5);
         __pyx_t_6 = 1;
         #if CYTHON_UNPACK_METHODS
@@ -51642,7 +51757,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
           __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
           __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
           __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-          if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 117, __pyx_L1_error)
+          if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 146, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_2);
         }
         __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
@@ -51662,17 +51777,17 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
     #endif
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":118
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":147
  * 
  *     cpdef void set_telemetry_enabled(self, bint enabled):
  *         self._telemetry_enabled = enabled             # <<<<<<<<<<<<<<
  * 
- *     cdef void _resolve_on_first_morsel(self, object morsel):
+ *     cdef void _promote_parvi_to_carchar(self):
 */
   __pyx_v_self->_telemetry_enabled = __pyx_v_enabled;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":117
- *             self._index = NULL
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":146
+ *             self._parvi = NULL
  * 
  *     cpdef void set_telemetry_enabled(self, bint enabled):             # <<<<<<<<<<<<<<
  *         self._telemetry_enabled = enabled
@@ -51731,32 +51846,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_enabled,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(10, 117, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(10, 146, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(10, 117, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(10, 146, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "set_telemetry_enabled", 0) < (0)) __PYX_ERR(10, 117, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "set_telemetry_enabled", 0) < (0)) __PYX_ERR(10, 146, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("set_telemetry_enabled", 1, 1, 1, i); __PYX_ERR(10, 117, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("set_telemetry_enabled", 1, 1, 1, i); __PYX_ERR(10, 146, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(10, 117, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(10, 146, __pyx_L3_error)
     }
-    __pyx_v_enabled = __Pyx_PyObject_IsTrue(values[0]); if (unlikely((__pyx_v_enabled == (int)-1) && PyErr_Occurred())) __PYX_ERR(10, 117, __pyx_L3_error)
+    __pyx_v_enabled = __Pyx_PyObject_IsTrue(values[0]); if (unlikely((__pyx_v_enabled == (int)-1) && PyErr_Occurred())) __PYX_ERR(10, 146, __pyx_L3_error)
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("set_telemetry_enabled", 1, 1, 1, __pyx_nargs); __PYX_ERR(10, 117, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("set_telemetry_enabled", 1, 1, 1, __pyx_nargs); __PYX_ERR(10, 146, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -51786,8 +51901,8 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("set_telemetry_enabled", 0);
   __Pyx_XDECREF(__pyx_r);
-  __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_set_telemetry_enabled(__pyx_v_self, __pyx_v_enabled, 1); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 117, __pyx_L1_error)
-  __pyx_t_1 = __Pyx_void_to_None(NULL); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 117, __pyx_L1_error)
+  __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_set_telemetry_enabled(__pyx_v_self, __pyx_v_enabled, 1); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 146, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_void_to_None(NULL); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 146, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
@@ -51804,8 +51919,124 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   return __pyx_r;
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":120
+/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":149
  *         self._telemetry_enabled = enabled
+ * 
+ *     cdef void _promote_parvi_to_carchar(self):             # <<<<<<<<<<<<<<
+ *         """One-shot: promote the small parvi map to a carchar index.
+ * 
+*/
+
+static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine__promote_parvi_to_carchar(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *__pyx_v_self) {
+  opteryx::carchar::CarcharIndex *__pyx_t_1;
+  int __pyx_lineno = 0;
+  const char *__pyx_filename = NULL;
+  int __pyx_clineno = 0;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":159
+ *         and _parvi has been freed.
+ *         """
+ *         self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)             # <<<<<<<<<<<<<<
+ *         if self._telemetry_enabled:
+ *             self._parvi_final_size = <int64_t>self._parvi.size()
+*/
+  try {
+    __pyx_t_1 = new opteryx::carchar::CarcharIndex(__pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__INITIAL_INDEX_CAPACITY, __pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__CARCHAR_LOAD_FACTOR);
+  } catch(...) {
+    __Pyx_CppExn2PyErr();
+    __PYX_ERR(10, 159, __pyx_L1_error)
+  }
+  __pyx_v_self->_index = __pyx_t_1;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":160
+ *         """
+ *         self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
+ *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
+ *             self._parvi_final_size = <int64_t>self._parvi.size()
+ *         self._parvi.drain_into(self._index[0])
+*/
+  if (__pyx_v_self->_telemetry_enabled) {
+
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":161
+ *         self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
+ *         if self._telemetry_enabled:
+ *             self._parvi_final_size = <int64_t>self._parvi.size()             # <<<<<<<<<<<<<<
+ *         self._parvi.drain_into(self._index[0])
+ *         del self._parvi
+*/
+    __pyx_v_self->_parvi_final_size = ((int64_t)__pyx_v_self->_parvi->size());
+
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":160
+ *         """
+ *         self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
+ *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
+ *             self._parvi_final_size = <int64_t>self._parvi.size()
+ *         self._parvi.drain_into(self._index[0])
+*/
+  }
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":162
+ *         if self._telemetry_enabled:
+ *             self._parvi_final_size = <int64_t>self._parvi.size()
+ *         self._parvi.drain_into(self._index[0])             # <<<<<<<<<<<<<<
+ *         del self._parvi
+ *         self._parvi = NULL
+*/
+  __pyx_v_self->_parvi->drain_into((__pyx_v_self->_index[0]));
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":163
+ *             self._parvi_final_size = <int64_t>self._parvi.size()
+ *         self._parvi.drain_into(self._index[0])
+ *         del self._parvi             # <<<<<<<<<<<<<<
+ *         self._parvi = NULL
+ *         self._use_parvi = False
+*/
+  delete __pyx_v_self->_parvi;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":164
+ *         self._parvi.drain_into(self._index[0])
+ *         del self._parvi
+ *         self._parvi = NULL             # <<<<<<<<<<<<<<
+ *         self._use_parvi = False
+ *         self._promoted_from_parvi = True
+*/
+  __pyx_v_self->_parvi = NULL;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":165
+ *         del self._parvi
+ *         self._parvi = NULL
+ *         self._use_parvi = False             # <<<<<<<<<<<<<<
+ *         self._promoted_from_parvi = True
+ * 
+*/
+  __pyx_v_self->_use_parvi = 0;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":166
+ *         self._parvi = NULL
+ *         self._use_parvi = False
+ *         self._promoted_from_parvi = True             # <<<<<<<<<<<<<<
+ * 
+ *     cdef void _resolve_on_first_morsel(self, object morsel):
+*/
+  __pyx_v_self->_promoted_from_parvi = 1;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":149
+ *         self._telemetry_enabled = enabled
+ * 
+ *     cdef void _promote_parvi_to_carchar(self):             # <<<<<<<<<<<<<<
+ *         """One-shot: promote the small parvi map to a carchar index.
+ * 
+*/
+
+  /* function exit code */
+  goto __pyx_L0;
+  __pyx_L1_error:;
+  __Pyx_AddTraceback("opteryx.operators.grouped_aggregate_hashed._grouped_agg.GroupHashEngine._promote_parvi_to_carchar", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __pyx_L0:;
+}
+
+/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":168
+ *         self._promoted_from_parvi = True
  * 
  *     cdef void _resolve_on_first_morsel(self, object morsel):             # <<<<<<<<<<<<<<
  *         """Called once on first non-empty morsel to fix collector types and key kinds."""
@@ -51819,13 +52050,14 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   PyObject *__pyx_t_2 = NULL;
   PyObject *__pyx_t_3 = NULL;
   size_t __pyx_t_4;
-  opteryx::carchar::CarcharIndex *__pyx_t_5;
+  opteryx::parvi::ParviMap *__pyx_t_5;
+  opteryx::carchar::CarcharIndex *__pyx_t_6;
   int __pyx_lineno = 0;
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_resolve_on_first_morsel", 0);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":123
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":171
  *         """Called once on first non-empty morsel to fix collector types and key kinds."""
  *         cdef long long start_ns
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -51834,7 +52066,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   if (__pyx_v_self->_telemetry_enabled) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":124
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":172
  *         cdef long long start_ns
  *         if self._telemetry_enabled:
  *             start_ns = _now_ns()             # <<<<<<<<<<<<<<
@@ -51843,7 +52075,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     __pyx_v_start_ns = __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns();
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":123
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":171
  *         """Called once on first non-empty morsel to fix collector types and key kinds."""
  *         cdef long long start_ns
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -51852,7 +52084,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":126
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":174
  *             start_ns = _now_ns()
  *         resolve_deferred_collectors(
  *             self._collectors, morsel, self._group_columns, self._key_kinds             # <<<<<<<<<<<<<<
@@ -51866,24 +52098,24 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   __pyx_t_3 = __pyx_v_self->_key_kinds;
   __Pyx_INCREF(__pyx_t_3);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":125
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":173
  *         if self._telemetry_enabled:
  *             start_ns = _now_ns()
  *         resolve_deferred_collectors(             # <<<<<<<<<<<<<<
  *             self._collectors, morsel, self._group_columns, self._key_kinds
  *         )
 */
-  __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_resolve_deferred_collectors(((PyObject*)__pyx_t_1), __pyx_v_morsel, ((PyObject*)__pyx_t_2), ((PyObject*)__pyx_t_3), 0); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 125, __pyx_L1_error)
+  __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_resolve_deferred_collectors(((PyObject*)__pyx_t_1), __pyx_v_morsel, ((PyObject*)__pyx_t_2), ((PyObject*)__pyx_t_3), 0); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 173, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":128
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":176
  *             self._collectors, morsel, self._group_columns, self._key_kinds
  *         )
  *         self._key_store = KeyStore(self._group_columns, self._key_kinds)             # <<<<<<<<<<<<<<
- *         self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
- *         self._resolved = True
+ *         if self._use_parvi:
+ *             # Small-map fast path: no heap hash table, single SIMD group.
 */
   __pyx_t_2 = NULL;
   __pyx_t_4 = 1;
@@ -51891,7 +52123,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
     PyObject *__pyx_callargs[3] = {__pyx_t_2, __pyx_v_self->_group_columns, __pyx_v_self->_key_kinds};
     __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)__pyx_mstate_global->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_KeyStore, __pyx_callargs+__pyx_t_4, (3-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-    if (unlikely(!__pyx_t_3)) __PYX_ERR(10, 128, __pyx_L1_error)
+    if (unlikely(!__pyx_t_3)) __PYX_ERR(10, 176, __pyx_L1_error)
     __Pyx_GOTREF((PyObject *)__pyx_t_3);
   }
   __Pyx_GIVEREF((PyObject *)__pyx_t_3);
@@ -51900,32 +52132,69 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   __pyx_v_self->_key_store = ((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_KeyStore *)__pyx_t_3);
   __pyx_t_3 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":129
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":177
  *         )
  *         self._key_store = KeyStore(self._group_columns, self._key_kinds)
- *         self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)             # <<<<<<<<<<<<<<
+ *         if self._use_parvi:             # <<<<<<<<<<<<<<
+ *             # Small-map fast path: no heap hash table, single SIMD group.
+ *             # Carchar is allocated lazily on overflow (see _promote_parvi_to_carchar).
+*/
+  if (__pyx_v_self->_use_parvi) {
+
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":180
+ *             # Small-map fast path: no heap hash table, single SIMD group.
+ *             # Carchar is allocated lazily on overflow (see _promote_parvi_to_carchar).
+ *             self._parvi = new ParviMap()             # <<<<<<<<<<<<<<
+ *         else:
+ *             self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
+*/
+    try {
+      __pyx_t_5 = new opteryx::parvi::ParviMap();
+    } catch(...) {
+      __Pyx_CppExn2PyErr();
+      __PYX_ERR(10, 180, __pyx_L1_error)
+    }
+    __pyx_v_self->_parvi = __pyx_t_5;
+
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":177
+ *         )
+ *         self._key_store = KeyStore(self._group_columns, self._key_kinds)
+ *         if self._use_parvi:             # <<<<<<<<<<<<<<
+ *             # Small-map fast path: no heap hash table, single SIMD group.
+ *             # Carchar is allocated lazily on overflow (see _promote_parvi_to_carchar).
+*/
+    goto __pyx_L4;
+  }
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":182
+ *             self._parvi = new ParviMap()
+ *         else:
+ *             self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)             # <<<<<<<<<<<<<<
  *         self._resolved = True
  *         if self._telemetry_enabled:
 */
-  try {
-    __pyx_t_5 = new opteryx::carchar::CarcharIndex(__pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__INITIAL_INDEX_CAPACITY, __pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__CARCHAR_LOAD_FACTOR);
-  } catch(...) {
-    __Pyx_CppExn2PyErr();
-    __PYX_ERR(10, 129, __pyx_L1_error)
+  /*else*/ {
+    try {
+      __pyx_t_6 = new opteryx::carchar::CarcharIndex(__pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__INITIAL_INDEX_CAPACITY, __pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__CARCHAR_LOAD_FACTOR);
+    } catch(...) {
+      __Pyx_CppExn2PyErr();
+      __PYX_ERR(10, 182, __pyx_L1_error)
+    }
+    __pyx_v_self->_index = __pyx_t_6;
   }
-  __pyx_v_self->_index = __pyx_t_5;
+  __pyx_L4:;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":130
- *         self._key_store = KeyStore(self._group_columns, self._key_kinds)
- *         self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":183
+ *         else:
+ *             self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
  *         self._resolved = True             # <<<<<<<<<<<<<<
  *         if self._telemetry_enabled:
  *             self._time_resolve_ns += _now_ns() - start_ns
 */
   __pyx_v_self->_resolved = 1;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":131
- *         self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":184
+ *             self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
  *         self._resolved = True
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
  *             self._time_resolve_ns += _now_ns() - start_ns
@@ -51933,7 +52202,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   if (__pyx_v_self->_telemetry_enabled) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":132
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":185
  *         self._resolved = True
  *         if self._telemetry_enabled:
  *             self._time_resolve_ns += _now_ns() - start_ns             # <<<<<<<<<<<<<<
@@ -51942,8 +52211,8 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     __pyx_v_self->_time_resolve_ns = (__pyx_v_self->_time_resolve_ns + (__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns() - __pyx_v_start_ns));
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":131
- *         self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":184
+ *             self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
  *         self._resolved = True
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
  *             self._time_resolve_ns += _now_ns() - start_ns
@@ -51951,8 +52220,8 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":120
- *         self._telemetry_enabled = enabled
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":168
+ *         self._promoted_from_parvi = True
  * 
  *     cdef void _resolve_on_first_morsel(self, object morsel):             # <<<<<<<<<<<<<<
  *         """Called once on first non-empty morsel to fix collector types and key kinds."""
@@ -51970,7 +52239,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   __Pyx_RefNannyFinishContext();
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":134
+/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":187
  *             self._time_resolve_ns += _now_ns() - start_ns
  * 
  *     cpdef void ingest(self, object morsel):             # <<<<<<<<<<<<<<
@@ -51994,6 +52263,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   int64_t __pyx_v_state_idx;
   Py_ssize_t __pyx_v_i;
   int64_t __pyx_v_num_groups;
+  struct opteryx::parvi::ParviResult __pyx_v_pr;
   Py_ssize_t __pyx_v_n_new;
   PyObject *__pyx_v_collector = NULL;
   __Pyx_RefNannyDeclarations
@@ -52007,8 +52277,6 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   __Pyx_memviewslice __pyx_t_8 = { 0, 0, { 0 }, { 0 }, { 0 } };
   int64_t __pyx_t_9;
   Py_ssize_t __pyx_t_10;
-  Py_ssize_t __pyx_t_11;
-  Py_ssize_t __pyx_t_12;
   int __pyx_lineno = 0;
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
@@ -52029,7 +52297,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
     if (unlikely(!__Pyx_object_dict_version_matches(((PyObject *)__pyx_v_self), __pyx_tp_dict_version, __pyx_obj_dict_version))) {
       PY_UINT64_T __pyx_typedict_guard = __Pyx_get_tp_dict_version(((PyObject *)__pyx_v_self));
       #endif
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_ingest); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 134, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_ingest); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 187, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
       if (!__Pyx_IsSameCFunction(__pyx_t_1, (void(*)(void)) __pyx_pw_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_7ingest)) {
         __pyx_t_3 = NULL;
@@ -52052,7 +52320,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
           __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_4, __pyx_callargs+__pyx_t_5, (2-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
           __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
           __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-          if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 134, __pyx_L1_error)
+          if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 187, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_2);
         }
         __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
@@ -52072,20 +52340,20 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
     #endif
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":140
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":193
  *         cdef long long start_ns
  *         cdef long long phase_start
  *         cdef Py_ssize_t n_rows = morsel.num_rows             # <<<<<<<<<<<<<<
  *         if n_rows == 0:
  *             return
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_morsel, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 140, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_morsel, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 193, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_6 = __Pyx_PyIndex_AsSsize_t(__pyx_t_1); if (unlikely((__pyx_t_6 == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(10, 140, __pyx_L1_error)
+  __pyx_t_6 = __Pyx_PyIndex_AsSsize_t(__pyx_t_1); if (unlikely((__pyx_t_6 == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(10, 193, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_v_n_rows = __pyx_t_6;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":141
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":194
  *         cdef long long phase_start
  *         cdef Py_ssize_t n_rows = morsel.num_rows
  *         if n_rows == 0:             # <<<<<<<<<<<<<<
@@ -52095,7 +52363,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   __pyx_t_7 = (__pyx_v_n_rows == 0);
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":142
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":195
  *         cdef Py_ssize_t n_rows = morsel.num_rows
  *         if n_rows == 0:
  *             return             # <<<<<<<<<<<<<<
@@ -52104,7 +52372,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     goto __pyx_L0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":141
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":194
  *         cdef long long phase_start
  *         cdef Py_ssize_t n_rows = morsel.num_rows
  *         if n_rows == 0:             # <<<<<<<<<<<<<<
@@ -52113,7 +52381,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":144
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":197
  *             return
  * 
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52122,7 +52390,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   if (__pyx_v_self->_telemetry_enabled) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":145
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":198
  * 
  *         if self._telemetry_enabled:
  *             start_ns = _now_ns()             # <<<<<<<<<<<<<<
@@ -52131,7 +52399,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     __pyx_v_start_ns = __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns();
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":144
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":197
  *             return
  * 
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52140,7 +52408,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":147
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":200
  *             start_ns = _now_ns()
  * 
  *         if not self._resolved:             # <<<<<<<<<<<<<<
@@ -52150,16 +52418,16 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   __pyx_t_7 = (!__pyx_v_self->_resolved);
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":148
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":201
  * 
  *         if not self._resolved:
  *             self._resolve_on_first_morsel(morsel)             # <<<<<<<<<<<<<<
  * 
  *         if self._telemetry_enabled:
 */
-    ((struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *)__pyx_v_self->__pyx_vtab)->_resolve_on_first_morsel(__pyx_v_self, __pyx_v_morsel); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 148, __pyx_L1_error)
+    ((struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *)__pyx_v_self->__pyx_vtab)->_resolve_on_first_morsel(__pyx_v_self, __pyx_v_morsel); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 201, __pyx_L1_error)
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":147
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":200
  *             start_ns = _now_ns()
  * 
  *         if not self._resolved:             # <<<<<<<<<<<<<<
@@ -52168,7 +52436,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":150
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":203
  *             self._resolve_on_first_morsel(morsel)
  * 
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52177,7 +52445,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   if (__pyx_v_self->_telemetry_enabled) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":151
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":204
  * 
  *         if self._telemetry_enabled:
  *             phase_start = _now_ns()             # <<<<<<<<<<<<<<
@@ -52186,7 +52454,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     __pyx_v_phase_start = __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns();
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":150
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":203
  *             self._resolve_on_first_morsel(morsel)
  * 
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52195,7 +52463,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":153
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":206
  *             phase_start = _now_ns()
  *         # Compute group hashes for the group-by columns
  *         cdef uint64_t[::1] hashes = morsel.hash(self._group_columns)             # <<<<<<<<<<<<<<
@@ -52209,16 +52477,16 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
     PyObject *__pyx_callargs[2] = {__pyx_t_2, __pyx_v_self->_group_columns};
     __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_hash, __pyx_callargs+__pyx_t_5, (2-__pyx_t_5) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 153, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 206, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
-  __pyx_t_8 = __Pyx_PyObject_to_MemoryviewSlice_dc_nn_uint64_t(__pyx_t_1, PyBUF_WRITABLE); if (unlikely(!__pyx_t_8.memview)) __PYX_ERR(10, 153, __pyx_L1_error)
+  __pyx_t_8 = __Pyx_PyObject_to_MemoryviewSlice_dc_nn_uint64_t(__pyx_t_1, PyBUF_WRITABLE); if (unlikely(!__pyx_t_8.memview)) __PYX_ERR(10, 206, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_v_hashes = __pyx_t_8;
   __pyx_t_8.memview = NULL;
   __pyx_t_8.data = NULL;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":154
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":207
  *         # Compute group hashes for the group-by columns
  *         cdef uint64_t[::1] hashes = morsel.hash(self._group_columns)
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52227,7 +52495,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   if (__pyx_v_self->_telemetry_enabled) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":155
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":208
  *         cdef uint64_t[::1] hashes = morsel.hash(self._group_columns)
  *         if self._telemetry_enabled:
  *             self._time_hash_ns += _now_ns() - phase_start             # <<<<<<<<<<<<<<
@@ -52236,7 +52504,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     __pyx_v_self->_time_hash_ns = (__pyx_v_self->_time_hash_ns + (__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns() - __pyx_v_phase_start));
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":154
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":207
  *         # Compute group hashes for the group-by columns
  *         cdef uint64_t[::1] hashes = morsel.hash(self._group_columns)
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52245,7 +52513,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":158
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":211
  * 
  *         # Ensure scratch buffers are large enough
  *         if <Py_ssize_t>self._state_indices_buf.size() < n_rows:             # <<<<<<<<<<<<<<
@@ -52255,7 +52523,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   __pyx_t_7 = (((Py_ssize_t)__pyx_v_self->_state_indices_buf.size()) < __pyx_v_n_rows);
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":159
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":212
  *         # Ensure scratch buffers are large enough
  *         if <Py_ssize_t>self._state_indices_buf.size() < n_rows:
  *             self._state_indices_buf.resize(n_rows)             # <<<<<<<<<<<<<<
@@ -52266,10 +52534,10 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
       __pyx_v_self->_state_indices_buf.resize(__pyx_v_n_rows);
     } catch(...) {
       __Pyx_CppExn2PyErr();
-      __PYX_ERR(10, 159, __pyx_L1_error)
+      __PYX_ERR(10, 212, __pyx_L1_error)
     }
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":158
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":211
  * 
  *         # Ensure scratch buffers are large enough
  *         if <Py_ssize_t>self._state_indices_buf.size() < n_rows:             # <<<<<<<<<<<<<<
@@ -52278,7 +52546,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":161
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":214
  *             self._state_indices_buf.resize(n_rows)
  * 
  *         self._new_row_scratch.clear()             # <<<<<<<<<<<<<<
@@ -52287,7 +52555,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_self->_new_row_scratch.clear();
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":163
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":216
  *         self._new_row_scratch.clear()
  * 
  *         cdef int64_t* si_buf = self._state_indices_buf.data()             # <<<<<<<<<<<<<<
@@ -52296,143 +52564,361 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_si_buf = __pyx_v_self->_state_indices_buf.data();
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":166
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":219
  *         cdef int64_t state_idx
  *         cdef Py_ssize_t i
  *         cdef int64_t num_groups = self._num_groups             # <<<<<<<<<<<<<<
  * 
- *         if self._telemetry_enabled:
+ *         cdef ParviResult pr
 */
   __pyx_t_9 = __pyx_v_self->_num_groups;
   __pyx_v_num_groups = __pyx_t_9;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":168
- *         cdef int64_t num_groups = self._num_groups
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":222
  * 
+ *         cdef ParviResult pr
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
  *             phase_start = _now_ns()
- *         for i in range(n_rows):
+ *         # i is shared across parvi  carchar handoff so an overflow mid-morsel
 */
   if (__pyx_v_self->_telemetry_enabled) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":169
- * 
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":223
+ *         cdef ParviResult pr
  *         if self._telemetry_enabled:
  *             phase_start = _now_ns()             # <<<<<<<<<<<<<<
- *         for i in range(n_rows):
- *             if not self._index.lookup_fast(hashes[i], state_idx):
+ *         # i is shared across parvi  carchar handoff so an overflow mid-morsel
+ *         # resumes at the row after the one that triggered promotion.
 */
     __pyx_v_phase_start = __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns();
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":168
- *         cdef int64_t num_groups = self._num_groups
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":222
  * 
+ *         cdef ParviResult pr
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
  *             phase_start = _now_ns()
- *         for i in range(n_rows):
+ *         # i is shared across parvi  carchar handoff so an overflow mid-morsel
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":170
- *         if self._telemetry_enabled:
- *             phase_start = _now_ns()
- *         for i in range(n_rows):             # <<<<<<<<<<<<<<
- *             if not self._index.lookup_fast(hashes[i], state_idx):
- *                 # New group
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":226
+ *         # i is shared across parvi  carchar handoff so an overflow mid-morsel
+ *         # resumes at the row after the one that triggered promotion.
+ *         i = 0             # <<<<<<<<<<<<<<
+ *         if self._use_parvi:
+ *             while i < n_rows:
 */
-  __pyx_t_6 = __pyx_v_n_rows;
-  __pyx_t_10 = __pyx_t_6;
-  for (__pyx_t_11 = 0; __pyx_t_11 < __pyx_t_10; __pyx_t_11+=1) {
-    __pyx_v_i = __pyx_t_11;
+  __pyx_v_i = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":171
- *             phase_start = _now_ns()
- *         for i in range(n_rows):
- *             if not self._index.lookup_fast(hashes[i], state_idx):             # <<<<<<<<<<<<<<
- *                 # New group
- *                 state_idx = num_groups
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":227
+ *         # resumes at the row after the one that triggered promotion.
+ *         i = 0
+ *         if self._use_parvi:             # <<<<<<<<<<<<<<
+ *             while i < n_rows:
+ *                 if not self._parvi.lookup_fast(hashes[i], state_idx):
 */
-    __pyx_t_12 = __pyx_v_i;
-    __pyx_t_7 = (!__pyx_v_self->_index->lookup_fast((*((uint64_t *) ( /* dim=0 */ ((char *) (((uint64_t *) __pyx_v_hashes.data) + __pyx_t_12)) ))), __pyx_v_state_idx));
-    if (__pyx_t_7) {
+  if (__pyx_v_self->_use_parvi) {
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":173
- *             if not self._index.lookup_fast(hashes[i], state_idx):
- *                 # New group
- *                 state_idx = num_groups             # <<<<<<<<<<<<<<
- *                 self._index.insert_new(hashes[i], state_idx)
- *                 self._new_row_scratch.push_back(i)
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":228
+ *         i = 0
+ *         if self._use_parvi:
+ *             while i < n_rows:             # <<<<<<<<<<<<<<
+ *                 if not self._parvi.lookup_fast(hashes[i], state_idx):
+ *                     state_idx = num_groups
 */
-      __pyx_v_state_idx = __pyx_v_num_groups;
+    while (1) {
+      __pyx_t_7 = (__pyx_v_i < __pyx_v_n_rows);
+      if (!__pyx_t_7) break;
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":174
- *                 # New group
- *                 state_idx = num_groups
- *                 self._index.insert_new(hashes[i], state_idx)             # <<<<<<<<<<<<<<
- *                 self._new_row_scratch.push_back(i)
- *                 num_groups += 1
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":229
+ *         if self._use_parvi:
+ *             while i < n_rows:
+ *                 if not self._parvi.lookup_fast(hashes[i], state_idx):             # <<<<<<<<<<<<<<
+ *                     state_idx = num_groups
+ *                     pr = self._parvi.insert_new(hashes[i], state_idx)
 */
-      __pyx_t_12 = __pyx_v_i;
-      try {
-        __pyx_v_self->_index->insert_new((*((uint64_t *) ( /* dim=0 */ ((char *) (((uint64_t *) __pyx_v_hashes.data) + __pyx_t_12)) ))), __pyx_v_state_idx);
-      } catch(...) {
-        __Pyx_CppExn2PyErr();
-        __PYX_ERR(10, 174, __pyx_L1_error)
+      __pyx_t_10 = __pyx_v_i;
+      __pyx_t_7 = (!__pyx_v_self->_parvi->lookup_fast((*((uint64_t *) ( /* dim=0 */ ((char *) (((uint64_t *) __pyx_v_hashes.data) + __pyx_t_10)) ))), __pyx_v_state_idx));
+      if (__pyx_t_7) {
+
+        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":230
+ *             while i < n_rows:
+ *                 if not self._parvi.lookup_fast(hashes[i], state_idx):
+ *                     state_idx = num_groups             # <<<<<<<<<<<<<<
+ *                     pr = self._parvi.insert_new(hashes[i], state_idx)
+ *                     if pr.slot == _PARVI_CAPACITY:
+*/
+        __pyx_v_state_idx = __pyx_v_num_groups;
+
+        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":231
+ *                 if not self._parvi.lookup_fast(hashes[i], state_idx):
+ *                     state_idx = num_groups
+ *                     pr = self._parvi.insert_new(hashes[i], state_idx)             # <<<<<<<<<<<<<<
+ *                     if pr.slot == _PARVI_CAPACITY:
+ *                         # Parvi overflow: drain into a freshly-allocated carchar and
+*/
+        __pyx_t_10 = __pyx_v_i;
+        __pyx_v_pr = __pyx_v_self->_parvi->insert_new((*((uint64_t *) ( /* dim=0 */ ((char *) (((uint64_t *) __pyx_v_hashes.data) + __pyx_t_10)) ))), __pyx_v_state_idx);
+
+        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":232
+ *                     state_idx = num_groups
+ *                     pr = self._parvi.insert_new(hashes[i], state_idx)
+ *                     if pr.slot == _PARVI_CAPACITY:             # <<<<<<<<<<<<<<
+ *                         # Parvi overflow: drain into a freshly-allocated carchar and
+ *                         # flip the active map. Parvi slot ids are dense 0..size-1 in
+*/
+        __pyx_t_7 = (__pyx_v_pr.slot == __pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__PARVI_CAPACITY);
+        if (__pyx_t_7) {
+
+          /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":237
+ *                         # insertion order, matching num_groups, so _num_groups /
+ *                         # _key_store / collector state stays valid without remap.
+ *                         self._promote_parvi_to_carchar()             # <<<<<<<<<<<<<<
+ *                         self._index.insert_new(hashes[i], state_idx)
+ *                     self._new_row_scratch.push_back(i)
+*/
+          ((struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *)__pyx_v_self->__pyx_vtab)->_promote_parvi_to_carchar(__pyx_v_self); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 237, __pyx_L1_error)
+
+          /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":238
+ *                         # _key_store / collector state stays valid without remap.
+ *                         self._promote_parvi_to_carchar()
+ *                         self._index.insert_new(hashes[i], state_idx)             # <<<<<<<<<<<<<<
+ *                     self._new_row_scratch.push_back(i)
+ *                     num_groups += 1
+*/
+          __pyx_t_10 = __pyx_v_i;
+          try {
+            __pyx_v_self->_index->insert_new((*((uint64_t *) ( /* dim=0 */ ((char *) (((uint64_t *) __pyx_v_hashes.data) + __pyx_t_10)) ))), __pyx_v_state_idx);
+          } catch(...) {
+            __Pyx_CppExn2PyErr();
+            __PYX_ERR(10, 238, __pyx_L1_error)
+          }
+
+          /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":232
+ *                     state_idx = num_groups
+ *                     pr = self._parvi.insert_new(hashes[i], state_idx)
+ *                     if pr.slot == _PARVI_CAPACITY:             # <<<<<<<<<<<<<<
+ *                         # Parvi overflow: drain into a freshly-allocated carchar and
+ *                         # flip the active map. Parvi slot ids are dense 0..size-1 in
+*/
+        }
+
+        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":239
+ *                         self._promote_parvi_to_carchar()
+ *                         self._index.insert_new(hashes[i], state_idx)
+ *                     self._new_row_scratch.push_back(i)             # <<<<<<<<<<<<<<
+ *                     num_groups += 1
+ *                 si_buf[i] = state_idx
+*/
+        try {
+          __pyx_v_self->_new_row_scratch.push_back(__pyx_v_i);
+        } catch(...) {
+          __Pyx_CppExn2PyErr();
+          __PYX_ERR(10, 239, __pyx_L1_error)
+        }
+
+        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":240
+ *                         self._index.insert_new(hashes[i], state_idx)
+ *                     self._new_row_scratch.push_back(i)
+ *                     num_groups += 1             # <<<<<<<<<<<<<<
+ *                 si_buf[i] = state_idx
+ *                 i += 1
+*/
+        __pyx_v_num_groups = (__pyx_v_num_groups + 1);
+
+        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":229
+ *         if self._use_parvi:
+ *             while i < n_rows:
+ *                 if not self._parvi.lookup_fast(hashes[i], state_idx):             # <<<<<<<<<<<<<<
+ *                     state_idx = num_groups
+ *                     pr = self._parvi.insert_new(hashes[i], state_idx)
+*/
       }
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":175
- *                 state_idx = num_groups
- *                 self._index.insert_new(hashes[i], state_idx)
- *                 self._new_row_scratch.push_back(i)             # <<<<<<<<<<<<<<
- *                 num_groups += 1
- *             si_buf[i] = state_idx
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":241
+ *                     self._new_row_scratch.push_back(i)
+ *                     num_groups += 1
+ *                 si_buf[i] = state_idx             # <<<<<<<<<<<<<<
+ *                 i += 1
+ *                 if not self._use_parvi:
 */
-      try {
-        __pyx_v_self->_new_row_scratch.push_back(__pyx_v_i);
-      } catch(...) {
-        __Pyx_CppExn2PyErr();
-        __PYX_ERR(10, 175, __pyx_L1_error)
+      (__pyx_v_si_buf[__pyx_v_i]) = __pyx_v_state_idx;
+
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":242
+ *                     num_groups += 1
+ *                 si_buf[i] = state_idx
+ *                 i += 1             # <<<<<<<<<<<<<<
+ *                 if not self._use_parvi:
+ *                     break  # promoted  finish the morsel on the carchar path
+*/
+      __pyx_v_i = (__pyx_v_i + 1);
+
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":243
+ *                 si_buf[i] = state_idx
+ *                 i += 1
+ *                 if not self._use_parvi:             # <<<<<<<<<<<<<<
+ *                     break  # promoted  finish the morsel on the carchar path
+ *         if not self._use_parvi:
+*/
+      __pyx_t_7 = (!__pyx_v_self->_use_parvi);
+      if (__pyx_t_7) {
+
+        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":244
+ *                 i += 1
+ *                 if not self._use_parvi:
+ *                     break  # promoted  finish the morsel on the carchar path             # <<<<<<<<<<<<<<
+ *         if not self._use_parvi:
+ *             while i < n_rows:
+*/
+        goto __pyx_L12_break;
+
+        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":243
+ *                 si_buf[i] = state_idx
+ *                 i += 1
+ *                 if not self._use_parvi:             # <<<<<<<<<<<<<<
+ *                     break  # promoted  finish the morsel on the carchar path
+ *         if not self._use_parvi:
+*/
       }
-
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":176
- *                 self._index.insert_new(hashes[i], state_idx)
- *                 self._new_row_scratch.push_back(i)
- *                 num_groups += 1             # <<<<<<<<<<<<<<
- *             si_buf[i] = state_idx
- *         if self._telemetry_enabled:
-*/
-      __pyx_v_num_groups = (__pyx_v_num_groups + 1);
-
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":171
- *             phase_start = _now_ns()
- *         for i in range(n_rows):
- *             if not self._index.lookup_fast(hashes[i], state_idx):             # <<<<<<<<<<<<<<
- *                 # New group
- *                 state_idx = num_groups
-*/
     }
+    __pyx_L12_break:;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":177
- *                 self._new_row_scratch.push_back(i)
- *                 num_groups += 1
- *             si_buf[i] = state_idx             # <<<<<<<<<<<<<<
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":227
+ *         # resumes at the row after the one that triggered promotion.
+ *         i = 0
+ *         if self._use_parvi:             # <<<<<<<<<<<<<<
+ *             while i < n_rows:
+ *                 if not self._parvi.lookup_fast(hashes[i], state_idx):
+*/
+  }
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":245
+ *                 if not self._use_parvi:
+ *                     break  # promoted  finish the morsel on the carchar path
+ *         if not self._use_parvi:             # <<<<<<<<<<<<<<
+ *             while i < n_rows:
+ *                 if not self._index.lookup_fast(hashes[i], state_idx):
+*/
+  __pyx_t_7 = (!__pyx_v_self->_use_parvi);
+  if (__pyx_t_7) {
+
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":246
+ *                     break  # promoted  finish the morsel on the carchar path
+ *         if not self._use_parvi:
+ *             while i < n_rows:             # <<<<<<<<<<<<<<
+ *                 if not self._index.lookup_fast(hashes[i], state_idx):
+ *                     state_idx = num_groups
+*/
+    while (1) {
+      __pyx_t_7 = (__pyx_v_i < __pyx_v_n_rows);
+      if (!__pyx_t_7) break;
+
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":247
+ *         if not self._use_parvi:
+ *             while i < n_rows:
+ *                 if not self._index.lookup_fast(hashes[i], state_idx):             # <<<<<<<<<<<<<<
+ *                     state_idx = num_groups
+ *                     self._index.insert_new(hashes[i], state_idx)
+*/
+      __pyx_t_10 = __pyx_v_i;
+      __pyx_t_7 = (!__pyx_v_self->_index->lookup_fast((*((uint64_t *) ( /* dim=0 */ ((char *) (((uint64_t *) __pyx_v_hashes.data) + __pyx_t_10)) ))), __pyx_v_state_idx));
+      if (__pyx_t_7) {
+
+        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":248
+ *             while i < n_rows:
+ *                 if not self._index.lookup_fast(hashes[i], state_idx):
+ *                     state_idx = num_groups             # <<<<<<<<<<<<<<
+ *                     self._index.insert_new(hashes[i], state_idx)
+ *                     self._new_row_scratch.push_back(i)
+*/
+        __pyx_v_state_idx = __pyx_v_num_groups;
+
+        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":249
+ *                 if not self._index.lookup_fast(hashes[i], state_idx):
+ *                     state_idx = num_groups
+ *                     self._index.insert_new(hashes[i], state_idx)             # <<<<<<<<<<<<<<
+ *                     self._new_row_scratch.push_back(i)
+ *                     num_groups += 1
+*/
+        __pyx_t_10 = __pyx_v_i;
+        try {
+          __pyx_v_self->_index->insert_new((*((uint64_t *) ( /* dim=0 */ ((char *) (((uint64_t *) __pyx_v_hashes.data) + __pyx_t_10)) ))), __pyx_v_state_idx);
+        } catch(...) {
+          __Pyx_CppExn2PyErr();
+          __PYX_ERR(10, 249, __pyx_L1_error)
+        }
+
+        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":250
+ *                     state_idx = num_groups
+ *                     self._index.insert_new(hashes[i], state_idx)
+ *                     self._new_row_scratch.push_back(i)             # <<<<<<<<<<<<<<
+ *                     num_groups += 1
+ *                 si_buf[i] = state_idx
+*/
+        try {
+          __pyx_v_self->_new_row_scratch.push_back(__pyx_v_i);
+        } catch(...) {
+          __Pyx_CppExn2PyErr();
+          __PYX_ERR(10, 250, __pyx_L1_error)
+        }
+
+        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":251
+ *                     self._index.insert_new(hashes[i], state_idx)
+ *                     self._new_row_scratch.push_back(i)
+ *                     num_groups += 1             # <<<<<<<<<<<<<<
+ *                 si_buf[i] = state_idx
+ *                 i += 1
+*/
+        __pyx_v_num_groups = (__pyx_v_num_groups + 1);
+
+        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":247
+ *         if not self._use_parvi:
+ *             while i < n_rows:
+ *                 if not self._index.lookup_fast(hashes[i], state_idx):             # <<<<<<<<<<<<<<
+ *                     state_idx = num_groups
+ *                     self._index.insert_new(hashes[i], state_idx)
+*/
+      }
+
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":252
+ *                     self._new_row_scratch.push_back(i)
+ *                     num_groups += 1
+ *                 si_buf[i] = state_idx             # <<<<<<<<<<<<<<
+ *                 i += 1
+ *         if self._telemetry_enabled:
+*/
+      (__pyx_v_si_buf[__pyx_v_i]) = __pyx_v_state_idx;
+
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":253
+ *                     num_groups += 1
+ *                 si_buf[i] = state_idx
+ *                 i += 1             # <<<<<<<<<<<<<<
  *         if self._telemetry_enabled:
  *             self._time_lookup_ns += _now_ns() - phase_start
 */
-    (__pyx_v_si_buf[__pyx_v_i]) = __pyx_v_state_idx;
+      __pyx_v_i = (__pyx_v_i + 1);
+    }
+
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":245
+ *                 if not self._use_parvi:
+ *                     break  # promoted  finish the morsel on the carchar path
+ *         if not self._use_parvi:             # <<<<<<<<<<<<<<
+ *             while i < n_rows:
+ *                 if not self._index.lookup_fast(hashes[i], state_idx):
+*/
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":178
- *                 num_groups += 1
- *             si_buf[i] = state_idx
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":254
+ *                 si_buf[i] = state_idx
+ *                 i += 1
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
  *             self._time_lookup_ns += _now_ns() - phase_start
  * 
 */
   if (__pyx_v_self->_telemetry_enabled) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":179
- *             si_buf[i] = state_idx
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":255
+ *                 i += 1
  *         if self._telemetry_enabled:
  *             self._time_lookup_ns += _now_ns() - phase_start             # <<<<<<<<<<<<<<
  * 
@@ -52440,16 +52926,16 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     __pyx_v_self->_time_lookup_ns = (__pyx_v_self->_time_lookup_ns + (__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns() - __pyx_v_phase_start));
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":178
- *                 num_groups += 1
- *             si_buf[i] = state_idx
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":254
+ *                 si_buf[i] = state_idx
+ *                 i += 1
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
  *             self._time_lookup_ns += _now_ns() - phase_start
  * 
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":181
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":257
  *             self._time_lookup_ns += _now_ns() - phase_start
  * 
  *         self._num_groups = num_groups             # <<<<<<<<<<<<<<
@@ -52458,7 +52944,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_self->_num_groups = __pyx_v_num_groups;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":185
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":261
  *         # ---- Post-loop (once per morsel, not per row) ----
  * 
  *         cdef Py_ssize_t n_new = <Py_ssize_t>self._new_row_scratch.size()             # <<<<<<<<<<<<<<
@@ -52467,7 +52953,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   __pyx_v_n_new = ((Py_ssize_t)__pyx_v_self->_new_row_scratch.size());
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":186
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":262
  * 
  *         cdef Py_ssize_t n_new = <Py_ssize_t>self._new_row_scratch.size()
  *         if n_new > 0:             # <<<<<<<<<<<<<<
@@ -52477,7 +52963,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   __pyx_t_7 = (__pyx_v_n_new > 0);
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":187
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":263
  *         cdef Py_ssize_t n_new = <Py_ssize_t>self._new_row_scratch.size()
  *         if n_new > 0:
  *             if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52486,7 +52972,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     if (__pyx_v_self->_telemetry_enabled) {
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":188
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":264
  *         if n_new > 0:
  *             if self._telemetry_enabled:
  *                 phase_start = _now_ns()             # <<<<<<<<<<<<<<
@@ -52495,7 +52981,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
       __pyx_v_phase_start = __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns();
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":187
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":263
  *         cdef Py_ssize_t n_new = <Py_ssize_t>self._new_row_scratch.size()
  *         if n_new > 0:
  *             if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52504,16 +52990,16 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     }
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":190
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":266
  *                 phase_start = _now_ns()
  *             # Store group keys for new groups
  *             self._key_store.store_new_rows(             # <<<<<<<<<<<<<<
  *                 morsel,
  *                 self._new_row_scratch.data(),
 */
-    ((struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_KeyStore *)__pyx_v_self->_key_store->__pyx_vtab)->store_new_rows(__pyx_v_self->_key_store, __pyx_v_morsel, __pyx_v_self->_new_row_scratch.data(), __pyx_v_n_new); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 190, __pyx_L1_error)
+    ((struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_KeyStore *)__pyx_v_self->_key_store->__pyx_vtab)->store_new_rows(__pyx_v_self->_key_store, __pyx_v_morsel, __pyx_v_self->_new_row_scratch.data(), __pyx_v_n_new); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 266, __pyx_L1_error)
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":195
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":271
  *                 n_new,
  *             )
  *             if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52522,7 +53008,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     if (__pyx_v_self->_telemetry_enabled) {
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":196
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":272
  *             )
  *             if self._telemetry_enabled:
  *                 self._time_store_keys_ns += _now_ns() - phase_start             # <<<<<<<<<<<<<<
@@ -52531,7 +53017,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
       __pyx_v_self->_time_store_keys_ns = (__pyx_v_self->_time_store_keys_ns + (__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns() - __pyx_v_phase_start));
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":195
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":271
  *                 n_new,
  *             )
  *             if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52540,7 +53026,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     }
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":198
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":274
  *                 self._time_store_keys_ns += _now_ns() - phase_start
  * 
  *             if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52549,7 +53035,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     if (__pyx_v_self->_telemetry_enabled) {
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":199
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":275
  * 
  *             if self._telemetry_enabled:
  *                 phase_start = _now_ns()             # <<<<<<<<<<<<<<
@@ -52558,7 +53044,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
       __pyx_v_phase_start = __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns();
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":198
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":274
  *                 self._time_store_keys_ns += _now_ns() - phase_start
  * 
  *             if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52567,7 +53053,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     }
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":201
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":277
  *                 phase_start = _now_ns()
  *             # Grow all collectors to the new group count
  *             for collector in self._collectors:             # <<<<<<<<<<<<<<
@@ -52576,7 +53062,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     if (unlikely(__pyx_v_self->_collectors == Py_None)) {
       PyErr_SetString(PyExc_TypeError, "'NoneType' object is not iterable");
-      __PYX_ERR(10, 201, __pyx_L1_error)
+      __PYX_ERR(10, 277, __pyx_L1_error)
     }
     __pyx_t_1 = __pyx_v_self->_collectors; __Pyx_INCREF(__pyx_t_1);
     __pyx_t_6 = 0;
@@ -52584,27 +53070,27 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
       {
         Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_1);
         #if !CYTHON_ASSUME_SAFE_SIZE
-        if (unlikely((__pyx_temp < 0))) __PYX_ERR(10, 201, __pyx_L1_error)
+        if (unlikely((__pyx_temp < 0))) __PYX_ERR(10, 277, __pyx_L1_error)
         #endif
         if (__pyx_t_6 >= __pyx_temp) break;
       }
       __pyx_t_2 = __Pyx_PyList_GetItemRefFast(__pyx_t_1, __pyx_t_6, __Pyx_ReferenceSharing_OwnStrongReference);
       ++__pyx_t_6;
-      if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 201, __pyx_L1_error)
+      if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 277, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
       __Pyx_XDECREF_SET(__pyx_v_collector, __pyx_t_2);
       __pyx_t_2 = 0;
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":202
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":278
  *             # Grow all collectors to the new group count
  *             for collector in self._collectors:
  *                 (<BaseCollector>collector).grow(num_groups)             # <<<<<<<<<<<<<<
  *             if self._telemetry_enabled:
  *                 self._time_grow_ns += _now_ns() - phase_start
 */
-      ((struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_BaseCollector *)((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_BaseCollector *)__pyx_v_collector)->__pyx_vtab)->grow(((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_BaseCollector *)__pyx_v_collector), __pyx_v_num_groups); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 202, __pyx_L1_error)
+      ((struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_BaseCollector *)((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_BaseCollector *)__pyx_v_collector)->__pyx_vtab)->grow(((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_BaseCollector *)__pyx_v_collector), __pyx_v_num_groups); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 278, __pyx_L1_error)
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":201
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":277
  *                 phase_start = _now_ns()
  *             # Grow all collectors to the new group count
  *             for collector in self._collectors:             # <<<<<<<<<<<<<<
@@ -52614,7 +53100,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
     }
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":203
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":279
  *             for collector in self._collectors:
  *                 (<BaseCollector>collector).grow(num_groups)
  *             if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52623,7 +53109,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     if (__pyx_v_self->_telemetry_enabled) {
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":204
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":280
  *                 (<BaseCollector>collector).grow(num_groups)
  *             if self._telemetry_enabled:
  *                 self._time_grow_ns += _now_ns() - phase_start             # <<<<<<<<<<<<<<
@@ -52632,7 +53118,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
       __pyx_v_self->_time_grow_ns = (__pyx_v_self->_time_grow_ns + (__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns() - __pyx_v_phase_start));
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":203
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":279
  *             for collector in self._collectors:
  *                 (<BaseCollector>collector).grow(num_groups)
  *             if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52641,7 +53127,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     }
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":186
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":262
  * 
  *         cdef Py_ssize_t n_new = <Py_ssize_t>self._new_row_scratch.size()
  *         if n_new > 0:             # <<<<<<<<<<<<<<
@@ -52650,7 +53136,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":206
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":282
  *                 self._time_grow_ns += _now_ns() - phase_start
  * 
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52659,7 +53145,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   if (__pyx_v_self->_telemetry_enabled) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":207
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":283
  * 
  *         if self._telemetry_enabled:
  *             phase_start = _now_ns()             # <<<<<<<<<<<<<<
@@ -52668,7 +53154,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     __pyx_v_phase_start = __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns();
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":206
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":282
  *                 self._time_grow_ns += _now_ns() - phase_start
  * 
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52677,7 +53163,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":209
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":285
  *             phase_start = _now_ns()
  *         # Accumulate each collector over this morsel's rows
  *         for collector in self._collectors:             # <<<<<<<<<<<<<<
@@ -52686,7 +53172,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   if (unlikely(__pyx_v_self->_collectors == Py_None)) {
     PyErr_SetString(PyExc_TypeError, "'NoneType' object is not iterable");
-    __PYX_ERR(10, 209, __pyx_L1_error)
+    __PYX_ERR(10, 285, __pyx_L1_error)
   }
   __pyx_t_1 = __pyx_v_self->_collectors; __Pyx_INCREF(__pyx_t_1);
   __pyx_t_6 = 0;
@@ -52694,27 +53180,27 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
     {
       Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_1);
       #if !CYTHON_ASSUME_SAFE_SIZE
-      if (unlikely((__pyx_temp < 0))) __PYX_ERR(10, 209, __pyx_L1_error)
+      if (unlikely((__pyx_temp < 0))) __PYX_ERR(10, 285, __pyx_L1_error)
       #endif
       if (__pyx_t_6 >= __pyx_temp) break;
     }
     __pyx_t_2 = __Pyx_PyList_GetItemRefFast(__pyx_t_1, __pyx_t_6, __Pyx_ReferenceSharing_OwnStrongReference);
     ++__pyx_t_6;
-    if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 209, __pyx_L1_error)
+    if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 285, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __Pyx_XDECREF_SET(__pyx_v_collector, __pyx_t_2);
     __pyx_t_2 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":210
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":286
  *         # Accumulate each collector over this morsel's rows
  *         for collector in self._collectors:
  *             (<BaseCollector>collector).accumulate(morsel, si_buf, n_rows)             # <<<<<<<<<<<<<<
  *         if self._telemetry_enabled:
  *             self._time_accumulate_ns += _now_ns() - phase_start
 */
-    ((struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_BaseCollector *)((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_BaseCollector *)__pyx_v_collector)->__pyx_vtab)->accumulate(((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_BaseCollector *)__pyx_v_collector), __pyx_v_morsel, __pyx_v_si_buf, __pyx_v_n_rows); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 210, __pyx_L1_error)
+    ((struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_BaseCollector *)((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_BaseCollector *)__pyx_v_collector)->__pyx_vtab)->accumulate(((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_BaseCollector *)__pyx_v_collector), __pyx_v_morsel, __pyx_v_si_buf, __pyx_v_n_rows); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 286, __pyx_L1_error)
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":209
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":285
  *             phase_start = _now_ns()
  *         # Accumulate each collector over this morsel's rows
  *         for collector in self._collectors:             # <<<<<<<<<<<<<<
@@ -52724,7 +53210,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":211
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":287
  *         for collector in self._collectors:
  *             (<BaseCollector>collector).accumulate(morsel, si_buf, n_rows)
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52733,7 +53219,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   if (__pyx_v_self->_telemetry_enabled) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":212
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":288
  *             (<BaseCollector>collector).accumulate(morsel, si_buf, n_rows)
  *         if self._telemetry_enabled:
  *             self._time_accumulate_ns += _now_ns() - phase_start             # <<<<<<<<<<<<<<
@@ -52742,7 +53228,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     __pyx_v_self->_time_accumulate_ns = (__pyx_v_self->_time_accumulate_ns + (__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns() - __pyx_v_phase_start));
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":211
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":287
  *         for collector in self._collectors:
  *             (<BaseCollector>collector).accumulate(morsel, si_buf, n_rows)
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52751,7 +53237,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":214
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":290
  *             self._time_accumulate_ns += _now_ns() - phase_start
  * 
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52760,7 +53246,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   if (__pyx_v_self->_telemetry_enabled) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":215
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":291
  * 
  *         if self._telemetry_enabled:
  *             self._time_resolve_ns += _now_ns() - start_ns             # <<<<<<<<<<<<<<
@@ -52769,7 +53255,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
     __pyx_v_self->_time_resolve_ns = (__pyx_v_self->_time_resolve_ns + (__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns() - __pyx_v_start_ns));
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":214
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":290
  *             self._time_accumulate_ns += _now_ns() - phase_start
  * 
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -52778,7 +53264,7 @@ static void __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_ag
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":134
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":187
  *             self._time_resolve_ns += _now_ns() - start_ns
  * 
  *     cpdef void ingest(self, object morsel):             # <<<<<<<<<<<<<<
@@ -52841,32 +53327,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_morsel,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(10, 134, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(10, 187, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(10, 134, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(10, 187, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "ingest", 0) < (0)) __PYX_ERR(10, 134, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "ingest", 0) < (0)) __PYX_ERR(10, 187, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("ingest", 1, 1, 1, i); __PYX_ERR(10, 134, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("ingest", 1, 1, 1, i); __PYX_ERR(10, 187, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(10, 134, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(10, 187, __pyx_L3_error)
     }
     __pyx_v_morsel = values[0];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("ingest", 1, 1, 1, __pyx_nargs); __PYX_ERR(10, 134, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("ingest", 1, 1, 1, __pyx_nargs); __PYX_ERR(10, 187, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -52896,8 +53382,8 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("ingest", 0);
   __Pyx_XDECREF(__pyx_r);
-  __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_ingest(__pyx_v_self, __pyx_v_morsel, 1); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 134, __pyx_L1_error)
-  __pyx_t_1 = __Pyx_void_to_None(NULL); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 134, __pyx_L1_error)
+  __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_ingest(__pyx_v_self, __pyx_v_morsel, 1); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 187, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_void_to_None(NULL); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 187, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
@@ -52915,7 +53401,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 }
 static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_10generator(__pyx_CoroutineObject *__pyx_generator, CYTHON_UNUSED PyThreadState *__pyx_tstate, PyObject *__pyx_sent_value); /* proto */
 
-/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":217
+/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":293
  *             self._time_resolve_ns += _now_ns() - start_ns
  * 
  *     def finalize_morsels(self, Py_ssize_t chunk_size=65536, filter_fn=None):             # <<<<<<<<<<<<<<
@@ -52964,32 +53450,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_chunk_size,&__pyx_mstate_global->__pyx_n_u_filter_fn,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(10, 217, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(10, 293, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(10, 217, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(10, 293, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(10, 217, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(10, 293, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "finalize_morsels", 0) < (0)) __PYX_ERR(10, 217, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "finalize_morsels", 0) < (0)) __PYX_ERR(10, 293, __pyx_L3_error)
       if (!values[1]) values[1] = __Pyx_NewRef(((PyObject *)Py_None));
     } else {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(10, 217, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(10, 293, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(10, 217, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(10, 293, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
@@ -52997,7 +53483,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
       if (!values[1]) values[1] = __Pyx_NewRef(((PyObject *)Py_None));
     }
     if (values[0]) {
-      __pyx_v_chunk_size = __Pyx_PyIndex_AsSsize_t(values[0]); if (unlikely((__pyx_v_chunk_size == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(10, 217, __pyx_L3_error)
+      __pyx_v_chunk_size = __Pyx_PyIndex_AsSsize_t(values[0]); if (unlikely((__pyx_v_chunk_size == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(10, 293, __pyx_L3_error)
     } else {
       __pyx_v_chunk_size = ((Py_ssize_t)0x10000);
     }
@@ -53005,7 +53491,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("finalize_morsels", 0, 0, 2, __pyx_nargs); __PYX_ERR(10, 217, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("finalize_morsels", 0, 0, 2, __pyx_nargs); __PYX_ERR(10, 293, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -53038,7 +53524,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   if (unlikely(!__pyx_cur_scope)) {
     __pyx_cur_scope = ((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct__finalize_morsels *)Py_None);
     __Pyx_INCREF(Py_None);
-    __PYX_ERR(10, 217, __pyx_L1_error)
+    __PYX_ERR(10, 293, __pyx_L1_error)
   } else {
     __Pyx_GOTREF((PyObject *)__pyx_cur_scope);
   }
@@ -53050,7 +53536,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_INCREF(__pyx_cur_scope->__pyx_v_filter_fn);
   __Pyx_GIVEREF(__pyx_cur_scope->__pyx_v_filter_fn);
   {
-    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_10generator, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[0]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_finalize_morsels, __pyx_mstate_global->__pyx_n_u_GroupHashEngine_finalize_morsels, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg); if (unlikely(!gen)) __PYX_ERR(10, 217, __pyx_L1_error)
+    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_10generator, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[0]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_finalize_morsels, __pyx_mstate_global->__pyx_n_u_GroupHashEngine_finalize_morsels, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg); if (unlikely(!gen)) __PYX_ERR(10, 293, __pyx_L1_error)
     __Pyx_DECREF(__pyx_cur_scope);
     __Pyx_RefNannyFinishContext();
     return (PyObject *) gen;
@@ -53098,10 +53584,10 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_L3_first_run:;
   if (unlikely(__pyx_sent_value != Py_None)) {
     if (unlikely(__pyx_sent_value)) PyErr_SetString(PyExc_TypeError, "can't send non-None value to a just-started generator");
-    __PYX_ERR(10, 217, __pyx_L1_error)
+    __PYX_ERR(10, 293, __pyx_L1_error)
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":228
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":304
  *                        This avoids reconstructing groups that don't pass the filter.
  *         """
  *         from opteryx.compiled.draken.morsels.morsel import Morsel as _Morsel             # <<<<<<<<<<<<<<
@@ -53110,14 +53596,14 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   {
     PyObject* const __pyx_imported_names[] = {__pyx_mstate_global->__pyx_n_u_Morsel};
-    __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_opteryx_compiled_draken_morsels, __pyx_imported_names, 1, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 228, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_opteryx_compiled_draken_morsels, __pyx_imported_names, 1, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 304, __pyx_L1_error)
   }
   __pyx_t_1 = __pyx_t_2;
   __Pyx_GOTREF(__pyx_t_1);
   {
     PyObject* const __pyx_imported_names[] = {__pyx_mstate_global->__pyx_n_u_Morsel};
     __pyx_t_3 = 0; {
-      __pyx_t_4 = __Pyx_ImportFrom(__pyx_t_1, __pyx_imported_names[__pyx_t_3]); if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 228, __pyx_L1_error)
+      __pyx_t_4 = __Pyx_ImportFrom(__pyx_t_1, __pyx_imported_names[__pyx_t_3]); if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 304, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
       switch (__pyx_t_3) {
         case 0:
@@ -53132,7 +53618,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":232
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":308
  *         cdef long long start_ns
  *         cdef long long phase_start
  *         cdef int64_t num_groups = self._num_groups             # <<<<<<<<<<<<<<
@@ -53142,7 +53628,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_t_5 = __pyx_cur_scope->__pyx_v_self->_num_groups;
   __pyx_cur_scope->__pyx_v_num_groups = __pyx_t_5;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":234
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":310
  *         cdef int64_t num_groups = self._num_groups
  * 
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -53151,7 +53637,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   if (__pyx_cur_scope->__pyx_v_self->_telemetry_enabled) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":235
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":311
  * 
  *         if self._telemetry_enabled:
  *             start_ns = _now_ns()             # <<<<<<<<<<<<<<
@@ -53160,7 +53646,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     __pyx_cur_scope->__pyx_v_start_ns = __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns();
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":234
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":310
  *         cdef int64_t num_groups = self._num_groups
  * 
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -53169,7 +53655,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":237
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":313
  *             start_ns = _now_ns()
  * 
  *         if num_groups == 0 or not self._resolved:             # <<<<<<<<<<<<<<
@@ -53187,7 +53673,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_L6_bool_binop_done:;
   if (__pyx_t_6) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":238
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":314
  * 
  *         if num_groups == 0 or not self._resolved:
  *             return             # <<<<<<<<<<<<<<
@@ -53198,7 +53684,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":237
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":313
  *             start_ns = _now_ns()
  * 
  *         if num_groups == 0 or not self._resolved:             # <<<<<<<<<<<<<<
@@ -53207,33 +53693,33 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":245
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":321
  * 
  *         # Reconstruct key columns  timed by path for split telemetry
  *         cdef list key_names = []             # <<<<<<<<<<<<<<
  *         cdef list key_vecs = []
  *         if self._telemetry_enabled:
 */
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 245, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 321, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_GIVEREF(__pyx_t_1);
   __pyx_cur_scope->__pyx_v_key_names = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":246
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":322
  *         # Reconstruct key columns  timed by path for split telemetry
  *         cdef list key_names = []
  *         cdef list key_vecs = []             # <<<<<<<<<<<<<<
  *         if self._telemetry_enabled:
  *             t0 = _now_ns()
 */
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 246, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 322, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_GIVEREF(__pyx_t_1);
   __pyx_cur_scope->__pyx_v_key_vecs = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":247
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":323
  *         cdef list key_names = []
  *         cdef list key_vecs = []
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -53242,7 +53728,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   if (__pyx_cur_scope->__pyx_v_self->_telemetry_enabled) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":248
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":324
  *         cdef list key_vecs = []
  *         if self._telemetry_enabled:
  *             t0 = _now_ns()             # <<<<<<<<<<<<<<
@@ -53251,16 +53737,16 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     __pyx_cur_scope->__pyx_v_t0 = __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns();
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":249
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":325
  *         if self._telemetry_enabled:
  *             t0 = _now_ns()
  *             self._key_store.reconstruct_vectors(num_groups, key_names, key_vecs)             # <<<<<<<<<<<<<<
  *             _recon_elapsed = _now_ns() - t0
  *             self._time_reconstruct_ns += _recon_elapsed
 */
-    ((struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_KeyStore *)__pyx_cur_scope->__pyx_v_self->_key_store->__pyx_vtab)->reconstruct_vectors(__pyx_cur_scope->__pyx_v_self->_key_store, __pyx_cur_scope->__pyx_v_num_groups, __pyx_cur_scope->__pyx_v_key_names, __pyx_cur_scope->__pyx_v_key_vecs); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 249, __pyx_L1_error)
+    ((struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_KeyStore *)__pyx_cur_scope->__pyx_v_self->_key_store->__pyx_vtab)->reconstruct_vectors(__pyx_cur_scope->__pyx_v_self->_key_store, __pyx_cur_scope->__pyx_v_num_groups, __pyx_cur_scope->__pyx_v_key_names, __pyx_cur_scope->__pyx_v_key_vecs); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 325, __pyx_L1_error)
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":250
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":326
  *             t0 = _now_ns()
  *             self._key_store.reconstruct_vectors(num_groups, key_names, key_vecs)
  *             _recon_elapsed = _now_ns() - t0             # <<<<<<<<<<<<<<
@@ -53269,7 +53755,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     __pyx_cur_scope->__pyx_v__recon_elapsed = (__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns() - __pyx_cur_scope->__pyx_v_t0);
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":251
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":327
  *             self._key_store.reconstruct_vectors(num_groups, key_names, key_vecs)
  *             _recon_elapsed = _now_ns() - t0
  *             self._time_reconstruct_ns += _recon_elapsed             # <<<<<<<<<<<<<<
@@ -53278,7 +53764,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     __pyx_cur_scope->__pyx_v_self->_time_reconstruct_ns = (__pyx_cur_scope->__pyx_v_self->_time_reconstruct_ns + __pyx_cur_scope->__pyx_v__recon_elapsed);
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":252
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":328
  *             _recon_elapsed = _now_ns() - t0
  *             self._time_reconstruct_ns += _recon_elapsed
  *             if self._key_store._n_cols == 1:             # <<<<<<<<<<<<<<
@@ -53288,7 +53774,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_t_6 = (__pyx_cur_scope->__pyx_v_self->_key_store->_n_cols == 1);
     if (__pyx_t_6) {
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":253
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":329
  *             self._time_reconstruct_ns += _recon_elapsed
  *             if self._key_store._n_cols == 1:
  *                 if self._key_store._key_kinds[0] == KEY_MULTI_ENCODED_STRING:             # <<<<<<<<<<<<<<
@@ -53298,7 +53784,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __pyx_t_6 = ((__pyx_cur_scope->__pyx_v_self->_key_store->_key_kinds[0]) == __pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_KEY_MULTI_ENCODED_STRING);
       if (__pyx_t_6) {
 
-        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":254
+        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":330
  *             if self._key_store._n_cols == 1:
  *                 if self._key_store._key_kinds[0] == KEY_MULTI_ENCODED_STRING:
  *                     self._time_reconstruct_single_string_ns += _recon_elapsed             # <<<<<<<<<<<<<<
@@ -53307,7 +53793,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
         __pyx_cur_scope->__pyx_v_self->_time_reconstruct_single_string_ns = (__pyx_cur_scope->__pyx_v_self->_time_reconstruct_single_string_ns + __pyx_cur_scope->__pyx_v__recon_elapsed);
 
-        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":253
+        /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":329
  *             self._time_reconstruct_ns += _recon_elapsed
  *             if self._key_store._n_cols == 1:
  *                 if self._key_store._key_kinds[0] == KEY_MULTI_ENCODED_STRING:             # <<<<<<<<<<<<<<
@@ -53317,7 +53803,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         goto __pyx_L10;
       }
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":256
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":332
  *                     self._time_reconstruct_single_string_ns += _recon_elapsed
  *                 else:
  *                     self._time_reconstruct_single_fixed_ns += _recon_elapsed             # <<<<<<<<<<<<<<
@@ -53329,7 +53815,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       }
       __pyx_L10:;
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":252
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":328
  *             _recon_elapsed = _now_ns() - t0
  *             self._time_reconstruct_ns += _recon_elapsed
  *             if self._key_store._n_cols == 1:             # <<<<<<<<<<<<<<
@@ -53339,7 +53825,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       goto __pyx_L9;
     }
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":258
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":334
  *                     self._time_reconstruct_single_fixed_ns += _recon_elapsed
  *             else:
  *                 self._time_reconstruct_multi_ns += _recon_elapsed             # <<<<<<<<<<<<<<
@@ -53351,7 +53837,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     }
     __pyx_L9:;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":247
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":323
  *         cdef list key_names = []
  *         cdef list key_vecs = []
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -53361,7 +53847,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     goto __pyx_L8;
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":260
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":336
  *                 self._time_reconstruct_multi_ns += _recon_elapsed
  *         else:
  *             self._key_store.reconstruct_vectors(num_groups, key_names, key_vecs)             # <<<<<<<<<<<<<<
@@ -53369,37 +53855,37 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
  *         # Finalize each aggregate collector
 */
   /*else*/ {
-    ((struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_KeyStore *)__pyx_cur_scope->__pyx_v_self->_key_store->__pyx_vtab)->reconstruct_vectors(__pyx_cur_scope->__pyx_v_self->_key_store, __pyx_cur_scope->__pyx_v_num_groups, __pyx_cur_scope->__pyx_v_key_names, __pyx_cur_scope->__pyx_v_key_vecs); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 260, __pyx_L1_error)
+    ((struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_KeyStore *)__pyx_cur_scope->__pyx_v_self->_key_store->__pyx_vtab)->reconstruct_vectors(__pyx_cur_scope->__pyx_v_self->_key_store, __pyx_cur_scope->__pyx_v_num_groups, __pyx_cur_scope->__pyx_v_key_names, __pyx_cur_scope->__pyx_v_key_vecs); if (unlikely(PyErr_Occurred())) __PYX_ERR(10, 336, __pyx_L1_error)
   }
   __pyx_L8:;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":263
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":339
  * 
  *         # Finalize each aggregate collector
  *         cdef list agg_names = []             # <<<<<<<<<<<<<<
  *         cdef list agg_vecs = []
  *         if self._telemetry_enabled:
 */
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 263, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 339, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_GIVEREF(__pyx_t_1);
   __pyx_cur_scope->__pyx_v_agg_names = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":264
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":340
  *         # Finalize each aggregate collector
  *         cdef list agg_names = []
  *         cdef list agg_vecs = []             # <<<<<<<<<<<<<<
  *         if self._telemetry_enabled:
  *             t0 = _now_ns()
 */
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 264, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 340, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_GIVEREF(__pyx_t_1);
   __pyx_cur_scope->__pyx_v_agg_vecs = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":265
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":341
  *         cdef list agg_names = []
  *         cdef list agg_vecs = []
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -53408,7 +53894,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   if (__pyx_cur_scope->__pyx_v_self->_telemetry_enabled) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":266
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":342
  *         cdef list agg_vecs = []
  *         if self._telemetry_enabled:
  *             t0 = _now_ns()             # <<<<<<<<<<<<<<
@@ -53417,7 +53903,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     __pyx_cur_scope->__pyx_v_t0 = __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns();
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":265
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":341
  *         cdef list agg_names = []
  *         cdef list agg_vecs = []
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -53426,7 +53912,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":267
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":343
  *         if self._telemetry_enabled:
  *             t0 = _now_ns()
  *         for collector in self._collectors:             # <<<<<<<<<<<<<<
@@ -53435,7 +53921,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   if (unlikely(__pyx_cur_scope->__pyx_v_self->_collectors == Py_None)) {
     PyErr_SetString(PyExc_TypeError, "'NoneType' object is not iterable");
-    __PYX_ERR(10, 267, __pyx_L1_error)
+    __PYX_ERR(10, 343, __pyx_L1_error)
   }
   __pyx_t_1 = __pyx_cur_scope->__pyx_v_self->_collectors; __Pyx_INCREF(__pyx_t_1);
   __pyx_t_3 = 0;
@@ -53443,20 +53929,20 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     {
       Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_1);
       #if !CYTHON_ASSUME_SAFE_SIZE
-      if (unlikely((__pyx_temp < 0))) __PYX_ERR(10, 267, __pyx_L1_error)
+      if (unlikely((__pyx_temp < 0))) __PYX_ERR(10, 343, __pyx_L1_error)
       #endif
       if (__pyx_t_3 >= __pyx_temp) break;
     }
     __pyx_t_4 = __Pyx_PyList_GetItemRefFast(__pyx_t_1, __pyx_t_3, __Pyx_ReferenceSharing_OwnStrongReference);
     ++__pyx_t_3;
-    if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 267, __pyx_L1_error)
+    if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 343, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __Pyx_XGOTREF(__pyx_cur_scope->__pyx_v_collector);
     __Pyx_XDECREF_SET(__pyx_cur_scope->__pyx_v_collector, __pyx_t_4);
     __Pyx_GIVEREF(__pyx_t_4);
     __pyx_t_4 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":268
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":344
  *             t0 = _now_ns()
  *         for collector in self._collectors:
  *             c = <BaseCollector>collector             # <<<<<<<<<<<<<<
@@ -53470,7 +53956,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_GIVEREF(__pyx_t_4);
     __pyx_t_4 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":270
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":346
  *             c = <BaseCollector>collector
  *             agg_names.append(
  *                 c.result_name.decode("utf-8") if isinstance(c.result_name, bytes) else c.result_name             # <<<<<<<<<<<<<<
@@ -53484,9 +53970,9 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     if (__pyx_t_6) {
       if (unlikely(__pyx_cur_scope->__pyx_v_c->result_name == Py_None)) {
         PyErr_Format(PyExc_AttributeError, "'NoneType' object has no attribute '%.30s'", "decode");
-        __PYX_ERR(10, 270, __pyx_L1_error)
+        __PYX_ERR(10, 346, __pyx_L1_error)
       }
-      __pyx_t_8 = __Pyx_decode_bytes(__pyx_cur_scope->__pyx_v_c->result_name, 0, PY_SSIZE_T_MAX, NULL, NULL, PyUnicode_DecodeUTF8); if (unlikely(!__pyx_t_8)) __PYX_ERR(10, 270, __pyx_L1_error)
+      __pyx_t_8 = __Pyx_decode_bytes(__pyx_cur_scope->__pyx_v_c->result_name, 0, PY_SSIZE_T_MAX, NULL, NULL, PyUnicode_DecodeUTF8); if (unlikely(!__pyx_t_8)) __PYX_ERR(10, 346, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_8);
       __pyx_t_4 = __pyx_t_8;
       __pyx_t_8 = 0;
@@ -53495,29 +53981,29 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __pyx_t_4 = __pyx_cur_scope->__pyx_v_c->result_name;
     }
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":269
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":345
  *         for collector in self._collectors:
  *             c = <BaseCollector>collector
  *             agg_names.append(             # <<<<<<<<<<<<<<
  *                 c.result_name.decode("utf-8") if isinstance(c.result_name, bytes) else c.result_name
  *             )
 */
-    __pyx_t_9 = __Pyx_PyList_Append(__pyx_cur_scope->__pyx_v_agg_names, __pyx_t_4); if (unlikely(__pyx_t_9 == ((int)-1))) __PYX_ERR(10, 269, __pyx_L1_error)
+    __pyx_t_9 = __Pyx_PyList_Append(__pyx_cur_scope->__pyx_v_agg_names, __pyx_t_4); if (unlikely(__pyx_t_9 == ((int)-1))) __PYX_ERR(10, 345, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":272
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":348
  *                 c.result_name.decode("utf-8") if isinstance(c.result_name, bytes) else c.result_name
  *             )
  *             agg_vecs.append(c.finalize(num_groups))             # <<<<<<<<<<<<<<
  *         if self._telemetry_enabled:
  *             self._time_finalize_ns += _now_ns() - t0
 */
-    __pyx_t_4 = ((PyObject *)((struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_BaseCollector *)__pyx_cur_scope->__pyx_v_c->__pyx_vtab)->finalize(__pyx_cur_scope->__pyx_v_c, __pyx_cur_scope->__pyx_v_num_groups, 0)); if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 272, __pyx_L1_error)
+    __pyx_t_4 = ((PyObject *)((struct __pyx_vtabstruct_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_BaseCollector *)__pyx_cur_scope->__pyx_v_c->__pyx_vtab)->finalize(__pyx_cur_scope->__pyx_v_c, __pyx_cur_scope->__pyx_v_num_groups, 0)); if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 348, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
-    __pyx_t_9 = __Pyx_PyList_Append(__pyx_cur_scope->__pyx_v_agg_vecs, __pyx_t_4); if (unlikely(__pyx_t_9 == ((int)-1))) __PYX_ERR(10, 272, __pyx_L1_error)
+    __pyx_t_9 = __Pyx_PyList_Append(__pyx_cur_scope->__pyx_v_agg_vecs, __pyx_t_4); if (unlikely(__pyx_t_9 == ((int)-1))) __PYX_ERR(10, 348, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":267
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":343
  *         if self._telemetry_enabled:
  *             t0 = _now_ns()
  *         for collector in self._collectors:             # <<<<<<<<<<<<<<
@@ -53527,7 +54013,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":273
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":349
  *             )
  *             agg_vecs.append(c.finalize(num_groups))
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -53536,7 +54022,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   if (__pyx_cur_scope->__pyx_v_self->_telemetry_enabled) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":274
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":350
  *             agg_vecs.append(c.finalize(num_groups))
  *         if self._telemetry_enabled:
  *             self._time_finalize_ns += _now_ns() - t0             # <<<<<<<<<<<<<<
@@ -53545,7 +54031,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     __pyx_cur_scope->__pyx_v_self->_time_finalize_ns = (__pyx_cur_scope->__pyx_v_self->_time_finalize_ns + (__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns() - __pyx_cur_scope->__pyx_v_t0));
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":273
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":349
  *             )
  *             agg_vecs.append(c.finalize(num_groups))
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -53554,7 +54040,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":277
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":353
  * 
  *         # Build one full-size Morsel, then apply filter if provided, then slice into chunks
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -53563,7 +54049,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   if (__pyx_cur_scope->__pyx_v_self->_telemetry_enabled) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":278
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":354
  *         # Build one full-size Morsel, then apply filter if provided, then slice into chunks
  *         if self._telemetry_enabled:
  *             t0 = _now_ns()             # <<<<<<<<<<<<<<
@@ -53572,7 +54058,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     __pyx_cur_scope->__pyx_v_t0 = __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns();
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":277
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":353
  * 
  *         # Build one full-size Morsel, then apply filter if provided, then slice into chunks
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -53581,33 +54067,33 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":279
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":355
  *         if self._telemetry_enabled:
  *             t0 = _now_ns()
  *         all_names = agg_names + key_names             # <<<<<<<<<<<<<<
  *         all_vecs = agg_vecs + key_vecs
  *         full_morsel = _Morsel.from_vectors(all_names, all_vecs)
 */
-  __pyx_t_1 = PyNumber_Add(__pyx_cur_scope->__pyx_v_agg_names, __pyx_cur_scope->__pyx_v_key_names); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 279, __pyx_L1_error)
+  __pyx_t_1 = PyNumber_Add(__pyx_cur_scope->__pyx_v_agg_names, __pyx_cur_scope->__pyx_v_key_names); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 355, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_GIVEREF(__pyx_t_1);
   __pyx_cur_scope->__pyx_v_all_names = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":280
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":356
  *             t0 = _now_ns()
  *         all_names = agg_names + key_names
  *         all_vecs = agg_vecs + key_vecs             # <<<<<<<<<<<<<<
  *         full_morsel = _Morsel.from_vectors(all_names, all_vecs)
  *         if self._telemetry_enabled:
 */
-  __pyx_t_1 = PyNumber_Add(__pyx_cur_scope->__pyx_v_agg_vecs, __pyx_cur_scope->__pyx_v_key_vecs); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 280, __pyx_L1_error)
+  __pyx_t_1 = PyNumber_Add(__pyx_cur_scope->__pyx_v_agg_vecs, __pyx_cur_scope->__pyx_v_key_vecs); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 356, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_GIVEREF(__pyx_t_1);
   __pyx_cur_scope->__pyx_v_all_vecs = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":281
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":357
  *         all_names = agg_names + key_names
  *         all_vecs = agg_vecs + key_vecs
  *         full_morsel = _Morsel.from_vectors(all_names, all_vecs)             # <<<<<<<<<<<<<<
@@ -53621,14 +54107,14 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     PyObject *__pyx_callargs[3] = {__pyx_t_4, __pyx_cur_scope->__pyx_v_all_names, __pyx_cur_scope->__pyx_v_all_vecs};
     __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_from_vectors, __pyx_callargs+__pyx_t_10, (3-__pyx_t_10) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 281, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 357, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __Pyx_GIVEREF(__pyx_t_1);
   __pyx_cur_scope->__pyx_v_full_morsel = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":282
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":358
  *         all_vecs = agg_vecs + key_vecs
  *         full_morsel = _Morsel.from_vectors(all_names, all_vecs)
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -53637,7 +54123,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   if (__pyx_cur_scope->__pyx_v_self->_telemetry_enabled) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":283
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":359
  *         full_morsel = _Morsel.from_vectors(all_names, all_vecs)
  *         if self._telemetry_enabled:
  *             self._time_build_morsel_ns += _now_ns() - t0             # <<<<<<<<<<<<<<
@@ -53646,7 +54132,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     __pyx_cur_scope->__pyx_v_self->_time_build_morsel_ns = (__pyx_cur_scope->__pyx_v_self->_time_build_morsel_ns + (__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns() - __pyx_cur_scope->__pyx_v_t0));
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":282
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":358
  *         all_vecs = agg_vecs + key_vecs
  *         full_morsel = _Morsel.from_vectors(all_names, all_vecs)
  *         if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -53655,7 +54141,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":286
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":362
  * 
  *         # Apply filter early (before chunking) if provided, to avoid creating chunks for filtered-out groups
  *         if filter_fn is not None:             # <<<<<<<<<<<<<<
@@ -53665,7 +54151,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_t_6 = (__pyx_cur_scope->__pyx_v_filter_fn != Py_None);
   if (__pyx_t_6) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":287
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":363
  *         # Apply filter early (before chunking) if provided, to avoid creating chunks for filtered-out groups
  *         if filter_fn is not None:
  *             full_morsel = filter_fn(full_morsel)             # <<<<<<<<<<<<<<
@@ -53692,7 +54178,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_8, __pyx_callargs+__pyx_t_10, (2-__pyx_t_10) | (__pyx_t_10*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 287, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 363, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __Pyx_GOTREF(__pyx_cur_scope->__pyx_v_full_morsel);
@@ -53700,7 +54186,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_GIVEREF(__pyx_t_1);
     __pyx_t_1 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":288
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":364
  *         if filter_fn is not None:
  *             full_morsel = filter_fn(full_morsel)
  *             if full_morsel is None or full_morsel.num_rows == 0:             # <<<<<<<<<<<<<<
@@ -53713,15 +54199,15 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __pyx_t_6 = __pyx_t_7;
       goto __pyx_L20_bool_binop_done;
     }
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_full_morsel, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 288, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_full_morsel, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 364, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_7 = (__Pyx_PyLong_BoolEqObjC(__pyx_t_1, __pyx_mstate_global->__pyx_int_0, 0, 0)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(10, 288, __pyx_L1_error)
+    __pyx_t_7 = (__Pyx_PyLong_BoolEqObjC(__pyx_t_1, __pyx_mstate_global->__pyx_int_0, 0, 0)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(10, 364, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     __pyx_t_6 = __pyx_t_7;
     __pyx_L20_bool_binop_done:;
     if (__pyx_t_6) {
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":289
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":365
  *             full_morsel = filter_fn(full_morsel)
  *             if full_morsel is None or full_morsel.num_rows == 0:
  *                 return             # <<<<<<<<<<<<<<
@@ -53732,7 +54218,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __pyx_r = Py_None; __Pyx_INCREF(Py_None);
       goto __pyx_L0;
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":288
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":364
  *         if filter_fn is not None:
  *             full_morsel = filter_fn(full_morsel)
  *             if full_morsel is None or full_morsel.num_rows == 0:             # <<<<<<<<<<<<<<
@@ -53741,7 +54227,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     }
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":286
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":362
  * 
  *         # Apply filter early (before chunking) if provided, to avoid creating chunks for filtered-out groups
  *         if filter_fn is not None:             # <<<<<<<<<<<<<<
@@ -53750,7 +54236,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":291
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":367
  *                 return
  * 
  *         cdef Py_ssize_t start = 0             # <<<<<<<<<<<<<<
@@ -53759,20 +54245,20 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   __pyx_cur_scope->__pyx_v_start = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":293
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":369
  *         cdef Py_ssize_t start = 0
  *         cdef Py_ssize_t length
  *         cdef Py_ssize_t result_rows = full_morsel.num_rows             # <<<<<<<<<<<<<<
  *         while start < result_rows:
  *             if self._telemetry_enabled:
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_full_morsel, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 293, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_full_morsel, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 369, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_3 = __Pyx_PyIndex_AsSsize_t(__pyx_t_1); if (unlikely((__pyx_t_3 == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(10, 293, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyIndex_AsSsize_t(__pyx_t_1); if (unlikely((__pyx_t_3 == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(10, 369, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_cur_scope->__pyx_v_result_rows = __pyx_t_3;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":294
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":370
  *         cdef Py_ssize_t length
  *         cdef Py_ssize_t result_rows = full_morsel.num_rows
  *         while start < result_rows:             # <<<<<<<<<<<<<<
@@ -53783,7 +54269,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_t_6 = (__pyx_cur_scope->__pyx_v_start < __pyx_cur_scope->__pyx_v_result_rows);
     if (!__pyx_t_6) break;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":295
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":371
  *         cdef Py_ssize_t result_rows = full_morsel.num_rows
  *         while start < result_rows:
  *             if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -53792,7 +54278,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     if (__pyx_cur_scope->__pyx_v_self->_telemetry_enabled) {
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":296
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":372
  *         while start < result_rows:
  *             if self._telemetry_enabled:
  *                 t1 = _now_ns()             # <<<<<<<<<<<<<<
@@ -53801,7 +54287,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
       __pyx_cur_scope->__pyx_v_t1 = __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns();
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":295
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":371
  *         cdef Py_ssize_t result_rows = full_morsel.num_rows
  *         while start < result_rows:
  *             if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -53810,7 +54296,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     }
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":297
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":373
  *             if self._telemetry_enabled:
  *                 t1 = _now_ns()
  *             length = min(chunk_size, result_rows - start)             # <<<<<<<<<<<<<<
@@ -53827,7 +54313,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     }
     __pyx_cur_scope->__pyx_v_length = __pyx_t_12;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":298
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":374
  *                 t1 = _now_ns()
  *             length = min(chunk_size, result_rows - start)
  *             yield full_morsel.slice(start, length)             # <<<<<<<<<<<<<<
@@ -53836,9 +54322,9 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     __pyx_t_8 = __pyx_cur_scope->__pyx_v_full_morsel;
     __Pyx_INCREF(__pyx_t_8);
-    __pyx_t_4 = PyLong_FromSsize_t(__pyx_cur_scope->__pyx_v_start); if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 298, __pyx_L1_error)
+    __pyx_t_4 = PyLong_FromSsize_t(__pyx_cur_scope->__pyx_v_start); if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 374, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
-    __pyx_t_13 = PyLong_FromSsize_t(__pyx_cur_scope->__pyx_v_length); if (unlikely(!__pyx_t_13)) __PYX_ERR(10, 298, __pyx_L1_error)
+    __pyx_t_13 = PyLong_FromSsize_t(__pyx_cur_scope->__pyx_v_length); if (unlikely(!__pyx_t_13)) __PYX_ERR(10, 374, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_13);
     __pyx_t_10 = 0;
     {
@@ -53847,7 +54333,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __Pyx_XDECREF(__pyx_t_8); __pyx_t_8 = 0;
       __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_DECREF(__pyx_t_13); __pyx_t_13 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 298, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 374, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __pyx_r = __pyx_t_1;
@@ -53859,9 +54345,9 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_generator->resume_label = 1;
     return __pyx_r;
     __pyx_L25_resume_from_yield:;
-    if (unlikely(!__pyx_sent_value)) __PYX_ERR(10, 298, __pyx_L1_error)
+    if (unlikely(!__pyx_sent_value)) __PYX_ERR(10, 374, __pyx_L1_error)
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":299
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":375
  *             length = min(chunk_size, result_rows - start)
  *             yield full_morsel.slice(start, length)
  *             if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -53870,7 +54356,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     if (__pyx_cur_scope->__pyx_v_self->_telemetry_enabled) {
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":300
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":376
  *             yield full_morsel.slice(start, length)
  *             if self._telemetry_enabled:
  *                 self._time_slice_output_ns += _now_ns() - t1             # <<<<<<<<<<<<<<
@@ -53879,7 +54365,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
       __pyx_cur_scope->__pyx_v_self->_time_slice_output_ns = (__pyx_cur_scope->__pyx_v_self->_time_slice_output_ns + (__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__now_ns() - __pyx_cur_scope->__pyx_v_t1));
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":299
+      /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":375
  *             length = min(chunk_size, result_rows - start)
  *             yield full_morsel.slice(start, length)
  *             if self._telemetry_enabled:             # <<<<<<<<<<<<<<
@@ -53888,7 +54374,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     }
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":301
+    /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":377
  *             if self._telemetry_enabled:
  *                 self._time_slice_output_ns += _now_ns() - t1
  *             start += length             # <<<<<<<<<<<<<<
@@ -53899,7 +54385,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   }
   CYTHON_MAYBE_UNUSED_VAR(__pyx_cur_scope);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":217
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":293
  *             self._time_resolve_ns += _now_ns() - start_ns
  * 
  *     def finalize_morsels(self, Py_ssize_t chunk_size=65536, filter_fn=None):             # <<<<<<<<<<<<<<
@@ -53930,7 +54416,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   return __pyx_r;
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":303
+/* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":379
  *             start += length
  * 
  *     cpdef dict telemetry(self):             # <<<<<<<<<<<<<<
@@ -53953,6 +54439,7 @@ static PyObject *__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_group
   PyObject *__pyx_t_3 = NULL;
   PyObject *__pyx_t_4 = NULL;
   size_t __pyx_t_5;
+  int __pyx_t_6;
   int __pyx_lineno = 0;
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
@@ -53973,7 +54460,7 @@ static PyObject *__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_group
     if (unlikely(!__Pyx_object_dict_version_matches(((PyObject *)__pyx_v_self), __pyx_tp_dict_version, __pyx_obj_dict_version))) {
       PY_UINT64_T __pyx_typedict_guard = __Pyx_get_tp_dict_version(((PyObject *)__pyx_v_self));
       #endif
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_telemetry); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 303, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_telemetry); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 379, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
       if (!__Pyx_IsSameCFunction(__pyx_t_1, (void(*)(void)) __pyx_pw_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_12telemetry)) {
         __Pyx_XDECREF(__pyx_r);
@@ -53997,10 +54484,10 @@ static PyObject *__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_group
           __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_4, __pyx_callargs+__pyx_t_5, (1-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
           __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
           __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-          if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 303, __pyx_L1_error)
+          if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 379, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_2);
         }
-        if (!(likely(PyDict_CheckExact(__pyx_t_2))||((__pyx_t_2) == Py_None) || __Pyx_RaiseUnexpectedTypeError("dict", __pyx_t_2))) __PYX_ERR(10, 303, __pyx_L1_error)
+        if (!(likely(PyDict_CheckExact(__pyx_t_2))||((__pyx_t_2) == Py_None) || __Pyx_RaiseUnexpectedTypeError("dict", __pyx_t_2))) __PYX_ERR(10, 379, __pyx_L1_error)
         __pyx_r = ((PyObject*)__pyx_t_2);
         __pyx_t_2 = 0;
         __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
@@ -54019,7 +54506,7 @@ static PyObject *__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_group
     #endif
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":304
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":380
  * 
  *     cpdef dict telemetry(self):
  *         return {             # <<<<<<<<<<<<<<
@@ -54028,167 +54515,215 @@ static PyObject *__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_group
 */
   __Pyx_XDECREF(__pyx_r);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":305
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":381
  *     cpdef dict telemetry(self):
  *         return {
  *             "time_resolve_ns": self._time_resolve_ns,             # <<<<<<<<<<<<<<
  *             "time_hash_ns": self._time_hash_ns,
  *             "time_lookup_ns": self._time_lookup_ns,
 */
-  __pyx_t_1 = __Pyx_PyDict_NewPresized(13); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 305, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyDict_NewPresized(16); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 381, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_resolve_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 305, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_resolve_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 381, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_resolve_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 305, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_resolve_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 381, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":306
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":382
  *         return {
  *             "time_resolve_ns": self._time_resolve_ns,
  *             "time_hash_ns": self._time_hash_ns,             # <<<<<<<<<<<<<<
  *             "time_lookup_ns": self._time_lookup_ns,
  *             "time_store_keys_ns": self._time_store_keys_ns,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_hash_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 306, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_hash_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 382, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_hash_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 305, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_hash_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 381, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":307
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":383
  *             "time_resolve_ns": self._time_resolve_ns,
  *             "time_hash_ns": self._time_hash_ns,
  *             "time_lookup_ns": self._time_lookup_ns,             # <<<<<<<<<<<<<<
  *             "time_store_keys_ns": self._time_store_keys_ns,
  *             "time_grow_ns": self._time_grow_ns,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_lookup_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 307, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_lookup_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 383, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_lookup_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 305, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_lookup_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 381, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":308
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":384
  *             "time_hash_ns": self._time_hash_ns,
  *             "time_lookup_ns": self._time_lookup_ns,
  *             "time_store_keys_ns": self._time_store_keys_ns,             # <<<<<<<<<<<<<<
  *             "time_grow_ns": self._time_grow_ns,
  *             "time_accumulate_ns": self._time_accumulate_ns,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_store_keys_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 308, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_store_keys_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 384, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_store_keys_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 305, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_store_keys_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 381, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":309
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":385
  *             "time_lookup_ns": self._time_lookup_ns,
  *             "time_store_keys_ns": self._time_store_keys_ns,
  *             "time_grow_ns": self._time_grow_ns,             # <<<<<<<<<<<<<<
  *             "time_accumulate_ns": self._time_accumulate_ns,
  *             "time_finalize_ns": self._time_finalize_ns,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_grow_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 309, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_grow_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 385, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_grow_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 305, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_grow_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 381, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":310
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":386
  *             "time_store_keys_ns": self._time_store_keys_ns,
  *             "time_grow_ns": self._time_grow_ns,
  *             "time_accumulate_ns": self._time_accumulate_ns,             # <<<<<<<<<<<<<<
  *             "time_finalize_ns": self._time_finalize_ns,
  *             "time_reconstruct_ns": self._time_reconstruct_ns,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_accumulate_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 310, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_accumulate_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 386, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_accumulate_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 305, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_accumulate_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 381, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":311
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":387
  *             "time_grow_ns": self._time_grow_ns,
  *             "time_accumulate_ns": self._time_accumulate_ns,
  *             "time_finalize_ns": self._time_finalize_ns,             # <<<<<<<<<<<<<<
  *             "time_reconstruct_ns": self._time_reconstruct_ns,
  *             "time_reconstruct_single_fixed_ns": self._time_reconstruct_single_fixed_ns,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_finalize_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 311, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_finalize_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 387, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_finalize_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 305, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_finalize_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 381, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":312
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":388
  *             "time_accumulate_ns": self._time_accumulate_ns,
  *             "time_finalize_ns": self._time_finalize_ns,
  *             "time_reconstruct_ns": self._time_reconstruct_ns,             # <<<<<<<<<<<<<<
  *             "time_reconstruct_single_fixed_ns": self._time_reconstruct_single_fixed_ns,
  *             "time_reconstruct_single_string_ns": self._time_reconstruct_single_string_ns,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_reconstruct_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 312, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_reconstruct_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 388, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_reconstruct_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 305, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_reconstruct_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 381, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":313
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":389
  *             "time_finalize_ns": self._time_finalize_ns,
  *             "time_reconstruct_ns": self._time_reconstruct_ns,
  *             "time_reconstruct_single_fixed_ns": self._time_reconstruct_single_fixed_ns,             # <<<<<<<<<<<<<<
  *             "time_reconstruct_single_string_ns": self._time_reconstruct_single_string_ns,
  *             "time_reconstruct_multi_ns": self._time_reconstruct_multi_ns,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_reconstruct_single_fixed_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 313, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_reconstruct_single_fixed_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 389, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_reconstruct_single_fixed_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 305, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_reconstruct_single_fixed_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 381, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":314
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":390
  *             "time_reconstruct_ns": self._time_reconstruct_ns,
  *             "time_reconstruct_single_fixed_ns": self._time_reconstruct_single_fixed_ns,
  *             "time_reconstruct_single_string_ns": self._time_reconstruct_single_string_ns,             # <<<<<<<<<<<<<<
  *             "time_reconstruct_multi_ns": self._time_reconstruct_multi_ns,
  *             "time_build_morsel_ns": self._time_build_morsel_ns,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_reconstruct_single_string_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 314, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_reconstruct_single_string_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 390, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_reconstruct_single_string_n, __pyx_t_2) < (0)) __PYX_ERR(10, 305, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_reconstruct_single_string_n, __pyx_t_2) < (0)) __PYX_ERR(10, 381, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":315
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":391
  *             "time_reconstruct_single_fixed_ns": self._time_reconstruct_single_fixed_ns,
  *             "time_reconstruct_single_string_ns": self._time_reconstruct_single_string_ns,
  *             "time_reconstruct_multi_ns": self._time_reconstruct_multi_ns,             # <<<<<<<<<<<<<<
  *             "time_build_morsel_ns": self._time_build_morsel_ns,
  *             "time_slice_output_ns": self._time_slice_output_ns,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_reconstruct_multi_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 315, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_reconstruct_multi_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 391, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_reconstruct_multi_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 305, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_reconstruct_multi_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 381, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":316
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":392
  *             "time_reconstruct_single_string_ns": self._time_reconstruct_single_string_ns,
  *             "time_reconstruct_multi_ns": self._time_reconstruct_multi_ns,
  *             "time_build_morsel_ns": self._time_build_morsel_ns,             # <<<<<<<<<<<<<<
  *             "time_slice_output_ns": self._time_slice_output_ns,
- *         }
+ *             # Hash-map variant telemetry. Only meaningful when telemetry is on;
 */
-  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_build_morsel_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 316, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_build_morsel_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 392, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_build_morsel_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 305, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_build_morsel_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 381, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":317
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":393
  *             "time_reconstruct_multi_ns": self._time_reconstruct_multi_ns,
  *             "time_build_morsel_ns": self._time_build_morsel_ns,
  *             "time_slice_output_ns": self._time_slice_output_ns,             # <<<<<<<<<<<<<<
+ *             # Hash-map variant telemetry. Only meaningful when telemetry is on;
+ *             # otherwise _parvi_final_size is never updated (stays 0) and the
+*/
+  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_slice_output_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 393, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_slice_output_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 381, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":398
+ *             # bools still reflect the final map state since they are kept in
+ *             # sync on every transition.
+ *             "used_parvi": self._parvi != NULL or self._promoted_from_parvi,             # <<<<<<<<<<<<<<
+ *             "promoted_from_parvi": self._promoted_from_parvi,
+ *             "parvi_final_size": self._parvi_final_size,
+*/
+  __pyx_t_6 = (__pyx_v_self->_parvi != NULL);
+  if (!__pyx_t_6) {
+  } else {
+    __pyx_t_4 = __Pyx_PyBool_FromLong(__pyx_t_6); if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 398, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_4);
+    __pyx_t_2 = __pyx_t_4;
+    __pyx_t_4 = 0;
+    goto __pyx_L3_bool_binop_done;
+  }
+  __pyx_t_4 = __Pyx_PyBool_FromLong(__pyx_v_self->_promoted_from_parvi); if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 398, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_4);
+  __pyx_t_2 = __pyx_t_4;
+  __pyx_t_4 = 0;
+  __pyx_L3_bool_binop_done:;
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_used_parvi, __pyx_t_2) < (0)) __PYX_ERR(10, 381, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":399
+ *             # sync on every transition.
+ *             "used_parvi": self._parvi != NULL or self._promoted_from_parvi,
+ *             "promoted_from_parvi": self._promoted_from_parvi,             # <<<<<<<<<<<<<<
+ *             "parvi_final_size": self._parvi_final_size,
  *         }
 */
-  __pyx_t_2 = __Pyx_PyLong_From_PY_LONG_LONG(__pyx_v_self->_time_slice_output_ns); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 317, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyBool_FromLong(__pyx_v_self->_promoted_from_parvi); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 399, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_time_slice_output_ns, __pyx_t_2) < (0)) __PYX_ERR(10, 305, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_promoted_from_parvi, __pyx_t_2) < (0)) __PYX_ERR(10, 381, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":400
+ *             "used_parvi": self._parvi != NULL or self._promoted_from_parvi,
+ *             "promoted_from_parvi": self._promoted_from_parvi,
+ *             "parvi_final_size": self._parvi_final_size,             # <<<<<<<<<<<<<<
+ *         }
+*/
+  __pyx_t_2 = __Pyx_PyLong_From_int64_t(__pyx_v_self->_parvi_final_size); if (unlikely(!__pyx_t_2)) __PYX_ERR(10, 400, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_parvi_final_size, __pyx_t_2) < (0)) __PYX_ERR(10, 381, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   __pyx_r = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":303
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":379
  *             start += length
  * 
  *     cpdef dict telemetry(self):             # <<<<<<<<<<<<<<
@@ -54261,7 +54796,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("telemetry", 0);
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_telemetry(__pyx_v_self, 1); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 303, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_telemetry(__pyx_v_self, 1); if (unlikely(!__pyx_t_1)) __PYX_ERR(10, 379, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
@@ -58837,6 +59372,8 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   PyObject *__pyx_v_normalized_group_cols = NULL;
   PyObject *__pyx_v_collectors = NULL;
   CYTHON_UNUSED PyObject *__pyx_v__key_kinds_placeholder = NULL;
+  PyObject *__pyx_v_variant = NULL;
+  PyObject *__pyx_v_use_parvi = NULL;
   PyObject *__pyx_8genexpr2__pyx_v_group = NULL;
   PyObject *__pyx_8genexpr3__pyx_v_node = NULL;
   PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_8__init___2generator3 = 0;
@@ -59763,23 +60300,46 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":94
  *         )
  * 
- *         self._engine = GroupHashEngine(normalized_group_cols, collectors, True)             # <<<<<<<<<<<<<<
+ *         variant = parameters.get("group_map_variant", "carchar")             # <<<<<<<<<<<<<<
+ *         use_parvi = variant == "parvi"
+ *         self._engine = GroupHashEngine(normalized_group_cols, collectors, True, use_parvi)
+*/
+  __pyx_t_10 = __Pyx_PyDict_GetItemDefault(__pyx_v_parameters, __pyx_mstate_global->__pyx_n_u_group_map_variant, __pyx_mstate_global->__pyx_n_u_carchar); if (unlikely(!__pyx_t_10)) __PYX_ERR(1, 94, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_10);
+  __pyx_v_variant = __pyx_t_10;
+  __pyx_t_10 = 0;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":95
+ * 
+ *         variant = parameters.get("group_map_variant", "carchar")
+ *         use_parvi = variant == "parvi"             # <<<<<<<<<<<<<<
+ *         self._engine = GroupHashEngine(normalized_group_cols, collectors, True, use_parvi)
+ * 
+*/
+  __pyx_t_10 = PyObject_RichCompare(__pyx_v_variant, __pyx_mstate_global->__pyx_n_u_parvi, Py_EQ); __Pyx_XGOTREF(__pyx_t_10); if (unlikely(!__pyx_t_10)) __PYX_ERR(1, 95, __pyx_L1_error)
+  __pyx_v_use_parvi = __pyx_t_10;
+  __pyx_t_10 = 0;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":96
+ *         variant = parameters.get("group_map_variant", "carchar")
+ *         use_parvi = variant == "parvi"
+ *         self._engine = GroupHashEngine(normalized_group_cols, collectors, True, use_parvi)             # <<<<<<<<<<<<<<
  * 
  *         # Required columns for morsel.select() before ingestion
 */
   __pyx_t_3 = NULL;
   __pyx_t_4 = 1;
   {
-    PyObject *__pyx_callargs[4] = {__pyx_t_3, __pyx_v_normalized_group_cols, __pyx_v_collectors, Py_True};
-    __pyx_t_10 = __Pyx_PyObject_FastCall((PyObject*)__pyx_mstate_global->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine, __pyx_callargs+__pyx_t_4, (4-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+    PyObject *__pyx_callargs[5] = {__pyx_t_3, __pyx_v_normalized_group_cols, __pyx_v_collectors, Py_True, __pyx_v_use_parvi};
+    __pyx_t_10 = __Pyx_PyObject_FastCall((PyObject*)__pyx_mstate_global->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine, __pyx_callargs+__pyx_t_4, (5-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (unlikely(!__pyx_t_10)) __PYX_ERR(1, 94, __pyx_L1_error)
+    if (unlikely(!__pyx_t_10)) __PYX_ERR(1, 96, __pyx_L1_error)
     __Pyx_GOTREF((PyObject *)__pyx_t_10);
   }
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_engine, ((PyObject *)__pyx_t_10)) < (0)) __PYX_ERR(1, 94, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_engine, ((PyObject *)__pyx_t_10)) < (0)) __PYX_ERR(1, 96, __pyx_L1_error)
   __Pyx_DECREF((PyObject *)__pyx_t_10); __pyx_t_10 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":97
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":99
  * 
  *         # Required columns for morsel.select() before ingestion
  *         self._required_columns = self._build_required_columns()             # <<<<<<<<<<<<<<
@@ -59793,22 +60353,22 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     PyObject *__pyx_callargs[2] = {__pyx_t_3, NULL};
     __pyx_t_10 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_build_required_columns, __pyx_callargs+__pyx_t_4, (1-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (unlikely(!__pyx_t_10)) __PYX_ERR(1, 97, __pyx_L1_error)
+    if (unlikely(!__pyx_t_10)) __PYX_ERR(1, 99, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_10);
   }
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_required_columns, __pyx_t_10) < (0)) __PYX_ERR(1, 97, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_required_columns, __pyx_t_10) < (0)) __PYX_ERR(1, 99, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":99
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":101
  *         self._required_columns = self._build_required_columns()
  * 
  *         self._having_condition = parameters.get("having_condition")             # <<<<<<<<<<<<<<
  * 
  *     @property
 */
-  __pyx_t_10 = __Pyx_PyDict_GetItemDefault(__pyx_v_parameters, __pyx_mstate_global->__pyx_n_u_having_condition, Py_None); if (unlikely(!__pyx_t_10)) __PYX_ERR(1, 99, __pyx_L1_error)
+  __pyx_t_10 = __Pyx_PyDict_GetItemDefault(__pyx_v_parameters, __pyx_mstate_global->__pyx_n_u_having_condition, Py_None); if (unlikely(!__pyx_t_10)) __PYX_ERR(1, 101, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_10);
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_having_condition_2, __pyx_t_10) < (0)) __PYX_ERR(1, 99, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_having_condition_2, __pyx_t_10) < (0)) __PYX_ERR(1, 101, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
 
   /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":44
@@ -59838,6 +60398,8 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_XDECREF(__pyx_v_normalized_group_cols);
   __Pyx_XDECREF(__pyx_v_collectors);
   __Pyx_XDECREF(__pyx_v__key_kinds_placeholder);
+  __Pyx_XDECREF(__pyx_v_variant);
+  __Pyx_XDECREF(__pyx_v_use_parvi);
   __Pyx_XDECREF(__pyx_8genexpr2__pyx_v_group);
   __Pyx_XDECREF(__pyx_8genexpr3__pyx_v_node);
   __Pyx_XDECREF(__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_8__init___2generator3);
@@ -59848,7 +60410,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   return __pyx_r;
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":101
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":103
  *         self._having_condition = parameters.get("having_condition")
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -59895,32 +60457,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 101, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 103, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 101, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 103, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "config", 0) < (0)) __PYX_ERR(1, 101, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "config", 0) < (0)) __PYX_ERR(1, 103, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("config", 1, 1, 1, i); __PYX_ERR(1, 101, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("config", 1, 1, 1, i); __PYX_ERR(1, 103, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 101, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 103, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("config", 1, 1, 1, __pyx_nargs); __PYX_ERR(1, 101, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("config", 1, 1, 1, __pyx_nargs); __PYX_ERR(1, 103, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -59942,7 +60504,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 }
 static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_6config_2generator4(__pyx_CoroutineObject *__pyx_generator, CYTHON_UNUSED PyThreadState *__pyx_tstate, PyObject *__pyx_sent_value); /* proto */
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":105
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":107
  *         from opteryx.expression import format_expression
  *         return (
  *             f"AGGREGATE ({', '.join(format_expression(col) for col in self.aggregates)}) "             # <<<<<<<<<<<<<<
@@ -59962,7 +60524,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   if (unlikely(!__pyx_cur_scope)) {
     __pyx_cur_scope = ((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_3_genexpr *)Py_None);
     __Pyx_INCREF(Py_None);
-    __PYX_ERR(1, 105, __pyx_L1_error)
+    __PYX_ERR(1, 107, __pyx_L1_error)
   } else {
     __Pyx_GOTREF((PyObject *)__pyx_cur_scope);
   }
@@ -59973,7 +60535,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_INCREF(__pyx_cur_scope->__pyx_genexpr_arg_0);
   __Pyx_GIVEREF(__pyx_cur_scope->__pyx_genexpr_arg_0);
   {
-    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_6config_2generator4, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[2]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_genexpr, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode_confi, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg); if (unlikely(!gen)) __PYX_ERR(1, 105, __pyx_L1_error)
+    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_6config_2generator4, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[2]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_genexpr, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode_confi, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg); if (unlikely(!gen)) __PYX_ERR(1, 107, __pyx_L1_error)
     __Pyx_DECREF(__pyx_cur_scope);
     __Pyx_RefNannyFinishContext();
     return (PyObject *) gen;
@@ -60009,18 +60571,18 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     return NULL;
   }
   __pyx_L3_first_run:;
-  if (unlikely(!__pyx_sent_value)) __PYX_ERR(1, 105, __pyx_L1_error)
-  __pyx_r = PyList_New(0); if (unlikely(!__pyx_r)) __PYX_ERR(1, 105, __pyx_L1_error)
+  if (unlikely(!__pyx_sent_value)) __PYX_ERR(1, 107, __pyx_L1_error)
+  __pyx_r = PyList_New(0); if (unlikely(!__pyx_r)) __PYX_ERR(1, 107, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_r);
-  if (unlikely(!__pyx_cur_scope->__pyx_genexpr_arg_0)) { __Pyx_RaiseUnboundLocalError(".0"); __PYX_ERR(1, 105, __pyx_L1_error) }
+  if (unlikely(!__pyx_cur_scope->__pyx_genexpr_arg_0)) { __Pyx_RaiseUnboundLocalError(".0"); __PYX_ERR(1, 107, __pyx_L1_error) }
   if (likely(PyList_CheckExact(__pyx_cur_scope->__pyx_genexpr_arg_0)) || PyTuple_CheckExact(__pyx_cur_scope->__pyx_genexpr_arg_0)) {
     __pyx_t_1 = __pyx_cur_scope->__pyx_genexpr_arg_0; __Pyx_INCREF(__pyx_t_1);
     __pyx_t_2 = 0;
     __pyx_t_3 = NULL;
   } else {
-    __pyx_t_2 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_cur_scope->__pyx_genexpr_arg_0); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 105, __pyx_L1_error)
+    __pyx_t_2 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_cur_scope->__pyx_genexpr_arg_0); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 107, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_3 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 105, __pyx_L1_error)
+    __pyx_t_3 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 107, __pyx_L1_error)
   }
   for (;;) {
     if (likely(!__pyx_t_3)) {
@@ -60028,7 +60590,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         {
           Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_1);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 105, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 107, __pyx_L1_error)
           #endif
           if (__pyx_t_2 >= __pyx_temp) break;
         }
@@ -60038,7 +60600,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         {
           Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_1);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 105, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 107, __pyx_L1_error)
           #endif
           if (__pyx_t_2 >= __pyx_temp) break;
         }
@@ -60049,13 +60611,13 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         #endif
         ++__pyx_t_2;
       }
-      if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 105, __pyx_L1_error)
+      if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 107, __pyx_L1_error)
     } else {
       __pyx_t_4 = __pyx_t_3(__pyx_t_1);
       if (unlikely(!__pyx_t_4)) {
         PyObject* exc_type = PyErr_Occurred();
         if (exc_type) {
-          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(1, 105, __pyx_L1_error)
+          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(1, 107, __pyx_L1_error)
           PyErr_Clear();
         }
         break;
@@ -60066,10 +60628,10 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_XDECREF_SET(__pyx_cur_scope->__pyx_v_col, __pyx_t_4);
     __Pyx_GIVEREF(__pyx_t_4);
     __pyx_t_4 = 0;
-    if (unlikely(!__pyx_cur_scope->__pyx_outer_scope->__pyx_v_format_expression)) { __Pyx_RaiseClosureNameError("format_expression"); __PYX_ERR(1, 105, __pyx_L1_error) }
-    __pyx_t_4 = __Pyx_PyObject_CallOneArg(__pyx_cur_scope->__pyx_outer_scope->__pyx_v_format_expression, __pyx_cur_scope->__pyx_v_col); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 105, __pyx_L1_error)
+    if (unlikely(!__pyx_cur_scope->__pyx_outer_scope->__pyx_v_format_expression)) { __Pyx_RaiseClosureNameError("format_expression"); __PYX_ERR(1, 107, __pyx_L1_error) }
+    __pyx_t_4 = __Pyx_PyObject_CallOneArg(__pyx_cur_scope->__pyx_outer_scope->__pyx_v_format_expression, __pyx_cur_scope->__pyx_v_col); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 107, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
-    if (unlikely(__Pyx_ListComp_Append(__pyx_r, (PyObject*)__pyx_t_4))) __PYX_ERR(1, 105, __pyx_L1_error)
+    if (unlikely(__Pyx_ListComp_Append(__pyx_r, (PyObject*)__pyx_t_4))) __PYX_ERR(1, 107, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
@@ -60097,7 +60659,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 }
 static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_6config_5generator5(__pyx_CoroutineObject *__pyx_generator, CYTHON_UNUSED PyThreadState *__pyx_tstate, PyObject *__pyx_sent_value); /* proto */
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":106
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":108
  *         return (
  *             f"AGGREGATE ({', '.join(format_expression(col) for col in self.aggregates)}) "
  *             f"GROUP BY ({', '.join(format_expression(col) for col in self.groups)})"             # <<<<<<<<<<<<<<
@@ -60117,7 +60679,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   if (unlikely(!__pyx_cur_scope)) {
     __pyx_cur_scope = ((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_4_genexpr *)Py_None);
     __Pyx_INCREF(Py_None);
-    __PYX_ERR(1, 106, __pyx_L1_error)
+    __PYX_ERR(1, 108, __pyx_L1_error)
   } else {
     __Pyx_GOTREF((PyObject *)__pyx_cur_scope);
   }
@@ -60128,7 +60690,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_INCREF(__pyx_cur_scope->__pyx_genexpr_arg_0);
   __Pyx_GIVEREF(__pyx_cur_scope->__pyx_genexpr_arg_0);
   {
-    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_6config_5generator5, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[3]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_genexpr, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode_confi, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg); if (unlikely(!gen)) __PYX_ERR(1, 106, __pyx_L1_error)
+    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_6config_5generator5, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[3]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_genexpr, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode_confi, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg); if (unlikely(!gen)) __PYX_ERR(1, 108, __pyx_L1_error)
     __Pyx_DECREF(__pyx_cur_scope);
     __Pyx_RefNannyFinishContext();
     return (PyObject *) gen;
@@ -60164,18 +60726,18 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     return NULL;
   }
   __pyx_L3_first_run:;
-  if (unlikely(!__pyx_sent_value)) __PYX_ERR(1, 106, __pyx_L1_error)
-  __pyx_r = PyList_New(0); if (unlikely(!__pyx_r)) __PYX_ERR(1, 106, __pyx_L1_error)
+  if (unlikely(!__pyx_sent_value)) __PYX_ERR(1, 108, __pyx_L1_error)
+  __pyx_r = PyList_New(0); if (unlikely(!__pyx_r)) __PYX_ERR(1, 108, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_r);
-  if (unlikely(!__pyx_cur_scope->__pyx_genexpr_arg_0)) { __Pyx_RaiseUnboundLocalError(".0"); __PYX_ERR(1, 106, __pyx_L1_error) }
+  if (unlikely(!__pyx_cur_scope->__pyx_genexpr_arg_0)) { __Pyx_RaiseUnboundLocalError(".0"); __PYX_ERR(1, 108, __pyx_L1_error) }
   if (likely(PyList_CheckExact(__pyx_cur_scope->__pyx_genexpr_arg_0)) || PyTuple_CheckExact(__pyx_cur_scope->__pyx_genexpr_arg_0)) {
     __pyx_t_1 = __pyx_cur_scope->__pyx_genexpr_arg_0; __Pyx_INCREF(__pyx_t_1);
     __pyx_t_2 = 0;
     __pyx_t_3 = NULL;
   } else {
-    __pyx_t_2 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_cur_scope->__pyx_genexpr_arg_0); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 106, __pyx_L1_error)
+    __pyx_t_2 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_cur_scope->__pyx_genexpr_arg_0); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 108, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_3 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 106, __pyx_L1_error)
+    __pyx_t_3 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 108, __pyx_L1_error)
   }
   for (;;) {
     if (likely(!__pyx_t_3)) {
@@ -60183,7 +60745,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         {
           Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_1);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 106, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 108, __pyx_L1_error)
           #endif
           if (__pyx_t_2 >= __pyx_temp) break;
         }
@@ -60193,7 +60755,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         {
           Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_1);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 106, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 108, __pyx_L1_error)
           #endif
           if (__pyx_t_2 >= __pyx_temp) break;
         }
@@ -60204,13 +60766,13 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         #endif
         ++__pyx_t_2;
       }
-      if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 106, __pyx_L1_error)
+      if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 108, __pyx_L1_error)
     } else {
       __pyx_t_4 = __pyx_t_3(__pyx_t_1);
       if (unlikely(!__pyx_t_4)) {
         PyObject* exc_type = PyErr_Occurred();
         if (exc_type) {
-          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(1, 106, __pyx_L1_error)
+          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(1, 108, __pyx_L1_error)
           PyErr_Clear();
         }
         break;
@@ -60221,10 +60783,10 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_XDECREF_SET(__pyx_cur_scope->__pyx_v_col, __pyx_t_4);
     __Pyx_GIVEREF(__pyx_t_4);
     __pyx_t_4 = 0;
-    if (unlikely(!__pyx_cur_scope->__pyx_outer_scope->__pyx_v_format_expression)) { __Pyx_RaiseClosureNameError("format_expression"); __PYX_ERR(1, 106, __pyx_L1_error) }
-    __pyx_t_4 = __Pyx_PyObject_CallOneArg(__pyx_cur_scope->__pyx_outer_scope->__pyx_v_format_expression, __pyx_cur_scope->__pyx_v_col); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 106, __pyx_L1_error)
+    if (unlikely(!__pyx_cur_scope->__pyx_outer_scope->__pyx_v_format_expression)) { __Pyx_RaiseClosureNameError("format_expression"); __PYX_ERR(1, 108, __pyx_L1_error) }
+    __pyx_t_4 = __Pyx_PyObject_CallOneArg(__pyx_cur_scope->__pyx_outer_scope->__pyx_v_format_expression, __pyx_cur_scope->__pyx_v_col); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 108, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
-    if (unlikely(__Pyx_ListComp_Append(__pyx_r, (PyObject*)__pyx_t_4))) __PYX_ERR(1, 106, __pyx_L1_error)
+    if (unlikely(__Pyx_ListComp_Append(__pyx_r, (PyObject*)__pyx_t_4))) __PYX_ERR(1, 108, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
@@ -60251,7 +60813,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   return __pyx_r;
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":101
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":103
  *         self._having_condition = parameters.get("having_condition")
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -60279,12 +60841,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   if (unlikely(!__pyx_cur_scope)) {
     __pyx_cur_scope = ((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_2_config *)Py_None);
     __Pyx_INCREF(Py_None);
-    __PYX_ERR(1, 101, __pyx_L1_error)
+    __PYX_ERR(1, 103, __pyx_L1_error)
   } else {
     __Pyx_GOTREF((PyObject *)__pyx_cur_scope);
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":103
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":105
  *     @property
  *     def config(self):  # pragma: no cover
  *         from opteryx.expression import format_expression             # <<<<<<<<<<<<<<
@@ -60293,14 +60855,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   {
     PyObject* const __pyx_imported_names[] = {__pyx_mstate_global->__pyx_n_u_format_expression};
-    __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_opteryx_expression, __pyx_imported_names, 1, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 103, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_opteryx_expression, __pyx_imported_names, 1, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 105, __pyx_L1_error)
   }
   __pyx_t_1 = __pyx_t_2;
   __Pyx_GOTREF(__pyx_t_1);
   {
     PyObject* const __pyx_imported_names[] = {__pyx_mstate_global->__pyx_n_u_format_expression};
     __pyx_t_3 = 0; {
-      __pyx_t_4 = __Pyx_ImportFrom(__pyx_t_1, __pyx_imported_names[__pyx_t_3]); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 103, __pyx_L1_error)
+      __pyx_t_4 = __Pyx_ImportFrom(__pyx_t_1, __pyx_imported_names[__pyx_t_3]); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 105, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
       switch (__pyx_t_3) {
         case 0:
@@ -60315,7 +60877,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":104
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":106
  *     def config(self):  # pragma: no cover
  *         from opteryx.expression import format_expression
  *         return (             # <<<<<<<<<<<<<<
@@ -60324,41 +60886,41 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   __Pyx_XDECREF(__pyx_r);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":105
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":107
  *         from opteryx.expression import format_expression
  *         return (
  *             f"AGGREGATE ({', '.join(format_expression(col) for col in self.aggregates)}) "             # <<<<<<<<<<<<<<
  *             f"GROUP BY ({', '.join(format_expression(col) for col in self.groups)})"
  *         )
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregates); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 105, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregates); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 107, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_4 = __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_6config_genexpr(((PyObject*)__pyx_cur_scope), __pyx_t_1); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 105, __pyx_L1_error)
+  __pyx_t_4 = __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_6config_genexpr(((PyObject*)__pyx_cur_scope), __pyx_t_1); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 107, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __pyx_t_1 = __Pyx_Generator_GetInlinedResult(__pyx_t_4); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 105, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_Generator_GetInlinedResult(__pyx_t_4); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 107, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-  __pyx_t_4 = PyUnicode_Join(__pyx_mstate_global->__pyx_kp_u__7, __pyx_t_1); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 105, __pyx_L1_error)
+  __pyx_t_4 = PyUnicode_Join(__pyx_mstate_global->__pyx_kp_u__7, __pyx_t_1); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 107, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":106
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":108
  *         return (
  *             f"AGGREGATE ({', '.join(format_expression(col) for col in self.aggregates)}) "
  *             f"GROUP BY ({', '.join(format_expression(col) for col in self.groups)})"             # <<<<<<<<<<<<<<
  *         )
  * 
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_groups); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 106, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_groups); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 108, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_5 = __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_6config_3genexpr(((PyObject*)__pyx_cur_scope), __pyx_t_1); if (unlikely(!__pyx_t_5)) __PYX_ERR(1, 106, __pyx_L1_error)
+  __pyx_t_5 = __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_6config_3genexpr(((PyObject*)__pyx_cur_scope), __pyx_t_1); if (unlikely(!__pyx_t_5)) __PYX_ERR(1, 108, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __pyx_t_1 = __Pyx_Generator_GetInlinedResult(__pyx_t_5); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 106, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_Generator_GetInlinedResult(__pyx_t_5); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 108, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-  __pyx_t_5 = PyUnicode_Join(__pyx_mstate_global->__pyx_kp_u__7, __pyx_t_1); if (unlikely(!__pyx_t_5)) __PYX_ERR(1, 106, __pyx_L1_error)
+  __pyx_t_5 = PyUnicode_Join(__pyx_mstate_global->__pyx_kp_u__7, __pyx_t_1); if (unlikely(!__pyx_t_5)) __PYX_ERR(1, 108, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_t_6[0] = __pyx_mstate_global->__pyx_kp_u_AGGREGATE;
@@ -60367,7 +60929,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_t_6[3] = __pyx_t_5;
   __pyx_t_6[4] = __pyx_mstate_global->__pyx_kp_u__5;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":105
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":107
  *         from opteryx.expression import format_expression
  *         return (
  *             f"AGGREGATE ({', '.join(format_expression(col) for col in self.aggregates)}) "             # <<<<<<<<<<<<<<
@@ -60375,7 +60937,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
  *         )
 */
   __pyx_t_1 = __Pyx_PyUnicode_Join(__pyx_t_6, 5, 11 + __Pyx_PyUnicode_GET_LENGTH(__pyx_t_4) + 12 + __Pyx_PyUnicode_GET_LENGTH(__pyx_t_5) + 1, 127 | __Pyx_PyUnicode_MAX_CHAR_VALUE(__pyx_t_4) | __Pyx_PyUnicode_MAX_CHAR_VALUE(__pyx_t_5));
-  if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 105, __pyx_L1_error)
+  if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 107, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
@@ -60383,7 +60945,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":101
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":103
  *         self._having_condition = parameters.get("having_condition")
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -60407,7 +60969,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   return __pyx_r;
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":109
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":111
  *         )
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -60454,32 +61016,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 109, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 111, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 109, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 111, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "name", 0) < (0)) __PYX_ERR(1, 109, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "name", 0) < (0)) __PYX_ERR(1, 111, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("name", 1, 1, 1, i); __PYX_ERR(1, 109, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("name", 1, 1, 1, i); __PYX_ERR(1, 111, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 109, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 111, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("name", 1, 1, 1, __pyx_nargs); __PYX_ERR(1, 109, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("name", 1, 1, 1, __pyx_nargs); __PYX_ERR(1, 111, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -60505,7 +61067,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("name", 0);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":111
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":113
  *     @property
  *     def name(self):  # pragma: no cover
  *         return "Grouped Aggregate (Hashed)"             # <<<<<<<<<<<<<<
@@ -60517,7 +61079,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_r = __pyx_mstate_global->__pyx_kp_u_Grouped_Aggregate_Hashed;
   goto __pyx_L0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":109
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":111
  *         )
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -60532,7 +61094,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   return __pyx_r;
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":113
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":115
  *         return "Grouped Aggregate (Hashed)"
  * 
  *     def _build_aggregation_specs(self, aggregates):             # <<<<<<<<<<<<<<
@@ -60580,39 +61142,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,&__pyx_mstate_global->__pyx_n_u_aggregates,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 113, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 115, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(1, 113, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(1, 115, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 113, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 115, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_build_aggregation_specs", 0) < (0)) __PYX_ERR(1, 113, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_build_aggregation_specs", 0) < (0)) __PYX_ERR(1, 115, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_build_aggregation_specs", 1, 2, 2, i); __PYX_ERR(1, 113, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_build_aggregation_specs", 1, 2, 2, i); __PYX_ERR(1, 115, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 113, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 115, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(1, 113, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(1, 115, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
     __pyx_v_aggregates = values[1];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_build_aggregation_specs", 1, 2, 2, __pyx_nargs); __PYX_ERR(1, 113, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_build_aggregation_specs", 1, 2, 2, __pyx_nargs); __PYX_ERR(1, 115, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -60664,7 +61226,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_build_aggregation_specs", 0);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":114
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":116
  * 
  *     def _build_aggregation_specs(self, aggregates):
  *         from opteryx.exceptions import InvalidFunctionParameterError             # <<<<<<<<<<<<<<
@@ -60673,14 +61235,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   {
     PyObject* const __pyx_imported_names[] = {__pyx_mstate_global->__pyx_n_u_InvalidFunctionParameterError};
-    __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_opteryx_exceptions, __pyx_imported_names, 1, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 114, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_opteryx_exceptions, __pyx_imported_names, 1, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 116, __pyx_L1_error)
   }
   __pyx_t_1 = __pyx_t_2;
   __Pyx_GOTREF(__pyx_t_1);
   {
     PyObject* const __pyx_imported_names[] = {__pyx_mstate_global->__pyx_n_u_InvalidFunctionParameterError};
     __pyx_t_3 = 0; {
-      __pyx_t_4 = __Pyx_ImportFrom(__pyx_t_1, __pyx_imported_names[__pyx_t_3]); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 114, __pyx_L1_error)
+      __pyx_t_4 = __Pyx_ImportFrom(__pyx_t_1, __pyx_imported_names[__pyx_t_3]); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 116, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
       switch (__pyx_t_3) {
         case 0:
@@ -60694,19 +61256,19 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":116
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":118
  *         from opteryx.exceptions import InvalidFunctionParameterError
  * 
  *         specs = []             # <<<<<<<<<<<<<<
  *         for root in aggregates:
  *             for aggregator in get_all_nodes_of_type(root, select_nodes=(NodeType.AGGREGATOR,)):
 */
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 116, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 118, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_specs = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":117
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":119
  * 
  *         specs = []
  *         for root in aggregates:             # <<<<<<<<<<<<<<
@@ -60718,9 +61280,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_t_3 = 0;
     __pyx_t_5 = NULL;
   } else {
-    __pyx_t_3 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_v_aggregates); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 117, __pyx_L1_error)
+    __pyx_t_3 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_v_aggregates); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 119, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_5 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_5)) __PYX_ERR(1, 117, __pyx_L1_error)
+    __pyx_t_5 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_5)) __PYX_ERR(1, 119, __pyx_L1_error)
   }
   for (;;) {
     if (likely(!__pyx_t_5)) {
@@ -60728,7 +61290,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         {
           Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_1);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 117, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 119, __pyx_L1_error)
           #endif
           if (__pyx_t_3 >= __pyx_temp) break;
         }
@@ -60738,7 +61300,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         {
           Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_1);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 117, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 119, __pyx_L1_error)
           #endif
           if (__pyx_t_3 >= __pyx_temp) break;
         }
@@ -60749,13 +61311,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         #endif
         ++__pyx_t_3;
       }
-      if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 117, __pyx_L1_error)
+      if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 119, __pyx_L1_error)
     } else {
       __pyx_t_4 = __pyx_t_5(__pyx_t_1);
       if (unlikely(!__pyx_t_4)) {
         PyObject* exc_type = PyErr_Occurred();
         if (exc_type) {
-          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(1, 117, __pyx_L1_error)
+          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(1, 119, __pyx_L1_error)
           PyErr_Clear();
         }
         break;
@@ -60765,7 +61327,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_XDECREF_SET(__pyx_v_root, __pyx_t_4);
     __pyx_t_4 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":118
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":120
  *         specs = []
  *         for root in aggregates:
  *             for aggregator in get_all_nodes_of_type(root, select_nodes=(NodeType.AGGREGATOR,)):             # <<<<<<<<<<<<<<
@@ -60773,17 +61335,17 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
  *                 field_node = aggregator.parameters[0]
 */
     __pyx_t_6 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_get_all_nodes_of_type); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 118, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_get_all_nodes_of_type); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 120, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_7);
-    __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_NodeType); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 118, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_NodeType); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 120, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_8);
-    __pyx_t_9 = __Pyx_PyObject_GetAttrStr(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_AGGREGATOR); if (unlikely(!__pyx_t_9)) __PYX_ERR(1, 118, __pyx_L1_error)
+    __pyx_t_9 = __Pyx_PyObject_GetAttrStr(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_AGGREGATOR); if (unlikely(!__pyx_t_9)) __PYX_ERR(1, 120, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_9);
     __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
-    __pyx_t_8 = PyTuple_New(1); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 118, __pyx_L1_error)
+    __pyx_t_8 = PyTuple_New(1); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 120, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_8);
     __Pyx_GIVEREF(__pyx_t_9);
-    if (__Pyx_PyTuple_SET_ITEM(__pyx_t_8, 0, __pyx_t_9) != (0)) __PYX_ERR(1, 118, __pyx_L1_error);
+    if (__Pyx_PyTuple_SET_ITEM(__pyx_t_8, 0, __pyx_t_9) != (0)) __PYX_ERR(1, 120, __pyx_L1_error);
     __pyx_t_9 = 0;
     __pyx_t_10 = 1;
     #if CYTHON_UNPACK_METHODS
@@ -60799,15 +61361,15 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     #endif
     {
       PyObject *__pyx_callargs[2 + ((CYTHON_VECTORCALL) ? 1 : 0)] = {__pyx_t_6, __pyx_v_root};
-      __pyx_t_9 = __Pyx_MakeVectorcallBuilderKwds(1); if (unlikely(!__pyx_t_9)) __PYX_ERR(1, 118, __pyx_L1_error)
+      __pyx_t_9 = __Pyx_MakeVectorcallBuilderKwds(1); if (unlikely(!__pyx_t_9)) __PYX_ERR(1, 120, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_9);
-      if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_select_nodes, __pyx_t_8, __pyx_t_9, __pyx_callargs+2, 0) < (0)) __PYX_ERR(1, 118, __pyx_L1_error)
+      if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_select_nodes, __pyx_t_8, __pyx_t_9, __pyx_callargs+2, 0) < (0)) __PYX_ERR(1, 120, __pyx_L1_error)
       __pyx_t_4 = __Pyx_Object_Vectorcall_CallFromBuilder((PyObject*)__pyx_t_7, __pyx_callargs+__pyx_t_10, (2-__pyx_t_10) | (__pyx_t_10*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET), __pyx_t_9);
       __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
       __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
       __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
       __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
-      if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 118, __pyx_L1_error)
+      if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 120, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
     }
     if (likely(PyList_CheckExact(__pyx_t_4)) || PyTuple_CheckExact(__pyx_t_4)) {
@@ -60815,9 +61377,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __pyx_t_11 = 0;
       __pyx_t_12 = NULL;
     } else {
-      __pyx_t_11 = -1; __pyx_t_7 = PyObject_GetIter(__pyx_t_4); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 118, __pyx_L1_error)
+      __pyx_t_11 = -1; __pyx_t_7 = PyObject_GetIter(__pyx_t_4); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 120, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_7);
-      __pyx_t_12 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_7); if (unlikely(!__pyx_t_12)) __PYX_ERR(1, 118, __pyx_L1_error)
+      __pyx_t_12 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_7); if (unlikely(!__pyx_t_12)) __PYX_ERR(1, 120, __pyx_L1_error)
     }
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
     for (;;) {
@@ -60826,7 +61388,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
           {
             Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_7);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 118, __pyx_L1_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 120, __pyx_L1_error)
             #endif
             if (__pyx_t_11 >= __pyx_temp) break;
           }
@@ -60836,7 +61398,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
           {
             Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_7);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 118, __pyx_L1_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 120, __pyx_L1_error)
             #endif
             if (__pyx_t_11 >= __pyx_temp) break;
           }
@@ -60847,13 +61409,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
           #endif
           ++__pyx_t_11;
         }
-        if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 118, __pyx_L1_error)
+        if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 120, __pyx_L1_error)
       } else {
         __pyx_t_4 = __pyx_t_12(__pyx_t_7);
         if (unlikely(!__pyx_t_4)) {
           PyObject* exc_type = PyErr_Occurred();
           if (exc_type) {
-            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(1, 118, __pyx_L1_error)
+            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(1, 120, __pyx_L1_error)
             PyErr_Clear();
           }
           break;
@@ -60863,7 +61425,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __Pyx_XDECREF_SET(__pyx_v_aggregator, __pyx_t_4);
       __pyx_t_4 = 0;
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":119
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":121
  *         for root in aggregates:
  *             for aggregator in get_all_nodes_of_type(root, select_nodes=(NodeType.AGGREGATOR,)):
  *                 fn = self._normalize_aggregate_function(aggregator)             # <<<<<<<<<<<<<<
@@ -60877,28 +61439,28 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         PyObject *__pyx_callargs[2] = {__pyx_t_9, __pyx_v_aggregator};
         __pyx_t_4 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_normalize_aggregate_function, __pyx_callargs+__pyx_t_10, (2-__pyx_t_10) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
         __Pyx_XDECREF(__pyx_t_9); __pyx_t_9 = 0;
-        if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 119, __pyx_L1_error)
+        if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 121, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_4);
       }
       __Pyx_XDECREF_SET(__pyx_v_fn, __pyx_t_4);
       __pyx_t_4 = 0;
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":120
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":122
  *             for aggregator in get_all_nodes_of_type(root, select_nodes=(NodeType.AGGREGATOR,)):
  *                 fn = self._normalize_aggregate_function(aggregator)
  *                 field_node = aggregator.parameters[0]             # <<<<<<<<<<<<<<
  *                 options = None
  *                 if fn == "approx_percentile":
 */
-      __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_parameters); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 120, __pyx_L1_error)
+      __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_parameters); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 122, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
-      __pyx_t_9 = __Pyx_GetItemInt(__pyx_t_4, 0, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_9)) __PYX_ERR(1, 120, __pyx_L1_error)
+      __pyx_t_9 = __Pyx_GetItemInt(__pyx_t_4, 0, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_9)) __PYX_ERR(1, 122, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_9);
       __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_XDECREF_SET(__pyx_v_field_node, __pyx_t_9);
       __pyx_t_9 = 0;
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":121
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":123
  *                 fn = self._normalize_aggregate_function(aggregator)
  *                 field_node = aggregator.parameters[0]
  *                 options = None             # <<<<<<<<<<<<<<
@@ -60908,17 +61470,17 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __Pyx_INCREF(Py_None);
       __Pyx_XDECREF_SET(__pyx_v_options, Py_None);
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":122
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":124
  *                 field_node = aggregator.parameters[0]
  *                 options = None
  *                 if fn == "approx_percentile":             # <<<<<<<<<<<<<<
  *                     options = self._extract_percentile_option(aggregator)
  *                 elif fn == "array_agg":
 */
-      __pyx_t_13 = (__Pyx_PyUnicode_Equals(__pyx_v_fn, __pyx_mstate_global->__pyx_n_u_approx_percentile, Py_EQ)); if (unlikely((__pyx_t_13 < 0))) __PYX_ERR(1, 122, __pyx_L1_error)
+      __pyx_t_13 = (__Pyx_PyUnicode_Equals(__pyx_v_fn, __pyx_mstate_global->__pyx_n_u_approx_percentile, Py_EQ)); if (unlikely((__pyx_t_13 < 0))) __PYX_ERR(1, 124, __pyx_L1_error)
       if (__pyx_t_13) {
 
-        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":123
+        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":125
  *                 options = None
  *                 if fn == "approx_percentile":
  *                     options = self._extract_percentile_option(aggregator)             # <<<<<<<<<<<<<<
@@ -60932,13 +61494,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
           PyObject *__pyx_callargs[2] = {__pyx_t_4, __pyx_v_aggregator};
           __pyx_t_9 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_extract_percentile_option, __pyx_callargs+__pyx_t_10, (2-__pyx_t_10) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
           __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
-          if (unlikely(!__pyx_t_9)) __PYX_ERR(1, 123, __pyx_L1_error)
+          if (unlikely(!__pyx_t_9)) __PYX_ERR(1, 125, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_9);
         }
         __Pyx_DECREF_SET(__pyx_v_options, __pyx_t_9);
         __pyx_t_9 = 0;
 
-        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":122
+        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":124
  *                 field_node = aggregator.parameters[0]
  *                 options = None
  *                 if fn == "approx_percentile":             # <<<<<<<<<<<<<<
@@ -60948,17 +61510,17 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         goto __pyx_L7;
       }
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":124
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":126
  *                 if fn == "approx_percentile":
  *                     options = self._extract_percentile_option(aggregator)
  *                 elif fn == "array_agg":             # <<<<<<<<<<<<<<
  *                     options = self._extract_array_agg_options(aggregator)
  * 
 */
-      __pyx_t_13 = (__Pyx_PyUnicode_Equals(__pyx_v_fn, __pyx_mstate_global->__pyx_n_u_array_agg, Py_EQ)); if (unlikely((__pyx_t_13 < 0))) __PYX_ERR(1, 124, __pyx_L1_error)
+      __pyx_t_13 = (__Pyx_PyUnicode_Equals(__pyx_v_fn, __pyx_mstate_global->__pyx_n_u_array_agg, Py_EQ)); if (unlikely((__pyx_t_13 < 0))) __PYX_ERR(1, 126, __pyx_L1_error)
       if (__pyx_t_13) {
 
-        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":125
+        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":127
  *                     options = self._extract_percentile_option(aggregator)
  *                 elif fn == "array_agg":
  *                     options = self._extract_array_agg_options(aggregator)             # <<<<<<<<<<<<<<
@@ -60972,13 +61534,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
           PyObject *__pyx_callargs[2] = {__pyx_t_4, __pyx_v_aggregator};
           __pyx_t_9 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_extract_array_agg_options, __pyx_callargs+__pyx_t_10, (2-__pyx_t_10) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
           __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
-          if (unlikely(!__pyx_t_9)) __PYX_ERR(1, 125, __pyx_L1_error)
+          if (unlikely(!__pyx_t_9)) __PYX_ERR(1, 127, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_9);
         }
         __Pyx_DECREF_SET(__pyx_v_options, __pyx_t_9);
         __pyx_t_9 = 0;
 
-        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":124
+        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":126
  *                 if fn == "approx_percentile":
  *                     options = self._extract_percentile_option(aggregator)
  *                 elif fn == "array_agg":             # <<<<<<<<<<<<<<
@@ -60988,28 +61550,28 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       }
       __pyx_L7:;
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":127
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":129
  *                     options = self._extract_array_agg_options(aggregator)
  * 
  *                 if field_node.node_type == NodeType.WILDCARD:             # <<<<<<<<<<<<<<
  *                     column = "*"
  *                 else:
 */
-      __pyx_t_9 = __Pyx_PyObject_GetAttrStr(__pyx_v_field_node, __pyx_mstate_global->__pyx_n_u_node_type); if (unlikely(!__pyx_t_9)) __PYX_ERR(1, 127, __pyx_L1_error)
+      __pyx_t_9 = __Pyx_PyObject_GetAttrStr(__pyx_v_field_node, __pyx_mstate_global->__pyx_n_u_node_type); if (unlikely(!__pyx_t_9)) __PYX_ERR(1, 129, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_9);
-      __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_NodeType); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 127, __pyx_L1_error)
+      __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_NodeType); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 129, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
-      __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_WILDCARD); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 127, __pyx_L1_error)
+      __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_WILDCARD); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 129, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_8);
       __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-      __pyx_t_4 = PyObject_RichCompare(__pyx_t_9, __pyx_t_8, Py_EQ); __Pyx_XGOTREF(__pyx_t_4); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 127, __pyx_L1_error)
+      __pyx_t_4 = PyObject_RichCompare(__pyx_t_9, __pyx_t_8, Py_EQ); __Pyx_XGOTREF(__pyx_t_4); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 129, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
       __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
-      __pyx_t_13 = __Pyx_PyObject_IsTrue(__pyx_t_4); if (unlikely((__pyx_t_13 < 0))) __PYX_ERR(1, 127, __pyx_L1_error)
+      __pyx_t_13 = __Pyx_PyObject_IsTrue(__pyx_t_4); if (unlikely((__pyx_t_13 < 0))) __PYX_ERR(1, 129, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
       if (__pyx_t_13) {
 
-        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":128
+        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":130
  * 
  *                 if field_node.node_type == NodeType.WILDCARD:
  *                     column = "*"             # <<<<<<<<<<<<<<
@@ -61019,7 +61581,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         __Pyx_INCREF(__pyx_mstate_global->__pyx_kp_u__6);
         __Pyx_XDECREF_SET(__pyx_v_column, __pyx_mstate_global->__pyx_kp_u__6);
 
-        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":127
+        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":129
  *                     options = self._extract_array_agg_options(aggregator)
  * 
  *                 if field_node.node_type == NodeType.WILDCARD:             # <<<<<<<<<<<<<<
@@ -61029,7 +61591,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         goto __pyx_L8;
       }
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":130
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":132
  *                     column = "*"
  *                 else:
  *                     column = field_node.schema_column.identity             # <<<<<<<<<<<<<<
@@ -61037,9 +61599,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
  *                 specs.append(
 */
       /*else*/ {
-        __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_field_node, __pyx_mstate_global->__pyx_n_u_schema_column); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 130, __pyx_L1_error)
+        __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_field_node, __pyx_mstate_global->__pyx_n_u_schema_column); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 132, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_4);
-        __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_identity); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 130, __pyx_L1_error)
+        __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_identity); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 132, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_8);
         __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
         __Pyx_XDECREF_SET(__pyx_v_column, __pyx_t_8);
@@ -61047,7 +61609,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       }
       __pyx_L8:;
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":133
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":135
  * 
  *                 specs.append(
  *                     AggregationSpec(             # <<<<<<<<<<<<<<
@@ -61055,23 +61617,23 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
  *                         function=fn,
 */
       __pyx_t_4 = NULL;
-      __Pyx_GetModuleGlobalName(__pyx_t_9, __pyx_mstate_global->__pyx_n_u_AggregationSpec); if (unlikely(!__pyx_t_9)) __PYX_ERR(1, 133, __pyx_L1_error)
+      __Pyx_GetModuleGlobalName(__pyx_t_9, __pyx_mstate_global->__pyx_n_u_AggregationSpec); if (unlikely(!__pyx_t_9)) __PYX_ERR(1, 135, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_9);
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":134
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":136
  *                 specs.append(
  *                     AggregationSpec(
  *                         alias=aggregator.schema_column.identity,             # <<<<<<<<<<<<<<
  *                         function=fn,
  *                         column=column,
 */
-      __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_schema_column); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 134, __pyx_L1_error)
+      __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_schema_column); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 136, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_6);
-      __pyx_t_14 = __Pyx_PyObject_GetAttrStr(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_identity); if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 134, __pyx_L1_error)
+      __pyx_t_14 = __Pyx_PyObject_GetAttrStr(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_identity); if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 136, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_14);
       __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":137
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":139
  *                         function=fn,
  *                         column=column,
  *                         options=options,             # <<<<<<<<<<<<<<
@@ -61092,32 +61654,32 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       #endif
       {
         PyObject *__pyx_callargs[2 + ((CYTHON_VECTORCALL) ? 4 : 0)] = {__pyx_t_4, NULL};
-        __pyx_t_6 = __Pyx_MakeVectorcallBuilderKwds(4); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 133, __pyx_L1_error)
+        __pyx_t_6 = __Pyx_MakeVectorcallBuilderKwds(4); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 135, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_6);
-        if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_alias, __pyx_t_14, __pyx_t_6, __pyx_callargs+1, 0) < (0)) __PYX_ERR(1, 133, __pyx_L1_error)
-        if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_function, __pyx_v_fn, __pyx_t_6, __pyx_callargs+1, 1) < (0)) __PYX_ERR(1, 133, __pyx_L1_error)
-        if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_column, __pyx_v_column, __pyx_t_6, __pyx_callargs+1, 2) < (0)) __PYX_ERR(1, 133, __pyx_L1_error)
-        if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_options, __pyx_v_options, __pyx_t_6, __pyx_callargs+1, 3) < (0)) __PYX_ERR(1, 133, __pyx_L1_error)
+        if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_alias, __pyx_t_14, __pyx_t_6, __pyx_callargs+1, 0) < (0)) __PYX_ERR(1, 135, __pyx_L1_error)
+        if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_function, __pyx_v_fn, __pyx_t_6, __pyx_callargs+1, 1) < (0)) __PYX_ERR(1, 135, __pyx_L1_error)
+        if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_column, __pyx_v_column, __pyx_t_6, __pyx_callargs+1, 2) < (0)) __PYX_ERR(1, 135, __pyx_L1_error)
+        if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_options, __pyx_v_options, __pyx_t_6, __pyx_callargs+1, 3) < (0)) __PYX_ERR(1, 135, __pyx_L1_error)
         __pyx_t_8 = __Pyx_Object_Vectorcall_CallFromBuilder((PyObject*)__pyx_t_9, __pyx_callargs+__pyx_t_10, (1-__pyx_t_10) | (__pyx_t_10*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET), __pyx_t_6);
         __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
         __Pyx_DECREF(__pyx_t_14); __pyx_t_14 = 0;
         __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
         __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
-        if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 133, __pyx_L1_error)
+        if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 135, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_8);
       }
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":132
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":134
  *                     column = field_node.schema_column.identity
  * 
  *                 specs.append(             # <<<<<<<<<<<<<<
  *                     AggregationSpec(
  *                         alias=aggregator.schema_column.identity,
 */
-      __pyx_t_15 = __Pyx_PyList_Append(__pyx_v_specs, __pyx_t_8); if (unlikely(__pyx_t_15 == ((int)-1))) __PYX_ERR(1, 132, __pyx_L1_error)
+      __pyx_t_15 = __Pyx_PyList_Append(__pyx_v_specs, __pyx_t_8); if (unlikely(__pyx_t_15 == ((int)-1))) __PYX_ERR(1, 134, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":118
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":120
  *         specs = []
  *         for root in aggregates:
  *             for aggregator in get_all_nodes_of_type(root, select_nodes=(NodeType.AGGREGATOR,)):             # <<<<<<<<<<<<<<
@@ -61127,7 +61689,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     }
     __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":117
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":119
  * 
  *         specs = []
  *         for root in aggregates:             # <<<<<<<<<<<<<<
@@ -61137,7 +61699,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":140
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":142
  *                     )
  *                 )
  *         return specs             # <<<<<<<<<<<<<<
@@ -61149,7 +61711,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_r = __pyx_v_specs;
   goto __pyx_L0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":113
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":115
  *         return "Grouped Aggregate (Hashed)"
  * 
  *     def _build_aggregation_specs(self, aggregates):             # <<<<<<<<<<<<<<
@@ -61182,7 +61744,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   return __pyx_r;
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":142
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":144
  *         return specs
  * 
  *     def _build_required_columns(self):             # <<<<<<<<<<<<<<
@@ -61229,32 +61791,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 142, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 144, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 142, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 144, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_build_required_columns", 0) < (0)) __PYX_ERR(1, 142, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_build_required_columns", 0) < (0)) __PYX_ERR(1, 144, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_build_required_columns", 1, 1, 1, i); __PYX_ERR(1, 142, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_build_required_columns", 1, 1, 1, i); __PYX_ERR(1, 144, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 142, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 144, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_build_required_columns", 1, 1, 1, __pyx_nargs); __PYX_ERR(1, 142, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_build_required_columns", 1, 1, 1, __pyx_nargs); __PYX_ERR(1, 144, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -61276,7 +61838,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 }
 static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_23_build_required_columns_2generator6(__pyx_CoroutineObject *__pyx_generator, CYTHON_UNUSED PyThreadState *__pyx_tstate, PyObject *__pyx_sent_value); /* proto */
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":145
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":147
  *         required = list(self.group_by_columns)
  *         required.extend(
  *             ident for ident in self.all_identifiers if ident not in required             # <<<<<<<<<<<<<<
@@ -61296,7 +61858,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   if (unlikely(!__pyx_cur_scope)) {
     __pyx_cur_scope = ((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_6_genexpr *)Py_None);
     __Pyx_INCREF(Py_None);
-    __PYX_ERR(1, 145, __pyx_L1_error)
+    __PYX_ERR(1, 147, __pyx_L1_error)
   } else {
     __Pyx_GOTREF((PyObject *)__pyx_cur_scope);
   }
@@ -61307,7 +61869,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_INCREF(__pyx_cur_scope->__pyx_genexpr_arg_0);
   __Pyx_GIVEREF(__pyx_cur_scope->__pyx_genexpr_arg_0);
   {
-    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_23_build_required_columns_2generator6, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[4]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_genexpr, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__buil, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg); if (unlikely(!gen)) __PYX_ERR(1, 145, __pyx_L1_error)
+    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_23_build_required_columns_2generator6, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[4]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_genexpr, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__buil, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg); if (unlikely(!gen)) __PYX_ERR(1, 147, __pyx_L1_error)
     __Pyx_DECREF(__pyx_cur_scope);
     __Pyx_RefNannyFinishContext();
     return (PyObject *) gen;
@@ -61347,17 +61909,17 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_L3_first_run:;
   if (unlikely(__pyx_sent_value != Py_None)) {
     if (unlikely(__pyx_sent_value)) PyErr_SetString(PyExc_TypeError, "can't send non-None value to a just-started generator");
-    __PYX_ERR(1, 145, __pyx_L1_error)
+    __PYX_ERR(1, 147, __pyx_L1_error)
   }
-  if (unlikely(!__pyx_cur_scope->__pyx_genexpr_arg_0)) { __Pyx_RaiseUnboundLocalError(".0"); __PYX_ERR(1, 145, __pyx_L1_error) }
+  if (unlikely(!__pyx_cur_scope->__pyx_genexpr_arg_0)) { __Pyx_RaiseUnboundLocalError(".0"); __PYX_ERR(1, 147, __pyx_L1_error) }
   if (likely(PyList_CheckExact(__pyx_cur_scope->__pyx_genexpr_arg_0)) || PyTuple_CheckExact(__pyx_cur_scope->__pyx_genexpr_arg_0)) {
     __pyx_t_1 = __pyx_cur_scope->__pyx_genexpr_arg_0; __Pyx_INCREF(__pyx_t_1);
     __pyx_t_2 = 0;
     __pyx_t_3 = NULL;
   } else {
-    __pyx_t_2 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_cur_scope->__pyx_genexpr_arg_0); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 145, __pyx_L1_error)
+    __pyx_t_2 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_cur_scope->__pyx_genexpr_arg_0); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 147, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_3 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 145, __pyx_L1_error)
+    __pyx_t_3 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 147, __pyx_L1_error)
   }
   for (;;) {
     if (likely(!__pyx_t_3)) {
@@ -61365,7 +61927,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         {
           Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_1);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 145, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 147, __pyx_L1_error)
           #endif
           if (__pyx_t_2 >= __pyx_temp) break;
         }
@@ -61375,7 +61937,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         {
           Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_1);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 145, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 147, __pyx_L1_error)
           #endif
           if (__pyx_t_2 >= __pyx_temp) break;
         }
@@ -61386,13 +61948,13 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         #endif
         ++__pyx_t_2;
       }
-      if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 145, __pyx_L1_error)
+      if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 147, __pyx_L1_error)
     } else {
       __pyx_t_4 = __pyx_t_3(__pyx_t_1);
       if (unlikely(!__pyx_t_4)) {
         PyObject* exc_type = PyErr_Occurred();
         if (exc_type) {
-          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(1, 145, __pyx_L1_error)
+          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(1, 147, __pyx_L1_error)
           PyErr_Clear();
         }
         break;
@@ -61403,8 +61965,8 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_XDECREF_SET(__pyx_cur_scope->__pyx_v_ident, __pyx_t_4);
     __Pyx_GIVEREF(__pyx_t_4);
     __pyx_t_4 = 0;
-    if (unlikely(!__pyx_cur_scope->__pyx_outer_scope->__pyx_v_required)) { __Pyx_RaiseClosureNameError("required"); __PYX_ERR(1, 145, __pyx_L1_error) }
-    __pyx_t_5 = (__Pyx_PySequence_ContainsTF(__pyx_cur_scope->__pyx_v_ident, __pyx_cur_scope->__pyx_outer_scope->__pyx_v_required, Py_NE)); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 145, __pyx_L1_error)
+    if (unlikely(!__pyx_cur_scope->__pyx_outer_scope->__pyx_v_required)) { __Pyx_RaiseClosureNameError("required"); __PYX_ERR(1, 147, __pyx_L1_error) }
+    __pyx_t_5 = (__Pyx_PySequence_ContainsTF(__pyx_cur_scope->__pyx_v_ident, __pyx_cur_scope->__pyx_outer_scope->__pyx_v_required, Py_NE)); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 147, __pyx_L1_error)
     if (__pyx_t_5) {
       __Pyx_INCREF(__pyx_cur_scope->__pyx_v_ident);
       __pyx_r = __pyx_cur_scope->__pyx_v_ident;
@@ -61424,7 +61986,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __Pyx_XGOTREF(__pyx_t_1);
       __pyx_t_2 = __pyx_cur_scope->__pyx_t_1;
       __pyx_t_3 = __pyx_cur_scope->__pyx_t_2;
-      if (unlikely(!__pyx_sent_value)) __PYX_ERR(1, 145, __pyx_L1_error)
+      if (unlikely(!__pyx_sent_value)) __PYX_ERR(1, 147, __pyx_L1_error)
     }
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
@@ -61451,7 +62013,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   return __pyx_r;
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":142
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":144
  *         return specs
  * 
  *     def _build_required_columns(self):             # <<<<<<<<<<<<<<
@@ -61483,67 +62045,67 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   if (unlikely(!__pyx_cur_scope)) {
     __pyx_cur_scope = ((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_5__build_required_columns *)Py_None);
     __Pyx_INCREF(Py_None);
-    __PYX_ERR(1, 142, __pyx_L1_error)
+    __PYX_ERR(1, 144, __pyx_L1_error)
   } else {
     __Pyx_GOTREF((PyObject *)__pyx_cur_scope);
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":143
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":145
  * 
  *     def _build_required_columns(self):
  *         required = list(self.group_by_columns)             # <<<<<<<<<<<<<<
  *         required.extend(
  *             ident for ident in self.all_identifiers if ident not in required
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_group_by_columns); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 143, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_group_by_columns); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 145, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_2 = __Pyx_PySequence_ListKeepNew(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 143, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PySequence_ListKeepNew(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 145, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __Pyx_GIVEREF(__pyx_t_2);
   __pyx_cur_scope->__pyx_v_required = ((PyObject*)__pyx_t_2);
   __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":145
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":147
  *         required = list(self.group_by_columns)
  *         required.extend(
  *             ident for ident in self.all_identifiers if ident not in required             # <<<<<<<<<<<<<<
  *         )
  *         for node in self.evaluatable_nodes:
 */
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_all_identifiers); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 145, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_all_identifiers); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 147, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_1 = __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_23_build_required_columns_genexpr(((PyObject*)__pyx_cur_scope), __pyx_t_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 145, __pyx_L1_error)
+  __pyx_t_1 = __pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_23_build_required_columns_genexpr(((PyObject*)__pyx_cur_scope), __pyx_t_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 147, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":144
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":146
  *     def _build_required_columns(self):
  *         required = list(self.group_by_columns)
  *         required.extend(             # <<<<<<<<<<<<<<
  *             ident for ident in self.all_identifiers if ident not in required
  *         )
 */
-  __pyx_t_3 = __Pyx_PyList_Extend(__pyx_cur_scope->__pyx_v_required, __pyx_t_1); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(1, 144, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyList_Extend(__pyx_cur_scope->__pyx_v_required, __pyx_t_1); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(1, 146, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":147
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":149
  *             ident for ident in self.all_identifiers if ident not in required
  *         )
  *         for node in self.evaluatable_nodes:             # <<<<<<<<<<<<<<
  *             ident = node.schema_column.identity
  *             if ident not in required:
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_evaluatable_nodes); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 147, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_evaluatable_nodes); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 149, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   if (likely(PyList_CheckExact(__pyx_t_1)) || PyTuple_CheckExact(__pyx_t_1)) {
     __pyx_t_2 = __pyx_t_1; __Pyx_INCREF(__pyx_t_2);
     __pyx_t_4 = 0;
     __pyx_t_5 = NULL;
   } else {
-    __pyx_t_4 = -1; __pyx_t_2 = PyObject_GetIter(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 147, __pyx_L1_error)
+    __pyx_t_4 = -1; __pyx_t_2 = PyObject_GetIter(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 149, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_5 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_2); if (unlikely(!__pyx_t_5)) __PYX_ERR(1, 147, __pyx_L1_error)
+    __pyx_t_5 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_2); if (unlikely(!__pyx_t_5)) __PYX_ERR(1, 149, __pyx_L1_error)
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   for (;;) {
@@ -61552,7 +62114,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         {
           Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_2);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 147, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 149, __pyx_L1_error)
           #endif
           if (__pyx_t_4 >= __pyx_temp) break;
         }
@@ -61562,7 +62124,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         {
           Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_2);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 147, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 149, __pyx_L1_error)
           #endif
           if (__pyx_t_4 >= __pyx_temp) break;
         }
@@ -61573,13 +62135,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         #endif
         ++__pyx_t_4;
       }
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 147, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 149, __pyx_L1_error)
     } else {
       __pyx_t_1 = __pyx_t_5(__pyx_t_2);
       if (unlikely(!__pyx_t_1)) {
         PyObject* exc_type = PyErr_Occurred();
         if (exc_type) {
-          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(1, 147, __pyx_L1_error)
+          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(1, 149, __pyx_L1_error)
           PyErr_Clear();
         }
         break;
@@ -61589,41 +62151,41 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_XDECREF_SET(__pyx_v_node, __pyx_t_1);
     __pyx_t_1 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":148
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":150
  *         )
  *         for node in self.evaluatable_nodes:
  *             ident = node.schema_column.identity             # <<<<<<<<<<<<<<
  *             if ident not in required:
  *                 required.append(ident)
 */
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_node, __pyx_mstate_global->__pyx_n_u_schema_column); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 148, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_node, __pyx_mstate_global->__pyx_n_u_schema_column); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 150, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_identity); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 148, __pyx_L1_error)
+    __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_identity); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 150, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_6);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     __Pyx_XDECREF_SET(__pyx_v_ident, __pyx_t_6);
     __pyx_t_6 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":149
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":151
  *         for node in self.evaluatable_nodes:
  *             ident = node.schema_column.identity
  *             if ident not in required:             # <<<<<<<<<<<<<<
  *                 required.append(ident)
  *         for node in self.groups:
 */
-    __pyx_t_7 = (__Pyx_PySequence_ContainsTF(__pyx_v_ident, __pyx_cur_scope->__pyx_v_required, Py_NE)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(1, 149, __pyx_L1_error)
+    __pyx_t_7 = (__Pyx_PySequence_ContainsTF(__pyx_v_ident, __pyx_cur_scope->__pyx_v_required, Py_NE)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(1, 151, __pyx_L1_error)
     if (__pyx_t_7) {
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":150
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":152
  *             ident = node.schema_column.identity
  *             if ident not in required:
  *                 required.append(ident)             # <<<<<<<<<<<<<<
  *         for node in self.groups:
  *             if node.node_type != NodeType.IDENTIFIER:
 */
-      __pyx_t_3 = __Pyx_PyList_Append(__pyx_cur_scope->__pyx_v_required, __pyx_v_ident); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(1, 150, __pyx_L1_error)
+      __pyx_t_3 = __Pyx_PyList_Append(__pyx_cur_scope->__pyx_v_required, __pyx_v_ident); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(1, 152, __pyx_L1_error)
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":149
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":151
  *         for node in self.evaluatable_nodes:
  *             ident = node.schema_column.identity
  *             if ident not in required:             # <<<<<<<<<<<<<<
@@ -61632,7 +62194,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     }
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":147
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":149
  *             ident for ident in self.all_identifiers if ident not in required
  *         )
  *         for node in self.evaluatable_nodes:             # <<<<<<<<<<<<<<
@@ -61642,23 +62204,23 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   }
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":151
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":153
  *             if ident not in required:
  *                 required.append(ident)
  *         for node in self.groups:             # <<<<<<<<<<<<<<
  *             if node.node_type != NodeType.IDENTIFIER:
  *                 ident = node.schema_column.identity
 */
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_groups); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 151, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_groups); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 153, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   if (likely(PyList_CheckExact(__pyx_t_2)) || PyTuple_CheckExact(__pyx_t_2)) {
     __pyx_t_6 = __pyx_t_2; __Pyx_INCREF(__pyx_t_6);
     __pyx_t_4 = 0;
     __pyx_t_5 = NULL;
   } else {
-    __pyx_t_4 = -1; __pyx_t_6 = PyObject_GetIter(__pyx_t_2); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 151, __pyx_L1_error)
+    __pyx_t_4 = -1; __pyx_t_6 = PyObject_GetIter(__pyx_t_2); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 153, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_6);
-    __pyx_t_5 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_6); if (unlikely(!__pyx_t_5)) __PYX_ERR(1, 151, __pyx_L1_error)
+    __pyx_t_5 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_6); if (unlikely(!__pyx_t_5)) __PYX_ERR(1, 153, __pyx_L1_error)
   }
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   for (;;) {
@@ -61667,7 +62229,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         {
           Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_6);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 151, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 153, __pyx_L1_error)
           #endif
           if (__pyx_t_4 >= __pyx_temp) break;
         }
@@ -61677,7 +62239,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         {
           Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_6);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 151, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 153, __pyx_L1_error)
           #endif
           if (__pyx_t_4 >= __pyx_temp) break;
         }
@@ -61688,13 +62250,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         #endif
         ++__pyx_t_4;
       }
-      if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 151, __pyx_L1_error)
+      if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 153, __pyx_L1_error)
     } else {
       __pyx_t_2 = __pyx_t_5(__pyx_t_6);
       if (unlikely(!__pyx_t_2)) {
         PyObject* exc_type = PyErr_Occurred();
         if (exc_type) {
-          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(1, 151, __pyx_L1_error)
+          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(1, 153, __pyx_L1_error)
           PyErr_Clear();
         }
         break;
@@ -61704,62 +62266,62 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_XDECREF_SET(__pyx_v_node, __pyx_t_2);
     __pyx_t_2 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":152
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":154
  *                 required.append(ident)
  *         for node in self.groups:
  *             if node.node_type != NodeType.IDENTIFIER:             # <<<<<<<<<<<<<<
  *                 ident = node.schema_column.identity
  *                 if ident not in required:
 */
-    __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_node, __pyx_mstate_global->__pyx_n_u_node_type); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 152, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_node, __pyx_mstate_global->__pyx_n_u_node_type); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 154, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_NodeType); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 152, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_NodeType); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 154, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_IDENTIFIER); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 152, __pyx_L1_error)
+    __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_IDENTIFIER); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 154, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_8);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    __pyx_t_1 = PyObject_RichCompare(__pyx_t_2, __pyx_t_8, Py_NE); __Pyx_XGOTREF(__pyx_t_1); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 152, __pyx_L1_error)
+    __pyx_t_1 = PyObject_RichCompare(__pyx_t_2, __pyx_t_8, Py_NE); __Pyx_XGOTREF(__pyx_t_1); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 154, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
     __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
-    __pyx_t_7 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(1, 152, __pyx_L1_error)
+    __pyx_t_7 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(1, 154, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     if (__pyx_t_7) {
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":153
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":155
  *         for node in self.groups:
  *             if node.node_type != NodeType.IDENTIFIER:
  *                 ident = node.schema_column.identity             # <<<<<<<<<<<<<<
  *                 if ident not in required:
  *                     required.append(ident)
 */
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_node, __pyx_mstate_global->__pyx_n_u_schema_column); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 153, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_node, __pyx_mstate_global->__pyx_n_u_schema_column); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 155, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
-      __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_identity); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 153, __pyx_L1_error)
+      __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_identity); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 155, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_8);
       __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
       __Pyx_XDECREF_SET(__pyx_v_ident, __pyx_t_8);
       __pyx_t_8 = 0;
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":154
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":156
  *             if node.node_type != NodeType.IDENTIFIER:
  *                 ident = node.schema_column.identity
  *                 if ident not in required:             # <<<<<<<<<<<<<<
  *                     required.append(ident)
  *         return list(dict.fromkeys(required))
 */
-      __pyx_t_7 = (__Pyx_PySequence_ContainsTF(__pyx_v_ident, __pyx_cur_scope->__pyx_v_required, Py_NE)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(1, 154, __pyx_L1_error)
+      __pyx_t_7 = (__Pyx_PySequence_ContainsTF(__pyx_v_ident, __pyx_cur_scope->__pyx_v_required, Py_NE)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(1, 156, __pyx_L1_error)
       if (__pyx_t_7) {
 
-        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":155
+        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":157
  *                 ident = node.schema_column.identity
  *                 if ident not in required:
  *                     required.append(ident)             # <<<<<<<<<<<<<<
  *         return list(dict.fromkeys(required))
  * 
 */
-        __pyx_t_3 = __Pyx_PyList_Append(__pyx_cur_scope->__pyx_v_required, __pyx_v_ident); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(1, 155, __pyx_L1_error)
+        __pyx_t_3 = __Pyx_PyList_Append(__pyx_cur_scope->__pyx_v_required, __pyx_v_ident); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(1, 157, __pyx_L1_error)
 
-        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":154
+        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":156
  *             if node.node_type != NodeType.IDENTIFIER:
  *                 ident = node.schema_column.identity
  *                 if ident not in required:             # <<<<<<<<<<<<<<
@@ -61768,7 +62330,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
       }
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":152
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":154
  *                 required.append(ident)
  *         for node in self.groups:
  *             if node.node_type != NodeType.IDENTIFIER:             # <<<<<<<<<<<<<<
@@ -61777,7 +62339,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     }
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":151
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":153
  *             if ident not in required:
  *                 required.append(ident)
  *         for node in self.groups:             # <<<<<<<<<<<<<<
@@ -61787,7 +62349,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   }
   __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":156
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":158
  *                 if ident not in required:
  *                     required.append(ident)
  *         return list(dict.fromkeys(required))             # <<<<<<<<<<<<<<
@@ -61802,17 +62364,17 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     PyObject *__pyx_callargs[2] = {__pyx_t_8, __pyx_cur_scope->__pyx_v_required};
     __pyx_t_6 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_fromkeys, __pyx_callargs+__pyx_t_9, (2-__pyx_t_9) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_8); __pyx_t_8 = 0;
-    if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 156, __pyx_L1_error)
+    if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 158, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_6);
   }
-  __pyx_t_8 = __Pyx_PySequence_ListKeepNew(__pyx_t_6); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 156, __pyx_L1_error)
+  __pyx_t_8 = __Pyx_PySequence_ListKeepNew(__pyx_t_6); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 158, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_8);
   __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
   __pyx_r = __pyx_t_8;
   __pyx_t_8 = 0;
   goto __pyx_L0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":142
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":144
  *         return specs
  * 
  *     def _build_required_columns(self):             # <<<<<<<<<<<<<<
@@ -61838,7 +62400,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   return __pyx_r;
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":158
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":160
  *         return list(dict.fromkeys(required))
  * 
  *     @staticmethod             # <<<<<<<<<<<<<<
@@ -61885,32 +62447,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_aggregator,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 158, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 160, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 158, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 160, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_normalize_aggregate_function", 0) < (0)) __PYX_ERR(1, 158, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_normalize_aggregate_function", 0) < (0)) __PYX_ERR(1, 160, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_normalize_aggregate_function", 1, 1, 1, i); __PYX_ERR(1, 158, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_normalize_aggregate_function", 1, 1, 1, i); __PYX_ERR(1, 160, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 158, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 160, __pyx_L3_error)
     }
     __pyx_v_aggregator = values[0];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_normalize_aggregate_function", 1, 1, 1, __pyx_nargs); __PYX_ERR(1, 158, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_normalize_aggregate_function", 1, 1, 1, __pyx_nargs); __PYX_ERR(1, 160, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -61949,19 +62511,19 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_normalize_aggregate_function", 0);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":160
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":162
  *     @staticmethod
  *     def _normalize_aggregate_function(aggregator) -> str:
  *         value = aggregator.value             # <<<<<<<<<<<<<<
  *         function = value.lower()
  *         if function == "count" and aggregator.duplicate_treatment == "Distinct":
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_value); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 160, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_value); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 162, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_value = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":161
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":163
  *     def _normalize_aggregate_function(aggregator) -> str:
  *         value = aggregator.value
  *         function = value.lower()             # <<<<<<<<<<<<<<
@@ -61975,34 +62537,34 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     PyObject *__pyx_callargs[2] = {__pyx_t_2, NULL};
     __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_lower, __pyx_callargs+__pyx_t_3, (1-__pyx_t_3) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 161, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 163, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __pyx_v_function = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":162
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":164
  *         value = aggregator.value
  *         function = value.lower()
  *         if function == "count" and aggregator.duplicate_treatment == "Distinct":             # <<<<<<<<<<<<<<
  *             return "count_distinct"
  *         if function in ("count", "sum", "min", "max", "avg"):
 */
-  __pyx_t_5 = (__Pyx_PyUnicode_Equals(__pyx_v_function, __pyx_mstate_global->__pyx_n_u_count, Py_EQ)); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 162, __pyx_L1_error)
+  __pyx_t_5 = (__Pyx_PyUnicode_Equals(__pyx_v_function, __pyx_mstate_global->__pyx_n_u_count, Py_EQ)); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 164, __pyx_L1_error)
   if (__pyx_t_5) {
   } else {
     __pyx_t_4 = __pyx_t_5;
     goto __pyx_L4_bool_binop_done;
   }
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_duplicate_treatment); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 162, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_duplicate_treatment); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 164, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_5 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_Distinct, Py_EQ)); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 162, __pyx_L1_error)
+  __pyx_t_5 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_Distinct, Py_EQ)); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 164, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_t_4 = __pyx_t_5;
   __pyx_L4_bool_binop_done:;
   if (__pyx_t_4) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":163
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":165
  *         function = value.lower()
  *         if function == "count" and aggregator.duplicate_treatment == "Distinct":
  *             return "count_distinct"             # <<<<<<<<<<<<<<
@@ -62014,7 +62576,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_r = __pyx_mstate_global->__pyx_n_u_count_distinct;
     goto __pyx_L0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":162
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":164
  *         value = aggregator.value
  *         function = value.lower()
  *         if function == "count" and aggregator.duplicate_treatment == "Distinct":             # <<<<<<<<<<<<<<
@@ -62023,7 +62585,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":164
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":166
  *         if function == "count" and aggregator.duplicate_treatment == "Distinct":
  *             return "count_distinct"
  *         if function in ("count", "sum", "min", "max", "avg"):             # <<<<<<<<<<<<<<
@@ -62032,38 +62594,38 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   __Pyx_INCREF(__pyx_v_function);
   __pyx_t_1 = __pyx_v_function;
-  __pyx_t_5 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_count, Py_EQ)); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 164, __pyx_L1_error)
+  __pyx_t_5 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_count, Py_EQ)); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 166, __pyx_L1_error)
   if (!__pyx_t_5) {
   } else {
     __pyx_t_4 = __pyx_t_5;
     goto __pyx_L7_bool_binop_done;
   }
-  __pyx_t_5 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_sum, Py_EQ)); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 164, __pyx_L1_error)
+  __pyx_t_5 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_sum, Py_EQ)); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 166, __pyx_L1_error)
   if (!__pyx_t_5) {
   } else {
     __pyx_t_4 = __pyx_t_5;
     goto __pyx_L7_bool_binop_done;
   }
-  __pyx_t_5 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_min, Py_EQ)); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 164, __pyx_L1_error)
+  __pyx_t_5 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_min, Py_EQ)); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 166, __pyx_L1_error)
   if (!__pyx_t_5) {
   } else {
     __pyx_t_4 = __pyx_t_5;
     goto __pyx_L7_bool_binop_done;
   }
-  __pyx_t_5 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_max, Py_EQ)); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 164, __pyx_L1_error)
+  __pyx_t_5 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_max, Py_EQ)); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 166, __pyx_L1_error)
   if (!__pyx_t_5) {
   } else {
     __pyx_t_4 = __pyx_t_5;
     goto __pyx_L7_bool_binop_done;
   }
-  __pyx_t_5 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_avg, Py_EQ)); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 164, __pyx_L1_error)
+  __pyx_t_5 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_avg, Py_EQ)); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 166, __pyx_L1_error)
   __pyx_t_4 = __pyx_t_5;
   __pyx_L7_bool_binop_done:;
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_t_5 = __pyx_t_4;
   if (__pyx_t_5) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":165
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":167
  *             return "count_distinct"
  *         if function in ("count", "sum", "min", "max", "avg"):
  *             return function             # <<<<<<<<<<<<<<
@@ -62073,12 +62635,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_XDECREF(__pyx_r);
     __pyx_t_1 = __pyx_v_function;
     __Pyx_INCREF(__pyx_t_1);
-    if (!(likely(PyUnicode_CheckExact(__pyx_t_1))||((__pyx_t_1) == Py_None) || __Pyx_RaiseUnexpectedTypeError("str", __pyx_t_1))) __PYX_ERR(1, 165, __pyx_L1_error)
+    if (!(likely(PyUnicode_CheckExact(__pyx_t_1))||((__pyx_t_1) == Py_None) || __Pyx_RaiseUnexpectedTypeError("str", __pyx_t_1))) __PYX_ERR(1, 167, __pyx_L1_error)
     __pyx_r = ((PyObject*)__pyx_t_1);
     __pyx_t_1 = 0;
     goto __pyx_L0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":164
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":166
  *         if function == "count" and aggregator.duplicate_treatment == "Distinct":
  *             return "count_distinct"
  *         if function in ("count", "sum", "min", "max", "avg"):             # <<<<<<<<<<<<<<
@@ -62087,7 +62649,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":166
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":168
  *         if function in ("count", "sum", "min", "max", "avg"):
  *             return function
  *         if function in ("count_distinct", "approx_count_distinct", "approx_percentile",             # <<<<<<<<<<<<<<
@@ -62096,38 +62658,38 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   __Pyx_INCREF(__pyx_v_function);
   __pyx_t_1 = __pyx_v_function;
-  __pyx_t_4 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_count_distinct, Py_EQ)); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(1, 166, __pyx_L1_error)
+  __pyx_t_4 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_count_distinct, Py_EQ)); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(1, 168, __pyx_L1_error)
   if (!__pyx_t_4) {
   } else {
     __pyx_t_5 = __pyx_t_4;
     goto __pyx_L13_bool_binop_done;
   }
-  __pyx_t_4 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_approx_count_distinct, Py_EQ)); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(1, 166, __pyx_L1_error)
+  __pyx_t_4 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_approx_count_distinct, Py_EQ)); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(1, 168, __pyx_L1_error)
   if (!__pyx_t_4) {
   } else {
     __pyx_t_5 = __pyx_t_4;
     goto __pyx_L13_bool_binop_done;
   }
-  __pyx_t_4 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_approx_percentile, Py_EQ)); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(1, 166, __pyx_L1_error)
+  __pyx_t_4 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_approx_percentile, Py_EQ)); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(1, 168, __pyx_L1_error)
   if (!__pyx_t_4) {
   } else {
     __pyx_t_5 = __pyx_t_4;
     goto __pyx_L13_bool_binop_done;
   }
-  __pyx_t_4 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_array_agg, Py_EQ)); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(1, 166, __pyx_L1_error)
+  __pyx_t_4 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_array_agg, Py_EQ)); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(1, 168, __pyx_L1_error)
   if (!__pyx_t_4) {
   } else {
     __pyx_t_5 = __pyx_t_4;
     goto __pyx_L13_bool_binop_done;
   }
-  __pyx_t_4 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_any_value, Py_EQ)); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(1, 166, __pyx_L1_error)
+  __pyx_t_4 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_any_value, Py_EQ)); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(1, 168, __pyx_L1_error)
   __pyx_t_5 = __pyx_t_4;
   __pyx_L13_bool_binop_done:;
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_t_4 = __pyx_t_5;
   if (__pyx_t_4) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":168
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":170
  *         if function in ("count_distinct", "approx_count_distinct", "approx_percentile",
  *                         "array_agg", "any_value"):
  *             return function             # <<<<<<<<<<<<<<
@@ -62137,12 +62699,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_XDECREF(__pyx_r);
     __pyx_t_1 = __pyx_v_function;
     __Pyx_INCREF(__pyx_t_1);
-    if (!(likely(PyUnicode_CheckExact(__pyx_t_1))||((__pyx_t_1) == Py_None) || __Pyx_RaiseUnexpectedTypeError("str", __pyx_t_1))) __PYX_ERR(1, 168, __pyx_L1_error)
+    if (!(likely(PyUnicode_CheckExact(__pyx_t_1))||((__pyx_t_1) == Py_None) || __Pyx_RaiseUnexpectedTypeError("str", __pyx_t_1))) __PYX_ERR(1, 170, __pyx_L1_error)
     __pyx_r = ((PyObject*)__pyx_t_1);
     __pyx_t_1 = 0;
     goto __pyx_L0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":166
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":168
  *         if function in ("count", "sum", "min", "max", "avg"):
  *             return function
  *         if function in ("count_distinct", "approx_count_distinct", "approx_percentile",             # <<<<<<<<<<<<<<
@@ -62151,7 +62713,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":169
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":171
  *                         "array_agg", "any_value"):
  *             return function
  *         raise UnsupportedSyntaxError(             # <<<<<<<<<<<<<<
@@ -62159,19 +62721,19 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
  *         )
 */
   __pyx_t_2 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_UnsupportedSyntaxError); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 169, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_UnsupportedSyntaxError); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 171, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_6);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":170
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":172
  *             return function
  *         raise UnsupportedSyntaxError(
  *             f"Unsupported aggregate function: {value}"             # <<<<<<<<<<<<<<
  *         )
  * 
 */
-  __pyx_t_7 = __Pyx_PyObject_FormatSimple(__pyx_v_value, __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 170, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_PyObject_FormatSimple(__pyx_v_value, __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 172, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
-  __pyx_t_8 = __Pyx_PyUnicode_Concat(__pyx_mstate_global->__pyx_kp_u_Unsupported_aggregate_function, __pyx_t_7); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 170, __pyx_L1_error)
+  __pyx_t_8 = __Pyx_PyUnicode_Concat(__pyx_mstate_global->__pyx_kp_u_Unsupported_aggregate_function, __pyx_t_7); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 172, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_8);
   __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
   __pyx_t_3 = 1;
@@ -62192,14 +62754,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
     __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
     __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 169, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 171, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __Pyx_Raise(__pyx_t_1, 0, 0, 0);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __PYX_ERR(1, 169, __pyx_L1_error)
+  __PYX_ERR(1, 171, __pyx_L1_error)
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":158
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":160
  *         return list(dict.fromkeys(required))
  * 
  *     @staticmethod             # <<<<<<<<<<<<<<
@@ -62224,7 +62786,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   return __pyx_r;
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":173
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":175
  *         )
  * 
  *     @staticmethod             # <<<<<<<<<<<<<<
@@ -62271,32 +62833,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_aggregator,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 173, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 175, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 173, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 175, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_extract_percentile_option", 0) < (0)) __PYX_ERR(1, 173, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_extract_percentile_option", 0) < (0)) __PYX_ERR(1, 175, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_extract_percentile_option", 1, 1, 1, i); __PYX_ERR(1, 173, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_extract_percentile_option", 1, 1, 1, i); __PYX_ERR(1, 175, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 173, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 175, __pyx_L3_error)
     }
     __pyx_v_aggregator = values[0];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_extract_percentile_option", 1, 1, 1, __pyx_nargs); __PYX_ERR(1, 173, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_extract_percentile_option", 1, 1, 1, __pyx_nargs); __PYX_ERR(1, 175, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -62337,7 +62899,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_extract_percentile_option", 0);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":175
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":177
  *     @staticmethod
  *     def _extract_percentile_option(aggregator) -> float:
  *         from opteryx.exceptions import InvalidFunctionParameterError             # <<<<<<<<<<<<<<
@@ -62346,14 +62908,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   {
     PyObject* const __pyx_imported_names[] = {__pyx_mstate_global->__pyx_n_u_InvalidFunctionParameterError};
-    __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_opteryx_exceptions, __pyx_imported_names, 1, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 175, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_opteryx_exceptions, __pyx_imported_names, 1, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 177, __pyx_L1_error)
   }
   __pyx_t_1 = __pyx_t_2;
   __Pyx_GOTREF(__pyx_t_1);
   {
     PyObject* const __pyx_imported_names[] = {__pyx_mstate_global->__pyx_n_u_InvalidFunctionParameterError};
     __pyx_t_3 = 0; {
-      __pyx_t_4 = __Pyx_ImportFrom(__pyx_t_1, __pyx_imported_names[__pyx_t_3]); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 175, __pyx_L1_error)
+      __pyx_t_4 = __Pyx_ImportFrom(__pyx_t_1, __pyx_imported_names[__pyx_t_3]); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 177, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
       switch (__pyx_t_3) {
         case 0:
@@ -62367,21 +62929,21 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":176
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":178
  *     def _extract_percentile_option(aggregator) -> float:
  *         from opteryx.exceptions import InvalidFunctionParameterError
  *         if len(aggregator.parameters) != 2:             # <<<<<<<<<<<<<<
  *             raise InvalidFunctionParameterError(
  *                 "APPROX_PERCENTILE requires two arguments: the column and the percentile"
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_parameters); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 176, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_parameters); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 178, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_3 = PyObject_Length(__pyx_t_1); if (unlikely(__pyx_t_3 == ((Py_ssize_t)-1))) __PYX_ERR(1, 176, __pyx_L1_error)
+  __pyx_t_3 = PyObject_Length(__pyx_t_1); if (unlikely(__pyx_t_3 == ((Py_ssize_t)-1))) __PYX_ERR(1, 178, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_t_5 = (__pyx_t_3 != 2);
   if (unlikely(__pyx_t_5)) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":177
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":179
  *         from opteryx.exceptions import InvalidFunctionParameterError
  *         if len(aggregator.parameters) != 2:
  *             raise InvalidFunctionParameterError(             # <<<<<<<<<<<<<<
@@ -62408,14 +62970,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_6, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (__pyx_t_7*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 177, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 179, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __Pyx_Raise(__pyx_t_1, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    __PYX_ERR(1, 177, __pyx_L1_error)
+    __PYX_ERR(1, 179, __pyx_L1_error)
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":176
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":178
  *     def _extract_percentile_option(aggregator) -> float:
  *         from opteryx.exceptions import InvalidFunctionParameterError
  *         if len(aggregator.parameters) != 2:             # <<<<<<<<<<<<<<
@@ -62424,43 +62986,43 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":180
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":182
  *                 "APPROX_PERCENTILE requires two arguments: the column and the percentile"
  *             )
  *         percentile_node = aggregator.parameters[1]             # <<<<<<<<<<<<<<
  *         if percentile_node.node_type != NodeType.LITERAL:
  *             raise InvalidFunctionParameterError(
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_parameters); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 180, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_parameters); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 182, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_6 = __Pyx_GetItemInt(__pyx_t_1, 1, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 180, __pyx_L1_error)
+  __pyx_t_6 = __Pyx_GetItemInt(__pyx_t_1, 1, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 182, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_6);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_v_percentile_node = __pyx_t_6;
   __pyx_t_6 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":181
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":183
  *             )
  *         percentile_node = aggregator.parameters[1]
  *         if percentile_node.node_type != NodeType.LITERAL:             # <<<<<<<<<<<<<<
  *             raise InvalidFunctionParameterError(
  *                 "APPROX_PERCENTILE percentile argument must be a literal"
 */
-  __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_v_percentile_node, __pyx_mstate_global->__pyx_n_u_node_type); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 181, __pyx_L1_error)
+  __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_v_percentile_node, __pyx_mstate_global->__pyx_n_u_node_type); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 183, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_6);
-  __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_NodeType); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 181, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_NodeType); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 183, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_LITERAL); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 181, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_LITERAL); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 183, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __pyx_t_1 = PyObject_RichCompare(__pyx_t_6, __pyx_t_4, Py_NE); __Pyx_XGOTREF(__pyx_t_1); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 181, __pyx_L1_error)
+  __pyx_t_1 = PyObject_RichCompare(__pyx_t_6, __pyx_t_4, Py_NE); __Pyx_XGOTREF(__pyx_t_1); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 183, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-  __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 181, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 183, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (unlikely(__pyx_t_5)) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":182
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":184
  *         percentile_node = aggregator.parameters[1]
  *         if percentile_node.node_type != NodeType.LITERAL:
  *             raise InvalidFunctionParameterError(             # <<<<<<<<<<<<<<
@@ -62487,14 +63049,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_6, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (__pyx_t_7*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 182, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 184, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __Pyx_Raise(__pyx_t_1, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    __PYX_ERR(1, 182, __pyx_L1_error)
+    __PYX_ERR(1, 184, __pyx_L1_error)
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":181
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":183
  *             )
  *         percentile_node = aggregator.parameters[1]
  *         if percentile_node.node_type != NodeType.LITERAL:             # <<<<<<<<<<<<<<
@@ -62503,20 +63065,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":185
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":187
  *                 "APPROX_PERCENTILE percentile argument must be a literal"
  *             )
  *         percentile = float(percentile_node.value)             # <<<<<<<<<<<<<<
  *         if not (0.0 <= percentile <= 1.0):
  *             raise InvalidFunctionParameterError(
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_percentile_node, __pyx_mstate_global->__pyx_n_u_value); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 185, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_percentile_node, __pyx_mstate_global->__pyx_n_u_value); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 187, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_8 = __Pyx_PyObject_AsDouble(__pyx_t_1); if (unlikely(__PYX_CHECK_FLOAT_EXCEPTION(__pyx_t_8, ((double)((double)-1))) && PyErr_Occurred())) __PYX_ERR(1, 185, __pyx_L1_error)
+  __pyx_t_8 = __Pyx_PyObject_AsDouble(__pyx_t_1); if (unlikely(__PYX_CHECK_FLOAT_EXCEPTION(__pyx_t_8, ((double)((double)-1))) && PyErr_Occurred())) __PYX_ERR(1, 187, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_v_percentile = __pyx_t_8;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":186
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":188
  *             )
  *         percentile = float(percentile_node.value)
  *         if not (0.0 <= percentile <= 1.0):             # <<<<<<<<<<<<<<
@@ -62530,7 +63092,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_t_9 = (!__pyx_t_5);
   if (unlikely(__pyx_t_9)) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":187
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":189
  *         percentile = float(percentile_node.value)
  *         if not (0.0 <= percentile <= 1.0):
  *             raise InvalidFunctionParameterError(             # <<<<<<<<<<<<<<
@@ -62557,14 +63119,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_4, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (__pyx_t_7*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
       __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 187, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 189, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __Pyx_Raise(__pyx_t_1, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    __PYX_ERR(1, 187, __pyx_L1_error)
+    __PYX_ERR(1, 189, __pyx_L1_error)
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":186
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":188
  *             )
  *         percentile = float(percentile_node.value)
  *         if not (0.0 <= percentile <= 1.0):             # <<<<<<<<<<<<<<
@@ -62573,7 +63135,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":190
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":192
  *                 "APPROX_PERCENTILE percentile must be between 0.0 and 1.0"
  *             )
  *         return percentile             # <<<<<<<<<<<<<<
@@ -62581,13 +63143,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
  *     @staticmethod
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = PyFloat_FromDouble(__pyx_v_percentile); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 190, __pyx_L1_error)
+  __pyx_t_1 = PyFloat_FromDouble(__pyx_v_percentile); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 192, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":173
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":175
  *         )
  * 
  *     @staticmethod             # <<<<<<<<<<<<<<
@@ -62610,7 +63172,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   return __pyx_r;
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":192
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":194
  *         return percentile
  * 
  *     @staticmethod             # <<<<<<<<<<<<<<
@@ -62657,32 +63219,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_aggregator,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 192, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 194, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 192, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 194, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_extract_array_agg_options", 0) < (0)) __PYX_ERR(1, 192, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_extract_array_agg_options", 0) < (0)) __PYX_ERR(1, 194, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_extract_array_agg_options", 1, 1, 1, i); __PYX_ERR(1, 192, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_extract_array_agg_options", 1, 1, 1, i); __PYX_ERR(1, 194, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 192, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 194, __pyx_L3_error)
     }
     __pyx_v_aggregator = values[0];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_extract_array_agg_options", 1, 1, 1, __pyx_nargs); __PYX_ERR(1, 192, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_extract_array_agg_options", 1, 1, 1, __pyx_nargs); __PYX_ERR(1, 194, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -62723,7 +63285,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_extract_array_agg_options", 0);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":194
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":196
  *     @staticmethod
  *     def _extract_array_agg_options(aggregator) -> dict:
  *         from opteryx.exceptions import InvalidFunctionParameterError             # <<<<<<<<<<<<<<
@@ -62732,14 +63294,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   {
     PyObject* const __pyx_imported_names[] = {__pyx_mstate_global->__pyx_n_u_InvalidFunctionParameterError};
-    __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_opteryx_exceptions, __pyx_imported_names, 1, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 194, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_opteryx_exceptions, __pyx_imported_names, 1, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 196, __pyx_L1_error)
   }
   __pyx_t_1 = __pyx_t_2;
   __Pyx_GOTREF(__pyx_t_1);
   {
     PyObject* const __pyx_imported_names[] = {__pyx_mstate_global->__pyx_n_u_InvalidFunctionParameterError};
     __pyx_t_3 = 0; {
-      __pyx_t_4 = __Pyx_ImportFrom(__pyx_t_1, __pyx_imported_names[__pyx_t_3]); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 194, __pyx_L1_error)
+      __pyx_t_4 = __Pyx_ImportFrom(__pyx_t_1, __pyx_imported_names[__pyx_t_3]); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 196, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
       switch (__pyx_t_3) {
         case 0:
@@ -62753,20 +63315,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":195
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":197
  *     def _extract_array_agg_options(aggregator) -> dict:
  *         from opteryx.exceptions import InvalidFunctionParameterError
  *         ordered = bool(aggregator.order)             # <<<<<<<<<<<<<<
  *         descending = False
  *         if aggregator.order:
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_order); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 195, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_order); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 197, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 195, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 197, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_v_ordered = (!(!__pyx_t_5));
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":196
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":198
  *         from opteryx.exceptions import InvalidFunctionParameterError
  *         ordered = bool(aggregator.order)
  *         descending = False             # <<<<<<<<<<<<<<
@@ -62775,34 +63337,34 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   __pyx_v_descending = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":197
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":199
  *         ordered = bool(aggregator.order)
  *         descending = False
  *         if aggregator.order:             # <<<<<<<<<<<<<<
  *             if len(aggregator.order) != 1:
  *                 raise InvalidFunctionParameterError(
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_order); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 197, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_order); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 199, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 197, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 199, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (__pyx_t_5) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":198
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":200
  *         descending = False
  *         if aggregator.order:
  *             if len(aggregator.order) != 1:             # <<<<<<<<<<<<<<
  *                 raise InvalidFunctionParameterError(
  *                     "ARRAY_AGG can only ORDER BY the aggregated column"
 */
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_order); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 198, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_order); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 200, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_3 = PyObject_Length(__pyx_t_1); if (unlikely(__pyx_t_3 == ((Py_ssize_t)-1))) __PYX_ERR(1, 198, __pyx_L1_error)
+    __pyx_t_3 = PyObject_Length(__pyx_t_1); if (unlikely(__pyx_t_3 == ((Py_ssize_t)-1))) __PYX_ERR(1, 200, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     __pyx_t_5 = (__pyx_t_3 != 1);
     if (unlikely(__pyx_t_5)) {
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":199
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":201
  *         if aggregator.order:
  *             if len(aggregator.order) != 1:
  *                 raise InvalidFunctionParameterError(             # <<<<<<<<<<<<<<
@@ -62829,14 +63391,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_6, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (__pyx_t_7*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
         __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
         __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
-        if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 199, __pyx_L1_error)
+        if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 201, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_1);
       }
       __Pyx_Raise(__pyx_t_1, 0, 0, 0);
       __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-      __PYX_ERR(1, 199, __pyx_L1_error)
+      __PYX_ERR(1, 201, __pyx_L1_error)
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":198
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":200
  *         descending = False
  *         if aggregator.order:
  *             if len(aggregator.order) != 1:             # <<<<<<<<<<<<<<
@@ -62845,26 +63407,26 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     }
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":202
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":204
  *                     "ARRAY_AGG can only ORDER BY the aggregated column"
  *                 )
  *             descending = not bool(aggregator.order[0][1])             # <<<<<<<<<<<<<<
  *         limit = None if aggregator.limit is None else int(aggregator.limit)
  *         if limit is not None and limit < 0:
 */
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_order); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 202, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_order); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 204, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_6 = __Pyx_GetItemInt(__pyx_t_1, 0, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 202, __pyx_L1_error)
+    __pyx_t_6 = __Pyx_GetItemInt(__pyx_t_1, 0, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 204, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_6);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    __pyx_t_1 = __Pyx_GetItemInt(__pyx_t_6, 1, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 202, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_GetItemInt(__pyx_t_6, 1, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 204, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
-    __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 202, __pyx_L1_error)
+    __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(1, 204, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     __pyx_v_descending = (!(!(!__pyx_t_5)));
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":197
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":199
  *         ordered = bool(aggregator.order)
  *         descending = False
  *         if aggregator.order:             # <<<<<<<<<<<<<<
@@ -62873,14 +63435,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":203
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":205
  *                 )
  *             descending = not bool(aggregator.order[0][1])
  *         limit = None if aggregator.limit is None else int(aggregator.limit)             # <<<<<<<<<<<<<<
  *         if limit is not None and limit < 0:
  *             raise InvalidFunctionParameterError("ARRAY_AGG LIMIT must be zero or greater")
 */
-  __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_limit); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 203, __pyx_L1_error)
+  __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_limit); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 205, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_6);
   __pyx_t_5 = (__pyx_t_6 == Py_None);
   __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
@@ -62888,9 +63450,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_INCREF(Py_None);
     __pyx_t_1 = Py_None;
   } else {
-    __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_limit); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 203, __pyx_L1_error)
+    __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_limit); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 205, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_6);
-    __pyx_t_4 = __Pyx_PyNumber_Int(__pyx_t_6); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 203, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyNumber_Int(__pyx_t_6); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 205, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
     __pyx_t_1 = __pyx_t_4;
@@ -62899,7 +63461,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_v_limit = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":204
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":206
  *             descending = not bool(aggregator.order[0][1])
  *         limit = None if aggregator.limit is None else int(aggregator.limit)
  *         if limit is not None and limit < 0:             # <<<<<<<<<<<<<<
@@ -62912,14 +63474,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_t_5 = __pyx_t_8;
     goto __pyx_L6_bool_binop_done;
   }
-  __pyx_t_1 = PyObject_RichCompare(__pyx_v_limit, __pyx_mstate_global->__pyx_int_0, Py_LT); __Pyx_XGOTREF(__pyx_t_1); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 204, __pyx_L1_error)
-  __pyx_t_8 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_8 < 0))) __PYX_ERR(1, 204, __pyx_L1_error)
+  __pyx_t_1 = PyObject_RichCompare(__pyx_v_limit, __pyx_mstate_global->__pyx_int_0, Py_LT); __Pyx_XGOTREF(__pyx_t_1); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 206, __pyx_L1_error)
+  __pyx_t_8 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_8 < 0))) __PYX_ERR(1, 206, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_t_5 = __pyx_t_8;
   __pyx_L6_bool_binop_done:;
   if (unlikely(__pyx_t_5)) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":205
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":207
  *         limit = None if aggregator.limit is None else int(aggregator.limit)
  *         if limit is not None and limit < 0:
  *             raise InvalidFunctionParameterError("ARRAY_AGG LIMIT must be zero or greater")             # <<<<<<<<<<<<<<
@@ -62946,14 +63508,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_6, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (__pyx_t_7*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 205, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 207, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __Pyx_Raise(__pyx_t_1, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    __PYX_ERR(1, 205, __pyx_L1_error)
+    __PYX_ERR(1, 207, __pyx_L1_error)
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":204
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":206
  *             descending = not bool(aggregator.order[0][1])
  *         limit = None if aggregator.limit is None else int(aggregator.limit)
  *         if limit is not None and limit < 0:             # <<<<<<<<<<<<<<
@@ -62962,7 +63524,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":206
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":208
  *         if limit is not None and limit < 0:
  *             raise InvalidFunctionParameterError("ARRAY_AGG LIMIT must be zero or greater")
  *         return {             # <<<<<<<<<<<<<<
@@ -62971,59 +63533,59 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   __Pyx_XDECREF(__pyx_r);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":207
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":209
  *             raise InvalidFunctionParameterError("ARRAY_AGG LIMIT must be zero or greater")
  *         return {
  *             "distinct": aggregator.duplicate_treatment == "Distinct",             # <<<<<<<<<<<<<<
  *             "ordered": ordered,
  *             "descending": descending,
 */
-  __pyx_t_1 = __Pyx_PyDict_NewPresized(4); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 207, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyDict_NewPresized(4); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 209, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_duplicate_treatment); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 207, __pyx_L1_error)
+  __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregator, __pyx_mstate_global->__pyx_n_u_duplicate_treatment); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 209, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_6);
-  __pyx_t_4 = PyObject_RichCompare(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_Distinct, Py_EQ); __Pyx_XGOTREF(__pyx_t_4); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 207, __pyx_L1_error)
+  __pyx_t_4 = PyObject_RichCompare(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_Distinct, Py_EQ); __Pyx_XGOTREF(__pyx_t_4); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 209, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_distinct, __pyx_t_4) < (0)) __PYX_ERR(1, 207, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_distinct, __pyx_t_4) < (0)) __PYX_ERR(1, 209, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":208
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":210
  *         return {
  *             "distinct": aggregator.duplicate_treatment == "Distinct",
  *             "ordered": ordered,             # <<<<<<<<<<<<<<
  *             "descending": descending,
  *             "limit": limit,
 */
-  __pyx_t_4 = __Pyx_PyBool_FromLong(__pyx_v_ordered); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 208, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyBool_FromLong(__pyx_v_ordered); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 210, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_ordered, __pyx_t_4) < (0)) __PYX_ERR(1, 207, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_ordered, __pyx_t_4) < (0)) __PYX_ERR(1, 209, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":209
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":211
  *             "distinct": aggregator.duplicate_treatment == "Distinct",
  *             "ordered": ordered,
  *             "descending": descending,             # <<<<<<<<<<<<<<
  *             "limit": limit,
  *         }
 */
-  __pyx_t_4 = __Pyx_PyBool_FromLong(__pyx_v_descending); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 209, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyBool_FromLong(__pyx_v_descending); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 211, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_descending, __pyx_t_4) < (0)) __PYX_ERR(1, 207, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_descending, __pyx_t_4) < (0)) __PYX_ERR(1, 209, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":210
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":212
  *             "ordered": ordered,
  *             "descending": descending,
  *             "limit": limit,             # <<<<<<<<<<<<<<
  *         }
  * 
 */
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_limit, __pyx_v_limit) < (0)) __PYX_ERR(1, 207, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_limit, __pyx_v_limit) < (0)) __PYX_ERR(1, 209, __pyx_L1_error)
   __pyx_r = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":192
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":194
  *         return percentile
  * 
  *     @staticmethod             # <<<<<<<<<<<<<<
@@ -63046,7 +63608,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   return __pyx_r;
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":213
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":215
  *         }
  * 
  *     def _prepare_chunk(self, chunk):             # <<<<<<<<<<<<<<
@@ -63095,39 +63657,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,&__pyx_mstate_global->__pyx_n_u_chunk,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 213, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 215, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(1, 213, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(1, 215, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 213, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 215, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_prepare_chunk", 0) < (0)) __PYX_ERR(1, 213, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_prepare_chunk", 0) < (0)) __PYX_ERR(1, 215, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_prepare_chunk", 1, 2, 2, i); __PYX_ERR(1, 213, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_prepare_chunk", 1, 2, 2, i); __PYX_ERR(1, 215, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 213, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 215, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(1, 213, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(1, 215, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
     __pyx_v_chunk = values[1];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_prepare_chunk", 1, 2, 2, __pyx_nargs); __PYX_ERR(1, 213, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_prepare_chunk", 1, 2, 2, __pyx_nargs); __PYX_ERR(1, 215, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -63184,20 +63746,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_RefNannySetupContext("_prepare_chunk", 0);
   __Pyx_INCREF(__pyx_v_chunk);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":215
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":217
  *     def _prepare_chunk(self, chunk):
  *         """Pre-evaluate GROUP BY expressions and add * column."""
  *         if self.all_identifiers:             # <<<<<<<<<<<<<<
  *             chunk = chunk.select(self.all_identifiers)
  *         if b"*" not in chunk.column_names and "*" not in chunk.column_names:
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_all_identifiers); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 215, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_all_identifiers); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 217, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_2 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_2 < 0))) __PYX_ERR(1, 215, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_2 < 0))) __PYX_ERR(1, 217, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (__pyx_t_2) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":216
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":218
  *         """Pre-evaluate GROUP BY expressions and add * column."""
  *         if self.all_identifiers:
  *             chunk = chunk.select(self.all_identifiers)             # <<<<<<<<<<<<<<
@@ -63206,7 +63768,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     __pyx_t_3 = __pyx_v_chunk;
     __Pyx_INCREF(__pyx_t_3);
-    __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_all_identifiers); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 216, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_all_identifiers); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 218, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __pyx_t_5 = 0;
     {
@@ -63214,13 +63776,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_select, __pyx_callargs+__pyx_t_5, (2-__pyx_t_5) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
       __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 216, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 218, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __Pyx_DECREF_SET(__pyx_v_chunk, __pyx_t_1);
     __pyx_t_1 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":215
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":217
  *     def _prepare_chunk(self, chunk):
  *         """Pre-evaluate GROUP BY expressions and add * column."""
  *         if self.all_identifiers:             # <<<<<<<<<<<<<<
@@ -63229,31 +63791,31 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":217
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":219
  *         if self.all_identifiers:
  *             chunk = chunk.select(self.all_identifiers)
  *         if b"*" not in chunk.column_names and "*" not in chunk.column_names:             # <<<<<<<<<<<<<<
  *             star_vector = constant_from_scalar(1, chunk.num_rows, dtype="int8")
  *             chunk.append_vector("*", star_vector)
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_chunk, __pyx_mstate_global->__pyx_n_u_column_names); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 217, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_chunk, __pyx_mstate_global->__pyx_n_u_column_names); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 219, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_6 = (__Pyx_PySequence_ContainsTF(__pyx_mstate_global->__pyx_kp_b__6, __pyx_t_1, Py_NE)); if (unlikely((__pyx_t_6 < 0))) __PYX_ERR(1, 217, __pyx_L1_error)
+  __pyx_t_6 = (__Pyx_PySequence_ContainsTF(__pyx_mstate_global->__pyx_kp_b__6, __pyx_t_1, Py_NE)); if (unlikely((__pyx_t_6 < 0))) __PYX_ERR(1, 219, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (__pyx_t_6) {
   } else {
     __pyx_t_2 = __pyx_t_6;
     goto __pyx_L5_bool_binop_done;
   }
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_chunk, __pyx_mstate_global->__pyx_n_u_column_names); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 217, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_chunk, __pyx_mstate_global->__pyx_n_u_column_names); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 219, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_6 = (__Pyx_PySequence_ContainsTF(__pyx_mstate_global->__pyx_kp_u__6, __pyx_t_1, Py_NE)); if (unlikely((__pyx_t_6 < 0))) __PYX_ERR(1, 217, __pyx_L1_error)
+  __pyx_t_6 = (__Pyx_PySequence_ContainsTF(__pyx_mstate_global->__pyx_kp_u__6, __pyx_t_1, Py_NE)); if (unlikely((__pyx_t_6 < 0))) __PYX_ERR(1, 219, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_t_2 = __pyx_t_6;
   __pyx_L5_bool_binop_done:;
   if (__pyx_t_2) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":218
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":220
  *             chunk = chunk.select(self.all_identifiers)
  *         if b"*" not in chunk.column_names and "*" not in chunk.column_names:
  *             star_vector = constant_from_scalar(1, chunk.num_rows, dtype="int8")             # <<<<<<<<<<<<<<
@@ -63261,9 +63823,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
  *         eval_start = time.monotonic_ns()
 */
     __pyx_t_4 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_constant_from_scalar); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 218, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_constant_from_scalar); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 220, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
-    __pyx_t_7 = __Pyx_PyObject_GetAttrStr(__pyx_v_chunk, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 218, __pyx_L1_error)
+    __pyx_t_7 = __Pyx_PyObject_GetAttrStr(__pyx_v_chunk, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 220, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_7);
     __pyx_t_5 = 1;
     #if CYTHON_UNPACK_METHODS
@@ -63279,21 +63841,21 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     #endif
     {
       PyObject *__pyx_callargs[3 + ((CYTHON_VECTORCALL) ? 1 : 0)] = {__pyx_t_4, __pyx_mstate_global->__pyx_int_1, __pyx_t_7};
-      __pyx_t_8 = __Pyx_MakeVectorcallBuilderKwds(1); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 218, __pyx_L1_error)
+      __pyx_t_8 = __Pyx_MakeVectorcallBuilderKwds(1); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 220, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_8);
-      if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_dtype, __pyx_mstate_global->__pyx_n_u_int8, __pyx_t_8, __pyx_callargs+3, 0) < (0)) __PYX_ERR(1, 218, __pyx_L1_error)
+      if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_dtype, __pyx_mstate_global->__pyx_n_u_int8, __pyx_t_8, __pyx_callargs+3, 0) < (0)) __PYX_ERR(1, 220, __pyx_L1_error)
       __pyx_t_1 = __Pyx_Object_Vectorcall_CallFromBuilder((PyObject*)__pyx_t_3, __pyx_callargs+__pyx_t_5, (3-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET), __pyx_t_8);
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
       __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
       __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 218, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 220, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __pyx_v_star_vector = __pyx_t_1;
     __pyx_t_1 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":219
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":221
  *         if b"*" not in chunk.column_names and "*" not in chunk.column_names:
  *             star_vector = constant_from_scalar(1, chunk.num_rows, dtype="int8")
  *             chunk.append_vector("*", star_vector)             # <<<<<<<<<<<<<<
@@ -63307,12 +63869,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       PyObject *__pyx_callargs[3] = {__pyx_t_3, __pyx_mstate_global->__pyx_kp_u__6, __pyx_v_star_vector};
       __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_append_vector, __pyx_callargs+__pyx_t_5, (3-__pyx_t_5) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 219, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 221, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":217
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":219
  *         if self.all_identifiers:
  *             chunk = chunk.select(self.all_identifiers)
  *         if b"*" not in chunk.column_names and "*" not in chunk.column_names:             # <<<<<<<<<<<<<<
@@ -63321,7 +63883,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":220
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":222
  *             star_vector = constant_from_scalar(1, chunk.num_rows, dtype="int8")
  *             chunk.append_vector("*", star_vector)
  *         eval_start = time.monotonic_ns()             # <<<<<<<<<<<<<<
@@ -63329,9 +63891,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
  *             if self.evaluatable_nodes:
 */
   __pyx_t_3 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 220, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 222, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_8);
-  __pyx_t_7 = __Pyx_PyObject_GetAttrStr(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 220, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_PyObject_GetAttrStr(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 222, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
   __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
   __pyx_t_5 = 1;
@@ -63351,13 +63913,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_7, __pyx_callargs+__pyx_t_5, (1-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
     __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 220, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 222, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __pyx_v_eval_start = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":221
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":223
  *             chunk.append_vector("*", star_vector)
  *         eval_start = time.monotonic_ns()
  *         try:             # <<<<<<<<<<<<<<
@@ -63373,20 +63935,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_XGOTREF(__pyx_t_11);
     /*try:*/ {
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":222
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":224
  *         eval_start = time.monotonic_ns()
  *         try:
  *             if self.evaluatable_nodes:             # <<<<<<<<<<<<<<
  *                 chunk = evaluate_and_append_draken(self.evaluatable_nodes, chunk)
  *             chunk = evaluate_and_append_draken(self.groups, chunk)
 */
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_evaluatable_nodes); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 222, __pyx_L7_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_evaluatable_nodes); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 224, __pyx_L7_error)
       __Pyx_GOTREF(__pyx_t_1);
-      __pyx_t_2 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_2 < 0))) __PYX_ERR(1, 222, __pyx_L7_error)
+      __pyx_t_2 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_2 < 0))) __PYX_ERR(1, 224, __pyx_L7_error)
       __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
       if (__pyx_t_2) {
 
-        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":223
+        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":225
  *         try:
  *             if self.evaluatable_nodes:
  *                 chunk = evaluate_and_append_draken(self.evaluatable_nodes, chunk)             # <<<<<<<<<<<<<<
@@ -63394,9 +63956,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
  *             self.readings["time_aggregate_evaluations"] += time.monotonic_ns() - eval_start
 */
         __pyx_t_7 = NULL;
-        __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_evaluate_and_append_draken); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 223, __pyx_L7_error)
+        __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_evaluate_and_append_draken); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 225, __pyx_L7_error)
         __Pyx_GOTREF(__pyx_t_3);
-        __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_evaluatable_nodes); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 223, __pyx_L7_error)
+        __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_evaluatable_nodes); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 225, __pyx_L7_error)
         __Pyx_GOTREF(__pyx_t_8);
         __pyx_t_5 = 1;
         #if CYTHON_UNPACK_METHODS
@@ -63416,13 +63978,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
           __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
           __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
           __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-          if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 223, __pyx_L7_error)
+          if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 225, __pyx_L7_error)
           __Pyx_GOTREF(__pyx_t_1);
         }
         __Pyx_DECREF_SET(__pyx_v_chunk, __pyx_t_1);
         __pyx_t_1 = 0;
 
-        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":222
+        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":224
  *         eval_start = time.monotonic_ns()
  *         try:
  *             if self.evaluatable_nodes:             # <<<<<<<<<<<<<<
@@ -63431,7 +63993,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
       }
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":224
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":226
  *             if self.evaluatable_nodes:
  *                 chunk = evaluate_and_append_draken(self.evaluatable_nodes, chunk)
  *             chunk = evaluate_and_append_draken(self.groups, chunk)             # <<<<<<<<<<<<<<
@@ -63439,9 +64001,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
  *             return chunk
 */
       __pyx_t_3 = NULL;
-      __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_evaluate_and_append_draken); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 224, __pyx_L7_error)
+      __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_evaluate_and_append_draken); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 226, __pyx_L7_error)
       __Pyx_GOTREF(__pyx_t_8);
-      __pyx_t_7 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_groups); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 224, __pyx_L7_error)
+      __pyx_t_7 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_groups); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 226, __pyx_L7_error)
       __Pyx_GOTREF(__pyx_t_7);
       __pyx_t_5 = 1;
       #if CYTHON_UNPACK_METHODS
@@ -63461,29 +64023,29 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
         __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
         __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
-        if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 224, __pyx_L7_error)
+        if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 226, __pyx_L7_error)
         __Pyx_GOTREF(__pyx_t_1);
       }
       __Pyx_DECREF_SET(__pyx_v_chunk, __pyx_t_1);
       __pyx_t_1 = 0;
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":225
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":227
  *                 chunk = evaluate_and_append_draken(self.evaluatable_nodes, chunk)
  *             chunk = evaluate_and_append_draken(self.groups, chunk)
  *             self.readings["time_aggregate_evaluations"] += time.monotonic_ns() - eval_start             # <<<<<<<<<<<<<<
  *             return chunk
  *         except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
 */
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 225, __pyx_L7_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 227, __pyx_L7_error)
       __Pyx_GOTREF(__pyx_t_1);
       __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_evaluations);
       __pyx_t_12 = __pyx_mstate_global->__pyx_n_u_time_aggregate_evaluations;
-      __pyx_t_8 = __Pyx_PyObject_Dict_GetItem(__pyx_t_1, __pyx_t_12); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 225, __pyx_L7_error)
+      __pyx_t_8 = __Pyx_PyObject_Dict_GetItem(__pyx_t_1, __pyx_t_12); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 227, __pyx_L7_error)
       __Pyx_GOTREF(__pyx_t_8);
       __pyx_t_3 = NULL;
-      __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 225, __pyx_L7_error)
+      __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 227, __pyx_L7_error)
       __Pyx_GOTREF(__pyx_t_4);
-      __pyx_t_13 = __Pyx_PyObject_GetAttrStr(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_13)) __PYX_ERR(1, 225, __pyx_L7_error)
+      __pyx_t_13 = __Pyx_PyObject_GetAttrStr(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_13)) __PYX_ERR(1, 227, __pyx_L7_error)
       __Pyx_GOTREF(__pyx_t_13);
       __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
       __pyx_t_5 = 1;
@@ -63503,22 +64065,22 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         __pyx_t_7 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_13, __pyx_callargs+__pyx_t_5, (1-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
         __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
         __Pyx_DECREF(__pyx_t_13); __pyx_t_13 = 0;
-        if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 225, __pyx_L7_error)
+        if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 227, __pyx_L7_error)
         __Pyx_GOTREF(__pyx_t_7);
       }
-      __pyx_t_13 = PyNumber_Subtract(__pyx_t_7, __pyx_v_eval_start); if (unlikely(!__pyx_t_13)) __PYX_ERR(1, 225, __pyx_L7_error)
+      __pyx_t_13 = PyNumber_Subtract(__pyx_t_7, __pyx_v_eval_start); if (unlikely(!__pyx_t_13)) __PYX_ERR(1, 227, __pyx_L7_error)
       __Pyx_GOTREF(__pyx_t_13);
       __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
-      __pyx_t_7 = PyNumber_InPlaceAdd(__pyx_t_8, __pyx_t_13); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 225, __pyx_L7_error)
+      __pyx_t_7 = PyNumber_InPlaceAdd(__pyx_t_8, __pyx_t_13); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 227, __pyx_L7_error)
       __Pyx_GOTREF(__pyx_t_7);
       __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
       __Pyx_DECREF(__pyx_t_13); __pyx_t_13 = 0;
-      if (unlikely((PyObject_SetItem(__pyx_t_1, __pyx_t_12, __pyx_t_7) < 0))) __PYX_ERR(1, 225, __pyx_L7_error)
+      if (unlikely((PyObject_SetItem(__pyx_t_1, __pyx_t_12, __pyx_t_7) < 0))) __PYX_ERR(1, 227, __pyx_L7_error)
       __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
       __Pyx_DECREF(__pyx_t_12); __pyx_t_12 = 0;
       __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":226
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":228
  *             chunk = evaluate_and_append_draken(self.groups, chunk)
  *             self.readings["time_aggregate_evaluations"] += time.monotonic_ns() - eval_start
  *             return chunk             # <<<<<<<<<<<<<<
@@ -63530,7 +64092,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __pyx_r = __pyx_v_chunk;
       goto __pyx_L11_try_return;
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":221
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":223
  *             chunk.append_vector("*", star_vector)
  *         eval_start = time.monotonic_ns()
  *         try:             # <<<<<<<<<<<<<<
@@ -63547,7 +64109,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
     __Pyx_XDECREF(__pyx_t_8); __pyx_t_8 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":227
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":229
  *             self.readings["time_aggregate_evaluations"] += time.monotonic_ns() - eval_start
  *             return chunk
  *         except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:             # <<<<<<<<<<<<<<
@@ -63555,7 +64117,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
  *                 f"Grouped aggregate expression evaluation does not support this query shape: {err}"
 */
     __Pyx_ErrFetch(&__pyx_t_1, &__pyx_t_7, &__pyx_t_13);
-    __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_UnsupportedSyntaxError); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 227, __pyx_L9_except_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_UnsupportedSyntaxError); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 229, __pyx_L9_except_error)
     __Pyx_GOTREF(__pyx_t_8);
     __pyx_t_14 = __Pyx_PyErr_GivenExceptionMatches(__pyx_t_1, ((PyObject *)(((PyTypeObject*)PyExc_NotImplementedError)))) || __Pyx_PyErr_GivenExceptionMatches(__pyx_t_1, ((PyObject *)(((PyTypeObject*)PyExc_TypeError)))) || __Pyx_PyErr_GivenExceptionMatches(__pyx_t_1, __pyx_t_8);
     __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
@@ -63563,7 +64125,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_t_1 = 0; __pyx_t_7 = 0; __pyx_t_13 = 0;
     if (__pyx_t_14) {
       __Pyx_AddTraceback("opteryx.operators.grouped_aggregate_hashed._grouped_agg.GroupedAggregateHashedNode._prepare_chunk", __pyx_clineno, __pyx_lineno, __pyx_filename);
-      if (__Pyx_GetException(&__pyx_t_13, &__pyx_t_7, &__pyx_t_1) < 0) __PYX_ERR(1, 227, __pyx_L9_except_error)
+      if (__Pyx_GetException(&__pyx_t_13, &__pyx_t_7, &__pyx_t_1) < 0) __PYX_ERR(1, 229, __pyx_L9_except_error)
       __Pyx_XGOTREF(__pyx_t_13);
       __Pyx_XGOTREF(__pyx_t_7);
       __Pyx_XGOTREF(__pyx_t_1);
@@ -63571,7 +64133,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __pyx_v_err = __pyx_t_7;
       /*try:*/ {
 
-        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":228
+        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":230
  *             return chunk
  *         except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
  *             raise UnsupportedSyntaxError(             # <<<<<<<<<<<<<<
@@ -63579,19 +64141,19 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
  *             ) from err
 */
         __pyx_t_3 = NULL;
-        __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_UnsupportedSyntaxError); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 228, __pyx_L19_error)
+        __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_UnsupportedSyntaxError); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 230, __pyx_L19_error)
         __Pyx_GOTREF(__pyx_t_4);
 
-        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":229
+        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":231
  *         except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
  *             raise UnsupportedSyntaxError(
  *                 f"Grouped aggregate expression evaluation does not support this query shape: {err}"             # <<<<<<<<<<<<<<
  *             ) from err
  * 
 */
-        __pyx_t_15 = __Pyx_PyObject_FormatSimple(__pyx_v_err, __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_15)) __PYX_ERR(1, 229, __pyx_L19_error)
+        __pyx_t_15 = __Pyx_PyObject_FormatSimple(__pyx_v_err, __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_15)) __PYX_ERR(1, 231, __pyx_L19_error)
         __Pyx_GOTREF(__pyx_t_15);
-        __pyx_t_16 = __Pyx_PyUnicode_Concat(__pyx_mstate_global->__pyx_kp_u_Grouped_aggregate_expression_eva, __pyx_t_15); if (unlikely(!__pyx_t_16)) __PYX_ERR(1, 229, __pyx_L19_error)
+        __pyx_t_16 = __Pyx_PyUnicode_Concat(__pyx_mstate_global->__pyx_kp_u_Grouped_aggregate_expression_eva, __pyx_t_15); if (unlikely(!__pyx_t_16)) __PYX_ERR(1, 231, __pyx_L19_error)
         __Pyx_GOTREF(__pyx_t_16);
         __Pyx_DECREF(__pyx_t_15); __pyx_t_15 = 0;
         __pyx_t_5 = 1;
@@ -63612,11 +64174,11 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
           __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
           __Pyx_DECREF(__pyx_t_16); __pyx_t_16 = 0;
           __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-          if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 228, __pyx_L19_error)
+          if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 230, __pyx_L19_error)
           __Pyx_GOTREF(__pyx_t_8);
         }
 
-        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":230
+        /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":232
  *             raise UnsupportedSyntaxError(
  *                 f"Grouped aggregate expression evaluation does not support this query shape: {err}"
  *             ) from err             # <<<<<<<<<<<<<<
@@ -63625,10 +64187,10 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
         __Pyx_Raise(__pyx_t_8, 0, 0, __pyx_v_err);
         __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
-        __PYX_ERR(1, 228, __pyx_L19_error)
+        __PYX_ERR(1, 230, __pyx_L19_error)
       }
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":227
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":229
  *             self.readings["time_aggregate_evaluations"] += time.monotonic_ns() - eval_start
  *             return chunk
  *         except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:             # <<<<<<<<<<<<<<
@@ -63675,7 +64237,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     }
     goto __pyx_L9_except_error;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":221
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":223
  *             chunk.append_vector("*", star_vector)
  *         eval_start = time.monotonic_ns()
  *         try:             # <<<<<<<<<<<<<<
@@ -63696,7 +64258,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     goto __pyx_L0;
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":213
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":215
  *         }
  * 
  *     def _prepare_chunk(self, chunk):             # <<<<<<<<<<<<<<
@@ -63727,7 +64289,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   return __pyx_r;
 }
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":232
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":234
  *             ) from err
  * 
  *     def _apply_having_filter(self, morsel):             # <<<<<<<<<<<<<<
@@ -63775,39 +64337,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,&__pyx_mstate_global->__pyx_n_u_morsel,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 232, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 234, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(1, 232, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(1, 234, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 232, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 234, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_apply_having_filter", 0) < (0)) __PYX_ERR(1, 232, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_apply_having_filter", 0) < (0)) __PYX_ERR(1, 234, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_apply_having_filter", 1, 2, 2, i); __PYX_ERR(1, 232, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_apply_having_filter", 1, 2, 2, i); __PYX_ERR(1, 234, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 232, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 234, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(1, 232, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(1, 234, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
     __pyx_v_morsel = values[1];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_apply_having_filter", 1, 2, 2, __pyx_nargs); __PYX_ERR(1, 232, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_apply_having_filter", 1, 2, 2, __pyx_nargs); __PYX_ERR(1, 234, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -63845,7 +64407,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_apply_having_filter", 0);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":233
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":235
  * 
  *     def _apply_having_filter(self, morsel):
  *         from opteryx.expression.evaluator import evaluate_draken             # <<<<<<<<<<<<<<
@@ -63854,14 +64416,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   {
     PyObject* const __pyx_imported_names[] = {__pyx_mstate_global->__pyx_n_u_evaluate_draken};
-    __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_opteryx_expression_evaluator, __pyx_imported_names, 1, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 233, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_opteryx_expression_evaluator, __pyx_imported_names, 1, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 235, __pyx_L1_error)
   }
   __pyx_t_1 = __pyx_t_2;
   __Pyx_GOTREF(__pyx_t_1);
   {
     PyObject* const __pyx_imported_names[] = {__pyx_mstate_global->__pyx_n_u_evaluate_draken};
     __pyx_t_3 = 0; {
-      __pyx_t_4 = __Pyx_ImportFrom(__pyx_t_1, __pyx_imported_names[__pyx_t_3]); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 233, __pyx_L1_error)
+      __pyx_t_4 = __Pyx_ImportFrom(__pyx_t_1, __pyx_imported_names[__pyx_t_3]); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 235, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
       switch (__pyx_t_3) {
         case 0:
@@ -63875,7 +64437,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":234
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":236
  *     def _apply_having_filter(self, morsel):
  *         from opteryx.expression.evaluator import evaluate_draken
  *         mask = evaluate_draken(self._having_condition, morsel)             # <<<<<<<<<<<<<<
@@ -63885,7 +64447,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_t_4 = NULL;
   __Pyx_INCREF(__pyx_v_evaluate_draken);
   __pyx_t_5 = __pyx_v_evaluate_draken; 
-  __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_having_condition_2); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 234, __pyx_L1_error)
+  __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_having_condition_2); if (unlikely(!__pyx_t_6)) __PYX_ERR(1, 236, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_6);
   __pyx_t_7 = 1;
   #if CYTHON_UNPACK_METHODS
@@ -63905,13 +64467,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
     __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
     __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 234, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 236, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __pyx_v_mask = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":235
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":237
  *         from opteryx.expression.evaluator import evaluate_draken
  *         mask = evaluate_draken(self._having_condition, morsel)
  *         return morsel.filter_mask(mask)             # <<<<<<<<<<<<<<
@@ -63926,14 +64488,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     PyObject *__pyx_callargs[2] = {__pyx_t_5, __pyx_v_mask};
     __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_filter_mask, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 235, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 237, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":232
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":234
  *             ) from err
  * 
  *     def _apply_having_filter(self, morsel):             # <<<<<<<<<<<<<<
@@ -63958,7 +64520,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 }
 static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_22generator1(__pyx_CoroutineObject *__pyx_generator, CYTHON_UNUSED PyThreadState *__pyx_tstate, PyObject *__pyx_sent_value); /* proto */
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":237
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":239
  *         return morsel.filter_mask(mask)
  * 
  *     def execute(self, morsel):             # <<<<<<<<<<<<<<
@@ -64006,39 +64568,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,&__pyx_mstate_global->__pyx_n_u_morsel,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 237, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 239, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(1, 237, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(1, 239, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 237, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 239, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "execute", 0) < (0)) __PYX_ERR(1, 237, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "execute", 0) < (0)) __PYX_ERR(1, 239, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("execute", 1, 2, 2, i); __PYX_ERR(1, 237, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("execute", 1, 2, 2, i); __PYX_ERR(1, 239, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 237, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 239, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(1, 237, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(1, 239, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
     __pyx_v_morsel = values[1];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("execute", 1, 2, 2, __pyx_nargs); __PYX_ERR(1, 237, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("execute", 1, 2, 2, __pyx_nargs); __PYX_ERR(1, 239, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -64071,7 +64633,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   if (unlikely(!__pyx_cur_scope)) {
     __pyx_cur_scope = ((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_7_execute *)Py_None);
     __Pyx_INCREF(Py_None);
-    __PYX_ERR(1, 237, __pyx_L1_error)
+    __PYX_ERR(1, 239, __pyx_L1_error)
   } else {
     __Pyx_GOTREF((PyObject *)__pyx_cur_scope);
   }
@@ -64082,7 +64644,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_INCREF(__pyx_cur_scope->__pyx_v_morsel);
   __Pyx_GIVEREF(__pyx_cur_scope->__pyx_v_morsel);
   {
-    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_22generator1, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[5]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_execute, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode_execu, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg); if (unlikely(!gen)) __PYX_ERR(1, 237, __pyx_L1_error)
+    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_22generator1, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[5]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_execute, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode_execu, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg); if (unlikely(!gen)) __PYX_ERR(1, 239, __pyx_L1_error)
     __Pyx_DECREF(__pyx_cur_scope);
     __Pyx_RefNannyFinishContext();
     return (PyObject *) gen;
@@ -64130,23 +64692,23 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_L3_first_run:;
   if (unlikely(__pyx_sent_value != Py_None)) {
     if (unlikely(__pyx_sent_value)) PyErr_SetString(PyExc_TypeError, "can't send non-None value to a just-started generator");
-    __PYX_ERR(1, 237, __pyx_L1_error)
+    __PYX_ERR(1, 239, __pyx_L1_error)
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":238
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":240
  * 
  *     def execute(self, morsel):
  *         if morsel is EOS:             # <<<<<<<<<<<<<<
  *             yield from self._finalize()
  *             return
 */
-  __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_EOS); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 238, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_EOS); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 240, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_t_2 = (__pyx_cur_scope->__pyx_v_morsel == __pyx_t_1);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (__pyx_t_2) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":239
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":241
  *     def execute(self, morsel):
  *         if morsel is EOS:
  *             yield from self._finalize()             # <<<<<<<<<<<<<<
@@ -64160,7 +64722,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       PyObject *__pyx_callargs[2] = {__pyx_t_3, NULL};
       __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_finalize_2, __pyx_callargs+__pyx_t_4, (1-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 239, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 241, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __pyx_t_5 = __Pyx_Generator_Yield_From(__pyx_generator, __pyx_t_1, &__pyx_r);
@@ -64174,16 +64736,16 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __pyx_generator->resume_label = 1;
       return __pyx_r;
       __pyx_L5_resume_from_yield_from:;
-      if (unlikely(!__pyx_sent_value)) __PYX_ERR(1, 239, __pyx_L1_error)
+      if (unlikely(!__pyx_sent_value)) __PYX_ERR(1, 241, __pyx_L1_error)
     } else if (likely(__pyx_t_5 == PYGEN_RETURN)) {
       __Pyx_GOTREF(__pyx_r);
       __Pyx_DECREF(__pyx_r); __pyx_r = 0;
     } else {
       __Pyx_XGOTREF(__pyx_r);
-      __PYX_ERR(1, 239, __pyx_L1_error)
+      __PYX_ERR(1, 241, __pyx_L1_error)
     }
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":240
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":242
  *         if morsel is EOS:
  *             yield from self._finalize()
  *             return             # <<<<<<<<<<<<<<
@@ -64194,7 +64756,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":238
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":240
  * 
  *     def execute(self, morsel):
  *         if morsel is EOS:             # <<<<<<<<<<<<<<
@@ -64203,7 +64765,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":242
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":244
  *             return
  * 
  *         if not isinstance(morsel, Morsel):             # <<<<<<<<<<<<<<
@@ -64214,7 +64776,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_t_6 = (!__pyx_t_2);
   if (__pyx_t_6) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":243
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":245
  * 
  *         if not isinstance(morsel, Morsel):
  *             morsel = Morsel.from_arrow(morsel.combine_chunks())             # <<<<<<<<<<<<<<
@@ -64230,7 +64792,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       PyObject *__pyx_callargs[2] = {__pyx_t_8, NULL};
       __pyx_t_7 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_combine_chunks, __pyx_callargs+__pyx_t_4, (1-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_8); __pyx_t_8 = 0;
-      if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 243, __pyx_L1_error)
+      if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 245, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_7);
     }
     __pyx_t_4 = 0;
@@ -64239,7 +64801,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_from_arrow, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
       __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 243, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 245, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __Pyx_GOTREF(__pyx_cur_scope->__pyx_v_morsel);
@@ -64247,7 +64809,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_GIVEREF(__pyx_t_1);
     __pyx_t_1 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":242
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":244
  *             return
  * 
  *         if not isinstance(morsel, Morsel):             # <<<<<<<<<<<<<<
@@ -64256,27 +64818,27 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":245
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":247
  *             morsel = Morsel.from_arrow(morsel.combine_chunks())
  * 
  *         if morsel.num_rows == 0:             # <<<<<<<<<<<<<<
  *             yield EMPTY
  *             return
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_morsel, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 245, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_morsel, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 247, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_6 = (__Pyx_PyLong_BoolEqObjC(__pyx_t_1, __pyx_mstate_global->__pyx_int_0, 0, 0)); if (unlikely((__pyx_t_6 < 0))) __PYX_ERR(1, 245, __pyx_L1_error)
+  __pyx_t_6 = (__Pyx_PyLong_BoolEqObjC(__pyx_t_1, __pyx_mstate_global->__pyx_int_0, 0, 0)); if (unlikely((__pyx_t_6 < 0))) __PYX_ERR(1, 247, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (__pyx_t_6) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":246
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":248
  * 
  *         if morsel.num_rows == 0:
  *             yield EMPTY             # <<<<<<<<<<<<<<
  *             return
  * 
 */
-    __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_EMPTY); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 246, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_EMPTY); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 248, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __pyx_r = __pyx_t_1;
     __pyx_t_1 = 0;
@@ -64287,9 +64849,9 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_generator->resume_label = 2;
     return __pyx_r;
     __pyx_L8_resume_from_yield:;
-    if (unlikely(!__pyx_sent_value)) __PYX_ERR(1, 246, __pyx_L1_error)
+    if (unlikely(!__pyx_sent_value)) __PYX_ERR(1, 248, __pyx_L1_error)
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":247
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":249
  *         if morsel.num_rows == 0:
  *             yield EMPTY
  *             return             # <<<<<<<<<<<<<<
@@ -64300,7 +64862,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":245
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":247
  *             morsel = Morsel.from_arrow(morsel.combine_chunks())
  * 
  *         if morsel.num_rows == 0:             # <<<<<<<<<<<<<<
@@ -64309,20 +64871,20 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":249
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":251
  *             return
  * 
  *         if self._needs_expression_eval:             # <<<<<<<<<<<<<<
  *             morsel = self._prepare_chunk(morsel)
  *         if self._required_columns:
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_needs_expression_eval); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 249, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_needs_expression_eval); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 251, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_6 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_6 < 0))) __PYX_ERR(1, 249, __pyx_L1_error)
+  __pyx_t_6 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_6 < 0))) __PYX_ERR(1, 251, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (__pyx_t_6) {
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":250
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":252
  * 
  *         if self._needs_expression_eval:
  *             morsel = self._prepare_chunk(morsel)             # <<<<<<<<<<<<<<
@@ -64336,53 +64898,6 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       PyObject *__pyx_callargs[2] = {__pyx_t_7, __pyx_cur_scope->__pyx_v_morsel};
       __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_prepare_chunk, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 250, __pyx_L1_error)
-      __Pyx_GOTREF(__pyx_t_1);
-    }
-    __Pyx_GOTREF(__pyx_cur_scope->__pyx_v_morsel);
-    __Pyx_DECREF_SET(__pyx_cur_scope->__pyx_v_morsel, __pyx_t_1);
-    __Pyx_GIVEREF(__pyx_t_1);
-    __pyx_t_1 = 0;
-
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":249
- *             return
- * 
- *         if self._needs_expression_eval:             # <<<<<<<<<<<<<<
- *             morsel = self._prepare_chunk(morsel)
- *         if self._required_columns:
-*/
-  }
-
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":251
- *         if self._needs_expression_eval:
- *             morsel = self._prepare_chunk(morsel)
- *         if self._required_columns:             # <<<<<<<<<<<<<<
- *             morsel = morsel.select(self._required_columns)
- * 
-*/
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_required_columns); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 251, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_6 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_6 < 0))) __PYX_ERR(1, 251, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  if (__pyx_t_6) {
-
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":252
- *             morsel = self._prepare_chunk(morsel)
- *         if self._required_columns:
- *             morsel = morsel.select(self._required_columns)             # <<<<<<<<<<<<<<
- * 
- *         ingest_start = time.monotonic_ns()
-*/
-    __pyx_t_7 = __pyx_cur_scope->__pyx_v_morsel;
-    __Pyx_INCREF(__pyx_t_7);
-    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_required_columns); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 252, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_3);
-    __pyx_t_4 = 0;
-    {
-      PyObject *__pyx_callargs[2] = {__pyx_t_7, __pyx_t_3};
-      __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_select, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-      __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
-      __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
       if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 252, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
@@ -64392,6 +64907,53 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_t_1 = 0;
 
     /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":251
+ *             return
+ * 
+ *         if self._needs_expression_eval:             # <<<<<<<<<<<<<<
+ *             morsel = self._prepare_chunk(morsel)
+ *         if self._required_columns:
+*/
+  }
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":253
+ *         if self._needs_expression_eval:
+ *             morsel = self._prepare_chunk(morsel)
+ *         if self._required_columns:             # <<<<<<<<<<<<<<
+ *             morsel = morsel.select(self._required_columns)
+ * 
+*/
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_required_columns); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 253, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __pyx_t_6 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_6 < 0))) __PYX_ERR(1, 253, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  if (__pyx_t_6) {
+
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":254
+ *             morsel = self._prepare_chunk(morsel)
+ *         if self._required_columns:
+ *             morsel = morsel.select(self._required_columns)             # <<<<<<<<<<<<<<
+ * 
+ *         ingest_start = time.monotonic_ns()
+*/
+    __pyx_t_7 = __pyx_cur_scope->__pyx_v_morsel;
+    __Pyx_INCREF(__pyx_t_7);
+    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_required_columns); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 254, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_3);
+    __pyx_t_4 = 0;
+    {
+      PyObject *__pyx_callargs[2] = {__pyx_t_7, __pyx_t_3};
+      __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_select, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+      __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
+      __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 254, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_1);
+    }
+    __Pyx_GOTREF(__pyx_cur_scope->__pyx_v_morsel);
+    __Pyx_DECREF_SET(__pyx_cur_scope->__pyx_v_morsel, __pyx_t_1);
+    __Pyx_GIVEREF(__pyx_t_1);
+    __pyx_t_1 = 0;
+
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":253
  *         if self._needs_expression_eval:
  *             morsel = self._prepare_chunk(morsel)
  *         if self._required_columns:             # <<<<<<<<<<<<<<
@@ -64400,7 +64962,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":254
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":256
  *             morsel = morsel.select(self._required_columns)
  * 
  *         ingest_start = time.monotonic_ns()             # <<<<<<<<<<<<<<
@@ -64408,9 +64970,9 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
  *         self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start
 */
   __pyx_t_3 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 254, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 256, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
-  __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 254, __pyx_L1_error)
+  __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 256, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_8);
   __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
   __pyx_t_4 = 1;
@@ -64430,21 +64992,21 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_8, __pyx_callargs+__pyx_t_4, (1-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
     __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 254, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 256, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __Pyx_GIVEREF(__pyx_t_1);
   __pyx_cur_scope->__pyx_v_ingest_start = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":255
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":257
  * 
  *         ingest_start = time.monotonic_ns()
  *         self._engine.ingest(morsel)             # <<<<<<<<<<<<<<
  *         self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start
  *         yield EMPTY
 */
-  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_engine); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 255, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_engine); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 257, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __pyx_t_8 = __pyx_t_3;
   __Pyx_INCREF(__pyx_t_8);
@@ -64454,28 +65016,28 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_ingest, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_8); __pyx_t_8 = 0;
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 255, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 257, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":256
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":258
  *         ingest_start = time.monotonic_ns()
  *         self._engine.ingest(morsel)
  *         self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start             # <<<<<<<<<<<<<<
  *         yield EMPTY
  * 
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 256, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 258, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_ingest);
   __pyx_t_9 = __pyx_mstate_global->__pyx_n_u_time_aggregate_ingest;
-  __pyx_t_3 = __Pyx_PyObject_Dict_GetItem(__pyx_t_1, __pyx_t_9); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 256, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyObject_Dict_GetItem(__pyx_t_1, __pyx_t_9); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 258, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __pyx_t_7 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_10)) __PYX_ERR(1, 256, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_10)) __PYX_ERR(1, 258, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_10);
-  __pyx_t_11 = __Pyx_PyObject_GetAttrStr(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 256, __pyx_L1_error)
+  __pyx_t_11 = __Pyx_PyObject_GetAttrStr(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 258, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
   __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
   __pyx_t_4 = 1;
@@ -64495,29 +65057,29 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_t_8 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_11, __pyx_callargs+__pyx_t_4, (1-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
     __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
-    if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 256, __pyx_L1_error)
+    if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 258, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_8);
   }
-  __pyx_t_11 = PyNumber_Subtract(__pyx_t_8, __pyx_cur_scope->__pyx_v_ingest_start); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 256, __pyx_L1_error)
+  __pyx_t_11 = PyNumber_Subtract(__pyx_t_8, __pyx_cur_scope->__pyx_v_ingest_start); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 258, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
   __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
-  __pyx_t_8 = PyNumber_InPlaceAdd(__pyx_t_3, __pyx_t_11); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 256, __pyx_L1_error)
+  __pyx_t_8 = PyNumber_InPlaceAdd(__pyx_t_3, __pyx_t_11); if (unlikely(!__pyx_t_8)) __PYX_ERR(1, 258, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_8);
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
   __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
-  if (unlikely((PyObject_SetItem(__pyx_t_1, __pyx_t_9, __pyx_t_8) < 0))) __PYX_ERR(1, 256, __pyx_L1_error)
+  if (unlikely((PyObject_SetItem(__pyx_t_1, __pyx_t_9, __pyx_t_8) < 0))) __PYX_ERR(1, 258, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":257
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":259
  *         self._engine.ingest(morsel)
  *         self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start
  *         yield EMPTY             # <<<<<<<<<<<<<<
  * 
  *     def _finalize(self):
 */
-  __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_EMPTY); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 257, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_EMPTY); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 259, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
@@ -64528,10 +65090,10 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_generator->resume_label = 3;
   return __pyx_r;
   __pyx_L11_resume_from_yield:;
-  if (unlikely(!__pyx_sent_value)) __PYX_ERR(1, 257, __pyx_L1_error)
+  if (unlikely(!__pyx_sent_value)) __PYX_ERR(1, 259, __pyx_L1_error)
   CYTHON_MAYBE_UNUSED_VAR(__pyx_cur_scope);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":237
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":239
  *         return morsel.filter_mask(mask)
  * 
  *     def execute(self, morsel):             # <<<<<<<<<<<<<<
@@ -64566,7 +65128,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 }
 static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_25generator2(__pyx_CoroutineObject *__pyx_generator, CYTHON_UNUSED PyThreadState *__pyx_tstate, PyObject *__pyx_sent_value); /* proto */
 
-/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":259
+/* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":261
  *         yield EMPTY
  * 
  *     def _finalize(self):             # <<<<<<<<<<<<<<
@@ -64613,32 +65175,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 259, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(1, 261, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 259, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 261, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_finalize", 0) < (0)) __PYX_ERR(1, 259, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_finalize", 0) < (0)) __PYX_ERR(1, 261, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_finalize", 1, 1, 1, i); __PYX_ERR(1, 259, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_finalize", 1, 1, 1, i); __PYX_ERR(1, 261, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 259, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(1, 261, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_finalize", 1, 1, 1, __pyx_nargs); __PYX_ERR(1, 259, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_finalize", 1, 1, 1, __pyx_nargs); __PYX_ERR(1, 261, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -64671,7 +65233,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   if (unlikely(!__pyx_cur_scope)) {
     __pyx_cur_scope = ((struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_8__finalize *)Py_None);
     __Pyx_INCREF(Py_None);
-    __PYX_ERR(1, 259, __pyx_L1_error)
+    __PYX_ERR(1, 261, __pyx_L1_error)
   } else {
     __Pyx_GOTREF((PyObject *)__pyx_cur_scope);
   }
@@ -64679,7 +65241,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_INCREF(__pyx_cur_scope->__pyx_v_self);
   __Pyx_GIVEREF(__pyx_cur_scope->__pyx_v_self);
   {
-    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_25generator2, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[6]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_finalize_2, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__fina, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg); if (unlikely(!gen)) __PYX_ERR(1, 259, __pyx_L1_error)
+    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_25generator2, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[6]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_finalize_2, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__fina, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg); if (unlikely(!gen)) __PYX_ERR(1, 261, __pyx_L1_error)
     __Pyx_DECREF(__pyx_cur_scope);
     __Pyx_RefNannyFinishContext();
     return (PyObject *) gen;
@@ -64725,10 +65287,10 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_L3_first_run:;
   if (unlikely(__pyx_sent_value != Py_None)) {
     if (unlikely(__pyx_sent_value)) PyErr_SetString(PyExc_TypeError, "can't send non-None value to a just-started generator");
-    __PYX_ERR(1, 259, __pyx_L1_error)
+    __PYX_ERR(1, 261, __pyx_L1_error)
   }
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":260
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":262
  * 
  *     def _finalize(self):
  *         finalize_start = time.monotonic_ns()             # <<<<<<<<<<<<<<
@@ -64736,9 +65298,9 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
  *         # Pass HAVING filter to engine for early filtering before chunking
 */
   __pyx_t_2 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 260, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 262, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
-  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 260, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 262, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
   __pyx_t_5 = 1;
@@ -64758,26 +65320,26 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_4, __pyx_callargs+__pyx_t_5, (1-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 260, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 262, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __Pyx_GIVEREF(__pyx_t_1);
   __pyx_cur_scope->__pyx_v_finalize_start = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":264
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":266
  *         # Pass HAVING filter to engine for early filtering before chunking
  *         # This avoids reconstructing groups that don't pass the filter.
  *         filter_fn = self._apply_having_filter if self._having_condition is not None else None             # <<<<<<<<<<<<<<
  * 
  *         for chunk in self._engine.finalize_morsels(CHUNK_SIZE, filter_fn=filter_fn):
 */
-  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_having_condition_2); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 264, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_having_condition_2); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 266, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_6 = (__pyx_t_4 != Py_None);
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   if (__pyx_t_6) {
-    __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_apply_having_filter); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 264, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_apply_having_filter); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 266, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __pyx_t_1 = __pyx_t_4;
     __pyx_t_4 = 0;
@@ -64789,31 +65351,31 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __pyx_cur_scope->__pyx_v_filter_fn = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":266
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":268
  *         filter_fn = self._apply_having_filter if self._having_condition is not None else None
  * 
  *         for chunk in self._engine.finalize_morsels(CHUNK_SIZE, filter_fn=filter_fn):             # <<<<<<<<<<<<<<
  *             if self._implicit_count_added:
  *                 # Drop the first column (the implicit COUNT(*))
 */
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_engine); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 266, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_engine); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 268, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __pyx_t_4 = __pyx_t_2;
   __Pyx_INCREF(__pyx_t_4);
-  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_CHUNK_SIZE); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 266, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_CHUNK_SIZE); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 268, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __pyx_t_5 = 0;
   {
     PyObject *__pyx_callargs[2 + ((CYTHON_VECTORCALL) ? 1 : 0)] = {__pyx_t_4, __pyx_t_3};
-    __pyx_t_7 = __Pyx_MakeVectorcallBuilderKwds(1); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 266, __pyx_L1_error)
+    __pyx_t_7 = __Pyx_MakeVectorcallBuilderKwds(1); if (unlikely(!__pyx_t_7)) __PYX_ERR(1, 268, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_7);
-    if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_filter_fn, __pyx_cur_scope->__pyx_v_filter_fn, __pyx_t_7, __pyx_callargs+2, 0) < (0)) __PYX_ERR(1, 266, __pyx_L1_error)
+    if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_filter_fn, __pyx_cur_scope->__pyx_v_filter_fn, __pyx_t_7, __pyx_callargs+2, 0) < (0)) __PYX_ERR(1, 268, __pyx_L1_error)
     __pyx_t_1 = __Pyx_Object_VectorcallMethod_CallFromBuilder((PyObject*)__pyx_mstate_global->__pyx_n_u_finalize_morsels, __pyx_callargs+__pyx_t_5, (2-__pyx_t_5) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET), __pyx_t_7);
     __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
     __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 266, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 268, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   if (likely(PyList_CheckExact(__pyx_t_1)) || PyTuple_CheckExact(__pyx_t_1)) {
@@ -64821,9 +65383,9 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_t_8 = 0;
     __pyx_t_9 = NULL;
   } else {
-    __pyx_t_8 = -1; __pyx_t_2 = PyObject_GetIter(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 266, __pyx_L1_error)
+    __pyx_t_8 = -1; __pyx_t_2 = PyObject_GetIter(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 268, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_9 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_2); if (unlikely(!__pyx_t_9)) __PYX_ERR(1, 266, __pyx_L1_error)
+    __pyx_t_9 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_2); if (unlikely(!__pyx_t_9)) __PYX_ERR(1, 268, __pyx_L1_error)
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   for (;;) {
@@ -64832,7 +65394,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         {
           Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_2);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 266, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 268, __pyx_L1_error)
           #endif
           if (__pyx_t_8 >= __pyx_temp) break;
         }
@@ -64842,7 +65404,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         {
           Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_2);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 266, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(1, 268, __pyx_L1_error)
           #endif
           if (__pyx_t_8 >= __pyx_temp) break;
         }
@@ -64853,13 +65415,13 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         #endif
         ++__pyx_t_8;
       }
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 266, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 268, __pyx_L1_error)
     } else {
       __pyx_t_1 = __pyx_t_9(__pyx_t_2);
       if (unlikely(!__pyx_t_1)) {
         PyObject* exc_type = PyErr_Occurred();
         if (exc_type) {
-          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(1, 266, __pyx_L1_error)
+          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(1, 268, __pyx_L1_error)
           PyErr_Clear();
         }
         break;
@@ -64871,20 +65433,20 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_GIVEREF(__pyx_t_1);
     __pyx_t_1 = 0;
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":267
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":269
  * 
  *         for chunk in self._engine.finalize_morsels(CHUNK_SIZE, filter_fn=filter_fn):
  *             if self._implicit_count_added:             # <<<<<<<<<<<<<<
  *                 # Drop the first column (the implicit COUNT(*))
  *                 chunk = chunk.select(chunk.column_names[1:])
 */
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_implicit_count_added); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 267, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_implicit_count_added); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 269, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_6 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_6 < 0))) __PYX_ERR(1, 267, __pyx_L1_error)
+    __pyx_t_6 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_6 < 0))) __PYX_ERR(1, 269, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     if (__pyx_t_6) {
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":269
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":271
  *             if self._implicit_count_added:
  *                 # Drop the first column (the implicit COUNT(*))
  *                 chunk = chunk.select(chunk.column_names[1:])             # <<<<<<<<<<<<<<
@@ -64893,9 +65455,9 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
       __pyx_t_7 = __pyx_cur_scope->__pyx_v_chunk;
       __Pyx_INCREF(__pyx_t_7);
-      __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_chunk, __pyx_mstate_global->__pyx_n_u_column_names); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 269, __pyx_L1_error)
+      __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_chunk, __pyx_mstate_global->__pyx_n_u_column_names); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 271, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
-      __pyx_t_4 = __Pyx_PyObject_GetSlice(__pyx_t_3, 1, 0, NULL, NULL, &__pyx_mstate_global->__pyx_slice[1], 1, 0, 0); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 269, __pyx_L1_error)
+      __pyx_t_4 = __Pyx_PyObject_GetSlice(__pyx_t_3, 1, 0, NULL, NULL, &__pyx_mstate_global->__pyx_slice[1], 1, 0, 0); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 271, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
       __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
       __pyx_t_5 = 0;
@@ -64904,7 +65466,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
         __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_select, __pyx_callargs+__pyx_t_5, (2-__pyx_t_5) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
         __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
         __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-        if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 269, __pyx_L1_error)
+        if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 271, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_1);
       }
       __Pyx_GOTREF(__pyx_cur_scope->__pyx_v_chunk);
@@ -64912,7 +65474,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
       __Pyx_GIVEREF(__pyx_t_1);
       __pyx_t_1 = 0;
 
-      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":267
+      /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":269
  * 
  *         for chunk in self._engine.finalize_morsels(CHUNK_SIZE, filter_fn=filter_fn):
  *             if self._implicit_count_added:             # <<<<<<<<<<<<<<
@@ -64921,7 +65483,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
 */
     }
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":270
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":272
  *                 # Drop the first column (the implicit COUNT(*))
  *                 chunk = chunk.select(chunk.column_names[1:])
  *             yield chunk             # <<<<<<<<<<<<<<
@@ -64946,9 +65508,9 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __Pyx_XGOTREF(__pyx_t_2);
     __pyx_t_8 = __pyx_cur_scope->__pyx_t_1;
     __pyx_t_9 = __pyx_cur_scope->__pyx_t_2;
-    if (unlikely(!__pyx_sent_value)) __PYX_ERR(1, 270, __pyx_L1_error)
+    if (unlikely(!__pyx_sent_value)) __PYX_ERR(1, 272, __pyx_L1_error)
 
-    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":266
+    /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":268
  *         filter_fn = self._apply_having_filter if self._having_condition is not None else None
  * 
  *         for chunk in self._engine.finalize_morsels(CHUNK_SIZE, filter_fn=filter_fn):             # <<<<<<<<<<<<<<
@@ -64958,23 +65520,23 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   }
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":272
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":274
  *             yield chunk
  * 
  *         self.readings["time_aggregate_finalize"] += time.monotonic_ns() - finalize_start             # <<<<<<<<<<<<<<
  *         engine_telemetry = self._engine.telemetry()
  *         self.readings["time_aggregate_resolve"] += engine_telemetry["time_resolve_ns"]
 */
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 272, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 274, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_finalize);
   __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_finalize;
-  __pyx_t_1 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_10); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 272, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_10); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 274, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_t_7 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 272, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_3)) __PYX_ERR(1, 274, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
-  __pyx_t_11 = __Pyx_PyObject_GetAttrStr(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 272, __pyx_L1_error)
+  __pyx_t_11 = __Pyx_PyObject_GetAttrStr(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 274, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
   __pyx_t_5 = 1;
@@ -64994,29 +65556,29 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_t_4 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_11, __pyx_callargs+__pyx_t_5, (1-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
     __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
-    if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 272, __pyx_L1_error)
+    if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 274, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
   }
-  __pyx_t_11 = PyNumber_Subtract(__pyx_t_4, __pyx_cur_scope->__pyx_v_finalize_start); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 272, __pyx_L1_error)
+  __pyx_t_11 = PyNumber_Subtract(__pyx_t_4, __pyx_cur_scope->__pyx_v_finalize_start); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 274, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-  __pyx_t_4 = PyNumber_InPlaceAdd(__pyx_t_1, __pyx_t_11); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 272, __pyx_L1_error)
+  __pyx_t_4 = PyNumber_InPlaceAdd(__pyx_t_1, __pyx_t_11); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 274, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
-  if (unlikely((PyObject_SetItem(__pyx_t_2, __pyx_t_10, __pyx_t_4) < 0))) __PYX_ERR(1, 272, __pyx_L1_error)
+  if (unlikely((PyObject_SetItem(__pyx_t_2, __pyx_t_10, __pyx_t_4) < 0))) __PYX_ERR(1, 274, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":273
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":275
  * 
  *         self.readings["time_aggregate_finalize"] += time.monotonic_ns() - finalize_start
  *         engine_telemetry = self._engine.telemetry()             # <<<<<<<<<<<<<<
  *         self.readings["time_aggregate_resolve"] += engine_telemetry["time_resolve_ns"]
  *         self.readings["time_aggregate_hash"] += engine_telemetry["time_hash_ns"]
 */
-  __pyx_t_11 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_engine); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 273, __pyx_L1_error)
+  __pyx_t_11 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_engine); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 275, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
   __pyx_t_4 = __pyx_t_11;
   __Pyx_INCREF(__pyx_t_4);
@@ -65026,75 +65588,27 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
     __pyx_t_2 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_telemetry, __pyx_callargs+__pyx_t_5, (1-__pyx_t_5) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
     __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
-    if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 273, __pyx_L1_error)
+    if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 275, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
   }
   __Pyx_GIVEREF(__pyx_t_2);
   __pyx_cur_scope->__pyx_v_engine_telemetry = __pyx_t_2;
   __pyx_t_2 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":274
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":276
  *         self.readings["time_aggregate_finalize"] += time.monotonic_ns() - finalize_start
  *         engine_telemetry = self._engine.telemetry()
  *         self.readings["time_aggregate_resolve"] += engine_telemetry["time_resolve_ns"]             # <<<<<<<<<<<<<<
  *         self.readings["time_aggregate_hash"] += engine_telemetry["time_hash_ns"]
  *         self.readings["time_aggregate_lookup"] += engine_telemetry["time_lookup_ns"]
 */
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 274, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 276, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_resolve);
   __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_resolve;
-  __pyx_t_11 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_10); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 274, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_11);
-  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_resolve_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 274, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_4);
-  __pyx_t_1 = PyNumber_InPlaceAdd(__pyx_t_11, __pyx_t_4); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 274, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_1);
-  __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
-  __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-  if (unlikely((PyObject_SetItem(__pyx_t_2, __pyx_t_10, __pyx_t_1) < 0))) __PYX_ERR(1, 274, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":275
- *         engine_telemetry = self._engine.telemetry()
- *         self.readings["time_aggregate_resolve"] += engine_telemetry["time_resolve_ns"]
- *         self.readings["time_aggregate_hash"] += engine_telemetry["time_hash_ns"]             # <<<<<<<<<<<<<<
- *         self.readings["time_aggregate_lookup"] += engine_telemetry["time_lookup_ns"]
- *         self.readings["time_aggregate_store_keys"] += engine_telemetry["time_store_keys_ns"]
-*/
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 275, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_hash);
-  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_hash;
-  __pyx_t_1 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_10); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 275, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_hash_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 275, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_4);
-  __pyx_t_11 = PyNumber_InPlaceAdd(__pyx_t_1, __pyx_t_4); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 275, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_11);
-  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-  if (unlikely((PyObject_SetItem(__pyx_t_2, __pyx_t_10, __pyx_t_11) < 0))) __PYX_ERR(1, 275, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
-  __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":276
- *         self.readings["time_aggregate_resolve"] += engine_telemetry["time_resolve_ns"]
- *         self.readings["time_aggregate_hash"] += engine_telemetry["time_hash_ns"]
- *         self.readings["time_aggregate_lookup"] += engine_telemetry["time_lookup_ns"]             # <<<<<<<<<<<<<<
- *         self.readings["time_aggregate_store_keys"] += engine_telemetry["time_store_keys_ns"]
- *         self.readings["time_aggregate_grow"] += engine_telemetry["time_grow_ns"]
-*/
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 276, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_lookup);
-  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_lookup;
   __pyx_t_11 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_10); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 276, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
-  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_lookup_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 276, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_resolve_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 276, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_1 = PyNumber_InPlaceAdd(__pyx_t_11, __pyx_t_4); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 276, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
@@ -65106,19 +65620,19 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
   /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":277
- *         self.readings["time_aggregate_hash"] += engine_telemetry["time_hash_ns"]
+ *         engine_telemetry = self._engine.telemetry()
+ *         self.readings["time_aggregate_resolve"] += engine_telemetry["time_resolve_ns"]
+ *         self.readings["time_aggregate_hash"] += engine_telemetry["time_hash_ns"]             # <<<<<<<<<<<<<<
  *         self.readings["time_aggregate_lookup"] += engine_telemetry["time_lookup_ns"]
- *         self.readings["time_aggregate_store_keys"] += engine_telemetry["time_store_keys_ns"]             # <<<<<<<<<<<<<<
- *         self.readings["time_aggregate_grow"] += engine_telemetry["time_grow_ns"]
- *         self.readings["time_aggregate_accumulate"] += engine_telemetry["time_accumulate_ns"]
+ *         self.readings["time_aggregate_store_keys"] += engine_telemetry["time_store_keys_ns"]
 */
   __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 277, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_store_keys);
-  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_store_keys;
+  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_hash);
+  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_hash;
   __pyx_t_1 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_10); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 277, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_store_keys_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 277, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_hash_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 277, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_11 = PyNumber_InPlaceAdd(__pyx_t_1, __pyx_t_4); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 277, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
@@ -65130,19 +65644,19 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
   /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":278
- *         self.readings["time_aggregate_lookup"] += engine_telemetry["time_lookup_ns"]
+ *         self.readings["time_aggregate_resolve"] += engine_telemetry["time_resolve_ns"]
+ *         self.readings["time_aggregate_hash"] += engine_telemetry["time_hash_ns"]
+ *         self.readings["time_aggregate_lookup"] += engine_telemetry["time_lookup_ns"]             # <<<<<<<<<<<<<<
  *         self.readings["time_aggregate_store_keys"] += engine_telemetry["time_store_keys_ns"]
- *         self.readings["time_aggregate_grow"] += engine_telemetry["time_grow_ns"]             # <<<<<<<<<<<<<<
- *         self.readings["time_aggregate_accumulate"] += engine_telemetry["time_accumulate_ns"]
- *         self.readings["time_aggregate_reconstruct"] += engine_telemetry["time_reconstruct_ns"]
+ *         self.readings["time_aggregate_grow"] += engine_telemetry["time_grow_ns"]
 */
   __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 278, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_grow);
-  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_grow;
+  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_lookup);
+  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_lookup;
   __pyx_t_11 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_10); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 278, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
-  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_grow_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 278, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_lookup_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 278, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_1 = PyNumber_InPlaceAdd(__pyx_t_11, __pyx_t_4); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 278, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
@@ -65154,19 +65668,19 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
   /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":279
- *         self.readings["time_aggregate_store_keys"] += engine_telemetry["time_store_keys_ns"]
+ *         self.readings["time_aggregate_hash"] += engine_telemetry["time_hash_ns"]
+ *         self.readings["time_aggregate_lookup"] += engine_telemetry["time_lookup_ns"]
+ *         self.readings["time_aggregate_store_keys"] += engine_telemetry["time_store_keys_ns"]             # <<<<<<<<<<<<<<
  *         self.readings["time_aggregate_grow"] += engine_telemetry["time_grow_ns"]
- *         self.readings["time_aggregate_accumulate"] += engine_telemetry["time_accumulate_ns"]             # <<<<<<<<<<<<<<
- *         self.readings["time_aggregate_reconstruct"] += engine_telemetry["time_reconstruct_ns"]
- *         self.readings["time_aggregate_reconstruct_single_fixed"] += engine_telemetry["time_reconstruct_single_fixed_ns"]
+ *         self.readings["time_aggregate_accumulate"] += engine_telemetry["time_accumulate_ns"]
 */
   __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 279, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_accumulate);
-  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_accumulate;
+  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_store_keys);
+  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_store_keys;
   __pyx_t_1 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_10); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 279, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_accumulate_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 279, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_store_keys_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 279, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_11 = PyNumber_InPlaceAdd(__pyx_t_1, __pyx_t_4); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 279, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
@@ -65178,19 +65692,19 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
   /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":280
- *         self.readings["time_aggregate_grow"] += engine_telemetry["time_grow_ns"]
+ *         self.readings["time_aggregate_lookup"] += engine_telemetry["time_lookup_ns"]
+ *         self.readings["time_aggregate_store_keys"] += engine_telemetry["time_store_keys_ns"]
+ *         self.readings["time_aggregate_grow"] += engine_telemetry["time_grow_ns"]             # <<<<<<<<<<<<<<
  *         self.readings["time_aggregate_accumulate"] += engine_telemetry["time_accumulate_ns"]
- *         self.readings["time_aggregate_reconstruct"] += engine_telemetry["time_reconstruct_ns"]             # <<<<<<<<<<<<<<
- *         self.readings["time_aggregate_reconstruct_single_fixed"] += engine_telemetry["time_reconstruct_single_fixed_ns"]
- *         self.readings["time_aggregate_reconstruct_single_string"] += engine_telemetry["time_reconstruct_single_string_ns"]
+ *         self.readings["time_aggregate_reconstruct"] += engine_telemetry["time_reconstruct_ns"]
 */
   __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 280, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_reconstruct);
-  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_reconstruct;
+  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_grow);
+  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_grow;
   __pyx_t_11 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_10); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 280, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
-  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_reconstruct_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 280, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_grow_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 280, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_1 = PyNumber_InPlaceAdd(__pyx_t_11, __pyx_t_4); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 280, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
@@ -65202,19 +65716,19 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
   /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":281
- *         self.readings["time_aggregate_accumulate"] += engine_telemetry["time_accumulate_ns"]
+ *         self.readings["time_aggregate_store_keys"] += engine_telemetry["time_store_keys_ns"]
+ *         self.readings["time_aggregate_grow"] += engine_telemetry["time_grow_ns"]
+ *         self.readings["time_aggregate_accumulate"] += engine_telemetry["time_accumulate_ns"]             # <<<<<<<<<<<<<<
  *         self.readings["time_aggregate_reconstruct"] += engine_telemetry["time_reconstruct_ns"]
- *         self.readings["time_aggregate_reconstruct_single_fixed"] += engine_telemetry["time_reconstruct_single_fixed_ns"]             # <<<<<<<<<<<<<<
- *         self.readings["time_aggregate_reconstruct_single_string"] += engine_telemetry["time_reconstruct_single_string_ns"]
- *         self.readings["time_aggregate_reconstruct_multi"] += engine_telemetry["time_reconstruct_multi_ns"]
+ *         self.readings["time_aggregate_reconstruct_single_fixed"] += engine_telemetry["time_reconstruct_single_fixed_ns"]
 */
   __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 281, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_reconstruct_singl);
-  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_reconstruct_singl;
+  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_accumulate);
+  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_accumulate;
   __pyx_t_1 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_10); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 281, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_reconstruct_single_fixed_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 281, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_accumulate_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 281, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_11 = PyNumber_InPlaceAdd(__pyx_t_1, __pyx_t_4); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 281, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
@@ -65226,19 +65740,19 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
   /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":282
- *         self.readings["time_aggregate_reconstruct"] += engine_telemetry["time_reconstruct_ns"]
+ *         self.readings["time_aggregate_grow"] += engine_telemetry["time_grow_ns"]
+ *         self.readings["time_aggregate_accumulate"] += engine_telemetry["time_accumulate_ns"]
+ *         self.readings["time_aggregate_reconstruct"] += engine_telemetry["time_reconstruct_ns"]             # <<<<<<<<<<<<<<
  *         self.readings["time_aggregate_reconstruct_single_fixed"] += engine_telemetry["time_reconstruct_single_fixed_ns"]
- *         self.readings["time_aggregate_reconstruct_single_string"] += engine_telemetry["time_reconstruct_single_string_ns"]             # <<<<<<<<<<<<<<
- *         self.readings["time_aggregate_reconstruct_multi"] += engine_telemetry["time_reconstruct_multi_ns"]
- *         self.readings["time_aggregate_build_morsel"] += engine_telemetry["time_build_morsel_ns"]
+ *         self.readings["time_aggregate_reconstruct_single_string"] += engine_telemetry["time_reconstruct_single_string_ns"]
 */
   __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 282, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_reconstruct_singl_2);
-  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_reconstruct_singl_2;
+  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_reconstruct);
+  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_reconstruct;
   __pyx_t_11 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_10); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 282, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
-  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_reconstruct_single_string_n); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 282, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_reconstruct_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 282, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_1 = PyNumber_InPlaceAdd(__pyx_t_11, __pyx_t_4); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 282, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
@@ -65250,19 +65764,19 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
   /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":283
- *         self.readings["time_aggregate_reconstruct_single_fixed"] += engine_telemetry["time_reconstruct_single_fixed_ns"]
+ *         self.readings["time_aggregate_accumulate"] += engine_telemetry["time_accumulate_ns"]
+ *         self.readings["time_aggregate_reconstruct"] += engine_telemetry["time_reconstruct_ns"]
+ *         self.readings["time_aggregate_reconstruct_single_fixed"] += engine_telemetry["time_reconstruct_single_fixed_ns"]             # <<<<<<<<<<<<<<
  *         self.readings["time_aggregate_reconstruct_single_string"] += engine_telemetry["time_reconstruct_single_string_ns"]
- *         self.readings["time_aggregate_reconstruct_multi"] += engine_telemetry["time_reconstruct_multi_ns"]             # <<<<<<<<<<<<<<
- *         self.readings["time_aggregate_build_morsel"] += engine_telemetry["time_build_morsel_ns"]
- *         self.readings["time_aggregate_slice_output"] += engine_telemetry["time_slice_output_ns"]
+ *         self.readings["time_aggregate_reconstruct_multi"] += engine_telemetry["time_reconstruct_multi_ns"]
 */
   __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 283, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_reconstruct_multi);
-  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_reconstruct_multi;
+  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_reconstruct_singl);
+  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_reconstruct_singl;
   __pyx_t_1 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_10); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 283, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_reconstruct_multi_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 283, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_reconstruct_single_fixed_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 283, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_11 = PyNumber_InPlaceAdd(__pyx_t_1, __pyx_t_4); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 283, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
@@ -65274,18 +65788,19 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
   /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":284
- *         self.readings["time_aggregate_reconstruct_single_string"] += engine_telemetry["time_reconstruct_single_string_ns"]
+ *         self.readings["time_aggregate_reconstruct"] += engine_telemetry["time_reconstruct_ns"]
+ *         self.readings["time_aggregate_reconstruct_single_fixed"] += engine_telemetry["time_reconstruct_single_fixed_ns"]
+ *         self.readings["time_aggregate_reconstruct_single_string"] += engine_telemetry["time_reconstruct_single_string_ns"]             # <<<<<<<<<<<<<<
  *         self.readings["time_aggregate_reconstruct_multi"] += engine_telemetry["time_reconstruct_multi_ns"]
- *         self.readings["time_aggregate_build_morsel"] += engine_telemetry["time_build_morsel_ns"]             # <<<<<<<<<<<<<<
- *         self.readings["time_aggregate_slice_output"] += engine_telemetry["time_slice_output_ns"]
+ *         self.readings["time_aggregate_build_morsel"] += engine_telemetry["time_build_morsel_ns"]
 */
   __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 284, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_build_morsel);
-  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_build_morsel;
+  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_reconstruct_singl_2);
+  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_reconstruct_singl_2;
   __pyx_t_11 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_10); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 284, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
-  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_build_morsel_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 284, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_reconstruct_single_string_n); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 284, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_1 = PyNumber_InPlaceAdd(__pyx_t_11, __pyx_t_4); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 284, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
@@ -65297,17 +65812,19 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
   /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":285
- *         self.readings["time_aggregate_reconstruct_multi"] += engine_telemetry["time_reconstruct_multi_ns"]
+ *         self.readings["time_aggregate_reconstruct_single_fixed"] += engine_telemetry["time_reconstruct_single_fixed_ns"]
+ *         self.readings["time_aggregate_reconstruct_single_string"] += engine_telemetry["time_reconstruct_single_string_ns"]
+ *         self.readings["time_aggregate_reconstruct_multi"] += engine_telemetry["time_reconstruct_multi_ns"]             # <<<<<<<<<<<<<<
  *         self.readings["time_aggregate_build_morsel"] += engine_telemetry["time_build_morsel_ns"]
- *         self.readings["time_aggregate_slice_output"] += engine_telemetry["time_slice_output_ns"]             # <<<<<<<<<<<<<<
+ *         self.readings["time_aggregate_slice_output"] += engine_telemetry["time_slice_output_ns"]
 */
   __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 285, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_slice_output);
-  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_slice_output;
+  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_reconstruct_multi);
+  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_reconstruct_multi;
   __pyx_t_1 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_10); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 285, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_slice_output_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 285, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_reconstruct_multi_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 285, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_11 = PyNumber_InPlaceAdd(__pyx_t_1, __pyx_t_4); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 285, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
@@ -65317,9 +65834,54 @@ static PyObject *__pyx_gb_7opteryx_9operators_24grouped_aggregate_hashed_12_grou
   __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
   __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":286
+ *         self.readings["time_aggregate_reconstruct_single_string"] += engine_telemetry["time_reconstruct_single_string_ns"]
+ *         self.readings["time_aggregate_reconstruct_multi"] += engine_telemetry["time_reconstruct_multi_ns"]
+ *         self.readings["time_aggregate_build_morsel"] += engine_telemetry["time_build_morsel_ns"]             # <<<<<<<<<<<<<<
+ *         self.readings["time_aggregate_slice_output"] += engine_telemetry["time_slice_output_ns"]
+*/
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 286, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_build_morsel);
+  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_build_morsel;
+  __pyx_t_11 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_10); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 286, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_11);
+  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_build_morsel_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 286, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_4);
+  __pyx_t_1 = PyNumber_InPlaceAdd(__pyx_t_11, __pyx_t_4); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 286, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
+  __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
+  if (unlikely((PyObject_SetItem(__pyx_t_2, __pyx_t_10, __pyx_t_1) < 0))) __PYX_ERR(1, 286, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":287
+ *         self.readings["time_aggregate_reconstruct_multi"] += engine_telemetry["time_reconstruct_multi_ns"]
+ *         self.readings["time_aggregate_build_morsel"] += engine_telemetry["time_build_morsel_ns"]
+ *         self.readings["time_aggregate_slice_output"] += engine_telemetry["time_slice_output_ns"]             # <<<<<<<<<<<<<<
+*/
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 287, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_slice_output);
+  __pyx_t_10 = __pyx_mstate_global->__pyx_n_u_time_aggregate_slice_output;
+  __pyx_t_1 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_10); if (unlikely(!__pyx_t_1)) __PYX_ERR(1, 287, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_1);
+  __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_cur_scope->__pyx_v_engine_telemetry, __pyx_mstate_global->__pyx_n_u_time_slice_output_ns); if (unlikely(!__pyx_t_4)) __PYX_ERR(1, 287, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_4);
+  __pyx_t_11 = PyNumber_InPlaceAdd(__pyx_t_1, __pyx_t_4); if (unlikely(!__pyx_t_11)) __PYX_ERR(1, 287, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_11);
+  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+  __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
+  if (unlikely((PyObject_SetItem(__pyx_t_2, __pyx_t_10, __pyx_t_11) < 0))) __PYX_ERR(1, 287, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
+  __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   CYTHON_MAYBE_UNUSED_VAR(__pyx_cur_scope);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":259
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":261
  *         yield EMPTY
  * 
  *     def _finalize(self):             # <<<<<<<<<<<<<<
@@ -73536,19 +74098,20 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   if (__Pyx_setup_reduce((PyObject *) __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_ArrayAggCollector) < (0)) __PYX_ERR(9, 156, __pyx_L1_error)
   __pyx_vtabptr_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine = &__pyx_vtable_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine;
   __pyx_vtable_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine.set_telemetry_enabled = (void (*)(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *, int, int __pyx_skip_dispatch))__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_set_telemetry_enabled;
+  __pyx_vtable_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine._promote_parvi_to_carchar = (void (*)(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *))__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine__promote_parvi_to_carchar;
   __pyx_vtable_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine._resolve_on_first_morsel = (void (*)(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *, PyObject *))__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine__resolve_on_first_morsel;
   __pyx_vtable_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine.ingest = (void (*)(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *, PyObject *, int __pyx_skip_dispatch))__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_ingest;
   __pyx_vtable_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine.telemetry = (PyObject *(*)(struct __pyx_obj_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine *, int __pyx_skip_dispatch))__pyx_f_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_telemetry;
   #if CYTHON_USE_TYPE_SPECS
-  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine)) __PYX_ERR(10, 49, __pyx_L1_error)
-  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine) < (0)) __PYX_ERR(10, 49, __pyx_L1_error)
+  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine)) __PYX_ERR(10, 66, __pyx_L1_error)
+  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine) < (0)) __PYX_ERR(10, 66, __pyx_L1_error)
   #else
   __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine = &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine;
   #endif
   #if !CYTHON_COMPILING_IN_LIMITED_API
   #endif
   #if !CYTHON_USE_TYPE_SPECS
-  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine) < (0)) __PYX_ERR(10, 49, __pyx_L1_error)
+  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine) < (0)) __PYX_ERR(10, 66, __pyx_L1_error)
   #endif
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount((PyObject*)__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine);
@@ -73558,10 +74121,10 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
     __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine->tp_getattro = PyObject_GenericGetAttr;
   }
   #endif
-  if (__Pyx_SetVtable(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine, __pyx_vtabptr_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine) < (0)) __PYX_ERR(10, 49, __pyx_L1_error)
-  if (__Pyx_MergeVtables(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine) < (0)) __PYX_ERR(10, 49, __pyx_L1_error)
-  if (PyObject_SetAttr(__pyx_m, __pyx_mstate_global->__pyx_n_u_GroupHashEngine, (PyObject *) __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine) < (0)) __PYX_ERR(10, 49, __pyx_L1_error)
-  if (__Pyx_setup_reduce((PyObject *) __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine) < (0)) __PYX_ERR(10, 49, __pyx_L1_error)
+  if (__Pyx_SetVtable(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine, __pyx_vtabptr_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine) < (0)) __PYX_ERR(10, 66, __pyx_L1_error)
+  if (__Pyx_MergeVtables(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine) < (0)) __PYX_ERR(10, 66, __pyx_L1_error)
+  if (PyObject_SetAttr(__pyx_m, __pyx_mstate_global->__pyx_n_u_GroupHashEngine, (PyObject *) __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine) < (0)) __PYX_ERR(10, 66, __pyx_L1_error)
+  if (__Pyx_setup_reduce((PyObject *) __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine) < (0)) __PYX_ERR(10, 66, __pyx_L1_error)
   __pyx_vtabptr_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__DeferredSumCollector = &__pyx_vtable_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__DeferredSumCollector;
   __pyx_vtable_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__DeferredSumCollector.__pyx_base = *__pyx_vtabptr_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_BaseCollector;
   #if CYTHON_USE_TYPE_SPECS
@@ -73683,15 +74246,15 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   if (PyObject_SetAttr(__pyx_m, __pyx_mstate_global->__pyx_n_u_DeferredAnyValueCollector, (PyObject *) __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__DeferredAnyValueCollector) < (0)) __PYX_ERR(11, 41, __pyx_L1_error)
   if (__Pyx_setup_reduce((PyObject *) __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__DeferredAnyValueCollector) < (0)) __PYX_ERR(11, 41, __pyx_L1_error)
   #if CYTHON_USE_TYPE_SPECS
-  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct__finalize_morsels = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct__finalize_morsels_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct__finalize_morsels)) __PYX_ERR(10, 217, __pyx_L1_error)
-  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct__finalize_morsels_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct__finalize_morsels) < (0)) __PYX_ERR(10, 217, __pyx_L1_error)
+  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct__finalize_morsels = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct__finalize_morsels_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct__finalize_morsels)) __PYX_ERR(10, 293, __pyx_L1_error)
+  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct__finalize_morsels_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct__finalize_morsels) < (0)) __PYX_ERR(10, 293, __pyx_L1_error)
   #else
   __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct__finalize_morsels = &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct__finalize_morsels;
   #endif
   #if !CYTHON_COMPILING_IN_LIMITED_API
   #endif
   #if !CYTHON_USE_TYPE_SPECS
-  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct__finalize_morsels) < (0)) __PYX_ERR(10, 217, __pyx_L1_error)
+  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct__finalize_morsels) < (0)) __PYX_ERR(10, 293, __pyx_L1_error)
   #endif
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount((PyObject*)__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct__finalize_morsels);
@@ -73721,15 +74284,15 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   }
   #endif
   #if CYTHON_USE_TYPE_SPECS
-  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_2_config = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_2_config_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_2_config)) __PYX_ERR(1, 101, __pyx_L1_error)
-  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_2_config_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_2_config) < (0)) __PYX_ERR(1, 101, __pyx_L1_error)
+  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_2_config = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_2_config_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_2_config)) __PYX_ERR(1, 103, __pyx_L1_error)
+  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_2_config_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_2_config) < (0)) __PYX_ERR(1, 103, __pyx_L1_error)
   #else
   __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_2_config = &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_2_config;
   #endif
   #if !CYTHON_COMPILING_IN_LIMITED_API
   #endif
   #if !CYTHON_USE_TYPE_SPECS
-  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_2_config) < (0)) __PYX_ERR(1, 101, __pyx_L1_error)
+  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_2_config) < (0)) __PYX_ERR(1, 103, __pyx_L1_error)
   #endif
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount((PyObject*)__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_2_config);
@@ -73740,15 +74303,15 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   }
   #endif
   #if CYTHON_USE_TYPE_SPECS
-  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_3_genexpr = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_3_genexpr_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_3_genexpr)) __PYX_ERR(1, 105, __pyx_L1_error)
-  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_3_genexpr_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_3_genexpr) < (0)) __PYX_ERR(1, 105, __pyx_L1_error)
+  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_3_genexpr = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_3_genexpr_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_3_genexpr)) __PYX_ERR(1, 107, __pyx_L1_error)
+  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_3_genexpr_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_3_genexpr) < (0)) __PYX_ERR(1, 107, __pyx_L1_error)
   #else
   __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_3_genexpr = &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_3_genexpr;
   #endif
   #if !CYTHON_COMPILING_IN_LIMITED_API
   #endif
   #if !CYTHON_USE_TYPE_SPECS
-  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_3_genexpr) < (0)) __PYX_ERR(1, 105, __pyx_L1_error)
+  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_3_genexpr) < (0)) __PYX_ERR(1, 107, __pyx_L1_error)
   #endif
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount((PyObject*)__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_3_genexpr);
@@ -73759,15 +74322,15 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   }
   #endif
   #if CYTHON_USE_TYPE_SPECS
-  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_4_genexpr = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_4_genexpr_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_4_genexpr)) __PYX_ERR(1, 106, __pyx_L1_error)
-  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_4_genexpr_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_4_genexpr) < (0)) __PYX_ERR(1, 106, __pyx_L1_error)
+  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_4_genexpr = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_4_genexpr_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_4_genexpr)) __PYX_ERR(1, 108, __pyx_L1_error)
+  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_4_genexpr_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_4_genexpr) < (0)) __PYX_ERR(1, 108, __pyx_L1_error)
   #else
   __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_4_genexpr = &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_4_genexpr;
   #endif
   #if !CYTHON_COMPILING_IN_LIMITED_API
   #endif
   #if !CYTHON_USE_TYPE_SPECS
-  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_4_genexpr) < (0)) __PYX_ERR(1, 106, __pyx_L1_error)
+  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_4_genexpr) < (0)) __PYX_ERR(1, 108, __pyx_L1_error)
   #endif
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount((PyObject*)__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_4_genexpr);
@@ -73778,15 +74341,15 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   }
   #endif
   #if CYTHON_USE_TYPE_SPECS
-  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_5__build_required_columns = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_5__build_required_columns_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_5__build_required_columns)) __PYX_ERR(1, 142, __pyx_L1_error)
-  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_5__build_required_columns_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_5__build_required_columns) < (0)) __PYX_ERR(1, 142, __pyx_L1_error)
+  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_5__build_required_columns = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_5__build_required_columns_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_5__build_required_columns)) __PYX_ERR(1, 144, __pyx_L1_error)
+  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_5__build_required_columns_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_5__build_required_columns) < (0)) __PYX_ERR(1, 144, __pyx_L1_error)
   #else
   __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_5__build_required_columns = &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_5__build_required_columns;
   #endif
   #if !CYTHON_COMPILING_IN_LIMITED_API
   #endif
   #if !CYTHON_USE_TYPE_SPECS
-  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_5__build_required_columns) < (0)) __PYX_ERR(1, 142, __pyx_L1_error)
+  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_5__build_required_columns) < (0)) __PYX_ERR(1, 144, __pyx_L1_error)
   #endif
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount((PyObject*)__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_5__build_required_columns);
@@ -73797,15 +74360,15 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   }
   #endif
   #if CYTHON_USE_TYPE_SPECS
-  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_6_genexpr = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_6_genexpr_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_6_genexpr)) __PYX_ERR(1, 145, __pyx_L1_error)
-  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_6_genexpr_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_6_genexpr) < (0)) __PYX_ERR(1, 145, __pyx_L1_error)
+  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_6_genexpr = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_6_genexpr_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_6_genexpr)) __PYX_ERR(1, 147, __pyx_L1_error)
+  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_6_genexpr_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_6_genexpr) < (0)) __PYX_ERR(1, 147, __pyx_L1_error)
   #else
   __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_6_genexpr = &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_6_genexpr;
   #endif
   #if !CYTHON_COMPILING_IN_LIMITED_API
   #endif
   #if !CYTHON_USE_TYPE_SPECS
-  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_6_genexpr) < (0)) __PYX_ERR(1, 145, __pyx_L1_error)
+  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_6_genexpr) < (0)) __PYX_ERR(1, 147, __pyx_L1_error)
   #endif
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount((PyObject*)__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_6_genexpr);
@@ -73816,15 +74379,15 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   }
   #endif
   #if CYTHON_USE_TYPE_SPECS
-  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_7_execute = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_7_execute_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_7_execute)) __PYX_ERR(1, 237, __pyx_L1_error)
-  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_7_execute_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_7_execute) < (0)) __PYX_ERR(1, 237, __pyx_L1_error)
+  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_7_execute = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_7_execute_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_7_execute)) __PYX_ERR(1, 239, __pyx_L1_error)
+  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_7_execute_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_7_execute) < (0)) __PYX_ERR(1, 239, __pyx_L1_error)
   #else
   __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_7_execute = &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_7_execute;
   #endif
   #if !CYTHON_COMPILING_IN_LIMITED_API
   #endif
   #if !CYTHON_USE_TYPE_SPECS
-  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_7_execute) < (0)) __PYX_ERR(1, 237, __pyx_L1_error)
+  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_7_execute) < (0)) __PYX_ERR(1, 239, __pyx_L1_error)
   #endif
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount((PyObject*)__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_7_execute);
@@ -73835,15 +74398,15 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   }
   #endif
   #if CYTHON_USE_TYPE_SPECS
-  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_8__finalize = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_8__finalize_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_8__finalize)) __PYX_ERR(1, 259, __pyx_L1_error)
-  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_8__finalize_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_8__finalize) < (0)) __PYX_ERR(1, 259, __pyx_L1_error)
+  __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_8__finalize = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_8__finalize_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_8__finalize)) __PYX_ERR(1, 261, __pyx_L1_error)
+  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_8__finalize_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_8__finalize) < (0)) __PYX_ERR(1, 261, __pyx_L1_error)
   #else
   __pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_8__finalize = &__pyx_type_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_8__finalize;
   #endif
   #if !CYTHON_COMPILING_IN_LIMITED_API
   #endif
   #if !CYTHON_USE_TYPE_SPECS
-  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_8__finalize) < (0)) __PYX_ERR(1, 259, __pyx_L1_error)
+  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_8__finalize) < (0)) __PYX_ERR(1, 261, __pyx_L1_error)
   #endif
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount((PyObject*)__pyx_mstate->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg___pyx_scope_struct_8__finalize);
@@ -75837,83 +76400,92 @@ __Pyx_RefNannySetupContext("PyInit__grouped_agg", 0);
   if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_setstate_cython, __pyx_t_4) < (0)) __PYX_ERR(2, 3, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":38
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":54
  * 
  * 
  * cdef double _CARCHAR_LOAD_FACTOR = 0.70             # <<<<<<<<<<<<<<
  * cdef size_t _INITIAL_INDEX_CAPACITY = 256
- * 
+ * cdef size_t _PARVI_CAPACITY = 16  # must match opteryx::parvi::kCapacity
 */
   __pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__CARCHAR_LOAD_FACTOR = 0.70;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":39
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":55
  * 
  * cdef double _CARCHAR_LOAD_FACTOR = 0.70
  * cdef size_t _INITIAL_INDEX_CAPACITY = 256             # <<<<<<<<<<<<<<
- * 
+ * cdef size_t _PARVI_CAPACITY = 16  # must match opteryx::parvi::kCapacity
  * 
 */
   __pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__INITIAL_INDEX_CAPACITY = 0x100;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":117
- *             self._index = NULL
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":56
+ * cdef double _CARCHAR_LOAD_FACTOR = 0.70
+ * cdef size_t _INITIAL_INDEX_CAPACITY = 256
+ * cdef size_t _PARVI_CAPACITY = 16  # must match opteryx::parvi::kCapacity             # <<<<<<<<<<<<<<
+ * 
+ * 
+*/
+  __pyx_v_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg__PARVI_CAPACITY = 16;
+
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":146
+ *             self._parvi = NULL
  * 
  *     cpdef void set_telemetry_enabled(self, bint enabled):             # <<<<<<<<<<<<<<
  *         self._telemetry_enabled = enabled
  * 
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_5set_telemetry_enabled, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_GroupHashEngine_set_telemetry_en, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[65])); if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 117, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_5set_telemetry_enabled, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_GroupHashEngine_set_telemetry_en, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[65])); if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 146, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine, __pyx_mstate_global->__pyx_n_u_set_telemetry_enabled, __pyx_t_4) < (0)) __PYX_ERR(10, 117, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine, __pyx_mstate_global->__pyx_n_u_set_telemetry_enabled, __pyx_t_4) < (0)) __PYX_ERR(10, 146, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":134
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":187
  *             self._time_resolve_ns += _now_ns() - start_ns
  * 
  *     cpdef void ingest(self, object morsel):             # <<<<<<<<<<<<<<
  *         """
  *         Process one input Morsel. No Python in the inner loop.
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_7ingest, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_GroupHashEngine_ingest, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[66])); if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 134, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_7ingest, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_GroupHashEngine_ingest, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[66])); if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 187, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine, __pyx_mstate_global->__pyx_n_u_ingest, __pyx_t_4) < (0)) __PYX_ERR(10, 134, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine, __pyx_mstate_global->__pyx_n_u_ingest, __pyx_t_4) < (0)) __PYX_ERR(10, 187, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":217
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":293
  *             self._time_resolve_ns += _now_ns() - start_ns
  * 
  *     def finalize_morsels(self, Py_ssize_t chunk_size=65536, filter_fn=None):             # <<<<<<<<<<<<<<
  *         """
  *         Generator. Yields result Morsels in chunks.
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_9finalize_morsels, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_GroupHashEngine_finalize_morsels, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[0])); if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 217, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_9finalize_morsels, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_GroupHashEngine_finalize_morsels, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[0])); if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 293, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
   __Pyx_CyFunction_SetDefaultsTuple(__pyx_t_4, __pyx_mstate_global->__pyx_tuple[6]);
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine, __pyx_mstate_global->__pyx_n_u_finalize_morsels, __pyx_t_4) < (0)) __PYX_ERR(10, 217, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine, __pyx_mstate_global->__pyx_n_u_finalize_morsels, __pyx_t_4) < (0)) __PYX_ERR(10, 293, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":303
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":379
  *             start += length
  * 
  *     cpdef dict telemetry(self):             # <<<<<<<<<<<<<<
  *         return {
  *             "time_resolve_ns": self._time_resolve_ns,
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_12telemetry, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_GroupHashEngine_telemetry, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[67])); if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 303, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_15GroupHashEngine_12telemetry, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_GroupHashEngine_telemetry, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[67])); if (unlikely(!__pyx_t_4)) __PYX_ERR(10, 379, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine, __pyx_mstate_global->__pyx_n_u_telemetry, __pyx_t_4) < (0)) __PYX_ERR(10, 303, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_GroupHashEngine, __pyx_mstate_global->__pyx_n_u_telemetry, __pyx_t_4) < (0)) __PYX_ERR(10, 379, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
   /* "(tree fragment)":1
@@ -76535,7 +77107,7 @@ __Pyx_RefNannySetupContext("PyInit__grouped_agg", 0);
   if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_init, __pyx_t_14) < (0)) __PYX_ERR(1, 44, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_14); __pyx_t_14 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":101
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":103
  *         self._having_condition = parameters.get("having_condition")
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -76543,7 +77115,7 @@ __Pyx_RefNannySetupContext("PyInit__grouped_agg", 0);
  *         from opteryx.expression import format_expression
 */
   __pyx_t_10 = NULL;
-  __pyx_t_12 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_3config, 0, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode_confi_2, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[82])); if (unlikely(!__pyx_t_12)) __PYX_ERR(1, 101, __pyx_L1_error)
+  __pyx_t_12 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_3config, 0, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode_confi_2, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[82])); if (unlikely(!__pyx_t_12)) __PYX_ERR(1, 103, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_12);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_12);
@@ -76554,13 +77126,13 @@ __Pyx_RefNannySetupContext("PyInit__grouped_agg", 0);
     __pyx_t_14 = __Pyx_PyObject_FastCall((PyObject*)__pyx_builtin_property, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_10); __pyx_t_10 = 0;
     __Pyx_DECREF(__pyx_t_12); __pyx_t_12 = 0;
-    if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 101, __pyx_L1_error)
+    if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 103, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_14);
   }
-  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_config, __pyx_t_14) < (0)) __PYX_ERR(1, 101, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_config, __pyx_t_14) < (0)) __PYX_ERR(1, 103, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_14); __pyx_t_14 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":109
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":111
  *         )
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -76568,7 +77140,7 @@ __Pyx_RefNannySetupContext("PyInit__grouped_agg", 0);
  *         return "Grouped Aggregate (Hashed)"
 */
   __pyx_t_12 = NULL;
-  __pyx_t_10 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_5name, 0, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode_name, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[83])); if (unlikely(!__pyx_t_10)) __PYX_ERR(1, 109, __pyx_L1_error)
+  __pyx_t_10 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_5name, 0, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode_name, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[83])); if (unlikely(!__pyx_t_10)) __PYX_ERR(1, 111, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_10);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_10);
@@ -76579,43 +77151,43 @@ __Pyx_RefNannySetupContext("PyInit__grouped_agg", 0);
     __pyx_t_14 = __Pyx_PyObject_FastCall((PyObject*)__pyx_builtin_property, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_12); __pyx_t_12 = 0;
     __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
-    if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 109, __pyx_L1_error)
+    if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 111, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_14);
   }
-  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_name, __pyx_t_14) < (0)) __PYX_ERR(1, 109, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_name, __pyx_t_14) < (0)) __PYX_ERR(1, 111, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_14); __pyx_t_14 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":113
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":115
  *         return "Grouped Aggregate (Hashed)"
  * 
  *     def _build_aggregation_specs(self, aggregates):             # <<<<<<<<<<<<<<
  *         from opteryx.exceptions import InvalidFunctionParameterError
  * 
 */
-  __pyx_t_14 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_7_build_aggregation_specs, 0, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__buil_2, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[84])); if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 113, __pyx_L1_error)
+  __pyx_t_14 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_7_build_aggregation_specs, 0, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__buil_2, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[84])); if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 115, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_14);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_14);
   #endif
-  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_build_aggregation_specs, __pyx_t_14) < (0)) __PYX_ERR(1, 113, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_build_aggregation_specs, __pyx_t_14) < (0)) __PYX_ERR(1, 115, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_14); __pyx_t_14 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":142
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":144
  *         return specs
  * 
  *     def _build_required_columns(self):             # <<<<<<<<<<<<<<
  *         required = list(self.group_by_columns)
  *         required.extend(
 */
-  __pyx_t_14 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_9_build_required_columns, 0, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__buil_3, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[85])); if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 142, __pyx_L1_error)
+  __pyx_t_14 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_9_build_required_columns, 0, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__buil_3, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[85])); if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 144, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_14);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_14);
   #endif
-  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_build_required_columns, __pyx_t_14) < (0)) __PYX_ERR(1, 142, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_build_required_columns, __pyx_t_14) < (0)) __PYX_ERR(1, 144, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_14); __pyx_t_14 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":158
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":160
  *         return list(dict.fromkeys(required))
  * 
  *     @staticmethod             # <<<<<<<<<<<<<<
@@ -76623,10 +77195,10 @@ __Pyx_RefNannySetupContext("PyInit__grouped_agg", 0);
  *         value = aggregator.value
 */
   __pyx_t_10 = NULL;
-  __pyx_t_12 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_12)) __PYX_ERR(1, 158, __pyx_L1_error)
+  __pyx_t_12 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_12)) __PYX_ERR(1, 160, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_12);
-  if (PyDict_SetItem(__pyx_t_12, __pyx_mstate_global->__pyx_n_u_return, __pyx_mstate_global->__pyx_n_u_str) < (0)) __PYX_ERR(1, 158, __pyx_L1_error)
-  __pyx_t_15 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_11_normalize_aggregate_function, __Pyx_CYFUNCTION_STATICMETHOD, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__norm, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[86])); if (unlikely(!__pyx_t_15)) __PYX_ERR(1, 158, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_12, __pyx_mstate_global->__pyx_n_u_return, __pyx_mstate_global->__pyx_n_u_str) < (0)) __PYX_ERR(1, 160, __pyx_L1_error)
+  __pyx_t_15 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_11_normalize_aggregate_function, __Pyx_CYFUNCTION_STATICMETHOD, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__norm, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[86])); if (unlikely(!__pyx_t_15)) __PYX_ERR(1, 160, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_15);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_15);
@@ -76639,13 +77211,13 @@ __Pyx_RefNannySetupContext("PyInit__grouped_agg", 0);
     __pyx_t_14 = __Pyx_PyObject_FastCall((PyObject*)__pyx_builtin_staticmethod, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_10); __pyx_t_10 = 0;
     __Pyx_DECREF(__pyx_t_15); __pyx_t_15 = 0;
-    if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 158, __pyx_L1_error)
+    if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 160, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_14);
   }
-  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_normalize_aggregate_function, __pyx_t_14) < (0)) __PYX_ERR(1, 158, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_normalize_aggregate_function, __pyx_t_14) < (0)) __PYX_ERR(1, 160, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_14); __pyx_t_14 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":173
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":175
  *         )
  * 
  *     @staticmethod             # <<<<<<<<<<<<<<
@@ -76653,10 +77225,10 @@ __Pyx_RefNannySetupContext("PyInit__grouped_agg", 0);
  *         from opteryx.exceptions import InvalidFunctionParameterError
 */
   __pyx_t_15 = NULL;
-  __pyx_t_10 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_10)) __PYX_ERR(1, 173, __pyx_L1_error)
+  __pyx_t_10 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_10)) __PYX_ERR(1, 175, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_10);
-  if (PyDict_SetItem(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_return, __pyx_mstate_global->__pyx_n_u_float) < (0)) __PYX_ERR(1, 173, __pyx_L1_error)
-  __pyx_t_12 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_13_extract_percentile_option, __Pyx_CYFUNCTION_STATICMETHOD, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__extr, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[87])); if (unlikely(!__pyx_t_12)) __PYX_ERR(1, 173, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_return, __pyx_mstate_global->__pyx_n_u_float) < (0)) __PYX_ERR(1, 175, __pyx_L1_error)
+  __pyx_t_12 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_13_extract_percentile_option, __Pyx_CYFUNCTION_STATICMETHOD, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__extr, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[87])); if (unlikely(!__pyx_t_12)) __PYX_ERR(1, 175, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_12);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_12);
@@ -76669,13 +77241,13 @@ __Pyx_RefNannySetupContext("PyInit__grouped_agg", 0);
     __pyx_t_14 = __Pyx_PyObject_FastCall((PyObject*)__pyx_builtin_staticmethod, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_15); __pyx_t_15 = 0;
     __Pyx_DECREF(__pyx_t_12); __pyx_t_12 = 0;
-    if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 173, __pyx_L1_error)
+    if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 175, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_14);
   }
-  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_extract_percentile_option, __pyx_t_14) < (0)) __PYX_ERR(1, 173, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_extract_percentile_option, __pyx_t_14) < (0)) __PYX_ERR(1, 175, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_14); __pyx_t_14 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":192
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":194
  *         return percentile
  * 
  *     @staticmethod             # <<<<<<<<<<<<<<
@@ -76683,10 +77255,10 @@ __Pyx_RefNannySetupContext("PyInit__grouped_agg", 0);
  *         from opteryx.exceptions import InvalidFunctionParameterError
 */
   __pyx_t_12 = NULL;
-  __pyx_t_15 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_15)) __PYX_ERR(1, 192, __pyx_L1_error)
+  __pyx_t_15 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_15)) __PYX_ERR(1, 194, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_15);
-  if (PyDict_SetItem(__pyx_t_15, __pyx_mstate_global->__pyx_n_u_return, __pyx_mstate_global->__pyx_n_u_dict_2) < (0)) __PYX_ERR(1, 192, __pyx_L1_error)
-  __pyx_t_10 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_15_extract_array_agg_options, __Pyx_CYFUNCTION_STATICMETHOD, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__extr_2, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[88])); if (unlikely(!__pyx_t_10)) __PYX_ERR(1, 192, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_15, __pyx_mstate_global->__pyx_n_u_return, __pyx_mstate_global->__pyx_n_u_dict_2) < (0)) __PYX_ERR(1, 194, __pyx_L1_error)
+  __pyx_t_10 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_15_extract_array_agg_options, __Pyx_CYFUNCTION_STATICMETHOD, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__extr_2, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[88])); if (unlikely(!__pyx_t_10)) __PYX_ERR(1, 194, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_10);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_10);
@@ -76699,70 +77271,70 @@ __Pyx_RefNannySetupContext("PyInit__grouped_agg", 0);
     __pyx_t_14 = __Pyx_PyObject_FastCall((PyObject*)__pyx_builtin_staticmethod, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_12); __pyx_t_12 = 0;
     __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
-    if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 192, __pyx_L1_error)
+    if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 194, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_14);
   }
-  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_extract_array_agg_options, __pyx_t_14) < (0)) __PYX_ERR(1, 192, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_extract_array_agg_options, __pyx_t_14) < (0)) __PYX_ERR(1, 194, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_14); __pyx_t_14 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":213
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":215
  *         }
  * 
  *     def _prepare_chunk(self, chunk):             # <<<<<<<<<<<<<<
  *         """Pre-evaluate GROUP BY expressions and add * column."""
  *         if self.all_identifiers:
 */
-  __pyx_t_14 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_17_prepare_chunk, 0, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__prep, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[89])); if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 213, __pyx_L1_error)
+  __pyx_t_14 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_17_prepare_chunk, 0, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__prep, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[89])); if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 215, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_14);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_14);
   #endif
-  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_prepare_chunk, __pyx_t_14) < (0)) __PYX_ERR(1, 213, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_prepare_chunk, __pyx_t_14) < (0)) __PYX_ERR(1, 215, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_14); __pyx_t_14 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":232
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":234
  *             ) from err
  * 
  *     def _apply_having_filter(self, morsel):             # <<<<<<<<<<<<<<
  *         from opteryx.expression.evaluator import evaluate_draken
  *         mask = evaluate_draken(self._having_condition, morsel)
 */
-  __pyx_t_14 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_19_apply_having_filter, 0, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__appl, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[90])); if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 232, __pyx_L1_error)
+  __pyx_t_14 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_19_apply_having_filter, 0, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__appl, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[90])); if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 234, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_14);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_14);
   #endif
-  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_apply_having_filter, __pyx_t_14) < (0)) __PYX_ERR(1, 232, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_apply_having_filter, __pyx_t_14) < (0)) __PYX_ERR(1, 234, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_14); __pyx_t_14 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":237
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":239
  *         return morsel.filter_mask(mask)
  * 
  *     def execute(self, morsel):             # <<<<<<<<<<<<<<
  *         if morsel is EOS:
  *             yield from self._finalize()
 */
-  __pyx_t_14 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_21execute, 0, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode_execu, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[5])); if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 237, __pyx_L1_error)
+  __pyx_t_14 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_21execute, 0, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode_execu, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[5])); if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 239, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_14);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_14);
   #endif
-  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_execute, __pyx_t_14) < (0)) __PYX_ERR(1, 237, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_execute, __pyx_t_14) < (0)) __PYX_ERR(1, 239, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_14); __pyx_t_14 = 0;
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":259
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":261
  *         yield EMPTY
  * 
  *     def _finalize(self):             # <<<<<<<<<<<<<<
  *         finalize_start = time.monotonic_ns()
  * 
 */
-  __pyx_t_14 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_24_finalize, 0, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__fina, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[6])); if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 259, __pyx_L1_error)
+  __pyx_t_14 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_24grouped_aggregate_hashed_12_grouped_agg_26GroupedAggregateHashedNode_24_finalize, 0, __pyx_mstate_global->__pyx_n_u_GroupedAggregateHashedNode__fina, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_grouped_aggreg, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[6])); if (unlikely(!__pyx_t_14)) __PYX_ERR(1, 261, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_14);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_14);
   #endif
-  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_finalize_2, __pyx_t_14) < (0)) __PYX_ERR(1, 259, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_13, __pyx_mstate_global->__pyx_n_u_finalize_2, __pyx_t_14) < (0)) __PYX_ERR(1, 261, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_14); __pyx_t_14 = 0;
 
   /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":42
@@ -76937,8 +77509,8 @@ __Pyx_RefNannySetupContext("PyInit__grouped_agg", 0);
 
 static int __Pyx_InitCachedBuiltins(__pyx_mstatetype *__pyx_mstate) {
   CYTHON_UNUSED_VAR(__pyx_mstate);
-  __pyx_builtin_property = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_property); if (!__pyx_builtin_property) __PYX_ERR(1, 101, __pyx_L1_error)
-  __pyx_builtin_staticmethod = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_staticmethod); if (!__pyx_builtin_staticmethod) __PYX_ERR(1, 158, __pyx_L1_error)
+  __pyx_builtin_property = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_property); if (!__pyx_builtin_property) __PYX_ERR(1, 103, __pyx_L1_error)
+  __pyx_builtin_staticmethod = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_staticmethod); if (!__pyx_builtin_staticmethod) __PYX_ERR(1, 160, __pyx_L1_error)
   __pyx_builtin_super = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_super); if (!__pyx_builtin_super) __PYX_ERR(1, 45, __pyx_L1_error)
   __pyx_builtin___import__ = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_import); if (!__pyx_builtin___import__) __PYX_ERR(2, 101, __pyx_L1_error)
   __pyx_builtin_enumerate = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_enumerate); if (!__pyx_builtin_enumerate) __PYX_ERR(2, 157, __pyx_L1_error)
@@ -77045,25 +77617,25 @@ static int __Pyx_InitCachedConstants(__pyx_mstatetype *__pyx_mstate) {
   __Pyx_GOTREF(__pyx_mstate_global->__pyx_tuple[5]);
   __Pyx_GIVEREF(__pyx_mstate_global->__pyx_tuple[5]);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":269
+  /* "opteryx/operators/grouped_aggregate_hashed/_node.pxi":271
  *             if self._implicit_count_added:
  *                 # Drop the first column (the implicit COUNT(*))
  *                 chunk = chunk.select(chunk.column_names[1:])             # <<<<<<<<<<<<<<
  *             yield chunk
  * 
 */
-  __pyx_mstate_global->__pyx_slice[1] = PySlice_New(__pyx_mstate_global->__pyx_int_1, Py_None, Py_None); if (unlikely(!__pyx_mstate_global->__pyx_slice[1])) __PYX_ERR(1, 269, __pyx_L1_error)
+  __pyx_mstate_global->__pyx_slice[1] = PySlice_New(__pyx_mstate_global->__pyx_int_1, Py_None, Py_None); if (unlikely(!__pyx_mstate_global->__pyx_slice[1])) __PYX_ERR(1, 271, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_mstate_global->__pyx_slice[1]);
   __Pyx_GIVEREF(__pyx_mstate_global->__pyx_slice[1]);
 
-  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":217
+  /* "opteryx/operators/grouped_aggregate_hashed/_engine.pxi":293
  *             self._time_resolve_ns += _now_ns() - start_ns
  * 
  *     def finalize_morsels(self, Py_ssize_t chunk_size=65536, filter_fn=None):             # <<<<<<<<<<<<<<
  *         """
  *         Generator. Yields result Morsels in chunks.
 */
-  __pyx_mstate_global->__pyx_tuple[6] = PyTuple_Pack(2, __pyx_mstate_global->__pyx_int_65536, Py_None); if (unlikely(!__pyx_mstate_global->__pyx_tuple[6])) __PYX_ERR(10, 217, __pyx_L1_error)
+  __pyx_mstate_global->__pyx_tuple[6] = PyTuple_Pack(2, __pyx_mstate_global->__pyx_int_65536, Py_None); if (unlikely(!__pyx_mstate_global->__pyx_tuple[6])) __PYX_ERR(10, 293, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_mstate_global->__pyx_tuple[6]);
   __Pyx_GIVEREF(__pyx_mstate_global->__pyx_tuple[6]);
   #if CYTHON_IMMORTAL_CONSTANTS
@@ -77115,31 +77687,31 @@ static int __Pyx_InitCachedConstants(__pyx_mstatetype *__pyx_mstate) {
 static int __Pyx_InitConstants(__pyx_mstatetype *__pyx_mstate) {
   CYTHON_UNUSED_VAR(__pyx_mstate);
   {
-    const struct { const unsigned int length: 9; } index[] = {{2},{11},{55},{56},{71},{39},{49},{68},{35},{54},{37},{60},{24},{52},{26},{34},{12},{26},{75},{29},{33},{45},{22},{15},{179},{37},{30},{32},{32},{1},{1},{1},{1},{1},{2},{1},{8},{5},{6},{15},{23},{25},{7},{6},{2},{6},{35},{15},{9},{30},{29},{41},{50},{8},{13},{54},{52},{63},{66},{67},{65},{55},{62},{66},{31},{35},{32},{18},{20},{32},{22},{14},{30},{37},{34},{5},{10},{5},{15},{24},{42},{44},{33},{22},{40},{42},{31},{23},{41},{43},{32},{28},{46},{48},{37},{25},{43},{45},{34},{17},{35},{37},{26},{12},{30},{32},{21},{27},{13},{31},{33},{22},{28},{12},{10},{22},{40},{42},{31},{18},{36},{38},{27},{33},{19},{37},{39},{28},{34},{26},{44},{46},{21},{39},{41},{21},{39},{41},{21},{39},{41},{8},{5},{3},{8},{15},{33},{35},{32},{22},{37},{25},{26},{52},{35},{47},{67},{51},{50},{53},{53},{36},{56},{41},{50},{33},{34},{31},{10},{7},{29},{8},{26},{28},{7},{22},{40},{42},{31},{37},{20},{38},{40},{29},{35},{21},{39},{41},{30},{6},{7},{8},{20},{15},{8},{19},{37},{39},{28},{34},{17},{35},{37},{26},{32},{22},{15},{8},{3},{9},{8},{10},{17},{18},{10},{5},{15},{9},{8},{15},{15},{9},{6},{13},{20},{21},{17},{9},{18},{3},{4},{24},{23},{1},{5},{10},{9},{17},{18},{5},{3},{9},{10},{6},{12},{14},{6},{20},{5},{14},{17},{9},{11},{6},{10},{8},{4},{5},{8},{7},{5},{15},{19},{7},{6},{7},{16},{9},{3},{5},{10},{17},{26},{15},{7},{26},{19},{26},{10},{9},{11},{8},{9},{16},{14},{14},{5},{5},{2},{6},{17},{7},{10},{11},{12},{8},{6},{11},{8},{8},{7},{3},{21},{12},{5},{16},{13},{6},{4},{9},{16},{17},{2},{5},{8},{21},{10},{5},{6},{12},{8},{4},{13},{5},{8},{9},{22},{9},{8},{6},{5},{5},{8},{4},{3},{4},{7},{13},{3},{4},{10},{12},{6},{15},{4},{8},{4},{22},{7},{4},{4},{9},{29},{22},{21},{10},{8},{3},{7},{37},{38},{51},{18},{18},{28},{14},{17},{35},{55},{7},{5},{7},{4},{10},{10},{15},{11},{3},{11},{14},{10},{10},{8},{14},{12},{11},{10},{39},{37},{28},{19},{41},{36},{36},{36},{14},{12},{8},{14},{10},{17},{13},{8},{8},{17},{27},{11},{6},{7},{4},{13},{6},{12},{4},{4},{12},{21},{10},{12},{19},{5},{4},{5},{4},{5},{11},{5},{8},{5},{12},{4},{4},{3},{6},{3},{5},{2},{2},{9},{17},{8},{5},{4},{18},{25},{27},{26},{23},{19},{19},{21},{21},{26},{32},{39},{40},{22},{27},{25},{20},{16},{12},{12},{14},{25},{19},{32},{33},{15},{20},{18},{9},{4},{6},{6},{12},{5},{6},{20},{1},{1},{11},{416},{385},{11},{11},{8},{11},{11},{2},{114},{161},{108},{26},{316},{35},{2},{2},{2},{123},{179},{10},{88},{82},{57},{57},{52},{44},{167},{126},{133},{153},{132},{133},{153},{127},{127},{7},{509},{179},{41},{96},{15},{15},{2},{9},{143},{145},{120},{121},{123},{507},{59},{59},{56},{59},{59},{33},{44},{1}};
-    #if (CYTHON_COMPRESS_STRINGS) == 2 /* compression: bz2 (5757 bytes) */
-const char* const cstring = "BZh91AY&SY\031\272$v\000\005\246\177\377\377\377\377\377\377\377\377\377\377\377\377\377\377\377\377\377\300@@@@@@@@@@@@\000@\000`\030\335\335\367)\246\254\257\257/\275\206\324\317>\347\317}t\2355\3465D]\232\3509\232\272\245\354\356\303f\0245\2552\273\270\355\275\315]Y\222J\275\301P\361\000\017\252\300<2\t\010\223F\233I\250\3656#A\246\304\312i\251\341\221\352bi4z\231\032\t\223'\351\242\236\221\232&\236\243M44\r=\rFjz\231\004\221\023L\2154!#\322d\006\231S\305=G\251\350\t\344OH\320d\321\352\003 2\031\032\000\000\r\000i\223A\240\323&\211\022j\236D\311\243@b4h\000\000\323\023F\217S\030\240\000\0004\006\200\000\000\032\032\001&\244H\324\3654MOS\020\001\241\240z\206\215\r\032\036\240\001\240\003 \003@\003M4\032\r\003\023'\244\000\322T\331O!\243\3250L\232h\000\03144i\240\036\240\320\032i\246\200\323@\030\201\240\001\240\001\240\000\022\"\020\022`\230\214\202i\246\232\251\346\236\251\352zh\247\224<\243G\224\320\000\320\032\000\006@d\000\000\000\007\374n\214\265Xe\271i\200+j\3158\\8mmsC\3716\200\261\013\234\353;Q\024\311\2722\2175\253\231\2260\010\"\2321#\0209\263I\270\215\201v\017\t\200\225\002*\210\377\311#\335a\014\217u\3231!H1TU\320G\273d\254X\312\334\020\213Z\326\344\001\"\221\\\005\306\264^\203F`\233d\020\213\004\030\240\301X*\261X\240\240\010\212\010\301\021\212\252\252\204\026\t\020Y\005F\223b\014o\306\364E\331\000\272\227\002\206au\305\021\242\265\256\250\240\252\200\027\r\2645MBj\242\300\004T\200\214\005$\024\202\201\254\252\240\211\030\241\323\204\317&0d\206:u!\204\205\351\257\005z\211'N\013y\033\"\027V\306[.\272\360\023\212i\231&\032\013#\202\004\313M$X)\005\204Q\030\242\300\300\222\206J\323\314\030n\200\244d)X\240\013\002\344\301&y\205/\311#@\031\242\310\324\264ej\225\262,8\230hh\244\023\350\212*\335\027\314S#\215\230\331\315z\252\222\332!\226D`\271\330h/\n\013\3428\204\241\217T\201\202\010\rw$-M^/\034\025\355\264\262A\230b\031\206f{\225\341\235(Rj\245U\312\\\303\023f\324\n)\326\275\0200\300*\254\224\260\270F\324\362j\242n\350\204\022\255V\026J\212]\213\351\253""\274h\024\300\320\264\026\306\3503D\021}\305\254%Z\215Z\263\016Z\n\033\367\354Y\245us\224\310\320\226\230\006\022# %\010P\217r\373\224\2449\333\314,n\350\033\245\302\204\226\250cN%5\3177yM\023\002\311\272\\(#\344n\254\370\353\224pAE\251\302M\r\335\344\324\205\021$$}\216\317sO`\317\373\316\246\247?Q\332\003\375(^\3037\326\216\r&\237~.\2242!W\266x\231\324\376\0079\321ZX\247\254\023\247\247%\2669\301\362?\233\340\235\335s\231\230\334\310\304\335\275W\244J\374\236\220\360\226\262;\217\337+,U\312\341\3637\027\244Q\031\r\275kh\024(s\264\377\245\275\226\\\205\265(K\333\226[Q:\3229\230\263\300\300\211\214\031\372\375)J2\200\301W\244^\027O\034\311\267\234I0PL\233\03664\364L\336p\251\221\216\207\240r\211\031z\203&\352\353\204\022@\016q\304Q\221\030\326g\344\265KV'4HBLd\213\345sR\201-\335s\226W\021\225\202\330Z\316\262C!\350IeI\315\007\217\177\301\243\344\030\031[\271Z\230\236\206\006x\261\252+S\030iP\304[v\340\03236\006\030P\314)#,\220S)\373\356\277\340\352WP\310\311dw\227\226\036f\342\300\266\233LLR\307\037\230\227\207,q1\307\036\036\277o\260\250b\230\336p\326\246\030o\357m9\266\355+\263f\030q\365|\023\352\374\355o4=>\306\371\243>Uj\034a?\004r\270\202u\345\374\332\0256\262\232\1777\231N\374\323$ B\010@\200\004&\361\004\342\363Y\361y\325O\206\345ZQ\227\200C\003\336W\311Z\314L\255\361\344\345\350\264\025\0269\370\027\3502\007\315\214y\230w\244\315'\206M:Hf\212\377 \221P_7n\006\361\201z\004y%\342\227x-g\263\0141>\200mX\014=\354&\224\211x\264\r\211\257\241 \342\002Y\001\n\254\264\2452\342\2242\20773\351\217\335\317\243\r\"\310\26210\356z^\214\317T\373\276\257\256\222UH\252\252\252*\036\237\247m\241zWe\267\2101\021q\201\352S\211$\256.\244y\tz\364\276\364S\324\267Zz`fh\270\376_\005\266l[+\353\027lJ\t\014\003\271\217]\254H\002n\034\206,*\310\225rt\2228\250;r\025B\264Y>xFj`\3142\226s\203\220\236\243\022\216AF\344\350\023\024\212\212\371\240h\311\210 \304:\320\n\352\205Bo3b\324\345\247\364\363\3739\370\307\010\243\300\r\033 \037^\305\006:\306\355\244\323i*\250\252\242\252\212\210 ""\335\303\323\324\217\324j\223\305A\"\225\362s\323\317K\237]&Z\013\234\2721\021[\325KS\311\205\224\260\366J$w\323i\247I\244o]\330\210\356\373<\025\277\246\377\017N\270\352{a\300\031x`\255\262bH^\007K\3451B\260\n\302\252\014\211\306$0\360\016%0\210r\344\004C\t\202\232bHWxa\206\332\263\244\223\364\341\002C\270\347\007\020\267\007\n<\177\305\307\373:\373\314@9w\356\002\025G\030u\021\325\304{\3127g\323v\032\353\223@\333\354\264\024\336\321\346Il\231\3308t@\027\244\337\231\270XqrUUUY\235\335\373\027\243\241\274\352\036n\303\254\276\3309\\5:{\262~\357\245.\013\330\273\231\210\277\267\036\314|:Q\270];\367\370-\007Ws\372\211l\314\003%\226]t\376n\354\177\272\027\217\247\372\241\363u\034q\357\357wwwfww\350\335MCU\311\310\240\215\274'\017g\330\257C\2459\316~7\353\271q\006\224\376^\363\207Y|.\31789\204\274\337\"\001\266\246\354a\002\003\270\354\331\213~~~\231\3303\245RZ_\313\261g\300\341\362\372;\355\237`m\3636\333|29\355v\245\265|\307\261xA\317\220g\352\277\001\375\325\300}^\337.\275\036\037\024\243\210q\017\000\274W\205\225B\266\212@8D\330\006&p^\tQT\032\214\261F\241\013U#\023\271\033\315\330P\267]\250\220u\024\232Q\355\343\207\363\377h\255\2137{\277\017V(\351\342\275\001\343y\326D\020O>\363\211\006~>\2753,#q\275\343\274\\N\t.J/\364\360\275z\367\343\215\340kZ\372\315\034ON\035\r\2310\005[{H\241\257\357\346\363'\2323W\235l\3719\367\360\363\224\320[u6\370\236\300\364\342\0377_\367\350\246EM\307\357|\264)\264\325w\353\265\267\374\264\372\000\304gk\033\004\373\240]\215\232b\305\ngo\257@owV\233\313\376\314\014\370\035\211!k\"\2125,\201HZ\014\233\026)2\266\305\267\3738\234\rG\003\264\277r&Z}~\214\345\035\307\207\202\335\273ay\202\203\003\347\226BF\257\033\342$Z0\210\324P\202L\003\010b\321\206$o\302R1{\356d\303\327\030\252/\212\017\205\316\353\325\254a\260\313\014\261\242I\030\220\213\017|^\330*\307\326\215\360&\366\203BU!\024VM\204\006\275\345h\323PX\346lu\243l>8\301\224>h+\223E\331Ps\230\307\216\213=.\253\026\235/jY\351w\005\321\223p[o\265)\347|5\007 1\003ts\263na)\260\020\201^""\020[]\355T\275\244\212\272\007\317J$k\nj\222\366\036|G\231'\362\344\360p83\243\345\227:^\311\311\333\343\014\357\327\316\205\223\014\215\315;\366\025\317\332\336QE\033\266\233\217\355G\343r\314T\321\320'\203;\260\331k\212:\r\356\024N\353b\002\344\302L\305\344\332\203~y\257Bi{)!\224\304`t\345\362!l\2223\235U\260\327\343V\273\243\004>\273\341V\270\2647\345\321-<\326\353\213\342\035\302\335\323\361$\364z\222c`0\006t\031\346\226|]OBJ\332\372Ym[\240q\010\r)\326\221J$\212H\006-*\275\245\242\325\2720\3034N7\n\007'\007\240\217\027\242q\330<\340\243\txM[*3 \361\274\036G\230y)+\"\007\016\017xz\303\001s2\234\360\270\231@\301R\325\252\220\342\232\231\n!0\231g\n\326\233\373\270|\007A\265.\347\267\220} \032\262\025\002\360\033zL\263+\226h\360\317\3179x\322\235j\2134\3250\243:e\0275\254Be\036\016-`^\272w\337\344l\277\246\376$\235J\363\006\020\330\264[\320m\006\204\345~\210\231\2275\341\233+\206\225\235'\356+\344\202k\317P*\377\010\240M\231\257\017\310\2517!s\274\232Lc\021\021\0255J\326)\271v\204.^\343D\250\020\226K\244\033H$\270\304I\035\375\207 \355\344|\346x\266!\243\363#\232$\206HI\231\000\005\032\000\243\021\274\210Cp\275Q\t\311\315\300\365^v\002S\202\302m\317\262e\342\354\236\374\334\223Ff\035\227\252\337F\213Fl\224\323>\255\262e\2522*GJ\222\204\261\254Z\226!Vm\273r\334\013\270[\324\236\036\376\377{\017\372}\363\024\341\024\243\"S\244\317K\255fc\333\013\266\352\\r\271\233\2717\000\242\212\rE\236\233= \004.o@I\004\221) ME(\027o(\000p*\006\2060\014\201\222\222ps\202I\003AY\345u7y\211j\021\002\206B\214j\263\231V\032T\252\252\252\252\252*\252\252\252*\253\241\311\263\237\n\310K+\003;\226\221{f3\030Z\332W1-V6\306\361\260\0230L\315L#\034Ur\264\243\n\243)\3218\310\212-\n4s\205`\300\\[5fBB\342\244V\325\2734f\031z\222\033:q,\232V\000\3002\245\244\n\2000\213\362\255\310*\214\360x\312\217R8\302\nS\270B\314\362\244\365\357bw\200\030\313+\312\t\t\234_\024\346G_t\031\t\254\036\266\241\312\234E\316{\343X\242\2526\333\335Y\025\301\356\347\030\307j\322gh4\245\033:d\201\211\202h\326=\375\220""\321N\370O\303\234\205\343\334\306\237\010\014\271lB\370\301\243*]\032\314o\232 #^\\9cX\2065\274\221\007\017A\221}-\221\200\364Q\363\314]\026\236k\326\334\035\245\0341m\220h\306Z\246\367r\014K\014\343\021\\;\000\247\267)\357\213\335\237-\3075\245~\250/\320\326s\016\342`R\214\341\033\254\352\342\351\005\351\260P\232s\361N0\306\013w\200\005\251\330\203\t\356\324\354C@p\r\376[a\253V#zCh\330\3510\007<\311\270f\212DH;\275\256]<\357\215\306\252\322\303\\8\034\017W\317pk\355\356lm\270\224Kk\236\024\220\227o\2570\206\276\266\241\300\016\324\213\020\004$X`C\025)\341\241\3453\211\013\255M\315\227\232\223\301\225\014X21\\&\343\246wz\275\343\237\312u8%\245\003h\331\356kA.\211\246\026\224\013lK\230\346g\006\010SDg\366\377\225^]\246\355\360\001\244E~\217\212\265SQ\252\262]\260\231x\037\003ln\351\252\323\013\322\223H\315:\004\326A'\233\010\317\3754\035\252\236\370\203\262\230\240\n!T\226\037hw\001\345\214\0266f\364\306\260\2365\3703\332\225\330\227\0355^\275\325\225\361\231*\221@QQY2&\226D1%\203Zt\331\3623]<\351\036r\006O\216\360l\353>;\353>\321tM\\\2378/\275\000\314\2200\335]y\302]\272\277&\213N\2020\325_\301h\276\214\354^!\332cb\315\227h\352\"\272<\301\300DG-\236\312\325b\227\023/\020\253P\370\230n\231\205\010\354\002.\241Id\016\354\301\002p\250/o\030\240\266\326\026\207\225\020\231+\247\233A\226\354\372.B\017S\324\326\260@\276\244\007\314\222\335\362,\226F\276n\310/M\274^A\264\034DQ\000Q%\310+\264\354=U\245\302M\220\357p\023\227h1\233\267]TL\022\353E\031F\"\302\314\240\0301\235\325\024_\t\002\2459$\270Y\306\257\005r\275o\245\026\n\014\002~\212\271F~|(\3306IN\312M\002\211\225\240@\304\251\t$C\t\032!\340}\305\205D\001\236G\006+T\352x\\\205Ab\221F\327\266\212\351\231\014\213\020\202\030sZ\tv\226\207!\310w\322\242%\206\240\226\231\t\r\310\302\364@VX\036ls;\2042\317R\373yu\0262\327\322\200\364)\252\213\021L\344\302\3064\231\033`\230\215\227;iIh(\204_\252+F\\\230)a\247p\370QIt\204\030v\355\2529\233V \305\235\370\0006\235\3662\317\202\341py\t,Z\216R\304\341\243\276,`\030g\260\276\347""\363$$4#5QCkJ\305\231\246\232T\211$/@&\202\252&\331\314l\225\252\310`(\006\223\023\277\254\370\022r\261\356\335v\255N\315d\034Y\362n\016\355\235\303\031\241!\006\r\r\244\236\020\210\304(N\261\200z\315\240B6\212\245\364(\321C<h\206a\230\016\006\337\325\354\235\001\005\221\230\010\313\254\265\201\260\315\017f\020pV\364\231\203\216\334\267,\005v}@dyVG\025\311\n<\n\242&\251\242\236w\331_\223\233\264\001\201\251W\033\022dop\303=\031\"\310~p\031+\034\023\213J\316\211\027\323\211\255\232@\354\016\331X\350\245\220\227\202Fl/'\271\331C2\200(Q d\001\002g\207.C\207|\322#W1\254;\244;\220\305\014\n\265\215\024\313\336[\030\313\024\027/\002\222\327\206\032\331$f\332\200\002\030\033P\324s\215\302D\014\t\210qAu\242iB\212P\273\004n\200U\253CL\326m\355]\370eJ\260:\004d\200h\306@[\313\304\205\026\025\312\002\351wt\320\252\034\031q\321Ve\230\r\257\027\026\026\2309_\312\224\016\354\tX\213}\024\265L `Q\032\006c\366\357H\245\216\2600e o\006\214\211)\010\261\023mT\266\022\204\242\206\243V\210r\242 \2045\002\016\236<\274\334\016]\020o1\302H\230\223\241\332&\266\2501\271\033\363&\"\246%\253\350\344<\"\247\000\322\312\355o\335a\356\246r'os-\311\274\306\031I\372\357\2247\031\342\203F\206\373\321L-\2367\"\033\355\010\256\2244m\214\002\351\266\270\353\\7D\325\006!= \220\262\235K\202\365\0242\227H\213U\332g\004\210\305\322\355\027\366\321sU\225\211\321pm\265j\342\351\311\r\203FU7\004\247\265(\312\216;$\2105\331\356/5d\207B\213\3472ZwS(;F\344\031;\257\270\203\206[ia\272\352\357\352\344xl\251\313\241\310\306\336\2707\214c+\257F\344\300\302jaV\327m\302\307\025UUUUUUYrA\200\314|e\022\320\356L\270\214\313W\033\025r;\342\n;\236L\275\2068\031\361\337U\222\370v\020\240\201\250i\346p\244\314]\0052`\021@P\304v\006\351g\304\307\345\215\221\216\226\2662\266\212m9G\240 \255\365ef\315\334\226\016\206\347\2520\272WQ T\254\353\200\300\022\243\\\357\322\345\3432\351\351k\356\230+\360\204-C\320k0de\020\211\211dH\323\321\215\361[Wn\301\030ovBH\253\347RJ\226\223\001\265\263AM\270\"\206\023Ad\303\330\301Y(Q\252\363""\"!=\315\203\322#g+C\023k3\354\207E#\242\227i\007/L\351\245\332%)\033?\337\n[\013\010Z$4\000Q^\213\235\303\344\262\016+\205\312_\356S\026\350v\tGR\363\014\310\024\365\237\017\206!\361\263a\350G\233\250\013Q$f\230\217pi\013'\331\262Q%\035\032\277XG\323\363\352;\250\023\326\272\321\334\035\310\352boL\226\326:\334$\003g\003\231\"W\251w\021\307M\016\302\335\020\303\304F\305\256\274\266\021\237=\212\216\356\301y\271r\317\2775\230\213\331+\003\203$\230\036\r\003\005\036Mk\007\320+\003u\224\203\034t\234\364N\335$\021\253\306\\\261\207\212\344\226\361\003\222\271sA^FJM\031e\305\313\316\237\315`&\247\217\217\221`\005@Dd\205\035\032\316t\220o\320A\306\250\335m\337H\241I\345\304\364\030\254\0213\022I0\204\326\000/\000\350R\267K\303\310xb\241VC\352\344\300y\274\3531\004\300\202Dd\016\343b\303\215\350\305\345\200~0\3769\222q\330E\220\030\n\351Q\364!\005P\217 Y\311\360!\2659\227\251\365\007\276\236\344\004\026\002\311\267\365\350)\227\207\027\347\002\200Y\"\310{;\200\373\274\320\035\361\275\351ig\007\221\277a\304d\301\337\367\236\214?0\2774\ne\330\302\272\304\244\nNT*\254\220N\272|\\sc\320\234k\\\275\260^,\033C\317\315a`\355ryC8a\371Z\335\234@(\222\224B9\001g\2616\323\322\007\203\1776%S\026F\317[\330rj\234\224e%\003\224\224$\302\202\345\260\302\365\\K\311\313\340\363\273\207\277\371\206`#\231\303\364\n0\300J\214\276Q\273T\0049vsj\247\220\010\024F!]\263\346\205\t\014\376\343Bd\331@\351\204=\364\336\374+Z\260C\372\213\331\373\224\233\327*\023\364\361\221\3212\024\256\232GOH\010\022\311\267\355\216\003l\240\017#\220\335}\036l\226;:J\235\207\3231\3320KP;\256VDU\206\274\002~\344j\021\274\235MC\023j*\304\007m\211\325u\206\252\204}=O\202jZ\265\334\377\003uB\372\346\005\223\314\242\2435\030\275\201\023\257\021\311\217\270\004\007\235\363\370\227\r\023@\217\323\252\003g\220\275\223\263#\226(P\025\027S\330G#\374^\026\311\003h\361\370\344\r\255\250x\260\242+2_\360\366]h\270\"\370\321\263\306\020&y;3\035\243\010\230\201\260\344\260\007\024\361A\324\200\022\037|\205\257\014\356\352D\240\tE""\232\"\273\273\025(\003\364\263\006-J\265>\016\003\327\010\272\032\352\3024\215\231\02133*\254\273\344V\316\320\2342\204D\253\244\034\020\301\032\335\021\336B5\323B\254\254\350\345]\203n\214\336\365\261H\226\360J\033\210\276\361p=b+\254r(A\273%oq\031\334R%\330\225`\034\030\004\320b\304\241\271W\321ZV |\252\333;\r\277\2628\317\243\261\030\233u0-\214\273\tggf\314Q\010\234m\345m\221q4\220[-\261\201\010\242\212\265\257\016\353\006\n\251\247\244\355\374\237\240\212\301B\213*7\236\302A\354\005\032\026\353oY\265\242\021\237\306QH\322'\\<\223?TR#N\224\344\227\245\351R\250\246\343Y\016\037\242\2048\261XW\257\344\263\273f\200\202\037Yh\305\213z\033y\345eXXhh\356.\213\206\2126U\366\323\025\356WgV\262\246\016\274\264L\364\343k\354\"y\004\2448t\237n\372\255\312\325\273Ir\340\211\030b\350\013\232\353c\216+\274B\t\r\266\035\243a\000\317\"\372\276\030\251\232\226X#&H\355\215\254\317(L\246\r\223\2169\000\016\177</A\332p\212\220\354u\300\371\362~\220\310\271#p\210\310\362\336\014\256x\245\242(\014}jo\270\276\313\312\364\250\375x\340?V\344\243\317\255\330\014=\333\224\373\350=\362\365\002P\237\334\332\243\253\337Q\324\307\224(\2369\333\335;[;S\365(\334|q\231\316\323\240F\224qK\264\370\204\0332\312\222l`\351\267\3636\244c\277\207\002\"\014\310S+u#\224\214\010\030\002]\000\000}\004\021K\320F7\200\013\320p\016}Bp\017#c/W\304A\273\341_n]\212\223\263\210\206\267.\247TB^\027s\275\316^\017o*-\002.7\364T$Qf\321\262NM\353\030\204\230c\005\304\031\316\207\372\323\352\322\010\310\337\313\032\334\034\007\203\023dqxwc?\2120H\214\214\036X\302\302w\334]\364\237'tx\202q\310\220\030\240\251\231\324\205:\230\000\233v\270\"]\341\024\013\022H\006\256\303n\225\362\205\300\r\324d\306T\331\240\344\030\024\371Uy\300\274\3062B\225\030\010\3019R\210L!0\203P\t\023\02160\261\356\313\235\210\313<\320\025p\t\000\306\014*\245\232\265O$\250\\\311\tCW1\231I\244\316\233R\235\201r\2620\n\274\303\2200\215\265s\231\300X/\n\345T\"\rA$\305\000\224\031d\014\246\204\342\305\331\2460\215\001PX\0050\332\233nP\241#Y\330\003qQ""\0237\021jNO\332\227\2361t1\n`h\221\304r\016@\023\024\365FV\205VY\327.\264\022\013#%;\355\366\367yx0\010\306\205\032\232\254NS\226\206\240u\272\373\364Y\225\3752#\020\275\247X\225\361V\354\013\241\016\262D\237\376.\344\212p\241 3tH\354";
-    PyObject *data = __Pyx_DecompressString(cstring, 5757, 2);
+    const struct { const unsigned int length: 10; } index[] = {{2},{11},{55},{56},{71},{39},{49},{68},{35},{54},{37},{60},{24},{52},{26},{34},{12},{26},{75},{29},{33},{45},{22},{15},{179},{37},{30},{32},{32},{1},{1},{1},{1},{1},{2},{1},{8},{5},{6},{15},{23},{25},{7},{6},{2},{6},{35},{15},{9},{30},{29},{41},{50},{8},{13},{54},{52},{63},{66},{67},{65},{55},{62},{66},{31},{35},{32},{18},{20},{32},{22},{14},{30},{37},{34},{5},{10},{5},{15},{24},{42},{44},{33},{22},{40},{42},{31},{23},{41},{43},{32},{28},{46},{48},{37},{25},{43},{45},{34},{17},{35},{37},{26},{12},{30},{32},{21},{27},{13},{31},{33},{22},{28},{12},{10},{22},{40},{42},{31},{18},{36},{38},{27},{33},{19},{37},{39},{28},{34},{26},{44},{46},{21},{39},{41},{21},{39},{41},{21},{39},{41},{8},{5},{3},{8},{15},{33},{35},{32},{22},{37},{25},{26},{52},{35},{47},{67},{51},{50},{53},{53},{36},{56},{41},{50},{33},{34},{31},{10},{7},{29},{8},{26},{28},{7},{22},{40},{42},{31},{37},{20},{38},{40},{29},{35},{21},{39},{41},{30},{6},{7},{8},{20},{15},{8},{19},{37},{39},{28},{34},{17},{35},{37},{26},{32},{22},{15},{8},{3},{9},{8},{10},{17},{18},{10},{5},{15},{9},{8},{15},{15},{9},{6},{13},{20},{21},{17},{9},{18},{3},{4},{24},{23},{1},{7},{5},{10},{9},{17},{18},{5},{3},{9},{10},{6},{12},{14},{6},{20},{5},{14},{17},{9},{11},{6},{10},{8},{4},{5},{8},{7},{5},{15},{19},{7},{6},{7},{16},{9},{3},{5},{10},{17},{26},{15},{7},{26},{19},{26},{10},{9},{11},{8},{9},{16},{14},{14},{5},{5},{2},{6},{17},{7},{10},{11},{12},{8},{6},{11},{8},{8},{7},{3},{21},{12},{5},{16},{13},{17},{6},{4},{9},{16},{17},{2},{5},{8},{21},{10},{5},{6},{12},{8},{4},{13},{5},{8},{9},{22},{9},{8},{6},{5},{5},{8},{4},{3},{4},{7},{13},{3},{4},{10},{12},{6},{15},{4},{8},{4},{22},{7},{4},{4},{9},{29},{22},{21},{10},{8},{3},{7},{37},{38},{51},{18},{18},{28},{14},{17},{35},{55},{7},{5},{7},{4},{10},{5},{16},{10},{15},{11},{3},{11},{14},{10},{19},{10},{8},{14},{12},{11},{10},{39},{37},{28},{19},{41},{36},{36},{36},{14},{12},{8},{14},{10},{17},{13},{8},{8},{17},{27},{11},{6},{7},{4},{13},{6},{12},{4},{4},{12},{21},{10},{12},{19},{5},{4},{5},{4},{5},{11},{5},{8},{5},{12},{4},{4},{3},{6},{3},{5},{2},{2},{9},{17},{8},{5},{4},{18},{25},{27},{26},{23},{19},{19},{21},{21},{26},{32},{39},{40},{22},{27},{25},{20},{16},{12},{12},{14},{25},{19},{32},{33},{15},{20},{18},{9},{4},{6},{6},{9},{12},{10},{5},{6},{7},{20},{1},{1},{11},{442},{385},{11},{11},{8},{11},{11},{2},{114},{161},{108},{26},{316},{35},{2},{2},{2},{123},{179},{10},{88},{82},{57},{57},{52},{44},{167},{126},{133},{153},{132},{133},{153},{127},{127},{7},{672},{179},{41},{129},{15},{15},{2},{9},{143},{145},{120},{121},{123},{507},{59},{59},{56},{59},{59},{33},{44},{1}};
+    #if (CYTHON_COMPRESS_STRINGS) == 2 /* compression: bz2 (5896 bytes) */
+const char* const cstring = "BZh91AY&SY\206e\254\204\000\005\322\177\377\377\377\377\377\377\377\377\377\377\377\377\377\377\377\377\377\300@@@@@@@@@@@@\000@\000`\031}\337{\215i\273p}w\267\337a\272\335\r\336\326\321v\351\236Z.\332Z\246\272W\030n\242\246\213V\005\333\216\300\227v\025\271\216Z\000\323\330\253\322\212\000\037J\367\001BH\204\232!O\000\244\374\247\251\247\222\237\221\264L\251\355\031\252\237\251\344\332i\350\2257\202i'\264\233T{\320D4\365'\250\365\037\250OS4d\311\265\023jz\217PI \230\020!\032F\215!\265O\3213B\233Q\241\372\246\236\211\240\r\030A\2404\033Q\240\000\0004\007\251\240\000\302h\211*\237\352\223\365M6\247\250\323#@\365\003A\202\031\032\r\r\251\246\203\365CL \000\311\240\006\2151\000\003F\200I\250\210MMM0\251\352dhzj4h\323G\251\243@\032h\000\000\032\r\0002\032\006\203F@f\243\324z@\rH\236Tz\231\352L\200h\000\000\315C@z\2324\000\036\221\352h4\321\240\036\210\003\3244\321\241\240\036\240\000\022$\020&@\021\221\220'\250\236\211'\352z\236\232\236\251\264b\215\244\032\032\006M\000\000\003#!\2404\000\323\324\032\177\343\260o\312\303\177J\224\220\025\272\3455\2367\336\207s\266\037\340\377 w\010`\364l/D\233\203-S^\224yUPh \205\250h\r\021\351U\271\010\264?(\212\207\324/\022\270&\256G\377$\217\276\3044}\370M\225\025C\000\271_A\037\373\004\2600-\207\022H\303\014'.\240\004\005\004\246\004\315QD\030\361\010\243\005\004\"\202\014PAU\202\253\025\212\n\000\210\240\214\021\030\252\252\254 \260H\202\310*2)\003\223m\366\205k\304\204\3653\2730q\ru1\014\014kZ\350\211\212\242\001\272gE\206\"\311\215\200\014m\210\030\220RAH(\034\312\212\202$AC\257\t\2516C\000\247g$E\"K'L\024\324I98\027H\206h|q\314\313ds\250\022\211\264R#\005\221\312\004\337\213\000X)\005\222(\214R\031$\241\222\2714\014\366\000\244d)X\240\r\240\230\250\305b\244\355\301# 3\"\250\322\261\302\264)P\250\342P\310DF+\3328oN`h\225\272ER\310\333\000W28#\220J\013\253\016&!\324\260\317\001e2R<\366\006\360(:6\200\0322TGb\212l\314\250\312\3421\013\006\210\320\323r\222\235(Rj\345\324T\245\314\346p\346m\211QcLq\344Ai\226\t\342\250\224\343\200""\215\311\322k\242\203\234\207\275+\325W (\214;2\246\256sB\201J\030\254L\to\265\036b\207E\237Z\023\220\224b2\224hA\355\006A\023~\3756\253\245<\265\234\351\032\222\355\326Ai\021\220\022{\352s\307\275<\tHq]CC\207\214\341\303\215\022\245\331\235&i$w\221\221$4gW\220\246\362C\257KQ\251\335\020\036a%R/\007\022GUir\257\366%|\271\224\034y\245sS~\243\231\343\276s\344\3037\322\205[\006\237\276\203\222~#\356\354\263\261\235\333\3705\037X\363\202\347@r\347=\277P\270+\304\364s\277]\235\366\034#\324\241\252\314\236\236s\024\377\224\346&\2423\303\327\377\026\325\314\245e\037\027\336\327\\\305\031i\246\231\357(P\325I\374\221\335&\274\014\264\2240\376\370c\265\023\275!\231fs\312\220,\366w/&\030C\007\214\027u!\010\332\022\245o.\347\305b\235JY]R\256X\315\245\224\264\363\363Yu\215\024\212\333\207^\342\342\350i\301j*\202~B\267\315\337\277\323&\231\253\343\013\n\221\022\311\342\267\223\001kE\3155\312\236F9\004\314\253\226Z\017Y!\220\373\023S\255(\203\335J\264\035\210T\307.\365\356\254|\212\231\331\215\021{\226~\227\013\013n\332\206\214T\255hf\024\300\307\024\024\306{{\234\277w\306\307`dd\262:\027\200<\376\0030[\215\305\213%kzizX\332\305\255n\237/?eP\262c\244t\357s\214\265\272}\033\216m\306\343\035\273k[u<\331\370\376\246\26248r\277d\350\273\350\336\025\362\360J\270\247F\360\300\275\247S/K\277\241\n\2719\031\330K9!\206B\030`\032Z\031\254\264\322{{\325\017e\212\223\233-\000\206\007\272\255\221JJ%%\271\363Z\ru3\232OJ\256\036\023\035S\177)dt/\222\250\227\270\226vk*\206\266!;\261\201\016\344\226\217\024;H\356%\330K\256\013S\312\245*wE\265P`\347\243\341\007=\252\310\031\221\236\316\301\252\013J\n\231M,\013\323\025y\311\311M\350\237\034|\016<T\314V0EJ\367\275_Vg\256}\257_\330I+\241]\027W\025\303\326\365\262\332\022J8\355\343\013\010\215O\251N4\222\211\032B\336\227)?b\324\2424/\352W\257M\22656.\257\243\303\236\355\313u\374$v\253\236\034N\337\352\356\366\337 \\G\021\226=\204\274\356\236rvg.{\321\314y'\225\337\347M\271\215\206\237{<\315\250\323\220\3739\242\373\327PYIu|\375\246\335r\021\221\213""\300kr\032\304\375O\223\370\344o\317\343\277\257K\230\356\216X\013\232\340\037Vc\204\367\206K;\027\014\354\210\202\"\010\210\" \203oG\227\255\037\262\324\334\270)\022\024\227\301\262}\363\261\333\306\344D\r\252Q\002\036pld\367h\006\026\026\200\356h\212\013s\262\035\035\005\330\315{rOp#\037\233\335T\276\352y=-\223\245\240e\023\355\014\367\257\022\014=\256\207v$\211h'\247v\"\025\255P\202h-S\201\241*P\r\010\034\t\307\t2+[&L\234\347\025y\233\177\245)\025\"\0107m\026\335\241\275\036\317\345\353\373\236M\345\310\006N\036\010\020\272E\3221\221\217\217\033\314\313\245\347\272!q\215\226\255\366\341'W\331\231\023\333K__/\024\265%\271_\307\225{b\"\"\033\210\210\367,G\016\223\264\372:\216\365\373\241\006k\364\235\2331\217W\327\256\333\031O+'\037z~3\347\275\033Q\274\335\273\232\304\353\356\177U-Y\2000X\030q\237\334\356\277\374ay\274\277\335\017.\263\205\376\036\021\021\021\r\304Dq\245\332CJ\360\360RE\376\031\207W\357\271\304\350O<\344\372\037\346K\336\013\312~n\236\035\354\332\265p\203\244%Eh\005\375\311\201q\010\017\034\341\314\331\213\213?\215\246y\006t\272K6\360lW\336o\360r\365\360\277 m\361\231\231\231\27206V\315\013Z\370\327\251s\203f\001\233\321m\303\370\254\003\365;>W\034y\373d\216\001\3009\255\2206\006\034\3001\270\300L\212\300 \252\322\232\t3v\224gz\243\242\202\261IYX\236\303\267y\n7z\311\016\305#:=|.\376\277\272*\336\315\276\177g]\350\337\301y\003\315i\304\210 \226\315\247\002\014\336oNyI\204m7;\367\013\201\320\222\343N\2376\371\256\367\rk05Z\365Lzg58\231\2310\005\333\211\260(k\3739\274\351\346\214\324\346y\031\365\367\317\245\302\250\202\233\251\267\277\373\207S\214l\272\277\307\030X\217\001\370<\020!\264\323_\302\316\236\327W\276\003q:\350\241\036\305\023\3256\323\026(S=\267E\001\355{\027;8\376\254\rrx\004\205\332(\243R\320)\013\203'\261\261\314U\375\267\364x&||Z'v\036X\305m\331\274\2129\303\237\346\345\317\225dU=\201\331\343\210\221\246'd\304\214\247)\216\345)$\300b\031\224\345\201;/\255L\"Qd\303\257h*/\202\016\254\\\345\341\274\037\260\306\270\332\211$X|\030t\240""\354\252\257\017\261\t<\233\262{?\013\236\324\"\214o7^\003Q\243\203\264\210+bmh\301\231\203\241\324b\007\302q\035\227r'x\214\374F\032\331\340\352\307\0264\235$\324\315\324\217\014gW\273>}U\267=\222\322\020HfwJ\033+\243;\330\304\245`\020\201X\0203{F\306\321$Z\200|\236\213\262Gb\005\312\033@xP=\214}\376:`pk\245_\226\\2\361\035~~\240i-\237\025\371\246\031\034\r9m/\237\265\260\242\2027m6\037\351tu\301\2233\032!\002\2118\206<t\340\216\017\344\324\357R\205$\005\023\022f$M\2507\345\232\364&\227\211$2\230\212\235l>#\362\262E\337\244p\031zq\217\006\243\365\262\035\325\253\224\245vC7s\213\032E\351\2624\033\202\245\234\346\250\244\214\267\373Rxz\022c`0\006i+\212Y\270:\036D\225u\357etj\201\266@\035\005\\r\022D\240\000\344\211\265\324\030\362\364\370\343\231\025\313@\261\005\262\213\204z\370\235y\007\343\005\314K\352\032^76\203\336\370~o\304{@2D\276\020W\301\013\334\242\037\371\335q\247\361vF\202u\036[\020\3603*P\272&\231\222\233\245\"[\273\272=\343\244\326\227s\327\324\037\204\003UB\230Z\003o#\014\3450\314\217.n\371a\356N|T\326e\337\n\223\275p\222-kP\204\311\273\334V\240\2753\244\373\204vK\254\356\374\034\260\231V\020\326h7\240\332\014\371\341-\0213.i\005\231Du\306\022~*\331\020J\233(\005\037\344\223\tU\232.\374\352\022\261\013c\301\244\304DDENR\271\212pa\241\014\030\300\321*\004%\244\331\006\302\t\026\027\211#\303\260\352\016G_Y\364\214plCG\327\214\361\"\031 \221\211\000\004\332\000\233\021\320D!\262\027\242\010NF~\223\321\261\327\t/\204\341zu\272n\335\335#\335ql\274'\020\353\3553\266\030i\\R\323L\375:\340\312\320dP\216\nD\3111\253\332\223\020\251*\356\334\267\002\334GT\032\035n\353\253\356\270\377k\331\323\236\255\310\203\242\245Wf\256\352\237r\317m\251\241\332i\017U\332$\300.\323\021\234]\267\034\300\014eg \333\r\264\233a+6\310\314\233 \017odr\203AP\033t\226\227\005$\200\344\237\033\313\254\316\005\342\245!\221\220\243j\255M\353<)UUUUTUUUTUW\213\273n\271\255\304\265`j\357\300\305\350hf\357\206\r\215\365\321\025\026\264\002\356\213\273\311\302\267\336g\223K\207\014\303\222""\372\227\275\220\304\342\243G\242+\006\002\354\333V\310H`T\215\271G35FZ\244Cf\373\312\246\225@.\014'Y\001@\006\016\235\243$\021Ds\256\020\302Tu\310Y\357R\254D,\3173\007_\242\307@\003\031cap\220\233\213by#\217t\030\t\253\236\226\241\311J\361l>`\325\350\212v\334;J\304h\350\360\226\206\325\244\316\320iJ6t\305\003\023\004\320\274=\356\307\350\247Y\302\236\216r\027\227\026\0316\367\005\370\366!{\300dZ\022u\312\315\360@;[o\343\254\\\346\031p\217\020o\345,N\030X\240\330\301\267=\322v\017\312km\033\007\243\242\366\331\0067\311\253\272b\t2\267\347\234\305B\030\n\335x\332t\316)\237\235\016l\245\252\01445\224\210@\230\344\317\200\317\364`\350\025cb\367\351\222\356\371<\313\262vH\307x~>\316\343\214\361\203\222\032\003\2407|\255p\325i\020nHm\032\234\345\000l\224\215\2431\234D\201\331\353rs;\337\013\r\024\235F\272:\016\203\321\364\254\r=\235\312*\325\302\326s\212HL8\350\231\207G7P\371!\355\010\261\000`\223h\240\213ZV\337\240\371\356\004\205\337v\301\343\364R\214\232\274\314\303#2\336l;\017Ww\316:9\235\271%\245\003h\226\257\035(&\350\232aI Z\342NQ\223:\030!Jh\313\037\177\353uX\366\035\203\335\000\032\004S\345\371\225h\232\256|\331\257Iv\360<5E\326\3639\252z\351\031\0161\300^l$x\240\353\370\261:\312\035\361\007$*  \205\021\354\035\223\307\003\271W\030\033.\331\273\234/\274\317\207\307\246Mw5=>gg\255[\343i\272\251\024\005\025\025\222\242\261[\010\240\240\032.I\330\3024\316\220\341@\311\327\342\006\322\363\352\312\363\355\021\231\2524\216\355\301m\250\006\322\006\237~\255\302^\3561\333\245i\340\213\365+7e8\322\341\226\010\207h\360o\0379\332\214\332\036`p\021\004uj\365R\212\364\272\214<\301F\241\365\027m\224\241B9\001\026L\234\231\003\2630 N\024\305\353\352\211\213]!b\360\232\023$\267\345\211\206\334\3356!\007\241\350kH _\237\001\361\244\266\375\005\202\300\323\227(-M\273\336\001\254\034DM\000M%\324\024\326r\364Rv\t6C\266!\204\260\354\006\231\267e3\"\320K\302h\306s\025\3715 \253\031\306\342\203\253\200*S\227\005\322g\014\246\224\231\014\246\270a\005D\342\201]\301\321|\375\227\021 ""\022\024'\257\225\000\205\013\2000\2011\222Hh\022\032!\334|\372\212b\0036\007C\025hu\273\254B\230\257H\233k\3279\255\335\207!\241P)\016](\267K`\330w\203\2662B\320\346\013bT\202\330\206\320\240\315\240w\273h\365\220\337Z\230\364\223\n,e\343\204\007\273NTX\212jL\331\276.\305B$:5t\352\304\261 \204OGF\020q$\300\240\300\374\370\007\326\212K\220A.|\265Ga\264\262L\312#h\006\263\337f9\366\320[~jK\006\243\252LN\032<\"\245\301vmE\266?\215!!\241\031\225\022\2065\235Z\325V\014\204\230\222'\00031\020\231\235\324\370\010\311\244Pl\0039y\341\304\367\222rW\367m\263F\207V\260\016\014\372\033C\273Wp\306b\220\202\346\206\322N\350D^\023%\244`\036\223X\020\215b\241l\311\264L\317\205\310ll\r\264\216\236\357\023\200\203$g@\214{\326\231\032\214\021\0311\006\334\326$\332;8\347\347U\323\215\326\"\246\265\006G\231\2028\342\220\241\302\262\0215j\246\322QR\263>9\0013U\032`<\251\275\234\301\2166F\010o \006\036\253D\341k}iT\211\3377\226t\202\030C\307#\212X\211|53\261{}>(n\000\363\372\020|\260Y>\340C\010\202O\200F\2347\252\317\034\213\200QG\013A\355\206\2141/X\313(0b\005%\342\031\346\335#:\264\000\024\201\323\006\243`\334$@\300\224C\211\213\212%9\223RB\344#l\002\231F\320\3234\232\373\027\205\330N\214\016\221\030 \032/\220\013qh\220\242\242\261@Y'f\371\224C\203\016\030\321\206\031\200my\234TY\340\352\263\230\016G\252\n\344M\375T\264\203\0200S\034\214\344{\266$]\221\336\014/P;#F\344\224\204X\211\325\252[\022\204\242\206\243W!\010\211)D\020\206\240A\274\341\325\333\320ut\301\270\276\351\021(\221\322\353\022\245h\004\035A\326T\211\2725\036v\264&\232u\240\255\3571\365\245\352uj\266\227c\217{u\370\213?\034\035\312\354_\270\316\3104\031\374O\222)\\\263\264P\376,\237\005\310\375\033c\000\272\315\255\265\275w@\330\202\301=^\220\261\235\310\204\224\020\313\016B\014\327n\323l\204^\347f6\366MeFR%\214\354\rt\243\235\222\301\r\203F\0246\004\224eu\315]\0044\221'L\373\013\r-\"\020\247\031\355+\243\324\232\2249\321\006\016\313l \350\303\\\3527M\036\035~\035g=u:\367\271\014m\352\203\240b&z:\235\321\2233\2275}-\370""\333l\252\252\252\252\252\252\2530H &\375\375\302\330:\304\324\256&\231\337C-\216\325F\035\\\031k\013hYo\262$\311\323\305\020\01010\253\2442\244\3306^\320\t\230\004\373\016`\203\272\331\365\030\374p\311\026\323,\257\206Z)\264\360\207\030\202\362\273\014\372\034\025\266\371!\364\253\330\273+z@\257\315m\327\214\002\267:Dvyx\230\366\350\312\312Z\n\333\241\013@\3614\22720\210D\242L\211\r<o\266)Zk\324\"\355\316\250I\024{\024\211)4\230\r\255X\223\327r&])\213\006\036\246\013$\245s\315\026\223\020\242\216\370\272v8\317fR\300\326\334j\227$\216B9 \347\330v\001\347+Z\232\377\357zZ\314\204-\t\016@)\257\255\007\244\372m\007U\005\314\263\306w\2673\220\224p]\2430\005.'\263\235\341\370,\324y\021\333\326\005f\2223&\221\3424\205\203\345\252H\22176\255\355z\202_\213\337\244\357\230K\222\344\227xw\243\273\003zilyF\230\336H4\355\203$Yj\257\245\035}\327\352=\305\272\201@\303\346#b\324\034\362\021\237K3\021\020\302\246\323\235\276\375\2538\215Y9B\201\222!V\320\204\257d\316p}14\005\315\310\033\357\274\3334\353\300\2024l\223\223\030z\340\252\351\020AZ/,\225\204\352\252\347\\z\271\356\267\363\030\026\253p\366bd\000\246\010\214\020\243\247I\261$\033\236#8Q\0303`\330\"F1\367\261\014\202\242\246\211\261\347\237\337*@\007\366\031\371\275\354\337\017\301\031t\231<\032v\273\334\237\263\314\256\t\300M\233L`l\261\333\024[\375\300?\204;]\271?z\021E\220\030\n\351\371\255B\nH\377!g\241\342\303\271;x\251\345\207\340O\270A\004@Y:~\305\0053\020\375?\224\n\001d\213!o\020<\235\224\232\261\326\305ve\334\322\374\022\376\314\224\233\315\247\251\333D\002?\240\016\312,2\302\273\346I\375\241Ui\004\357\347\223\373\2170\360~\214\375x\311\213\321|\2707\017\241\244\006d7\353\371z\206\017\000ya\00390u\022n\240\321@\371p\025\266\374E\341\266\177\256\373M\235w_k\247\373\036\363\341\036\361S\005\010Q,F\202\"\350\033\025uo\362\304\271\373\276\262\307\210e\021\206\223iy\301\324\2446\234\037\230\364j\003/\337k\341\324o\352\022L\320C\306\032\255Pa\270&\256\360\225:\225\303he\3637\347\365X\333\241\021\364\250\332\376\357\026""\025\365\226\027\235\370\210\353\234+\300^\t\371^\010\022\311\213\313\376\222\307\226QaFC\372?\037\255\257\003~\323\267oh\370\224\356\242\333D\363\261\351\222r\233;\315\305!\277\004n#\235\266\367\024\320\334w\230;\260Kv/'\335\200\321\330\334\366\266\346\316\317\007\351\r\321\375T\307\237y\311*n3KtO\361%\267\270\274\301\017\215\227{\311\361\316\242\354\323\rM\275UC\265\272\355\341~\324\017\031\022C\"G.\273\203\363\177\343\360\272Q\036\037\206\200\351\3513>\200d\253\341)\365o\246_,(g\\\364\365\304B\035\236\324\026\353\021\321gfH\336\2247\207\220\033m\2605\322\007s\315\001\315\305\010\306/&\013\000XTg\026c\030'L\021\330\333\3242\353\327\325\366\304#hg\242\333\300\244\324\241\001\264\353\266\277\255\026k\321~V&J0%\367HDF\217\016qm\221a\265\316\305\210E\242\235\307\364\035\356\023\367%\330\360\353\020\205\334?\361\306K]\024<\363\270\307\242}\177\325\032\267\250\326\344\326y\021\024\206\261\005(\244\350\323\323\261cV\0104\036\034\234\220\365\367\314\030\321\311H\251\345\246=\232\326Z\217\007\202\324\323\023D\345\255\312\213-i\216%\016\376\034\246\232mm\257C\216;\266\305\230\303\316\270i\226\321\254Dr\327\014\016z&\2324\016k\377;\034\366\266\354\263\302<i\235\033\tq\021\236\237\225\235\014\251>\316\023W\331\374];\2567\264D\217\360wDJ5\312(\361Z\364\332\314%\260\353\362Q\234\242\326\267.\252z\362\241\345g\211\354\304\204\323\301\337\375\320g\224qQ\t<-:\224_%\232\273ap\361\263\217\342,\"\004[2\336\r\177\360\270\332\317q\216>2f\201\364\325\2607%\017\311\034R\210D\2104\266 |\213]\203\002\272\032\217\200\324\370[b\003A\264M\003\345\322\346\032\264\010hg\030\300g\272\317!\327\204/\311\263\215\376\330\177(u\373$Y\372\347\215\022G5\341\243\3253\254\231\202y\326\205a\025\334\341&\3563\300\n\266\273\361\"\016xh>\030\263]\001\372\376\000B\312\306\036\333\274\305\321\n\274\276\016U:|\373;]\377\226\256\346g$z\205n\236\306Z,\3331\271s\321g\254\267\376v\3321p}\267\330\t\256\3647koF\371\030\365\365>\177\2550\206\005R\260\013\355B3~\324er\205\3620\326\246\222Xk@Tl\243\002!\001\033\236u""\200\334)8\370\200\313\n\2652\302\255\203Xi\302l\034)\032\r\t\235q\3049\014k\353\374\032X\235g\374\370\021\363n\226\260\354\277\223G\223\335\257\214pK_\304o{=\213\331\321\343/}\313\243\261z{\350\244\216>C\227)\317\354G\310\374\366\376\211\374#\352E\242\255!\334\360Q\\#\351\310$\354\235c\340%6\266\302\202\261\260\026V\t%\274\362F\020$\263\2707r+\022\202\"\347\223y\301\031\300\326\336\326V\"\032)Kd\270\030\242\304d$(\232\301\247\257\303O\323\035\361\303\003xB@#\244]\333\341\343\271\266\354eR\r\230\253\031\3417\033\265\317\0359\200e=\242\023\316\004\2404\326IY3\204\323\2654\362\235\226\202\262\222pQ\260#*\021\2700T\032\3011d\032j\300\262\241N\t\035jJb\305\016\211\200\216\312\311\252\274\341\262UE\007\006\374\245/\226\367v4]\021\272\037\031\211\260\02272-\254\024\245\267S\354R\366\3076[\022\357\357\356\355\255\215\014\262\370Xe2XK\014Za^\267\276\300\317\262\033\327 6\212lP\357V\227\003(\205UZr\207\377\027rE8P\220\206e\254\204";
+    PyObject *data = __Pyx_DecompressString(cstring, 5896, 2);
     if (unlikely(!data)) __PYX_ERR(0, 1, __pyx_L1_error)
     const char* const bytes = __Pyx_PyBytes_AsString(data);
     #if !CYTHON_ASSUME_SAFE_MACROS
     if (likely(bytes)); else { Py_DECREF(data); __PYX_ERR(0, 1, __pyx_L1_error) }
     #endif
-    #elif (CYTHON_COMPRESS_STRINGS) != 0 /* compression: zlib (5813 bytes) */
-const char* const cstring = "x\332\275Y\313\177\323\306\366'm(I\033 .II)P\031\002\t\241\270\244\204G\303\243\327$\001R^y\002\345\376\356\325O\261\306\216nl\311\221\344$\206\373kYz\351\245\226Zj\351\245\227^f\251\245\227\371\023\372'\374\276gF\226\337\006n\333\313\207\310\322\2313s\316\234\367\231\231\225\342\017\037\256,<\214\257-H\223\361\245\245\225\347\257\344\245\205\225\271\205gk\213O\026\244,3\023L\267\2654\223\0243\225\313\340]\312\344,[\332\000@Jk63\225t\317i5\354\rf\3572\246KWcW%EW\245\351\330\325\366y&\333\316i&\263${\327\010\tZ\263\222\275\311\244\204\221\316et>\227>\353$\342++\361_dlCz\262\370tq-\244\370\206\231\206d\230R\312d\n\370\254\243%\024]2\364t^z\2762\277\260\"\335\377\205/\250\244\200\230\002\246\032\220\212\247\323\222\252\201\003K3tK\312\232,\301TMO\325\201\322\0055\244\246\351*\333\303\\\342O7l\311Jk@\277\237K&\231)\355hlWR\rl\214\206\330^\326\260\230d\331\246\2462k\256\306M\202\363\t\261n\210I\366\246bK\232\005n\260\315T\316\310Y \"eX\3060\3631\314\242\245\024\313\322R\272d\033\020\235\242^\341\353\010\014\"\031 \005\013\357\232\232\255l\220J8\202`*i\032\231^s\371\266\244]\315\336\224\354|\226I\023\001\3346\025\335\342\333\250O\021h\230\001\025&\354\006\331\3157\nL\023B\020H\013\231\254\235\227\254M\005K\333\271,\230KBc\211\274\275i\3501\3054\225\374%\351\341\312\363\365%\322\322\344C\323\310e!\343xMU\322\344#\305\332d\352\245\332H\250D\0222\014\211\023e;J:\247\330\364\032\352\300\312e\263\206\211}l\202\237\355\0343\003.f\245E\276c#gKFR\3320r\272jI\223\312\036\320.\250\227\026\3337\327\270\034S\027u\020\323`\026\206\312\276#&\200\014\276&\022\023d\212\023\330\035In\342;)\205Y5d\261\177(\227\223\271\363\224K\364\005I\024,<3\260\033n\013s\\,$@\225\245\265\r\270\236\315\2403\262#\020\341\006\243KK\013KWfn\315p;4\331\277@\336\002w\033\2114L\005{\247=\345\264\264\rb\244O+&-&\245\274\221\223t\0066aGY\3405N\200k\350\222\305l\356#\023\\\371\\\2242\246\303\031&\002Ej;\214f?P\322\026\213=o\022\036X\016,ZI$\240\222@\232\2536\313J\031%\317\345Ws\327P\320\353:7U,\t\363\337a\320\024b""M\206\276\215\r\332\324\272\036\212\274A\351\311\234\236 \346f\245\330\275\211KS\337I?)\252*\353$A\222\207\004!^\335\203w\247\031G\263b\312F\342N\203\177\021\222\330\317\275Vp\315\254\357\251\232E\2541\316`*!M\222&S\334\242i\223\024 \330\236Mq\2134Z\217\025\343Z&\213\230\240\331W\022\220\213\255Yb\005\225\366eio\230t\347\256t\265\315\374ABI\344\245-\206\370\000\223J@?\3601\023\026\262\303\324\266A0\210]\331f\016\026\332\210\250\0330\231\244\222K\333\222,\233L\315%\230,Kj\216\013X7\364+0\241\035MIc4\241\351\232\215A!\346{\342G\3727\314PgF\026f\226\337\373\336\310\222\355\031\246\365}J\370\235\034\252@\336\344\016\371\275\314\364\224\246\263XvO\373\230Y:\266\361\261s\002}\002I\336P\254?2]G\276\201/\375\201\025`\034p\255\204\375\007\226P\262Y\323\330\373\330\005\222\n\315\316\3234\213\245\2231\031.kQ\246\013\274+\360\"\341\343\212\264$BI\240]2\272\254\226\330J\303x\203\331[\314Nl\262\377l\005\374Q \327\366x*m5\332\246\341\316v\035\240P`\2037u\030\267MX\344F\336\006\203\3022\357\210d\2526yp;\214bp\350\310M\343\315Pl\302\310\241\276\270\227\013\303\220\222N\033\t\236\237\311-%U\261\225X\207Q\021\312i\305 \275\003\251=RQ<\250\307\252\234\235\274r\253V\206=_\211\257\316-.\306\353\230\253\310!q=\377\002I\214=H\033\212}cf\256f.\335\340\261\320\315E0\221\345\036\230d*6\031\323{q\223\232\216\204\365\206\325\020\026\365N\3144C\273\263\322\206\327\225\221\026\314V6\236s#l\343\243\005\334\235\221v\304\256\234\264\242\206\254p\257\235\243\310>\037\304\200:?=\306:0\325\033\273\235\263^\370\315\354-\2055s\013o\035\006\2721\326\031\265\013W\235\220C\226\310\217`\346uVZ\001\035X\350\200\322N\272\r)$\271\323@m\247'\241\235\367\320\330y\317\362!P\346\215\300}$\246p\254\351\243\235v\353p\033\361f\204\032\241\316\320:\371\245\264\242?C(\235{\264\376\354\261\274\272\370z\241\263\315|\250\235~\270\205\276\3076\371\360\252\255\230\315,4A\272\220o\305\351L\272\031\253;\331\026\241q\004\356\364\315\2145\203\272p\326\206\324\231\265\026\264&\336\272\214\t\346\344y\206b\023\224k\201)D\354>\322""\316jO\3346\216C\354\247\312^;\271F`\017J-h=\210hz\007\"\r\300^D\232\321\272\023Y\315e\332\2114\002{\020iAk#R\263\370\205\247Kk\277,<_]H\247\265\254\245Y\274W\245\276u\201\227\310-\237\355\004\333\021\332H\265\242\204\266\202F\022\005]+\311\030\n\034f\331\255P,+\243\243d\031f\233y9hOZ\221B\204\240\345\016{q\321\211S\204\351>\002\336E{\021\273C\365R\332\272\027K1\235Z\365\017\230\323\013\005Es:\217bx\007;\223\223\350oY\317\025\251\005V\345\340\264I\225\305y\217\365QL\211%\032\n:\331B\235f}<\325^3\320H\232(\354\345\372a\227\214\246\000\304>d\022/T\211\303`NOJ5\213\351\205\243\033fF\230U\275\377\250U\261\275\346eM\226ULX\353fN\337\352\201\210\016#\251\245>F\013bF\017\004\266\307\0229\273\327\256t%\303\026\347\351\374\361\301\342\302\312\342\263\265\205\207\370\021\0073\017\202\315-)&\260`S\013\246i\230\217Y~\025.\317j\277\355\036\3330\322\346\252O\026\327\026V\342O\020\241\020\t[\013\354\316\320v\002]\361\332\310u\301\254\251\373=\303\"\327\010\244\346\032\274\023\254\033\237\357\257\363;\3425\363\330e\260\221\303\226\332\274#\260\033\217\037\320\002tF\014\271\344\221V\026?dYk\371,\223\345\245\374\036\376\3465\370\34338\346\nK.\323a\343\222IM\275\2551k\025\341\200\351\t\206l\322\252\206\016\240v\366;#\2651\337\t\255\306z\2571!_`4\313\277\r\320\221\261\367+\276\035\251\201\251\236*o8\000\\\315\353\266\262\307}\223\016Mc\365\363\323\227\213O\346\347\342+\363\312F\202\342 \371\272E/;\210\324a\014\263\332\202x{X\257\001\014\023,(\026\332}\031\315=\"rRc&\377\024k\343\205\257\035\034\007\310\342\340S\226\353\347\246\026}\344e:\222f\310ZLW\305\223\346Q\021\322!\223\211\023!\231\037\033\206'L\001\260\236\031\302p\257Xy=\241\031\010\216\210z\300\005[;):\031\353\226\263\272$\246\004\217\327\374!\323\001\245,\3633aT@\301K\212\331txI\237\240\202,-S\342a\033Jb+\2216,\206u\302s\255\372\001\227X]<\205\324\022Ff\203\026\340\244,\021\323\3719\246\202\375\322\005\205l!!(&\027@\263\024\304\325F\303\361\031\235\313p\356\302\027f\251\214\216\220T\020\202\234I\254\230\016\177\024Oz\324V""\003\310H\340A'\343\374!k\226,N\270\324\034\035\336\022-\233H\322\275TP \301y\261zp\336)\236\365*\212\361#EL\243\212\221\014\224\356\"d\354\014v+n%h\r~\354i\005\000dWXC`\024\252\251l!\013\326F\202O\221\324\272'\372\332@\375\342\303\352^J\300\202\323*\347@X\233\234\324\203\227\214bm\205NW{i--\233\275\262\376E[L\246\225\224\225\244\320\2025\251x\260\305S\256_\316\004\027\"\\\313\330\207\261\333\240o\376*\334\302\242\367-\226\247\3377LO\346\340h\202\001\231\227 rX\210\004E\003l\023\377e\356\231$\\\331H\312\\\243d\265\"\006\311\3744\225?\344\215|\315\352\305w\343\207Eg\254\364'\247a'\201g\302>U\215\273P+@SEd\340\017;/\327\216\375\003\377UT\230\242LP\354\234J[\225\355\211r\\<\205\344j5\257\246\333\267\310\010C_\026\267\005\301\225\001\004\"oa\005K\256\277e\323p\301M#\2552\223\200\334\301\350\205\302R\032\346io\246\265\214f\247\215]\212K\031\005^\313\025\235Q\3662L\3213,CWy\200\261\300\177\360\252\351t\235\205\027C\315\245\371/\242\031v\232\220u\253\246\205\214i\300\007l\023)M\346T\303\247\252ed\272]\262\032\324\316M\023cD\t\372\262IG\364't\324\253\320l\030l\210!!P\225C\005Z\360=\361\305\337`[\026|98T\017~\020$3Y\370\202\032\023\256\205\316\010p#\033\343\266\330\r)0\375\340\267\033V`\2711a\314rx3\003Xm\n\333K0\341\262uHMD\355\220X\340\317\260\205`\214\324\222\016\347\206\367\004m\200X(\307\330&K\003\332\001\245\333\335BLn\030\t\002\214a\302\274\370\203\251Y\204\373l\255@\266\352\341\245!\320\220f\263\233\224\201\270qg\215\254\0346\005rs{\200\244\366/q9\227\rK\244\340-\017TTS\211M\226\330\262\240P\376\005\321\344\322\266x\017\334\232^\205\253\323[N\347\367\022\254\353\241v\027\264\346\342\243\005\251\351\254\255elA\257\361\026\202z\034\326tAl:a\351\206\323x@\322\005\247\351|\203\343\354\210\214\203\177\3339%-\\\224\356\377\351\316C\346\367\2072K+Y\213\202T\355\246\260\375\014\244\006`{\364\232B\\$rA\375\320ZH@GFz\007\331+`\252!]\007\352#\3374\231\2353u$HX\021\214\313\260-h:\243\324\026a4C<ED\247\213*\213r$U\225A\254\351x\202\001`p\371\331P\200\312\035\212Q~wCq\225\2472""\030\271\315\313#\262\331Z\032\"\363\025\001Z\267\370dzh\t\320\3334T\010!k\331\006\376L\341\351\260R\024\2510\335\253\366t\310V\033\177\262L\313\340\271\t1\330\032\306\360'+\211D.\223K\023\177\210\033\034\022:f}\254e@\024r\",\265\0145\324\002-#\265\234\335\002N\005\334\264\004\204\026\220HZ-\300\264al\345\262-\300\206\273\351\356#2\266\205\254\331}\\\\\r\312\374\366\360\375h\342.\257\r\217\233c\013T\234\252\"\311fs\255\374Y\324\313S\212\025\222k\024rM7a\335\023|\223\360j\357\274t\010\336\205dj_m\033\3574\320\001\324(\204\036\343b\367u\004\341\205\301g\343~CX\270Q\202\030\210\027T\361P,EdA\230\317eQU\263\034\305\361\300wx\033\303\037V\320\277\210\372-hj\367\246\336\365U\373/{\323\336\203R\324\357?\357NW\007\216\026V\ny\247\317\371\306}V\212\036\014\014\025~.\252N\324\231u\227]\245\212\317g\316\270\2438o\274\210\027\255\016\214\026\327\234\2103\345\306\335\345\337?;4x\024\310\312\301p\244zb\3149\354\374\335\373\324\273U\372\261<_9\\Y\337\237\362\327\376\351\377S\361\225\215\352\350\267\316\266{\330}\351\335\367\224\203\241\341\342\2403\342,\377>ph\360\033'Z\305\3671G\241\237\001\177\354\212\267\\\035\036)>r\356;\252{\305\373\265\374\252\"\010\371C\337:\266;\355\316{\203\245\010\347\323\037\212\372\321\231R\274\264V\216T\351\363\242\253zQo\306\377~\2562]=}&\230&\271\375\304-\306b\345\317+\343\225\315}\325_Y\345\363\317\271\343\376\305\237\312\333\225\376J\234\270\031*\314\024l\377\304\204k{3\33668\362\207/B\006\303\304\375g\376\305\037\313_W.\355\337\244\3314t\311\213\204\277\003\222\333\347Go\226\266\313\237\226g\312\271\312\374~_u`\304\037\271\342_\271WV\370J\027j\022{\\\374\315U\374\211{\345\364~4\3401\352\216\370\027\356\226\227\305\256\334SD\276\324\367\256\357\367\221C\207O;\323\277\017\035:<X\030(\366\221\262\326\212_;\027]\274\236(N\223\320\216\024w\241\236\177{\263\245\345\222Z\276\204\255GF\213\313\325\243\221\342\2303\346~\345\346\274\307\245\355\352\300 \341~VL9\313N\332\233\342R\033\253D8.11T\270VH`\306(\304>\351\235\367\326K\3479\306\010\024\031\345\374""\237s\243\325\243\303\305O9U\177\230L\247\341\023\273\243\317\376b\274\347\347C\207\363<\344\304\033'\223\220\033>\247\274&J\337yu\344\257\301\240\002;\270[\352/-\226_V~\336\027\302\275\304\255\223\223x\352F8(\352F\334q\027\346\366eq\312\211\373g\342\225H\005f3X\370\326\201\360\202\237/\213\0230gR\303a\230\242\377\315\017\330\366rI9\350\377\242p\247\270M\276r\2554]zP\216\322+\331\332\213\362\264\337\177\335\277\376\240\242\020\350FI)\355\224\227\351\365V\271\257\374Uy\333\211\277\213W\177\270\006M\371G'\\\010\376\013HV)\274q\316\270\t\017\234}\351\177\371=lk\0306s\n~\364\230\024MH?9\227\335Uo\000\037\215(\243\305u\270\342O\344y_\024\256cws\305_!\313F\224\343\205\355\026\212_\026\307\213J\361\r\3440@\226\200\231\263\370\031:^\260\212\321\342\254\363\nt\372\252\303_\371_ao\325\221\321\003Hu\304Y\203\270\246(*\224~ \tT\007\340\216\316\347\356\204w\302\373\271\224(G\312S\2258-u\243x\022\236\276\006\3032\353\333\241-\300\300\306\234\317\375s7KV\031\026s\262\010\007:E\356\r\036\300\340\365\033\264\344\347\000\300p\257;\237\301\343\261\332\217\330\320\036\3649\353_\271_9_\001\227d\325|`\336\031tOzG\274]0\323\000\365\307\246\374)r\36012*1p\314?6\356\302\322b\236\342\2210H\022\263`b\340\270\177\374<\217\031\003\245OJ\321\306\221o\340U0\3733\316\274;\350\215x\313\036\3309\215\217>w\304\375\305S!\206\333\360\333\201z\314\031\201Tt\022\301\031.\252qW\363l\230\306\223J\037\205\314\205\342(D\276M\374\314\024\337\272Q8\007\344\r\005\235\305>\207I\014\010j\013N\244:2\346\364;q\347\205;\343\276A\034\033/\261\362\315\312\205\312\356~\322_{\345\277\372\305\377%\351'S\325\221\223E\3239\t/\037\013\302Wu\354[g\327U\240\336a.Y\276\370i\254\264\002\016\257{\207\275U\354p\002\201\020\024\023\340\357\242\367\t\274\230\2665,|f\2576u\230D\0066\216 \250\365\271c\244\304\343\205\235\342K\270$\306m\347\007\207\354K\370E(\301x \273\351\022\214\352x\3417rB\377\374M\n,4\371\177@1Z\212\027\200F\210$\204m\332'\251\374\010\261{\224\204\364\010:\205y\217\340\347\030<\276N6`\246Z\3079^\260\213\267\261""\021bo\230D\366\014.\000\316op\241\214\234v\036\022SD\334.NsS\001\003\357\342\007\260\221\031Hf\210\204}\222+sYx\316\221b\016k\214C\263\023\345Q\212\310\247\374Sd.V\351B\351m\345\"\302\365P\244x\226g\251e\221\345\316P\366\033\024\254L\203\t\177\354\007X\305\214\177\363\361>\224\213\330N\323md;\nq\310h\021\377\324m\304\376\377\333\237\3337\375\345\225\3004y\360\373\273\177\225O\202\263L\222\353\375\303\377\0072\243\\=1B\322\342\211\250\3118\277v\"\"U\204f\025\304N\010\013\374\354\002f9\347\035\236)9\364 xy\354n#\005S\356jU\034_\367\034\3349\302\227o\262Y\256#\310\370\021\014\355\005f\357\300\3247\311\3729g\024\001\356\223{tZ\261\363R\203\220\373\013\324\030\367=\206\010\363\221\023_#\234|R\272T\236\356\271\207\210\037\271\300\223\372d\351\\)\336\306*\217\2115\\\250\032e\005T?U~\210\300\321\031\227\027\017\325\201K\024\014\252\003Q\367kr\237\352\300\270\373\263\227,\305E\212\234-\276\202\320\033\331>^x\213\370|\315\331\200U\302\321\"\316\005'\357\365\361\245\267\0203\243\007\303\210\310\244\3623\310\273\t\367\254\267M\273^\364G\001\366'o\241Z ~\n\217\375\223\224\301b\265\357\247$\035Zn\322m\361\301\017es\215\242\177\215Q\333\231\376\317X\005e\004Vw\335\233(E\032\250\363\020\330$\022r1\221\257\213\207y\312\232&o\235\361O\302\336\275\257`\217\010h\250z\252#\210\273\224r:\ta\261\270\034\356\275a\275\276b\344\240I\004\201V\377|^\274c\224\350\336\307J\233SDE\354\371s9j\265\210\367\010\347/\344\301\237\232-\237//\377i\032\342\226IEQ\006\306\310\220\007s\336\034/\266\003\276f\234\355\236\234\221%\347P6lS\364\213\027y\020\\tP:\237\361\317\\-\365\225FK)\316m\017'\377oq\364a\356\363W\222GbAup\204\252\242\240RD/1x\016\325\033\257Lo\026\317Sex4\314\233'\251\231\020_vP~\363\322:D8\345L\270\320\366\270\373\300\273\200@\335_\342E!\037\342=B q\261\273;E\333\377&\206$p\255\264Q\356\013\332\206\233\350\321\246\271\033\235A\031\204\267o\251\224\270\201B\210Wd\347y\321\336D\256%\342\332\250.v\321\304D\275\033\274\202B\377y\232\252\010J\201\267Q\"\355\360XO\025\227?r\201\247\223>Q\207""\241\252\211\242\364\354k\344x\334}\350]\3636J\274\212{\216\242\020m`\324\035\362\346\375\253\361\312hE\021%\357\227\305\351\260\0208\353\244\334ejb\277\340u9z_Ah\235\177\034\324\320\000\373\316{(v~\3206\367(\327zDr?\347b\354\2536L\273\350\246x5\327&t\362<\364\315\325\243\247\235\237\335-\354}\262<Y\2116\356f\022\252\266(!\0364\000/\240\357\236\363La\202\242G8@]\026\224[\274z9\346\237\025}Nl\177\300_\202\005\241\000\362\277\246v\226\347\203\327\356[\224>\323A!{\242x\255\230\240R\366\254\243\372\347\320\265\242T\030\035s>%c\254\203\016\2007\033\234\010`\000I\345`\204V\372\265\264|\200\345\251\356\033\241\036r\354\254\363/\004^\245:\206\030FU\3566\325\274}d\n\303\005n\266\265\266f\220\332\277\2103\3560\377\374\365\3222\265\033}\220\307\272\177\016\215\031\355\r\010\274^\257\016\361J\276:\004n\220?\251\315\247r3\000\006_\274\256\256\016\235\207\277ALW\271%\017MS\231_\035\022\331uh\034\205\177_\360#\374\307.\376\004\207\272\346*\357\202\3323\370,\361\016\360\363\302e\264:}0\241\303\307\320\246\2179#\376\031Z\361u\331\256\334\363\227\327\375\365\204\237H\371\251\267\376\333\337~?t\350o\237\304?\251\366\017\025\036\242\202}\340|\007\246\372\217\274\333)\274D\351JZF\033\007\335\242b?\030\240\262\374.T\233+\315\225\354\362\335\375#\373\333\204+\252\274\233\000M\243\260\271\275\237\362\327_\0344\203\224\377:;?\226G\240\376T\345\357\376\322K\377\345\253\203\026X\203|\316BW\367J#\376\365\305\375\221\375\345?\201t\214\367m7\313\227+/\367\343\007\315\220\277\222\356\215\222Z\216\242\215\273\274\377\322_[?h\006\375\225\204\251\337\330\256\034\251\274\365W\3208\276>h\201\255\202\264D'G\207\013\353\210|\327x\000\345a\216\237\355\035\210\203\001\356\313\010\215\027\203\216\220\367\203ox}\210\214\202\332\3712\302\365\260\250\241\251\251\371It\267\341\313WX6\207\026\344(\370\345A\240\327Z\350\231\252\221\tw\317\373\0259:\202\374\345,\000\211F\220\272\253\221K\336X\351ly\233\223\243\363\215\310$:\367ce\345\317\243\373\033\026\353L\367[t\362Mt\217\227\267\3770]\276z#9\364\220\234\n5""\322\335\027'\213\031,|V`\260\017$v\207\237\366\335\345\004\006\216\025\222A+\030\350\217\021\017\243xI\202\253\332\313\273\276\203~\304R_\272Z\372\242|\273\262E\035i\377\t\377\004m\254\017\264aC\377.\336\244\016\037Q\336\277\265\344/\361\216\264\377\213\302t\267\251$\244\010\362j}\352\255r\237\377\343\212\277\362\277\376\377*=\246\202\363\001T.\215D!d\377\352\337*\307\366\225\236$/S\362@`\256OD\017\350\337~\341\277P}\225\365\234z\305{\305\317\261\352S\357\224\343\376\335\327\376\353M\177S\013\246\322\350\233b\2448\311\217:\220/\373\305i\335.?'Ur\032\3359\312\266\304O\362\245C\207\236.\276\222\037\305W\037\311s\317\237\255\256\305\237\255\035z\266\376\344\t\007=\377\177\02458\264";
-    PyObject *data = __Pyx_DecompressString(cstring, 5813, 1);
+    #elif (CYTHON_COMPRESS_STRINGS) != 0 /* compression: zlib (5952 bytes) */
+const char* const cstring = "x\332\275Z\313\177\323V\366'm(\t\r\020\203\003\201\002\225!\220\020\300%%<\032\036\035\223\004Hy\345\t\224\376f4\212%;\232\330\222#\311!\206\371\265,\275\324RK-\265\364\322K/\263\324\322\313\374\t\375\023\346{\356\225\345\267\201i;\375\020\371\352\334s\3579\367\274\317Ug\204\304\243G\313\363\217\022\253\363\302Dbqq\371\305kqq~yv\376\371\352\302\323y!\247\030IE\263\324\214\"HF:\237\305X\310\346MKX\007@\310\250\226bH\231\236\313j\330\353\212\365VQ4\341Z\374\232 i\2620\025\277\326\276\316P\266\362\252\241\230\202\365V\017\t\2323\202\265\241\010I=\223\317jl-\275\326I$\226\227\023?\2138\206\360t\341\331\302jH\361\235b\350\202n\010iC\221\300g\035-)i\202\256e\n\302\213\345\271\371e\341\301\317lC)\r\30440\345\200T\"\223\021d\025\034\230\252\256\231B\316P\222\212\254j\351:P\270 \207\324TMVv\260\226\370\323tK03*\320\037\344S)\305\020\266U\345\255 \3538\030M);9\335T\004\3232TY1gk\334$\031\237\020\353:_dmH\226\240\232\340\006\307L\347\365\274\t\"BV\311\352F!\216U\264\225d\232jZ\023,\035\242\223\344\253l\037\216A$\003\244`\343\267\206jI\353\244\022\206\300\231J\031z\266\327Zv,\341\255jm\010V!\247\010\343\001\3342$\315d\307\250/\341hX\001\025&\255\006\331\3155\nL\345B\340H\363\331\234U\020\314\r\t[[\371\034\230KAc\311\202\265\241kq\3110\244\302%\341\321\362\213\265E\322\322\304#C\317\347 \343DMU\302\304c\311\334P\344K\265\231P\211$d\030\022#\252lK\231\274d\3210\324\201\231\317\345t\003\347\330\000?[y\305\010\270\230\021\026\330\211\365\274%\350)a]\317k\262)LH;@\273 _Zh?\\\343v\212\274\240\201\230\n\263\320e\345\n1\001d\3605\236\034'S\034\307\351Hr\343W\2044V\325\220\371\371\241\\F\346\3563&\321\227$Q\260\360\\\307i\230-\3142\261\220\000e%\243\256\303\365,\005:#;\002\021f0\232\2608\277xu\372\3664\263CC\371\027\310\233\340n=\231\201\251\340\354t\246\274\232\261@\214\364i\306\205\205\224P\320\363\202\246\200M\330Q\016x\215\013\340\032\232`*\026\363\221q\246|&J\021\313\341\014\343\201\"\325m\205V?\2242\246\022\177\321$<\260\034X\264\224LB%\2014W,%'d\245\002\223_\315]CA\257i\314T\261%""\314\177[\201\246\020k\262\364\256\257\323\241\326\264P\344\rJO\345\265$17#\304\357\217_\232\274\"\374(\311\262\250\221\004I\036\002\204xm\007\336\235Q\030\232\031\227\326\223w\033\374\213\220\370y\356\267\202kf}_VMbMa\014\246\223\302\004i2\315,\232\016I\001B\331\261(n\221F\353\261bL\315\346\020\023T\353j\022r\261T\223\357 \323\271L\365\235\"\334\275'\\k3\177\220\220\222\005aSA|\200I%\241\037\370\230\001\013\331V\344\266I0\210SYF\036\026\332\210\250\3510\231\224\224\317X\202(\032\212\234O*\242(\310y&`M\327\256\302\204\266U)\203\331\244\252\251\026&\271\230\357\363\037\341\3370CM\321s0\263\302\316wz\216lO7\314\357\322\334\357\304P\005\342\006s\310\357DEK\253\232\022\317\355\250\237\263J\3031>wM\240O \211\353\222\371G\226k\3107\360\245?\260\003\214\003\256\225\264\376\300\026R.g\350;\237\273AJ\242\325\005Zf*\231T\\\204\313\232\224\351\002\357\n\274\210\373\270$,\362P\022h\227\214.\247&730\336`\365\246b%7\224\377n\007\374Q WwX*m5\332\246\351\316v\035\240P`\2037u\230\267\014X\344z\301\002\203\3342\357\362d*7yp;\214bp\350\310M\363\315P\034B\317\243\276\270\237\017\303\220\224\311\350I\226\237\311-\005Y\262\244x\207Y\036\312i\307 \275\003\251=RQ<\250\307\252\274\225\272z\273V\206\275XN\254\314.,$\352\230+\310!\t\255\360\022ILy\230\321%\353\346\364l\315\\\272\301\343\241\233\363`\"\212=0\311T,2\246\217\342\246T\r\t\353\235RCX\320:1\323\014\355\316J\033^WFZ0[\331x\301\214\260\215\217\026pwF\332\021\273r\322\212\032\262\302\274v\226\"\373\\\020\003\352\374\364\230\353\300To\354v\316z\3417\263\267\030\326\314-\274u\230\350\306Xg\324.\\uB\016Y\"?\202\231\327Yi\005t`\241\003J;\3516\244\220\344v\003\265\355\236\204\266?Bc\373#\333\207@\2215\002\017\220\230\302\271\246\227v\332\255\323m\304\233\021j\204:C\353\344\0273\222\366\034\241t\366\361\332\363'\342\312\302\233\371\3166\363\251v\372\351\026\372\021\333d\323+\226d4\263\320\004\351B\276\025\2473\351f\254\356d[\204\306\020\230\32373\326\014\352\302Y\033Rg\326Z\320\232x\3532\307\231\023\347\024\024\233\240\\\013L!b\367\231vV{""\342\266q\034b?\223v\332\3115\002{PjA\353AD\325:\020i\000\366\"\322\214\326\235\310J>\333N\244\021\330\203H\013Z\033\221\232\305\317?[\\\375y\376\305\312|&\243\346L\325d\275*\365\255\363\254Dnym'\330\216\320F\252\025%\264\0254\222(\350ZI\306Q\340(\246\325\n\305\266\":J%\253XFA\014\332\223V\244\020!h\271\303^\234w\342\024a\272\317\200w\336^\304\357R\275\2241\357\307\323\212F\255\372'\254\351\205\202\2429S@1\274\215\223\211)\364\267J\317\035\251\005\226\305\340\266I\026\371}\217\371YL\361-\032\n:\321D\235f~>\325^+\320H\032(\354\305\372e\227\210\246\000\304>e\021+T\211\303`MOJ5\213\351\205\243\351F\226\233U\275\377\250U\261\275\326\345\014%'\031\260\326\215\274\266\331\003\021\035FJM\177\216\026\370\212\036\010\312\216\222\314[\275N\245IYea\216\356\037\037.\314//<_\235\177\204\037~1\36308\334\242d\000\01365o\030\272\361D)\254\300\345\225\332o\273\3076\314\264\271\352\323\205\325\371\345\304SD(D\302\326\002\2733\264\235@W\2746r]0k\352\376\3104\3175\034\251\271\006\357\004\353\306\347\307\353\374\216x\315<v\231l\344\260\2456\357\010\354\306\343'\264\000\235\021C.Y\244\025\371\017Y\326j!\247\210\342ba\007\177s*\374\3619\034sYI-\321e\343\242AM\275\245*\346\n\302\201\242%\025d\223V5t\000\265\263\337\031\251\215\371Nh5\326{\315q\371\002\243Y\376m\200\216\214}\\\361\355H\rL\365Ty\303\005\340JA\263\244\035\346\233ti\032\257\337\237\276Zx:7\233X\236\223\326\223\024\007\311\327M\032l#R\2071\314l\013\342\355a\275\006\320\r\260 \231h\367E4\367\210\310)U1\330+\337\033\003\266wp\035 \362\213OQ\254\337\233\232\364R\020\351JZA\326R4\231?i\035\025!\0352\031\277\021\022\331\265ax\303\024\000\353\231!\014\367\222Y\320\222\252\216\340\210\250\007\\\260\265\235\246\233\261n9\253KbJ&%#\271A\177\010\333\354!\322=\245(\262\253a\024B\301 \255Xt\207I\257 \206d-R\376Q\326\245\344f2\243\233\n\266\013\257\267\352\367\\\234\010\177r\341%\365\354:m\300H\231<\264\263\353L\t\307\246\357\024\242\211\274\000~H\016\315\302\340_8\032n\321\350z\206q\027\016\024SV\350&I\006!\210\233\244\213\345pK\376\244Gm7""\200\364$\036tA\316\036\242j\212\374\242K\316\323\035.\321\262\210$}\236\n\352$\3700v\017\256=\371\263^L)\354f\021\313\250p$;\245O\022\"N\006\363\345\037'h\017v\373i\006\000$Y\030E`\033\262!m\"\031\326f\202W\236\333\272\347\373\332D\375\373\207\331\275\242\200!gd\306\0017:1\245\005\203\254dn\206\276W\033\264V\230\315\316Y\177\243#\2462R\332LQ\204\301\236TCX\374)\326\277\321\004\337E\230\226q\016\375m\203\276\331\220{\207I\343M\245@\277\357\024-\225\207\277q\006DV\211\210a=\022\324\016\260M\374\023\231\203\222pE=%2\215\222\325\362P$\262KU\366\020\327\0135\343\347\357M/Y)\007\2675T\230#\003\230t\367J\177b\006\206\023x,\014VV\231k\265\002T\231G\014\366\260\nb\355s@\340\327\222\014\333\024\t\nQP\311++;\274L\347O.\312Z-\254j\326m\262\312\320\307\371W\204\340S\002$$nb\007S\254\217r\031\370\344\206\236\221\025\203\200\314\343h@\341*\003{\26562jV\2652\372[\212WY\tn\3144\237\225v\262\212\244e\225,}\342\003L\t\034\nCU\243\317\\\030\350r>\303~\021\345p\322\244\250\2315\265d\r\035Na\031Hu\"\243\032>e5+\322W'\263\301\016\230\255b\216(A\201\026)\215\376\270\322z\025\240\r\223\rA%\004\312b\250Q\023\316\310\337\330\010\306f\302\271\203\313\366\340\007\3013\233\203s\310q\356k\350\230\000\327sqf\234\335\220\002_\010~\273a\005\246\034\347\326-\206_l\000\253-Qv\222\n\367\341:\244&\242vH<pp\330B0Gj\311\204k\303\357\007m\200x(\307\370\206\222\001\264\003J\267o\016q\261a&\2108\272\001\363b\017E\316!\376\347j\205\263\211\321\266\312\036<\204\260TR\017B\r\341\210\324\235\333\240t\305,>\247\347\304\260\203\020\233{\td\300\177\361/y\030eu\224\002<Opba\211\025\214\nX\215j,\271\241$7M(\236\275A\204\371\214\305\307A<\240!\217\0214\312k\354\273\206\322\365R\274\013Zs\361\322\202\324tW\32727\257\325x\013A=.{\272 6\335\320t\303i\274`\351\202\323t?\302p\266y\252\302\177[y)\303]\231\376\377\001\372f\"\262\357\217\242\222\221r&\005\263\332\227\306\366;\224\032@\331\241a\032\361\223\310\005\365Gk!\002\035\351\231m\244\275\200\251\206<\037\250\217|\330P\254\274\241!\263\302\332`\204\272eB\323Y\251\266""\211B+\370\223\247\002\372\320eRr\245\2524\210I\035o@\000\014>\2366\024\260b\207b\226}\373!\273f9\020\316`\261\362\212\314\270\226\277\310\242y \327L\266\230\036j\022\3646t\031B\310\231\226\216?\203G\004X)\212\\\230\3565k*d\253\215?Q\244m\360\334\200\030,\025s\370\023\245d2\237\315g\210?\304\027\006\t\035\270>\3272\301\013A\036\276Z\246\032\212\210\226\231Z\262o\001\247\003nZ\002G\013\210'\267\026`F\3277\363\271\026`\303\267\355\3563\"\216\205\354\332}\236\177Z\024\331\327\307\217\243\361o\201mx\314\034[\240\374V\026\3118\227o\345\317\244\273\000J\305\\r\215B\256\351&,\230\202w\022^m\314J\214`\314%S{k;x\247\211\016\240F!\364\230\347\247\257#p/\014^\033\317\033\302\302\203\022DG\274\240\312\210b)\"\013\322A>\207r\\\311#\264\263\010M\203\232\023\345)`0(\353\214\330\303\014\252\255\2403\342%a\320.\357L~\350\253\366_\366\246\274\207\245\230\337\177\336\235\252\016\034*.\027\013N\237\363\215\373\274\024\333\033\030*\376d\313N\314\231q\227\\\251\212\327\347\316\230#9\357\274\210\027\253\016\214\330\253N\304\231t\023\356\322\357_\355\033<\004dio8R=6\352\354w~\361\276\364n\227~(\317U\366W\326v'\375\325\177\370\377\220|i\275:\362\255\263\345\356w_y\017<ioh\330\036t\242\316\322\357\003\373\006\277qbU\274\037v$\372\031\360G\257zK\325\341\250\375\330y\340\310\356U\357\327\362\353\n'\344\017}\353X\356\224;\347\r\226\"\214O\177(\346\307\246K\211\322j9R\245\327\213\256\354\305\274i\377\273\331\312T\365\364\231`\231\340\366\023\267\230\213\227\017V\306*\033\273\262\277\274\302\326\237s\307\374\213?\226\267*\375\225\004q3T\234.Z\376\261q\327\362\246\275-p\344\017_\204\014\206\211\373\257\374\213?\224OV.\355\336\242\3254u\311\213\204\277\003\202\333\347\307n\225\266\312_\226\247\313\371\312\334n_u \352G\257\372W\357\227%\266\323\005.\261c\366\2443G\3107K\220.\235t\326\331\"1?\261\177s%\177\374~9\263{\321_\254\035:\346F\375\013\367\312K\374\274\356)b\254\324\367\241\357\367\350\276\375\247\235\251\337\207\366\355\037,\016\330}\244\306U\373\244s\321\305\360\230=E\342<`\277\205\342\376""\355\315\224\226Jr\371\022\204\022\031\261\227\252\207\"\366\2503\352\036w\363\336\223\022H\017\022\356Wv\332Yr2\336$\223\347h%\302p\211\211\241\342\365b\022+F\240\220\t\357\274\267V:\3170\242Pq\214\235\354\234\033\253\036\032\266\277dT\375a2\252\206W\234\233^\373\355D\317\327G\016\343y\310I4.&\3617\274NzM\224\256xu\344\223`P\202\205\334+\365\227\026\312\257*?\355r\261_bv\313H<s#\014\024s#\356\230\013C<\n]$\3743\211J\244\002\203\032,~\353@x\301\317Q{\034\206\036\203\004\366\303H\375o\276\307\261\227J\322^\377\327\305\273\366\026y\321\365\322T\351a9FC\262\302\227\345)\277\377\206\177\343aE\"\020\324[\332./\321\360v\271\257|\274\274\345$>$\252\337_\207\246\374C\343.\004\3775$+\025\3379g\334\244\007\316\216\372G\277\203\325\r\303\232N\301\303\236\220\242\t\351G\347\262\273\342\r\340\245\021e\304^\203\223\376H>\371u\361\006N7k\377\nY6\242\034)n\265P<j\217\331\222\375\016r\030 K\300\312\031\374\014\035)\232v\314\236q^\203N_u\370\270\177\034g\253FG\366 \325\250\263\nqMR\274(}O\022\250\016\300Q\235\203\356\270w\314\373\251\224,G\312\223\225\004mu\323>\201\030\260\n\3032\352\307\241#\300\300F\235\203\376\271[%\263\014\2139a\303\265N\221\343\203\0070x\343&my\020\000\030\356\r\347+\304\002\354\366\003\016\264\003}\316\370W\037T\316W\300%Y5\233\230s\006\335\023\336\001\357-\230i\200\372\243\223\376$\271\376(\031\025\2378\354\037\036saiqO\362H\030$\211\03101p\304?r\236E\223\201\322\027\245X\343\3147\360*\230\375\031x\351\240\027\365\226<\260s\232\\\326\215\272?{2\304p\007\036=P\217FQHE#\021\234a\242\032sU\317\202i<\255\364Q0\235\267G \362-\342g\332~\357\306\340\034\2207\024t\026\347\034&1 \334\315;\221jt\324\351w\022\316Kw\332}\207\0107VR\312\267*\027*owS\376\352k\377\365\317\376\317)?\225\256FO\330\206s\002^>\032\004\266\352\350\267\316[W\202z\207\231d\331\346\247\261\32328\274\341\355\367Vp\302q\204HPL\202\277\213\336\027\360b:\3260\367\231\235\332\322a\022\031\3308\200p\327\347\216\222\022\217\024\267\355WpI\314[\316\367\016\331\027\367\213P\202\211@vS%\030\325\221\342o\344""\204\376\371[\024Xh\361\377\201b\254\224(\002\215\020I\010[tNR\371\001b\367\020\t\3511t\n\363\216\342\3470<\276N6`\246Z\3079R\264\354;8\010\2617L\"{\016\027\000\3477\231P\242\247\235G\304\024\021\267\354)f*`\340Cb\01762\r\311\014\221\260O0e.q\3179`\347\261\307\0304;^\036\241X}\312?E\346b\226.\224\336W.\"\220\017E\354\263,\177-\361\374w\206\362\342 ge\nL\370\243\337\303*\246\375[Ov\241\\D}Zn!\017R\210C\256\213\370\247\356 +\374\377\356\354\256\341/-\007\246\311\202\337/\3765\266\010\3162A\256\367w\377\357\310\231b\365X\224\244\305RT\223q\236t\"<\355\206f\025\304N\010\013\374\274\005\314t\316;,\2072\350^0x\342n!9SVkU\034\333\367\034\3349\302\266o\262Y\246#\310\3701\014\355%Vo\303\3247\310\372\031g\024\001\036\220{t\332\261\363V\203\220\373KT\037\017<\005\021\3463\027\276A8\371\242t\251<\325\363\014\021?r\201\245\373\211\322\271R\242\215U\026\023k\270P5\n\016\250~\262\374\010\201\2433.++\252\003\227(\030T\007b\356Ir\237\352\300\230\373\223\227*%x\212\234\261_C\350\215l\037)\276G|\276\356\254\303*\341h\021\347\202S\360\372\330\326\233\210\231\261\275aDdR\371\031\344\335\244{\326\333\242S/\370#\000\373\023\267QGL\261\252\300?A\031,^{\177F\322\241\355&\334\026\037\374T6W)\372\327\030\265\234\251\377\216UPF`u\327\274\361R\244\201:\013\201M\"!\027\343\371\332\336\317R\326\024y\353\264\177\002\366\356\035\207=\"\240\241\360\251F\021w)\345t\022\302\202\275\024\236\275a\277>;\262\327$\202@\253\177>/\336aJt\037c\245\315)b<\366\374\271\034\265Z\304G\204\363\027\362\340O\316\224\317\227\227\3764\r1\313\244\242(\013cT\220\007\363\336,+\303\003\276\246\235\255\236\234\221%\347Q6lQ\364K\330,\010.8(\235\317\370g\256\225\372J#\2454\343\266\207\223\377\2578\3724\367\371+\311#\261\240:8@UQP)\242\227\030<\207\352\215U\246\267\354\363T\031\036\n\363\346\tj&\370\233\025\224\337\254\264\016\021N9\343.\264=\346>\364. P\367\227XQ\310\246X\217\020H\234\237\356\256m\371\337\304\221\004\256\227\326\313}A\333p\013\335\333\024s\2433(\2030\372\226J\211\233(\204XEv\236\212v\276\274N\220g\303:\251""\243\3669\373\201-1\261 \272\335r\257 \027o\263\006(V\215\nT\"PM\373\212\225\327_\241F\267\340E\254\246:\356\230n\354\367\203\373N\236\361OSo6J\245\304\235\306\325H\364\227\274S(\355\022\325(\365<\303\307\021A\363T\246P1\035Pdr\257\213\351\023\370\241\032\347=\216~\223U}\322\307\3504\010u\314}\344]\367\326K\254\320|\201\272\025=l\314\035\362\346\374k\211\312HE\342U\371Q{*\254U\316:iw\211:\360\257Y\353\200\306}\030\365\312\005\030\"\275\354\325\320\000\273\342=\342\312\331k[{\210\031fDp\0172M\367U\033\226]t\323\254\340l\263\013\n\016h\372\253\207N;?\271\2338\352Dy\242\022k<\315\004\254\321\244\234\275\327\000\274\340\276\202\315\033\334Kx\033\263\207\3221\250\010Y\201u\330?\313[\261\370\356\000\032g\222\322\252\177\222zq\226\262\336\270\357Q\235M\005\265\3661\373\272\235\244j\373\254#\373\347\320X\243\232\031\031u\276$\275\325A{\300\233\t\25630\201\274\267\027\245\235~--\355a{*M\243\324\346\216\236u\376\205\334\000cA\230\245B|\213\312\362>2\312\341\"\363\254Z\3475H\035j\304\031s\024\377\374\215\322\022uD}\220\307\232\177\016\275#\235\r\010\254\245\250\016\261f\243:\004n\240{\272\243\240\2128\000\006o\254\364\257\016\235GH\200\230\2561g\033\232\242N\244:\304\013\200\2411\364&}\301\017\254\372\3207\240\275\201Fs\304Kr\274`1\333\212\307\000\313\376\021A\341\272+}\010\352\347\340\265\304\272\330\203\305\313h\327\372`c\373\017\027W\355Q'\352\237!\222o\312V\345\276\277\264\346\257%\375d\332O\277\367\337\377\366\373\276}\177\373\"\361E\265\177\250\370\010U\370C\347\n\270\356?\360a\273\370\n\3457\231\001ZQ(\037]\307\336\000\265\026\367\240\373|i\026\336xo\367\300\356\026\341\362J\365\0269(\212\263;\273i\177\355\345^3H\372\237\263\363C9\n\373HW~\361\027_\371\257^\357\265\300\032\344s\026\312\274_\212\3727\026v\243\273K\177\002\3518\353=o\225/W^\355&\366\232!\177%\335\233\024\252\320\212^\336}\345\257\256\3555\203\376J\302\3243mU\016T\336\373\313h~\337\354\265\300V@Z\240\333\257\375\3055;\006\267\246\262\233\305Avs\271\307/7\230\263#\n_\014\272Z\326\323\276c5.\262\"\352\377""\313H9\303\274\017\240\306\354G\336\241\207\203 \364\356\035\002\277,J\364\332\013}_52\356\356x\277\242\316\210 \007;\363@\242\031\224\037\325\310%o\264t\266\274\305\310\321\035Md\302\033(\035.K\177\036\335\337\260Yg\272\337V\372\232\351\036)o\375a\272l\367Fr\350\203\031\025\272\014\350\2769Y\314`\361\253\242\002\373@q\342\260\033\313{\214\300\300\341b*hg\003\375)\304\003\362\236\235\002W\265\301\207\276\275~\004[_\270V\372\272|\247\262I]u\3771\377\030\035\254\017\264aC\377\266o\321-\005\322\200\177{\321_d]u\377\327\305\251nKIH\221R\254a\351\355r\237\377\303\262\277\374O\377\237R\217\245\340|\000\325W#Q\010\331\277\366\267\312\341]\251'\311\313\224]\020\271\353\013\321\307\372w^\372/e_Vz.\275\352\275fwq\365\245w\313\t\377\336\033\377\315\206\277\241\006Ki\366\235\035\261'\330u\r\022j?\277q|\313\356z\245\274J\337ZEK`_0\204}\373\236-\274\026\037'V\036\213\263/\236\257\254&\236\257\356{\276\366\364)\003\275\370\017\303\260\266<";
+    PyObject *data = __Pyx_DecompressString(cstring, 5952, 1);
     if (unlikely(!data)) __PYX_ERR(0, 1, __pyx_L1_error)
     const char* const bytes = __Pyx_PyBytes_AsString(data);
     #if !CYTHON_ASSUME_SAFE_MACROS
     if (likely(bytes)); else { Py_DECREF(data); __PYX_ERR(0, 1, __pyx_L1_error) }
     #endif
-    #else /* compression: none (15801 bytes) */
-const char* const bytes = ": AGGREGATE (APPROX_PERCENTILE percentile argument must be a literalAPPROX_PERCENTILE percentile must be between 0.0 and 1.0APPROX_PERCENTILE requires two arguments: the column and the percentileARRAY_AGG LIMIT must be zero or greaterARRAY_AGG can only ORDER BY the aggregated columnAll dimensions preceding dimension %d must be indexed and not slicedBuffer view does not expose stridesCan only create a buffer that is contiguous in memory.Cannot assign to read-only memoryviewCannot create writable memory view from read-only memoryviewCannot index with type 'Cannot transpose memoryview with indirect dimensionsDimension %d is not directEmpty shape tuple for cython.array) GROUP BY (Grouped Aggregate (Hashed)Grouped aggregate expression evaluation does not support this query shape: Index out of bounds (axis %d)Indirect dimensions not supportedInvalid mode, expected 'c' or 'fortran', got Invalid shape in axis <MemoryView of Note that Cython is deliberately stricter than PEP-484 and rejects subclasses of builtin types. If you need to pass subclasses then set the 'annotation_typing' directive to False.Out of bounds on buffer access (axis Step may not be zero (axis %d)Unable to convert item to objectUnsupported aggregate function: .>')*, ?add_note and  at 0xcollections.abc<contiguous and direct><contiguous and indirect>disableenablegc (got got differing extents in dimension $implicit-countisenableditemsize <= 0 for cython.arraylegacy key codec path removedlegacy key codec reconstruct path removedno default __reduce__ due to non-trivial __cinit__ object>object | Noneopteryx/operators/grouped_aggregate_hashed/_engine.pxiopteryx/operators/grouped_aggregate_hashed/_node.pxiopteryx/operators/grouped_aggregate_hashed/_collectors_base.pxiopteryx/operators/grouped_aggregate_hashed/_collectors_numeric.pxiopteryx/operators/grouped_aggregate_hashed/_collectors_distinct.pxiopteryx/operators/grouped_aggregate_hashed/_collectors_approx.pxiopteryx/operators/grouped_aggregate_hashed/_factory.""pxiself._sets cannot be converted to a Python object for picklingself._sketches cannot be converted to a Python object for picklingsingle fixed codec path removedsingle fixed key codec path removedsingle string codec path removedstr | bytes | None<strided and direct><strided and direct or indirect><strided and indirect><stringsource>unable to allocate array data.unable to allocate shape and strides.unsupported aggregation function: utf-8AGGREGATORASCIIAggregationSpecAnyValueFloat64CollectorAnyValueFloat64Collector.__reduce_cython__AnyValueFloat64Collector.__setstate_cython__AnyValueFloat64Collector.finalizeAnyValueInt64CollectorAnyValueInt64Collector.__reduce_cython__AnyValueInt64Collector.__setstate_cython__AnyValueInt64Collector.finalizeAnyValueObjectCollectorAnyValueObjectCollector.__reduce_cython__AnyValueObjectCollector.__setstate_cython__AnyValueObjectCollector.finalizeApproxCountDistinctCollectorApproxCountDistinctCollector.__reduce_cython__ApproxCountDistinctCollector.__setstate_cython__ApproxCountDistinctCollector.finalizeApproxPercentileCollectorApproxPercentileCollector.__reduce_cython__ApproxPercentileCollector.__setstate_cython__ApproxPercentileCollector.finalizeArrayAggCollectorArrayAggCollector.__reduce_cython__ArrayAggCollector.__setstate_cython__ArrayAggCollector.finalizeAvgCollectorAvgCollector.__reduce_cython__AvgCollector.__setstate_cython__AvgCollector.finalizeAvgCollector.finalize_sliceBaseCollectorBaseCollector.__reduce_cython__BaseCollector.__setstate_cython__BaseCollector.finalizeBaseCollector.finalize_sliceBasePlanNodeCHUNK_SIZECountDistinctCollectorCountDistinctCollector.__reduce_cython__CountDistinctCollector.__setstate_cython__CountDistinctCollector.finalizeCountStarCollectorCountStarCollector.__reduce_cython__CountStarCollector.__setstate_cython__CountStarCollector.finalizeCountStarCollector.finalize_sliceCountValueCollectorCountValueCollector.__reduce_cython__CountValueCollector.__setstate_cython__CountValueCollector.finalizeCountValue""Collector.finalize_slice_DeferredAnyValueCollector_DeferredAnyValueCollector.__reduce_cython___DeferredAnyValueCollector.__setstate_cython___DeferredMaxCollector_DeferredMaxCollector.__reduce_cython___DeferredMaxCollector.__setstate_cython___DeferredMinCollector_DeferredMinCollector.__reduce_cython___DeferredMinCollector.__setstate_cython___DeferredSumCollector_DeferredSumCollector.__reduce_cython___DeferredSumCollector.__setstate_cython__DistinctEMPTYEOSEllipsisGroupHashEngineGroupHashEngine.__reduce_cython__GroupHashEngine.__setstate_cython__GroupHashEngine.finalize_morselsGroupHashEngine.ingestGroupHashEngine.set_telemetry_enabledGroupHashEngine.telemetryGroupedAggregateHashedNodeGroupedAggregateHashedNode.__init__.<locals>.genexprGroupedAggregateHashedNode.__init__GroupedAggregateHashedNode._apply_having_filterGroupedAggregateHashedNode._build_required_columns.<locals>.genexprGroupedAggregateHashedNode._build_aggregation_specsGroupedAggregateHashedNode._build_required_columnsGroupedAggregateHashedNode._extract_percentile_optionGroupedAggregateHashedNode._extract_array_agg_optionsGroupedAggregateHashedNode._finalizeGroupedAggregateHashedNode._normalize_aggregate_functionGroupedAggregateHashedNode._prepare_chunkGroupedAggregateHashedNode.config.<locals>.genexprGroupedAggregateHashedNode.configGroupedAggregateHashedNode.executeGroupedAggregateHashedNode.nameIDENTIFIERINTEGERInvalidFunctionParameterErrorKeyStoreKeyStore.__reduce_cython__KeyStore.__setstate_cython__LITERALMinMaxFloat64CollectorMinMaxFloat64Collector.__reduce_cython__MinMaxFloat64Collector.__setstate_cython__MinMaxFloat64Collector.finalizeMinMaxFloat64Collector.finalize_sliceMinMaxInt64CollectorMinMaxInt64Collector.__reduce_cython__MinMaxInt64Collector.__setstate_cython__MinMaxInt64Collector.finalizeMinMaxInt64Collector.finalize_sliceMinMaxObjectCollectorMinMaxObjectCollector.__reduce_cython__MinMaxObjectCollector.__setstate_cython__MinMaxObjectCollector.finalizeMorsel_MorselNodeType__Pyx_PyDict_NextR""efQueryPropertiesSequenceSumFloat64CollectorSumFloat64Collector.__reduce_cython__SumFloat64Collector.__setstate_cython__SumFloat64Collector.finalizeSumFloat64Collector.finalize_sliceSumInt64CollectorSumInt64Collector.__reduce_cython__SumInt64Collector.__setstate_cython__SumInt64Collector.finalizeSumInt64Collector.finalize_sliceUnsupportedSyntaxErrorView.MemoryViewWILDCARDabcagg_namesagg_vecsaggregatesaggregation_specs_aggregation_specsaggregatoraliasall_identifiersall_namesall_vecsallocate_buffer__annotations__any_valueappendappend_vector_apply_having_filterapprox_count_distinctapprox_percentilearray_aggasyncio.coroutinesavgbase_build_aggregation_specs_build_required_columnscchunkchunk_size__class____class_getitem__cline_in_tracebackclosecolcollectorcollectorscolumncolumn_namescombine_chunksconfigconstant_from_scalarcountcount_distinctcreate_collectorsdataclassdataclassesdecodedescending__dict__dict_dictdistinct__doc__dtypedtype_is_objectduplicate_treatmentenabledencode_engineengine_telemetryenumerateerrerroreval_startevaluatable_nodesevaluate_and_append_drakenevaluate_drakenexecute_extract_array_agg_optionsextract_evaluations_extract_percentile_optionfield_nodefilter_fnfilter_maskfinalize_finalizefinalize_morselsfinalize_slicefinalize_startflagsfloatfnformatformat_expressionfortranfrom_arrowfrom_scalarfrom_vectorsfromkeysfrozenfull_morsel__func__functiongenexprgetget_all_nodes_of_type__getstate__groupgroup_by_columnsgroup_columnsgroupshashhash_listhaving_condition_having_conditionididentidentity_implicit_count_added__import__indexingestingest_start__init__int8_is_coroutineitemsitemsizekey_kinds_key_kinds_placeholderkey_nameskey_vecslengthlimitlower__main__maskmaxmeanmemview__metaclass__minmode__module__monotonic_nsmorsel__mro_entries__name__name__ndim_needs_expression_eval__new__nextnodenode_type_normalize_aggregate_function_normalize_column_namenormalized_group_colsnum_groupsnum_rowsobjopteryxopteryx.compiled.draken.interop.arrowopteryx.compiled.draken.morsels.mor""selopteryx.compiled.draken.vectors.scalar_constructorsopteryx.exceptionsopteryx.expressionopteryx.expression.evaluatoropteryx.modelsopteryx.operatorsopteryx.operators.aggregate.helpersopteryx.operators.grouped_aggregate_hashed._grouped_aggoptionsorderorderedpackparameterspercentilepercentile_nodephase_startpop__prepare___prepare_chunkprojectionpropertiesproperty__pyx_checksum__pyx_result__pyx_state__pyx_type__pyx_unpickle_AnyValueFloat64Collector__pyx_unpickle_AnyValueInt64Collector__pyx_unpickle_BaseCollector__pyx_unpickle_Enum__pyx_unpickle__DeferredAnyValueCollector__pyx_unpickle__DeferredMaxCollector__pyx_unpickle__DeferredMinCollector__pyx_unpickle__DeferredSumCollector__pyx_vtable____qualname__readings_recon_elapsed__reduce____reduce_cython____reduce_ex__registerrequired_required_columnsresolve_deferred_collectorsresult_rowsreturnreverserootschema_columnselectselect_nodesselfsend__set_name__set_telemetry_enabledsetdefault__setstate____setstate_cython__shapesizeslicesortspecsstar_vectorstartstart_nsstatestaticmethodstepstopstrstructsumsupert0t1telemetrytelemetry_enabled__test__throwtimetime_accumulate_nstime_aggregate_accumulatetime_aggregate_build_morseltime_aggregate_evaluationstime_aggregate_finalizetime_aggregate_growtime_aggregate_hashtime_aggregate_ingesttime_aggregate_lookuptime_aggregate_reconstructtime_aggregate_reconstruct_multitime_aggregate_reconstruct_single_fixedtime_aggregate_reconstruct_single_stringtime_aggregate_resolvetime_aggregate_slice_outputtime_aggregate_store_keystime_build_morsel_nstime_finalize_nstime_grow_nstime_hash_nstime_lookup_nstime_reconstruct_multi_nstime_reconstruct_nstime_reconstruct_single_fixed_nstime_reconstruct_single_string_nstime_resolve_nstime_slice_output_nstime_store_keys_nsto_pylisttypeunpackupdateuse_setstatevaluevaluesvector_from_sequencex*\200\001\330\004+\2501\250F\260!\320\004#\2401\330\010\r\210R\210y\230\001\230\033\240N\260!\340\010\014\210J\220d\230!\230:\240Q\240a\330\010\014\210N\230$\230a\230z\250\021""\250!\330\010\025\220T\230\021\230*\240A\240Q\360\006\000\t\r\210J\220a\340\020\021\330\023\030\230\005\230[\250\003\2508\2609\270D\300\005\300U\310*\320T^\320^a\320ab\330\025\037\230q\240\005\240W\250B\250a\340\014\020\220\t\230\024\230Q\360\010\000\t\033\230!\330\014\020\220\016\230a\330\014\020\220\010\320\030-\250Q\330\020\024\220H\230B\230d\240-\250~\270X\300Q\360\006\000\t\r\320\014\037\230t\2401\240D\250\t\260\021\260!\340\010\014\320\014!\320!4\260A\260T\270\021\330\010\014\320\014&\240d\250!\2504\320/C\3001\330\034\035\360\006\000\t\r\320\014 \240\004\240A\240Q\240d\250.\270\n\300$\300h\310d\320RS\340\010\014\320\014\"\240$\320&?\270q\300\004\300A\360\010\000\t\014\2104\210t\320\023'\240t\2504\250q\330\014\020\320\020&\240a\330\020\037\230q\240\006\320&9\270\031\300)\3107\320RS\340\014\020\320\020)\250\021\340\014\020\320\020)\250\021\340\010 \240\001\320!7\260q\270\003\2704\270u\300D\310\001\330\010\024\320\024-\320->\270a\330\014\020\320\020%\240Q\360\006\000\t\r\210K\220\177\240a\320'>\270l\310!\360\006\000\t\r\320\014!\240\024\320%=\270Q\340\010\014\320\014!\240\032\2504\250q\260\001\200\001\360\024\000\005\034\2301\360\014\000\005\t\210\010\220\001\330\010\r\210T\220\031\230&\240\001\330\010\023\2201\330\014\020\220\007\220w\230a\230|\250:\260Q\260d\270)\3001\330\021\025\220Q\330\r\021\220\030\230\030\240\026\240u\250K\260q\330\010\t\330\014\020\220\006\220g\230Q\230l\250*\260A\260T\270\030\300\021\330\021\025\220Q\360\006\000\t\014\2103\210c\220\030\230\025\230d\240(\250#\250U\260#\260T\270\030\300\024\300U\310!\330\014\020\320\020\"\240!\330\r\020\220\003\2201\330\014\020\320\020#\2401\330\r\020\220\003\2201\330\014\020\320\020%\240Q\330\r\020\220\004\220A\330\014\020\320\020%\240Q\330\r\020\220\004\220A\330\014\020\320\020%\240Q\330\r\020\220\004\220G\2301\330\014\020\220\014\230A\330\r\020\220\003\2201\330\014\020\320\020&\240a\330\r\020\220\003\2201\330\014\020\320\020*\250!\330\r\020\220\003\2201\330\014\020\320\020,\250A\330\r\020\220\003\2201""\330\014\031\230\025\230a\230t\240=\260\004\260I\270W\300J\310a\330\014\020\320\020)\250\021\250!\330\r\020\220\004\220M\240\021\330\014\020\320\020!\240\021\240$\240a\340\014\022\220*\230A\320\035A\300\021\300!\340\010\t\210\037\230\001\330\010\t\210\037\230\001\330\010\022\220'\230\021\230!\360\006\000\005\033\230!\320\0332\260#\260Q\260a\340\004\013\210<\220q\200\001\330\0043\2601\260F\270!\200\001\330\0044\260A\260V\2701\320\0045\3205F\300a\200\001\330\0046\260a\260v\270Q\200\001\330\0048\270\001\270\026\270q\230A\200A\33023\330\010\r\320\r'\240q\330\010\013\2103\210a\210z\230\035\240c\250\021\330\014\022\320\022/\250q\330\020\021\340\010\032\230*\240K\250q\260\001\330\010\013\210?\230+\240S\250\010\260\001\330\014\022\320\022/\250q\330\020\021\340\010\025\220U\230!\230?\250!\330\010\013\2105\220\004\220C\220~\240Q\330\014\022\320\022/\250q\330\020\021\340\010\017\210q\200A\33023\330\010\r\320\r'\240q\330\010\022\220$\220a\220z\240\021\330\010\025\220Q\330\010\013\210:\220Q\330\014\017\210s\220!\220:\230X\240S\250\001\330\020\026\320\0263\2601\330\024\025\340\014\031\230\024\230T\240\021\240*\250F\260!\2602\260Q\260a\330\010\020\220\010\230\n\240'\250\023\250J\260c\270\021\270*\300A\330\010\013\2106\220\027\230\005\230T\240\026\240r\250\021\330\014\022\320\022/\250q\260\001\330\010\t\330\014\030\230\n\320\"7\260s\270!\330\014\027\220q\330\014\032\230!\330\014\025\220Q\200A\33056\330\010\020\220\n\230!\330\010\023\2205\230\006\230a\330\010\013\2109\220C\220x\230t\240:\320-B\300#\300Q\330\014\023\2201\330\010\013\2109\220D\230\t\240\027\250\007\250w\260a\330\014\023\2201\330\010\013\2109\220D\320\030*\320*C\3001\330\030%\240Q\330\014\023\2201\330\010\016\320\016$\240A\330\014.\250a\250q\200A\330\010\r\320\r:\270!\330\010\017\320\017#\2401\240D\250\010\260\002\260!\200A\330\010\r\320\r:\270!\330\010\033\2301\360\006\000\t\035\230D\240\t\250\024\250Q\250a\330\010\034\230D\240\001\240\024\240Y\250d\260!\260;\270a\330\010\037\230t\2401\240D\250\t\260\024\260Q\260n""\300A\330\010\035\230T\240\021\240$\240i\250t\2601\260L\300\001\340\010\014\210E\220\025\220a\220q\330\014\023\2204\220{\240!\2401\330\014\017\210q\330\020\036\230a\330\020\032\230!\330\020\024\220E\230\021\330\024\030\230\004\230A\230V\2404\240z\260\021\260$\260e\2707\300%\300w\310f\320TX\320XY\320Yf\320fg\330\024\027\220r\230\027\240\001\330\030 \240\004\240A\240Q\330\030\037\230w\240a\240q\330\020\027\220q\330\014\017\210q\330\020\034\230A\230R\230t\2405\250\005\250S\260\002\260'\270\021\330\020\036\230c\240\021\240&\250\002\250#\250Q\250a\330\020\031\230\025\230a\230x\240q\330\020\027\220q\330\020\023\2201\330\024\030\230\007\230q\240\001\240\030\250\021\330\014\017\210v\220W\230A\330\020\027\220t\2302\230Q\330\014\022\220'\230\021\230!\330\010\017\320\017#\2401\240A\200A\330\010\r\320\r1\260\021\330\010\017\210\177\230a\230t\320#7\260q\330\010\017\210v\220\\\240\021\240!\260A\210A\200A\200A\330\010\023\2204\220q\230\004\230A\330\010\020\220\007\220q\330\014\r\340\010\014\210H\220D\230\001\330\014\024\220D\230\016\240a\330\014\017\210v\220W\230A\330\020\030\230\007\230q\240\001\330\010\014\210H\220D\230\001\330\014\017\210t\220;\230c\240\030\250\021\330\020\030\230\004\230N\250!\330\020\023\2206\230\027\240\001\330\024\034\230G\2401\240A\330\010\017\210t\2201\220D\230\t\240\021\240!\200A\340\010\013\2104\210q\330\014\024\220E\230\027\240\001\240\024\240Q\330\010\013\2105\220\007\220u\230N\250$\250d\260'\270\025\270a\330\014\032\320\032.\250a\250s\260%\260{\300&\310\001\330\014\021\220\036\230q\240\005\240Q\330\010\025\220T\230\035\240a\330\010\t\330\014\017\210t\2201\330\020\030\320\0302\260!\2604\3207K\3101\330\014\024\320\024.\250a\250t\2609\270A\330\014\020\220\t\230\021\320\032;\2704\270}\310C\310r\320QR\330\014\023\2201\330\010\020\320\020%\240[\3200K\3101\330\014\022\320\022(\250\001\330\020]\320]^\320^_\330\023\024\200A\330\010\014\320\014\"\240!\200A\330\010\r\320\r:\270!\330\010\031\230\021\360\006\000\t\r\210E\220\025\220a\220q\330\014\020\220\004\220G""\2301\230A\330\014\017\210w\220a\220s\230#\230Q\330\020\024\220G\2301\230A\340\020\024\220G\2301\230K\240q\250\003\2504\250q\330\010\017\320\017#\2401\240A\200A\330\010\r\320\r:\270!\330\010\"\240'\250\021\330\010\031\230\021\340\010\014\210E\220\025\220a\220q\330\014\020\220\007\220q\230\004\230H\240A\240V\2504\250v\260Q\260h\270a\330\010\014\320\014\"\240'\250\023\250B\250a\330\010\017\320\017#\2401\240A\200A\330\010\r\320\r:\270!\330\010\031\230\021\340\010\014\210E\220\025\220a\220q\330\014\020\220\007\220q\230\t\240\024\240V\2501\250B\250e\2601\330\010\017\320\017#\2401\240A\200A\330\010\r\320\r:\270!\330\010\031\230\021\340\010\014\210E\220\025\220a\220q\330\014\020\220\007\220q\230\t\240\024\240Z\250q\260\002\260)\2701\330\010\017\320\017#\2401\240A\200A\330\010\r\320\r:\270!\330\010\"\240'\250\021\330\010\021\320\021%\240Q\240d\250(\260\"\260A\330\010\014\320\014\"\240'\250\023\250B\250a\330\010\017\210q\200A\330\010\"\240'\250\021\330\010\032\320\032-\250Q\250d\260*\270G\3001\330\010\014\320\014\"\240'\250\023\250B\250a\330\010\017\210q\200A\330\010&\240d\250!\330\010)\250\024\250Q\330\010!\240\031\250#\250Q\330\010$\240J\250f\260A\360\006\000\t\014\210:\220X\230Q\330\010\014\210E\220\025\220a\220q\330\014\017\210{\230!\2303\230b\240\001\330\020\031\230\021\230%\230y\250\001\250\023\250B\250k\270\021\270!\340\020'\240q\250\001\330\020\035\230Q\230c\240\036\250q\340\010\014\210I\320\025'\240q\320(8\270\003\2701\330\010\014\210K\320\027)\250\021\250.\270\003\2701\330\010\014\210M\230\021\340\010\031\230\021\230(\240!\330\010\017\320\017#\2401\240A\200A\330\010&\240d\250!\330\010)\250\024\250Q\330\010!\240\031\250#\250Q\330\010$\240J\250f\260A\360\006\000\t\014\210:\220X\230T\240\021\330\010\014\210E\220\025\220a\220t\2301\330\014\017\210{\230!\2303\230b\240\001\330\020\031\230\021\230%\230y\250\001\250\023\250B\250k\270\021\270!\340\020'\240q\250\001\330\020\035\230Q\230c\240\036\250q\340\010\017\320\017$\240A\240U\250'\260\021\200A\330\010&\240d\250!\330""\010\035\230T\240\021\360\006\000\t\014\210:\220X\230Q\330\010\013\2105\220\003\2201\330\014\020\220\005\220U\230!\2301\330\020\023\2204\320\027(\250\001\250\026\250q\330\024\027\220\177\240a\330\024\033\2301\330\024\025\340\010\014\210I\320\025'\240q\320(8\270\003\2701\330\010\014\210I\220Q\330\010\014\210M\230\021\340\010\013\2105\220\003\2201\330\014\020\220\001\220\021\340\010\017\320\017#\2401\240A\200A\330\010\"\240'\250\021\330\010&\240d\250!\330\010\035\230T\240\021\360\006\000\t\014\210:\220X\230Q\330\010\013\2105\220\003\2201\330\014\020\220\005\220U\230!\2301\330\020\023\2204\320\027(\250\001\250\026\250q\330\024\027\220\177\240a\330\024\033\2301\330\024\025\340\010\014\210I\320\025'\240q\250\016\260c\270\021\330\010\014\210I\220Q\330\010\014\210M\230\021\340\010\013\2105\220\003\2201\330\014\020\220\001\220\021\340\010\014\320\014\"\240'\250\023\250B\250a\330\010\017\320\017!\240\021\240!\200A\330\010&\240d\250!\330\010\035\230T\240\021\360\006\000\t\014\210:\220X\230Q\330\010\013\2105\220\003\2201\330\014\020\220\005\220U\230!\2301\330\020\023\2204\320\027(\250\001\250\026\250q\330\024\027\220\177\240a\330\024\033\2301\330\024\025\340\010\014\210K\320\027)\250\021\250.\270\003\2701\330\010\014\210I\220Q\330\010\014\210M\230\021\340\010\013\2105\220\003\2201\330\014\020\220\001\220\021\340\010\017\320\017!\240\021\240!\200A\330\010&\240d\250!\330\010\035\230T\240\021\360\006\000\t\014\210:\220X\230Q\330\010\013\2105\220\003\2201\330\014\020\220\005\220U\230!\2301\330\020\023\2204\320\027(\250\001\250\026\250q\330\024\027\220\177\240a\330\024\033\2301\330\024\025\340\010\014\210K\320\027)\250\021\320*:\270#\270Q\330\010\014\210I\220Q\330\010\014\210M\230\021\340\010\013\2105\220\003\2201\330\014\020\220\001\220\021\340\010\017\320\017#\2401\240A\200A\330\010\"\240'\250\021\330\010&\240d\250!\330\010\035\230T\240\021\360\006\000\t\014\210:\220X\230T\240\021\330\010\013\2103\210m\2303\230e\2404\240u\250C\250q\330\014\020\220\005\220U\230!\2304\230q\330\020""\023\2204\320\027(\250\001\250\026\250q\330\024\027\220\177\240a\330\024\033\2301\330\024\025\330\014\017\210u\220C\220q\330\020\024\220A\220Q\330\020\024\220I\230Q\340\010\035\320\0350\260\001\260\025\260g\270Q\330\010\014\320\014\"\240'\250\023\250B\250a\330\010\017\210q\200A\330\010&\240d\250!\330\010\035\230T\240\021\360\006\000\t\014\210:\220X\230T\240\021\330\010\013\2103\210m\2303\230e\2404\240u\250C\250q\330\014\020\220\005\220U\230!\2304\230q\330\020\023\2204\320\027(\250\001\250\026\250q\330\024\027\220\177\240a\330\024\033\2301\330\024\025\330\014\017\210u\220C\220q\330\020\024\220A\220Q\330\020\024\220I\230Q\340\010\017\320\017$\240A\240U\250'\260\021\200A\330\010&\240d\250!\330\010\035\230T\240\021\360\006\000\t\014\210:\220X\230T\240\021\330\010\013\2103\210m\2303\230e\2404\240u\250C\250q\330\014\020\220\005\220U\230!\2304\230q\330\020\023\2204\320\027(\250\001\250\026\250q\330\024\027\220\177\240a\330\024\033\2301\330\024\025\330\014\017\210u\220C\220q\330\020\024\220A\220Q\330\020\024\220I\230Q\340\010\017\320\017\"\240!\2405\250\007\250q\200A\340\010\017\210q\200A\360\014\000\t\"\240\026\240q\330\010\013\2107\220#\220Q\330\014\r\340\010\013\2104\210q\330\014\027\220w\230a\340\010\013\2104\210t\2201\330\014\020\320\020)\250\021\250!\340\010\013\2104\210q\330\014\032\230'\240\021\340\010$\240F\250%\250q\260\004\260A\330\010\013\2104\210q\330\014\020\320\020\"\240'\250\023\250B\250a\360\006\000\t\014\210<\220t\320\033.\250e\2603\260b\270\001\330\014\020\320\020#\2407\250!\2501\340\010\014\320\014\035\230V\2401\340\010\037\230t\320#6\260e\2701\360\006\000\t#\240$\240a\340\010\013\2104\210q\330\014\032\230'\240\021\330\010\014\210E\220\025\220a\220q\330\014\017\210t\2204\220w\230l\250!\2506\260\021\260$\260a\340\020\034\230A\330\020\024\220G\230;\240a\240v\250Q\250d\260!\330\020\024\320\024%\240Z\250q\260\001\330\020\036\230a\330\014\022\220!\2205\230\001\330\010\013\2104\210q\330\014\020\320\020$\240G\2503\250b\260\001\340\010\014\210O\2301\360\010\000""\t!\240\014\250D\3200A\300\025\300a\330\010\013\2106\220\022\2201\330\014\017\210t\2201\330\020\036\230g\240Q\340\014\020\220\013\230?\250!\330\020\021\330\020\024\320\024%\240U\250!\330\020\021\340\014\017\210t\2201\330\020\024\320\024,\250G\2603\260b\270\001\340\014\017\210t\2201\330\020\036\230g\240Q\340\014\020\220\r\230T\240\021\330\021 \240\n\250%\250q\260\001\330\014\017\210t\2201\330\020\024\320\024&\240g\250S\260\002\260!\340\010\013\2104\210q\330\014\032\230'\240\021\340\010\014\210M\230\024\230Q\330\r\034\230J\240k\260\021\260(\270(\300!\330\010\013\2104\210q\330\014\020\320\020(\250\007\250s\260\"\260A\340\010\013\2104\210q\330\014\020\320\020%\240W\250C\250r\260\021\200A\330\010\r\320\r'\240q\340\010\020\220\001\330\010\014\210H\220A\330\014\020\220\016\320\0363\2601\260F\270.\310\010\320PQ\330\020\025\220T\320\0317\260q\270\001\330\020\035\230Z\240{\260!\2601\330\020\032\230!\330\020\023\2203\220c\230\021\330\024\036\230d\320\"=\270Q\270a\330\025\030\230\003\2301\330\024\036\230d\320\"=\270Q\270a\340\020\023\220:\230[\250\003\2508\2601\330\024\035\230Q\340\024\035\230Z\240~\260Q\340\020\025\220W\230A\330\024#\2401\330\030\036\230j\250\016\260a\330\030!\240\021\330\030\037\230q\330\030 \240\001\360\006\000\t\020\210q\200A\340\010\r\320\r'\240q\330\010\t\330\014\031\230\021\230$\230e\320#5\260Q\330\014\030\230\001\230\024\230U\320\"4\260A\200A\330\010\t\330\014\037\230t\2401\330\014\034\230D\240\001\330\014\036\230d\240!\330\014\"\240$\240a\330\014\034\230D\240\001\330\014\"\240$\240a\330\014 \240\004\240A\330\014#\2404\240q\330\0140\260\004\260A\330\0141\260\024\260Q\330\014)\250\024\250Q\330\014$\240D\250\001\330\014$\240D\250\001\200A\340\010\017\210t\220?\240!\2403\240a\200A\330\010\017\210t\220?\240!\2403\240a\260Q\200\001\330\004\n\210+\220Q\200\001\360\010\000\005\016\210T\220\030\230\024\320\0351\260\024\260Z\270t\300>\320QU\320Uc\320cg\320g{\320{\177\360\000\000@\002A\002\330\004\014\210G\2201\220F\230,\240a\330\004\007\200v\210W\220E\230\024""\230Q\330\010\022\220!\330\010\027\220q\340\010\027\220t\230=\250\007\250u\260C\260t\270=\310\007\310q\330\004\007\200q\330\010\017\320\0177\260t\2701\270G\300;\310g\320UV\340\010\017\320\0177\260t\2701\270G\300;\310a\200\001\360\010\000\005\016\210T\220\030\230\024\320\0351\260\024\260Z\270t\300>\320QU\320Uc\320cg\320g{\320{\177\360\000\000@\002A\002\330\004\014\210G\2201\220F\230,\240a\330\004\007\200v\210W\220E\230\024\230Q\330\010\022\220!\330\010\027\220q\340\010\027\220t\230=\250\007\250u\260C\260t\270=\310\007\310q\330\004\007\200q\330\010\017\320\0179\270\024\270Q\270g\300[\320PW\320WX\340\010\017\320\0179\270\024\270Q\270g\300[\320PQ\200\001\360\010\000\005\016\210T\220\036\230t\240>\260\024\3205I\310\024\310Q\330\004\014\210G\2201\220F\230,\240a\330\004\007\200v\210W\220E\230\024\230Q\330\010\022\220!\330\010\027\220q\340\010\027\220t\230=\250\007\250u\260C\260t\270=\310\007\310q\330\004\007\200q\330\010\017\320\017.\250d\260!\2607\270+\300W\310A\340\010\017\320\017.\250d\260!\2607\270+\300Q\200\001\360\010\000\005\016\210T\220\036\230t\240>\260\024\3205I\310\024\310Q\330\004\014\210G\2201\220F\230,\240a\330\004\007\200v\210W\220E\230\024\230Q\330\010\022\220!\330\010\027\220q\340\010\027\220t\230=\250\007\250u\260C\260t\270=\310\007\310q\330\004\007\200q\330\010\017\320\0176\260d\270!\2707\300+\310W\320TU\340\010\017\320\0176\260d\270!\2707\300+\310Q\200\001\360\010\000\005\016\210T\220\036\230t\240>\260\024\3205I\310\024\310Q\330\004\014\210G\2201\220F\230,\240a\330\004\007\200v\210W\220E\230\024\230Q\330\010\022\220!\330\010\027\220q\340\010\027\220t\230=\250\007\250u\260C\260t\270=\310\007\310q\330\004\007\200q\330\010\017\320\017;\2704\270q\300\007\300{\320RY\320YZ\340\010\017\320\017;\2704\270q\300\007\300{\320RS\200\001\360 \000\005\t\210\005\210U\220!\2203\220a\220q\330\010\014\210O\230:\240Q\240a\340\010\013\210:\220Q\220c\230\021\330\014\022\220&\230\007\230q\240\001\240\021\330\014\017\210z\230\021\230%\230q\330\020\032\320\032+\2501\340\020""\032\320\032-\250Q\330\014\023\220?\240!\2401\330\014\023\220?\240!\2401\330\014\026\220a\220u\230A\340\r\027\220q\230\003\2301\330\014\022\220&\230\007\230q\240\001\240\021\330\014\017\210z\230\021\230%\230q\330\020\032\320\032.\250a\330\021'\240x\250~\270Q\330\021\033\2301\230E\240\021\330\020\032\320\0320\260\001\330\021)\250\030\260\036\270q\340\020\032\320\032/\250q\330\021(\250\010\260\016\270a\330\014\023\220?\240!\2401\330\014\023\220?\240!\2401\330\014\026\220a\220u\230A\340\r\027\220q\230\003\2301\330\014\022\220&\230\007\230q\240\001\240\021\330\014\017\210z\230\021\230%\230q\330\020\032\320\032.\250a\330\021'\240x\250\177\270a\330\021\033\2301\230E\240\021\330\020\032\320\0320\260\001\330\021)\250\030\260\037\300\001\340\020\032\320\032/\250q\330\021(\250\010\260\017\270q\330\014\023\220?\240!\2401\330\014\023\220?\240!\2401\330\014\026\220a\220u\230A\340\r\027\220q\230\003\2301\330\014\022\220&\230\007\230q\240\001\240\021\330\014\017\210z\230\021\230%\230q\330\020\032\320\0320\260\001\330\021\033\2301\230E\240\021\330\020\032\320\0322\260!\340\020\032\320\0321\260\021\330\014\023\220?\240!\2401\330\014\023\220?\240!\2401\330\014\026\220a\220u\230A\360\010\000\005\t\210\006\210e\2201\220C\220q\230\001\330\010\023\220=\240\001\240\021\330\010\016\210f\220G\2301\230A\330\010\013\210:\220Q\220e\2301\330\014\025\220Q\220f\230A\340\014\025\220Q\220f\230A\200\001\340\004\037\230q\320 0\260\013\270;\300k\320QR\330\004\023\320\023(\250\010\260\001\260\021\330\004\007\200|\2207\230!\330\0107\260q\3208P\320P^\320^_\330\004\013\2101\200\001\340\004\037\230q\320 0\260\013\270;\300k\320QR\330\004\023\320\023)\250\030\260\021\260!\330\004\007\200|\2207\230!\330\0108\270\001\3209R\320R`\320`a\330\004\013\2101\200\001\340\004\037\230q\320 0\260\013\270;\300k\320QR\330\004\023\220=\240\010\250\001\250\021\330\004\007\200|\2207\230!\330\010/\250q\3200@\300\016\310a\330\004\013\2101\200\001\340\004\037\230q\320 0\260\013\270;\300k\320QR\330\004\023\320\023+\2508\2601\260A""\330\004\007\200|\2207\230!\330\010:\270!\320;V\320Vd\320de\330\004\013\2101\200\001\340\004\037\230q\320 0\260\013\270;\300k\320QR\330\004\023\320\023-\250X\260Q\260a\330\004\007\200|\2207\230!\330\010<\270A\320=Z\320Zh\320hi\330\004\013\2101\200\001\330\004\007\200z\220\021\220(\230!\330\010\017\210q\330\004\013\2103\210a\210w\220g\230Q\230auint64_t const \000\000MIX_HASH_CONSTANT\000NULL_HASHO";
+    #else /* compression: none (16113 bytes) */
+const char* const bytes = ": AGGREGATE (APPROX_PERCENTILE percentile argument must be a literalAPPROX_PERCENTILE percentile must be between 0.0 and 1.0APPROX_PERCENTILE requires two arguments: the column and the percentileARRAY_AGG LIMIT must be zero or greaterARRAY_AGG can only ORDER BY the aggregated columnAll dimensions preceding dimension %d must be indexed and not slicedBuffer view does not expose stridesCan only create a buffer that is contiguous in memory.Cannot assign to read-only memoryviewCannot create writable memory view from read-only memoryviewCannot index with type 'Cannot transpose memoryview with indirect dimensionsDimension %d is not directEmpty shape tuple for cython.array) GROUP BY (Grouped Aggregate (Hashed)Grouped aggregate expression evaluation does not support this query shape: Index out of bounds (axis %d)Indirect dimensions not supportedInvalid mode, expected 'c' or 'fortran', got Invalid shape in axis <MemoryView of Note that Cython is deliberately stricter than PEP-484 and rejects subclasses of builtin types. If you need to pass subclasses then set the 'annotation_typing' directive to False.Out of bounds on buffer access (axis Step may not be zero (axis %d)Unable to convert item to objectUnsupported aggregate function: .>')*, ?add_note and  at 0xcollections.abc<contiguous and direct><contiguous and indirect>disableenablegc (got got differing extents in dimension $implicit-countisenableditemsize <= 0 for cython.arraylegacy key codec path removedlegacy key codec reconstruct path removedno default __reduce__ due to non-trivial __cinit__ object>object | Noneopteryx/operators/grouped_aggregate_hashed/_engine.pxiopteryx/operators/grouped_aggregate_hashed/_node.pxiopteryx/operators/grouped_aggregate_hashed/_collectors_base.pxiopteryx/operators/grouped_aggregate_hashed/_collectors_numeric.pxiopteryx/operators/grouped_aggregate_hashed/_collectors_distinct.pxiopteryx/operators/grouped_aggregate_hashed/_collectors_approx.pxiopteryx/operators/grouped_aggregate_hashed/_factory.""pxiself._sets cannot be converted to a Python object for picklingself._sketches cannot be converted to a Python object for picklingsingle fixed codec path removedsingle fixed key codec path removedsingle string codec path removedstr | bytes | None<strided and direct><strided and direct or indirect><strided and indirect><stringsource>unable to allocate array data.unable to allocate shape and strides.unsupported aggregation function: utf-8AGGREGATORASCIIAggregationSpecAnyValueFloat64CollectorAnyValueFloat64Collector.__reduce_cython__AnyValueFloat64Collector.__setstate_cython__AnyValueFloat64Collector.finalizeAnyValueInt64CollectorAnyValueInt64Collector.__reduce_cython__AnyValueInt64Collector.__setstate_cython__AnyValueInt64Collector.finalizeAnyValueObjectCollectorAnyValueObjectCollector.__reduce_cython__AnyValueObjectCollector.__setstate_cython__AnyValueObjectCollector.finalizeApproxCountDistinctCollectorApproxCountDistinctCollector.__reduce_cython__ApproxCountDistinctCollector.__setstate_cython__ApproxCountDistinctCollector.finalizeApproxPercentileCollectorApproxPercentileCollector.__reduce_cython__ApproxPercentileCollector.__setstate_cython__ApproxPercentileCollector.finalizeArrayAggCollectorArrayAggCollector.__reduce_cython__ArrayAggCollector.__setstate_cython__ArrayAggCollector.finalizeAvgCollectorAvgCollector.__reduce_cython__AvgCollector.__setstate_cython__AvgCollector.finalizeAvgCollector.finalize_sliceBaseCollectorBaseCollector.__reduce_cython__BaseCollector.__setstate_cython__BaseCollector.finalizeBaseCollector.finalize_sliceBasePlanNodeCHUNK_SIZECountDistinctCollectorCountDistinctCollector.__reduce_cython__CountDistinctCollector.__setstate_cython__CountDistinctCollector.finalizeCountStarCollectorCountStarCollector.__reduce_cython__CountStarCollector.__setstate_cython__CountStarCollector.finalizeCountStarCollector.finalize_sliceCountValueCollectorCountValueCollector.__reduce_cython__CountValueCollector.__setstate_cython__CountValueCollector.finalizeCountValue""Collector.finalize_slice_DeferredAnyValueCollector_DeferredAnyValueCollector.__reduce_cython___DeferredAnyValueCollector.__setstate_cython___DeferredMaxCollector_DeferredMaxCollector.__reduce_cython___DeferredMaxCollector.__setstate_cython___DeferredMinCollector_DeferredMinCollector.__reduce_cython___DeferredMinCollector.__setstate_cython___DeferredSumCollector_DeferredSumCollector.__reduce_cython___DeferredSumCollector.__setstate_cython__DistinctEMPTYEOSEllipsisGroupHashEngineGroupHashEngine.__reduce_cython__GroupHashEngine.__setstate_cython__GroupHashEngine.finalize_morselsGroupHashEngine.ingestGroupHashEngine.set_telemetry_enabledGroupHashEngine.telemetryGroupedAggregateHashedNodeGroupedAggregateHashedNode.__init__.<locals>.genexprGroupedAggregateHashedNode.__init__GroupedAggregateHashedNode._apply_having_filterGroupedAggregateHashedNode._build_required_columns.<locals>.genexprGroupedAggregateHashedNode._build_aggregation_specsGroupedAggregateHashedNode._build_required_columnsGroupedAggregateHashedNode._extract_percentile_optionGroupedAggregateHashedNode._extract_array_agg_optionsGroupedAggregateHashedNode._finalizeGroupedAggregateHashedNode._normalize_aggregate_functionGroupedAggregateHashedNode._prepare_chunkGroupedAggregateHashedNode.config.<locals>.genexprGroupedAggregateHashedNode.configGroupedAggregateHashedNode.executeGroupedAggregateHashedNode.nameIDENTIFIERINTEGERInvalidFunctionParameterErrorKeyStoreKeyStore.__reduce_cython__KeyStore.__setstate_cython__LITERALMinMaxFloat64CollectorMinMaxFloat64Collector.__reduce_cython__MinMaxFloat64Collector.__setstate_cython__MinMaxFloat64Collector.finalizeMinMaxFloat64Collector.finalize_sliceMinMaxInt64CollectorMinMaxInt64Collector.__reduce_cython__MinMaxInt64Collector.__setstate_cython__MinMaxInt64Collector.finalizeMinMaxInt64Collector.finalize_sliceMinMaxObjectCollectorMinMaxObjectCollector.__reduce_cython__MinMaxObjectCollector.__setstate_cython__MinMaxObjectCollector.finalizeMorsel_MorselNodeType__Pyx_PyDict_NextR""efQueryPropertiesSequenceSumFloat64CollectorSumFloat64Collector.__reduce_cython__SumFloat64Collector.__setstate_cython__SumFloat64Collector.finalizeSumFloat64Collector.finalize_sliceSumInt64CollectorSumInt64Collector.__reduce_cython__SumInt64Collector.__setstate_cython__SumInt64Collector.finalizeSumInt64Collector.finalize_sliceUnsupportedSyntaxErrorView.MemoryViewWILDCARDabcagg_namesagg_vecsaggregatesaggregation_specs_aggregation_specsaggregatoraliasall_identifiersall_namesall_vecsallocate_buffer__annotations__any_valueappendappend_vector_apply_having_filterapprox_count_distinctapprox_percentilearray_aggasyncio.coroutinesavgbase_build_aggregation_specs_build_required_columnsccarcharchunkchunk_size__class____class_getitem__cline_in_tracebackclosecolcollectorcollectorscolumncolumn_namescombine_chunksconfigconstant_from_scalarcountcount_distinctcreate_collectorsdataclassdataclassesdecodedescending__dict__dict_dictdistinct__doc__dtypedtype_is_objectduplicate_treatmentenabledencode_engineengine_telemetryenumerateerrerroreval_startevaluatable_nodesevaluate_and_append_drakenevaluate_drakenexecute_extract_array_agg_optionsextract_evaluations_extract_percentile_optionfield_nodefilter_fnfilter_maskfinalize_finalizefinalize_morselsfinalize_slicefinalize_startflagsfloatfnformatformat_expressionfortranfrom_arrowfrom_scalarfrom_vectorsfromkeysfrozenfull_morsel__func__functiongenexprgetget_all_nodes_of_type__getstate__groupgroup_by_columnsgroup_columnsgroup_map_variantgroupshashhash_listhaving_condition_having_conditionididentidentity_implicit_count_added__import__indexingestingest_start__init__int8_is_coroutineitemsitemsizekey_kinds_key_kinds_placeholderkey_nameskey_vecslengthlimitlower__main__maskmaxmeanmemview__metaclass__minmode__module__monotonic_nsmorsel__mro_entries__name__name__ndim_needs_expression_eval__new__nextnodenode_type_normalize_aggregate_function_normalize_column_namenormalized_group_colsnum_groupsnum_rowsobjopteryxopteryx.compiled.draken.interop.arrowopteryx.com""piled.draken.morsels.morselopteryx.compiled.draken.vectors.scalar_constructorsopteryx.exceptionsopteryx.expressionopteryx.expression.evaluatoropteryx.modelsopteryx.operatorsopteryx.operators.aggregate.helpersopteryx.operators.grouped_aggregate_hashed._grouped_aggoptionsorderorderedpackparametersparviparvi_final_sizepercentilepercentile_nodephase_startpop__prepare___prepare_chunkprojectionpromoted_from_parvipropertiesproperty__pyx_checksum__pyx_result__pyx_state__pyx_type__pyx_unpickle_AnyValueFloat64Collector__pyx_unpickle_AnyValueInt64Collector__pyx_unpickle_BaseCollector__pyx_unpickle_Enum__pyx_unpickle__DeferredAnyValueCollector__pyx_unpickle__DeferredMaxCollector__pyx_unpickle__DeferredMinCollector__pyx_unpickle__DeferredSumCollector__pyx_vtable____qualname__readings_recon_elapsed__reduce____reduce_cython____reduce_ex__registerrequired_required_columnsresolve_deferred_collectorsresult_rowsreturnreverserootschema_columnselectselect_nodesselfsend__set_name__set_telemetry_enabledsetdefault__setstate____setstate_cython__shapesizeslicesortspecsstar_vectorstartstart_nsstatestaticmethodstepstopstrstructsumsupert0t1telemetrytelemetry_enabled__test__throwtimetime_accumulate_nstime_aggregate_accumulatetime_aggregate_build_morseltime_aggregate_evaluationstime_aggregate_finalizetime_aggregate_growtime_aggregate_hashtime_aggregate_ingesttime_aggregate_lookuptime_aggregate_reconstructtime_aggregate_reconstruct_multitime_aggregate_reconstruct_single_fixedtime_aggregate_reconstruct_single_stringtime_aggregate_resolvetime_aggregate_slice_outputtime_aggregate_store_keystime_build_morsel_nstime_finalize_nstime_grow_nstime_hash_nstime_lookup_nstime_reconstruct_multi_nstime_reconstruct_nstime_reconstruct_single_fixed_nstime_reconstruct_single_string_nstime_resolve_nstime_slice_output_nstime_store_keys_nsto_pylisttypeunpackupdateuse_parviuse_setstateused_parvivaluevaluesvariantvector_from_sequencex*\200\001\330\004+\2501\250F\260!\320\004#\2401\330\010\r\210R\210y\230\001\230\033""\240N\260!\340\010\014\210J\220d\230!\230:\240Q\240a\330\010\014\210N\230$\230a\230z\250\021\250!\330\010\025\220T\230\021\230*\240A\240Q\360\006\000\t\r\210J\220a\340\020\021\330\023\030\230\005\230[\250\003\2508\2609\270D\300\005\300U\310*\320T^\320^a\320ab\330\025\037\230q\240\005\240W\250B\250a\340\014\020\220\t\230\024\230Q\360\010\000\t\033\230!\330\014\020\220\016\230a\330\014\020\220\010\320\030-\250Q\330\020\024\220H\230B\230d\240-\250~\270X\300Q\360\006\000\t\r\320\014\037\230t\2401\240D\250\t\260\021\260!\340\010\014\320\014!\320!4\260A\260T\270\021\330\010\014\320\014&\240d\250!\2504\320/C\3001\330\034\035\360\006\000\t\r\320\014 \240\004\240A\240Q\240d\250.\270\n\300$\300h\310d\320RS\340\010\014\320\014\"\240$\320&?\270q\300\004\300A\360\010\000\t\014\2104\210t\320\023'\240t\2504\250q\330\014\020\320\020&\240a\330\020\037\230q\240\006\320&9\270\031\300)\3107\320RS\340\014\020\320\020)\250\021\340\014\020\320\020)\250\021\340\010 \240\001\320!7\260q\270\003\2704\270u\300D\310\001\330\010\024\320\024-\320->\270a\330\014\020\320\020%\240Q\360\006\000\t\023\220*\230D\240\001\320!6\260a\330\010\024\220H\230C\230q\330\010\014\210K\220\177\240a\320'>\270l\310&\320PQ\360\006\000\t\r\320\014!\240\024\320%=\270Q\340\010\014\320\014!\240\032\2504\250q\260\001\200\001\360\024\000\005\034\2301\360\014\000\005\t\210\010\220\001\330\010\r\210T\220\031\230&\240\001\330\010\023\2201\330\014\020\220\007\220w\230a\230|\250:\260Q\260d\270)\3001\330\021\025\220Q\330\r\021\220\030\230\030\240\026\240u\250K\260q\330\010\t\330\014\020\220\006\220g\230Q\230l\250*\260A\260T\270\030\300\021\330\021\025\220Q\360\006\000\t\014\2103\210c\220\030\230\025\230d\240(\250#\250U\260#\260T\270\030\300\024\300U\310!\330\014\020\320\020\"\240!\330\r\020\220\003\2201\330\014\020\320\020#\2401\330\r\020\220\003\2201\330\014\020\320\020%\240Q\330\r\020\220\004\220A\330\014\020\320\020%\240Q\330\r\020\220\004\220A\330\014\020\320\020%\240Q\330\r\020\220\004\220G\2301\330\014\020\220\014\230A""\330\r\020\220\003\2201\330\014\020\320\020&\240a\330\r\020\220\003\2201\330\014\020\320\020*\250!\330\r\020\220\003\2201\330\014\020\320\020,\250A\330\r\020\220\003\2201\330\014\031\230\025\230a\230t\240=\260\004\260I\270W\300J\310a\330\014\020\320\020)\250\021\250!\330\r\020\220\004\220M\240\021\330\014\020\320\020!\240\021\240$\240a\340\014\022\220*\230A\320\035A\300\021\300!\340\010\t\210\037\230\001\330\010\t\210\037\230\001\330\010\022\220'\230\021\230!\360\006\000\005\033\230!\320\0332\260#\260Q\260a\340\004\013\210<\220q\200\001\330\0043\2601\260F\270!\200\001\330\0044\260A\260V\2701\320\0045\3205F\300a\200\001\330\0046\260a\260v\270Q\200\001\330\0048\270\001\270\026\270q\230A\200A\33023\330\010\r\320\r'\240q\330\010\013\2103\210a\210z\230\035\240c\250\021\330\014\022\320\022/\250q\330\020\021\340\010\032\230*\240K\250q\260\001\330\010\013\210?\230+\240S\250\010\260\001\330\014\022\320\022/\250q\330\020\021\340\010\025\220U\230!\230?\250!\330\010\013\2105\220\004\220C\220~\240Q\330\014\022\320\022/\250q\330\020\021\340\010\017\210q\200A\33023\330\010\r\320\r'\240q\330\010\022\220$\220a\220z\240\021\330\010\025\220Q\330\010\013\210:\220Q\330\014\017\210s\220!\220:\230X\240S\250\001\330\020\026\320\0263\2601\330\024\025\340\014\031\230\024\230T\240\021\240*\250F\260!\2602\260Q\260a\330\010\020\220\010\230\n\240'\250\023\250J\260c\270\021\270*\300A\330\010\013\2106\220\027\230\005\230T\240\026\240r\250\021\330\014\022\320\022/\250q\260\001\330\010\t\330\014\030\230\n\320\"7\260s\270!\330\014\027\220q\330\014\032\230!\330\014\025\220Q\200A\33056\330\010\020\220\n\230!\330\010\023\2205\230\006\230a\330\010\013\2109\220C\220x\230t\240:\320-B\300#\300Q\330\014\023\2201\330\010\013\2109\220D\230\t\240\027\250\007\250w\260a\330\014\023\2201\330\010\013\2109\220D\320\030*\320*C\3001\330\030%\240Q\330\014\023\2201\330\010\016\320\016$\240A\330\014.\250a\250q\200A\330\010\r\320\r:\270!\330\010\017\320\017#\2401\240D\250\010\260\002\260!\200A\330\010\r\320\r:\270!\330""\010\033\2301\360\006\000\t\035\230D\240\t\250\024\250Q\250a\330\010\034\230D\240\001\240\024\240Y\250d\260!\260;\270a\330\010\037\230t\2401\240D\250\t\260\024\260Q\260n\300A\330\010\035\230T\240\021\240$\240i\250t\2601\260L\300\001\340\010\014\210E\220\025\220a\220q\330\014\023\2204\220{\240!\2401\330\014\017\210q\330\020\036\230a\330\020\032\230!\330\020\024\220E\230\021\330\024\030\230\004\230A\230V\2404\240z\260\021\260$\260e\2707\300%\300w\310f\320TX\320XY\320Yf\320fg\330\024\027\220r\230\027\240\001\330\030 \240\004\240A\240Q\330\030\037\230w\240a\240q\330\020\027\220q\330\014\017\210q\330\020\034\230A\230R\230t\2405\250\005\250S\260\002\260'\270\021\330\020\036\230c\240\021\240&\250\002\250#\250Q\250a\330\020\031\230\025\230a\230x\240q\330\020\027\220q\330\020\023\2201\330\024\030\230\007\230q\240\001\240\030\250\021\330\014\017\210v\220W\230A\330\020\027\220t\2302\230Q\330\014\022\220'\230\021\230!\330\010\017\320\017#\2401\240A\200A\330\010\r\320\r1\260\021\330\010\017\210\177\230a\230t\320#7\260q\330\010\017\210v\220\\\240\021\240!\260A\210A\200A\200A\330\010\023\2204\220q\230\004\230A\330\010\020\220\007\220q\330\014\r\340\010\014\210H\220D\230\001\330\014\024\220D\230\016\240a\330\014\017\210v\220W\230A\330\020\030\230\007\230q\240\001\330\010\014\210H\220D\230\001\330\014\017\210t\220;\230c\240\030\250\021\330\020\030\230\004\230N\250!\330\020\023\2206\230\027\240\001\330\024\034\230G\2401\240A\330\010\017\210t\2201\220D\230\t\240\021\240!\200A\340\010\013\2104\210q\330\014\024\220E\230\027\240\001\240\024\240Q\330\010\013\2105\220\007\220u\230N\250$\250d\260'\270\025\270a\330\014\032\320\032.\250a\250s\260%\260{\300&\310\001\330\014\021\220\036\230q\240\005\240Q\330\010\025\220T\230\035\240a\330\010\t\330\014\017\210t\2201\330\020\030\320\0302\260!\2604\3207K\3101\330\014\024\320\024.\250a\250t\2609\270A\330\014\020\220\t\230\021\320\032;\2704\270}\310C\310r\320QR\330\014\023\2201\330\010\020\320\020%\240[\3200K\3101\330\014\022\320\022(\250\001\330""\020]\320]^\320^_\330\023\024\200A\330\010\014\320\014\"\240!\200A\330\010\r\320\r:\270!\330\010\031\230\021\360\006\000\t\r\210E\220\025\220a\220q\330\014\020\220\004\220G\2301\230A\330\014\017\210w\220a\220s\230#\230Q\330\020\024\220G\2301\230A\340\020\024\220G\2301\230K\240q\250\003\2504\250q\330\010\017\320\017#\2401\240A\200A\330\010\r\320\r:\270!\330\010\"\240'\250\021\330\010\031\230\021\340\010\014\210E\220\025\220a\220q\330\014\020\220\007\220q\230\004\230H\240A\240V\2504\250v\260Q\260h\270a\330\010\014\320\014\"\240'\250\023\250B\250a\330\010\017\320\017#\2401\240A\200A\330\010\r\320\r:\270!\330\010\031\230\021\340\010\014\210E\220\025\220a\220q\330\014\020\220\007\220q\230\t\240\024\240V\2501\250B\250e\2601\330\010\017\320\017#\2401\240A\200A\330\010\r\320\r:\270!\330\010\031\230\021\340\010\014\210E\220\025\220a\220q\330\014\020\220\007\220q\230\t\240\024\240Z\250q\260\002\260)\2701\330\010\017\320\017#\2401\240A\200A\330\010\r\320\r:\270!\330\010\"\240'\250\021\330\010\021\320\021%\240Q\240d\250(\260\"\260A\330\010\014\320\014\"\240'\250\023\250B\250a\330\010\017\210q\200A\330\010\"\240'\250\021\330\010\032\320\032-\250Q\250d\260*\270G\3001\330\010\014\320\014\"\240'\250\023\250B\250a\330\010\017\210q\200A\330\010&\240d\250!\330\010)\250\024\250Q\330\010!\240\031\250#\250Q\330\010$\240J\250f\260A\360\006\000\t\014\210:\220X\230Q\330\010\014\210E\220\025\220a\220q\330\014\017\210{\230!\2303\230b\240\001\330\020\031\230\021\230%\230y\250\001\250\023\250B\250k\270\021\270!\340\020'\240q\250\001\330\020\035\230Q\230c\240\036\250q\340\010\014\210I\320\025'\240q\320(8\270\003\2701\330\010\014\210K\320\027)\250\021\250.\270\003\2701\330\010\014\210M\230\021\340\010\031\230\021\230(\240!\330\010\017\320\017#\2401\240A\200A\330\010&\240d\250!\330\010)\250\024\250Q\330\010!\240\031\250#\250Q\330\010$\240J\250f\260A\360\006\000\t\014\210:\220X\230T\240\021\330\010\014\210E\220\025\220a\220t\2301\330\014\017\210{\230!\2303\230b\240\001\330\020\031\230\021\230%\230y""\250\001\250\023\250B\250k\270\021\270!\340\020'\240q\250\001\330\020\035\230Q\230c\240\036\250q\340\010\017\320\017$\240A\240U\250'\260\021\200A\330\010&\240d\250!\330\010\035\230T\240\021\360\006\000\t\014\210:\220X\230Q\330\010\013\2105\220\003\2201\330\014\020\220\005\220U\230!\2301\330\020\023\2204\320\027(\250\001\250\026\250q\330\024\027\220\177\240a\330\024\033\2301\330\024\025\340\010\014\210I\320\025'\240q\320(8\270\003\2701\330\010\014\210I\220Q\330\010\014\210M\230\021\340\010\013\2105\220\003\2201\330\014\020\220\001\220\021\340\010\017\320\017#\2401\240A\200A\330\010\"\240'\250\021\330\010&\240d\250!\330\010\035\230T\240\021\360\006\000\t\014\210:\220X\230Q\330\010\013\2105\220\003\2201\330\014\020\220\005\220U\230!\2301\330\020\023\2204\320\027(\250\001\250\026\250q\330\024\027\220\177\240a\330\024\033\2301\330\024\025\340\010\014\210I\320\025'\240q\250\016\260c\270\021\330\010\014\210I\220Q\330\010\014\210M\230\021\340\010\013\2105\220\003\2201\330\014\020\220\001\220\021\340\010\014\320\014\"\240'\250\023\250B\250a\330\010\017\320\017!\240\021\240!\200A\330\010&\240d\250!\330\010\035\230T\240\021\360\006\000\t\014\210:\220X\230Q\330\010\013\2105\220\003\2201\330\014\020\220\005\220U\230!\2301\330\020\023\2204\320\027(\250\001\250\026\250q\330\024\027\220\177\240a\330\024\033\2301\330\024\025\340\010\014\210K\320\027)\250\021\250.\270\003\2701\330\010\014\210I\220Q\330\010\014\210M\230\021\340\010\013\2105\220\003\2201\330\014\020\220\001\220\021\340\010\017\320\017!\240\021\240!\200A\330\010&\240d\250!\330\010\035\230T\240\021\360\006\000\t\014\210:\220X\230Q\330\010\013\2105\220\003\2201\330\014\020\220\005\220U\230!\2301\330\020\023\2204\320\027(\250\001\250\026\250q\330\024\027\220\177\240a\330\024\033\2301\330\024\025\340\010\014\210K\320\027)\250\021\320*:\270#\270Q\330\010\014\210I\220Q\330\010\014\210M\230\021\340\010\013\2105\220\003\2201\330\014\020\220\001\220\021\340\010\017\320\017#\2401\240A\200A\330\010\"\240'\250\021\330\010&\240d""\250!\330\010\035\230T\240\021\360\006\000\t\014\210:\220X\230T\240\021\330\010\013\2103\210m\2303\230e\2404\240u\250C\250q\330\014\020\220\005\220U\230!\2304\230q\330\020\023\2204\320\027(\250\001\250\026\250q\330\024\027\220\177\240a\330\024\033\2301\330\024\025\330\014\017\210u\220C\220q\330\020\024\220A\220Q\330\020\024\220I\230Q\340\010\035\320\0350\260\001\260\025\260g\270Q\330\010\014\320\014\"\240'\250\023\250B\250a\330\010\017\210q\200A\330\010&\240d\250!\330\010\035\230T\240\021\360\006\000\t\014\210:\220X\230T\240\021\330\010\013\2103\210m\2303\230e\2404\240u\250C\250q\330\014\020\220\005\220U\230!\2304\230q\330\020\023\2204\320\027(\250\001\250\026\250q\330\024\027\220\177\240a\330\024\033\2301\330\024\025\330\014\017\210u\220C\220q\330\020\024\220A\220Q\330\020\024\220I\230Q\340\010\017\320\017$\240A\240U\250'\260\021\200A\330\010&\240d\250!\330\010\035\230T\240\021\360\006\000\t\014\210:\220X\230T\240\021\330\010\013\2103\210m\2303\230e\2404\240u\250C\250q\330\014\020\220\005\220U\230!\2304\230q\330\020\023\2204\320\027(\250\001\250\026\250q\330\024\027\220\177\240a\330\024\033\2301\330\024\025\330\014\017\210u\220C\220q\330\020\024\220A\220Q\330\020\024\220I\230Q\340\010\017\320\017\"\240!\2405\250\007\250q\200A\340\010\017\210q\200A\360\014\000\t\"\240\026\240q\330\010\013\2107\220#\220Q\330\014\r\340\010\013\2104\210q\330\014\027\220w\230a\340\010\013\2104\210t\2201\330\014\020\320\020)\250\021\250!\340\010\013\2104\210q\330\014\032\230'\240\021\340\010$\240F\250%\250q\260\004\260A\330\010\013\2104\210q\330\014\020\320\020\"\240'\250\023\250B\250a\360\006\000\t\014\210<\220t\320\033.\250e\2603\260b\270\001\330\014\020\320\020#\2407\250!\2501\340\010\014\320\014\035\230V\2401\340\010\037\230t\320#6\260e\2701\360\006\000\t#\240$\240a\360\006\000\t\014\2104\210q\330\014\032\230'\240\021\360\006\000\t\r\210A\330\010\013\2104\210q\330\014\022\220\"\220B\220a\330\020\023\2204\220t\2307\240,\250a\250v\260Q\260d\270!\330\024 \240\001\330\024\031\230\024""\230W\240K\250q\260\006\260a\260t\2701\330\024\027\220r\230\026\230s\240!\360\n\000\031\035\320\0346\260a\330\030\034\230G\240;\250a\250v\260Q\260d\270!\330\024\030\320\030)\250\032\2601\260A\330\024\"\240!\330\020\026\220a\220u\230A\330\020\025\220Q\330\020\023\2204\220t\2301\330\024\025\330\010\013\2104\210t\2201\330\014\022\220\"\220B\220a\330\020\023\2204\220t\2307\240,\250a\250v\260Q\260d\270!\330\024 \240\001\330\024\030\230\007\230{\250!\2506\260\021\260$\260a\330\024\030\320\030)\250\032\2601\260A\330\024\"\240!\330\020\026\220a\220u\230A\330\020\025\220Q\330\010\013\2104\210q\330\014\020\320\020$\240G\2503\250b\260\001\340\010\014\210O\2301\360\010\000\t!\240\014\250D\3200A\300\025\300a\330\010\013\2106\220\022\2201\330\014\017\210t\2201\330\020\036\230g\240Q\340\014\020\220\013\230?\250!\330\020\021\330\020\024\320\024%\240U\250!\330\020\021\340\014\017\210t\2201\330\020\024\320\024,\250G\2603\260b\270\001\340\014\017\210t\2201\330\020\036\230g\240Q\340\014\020\220\r\230T\240\021\330\021 \240\n\250%\250q\260\001\330\014\017\210t\2201\330\020\024\320\024&\240g\250S\260\002\260!\340\010\013\2104\210q\330\014\032\230'\240\021\340\010\014\210M\230\024\230Q\330\r\034\230J\240k\260\021\260(\270(\300!\330\010\013\2104\210q\330\014\020\320\020(\250\007\250s\260\"\260A\340\010\013\2104\210q\330\014\020\320\020%\240W\250C\250r\260\021\200A\330\010\r\320\r'\240q\340\010\020\220\001\330\010\014\210H\220A\330\014\020\220\016\320\0363\2601\260F\270.\310\010\320PQ\330\020\025\220T\320\0317\260q\270\001\330\020\035\230Z\240{\260!\2601\330\020\032\230!\330\020\023\2203\220c\230\021\330\024\036\230d\320\"=\270Q\270a\330\025\030\230\003\2301\330\024\036\230d\320\"=\270Q\270a\340\020\023\220:\230[\250\003\2508\2601\330\024\035\230Q\340\024\035\230Z\240~\260Q\340\020\025\220W\230A\330\024#\2401\330\030\036\230j\250\016\260a\330\030!\240\021\330\030\037\230q\330\030 \240\001\360\006\000\t\020\210q\200A\340\010\r\320\r'\240q\330\010\t\330\014\031\230\021\230$\230e\320#5\260Q""\330\014\030\230\001\230\024\230U\320\"4\260A\200A\330\010\t\330\014\037\230t\2401\330\014\034\230D\240\001\330\014\036\230d\240!\330\014\"\240$\240a\330\014\034\230D\240\001\330\014\"\240$\240a\330\014 \240\004\240A\330\014#\2404\240q\330\0140\260\004\260A\330\0141\260\024\260Q\330\014)\250\024\250Q\330\014$\240D\250\001\330\014$\240D\250\001\360\n\000\r\033\230$\230h\240c\250\025\250c\260\024\260Q\330\014#\2404\240q\330\014 \240\004\240A\200A\340\010\017\210t\220?\240!\2403\240a\200A\330\010\017\210t\220?\240!\2403\240a\260Q\200\001\330\004\n\210+\220Q\200\001\360\010\000\005\016\210T\220\030\230\024\320\0351\260\024\260Z\270t\300>\320QU\320Uc\320cg\320g{\320{\177\360\000\000@\002A\002\330\004\014\210G\2201\220F\230,\240a\330\004\007\200v\210W\220E\230\024\230Q\330\010\022\220!\330\010\027\220q\340\010\027\220t\230=\250\007\250u\260C\260t\270=\310\007\310q\330\004\007\200q\330\010\017\320\0177\260t\2701\270G\300;\310g\320UV\340\010\017\320\0177\260t\2701\270G\300;\310a\200\001\360\010\000\005\016\210T\220\030\230\024\320\0351\260\024\260Z\270t\300>\320QU\320Uc\320cg\320g{\320{\177\360\000\000@\002A\002\330\004\014\210G\2201\220F\230,\240a\330\004\007\200v\210W\220E\230\024\230Q\330\010\022\220!\330\010\027\220q\340\010\027\220t\230=\250\007\250u\260C\260t\270=\310\007\310q\330\004\007\200q\330\010\017\320\0179\270\024\270Q\270g\300[\320PW\320WX\340\010\017\320\0179\270\024\270Q\270g\300[\320PQ\200\001\360\010\000\005\016\210T\220\036\230t\240>\260\024\3205I\310\024\310Q\330\004\014\210G\2201\220F\230,\240a\330\004\007\200v\210W\220E\230\024\230Q\330\010\022\220!\330\010\027\220q\340\010\027\220t\230=\250\007\250u\260C\260t\270=\310\007\310q\330\004\007\200q\330\010\017\320\017.\250d\260!\2607\270+\300W\310A\340\010\017\320\017.\250d\260!\2607\270+\300Q\200\001\360\010\000\005\016\210T\220\036\230t\240>\260\024\3205I\310\024\310Q\330\004\014\210G\2201\220F\230,\240a\330\004\007\200v\210W\220E\230\024\230Q\330\010\022\220!\330\010\027\220q\340\010\027\220t\230=\250""\007\250u\260C\260t\270=\310\007\310q\330\004\007\200q\330\010\017\320\0176\260d\270!\2707\300+\310W\320TU\340\010\017\320\0176\260d\270!\2707\300+\310Q\200\001\360\010\000\005\016\210T\220\036\230t\240>\260\024\3205I\310\024\310Q\330\004\014\210G\2201\220F\230,\240a\330\004\007\200v\210W\220E\230\024\230Q\330\010\022\220!\330\010\027\220q\340\010\027\220t\230=\250\007\250u\260C\260t\270=\310\007\310q\330\004\007\200q\330\010\017\320\017;\2704\270q\300\007\300{\320RY\320YZ\340\010\017\320\017;\2704\270q\300\007\300{\320RS\200\001\360 \000\005\t\210\005\210U\220!\2203\220a\220q\330\010\014\210O\230:\240Q\240a\340\010\013\210:\220Q\220c\230\021\330\014\022\220&\230\007\230q\240\001\240\021\330\014\017\210z\230\021\230%\230q\330\020\032\320\032+\2501\340\020\032\320\032-\250Q\330\014\023\220?\240!\2401\330\014\023\220?\240!\2401\330\014\026\220a\220u\230A\340\r\027\220q\230\003\2301\330\014\022\220&\230\007\230q\240\001\240\021\330\014\017\210z\230\021\230%\230q\330\020\032\320\032.\250a\330\021'\240x\250~\270Q\330\021\033\2301\230E\240\021\330\020\032\320\0320\260\001\330\021)\250\030\260\036\270q\340\020\032\320\032/\250q\330\021(\250\010\260\016\270a\330\014\023\220?\240!\2401\330\014\023\220?\240!\2401\330\014\026\220a\220u\230A\340\r\027\220q\230\003\2301\330\014\022\220&\230\007\230q\240\001\240\021\330\014\017\210z\230\021\230%\230q\330\020\032\320\032.\250a\330\021'\240x\250\177\270a\330\021\033\2301\230E\240\021\330\020\032\320\0320\260\001\330\021)\250\030\260\037\300\001\340\020\032\320\032/\250q\330\021(\250\010\260\017\270q\330\014\023\220?\240!\2401\330\014\023\220?\240!\2401\330\014\026\220a\220u\230A\340\r\027\220q\230\003\2301\330\014\022\220&\230\007\230q\240\001\240\021\330\014\017\210z\230\021\230%\230q\330\020\032\320\0320\260\001\330\021\033\2301\230E\240\021\330\020\032\320\0322\260!\340\020\032\320\0321\260\021\330\014\023\220?\240!\2401\330\014\023\220?\240!\2401\330\014\026\220a\220u\230A\360\010\000\005\t\210\006\210e\2201\220C\220q\230\001""\330\010\023\220=\240\001\240\021\330\010\016\210f\220G\2301\230A\330\010\013\210:\220Q\220e\2301\330\014\025\220Q\220f\230A\340\014\025\220Q\220f\230A\200\001\340\004\037\230q\320 0\260\013\270;\300k\320QR\330\004\023\320\023(\250\010\260\001\260\021\330\004\007\200|\2207\230!\330\0107\260q\3208P\320P^\320^_\330\004\013\2101\200\001\340\004\037\230q\320 0\260\013\270;\300k\320QR\330\004\023\320\023)\250\030\260\021\260!\330\004\007\200|\2207\230!\330\0108\270\001\3209R\320R`\320`a\330\004\013\2101\200\001\340\004\037\230q\320 0\260\013\270;\300k\320QR\330\004\023\220=\240\010\250\001\250\021\330\004\007\200|\2207\230!\330\010/\250q\3200@\300\016\310a\330\004\013\2101\200\001\340\004\037\230q\320 0\260\013\270;\300k\320QR\330\004\023\320\023+\2508\2601\260A\330\004\007\200|\2207\230!\330\010:\270!\320;V\320Vd\320de\330\004\013\2101\200\001\340\004\037\230q\320 0\260\013\270;\300k\320QR\330\004\023\320\023-\250X\260Q\260a\330\004\007\200|\2207\230!\330\010<\270A\320=Z\320Zh\320hi\330\004\013\2101\200\001\330\004\007\200z\220\021\220(\230!\330\010\017\210q\330\004\013\2103\210a\210w\220g\230Q\230auint64_t const \000\000MIX_HASH_CONSTANT\000NULL_HASHO";
     PyObject *data = NULL;
     CYTHON_UNUSED_VAR(__Pyx_DecompressString);
     #endif
     PyObject **stringtab = __pyx_mstate->__pyx_string_tab;
     Py_ssize_t pos = 0;
-    for (int i = 0; i < 480; i++) {
+    for (int i = 0; i < 488; i++) {
       Py_ssize_t bytes_length = index[i].length;
       PyObject *string = PyUnicode_DecodeUTF8(bytes + pos, bytes_length, NULL);
       if (likely(string) && i >= 76) PyUnicode_InternInPlace(&string);
@@ -77150,7 +77722,7 @@ const char* const bytes = ": AGGREGATE (APPROX_PERCENTILE percentile argument mu
       stringtab[i] = string;
       pos += bytes_length;
     }
-    for (int i = 480; i < 540; i++) {
+    for (int i = 488; i < 548; i++) {
       Py_ssize_t bytes_length = index[i].length;
       PyObject *string = PyBytes_FromStringAndSize(bytes + pos, bytes_length);
       stringtab[i] = string;
@@ -77161,14 +77733,14 @@ const char* const bytes = ": AGGREGATE (APPROX_PERCENTILE percentile argument mu
       }
     }
     Py_XDECREF(data);
-    for (Py_ssize_t i = 0; i < 540; i++) {
+    for (Py_ssize_t i = 0; i < 548; i++) {
       if (unlikely(PyObject_Hash(stringtab[i]) == -1)) {
         __PYX_ERR(0, 1, __pyx_L1_error)
       }
     }
     #if CYTHON_IMMORTAL_CONSTANTS
     {
-      PyObject **table = stringtab + 480;
+      PyObject **table = stringtab + 488;
       for (Py_ssize_t i=0; i<60; ++i) {
         #if CYTHON_COMPILING_IN_CPYTHON_FREETHREADING
         #if PY_VERSION_HEX < 0x030E0000
@@ -77242,7 +77814,7 @@ static int __Pyx_CreateCodeObjects(__pyx_mstatetype *__pyx_mstate) {
   PyObject* tuple_dedup_map = PyDict_New();
   if (unlikely(!tuple_dedup_map)) return -1;
   {
-    const __Pyx_PyCode_New_function_description descr = {3, 0, 0, 22, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 217};
+    const __Pyx_PyCode_New_function_description descr = {3, 0, 0, 22, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 293};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_chunk_size, __pyx_mstate->__pyx_n_u_filter_fn, __pyx_mstate->__pyx_n_u_Morsel_2, __pyx_mstate->__pyx_n_u_start_ns, __pyx_mstate->__pyx_n_u_phase_start, __pyx_mstate->__pyx_n_u_num_groups, __pyx_mstate->__pyx_n_u_t0, __pyx_mstate->__pyx_n_u_t1, __pyx_mstate->__pyx_n_u_recon_elapsed, __pyx_mstate->__pyx_n_u_key_names, __pyx_mstate->__pyx_n_u_key_vecs, __pyx_mstate->__pyx_n_u_agg_names, __pyx_mstate->__pyx_n_u_agg_vecs, __pyx_mstate->__pyx_n_u_collector, __pyx_mstate->__pyx_n_u_c, __pyx_mstate->__pyx_n_u_all_names, __pyx_mstate->__pyx_n_u_all_vecs, __pyx_mstate->__pyx_n_u_full_morsel, __pyx_mstate->__pyx_n_u_start, __pyx_mstate->__pyx_n_u_length, __pyx_mstate->__pyx_n_u_result_rows};
     __pyx_mstate_global->__pyx_codeobj_tab[0] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_2, __pyx_mstate->__pyx_n_u_finalize_morsels, __pyx_mstate->__pyx_kp_b_iso88591_55Fa, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[0])) goto bad;
   }
@@ -77252,27 +77824,27 @@ static int __Pyx_CreateCodeObjects(__pyx_mstatetype *__pyx_mstate) {
     __pyx_mstate_global->__pyx_codeobj_tab[1] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_genexpr, __pyx_mstate->__pyx_kp_b_iso88591_A, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[1])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {0, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 105};
+    const __Pyx_PyCode_New_function_description descr = {0, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 107};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_col};
     __pyx_mstate_global->__pyx_codeobj_tab[2] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_genexpr, __pyx_mstate->__pyx_kp_b_iso88591_Q, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[2])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {0, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 106};
+    const __Pyx_PyCode_New_function_description descr = {0, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 108};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_col};
     __pyx_mstate_global->__pyx_codeobj_tab[3] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_genexpr, __pyx_mstate->__pyx_kp_b_iso88591_A_2, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[3])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {0, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 145};
+    const __Pyx_PyCode_New_function_description descr = {0, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 147};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_ident};
     __pyx_mstate_global->__pyx_codeobj_tab[4] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_genexpr, __pyx_mstate->__pyx_kp_b_iso88591_A_3, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[4])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 237};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 239};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_morsel, __pyx_mstate->__pyx_n_u_ingest_start};
     __pyx_mstate_global->__pyx_codeobj_tab[5] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_execute, __pyx_mstate->__pyx_kp_b_iso88591_A_4, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[5])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 5, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 259};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 5, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 261};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_finalize_start, __pyx_mstate->__pyx_n_u_filter_fn, __pyx_mstate->__pyx_n_u_chunk, __pyx_mstate->__pyx_n_u_engine_telemetry};
     __pyx_mstate_global->__pyx_codeobj_tab[6] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_finalize_2, __pyx_mstate->__pyx_kp_b_iso88591_A_4, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[6])) goto bad;
   }
@@ -77567,17 +78139,17 @@ static int __Pyx_CreateCodeObjects(__pyx_mstatetype *__pyx_mstate) {
     __pyx_mstate_global->__pyx_codeobj_tab[64] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_stringsource, __pyx_mstate->__pyx_n_u_setstate_cython, __pyx_mstate->__pyx_kp_b_iso88591_Q_2, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[64])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 117};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 146};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_enabled};
     __pyx_mstate_global->__pyx_codeobj_tab[65] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_2, __pyx_mstate->__pyx_n_u_set_telemetry_enabled, __pyx_mstate->__pyx_kp_b_iso88591_A_5, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[65])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 134};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 187};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_morsel};
     __pyx_mstate_global->__pyx_codeobj_tab[66] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_2, __pyx_mstate->__pyx_n_u_ingest, __pyx_mstate->__pyx_kp_b_iso88591_A_q_7_Q_4q_wa_4t1_4q_F_q_A_4q_Ba, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[66])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 303};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 379};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self};
     __pyx_mstate_global->__pyx_codeobj_tab[67] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_2, __pyx_mstate->__pyx_n_u_telemetry, __pyx_mstate->__pyx_kp_b_iso88591_A_t1_D_d_a_D_a_A_4q_0_A_1_Q_Q_D, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[67])) goto bad;
   }
@@ -77647,52 +78219,52 @@ static int __Pyx_CreateCodeObjects(__pyx_mstatetype *__pyx_mstate) {
     __pyx_mstate_global->__pyx_codeobj_tab[80] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_normalize_column_name, __pyx_mstate->__pyx_kp_b_iso88591_z_q_3awgQa, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[80])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 14, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_VARKEYWORDS), 44};
-    PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_properties, __pyx_mstate->__pyx_n_u_parameters, __pyx_mstate->__pyx_n_u_projection, __pyx_mstate->__pyx_n_u_all_identifiers, __pyx_mstate->__pyx_n_u_normalized_group_cols, __pyx_mstate->__pyx_n_u_collectors, __pyx_mstate->__pyx_n_u_key_kinds_placeholder, __pyx_mstate->__pyx_n_u_group, __pyx_mstate->__pyx_n_u_node, __pyx_mstate->__pyx_n_u_genexpr, __pyx_mstate->__pyx_n_u_genexpr, __pyx_mstate->__pyx_n_u_node, __pyx_mstate->__pyx_n_u_c};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 16, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_VARKEYWORDS), 44};
+    PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_properties, __pyx_mstate->__pyx_n_u_parameters, __pyx_mstate->__pyx_n_u_projection, __pyx_mstate->__pyx_n_u_all_identifiers, __pyx_mstate->__pyx_n_u_normalized_group_cols, __pyx_mstate->__pyx_n_u_collectors, __pyx_mstate->__pyx_n_u_key_kinds_placeholder, __pyx_mstate->__pyx_n_u_variant, __pyx_mstate->__pyx_n_u_use_parvi, __pyx_mstate->__pyx_n_u_group, __pyx_mstate->__pyx_n_u_node, __pyx_mstate->__pyx_n_u_genexpr, __pyx_mstate->__pyx_n_u_genexpr, __pyx_mstate->__pyx_n_u_node, __pyx_mstate->__pyx_n_u_c};
     __pyx_mstate_global->__pyx_codeobj_tab[81] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_init, __pyx_mstate->__pyx_kp_b_iso88591_1_Ry_N_Jd_Qa_N_az_T_AQ_Ja_89D_U, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[81])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 5, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 101};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 5, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 103};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_format_expression, __pyx_mstate->__pyx_n_u_genexpr, __pyx_mstate->__pyx_n_u_genexpr, __pyx_mstate->__pyx_n_u_genexpr};
     __pyx_mstate_global->__pyx_codeobj_tab[82] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_config, __pyx_mstate->__pyx_kp_b_iso88591_A_q_e_5Q_U_4A, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[82])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 109};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 111};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self};
     __pyx_mstate_global->__pyx_codeobj_tab[83] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_name, __pyx_mstate->__pyx_kp_b_iso88591_A_q, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[83])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 10, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 113};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 10, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 115};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_aggregates, __pyx_mstate->__pyx_n_u_InvalidFunctionParameterError, __pyx_mstate->__pyx_n_u_specs, __pyx_mstate->__pyx_n_u_root, __pyx_mstate->__pyx_n_u_aggregator, __pyx_mstate->__pyx_n_u_fn, __pyx_mstate->__pyx_n_u_field_node, __pyx_mstate->__pyx_n_u_options, __pyx_mstate->__pyx_n_u_column};
     __pyx_mstate_global->__pyx_codeobj_tab[84] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_build_aggregation_specs, __pyx_mstate->__pyx_kp_b_iso88591_A_q_HA_31F_PQ_T_7q_Z_1_3c_d_Qa_1, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[84])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 6, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 142};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 6, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 144};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_required, __pyx_mstate->__pyx_n_u_node, __pyx_mstate->__pyx_n_u_ident, __pyx_mstate->__pyx_n_u_genexpr, __pyx_mstate->__pyx_n_u_genexpr};
     __pyx_mstate_global->__pyx_codeobj_tab[85] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_build_required_columns, __pyx_mstate->__pyx_kp_b_iso88591_A_4q_A_q_HD_D_a_vWA_q_HD_t_c_N_6, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[85])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 158};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 160};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_aggregator, __pyx_mstate->__pyx_n_u_value, __pyx_mstate->__pyx_n_u_function};
     __pyx_mstate_global->__pyx_codeobj_tab[86] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_normalize_aggregate_function, __pyx_mstate->__pyx_kp_b_iso88591_A56_5_a_9Cxt_B_Q_1_9D_wa_1_9D_C1, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[86])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 173};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 175};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_aggregator, __pyx_mstate->__pyx_n_u_InvalidFunctionParameterError, __pyx_mstate->__pyx_n_u_percentile_node, __pyx_mstate->__pyx_n_u_percentile};
     __pyx_mstate_global->__pyx_codeobj_tab[87] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_extract_percentile_option, __pyx_mstate->__pyx_kp_b_iso88591_A23_q_3az_c_q_Kq_S_q_U_5_C_Q_q_q, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[87])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 5, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 192};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 5, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 194};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_aggregator, __pyx_mstate->__pyx_n_u_InvalidFunctionParameterError, __pyx_mstate->__pyx_n_u_ordered, __pyx_mstate->__pyx_n_u_descending, __pyx_mstate->__pyx_n_u_limit};
     __pyx_mstate_global->__pyx_codeobj_tab[88] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_extract_array_agg_options, __pyx_mstate->__pyx_kp_b_iso88591_A23_q_az_Q_Q_s_XS_31_T_F_2Qa_Jc, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[88])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 5, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 213};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 5, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 215};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_chunk, __pyx_mstate->__pyx_n_u_star_vector, __pyx_mstate->__pyx_n_u_eval_start, __pyx_mstate->__pyx_n_u_err};
     __pyx_mstate_global->__pyx_codeobj_tab[89] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_prepare_chunk, __pyx_mstate->__pyx_kp_b_iso88591_A_4q_E_Q_5_uN_d_a_as_q_Q_T_a_t1, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[89])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 232};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 234};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_morsel, __pyx_mstate->__pyx_n_u_evaluate_draken, __pyx_mstate->__pyx_n_u_mask};
     __pyx_mstate_global->__pyx_codeobj_tab[90] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_grouped_aggreg_3, __pyx_mstate->__pyx_n_u_apply_having_filter, __pyx_mstate->__pyx_kp_b_iso88591_A_1_at_7q_v, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[90])) goto bad;
   }

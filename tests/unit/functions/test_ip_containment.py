@@ -7,6 +7,7 @@ import pyarrow as pa
 import pytest
 from opteryx.compiled.vector_ops import vector_ip_in_cidr
 from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+from opteryx.compiled.draken.vectors.string_vector import StringVector
 
 TESTS = [
     # Test case 1: Single IP in CIDR
@@ -172,12 +173,20 @@ TESTS = [
 def test_ip_containment(ips, cidr, expected):
     try:
         vec = vector_from_arrow(pa.array(ips, type=pa.string()))
-        result = vector_ip_in_cidr(vec, cidr).to_arrow().to_pylist()
+        cidr_vec = StringVector.from_constant(cidr, 1)
+        result = vector_ip_in_cidr(vec, cidr_vec).to_arrow().to_pylist()
         assert result == expected, (ips, cidr, expected, result)
     except AssertionError as e:
         assert False, (ips, cidr, expected, e)
     except Exception as e:
         assert expected == type(e), (ips, cidr, expected, type(e))
+
+
+def test_ip_containment_accepts_constant_stringvector_cidr():
+    vec = vector_from_arrow(pa.array(["192.168.1.1", "192.168.2.1"], type=pa.string()))
+    cidr = StringVector.from_constant("192.168.1.0/24", 1)
+    result = vector_ip_in_cidr(vec, cidr).to_arrow().to_pylist()
+    assert result == [True, False]
         
 
 

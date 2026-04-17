@@ -35,8 +35,25 @@ cdef extern from "carchar_index.hpp" namespace "opteryx::carchar":
         size_t insert_new(uint64_t key, int64_t payload_ref) except +
 
 
+cdef extern from "parvi.hpp" namespace "opteryx::parvi":
+    cdef struct ParviResult:
+        size_t slot
+        bint   found
+
+    cdef cppclass ParviMap:
+        ParviMap() except +
+        size_t size() const
+        bint   full() const
+        bint   lookup_fast(uint64_t key, int64_t& payload_ref_out) const
+        ParviResult insert_new(uint64_t key, int64_t payload_ref)
+        void   drain_into(CarcharIndex& target) const
+
+    const size_t kCapacity
+
+
 cdef double _CARCHAR_LOAD_FACTOR = 0.70
 cdef size_t _INITIAL_INDEX_CAPACITY = 256
+cdef size_t _PARVI_CAPACITY = 16  # must match opteryx::parvi::kCapacity
 
 
 cdef inline long long _now_ns() noexcept nogil:
@@ -58,6 +75,10 @@ cdef class GroupHashEngine:
     """
 
     cdef CarcharIndex* _index
+    cdef ParviMap* _parvi
+    cdef bint _use_parvi                      # chosen at init — parvi is the active map
+    cdef bint _promoted_from_parvi            # telemetry: parvi overflowed → carchar
+    cdef int64_t _parvi_final_size            # telemetry: groups held in parvi at promotion
     cdef KeyStore _key_store
     cdef list _collectors           # list[BaseCollector] — not accessed inside the loop
     cdef list _key_kinds            # list[int] — resolved on first morsel
@@ -86,12 +107,17 @@ cdef class GroupHashEngine:
         list group_columns,
         list collectors,
         bint telemetry_enabled=False,
+        bint use_parvi=False,
     ):
         self._group_columns = group_columns
         self._collectors = collectors
         self._num_groups = 0
         self._resolved = False
         self._telemetry_enabled = telemetry_enabled
+        self._use_parvi = use_parvi
+        self._promoted_from_parvi = False
+        self._parvi_final_size = 0
+        self._parvi = NULL
         self._time_resolve_ns = 0
         self._time_hash_ns = 0
         self._time_lookup_ns = 0
@@ -113,9 +139,31 @@ cdef class GroupHashEngine:
         if self._index != NULL:
             del self._index
             self._index = NULL
+        if self._parvi != NULL:
+            del self._parvi
+            self._parvi = NULL
 
     cpdef void set_telemetry_enabled(self, bint enabled):
         self._telemetry_enabled = enabled
+
+    cdef void _promote_parvi_to_carchar(self):
+        """One-shot: promote the small parvi map to a carchar index.
+
+        Called when parvi.insert_new() signals overflow. Slot ids assigned in
+        parvi are dense and monotonic in insertion order — identical to the
+        convention num_groups++ used by the ingest loop — so no remap of the
+        collectors, KeyStore or _num_groups is needed. After this call the
+        carchar index holds every live entry from parvi, _use_parvi is False,
+        and _parvi has been freed.
+        """
+        self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
+        if self._telemetry_enabled:
+            self._parvi_final_size = <int64_t>self._parvi.size()
+        self._parvi.drain_into(self._index[0])
+        del self._parvi
+        self._parvi = NULL
+        self._use_parvi = False
+        self._promoted_from_parvi = True
 
     cdef void _resolve_on_first_morsel(self, object morsel):
         """Called once on first non-empty morsel to fix collector types and key kinds."""
@@ -126,7 +174,12 @@ cdef class GroupHashEngine:
             self._collectors, morsel, self._group_columns, self._key_kinds
         )
         self._key_store = KeyStore(self._group_columns, self._key_kinds)
-        self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
+        if self._use_parvi:
+            # Small-map fast path: no heap hash table, single SIMD group.
+            # Carchar is allocated lazily on overflow (see _promote_parvi_to_carchar).
+            self._parvi = new ParviMap()
+        else:
+            self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
         self._resolved = True
         if self._telemetry_enabled:
             self._time_resolve_ns += _now_ns() - start_ns
@@ -165,16 +218,39 @@ cdef class GroupHashEngine:
         cdef Py_ssize_t i
         cdef int64_t num_groups = self._num_groups
 
+        cdef ParviResult pr
         if self._telemetry_enabled:
             phase_start = _now_ns()
-        for i in range(n_rows):
-            if not self._index.lookup_fast(hashes[i], state_idx):
-                # New group
-                state_idx = num_groups
-                self._index.insert_new(hashes[i], state_idx)
-                self._new_row_scratch.push_back(i)
-                num_groups += 1
-            si_buf[i] = state_idx
+        # i is shared across parvi → carchar handoff so an overflow mid-morsel
+        # resumes at the row after the one that triggered promotion.
+        i = 0
+        if self._use_parvi:
+            while i < n_rows:
+                if not self._parvi.lookup_fast(hashes[i], state_idx):
+                    state_idx = num_groups
+                    pr = self._parvi.insert_new(hashes[i], state_idx)
+                    if pr.slot == _PARVI_CAPACITY:
+                        # Parvi overflow: drain into a freshly-allocated carchar and
+                        # flip the active map. Parvi slot ids are dense 0..size-1 in
+                        # insertion order, matching num_groups, so _num_groups /
+                        # _key_store / collector state stays valid without remap.
+                        self._promote_parvi_to_carchar()
+                        self._index.insert_new(hashes[i], state_idx)
+                    self._new_row_scratch.push_back(i)
+                    num_groups += 1
+                si_buf[i] = state_idx
+                i += 1
+                if not self._use_parvi:
+                    break  # promoted — finish the morsel on the carchar path
+        if not self._use_parvi:
+            while i < n_rows:
+                if not self._index.lookup_fast(hashes[i], state_idx):
+                    state_idx = num_groups
+                    self._index.insert_new(hashes[i], state_idx)
+                    self._new_row_scratch.push_back(i)
+                    num_groups += 1
+                si_buf[i] = state_idx
+                i += 1
         if self._telemetry_enabled:
             self._time_lookup_ns += _now_ns() - phase_start
 
@@ -315,4 +391,11 @@ cdef class GroupHashEngine:
             "time_reconstruct_multi_ns": self._time_reconstruct_multi_ns,
             "time_build_morsel_ns": self._time_build_morsel_ns,
             "time_slice_output_ns": self._time_slice_output_ns,
+            # Hash-map variant telemetry. Only meaningful when telemetry is on;
+            # otherwise _parvi_final_size is never updated (stays 0) and the
+            # bools still reflect the final map state since they are kept in
+            # sync on every transition.
+            "used_parvi": self._parvi != NULL or self._promoted_from_parvi,
+            "promoted_from_parvi": self._promoted_from_parvi,
+            "parvi_final_size": self._parvi_final_size,
         }

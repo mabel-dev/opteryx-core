@@ -328,6 +328,7 @@ include_dirs = [
     "src/c",
     "third_party/mabel/draken",
     "third_party/mabel/carchar",
+    "third_party/mabel/parvi",
     "third_party/abseil",
     "third_party/fastfloat",
     "third_party/fastfloat/fast_float",
@@ -817,6 +818,12 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA,
+        depends=[
+            "third_party/mabel/parvi/parvi.hpp",
+            "third_party/mabel/carchar/carchar_index.hpp",
+            "third_party/mabel/carchar/carchar_common.hpp",
+            "third_party/mabel/carchar/carchar_simd.hpp",
+        ],
     ),
     # Ungrouped (global) aggregate engine — single .so
     Extension(

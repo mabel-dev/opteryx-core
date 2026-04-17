@@ -56,29 +56,40 @@ cdef inline int parse_ip_to_int(const char* ip, size_t length, uint32_t* out) no
     return 0
 
 
-cpdef BoolVector vector_ip_in_cidr(StringVector vec, str cidr):
+cpdef BoolVector vector_ip_in_cidr(StringVector vec, StringVector cidr):
     """
     Check if each IP address in vec falls within a CIDR block.
 
     Parameters:
         vec: StringVector of IP address strings.
-        cidr: CIDR notation string (e.g. "192.168.1.0/24").
+        cidr: CIDR notation as a constant-encoded StringVector.
 
     Returns:
         BoolVector: True where the IP is inside the CIDR block.
     """
-    cdef int slash_idx = cidr.find('/')
+    from opteryx.compiled.draken import encoding as draken_encoding
+    from opteryx.exceptions import IncorrectTypeError
+
+    cdef bytes cidr_bytes
+
+    if cidr.encoding != draken_encoding.DRAKEN_ENCODING_CONSTANT:
+        raise IncorrectTypeError("CIDR argument must be constant encoded StringVector")
+    cidr_bytes = cidr[0]
+
+    cdef int slash_idx = cidr_bytes.find(b'/')
     if slash_idx == -1:
         raise ValueError("Invalid CIDR notation: missing /")
-    cdef int mask_size = int(cidr[slash_idx + 1:])
+    cdef int mask_size = int(cidr_bytes[slash_idx + 1 :])
     if mask_size < 0 or mask_size > 32:
         raise ValueError("Invalid CIDR notation: mask out of range")
 
-    cdef bytes base_ip_bytes = cidr[:slash_idx].encode("ascii")
+    cdef bytes base_ip_bytes = cidr_bytes[:slash_idx]
     cdef uint32_t netmask = (0xFFFFFFFF << (32 - mask_size)) & 0xFFFFFFFF
     cdef uint32_t base_ip = 0
     if parse_ip_to_int(base_ip_bytes, len(base_ip_bytes), &base_ip) != 0:
-        raise ValueError(f"Invalid CIDR base address: {cidr[:slash_idx]}")
+        raise ValueError(
+            f"Invalid CIDR base address: {base_ip_bytes.decode('ascii', 'replace')}"
+        )
 
     cdef DrakenVarBuffer* ptr = vec.ptr
     cdef Py_ssize_t n = ptr.length

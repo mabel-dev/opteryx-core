@@ -66,6 +66,7 @@ from opteryx.planner.optimizer.strategies import CastSimplificationStrategy
 from opteryx.planner.optimizer.strategies import ConstantFoldingStrategy
 from opteryx.planner.optimizer.strategies import CorrelatedFiltersStrategy
 from opteryx.planner.optimizer.strategies import DistinctPushdownStrategy
+from opteryx.planner.optimizer.strategies import HashMapVariantStrategy
 from opteryx.planner.optimizer.strategies import JoinOrderingStrategy
 from opteryx.planner.optimizer.strategies import JoinRewriteStrategy
 from opteryx.planner.optimizer.strategies import LimitFilesPruningStrategy
@@ -114,6 +115,9 @@ class OptimizerVisitor:
             PredicateOrderingStrategy(telemetry),
             RedundantOperationsStrategy(telemetry),
             ConstantFoldingStrategy(telemetry),
+            # Runs last: all other strategies have had their say, and we have
+            # the final set of scans + group columns for cardinality estimation.
+            HashMapVariantStrategy(telemetry),
         ]
 
     def traverse(self, plan: LogicalPlan, strategy) -> LogicalPlan:
