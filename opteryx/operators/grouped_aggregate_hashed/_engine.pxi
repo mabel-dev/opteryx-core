@@ -217,6 +217,11 @@ cdef class GroupHashEngine:
         cdef int64_t state_idx
         cdef Py_ssize_t i
         cdef int64_t num_groups = self._num_groups
+        cdef uint64_t h
+        cdef int cache_slot
+        cdef uint64_t cache_keys[8]
+        cdef int64_t cache_vals[8]
+        cdef uint8_t cache_used[8]
 
         cdef ParviResult pr
         if self._telemetry_enabled:
@@ -225,19 +230,40 @@ cdef class GroupHashEngine:
         # resumes at the row after the one that triggered promotion.
         i = 0
         if self._use_parvi:
+            # Tiny direct-mapped cache for repeated hashes within this morsel.
+            # This targets very low-cardinality GROUP BY workloads (e.g. status/category).
+            for cache_slot in range(8):
+                cache_used[cache_slot] = 0
+
             while i < n_rows:
-                if not self._parvi.lookup_fast(hashes[i], state_idx):
+                h = hashes[i]
+                cache_slot = <int>(h & 7)
+                if cache_used[cache_slot] and cache_keys[cache_slot] == h:
+                    state_idx = cache_vals[cache_slot]
+                    si_buf[i] = state_idx
+                    i += 1
+                    continue
+
+                # Single-probe path: insert_new returns existing slot on hit,
+                # new slot on insert, and kCapacity on overflow.
+                pr = self._parvi.insert_new(h, num_groups)
+                if pr.found:
                     state_idx = num_groups
-                    pr = self._parvi.insert_new(hashes[i], state_idx)
-                    if pr.slot == _PARVI_CAPACITY:
-                        # Parvi overflow: drain into a freshly-allocated carchar and
-                        # flip the active map. Parvi slot ids are dense 0..size-1 in
-                        # insertion order, matching num_groups, so _num_groups /
-                        # _key_store / collector state stays valid without remap.
-                        self._promote_parvi_to_carchar()
-                        self._index.insert_new(hashes[i], state_idx)
                     self._new_row_scratch.push_back(i)
                     num_groups += 1
+                elif pr.slot == _PARVI_CAPACITY:
+                    state_idx = num_groups
+                    # Parvi overflow: drain into carchar and continue seamlessly.
+                    self._promote_parvi_to_carchar()
+                    self._index.insert_new(h, state_idx)
+                    self._new_row_scratch.push_back(i)
+                    num_groups += 1
+                else:
+                    state_idx = <int64_t>pr.slot
+
+                cache_keys[cache_slot] = h
+                cache_vals[cache_slot] = state_idx
+                cache_used[cache_slot] = 1
                 si_buf[i] = state_idx
                 i += 1
                 if not self._use_parvi:

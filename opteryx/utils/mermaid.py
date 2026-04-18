@@ -63,6 +63,13 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
             registry = get_registry()
             metadata = registry.get(node.__class__)
             if metadata:
+                # Some operators share the SET_OP category but represent
+                # different logical relations. Distinct is semantically an
+                # aggregate-style deduplication, not a union.
+                if metadata.name == "Distinct":
+                    return "AggregateRel"
+                if metadata.name == "Union":
+                    return "UnionRel"
                 category = metadata.category
                 category_map = {
                     OperatorCategory.SCAN: "ReadRel",
@@ -72,7 +79,7 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
                     OperatorCategory.FILTER: "FilterRel",
                     OperatorCategory.LIMIT: "LimitRel",
                     OperatorCategory.SORT: "SortRel",
-                    OperatorCategory.SET_OP: "UnionRel",
+                    OperatorCategory.SET_OP: "SetRel",
                     OperatorCategory.DDL: "DDLRel",
                     OperatorCategory.IO: "IRel",
                 }

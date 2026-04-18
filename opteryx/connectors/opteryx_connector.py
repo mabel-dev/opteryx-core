@@ -11,13 +11,14 @@ Architecture:
 - OpteryxTable: Transient table-specific engine (handles data reading for one table)
 """
 
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from opteryx.connectors import TableType
 from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable
 from opteryx.exceptions import DatasetNotFoundError, DatasetReadError
 from opteryx.models import FileEntry, Manifest
-from opteryx.types.schema import RelationSchema
+from opteryx.types import OrsoTypes
+from opteryx.types.schema import FlatColumn, RelationSchema
 
 
 class OpteryxTable(Diachronic, PredicatePushable):
@@ -99,6 +100,71 @@ class OpteryxTable(Diachronic, PredicatePushable):
         except DatasetNotFound as exc:
             raise DatasetNotFoundError(dataset=self.dataset, connector=self.__type__) from exc
 
+    @staticmethod
+    def _normalize_type(
+        raw_type: Any, default: Optional[OrsoTypes] = OrsoTypes.VARCHAR
+    ) -> Optional[OrsoTypes]:
+        if isinstance(raw_type, OrsoTypes):
+            return raw_type
+
+        candidate = raw_type
+        if hasattr(raw_type, "name"):
+            candidate = getattr(raw_type, "name")
+        elif hasattr(raw_type, "value"):
+            candidate = getattr(raw_type, "value")
+
+        if candidate is None:
+            return default
+
+        try:
+            return OrsoTypes.from_name(str(candidate))[0]
+        except (TypeError, ValueError):
+            return default
+
+    @classmethod
+    def _normalize_schema(
+        cls, schema: Any, relation_name: Optional[str] = None
+    ) -> RelationSchema:
+        if isinstance(schema, RelationSchema):
+            if relation_name:
+                schema.name = relation_name
+            return schema
+
+        columns = []
+        for column in getattr(schema, "columns", []) or []:
+            if isinstance(column, FlatColumn):
+                normalized = column
+            else:
+                name = getattr(column, "name", None)
+                if name is None and isinstance(column, dict):
+                    name = column.get("name")
+                if name is None:
+                    continue
+
+                raw_type = getattr(column, "type", None)
+                if raw_type is None and isinstance(column, dict):
+                    raw_type = column.get("type")
+                raw_element_type = getattr(column, "element_type", None)
+                if raw_element_type is None and isinstance(column, dict):
+                    raw_element_type = column.get("element_type") or column.get("element-type")
+
+                normalized = FlatColumn(
+                    name=name,
+                    type=cls._normalize_type(raw_type, default=OrsoTypes.VARCHAR),
+                    element_type=cls._normalize_type(raw_element_type, default=None)
+                    if raw_element_type is not None
+                    else None,
+                    nullable=getattr(column, "nullable", True),
+                    precision=getattr(column, "precision", None),
+                    scale=getattr(column, "scale", None),
+                )
+
+            columns.append(normalized)
+
+        return RelationSchema(
+            name=relation_name or getattr(schema, "name", "dataset"), columns=columns
+        )
+
     def get_dataset_metadata(self) -> Tuple[RelationSchema, Manifest]:
         """
         Get dataset schema and build manifest from catalog.
@@ -156,7 +222,8 @@ class OpteryxTable(Diachronic, PredicatePushable):
                 raise DatasetReadError("The dataset exists, but it no data has been committed.")
             self.snapshot_id = self.snapshot.snapshot_id
 
-        self.schema = self.table.schema(self.snapshot.schema_id)
+        raw_schema = self.table.schema(self.snapshot.schema_id)
+        self.schema = self._normalize_schema(raw_schema, relation_name=self.dataset)
         self.dataset_committed_at = self.snapshot.timestamp_ms
 
         # Build Manifest from catalog table.scan()

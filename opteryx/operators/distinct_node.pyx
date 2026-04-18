@@ -59,15 +59,32 @@ class DistinctNode(BasePlanNode):
             return
 
         for chunk in [morsel]:
-            distinct(chunk, self._hash_set, columns=self._distinct_on)
+            is_active_parvi = isinstance(self._hash_set, ParviSetWrapper) and not self._promoted
+            promotion_seed = None
+            if is_active_parvi and not self._hash_set.full():
+                # Snapshot pre-chunk state so overflow replay can include all
+                # new keys from this chunk, including those inserted pre-overflow.
+                promotion_seed = CarcharSetWrapper()
+                self._hash_set.drain_into_carchar(promotion_seed)
 
-            # If parvi is now full and we haven't promoted yet, prepare to promote
-            # on the next morsel
-            if isinstance(self._hash_set, ParviSetWrapper) and self._hash_set.full() and not self._promoted:
-                # Promote to carchar for next morsel
-                carchar_set = CarcharSetWrapper()
+            overflow = distinct(chunk, self._hash_set, columns=self._distinct_on)
+
+            # Promote only on real capacity overflow (unseen key at capacity).
+            should_promote = overflow and is_active_parvi
+            if should_promote:
+                if promotion_seed is not None:
+                    carchar_set = promotion_seed
+                else:
+                    # Already full at chunk start; current Parvi state is a valid seed.
+                    parvi_set = self._hash_set
+                    carchar_set = CarcharSetWrapper()
+                    parvi_set.drain_into_carchar(carchar_set)
                 self._hash_set = carchar_set
                 self._promoted = True
+
+                # Overflow path leaves chunk unchanged; replay yields all
+                # previously-unseen rows for this chunk.
+                distinct(chunk, self._hash_set, columns=self._distinct_on)
 
             if len(chunk) > 0 or not self.at_least_one_yielded:
                 yield chunk
