@@ -19,15 +19,13 @@ REFACTORED (Session 46): Draken-native Cartesian product
 
 from typing import Generator, Optional
 from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.joins import build_cartesian_indices
 from opteryx.models import QueryProperties
 
 from opteryx import EOS, EMPTY
 
 from . import JoinNode
-
-_DATA_FORMAT = "draken"
 
 INTERNAL_BATCH_SIZE: int = 10000  # config
 MAX_JOIN_SIZE: int = 1_000_000  # config
@@ -129,8 +127,7 @@ class CrossJoinNode(JoinNode):
     def config(self):  # pragma: no cover
         return f"CROSS JOIN"
 
-    def execute(self, morsel):
-        morsel = self.ensure_draken_morsel(morsel)
+    def execute(self, Morsel morsel):
 
         if not self.continue_executing:
             yield None

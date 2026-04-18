@@ -20,7 +20,7 @@ This node doesn't do any calculations, it is a pure Projection.
 from typing import Generator, Optional
 from collections.abc import Iterable
 
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.exceptions import AmbiguousIdentifierError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import QueryProperties
@@ -74,14 +74,13 @@ class ExitNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Exit"
 
-    def execute(self, morsel):
+    def execute(self, Morsel morsel):
         """Execute exit node: Draken-native column projection.
 
         The query engine (motor) is Draken-native throughout. Exit node formats results
         for the cursor layer, which is responsible for converting to the user's desired
         output format (Arrow, JSON, CSV, MessagePack, etc).
         """
-        morsel = self.ensure_draken_morsel(morsel)
 
         # Exit doesn't return EOS
         if morsel == EOS:

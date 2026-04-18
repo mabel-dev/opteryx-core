@@ -22,7 +22,7 @@ import time
 from libc.stdint cimport uint8_t
 
 from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.draken.vectors.vector cimport Vector
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
@@ -49,7 +49,6 @@ from opteryx.types import OrsoTypes
 from opteryx import EOS
 from opteryx.operators import BasePlanNode
 
-_DATA_FORMAT = "draken"
 _DRAKEN_ENCODING_CONSTANT = 3
 
 
@@ -455,10 +454,9 @@ class UngroupedAggregateNode(BasePlanNode):
 
         return Morsel.from_vectors(names, vectors)
 
-    def execute(self, morsel):
-        draken = self.ensure_draken_morsel(morsel)
+    def execute(self, Morsel morsel):
 
-        if draken == EOS:
+        if morsel == EOS:
             if self._finalized:
                 return
             self._finalized = True
@@ -467,25 +465,12 @@ class UngroupedAggregateNode(BasePlanNode):
 
         ingest_start = time.monotonic_ns()
 
-        if isinstance(draken, Morsel):
-            if draken.num_rows > 0:
-                draken = self._prepare_chunk(draken)
-                self._engine.ingest(draken)
-                for spec in self._result_specs:
-                    if spec["kind"] == "literal":
-                        _update_literal_spec(spec["state"], draken.num_rows)
-            self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start
-            yield None
-            return
-
-        for chunk in draken:
-            if chunk is None or chunk is EOS or chunk.num_rows == 0:
-                continue
-            chunk = self._prepare_chunk(chunk)
-            self._engine.ingest(chunk)
+        if morsel.num_rows > 0:
+            morsel = self._prepare_chunk(morsel)
+            self._engine.ingest(morsel)
             for spec in self._result_specs:
                 if spec["kind"] == "literal":
-                    _update_literal_spec(spec["state"], chunk.num_rows)
-
+                    _update_literal_spec(spec["state"], morsel.num_rows)
         self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start
         yield None
+        return

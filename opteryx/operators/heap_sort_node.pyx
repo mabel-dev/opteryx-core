@@ -8,7 +8,7 @@
 import heapq
 from collections.abc import Iterable
 
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.vectors.vector_ranking import vector_exact_search_top_k
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
@@ -384,8 +384,7 @@ class HeapSortNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Heap Sort"
 
-    def execute(self, morsel):
-        morsel = self.ensure_draken_morsel(morsel)
+    def execute(self, Morsel morsel):
 
         if morsel is EOS:
             if self.table is None and not self._chunk_buffer:

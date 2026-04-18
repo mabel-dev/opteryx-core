@@ -9,7 +9,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.structures.shuffle_partition import row_indexes_by_bin_flat
 from opteryx.managers.kvstores import create_kv_store
 from opteryx.models import QueryProperties
@@ -303,8 +303,7 @@ class ShuffleNode(BasePlanNode):
                 yield morsel
         self.readings["shuffle_chunks_out"] += emitted
 
-    def execute(self, morsel):
-        morsel = self.ensure_draken_morsel(morsel)
+    def execute(self, Morsel morsel):
 
         if morsel is EOS:
             for result in self._drain():

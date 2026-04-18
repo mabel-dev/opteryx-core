@@ -14,7 +14,7 @@ value rank before sorting, with AVX2/NEON SIMD acceleration for uint8 codes).
 """
 
 from typing import Generator, Optional
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.morsel_ops.sort import morsel_sort
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
@@ -43,8 +43,7 @@ class SortNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Sort"
 
-    def execute(self, morsel):
-        morsel = self.ensure_draken_morsel(morsel)
+    def execute(self, Morsel morsel):
 
         if morsel is not EOS:
             if morsel.num_rows > 0:

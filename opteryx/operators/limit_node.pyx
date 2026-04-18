@@ -14,7 +14,7 @@ This Node performs the LIMIT and the OFFSET steps
 from typing import Generator, Optional
 from collections.abc import Iterable
 
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.models import QueryProperties
 
 from opteryx import EOS
@@ -41,8 +41,7 @@ class LimitNode(BasePlanNode):
     def config(self):  # pragma: no cover
         return str(self.limit) + " OFFSET " + str(self.offset)
 
-    def execute(self, morsel):
-        morsel = self.ensure_draken_morsel(morsel)
+    def execute(self, Morsel morsel):
 
         if morsel == EOS:
             return

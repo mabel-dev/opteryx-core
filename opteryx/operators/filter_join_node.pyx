@@ -22,6 +22,7 @@ from opteryx.compiled.joins import filter_join_set
 from opteryx.compiled.joins import semi_join
 from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
 from opteryx.models import QueryProperties
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 
 from opteryx import EOS
 
@@ -61,8 +62,7 @@ class FilterJoinNode(JoinNode):
             return f"{self.join_type.upper()} JOIN (USING {','.join(map(format_expression, self.using))})"
         return f"{self.join_type.upper()}"
 
-    def execute(self, morsel):
-        morsel = self.ensure_arrow_table(morsel)
+    def execute(self, Morsel morsel):
 
         if self._build_phase:
             # Build phase: right side arrives first due to plan ordering for semi/anti joins

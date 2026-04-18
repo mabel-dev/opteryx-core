@@ -57,6 +57,13 @@ cdef inline int64_t _dict_accessor_read_int_value(DictAccessor* dacc, Py_ssize_t
     else:
         code = (<uint32_t*>dacc.codes)[index]
 
+    # Defensive: ensure code is within the dictionary length. If not, return 0
+    # to avoid out-of-bounds access that can cause a native crash.
+    if dv is NULL:
+        return 0
+    if code >= dv.length:
+        return 0
+
     if dv.type == 1:
         return (<int8_t*>dv.data)[code]
     if dv.type == 2:

@@ -287,7 +287,22 @@ cdef class Morsel:
     cdef void _empty_inplace(self)
 
     def __cinit__(self):
-        self.ptr = <DrakenMorsel*> NULL
+        # Allocate and initialize a minimal DrakenMorsel so `self.ptr` is never NULL.
+        # This defensive initialization prevents accidental EXC_BAD_ACCESS when
+        # Python-level code or Cython properties access `self.ptr` before the
+        # morsel is fully populated by other factory methods.
+        self.ptr = <DrakenMorsel*> PyMem_Malloc(sizeof(DrakenMorsel))
+        if self.ptr == NULL:
+            # Let Python surface MemoryError if allocation fails.
+            raise MemoryError()
+
+        # Initialize pointer fields to safe defaults.
+        self.ptr.column_names = NULL
+        self.ptr.column_types = NULL
+        self.ptr.columns = NULL
+        self.ptr.num_columns = 0
+        self.ptr.num_rows = 0
+
         self._columns = []
         self._encoded_names = []
         self._name_to_index = None
@@ -810,7 +825,15 @@ cdef class Morsel:
 
     @property
     def num_rows(self) -> int:
-        """Return the number of rows."""
+        """Return the number of rows.
+
+        Defensive: ensure the underlying C pointer is present to avoid
+        crashing with EXC_BAD_ACCESS when native code tries to access
+        a NULL morsel pointer. If the morsel was not fully initialized
+        this raises a clear Python exception rather than segfaulting.
+        """
+        if self.ptr == NULL:
+            raise ValueError("Morsel pointer is NULL: morsel not initialized")
         return self.ptr.num_rows
 
     def __len__(self) -> int:

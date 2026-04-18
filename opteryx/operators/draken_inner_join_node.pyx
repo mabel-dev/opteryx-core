@@ -20,7 +20,7 @@ from typing import Generator, Optional
 import time
 from threading import Lock
 
-from opteryx.compiled.draken import Morsel
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.joins import build_side_carchar_morsel_map
 from opteryx.compiled.joins import get_last_draken_inner_join_metrics
 from opteryx.compiled.joins import inner_join_carchar_morsel_aligned
@@ -172,7 +172,7 @@ class DrakenInnerJoinNode(JoinNode):
     def _append_left_morsel(self, morsel: Morsel) -> None:
         self.left_morsels.append(morsel)
 
-    def execute(self, morsel):
+    def execute(self, Morsel morsel):
         with self.lock:
             if self._build_phase:
                 if morsel == EOS:
@@ -254,8 +254,7 @@ class DrakenInnerJoinNode(JoinNode):
                     yield None
                     return
 
-                draken = self.ensure_draken_morsel(morsel)
-                for chunk in self._iter_morsels(draken):
+                for chunk in self._iter_morsels(morsel):
                     if chunk.num_rows == 0:
                         continue
                     start = time.monotonic_ns()
@@ -273,9 +272,8 @@ class DrakenInnerJoinNode(JoinNode):
                     yield EMPTY
                     return
 
-                draken = self.ensure_draken_morsel(morsel)
                 produced = False
-                for chunk in self._iter_morsels(draken):
+                for chunk in self._iter_morsels(morsel):
                     if chunk.num_rows == 0:
                         continue
 

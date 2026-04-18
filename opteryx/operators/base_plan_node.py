@@ -90,28 +90,6 @@ class BasePlanNode:
     def execute(self, morsel) -> None:  # pragma: no cover
         raise NotImplementedError()
 
-    def ensure_arrow_table(self, morsel):
-        """Ensure the provided morsel is a PyArrow table when needed."""
-        if morsel is EOS:
-            return EOS
-        if isinstance(morsel, Morsel):
-            self.readings["morsel_to_table_conversion"] += 1
-            return morsel.to_arrow()
-        return morsel
-
-    def ensure_draken_morsel(self, table):
-        """Ensure the provided morsel is a Draken morsel when needed.
-
-        Returns either a single Morsel or a generator of Morsels.
-        """
-        if table is EOS:
-            return EOS
-        if not hasattr(table, "to_arrow"):
-            # PyArrow Table (no to_arrow method) — convert to Morsel stream
-            self.readings["table_to_morsel_conversion"] += 1
-            return Morsel.iter_from_arrow(table)
-        return table
-
     def __call__(self, morsel):
         # Cache frequently accessed attributes
         telemetry = self.telemetry
