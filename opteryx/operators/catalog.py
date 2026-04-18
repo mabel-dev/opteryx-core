@@ -142,7 +142,7 @@ _registry_lock = RLock()
 def _build_registry() -> OperatorRegistry:
     """Explicitly register every operator with its metadata. No magic."""
     # Local imports to avoid circular dependencies at module load time.
-    from opteryx.operators.aggregate.aggregate_node import AggregateOperator
+    from opteryx.operators.aggregate.aggregate_node import UngroupedAggregateNode
     from opteryx.operators.cross_join_node import CrossJoinNode
     from opteryx.operators.distinct_node import DistinctNode
     from opteryx.operators.draken_inner_join_node import DrakenInnerJoinNode
@@ -228,7 +228,7 @@ def _build_registry() -> OperatorRegistry:
 
     # -- Aggregate operators --------------------------------------------------
     r.register(
-        AggregateOperator,
+        UngroupedAggregateNode,
         name="Aggregate",
         category=OperatorCategory.AGGREGATE,
         is_pipeline_breaking=True,
