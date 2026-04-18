@@ -7,9 +7,6 @@ Purpose
 
 Findings (opteryx/ only)
 
-Files that explicitly import numpy
-- opteryx/expression/operations/type_coercion.py:3: import numpy
-
 Files that explicitly import pyarrow (file:line:import)
 - opteryx/__main__.py:188: from pyarrow import parquet
 - opteryx/__main__.py:192: from pyarrow import csv
@@ -18,7 +15,6 @@ Files that explicitly import pyarrow (file:line:import)
 - opteryx/models/dataframe.py:65: import pyarrow
 - opteryx/expression/operations/fastpath_dictionary.py:3: import pyarrow
 - opteryx/expression/evaluator/evaluation.py:334: import pyarrow as _pa_local
-- opteryx/expression/operations/type_coercion.py:4: import pyarrow
 - opteryx/expression/evaluator/temporal_ops.py:116: import pyarrow as _pa_local
 - opteryx/expression/evaluator/temporal_ops.py:163: import pyarrow as _pa_local
 - opteryx/expression/evaluator/temporal_ops.py:208: import pyarrow as _pa_local

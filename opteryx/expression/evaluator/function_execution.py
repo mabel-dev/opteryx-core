@@ -6,7 +6,6 @@ compression path while preserving the existing kernel execution contract.
 
 from typing import Any
 
-from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as _const_scalar
 from opteryx.exceptions import FunctionExecutionError
 
 
@@ -14,59 +13,24 @@ def _is_draken_vector(value) -> bool:
     return value.__class__.__module__.startswith("opteryx.compiled.draken.vectors.")
 
 
-def _coerce_param_for_kernel(p, pa):
-    """Convert a Draken vector to a PyArrow array for kernel dispatch."""
-    if not _is_draken_vector(p):
-        return p
-    arr = p.to_arrow()
-    if pa.types.is_dictionary(arr.type):
-        arr = arr.cast(arr.type.value_type)
-    if pa.types.is_binary(arr.type) or pa.types.is_large_binary(arr.type):
-        arr = arr.cast(pa.utf8())
-    return arr
-
-
 def _coerce_param_for_draken(p):
-    """Coerce inputs into native Draken vectors for draken kernels."""
+    """Validate draken-kernel parameters.
+
+    Column data must already be Draken vectors. Literal scalars are allowed.
+    """
     if _is_draken_vector(p):
         return p
 
-    if not _is_draken_vector(p) and hasattr(p, "to_pylist") and not isinstance(p, (list, tuple)):
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-        arr = p.combine_chunks() if hasattr(p, "combine_chunks") else p
-        return vector_from_arrow(arr)
-
-    if hasattr(p, "as_py") and not isinstance(p, (bytes, str)):
-        try:
-            p = p.as_py()
-        except Exception:
-            pass
-
-    # Fast-path plain Python scalars before sequence coercion.
-    if isinstance(p, bool):
+    if isinstance(p, (bool, int, float, str, bytes, type(None))):
         return p
 
-    if isinstance(p, (int, float, str, bytes, type(None))):
-        vec = _const_scalar(p, 1)
-        if vec is not None:
-            return vec
-
-    if isinstance(p, (list, tuple)):
-        from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
-
-        try:
-            return vector_from_sequence(p)
-        except Exception as e:
-            raise FunctionExecutionError(
-                message=(
-                    "Failed to coerce list/tuple to Draken vector for draken kernel. "
-                    f"Inner error: {e}"
-                ),
-                function=None,
-            )
-
-    return p
+    raise FunctionExecutionError(
+        message=(
+            "Draken kernel received non-Draken column data. "
+            f"Expected Draken vector or literal scalar, got {type(p).__name__}."
+        ),
+        function=None,
+    )
 
 
 def _normalize_null_policy(null_policy: str) -> str:
@@ -94,7 +58,7 @@ def apply_bounded_function(node, *parameters) -> Any:
 
     if engine is None:
         raise FunctionExecutionError(
-            message=("KernelSpec.engine is required; please specify one of: 'arrow', 'draken'."),
+            message=("KernelSpec.engine is required; expected 'draken'."),
             function=node.value,
         )
 
@@ -136,19 +100,13 @@ def apply_bounded_function(node, *parameters) -> Any:
             parameters = tuple(arr.compress(valid_positions) for arr in parameters)
             compressed = True
 
-    if engine == "arrow":
-        import pyarrow as _pa_abf
-
-        parameters = tuple(_coerce_param_for_kernel(p, _pa_abf) for p in parameters)
-    elif engine == "draken":
+    if engine == "draken":
         parameters = tuple(_coerce_param_for_draken(p) for p in parameters)
-    elif engine == "python":
-        pass
     else:
         raise FunctionExecutionError(
             message=(
                 f"Unknown kernel engine '{engine}' for function '{node.value}'. "
-                "Expected one of: 'arrow', 'draken', 'python'."
+                "Expected: 'draken'."
             ),
             function=node.value,
         )

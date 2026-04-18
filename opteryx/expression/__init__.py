@@ -527,32 +527,10 @@ def _inner_evaluate(root: Node, table):
             from opteryx.utils.vector_types import is_draken_vector
 
             if not is_draken_vector(result):
-                import pyarrow as _pyarrow
-
-                from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-                from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
-
-                if isinstance(result, (_pyarrow.Array, _pyarrow.ChunkedArray)):
-                    if hasattr(result, "combine_chunks"):
-                        result = vector_from_arrow(result.combine_chunks())
-                    else:
-                        result = vector_from_arrow(result)
-                elif hasattr(result, "to_arrow"):
-                    result = vector_from_arrow(result.to_arrow())
-                elif not hasattr(result, "__iter__") or isinstance(
-                    result, (str, bytes, bytearray, memoryview)
-                ):
-                    from opteryx.compiled.draken.vectors.scalar_constructors import (
-                        from_scalar as constant_from_scalar,
-                    )
-
-                    scalar = constant_from_scalar(result, table.num_rows)
-                    if scalar is not None:
-                        result = scalar
-                    else:
-                        result = vector_from_sequence([result] * table.num_rows)
-                else:
-                    result = vector_from_sequence(result)
+                raise TypeError(
+                    "FUNCTION evaluation expected Draken vector result; "
+                    f"got {type(result).__name__}."
+                )
             return result
         if node_type == NodeType.CAST:
             # Handle CAST operations (CAST(expr AS type), TRY_CAST, SAFE_CAST)
@@ -576,14 +554,12 @@ def _inner_evaluate(root: Node, table):
             # Apply the cast kernel to the source
             result = kernel(source)
 
-            # Convert PyArrow arrays to Draken vectors if needed
-            if hasattr(result, "__class__") and "pyarrow" in result.__class__.__module__:
-                from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-                if hasattr(result, "combine_chunks"):
-                    result = vector_from_arrow(result.combine_chunks())
-                else:
-                    result = vector_from_arrow(result)
+            from opteryx.utils.vector_types import is_draken_vector
+            if not is_draken_vector(result):
+                raise TypeError(
+                    "CAST evaluation expected Draken vector result; "
+                    f"got {type(result).__name__}."
+                )
 
             # Propagate Draken vectors directly; keep fallback values native.
             return result

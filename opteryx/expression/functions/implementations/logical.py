@@ -25,25 +25,6 @@ def array_contains(array, item):
     return item in set(array)
 
 
-# Draken vector class names — used to guard against PyArrow arrays that also
-# expose .is_null() but return a PyArrow BooleanArray instead of int8_t[::1].
-_DRAKEN_VECTOR_CLASSES = frozenset(
-    {
-        "StringVector",
-        "Int64Vector",
-        "IntegerVector",
-        "Float64Vector",
-        "BoolVector",
-        "TimestampVector",
-        "Date32Vector",
-        "IntervalVector",
-        "ArrayVector",
-        "VectorVector",
-        "DecimalVector",
-    }
-)
-
-
 def if_null(values, replacements):
     """
     Replace null values in the input array with corresponding values from the replacement array.
@@ -52,28 +33,12 @@ def if_null(values, replacements):
     from opteryx.compiled.vector_ops import vector_iif
     from opteryx.compiled.vector_ops.function_definitions import bool_vector_from_int8_mask
 
-    # Convert PyArrow arrays to Draken vectors so the fast path can be used
-    if type(values).__name__ not in _DRAKEN_VECTOR_CLASSES and hasattr(values, "type"):
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-        values = vector_from_arrow(
-            values.combine_chunks() if hasattr(values, "combine_chunks") else values
-        )
-    if (
-        type(replacements).__name__ not in _DRAKEN_VECTOR_CLASSES
-        and hasattr(replacements, "type")
-        and not isinstance(replacements, type)
-    ):
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-        replacements = vector_from_arrow(
-            replacements.combine_chunks()
-            if hasattr(replacements, "combine_chunks")
-            else replacements
-        )
+    if not values.__class__.__module__.startswith("opteryx.compiled.draken.vectors."):
+        raise TypeError(f"IFNULL expects Draken vector input, got {type(values).__name__}.")
+    if not replacements.__class__.__module__.startswith("opteryx.compiled.draken.vectors."):
+        raise TypeError(f"IFNULL expects Draken vector replacement, got {type(replacements).__name__}.")
 
     # Draken vector — is_null() returns int8_t[::1] memoryview
-    # Assume values is now a Draken vector after conversion above
     n = len(values)
     null_mask = values.is_null()  # int8_t[::1]: 1 = null, 0 = not null
     null_boolvec = bool_vector_from_int8_mask(null_mask, n)
@@ -94,28 +59,14 @@ def if_not_null(values, replacements):
     from opteryx.compiled.vector_ops import vector_iif
     from opteryx.compiled.vector_ops.function_definitions import bool_vector_from_int8_mask
 
-    # Convert PyArrow arrays to Draken vectors so the fast path can be used
-    if type(values).__name__ not in _DRAKEN_VECTOR_CLASSES and hasattr(values, "type"):
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-        values = vector_from_arrow(
-            values.combine_chunks() if hasattr(values, "combine_chunks") else values
-        )
-    if (
-        type(replacements).__name__ not in _DRAKEN_VECTOR_CLASSES
-        and hasattr(replacements, "type")
-        and not isinstance(replacements, type)
-    ):
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-        replacements = vector_from_arrow(
-            replacements.combine_chunks()
-            if hasattr(replacements, "combine_chunks")
-            else replacements
+    if not values.__class__.__module__.startswith("opteryx.compiled.draken.vectors."):
+        raise TypeError(f"IFNOTNULL expects Draken vector input, got {type(values).__name__}.")
+    if not replacements.__class__.__module__.startswith("opteryx.compiled.draken.vectors."):
+        raise TypeError(
+            f"IFNOTNULL expects Draken vector replacement, got {type(replacements).__name__}."
         )
 
     # Draken vector — is_null() returns int8_t[::1] memoryview
-    # Assume values is now a Draken vector after conversion above
     n = len(values)
     null_mask = values.is_null()  # int8_t[::1]: 1 = null, 0 = not null
     # Invert: 1 = not null (true → use replacement), 0 = null (false → keep null)

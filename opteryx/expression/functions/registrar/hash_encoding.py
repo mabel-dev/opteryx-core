@@ -107,7 +107,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                     parameters=(_n,),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=number_functions.random_number,
                         null_policy="compress",
@@ -119,7 +119,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                     parameters=(),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="zero_arg",
                         callable_ref=number_functions.random_number,
                         null_policy="compress",
@@ -143,7 +143,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                     parameters=(_n,),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=number_functions.random_normal,
                         null_policy="compress",
@@ -155,7 +155,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                     parameters=(),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="zero_arg",
                         callable_ref=number_functions.random_normal,
                         null_policy="compress",

@@ -88,7 +88,7 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
                     parameters=(ParameterSpec(name="arr", type_family="array"),),
                     return_spec=ReturnSpec(mode="resolver", resolver=_element_type_return),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=_greatest_kernel,
                         cost_us_per_million=4482220.29,
@@ -111,7 +111,7 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
                     parameters=(ParameterSpec(name="arr", type_family="array"),),
                     return_spec=ReturnSpec(mode="resolver", resolver=_element_type_return),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=_least_kernel,
                         cost_us_per_million=4419443.37,
@@ -134,7 +134,7 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
                     parameters=(ParameterSpec(name="arr", type_family="array"),),
                     return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=_sort_kernel,
                         cost_us_per_million=4.92,
@@ -160,7 +160,7 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="resolver", resolver=_array_literal_return_type),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=lambda *a: None,  # constructed inline by evaluator
                         cost_us_per_million=0.25,
@@ -186,7 +186,7 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="resolver", resolver=_array_literal_return_type),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=lambda *a: None,
                         cost_us_per_million=0.31,
@@ -307,7 +307,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                     parameters=(ParameterSpec(name="text", type_family="string"),),
                     return_spec=ReturnSpec(mode="resolver", resolver=_embed_return_type),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=other_functions.embed,
                         null_policy="compress",
@@ -334,7 +334,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=other_functions.cosine_similarity,
                         null_policy="compress",
@@ -349,7 +349,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=other_functions.cosine_similarity,
                         null_policy="compress",
@@ -376,7 +376,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=other_functions.cosine_distance,
                         null_policy="compress",
@@ -391,7 +391,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=other_functions.cosine_distance,
                         null_policy="compress",

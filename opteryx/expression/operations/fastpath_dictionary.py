@@ -1,32 +1,15 @@
 """Dictionary vector encoding optimization for filter operations."""
 
-import pyarrow
-
 from opteryx.compiled.vector_ops import vector_in_list, vector_like, vector_rlike
 from opteryx.expression.operations.fastpath_constant import _coerce_in_list_values
 from opteryx.expression.operations.fastpath_telemetry import record_dict_fastpath_hit
 
 
 def _dictionary_arrow_type(arr):
-    """Extract dictionary type information from array."""
-    if isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
-        return arr.type if pyarrow.types.is_dictionary(arr.type) else None
-
-    to_arrow = getattr(arr, "to_arrow", None)
-    if to_arrow is None:
+    """Extract dictionary type information from a Draken vector."""
+    if not arr.__class__.__module__.startswith("opteryx.compiled.draken.vectors."):
         return None
-
-    try:
-        arrow_arr = to_arrow()
-    except Exception:
-        return None
-
-    if isinstance(arrow_arr, (pyarrow.Array, pyarrow.ChunkedArray)) and pyarrow.types.is_dictionary(
-        arrow_arr.type
-    ):
-        return arrow_arr.type
-
-    return None
+    return getattr(arr, "dictionary_value_type", None)
 
 
 def _has_dictionary_fastpath_ops(arr):
@@ -48,34 +31,16 @@ def _has_dictionary_fastpath_ops(arr):
 
 
 def _dictionary_vector(arr):
-    """Extract or convert to dictionary-encoded vector."""
+    """Validate dictionary-encoded Draken vector."""
     if _dictionary_arrow_type(arr) is None:
         return None
 
     if _has_dictionary_fastpath_ops(arr):
         return arr
 
-    if hasattr(arr, "to_arrow") and not isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
-        arr = arr.to_arrow()
-
-    if isinstance(arr, pyarrow.ChunkedArray):
-        if arr.num_chunks != 1:
-            raise NotImplementedError(
-                "Dictionary motor path does not support multi-chunk dictionary arrays."
-            )
-        arr = arr.chunk(0)
-
-    if isinstance(arr, pyarrow.DictionaryArray):
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-        vec = vector_from_arrow(arr)
-        if _has_dictionary_fastpath_ops(vec):
-            return vec
-        raise TypeError(
-            "Dictionary fastpath expected a dictionary-capable vector conversion result."
-        )
-
-    return None
+    raise TypeError(
+        "Dictionary fastpath requires dictionary-capable Draken vector operators."
+    )
 
 
 def has_dictionary_candidate(arr):
@@ -89,19 +54,17 @@ def _dictionary_supports_numeric_fastpath(arr):
     if vec is None:
         return False
 
-    arrow_type = _dictionary_arrow_type(vec)
-    if arrow_type is None:
+    value_type = _dictionary_arrow_type(vec)
+    if value_type is None:
         return False
 
-    value_type = arrow_type.value_type
-    return (
-        pyarrow.types.is_integer(value_type)
-        or pyarrow.types.is_floating(value_type)
-        or pyarrow.types.is_boolean(value_type)
-        or pyarrow.types.is_date32(value_type)
-        or pyarrow.types.is_timestamp(value_type)
-        or pyarrow.types.is_time32(value_type)
-        or pyarrow.types.is_time64(value_type)
+    return str(value_type).lower() in (
+        "integer",
+        "double",
+        "boolean",
+        "date",
+        "timestamp",
+        "time",
     )
 
 

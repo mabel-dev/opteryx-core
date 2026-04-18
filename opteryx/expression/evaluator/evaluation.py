@@ -96,10 +96,6 @@ def _eval_value(node, morsel):
         op = node.value
 
         if op == "MapAccess":
-            from opteryx.compiled.draken.interop.arrow import (
-                vector_from_arrow,
-                vector_from_sequence,
-            )
             from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
             from opteryx.expression.binary_operators import MapAccessOp
 
@@ -109,9 +105,10 @@ def _eval_value(node, morsel):
             result = MapAccessOp(left_vec, key_vec)
             if is_draken_vector(result):
                 return result
-            if hasattr(result, "to_arrow"):
-                return vector_from_arrow(result.to_arrow())
-            return vector_from_sequence(result)
+            raise TypeError(
+                "MapAccessOp expected Draken vector result; "
+                f"got {type(result).__name__}."
+            )
 
         if op in ("Arrow", "LongArrow"):
             from opteryx.compiled.draken.vectors.string_vector import StringVector
@@ -141,30 +138,15 @@ def _eval_value(node, morsel):
             if vec is not None:
                 return vec
 
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-        from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
         from opteryx.expression import _inner_evaluate
 
-        arrow_table = morsel.to_arrow()
-        result = _inner_evaluate(node, arrow_table)
+        result = _inner_evaluate(node, morsel)
         if result is not None and is_draken_vector(result):
             return result
-        if hasattr(result, "to_arrow"):
-            return vector_from_arrow(result.to_arrow())
-        if not hasattr(result, "__iter__") or isinstance(result, str):
-            from opteryx.compiled.draken.vectors.scalar_constructors import (
-                from_scalar as _const_scalar,
-            )
-
-            vec = _const_scalar(result, morsel.num_rows)
-            if vec is not None:
-                return vec
-            from opteryx.compiled.draken.interop.arrow import (
-                vector_from_sequence as _vector_from_sequence,
-            )
-
-            return _vector_from_sequence([result] * morsel.num_rows)
-        return vector_from_sequence(result)
+        raise TypeError(
+            f"_eval_value: expected Draken vector for node {node.node_type!r}; "
+            f"got {type(result).__name__}."
+        )
 
     return evaluate_draken(node, morsel)
 
@@ -304,7 +286,6 @@ def evaluate_draken(node, morsel):
 
 
 def evaluate_and_append_draken(nodes, morsel):
-    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
     from opteryx.compiled.draken.morsels.morsel import Morsel
     from opteryx.expression import NodeType
 
@@ -331,21 +312,10 @@ def evaluate_and_append_draken(nodes, morsel):
         else:
             result = _eval_value(node, morsel)
         if not _is_draken_vector(result):
-            import pyarrow as _pa_local
-
-            from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
-
-            if isinstance(result, (_pa_local.Array, _pa_local.ChunkedArray)):
-                result = _vfa(result)
-            elif not hasattr(result, "__iter__") or isinstance(result, (str, bytes)):
-                from opteryx.compiled.draken.vectors.scalar_constructors import (
-                    from_scalar as _const_scalar,
-                )
-
-                vec = _const_scalar(result, morsel.num_rows)
-                result = _vfa(_pa_local.array([result] * morsel.num_rows)) if vec is None else vec
-            else:
-                result = vector_from_sequence(result)
+            raise TypeError(
+                "evaluate_and_append_draken expected Draken vector result; "
+                f"got {type(result).__name__} for expression {node.value!r}."
+            )
         col_names.append(identity)
         col_vecs.append(result)
         existing.add(identity)
