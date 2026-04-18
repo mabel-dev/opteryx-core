@@ -5,6 +5,7 @@ from libc.stdint cimport uint64_t, uint8_t
 
 from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
 from opteryx.compiled.draken.vectors.vector cimport Vector
 
 cdef class IntervalVector(Vector):
@@ -34,7 +35,7 @@ cdef class IntervalVector(Vector):
     cpdef BoolVector greater_than(self, object literal)
     cpdef BoolVector less_than_or_equals(self, object literal)
     cpdef BoolVector greater_than_or_equals(self, object literal)
-    cpdef object apply_to_temporal(self, object values, int8_t signum=*)
+    cpdef TimestampVector apply_to_temporal(self, Vector values, int8_t signum=*)
 
     cpdef object min(self)
     cpdef object max(self)

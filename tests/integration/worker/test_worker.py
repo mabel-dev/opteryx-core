@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import io
+import logging
 import os
 import sys
 from typing import List, Tuple
@@ -14,13 +15,13 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../../../opteryx-catalog"))
 import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx_catalog import OpteryxCatalog
 
 import opteryx
 from opteryx.connectors import OpteryxConnector
-from opteryx.logging import get_logger
 
-logger = get_logger()
+logger = logging.getLogger(__name__)
 
 SIZE_THRESHOLD_BYTES = 256 * 1024 * 1024  # 256 MB
 FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
@@ -136,49 +137,69 @@ def worker_executor(
     total_size_estimate = 0
 
     try:
-        with opteryx.connect() as conn:
-            cursor = conn.cursor()
-            batches = cursor.execute_to_arrow_batches(sql, batch_size=batch_size)
+        session = opteryx.session()
+        try:
+            morsels = session.execute_to_morsels(sql, max_size=batch_size)
 
-            # Iterate batches and calculate sizes (same as deployed version)
+            # Iterate morsels and calculate sizes (same as deployed version)
             part_index = 0
-            buffered_batches: List[pa.RecordBatch] = []
+            buffered_morsels: List[Morsel] = []
+            buffered_bytes = 0
             buffered_rows = 0
             parts: List[Tuple[str, int, int]] = []  # (filename, rows, approx_size)
+            result_schema: pa.Schema | None = None
 
-            for batch in batches:
-                buffered_batches.append(batch)
-                buffered_rows += batch.num_rows
-
-                # Estimate bytes for the accumulated buffered batches
-                buffered_table = pa.Table.from_batches(buffered_batches)
-                buffered_bytes = _estimate_table_bytes(buffered_table)
+            for morsel in morsels:
+                buffered_morsels.append(morsel)
+                buffered_rows += morsel.num_rows
+                buffered_bytes += morsel.nbytes
 
                 # When we exceed threshold, flush to a parquet part
                 if buffered_bytes >= SIZE_THRESHOLD_BYTES:
                     part_name = f"part_{part_index:04d}.parquet"
+                    combined = (
+                        buffered_morsels[0]
+                        if len(buffered_morsels) == 1
+                        else Morsel.combine(buffered_morsels)
+                    )
+                    buffered_table = combined.to_arrow()
+                    if result_schema is None:
+                        result_schema = buffered_table.schema
                     # Write to in-memory buffer (discarded)
                     _write_parquet_table(buffered_table, "")
                     parts.append((part_name, buffered_rows, buffered_bytes))
                     # Reset buffers
-                    buffered_batches = []
+                    buffered_morsels = []
                     buffered_rows = 0
-                    part_index += 1
                     total_size_estimate += buffered_bytes
+                    buffered_bytes = 0
+                    part_index += 1
 
             # At the end write any remaining buffered batches as the final part
-            if buffered_batches:
-                last_table = pa.Table.from_batches(buffered_batches)
+            if buffered_morsels:
+                combined = (
+                    buffered_morsels[0]
+                    if len(buffered_morsels) == 1
+                    else Morsel.combine(buffered_morsels)
+                )
+                last_table = combined.to_arrow()
+                if result_schema is None:
+                    result_schema = last_table.schema
                 part_name = f"part_{part_index:04d}.parquet"
                 _write_parquet_table(last_table, "")
-                last_table_size = _estimate_table_bytes(last_table)
-                parts.append((part_name, buffered_rows, last_table_size))
-                total_size_estimate += last_table_size
+                parts.append((part_name, buffered_rows, buffered_bytes))
+                total_size_estimate += buffered_bytes
 
-            telemetry = cursor.telemetry
+            telemetry = session.telemetry
+        finally:
+            session.close()
 
         total_rows = sum(rows for _, rows, _ in parts)
-        columns = [{"name": f.name, "type": str(f.type)} for f in cursor.schema.columns]
+        columns = (
+            [{"name": f.name, "type": str(f.type)} for f in result_schema]
+            if result_schema is not None
+            else []
+        )
 
         # Build manifest (same format as deployed version)
         manifest = {
@@ -190,6 +211,7 @@ def worker_executor(
                 }
                 for pname, rows, approx_size in parts
             ],
+            "columns": columns,
             "total_parts": len(parts),
             "total_rows": total_rows,
             "total_size_estimate": total_size_estimate,

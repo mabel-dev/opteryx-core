@@ -100,7 +100,8 @@ def test_interval_vector_compare_and_temporal_apply():
         months_left.compare_vector(months_right, 0, True)
 
     temporal = pa.array([datetime.date(2024, 1, 31), None], type=pa.date32())
-    applied = right_vec.apply_to_temporal(temporal, 1)
+    temporal_vec = Vector.from_arrow(temporal)
+    applied = right_vec.apply_to_temporal(temporal_vec, 1)
     assert applied.to_pylist() == [datetime.datetime(2024, 2, 1, 0, 0), None]
 
 
@@ -108,8 +109,9 @@ def test_interval_vector_temporal_apply_proleptic_year_support():
     interval = pa.array([(-768, 0, 0)], type=pa.month_day_nano_interval())  # 64 years
     values = pa.array([datetime.date(1, 4, 23)], type=pa.date32())
     vec = Vector.from_arrow(interval)
+    values_vec = Vector.from_arrow(values)
 
-    applied = vec.apply_to_temporal(values, 1)
+    applied = vec.apply_to_temporal(values_vec, 1)
 
     # apply_to_temporal now returns a TimestampVector (microseconds since epoch).
     raw = applied.to_pylist()

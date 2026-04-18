@@ -28,6 +28,7 @@ from opteryx.models import LogicalColumn, Node
 from opteryx.operators.aggregate.helpers import aggregator_names, is_aggregator
 from opteryx.types import OrsoTypes
 from opteryx.utils import dates, suggest_alternative
+from opteryx.utils.vector_types import VectorType, get_vector_type
 
 # Epoch constants for converting datetime literals to Draken-native integers.
 # DATE literals are stored as int (days since epoch, fits int32).
@@ -50,31 +51,13 @@ def _evaluate_fixed_temporal_function(function_name: str):
 
 
 def _extract_single_scalar(value):
-    # Arrow array / chunked array → to_pylist is the common denominator
-    if hasattr(value, "to_pylist"):
-        lst = value.to_pylist()
-        if len(lst) != 1:
-            raise UnsupportedSyntaxError(
-                "Time-travel expressions must evaluate to a single scalar value."
-            )
-        return lst[0]
-    # Scalar wrapper objects that expose .item()
-    if hasattr(value, "item") and hasattr(value, "shape"):
-        if value.size != 1:
-            raise UnsupportedSyntaxError(
-                "Time-travel expressions must evaluate to a single scalar value."
-            )
-        return value.item()
-    # Plain Python sequences
-    if isinstance(value, (list, tuple)):
+    value_type = get_vector_type(value)
+    if value_type != VectorType.UNKNOWN:
         if len(value) != 1:
             raise UnsupportedSyntaxError(
                 "Time-travel expressions must evaluate to a single scalar value."
             )
         return value[0]
-    # Arrow scalar
-    if hasattr(value, "as_py"):
-        return value.as_py()
     # Already a Python scalar
     return value
 
@@ -635,10 +618,10 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
     elif base_type == "DATE" and literal_node.type in (OrsoTypes.INTEGER, OrsoTypes.DATE):
         value = _EPOCH_DATE + datetime.timedelta(days=int(literal_node.value))
         return Node(NodeType.LITERAL, type=OrsoTypes.DATE, value=value, alias=alias)
-    # Special case: INTEGER to TIMESTAMP conversion using PyArrow
+    # Special case: INTEGER to TIMESTAMP conversion
     elif base_type == "TIMESTAMP" and (
         literal_node.type in (OrsoTypes.INTEGER, OrsoTypes.DATE)
-        or isinstance(literal_node.value, (int, numpy.integer))
+        or isinstance(literal_node.value, int)
     ):
         int_value = int(literal_node.value)
         if literal_node.type == OrsoTypes.DATE or abs(int_value) < 100_000:

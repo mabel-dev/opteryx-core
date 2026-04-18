@@ -205,8 +205,9 @@ def _interval_compare(op: str, vec, right):
 
 
 def _date_minus_date_draken(left_vec, right_vec):
+    import pyarrow as _pa_local
+
     from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-    from opteryx.expression.intervals import _intervals_to_month_day_nano
 
     # Native vector subtraction
     if left_vec.__class__.__name__ == "Date32Vector":
@@ -220,10 +221,18 @@ def _date_minus_date_draken(left_vec, right_vec):
         else:  # Date32Vector
             diff_us = left_vec.subtract_date32_vector(right_vec)
 
-    # Convert Int64Vector microseconds to IntervalVector (months, microseconds)
-    # Nulls are already handled by the subtraction methods via bitmap
-    rows = [(0, d) if d is not None else None for d in diff_us.to_pylist()]
-    return vector_from_arrow(_intervals_to_month_day_nano(rows))
+    # Convert Int64Vector microseconds to IntervalVector (months, days, nanoseconds).
+    # Nulls are already handled by the subtraction methods via bitmap.
+    mdn_rows = []
+    for micros in diff_us.to_pylist():
+        if micros is None:
+            mdn_rows.append(None)
+            continue
+        days, remainder = divmod(int(micros), 86_400_000_000)
+        mdn_rows.append((0, int(days), int(remainder) * 1_000))
+
+    mdn_array = _pa_local.array(mdn_rows, type=_pa_local.month_day_nano_interval())
+    return vector_from_arrow(mdn_array)
 
 
 def _date_interval_op_draken(left_vec, right_vec, op):
