@@ -5,7 +5,11 @@ Null handling is native to Draken vector operations.
 If you get AttributeError, your input isn't Draken - that's a bug upstream.
 """
 
+import datetime
+
+from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 from opteryx.compiled.vector_ops import vector_contains
+from opteryx.expression.evaluator.comparisons import draken_compare
 from opteryx.expression.operations import (
     array_ops,
     comparisons,
@@ -29,8 +33,13 @@ from opteryx.expression.operations.fastpath_telemetry import (
     record_constant_fastpath_hit,
     reset_fastpath_telemetry,
 )
-from opteryx.expression.operations.type_coercion import to_temporal_array
 from opteryx.types import OrsoTypes
+from opteryx.types._datetime_conversion import (
+    date_to_int64_days,
+    int64_days_to_date,
+    int64_us_to_datetime,
+    timestamp_to_int64_us,
+)
 
 # Operators that should skip null compression during filtering
 _SKIP_COMPRESSION_OPS = frozenset(
@@ -67,6 +76,60 @@ def get_dict_expr_telemetry():
     return get_fastpath_telemetry()
 
 
+def _coerce_temporal_scalar(value, source_type, target_type):
+    """Normalize temporal scalars to the backing Python type for `target_type`."""
+
+    if target_type == OrsoTypes.DATE:
+        if isinstance(value, datetime.datetime):
+            value = value.date()
+        if isinstance(value, datetime.date):
+            return date_to_int64_days(value)
+        if isinstance(value, int):
+            if source_type == OrsoTypes.TIMESTAMP:
+                return date_to_int64_days(int64_us_to_datetime(value).date())
+            return date_to_int64_days(int64_days_to_date(value))
+        return date_to_int64_days(OrsoTypes.DATE.parse(value))
+
+    if target_type == OrsoTypes.TIMESTAMP:
+        if isinstance(value, datetime.datetime):
+            if value.tzinfo is not None:
+                value = value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            return timestamp_to_int64_us(value)
+        if isinstance(value, datetime.date):
+            return timestamp_to_int64_us(value)
+        if isinstance(value, int):
+            if source_type == OrsoTypes.DATE:
+                return timestamp_to_int64_us(int64_days_to_date(value))
+            return value
+        return timestamp_to_int64_us(OrsoTypes.TIMESTAMP.parse(value))
+
+    return value
+
+
+def to_temporal_array(values, source_type, target_type):
+    """Coerce values to a Draken temporal vector without Arrow/Numpy conversion."""
+    if not isinstance(values, (list, tuple)):
+        values = [values]
+
+    coerced = [
+        None if value is None else _coerce_temporal_scalar(value, source_type, target_type)
+        for value in values
+    ]
+
+    source_vec = vector_from_sequence(coerced, dtype=OrsoTypes.INTEGER)
+    if target_type == OrsoTypes.DATE:
+        from opteryx.compiled.draken.vectors.date32_vector import from_int64_vector as _from_int64
+
+        return _from_int64(source_vec)
+    if target_type == OrsoTypes.TIMESTAMP:
+        from opteryx.compiled.draken.vectors.timestamp_vector import (
+            from_int64_vector as _from_int64,
+        )
+
+        return _from_int64(source_vec, timestamp_unit="us")
+    return source_vec
+
+
 def filter_operations(left_arr, left_type, operator, right_arr, right_type):
     """Execute filter operation with appropriate fast path.
 
@@ -89,22 +152,34 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
         left_type = OrsoTypes.DOUBLE
 
     # Temporal type coercions
+    temporal_types = {OrsoTypes.DATE, OrsoTypes.TIMESTAMP}
     if (
-        OrsoTypes.TIMESTAMP in (left_type, right_type) or OrsoTypes.DATE in (left_type, right_type)
-    ) and OrsoTypes.INTEGER in (left_type, right_type):
-        if left_type == OrsoTypes.INTEGER:
-            target_type = OrsoTypes.DATE if right_type == OrsoTypes.DATE else OrsoTypes.TIMESTAMP
-            left_arr = to_temporal_array(left_arr, left_type, target_type)
-            left_type = target_type
-        if right_type == OrsoTypes.INTEGER:
-            target_type = OrsoTypes.DATE if left_type == OrsoTypes.DATE else OrsoTypes.TIMESTAMP
-            right_arr = to_temporal_array(right_arr, right_type, target_type)
-            right_type = target_type
+        OrsoTypes.INTEGER in (left_type, right_type)
+        or left_type in temporal_types
+        or right_type in temporal_types
+    ):
+        left_source_type = left_type
+        right_source_type = right_type
+        left_target_type = left_type
+        right_target_type = right_type
 
-    if {left_type, right_type} == {OrsoTypes.DATE, OrsoTypes.TIMESTAMP}:
-        left_arr = to_temporal_array(left_arr, left_type, OrsoTypes.TIMESTAMP)
-        right_arr = to_temporal_array(right_arr, right_type, OrsoTypes.TIMESTAMP)
-        left_type = right_type = OrsoTypes.TIMESTAMP
+        if {left_type, right_type} == temporal_types:
+            left_target_type = right_target_type = OrsoTypes.TIMESTAMP
+        else:
+            if left_type == OrsoTypes.INTEGER:
+                left_target_type = (
+                    OrsoTypes.DATE if right_type == OrsoTypes.DATE else OrsoTypes.TIMESTAMP
+                )
+            if right_type == OrsoTypes.INTEGER:
+                right_target_type = (
+                    OrsoTypes.DATE if left_type == OrsoTypes.DATE else OrsoTypes.TIMESTAMP
+                )
+
+        left_arr = to_temporal_array(left_arr, left_source_type, left_target_type)
+        right_arr = to_temporal_array(right_arr, right_source_type, right_target_type)
+        left_type = left_target_type
+        right_type = right_target_type
+        return draken_compare(operator, left_arr, right_arr, left_type, right_type)
 
     # Handle interval operations
     if OrsoTypes.INTERVAL in (left_type, right_type):
