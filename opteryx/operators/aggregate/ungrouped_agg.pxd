@@ -1,4 +1,4 @@
-from libc.stdint cimport int64_t
+from libc.stdint cimport int32_t, int64_t, uint64_t
 from libc.stddef cimport size_t
 
 from opteryx.compiled.draken.morsels.morsel cimport Morsel
@@ -75,6 +75,8 @@ cdef class AnyValueAggregate(UngroupedAggregate):
 
 cdef class CountDistinctAggregate(UngroupedAggregate):
     cdef CarcharSetWrapper _set  # typed — needed for nogil insert loop
+    cdef uint64_t* _scratch_buf
+    cdef Py_ssize_t _scratch_capacity
 
 cdef class UngroupedAggregateEngine:
     cdef list _aggregates

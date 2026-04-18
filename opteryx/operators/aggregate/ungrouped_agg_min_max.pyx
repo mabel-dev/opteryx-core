@@ -20,71 +20,17 @@ cdef class MinInt64Aggregate(UngroupedAggregate):
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
+
+        if self._col_idx < 0 or self._col_idx >= len(typed._columns):
+            return
+
         cdef Vector raw = <Vector>typed._columns[self._col_idx]
 
-        if self._col_type == _VTYPE_UNKNOWN:
-            self._col_type = _classify_vector(raw)
+        if raw is None:
+            return
 
-        cdef const int64_t*   data
-        cdef const uint8_t*   nulls
-        cdef DictAccessor*    dacc
-        cdef DrakenFixedBuffer* buf
-        cdef Py_ssize_t i
+        # Skip native fast paths due to segfault - use fallback instead
         cdef int64_t val
-
-        if self._col_type == _VTYPE_INT64:
-            vec_i = <Int64Vector>raw
-            if vec_i._has_const:
-                if not vec_i._const_is_null:
-                    val = vec_i._const_value
-                    if not self._seen or val < self._result:
-                        self._result = val
-                        self._seen   = True
-                return
-            if vec_i._dict_codes != NULL:
-                dacc  = vec_i.dict_accessor()
-                nulls = dacc.row_nulls
-                for i in range(nrows):
-                    if _bitmap_is_valid(nulls, i):
-                        val = _dict_accessor_read_int_value(dacc, i)
-                        if not self._seen or val < self._result:
-                            self._result = val
-                            self._seen   = True
-                return
-            data  = <const int64_t*>vec_i.dense_ptr()
-            nulls = vec_i.null_bitmap_ptr()
-            if nulls == NULL:
-                with nogil:
-                    for i in range(nrows):
-                        if not self._seen or data[i] < self._result:
-                            self._result = data[i]
-                            self._seen   = True
-                return
-            with nogil:
-                for i in range(nrows):
-                    if _bitmap_is_valid(nulls, i):
-                        if not self._seen or data[i] < self._result:
-                            self._result = data[i]
-                            self._seen   = True
-            return
-
-        if self._col_type == _VTYPE_INTEGER:
-            vec_n = <IntegerVector>raw
-            if vec_n._has_const:
-                if not vec_n._const_is_null:
-                    val = vec_n._const_value
-                    if not self._seen or val < self._result:
-                        self._result = val; self._seen = True
-                return
-            buf   = vec_n.ptr
-            nulls = <const uint8_t*>buf.null_bitmap
-            for i in range(nrows):
-                if _bitmap_is_valid(nulls, i):
-                    val = _read_integer_value(buf, i)
-                    if not self._seen or val < self._result:
-                        self._result = val; self._seen = True
-            return
-
         for val_py in raw.to_pylist():
             if val_py is not None:
                 val = <int64_t>val_py
@@ -126,67 +72,17 @@ cdef class MaxInt64Aggregate(UngroupedAggregate):
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
+
+        if self._col_idx < 0 or self._col_idx >= len(typed._columns):
+            return
+
         cdef Vector raw = <Vector>typed._columns[self._col_idx]
 
-        if self._col_type == _VTYPE_UNKNOWN:
-            self._col_type = _classify_vector(raw)
+        if raw is None:
+            return
 
-        cdef const int64_t*   data
-        cdef const uint8_t*   nulls
-        cdef DictAccessor*    dacc
-        cdef DrakenFixedBuffer* buf
-        cdef Py_ssize_t i
+        # Skip native fast paths due to segfault - use fallback instead
         cdef int64_t val
-
-        if self._col_type == _VTYPE_INT64:
-            vec_i = <Int64Vector>raw
-            if vec_i._has_const:
-                if not vec_i._const_is_null:
-                    val = vec_i._const_value
-                    if not self._seen or val > self._result:
-                        self._result = val; self._seen = True
-                return
-            if vec_i._dict_codes != NULL:
-                dacc  = vec_i.dict_accessor()
-                nulls = dacc.row_nulls
-                for i in range(nrows):
-                    if _bitmap_is_valid(nulls, i):
-                        val = _dict_accessor_read_int_value(dacc, i)
-                        if not self._seen or val > self._result:
-                            self._result = val; self._seen = True
-                return
-            data  = <const int64_t*>vec_i.dense_ptr()
-            nulls = vec_i.null_bitmap_ptr()
-            if nulls == NULL:
-                with nogil:
-                    for i in range(nrows):
-                        if not self._seen or data[i] > self._result:
-                            self._result = data[i]; self._seen = True
-                return
-            with nogil:
-                for i in range(nrows):
-                    if _bitmap_is_valid(nulls, i):
-                        if not self._seen or data[i] > self._result:
-                            self._result = data[i]; self._seen = True
-            return
-
-        if self._col_type == _VTYPE_INTEGER:
-            vec_n = <IntegerVector>raw
-            if vec_n._has_const:
-                if not vec_n._const_is_null:
-                    val = vec_n._const_value
-                    if not self._seen or val > self._result:
-                        self._result = val; self._seen = True
-                return
-            buf   = vec_n.ptr
-            nulls = <const uint8_t*>buf.null_bitmap
-            for i in range(nrows):
-                if _bitmap_is_valid(nulls, i):
-                    val = _read_integer_value(buf, i)
-                    if not self._seen or val > self._result:
-                        self._result = val; self._seen = True
-            return
-
         for val_py in raw.to_pylist():
             if val_py is not None:
                 val = <int64_t>val_py
@@ -228,39 +124,17 @@ cdef class MinFloat64Aggregate(UngroupedAggregate):
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-        cdef Vector raw = <Vector>typed._columns[self._col_idx]
 
-        if self._col_type == _VTYPE_UNKNOWN:
-            self._col_type = _classify_vector(raw)
-
-        cdef const double*  data
-        cdef const uint8_t* nulls
-        cdef Py_ssize_t i
-        cdef double val
-
-        if self._col_type == _VTYPE_FLOAT64:
-            vec_f = <Float64Vector>raw
-            if vec_f._has_const:
-                if not vec_f._const_is_null:
-                    val = vec_f._const_value
-                    if not self._seen or val < self._result:
-                        self._result = val; self._seen = True
-                return
-            data  = <const double*>vec_f.dense_ptr()
-            nulls = vec_f.null_bitmap_ptr()
-            if nulls == NULL:
-                with nogil:
-                    for i in range(nrows):
-                        if not self._seen or data[i] < self._result:
-                            self._result = data[i]; self._seen = True
-                return
-            with nogil:
-                for i in range(nrows):
-                    if _bitmap_is_valid(nulls, i):
-                        if not self._seen or data[i] < self._result:
-                            self._result = data[i]; self._seen = True
+        if self._col_idx < 0 or self._col_idx >= len(typed._columns):
             return
 
+        cdef Vector raw = <Vector>typed._columns[self._col_idx]
+
+        if raw is None:
+            return
+
+        # Skip native fast paths due to segfault - use fallback instead
+        cdef double val
         for val_py in raw.to_pylist():
             if val_py is not None:
                 val = <double>val_py
@@ -302,39 +176,17 @@ cdef class MaxFloat64Aggregate(UngroupedAggregate):
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-        cdef Vector raw = <Vector>typed._columns[self._col_idx]
 
-        if self._col_type == _VTYPE_UNKNOWN:
-            self._col_type = _classify_vector(raw)
-
-        cdef const double*  data
-        cdef const uint8_t* nulls
-        cdef Py_ssize_t i
-        cdef double val
-
-        if self._col_type == _VTYPE_FLOAT64:
-            vec_f = <Float64Vector>raw
-            if vec_f._has_const:
-                if not vec_f._const_is_null:
-                    val = vec_f._const_value
-                    if not self._seen or val > self._result:
-                        self._result = val; self._seen = True
-                return
-            data  = <const double*>vec_f.dense_ptr()
-            nulls = vec_f.null_bitmap_ptr()
-            if nulls == NULL:
-                with nogil:
-                    for i in range(nrows):
-                        if not self._seen or data[i] > self._result:
-                            self._result = data[i]; self._seen = True
-                return
-            with nogil:
-                for i in range(nrows):
-                    if _bitmap_is_valid(nulls, i):
-                        if not self._seen or data[i] > self._result:
-                            self._result = data[i]; self._seen = True
+        if self._col_idx < 0 or self._col_idx >= len(typed._columns):
             return
 
+        cdef Vector raw = <Vector>typed._columns[self._col_idx]
+
+        if raw is None:
+            return
+
+        # Skip native fast paths due to segfault - use fallback instead
+        cdef double val
         for val_py in raw.to_pylist():
             if val_py is not None:
                 val = <double>val_py

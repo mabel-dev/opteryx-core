@@ -7,9 +7,15 @@
 # cython: boundscheck=False
 
 from libc.stdlib cimport malloc, free
+from libc.stddef cimport size_t
+from libc.stdint cimport uint8_t
 from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AsString
 
-from opteryx.third_party.alantsd.base64 cimport b64tobin_len, bintob64, b64_has_neon, b64_has_avx2
+cdef extern from "_base64.h":
+    void* b64tobin_len(void* dest, const char* src, size_t len)
+    char* bintob64(char* dest, const void* src, size_t size)
+    int b64_has_neon()
+    int b64_has_avx2()
 
 cdef inline size_t calc_encoded_size(size_t length):
     """Base64-encoded output length (without newlines)."""
@@ -33,7 +39,7 @@ cpdef bytes encode(bytes data):
         raise MemoryError()
 
     cdef const char* input_ptr = PyBytes_AsString(data)
-    bintob64(outbuf, <const void*>input_ptr, in_len)
+    bintob64(outbuf, <void*>input_ptr, in_len)
 
     cdef bytes result = PyBytes_FromStringAndSize(outbuf, out_len)
     free(outbuf)
@@ -42,17 +48,23 @@ cpdef bytes encode(bytes data):
 
 cpdef bytes decode(bytes data):
     cdef size_t in_len = len(data)
-    cdef size_t out_len = (in_len // 4) * 3  # may be smaller depending on padding
+    cdef size_t out_len = (in_len // 4) * 3   # may be smaller depending on padding
 
-    result = PyBytes_FromStringAndSize(NULL, out_len)
-    cdef char* outbuf = PyBytes_AsString(result)
+    cdef char* outbuf = <char*>malloc(out_len)
+    if outbuf == NULL:
+        raise MemoryError()
+
     cdef const char* inbuf = PyBytes_AsString(data)
-
     cdef char* end_ptr = <char*>b64tobin_len(outbuf, inbuf, in_len)
-    if end_ptr == NULL or end_ptr < outbuf or end_ptr > outbuf + out_len:
-        return b""
 
-    return result[:end_ptr - outbuf]
+    cdef size_t decoded_len = 0
+    if end_ptr != NULL and end_ptr >= outbuf and end_ptr <= outbuf + out_len:
+        decoded_len = end_ptr - outbuf
+
+    cdef bytes result = PyBytes_FromStringAndSize(outbuf, decoded_len)
+    free(outbuf)
+
+    return result
 
 
 cpdef bint has_neon():

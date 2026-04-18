@@ -41,3 +41,8 @@ cdef class CarcharSetWrapper:
         Py_ssize_t length,
         int32_t* out_indices,
     ) noexcept nogil
+
+    # C-level nogil helpers used by hot-path code; prototypes must be
+    # present here so Cython generates correct vtables.
+    cdef size_t _insert_many_nogil(self, uint64_t* keys, size_t length) noexcept nogil
+    cdef void _tighten_nogil(self) noexcept nogil
