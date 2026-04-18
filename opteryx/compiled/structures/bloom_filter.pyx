@@ -149,11 +149,7 @@ cdef class BloomFilter:
 
         if num_valid_rows > 0:
             # Compute hashes only for non-null rows — prefer Draken Morsel.hash()
-            if isinstance(relation, Morsel):
-                row_hashes = relation.hash(columns)
-            else:
-                _m = Morsel.from_arrow(relation)
-                row_hashes = _m.hash(columns)
+            row_hashes = relation.hash(columns)
 
             for i in range(num_valid_rows):
                 row_id = valid_row_ids_ptr[i]
@@ -224,12 +220,7 @@ cpdef BloomFilter create_bloom_filter(object relation, list columns):
         return bf
 
     # Populate row hashes using the selected columns (prefer Morsel.hash())
-    cdef Morsel _m
-    if isinstance(relation, Morsel):
-        row_hashes = relation.hash(columns)
-    else:
-        _m = Morsel.from_arrow(relation)
-        row_hashes = _m.hash(columns)
+    row_hashes = relation.hash(columns)
 
     # Precompute constants for faster access
     cdef uint64_t bit_mask = bf.bit_mask

@@ -351,9 +351,6 @@ class JoinNode(BasePlanNode):
         from opteryx.compiled.draken.morsels.morsel import Morsel as _Morsel
         from opteryx.expression.casts import cast_to_double, cast_to_int
 
-        if not isinstance(morsel, _Morsel):
-            morsel = _Morsel.from_arrow(morsel)
-
         names = list(morsel.column_names)
         names_str = [n.decode() if isinstance(n, bytes) else n for n in names]
         vectors = [morsel.column(n if isinstance(n, bytes) else n.encode()) for n in names]
