@@ -247,3 +247,5 @@ opteryx/operators/*.c*
 opteryx/third_party/mbleven.c
 opteryx/third_party/maki_nage/distogram.c
 testdata/github/**.parquet
+opteryx/operators/aggregate/ungrouped_agg.cpp
+opteryx/operators/aggregate/aggregate_node.c
