@@ -312,9 +312,9 @@ def _build_engine_aggregate(aggregate):
         return [CountAggregate(parameter_name, output_name)], None, None
 
     if aggregate_type in ("COUNT_DISTINCT", "DISTINCT"):
-        if parameter_name is None:
-            return [], None, _make_literal_spec(aggregate)
-        return [CountDistinctAggregate(parameter_name, output_name)], None, None
+         if parameter_name is None:
+             return [], None, _make_literal_spec(aggregate)
+         return [CountDistinctAggregate(parameter_name, output_name)], None, None
 
     if aggregate_type == "SUM":
         if parameter_name is None:

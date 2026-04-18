@@ -1,8 +1,8 @@
-#include "_base16.h"
+#include "_base64.h"
 #include <string.h>
 
 static int cpu_features_detected = 0;
-static b16_cpu_features features = {0};
+static b64_cpu_features features = {0};
 
 #ifdef __x86_64__
 #include <cpuid.h>
@@ -26,13 +26,16 @@ static int check_avx2(void) {
 static int check_avx512(void) {
     int cpuinfo[4];
     x86_cpuid(7, 0, cpuinfo);
+    // Check for AVX512F (bit 16) and AVX512BW (bit 30) in EBX (cpuinfo[1])
+    // AVX512F: Foundation instructions (required for all AVX512)
+    // AVX512BW: Byte and Word instructions (required for our string operations)
     int has_avx512f = (cpuinfo[1] & (1 << 16)) != 0;
     int has_avx512bw = (cpuinfo[1] & (1 << 30)) != 0;
     return has_avx512f && has_avx512bw;
 }
 #endif
 
-b16_cpu_features b16_detect_cpu_features(void) {
+b64_cpu_features b64_detect_cpu_features(void) {
     if (cpu_features_detected) {
         return features;
     }
@@ -58,69 +61,67 @@ b16_cpu_features b16_detect_cpu_features(void) {
     return features;
 }
 
-void b16_force_scalar(void) {
+void b64_force_scalar(void) {
     features.neon = 0;
     features.avx2 = 0;
     features.avx512 = 0;
     cpu_features_detected = 1;
 }
 
-int b16_has_neon(void) {
+int b64_has_neon(void) {
     if (!cpu_features_detected) {
-        b16_detect_cpu_features();
+        b64_detect_cpu_features();
     }
     return features.neon;
 }
 
-int b16_has_avx2(void) {
+int b64_has_avx2(void) {
     if (!cpu_features_detected) {
-        b16_detect_cpu_features();
+        b64_detect_cpu_features();
     }
     return features.avx2;
 }
 
-int b16_has_avx512(void) {
+int b64_has_avx512(void) {
     if (!cpu_features_detected) {
-        b16_detect_cpu_features();
+        b64_detect_cpu_features();
     }
     return features.avx512;
 }
 
 // Auto-dispatch implementations for core API
-void* b16tobin_len(void* restrict dest, const char* restrict src, size_t len) {
+void* b64tobin_len(void* restrict dest, const char* restrict src, size_t len) {
     if (!cpu_features_detected) {
-        b16_detect_cpu_features();
+        b64_detect_cpu_features();
     }
 
     if (features.avx512 && len >= 64) {
-        // If AVX512 implementations are added later, call them here
-        return b16tobin_avx2(dest, src, len);
+        return b64tobin_avx512(dest, src, len);
     } else if (features.avx2 && len >= 32) {
-        return b16tobin_avx2(dest, src, len);
-    } else if (0 && features.neon && len >= 16) {
-        // Disabled NEON decode path temporarily due to correctness bug
-        return b16tobin_neon(dest, src, len);
+        return b64tobin_avx2(dest, src, len);
+    } else if (features.neon && len >= 16) {
+        return b64tobin_neon(dest, src, len);
     } else {
-        return b16tobin_scalar(dest, src, len);
+        return b64tobin_scalar(dest, src, len);
     }
 }
 
-void* b16tobin(void* restrict dest, const char* restrict src) {
-    return b16tobin_len(dest, src, strlen(src));
+void* b64tobin(void* restrict dest, const char* restrict src) {
+    return b64tobin_len(dest, src, strlen(src));
 }
 
-char* bintob16(char* restrict dest, const void* restrict src, size_t size) {
+char* bintob64(char* restrict dest, const void* restrict src, size_t size) {
     if (!cpu_features_detected) {
-        b16_detect_cpu_features();
+        b64_detect_cpu_features();
     }
 
     if (features.avx512 && size >= 48) {
-        return bintob16_avx2(dest, src, size);
+        return bintob64_avx512(dest, src, size);
     } else if (features.avx2 && size >= 24) {
-        return bintob16_avx2(dest, src, size);
+        return bintob64_avx2(dest, src, size);
     } else if (features.neon && size >= 12) {
-        return bintob16_neon(dest, src, size);
+        return bintob64_neon(dest, src, size);
     } else {
-        return bintob16_scalar(dest, src, size);
+        return bintob64_scalar(dest, src, size);
     }
 }

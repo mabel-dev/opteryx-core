@@ -216,7 +216,6 @@ testdata/parquet_tests/hits_51.parquet
 
 opteryx/draken/vectors/_hash_api.c*
 opteryx/third_party/abseil/containers.c*
-opteryx/third_party/alantsd/base64.c*
 opteryx/third_party/cyan4973/xxhash.c*
 opteryx/third_party/facebook/zstd.c*
 opteryx/third_party/fastfloat/fast_float.c*
@@ -249,3 +248,6 @@ opteryx/third_party/maki_nage/distogram.c
 testdata/github/**.parquet
 opteryx/operators/aggregate/ungrouped_agg.cpp
 opteryx/operators/aggregate/aggregate_node.c
+opteryx/third_party/mabel/base16/base16.c
+opteryx/third_party/mabel/base64/base64.c
+opteryx/operators/grouped_aggregate_hashed/_grouped_agg.cpp

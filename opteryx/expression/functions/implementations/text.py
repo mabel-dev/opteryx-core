@@ -88,24 +88,6 @@ def get_base85_decode(item):
     return base64.b85decode(item).decode("UTF8")
 
 
-def get_hex_encode(item):
-    """calculate HEX encoding of a string"""
-    import base64
-
-    if not isinstance(item, bytes):
-        item = str(item).encode()
-    return base64.b16encode(item).decode("UTF8")
-
-
-def get_hex_decode(item):
-    """calculate HEX decoding of a string"""
-    import base64
-
-    if not isinstance(item, bytes):
-        item = str(item).encode()
-    return base64.b16decode(item).decode("UTF8")
-
-
 def substring(arr: List[str], from_pos, count=None) -> List[List[str]]:
     """Extracts substrings from each string in the 'arr' list."""
     import itertools

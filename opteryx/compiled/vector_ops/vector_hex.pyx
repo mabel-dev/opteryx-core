@@ -6,15 +6,16 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
+"""Vectorized HEX (base16) encoding/decoding using mabel.base16 Cython module."""
 
 from opteryx.compiled.draken.vectors.string_vector cimport StringVector
 from opteryx.compiled.draken.vectors import string_vector as string_vector_module
 from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
-from opteryx.third_party.mabel.base64 import encode as b64_encode, decode as b64_decode
+from opteryx.third_party.mabel.base16 import encode as b16_encode, decode as b16_decode
 
 
-cpdef StringVector vector_base64_encode(StringVector data):
-    """Vectorized Base64 encoding.
+cpdef StringVector vector_hex_encode(StringVector data):
+    """Vectorized HEX encoding.
 
     Parameters
     ----------
@@ -24,7 +25,7 @@ cpdef StringVector vector_base64_encode(StringVector data):
     Returns
     -------
     StringVector
-        Base64-encoded strings (NULLs preserved)
+        Hex-encoded strings (NULLs preserved)
     """
     cdef DrakenVarBuffer* ptr = data.ptr
     cdef Py_ssize_t n = ptr.length
@@ -42,7 +43,7 @@ cpdef StringVector vector_base64_encode(StringVector data):
         else:
             const_val = data._const_value
             input_bytes = bytes(const_val.data[:const_val.length])
-            encoded_bytes = b64_encode(input_bytes)
+            encoded_bytes = b16_encode(input_bytes)
             for i in range(n):
                 builder.append(encoded_bytes)
     else:
@@ -54,19 +55,19 @@ cpdef StringVector vector_base64_encode(StringVector data):
                 start = ptr.offsets[i]
                 end = ptr.offsets[i + 1]
                 input_bytes = bytes(ptr.data[start:end])
-                encoded_bytes = b64_encode(input_bytes)
+                encoded_bytes = b16_encode(input_bytes)
                 builder.append(encoded_bytes)
 
     return builder.finish()
 
 
-cpdef StringVector vector_base64_decode(StringVector data):
-    """Vectorized Base64 decoding.
+cpdef StringVector vector_hex_decode(StringVector data):
+    """Vectorized HEX decoding.
 
     Parameters
     ----------
     data : StringVector
-        Base64-encoded strings to decode
+        Hex-encoded strings to decode
 
     Returns
     -------
@@ -89,7 +90,7 @@ cpdef StringVector vector_base64_decode(StringVector data):
         else:
             const_val = data._const_value
             input_bytes = bytes(const_val.data[:const_val.length])
-            decoded_bytes = b64_decode(input_bytes)
+            decoded_bytes = b16_decode(input_bytes)
             for i in range(n):
                 builder.append(decoded_bytes)
     else:
@@ -101,7 +102,7 @@ cpdef StringVector vector_base64_decode(StringVector data):
                 start = ptr.offsets[i]
                 end = ptr.offsets[i + 1]
                 input_bytes = bytes(ptr.data[start:end])
-                decoded_bytes = b64_decode(input_bytes)
+                decoded_bytes = b16_decode(input_bytes)
                 builder.append(decoded_bytes)
 
     return builder.finish()

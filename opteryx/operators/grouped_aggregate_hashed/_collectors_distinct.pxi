@@ -8,7 +8,7 @@
 # AnyValueObjectCollector: fallback for non-numeric types (string, date, etc.)
 #   — Python list for values, but grow()/accumulate() stay in Cython.
 
-from libc.stdint cimport int64_t, uint8_t
+from libc.stdint cimport int64_t, uint8_t, uint64_t
 from libc.stdlib cimport malloc, free
 from libcpp.vector cimport vector
 
@@ -24,6 +24,8 @@ cdef extern from "carchar_set.hpp" namespace "opteryx::carchar":
         CarcharSet() except +
         size_t size() const
         bint insert_or_ignore(uint64_t key) except +
+        size_t insert_many(const uint64_t* keys, size_t length) except +
+        void tighten() noexcept
 
 
 # ---------------------------------------------------------------------------
@@ -32,8 +34,12 @@ cdef extern from "carchar_set.hpp" namespace "opteryx::carchar":
 
 cdef class CountDistinctCollector(BaseCollector):
     cdef vector[CarcharSet*] _sets
+    cdef vector[vector[uint64_t]] _scratch_per_group
 
     cdef long long _time_finalize_ns
+
+    def __cinit__(self):
+        self._scratch_per_group = []
 
     def __dealloc__(self):
         cdef Py_ssize_t i
@@ -41,32 +47,52 @@ cdef class CountDistinctCollector(BaseCollector):
             if self._sets[i] != NULL:
                 del self._sets[i]
         self._sets.clear()
+        self._scratch_per_group.clear()
 
     cdef void grow(self, int64_t new_count):
         while self._sets.size() < <size_t>new_count:
             self._sets.push_back(new CarcharSet())
+            self._scratch_per_group.push_back(vector[uint64_t]())
 
     cdef void accumulate(
         self,
         object morsel,
         const int64_t* state_indices,
         Py_ssize_t n_rows,
-    ):
-        # Hash the value column once, then insert each hash into the correct set
+     ):
+         # Hash the value column once, then batch-insert by group for better cache locality
         cdef long long start_ns = _now_ns()
         cdef uint64_t[::1] hashes = morsel.hash([self.column_name])
         cdef CarcharSet** sets = self._sets.data()
+        cdef vector[uint64_t]* scratch
         cdef Py_ssize_t i
+
+        # Collect hashes per group (batching)
         for i in range(n_rows):
-            sets[state_indices[i]].insert_or_ignore(hashes[i])
+            scratch = &self._scratch_per_group[state_indices[i]]
+            scratch.push_back(hashes[i])
+
+        # Now bulk-insert each group's collected hashes using insert_many()
+        cdef Py_ssize_t g
+        cdef vector[uint64_t]* per_group
+        for g in range(self._sets.size()):
+            per_group = &self._scratch_per_group[g]
+            if per_group.size() > 0:
+                sets[g].insert_many(per_group.data(), per_group.size())
+                per_group.clear()  # Reset for next batch
+
         self._time_finalize_ns += _now_ns() - start_ns
 
     cpdef Vector finalize(self, int64_t num_groups):
         from opteryx.compiled.draken.interop.arrow import vector_from_sequence
         cdef list vals = []
         cdef Py_ssize_t i
+
+        # Tighten each set to exact size before counting
         for i in range(num_groups):
+            self._sets[i].tighten()
             vals.append(<int64_t>self._sets[i].size())
+
         return vector_from_sequence(vals)
 
 

@@ -17,6 +17,8 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
     from opteryx.compiled.vector_ops import (
         vector_base64_decode,
         vector_base64_encode,
+        vector_hex_decode,
+        vector_hex_encode,
         vector_md5,
         vector_sha1,
         vector_sha256,
@@ -33,8 +35,6 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
     _sha384_kernel = _isingle(string_functions.get_sha384)
     _base85_enc_kernel = _isingle(string_functions.get_base85_encode)
     _base85_dec_kernel = _isingle(string_functions.get_base85_decode)
-    _hex_enc_kernel = _isingle(string_functions.get_hex_encode)
-    _hex_dec_kernel = _isingle(string_functions.get_hex_decode)
 
     # Parameter short-hands
     _any = ParameterSpec(name="val", type_family="any")
@@ -46,7 +46,13 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             "HASH", _hash_kernel, OrsoTypes.BLOB, (_any,), cost=437424.69, summary="Generic hash."
         ),
         _make(
-            "MD5", vector_md5, OrsoTypes.BLOB, (_any,), engine="draken", cost=8.44, summary="MD5 hash."
+            "MD5",
+            vector_md5,
+            OrsoTypes.BLOB,
+            (_any,),
+            engine="draken",
+            cost=8.44,
+            summary="MD5 hash.",
         ),
         _make(
             "SHA1",
@@ -210,14 +216,14 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "HEX_ENCODE",
-            _hex_enc_kernel,
+            vector_hex_encode,
             OrsoTypes.BLOB,
             (_b,),
             summary="Hex encode.",
             cost=539725.99,
         ),
         _make(
-            "HEX_DECODE", _hex_dec_kernel, OrsoTypes.BLOB, (_b,), summary="Hex decode.", cost=3.87
+            "HEX_DECODE", vector_hex_decode, OrsoTypes.BLOB, (_b,), summary="Hex decode.", cost=3.87
         ),
     ]
 

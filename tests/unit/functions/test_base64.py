@@ -1,15 +1,17 @@
+import base64
 import os
 import sys
-import base64
+
 import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.third_party.alantsd.base64 import encode, decode
+from opteryx.third_party.mabel.base64 import decode, encode
 
 # -------------------
 # CORE FUNCTIONALITY
 # -------------------
+
 
 def test_base64_encode_simple_string():
     data = b"hello world"
@@ -66,38 +68,48 @@ def test_base64_decode_invalid_input_raises():
     except Exception:
         assert False, "decode raised Exception unexpectedly!"
 
+
 # -------------------
 # EMPTY + SHORT INPUTS
 # -------------------
+
 
 def test_base64_empty_encode_decode():
     assert encode(b"") == b""
     assert decode(b"") == b""
 
+
 def test_base64_single_byte():
     assert decode(encode(b"a")) == b"a"
+
 
 def test_base64_two_bytes():
     assert decode(encode(b"ab")) == b"ab"
 
+
 def test_base64_three_bytes():
     assert decode(encode(b"abc")) == b"abc"
+
 
 # -------------------
 # LENGTH ALIGNMENTS
 # -------------------
 
+
 def test_base64_1_byte_mod_3():
     data = b"A" * 1
     assert decode(encode(data)) == data
+
 
 def test_base64_2_byte_mod_3():
     data = b"A" * 2
     assert decode(encode(data)) == data
 
+
 def test_base64_3_byte_block():
     data = b"A" * 3
     assert decode(encode(data)) == data
+
 
 def test_base64_non_multiple_of_three():
     for i in range(1, 100):
@@ -105,41 +117,51 @@ def test_base64_non_multiple_of_three():
         r = decode(encode(data))
         assert r == data, f"Expected {data} but got {r}"
 
+
 # -------------------
 # HIGH BIT DATA
 # -------------------
+
 
 def test_base64_high_bytes():
     data = bytes(range(256))
     assert decode(encode(data)) == data
 
+
 # -------------------
 # NON-BYTES INPUT HANDLING
 # -------------------
+
 
 def test_base64_encode_accepts_only_bytes():
     with pytest.raises(TypeError):
         encode("not bytes")  # str instead of bytes
 
+
 def test_base64_decode_accepts_only_bytes():
     with pytest.raises(TypeError):
         decode("not bytes")
+
 
 # -------------------
 # INVALID BASE64 DECODE
 # -------------------
 
+
 def test_base64_decode_invalid_characters():
     r = decode(b"!@#$%^&*")
     assert r == b"", r
 
+
 def test_base64_decode_non_base64_byte():
-    r = decode(b"Zm9vYmFy\xFF")  # invalid byte at end
+    r = decode(b"Zm9vYmFy\xff")  # invalid byte at end
     assert r == b"", r
+
 
 # -------------------
 # LARGE INPUTS
 # -------------------
+
 
 def test_base64_large_binary():
     data = os.urandom(10_000_001)  # Just over 10MB
@@ -148,4 +170,5 @@ def test_base64_large_binary():
 
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
+
     run_tests()

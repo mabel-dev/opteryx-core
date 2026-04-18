@@ -21,7 +21,6 @@ The third-party code is organized into two locations:
 
 ### Compiled Extensions (Cython wrappers for C/C++)
 - **abseil** - Google's Abseil C++ library (hash containers)
-- **alantsd** - Base64 encoding/decoding
 - **cyan4973** - xxHash fast hashing
 - **fastfloat** - Fast float parsing
 - **fuzzy** - Soundex phonetic algorithm
