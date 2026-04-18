@@ -8,8 +8,7 @@ from platform import node
 from typing import Callable
 
 from opteryx.expression import format_expression
-from opteryx.planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
 
 _render_registry: dict[LogicalPlanStepType, Callable[["LogicalPlanNode"], str]] = {}
 
@@ -128,8 +127,6 @@ def render_aggregate_and_group(node: LogicalPlanNode) -> str:
 @register_render(LogicalPlanStepType.FunctionDataset)
 def render_function_dataset(node: LogicalPlanNode) -> str:
     alias = f" AS {node.alias}" if node.alias else ""
-    if node.function == "FAKE":
-        return f"FAKE ({', '.join(format_expression(arg) for arg in node.args)}{alias})"
     if node.function == "GENERATE_SERIES":
         return f"GENERATE SERIES ({', '.join(format_expression(arg) for arg in node.args)}){alias}"
     if node.function == "VALUES":
@@ -167,8 +164,7 @@ def render_order(node: LogicalPlanNode) -> str:
 
 @register_render(LogicalPlanStepType.Scan)
 def render_scan(node: LogicalPlanNode) -> str:
-    from opteryx.expression import NodeType
-    from opteryx.expression import get_all_nodes_of_type
+    from opteryx.expression import NodeType, get_all_nodes_of_type
 
     io_async = "ASYNC " if hasattr(node.connector, "async_read_blob") else ""
     connector = " " if not hasattr(node.connector, "__type__") else f" [{node.connector.__type__}] "
