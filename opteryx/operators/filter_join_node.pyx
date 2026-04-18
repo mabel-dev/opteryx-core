@@ -16,11 +16,10 @@ presence or absence of matching rows in the right table.
 from typing import Generator, Optional
 import time
 
+from libc.stdint cimport int64_t, uint64_t
 
-from opteryx.compiled.joins import anti_join
-from opteryx.compiled.joins import filter_join_set
-from opteryx.compiled.joins import semi_join
-from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
+from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
+from opteryx.compiled.structures.buffers cimport IntBuffer, Int32Buffer
 from opteryx.models import QueryProperties
 from opteryx.compiled.draken.morsels.morsel cimport Morsel
 
@@ -29,6 +28,52 @@ from opteryx import EOS
 from . import JoinNode
 
 _DATA_FORMAT = "arrow"
+
+
+cdef CarcharSetWrapper _build_filter_hash_set(Morsel morsel, list columns, CarcharSetWrapper seen_hashes):
+    cdef Py_ssize_t num_rows = morsel.num_rows
+    cdef Py_ssize_t row_idx
+    cdef uint64_t[::1] row_hashes = morsel.hash(columns)
+
+    if seen_hashes is None:
+        seen_hashes = CarcharSetWrapper()
+
+    for row_idx in range(num_rows):
+        seen_hashes.insert(row_hashes[row_idx])
+
+    return seen_hashes
+
+
+cdef Morsel _semi_join_filter(Morsel relation, list join_columns, CarcharSetWrapper seen_hashes):
+    cdef Py_ssize_t num_rows = relation.num_rows
+    cdef Py_ssize_t row_idx
+    cdef IntBuffer index_buffer = IntBuffer(num_rows)
+    cdef uint64_t[::1] row_hashes = relation.hash(join_columns)
+
+    for row_idx in range(num_rows):
+        if seen_hashes.contains(row_hashes[row_idx]):
+            index_buffer.append(row_idx)
+
+    if index_buffer.size() > 0:
+        return relation.take(index_buffer.to_int32_buffer())
+    else:
+        return relation.slice(0, 0)
+
+
+cdef Morsel _anti_join_filter(Morsel relation, list join_columns, CarcharSetWrapper seen_hashes):
+    cdef Py_ssize_t num_rows = relation.num_rows
+    cdef Py_ssize_t row_idx
+    cdef IntBuffer index_buffer = IntBuffer(num_rows)
+    cdef uint64_t[::1] row_hashes = relation.hash(join_columns)
+
+    for row_idx in range(num_rows):
+        if not seen_hashes.contains(row_hashes[row_idx]):
+            index_buffer.append(row_idx)
+
+    if index_buffer.size() > 0:
+        return relation.take(index_buffer.to_int32_buffer())
+    else:
+        return relation.slice(0, 0)
 
 
 class FilterJoinNode(JoinNode):
@@ -72,7 +117,7 @@ class FilterJoinNode(JoinNode):
             else:
                 morsel = self._apply_join_key_casts(morsel, is_left=False)
                 start = time.monotonic_ns()
-                self.right_hash_set = filter_join_set(morsel, self.right_columns, self.right_hash_set)
+                self.right_hash_set = _build_filter_hash_set(morsel, self.right_columns, self.right_hash_set)
                 self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
                 yield None
         else:
@@ -81,15 +126,7 @@ class FilterJoinNode(JoinNode):
                 yield EOS
                 return
             morsel = self._apply_join_key_casts(morsel, is_left=True)
-            join_provider = providers.get(self.join_type)
-            yield join_provider(
-                relation=morsel,
-                join_columns=self.left_columns,
-                seen_hashes=self.right_hash_set,
-            )
-
-
-providers = {
-    "left anti": anti_join,
-    "left semi": semi_join,
-}
+            if self.join_type == "left anti":
+                yield _anti_join_filter(morsel, self.left_columns, self.right_hash_set)
+            elif self.join_type == "left semi":
+                yield _semi_join_filter(morsel, self.left_columns, self.right_hash_set)
