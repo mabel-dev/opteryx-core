@@ -1,35 +1,26 @@
 import os
 import sys
-from types import SimpleNamespace
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
+import pyarrow as pa
+
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.compiled.draken.vectors.integer_vector import IntegerVector
 from opteryx.compiled.draken.vectors.string_vector import StringVector
 
-from opteryx.expression import NodeType
-from opteryx.operators.draken_aggregate_node import (
-    _DrakenAggregateCollector,
-    _vector_max,
-    _vector_min,
-    _vector_sum,
+from opteryx.operators.aggregate.ungrouped_agg import (
+    CountAggregate,
+    MaxBytesAggregate,
+    MinBytesAggregate,
+    SumInt64Aggregate,
+    UngroupedAggregateEngine,
 )
 
-
-def _identifier_parameter(identity="value"):
-    return SimpleNamespace(
-        node_type=NodeType.IDENTIFIER,
-        schema_column=SimpleNamespace(identity=identity),
-    )
-
-
-def _aggregate(name: str):
-    return SimpleNamespace(
-        value=name,
-        duplicate_treatment=None,
-        schema_column=SimpleNamespace(identity=name.lower()),
-        parameters=[_identifier_parameter()],
-    )
+try:
+    from opteryx.operators.draken_aggregate_node import _vector_max, _vector_min, _vector_sum
+except ModuleNotFoundError:
+    from opteryx.operators.aggregate.aggregate_node import _vector_max, _vector_min, _vector_sum
 
 
 def test_vector_sum_uses_typed_constant_encoding():
@@ -42,6 +33,12 @@ def test_vector_sum_all_null_typed_constant_returns_none():
     vec = IntegerVector.from_constant(None, 4, is_null=True)
 
     assert _vector_sum(vec) is None
+
+
+def test_vector_sum_uses_null_bitmap_for_non_constant_integer_vectors():
+    vec = IntegerVector.from_arrow(pa.array([1, None, 3], type=pa.int32()))
+
+    assert _vector_sum(vec) == 4
 
 
 def test_vector_min_max_use_typed_constant_encoding_for_strings():
@@ -58,21 +55,32 @@ def test_vector_min_max_all_null_typed_constant_return_none():
     assert _vector_max(vec) is None
 
 
-def test_aggregate_collector_avg_uses_typed_constant_vector():
-    collector = _DrakenAggregateCollector(_aggregate("AVG"))
+def test_vector_min_max_use_null_bitmap_for_non_constant_integer_vectors():
+    vec = IntegerVector.from_arrow(pa.array([5, None, 3], type=pa.int32()))
 
-    collector._collect_vector(IntegerVector.from_constant(5, 4))
+    assert _vector_min(vec) == 3
+    assert _vector_max(vec) == 5
 
-    assert collector.finalize() == 5
+
+def test_ungrouped_engine_avg_uses_typed_constant_vector():
+    engine = UngroupedAggregateEngine()
+    engine.add_aggregate(SumInt64Aggregate(b"value", b"__avg_sum_value"))
+    engine.add_aggregate(CountAggregate(b"value", b"__avg_count_value"))
+    engine.add_avg_finalizer(b"__avg_sum_value", b"__avg_count_value", b"avg_value")
+
+    engine.ingest(Morsel.from_vectors([b"value"], [IntegerVector.from_constant(5, 4)]))
+    result = engine.finalize()
+
+    assert result.column(b"avg_value")[0] == 5
 
 
-def test_aggregate_collector_min_max_use_typed_string_constant_vector():
-    min_collector = _DrakenAggregateCollector(_aggregate("MIN"))
-    max_collector = _DrakenAggregateCollector(_aggregate("MAX"))
-    vec = StringVector.from_constant("zebra", 3)
+def test_ungrouped_engine_min_max_use_typed_string_constant_vector():
+    engine = UngroupedAggregateEngine()
+    engine.add_aggregate(MinBytesAggregate(b"value", b"min_value"))
+    engine.add_aggregate(MaxBytesAggregate(b"value", b"max_value"))
 
-    min_collector._collect_vector(vec)
-    max_collector._collect_vector(vec)
+    engine.ingest(Morsel.from_vectors([b"value"], [StringVector.from_constant("zebra", 3)]))
+    result = engine.finalize()
 
-    assert min_collector.finalize() == b"zebra"
-    assert max_collector.finalize() == b"zebra"
+    assert result.column(b"min_value")[0] == b"zebra"
+    assert result.column(b"max_value")[0] == b"zebra"

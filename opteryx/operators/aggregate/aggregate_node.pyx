@@ -9,23 +9,42 @@
 """
 Draken-native global aggregation node.
 
-This operator stays on Draken morsels end-to-end. It does not route through the
-grouped carchar backend and it does not delegate execution to the Arrow-based
-simple aggregate operator.
+This operator stays on Draken morsels end-to-end. The actual accumulation work
+is delegated to the lower-level ungrouped aggregate engine; this module only
+bridges planner-bound aggregate nodes to that engine and handles a few literal
+edge cases.
 """
 
 from __future__ import annotations
 
 import time
 
+from libc.stdint cimport uint8_t
+
 from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
-from opteryx.compiled.nanobind.carchar_native import CarcharSet
+from opteryx.compiled.draken.vectors.vector cimport Vector
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 from opteryx.operators.aggregate.helpers import extract_evaluations
+from opteryx.operators.aggregate.ungrouped_agg import (
+    AnyValueAggregate,
+    CountAggregate,
+    CountDistinctAggregate,
+    CountStarAggregate,
+    MaxBytesAggregate,
+    MaxFloat64Aggregate,
+    MaxInt64Aggregate,
+    MinBytesAggregate,
+    MinFloat64Aggregate,
+    MinInt64Aggregate,
+    SumFloat64Aggregate,
+    SumInt64Aggregate,
+    UngroupedAggregateEngine,
+)
+from opteryx.types import OrsoTypes
 
 from opteryx import EOS
 from opteryx.operators import BasePlanNode
@@ -48,11 +67,33 @@ def _constant_scalar_value(vector):
     return vector[0]
 
 
+def _count_null_bitmap(const uint8_t* bitmap, Py_ssize_t nrows) -> int:
+    cdef Py_ssize_t i
+    cdef Py_ssize_t count = 0
+
+    if bitmap == NULL:
+        return 0
+
+    for i in range(nrows):
+        if not ((bitmap[i >> 3] >> (i & 7)) & 1):
+            count += 1
+
+    return <int>count
+
+
 def _vector_null_count(vector) -> int:
+    cdef Vector typed_vector
     try:
         return int(vector.null_count)
     except Exception:
-        return sum(1 for value in vector.to_pylist() if value is None)
+        try:
+            typed_vector = vector
+            return _count_null_bitmap(
+                typed_vector.null_bitmap_ptr(),
+                len(typed_vector),
+            )
+        except Exception:
+            return sum(1 for value in vector.to_pylist() if value is None)
 
 
 def _vector_valid_values(vector):
@@ -129,187 +170,204 @@ def _vector_max(vector):
     return max(values) if values else None
 
 
-def _ensure_carchar_set(distinct_hashes):
-    return distinct_hashes if distinct_hashes is not None else CarcharSet()
+def _parameter_identity(parameter):
+    schema_column = getattr(parameter, "schema_column", None)
+    if schema_column is None:
+        return None
+    identity = getattr(schema_column, "identity", None)
+    if identity in (None, "", b""):
+        return None
+    return _column_bytes(identity)
 
 
-def _insert_vector_hashes(distinct_hashes, vector):
-    distinct_hashes = _ensure_carchar_set(distinct_hashes)
-    distinct_hashes.insert_many(vector.hash())
-    return distinct_hashes
+def _parameter_type(parameter):
+    schema_column = getattr(parameter, "schema_column", None)
+    if schema_column is None:
+        return None
+    return getattr(schema_column, "type", None)
 
 
-def _insert_literal_hash(distinct_hashes, literal):
-    distinct_hashes = _ensure_carchar_set(distinct_hashes)
-    distinct_hashes.insert_many(vector_from_sequence([literal]).hash())
-    return distinct_hashes
+def _is_float_type(type_value) -> bool:
+    if type_value is None:
+        return False
+    value = getattr(type_value, "value", type_value)
+    return value in ("DOUBLE", "FLOAT", "DECIMAL")
 
 
-class _DrakenAggregateCollector:
-    def __init__(self, aggregate):
-        self.aggregate = aggregate
-        self.aggregate_type = aggregate.value
-        self.duplicate_treatment = getattr(aggregate, "duplicate_treatment", None)
-        self.output_name = aggregate.schema_column.identity
-        self.parameter = aggregate.parameters[0]
+def _is_string_type(type_value) -> bool:
+    if type_value is None:
+        return False
+    value = getattr(type_value, "value", type_value)
+    return value in ("VARCHAR", "BLOB")
 
-        self._count = 0
-        self._sum = None
-        self._min = None
-        self._max = None
-        self._distinct_hashes = None
 
-    def _update_min(self, value):
-        if value is None:
-            return
-        if self._min is None or value < self._min:
-            self._min = value
+def _make_literal_spec(aggregate):
+    parameter = aggregate.parameters[0] if aggregate.parameters else None
+    return {
+        "kind": "literal",
+        "aggregate_type": aggregate.value,
+        "duplicate_treatment": getattr(aggregate, "duplicate_treatment", None),
+        "output_name": _column_bytes(aggregate.schema_column.identity),
+        "literal": None if parameter is None else parameter.value,
+        "count": 0,
+        "sum": None,
+        "value": None,
+        "seen": False,
+    }
 
-    def _update_max(self, value):
-        if value is None:
-            return
-        if self._max is None or value > self._max:
-            self._max = value
 
-    def _reject_unsupported_approximate(self):
-        raise NotImplementedError(
-            f"Approximate aggregate `{self.aggregate_type}` is no longer supported."
-        )
+def _update_literal_spec(spec, row_count: int):
+    if row_count == 0:
+        return
 
-    def _collect_literal(self, literal, row_count):
-        if row_count == 0:
-            return
+    aggregate_type = spec["aggregate_type"]
+    duplicate_treatment = spec["duplicate_treatment"]
+    literal = spec["literal"]
 
-        if self.aggregate_type == "COUNT":
-            if self.duplicate_treatment == "Distinct":
-                self._distinct_hashes = _insert_literal_hash(self._distinct_hashes, literal)
-                return
-
+    if aggregate_type == "COUNT":
+        if duplicate_treatment == "Distinct":
             if literal is not None:
-                self._count += row_count
+                spec["seen"] = True
             return
+        if literal is not None:
+            spec["count"] += row_count
+        return
 
-        if literal is None:
-            return
+    if aggregate_type in ("COUNT_DISTINCT", "DISTINCT"):
+        if literal is not None:
+            spec["seen"] = True
+        return
 
-        if self.aggregate_type == "SUM":
-            contribution = literal * row_count
-            self._sum = contribution if self._sum is None else self._sum + contribution
-            return
+    if literal is None:
+        return
 
-        if self.aggregate_type == "AVG":
-            self._sum = (
-                (literal * row_count) if self._sum is None else self._sum + (literal * row_count)
-            )
-            self._count += row_count
-            return
+    if aggregate_type == "SUM":
+        contribution = literal * row_count
+        spec["sum"] = contribution if spec["sum"] is None else spec["sum"] + contribution
+        return
 
-        if self.aggregate_type == "MIN":
-            self._update_min(literal)
-            return
+    if aggregate_type == "AVG":
+        contribution = literal * row_count
+        spec["sum"] = contribution if spec["sum"] is None else spec["sum"] + contribution
+        spec["count"] += row_count
+        return
 
-        if self.aggregate_type == "MAX":
-            self._update_max(literal)
-            return
+    if aggregate_type in ("MIN", "MAX", "ANY_VALUE"):
+        spec["value"] = literal
+        spec["seen"] = True
+        return
 
-        if self.aggregate_type in ("APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"):
-            self._reject_unsupported_approximate()
 
-    def _collect_vector(self, vector):
-        valid_count = len(vector) - _vector_null_count(vector)
+def _finalize_literal_spec(spec):
+    aggregate_type = spec["aggregate_type"]
+    duplicate_treatment = spec["duplicate_treatment"]
+    literal = spec["literal"]
 
-        if self.aggregate_type == "COUNT":
-            if self.duplicate_treatment == "Distinct":
-                self._distinct_hashes = _insert_vector_hashes(self._distinct_hashes, vector)
-                return
+    if aggregate_type == "COUNT":
+        if duplicate_treatment == "Distinct":
+            return 1 if literal is not None else 0
+        return spec["count"]
 
-            self._count += valid_count
-            return
+    if aggregate_type in ("COUNT_DISTINCT", "DISTINCT"):
+        return 1 if literal is not None else 0
 
-        if self.aggregate_type == "COUNT_DISTINCT" or self.aggregate_type == "DISTINCT":
-            self._distinct_hashes = _insert_vector_hashes(self._distinct_hashes, vector)
-            return
+    if aggregate_type == "SUM":
+        return spec["sum"]
 
-        if valid_count == 0:
-            return
+    if aggregate_type == "AVG":
+        if spec["count"] == 0 or spec["sum"] is None:
+            return None
+        return spec["sum"] / spec["count"]
 
-        if self.aggregate_type == "SUM":
-            chunk_sum = _vector_sum(vector)
-            self._sum = chunk_sum if self._sum is None else self._sum + chunk_sum
-            return
+    if aggregate_type in ("MIN", "MAX", "ANY_VALUE"):
+        return spec["value"] if spec["seen"] else None
 
-        if self.aggregate_type == "AVG":
-            chunk_sum = _vector_sum(vector)
-            self._sum = chunk_sum if self._sum is None else self._sum + chunk_sum
-            self._count += valid_count
-            return
+    raise ValueError(f"Unsupported literal aggregate type: {aggregate_type}")
 
-        if self.aggregate_type == "MIN":
-            self._update_min(_vector_min(vector))
-            return
 
-        if self.aggregate_type == "MAX":
-            self._update_max(_vector_max(vector))
-            return
+def _build_engine_aggregate(aggregate):
+    parameter = aggregate.parameters[0] if aggregate.parameters else None
+    aggregate_type = aggregate.value
+    duplicate_treatment = getattr(aggregate, "duplicate_treatment", None)
+    output_name = _column_bytes(aggregate.schema_column.identity)
+    parameter_name = _parameter_identity(parameter)
+    parameter_type = _parameter_type(parameter)
 
-        if self.aggregate_type in ("APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"):
-            self._reject_unsupported_approximate()
+    if aggregate_type == "COUNT":
+        if parameter is not None and parameter.node_type == NodeType.WILDCARD:
+            return [CountStarAggregate(output_name)], None, None
 
-    def collect(self, morsel: Morsel):
-        if self.aggregate_type == "COUNT":
-            if self.parameter.node_type == NodeType.WILDCARD:
-                self._count += morsel.num_rows
-                return
+        if parameter is not None and parameter.node_type == NodeType.LITERAL:
+            if parameter.value == "*":
+                return [CountStarAggregate(output_name)], None, None
+            return [], None, _make_literal_spec(aggregate)
 
-            if self.parameter.node_type == NodeType.LITERAL and self.parameter.value == "*":
-                self._count += morsel.num_rows
-                return
+        if duplicate_treatment == "Distinct":
+            if parameter_name is None:
+                return [], None, _make_literal_spec(aggregate)
+            return [CountDistinctAggregate(parameter_name, output_name)], None, None
 
-            schema_column = getattr(self.parameter, "schema_column", None)
-            identity = getattr(schema_column, "identity", None) if schema_column is not None else None
-            if identity in (None, "", b""):
-                self._count += morsel.num_rows
-                return
+        if parameter_name is None:
+            return [], None, _make_literal_spec(aggregate)
 
-        if self.parameter.node_type == NodeType.LITERAL:
-            self._collect_literal(self.parameter.value, morsel.num_rows)
-            return
+        return [CountAggregate(parameter_name, output_name)], None, None
 
-        vector = morsel.column(_column_bytes(self.parameter.schema_column.identity))
-        self._collect_vector(vector)
+    if aggregate_type in ("COUNT_DISTINCT", "DISTINCT"):
+        if parameter_name is None:
+            return [], None, _make_literal_spec(aggregate)
+        return [CountDistinctAggregate(parameter_name, output_name)], None, None
 
-    def finalize(self):
-        if self.aggregate_type == "COUNT":
-            if self.duplicate_treatment == "Distinct":
-                return 0 if self._distinct_hashes is None else self._distinct_hashes.size()
-            return self._count
+    if aggregate_type == "SUM":
+        if parameter_name is None:
+            return [], None, _make_literal_spec(aggregate)
+        if _is_float_type(parameter_type):
+            return [SumFloat64Aggregate(parameter_name, output_name)], None, None
+        return [SumInt64Aggregate(parameter_name, output_name)], None, None
 
-        if self.aggregate_type == "COUNT_DISTINCT" or self.aggregate_type == "DISTINCT":
-            return 0 if self._distinct_hashes is None else self._distinct_hashes.size()
+    if aggregate_type == "AVG":
+        if parameter_name is None:
+            return [], None, _make_literal_spec(aggregate)
+        sum_alias = _column_bytes(f"__avg_sum_{output_name.decode('utf-8', 'ignore')}")
+        count_alias = _column_bytes(f"__avg_count_{output_name.decode('utf-8', 'ignore')}")
+        if _is_float_type(parameter_type):
+            sum_agg = SumFloat64Aggregate(parameter_name, sum_alias)
+        else:
+            sum_agg = SumInt64Aggregate(parameter_name, sum_alias)
+        count_agg = CountAggregate(parameter_name, count_alias)
+        return [sum_agg, count_agg], ("avg", sum_alias, count_alias, output_name), None
 
-        if self.aggregate_type in ("APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"):
-            self._reject_unsupported_approximate()
+    if aggregate_type == "MIN":
+        if parameter_name is None:
+            return [], None, _make_literal_spec(aggregate)
+        if _is_string_type(parameter_type):
+            return [MinBytesAggregate(parameter_name, output_name)], None, None
+        if _is_float_type(parameter_type):
+            return [MinFloat64Aggregate(parameter_name, output_name)], None, None
+        return [MinInt64Aggregate(parameter_name, output_name)], None, None
 
-        if self.aggregate_type == "SUM":
-            return self._sum
+    if aggregate_type == "MAX":
+        if parameter_name is None:
+            return [], None, _make_literal_spec(aggregate)
+        if _is_string_type(parameter_type):
+            return [MaxBytesAggregate(parameter_name, output_name)], None, None
+        if _is_float_type(parameter_type):
+            return [MaxFloat64Aggregate(parameter_name, output_name)], None, None
+        return [MaxInt64Aggregate(parameter_name, output_name)], None, None
 
-        if self.aggregate_type == "AVG":
-            if self._count == 0 or self._sum is None:
-                return None
-            return self._sum / self._count
+    if aggregate_type == "ANY_VALUE":
+        if parameter_name is None:
+            return [], None, _make_literal_spec(aggregate)
+        return [AnyValueAggregate(parameter_name, output_name)], None, None
 
-        if self.aggregate_type == "MIN":
-            return self._min
-
-        if self.aggregate_type == "MAX":
-            return self._max
-
-        raise ValueError(
-            f"Unsupported aggregate type for Draken global aggregate: {self.aggregate_type}"
+    if aggregate_type in ("APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"):
+        raise NotImplementedError(
+            f"Approximate aggregate `{aggregate_type}` is no longer supported."
         )
 
+    raise ValueError(f"Unsupported aggregate type for Draken global aggregate: {aggregate_type}")
 
-class AggregateOperator(BasePlanNode):
+
+class UngroupedAggregateNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):
         super().__init__(properties=properties, **parameters)
 
@@ -325,8 +383,39 @@ class AggregateOperator(BasePlanNode):
             for node in get_all_nodes_of_type(self.aggregates, select_nodes=(NodeType.IDENTIFIER,))
         ]
         self.all_identifiers = list(dict.fromkeys(all_identifiers))
-        self.collectors = [_DrakenAggregateCollector(aggregate) for aggregate in self.aggregates]
+        self._engine = UngroupedAggregateEngine()
+        self._result_specs = []
+        self._engine_aggregate_count = 0
         self._finalized = False
+
+        for aggregate in self.aggregates:
+            engine_aggs, avg_spec, literal_spec = _build_engine_aggregate(aggregate)
+            for engine_agg in engine_aggs:
+                self._engine.add_aggregate(engine_agg)
+                self._engine_aggregate_count += 1
+            if avg_spec is not None:
+                self._engine.add_avg_finalizer(avg_spec[1], avg_spec[2], avg_spec[3])
+                self._result_specs.append(
+                    {
+                        "kind": "engine",
+                        "output_name": _column_bytes(aggregate.schema_column.identity),
+                    }
+                )
+            elif literal_spec is not None:
+                self._result_specs.append(
+                    {
+                        "kind": "literal",
+                        "output_name": literal_spec["output_name"],
+                        "state": literal_spec,
+                    }
+                )
+            else:
+                self._result_specs.append(
+                    {
+                        "kind": "engine",
+                        "output_name": _column_bytes(aggregate.schema_column.identity),
+                    }
+                )
 
     @property
     def config(self):  # pragma: no cover
@@ -336,7 +425,7 @@ class AggregateOperator(BasePlanNode):
 
     @property
     def name(self):  # pragma: no cover
-        return "Aggregation Draken"
+        return "Ungrouped Aggregate"
 
     def _prepare_chunk(self, chunk: Morsel) -> Morsel:
         if self.all_identifiers:
@@ -352,10 +441,17 @@ class AggregateOperator(BasePlanNode):
     def _finalize_morsel(self):
         names = []
         vectors = []
+        engine_result = None
 
-        for collector in self.collectors:
-            names.append(collector.output_name)
-            vectors.append(vector_from_sequence([collector.finalize()]))
+        if self._engine_aggregate_count:
+            engine_result = self._engine.finalize()
+
+        for spec in self._result_specs:
+            names.append(spec["output_name"])
+            if spec["kind"] == "engine":
+                vectors.append(engine_result.column(spec["output_name"]))
+            else:
+                vectors.append(vector_from_sequence([_finalize_literal_spec(spec["state"])]))
 
         return Morsel.from_vectors(names, vectors)
 
@@ -374,8 +470,10 @@ class AggregateOperator(BasePlanNode):
         if isinstance(draken, Morsel):
             if draken.num_rows > 0:
                 draken = self._prepare_chunk(draken)
-                for collector in self.collectors:
-                    collector.collect(draken)
+                self._engine.ingest(draken)
+                for spec in self._result_specs:
+                    if spec["kind"] == "literal":
+                        _update_literal_spec(spec["state"], draken.num_rows)
             self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start
             yield None
             return
@@ -384,8 +482,10 @@ class AggregateOperator(BasePlanNode):
             if chunk is None or chunk is EOS or chunk.num_rows == 0:
                 continue
             chunk = self._prepare_chunk(chunk)
-            for collector in self.collectors:
-                collector.collect(chunk)
+            self._engine.ingest(chunk)
+            for spec in self._result_specs:
+                if spec["kind"] == "literal":
+                    _update_literal_spec(spec["state"], chunk.num_rows)
 
         self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start
         yield None
