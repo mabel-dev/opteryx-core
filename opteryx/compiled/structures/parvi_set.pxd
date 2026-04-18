@@ -2,6 +2,7 @@
 
 from libc.stdint cimport uint64_t, int32_t, int64_t
 from libc.stddef cimport size_t
+from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 
 cdef extern from "parvi.hpp" namespace "opteryx::carchar":
     cdef cppclass CarcharSet:
@@ -10,6 +11,7 @@ cdef extern from "parvi.hpp" namespace "opteryx::carchar":
 cdef extern from "parvi.hpp" namespace "opteryx::parvi":
     cdef struct ParviSetResult:
         bint is_new
+        bint overflow
 
     cdef cppclass ParviSet:
         ParviSet() except +
@@ -33,6 +35,7 @@ cdef class ParviSetWrapper:
         int32_t[::1] indices_view,
         size_t length,
     )
+    cpdef void drain_into_carchar(self, CarcharSetWrapper target)
     cpdef void clear(self)
     cdef tuple mark_new_indices_32(
         self,

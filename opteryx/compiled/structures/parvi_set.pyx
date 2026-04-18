@@ -24,6 +24,7 @@ Design notes
 from libc.stdint cimport int32_t, int64_t, uint64_t
 from libc.stddef cimport size_t
 from libcpp.vector cimport vector
+from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 
 # ParviSet and CarcharSet are declared in parvi_set.pxd
 
@@ -141,6 +142,12 @@ cdef class ParviSetWrapper:
             )
         return (result.count, result.overflow)
 
+    cpdef void drain_into_carchar(self, CarcharSetWrapper target):
+        """Drain all current Parvi keys into the provided Carchar set."""
+        if self._ptr is NULL or target is None or target._ptr is NULL:
+            return
+        self._ptr.drain_into(target._ptr[0])
+
     cpdef void clear(self):
         """Clear the set."""
         self._ptr.clear()
@@ -156,7 +163,8 @@ cdef class ParviSetWrapper:
         Bulk insert; return (count_new, overflow_bool).
 
         Writes indices of newly-inserted entries into out_indices[0..count_new).
-        Returns overflow=True if table filled during this call.
+        Returns overflow=True only when an unseen key is encountered while
+        already at capacity.
         """
         cdef MarkResult32 result = _psw_mark_new_idx32(
             self._ptr, keys, out_indices, length

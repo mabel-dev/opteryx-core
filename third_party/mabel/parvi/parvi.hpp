@@ -145,9 +145,7 @@ public:
     //   * Otherwise                  → inserts and returns {new_slot, true}.
     ParviResult insert_new(std::uint64_t key, std::int64_t payload_ref) noexcept {
         const std::uint8_t tag = key_tag(key);
-        // Performance improvement #3: load control block only once.
-        // Compute both tag-match and empty-slot masks in the same SIMD pass.
-        auto [tag_matches, empty_matches] = get_masks(tag);
+        std::uint32_t tag_matches = group_match_mask(control_.data(), tag);
         // Check for existing key.
         while (tag_matches != 0U) {
             const std::size_t idx = static_cast<std::size_t>(__builtin_ctz(tag_matches));
@@ -160,6 +158,7 @@ public:
         if (size_ >= kCapacity) {
             return {kCapacity, false};
         }
+        const std::uint32_t empty_matches = group_match_mask(control_.data(), kEmpty);
         const std::size_t slot = static_cast<std::size_t>(__builtin_ctz(empty_matches));
         control_[slot]          = tag;
         hashes_[slot]           = key;
@@ -178,7 +177,7 @@ public:
     ) {
         overflow = false;
         const std::uint8_t tag = key_tag(key);
-        auto [tag_matches, empty_matches] = get_masks(tag);
+        std::uint32_t tag_matches = group_match_mask(control_.data(), tag);
         while (tag_matches != 0U) {
             const std::size_t idx = static_cast<std::size_t>(__builtin_ctz(tag_matches));
             if (hashes_[idx] == key) {
@@ -191,6 +190,7 @@ public:
             overflow = true;
             return {payload_ref, true};
         }
+        const std::uint32_t empty_matches = group_match_mask(control_.data(), kEmpty);
         const std::size_t slot = static_cast<std::size_t>(__builtin_ctz(empty_matches));
         control_[slot]          = tag;
         hashes_[slot]           = key;
@@ -309,6 +309,7 @@ private:
 
 struct ParviSetResult {
     bool is_new = false;
+    bool overflow = false;
 };
 
 class ParviSet {
@@ -337,35 +338,39 @@ public:
     }
 
     // Insert a new key.
-    //   * If the key already exists → returns {is_new: false}.
-    //   * If the table is full       → returns {is_new: false}; caller should promote.
-    //   * Otherwise                  → inserts and returns {is_new: true}.
+    //   * If the key already exists → returns {is_new: false, overflow: false}.
+    //   * If the table is full and key is absent
+    //                              → returns {is_new: false, overflow: true}.
+    //   * Otherwise                 → inserts and returns {is_new: true, overflow: false}.
     ParviSetResult insert_or_ignore(std::uint64_t key) noexcept {
         const std::uint8_t tag = key_tag(key);
-        auto [tag_matches, empty_matches] = get_masks(tag);
+        std::uint32_t tag_matches = group_match_mask(control_.data(), tag);
         // Check for existing key.
         while (tag_matches != 0U) {
             const std::size_t idx = static_cast<std::size_t>(__builtin_ctz(tag_matches));
             if (hashes_[idx] == key) {
-                return {false};
+                return {false, false};
             }
             tag_matches &= (tag_matches - 1U);
         }
         // No existing key: insert if space available.
         if (size_ >= kCapacity) {
-            return {false};
+            return {false, true};
         }
+        const std::uint32_t empty_matches = group_match_mask(control_.data(), kEmpty);
         const std::size_t slot = static_cast<std::size_t>(__builtin_ctz(empty_matches));
         control_[slot]  = tag;
         hashes_[slot]   = key;
         ++size_;
-        return {true};
+        return {true, false};
     }
 
     // Bulk mark-new-indices operation: like CarcharSet::mark_new_indices_32 but
     // with overflow handling. Returns count of newly-inserted entries and writes
-    // their indices into out_indices; when table overflows, stops and signals false
-    // in the overflow flag.
+    // their indices into out_indices.
+    //
+    // overflow=true means we encountered an unseen key that could not be inserted
+    // because capacity was already exhausted.
     template <typename IndexT>
     std::pair<std::size_t, bool> mark_new_indices(
         const std::uint64_t* keys, IndexT* out_indices, std::size_t length
@@ -375,13 +380,14 @@ public:
             auto result = insert_or_ignore(keys[i]);
             if (result.is_new) {
                 out_indices[count++] = static_cast<IndexT>(i);
+                continue;
             }
-            // Early exit if table fills mid-scan
-            if (full()) {
-                return {count, true};  // true = overflow
+            // Early exit only on true overflow (unseen key when full).
+            if (result.overflow) {
+                return {count, true};
             }
         }
-        return {count, false};  // false = no overflow
+        return {count, false};
     }
 
     // Copy live entries into a CarcharSet for promotion.

@@ -41,6 +41,13 @@ def distinct(Morsel morsel, object seen_hashes, list columns=None):
         Supports both carchar (dynamic) and parvi (fixed 16-slot) implementations.
     columns : list of bytes, optional
         Column names to hash; all columns used when None.
+
+    Returns
+    -------
+    bool
+        True when Parvi overflow occurred (unseen key while at capacity).
+        In that case the morsel is left unchanged so the caller can promote
+        and replay safely.
     """
     from opteryx.compiled.structures.parvi_set import ParviSetWrapper
 
@@ -57,6 +64,7 @@ def distinct(Morsel morsel, object seen_hashes, list columns=None):
     cdef CarcharSet* cs
     cdef uint64_t[::1] hashes_memview
     cdef int32_t[::1] idx_memview
+    cdef bint overflow = False
 
     if n == 0:
         return
@@ -106,7 +114,9 @@ def distinct(Morsel morsel, object seen_hashes, list columns=None):
             # ParviSet path: create memoryviews from pointers and call cpdef wrapper
             hashes_memview = <uint64_t[:n]>hashes_ptr
             idx_memview = <int32_t[:n]>idx_buf
-            count, _ = seen_hashes.mark_new_indices_32_public(hashes_memview, idx_memview, <size_t>n)
+            count, overflow = seen_hashes.mark_new_indices_32_public(
+                hashes_memview, idx_memview, <size_t>n
+            )
         else:
             # CarcharSet path
             carchar_set = <CarcharSetWrapper>seen_hashes
@@ -114,13 +124,18 @@ def distinct(Morsel morsel, object seen_hashes, list columns=None):
             with nogil:
                 count = cs.mark_new_indices_32(hashes_ptr, idx_buf, <size_t>n)
 
+        if overflow:
+            # Parvi overflow: caller will promote and replay this unchanged morsel.
+            return True
+
         if count == 0:
             morsel._empty_inplace()
-            return
+            return overflow
 
         # cdef method: no Python dispatch; typed memoryview hits the int32
         # fast path in _take_inplace directly — no copy, no extra allocation.
         morsel._take_inplace(<int32_t[:<Py_ssize_t>count]>idx_buf)
+        return overflow
 
     finally:
         free(col_indices)

@@ -1,6 +1,9 @@
 import pytest
 
 from opteryx.connectors.opteryx_connector import OpteryxConnector
+from opteryx.connectors.opteryx_connector import OpteryxTable
+from opteryx.types import OrsoTypes
+from opteryx.types.schema import RelationSchema
 
 
 def test_instantiates_class_catalog():
@@ -65,3 +68,33 @@ def test_bubbles_type_error_on_unexpected_kwargs():
     conn = OpteryxConnector(catalog=DummyCatalog, telemetry="not-allowed")
     with pytest.raises(TypeError):
         conn._get_catalog("ws")
+
+
+def test_normalize_external_schema_to_internal_relationschema():
+    class ExternalColumn:
+        def __init__(self, name, type_name, element_type=None):
+            self.name = name
+            self.type = type_name
+            self.element_type = element_type
+            self.nullable = True
+            self.precision = None
+            self.scale = None
+
+    class ExternalSchema:
+        def __init__(self):
+            self.name = "external"
+            self.columns = [
+                ExternalColumn("id", "INTEGER"),
+                ExternalColumn("tags", "ARRAY", element_type="VARCHAR"),
+                {"name": "payload", "type": "JSONB"},
+            ]
+
+    schema = OpteryxTable._normalize_schema(ExternalSchema(), relation_name="public.github.events")
+
+    assert isinstance(schema, RelationSchema)
+    assert schema.name == "public.github.events"
+    assert [c.name for c in schema.columns] == ["id", "tags", "payload"]
+    assert schema.columns[0].type == OrsoTypes.INTEGER
+    assert schema.columns[1].type == OrsoTypes.ARRAY
+    assert schema.columns[1].element_type == OrsoTypes.VARCHAR
+    assert schema.columns[2].type == OrsoTypes.JSONB
