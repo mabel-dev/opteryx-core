@@ -5,7 +5,7 @@ import time
 # GroupedAggregateHashedNode — the Python operator boundary.
 # Expression pre-evaluation and HAVING logic moved from draken_aggregate_and_group_node.pyx.
 
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
@@ -236,13 +236,10 @@ class GroupedAggregateHashedNode(BasePlanNode):
         mask = evaluate_draken(self._having_condition, morsel)
         return morsel.filter_mask(mask)
 
-    def execute(self, morsel):
+    def execute(self, Morsel morsel):
         if morsel is EOS:
             yield from self._finalize()
             return
-
-        if not isinstance(morsel, Morsel):
-            morsel = Morsel.from_arrow(morsel.combine_chunks())
 
         if morsel.num_rows == 0:
             yield EMPTY

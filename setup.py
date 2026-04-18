@@ -1008,7 +1008,9 @@ extensions = [
         "opteryx.operators.outer_join_node",
         sources=["opteryx/operators/outer_join_node.pyx"],
         include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+        language="c++",
     ),
     Extension(
         "opteryx.operators.parquet_read_node",

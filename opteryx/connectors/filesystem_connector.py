@@ -6,11 +6,9 @@ This provides a gateway connector (FileSystemConnector) and transient table read
 """
 
 import os
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from threading import Lock
-from typing import Dict, Optional, Tuple
+from typing import Dict, Generator, Optional, Tuple
 
-from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.connectors import TableType
 from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
 from opteryx.connectors.capabilities import LimitPushable, PredicatePushable
@@ -75,9 +73,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         OrsoTypes.DATE,
     }
 
-    _executor = None  # Lazy initialization
-    _max_workers = 8
-
     def __init__(self, dataset: str, filesystem, storage_type: str, **kwargs):
         """
         Initialize the table reader for a specific dataset.
@@ -104,14 +99,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             self.dataset = self.dataset.replace(".", OS_SEP)
 
         self._stats_lock = Lock()
-
-    def get_executor(self):
-        """Get or create the thread pool executor."""
-        if FileSystemTable._executor is None:
-            FileSystemTable._executor = ThreadPoolExecutor(
-                max_workers=self._max_workers, thread_name_prefix="opteryx-io-"
-            )
-        return FileSystemTable._executor
 
     def get_list_of_blob_names(self, prefix: str, predicates=None):
         """
@@ -190,7 +177,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         predicates: list = None,
         just_schema: bool = False,
         **kwargs,
-    ) -> Morsel:
+    ) -> Generator[RelationSchema, None, None]:
         """
         Read the entire dataset from the filesystem.
 
@@ -246,93 +233,8 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     ) from err
             return
 
-        def process_result(num_rows, raw_size, decoded):
-            self.telemetry.rows_seen += num_rows
-            self.rows_seen += num_rows
-            self.blobs_seen += 1
-            self.telemetry.bytes_raw += raw_size
-            return decoded
-
-        max_workers = min(self._max_workers, len(blob_names)) or 1
-
-        if max_workers <= 1:
-            # Single-threaded path
-            for blob_name in blob_names:
-                try:
-                    num_rows, _, raw_size, decoded = self._read_blob_task(
-                        blob_name,
-                        columns,
-                        predicates,
-                    )
-                except Exception as err:
-                    if "Invalid" in type(err).__name__ or "Arrow" in type(err).__name__:
-                        with self._stats_lock:
-                            self.telemetry.unreadable_data_blobs += 1
-                        continue
-                    raise DataError(
-                        f"Unable to read file {blob_name}: {type(err).__name__}"
-                    ) from err
-
-                decoded = process_result(num_rows, raw_size, decoded)
-                yield Morsel.from_arrow(decoded)
-        else:
-            # Multi-threaded path
-            blob_iter = iter(blob_names)
-            pending = {}
-
-            executor = self.get_executor()
-            for _ in range(max_workers):
-                try:
-                    blob_name = next(blob_iter)
-                except StopIteration:
-                    break
-                future = executor.submit(
-                    self._read_blob_task,
-                    blob_name,
-                    columns,
-                    predicates,
-                )
-                pending[future] = blob_name
-
-            while pending:
-                done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
-                for future in done:
-                    blob_name = pending.pop(future)
-                    try:
-                        num_rows, _, raw_size, decoded = future.result()
-                    except Exception as err:
-                        if "Invalid" in type(err).__name__ or "Arrow" in type(err).__name__:
-                            with self._stats_lock:
-                                self.telemetry.unreadable_data_blobs += 1
-                        else:
-                            for remaining_future in list(pending):
-                                remaining_future.cancel()
-                        raise DataError(
-                            f"Unable to read file {blob_name}: {type(err).__name__}"
-                        ) from err
-                    else:
-                        decoded = process_result(num_rows, raw_size, decoded)
-                        yield Morsel.from_arrow(decoded)
-
-                    try:
-                        next_blob = next(blob_iter)
-                    except StopIteration:
-                        continue
-                    future = executor.submit(
-                        self._read_blob_task,
-                        next_blob,
-                        columns,
-                        predicates,
-                    )
-                    pending[future] = next_blob
-
-    def _read_blob_task(self, blob_name: str, columns, predicates):
-        """Helper for reading a blob in a thread pool."""
-        return self.read_blob(
-            blob_name=blob_name,
-            just_schema=False,
-            projection=columns,
-            selection=predicates,
+        raise UnsupportedSyntaxError(
+            "All Parquet scans use ParquetReadNode. FileSystemConnector data reads are not supported."
         )
 
     def get_dataset_schema(self) -> RelationSchema:

@@ -4,7 +4,4 @@
 include "cross_join.pyx"
 include "cross_join_draken.pyx"
 include "draken_inner_join.pyx"
-include "inner_join.pyx"
-include "nested_loop_join_equals.pyx"
 include "nested_loop_join_non_eqi.pyx"
-include "outer_join.pyx"

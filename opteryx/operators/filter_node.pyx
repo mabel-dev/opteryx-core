@@ -16,12 +16,11 @@ from opteryx.expression import NodeType
 from opteryx.expression import format_expression
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import QueryProperties
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 
 from opteryx import EOS
 
 from . import BasePlanNode
-
-_DATA_FORMAT = "draken"
 
 
 class FilterNode(BasePlanNode):
@@ -43,15 +42,12 @@ class FilterNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Filter"
 
-    def execute(self, morsel):
+    def execute(self, Morsel morsel):
         from opteryx.compiled.draken.morsels.morsel import Morsel
         from opteryx.expression.evaluator import evaluate_draken
 
         if morsel is EOS:
             return
-
-        if not isinstance(morsel, Morsel):
-            morsel = Morsel.from_arrow(morsel.combine_chunks())
 
         mask = evaluate_draken(self.filter, morsel)
         filtered = morsel.filter_mask(mask)

@@ -23,20 +23,22 @@ from array import array
 from typing import List
 
 # Draken BoolVector helpers for converting bit-packed bloom results
-from libc.stdint cimport uint8_t
+from libc.stdint cimport uint8_t, uint64_t, int64_t
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
 
 # Telemetry: number of times the outer-join bloom-filter Draken fast-path was applied.
 # Incremented when a probe morsel is filtered via the Draken bit-packed result path.
 BLOOM_FASTPATH_COUNTER = 0
 
-from opteryx.compiled.joins import build_side_hash_map
-from opteryx.compiled.joins import probe_side_hash_map
 from opteryx.compiled.structures.bloom_filter import create_bloom_filter_morsel
 from opteryx.compiled.structures.bloom_filter import bloom_filter_check_morsel
 from opteryx.compiled.structures.buffers import IntBuffer
+from opteryx.compiled.structures.carchar_index cimport CarcharJoinIndexWrapper
 from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.draken.morsels.align import align_tables_pyarray
+from opteryx.compiled.morsel_ops.null_filter cimport non_null_row_indices
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.third_party.abseil.containers cimport FlatHashMap
 from opteryx.models import QueryProperties
 
 from opteryx import EOS, EMPTY
@@ -44,6 +46,35 @@ from opteryx import EOS, EMPTY
 from . import JoinNode
 
 _DATA_FORMAT = "draken"
+
+
+cpdef CarcharJoinIndexWrapper _build_probe_hash_map(Morsel morsel, list join_columns):
+    cdef CarcharJoinIndexWrapper ht = CarcharJoinIndexWrapper()
+    cdef Int64Vector non_null_indices_vec = non_null_row_indices(morsel, join_columns)
+    cdef const int64_t* non_null_ptr = <const int64_t*>non_null_indices_vec.dense_ptr()
+    cdef Py_ssize_t n_non_null = len(non_null_indices_vec)
+    cdef uint64_t[::1] row_hashes = morsel.hash(join_columns)
+    cdef Py_ssize_t i
+
+    for i in range(n_non_null):
+        ht.insert_row(row_hashes[non_null_ptr[i]], non_null_ptr[i])
+
+    return ht
+
+
+cpdef FlatHashMap _build_side_hash_map(Morsel morsel, list join_columns):
+    cdef FlatHashMap ht = FlatHashMap()
+    cdef Int64Vector non_null_indices_vec = non_null_row_indices(morsel, join_columns)
+    cdef const int64_t* non_null_ptr = <const int64_t*>non_null_indices_vec.dense_ptr()
+    cdef Py_ssize_t n_non_null = len(non_null_indices_vec)
+    cdef uint64_t[::1] row_hashes = morsel.hash(join_columns)
+    cdef int64_t i, row_idx
+
+    for i in range(n_non_null):
+        row_idx = non_null_ptr[i]
+        ht.insert(row_hashes[row_idx], row_idx)
+
+    return ht
 
 
 CHUNK_SIZE: int = 50_000
@@ -97,7 +128,7 @@ def left_join(
                 )
             return
 
-    right_hash = probe_side_hash_map(right_morsel, right_columns)
+    right_hash = _build_probe_hash_map(right_morsel, right_columns)
 
     for h, right_rows in right_hash.items_py():
         left_rows = left_hash.rows_for(h)
@@ -152,7 +183,7 @@ def right_join(
         Morsel chunks of the joined result.
     """
 
-    left_hash_table = probe_side_hash_map(left_morsel, left_columns)
+    left_hash_table = _build_probe_hash_map(left_morsel, left_columns)
 
     left_indexes = []
     right_indexes = []
@@ -180,7 +211,7 @@ def right_join(
     right_hashes = right_morsel.hash(right_columns)
     for i in range(len(right_morsel)):
         left_rows = left_hash_table.rows_for(right_hashes[i])
-        if left_rows:
+        if left_rows.size() > 0:
             seen_flags[i] = 1
             for left_idx in left_rows:
                 left_indexes.append(left_idx)
@@ -228,7 +259,7 @@ def full_join(
     Yields:
         Morsel chunks of the joined result.
     """
-    right_hash_table = probe_side_hash_map(right_morsel, right_columns)
+    right_hash_table = _build_probe_hash_map(right_morsel, right_columns)
 
     left_indexes = []
     right_indexes = []
@@ -237,7 +268,7 @@ def full_join(
     left_hashes = left_morsel.hash(left_columns)
     for i in range(len(left_morsel)):
         right_rows = right_hash_table.rows_for(left_hashes[i])
-        if right_rows:
+        if right_rows.size() > 0:
             for right_idx in right_rows:
                 left_indexes.append(i)
                 right_indexes.append(right_idx)
@@ -332,7 +363,7 @@ class OuterJoinNode(JoinNode):
 
                 if self.join_type == "left outer":
                     start = time.monotonic_ns()
-                    self.left_hash = build_side_hash_map(self._left_morsel, self.left_columns)
+                    self.left_hash = _build_side_hash_map(self._left_morsel, self.left_columns)
 
                     if len(self._left_morsel) < 16_000_001:
                         start = time.monotonic_ns()
