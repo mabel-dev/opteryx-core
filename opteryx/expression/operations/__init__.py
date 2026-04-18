@@ -108,7 +108,9 @@ def _coerce_temporal_scalar(value, source_type, target_type):
 
 def to_temporal_array(values, source_type, target_type):
     """Coerce values to a Draken temporal vector without Arrow/Numpy conversion."""
-    if not isinstance(values, (list, tuple)):
+    if values.__class__.__module__.startswith("opteryx.compiled.draken.vectors."):
+        values = values.to_pylist()
+    elif not isinstance(values, (list, tuple)):
         values = [values]
 
     coerced = [

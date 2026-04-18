@@ -64,7 +64,7 @@ class KernelSpec:
 
     id: str  # kernel identifier, e.g., "integer_integer" or "polymorphic"
     callable_ref: Callable
-    engine: Literal["arrow", "draken", "numpy", "python"] | object = _UNSET
+    engine: Literal["draken"] | object = _UNSET
     null_policy: Literal[
         "compress",
         "passthru",
@@ -79,7 +79,7 @@ class KernelSpec:
         if self.engine is _UNSET:
             raise ValueError(
                 "KernelSpec.engine is required and must be one of "
-                "('arrow','draken','numpy','python')."
+                "('draken')."
             )
 
         if self.null_policy not in (

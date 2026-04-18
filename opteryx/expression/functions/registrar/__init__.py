@@ -82,7 +82,7 @@ def _make(
     volatility: Any = "immutable",
     deterministic: bool | None = None,
     lifecycle: LifecycleSpec | None = None,
-    engine: Any = "arrow",
+    engine: Any = "draken",
     kernel_id: str = "default",
     id_suffix: str = "default",
     null_policy: Any = "compress",

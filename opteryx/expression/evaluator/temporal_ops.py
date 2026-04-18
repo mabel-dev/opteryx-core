@@ -45,6 +45,36 @@ _NEGATED_OPS = {
 }
 
 
+def _compare_nullable_temporal(op: str, left, right):
+    if left is None or right is None:
+        return None
+    if op == "Eq":
+        return left == right
+    if op == "NotEq":
+        return left != right
+    if op == "Lt":
+        return left < right
+    if op == "Gt":
+        return left > right
+    if op == "LtEq":
+        return left <= right
+    if op == "GtEq":
+        return left >= right
+    raise NotImplementedError(f"Temporal compare: unsupported op {op!r}")
+
+
+def _compare_timestamp_date32_vectors(op: str, ts_vec, d_vec):
+    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+
+    ts_values = ts_vec.to_pylist()
+    d_values = d_vec.to_pylist()
+    if len(ts_values) != len(d_values):
+        raise ValueError("Timestamp/Date32 comparison requires equal-length vectors.")
+
+    out = [_compare_nullable_temporal(op, ts, None if d is None else int(d) * 86_400_000_000) for ts, d in zip(ts_values, d_values)]
+    return BoolVector.from_list(out)
+
+
 def _int64_temporal_compare(op: str, vec, right, temporal_type):
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
     from opteryx.types import OrsoTypes
@@ -113,12 +143,7 @@ def _timestamp_compare(op: str, vec, right):
             raise NotImplementedError(f"TimestampVector vector-vector: unsupported op {op!r}")
         return fn(right)
     elif right.__class__.__name__ == "Date32Vector":
-        import pyarrow as _pa_local
-
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
-
-        ts_right = _vfa(right.to_arrow().cast(_pa_local.timestamp("us")))
-        return _timestamp_compare(op, vec, ts_right)
+        return _compare_timestamp_date32_vectors(op, vec, right)
     else:
         value = _coerce_timestamp(right)
         if value is None:
@@ -160,12 +185,7 @@ def _date32_compare(op: str, vec, right):
             raise NotImplementedError(f"Date32Vector vector-vector: unsupported op {op!r}")
         return fn(right)
     elif right.__class__.__name__ == "TimestampVector":
-        import pyarrow as _pa_local
-
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
-
-        ts_left = _vfa(vec.to_arrow().cast(_pa_local.timestamp("us")))
-        return _timestamp_compare(op, ts_left, right)
+        return _compare_timestamp_date32_vectors(op, right, vec)
     else:
         value = _coerce_date32(right)
 
@@ -205,10 +225,6 @@ def _interval_compare(op: str, vec, right):
 
 
 def _date_minus_date_draken(left_vec, right_vec):
-    import pyarrow as _pa_local
-
-    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
     # Native vector subtraction
     if left_vec.__class__.__name__ == "Date32Vector":
         if right_vec.__class__.__name__ == "Date32Vector":
@@ -221,18 +237,10 @@ def _date_minus_date_draken(left_vec, right_vec):
         else:  # Date32Vector
             diff_us = left_vec.subtract_date32_vector(right_vec)
 
-    # Convert Int64Vector microseconds to IntervalVector (months, days, nanoseconds).
-    # Nulls are already handled by the subtraction methods via bitmap.
-    mdn_rows = []
-    for micros in diff_us.to_pylist():
-        if micros is None:
-            mdn_rows.append(None)
-            continue
-        days, remainder = divmod(int(micros), 86_400_000_000)
-        mdn_rows.append((0, int(days), int(remainder) * 1_000))
-
-    mdn_array = _pa_local.array(mdn_rows, type=_pa_local.month_day_nano_interval())
-    return vector_from_arrow(mdn_array)
+    raise NotImplementedError(
+        "Date/timestamp subtraction requires a native IntervalVector constructor; "
+        "Arrow-backed interval materialization has been removed."
+    )
 
 
 def _date_interval_op_draken(left_vec, right_vec, op):

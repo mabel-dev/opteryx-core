@@ -9,25 +9,9 @@ _DRAKEN_ENCODING_CONSTANT = 3
 
 
 def _dictionary_arrow_type(vec):
-    # Arrow arrays have .type but not .to_arrow(); Draken vectors have .to_arrow()
-    arr_type = getattr(vec, "type", None)
-    if arr_type is not None and not hasattr(vec, "to_arrow"):
-        return arr_type if str(arr_type).startswith("dictionary") else None
-
-    to_arrow = getattr(vec, "to_arrow", None)
-    if to_arrow is None:
+    if not vec.__class__.__module__.startswith("opteryx.compiled.draken.vectors."):
         return None
-
-    try:
-        arrow_arr = to_arrow()
-    except Exception:
-        return None
-
-    arr_type = getattr(arrow_arr, "type", None)
-    if arr_type is not None and str(arr_type).startswith("dictionary"):
-        return arr_type
-
-    return None
+    return getattr(vec, "dictionary_value_type", None)
 
 
 def _is_dictionary_encoded_vector(vec) -> bool:
@@ -55,17 +39,9 @@ def _dictionary_compare_vector(vec):
     ):
         return vec
 
-    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-    arrow_arr = vec.to_arrow() if hasattr(vec, "to_arrow") else vec
-    if hasattr(arrow_arr, "num_chunks"):  # ChunkedArray
-        if arrow_arr.num_chunks != 1:
-            raise NotImplementedError(
-                "Dictionary compare path does not support multi-chunk dictionary arrays."
-            )
-        arrow_arr = arrow_arr.chunk(0)
-
-    return vector_from_arrow(arrow_arr)
+    raise TypeError(
+        "Dictionary compare path requires a Draken dictionary-capable vector with native operators."
+    )
 
 
 def _coerce_str(value) -> bytes:
@@ -228,16 +204,10 @@ def _is_null_as_boolvector(vec):
     if _is_dictionary_encoded_vector(vec):
         if hasattr(vec, "is_null_boolvector"):
             return vec.is_null_boolvector()
-
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
-
-        # Convert dictionary vector to native Draken vector and use native is_null()
-        native_vec = _vfa(vec.to_arrow())
-        native_cls = native_vec.__class__.__name__
-        if native_cls == "Float64Vector":
-            return bool_vector_from_int8_mask(native_vec.is_null_with_nan(), len(native_vec))
-        elif hasattr(native_vec, "is_null"):
-            return bool_vector_from_int8_mask(native_vec.is_null(), len(native_vec))
+        if hasattr(vec, "is_null_with_nan"):
+            return bool_vector_from_int8_mask(vec.is_null_with_nan(), n)
+        if hasattr(vec, "is_null"):
+            return bool_vector_from_int8_mask(vec.is_null(), n)
         return BoolVector(n)
 
     if cls_name in _FIXED_BUFFER_VECTOR_CLASSES:
@@ -261,12 +231,7 @@ def _is_null_as_boolvector(vec):
     if cls_name == "StringVector" and hasattr(vec, "is_null"):
         return bool_vector_from_int8_mask(vec.is_null(), n)
 
-    # Fallback to Arrow conversion for other types
-    from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
-
-    native_vec = _vfa(vec.to_arrow())
-    if native_vec.__class__.__name__ == "Float64Vector":
-        return bool_vector_from_int8_mask(native_vec.is_null_with_nan(), len(native_vec))
-    elif hasattr(native_vec, "is_null"):
-        return bool_vector_from_int8_mask(native_vec.is_null(), len(native_vec))
-    return BoolVector(n)
+    raise TypeError(
+        "Null-mask evaluation requires native Draken vector null APIs; unsupported vector "
+        f"type {cls_name!r}."
+    )

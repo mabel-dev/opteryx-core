@@ -170,7 +170,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     parameters=_variadic_any,
                     return_spec=ReturnSpec(mode="resolver", resolver=_coalesce_return_type),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=_coalesce_kernel,
                         null_policy="passthru",
@@ -197,7 +197,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="resolver", resolver=_coalesce_return_type),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=other_functions.if_null,
                         null_policy="passthru",
@@ -224,7 +224,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="resolver", resolver=_coalesce_return_type),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=other_functions.if_null,  # same kernel, semantics handled by evaluator
                         null_policy="passthru",
@@ -251,7 +251,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=other_functions.null_if,
                         cost_us_per_million=0.72,
@@ -302,7 +302,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     parameters=(ParameterSpec(name="value", type_family="any"),),
                     return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=lambda x: x,
                         cost_us_per_million=0.28,
@@ -325,7 +325,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     parameters=_variadic_any,
                     return_spec=ReturnSpec(mode="resolver", resolver=_case_return_type),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=_case_kernel,
                         null_policy="passthru",

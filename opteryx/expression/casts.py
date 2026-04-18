@@ -22,6 +22,10 @@ import math
 from opteryx.types import OrsoTypes
 
 
+def _is_draken_vector(value) -> bool:
+    return value.__class__.__module__.startswith("opteryx.compiled.draken.vectors.")
+
+
 def _is_nullish(value) -> bool:
     """Check if a value is None or represents null."""
     return value is None or (isinstance(value, float) and math.isnan(value))
@@ -114,7 +118,7 @@ def cast_to_double(arr, *args):
     from opteryx.utils.vector_types import VectorType, get_vector_type
 
     # Primary path: Draken vectors
-    if hasattr(arr, "to_arrow"):
+    if _is_draken_vector(arr):
         v_type = get_vector_type(arr)
         if v_type == VectorType.FLOAT64:
             return arr
@@ -151,7 +155,7 @@ def cast_to_int(arr, *args):
     from opteryx.utils.vector_types import VectorType, get_vector_type
 
     # Primary path: Draken vectors
-    if hasattr(arr, "to_arrow"):
+    if _is_draken_vector(arr):
         v_type = get_vector_type(arr)
         if v_type == VectorType.INT64:
             return arr
@@ -180,7 +184,7 @@ def cast_to_varchar(arr, *args):
     from opteryx.compiled.draken.vectors.string_vector import StringVector
     from opteryx.utils.vector_types import VectorType, get_vector_type
 
-    if hasattr(arr, "to_arrow"):
+    if _is_draken_vector(arr):
         v_type = get_vector_type(arr)
         if v_type == VectorType.STRING:
             return arr
@@ -201,7 +205,7 @@ def cast_to_boolean(arr, *args):
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
     from opteryx.utils.vector_types import VectorType, get_vector_type
 
-    if hasattr(arr, "to_arrow"):
+    if _is_draken_vector(arr):
         v_type = get_vector_type(arr)
         if v_type == VectorType.BOOL:
             return arr
@@ -221,7 +225,7 @@ def cast_to_date(arr, *args):
     """Cast array to DATE type."""
     from opteryx.utils.vector_types import VectorType, get_vector_type
 
-    if hasattr(arr, "to_arrow"):
+    if _is_draken_vector(arr):
         v_type = get_vector_type(arr)
         if v_type == VectorType.DATE32:
             return arr
@@ -255,6 +259,8 @@ def cast(arr: any, _type: str, args: tuple = ()) -> any:
     """
 
     def _inner(arr):
+        from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+
         def _cast_value(i):
             return caster(i, **kwargs)
 
@@ -278,11 +284,16 @@ def cast(arr: any, _type: str, args: tuple = ()) -> any:
             kwargs["element_type"] = args[0]
 
         if _type == "TIMESTAMP":
-            return [parse_timestamp_value(i) for i in arr]
+            result = [parse_timestamp_value(i) for i in arr]
+            return vector_from_sequence(result, dtype=OrsoTypes.TIMESTAMP)
         if _type == "ARRAY":
-            return [_parse_array_value(i, args[0], safe_cast=False) for i in arr]
+            result = [_parse_array_value(i, args[0], safe_cast=False) for i in arr]
+            return vector_from_sequence(result, dtype=OrsoTypes.ARRAY)
         if _type == "VECTOR":
-            return [caster(_unwrap_vector_value(i), **kwargs) for i in arr]
-        return [_cast_value(i) for i in arr]
+            result = [caster(_unwrap_vector_value(i), **kwargs) for i in arr]
+            return vector_from_sequence(result, dtype=OrsoTypes.VECTOR)
+        result = [_cast_value(i) for i in arr]
+        resolved = "BLOB" if _type == "VARBINARY" else _type
+        return vector_from_sequence(result, dtype=OrsoTypes[resolved])
 
     return _inner
