@@ -251,3 +251,4 @@ opteryx/operators/aggregate/aggregate_node.c
 opteryx/third_party/mabel/base16/base16.c
 opteryx/third_party/mabel/base64/base64.c
 opteryx/operators/grouped_aggregate_hashed/_grouped_agg.cpp
+third_party/mabel/draken/interop/vector_sequence.cpp
