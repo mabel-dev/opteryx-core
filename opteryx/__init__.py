@@ -33,8 +33,10 @@ getcontext().prec = 28
 
 # end-of-stream marker
 def _generate_eos_marker() -> int:
-    """Generate a random 64-bit signed end-of-stream marker."""
-    return secrets.randbits(64) - (1 << 63)
+    """Create an end-of-stream marker using the Morsel class."""
+    from opteryx.compiled.draken import Morsel
+
+    return Morsel()
 
 
 EOS: int = _generate_eos_marker()

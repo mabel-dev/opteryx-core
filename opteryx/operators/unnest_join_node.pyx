@@ -191,8 +191,7 @@ class UnnestJoinNode(BasePlanNode):
             filters = f"({self._unnest_target.name} IN ({', '.join(self._filters)}))"
         return f"CROSS JOIN {filters}"
 
-    def execute(self, morsel):
-        morsel = self.ensure_draken_morsel(morsel)
+    def execute(self, Morsel morsel):
 
         if morsel == EOS:
             yield EOS

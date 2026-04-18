@@ -171,8 +171,7 @@ class NonEquiJoinNode(JoinNode):
         op_symbol = op_symbols.get(self.comparison_op, self.comparison_op)
         return f"{self.left_column} {op_symbol} {self.right_column}"
 
-    def execute(self, morsel):
-        morsel = self.ensure_draken_morsel(morsel)
+    def execute(self, Morsel morsel):
 
         if self._build_phase:
             if morsel == EOS:

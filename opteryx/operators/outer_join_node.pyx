@@ -35,7 +35,7 @@ from opteryx.compiled.joins import probe_side_hash_map
 from opteryx.compiled.structures.bloom_filter import create_bloom_filter_morsel
 from opteryx.compiled.structures.bloom_filter import bloom_filter_check_morsel
 from opteryx.compiled.structures.buffers import IntBuffer
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.draken.morsels.align import align_tables_pyarray
 from opteryx.models import QueryProperties
 
@@ -311,8 +311,7 @@ class OuterJoinNode(JoinNode):
             return f"{self.join_type.upper()} JOIN (USING {','.join(map(format_expression, self.using))})"
         return f"{self.join_type.upper()}"
 
-    def execute(self, morsel):
-        morsel = self.ensure_draken_morsel(morsel)
+    def execute(self, Morsel morsel):
         # Cython-typed locals used for Draken-native bloom-filter checks.
         # Declared here at the top of the function so cdef is valid (not inside a nested block).
         cdef Py_ssize_t orig_rows

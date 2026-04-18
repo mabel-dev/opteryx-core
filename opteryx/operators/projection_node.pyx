@@ -16,7 +16,7 @@ from typing import Generator, Optional
 from collections.abc import Iterable
 
 from opteryx.compiled.draken.encoding import DRAKEN_ENCODING_CONSTANT
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
@@ -81,12 +81,9 @@ class ProjectionNode(BasePlanNode):
             self.readings["draken_constant_columns_emitted"] += emitted
         return morsel.select(self.projection)
 
-    def execute(self, morsel):
+    def execute(self, Morsel morsel):
         if morsel == EOS:
             return
-
-        # Draken-native execution: ensure all inputs are morsels
-        morsel = self.ensure_draken_morsel(morsel)
 
         # Handle both single Morsel and Iterable of Morsels (from streaming)
         if isinstance(morsel, Morsel):

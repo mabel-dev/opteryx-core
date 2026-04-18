@@ -126,8 +126,7 @@ class NestedLoopJoinNode(JoinNode):
     def config(self):
         return "draken"
 
-    def execute(self, morsel):
-        morsel = self.ensure_draken_morsel(morsel)
+    def execute(self, Morsel morsel):
 
         if self._build_phase:
             if morsel == EOS:

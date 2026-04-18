@@ -11,12 +11,13 @@ This is a SQL Query Execution Plan Node.
 
 from typing import Generator, Optional
 from opteryx.models import QueryProperties
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 
 from opteryx import EOS
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "arrow,draken"
+_DATA_FORMAT = "draken"
 
 
 class UnionNode(BasePlanNode):
@@ -35,13 +36,11 @@ class UnionNode(BasePlanNode):
     def config(self):  # pragma: no cover
         return ""
 
-    def execute(self, morsel):
+    def execute(self, Morsel morsel):
         """
         Union needs to ensure the column names are the same and that
         coercible types are coerced.
         """
-        morsel = self.ensure_arrow_table(morsel)
-
         if morsel == EOS and self.seen_first_eos:
             return
         elif morsel == EOS:
