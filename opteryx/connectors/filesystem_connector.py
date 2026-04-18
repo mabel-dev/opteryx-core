@@ -431,7 +431,7 @@ class FileSystemConnector(BaseConnector):
     Works with:
     - OpteryxLocalFileSystem (local storage)
     - OpteryxGcsFileSystem (Google Cloud Storage)
-    - Any other pyarrow-compatible filesystem
+    - Any other Opteryx filesystem-compatible backend
 
     Note: Filesystems only support tables, not views.
     """

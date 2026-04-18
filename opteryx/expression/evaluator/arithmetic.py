@@ -85,7 +85,7 @@ def _eval_binary_op_draken(node, morsel):
     # Convert temporal scalars to vectors (matching length of morsel)
     from opteryx.types import OrsoTypes
 
-    if not hasattr(left, "null_count") and node.left.schema_column.type in (
+    if get_vector_type(left) == VectorType.UNKNOWN and node.left.schema_column.type in (
         OrsoTypes.DATE,
         OrsoTypes.TIMESTAMP,
     ):
@@ -98,7 +98,7 @@ def _eval_binary_op_draken(node, morsel):
 
             left = TimestampVector.from_constant(_coerce_timestamp(left), morsel.num_rows)
 
-    if not hasattr(right, "null_count") and node.right.schema_column.type in (
+    if get_vector_type(right) == VectorType.UNKNOWN and node.right.schema_column.type in (
         OrsoTypes.DATE,
         OrsoTypes.TIMESTAMP,
     ):
@@ -149,46 +149,38 @@ def _eval_binary_op_draken(node, morsel):
     # ===================================================================
     # GENERAL ARITHMETIC OPERATIONS
     # ===================================================================
-    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
-    from opteryx.expression.binary_operators import BINARY_OPERATORS, binary_operations
+    from opteryx.expression.binary_operators import BINARY_OPERATORS
 
     if op not in BINARY_OPERATORS:
         return None
 
     # Attempt centralized arithmetic dispatch
-    # Falls back to binary_operations() for operators without native kernels
+
     result = call_arithmetic_op(op, left, right)
 
-    # If call_arithmetic_op returns None, it means no Draken kernel exists
-    # Fallback: convert to Arrow and dispatch through binary_operations()
     if result is None:
-        # Convert to Arrow if needed
-        if hasattr(left, "to_arrow"):
-            left = left.to_arrow()
-        if hasattr(right, "to_arrow"):
-            right = right.to_arrow()
-
-        # Use existing binary_operations dispatcher
-        result = binary_operations(
-            left,
-            node.left.schema_column.type,
-            op,
-            right,
-            node.right.schema_column.type,
+        raise NotImplementedError(
+            f"Operator `{op}` has no Draken kernel for {left.__class__.__name__} and "
+            f"{right.__class__.__name__}."
         )
 
-    # ===================================================================
-    # RESULT CONVERSION
-    # ===================================================================
-    # Convert Arrow-like results back to Draken vectors
-    if hasattr(result, "to_pylist") and not hasattr(result, "to_arrow"):
-        arr = result.combine_chunks() if hasattr(result, "combine_chunks") else result
-        return vector_from_arrow(arr)
+    if get_vector_type(result) == VectorType.UNKNOWN and not isinstance(
+        result,
+        (
+            type(None),
+            bool,
+            int,
+            float,
+            str,
+            bytes,
+            datetime.date,
+            datetime.datetime,
+            datetime.time,
+            tuple,
+        ),
+    ):
+        raise TypeError(
+            f"Arithmetic op `{op}` returned non-Draken value type {result.__class__.__name__}."
+        )
 
-    # Arrow scalars → extract Python value
-    if hasattr(result, "as_py") and not hasattr(result, "to_arrow"):
-        return result.as_py()
-
-    # Result is already a Draken vector or Python scalar
     return result

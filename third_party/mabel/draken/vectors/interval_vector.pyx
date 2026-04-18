@@ -31,6 +31,8 @@ from libc.stdint cimport int8_t
 from libc.stdint cimport intptr_t
 from libc.stdint cimport uint64_t
 from libc.stdint cimport uint8_t
+from libc.limits cimport LLONG_MAX
+from libc.limits cimport LLONG_MIN
 from libc.stdlib cimport free
 from libc.stdlib cimport malloc
 from libc.string cimport memset
@@ -45,6 +47,7 @@ from opteryx.compiled.draken.core.fixed_vector cimport buf_length
 from opteryx.compiled.draken.core.fixed_vector cimport free_fixed_buffer
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 from opteryx.compiled.draken.vectors.bool_vector cimport bool_vector_from_bits
+from opteryx.compiled.draken.vectors.date32_vector cimport Date32Vector
 from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
 from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, NULL_HASH, Vector, mix_hash, simd_mix_hash
 
@@ -199,68 +202,30 @@ cdef inline Py_ssize_t _broadcast_index(Py_ssize_t i, Py_ssize_t source_len) nog
         return 0
     return i
 
+cdef inline int64_t _safe_mul_int64(int64_t value, int64_t factor) noexcept nogil:
+    if factor > 0:
+        if value > 0 and value > (<int64_t>LLONG_MAX) // factor:
+            return <int64_t>LLONG_MAX
+        if value < 0 and value < (<int64_t>LLONG_MIN) // factor:
+            return <int64_t>LLONG_MIN
+    return value * factor
 
-cdef inline object _coerce_temporal_value(object value):
-    import datetime as _datetime
 
-    if value is None:
-        return None
-
-    if hasattr(value, "as_py"):
-        value = value.as_py()
-
-    if hasattr(value, "item"):
-        try:
-            maybe = value.item()
-            if isinstance(maybe, (_datetime.datetime, _datetime.date)):
-                value = maybe
-        except Exception:
-            pass
-
-    if isinstance(value, _datetime.datetime):
-        if value.tzinfo is not None:
-            value = value.astimezone(_datetime.timezone.utc).replace(tzinfo=None)
+cdef inline int64_t _timestamp_raw_to_microseconds(int64_t value, int unit_code) noexcept nogil:
+    if unit_code == 0:  # ns
+        return value // 1000
+    if unit_code == 1:  # us
         return value
-
-    if isinstance(value, _datetime.date):
-        return _datetime.datetime.combine(value, _datetime.time())
-
-    if isinstance(value, str):
-        parsed = _datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is not None:
-            parsed = parsed.astimezone(_datetime.timezone.utc).replace(tzinfo=None)
-        return parsed
-
-    return None
+    if unit_code == 2:  # ms
+        return _safe_mul_int64(value, 1000)
+    return _safe_mul_int64(value, 1000000)  # s
 
 
-cdef inline bint _extract_temporal_epoch_parts(
-    object value,
-    int64_t* out_days,
-    int64_t* out_day_microseconds,
-):
-    import datetime as _datetime
-
-    cdef object temporal = _coerce_temporal_value(value)
-    if temporal is None:
-        return False
-
-    if isinstance(temporal, _datetime.datetime):
-        out_days[0] = _days_from_civil(temporal.year, temporal.month, temporal.day)
-        out_day_microseconds[0] = (
-            temporal.hour * MICROSECONDS_PER_HOUR
-            + temporal.minute * MICROSECONDS_PER_MINUTE
-            + temporal.second * MICROSECONDS_PER_SECOND
-            + temporal.microsecond
-        )
+cdef inline bint _is_valid_with_offset(uint8_t* bitmap, Py_ssize_t idx, Py_ssize_t bit_offset) noexcept nogil:
+    cdef Py_ssize_t bit_index = idx + bit_offset
+    if bitmap == NULL:
         return True
-
-    if isinstance(temporal, _datetime.date):
-        out_days[0] = _days_from_civil(temporal.year, temporal.month, temporal.day)
-        out_day_microseconds[0] = 0
-        return True
-
-    return False
+    return (bitmap[bit_index >> 3] >> (bit_index & 7)) & 1
 
 cdef class IntervalVector(Vector):
 
@@ -645,8 +610,8 @@ cdef class IntervalVector(Vector):
         cdef int64_t sc_microseconds = literal[1]
         return self._compare_scalar(sc_months, sc_microseconds, INTERVAL_OP_GTE, True)
 
-    cpdef object apply_to_temporal(self, object values, int8_t signum=1):
-        cdef list temporal_values = []
+    cpdef TimestampVector apply_to_temporal(self, Vector values, int8_t signum=1):
+        """Apply this interval vector to DATE/TIMESTAMP vectors with SQL-style month/day handling."""
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef IntervalValue* intervals = <IntervalValue*> ptr.data
         cdef Py_ssize_t interval_len = ptr.length
@@ -667,71 +632,140 @@ cdef class IntervalVector(Vector):
         cdef int64_t month_div
         cdef int64_t last_day
         cdef int64_t result_microseconds
+        cdef Date32Vector date_values
+        cdef DrakenFixedBuffer* date_ptr
+        cdef int32_t* date_data
+        cdef TimestampVector ts_values
+        cdef DrakenFixedBuffer* ts_ptr
+        cdef int64_t* ts_data
+        cdef int ts_unit_code
+        cdef int64_t ts_raw
+        cdef Py_ssize_t ts_bit_offset
+        cdef bint values_is_date = isinstance(values, Date32Vector)
+        cdef bint values_is_timestamp = isinstance(values, TimestampVector)
 
-        if hasattr(values, "num_chunks"):
-            for chunk in values.chunks:
-                temporal_values.extend(chunk.to_pylist())
-        elif hasattr(values, "to_pylist"):
-            temporal_values = values.to_pylist()
-        elif hasattr(values, "to_numpy"):
-            values = values.to_numpy(zero_copy_only=False)
-            try:
-                temporal_values = list(values)
-            except TypeError:
-                temporal_values = [values]
-        else:
-            try:
-                temporal_values = list(values)
-            except TypeError:
-                temporal_values = [values]
+        if not values_is_date and not values_is_timestamp:
+            raise TypeError(
+                "IntervalVector.apply_to_temporal expects Date32Vector or TimestampVector, "
+                f"got {values.__class__.__name__}."
+            )
 
-        row_len = len(temporal_values)
+        row_len = len(values)
         out_len = _resolve_broadcast_length(row_len, interval_len)
 
-        # Preallocate TimestampVector — write results directly into the C buffer.
         cdef TimestampVector result = TimestampVector(out_len)
         cdef int64_t* out_data = <int64_t*> result.ptr.data
         cdef Py_ssize_t null_bytes = (out_len + 7) >> 3
-        cdef uint8_t* out_null = <uint8_t*> malloc(null_bytes)
+        cdef uint8_t* out_null = NULL
+
+        if out_len == 0:
+            result.ptr.null_bitmap = NULL
+            return result
+
+        out_null = <uint8_t*> malloc(null_bytes if null_bytes > 0 else 1)
         if out_null == NULL:
             raise MemoryError()
-        memset(out_null, 0, null_bytes)  # all null initially; set bits below
+        memset(out_null, 0, null_bytes)
         result.ptr.null_bitmap = out_null
 
-        for i in range(out_len):
-            value_index = _broadcast_index(i, row_len)
-            interval_index = _broadcast_index(i, interval_len)
+        if values_is_date:
+            date_values = <Date32Vector> values
+            date_ptr = date_values.ptr
+            date_data = <int32_t*> date_ptr.data
 
-            if not _is_valid(ptr, interval_index):
-                continue
+            for i in range(out_len):
+                value_index = _broadcast_index(i, row_len)
+                interval_index = _broadcast_index(i, interval_len)
 
-            value = temporal_values[value_index]
-            if not _extract_temporal_epoch_parts(value, &epoch_days, &day_microseconds):
-                continue
+                if not _is_valid(ptr, interval_index):
+                    continue
 
-            _divmod_microseconds(
-                day_microseconds + intervals[interval_index].microseconds * signum,
-                &days_offset,
-                &normalized_day_microseconds,
-            )
-            epoch_days += days_offset
-            day_microseconds = normalized_day_microseconds
+                if date_values._has_const:
+                    if date_values._const_is_null:
+                        continue
+                    epoch_days = <int64_t> date_values._const_value
+                else:
+                    if not _is_valid(date_ptr, value_index):
+                        continue
+                    epoch_days = <int64_t> date_data[value_index]
 
-            month_delta = intervals[interval_index].months * signum
-            if month_delta != 0:
-                _civil_from_days(epoch_days, &year, &month, &day)
-                month_index = (month - 1) + month_delta
-                month_div = _floor_div_int64(month_index, 12)
-                year += month_div
-                month = month_index - month_div * 12 + 1
-                last_day = _days_in_month(year, month)
-                if day > last_day:
-                    day = last_day
-                epoch_days = _days_from_civil(year, month, day)
+                day_microseconds = 0
 
-            result_microseconds = epoch_days * MICROSECONDS_PER_DAY + day_microseconds
-            out_data[i] = result_microseconds
-            out_null[i >> 3] |= (<uint8_t>1 << (i & 7))  # mark valid
+                _divmod_microseconds(
+                    day_microseconds + intervals[interval_index].microseconds * signum,
+                    &days_offset,
+                    &normalized_day_microseconds,
+                )
+                epoch_days += days_offset
+                day_microseconds = normalized_day_microseconds
+
+                month_delta = intervals[interval_index].months * signum
+                if month_delta != 0:
+                    _civil_from_days(epoch_days, &year, &month, &day)
+                    month_index = (month - 1) + month_delta
+                    month_div = _floor_div_int64(month_index, 12)
+                    year += month_div
+                    month = month_index - month_div * 12 + 1
+                    last_day = _days_in_month(year, month)
+                    if day > last_day:
+                        day = last_day
+                    epoch_days = _days_from_civil(year, month, day)
+
+                result_microseconds = epoch_days * MICROSECONDS_PER_DAY + day_microseconds
+                out_data[i] = result_microseconds
+                out_null[i >> 3] |= (<uint8_t>1 << (i & 7))
+        else:
+            ts_values = <TimestampVector> values
+            ts_ptr = ts_values.ptr
+            ts_data = <int64_t*> ts_ptr.data
+            ts_unit_code = ts_values._unit_code
+            ts_bit_offset = ts_values.null_bit_offset
+
+            for i in range(out_len):
+                value_index = _broadcast_index(i, row_len)
+                interval_index = _broadcast_index(i, interval_len)
+
+                if not _is_valid(ptr, interval_index):
+                    continue
+
+                if ts_values._has_const:
+                    if ts_values._const_is_null:
+                        continue
+                    ts_raw = ts_values._const_value
+                else:
+                    if not _is_valid_with_offset(ts_ptr.null_bitmap, value_index, ts_bit_offset):
+                        continue
+                    ts_raw = ts_data[value_index]
+
+                _divmod_microseconds(
+                    _timestamp_raw_to_microseconds(ts_raw, ts_unit_code),
+                    &epoch_days,
+                    &day_microseconds,
+                )
+
+                _divmod_microseconds(
+                    day_microseconds + intervals[interval_index].microseconds * signum,
+                    &days_offset,
+                    &normalized_day_microseconds,
+                )
+                epoch_days += days_offset
+                day_microseconds = normalized_day_microseconds
+
+                month_delta = intervals[interval_index].months * signum
+                if month_delta != 0:
+                    _civil_from_days(epoch_days, &year, &month, &day)
+                    month_index = (month - 1) + month_delta
+                    month_div = _floor_div_int64(month_index, 12)
+                    year += month_div
+                    month = month_index - month_div * 12 + 1
+                    last_day = _days_in_month(year, month)
+                    if day > last_day:
+                        day = last_day
+                    epoch_days = _days_from_civil(year, month, day)
+
+                result_microseconds = epoch_days * MICROSECONDS_PER_DAY + day_microseconds
+                out_data[i] = result_microseconds
+                out_null[i >> 3] |= (<uint8_t>1 << (i & 7))
 
         return result
 

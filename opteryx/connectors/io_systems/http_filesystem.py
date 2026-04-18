@@ -1,7 +1,7 @@
 """HTTP(S) filesystem for remote file access via HTTP Range requests.
 
 Provides efficient byte-range reads and async streaming support for HTTP/HTTPS URLs.
-Standalone implementation with no Arrow/PyArrow dependencies.
+Standalone implementation with no Arrow dependencies.
 """
 
 import urllib.parse
@@ -18,7 +18,7 @@ from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import MissingDependencyError
 
 
-# File type enumeration (minimal, no Arrow dependency)
+# File type enumeration (minimal, standalone)
 class FileType(Enum):
     """File type enumeration."""
 
@@ -29,7 +29,7 @@ class FileType(Enum):
 
 @dataclass
 class FileInfo:
-    """File metadata container (standalone, no Arrow dependency)."""
+    """File metadata container (standalone)."""
 
     path: str
     type: FileType

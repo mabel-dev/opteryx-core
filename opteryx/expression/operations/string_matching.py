@@ -6,7 +6,6 @@
 """String matching operations (Like, RLike, etc.).
 
 Uses Draken StringVector native like() and rlike() methods.
-No pyarrow dependency.
 """
 
 from opteryx.expression.operations.fastpath_dictionary import dictionary_fastpath
