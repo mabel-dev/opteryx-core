@@ -704,7 +704,19 @@ cdef class Morsel:
                 for morsel_obj in morsels:
                     morsel = <Morsel> morsel_obj
                     src_str = <StringVector> morsel.ptr.columns[i]
-                    total_string_bytes += src_str.ptr.offsets[morsel.ptr.num_rows]
+                    current_rows = morsel.ptr.num_rows
+                    # Handle constant-encoded StringVectors which do not have offsets/data
+                    if src_str._has_const:
+                        if src_str._const_is_null:
+                            # contributes no bytes
+                            continue
+                        total_string_bytes += <Py_ssize_t>src_str._const_value.length * current_rows
+                    else:
+                        if src_str.ptr != NULL and src_str.ptr.offsets != NULL:
+                            total_string_bytes += src_str.ptr.offsets[current_rows]
+                        else:
+                            # defensive: no bytes contributed
+                            continue
                 out_str = StringVector(<size_t> total_rows, <size_t> total_string_bytes)
                 row_offset = 0
                 string_offset = 0
@@ -714,17 +726,37 @@ cdef class Morsel:
                     morsel = <Morsel> morsel_obj
                     src_str = <StringVector> morsel.ptr.columns[i]
                     current_rows = morsel.ptr.num_rows
-                    current_bytes = src_str.ptr.offsets[current_rows]
-                    if current_bytes > 0 and src_str.ptr.data != NULL:
-                        memcpy(out_str.ptr.data + string_offset, src_str.ptr.data, current_bytes)
-                    for j in range(1, current_rows + 1):
-                        out_str.ptr.offsets[row_offset + j] = <int32_t> (
-                            string_offset + src_str.ptr.offsets[j]
-                        )
-                    if src_str.ptr.null_bitmap != NULL:
-                        if null_bitmap == NULL:
-                            null_bitmap = _allocate_valid_bitmap(total_rows)
-                        _copy_bits(src_str.ptr.null_bitmap, 0, null_bitmap, row_offset, current_rows)
+                    if src_str._has_const:
+                        if src_str._const_is_null:
+                            current_bytes = 0
+                        else:
+                            const_len = <Py_ssize_t> src_str._const_value.length
+                            current_bytes = const_len * current_rows
+                            if current_bytes > 0 and src_str._const_value.data != NULL:
+                                # copy repeated constant value for each row
+                                for k in range(current_rows):
+                                    memcpy(out_str.ptr.data + string_offset + k * const_len, src_str._const_value.data, const_len)
+                        # set offsets for each row
+                        for j in range(1, current_rows + 1):
+                            out_str.ptr.offsets[row_offset + j] = <int32_t>(string_offset + (<Py_ssize_t>j) * (0 if src_str._const_is_null else const_len))
+                        # handle constant nulls by clearing bits
+                        if src_str._const_is_null:
+                            if null_bitmap == NULL:
+                                null_bitmap = _allocate_valid_bitmap(total_rows)
+                            for k in range(current_rows):
+                                _bitmap_clear(null_bitmap, row_offset + k)
+                    else:
+                        current_bytes = src_str.ptr.offsets[current_rows] if src_str.ptr != NULL and src_str.ptr.offsets != NULL else 0
+                        if current_bytes > 0 and src_str.ptr.data != NULL:
+                            memcpy(out_str.ptr.data + string_offset, src_str.ptr.data, current_bytes)
+                        for j in range(1, current_rows + 1):
+                            out_str.ptr.offsets[row_offset + j] = <int32_t>(
+                                string_offset + src_str.ptr.offsets[j]
+                            )
+                        if src_str.ptr.null_bitmap != NULL:
+                            if null_bitmap == NULL:
+                                null_bitmap = _allocate_valid_bitmap(total_rows)
+                            _copy_bits(src_str.ptr.null_bitmap, 0, null_bitmap, row_offset, current_rows)
                     row_offset += current_rows
                     string_offset += current_bytes
                 out_str.ptr.null_bitmap = null_bitmap
