@@ -54,6 +54,27 @@ class build_ext(build_ext_orig):
     def build_extensions(self):
         if self.compiler and ".S" not in self.compiler.src_extensions:
             self.compiler.src_extensions.append(".S")
+
+        # Pre-compile yyjson.c as C code before C++ extensions need it
+        import subprocess
+        os.makedirs("build/temp", exist_ok=True)
+        yyjson_obj = "build/temp.yyjson.o"
+        yyjson_src = "third_party/yyjson/src/_yyjson.c"
+        if not os.path.exists(yyjson_obj) or os.path.getmtime(yyjson_src) > os.path.getmtime(yyjson_obj):
+            print(f"Pre-compiling {yyjson_src} to {yyjson_obj}")
+            result = subprocess.run([
+                "clang",
+                "-O3", "-std=c11",
+                "-Wno-unused-function",
+                "-Ithird_party/yyjson/src",
+                "-c", yyjson_src,
+                "-o", yyjson_obj
+            ], check=False, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"Error compiling yyjson: {result.stderr}")
+            else:
+                print(f"Successfully compiled yyjson to {yyjson_obj}")
+
         # libcurl is already built at module initialization time
         super().build_extensions()
 
@@ -333,7 +354,7 @@ include_dirs = [
     "third_party/fastfloat",
     "third_party/fastfloat/fast_float",
     "third_party/mabel/rugo/parquet",
-    "third_party/tktech/simdjson",
+    "third_party/yyjson/src",
     "third_party/re2",
     "third_party/cyan4973",
     "third_party/tdigest-c/src",
@@ -515,16 +536,14 @@ extensions = [
         extra_link_args=LD_EXTRA,
     ),
     Extension(
-        "opteryx.third_party.tktech.csimdjson",
+        "opteryx.third_party.yyjson.cyyjson",
         sources=[
-            "opteryx/third_party/tktech/csimdjson.pyx",
-            "third_party/tktech/simdjson/simdjson.cpp",
-            "src/cpp/simdjson_error_shim.cpp",
+            "opteryx/third_party/yyjson/cyyjson.pyx",
+            "third_party/yyjson/src/_yyjson.c",
         ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-        extra_link_args=LD_EXTRA,
+        include_dirs=include_dirs + ["third_party/yyjson/src"],
+        language="c",
+        extra_compile_args=C_FLAGS,
     ),
     Extension(
         "opteryx.third_party.facebook.zstd",
@@ -606,8 +625,7 @@ extensions = [
         sources=[
             "third_party/mabel/rugo/jsonl/jsonl_reader.pyx",
             "third_party/mabel/rugo/jsonl/decode.cpp",
-            "third_party/mabel/rugo/jsonl/simdjson_wrapper.cpp",
-            "third_party/tktech/simdjson/simdjson.cpp",
+            "third_party/mabel/rugo/jsonl/yyjson_wrapper.cpp",
             "src/cpp/simd_env.cpp",
             "src/cpp/cpu_features.cpp",
             "src/cpp/simd_search.cpp",
@@ -615,6 +633,7 @@ extensions = [
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
+        extra_objects=["build/temp.yyjson.o"] if os.path.exists("build/temp.yyjson.o") else [],
     ),
     # Draken core components
     make_draken_extension("interop.arrow", "interop/arrow.pyx"),
