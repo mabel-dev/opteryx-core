@@ -12,8 +12,11 @@ cdef bytes str_as_bytes(s):
     return s
 
 
+
+# Lazy wrappers: avoid converting whole document to Python objects until requested
+
 cdef object val_to_python(yyjson_val* val):
-    """Convert a yyjson value to a Python object."""
+    """Eager conversion helper used by as_py() when needed."""
     cdef const char* s
     cdef size_t length
 
@@ -36,11 +39,10 @@ cdef object val_to_python(yyjson_val* val):
     elif yyjson_is_obj(val):
         return obj_to_dict(val)
     else:
-        raise TypeError(f"Unknown yyjson value type")
+        raise TypeError("Unknown yyjson value type")
 
 
 cdef object arr_to_list(yyjson_val* arr):
-    """Convert a yyjson array to a Python list."""
     cdef list result = []
     cdef yyjson_arr_iter iter
     cdef yyjson_val* item
@@ -54,7 +56,6 @@ cdef object arr_to_list(yyjson_val* arr):
 
 
 cdef dict obj_to_dict(yyjson_val* obj):
-    """Convert a yyjson object to a Python dict."""
     cdef dict result = {}
     cdef yyjson_obj_iter iter
     cdef yyjson_val* key_val
@@ -72,58 +73,114 @@ cdef dict obj_to_dict(yyjson_val* obj):
     return result
 
 
+cdef class YYVal:
+    cdef yyjson_val* _val
+    cdef yyjson_doc* _doc
+
+    def __cinit__(self, yyjson_val* v, yyjson_doc* d):
+        self._val = v
+        self._doc = d
+
+    def as_py(self):
+        return val_to_python(self._val)
+
+    def as_list(self):
+        if not yyjson_is_arr(self._val):
+            raise TypeError("Not an array")
+        return arr_to_list(self._val)
+
+    def as_dict(self):
+        if not yyjson_is_obj(self._val):
+            raise TypeError("Not an object")
+        return obj_to_dict(self._val)
+
+    def get(self, key):
+        """Get object member by key (returns YYVal or None)."""
+        if not yyjson_is_obj(self._val):
+            raise TypeError("Not an object")
+        cdef yyjson_obj_iter iter = yyjson_obj_iter_with(self._val)
+        cdef yyjson_val* key_val = yyjson_obj_iter_next(&iter)
+        cdef const char* key_c
+        cdef size_t key_len
+        cdef object key_str
+        while key_val != NULL:
+            key_c = yyjson_get_str(key_val)
+            key_len = yyjson_get_len(key_val)
+            key_str = key_c[:key_len].decode('utf-8')
+            if key_str == key:
+                return YYVal(yyjson_obj_iter_get_val(key_val), self._doc)
+            key_val = yyjson_obj_iter_next(&iter)
+        return None
+
+    def __getitem__(self, idx):
+        if yyjson_is_arr(self._val):
+            cdef yyjson_arr_iter iter = yyjson_arr_iter_with(self._val)
+            cdef yyjson_val* item = yyjson_arr_iter_next(&iter)
+            cdef Py_ssize_t i = 0
+            while item != NULL:
+                if i == idx:
+                    return YYVal(item, self._doc)
+                i += 1
+                item = yyjson_arr_iter_next(&iter)
+            raise IndexError('index out of range')
+        elif yyjson_is_obj(self._val):
+            return self.get(idx)
+        else:
+            raise TypeError('value is not subscriptable')
+
+
+cdef class YYDoc:
+    cdef yyjson_doc* _doc
+    cdef yyjson_val* _root
+
+    def __cinit__(self, yyjson_doc* d):
+        self._doc = d
+        self._root = yyjson_doc_get_root(d)
+
+    def __dealloc__(self):
+        if self._doc != NULL:
+            yyjson_doc_free(self._doc)
+            self._doc = NULL
+
+    def root(self):
+        return YYVal(self._root, self._doc)
+
+    def get(self, key):
+        return self.root().get(key)
+
+    def as_py(self):
+        return val_to_python(self._root)
+
+    def dumps(self):
+        # For now, serialize by converting to Python and using json.dumps
+        import json
+        return json.dumps(self.as_py(), separators=(',', ':')).encode('utf-8')
+
+
 cdef class Parser:
-    """yyjson JSON parser wrapper."""
+    """yyjson JSON parser wrapper returning lazy YYDoc objects."""
 
     def parse(self, data, recursive=True):
-        """Parse JSON bytes/str to Python object.
-
-        Args:
-            data: JSON bytes or string
-            recursive: Ignored (kept for API compatibility)
-
-        Returns:
-            Parsed Python object
-
-        Raises:
-            ValueError: On JSON parse error
-        """
         cdef bytes json_bytes = str_as_bytes(data)
         cdef char* json_data
         cdef size_t json_len
         cdef yyjson_doc* doc
-        cdef yyjson_val* root
         cdef yyjson_read_err err
-        cdef object result
 
         PyBytes_AsStringAndSize(json_bytes, &json_data, <ssize_t*>&json_len)
 
-        # Parse with standard flags
         doc = yyjson_read_opts(json_data, json_len, 0, NULL, &err)
-
         if doc == NULL:
-            raise ValueError(f"yyjson parse error")
+            raise ValueError('yyjson parse error')
 
-        try:
-            root = yyjson_doc_get_root(doc)
-            if root == NULL:
-                raise ValueError("yyjson: failed to get root value")
-            result = val_to_python(root)
-        finally:
-            yyjson_doc_free(doc)
-
-        return result
+        return YYDoc(doc)
 
     def dump(self, obj):
-        """Serialize Python object to JSON bytes.
-
-        Args:
-            obj: Python object to serialize
-
-        Returns:
-            JSON bytes
-        """
-        # For now, fall back to stdlib json for serialization
-        # yyjson's mutable document API is more complex
+        # If given a YYDoc, serialize directly; otherwise fall back to json.dumps
+        try:
+            if isinstance(obj, YYDoc):
+                return obj.dumps()
+        except Exception:
+            pass
         import json
         return json.dumps(obj, separators=(',', ':')).encode('utf-8')
