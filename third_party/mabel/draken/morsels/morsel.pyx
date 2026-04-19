@@ -776,7 +776,8 @@ cdef class Morsel:
                         if src_str._const_is_null:
                             # contributes no bytes
                             continue
-                        total_string_bytes += <Py_ssize_t>src_str._const_value.length * current_rows
+                        if src_str._const_value != NULL:
+                            total_string_bytes += <Py_ssize_t>src_str._const_value.length * current_rows
                     else:
                         if src_str.ptr != NULL and src_str.ptr.offsets != NULL:
                             total_string_bytes += src_str.ptr.offsets[current_rows]
@@ -787,6 +788,7 @@ cdef class Morsel:
                 row_offset = 0
                 string_offset = 0
                 null_bitmap = NULL
+                const_len = 0
                 out_str.ptr.offsets[0] = 0
                 for morsel_obj in morsels:
                     morsel = <Morsel> morsel_obj
@@ -795,9 +797,11 @@ cdef class Morsel:
                     if src_str._has_const:
                         if src_str._const_is_null:
                             current_bytes = 0
-                        else:
+                        elif src_str._const_value != NULL:
                             const_len = <Py_ssize_t> src_str._const_value.length
                             current_bytes = const_len * current_rows
+                        else:
+                            current_bytes = 0
                             if current_bytes > 0 and src_str._const_value.data != NULL:
                                 # copy repeated constant value for each row
                                 for k in range(current_rows):
