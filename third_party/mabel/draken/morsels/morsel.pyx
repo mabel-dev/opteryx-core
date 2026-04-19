@@ -1414,7 +1414,7 @@ cdef class Morsel:
                 right_bytes = 0
 
                 if left_str._has_const:
-                    if not left_str._const_is_null:
+                    if not left_str._const_is_null and left_str._const_value != NULL:
                         const_len = <Py_ssize_t>left_str._const_value.length
                         left_bytes = const_len * left_rows
                 else:
@@ -1422,7 +1422,7 @@ cdef class Morsel:
                         left_bytes = <Py_ssize_t>left_str.ptr.offsets[left_rows]
 
                 if right_str._has_const:
-                    if not right_str._const_is_null:
+                    if not right_str._const_is_null and right_str._const_value != NULL:
                         const_len = <Py_ssize_t>right_str._const_value.length
                         right_bytes = const_len * right_rows
                 else:
