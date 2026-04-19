@@ -152,9 +152,8 @@ cdef class YYDoc:
         return val_to_python(self._root)
 
     def dumps(self):
-        # For now, serialize by converting to Python and using json.dumps
-        import json
-        return json.dumps(self.as_py(), separators=(',', ':')).encode('utf-8')
+        # Not implemented: avoid silent fallback to stdlib json.
+        raise NotImplementedError("YYDoc.dumps is not implemented. Use a yyjson-based writer or convert to Python objects and serialize with json.dumps")
 
 
 cdef class Parser:
@@ -171,16 +170,10 @@ cdef class Parser:
 
         doc = yyjson_read_opts(json_data, json_len, 0, NULL, &err)
         if doc == NULL:
-            raise ValueError('yyjson parse error')
+            raise ValueError('json parse error')
 
         return YYDoc(doc)
 
     def dump(self, obj):
-        # If given a YYDoc, serialize directly; otherwise fall back to json.dumps
-        try:
-            if isinstance(obj, YYDoc):
-                return obj.dumps()
-        except Exception:
-            pass
-        import json
-        return json.dumps(obj, separators=(',', ':')).encode('utf-8')
+        if isinstance(obj, YYDoc):
+            return obj.dumps()
