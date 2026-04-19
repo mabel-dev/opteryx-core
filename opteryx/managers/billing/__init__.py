@@ -2,7 +2,7 @@ import datetime
 import os
 from enum import Enum
 
-from opteryx.utils.json_compat import dumps as json_dumps
+from opteryx.third_party.yyjson import dumps as json_dumps
 
 
 class BillingEventType(Enum):

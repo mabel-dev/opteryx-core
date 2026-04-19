@@ -3,11 +3,12 @@
 
 from cpython.bytes cimport PyBytes_AsStringAndSize
 
-from cyyjson cimport *
+from .cyyjson cimport *
 
 cdef bytes str_as_bytes(s):
-    if isinstance(s, unicode):
-        return (<unicode>s).encode('utf-8')
+    # Accept both bytes and str; avoid Python 2 'unicode' name
+    if isinstance(s, str):
+        return s.encode('utf-8')
     return s
 
 

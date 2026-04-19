@@ -122,7 +122,7 @@ cdef class Node:
         """
         Return a JSON representation of the node's properties, including node_type and uuid.
         """
-        from opteryx.utils.json_compat import dumps as json_dumps
+        from opteryx.third_party.yyjson import dumps as json_dumps
         return json_dumps(self.properties, default=str).decode('utf-8')
 
     def __repr__(self):
