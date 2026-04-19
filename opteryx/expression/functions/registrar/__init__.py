@@ -231,6 +231,10 @@ def get_builtin_functions() -> list[FunctionDefinition]:
     # Collect from each domain getter. Domain modules should implement these
     # functions (or alias them) to return lists of FunctionDefinition objects.
     functions.extend(_text.get_builtin_text_functions())
+    # Extended text functions (regex, split, replace, etc.) were historically
+    # collected here as well. Add them so functions like REGEXP_REPLACE are
+    # available to the SQL engine.
+    functions.extend(_text.get_builtin_text_extended_functions())
     functions.extend(_arith.get_builtin_arithmetic_functions())
     functions.extend(_arith.get_builtin_arithmetic_extended_functions())
     functions.extend(_logical.get_builtin_logical_functions())
