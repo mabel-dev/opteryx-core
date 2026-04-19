@@ -263,7 +263,7 @@ cdef void _concat_string_buffers(
     # Copy left data
     if left_vec._has_const and not left_vec._const_is_null and left_vec._const_value != NULL:
         const_len = <Py_ssize_t>left_vec._const_value.length
-        if const_len > 0 and left_vec._const_value.data != NULL:
+        if const_len > 0 and left_vec._const_value.data != NULL and out_ptr.data != NULL:
             for k in range(left_rows):
                 memcpy(out_ptr.data + k * const_len, left_vec._const_value.data, const_len)
     elif left_bytes > 0 and left_ptr != NULL and left_ptr.data != NULL:
@@ -272,13 +272,15 @@ cdef void _concat_string_buffers(
     # Copy right data
     if right_vec._has_const and not right_vec._const_is_null and right_vec._const_value != NULL:
         const_len = <Py_ssize_t>right_vec._const_value.length
-        if const_len > 0 and right_vec._const_value.data != NULL:
+        if const_len > 0 and right_vec._const_value.data != NULL and out_ptr.data != NULL:
             for k in range(right_rows):
                 memcpy(out_ptr.data + left_bytes + k * const_len, right_vec._const_value.data, const_len)
     elif right_bytes > 0 and right_ptr != NULL and right_ptr.data != NULL:
         memcpy(out_ptr.data + left_bytes, right_ptr.data, right_bytes)
 
     # Set offsets for left side
+    if out_ptr == NULL or out_ptr.offsets == NULL:
+        raise RuntimeError("Output StringVector not properly initialized")
     out_ptr.offsets[0] = 0
     if left_vec._has_const:
         const_len = 0 if (left_vec._const_is_null or left_vec._const_value == NULL) else <Py_ssize_t>left_vec._const_value.length
