@@ -7,7 +7,7 @@ def json_path_exists(arr, value):
     Returns BoolVector to match registrar expectations.
     """
     from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
-    from opteryx.third_party.tktech import csimdjson as simdjson
+    from opteryx.third_party import yyjson
 
     # Convert to list of strings for processing
     if hasattr(arr, "tolist"):
@@ -15,7 +15,7 @@ def json_path_exists(arr, value):
     elif not isinstance(arr, (list, tuple)):
         arr = list(arr)
 
-    parser = simdjson.Parser()
+    parser = yyjson.Parser()
 
     if not value.startswith("$."):
         # Not a JSONPath, treat as a simple key existence check

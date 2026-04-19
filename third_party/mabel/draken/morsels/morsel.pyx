@@ -786,6 +786,12 @@ cdef class Morsel:
                         else:
                             # defensive: no bytes contributed
                             continue
+                # StringVector offsets are int32_t, max value ~2.1GB
+                # DEBUG: log total_string_bytes
+                import sys
+                print(f"DEBUG: combine() creating StringVector: total_rows={total_rows}, total_string_bytes={total_string_bytes}", file=sys.stderr, flush=True)
+                if total_string_bytes > 2147483647:
+                    raise MemoryError(f"StringVector buffer size {total_string_bytes} bytes exceeds int32_t maximum (2.1GB)")
                 out_str = StringVector(<size_t> total_rows, <size_t> total_string_bytes)
                 row_offset = 0
                 string_offset = 0
