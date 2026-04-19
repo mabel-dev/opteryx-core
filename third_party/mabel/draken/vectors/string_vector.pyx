@@ -1977,11 +1977,14 @@ cdef class StringVector(Vector):
         cdef uint8_t[::1] dictionary_arena_view
 
         if self._has_const:
-            return StringVector.from_constant(
-                None if self._const_is_null else PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length),
-                n,
-                is_null=self._const_is_null,
-            )
+            if self._const_is_null or self._const_value == NULL or self._const_value.data == NULL:
+                return StringVector.from_constant(None, n, is_null=True)
+            else:
+                return StringVector.from_constant(
+                    PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length),
+                    n,
+                    is_null=False,
+                )
 
         for i in range(n):
             src_idx = indices[i]
