@@ -602,6 +602,9 @@ cdef class StringVector(Vector):
             )
 
         cdef DrakenVarBuffer* ptr = self.ptr
+        if ptr == NULL:
+            # Defensive: empty vector
+            return pa.array([], type=pa.binary())
         cdef size_t n = ptr.length
 
         # Data buffer: all the concatenated string bytes
