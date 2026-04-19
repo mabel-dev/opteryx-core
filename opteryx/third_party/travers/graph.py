@@ -24,7 +24,7 @@ from typing import Optional
 from typing import Tuple
 
 from opteryx.exceptions import MissingDependencyError
-from opteryx.utils.json_compat import dumps as json_dumps
+from opteryx.third_party.yyjson import dumps as json_dumps
 
 
 def print_tree_inner(

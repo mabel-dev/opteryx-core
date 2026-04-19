@@ -6,7 +6,7 @@ yyjson provides fast JSON parsing and writing with a single vendored library.
 
 import json
 
-from opteryx.third_party.tktech.cyyjson import Parser
+from opteryx.third_party.yyjson.cyyjson import Parser
 
 _yyjson_parser = Parser()
 

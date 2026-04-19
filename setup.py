@@ -57,19 +57,30 @@ class build_ext(build_ext_orig):
 
         # Pre-compile yyjson.c as C code before C++ extensions need it
         import subprocess
+
         os.makedirs("build/temp", exist_ok=True)
         yyjson_obj = "build/temp.yyjson.o"
-        yyjson_src = "third_party/yyjson/src/_yyjson.c"
-        if not os.path.exists(yyjson_obj) or os.path.getmtime(yyjson_src) > os.path.getmtime(yyjson_obj):
+        yyjson_src = "third_party/yyjson/src/yyjson.c"
+        if not os.path.exists(yyjson_obj) or os.path.getmtime(yyjson_src) > os.path.getmtime(
+            yyjson_obj
+        ):
             print(f"Pre-compiling {yyjson_src} to {yyjson_obj}")
-            result = subprocess.run([
-                "clang",
-                "-O3", "-std=c11",
-                "-Wno-unused-function",
-                "-Ithird_party/yyjson/src",
-                "-c", yyjson_src,
-                "-o", yyjson_obj
-            ], check=False, capture_output=True, text=True)
+            result = subprocess.run(
+                [
+                    "clang",
+                    "-O3",
+                    "-std=c11",
+                    "-Wno-unused-function",
+                    "-Ithird_party/yyjson/src",
+                    "-c",
+                    yyjson_src,
+                    "-o",
+                    yyjson_obj,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
             if result.returncode != 0:
                 print(f"Error compiling yyjson: {result.stderr}")
             else:
@@ -539,7 +550,7 @@ extensions = [
         "opteryx.third_party.yyjson.cyyjson",
         sources=[
             "opteryx/third_party/yyjson/cyyjson.pyx",
-            "third_party/yyjson/src/_yyjson.c",
+            "third_party/yyjson/src/yyjson.c",
         ],
         include_dirs=include_dirs + ["third_party/yyjson/src"],
         language="c",
