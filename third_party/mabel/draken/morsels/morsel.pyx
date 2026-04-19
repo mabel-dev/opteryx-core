@@ -236,29 +236,95 @@ cdef void _concat_string_buffers(
     cdef DrakenVarBuffer* out_ptr = out_vec.ptr
     cdef DrakenVarBuffer* left_ptr = left_vec.ptr
     cdef DrakenVarBuffer* right_ptr = right_vec.ptr
-    cdef Py_ssize_t i
-    cdef Py_ssize_t left_bytes = <Py_ssize_t>left_ptr.offsets[left_rows]
-    cdef Py_ssize_t right_bytes = <Py_ssize_t>right_ptr.offsets[right_rows]
+    cdef Py_ssize_t i, j, k
+    cdef Py_ssize_t left_bytes = 0
+    cdef Py_ssize_t right_bytes = 0
+    cdef Py_ssize_t const_len
+    cdef uint8_t* null_bitmap = NULL
 
-    if left_bytes > 0 and left_ptr.data != NULL:
+    # Calculate left_bytes, handling constant and NULL vectors
+    if left_vec._has_const:
+        if not left_vec._const_is_null and left_vec._const_value != NULL:
+            const_len = <Py_ssize_t>left_vec._const_value.length
+            left_bytes = const_len * left_rows
+    else:
+        if left_ptr != NULL and left_ptr.offsets != NULL:
+            left_bytes = <Py_ssize_t>left_ptr.offsets[left_rows]
+
+    # Calculate right_bytes, handling constant and NULL vectors
+    if right_vec._has_const:
+        if not right_vec._const_is_null and right_vec._const_value != NULL:
+            const_len = <Py_ssize_t>right_vec._const_value.length
+            right_bytes = const_len * right_rows
+    else:
+        if right_ptr != NULL and right_ptr.offsets != NULL:
+            right_bytes = <Py_ssize_t>right_ptr.offsets[right_rows]
+
+    # Copy left data
+    if left_vec._has_const and not left_vec._const_is_null and left_vec._const_value != NULL:
+        const_len = <Py_ssize_t>left_vec._const_value.length
+        if const_len > 0 and left_vec._const_value.data != NULL:
+            for k in range(left_rows):
+                memcpy(out_ptr.data + k * const_len, left_vec._const_value.data, const_len)
+    elif left_bytes > 0 and left_ptr.data != NULL:
         memcpy(out_ptr.data, left_ptr.data, left_bytes)
-    if right_bytes > 0 and right_ptr.data != NULL:
+
+    # Copy right data
+    if right_vec._has_const and not right_vec._const_is_null and right_vec._const_value != NULL:
+        const_len = <Py_ssize_t>right_vec._const_value.length
+        if const_len > 0 and right_vec._const_value.data != NULL:
+            for k in range(right_rows):
+                memcpy(out_ptr.data + left_bytes + k * const_len, right_vec._const_value.data, const_len)
+    elif right_bytes > 0 and right_ptr.data != NULL:
         memcpy(out_ptr.data + left_bytes, right_ptr.data, right_bytes)
 
+    # Set offsets for left side
     out_ptr.offsets[0] = 0
-    for i in range(1, left_rows + 1):
-        out_ptr.offsets[i] = left_ptr.offsets[i]
-    for i in range(1, right_rows + 1):
-        out_ptr.offsets[left_rows + i] = <int32_t>(left_bytes + right_ptr.offsets[i])
+    if left_vec._has_const:
+        const_len = 0 if (left_vec._const_is_null or left_vec._const_value == NULL) else <Py_ssize_t>left_vec._const_value.length
+        for j in range(1, left_rows + 1):
+            out_ptr.offsets[j] = <int32_t>((<Py_ssize_t>j) * const_len)
+    else:
+        if left_ptr != NULL and left_ptr.offsets != NULL:
+            for j in range(1, left_rows + 1):
+                out_ptr.offsets[j] = left_ptr.offsets[j]
 
-    out_ptr.null_bitmap = _merge_null_bitmaps(
-        left_ptr.null_bitmap,
-        0,
-        left_rows,
-        right_ptr.null_bitmap,
-        0,
-        right_rows,
-    )
+    # Set offsets for right side
+    if right_vec._has_const:
+        const_len = 0 if (right_vec._const_is_null or right_vec._const_value == NULL) else <Py_ssize_t>right_vec._const_value.length
+        for j in range(1, right_rows + 1):
+            out_ptr.offsets[left_rows + j] = <int32_t>(left_bytes + ((<Py_ssize_t>j) * const_len))
+    else:
+        if right_ptr != NULL and right_ptr.offsets != NULL:
+            for j in range(1, right_rows + 1):
+                out_ptr.offsets[left_rows + j] = <int32_t>(left_bytes + right_ptr.offsets[j])
+
+    # Handle null bitmaps
+    if left_vec._has_const and left_vec._const_is_null:
+        if null_bitmap == NULL:
+            null_bitmap = _allocate_valid_bitmap(left_rows + right_rows)
+        for k in range(left_rows):
+            _bitmap_clear(null_bitmap, k)
+
+    if right_vec._has_const and right_vec._const_is_null:
+        if null_bitmap == NULL:
+            null_bitmap = _allocate_valid_bitmap(left_rows + right_rows)
+        for k in range(right_rows):
+            _bitmap_clear(null_bitmap, left_rows + k)
+
+    if not (left_vec._has_const):
+        if left_ptr != NULL and left_ptr.null_bitmap != NULL:
+            if null_bitmap == NULL:
+                null_bitmap = _allocate_valid_bitmap(left_rows + right_rows)
+            _copy_bits(left_ptr.null_bitmap, 0, null_bitmap, 0, left_rows)
+
+    if not (right_vec._has_const):
+        if right_ptr != NULL and right_ptr.null_bitmap != NULL:
+            if null_bitmap == NULL:
+                null_bitmap = _allocate_valid_bitmap(left_rows + right_rows)
+            _copy_bits(right_ptr.null_bitmap, 0, null_bitmap, left_rows, right_rows)
+
+    out_ptr.null_bitmap = null_bitmap
 
 
 cdef uint8_t* _allocate_valid_bitmap(Py_ssize_t total_rows) except NULL:
@@ -1201,7 +1267,12 @@ cdef class Morsel:
         cdef TimestampVector out_ts
         cdef IntervalVector out_interval
         cdef StringVector out_str
+        cdef StringVector left_str
+        cdef StringVector right_str
         cdef Py_ssize_t total_string_bytes
+        cdef Py_ssize_t left_bytes
+        cdef Py_ssize_t right_bytes
+        cdef Py_ssize_t const_len
 
         if other is None:
             return
@@ -1336,15 +1407,34 @@ cdef class Morsel:
                 new_vec = <Vector>out_interval
 
             elif isinstance(left_vec, StringVector) and isinstance(right_vec, StringVector):
-                total_string_bytes = (
-                    (<StringVector>left_vec).ptr.offsets[left_rows]
-                    + (<StringVector>right_vec).ptr.offsets[right_rows]
-                )
+                # Safely calculate total_string_bytes, handling constant and NULL vectors
+                left_str = <StringVector>left_vec
+                right_str = <StringVector>right_vec
+                left_bytes = 0
+                right_bytes = 0
+
+                if left_str._has_const:
+                    if not left_str._const_is_null:
+                        const_len = <Py_ssize_t>left_str._const_value.length
+                        left_bytes = const_len * left_rows
+                else:
+                    if left_str.ptr != NULL and left_str.ptr.offsets != NULL:
+                        left_bytes = <Py_ssize_t>left_str.ptr.offsets[left_rows]
+
+                if right_str._has_const:
+                    if not right_str._const_is_null:
+                        const_len = <Py_ssize_t>right_str._const_value.length
+                        right_bytes = const_len * right_rows
+                else:
+                    if right_str.ptr != NULL and right_str.ptr.offsets != NULL:
+                        right_bytes = <Py_ssize_t>right_str.ptr.offsets[right_rows]
+
+                total_string_bytes = left_bytes + right_bytes
                 out_str = StringVector(<size_t>total_rows, <size_t>total_string_bytes)
                 _concat_string_buffers(
                     out_str,
-                    <StringVector>left_vec,
-                    <StringVector>right_vec,
+                    left_str,
+                    right_str,
                     left_rows,
                     right_rows,
                 )
