@@ -13,7 +13,7 @@ from opteryx.compiled.draken.vectors.array_vector cimport ArrayVector
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.vectors.string_vector cimport StringVector
 from opteryx.compiled.draken.vectors.string_vector cimport StringVectorBuilder
-from opteryx.third_party.tktech import csimdjson as simdjson
+from opteryx.third_party import yyjson
 
 
 cpdef list vector_get_element(ArrayVector vec, int key):
@@ -158,7 +158,7 @@ cpdef StringVector vector_json_extract_text(StringVector docs, bytes key):
         else:
             doc_bytes = <bytes>doc
 
-        parser = simdjson.Parser()
+        parser = yyjson.Parser()
         try:
             value = parser.parse(doc_bytes).get(key)  # type: ignore
         except ValueError as err:
@@ -211,7 +211,7 @@ cpdef list vector_json_extract_variant(StringVector docs, bytes key):
         else:
             doc_bytes = <bytes>doc
 
-        parser = simdjson.Parser()
+        parser = yyjson.Parser()
         try:
             value = parser.parse(doc_bytes).get(key)  # type: ignore
         except ValueError as err:

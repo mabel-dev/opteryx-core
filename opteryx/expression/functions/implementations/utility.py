@@ -19,7 +19,7 @@ Includes:
 
 import math
 
-from opteryx.third_party.tktech import csimdjson as simdjson
+from opteryx.third_party import yyjson
 from opteryx.vectors.embeddings import embed_text_matrix, embed_text_values, get_embedding_provider
 
 # ============================================================================
@@ -305,7 +305,7 @@ def jsonb_object_keys(arr):
         for row in arr:
             result.append([str(key) for key in row.keys()])
     elif isinstance(first_elem, (str, bytes)):
-        parser = simdjson.Parser()
+        parser = yyjson.Parser()
         for row in arr:
             result.append([str(key) for key in parser.parse(row).keys()])
     else:

@@ -18,9 +18,9 @@ def _json_at_question(left, right):
     Returns:
         BoolVector with True where path exists, None where doc is None
     """
-    from opteryx.third_party.tktech import csimdjson as simdjson
+    from opteryx.third_party import yyjson
 
-    parser = simdjson.Parser()
+    parser = yyjson.Parser()
     path = right
     n = len(left)
 

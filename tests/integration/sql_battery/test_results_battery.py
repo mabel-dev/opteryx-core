@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-import orjson
+from opteryx.third_party import yyjson as orjson
 
 import opteryx
 from opteryx.utils.formatter import format_sql

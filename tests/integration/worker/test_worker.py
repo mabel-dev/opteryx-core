@@ -12,7 +12,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 sys.path.insert(1, os.path.join(sys.path[0], "../../../../pyiceberg-firestore-gcs"))
 sys.path.insert(1, os.path.join(sys.path[0], "../../../../opteryx-catalog"))
 
-import orjson
+from opteryx.third_party import yyjson as orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
 from opteryx.compiled.draken.morsels.morsel import Morsel
