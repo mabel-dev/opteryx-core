@@ -522,6 +522,7 @@ def _inner_evaluate(root: Node, table):
             # zero parameter functions get the number of rows as the parameter
             if len(parameters) == 0:
                 parameters = [table.num_rows]
+
             result = apply_bounded_function(root, *parameters)
             # Normalize function outputs to Draken vectors for morsel compatibility.
             from opteryx.utils.vector_types import is_draken_vector

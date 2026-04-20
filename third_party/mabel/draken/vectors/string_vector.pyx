@@ -3131,6 +3131,16 @@ cpdef StringVector uppercase(StringVector input):
     Return a new StringVector with all non-null values uppercased.
     Uses SIMD operations on the entire data buffer for maximum performance.
     """
+    # Handle constant-encoded vectors: they have NULL offsets, so materialize first
+    if input._has_const or input.ptr.offsets == NULL:
+        builder = StringVectorBuilder.with_estimate(len(input), 16)
+        for val in input.to_pylist():
+            if val is None:
+                builder.append_null()
+            else:
+                builder.append(val.upper())
+        return builder.finish()
+
     cdef DrakenVarBuffer* in_ptr = input.ptr
     cdef Py_ssize_t n = in_ptr.length
     cdef int32_t total_bytes = in_ptr.offsets[n]
@@ -3168,6 +3178,16 @@ cpdef StringVector lowercase(StringVector input):
     Return a new StringVector with all non-null values lowercased.
     Uses SIMD operations on the entire data buffer for maximum performance.
     """
+    # Handle constant-encoded vectors: they have NULL offsets, so materialize first
+    if input._has_const or input.ptr.offsets == NULL:
+        builder = StringVectorBuilder.with_estimate(len(input), 16)
+        for val in input.to_pylist():
+            if val is None:
+                builder.append_null()
+            else:
+                builder.append(val.lower())
+        return builder.finish()
+
     cdef DrakenVarBuffer* in_ptr = input.ptr
     cdef Py_ssize_t n = in_ptr.length
     cdef int32_t total_bytes = in_ptr.offsets[n]
