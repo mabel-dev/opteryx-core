@@ -1,3 +1,0 @@
-dependencies:
-  - name: "abseil/abseil-cpp"
-    version: "20240722.0"  # Use the current version you're on

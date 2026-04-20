@@ -48,9 +48,9 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             if isinstance(node.relation_names[1], list)
             else [node.relation_names[1]]
         )
-    if not node.left_readers and len(node.readers) >= 2:
+    if node.left_readers is None and node.readers and len(node.readers) >= 2:
         node.left_readers = node.readers[0]
-    if not node.right_readers and len(node.readers) >= 2:
+    if node.right_readers is None and node.readers and len(node.readers) >= 2:
         node.right_readers = node.readers[1]
 
     if node.type == "cross join" and node.implied_join:
