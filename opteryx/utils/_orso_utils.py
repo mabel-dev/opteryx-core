@@ -31,17 +31,11 @@ F = TypeVar("F", bound=Callable[..., Any])
 def random_string(length: int = 8, charset: str = None) -> str:
     """Generate a random alphanumeric string.
 
-    This will prefer a compiled PCG-based implementation when available for
-    better throughput. Falls back to Python's random.choice when not compiled.
+    Uses the compiled PCG-based implementation for best performance. This
+    function does not fall back — importing the compiled helper is required.
     """
-    try:
-        # Use compiled helper when available
-        from opteryx.compiled.utils.random_helper import random_string_c
-        return random_string_c(length, charset)
-    except Exception:
-        if charset is None:
-            charset = string.ascii_letters + string.digits
-        return "".join(random.choice(charset) for _ in range(length))
+    from opteryx.compiled.utils.random_helper import random_string_c
+    return random_string_c(length, charset)
 
 
 def random_int(min_value: int = 0, max_value: int = 2**31 - 1) -> int:
