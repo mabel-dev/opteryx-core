@@ -38,7 +38,6 @@ from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.draken.morsels.align import align_tables_pyarray
 from opteryx.compiled.morsel_ops.null_filter cimport non_null_row_indices
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.third_party.abseil.containers cimport FlatHashMap
 from opteryx.models import QueryProperties
 
 from opteryx import EOS, EMPTY
@@ -62,8 +61,8 @@ cpdef CarcharJoinIndexWrapper _build_probe_hash_map(Morsel morsel, list join_col
     return ht
 
 
-cpdef FlatHashMap _build_side_hash_map(Morsel morsel, list join_columns):
-    cdef FlatHashMap ht = FlatHashMap()
+cpdef CarcharJoinIndexWrapper _build_side_hash_map(Morsel morsel, list join_columns):
+    cdef CarcharJoinIndexWrapper ht = CarcharJoinIndexWrapper()
     cdef Int64Vector non_null_indices_vec = non_null_row_indices(morsel, join_columns)
     cdef const int64_t* non_null_ptr = <const int64_t*>non_null_indices_vec.dense_ptr()
     cdef Py_ssize_t n_non_null = len(non_null_indices_vec)
@@ -72,7 +71,7 @@ cpdef FlatHashMap _build_side_hash_map(Morsel morsel, list join_columns):
 
     for i in range(n_non_null):
         row_idx = non_null_ptr[i]
-        ht.insert(row_hashes[row_idx], row_idx)
+        ht.insert_row(row_hashes[row_idx], row_idx)
 
     return ht
 

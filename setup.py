@@ -361,7 +361,6 @@ include_dirs = [
     "third_party/mabel/draken",
     "third_party/mabel/carchar",
     "third_party/mabel/parvi",
-    "third_party/abseil",
     "third_party/fastfloat",
     "third_party/fastfloat/fast_float",
     "third_party/mabel/rugo/parquet",
@@ -483,22 +482,6 @@ if not is_mac():
 # Define all extensions
 extensions = [
     # Third-party libraries
-    Extension(
-        "opteryx.third_party.abseil.containers",
-        sources=[
-            "opteryx/third_party/abseil/containers.pyx",
-            "src/cpp/abseil_instantiations.cpp",
-            "third_party/abseil/absl/hash/internal/hash.cc",
-            "third_party/abseil/absl/hash/internal/city.cc",
-            "third_party/abseil/absl/container/internal/raw_hash_set.cc",
-            "third_party/abseil/absl/hash/internal/low_level_hash.cc",
-            "third_party/abseil/absl/base/internal/raw_logging.cc",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-        extra_link_args=LD_EXTRA,
-    ),
     Extension(
         "opteryx.third_party.mabel.base64",
         sources=[
@@ -858,9 +841,6 @@ extensions = [
         sources=[
             "opteryx/compiled/structures/buffers.pyx",
             "src/cpp/intbuffer.cpp",
-            # join kernels are tightly coupled with the buffer implementation
-            # build them into the same module so symbols are available at runtime
-            "src/cpp/join_kernels.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",
@@ -1248,7 +1228,6 @@ extensions.extend(
             "opteryx.compiled.joins.join_definitions",
             sources=[
                 "opteryx/compiled/joins/joins.pyx",
-                "src/cpp/join_kernels.cpp",
                 "src/cpp/intbuffer.cpp",
                 "src/cpp/cpu_features.cpp",
             ],
