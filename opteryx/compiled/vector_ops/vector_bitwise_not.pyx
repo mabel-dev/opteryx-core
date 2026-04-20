@@ -1,0 +1,74 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+
+"""
+Vectorized bitwise NOT operation for Int64Vectors.
+
+This module implements bitwise NOT (one's complement) on Int64Vector elements:
+- Inverts all bits of each element
+- Propagates NULLs explicitly (NULL input → NULL output)
+- Uses static dispatch with explicit specialization
+- Releases the GIL as early as possible
+
+Note: This module is part of the bitwise operations family.
+See: vector_bitwise_or.pyx, vector_bitwise_and.pyx, vector_bitwise_xor.pyx,
+     vector_bitwise_shift_left.pyx, vector_bitwise_shift_right.pyx
+"""
+
+from libc.stdint cimport int64_t, uint8_t
+from libc.stdlib cimport malloc, free
+from libc.string cimport memcpy
+
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.compiled.draken.interop.vector_sequence cimport vector_from_sequence
+
+
+cpdef object vector_bitwise_not(Int64Vector operand):
+    """Bitwise NOT (complement) an Int64Vector element-wise.
+
+    Performs bitwise NOT on each element: inverts all bits.
+    NULL propagates from the input (any NULL → NULL output).
+
+    Parameters:
+        operand: Int64Vector operand.
+
+    Returns:
+        Int64Vector with bitwise NOT result.
+
+    Example:
+        >>> ~1  (00...01) → ~1 = -2 (11...10 in two's complement)
+        >>> ~-1 (11...11) → ~(-1) = 0 (00...00 in two's complement)
+
+    Note:
+        Python's ~ operator on integers implements two's complement NOT.
+        The result follows Python semantics: ~x = -x - 1
+    """
+    cdef DrakenFixedBuffer* op = operand.ptr
+    cdef Py_ssize_t n = op.length
+
+    # Handle constant-encoded vector: data buffer is not materialised; use the
+    # stored scalar and return another constant vector.
+    if operand._has_const:
+        if operand._const_is_null:
+            return Int64Vector.from_constant(None, n, is_null=True)
+        return Int64Vector.from_constant(~operand._const_value, n)
+
+    cdef int64_t* op_data = <int64_t*>op.data
+    cdef uint8_t* op_null = op.null_bitmap
+
+    cdef list result = []
+    cdef Py_ssize_t i
+
+    for i in range(n):
+        if _is_null(op_null, i):
+            result.append(None)
+        else:
+            result.append(~op_data[i])
+
+    return vector_from_sequence(result)

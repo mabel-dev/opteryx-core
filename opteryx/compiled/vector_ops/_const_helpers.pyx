@@ -12,6 +12,12 @@ cdef inline ConstAccessor* _constant_string_accessor(StringVector vec) noexcept:
     return vec.const_accessor()
 
 
+cdef inline bint _is_null(uint8_t* null_bitmap, Py_ssize_t idx) noexcept:
+    """Check if element at idx is NULL in Draken null bitmap (bit=1 valid, bit=0 null)."""
+    if null_bitmap == NULL:
+        return False
+    return not ((null_bitmap[idx >> 3] >> (idx & 7)) & 1)
+
 cdef inline bint _constant_string_value(
     StringVector vec,
     const uint8_t** data_ptr,
