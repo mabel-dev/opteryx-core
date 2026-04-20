@@ -282,17 +282,12 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         and root.schema_column.type != OrsoTypes.INTERVAL
     ):
         table = no_table_data.read()
-        try:
-            result = evaluate(root, table)[0]
-            if is_draken_vector(result):
-                extracted = result.to_pylist()[0]
-                result = extracted if extracted is not None else None
-            telemetry.optimization_constant_fold_expression += 1
-            return build_literal_node(result, root, root.schema_column.type)
-        except Exception as e:
-            import sys
-            print(f"DEBUG: Evaluation failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-            return root
+        result = evaluate(root, table)[0]
+        if is_draken_vector(result):
+            extracted = result.to_pylist()[0]
+            result = extracted if extracted is not None else None
+        telemetry.optimization_constant_fold_expression += 1
+        return build_literal_node(result, root, root.schema_column.type)
 
     return root
 

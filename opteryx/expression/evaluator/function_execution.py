@@ -1,8 +1,4 @@
-"""Function execution helpers for the expression evaluator.
-
-Updated to keep null handling explicit and avoid NumPy-style coercion in the
-compression path while preserving the existing kernel execution contract.
-"""
+"""Function execution helpers for the expression evaluator."""
 
 from typing import Any
 
@@ -33,15 +29,6 @@ def _coerce_param_for_draken(p):
     )
 
 
-def _normalize_null_policy(null_policy: str) -> str:
-    """Normalize old null_policy labels to their new semantic equivalents."""
-    if null_policy == "strict":
-        return "compress"
-    if null_policy == "custom":
-        return "bypass"
-    if null_policy == "passthrough":
-        return "passthru"
-    return null_policy
 
 
 def apply_bounded_function(node, *parameters) -> Any:
@@ -62,44 +49,6 @@ def apply_bounded_function(node, *parameters) -> Any:
             function=node.value,
         )
 
-    null_policy = _normalize_null_policy(kernel.null_policy)
-
-    compressed = False
-    valid_positions = ()
-    morsel_size = 0
-    if (
-        null_policy == "compress"
-        and len(parameters) > 0
-        and not isinstance(parameters[0], int)
-        and all(hasattr(arr, "ndim") and arr.ndim == 1 for arr in parameters)
-    ):
-        morsel_size = len(parameters[0])
-        null_positions = None
-
-        for arr in parameters:
-            if not hasattr(arr, "is_null"):
-                continue
-
-            arr_nulls = arr.is_null()
-            if not hasattr(arr_nulls, "__len__"):
-                raise FunctionExecutionError(
-                    message=(
-                        "Function compression requires null-aware vector inputs; "
-                        f"received unsupported null result from {type(arr).__name__}."
-                    ),
-                    function=node.value,
-                )
-
-            null_positions = arr_nulls if null_positions is None else null_positions | arr_nulls
-
-        if null_positions is not None and null_positions.all():
-            return [None] * morsel_size
-
-        if null_positions is not None and null_positions.any():
-            valid_positions = ~null_positions
-            parameters = tuple(arr.compress(valid_positions) for arr in parameters)
-            compressed = True
-
     if engine == "draken":
         parameters = tuple(_coerce_param_for_draken(p) for p in parameters)
     else:
@@ -111,21 +60,7 @@ def apply_bounded_function(node, *parameters) -> Any:
             function=node.value,
         )
 
-    try:
-        result = kernel.callable_ref(*parameters)
-    except FunctionExecutionError as e:
-        raise e
-    except Exception as e:
-        raise FunctionExecutionError(message=str(e), function=node.value) from e
-
-    if compressed:
-        out = [None] * morsel_size
-        result_iter = iter(result)
-        for idx, is_valid in enumerate(valid_positions):
-            if is_valid:
-                out[idx] = next(result_iter)
-        return out
-
+    result = kernel.callable_ref(*parameters)
     return result
 
 
