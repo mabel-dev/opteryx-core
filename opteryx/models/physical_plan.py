@@ -68,24 +68,36 @@ class PhysicalPlan(Graph):
             if join.left_readers is None:
                 continue
 
-            for provider, provider_target, provider_relation in self.ingoing_edges(nid):
-                reader_edges = {
-                    (source, target, relation)
-                    for source, target, relation in self.breadth_first_search(
-                        provider, reverse=True
-                    )
-                }  # if hasattr(self[target], "uuid")}
-                if hasattr(self[provider], "uuid"):
-                    reader_edges.add((provider, provider_target, provider_relation))
-
-                for s, t, r in reader_edges:
-                    node = self[s]
-                    if not hasattr(node, "uuid"):
-                        continue
-                    if node.uuid in join.left_readers:
+            # Iterate through incoming edges and label them based on join sides
+            # If left_readers contains ANY Scan node UUID that the provider reaches,
+            # label that provider edge as "left"
+            ingoing = list(self.ingoing_edges(nid))
+            for idx, (provider, provider_target, provider_relation) in enumerate(ingoing):
+                # For joins with two providers, use position: first is left, second is right
+                if len(ingoing) == 2:
+                    if idx == 0:
                         self.add_edge(provider, nid, "left")
-                    elif node.uuid in join.right_readers:
+                    else:
                         self.add_edge(provider, nid, "right")
+                else:
+                    # Fall back to UUID matching for unusual cases
+                    reader_edges = {
+                        (source, target, relation)
+                        for source, target, relation in self.breadth_first_search(
+                            provider, reverse=True
+                        )
+                    }  # if hasattr(self[target], "uuid")}
+                    if hasattr(self[provider], "uuid"):
+                        reader_edges.add((provider, provider_target, provider_relation))
+
+                    for s, t, r in reader_edges:
+                        node = self[s]
+                        if not hasattr(node, "uuid"):
+                            continue
+                        if node.uuid in join.left_readers:
+                            self.add_edge(provider, nid, "left")
+                        elif node.uuid in join.right_readers:
+                            self.add_edge(provider, nid, "right")
 
             tester = self.breadth_first_search(nid, reverse=True)
             if not any(r == "left" for s, t, r in tester):
