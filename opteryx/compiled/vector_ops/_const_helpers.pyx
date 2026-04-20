@@ -1,0 +1,36 @@
+# Shared helper functions for constant-encoded string vectors
+# Used by vector_trim, vector_uppercase, vector_lowercase, etc.
+
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DrakenConstantStringPayload, DRAKEN_ENCODING_CONSTANT
+from libc.stdint cimport int32_t, uint8_t
+
+
+cdef inline ConstAccessor* _constant_string_accessor(StringVector vec) noexcept:
+    if vec.encoding != DRAKEN_ENCODING_CONSTANT:
+        return NULL
+    return vec.const_accessor()
+
+
+cdef inline bint _constant_string_value(
+    StringVector vec,
+    const uint8_t** data_ptr,
+    int32_t* data_len,
+    Py_ssize_t* row_count,
+) except? False:
+    cdef ConstAccessor* accessor = _constant_string_accessor(vec)
+    cdef DrakenConstantStringPayload* payload
+
+    if accessor == NULL:
+        return False
+
+    row_count[0] = accessor.length
+    if accessor.is_null != 0 or accessor.value_ptr == NULL:
+        data_ptr[0] = NULL
+        data_len[0] = 0
+        return True
+
+    payload = <DrakenConstantStringPayload*>accessor.value_ptr
+    data_ptr[0] = payload.data
+    data_len[0] = payload.length
+    return True

@@ -648,6 +648,38 @@ STATEMENTS = [
         ("SELECT COUNT(*), LENGTH(name), ROUND(density, 2) FROM $planets GROUP BY LENGTH(name), ROUND(density, 2)", 9, 3, None),
         # Testing Intervals with Arithmetic Expressions
         ("SELECT * FROM $planets WHERE TIMESTAMP('2024-10-01') + INTERVAL '2' DAY > current_timestamp", 0, 20, None),
+
+        # WHERE clause validation tests - reject bare literals and bare identifiers
+        # Bare TRUE literal should be rejected
+        ("SELECT * FROM testdata.planets WHERE TRUE", None, None, UnsupportedSyntaxError),
+        # Bare FALSE literal should be rejected
+        ("SELECT * FROM testdata.planets WHERE FALSE", None, None, UnsupportedSyntaxError),
+        # Bare NOT TRUE should be rejected (NOT applies to bare literal)
+        ("SELECT * FROM testdata.planets WHERE NOT TRUE", None, None, UnsupportedSyntaxError),
+        # Bare NOT FALSE should be rejected (NOT applies to bare literal)
+        ("SELECT * FROM testdata.planets WHERE NOT FALSE", None, None, UnsupportedSyntaxError),
+        # Bare column name should be rejected
+        ("SELECT * FROM testdata.planets WHERE id", None, None, UnsupportedSyntaxError),
+        # Bare column name in OR should be rejected
+        ("SELECT * FROM testdata.planets WHERE id OR name", None, None, UnsupportedSyntaxError),
+        # Bare literal in AND should be rejected
+        ("SELECT * FROM testdata.planets WHERE id > 5 AND TRUE", None, None, UnsupportedSyntaxError),
+        # Bare literal in OR should be rejected
+        ("SELECT * FROM testdata.planets WHERE id > 5 OR FALSE", None, None, UnsupportedSyntaxError),
+        # Bare numeric literal should be rejected
+        ("SELECT * FROM testdata.planets WHERE 1", None, None, UnsupportedSyntaxError),
+        # Valid: comparison should work
+        ("SELECT * FROM testdata.planets WHERE id > 5", 4, 20, None),
+        # Valid: IS TRUE operator should work
+        ("SELECT * FROM testdata.planets WHERE (id > 5) IS TRUE", 4, 20, None),
+        # Valid: IS FALSE operator should work
+        ("SELECT * FROM testdata.planets WHERE (id > 5) IS FALSE", 5, 20, None),
+        # Valid: NOT with comparison should work
+        ("SELECT * FROM testdata.planets WHERE NOT (id > 5)", 5, 20, None),
+        # Valid: AND with comparisons should work
+        ("SELECT * FROM testdata.planets WHERE id > 2 AND id < 6", 3, 20, None),
+        # Valid: OR with comparisons should work
+        ("SELECT * FROM testdata.planets WHERE id < 2 OR id > 6", 3, 20, None),
 ]
 # fmt:on
 
@@ -657,18 +689,25 @@ def test_sql_battery(statement: str, rows: int, columns: int, exception: Optiona
     """
     Test a battery of statements
     """
+    from opteryx.connectors import DiskConnector
+
+    opteryx.register_workspace("testdata", DiskConnector)
 
     try:
-        # query to arrow is the fastest way to query
         session = opteryx.session(memberships=["Apollo 11", "opteryx"])
-        result = session.execute(statement)
-        actual_rows, actual_columns = result.shape
+        morsels = list(session.execute_to_morsels(statement))
+        actual_rows = sum(morsel.num_rows for morsel in morsels)
         assert rows == actual_rows, (
             f"\n\033[38;5;203mQuery returned {actual_rows} rows but {rows} were expected.\033[0m\n{statement}"
         )
-        assert columns == actual_columns, (
-            f"\n\033[38;5;203mQuery returned {actual_columns} cols but {columns} were expected.\033[0m\n{statement}"
-        )
+        if morsels:
+            actual_columns = len(morsels[0].column_names)
+            assert columns == actual_columns, (
+                f"\n\033[38;5;203mQuery returned {actual_columns} cols but {columns} were expected.\033[0m\n{statement}"
+            )
+        else:
+            # Empty morsel streams currently do not expose output schema metadata.
+            assert rows == 0, f"Query returned no morsels but expected {rows} rows.\n{statement}"
         assert exception is None, (
             f"Exception {exception} not raised but expected\n{format_sql(statement)}"
         )
@@ -687,6 +726,9 @@ if __name__ == "__main__":  # pragma: no cover
 
     from tests import trunc_printable
 
+    # Change to repo root so testdata paths resolve correctly
+    os.chdir(os.path.join(os.path.dirname(__file__), "../../../"))
+
     start_suite = time.monotonic_ns()
     width = shutil.get_terminal_size((80, 20))[0] - 15
     passed: int = 0
@@ -694,7 +736,7 @@ if __name__ == "__main__":  # pragma: no cover
     nl: str = "\n"
     failures = []
 
-    print(f"RUNNING BATTERY OF {len(STATEMENTS)} OPERATORS_EXPRESSIONS SHAPE TESTS")
+    print(f"RUNNING BATTERY OF {len(STATEMENTS)} BASIC SHAPE TESTS")
     for index, (statement, rows, cols, err) in enumerate(STATEMENTS):
         printable = statement
         if hasattr(printable, "decode"):

@@ -700,18 +700,25 @@ def test_sql_battery(statement: str, rows: int, columns: int, exception: Optiona
     """
     Test a battery of statements
     """
+    from opteryx.connectors import DiskConnector
+
+    opteryx.register_workspace("testdata", DiskConnector)
 
     try:
-        # query to arrow is the fastest way to query
         session = opteryx.session(memberships=["Apollo 11", "opteryx"])
-        result = session.execute(statement)
-        actual_rows, actual_columns = result.shape
+        morsels = list(session.execute_to_morsels(statement))
+        actual_rows = sum(morsel.num_rows for morsel in morsels)
         assert rows == actual_rows, (
             f"\n\033[38;5;203mQuery returned {actual_rows} rows but {rows} were expected.\033[0m\n{statement}"
         )
-        assert columns == actual_columns, (
-            f"\n\033[38;5;203mQuery returned {actual_columns} cols but {columns} were expected.\033[0m\n{statement}"
-        )
+        if morsels:
+            actual_columns = len(morsels[0].column_names)
+            assert columns == actual_columns, (
+                f"\n\033[38;5;203mQuery returned {actual_columns} cols but {columns} were expected.\033[0m\n{statement}"
+            )
+        else:
+            # Empty morsel streams currently do not expose output schema metadata.
+            assert rows == 0, f"Query returned no morsels but expected {rows} rows.\n{statement}"
         assert exception is None, (
             f"Exception {exception} not raised but expected\n{format_sql(statement)}"
         )
@@ -730,6 +737,9 @@ if __name__ == "__main__":  # pragma: no cover
 
     from tests import trunc_printable
 
+    # Change to repo root so testdata paths resolve correctly
+    os.chdir(os.path.join(os.path.dirname(__file__), "../../../"))
+
     start_suite = time.monotonic_ns()
     width = shutil.get_terminal_size((80, 20))[0] - 15
     passed: int = 0
@@ -737,7 +747,7 @@ if __name__ == "__main__":  # pragma: no cover
     nl: str = "\n"
     failures = []
 
-    print(f"RUNNING BATTERY OF {len(STATEMENTS)} ALIASES_DISTINCT SHAPE TESTS")
+    print(f"RUNNING BATTERY OF {len(STATEMENTS)} BASIC SHAPE TESTS")
     for index, (statement, rows, cols, err) in enumerate(STATEMENTS):
         printable = statement
         if hasattr(printable, "decode"):

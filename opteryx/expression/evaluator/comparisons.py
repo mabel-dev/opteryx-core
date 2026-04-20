@@ -138,6 +138,7 @@ def _int64_compare(op: str, vec, right):
 
 
 def _float64_compare(op: str, vec, right):
+    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 
     if right is None:
         return BoolVector(len(vec))
@@ -148,7 +149,17 @@ def _float64_compare(op: str, vec, right):
             return vector_in_list(vec, value_set)
         raise NotImplementedError(f"Float64Vector: set op {op!r} not supported")
 
-    if get_vector_type(right) == VectorType.FLOAT64:
+    right_type = get_vector_type(right)
+
+    # Float64 vs Int64 vector — extract scalar if constant-encoded, otherwise convert to float
+    if right_type == VectorType.INT64:
+        if _is_constant_vector_like(right):
+            right = _constant_scalar_value(right)
+        else:
+            # Convert Int64Vector to Float64Vector for element-wise comparison
+            right_float = vector_from_sequence([float(x) for x in right.to_pylist()])
+            return _call_vector_vector_op(op, vec, right_float)
+    elif right_type == VectorType.FLOAT64:
         if _is_constant_vector_like(right):
             right = _constant_scalar_value(right)
         else:

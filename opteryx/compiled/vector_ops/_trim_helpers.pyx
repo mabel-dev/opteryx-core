@@ -91,38 +91,10 @@ cdef inline object _trim_chars_bytes(object chars):
     raise TypeError(f"unsupported trim chars type {type(chars)!r}")
 
 
-cdef inline ConstAccessor* _constant_string_accessor(StringVector vec) noexcept:
-    if vec.encoding != DRAKEN_ENCODING_CONSTANT:
-        return NULL
-    return vec.const_accessor()
-
-
-cdef inline bint _constant_string_value(
-    StringVector vec,
-    const uint8_t** data_ptr,
-    int32_t* data_len,
-    Py_ssize_t* row_count,
-) except? False:
-    cdef ConstAccessor* accessor = _constant_string_accessor(vec)
-    cdef DrakenConstantStringPayload* payload
-
-    if accessor == NULL:
-        return False
-
-    row_count[0] = accessor.length
-    if accessor.is_null != 0 or accessor.value_ptr == NULL:
-        data_ptr[0] = NULL
-        data_len[0] = 0
-        return True
-
-    payload = <DrakenConstantStringPayload*>accessor.value_ptr
-    data_ptr[0] = payload.data
-    data_len[0] = payload.length
-    return True
-
-
 # ----------------------------------------------------------------------
 # Main trimming functions
+# (helper functions _constant_string_value and _constant_string_accessor
+# are defined in _const_helpers.pyx)
 # ----------------------------------------------------------------------
 cpdef StringVector vector_trim(StringVector vec, object chars=None):
     cdef DrakenVarBuffer* ptr = vec.ptr
