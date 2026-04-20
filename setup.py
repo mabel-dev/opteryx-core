@@ -1324,6 +1324,18 @@ extensions.append(
     )
 )
 
+# Compiled utils: PCG-backed random string helper
+extensions.append(
+    Extension(
+        "opteryx.compiled.utils.random_helper",
+        sources=["opteryx/compiled/utils/random_helper.pyx"],
+        include_dirs=include_dirs + ["opteryx/third_party/pcg"],
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+        language="c++",
+    )
+)
+
 extensions.append(
     Extension(
         "opteryx.compiled.nanobind.carchar_native",
