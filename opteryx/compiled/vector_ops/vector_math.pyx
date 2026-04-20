@@ -50,25 +50,19 @@ from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.compiled.draken.vectors.int64_vector   cimport Int64Vector
 from opteryx.compiled.draken.vectors.scalar_constructors cimport from_scalar
 from opteryx.compiled.draken.vectors.vector cimport Vector
+from opteryx.third_party.pcg.pcg cimport oneseq_xsh_rs_32_16, static_arbitrary_seed
 
 
 # ---------------------------------------------------------------------------
-# Seeded RNG for RANDOM_NORMAL — separate from the time-seeded string RNG
-# so that RANDOM_NORMAL remains reproducible across process lifetime.
+# Seeded RNGs: uniform and normal (PCG-based)
 # ---------------------------------------------------------------------------
-cdef unsigned int _normal_rng_state = 674162347314
-# coordinates of Apollo 11's moonlanding
-# https://geohack.toolforge.org/geohack.php?pagename=Apollo_11&params=0.67416_N_23.47314_E_globe:moon
+# PCG engines for uniform and normal RNGs
+cdef oneseq_xsh_rs_32_16 _rng
+cdef oneseq_xsh_rs_32_16 _normal_rng
 
-
-cdef inline unsigned int _xorshift32_normal() nogil:
-    global _normal_rng_state
-    cdef unsigned int x = _normal_rng_state
-    x ^= x << 13
-    x ^= x >> 17
-    x ^= x << 5
-    _normal_rng_state = x
-    return x
+# Seed engines at module import time
+_rng.seed(static_arbitrary_seed())
+_normal_rng.seed(674162347314)
 
 
 # ---------------------------------------------------------------------------
@@ -570,7 +564,7 @@ cpdef Float64Vector vector_random(size_t n):
     cdef Py_ssize_t i
 
     for i in range(n):
-        rv = _xorshift32()
+        rv = _rng()
         out_data[i] = (rv & 0x7FFFFFFF) * (1.0 / 2147483648.0)
 
     return out_vec
@@ -607,8 +601,8 @@ cpdef Float64Vector vector_random_normal(size_t n):
 
     # Handle odd n: generate one more pair, keep the first value
     if n & 1:
-        rv1 = _xorshift32_normal()
-        rv2 = _xorshift32_normal()
+        rv1 = _normal_rng()
+        rv2 = _normal_rng()
         u1 = (rv1 & 0x7FFFFFFF) * scale
         u2 = (rv2 & 0x7FFFFFFF) * scale
         if u1 < 1e-300:
