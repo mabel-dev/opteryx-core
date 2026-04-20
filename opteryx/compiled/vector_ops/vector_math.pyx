@@ -589,8 +589,8 @@ cpdef Float64Vector vector_random_normal(size_t n):
     cdef Py_ssize_t pairs = <Py_ssize_t>(n >> 1)
 
     for i in range(pairs):
-        rv1 = _xorshift32_normal()
-        rv2 = _xorshift32_normal()
+        rv1 = _normal_rng()
+        rv2 = _normal_rng()
         u1 = (rv1 & 0x7FFFFFFF) * scale
         u2 = (rv2 & 0x7FFFFFFF) * scale
         if u1 < 1e-300:
