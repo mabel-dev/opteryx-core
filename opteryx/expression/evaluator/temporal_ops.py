@@ -5,7 +5,7 @@ import datetime
 from opteryx.compiled.vector_ops import vector_in_list
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
-from .function_execution import _is_draken_vector, apply_bounded_function
+from .function_execution import apply_bounded_function, is_draken_vector
 
 # Encoding type identifiers for interval detection
 _INTERVAL_TYPES = frozenset(("IntervalVector",))
@@ -71,7 +71,10 @@ def _compare_timestamp_date32_vectors(op: str, ts_vec, d_vec):
     if len(ts_values) != len(d_values):
         raise ValueError("Timestamp/Date32 comparison requires equal-length vectors.")
 
-    out = [_compare_nullable_temporal(op, ts, None if d is None else int(d) * 86_400_000_000) for ts, d in zip(ts_values, d_values)]
+    out = [
+        _compare_nullable_temporal(op, ts, None if d is None else int(d) * 86_400_000_000)
+        for ts, d in zip(ts_values, d_values)
+    ]
     return BoolVector.from_list(out)
 
 

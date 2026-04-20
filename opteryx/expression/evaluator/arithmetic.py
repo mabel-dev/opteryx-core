@@ -17,7 +17,7 @@ from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 from opteryx.utils.vector_types import VectorType, get_vector_type
 
 from .arithmetic_dispatch import call_arithmetic_op
-from .function_execution import _is_draken_vector, apply_bounded_function
+from .function_execution import apply_bounded_function, is_draken_vector
 from .temporal_ops import _date_interval_op_draken, _date_minus_date_draken
 from .type_coercion import (
     _coerce_date32,
