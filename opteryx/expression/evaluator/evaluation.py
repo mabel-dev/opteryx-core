@@ -218,7 +218,7 @@ def evaluate_draken(node, morsel):
 
         val = node.value
         scalar = bool(val) if val is not None else False
-        return BoolVector(morsel.num_rows, scalar)
+        return BoolVector.from_constant(scalar, morsel.num_rows)
 
     if node_type == NodeType.COMPARISON_OPERATOR:
         left = _eval_value(node.left, morsel)

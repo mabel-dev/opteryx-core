@@ -246,6 +246,92 @@ def _table_name(branch):
     return ".".join(part["Identifier"]["value"] for part in branch["relation"][key]["name"])
 
 
+def _validate_where_clause_expression(node: Node) -> None:
+    """Validate that a WHERE clause contains a valid boolean expression.
+
+    WHERE clauses must contain explicit comparisons or boolean operators, not bare literals
+    or identifiers. This prevents ambiguity and silent incorrect results.
+
+    Allowed expressions:
+    - COMPARISON_OPERATOR (=, <>, <, >, etc.)
+    - IS TRUE / IS FALSE / IS NULL
+    - AND, OR, XOR, NOT (applied to valid expressions)
+    - Function calls that return boolean
+    - Binary/unary operators that return boolean
+
+    Disallowed:
+    - Bare LITERAL (TRUE, FALSE, or numeric constants)
+    - Bare IDENTIFIER (column names without comparison)
+    - NOT applied to non-boolean expressions
+    """
+    if node is None:
+        return
+
+    node_type = node.node_type
+
+    # Allowed: comparison operators and boolean functions
+    if node_type == NodeType.COMPARISON_OPERATOR:
+        return
+    if node_type == NodeType.FUNCTION:
+        # Function result validity checked at evaluation time
+        return
+
+    # Allowed: IS TRUE/FALSE/NULL
+    if node_type == NodeType.UNARY_OPERATOR and node.value in (
+        "IsTrue",
+        "IsNotTrue",
+        "IsFalse",
+        "IsNotFalse",
+        "IsNull",
+        "IsNotNull",
+    ):
+        return
+
+    # Allowed: logical operators applied to valid expressions
+    if node_type in (NodeType.AND, NodeType.OR, NodeType.XOR):
+        _validate_where_clause_expression(node.left)
+        _validate_where_clause_expression(node.right)
+        return
+
+    # NOT is allowed if applied to a valid boolean expression
+    if node_type == NodeType.NOT:
+        _validate_where_clause_expression(node.centre)
+        return
+
+    # Allowed: nested expressions
+    if node_type == NodeType.NESTED:
+        _validate_where_clause_expression(node.centre)
+        return
+
+    # Binary/unary operators that might return boolean (like LIKE)
+    if node_type == NodeType.BINARY_OPERATOR:
+        # These are validated at evaluation time
+        return
+    if node_type == NodeType.UNARY_OPERATOR:
+        # Unary operators like NOT on columns (validated at evaluation)
+        return
+
+    # Disallowed: bare literals
+    if node_type == NodeType.LITERAL:
+        raise UnsupportedSyntaxError(
+            f"WHERE clause cannot be a bare literal ({node.value!r}). "
+            "Use a comparison (e.g., 'WHERE column = {value}') or IS operator (e.g., 'WHERE column IS TRUE')."
+        )
+
+    # Disallowed: bare identifiers (column names without comparison)
+    if node_type == NodeType.IDENTIFIER:
+        raise UnsupportedSyntaxError(
+            f"WHERE clause cannot be a bare column name ({node.value!r}). "
+            "Use a comparison (e.g., 'WHERE {node.value} = value') or IS operator (e.g., 'WHERE {node.value} IS TRUE')."
+        )
+
+    # Any other node type in WHERE is unsupported
+    raise UnsupportedSyntaxError(
+        f"WHERE clause contains unsupported expression type: {node_type}. "
+        "WHERE requires a boolean comparison or function."
+    )
+
+
 def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     if "Query" in ast_branch:
         # Sometimes we get a full query plan here (e.g. when queries in set
@@ -304,6 +390,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     if _selection:
         if len(_relations) == 0:
             raise UnsupportedSyntaxError("Statement has a WHERE clause but no FROM clause.")
+        _validate_where_clause_expression(_selection)
         selection_step = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
         selection_step.condition = _selection
         previous_step_id, step_id = step_id, random_string()

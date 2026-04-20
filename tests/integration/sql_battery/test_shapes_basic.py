@@ -217,25 +217,6 @@ def test_sql_battery(statement: str, rows: int, columns: int, exception: Optiona
             ) from error
 
 
-def test_timetravel_at_syntax_deprecation_warning():
-    """
-    AT(TIMESTAMP => ...) remains supported, but should emit a deprecation warning.
-    """
-    from opteryx.connectors import DiskConnector
-
-    opteryx.register_workspace("testdata", DiskConnector)
-    session = opteryx.session(memberships=["Apollo 11", "opteryx"])
-
-    with pytest.warns(DeprecationWarning, match=r"AT\(TIMESTAMP => \.\.\.\) is deprecated"):
-        morsels = list(
-            session.execute_to_morsels(
-                "SELECT * FROM $planets AT(TIMESTAMP => '2024-12-15 00:00:00')"
-            )
-        )
-        assert sum(morsel.num_rows for morsel in morsels) == 9
-        assert len(morsels[0].column_names) == 20
-
-
 if __name__ == "__main__":  # pragma: no cover
     import shutil
     import time

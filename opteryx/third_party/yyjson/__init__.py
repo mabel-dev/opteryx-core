@@ -11,10 +11,7 @@ from .cyyjson import Parser
 OPT_INDENT_2 = 1 << 0
 OPT_SORT_KEYS = 1 << 1
 
-# Indicate orjson is not present
-HAS_ORJSON = False
-
-__all__ = ["Parser", "loads", "dumps", "HAS_ORJSON", "OPT_INDENT_2", "OPT_SORT_KEYS"]
+__all__ = ["Parser", "loads", "dumps", "OPT_INDENT_2", "OPT_SORT_KEYS"]
 
 
 def loads(s):
