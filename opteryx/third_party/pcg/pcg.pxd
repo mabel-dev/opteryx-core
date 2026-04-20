@@ -17,7 +17,7 @@ Based on the reference implementation from third_party/pcg/pcg_random.hpp
 
 from libc.stdint cimport uint64_t, uint32_t
 
-cdef extern from "opteryx/third_party/pcg/pcg_random.hpp" namespace "pcg_engines":
+cdef extern from "../../third_party/pcg/pcg_random.hpp" namespace "pcg_engines":
     """
     PCG 32-bit one-seq engine with XSH-RS output transformation.
 
@@ -37,7 +37,7 @@ cdef extern from "opteryx/third_party/pcg/pcg_random.hpp" namespace "pcg_engines
         void advance(uint64_t delta) nogil
 
 
-cdef extern from "opteryx/third_party/pcg/pcg_extras.hpp" namespace "pcg_extras":
+cdef extern from "../../third_party/pcg/pcg_extras.hpp" namespace "pcg_extras":
     """
     PCG helper functions for seeding and other utilities.
     """
