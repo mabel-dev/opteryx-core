@@ -5,7 +5,7 @@ import datetime
 from opteryx.compiled.vector_ops import vector_contains, vector_in_list, vector_like, vector_rlike
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
-from .function_execution import _is_draken_vector, apply_bounded_function
+from .function_execution import apply_bounded_function, is_draken_vector
 from .type_coercion import (
     _coerce_date32,
     _coerce_date32_set,

@@ -22,7 +22,7 @@ class Dataset(enum.Enum):
     FULL_SINGLE = "scratch.hits_single"
 
 
-DATASET = Dataset.MID
+DATASET = Dataset.FULL_SINGLE
 
 # fmt:off
 STATEMENTS = [
@@ -168,7 +168,7 @@ if __name__ == "__main__":  # pragma: no cover
                 warm_session.close()
 
         print(
-            f"{'Query':<8} {'Iteration 1':<16} {'Iteration 2':<16} {'Iteration 3':<16}         {'Avg':<13} {'Min':<13} {'Max':<13}"
+            f"{'Query':<8} {'Iteration 1':>14} {'Iteration 2':>14} {'Iteration 3':>14}         {'Avg':<13} {'Min':<13} {'Max':<13}"
         )
         print("-" * 102)
 
@@ -176,7 +176,7 @@ if __name__ == "__main__":  # pragma: no cover
     for index, (statement, err) in enumerate(STATEMENTS):
         statement = statement.replace("{DATASET}", f"{DATASET.value}")
         printable = statement
-        query_num = f"Q{(index + 1):02d}"
+        query_num = f"Q{(index + 1):02d}/{index:02d}"
 
         if args.warm:
             # Run multiple iterations for warm query testing
@@ -225,7 +225,7 @@ if __name__ == "__main__":  # pragma: no cover
                     status = " ⚠️ SLOW"
 
                 print(
-                    f"{query_num:<8} {iter_strs[0]:<16} {iter_strs[1]:<16} {iter_strs[2]:<16} "
+                    f"{query_num:<8} {iter_strs[0]:>14} {iter_strs[1]:>14} {iter_strs[2]:>14} "
                     f"{avg_time:>9.2f}ms   {min_time:>9.2f}ms   {max_time:>9.2f}ms{status}"
                 )
 

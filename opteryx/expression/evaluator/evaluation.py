@@ -7,7 +7,7 @@ from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_ve
 
 from .arithmetic import _eval_binary_op_draken
 from .comparisons import draken_compare
-from .function_execution import _is_draken_vector, apply_bounded_function
+from .function_execution import apply_bounded_function, is_draken_vector
 from .type_coercion import (
     _coerce_date32,
     _coerce_date32_set,
@@ -106,8 +106,7 @@ def _eval_value(node, morsel):
             if is_draken_vector(result):
                 return result
             raise TypeError(
-                "MapAccessOp expected Draken vector result; "
-                f"got {type(result).__name__}."
+                f"MapAccessOp expected Draken vector result; got {type(result).__name__}."
             )
 
         if op in ("Arrow", "LongArrow"):
@@ -311,7 +310,7 @@ def evaluate_and_append_draken(nodes, morsel):
             result = apply_bounded_function(node, *parameters)
         else:
             result = _eval_value(node, morsel)
-        if not _is_draken_vector(result):
+        if not is_draken_vector(result):
             raise TypeError(
                 "evaluate_and_append_draken expected Draken vector result; "
                 f"got {type(result).__name__} for expression {node.value!r}."

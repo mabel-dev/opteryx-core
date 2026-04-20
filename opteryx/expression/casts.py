@@ -20,10 +20,8 @@ import datetime
 import math
 
 from opteryx.types import OrsoTypes
-
-
-def _is_draken_vector(value) -> bool:
-    return value.__class__.__module__.startswith("opteryx.compiled.draken.vectors.")
+from opteryx.utils.vector_types import VectorType, get_vector_type
+from opteryx.utils.vector_types import is_draken_vector as is_draken_vector_fn
 
 
 def _is_nullish(value) -> bool:
@@ -118,7 +116,7 @@ def cast_to_double(arr, *args):
     from opteryx.utils.vector_types import VectorType, get_vector_type
 
     # Primary path: Draken vectors
-    if _is_draken_vector(arr):
+    if is_draken_vector_fn(arr):
         v_type = get_vector_type(arr)
         if v_type == VectorType.FLOAT64:
             return arr
@@ -155,7 +153,7 @@ def cast_to_int(arr, *args):
     from opteryx.utils.vector_types import VectorType, get_vector_type
 
     # Primary path: Draken vectors
-    if _is_draken_vector(arr):
+    if is_draken_vector_fn(arr):
         v_type = get_vector_type(arr)
         if v_type == VectorType.INT64:
             return arr
@@ -184,7 +182,7 @@ def cast_to_varchar(arr, *args):
     from opteryx.compiled.draken.vectors.string_vector import StringVector
     from opteryx.utils.vector_types import VectorType, get_vector_type
 
-    if _is_draken_vector(arr):
+    if is_draken_vector_fn(arr):
         v_type = get_vector_type(arr)
         if v_type == VectorType.STRING:
             return arr
@@ -205,7 +203,7 @@ def cast_to_boolean(arr, *args):
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
     from opteryx.utils.vector_types import VectorType, get_vector_type
 
-    if _is_draken_vector(arr):
+    if is_draken_vector_fn(arr):
         v_type = get_vector_type(arr)
         if v_type == VectorType.BOOL:
             return arr
@@ -225,7 +223,7 @@ def cast_to_date(arr, *args):
     """Cast array to DATE type."""
     from opteryx.utils.vector_types import VectorType, get_vector_type
 
-    if _is_draken_vector(arr):
+    if is_draken_vector_fn(arr):
         v_type = get_vector_type(arr)
         if v_type == VectorType.DATE32:
             return arr
