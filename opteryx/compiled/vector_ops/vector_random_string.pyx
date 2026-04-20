@@ -6,29 +6,21 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-from libc.time cimport time
+from libc.stdlib cimport malloc, free
+from libc.stdint cimport uint8_t, uint32_t, uint64_t
 
 from opteryx.compiled.draken.vectors.string_vector cimport StringVector
 from opteryx.compiled.draken.vectors import string_vector as string_vector_module
+from opteryx.third_party.pcg.pcg cimport oneseq_xsh_rs_32_16, static_arbitrary_seed
 
 
 cdef bytes _ALPHABET = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/"
-cdef unsigned int _rng_state = <unsigned int>time(NULL)
 
-
-cdef inline unsigned int _xorshift32() nogil:
-    global _rng_state
-    cdef unsigned int x = _rng_state
-    x ^= x << 13
-    x ^= x >> 17
-    x ^= x << 5
-    _rng_state = x
-    return x
 
 
 def vector_random_strings(int row_count, int width) -> StringVector:
     """
-    Generate row_count random fixed-width ASCII strings.
+    Generate row_count random fixed-width ASCII strings using PCG PRNG.
 
     Parameters:
         row_count: number of strings to generate.
@@ -36,17 +28,31 @@ def vector_random_strings(int row_count, int width) -> StringVector:
 
     Returns:
         StringVector of random strings.
-    """
+
+    Uses PCG32 (PCG-XSH-RS) for high-quality random number generation with
+    excellent statistical properties and minimal collision risk.
+     """
     builder = string_vector_module.StringVectorBuilder.with_estimate(row_count, width)
 
     cdef int i, j
-    cdef unsigned int rv
-    cdef char buf[4096]
+    cdef oneseq_xsh_rs_32_16 rng
+    rng.seed(static_arbitrary_seed())
+    cdef uint32_t rv
+    cdef char* buf
 
-    for i in range(row_count):
-        for j in range(width):
-            rv = _xorshift32() & 0x3F
-            buf[j] = _ALPHABET[rv]
-        builder.append_bytes(buf, width)
+    # Allocate buffer once and reuse for all rows
+    buf = <char*>malloc(width + 1)
+    if buf is NULL:
+        raise MemoryError("Failed to allocate buffer for random strings")
+
+    try:
+        for i in range(row_count):
+            for j in range(width):
+                rv = rng() & 0x3F
+                buf[j] = _ALPHABET[rv]
+            buf[width] = 0  # Null-terminate for safety
+            builder.append_bytes(buf, width)
+    finally:
+        free(buf)
 
     return builder.finish()
