@@ -9,7 +9,6 @@ import re
 import sys
 import threading
 
-import numpy
 from Cython.Build import cythonize
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext as build_ext_orig
@@ -355,7 +354,6 @@ C_FLAGS.extend(WARNING_FLAGS)
 
 # Include directories
 include_dirs = [
-    numpy.get_include(),
     "src/cpp",
     "src/c",
     "third_party/mabel/draken",

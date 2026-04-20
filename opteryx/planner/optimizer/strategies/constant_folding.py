@@ -25,6 +25,7 @@ from opteryx.models import Node, QueryTelemetry
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.types import OrsoTypes
+from opteryx.utils.vector_types import is_draken_vector
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 
@@ -283,13 +284,15 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         table = no_table_data.read()
         try:
             result = evaluate(root, table)[0]
+            if is_draken_vector(result):
+                extracted = result.to_pylist()[0]
+                result = extracted if extracted is not None else None
             telemetry.optimization_constant_fold_expression += 1
             return build_literal_node(result, root, root.schema_column.type)
-        except (ValueError, TypeError, KeyError) as err:  # nosec
-            if not err:
-                pass
-            # what ever the reason, just skip
-            # DEBUG:log (err)
+        except Exception as e:
+            import sys
+            print(f"DEBUG: Evaluation failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            return root
 
     return root
 
