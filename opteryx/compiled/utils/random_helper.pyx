@@ -20,26 +20,28 @@ def random_string_c(int length, charset=None):
         return ""
 
     cdef bytes cs
+    cdef Py_ssize_t clen
+    cdef char* buf
+    cdef int i
+    cdef uint32_t rv
+
     if charset is None:
         cs = DEFAULT_CHARSET
     else:
         if isinstance(charset, bytes):
             cs = charset
         else:
-            # accept str-like
             cs = charset.encode('ascii')
 
-    cdef Py_ssize_t clen = len(cs)
+    clen = len(cs)
     if clen == 0:
         raise ValueError("charset must not be empty")
 
-    cdef char* buf = <char*>malloc(length)
+    buf = <char*>malloc(length)
     if buf is NULL:
         raise MemoryError("Failed to allocate buffer")
 
     try:
-        cdef int i
-        cdef uint32_t rv
         for i in range(length):
             rv = _util_rng()
             buf[i] = cs[rv % clen]
