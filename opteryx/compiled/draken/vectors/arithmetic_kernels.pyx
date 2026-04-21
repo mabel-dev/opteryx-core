@@ -303,9 +303,27 @@ def int64_add(left, right):
     if len(left) != len(right):
         return None  # Length mismatch
     if len(left) == 0:
-        # Zero-length vector
         return Int64Vector(0)
-    return _int64_int64_add_dense(<Int64Vector>left, <Int64Vector>right, len(left))
+
+    # Handle constant-encoded vectors by expanding them to dense
+    cdef size_t length = len(left)
+    if (<Int64Vector>left).ptr.data == NULL:
+        left_vals = []
+        for i in range(length):
+            left_vals.append(left[i])
+        left = vector_from_sequence(left_vals)
+    if (<Int64Vector>right).ptr.data == NULL:
+        right_vals = []
+        for i in range(length):
+            right_vals.append(right[i])
+        right = vector_from_sequence(right_vals)
+
+    if not (isinstance(left, Int64Vector) and isinstance(right, Int64Vector)):
+        return None
+    if (<Int64Vector>left).ptr.data == NULL or (<Int64Vector>right).ptr.data == NULL:
+        return None
+
+    return _int64_int64_add_dense(<Int64Vector>left, <Int64Vector>right, length)
 
 
 def int64_subtract(left, right):
@@ -313,6 +331,10 @@ def int64_subtract(left, right):
     if not (isinstance(left, Int64Vector) and isinstance(right, Int64Vector)):
         return None
     if len(left) != len(right):
+        return None
+    if len(left) == 0:
+        return Int64Vector(0)
+    if (<Int64Vector>left).ptr.data == NULL or (<Int64Vector>right).ptr.data == NULL:
         return None
     return _int64_int64_subtract_dense(<Int64Vector>left, <Int64Vector>right, len(left))
 
@@ -323,7 +345,28 @@ def int64_multiply(left, right):
         return None
     if len(left) != len(right):
         return None
-    return _int64_int64_multiply_dense(<Int64Vector>left, <Int64Vector>right, len(left))
+    if len(left) == 0:
+        return Int64Vector(0)
+
+    # Handle constant-encoded vectors by expanding them to dense
+    cdef size_t length = len(left)
+    if (<Int64Vector>left).ptr.data == NULL:
+        left_vals = []
+        for i in range(length):
+            left_vals.append(left[i])
+        left = vector_from_sequence(left_vals)
+    if (<Int64Vector>right).ptr.data == NULL:
+        right_vals = []
+        for i in range(length):
+            right_vals.append(right[i])
+        right = vector_from_sequence(right_vals)
+
+    if not (isinstance(left, Int64Vector) and isinstance(right, Int64Vector)):
+        return None
+    if (<Int64Vector>left).ptr.data == NULL or (<Int64Vector>right).ptr.data == NULL:
+        return None
+
+    return _int64_int64_multiply_dense(<Int64Vector>left, <Int64Vector>right, length)
 
 
 def int64_divide(left, right):
@@ -331,6 +374,10 @@ def int64_divide(left, right):
     if not (isinstance(left, Int64Vector) and isinstance(right, Int64Vector)):
         return None
     if len(left) != len(right):
+        return None
+    if len(left) == 0:
+        return Float64Vector(0)
+    if (<Int64Vector>left).ptr.data == NULL or (<Int64Vector>right).ptr.data == NULL:
         return None
     return _int64_int64_divide_dense(<Int64Vector>left, <Int64Vector>right, len(left))
 
@@ -341,6 +388,10 @@ def int64_floordiv(left, right):
         return None
     if len(left) != len(right):
         return None
+    if len(left) == 0:
+        return Int64Vector(0)
+    if (<Int64Vector>left).ptr.data == NULL or (<Int64Vector>right).ptr.data == NULL:
+        return None
     return _int64_int64_floordiv_dense(<Int64Vector>left, <Int64Vector>right, len(left))
 
 
@@ -349,6 +400,10 @@ def int64_modulo(left, right):
     if not (isinstance(left, Int64Vector) and isinstance(right, Int64Vector)):
         return None
     if len(left) != len(right):
+        return None
+    if len(left) == 0:
+        return Int64Vector(0)
+    if (<Int64Vector>left).ptr.data == NULL or (<Int64Vector>right).ptr.data == NULL:
         return None
     return _int64_int64_modulo_dense(<Int64Vector>left, <Int64Vector>right, len(left))
 
@@ -359,6 +414,10 @@ def float64_add(left, right):
         return None
     if len(left) != len(right):
         return None
+    if len(left) == 0:
+        return Float64Vector(0)
+    if (<Float64Vector>left).ptr.data == NULL or (<Float64Vector>right).ptr.data == NULL:
+        return None
     return _float64_float64_add_dense(<Float64Vector>left, <Float64Vector>right, len(left))
 
 
@@ -367,6 +426,10 @@ def float64_subtract(left, right):
     if not (isinstance(left, Float64Vector) and isinstance(right, Float64Vector)):
         return None
     if len(left) != len(right):
+        return None
+    if len(left) == 0:
+        return Float64Vector(0)
+    if (<Float64Vector>left).ptr.data == NULL or (<Float64Vector>right).ptr.data == NULL:
         return None
     return _float64_float64_subtract_dense(<Float64Vector>left, <Float64Vector>right, len(left))
 
@@ -377,6 +440,10 @@ def float64_multiply(left, right):
         return None
     if len(left) != len(right):
         return None
+    if len(left) == 0:
+        return Float64Vector(0)
+    if (<Float64Vector>left).ptr.data == NULL or (<Float64Vector>right).ptr.data == NULL:
+        return None
     return _float64_float64_multiply_dense(<Float64Vector>left, <Float64Vector>right, len(left))
 
 
@@ -385,6 +452,10 @@ def float64_divide(left, right):
     if not (isinstance(left, Float64Vector) and isinstance(right, Float64Vector)):
         return None
     if len(left) != len(right):
+        return None
+    if len(left) == 0:
+        return Float64Vector(0)
+    if (<Float64Vector>left).ptr.data == NULL or (<Float64Vector>right).ptr.data == NULL:
         return None
     return _float64_float64_divide_dense(<Float64Vector>left, <Float64Vector>right, len(left))
 
@@ -395,6 +466,10 @@ def int64_float64_add(left, right):
         return None
     if len(left) != len(right):
         return None
+    if len(left) == 0:
+        return Float64Vector(0)
+    if (<Int64Vector>left).ptr.data == NULL or (<Float64Vector>right).ptr.data == NULL:
+        return None
     return _int64_float64_add_dense(<Int64Vector>left, <Float64Vector>right, len(left))
 
 
@@ -403,6 +478,10 @@ def float64_int64_add(left, right):
     if not (isinstance(left, Float64Vector) and isinstance(right, Int64Vector)):
         return None
     if len(left) != len(right):
+        return None
+    if len(left) == 0:
+        return Float64Vector(0)
+    if (<Float64Vector>left).ptr.data == NULL or (<Int64Vector>right).ptr.data == NULL:
         return None
     return _float64_int64_add_dense(<Float64Vector>left, <Int64Vector>right, len(left))
 
