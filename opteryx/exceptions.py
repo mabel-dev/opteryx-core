@@ -51,9 +51,7 @@ Exception
                  └── VariableNotFoundError
 """
 
-from typing import Any
-from typing import Optional
-from typing import Union
+from typing import Any, Optional, Union
 
 
 # ======================== Begin Codebase Errors ========================
@@ -150,9 +148,11 @@ class ColumnNotFoundError(SqlError):
 
         dataset_message = (f" in '{dataset}'") if dataset else ""
         if column is not None:
-            message = f"Column '{column}' does not exist{dataset_message}."
+            message = f"Unknown column '{column}' {dataset_message}"
             if suggestion is not None:
-                message += f" Did you mean '{suggestion}'?."
+                message += f"— did you mean '{suggestion}'?"
+            else:
+                message += "."
         if message is None:  # pragma: no cover
             message = "Query contained columns which could not be found."
         super().__init__(message)

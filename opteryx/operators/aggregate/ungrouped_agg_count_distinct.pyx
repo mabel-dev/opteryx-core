@@ -35,6 +35,8 @@ cdef class CountDistinctAggregate(UngroupedAggregate):
 
         cdef CarcharSetWrapper the_set = self._set
 
+        # simd_mix_hash accumulates into dest, so zero before each call
+        memset(self._scratch_buf, 0, <size_t>nrows * sizeof(uint64_t))
         # Hash into scratch buffer, then batch insert
         raw.c_hash_into(self._scratch_buf, nrows)    # C-level hash, no memoryview
         with nogil:

@@ -185,7 +185,10 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
         if node.value == "TRUNC" and len(scalar_parameters) == 2:
             trunc_value, trunc_value_type = scalar_parameters[0]
             unit_value, unit_type = scalar_parameters[1]
-            if trunc_value_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP) and unit_type == OrsoTypes.VARCHAR:
+            if (
+                trunc_value_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
+                and unit_type == OrsoTypes.VARCHAR
+            ):
                 if isinstance(trunc_value, datetime.date) and not isinstance(
                     trunc_value, datetime.datetime
                 ):
@@ -595,7 +598,7 @@ def _normalize_cast_type(data_type: str) -> str:
     for aliases, suggestion in type_suggestions.items():
         if upper_type in aliases:
             raise SqlError(
-                f"Unsupported type for CAST - '{upper_type}'. Did you mean '{suggestion}'?"
+                f"Unsupported type for CAST - '{upper_type}' — did you mean '{suggestion}'?"
             )
 
     raise SqlError(f"Unsupported type for CAST - '{data_type}'.")
@@ -770,6 +773,7 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
         _TYPE_CAST_NAMES = {
             "VARCHAR": "VARCHAR",
             "INT": "INTEGER",
+            "INT64": "INTEGER",
             "INTEGER": "INTEGER",
             "DOUBLE": "DOUBLE",
             "TIMESTAMP": "TIMESTAMP",
@@ -777,22 +781,23 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
             "BOOLEAN": "BOOLEAN",
             "BLOB": "BLOB",
             "VARBINARY": "VARBINARY",
-            "FLOAT": "FLOAT",
+            "FLOAT": "DOUBLE",
+            "TIME": "TIME",
+        }
+        _COMMON_ERRORS = {
+            "LEN": "LENGTH",
         }
         if func in _TYPE_CAST_NAMES and len(args) == 1:
-            return Node(
-                NodeType.CAST,
-                left=args[0],
-                value=_TYPE_CAST_NAMES[func],
-                alias=alias,
+            raise UnsupportedSyntaxError(
+                f"Invalid cast syntax `{func}({args[0].value})` — use `{args[0].value}::{_TYPE_CAST_NAMES[func]}`."
             )
-
-        likely_match = suggest_alternative(func, aggregator_names() + _list_functions())
+        if func in _COMMON_ERRORS:
+            likely_match = _COMMON_ERRORS[func]
+        else:
+            likely_match = suggest_alternative(func, aggregator_names() + _list_functions())
         if likely_match is None:
-            raise UnsupportedSyntaxError(f"Unknown function or aggregate '{func}'")
-        raise FunctionNotFoundError(
-            f"Unknown function or aggregate '{func}'. Did you mean '{likely_match}'?"
-        )
+            raise FunctionNotFoundError(f"Unknown function '{func}',")
+        raise FunctionNotFoundError(f"Unknown function '{func}' — did you mean '{likely_match}'?")
 
     # rewrite COUNT_DISTINCT() to COUNT(DISTINCT)
     if func == "COUNT_DISTINCT":

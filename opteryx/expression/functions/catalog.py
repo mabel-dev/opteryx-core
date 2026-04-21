@@ -77,10 +77,7 @@ class KernelSpec:
 
     def __post_init__(self):
         if self.engine is _UNSET:
-            raise ValueError(
-                "KernelSpec.engine is required and must be one of "
-                "('draken')."
-            )
+            raise ValueError("KernelSpec.engine is required and must be one of ('draken').")
 
         if self.null_policy not in (
             "compress",
@@ -338,14 +335,13 @@ class FunctionCatalog:
                         getattr(node, "schema_column", None), "name", None
                     ) or getattr(node, "value", f"arg{i + 1}")
                     cast_type = _FAMILY_TO_CAST.get(current_param.type_family)
-                    cast_hint = f" — try `CAST({col_name} AS {cast_type})`" if cast_type else ""
+                    cast_hint = f" - use `{col_name}::{cast_type}`." if cast_type else "."
                     mismatches.append(
-                        f"argument {i + 1} '{col_name}' is {node_type} "
-                        f"but {canonical} expects {current_param.type_family}{cast_hint}"
+                        f"arg{i + 1} ('{col_name}'): expected {current_param.type_family.upper()}, got {node_type.value}{cast_hint}"
                     )
                 if not current_param.variadic:
                     current_param = next(param_iter, None)
-            raise TypeError(f"Type mismatch in call to {canonical}: " + "; ".join(mismatches))
+            raise TypeError(f"{canonical} " + "; ".join(mismatches))
 
         tied = [o for o in scored if abs(_score_overload(o) - best_score) < 1e-9]
 

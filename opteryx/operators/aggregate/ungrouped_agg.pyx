@@ -9,6 +9,7 @@ from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, u
 from libc.stddef cimport size_t
 from libc.float cimport DBL_MAX
 from libc.stdlib cimport malloc, free
+from libc.string cimport memset
 
 from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.draken.vectors.vector cimport Vector

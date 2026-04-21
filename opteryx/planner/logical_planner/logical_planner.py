@@ -420,7 +420,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     if _groups is not None and _groups != []:
         if any(p.node_type == NodeType.WILDCARD for p in _projection):
             raise UnsupportedSyntaxError(
-                "SELECT * cannot be used with GROUP BY, Did you mean `GROUP BY ALL`."
+                "SELECT * cannot be used with GROUP BY — did you mean `GROUP BY ALL`?"
             )
         # WILDCARD is used to represent GROUP BY ALL, we group by all columns in the projection
         # which aren't aggregates
@@ -497,7 +497,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             ):
                 if ast_branch["Select"].get("distinct"):
                     raise UnsupportedSyntaxError(
-                        "Values cannot be parenthesised in the SELECT clause. Did you mean DISTINCT ON(cols) cols FROM ?"
+                        "Values cannot be parenthesised in the SELECT clause — did you mean DISTINCT ON(cols) cols FROM ?"
                     )
                 raise UnsupportedSyntaxError("Values cannot be parenthesised in the SELECT clause.")
 

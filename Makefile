@@ -169,7 +169,7 @@ mypy: ## Run type checking
 
 compile: check-python clean ## Compile Cython extensions
 	$(call print_blue,"Compiling Cython extensions...")
-	@$(PIP) install --upgrade pip uv numpy cython setuptools setuptools_rust
+	@$(PIP) install --upgrade pip uv cython setuptools setuptools_rust
 	@$(PYTHON) setup.py clean
 	@$(PYTHON) setup.py build_ext --inplace -j $(JOBS)
 	$(call print_green,"Compilation complete!")

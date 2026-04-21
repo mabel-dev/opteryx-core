@@ -55,7 +55,7 @@ def suggest(dataset):
     suggestion = suggest_alternative(dataset, known_datasets)
     if suggestion is not None:
         return (
-            f"The requested dataset, '{dataset}', could not be found. Did you mean '{suggestion}'?"
+            f"The requested dataset, '{dataset}', could not be found — did you mean '{suggestion}'?"
         )
 
 
