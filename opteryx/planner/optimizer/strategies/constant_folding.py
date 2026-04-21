@@ -280,7 +280,6 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         len(identifiers) == 0
         and len(aggregators) == 0
         and root.schema_column.type != OrsoTypes.INTERVAL
-        and root.node_type != NodeType.BINARY_OPERATOR  # Skip binary ops (arithmetic with vectors)
     ):
         table = no_table_data.read()
         result = evaluate(root, table)[0]

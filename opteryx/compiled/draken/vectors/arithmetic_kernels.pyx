@@ -301,26 +301,23 @@ def int64_add(left, right):
     if not (isinstance(left, Int64Vector) and isinstance(right, Int64Vector)):
         return None
     if len(left) != len(right):
-        return None  # Length mismatch
+        return None
     if len(left) == 0:
         return Int64Vector(0)
 
-    # Handle constant-encoded vectors by expanding them to dense
     cdef size_t length = len(left)
-    if (<Int64Vector>left).ptr.data == NULL:
-        left_vals = []
-        for i in range(length):
-            left_vals.append(left[i])
-        left = vector_from_sequence(left_vals)
-    if (<Int64Vector>right).ptr.data == NULL:
-        right_vals = []
-        for i in range(length):
-            right_vals.append(right[i])
-        right = vector_from_sequence(right_vals)
+    left_is_const = (<Int64Vector>left).ptr.data == NULL
+    right_is_const = (<Int64Vector>right).ptr.data == NULL
 
-    if not (isinstance(left, Int64Vector) and isinstance(right, Int64Vector)):
-        return None
-    if (<Int64Vector>left).ptr.data == NULL or (<Int64Vector>right).ptr.data == NULL:
+    if left_is_const or right_is_const:
+        if left_is_const:
+            left = vector_from_sequence([left[i] for i in range(length)])
+        if right_is_const:
+            right = vector_from_sequence([right[i] for i in range(length)])
+
+        if isinstance(left, Int64Vector) and isinstance(right, Int64Vector):
+            if (<Int64Vector>left).ptr.data != NULL and (<Int64Vector>right).ptr.data != NULL:
+                return _int64_int64_add_dense(<Int64Vector>left, <Int64Vector>right, length)
         return None
 
     return _int64_int64_add_dense(<Int64Vector>left, <Int64Vector>right, length)
@@ -348,22 +345,22 @@ def int64_multiply(left, right):
     if len(left) == 0:
         return Int64Vector(0)
 
-    # Handle constant-encoded vectors by expanding them to dense
+    # For constant-encoded vectors (NULL .ptr.data), expand to dense and retry
     cdef size_t length = len(left)
-    if (<Int64Vector>left).ptr.data == NULL:
-        left_vals = []
-        for i in range(length):
-            left_vals.append(left[i])
-        left = vector_from_sequence(left_vals)
-    if (<Int64Vector>right).ptr.data == NULL:
-        right_vals = []
-        for i in range(length):
-            right_vals.append(right[i])
-        right = vector_from_sequence(right_vals)
+    left_is_const = (<Int64Vector>left).ptr.data == NULL
+    right_is_const = (<Int64Vector>right).ptr.data == NULL
 
-    if not (isinstance(left, Int64Vector) and isinstance(right, Int64Vector)):
-        return None
-    if (<Int64Vector>left).ptr.data == NULL or (<Int64Vector>right).ptr.data == NULL:
+    if left_is_const or right_is_const:
+        # Expand constant vectors to dense by extracting values
+        if left_is_const:
+            left = vector_from_sequence([left[i] for i in range(length)])
+        if right_is_const:
+            right = vector_from_sequence([right[i] for i in range(length)])
+
+        # Try again with expanded vectors
+        if isinstance(left, Int64Vector) and isinstance(right, Int64Vector):
+            if (<Int64Vector>left).ptr.data != NULL and (<Int64Vector>right).ptr.data != NULL:
+                return _int64_int64_multiply_dense(<Int64Vector>left, <Int64Vector>right, length)
         return None
 
     return _int64_int64_multiply_dense(<Int64Vector>left, <Int64Vector>right, length)
