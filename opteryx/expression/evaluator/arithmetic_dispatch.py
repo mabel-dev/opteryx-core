@@ -19,8 +19,8 @@ def call_arithmetic_op(op, left, right):
     Execute arithmetic operation with VectorType-based dispatch.
 
     Routes to native Draken kernels when both operands are Draken vectors
-    (or scalar with Draken vector). Returns None if no kernel is found,
-    which triggers the `binary_operations()` fallback.
+    (or scalar with Draken vector). Materializes dictionary-encoded vectors
+    to dense form for unsupported combinations.
 
     Parameters:
         op: str - Operator ('Plus', 'Minus', 'Multiply', 'Divide', etc.)
@@ -28,18 +28,26 @@ def call_arithmetic_op(op, left, right):
         right: Operand (Draken vector, PyArrow array, or scalar)
 
     Returns:
-        Result (Draken vector) or None to trigger fallback to binary_operations()
+        Result (Draken vector) or None if kernel not found
     """
-    # Materialize dictionary-encoded vectors to dense for arithmetic operations
+    # Materialize dictionary-encoded vectors except for DICT + CONST cases
     from opteryx.utils.vector_types import VectorType
-    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 
-    if is_draken_vector(left) and get_vector_type(left) == VectorType.DICTIONARY_ENCODED:
-        # Materialize dictionary-encoded vector to dense
-        left = vector_from_sequence(left.to_pylist())
-    if is_draken_vector(right) and get_vector_type(right) == VectorType.DICTIONARY_ENCODED:
-        # Materialize dictionary-encoded vector to dense
-        right = vector_from_sequence(right.to_pylist())
+    left_type_before = get_vector_type(left) if is_draken_vector(left) else None
+    right_type_before = get_vector_type(right) if is_draken_vector(right) else None
+
+    # Materialize DICT unless paired with CONST-encoded vector
+    # DICT + CONST(vector) -> keep DICT
+    # DICT + anything else -> materialize to DENSE
+    if left_type_before == VectorType.DICTIONARY_ENCODED:
+        # Only preserve DICT if right is a CONSTANT_ENCODED vector
+        if not (is_draken_vector(right) and get_vector_type(right) == VectorType.CONSTANT_ENCODED):
+            left = type(left).from_arrow(left.to_arrow())
+
+    if right_type_before == VectorType.DICTIONARY_ENCODED:
+        # Only preserve DICT if left is a CONSTANT_ENCODED vector
+        if not (is_draken_vector(left) and get_vector_type(left) == VectorType.CONSTANT_ENCODED):
+            right = type(right).from_arrow(right.to_arrow())
 
     # Only process if at least one operand is a Draken vector
     left_is_draken = is_draken_vector(left)

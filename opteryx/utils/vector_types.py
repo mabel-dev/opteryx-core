@@ -76,7 +76,17 @@ def get_vector_type(obj) -> VectorType:
     }
 
     if cls_name in TYPE_MAP:
-        return TYPE_MAP[cls_name]
+        base_type = TYPE_MAP[cls_name]
+
+        # Check vector encoding for special cases (constant or dictionary)
+        if hasattr(obj, "encoding"):
+            encoding = obj.encoding
+            if encoding == 1:  # Dictionary encoding
+                return VectorType.DICTIONARY_ENCODED
+            elif encoding == 3:  # Constant encoding
+                return VectorType.CONSTANT_ENCODED
+
+        return base_type
 
     # Special cases: constant/dictionary encoded vectors
     # These are detected by special flags rather than class name
