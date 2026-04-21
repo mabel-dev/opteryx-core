@@ -638,6 +638,13 @@ extensions = [
     make_draken_extension("vectors.time_vector", "vectors/time_vector.pyx"),
     make_draken_extension("vectors.interval_vector", "vectors/interval_vector.pyx"),
     make_draken_extension("vectors.scalar_constructors", "vectors/scalar_constructors.pyx"),
+    Extension(
+        "opteryx.compiled.draken.vectors.arithmetic_kernels",
+        sources=["opteryx/compiled/draken/vectors/arithmetic_kernels.pyx"],
+        include_dirs=include_dirs,
+        language="c",
+        extra_compile_args=C_FLAGS,
+    ),
     make_draken_extension("vectors.int64_vector", "vectors/int64_vector.pyx", language="c++"),
     make_draken_extension("vectors.integer_vector", "vectors/integer_vector.pyx", language="c++"),
     Extension(
