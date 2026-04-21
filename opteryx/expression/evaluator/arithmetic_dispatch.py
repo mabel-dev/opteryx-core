@@ -30,16 +30,18 @@ def call_arithmetic_op(op, left, right):
     Returns:
         Result (Draken vector) or None to trigger fallback to binary_operations()
     """
-    # Decompress dictionary-encoded vectors to dense for arithmetic operations
+    # Materialize dictionary-encoded vectors to dense for arithmetic operations
     from opteryx.utils.vector_types import VectorType
+    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+
     if is_draken_vector(left):
         if get_vector_type(left) == VectorType.DICTIONARY_ENCODED:
-            # Decompress dictionary-encoded vector to dense
-            left = type(left).from_arrow(left.to_arrow())
+            # Materialize dictionary-encoded vector to dense by converting to Python list and back
+            left = vector_from_sequence(left.to_pylist())
     if is_draken_vector(right):
         if get_vector_type(right) == VectorType.DICTIONARY_ENCODED:
-            # Decompress dictionary-encoded vector to dense
-            right = type(right).from_arrow(right.to_arrow())
+            # Materialize dictionary-encoded vector to dense
+            right = vector_from_sequence(right.to_pylist())
 
     # Only process if at least one operand is a Draken vector
     left_is_draken = is_draken_vector(left)
