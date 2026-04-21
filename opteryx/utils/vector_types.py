@@ -79,7 +79,8 @@ def get_vector_type(obj) -> VectorType:
         base_type = TYPE_MAP[cls_name]
 
         # Check vector encoding for special cases (constant or dictionary)
-        if hasattr(obj, "encoding"):
+        # BUT: only for numeric/string vectors, not temporal types
+        if hasattr(obj, "encoding") and base_type in (VectorType.INT64, VectorType.FLOAT64, VectorType.STRING):
             encoding = obj.encoding
             if encoding == 1:  # Dictionary encoding
                 return VectorType.DICTIONARY_ENCODED
