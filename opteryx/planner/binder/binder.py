@@ -380,6 +380,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                     "_TIMESTAMP_MS": "ms",
                     "_TIMESTAMP_S": "s",
                     "_TIMESTAMP_US": "us",
+                    "_TIMESTAMP_DAYS": "days",
                 }
                 if target_type_name in unit_map:
                     unit = unit_map[target_type_name]
@@ -388,7 +389,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                     raise IncompatibleTypesError(
                         message=f"Unknown temporal unit form: {target_type_name}. "
                         "Use the public form: `CAST(expr AS TIMESTAMP[ns])`, "
-                        "`CAST(expr AS TIMESTAMP[ms])`, `CAST(expr AS TIMESTAMP[s])`, or `CAST(expr AS TIMESTAMP[us])`."
+                        "`CAST(expr AS TIMESTAMP[ms])`, `CAST(expr AS TIMESTAMP[s])`, `CAST(expr AS TIMESTAMP[us])`, or `CAST(expr AS TIMESTAMP[d])`."
                     )
 
             # VARBINARY is not a canonical OrsoType — map to BLOB

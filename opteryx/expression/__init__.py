@@ -551,6 +551,7 @@ def _inner_evaluate(root: Node, table):
                 "_TIMESTAMP_MS": ("TIMESTAMP", "ms"),
                 "_TIMESTAMP_S": ("TIMESTAMP", "s"),
                 "_TIMESTAMP_US": ("TIMESTAMP", "us"),
+                "_TIMESTAMP_DAYS": ("TIMESTAMP", "days"),
             }
             if target_type in unit_map:
                 canonical_type, unit = unit_map[target_type]

@@ -565,7 +565,7 @@ def _normalize_cast_type(data_type: str) -> str:
 
     # Preserve internal temporal type forms (from SQL rewriter)
     # These should pass through unchanged to the binder for unit extraction
-    if upper_type in ("_TIMESTAMP_NS", "_TIMESTAMP_MS", "_TIMESTAMP_S", "_TIMESTAMP_US"):
+    if upper_type in ("_TIMESTAMP_NS", "_TIMESTAMP_MS", "_TIMESTAMP_S", "_TIMESTAMP_US", "_TIMESTAMP_DAYS"):
         return upper_type
 
     # Map of substring patterns to normalized types
@@ -633,6 +633,9 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
         base_type = "TIMESTAMP"
     elif base_type == "_TIMESTAMP_US":
         unit = "us"
+        base_type = "TIMESTAMP"
+    elif base_type == "_TIMESTAMP_DAYS":
+        unit = "days"
         base_type = "TIMESTAMP"
 
     # Special case: VARBINARY maps to BLOB in Orso types

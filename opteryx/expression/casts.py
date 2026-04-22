@@ -55,7 +55,7 @@ def parse_timestamp_value(value, unit=None):
         if unit is None:
             raise TypeError(
                 "Ambiguous cast: TIMESTAMP requires a unit. "
-                "Use `::TIMESTAMP[ns]`, `::TIMESTAMP[ms]`, `::TIMESTAMP[s]`, or `::TIMESTAMP[us]`."
+                "Use `::TIMESTAMP[ns]`, `::TIMESTAMP[ms]`, `::TIMESTAMP[s]`, `::TIMESTAMP[us]`, or `::TIMESTAMP[d]`."
             )
 
         numeric = float(value)
@@ -67,8 +67,10 @@ def parse_timestamp_value(value, unit=None):
             seconds = numeric
         elif unit == "us":
             seconds = numeric / 1_000_000
+        elif unit == "days":
+            seconds = numeric * 86_400
         else:
-            raise ValueError(f"Unsupported timestamp unit: {unit!r}. Use 'ns', 'ms', 's', or 'us'.")
+            raise ValueError(f"Unsupported timestamp unit: {unit!r}. Use 'ns', 'ms', 's', 'us', or 'days'.")
 
         return datetime.datetime.fromtimestamp(seconds, tz=datetime.timezone.utc).replace(
             tzinfo=None

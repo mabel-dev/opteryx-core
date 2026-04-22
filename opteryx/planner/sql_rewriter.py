@@ -246,8 +246,8 @@ def rewrite_temporal_units(statement: str) -> str:
     """
     Rewrite temporal unit syntax to internal form for parser compatibility.
 
-    User-facing syntax:  TIMESTAMP[ns], TIMESTAMP[ms], TIMESTAMP[s], TIMESTAMP[us], DATE[days]
-    Internal form:       _TIMESTAMP_NS, _TIMESTAMP_MS, _TIMESTAMP_S, _TIMESTAMP_US, _DATE_DAYS
+    User-facing syntax:  TIMESTAMP[ns], TIMESTAMP[ms], TIMESTAMP[s], TIMESTAMP[us], TIMESTAMP[d]
+    Internal form:       _TIMESTAMP_NS, _TIMESTAMP_MS, _TIMESTAMP_S, _TIMESTAMP_US, _TIMESTAMP_DAYS
 
     This allows users to write familiar syntax that the parser doesn't natively
     support, while using internal forms that the parser accepts as custom types.
@@ -257,14 +257,22 @@ def rewrite_temporal_units(statement: str) -> str:
         CAST(x AS TIMESTAMP[ms]) -> CAST(x AS _TIMESTAMP_MS)
         CAST(x AS TIMESTAMP[s])  -> CAST(x AS _TIMESTAMP_S)
         CAST(x AS TIMESTAMP[us]) -> CAST(x AS _TIMESTAMP_US)
-        CAST(x AS DATE[d])    -> CAST(x AS _DATE_DAYS)
+        CAST(x AS TIMESTAMP[d])  -> CAST(x AS _TIMESTAMP_DAYS)
     """
+    # Check for invalid forms (empty brackets)
+    if re.search(r"\bTIMESTAMP\s*\[\s*\]", statement, re.IGNORECASE):
+        raise UnsupportedSyntaxError(
+            "TIMESTAMP[] with empty brackets is not supported. "
+            "Use `TIMESTAMP[ns]`, `TIMESTAMP[ms]`, `TIMESTAMP[s]`, `TIMESTAMP[us]`, or `TIMESTAMP[d]`."
+        )
+
     # Map user-facing forms to internal forms
     replacements = [
         (r"\bTIMESTAMP\s*\[\s*ns\s*\]", "_TIMESTAMP_NS", re.IGNORECASE),
         (r"\bTIMESTAMP\s*\[\s*ms\s*\]", "_TIMESTAMP_MS", re.IGNORECASE),
         (r"\bTIMESTAMP\s*\[\s*s\s*\]", "_TIMESTAMP_S", re.IGNORECASE),
         (r"\bTIMESTAMP\s*\[\s*us\s*\]", "_TIMESTAMP_US", re.IGNORECASE),
+        (r"\bTIMESTAMP\s*\[\s*d\s*\]", "_TIMESTAMP_DAYS", re.IGNORECASE),
     ]
 
     for pattern, replacement, flags in replacements:
