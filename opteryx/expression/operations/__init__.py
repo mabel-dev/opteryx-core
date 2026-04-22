@@ -137,6 +137,8 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
 
     All inputs must be Draken vectors. Null handling is native to Draken.
     """
+    from opteryx.exceptions import IncompatibleTypesError
+
     # Empty arrays return empty result
     if len(left_arr) == 0 or len(right_arr) == 0:
         from opteryx.compiled.draken.vectors.bool_vector import BoolVector
@@ -153,13 +155,29 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
     elif right_type == OrsoTypes.DECIMAL and left_type == OrsoTypes.INTEGER:
         left_type = OrsoTypes.DOUBLE
 
-    # Temporal type coercions
+    # Temporal type coercions - reject INT vs temporal comparisons (no implicit conversion)
     temporal_types = {OrsoTypes.DATE, OrsoTypes.TIMESTAMP}
     if (
         OrsoTypes.INTEGER in (left_type, right_type)
         or left_type in temporal_types
         or right_type in temporal_types
     ):
+        # Reject implicit INTEGER to temporal conversions
+        if left_type == OrsoTypes.INTEGER and right_type in temporal_types:
+            raise IncompatibleTypesError(
+                message="Ambiguous comparison: INTEGER = TIMESTAMP/DATE. "
+                "Provide a TIMESTAMP or DATE column instead. "
+                "To convert an INTEGER to TIMESTAMP, use an explicit cast with a unit: "
+                "`::TIMESTAMP[ms]`, `::TIMESTAMP[s]`, or `::TIMESTAMP[us]`."
+            )
+        if right_type == OrsoTypes.INTEGER and left_type in temporal_types:
+            raise IncompatibleTypesError(
+                message="Ambiguous comparison: TIMESTAMP/DATE = INTEGER. "
+                "Provide a TIMESTAMP or DATE column instead. "
+                "To convert an INTEGER to TIMESTAMP, use an explicit cast with a unit: "
+                "`::TIMESTAMP[ms]`, `::TIMESTAMP[s]`, or `::TIMESTAMP[us]`."
+            )
+
         left_source_type = left_type
         right_source_type = right_type
         left_target_type = left_type
@@ -167,15 +185,6 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
 
         if {left_type, right_type} == temporal_types:
             left_target_type = right_target_type = OrsoTypes.TIMESTAMP
-        else:
-            if left_type == OrsoTypes.INTEGER:
-                left_target_type = (
-                    OrsoTypes.DATE if right_type == OrsoTypes.DATE else OrsoTypes.TIMESTAMP
-                )
-            if right_type == OrsoTypes.INTEGER:
-                right_target_type = (
-                    OrsoTypes.DATE if left_type == OrsoTypes.DATE else OrsoTypes.TIMESTAMP
-                )
 
         left_arr = to_temporal_array(left_arr, left_source_type, left_target_type)
         right_arr = to_temporal_array(right_arr, right_source_type, right_target_type)

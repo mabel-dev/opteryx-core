@@ -24,7 +24,7 @@ def date_part(part, arr):
 
     Inputs (guaranteed by the draken kernel dispatch layer):
       part: a Draken constant vector — the datepart name (bytes scalar)
-      arr:  a Draken TimestampVector, Int64Vector, or Date32Vector
+      arr:  a Draken TimestampVector or Date32Vector
 
     Compiled kernels only — no Arrow fallback.
     Raises InvalidFunctionParameterError for unsupported dateparts or input types.
@@ -37,6 +37,15 @@ def date_part(part, arr):
     part = part[0].lower()
 
     vector_type = arr.__class__.__name__
+
+    # Reject Int64Vector — no implicit temporal coercion
+    if vector_type == "Int64Vector":
+        raise InvalidFunctionParameterError(
+            f"EXTRACT({part.decode().upper()}) cannot operate on INTEGER values. "
+            "Provide a TIMESTAMP or DATE column instead. "
+            "To convert an INTEGER to TIMESTAMP, use an explicit cast with a unit: "
+            "`::TIMESTAMP[ms]`, `::TIMESTAMP[s]`, or `::TIMESTAMP[us]`."
+        )
 
     # Date32Vector: convert to TimestampVector so the timestamp kernels can be reused.
     if vector_type == "Date32Vector":
@@ -78,51 +87,12 @@ def date_part(part, arr):
             return vector_datepart_quarter(arr)
 
         raise InvalidFunctionParameterError(
-            f"EXTRACT({part.decode().upper()}) is not yet supported. "
-            f"Supported parts: minute, hour, second, year, month, day, dayofweek, dayofyear, quarter. "
-            f"To add {part.decode().upper()}, implement vector_datepart_{part.decode()}() in vector_ops/vector_date_part.pyx"
-        )
-
-    if vector_type == "Int64Vector":
-        from opteryx.compiled.vector_ops.function_definitions import (
-            vector_datepart_day_i64,
-            vector_datepart_dayofweek_i64,
-            vector_datepart_dayofyear_i64,
-            vector_datepart_hour_i64,
-            vector_datepart_minute_i64,
-            vector_datepart_month_i64,
-            vector_datepart_quarter_i64,
-            vector_datepart_second_i64,
-            vector_datepart_year_i64,
-        )
-
-        if part == b"minute":
-            return vector_datepart_minute_i64(arr)
-        elif part == b"hour":
-            return vector_datepart_hour_i64(arr)
-        elif part in (b"second", b"seconds"):
-            return vector_datepart_second_i64(arr)
-        elif part == b"year":
-            return vector_datepart_year_i64(arr)
-        elif part == b"month":
-            return vector_datepart_month_i64(arr)
-        elif part == b"day":
-            return vector_datepart_day_i64(arr)
-        elif part in (b"dayofweek", b"dow"):
-            return vector_datepart_dayofweek_i64(arr)
-        elif part in (b"dayofyear", b"doy"):
-            return vector_datepart_dayofyear_i64(arr)
-        elif part == b"quarter":
-            return vector_datepart_quarter_i64(arr)
-
-        raise InvalidFunctionParameterError(
-            f"EXTRACT({part.decode().upper()}) is not yet supported for int64 timestamps. "
-            f"Supported parts: minute, hour, second, year, month, day, dayofweek, dayofyear, quarter. "
-            f"To add {part.decode().upper()}, implement vector_datepart_{part.decode()}_i64() in vector_ops/vector_date_part.pyx"
+            f"EXTRACT({part.decode().upper()}) is not supported. "
+            f"Supported parts: minute, hour, second, year, month, day, dayofweek, dayofyear, quarter."
         )
 
     raise InvalidFunctionParameterError(
-        f"EXTRACT({part.decode().upper()}) expects TimestampVector or Int64Vector input, "
+        f"EXTRACT({part.decode().upper()}) expects TimestampVector or Date32Vector input, "
         f"got {vector_type}. No fallback available."
     )
 
@@ -144,7 +114,7 @@ def trunc_timestamp(arr, part):
 def date_diff(part, start, end):
     """Calculate the difference between two timestamps.
 
-    All inputs are converted to TimestampVector and processed with Draken.
+    All inputs must be TimestampVector or Date32Vector.
     Returns a Draken Int64Vector.
     """
     from opteryx.compiled.vector_ops import vector_date_diff
@@ -153,17 +123,26 @@ def date_diff(part, start, end):
     if not part.endswith("s"):
         part += "s"
 
-    # Convert inputs to TimestampVector if needed
+    # Convert inputs to TimestampVector if needed, rejecting INT values
     def _to_timestamp_vector(arr):
         """Ensure input is a Draken TimestampVector."""
         type_name = arr.__class__.__name__
+        if type_name == "Int64Vector":
+            raise InvalidFunctionParameterError(
+                f"DATEDIFF cannot operate on INTEGER values. "
+                "Provide TIMESTAMP or DATE columns instead. "
+                "To convert an INTEGER to TIMESTAMP, use an explicit cast with a unit: "
+                "`::TIMESTAMP[ms]`, `::TIMESTAMP[s]`, or `::TIMESTAMP[us]`."
+            )
         if type_name == "TimestampVector":
             return arr
         if type_name == "Date32Vector":
             from opteryx.compiled.vector_ops.function_definitions import vector_date32_to_timestamp
 
             return vector_date32_to_timestamp(arr)
-        return arr
+        raise InvalidFunctionParameterError(
+            f"DATEDIFF expects TIMESTAMP or DATE input, got {type_name}."
+        )
 
     start_vec = _to_timestamp_vector(start)
     end_vec = _to_timestamp_vector(end)

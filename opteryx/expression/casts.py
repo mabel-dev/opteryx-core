@@ -20,6 +20,7 @@ import datetime
 import math
 
 from opteryx.types import OrsoTypes
+from opteryx.types._datetime_conversion import timestamp_to_int64_us
 from opteryx.utils.vector_types import VectorType, get_vector_type
 from opteryx.utils.vector_types import is_draken_vector as is_draken_vector_fn
 
@@ -36,8 +37,11 @@ def _unwrap_vector_value(value):
     return value
 
 
-def parse_timestamp_value(value):
-    """Parse a timestamp value into a Python datetime object."""
+def parse_timestamp_value(value, unit=None):
+    """Parse a timestamp value into a Python datetime object.
+
+    For numeric values, a unit must be explicitly specified (ms, s, us).
+    """
     if _is_nullish(value):
         return None
 
@@ -48,17 +52,23 @@ def parse_timestamp_value(value):
         return datetime.datetime.combine(value, datetime.time()).replace(tzinfo=None)
 
     if isinstance(value, (int, float)):
-        numeric = float(value)
-        magnitude = abs(numeric)
+        if unit is None:
+            raise TypeError(
+                "Ambiguous cast: TIMESTAMP requires a unit. "
+                "Use `::TIMESTAMP[ns]`, `::TIMESTAMP[ms]`, `::TIMESTAMP[s]`, or `::TIMESTAMP[us]`."
+            )
 
-        if magnitude >= 1e18:
+        numeric = float(value)
+        if unit == "ns":
             seconds = numeric / 1_000_000_000
-        elif magnitude >= 1e15:
-            seconds = numeric / 1_000_000
-        elif magnitude >= 1e12:
+        elif unit == "ms":
             seconds = numeric / 1_000
-        else:
+        elif unit == "s":
             seconds = numeric
+        elif unit == "us":
+            seconds = numeric / 1_000_000
+        else:
+            raise ValueError(f"Unsupported timestamp unit: {unit!r}. Use 'ns', 'ms', 's', or 'us'.")
 
         return datetime.datetime.fromtimestamp(seconds, tz=datetime.timezone.utc).replace(
             tzinfo=None
@@ -249,15 +259,18 @@ def safe(func, value, **kwargs):
         return None
 
 
-def cast(arr: any, _type: str, args: tuple = ()) -> any:
+def cast(arr: any, _type: str, args: tuple = (), unit: str = None) -> any:
     """
     Create a casting function for the given type.
 
     This is a factory function that returns a callable that can be used to cast values.
+    For TIMESTAMP casts from integers, unit is required: 'ms', 's', or 'us'.
     """
 
     def _inner(arr):
         from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+
+        kwargs = {}
 
         def _cast_value(i):
             return caster(i, **kwargs)
@@ -282,8 +295,15 @@ def cast(arr: any, _type: str, args: tuple = ()) -> any:
             kwargs["element_type"] = args[0]
 
         if _type == "TIMESTAMP":
-            result = [parse_timestamp_value(i) for i in arr]
-            return vector_from_sequence(result, dtype=OrsoTypes.TIMESTAMP)
+            result = [parse_timestamp_value(i, unit=unit) for i in arr]
+            # Convert datetime objects to int64 microseconds, then create TimestampVector
+            int64_values = [timestamp_to_int64_us(dt) if dt is not None else None for dt in result]
+            int_vec = vector_from_sequence(int64_values, dtype=OrsoTypes.INTEGER)
+            from opteryx.compiled.draken.vectors.timestamp_vector import (
+                from_int64_vector as _from_int64,
+            )
+
+            return _from_int64(int_vec, timestamp_unit="us")
         if _type == "ARRAY":
             result = [_parse_array_value(i, args[0], safe_cast=False) for i in arr]
             return vector_from_sequence(result, dtype=OrsoTypes.ARRAY)

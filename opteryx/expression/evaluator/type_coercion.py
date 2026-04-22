@@ -39,9 +39,7 @@ def _dictionary_compare_vector(vec):
     ):
         return vec
 
-    raise TypeError(
-        "Dictionary compare path requires a Draken dictionary-capable vector with native operators."
-    )
+    return type(vec).from_arrow(vec.to_arrow())
 
 
 def _coerce_str(value) -> bytes:

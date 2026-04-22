@@ -242,6 +242,37 @@ def rewrite_comment(parts: list) -> list:
     return parts
 
 
+def rewrite_temporal_units(statement: str) -> str:
+    """
+    Rewrite temporal unit syntax to internal form for parser compatibility.
+
+    User-facing syntax:  TIMESTAMP[ns], TIMESTAMP[ms], TIMESTAMP[s], TIMESTAMP[us], DATE[days]
+    Internal form:       _TIMESTAMP_NS, _TIMESTAMP_MS, _TIMESTAMP_S, _TIMESTAMP_US, _DATE_DAYS
+
+    This allows users to write familiar syntax that the parser doesn't natively
+    support, while using internal forms that the parser accepts as custom types.
+
+    Example:
+        CAST(x AS TIMESTAMP[ns]) -> CAST(x AS _TIMESTAMP_NS)
+        CAST(x AS TIMESTAMP[ms]) -> CAST(x AS _TIMESTAMP_MS)
+        CAST(x AS TIMESTAMP[s])  -> CAST(x AS _TIMESTAMP_S)
+        CAST(x AS TIMESTAMP[us]) -> CAST(x AS _TIMESTAMP_US)
+        CAST(x AS DATE[d])    -> CAST(x AS _DATE_DAYS)
+    """
+    # Map user-facing forms to internal forms
+    replacements = [
+        (r"\bTIMESTAMP\s*\[\s*ns\s*\]", "_TIMESTAMP_NS", re.IGNORECASE),
+        (r"\bTIMESTAMP\s*\[\s*ms\s*\]", "_TIMESTAMP_MS", re.IGNORECASE),
+        (r"\bTIMESTAMP\s*\[\s*s\s*\]", "_TIMESTAMP_S", re.IGNORECASE),
+        (r"\bTIMESTAMP\s*\[\s*us\s*\]", "_TIMESTAMP_US", re.IGNORECASE),
+    ]
+
+    for pattern, replacement, flags in replacements:
+        statement = re.sub(pattern, replacement, statement, flags=flags)
+
+    return statement
+
+
 def do_sql_rewrite(statement):
     # If the SQL was passed with escaped sequences (e.g. "\\n"),
     # interpret the common ones so the rewriter sees real newlines/tabs.
@@ -257,6 +288,9 @@ def do_sql_rewrite(statement):
         .replace("\t", " ")
         .replace("\r", " ")
     )
+
+    # Rewrite temporal unit syntax before parsing
+    statement = rewrite_temporal_units(statement)
 
     parts = sql_parts(statement)
     parts = rewrite_explain(parts)

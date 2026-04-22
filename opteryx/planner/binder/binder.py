@@ -370,10 +370,41 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
             # Strip TRY_ prefix for safe casts — the prefix is kept in node.value for the evaluator
             if target_type_name.startswith("TRY_"):
                 target_type_name = target_type_name[4:]
+
+            # Extract unit from internal temporal type forms (e.g., "_TIMESTAMP_MS" → unit="ms")
+            unit = None
+            if target_type_name.startswith("_TIMESTAMP_"):
+                # Internal form detected - extract unit
+                unit_map = {
+                    "_TIMESTAMP_NS": "ns",
+                    "_TIMESTAMP_MS": "ms",
+                    "_TIMESTAMP_S": "s",
+                    "_TIMESTAMP_US": "us",
+                }
+                if target_type_name in unit_map:
+                    unit = unit_map[target_type_name]
+                    target_type_name = "TIMESTAMP"
+                else:
+                    raise IncompatibleTypesError(
+                        message=f"Unknown temporal unit form: {target_type_name}. "
+                        "Use the public form: `CAST(expr AS TIMESTAMP[ns])`, "
+                        "`CAST(expr AS TIMESTAMP[ms])`, `CAST(expr AS TIMESTAMP[s])`, or `CAST(expr AS TIMESTAMP[us])`."
+                    )
+
             # VARBINARY is not a canonical OrsoType — map to BLOB
             if target_type_name == "VARBINARY":
                 target_type_name = "BLOB"
             result_type = OrsoTypes[target_type_name]
+
+            # Validate TIMESTAMP casts from INTEGER — require explicit unit
+            if target_type_name == "TIMESTAMP" and node.left:
+                source_type = determine_type(node.left)
+                if source_type == OrsoTypes.INTEGER:
+                    if unit is None:
+                        raise IncompatibleTypesError(
+                            message="Ambiguous cast: INTEGER → TIMESTAMP requires a unit. "
+                            "Use `expr::TIMESTAMP[ms]`, `expr::TIMESTAMP[s]`, or `expr::TIMESTAMP[us]`."
+                        )
 
             element_type = None
             precision = 38

@@ -240,6 +240,11 @@ def _dict_compare(op: str, vec, right):
             f"dictionary-encoded vector temporal compare: unsupported op {op!r}"
         )
 
+    if op == "InList":
+        if isinstance(right, (list, tuple, set, frozenset)):
+            right = frozenset(right)
+        return vector_in_list(vec, right)
+
     value_list = list(right) if isinstance(right, (list, tuple, set, frozenset)) else right
 
     if op == "Eq":
@@ -254,8 +259,6 @@ def _dict_compare(op: str, vec, right):
         return vec.less_than_or_equals(value_list)
     if op == "GtEq":
         return vec.greater_than_or_equals(value_list)
-    if op == "InList":
-        return vector_in_list(vec, value_list)
     if op in ("Like", "ILike", "RLike", "InStr", "IInStr"):
         right = _coerce_str(right)
     if op == "Like":

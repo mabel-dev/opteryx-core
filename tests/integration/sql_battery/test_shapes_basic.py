@@ -176,6 +176,16 @@ STATEMENTS = [
         ("SELECT * FROM (SELECT ID, Name FROM $planets) AS subquery", 9, 2, None),
         ("SELECT name FROM $planets WHERE id IN (1, 3, 5) ORDER BY NAME DESC", 3, 1, None),
         ("SELECT ID, Name, id FROM $planets", 9, 3, AmbiguousIdentifierError),
+
+        ("SELECT 1::TIMESTAMP[ms]", 1, 1, None),
+        ("SELECT 1::TIMESTAMP[s]", 1, 1, None),
+        ("SELECT 1::TIMESTAMP[us]", 1, 1, None),
+        ("SELECT 1::TIMESTAMP[ns]", 1, 1, None),
+        ("SELECT 1::DATE", 1, 1, None),
+        ("SELECT 1::TIMESTAMP[d]", 1, 1, None),
+        ("SELECT 1::TIMESTAMP", 1, 1, UnsupportedSyntaxError),
+        ("SELECT 1::TIMESTAMP[]", 1, 1, UnsupportedSyntaxError),
+        ("SELECT 1::TIMESTAMP[milliseconds]", 1, 1, UnsupportedSyntaxError),
 ]
 
 # fmt:on

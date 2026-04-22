@@ -563,6 +563,11 @@ def _normalize_cast_type(data_type: str) -> str:
     lower_type = data_type.lower()
     upper_type = data_type.upper()
 
+    # Preserve internal temporal type forms (from SQL rewriter)
+    # These should pass through unchanged to the binder for unit extraction
+    if upper_type in ("_TIMESTAMP_NS", "_TIMESTAMP_MS", "_TIMESTAMP_S", "_TIMESTAMP_US"):
+        return upper_type
+
     # Map of substring patterns to normalized types
     type_mappings = {
         "timestamp": "TIMESTAMP",
@@ -615,6 +620,21 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
     # Strip TRY_ prefix for type lookup
     base_type = target_type.replace("TRY_", "")
 
+    # Extract unit from internal temporal type forms
+    unit = None
+    if base_type == "_TIMESTAMP_NS":
+        unit = "ns"
+        base_type = "TIMESTAMP"
+    elif base_type == "_TIMESTAMP_MS":
+        unit = "ms"
+        base_type = "TIMESTAMP"
+    elif base_type == "_TIMESTAMP_S":
+        unit = "s"
+        base_type = "TIMESTAMP"
+    elif base_type == "_TIMESTAMP_US":
+        unit = "us"
+        base_type = "TIMESTAMP"
+
     # Special case: VARBINARY maps to BLOB in Orso types
     if base_type == "VARBINARY":
         orso_type = OrsoTypes.BLOB
@@ -626,8 +646,18 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
         literal_node.type in (OrsoTypes.INTEGER, OrsoTypes.DATE)
         or isinstance(literal_node.value, int)
     ):
+        # Require explicit unit for INTEGER to TIMESTAMP conversion
+        if literal_node.type == OrsoTypes.INTEGER and unit is None:
+            raise UnsupportedSyntaxError(
+                "Ambiguous cast: INTEGER → TIMESTAMP requires a unit. "
+                "Use `expr::TIMESTAMP[ms]`, `expr::TIMESTAMP[s]`, or `expr::TIMESTAMP[us]`."
+            )
+
         int_value = int(literal_node.value)
-        if literal_node.type == OrsoTypes.DATE or abs(int_value) < 100_000:
+        # If unit was specified, use it; otherwise use default behavior for dates
+        if unit:
+            value = parse_timestamp_value(int_value, unit=unit)
+        elif literal_node.type == OrsoTypes.DATE or abs(int_value) < 100_000:
             value = (_EPOCH_DT + datetime.timedelta(days=int_value)).replace(tzinfo=None)
         else:
             value = parse_timestamp_value(int_value)

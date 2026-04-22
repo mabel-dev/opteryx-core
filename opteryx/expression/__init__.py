@@ -543,6 +543,19 @@ def _inner_evaluate(root: Node, table):
             # Get the target type name (remove TRY_ prefix if present for TRY_CAST/SAFE_CAST)
             target_type = root.value[4:] if root.value.startswith("TRY_") else root.value
 
+            # Extract unit from internal temporal type forms (e.g., "_TIMESTAMP_MS" → unit="ms")
+            # These forms come from the SQL rewriter, which converts user syntax like TIMESTAMP[ms]
+            unit = None
+            unit_map = {
+                "_TIMESTAMP_NS": ("TIMESTAMP", "ns"),
+                "_TIMESTAMP_MS": ("TIMESTAMP", "ms"),
+                "_TIMESTAMP_S": ("TIMESTAMP", "s"),
+                "_TIMESTAMP_US": ("TIMESTAMP", "us"),
+            }
+            if target_type in unit_map:
+                canonical_type, unit = unit_map[target_type]
+                target_type = canonical_type
+
             # Handle optional precision/scale/length parameters from node.parameters
             params = []
             if root.parameters:
@@ -550,7 +563,7 @@ def _inner_evaluate(root: Node, table):
                 params = [_inner_evaluate(param, table) for param in root.parameters]
 
             # Get the cast kernel - cast() is a factory that returns a callable
-            kernel = cast(None, target_type, tuple(params))
+            kernel = cast(None, target_type, tuple(params), unit=unit)
 
             # Apply the cast kernel to the source
             result = kernel(source)
