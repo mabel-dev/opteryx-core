@@ -297,6 +297,14 @@ def cast(arr: any, _type: str, args: tuple = (), unit: str = None) -> any:
             kwargs["element_type"] = args[0]
 
         if _type == "TIMESTAMP":
+            # Vectorized path for Int64Vector or DictionaryEncodedVector(int64)
+            if is_draken_vector_fn(arr) and unit is not None:
+                v_type = get_vector_type(arr)
+                if v_type in (VectorType.INT64, VectorType.DICTIONARY_ENCODED):
+                    from opteryx.compiled.vector_ops import vector_cast_int64_to_timestamp
+                    return vector_cast_int64_to_timestamp(arr, unit=unit)
+
+            # Fallback: parse path (for non-numeric or non-Draken inputs)
             result = [parse_timestamp_value(i, unit=unit) for i in arr]
             # Convert datetime objects to int64 microseconds, then create TimestampVector
             int64_values = [timestamp_to_int64_us(dt) if dt is not None else None for dt in result]

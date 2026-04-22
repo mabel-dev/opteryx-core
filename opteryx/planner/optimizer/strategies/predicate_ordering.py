@@ -57,6 +57,21 @@ BASIC_COMPARISON_COSTS = {
     0: 10.00,  # for completeness
 }
 
+# Operation-specific costs (override type-based costs)
+# Pattern matching operations are significantly more expensive than simple comparisons
+OPERATION_COSTS = {
+    "InStr": 2.5,  # substring search (Volnitsky algorithm)
+    "IInStr": 2.5,  # case-insensitive substring search
+    "NotInStr": 2.5,
+    "NotIInStr": 2.5,
+    "Like": 2.5,  # pattern matching
+    "ILike": 2.5,
+    "NotLike": 2.5,
+    "NotILike": 2.5,
+    "RLike": 3.0,  # regex is even more expensive
+    "NotRLike": 3.0,
+}
+
 # If we have no data, we assume these default selectivities
 DEFAULT_SELECTIVITY = {
     "Eq": 0.1,
@@ -65,6 +80,16 @@ DEFAULT_SELECTIVITY = {
     "GtEq": 0.5,
     "Lt": 0.5,
     "LtEq": 0.5,
+    "InStr": 0.3,
+    "IInStr": 0.3,
+    "NotInStr": 0.7,
+    "NotIInStr": 0.7,
+    "Like": 0.3,
+    "ILike": 0.3,
+    "NotLike": 0.7,
+    "NotILike": 0.7,
+    "RLike": 0.3,
+    "NotRLike": 0.7,
 }
 
 
@@ -83,6 +108,9 @@ def _estimate_selectivity(condition):
 
 
 def _base_cost(condition):
+    op = getattr(condition, "value", None)
+    if op in OPERATION_COSTS:
+        return OPERATION_COSTS[op]
     col = getattr(condition, "left", None)
     col_type = getattr(col, "schema_column", None)
     if col_type is None:

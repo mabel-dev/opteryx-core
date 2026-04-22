@@ -295,6 +295,20 @@ def _constant_compare(op: str, vec, right):
         return vec.greater_than_or_equals(right)
     if op == "InList":
         return vector_in_list(vec, right)
+    if op in ("Like", "ILike", "RLike", "InStr", "IInStr"):
+        if _is_constant_vector_like(right):
+            right = _constant_scalar_value(right)
+        right = _coerce_str(right)
+    if op == "Like":
+        return vector_like(vec, right, False)
+    if op == "ILike":
+        return vector_like(vec, right, True)
+    if op == "RLike":
+        return vector_rlike(vec, right)
+    if op == "InStr":
+        return vector_contains(vec, right, False)
+    if op == "IInStr":
+        return vector_contains(vec, right, True)
     raise NotImplementedError(f"constant-encoded vector: unsupported op {op!r}")
 
 
@@ -396,9 +410,11 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
         return vector_allop_neq(left, right)
     if op == "AtArrow":
         from .json_ops import _json_at_arrow
+
         return _json_at_arrow(left, right)
     if op == "ArrayContainsAll":
         from .json_ops import _json_array_contains_all
+
         return _json_array_contains_all(left, right)
     if op == "AnyOpLike":
         from opteryx.compiled.draken.vectors.string_vector import StringVector

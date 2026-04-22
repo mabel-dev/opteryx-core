@@ -1326,7 +1326,6 @@ cdef TimestampVector from_dict_nullable(
 
     return vec
 
-
 cpdef TimestampVector from_int64_vector(Int64Vector source, str timestamp_unit="us"):
     """
     Convert an Int64Vector containing epoch timestamp values to TimestampVector.

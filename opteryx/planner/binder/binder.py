@@ -175,7 +175,10 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
 
     # if we have an alias for a column not known about in the schema, add it
     if node.alias and node.alias not in column.all_names:
-        column.aliases.append(node.alias)
+        if column.aliases:
+            column.aliases.append(node.alias)
+        else:
+            column.aliases = [node.alias]
 
     # Update node.schema_column with the found column
     node.schema_column = column
@@ -445,7 +448,9 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                 precision=precision,
                 scale=scale,
             )
-            schema_column.identity = column_name
+            # CAST nodes must have unique identities distinct from source columns
+            # This ensures they're properly evaluated via _inner_evaluate in the Draken path
+            schema_column.identity = f"_cast__{column_name}__{target_type_name}"
             schemas["$derived"].columns.append(schema_column)
             node.derived_from = []
             node.schema_column = schema_column

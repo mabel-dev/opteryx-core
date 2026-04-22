@@ -222,7 +222,10 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
                 # update the column reference with any AS aliases
                 if node_column and node_column.alias:
                     node_column.schema_column.aliases.append(node_column.alias)
-                    column.aliases.append(node_column.alias)
+                    if column.aliases:
+                        column.aliases.append(node_column.alias)
+                    else:
+                        column.aliases = [node_column.alias]
             # update the schema with columns we have references to, removing redundant columns
             schema.columns = schema_columns
             for column in list(node.columns) + list(node.order_by_columns):
