@@ -23,8 +23,14 @@ def loads(s):
 
 
 def dumps(obj, default=None, option=None):
-    """Serialize to JSON bytes using the Cython Parser's dump implementation.
+    """Serialize to JSON bytes using the Cython Parser's mutable API.
 
-    No stdlib fallback is provided here; callers must ensure the extension is built.
+    Args:
+        obj: Python object to serialize
+        default: Optional callable(obj) for non-serializable types
+        option: yyjson write flags (e.g., OPT_INDENT_2)
+
+    Returns:
+        JSON as bytes
     """
-    return Parser().dump(obj)
+    return Parser().dumps(obj, default_handler=default, options=option or 0)

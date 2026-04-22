@@ -565,7 +565,13 @@ def _normalize_cast_type(data_type: str) -> str:
 
     # Preserve internal temporal type forms (from SQL rewriter)
     # These should pass through unchanged to the binder for unit extraction
-    if upper_type in ("_TIMESTAMP_NS", "_TIMESTAMP_MS", "_TIMESTAMP_S", "_TIMESTAMP_US", "_TIMESTAMP_DAYS"):
+    if upper_type in (
+        "_TIMESTAMP_NS",
+        "_TIMESTAMP_MS",
+        "_TIMESTAMP_S",
+        "_TIMESTAMP_US",
+        "_TIMESTAMP_DAYS",
+    ):
         return upper_type
 
     # Map of substring patterns to normalized types

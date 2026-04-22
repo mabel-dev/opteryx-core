@@ -297,3 +297,110 @@ cdef class Parser:
 
     def loads(self, object data, unsigned int flags=0):
         return self.parse(data, flags)
+
+    def dumps(self, object obj, object default_handler=None, unsigned int options=0):
+        """Serialize a Python object to JSON bytes using yyjson's mutable API.
+
+        Args:
+            obj: The Python object to serialize
+            default_handler: Optional callable(obj) for non-serializable objects
+            options: yyjson write flags (e.g., YYJSON_WRITE_PRETTY)
+
+        Returns:
+            JSON as bytes (the caller decodes to str if needed)
+        """
+        cdef yyjson_mut_doc* doc
+        cdef yyjson_mut_val* root
+        cdef size_t json_len
+        cdef char* json
+        cdef object result
+
+        doc = yyjson_mut_doc_new(NULL)
+        if doc == NULL:
+            raise MemoryError("Failed to create yyjson document")
+
+        try:
+            root = self._py_to_mut(obj, doc, default_handler)
+            if root == NULL:
+                raise TypeError(f"Cannot serialize object of type {type(obj).__name__}")
+
+            yyjson_mut_doc_set_root(doc, root)
+
+            json_len = 0
+            json = yyjson_mut_write(doc, options, &json_len)
+            if json == NULL:
+                raise MemoryError("Serialisation error")
+
+            try:
+                result = PyBytes_FromStringAndSize(json, json_len)
+                return result
+            finally:
+                free(json)
+        finally:
+            yyjson_mut_doc_free(doc)
+
+    cdef yyjson_mut_val* _py_to_mut(self, object obj, yyjson_mut_doc* doc,
+                                     object default_handler):
+        """Recursively convert Python object to yyjson_mut_val."""
+        cdef yyjson_mut_val* result
+        cdef yyjson_mut_val* key_val
+        cdef bytes key_bytes
+        cdef bytes value_bytes
+        cdef char* str_ptr
+        cdef size_t str_len
+
+        if obj is None:
+            return yyjson_mut_null(doc)
+        elif isinstance(obj, bool):
+            return yyjson_mut_true(doc) if obj else yyjson_mut_false(doc)
+        elif isinstance(obj, int):
+            if obj >= 0:
+                return yyjson_mut_uint(doc, <unsigned long long>obj)
+            else:
+                return yyjson_mut_sint(doc, <long long>obj)
+        elif isinstance(obj, float):
+            return yyjson_mut_real(doc, <double>obj)
+        elif isinstance(obj, str):
+            value_bytes = obj.encode('utf-8')
+            PyBytes_AsStringAndSize(value_bytes, &str_ptr, <Py_ssize_t*>&str_len)
+            return yyjson_mut_strncpy(doc, str_ptr, str_len)
+        elif isinstance(obj, bytes):
+            PyBytes_AsStringAndSize(obj, &str_ptr, <Py_ssize_t*>&str_len)
+            return yyjson_mut_strncpy(doc, str_ptr, str_len)
+        elif isinstance(obj, dict):
+            result = yyjson_mut_obj(doc)
+            if result == NULL:
+                return NULL
+            for py_key, py_val in obj.items():
+                key_bytes = str(py_key).encode('utf-8')
+                PyBytes_AsStringAndSize(key_bytes, &str_ptr, <Py_ssize_t*>&str_len)
+                # Create the key as a yyjson_mut_val with copy
+                key_val = yyjson_mut_strncpy(doc, str_ptr, str_len)
+                if key_val == NULL:
+                    return NULL
+                # Create the value
+                mut_val = self._py_to_mut(py_val, doc, default_handler)
+                if mut_val == NULL:
+                    return NULL
+                # Add key-value pair
+                if not yyjson_mut_obj_add(result, key_val, mut_val):
+                    return NULL
+            return result
+        elif isinstance(obj, (list, tuple)):
+            result = yyjson_mut_arr(doc)
+            if result == NULL:
+                return NULL
+            for item in obj:
+                mut_val = self._py_to_mut(item, doc, default_handler)
+                if mut_val == NULL:
+                    return NULL
+                if not yyjson_mut_arr_add_val(result, mut_val):
+                    return NULL
+            return result
+        elif default_handler is not None:
+            try:
+                return self._py_to_mut(default_handler(obj), doc, default_handler)
+            except (TypeError, ValueError):
+                return NULL
+        else:
+            return NULL

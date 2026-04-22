@@ -92,3 +92,38 @@ cdef extern from "yyjson.h":
      # Array/Object value setters
     bint yyjson_arr_set(yyjson_val* arr, size_t idx, yyjson_val* val)
     bint yyjson_obj_set(yyjson_val* obj, bytes key, yyjson_val* val)
+
+    # Mutable value types and functions
+    ctypedef struct yyjson_mut_doc:
+        pass
+
+    ctypedef struct yyjson_mut_val:
+        pass
+
+    # Mutable document creation
+    yyjson_mut_doc* yyjson_mut_doc_new(const yyjson_alc* alc)
+    void yyjson_mut_doc_free(yyjson_mut_doc* doc)
+    yyjson_mut_val* yyjson_mut_doc_get_root(yyjson_mut_doc* doc)
+    void yyjson_mut_doc_set_root(yyjson_mut_doc* doc, yyjson_mut_val* root)
+
+    # Mutable value creation
+    yyjson_mut_val* yyjson_mut_null(yyjson_mut_doc* doc)
+    yyjson_mut_val* yyjson_mut_true(yyjson_mut_doc* doc)
+    yyjson_mut_val* yyjson_mut_false(yyjson_mut_doc* doc)
+    yyjson_mut_val* yyjson_mut_uint(yyjson_mut_doc* doc, unsigned long long num)
+    yyjson_mut_val* yyjson_mut_sint(yyjson_mut_doc* doc, long long num)
+    yyjson_mut_val* yyjson_mut_real(yyjson_mut_doc* doc, double num)
+    yyjson_mut_val* yyjson_mut_str(yyjson_mut_doc* doc, const char* str)
+    yyjson_mut_val* yyjson_mut_strn(yyjson_mut_doc* doc, const char* str, size_t len)
+    yyjson_mut_val* yyjson_mut_strcpy(yyjson_mut_doc* doc, const char* str)
+    yyjson_mut_val* yyjson_mut_strncpy(yyjson_mut_doc* doc, const char* str, size_t len)
+    yyjson_mut_val* yyjson_mut_arr(yyjson_mut_doc* doc)
+    yyjson_mut_val* yyjson_mut_obj(yyjson_mut_doc* doc)
+
+    # Mutable array/object operations
+    bint yyjson_mut_arr_add_val(yyjson_mut_val* arr, yyjson_mut_val* val)
+    bint yyjson_mut_obj_add(yyjson_mut_val* obj, yyjson_mut_val* key,
+                           yyjson_mut_val* val)
+
+    # Write mutable document
+    char* yyjson_mut_write(const yyjson_mut_doc* doc, yyjson_write_flag flags, size_t* len)

@@ -15,13 +15,11 @@
             "-Wno-unused-command-line-argument"
         ],
         "include_dirs": [
-            "/Users/justin/.pyenv/versions/3.13.12/lib/python3.13/site-packages/numpy/_core/include",
             "src/cpp",
             "src/c",
             "third_party/mabel/draken",
             "third_party/mabel/carchar",
             "third_party/mabel/parvi",
-            "third_party/abseil",
             "third_party/fastfloat",
             "third_party/fastfloat/fast_float",
             "third_party/mabel/rugo/parquet",
@@ -1604,6 +1602,7 @@ struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_YYDoc {
 */
 struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser {
   PyObject_HEAD
+  struct __pyx_vtabstruct_7opteryx_11third_party_6yyjson_7cyyjson_Parser *__pyx_vtab;
 };
 
 
@@ -1621,6 +1620,20 @@ struct __pyx_vtabstruct_7opteryx_11third_party_6yyjson_7cyyjson_YYVal {
   PyObject *(*_jsonptr_from_dot)(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_YYVal *, PyObject *);
 };
 static struct __pyx_vtabstruct_7opteryx_11third_party_6yyjson_7cyyjson_YYVal *__pyx_vtabptr_7opteryx_11third_party_6yyjson_7cyyjson_YYVal;
+
+
+/* "opteryx/third_party/yyjson/cyyjson.pyx":277
+ * # Parser  creates YYDoc from JSON input
+ * # ----------------------------------------------------------------------
+ * cdef class Parser:             # <<<<<<<<<<<<<<
+ *     def parse(self, object data, unsigned int flags=0):
+ *         cdef bytes bdata
+*/
+
+struct __pyx_vtabstruct_7opteryx_11third_party_6yyjson_7cyyjson_Parser {
+  yyjson_mut_val *(*_py_to_mut)(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *, PyObject *, yyjson_mut_doc *, PyObject *);
+};
+static struct __pyx_vtabstruct_7opteryx_11third_party_6yyjson_7cyyjson_Parser *__pyx_vtabptr_7opteryx_11third_party_6yyjson_7cyyjson_Parser;
 /* #### Code section: utility_code_proto ### */
 
 /* --- Runtime support code (head) --- */
@@ -2118,6 +2131,74 @@ static int __Pyx_RaiseUnexpectedTypeError(const char *expected, PyObject *obj);
 /* PyObjectCallNoArg.proto */
 static CYTHON_INLINE PyObject* __Pyx_PyObject_CallNoArg(PyObject *func);
 
+/* IterFinish.proto (used by dict_iter) */
+static CYTHON_INLINE int __Pyx_IterFinish(void);
+
+/* PyObjectGetMethod.proto (used by PyObjectCallMethod0) */
+#if !(CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000)))
+static int __Pyx_PyObject_GetMethod(PyObject *obj, PyObject *name, PyObject **method);
+#endif
+
+/* PyObjectCallMethod0.proto (used by dict_iter) */
+static PyObject* __Pyx_PyObject_CallMethod0(PyObject* obj, PyObject* method_name);
+
+/* RaiseNeedMoreValuesToUnpack.proto (used by UnpackTuple2) */
+static CYTHON_INLINE void __Pyx_RaiseNeedMoreValuesError(Py_ssize_t index);
+
+/* RaiseTooManyValuesToUnpack.proto (used by UnpackItemEndCheck) */
+static CYTHON_INLINE void __Pyx_RaiseTooManyValuesError(Py_ssize_t expected);
+
+/* UnpackItemEndCheck.proto (used by UnpackTuple2) */
+static int __Pyx_IternextUnpackEndCheck(PyObject *retval, Py_ssize_t expected);
+
+/* RaiseNoneIterError.proto (used by UnpackTupleError) */
+static CYTHON_INLINE void __Pyx_RaiseNoneNotIterableError(void);
+
+/* UnpackTupleError.proto (used by UnpackTuple2) */
+static void __Pyx_UnpackTupleError(PyObject *, Py_ssize_t index);
+
+/* UnpackTuple2.proto (used by dict_iter) */
+static CYTHON_INLINE int __Pyx_unpack_tuple2(
+    PyObject* tuple, PyObject** value1, PyObject** value2, int is_tuple, int has_known_size, int decref_tuple);
+static CYTHON_INLINE int __Pyx_unpack_tuple2_exact(
+    PyObject* tuple, PyObject** value1, PyObject** value2, int decref_tuple);
+static int __Pyx_unpack_tuple2_generic(
+    PyObject* tuple, PyObject** value1, PyObject** value2, int has_known_size, int decref_tuple);
+
+/* dict_iter.proto */
+static CYTHON_INLINE PyObject* __Pyx_dict_iterator(PyObject* dict, int is_dict, PyObject* method_name,
+                                                   Py_ssize_t* p_orig_length, int* p_is_dict);
+static CYTHON_INLINE int __Pyx_dict_iter_next(PyObject* dict_or_iter, Py_ssize_t orig_length, Py_ssize_t* ppos,
+                                              PyObject** pkey, PyObject** pvalue, PyObject** pitem, int is_dict);
+
+/* PyObject_Unicode.proto */
+#define __Pyx_PyObject_Unicode(obj)\
+    (likely(PyUnicode_CheckExact(obj)) ? __Pyx_NewRef(obj) : PyObject_Str(obj))
+
+/* FastTypeChecks.proto */
+#if CYTHON_COMPILING_IN_CPYTHON
+#define __Pyx_TypeCheck(obj, type) __Pyx_IsSubtype(Py_TYPE(obj), (PyTypeObject *)type)
+#define __Pyx_TypeCheck2(obj, type1, type2) __Pyx_IsAnySubtype2(Py_TYPE(obj), (PyTypeObject *)type1, (PyTypeObject *)type2)
+static CYTHON_INLINE int __Pyx_IsSubtype(PyTypeObject *a, PyTypeObject *b);
+static CYTHON_INLINE int __Pyx_IsAnySubtype2(PyTypeObject *cls, PyTypeObject *a, PyTypeObject *b);
+static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches(PyObject *err, PyObject *type);
+static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches2(PyObject *err, PyObject *type1, PyObject *type2);
+#else
+#define __Pyx_TypeCheck(obj, type) PyObject_TypeCheck(obj, (PyTypeObject *)type)
+#define __Pyx_TypeCheck2(obj, type1, type2) (PyObject_TypeCheck(obj, (PyTypeObject *)type1) || PyObject_TypeCheck(obj, (PyTypeObject *)type2))
+#define __Pyx_PyErr_GivenExceptionMatches(err, type) PyErr_GivenExceptionMatches(err, type)
+static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches2(PyObject *err, PyObject *type1, PyObject *type2) {
+    return PyErr_GivenExceptionMatches(err, type1) || PyErr_GivenExceptionMatches(err, type2);
+}
+#endif
+#define __Pyx_PyErr_ExceptionMatches2(err1, err2)  __Pyx_PyErr_GivenExceptionMatches2(__Pyx_PyErr_CurrentExceptionType(), err1, err2)
+#define __Pyx_PyException_Check(obj) __Pyx_TypeCheck(obj, PyExc_Exception)
+#ifdef PyExceptionInstance_Check
+  #define __Pyx_PyBaseException_Check(obj) PyExceptionInstance_Check(obj)
+#else
+  #define __Pyx_PyBaseException_Check(obj) __Pyx_TypeCheck(obj, PyExc_BaseException)
+#endif
+
 /* GetAttr3.proto */
 static CYTHON_INLINE PyObject *__Pyx_GetAttr3(PyObject *, PyObject *, PyObject *);
 
@@ -2192,14 +2273,6 @@ static int __Pyx__SetItemOnTypeDict(PyTypeObject *tp, PyObject *k, PyObject *v);
 
 /* FixUpExtensionType.proto */
 static CYTHON_INLINE int __Pyx_fix_up_extension_type_from_spec(PyType_Spec *spec, PyTypeObject *type);
-
-/* PyObjectGetMethod.proto (used by PyObjectCallMethod0) */
-#if !(CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000)))
-static int __Pyx_PyObject_GetMethod(PyObject *obj, PyObject *name, PyObject **method);
-#endif
-
-/* PyObjectCallMethod0.proto (used by PyType_Ready) */
-static PyObject* __Pyx_PyObject_CallMethod0(PyObject* obj, PyObject* method_name);
 
 /* ValidateBasesTuple.proto (used by PyType_Ready) */
 #if CYTHON_COMPILING_IN_CPYTHON || CYTHON_COMPILING_IN_LIMITED_API || CYTHON_USE_TYPE_SPECS
@@ -2451,8 +2524,14 @@ static CYTHON_INLINE PyObject* __Pyx_PyLong_From_PY_LONG_LONG(PY_LONG_LONG value
 /* CIntToPy.proto */
 static CYTHON_INLINE PyObject* __Pyx_PyLong_From_int(int value);
 
+/* CIntFromPy.proto */
+static CYTHON_INLINE unsigned PY_LONG_LONG __Pyx_PyLong_As_unsigned_PY_LONG_LONG(PyObject *);
+
 /* CIntToPy.proto */
 static CYTHON_INLINE PyObject* __Pyx_PyLong_From_unsigned_int(unsigned int value);
+
+/* CIntFromPy.proto */
+static CYTHON_INLINE PY_LONG_LONG __Pyx_PyLong_As_PY_LONG_LONG(PyObject *);
 
 /* PyObjectCall2Args.proto */
 static CYTHON_INLINE PyObject* __Pyx_PyObject_Call2Args(PyObject* function, PyObject* arg1, PyObject* arg2);
@@ -2482,30 +2561,6 @@ typedef const char *__Pyx_TypeName;
 
 /* CIntToPy.proto */
 static CYTHON_INLINE PyObject* __Pyx_PyLong_From_long(long value);
-
-/* FastTypeChecks.proto */
-#if CYTHON_COMPILING_IN_CPYTHON
-#define __Pyx_TypeCheck(obj, type) __Pyx_IsSubtype(Py_TYPE(obj), (PyTypeObject *)type)
-#define __Pyx_TypeCheck2(obj, type1, type2) __Pyx_IsAnySubtype2(Py_TYPE(obj), (PyTypeObject *)type1, (PyTypeObject *)type2)
-static CYTHON_INLINE int __Pyx_IsSubtype(PyTypeObject *a, PyTypeObject *b);
-static CYTHON_INLINE int __Pyx_IsAnySubtype2(PyTypeObject *cls, PyTypeObject *a, PyTypeObject *b);
-static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches(PyObject *err, PyObject *type);
-static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches2(PyObject *err, PyObject *type1, PyObject *type2);
-#else
-#define __Pyx_TypeCheck(obj, type) PyObject_TypeCheck(obj, (PyTypeObject *)type)
-#define __Pyx_TypeCheck2(obj, type1, type2) (PyObject_TypeCheck(obj, (PyTypeObject *)type1) || PyObject_TypeCheck(obj, (PyTypeObject *)type2))
-#define __Pyx_PyErr_GivenExceptionMatches(err, type) PyErr_GivenExceptionMatches(err, type)
-static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches2(PyObject *err, PyObject *type1, PyObject *type2) {
-    return PyErr_GivenExceptionMatches(err, type1) || PyErr_GivenExceptionMatches(err, type2);
-}
-#endif
-#define __Pyx_PyErr_ExceptionMatches2(err1, err2)  __Pyx_PyErr_GivenExceptionMatches2(__Pyx_PyErr_CurrentExceptionType(), err1, err2)
-#define __Pyx_PyException_Check(obj) __Pyx_TypeCheck(obj, PyExc_Exception)
-#ifdef PyExceptionInstance_Check
-  #define __Pyx_PyBaseException_Check(obj) PyExceptionInstance_Check(obj)
-#else
-  #define __Pyx_PyBaseException_Check(obj) __Pyx_TypeCheck(obj, PyExc_BaseException)
-#endif
 
 /* GetRuntimeVersion.proto */
 #if __PYX_LIMITED_VERSION_HEX < 0x030b0000
@@ -2571,6 +2626,7 @@ static int __Pyx_State_RemoveModule(void*);
 
 static PyObject *__pyx_f_7opteryx_11third_party_6yyjson_7cyyjson_5YYVal__to_py(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_YYVal *__pyx_v_self, yyjson_val *__pyx_v_val); /* proto*/
 static PyObject *__pyx_f_7opteryx_11third_party_6yyjson_7cyyjson_5YYVal__jsonptr_from_dot(CYTHON_UNUSED struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_YYVal *__pyx_v_self, PyObject *__pyx_v_dot_path); /* proto*/
+static yyjson_mut_val *__pyx_f_7opteryx_11third_party_6yyjson_7cyyjson_6Parser__py_to_mut(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *__pyx_v_self, PyObject *__pyx_v_obj, yyjson_mut_doc *__pyx_v_doc, PyObject *__pyx_v_default_handler); /* proto*/
 
 /* Module declarations from "libc.string" */
 
@@ -2634,8 +2690,9 @@ static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_5YYDoc_10__red
 static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_5YYDoc_12__setstate_cython__(CYTHON_UNUSED struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_YYDoc *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v___pyx_state); /* proto */
 static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_parse(CYTHON_UNUSED struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *__pyx_v_self, PyObject *__pyx_v_data, unsigned int __pyx_v_flags); /* proto */
 static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_2loads(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *__pyx_v_self, PyObject *__pyx_v_data, unsigned int __pyx_v_flags); /* proto */
-static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_4__reduce_cython__(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *__pyx_v_self); /* proto */
-static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_6__setstate_cython__(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *__pyx_v_self, PyObject *__pyx_v___pyx_state); /* proto */
+static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_4dumps(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *__pyx_v_self, PyObject *__pyx_v_obj, PyObject *__pyx_v_default_handler, unsigned int __pyx_v_options); /* proto */
+static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_6__reduce_cython__(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *__pyx_v_self); /* proto */
+static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_8__setstate_cython__(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *__pyx_v_self, PyObject *__pyx_v___pyx_state); /* proto */
 static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson___pyx_unpickle_Parser(CYTHON_UNUSED PyObject *__pyx_self, PyObject *__pyx_v___pyx_type, long __pyx_v___pyx_checksum, PyObject *__pyx_v___pyx_state); /* proto */
 static PyObject *__pyx_tp_new_7opteryx_11third_party_6yyjson_7cyyjson_YYDoc(PyTypeObject *t, PyObject *a, PyObject *k); /*proto*/
 static PyObject *__pyx_tp_new_7opteryx_11third_party_6yyjson_7cyyjson_YYVal(PyTypeObject *t, PyObject *a, PyObject *k); /*proto*/
@@ -2670,9 +2727,9 @@ typedef struct {
   __Pyx_CachedCFunction __pyx_umethod_PyDict_Type_items;
   __Pyx_CachedCFunction __pyx_umethod_PyDict_Type_pop;
   __Pyx_CachedCFunction __pyx_umethod_PyDict_Type_values;
-  PyObject *__pyx_tuple[2];
-  PyObject *__pyx_codeobj_tab[25];
-  PyObject *__pyx_string_tab[149];
+  PyObject *__pyx_tuple[3];
+  PyObject *__pyx_codeobj_tab[26];
+  PyObject *__pyx_string_tab[156];
   PyObject *__pyx_number_tab[5];
 /* #### Code section: module_state_contents ### */
 /* CommonTypesMetaclass.module_state_decls */
@@ -2715,154 +2772,161 @@ static __pyx_mstatetype * const __pyx_mstate_global = &__pyx_mstate_global_stati
 #endif
 /* #### Code section: constant_name_defines ### */
 #define __pyx_kp_u_ __pyx_string_tab[0]
-#define __pyx_kp_u_JSON_parse_error_at_position __pyx_string_tab[1]
-#define __pyx_kp_u_Note_that_Cython_is_deliberately __pyx_string_tab[2]
-#define __pyx_kp_u_Serialisation_error __pyx_string_tab[3]
-#define __pyx_kp_u_Unknown_JSON_type __pyx_string_tab[4]
-#define __pyx_kp_u__10 __pyx_string_tab[5]
-#define __pyx_kp_u__2 __pyx_string_tab[6]
-#define __pyx_kp_u__3 __pyx_string_tab[7]
-#define __pyx_kp_u__4 __pyx_string_tab[8]
-#define __pyx_kp_u__5 __pyx_string_tab[9]
-#define __pyx_kp_u__6 __pyx_string_tab[10]
-#define __pyx_kp_u__7 __pyx_string_tab[11]
-#define __pyx_kp_u__8 __pyx_string_tab[12]
-#define __pyx_kp_u_add_note __pyx_string_tab[13]
-#define __pyx_kp_u_array_index_must_be_an_integer __pyx_string_tab[14]
-#define __pyx_kp_u_array_index_out_of_range __pyx_string_tab[15]
-#define __pyx_kp_u_array_indices_must_be_integers __pyx_string_tab[16]
-#define __pyx_kp_u_data_must_be_bytes_or_str __pyx_string_tab[17]
-#define __pyx_kp_u_disable __pyx_string_tab[18]
-#define __pyx_kp_u_enable __pyx_string_tab[19]
-#define __pyx_kp_u_gc __pyx_string_tab[20]
-#define __pyx_kp_u_has_no_length __pyx_string_tab[21]
-#define __pyx_kp_u_is_not_subscriptable __pyx_string_tab[22]
-#define __pyx_kp_u_isenabled __pyx_string_tab[23]
-#define __pyx_kp_u_opteryx_third_party_yyjson_cyyjs_2 __pyx_string_tab[24]
-#define __pyx_kp_u_self__doc_self__root_cannot_be_c __pyx_string_tab[25]
-#define __pyx_kp_u_self__val_cannot_be_converted_to __pyx_string_tab[26]
-#define __pyx_kp_u_stringsource __pyx_string_tab[27]
-#define __pyx_kp_u_unmatched_in_JSON_Pointer __pyx_string_tab[28]
-#define __pyx_kp_u_utf_8 __pyx_string_tab[29]
-#define __pyx_n_u_Parser __pyx_string_tab[30]
-#define __pyx_n_u_Parser___reduce_cython __pyx_string_tab[31]
-#define __pyx_n_u_Parser___setstate_cython __pyx_string_tab[32]
-#define __pyx_n_u_Parser_loads __pyx_string_tab[33]
-#define __pyx_n_u_Parser_parse __pyx_string_tab[34]
-#define __pyx_n_u_Pyx_PyDict_NextRef __pyx_string_tab[35]
-#define __pyx_n_u_YYDoc __pyx_string_tab[36]
-#define __pyx_n_u_YYDoc___reduce_cython __pyx_string_tab[37]
-#define __pyx_n_u_YYDoc___setstate_cython __pyx_string_tab[38]
-#define __pyx_n_u_YYDoc_at_pointer __pyx_string_tab[39]
-#define __pyx_n_u_YYDoc_dumps __pyx_string_tab[40]
-#define __pyx_n_u_YYDoc_get __pyx_string_tab[41]
-#define __pyx_n_u_YYVal __pyx_string_tab[42]
-#define __pyx_n_u_YYVal___reduce_cython __pyx_string_tab[43]
-#define __pyx_n_u_YYVal___setstate_cython __pyx_string_tab[44]
-#define __pyx_n_u_YYVal_as_py __pyx_string_tab[45]
-#define __pyx_n_u_YYVal_at_pointer __pyx_string_tab[46]
-#define __pyx_n_u_YYVal_dumps __pyx_string_tab[47]
-#define __pyx_n_u_YYVal_get __pyx_string_tab[48]
-#define __pyx_n_u_YYVal_is_arr __pyx_string_tab[49]
-#define __pyx_n_u_YYVal_is_bool __pyx_string_tab[50]
-#define __pyx_n_u_YYVal_is_int __pyx_string_tab[51]
-#define __pyx_n_u_YYVal_is_null __pyx_string_tab[52]
-#define __pyx_n_u_YYVal_is_obj __pyx_string_tab[53]
-#define __pyx_n_u_YYVal_is_real __pyx_string_tab[54]
-#define __pyx_n_u_YYVal_is_sint __pyx_string_tab[55]
-#define __pyx_n_u_YYVal_is_str __pyx_string_tab[56]
-#define __pyx_n_u_YYVal_is_uint __pyx_string_tab[57]
-#define __pyx_n_u_as_py __pyx_string_tab[58]
-#define __pyx_n_u_asyncio_coroutines __pyx_string_tab[59]
-#define __pyx_n_u_at_pointer __pyx_string_tab[60]
-#define __pyx_n_u_bdata __pyx_string_tab[61]
-#define __pyx_n_u_bkey __pyx_string_tab[62]
-#define __pyx_n_u_bptr __pyx_string_tab[63]
-#define __pyx_n_u_class_getitem __pyx_string_tab[64]
-#define __pyx_n_u_cline_in_traceback __pyx_string_tab[65]
-#define __pyx_n_u_data __pyx_string_tab[66]
-#define __pyx_n_u_decode __pyx_string_tab[67]
-#define __pyx_n_u_dict __pyx_string_tab[68]
-#define __pyx_n_u_dict_2 __pyx_string_tab[69]
-#define __pyx_n_u_doc __pyx_string_tab[70]
-#define __pyx_n_u_dumps __pyx_string_tab[71]
-#define __pyx_n_u_encode __pyx_string_tab[72]
-#define __pyx_n_u_err __pyx_string_tab[73]
-#define __pyx_n_u_flags __pyx_string_tab[74]
-#define __pyx_n_u_func __pyx_string_tab[75]
-#define __pyx_n_u_get __pyx_string_tab[76]
-#define __pyx_n_u_getstate __pyx_string_tab[77]
-#define __pyx_n_u_indent __pyx_string_tab[78]
-#define __pyx_n_u_is_arr __pyx_string_tab[79]
-#define __pyx_n_u_is_bool __pyx_string_tab[80]
-#define __pyx_n_u_is_coroutine __pyx_string_tab[81]
-#define __pyx_n_u_is_int __pyx_string_tab[82]
-#define __pyx_n_u_is_null __pyx_string_tab[83]
-#define __pyx_n_u_is_obj __pyx_string_tab[84]
-#define __pyx_n_u_is_real __pyx_string_tab[85]
-#define __pyx_n_u_is_sint __pyx_string_tab[86]
-#define __pyx_n_u_is_str __pyx_string_tab[87]
-#define __pyx_n_u_is_uint __pyx_string_tab[88]
-#define __pyx_n_u_isdigit __pyx_string_tab[89]
-#define __pyx_n_u_items __pyx_string_tab[90]
-#define __pyx_n_u_json __pyx_string_tab[91]
-#define __pyx_n_u_json_data __pyx_string_tab[92]
-#define __pyx_n_u_json_len __pyx_string_tab[93]
-#define __pyx_n_u_key __pyx_string_tab[94]
-#define __pyx_n_u_loads __pyx_string_tab[95]
-#define __pyx_n_u_main __pyx_string_tab[96]
-#define __pyx_n_u_member __pyx_string_tab[97]
-#define __pyx_n_u_module __pyx_string_tab[98]
-#define __pyx_n_u_msg __pyx_string_tab[99]
-#define __pyx_n_u_name __pyx_string_tab[100]
-#define __pyx_n_u_new __pyx_string_tab[101]
-#define __pyx_n_u_opteryx_third_party_yyjson_cyyjs __pyx_string_tab[102]
-#define __pyx_n_u_out __pyx_string_tab[103]
-#define __pyx_n_u_parse __pyx_string_tab[104]
-#define __pyx_n_u_pointer __pyx_string_tab[105]
-#define __pyx_n_u_pop __pyx_string_tab[106]
-#define __pyx_n_u_pos __pyx_string_tab[107]
-#define __pyx_n_u_pretty __pyx_string_tab[108]
-#define __pyx_n_u_pyx_checksum __pyx_string_tab[109]
-#define __pyx_n_u_pyx_result __pyx_string_tab[110]
-#define __pyx_n_u_pyx_state __pyx_string_tab[111]
-#define __pyx_n_u_pyx_type __pyx_string_tab[112]
-#define __pyx_n_u_pyx_unpickle_Parser __pyx_string_tab[113]
-#define __pyx_n_u_pyx_vtable __pyx_string_tab[114]
-#define __pyx_n_u_qualname __pyx_string_tab[115]
-#define __pyx_n_u_reduce __pyx_string_tab[116]
-#define __pyx_n_u_reduce_cython __pyx_string_tab[117]
-#define __pyx_n_u_reduce_ex __pyx_string_tab[118]
-#define __pyx_n_u_result __pyx_string_tab[119]
-#define __pyx_n_u_root __pyx_string_tab[120]
-#define __pyx_n_u_self __pyx_string_tab[121]
-#define __pyx_n_u_set_name __pyx_string_tab[122]
-#define __pyx_n_u_setdefault __pyx_string_tab[123]
-#define __pyx_n_u_setstate __pyx_string_tab[124]
-#define __pyx_n_u_setstate_cython __pyx_string_tab[125]
-#define __pyx_n_u_state __pyx_string_tab[126]
-#define __pyx_n_u_test __pyx_string_tab[127]
-#define __pyx_n_u_unknown __pyx_string_tab[128]
-#define __pyx_n_u_update __pyx_string_tab[129]
-#define __pyx_n_u_use_setstate __pyx_string_tab[130]
-#define __pyx_n_u_val __pyx_string_tab[131]
-#define __pyx_n_u_values __pyx_string_tab[132]
-#define __pyx_kp_b_iso88591_4A_QfA_D_q_q_a_A_1A_q_s_1_q_WFR __pyx_string_tab[133]
-#define __pyx_kp_b_iso88591_4A_t6 __pyx_string_tab[134]
-#define __pyx_kp_b_iso88591_AV1 __pyx_string_tab[135]
-#define __pyx_kp_b_iso88591_A_7_Qa_4_7_1_e7_q_4s_1_E_ha_hd_q __pyx_string_tab[136]
-#define __pyx_kp_b_iso88591_A_G1F_a_vWE_Q_q_q_q_t1G_gQ_t1G __pyx_string_tab[137]
-#define __pyx_kp_b_iso88591_A_WA_WM_7_Q_1_E_ha_hd_q __pyx_string_tab[138]
-#define __pyx_kp_b_iso88591_A_t5_1A __pyx_string_tab[139]
-#define __pyx_kp_b_iso88591_A_t5_AQ __pyx_string_tab[140]
-#define __pyx_kp_b_iso88591_A_t7_4q __pyx_string_tab[141]
-#define __pyx_kp_b_iso88591_Q __pyx_string_tab[142]
-#define __pyx_kp_b_iso88591_Q_1_q_1D_waq_5_1_Qa_1F_3gQa __pyx_string_tab[143]
-#define __pyx_kp_b_iso88591_Q_t5_axq __pyx_string_tab[144]
-#define __pyx_kp_b_iso88591_q_0_kQR_6_7_1 __pyx_string_tab[145]
-#define __pyx_kp_b_iso88591_wm1D __pyx_string_tab[146]
-#define __pyx_kp_b_iso88591_wnAT __pyx_string_tab[147]
-#define __pyx_kp_b_iso88591_wnAT_a __pyx_string_tab[148]
+#define __pyx_kp_u_Cannot_serialize_object_of_type __pyx_string_tab[1]
+#define __pyx_kp_u_Failed_to_create_yyjson_document __pyx_string_tab[2]
+#define __pyx_kp_u_JSON_parse_error_at_position __pyx_string_tab[3]
+#define __pyx_kp_u_Note_that_Cython_is_deliberately __pyx_string_tab[4]
+#define __pyx_kp_u_Serialisation_error __pyx_string_tab[5]
+#define __pyx_kp_u_Unknown_JSON_type __pyx_string_tab[6]
+#define __pyx_kp_u__10 __pyx_string_tab[7]
+#define __pyx_kp_u__2 __pyx_string_tab[8]
+#define __pyx_kp_u__3 __pyx_string_tab[9]
+#define __pyx_kp_u__4 __pyx_string_tab[10]
+#define __pyx_kp_u__5 __pyx_string_tab[11]
+#define __pyx_kp_u__6 __pyx_string_tab[12]
+#define __pyx_kp_u__7 __pyx_string_tab[13]
+#define __pyx_kp_u__8 __pyx_string_tab[14]
+#define __pyx_kp_u_add_note __pyx_string_tab[15]
+#define __pyx_kp_u_array_index_must_be_an_integer __pyx_string_tab[16]
+#define __pyx_kp_u_array_index_out_of_range __pyx_string_tab[17]
+#define __pyx_kp_u_array_indices_must_be_integers __pyx_string_tab[18]
+#define __pyx_kp_u_data_must_be_bytes_or_str __pyx_string_tab[19]
+#define __pyx_kp_u_disable __pyx_string_tab[20]
+#define __pyx_kp_u_enable __pyx_string_tab[21]
+#define __pyx_kp_u_gc __pyx_string_tab[22]
+#define __pyx_kp_u_has_no_length __pyx_string_tab[23]
+#define __pyx_kp_u_is_not_subscriptable __pyx_string_tab[24]
+#define __pyx_kp_u_isenabled __pyx_string_tab[25]
+#define __pyx_kp_u_opteryx_third_party_yyjson_cyyjs_2 __pyx_string_tab[26]
+#define __pyx_kp_u_self__doc_self__root_cannot_be_c __pyx_string_tab[27]
+#define __pyx_kp_u_self__val_cannot_be_converted_to __pyx_string_tab[28]
+#define __pyx_kp_u_stringsource __pyx_string_tab[29]
+#define __pyx_kp_u_unmatched_in_JSON_Pointer __pyx_string_tab[30]
+#define __pyx_kp_u_utf_8 __pyx_string_tab[31]
+#define __pyx_n_u_Parser __pyx_string_tab[32]
+#define __pyx_n_u_Parser___reduce_cython __pyx_string_tab[33]
+#define __pyx_n_u_Parser___setstate_cython __pyx_string_tab[34]
+#define __pyx_n_u_Parser_dumps __pyx_string_tab[35]
+#define __pyx_n_u_Parser_loads __pyx_string_tab[36]
+#define __pyx_n_u_Parser_parse __pyx_string_tab[37]
+#define __pyx_n_u_Pyx_PyDict_NextRef __pyx_string_tab[38]
+#define __pyx_n_u_YYDoc __pyx_string_tab[39]
+#define __pyx_n_u_YYDoc___reduce_cython __pyx_string_tab[40]
+#define __pyx_n_u_YYDoc___setstate_cython __pyx_string_tab[41]
+#define __pyx_n_u_YYDoc_at_pointer __pyx_string_tab[42]
+#define __pyx_n_u_YYDoc_dumps __pyx_string_tab[43]
+#define __pyx_n_u_YYDoc_get __pyx_string_tab[44]
+#define __pyx_n_u_YYVal __pyx_string_tab[45]
+#define __pyx_n_u_YYVal___reduce_cython __pyx_string_tab[46]
+#define __pyx_n_u_YYVal___setstate_cython __pyx_string_tab[47]
+#define __pyx_n_u_YYVal_as_py __pyx_string_tab[48]
+#define __pyx_n_u_YYVal_at_pointer __pyx_string_tab[49]
+#define __pyx_n_u_YYVal_dumps __pyx_string_tab[50]
+#define __pyx_n_u_YYVal_get __pyx_string_tab[51]
+#define __pyx_n_u_YYVal_is_arr __pyx_string_tab[52]
+#define __pyx_n_u_YYVal_is_bool __pyx_string_tab[53]
+#define __pyx_n_u_YYVal_is_int __pyx_string_tab[54]
+#define __pyx_n_u_YYVal_is_null __pyx_string_tab[55]
+#define __pyx_n_u_YYVal_is_obj __pyx_string_tab[56]
+#define __pyx_n_u_YYVal_is_real __pyx_string_tab[57]
+#define __pyx_n_u_YYVal_is_sint __pyx_string_tab[58]
+#define __pyx_n_u_YYVal_is_str __pyx_string_tab[59]
+#define __pyx_n_u_YYVal_is_uint __pyx_string_tab[60]
+#define __pyx_n_u_as_py __pyx_string_tab[61]
+#define __pyx_n_u_asyncio_coroutines __pyx_string_tab[62]
+#define __pyx_n_u_at_pointer __pyx_string_tab[63]
+#define __pyx_n_u_bdata __pyx_string_tab[64]
+#define __pyx_n_u_bkey __pyx_string_tab[65]
+#define __pyx_n_u_bptr __pyx_string_tab[66]
+#define __pyx_n_u_class_getitem __pyx_string_tab[67]
+#define __pyx_n_u_cline_in_traceback __pyx_string_tab[68]
+#define __pyx_n_u_data __pyx_string_tab[69]
+#define __pyx_n_u_decode __pyx_string_tab[70]
+#define __pyx_n_u_default_handler __pyx_string_tab[71]
+#define __pyx_n_u_dict __pyx_string_tab[72]
+#define __pyx_n_u_dict_2 __pyx_string_tab[73]
+#define __pyx_n_u_doc __pyx_string_tab[74]
+#define __pyx_n_u_dumps __pyx_string_tab[75]
+#define __pyx_n_u_encode __pyx_string_tab[76]
+#define __pyx_n_u_err __pyx_string_tab[77]
+#define __pyx_n_u_flags __pyx_string_tab[78]
+#define __pyx_n_u_func __pyx_string_tab[79]
+#define __pyx_n_u_get __pyx_string_tab[80]
+#define __pyx_n_u_getstate __pyx_string_tab[81]
+#define __pyx_n_u_indent __pyx_string_tab[82]
+#define __pyx_n_u_is_arr __pyx_string_tab[83]
+#define __pyx_n_u_is_bool __pyx_string_tab[84]
+#define __pyx_n_u_is_coroutine __pyx_string_tab[85]
+#define __pyx_n_u_is_int __pyx_string_tab[86]
+#define __pyx_n_u_is_null __pyx_string_tab[87]
+#define __pyx_n_u_is_obj __pyx_string_tab[88]
+#define __pyx_n_u_is_real __pyx_string_tab[89]
+#define __pyx_n_u_is_sint __pyx_string_tab[90]
+#define __pyx_n_u_is_str __pyx_string_tab[91]
+#define __pyx_n_u_is_uint __pyx_string_tab[92]
+#define __pyx_n_u_isdigit __pyx_string_tab[93]
+#define __pyx_n_u_items __pyx_string_tab[94]
+#define __pyx_n_u_json __pyx_string_tab[95]
+#define __pyx_n_u_json_data __pyx_string_tab[96]
+#define __pyx_n_u_json_len __pyx_string_tab[97]
+#define __pyx_n_u_key __pyx_string_tab[98]
+#define __pyx_n_u_loads __pyx_string_tab[99]
+#define __pyx_n_u_main __pyx_string_tab[100]
+#define __pyx_n_u_member __pyx_string_tab[101]
+#define __pyx_n_u_module __pyx_string_tab[102]
+#define __pyx_n_u_msg __pyx_string_tab[103]
+#define __pyx_n_u_name __pyx_string_tab[104]
+#define __pyx_n_u_new __pyx_string_tab[105]
+#define __pyx_n_u_obj __pyx_string_tab[106]
+#define __pyx_n_u_opteryx_third_party_yyjson_cyyjs __pyx_string_tab[107]
+#define __pyx_n_u_options __pyx_string_tab[108]
+#define __pyx_n_u_out __pyx_string_tab[109]
+#define __pyx_n_u_parse __pyx_string_tab[110]
+#define __pyx_n_u_pointer __pyx_string_tab[111]
+#define __pyx_n_u_pop __pyx_string_tab[112]
+#define __pyx_n_u_pos __pyx_string_tab[113]
+#define __pyx_n_u_pretty __pyx_string_tab[114]
+#define __pyx_n_u_pyx_checksum __pyx_string_tab[115]
+#define __pyx_n_u_pyx_result __pyx_string_tab[116]
+#define __pyx_n_u_pyx_state __pyx_string_tab[117]
+#define __pyx_n_u_pyx_type __pyx_string_tab[118]
+#define __pyx_n_u_pyx_unpickle_Parser __pyx_string_tab[119]
+#define __pyx_n_u_pyx_vtable __pyx_string_tab[120]
+#define __pyx_n_u_qualname __pyx_string_tab[121]
+#define __pyx_n_u_reduce __pyx_string_tab[122]
+#define __pyx_n_u_reduce_cython __pyx_string_tab[123]
+#define __pyx_n_u_reduce_ex __pyx_string_tab[124]
+#define __pyx_n_u_result __pyx_string_tab[125]
+#define __pyx_n_u_root __pyx_string_tab[126]
+#define __pyx_n_u_self __pyx_string_tab[127]
+#define __pyx_n_u_set_name __pyx_string_tab[128]
+#define __pyx_n_u_setdefault __pyx_string_tab[129]
+#define __pyx_n_u_setstate __pyx_string_tab[130]
+#define __pyx_n_u_setstate_cython __pyx_string_tab[131]
+#define __pyx_n_u_state __pyx_string_tab[132]
+#define __pyx_n_u_test __pyx_string_tab[133]
+#define __pyx_n_u_unknown __pyx_string_tab[134]
+#define __pyx_n_u_update __pyx_string_tab[135]
+#define __pyx_n_u_use_setstate __pyx_string_tab[136]
+#define __pyx_n_u_val __pyx_string_tab[137]
+#define __pyx_n_u_values __pyx_string_tab[138]
+#define __pyx_kp_b_iso88591_4A_QfA_D_q_q_a_A_1A_q_s_1_q_WFR __pyx_string_tab[139]
+#define __pyx_kp_b_iso88591_4A_t6 __pyx_string_tab[140]
+#define __pyx_kp_b_iso88591_77RRS_4s_Qa_4_5_Q_uCq_iq_B_4q_A __pyx_string_tab[141]
+#define __pyx_kp_b_iso88591_AV1 __pyx_string_tab[142]
+#define __pyx_kp_b_iso88591_A_7_Qa_4_7_1_e7_q_4s_1_E_ha_hd_q __pyx_string_tab[143]
+#define __pyx_kp_b_iso88591_A_G1F_a_vWE_Q_q_q_q_t1G_gQ_t1G __pyx_string_tab[144]
+#define __pyx_kp_b_iso88591_A_WA_WM_7_Q_1_E_ha_hd_q __pyx_string_tab[145]
+#define __pyx_kp_b_iso88591_A_t5_1A __pyx_string_tab[146]
+#define __pyx_kp_b_iso88591_A_t5_AQ __pyx_string_tab[147]
+#define __pyx_kp_b_iso88591_A_t7_4q __pyx_string_tab[148]
+#define __pyx_kp_b_iso88591_Q __pyx_string_tab[149]
+#define __pyx_kp_b_iso88591_Q_1_q_1D_waq_5_1_Qa_1F_3gQa __pyx_string_tab[150]
+#define __pyx_kp_b_iso88591_Q_t5_axq __pyx_string_tab[151]
+#define __pyx_kp_b_iso88591_q_0_kQR_6_7_1 __pyx_string_tab[152]
+#define __pyx_kp_b_iso88591_wm1D __pyx_string_tab[153]
+#define __pyx_kp_b_iso88591_wnAT __pyx_string_tab[154]
+#define __pyx_kp_b_iso88591_wnAT_a __pyx_string_tab[155]
 #define __pyx_int_0 __pyx_number_tab[0]
 #define __pyx_int_neg_1 __pyx_number_tab[1]
 #define __pyx_int_1 __pyx_number_tab[2]
@@ -2889,9 +2953,9 @@ static CYTHON_SMALL_CODE int __pyx_m_clear(PyObject *m) {
   Py_CLEAR(clear_module_state->__pyx_type_7opteryx_11third_party_6yyjson_7cyyjson_YYVal);
   Py_CLEAR(clear_module_state->__pyx_ptype_7opteryx_11third_party_6yyjson_7cyyjson_Parser);
   Py_CLEAR(clear_module_state->__pyx_type_7opteryx_11third_party_6yyjson_7cyyjson_Parser);
-  for (int i=0; i<2; ++i) { Py_CLEAR(clear_module_state->__pyx_tuple[i]); }
-  for (int i=0; i<25; ++i) { Py_CLEAR(clear_module_state->__pyx_codeobj_tab[i]); }
-  for (int i=0; i<149; ++i) { Py_CLEAR(clear_module_state->__pyx_string_tab[i]); }
+  for (int i=0; i<3; ++i) { Py_CLEAR(clear_module_state->__pyx_tuple[i]); }
+  for (int i=0; i<26; ++i) { Py_CLEAR(clear_module_state->__pyx_codeobj_tab[i]); }
+  for (int i=0; i<156; ++i) { Py_CLEAR(clear_module_state->__pyx_string_tab[i]); }
   for (int i=0; i<5; ++i) { Py_CLEAR(clear_module_state->__pyx_number_tab[i]); }
 /* #### Code section: module_state_clear_contents ### */
 /* CommonTypesMetaclass.module_state_clear */
@@ -2922,9 +2986,9 @@ static CYTHON_SMALL_CODE int __pyx_m_traverse(PyObject *m, visitproc visit, void
   Py_VISIT(traverse_module_state->__pyx_type_7opteryx_11third_party_6yyjson_7cyyjson_YYVal);
   Py_VISIT(traverse_module_state->__pyx_ptype_7opteryx_11third_party_6yyjson_7cyyjson_Parser);
   Py_VISIT(traverse_module_state->__pyx_type_7opteryx_11third_party_6yyjson_7cyyjson_Parser);
-  for (int i=0; i<2; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_tuple[i]); }
-  for (int i=0; i<25; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_codeobj_tab[i]); }
-  for (int i=0; i<149; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_string_tab[i]); }
+  for (int i=0; i<3; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_tuple[i]); }
+  for (int i=0; i<26; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_codeobj_tab[i]); }
+  for (int i=0; i<156; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_string_tab[i]); }
   for (int i=0; i<5; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_number_tab[i]); }
 /* #### Code section: module_state_traverse_contents ### */
 /* CommonTypesMetaclass.module_state_traverse */
@@ -7733,6 +7797,7 @@ static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_parse(
  * 
  *     def loads(self, object data, unsigned int flags=0):             # <<<<<<<<<<<<<<
  *         return self.parse(data, flags)
+ * 
 */
 
 /* Python wrapper */
@@ -7853,6 +7918,8 @@ static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_2loads
  * 
  *     def loads(self, object data, unsigned int flags=0):
  *         return self.parse(data, flags)             # <<<<<<<<<<<<<<
+ * 
+ *     def dumps(self, object obj, object default_handler=None, unsigned int options=0):
 */
   __Pyx_XDECREF(__pyx_r);
   __pyx_t_2 = ((PyObject *)__pyx_v_self);
@@ -7877,6 +7944,7 @@ static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_2loads
  * 
  *     def loads(self, object data, unsigned int flags=0):             # <<<<<<<<<<<<<<
  *         return self.parse(data, flags)
+ * 
 */
 
   /* function exit code */
@@ -7892,6 +7960,1411 @@ static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_2loads
   return __pyx_r;
 }
 
+/* "opteryx/third_party/yyjson/cyyjson.pyx":301
+ *         return self.parse(data, flags)
+ * 
+ *     def dumps(self, object obj, object default_handler=None, unsigned int options=0):             # <<<<<<<<<<<<<<
+ *         """Serialize a Python object to JSON bytes using yyjson's mutable API.
+ * 
+*/
+
+/* Python wrapper */
+static PyObject *__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_5dumps(PyObject *__pyx_v_self, 
+#if CYTHON_METH_FASTCALL
+PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
+#else
+PyObject *__pyx_args, PyObject *__pyx_kwds
+#endif
+); /*proto*/
+PyDoc_STRVAR(__pyx_doc_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_4dumps, "Serialize a Python object to JSON bytes using yyjson's mutable API.\n\n        Args:\n            obj: The Python object to serialize\n            default_handler: Optional callable(obj) for non-serializable objects\n            options: yyjson write flags (e.g., YYJSON_WRITE_PRETTY)\n\n        Returns:\n            JSON as bytes (the caller decodes to str if needed)\n        ");
+static PyMethodDef __pyx_mdef_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_5dumps = {"dumps", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_5dumps, __Pyx_METH_FASTCALL|METH_KEYWORDS, __pyx_doc_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_4dumps};
+static PyObject *__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_5dumps(PyObject *__pyx_v_self, 
+#if CYTHON_METH_FASTCALL
+PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
+#else
+PyObject *__pyx_args, PyObject *__pyx_kwds
+#endif
+) {
+  PyObject *__pyx_v_obj = 0;
+  PyObject *__pyx_v_default_handler = 0;
+  unsigned int __pyx_v_options;
+  #if !CYTHON_METH_FASTCALL
+  CYTHON_UNUSED Py_ssize_t __pyx_nargs;
+  #endif
+  CYTHON_UNUSED PyObject *const *__pyx_kwvalues;
+  PyObject* values[3] = {0,0,0};
+  int __pyx_lineno = 0;
+  const char *__pyx_filename = NULL;
+  int __pyx_clineno = 0;
+  PyObject *__pyx_r = 0;
+  __Pyx_RefNannyDeclarations
+  __Pyx_RefNannySetupContext("dumps (wrapper)", 0);
+  #if !CYTHON_METH_FASTCALL
+  #if CYTHON_ASSUME_SAFE_SIZE
+  __pyx_nargs = PyTuple_GET_SIZE(__pyx_args);
+  #else
+  __pyx_nargs = PyTuple_Size(__pyx_args); if (unlikely(__pyx_nargs < 0)) return NULL;
+  #endif
+  #endif
+  __pyx_kwvalues = __Pyx_KwValues_FASTCALL(__pyx_args, __pyx_nargs);
+  {
+    PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_obj,&__pyx_mstate_global->__pyx_n_u_default_handler,&__pyx_mstate_global->__pyx_n_u_options,0};
+    const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 301, __pyx_L3_error)
+    if (__pyx_kwds_len > 0) {
+      switch (__pyx_nargs) {
+        case  3:
+        values[2] = __Pyx_ArgRef_FASTCALL(__pyx_args, 2);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 301, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
+        case  2:
+        values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 301, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
+        case  1:
+        values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 301, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
+        case  0: break;
+        default: goto __pyx_L5_argtuple_error;
+      }
+      const Py_ssize_t kwd_pos_args = __pyx_nargs;
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "dumps", 0) < (0)) __PYX_ERR(0, 301, __pyx_L3_error)
+      if (!values[1]) values[1] = __Pyx_NewRef(((PyObject *)Py_None));
+      for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("dumps", 0, 1, 3, i); __PYX_ERR(0, 301, __pyx_L3_error) }
+      }
+    } else {
+      switch (__pyx_nargs) {
+        case  3:
+        values[2] = __Pyx_ArgRef_FASTCALL(__pyx_args, 2);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 301, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
+        case  2:
+        values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 301, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
+        case  1:
+        values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 301, __pyx_L3_error)
+        break;
+        default: goto __pyx_L5_argtuple_error;
+      }
+      if (!values[1]) values[1] = __Pyx_NewRef(((PyObject *)Py_None));
+    }
+    __pyx_v_obj = values[0];
+    __pyx_v_default_handler = values[1];
+    if (values[2]) {
+      __pyx_v_options = __Pyx_PyLong_As_unsigned_int(values[2]); if (unlikely((__pyx_v_options == (unsigned int)-1) && PyErr_Occurred())) __PYX_ERR(0, 301, __pyx_L3_error)
+    } else {
+      __pyx_v_options = ((unsigned int)0);
+    }
+  }
+  goto __pyx_L6_skip;
+  __pyx_L5_argtuple_error:;
+  __Pyx_RaiseArgtupleInvalid("dumps", 0, 1, 3, __pyx_nargs); __PYX_ERR(0, 301, __pyx_L3_error)
+  __pyx_L6_skip:;
+  goto __pyx_L4_argument_unpacking_done;
+  __pyx_L3_error:;
+  for (Py_ssize_t __pyx_temp=0; __pyx_temp < (Py_ssize_t)(sizeof(values)/sizeof(values[0])); ++__pyx_temp) {
+    Py_XDECREF(values[__pyx_temp]);
+  }
+  __Pyx_AddTraceback("opteryx.third_party.yyjson.cyyjson.Parser.dumps", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_RefNannyFinishContext();
+  return NULL;
+  __pyx_L4_argument_unpacking_done:;
+  __pyx_r = __pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_4dumps(((struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *)__pyx_v_self), __pyx_v_obj, __pyx_v_default_handler, __pyx_v_options);
+
+  /* function exit code */
+  for (Py_ssize_t __pyx_temp=0; __pyx_temp < (Py_ssize_t)(sizeof(values)/sizeof(values[0])); ++__pyx_temp) {
+    Py_XDECREF(values[__pyx_temp]);
+  }
+  __Pyx_RefNannyFinishContext();
+  return __pyx_r;
+}
+
+static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_4dumps(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *__pyx_v_self, PyObject *__pyx_v_obj, PyObject *__pyx_v_default_handler, unsigned int __pyx_v_options) {
+  yyjson_mut_doc *__pyx_v_doc;
+  yyjson_mut_val *__pyx_v_root;
+  size_t __pyx_v_json_len;
+  char *__pyx_v_json;
+  PyObject *__pyx_v_result = 0;
+  PyObject *__pyx_r = NULL;
+  __Pyx_RefNannyDeclarations
+  int __pyx_t_1;
+  PyObject *__pyx_t_2 = NULL;
+  PyObject *__pyx_t_3 = NULL;
+  size_t __pyx_t_4;
+  yyjson_mut_val *__pyx_t_5;
+  PyObject *__pyx_t_6 = NULL;
+  PyObject *__pyx_t_7 = NULL;
+  int __pyx_t_8;
+  int __pyx_t_9;
+  char const *__pyx_t_10;
+  PyObject *__pyx_t_11 = NULL;
+  PyObject *__pyx_t_12 = NULL;
+  PyObject *__pyx_t_13 = NULL;
+  PyObject *__pyx_t_14 = NULL;
+  PyObject *__pyx_t_15 = NULL;
+  PyObject *__pyx_t_16 = NULL;
+  char const *__pyx_t_17;
+  int __pyx_lineno = 0;
+  const char *__pyx_filename = NULL;
+  int __pyx_clineno = 0;
+  __Pyx_RefNannySetupContext("dumps", 0);
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":318
+ *         cdef object result
+ * 
+ *         doc = yyjson_mut_doc_new(NULL)             # <<<<<<<<<<<<<<
+ *         if doc == NULL:
+ *             raise MemoryError("Failed to create yyjson document")
+*/
+  __pyx_v_doc = yyjson_mut_doc_new(NULL);
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":319
+ * 
+ *         doc = yyjson_mut_doc_new(NULL)
+ *         if doc == NULL:             # <<<<<<<<<<<<<<
+ *             raise MemoryError("Failed to create yyjson document")
+ * 
+*/
+  __pyx_t_1 = (__pyx_v_doc == NULL);
+  if (unlikely(__pyx_t_1)) {
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":320
+ *         doc = yyjson_mut_doc_new(NULL)
+ *         if doc == NULL:
+ *             raise MemoryError("Failed to create yyjson document")             # <<<<<<<<<<<<<<
+ * 
+ *         try:
+*/
+    __pyx_t_3 = NULL;
+    __pyx_t_4 = 1;
+    {
+      PyObject *__pyx_callargs[2] = {__pyx_t_3, __pyx_mstate_global->__pyx_kp_u_Failed_to_create_yyjson_document};
+      __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)(((PyTypeObject*)PyExc_MemoryError)), __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+      __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 320, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_2);
+    }
+    __Pyx_Raise(__pyx_t_2, 0, 0, 0);
+    __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+    __PYX_ERR(0, 320, __pyx_L1_error)
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":319
+ * 
+ *         doc = yyjson_mut_doc_new(NULL)
+ *         if doc == NULL:             # <<<<<<<<<<<<<<
+ *             raise MemoryError("Failed to create yyjson document")
+ * 
+*/
+  }
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":322
+ *             raise MemoryError("Failed to create yyjson document")
+ * 
+ *         try:             # <<<<<<<<<<<<<<
+ *             root = self._py_to_mut(obj, doc, default_handler)
+ *             if root == NULL:
+*/
+  /*try:*/ {
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":323
+ * 
+ *         try:
+ *             root = self._py_to_mut(obj, doc, default_handler)             # <<<<<<<<<<<<<<
+ *             if root == NULL:
+ *                 raise TypeError(f"Cannot serialize object of type {type(obj).__name__}")
+*/
+    __pyx_t_5 = ((struct __pyx_vtabstruct_7opteryx_11third_party_6yyjson_7cyyjson_Parser *)__pyx_v_self->__pyx_vtab)->_py_to_mut(__pyx_v_self, __pyx_v_obj, __pyx_v_doc, __pyx_v_default_handler); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 323, __pyx_L5_error)
+    __pyx_v_root = __pyx_t_5;
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":324
+ *         try:
+ *             root = self._py_to_mut(obj, doc, default_handler)
+ *             if root == NULL:             # <<<<<<<<<<<<<<
+ *                 raise TypeError(f"Cannot serialize object of type {type(obj).__name__}")
+ * 
+*/
+    __pyx_t_1 = (__pyx_v_root == NULL);
+    if (unlikely(__pyx_t_1)) {
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":325
+ *             root = self._py_to_mut(obj, doc, default_handler)
+ *             if root == NULL:
+ *                 raise TypeError(f"Cannot serialize object of type {type(obj).__name__}")             # <<<<<<<<<<<<<<
+ * 
+ *             yyjson_mut_doc_set_root(doc, root)
+*/
+      __pyx_t_3 = NULL;
+      __pyx_t_6 = __Pyx_PyObject_GetAttrStr(((PyObject *)Py_TYPE(__pyx_v_obj)), __pyx_mstate_global->__pyx_n_u_name); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 325, __pyx_L5_error)
+      __Pyx_GOTREF(__pyx_t_6);
+      __pyx_t_7 = __Pyx_PyObject_FormatSimple(__pyx_t_6, __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 325, __pyx_L5_error)
+      __Pyx_GOTREF(__pyx_t_7);
+      __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+      __pyx_t_6 = __Pyx_PyUnicode_Concat(__pyx_mstate_global->__pyx_kp_u_Cannot_serialize_object_of_type, __pyx_t_7); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 325, __pyx_L5_error)
+      __Pyx_GOTREF(__pyx_t_6);
+      __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
+      __pyx_t_4 = 1;
+      {
+        PyObject *__pyx_callargs[2] = {__pyx_t_3, __pyx_t_6};
+        __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)(((PyTypeObject*)PyExc_TypeError)), __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+        __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+        __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
+        if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 325, __pyx_L5_error)
+        __Pyx_GOTREF(__pyx_t_2);
+      }
+      __Pyx_Raise(__pyx_t_2, 0, 0, 0);
+      __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+      __PYX_ERR(0, 325, __pyx_L5_error)
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":324
+ *         try:
+ *             root = self._py_to_mut(obj, doc, default_handler)
+ *             if root == NULL:             # <<<<<<<<<<<<<<
+ *                 raise TypeError(f"Cannot serialize object of type {type(obj).__name__}")
+ * 
+*/
+    }
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":327
+ *                 raise TypeError(f"Cannot serialize object of type {type(obj).__name__}")
+ * 
+ *             yyjson_mut_doc_set_root(doc, root)             # <<<<<<<<<<<<<<
+ * 
+ *             json_len = 0
+*/
+    yyjson_mut_doc_set_root(__pyx_v_doc, __pyx_v_root);
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":329
+ *             yyjson_mut_doc_set_root(doc, root)
+ * 
+ *             json_len = 0             # <<<<<<<<<<<<<<
+ *             json = yyjson_mut_write(doc, options, &json_len)
+ *             if json == NULL:
+*/
+    __pyx_v_json_len = 0;
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":330
+ * 
+ *             json_len = 0
+ *             json = yyjson_mut_write(doc, options, &json_len)             # <<<<<<<<<<<<<<
+ *             if json == NULL:
+ *                 raise MemoryError("Serialisation error")
+*/
+    __pyx_v_json = yyjson_mut_write(__pyx_v_doc, __pyx_v_options, (&__pyx_v_json_len));
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":331
+ *             json_len = 0
+ *             json = yyjson_mut_write(doc, options, &json_len)
+ *             if json == NULL:             # <<<<<<<<<<<<<<
+ *                 raise MemoryError("Serialisation error")
+ * 
+*/
+    __pyx_t_1 = (__pyx_v_json == NULL);
+    if (unlikely(__pyx_t_1)) {
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":332
+ *             json = yyjson_mut_write(doc, options, &json_len)
+ *             if json == NULL:
+ *                 raise MemoryError("Serialisation error")             # <<<<<<<<<<<<<<
+ * 
+ *             try:
+*/
+      __pyx_t_6 = NULL;
+      __pyx_t_4 = 1;
+      {
+        PyObject *__pyx_callargs[2] = {__pyx_t_6, __pyx_mstate_global->__pyx_kp_u_Serialisation_error};
+        __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)(((PyTypeObject*)PyExc_MemoryError)), __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+        __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
+        if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 332, __pyx_L5_error)
+        __Pyx_GOTREF(__pyx_t_2);
+      }
+      __Pyx_Raise(__pyx_t_2, 0, 0, 0);
+      __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+      __PYX_ERR(0, 332, __pyx_L5_error)
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":331
+ *             json_len = 0
+ *             json = yyjson_mut_write(doc, options, &json_len)
+ *             if json == NULL:             # <<<<<<<<<<<<<<
+ *                 raise MemoryError("Serialisation error")
+ * 
+*/
+    }
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":334
+ *                 raise MemoryError("Serialisation error")
+ * 
+ *             try:             # <<<<<<<<<<<<<<
+ *                 result = PyBytes_FromStringAndSize(json, json_len)
+ *                 return result
+*/
+    /*try:*/ {
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":335
+ * 
+ *             try:
+ *                 result = PyBytes_FromStringAndSize(json, json_len)             # <<<<<<<<<<<<<<
+ *                 return result
+ *             finally:
+*/
+      __pyx_t_2 = PyBytes_FromStringAndSize(__pyx_v_json, __pyx_v_json_len); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 335, __pyx_L10_error)
+      __Pyx_GOTREF(__pyx_t_2);
+      __pyx_v_result = __pyx_t_2;
+      __pyx_t_2 = 0;
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":336
+ *             try:
+ *                 result = PyBytes_FromStringAndSize(json, json_len)
+ *                 return result             # <<<<<<<<<<<<<<
+ *             finally:
+ *                 free(json)
+*/
+      __Pyx_XDECREF(__pyx_r);
+      __Pyx_INCREF(__pyx_v_result);
+      __pyx_r = __pyx_v_result;
+      goto __pyx_L9_return;
+    }
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":338
+ *                 return result
+ *             finally:
+ *                 free(json)             # <<<<<<<<<<<<<<
+ *         finally:
+ *             yyjson_mut_doc_free(doc)
+*/
+    /*finally:*/ {
+      __pyx_L10_error:;
+      /*exception exit:*/{
+        __Pyx_PyThreadState_declare
+        __Pyx_PyThreadState_assign
+        __pyx_t_11 = 0; __pyx_t_12 = 0; __pyx_t_13 = 0; __pyx_t_14 = 0; __pyx_t_15 = 0; __pyx_t_16 = 0;
+        __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
+        __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+        __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
+        __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
+         __Pyx_ExceptionSwap(&__pyx_t_14, &__pyx_t_15, &__pyx_t_16);
+        if ( unlikely(__Pyx_GetException(&__pyx_t_11, &__pyx_t_12, &__pyx_t_13) < 0)) __Pyx_ErrFetch(&__pyx_t_11, &__pyx_t_12, &__pyx_t_13);
+        __Pyx_XGOTREF(__pyx_t_11);
+        __Pyx_XGOTREF(__pyx_t_12);
+        __Pyx_XGOTREF(__pyx_t_13);
+        __Pyx_XGOTREF(__pyx_t_14);
+        __Pyx_XGOTREF(__pyx_t_15);
+        __Pyx_XGOTREF(__pyx_t_16);
+        __pyx_t_8 = __pyx_lineno; __pyx_t_9 = __pyx_clineno; __pyx_t_10 = __pyx_filename;
+        {
+          free(__pyx_v_json);
+        }
+        __Pyx_XGIVEREF(__pyx_t_14);
+        __Pyx_XGIVEREF(__pyx_t_15);
+        __Pyx_XGIVEREF(__pyx_t_16);
+        __Pyx_ExceptionReset(__pyx_t_14, __pyx_t_15, __pyx_t_16);
+        __Pyx_XGIVEREF(__pyx_t_11);
+        __Pyx_XGIVEREF(__pyx_t_12);
+        __Pyx_XGIVEREF(__pyx_t_13);
+        __Pyx_ErrRestore(__pyx_t_11, __pyx_t_12, __pyx_t_13);
+        __pyx_t_11 = 0; __pyx_t_12 = 0; __pyx_t_13 = 0; __pyx_t_14 = 0; __pyx_t_15 = 0; __pyx_t_16 = 0;
+        __pyx_lineno = __pyx_t_8; __pyx_clineno = __pyx_t_9; __pyx_filename = __pyx_t_10;
+        goto __pyx_L5_error;
+      }
+      __pyx_L9_return: {
+        __pyx_t_16 = __pyx_r;
+        __pyx_r = 0;
+        free(__pyx_v_json);
+        __pyx_r = __pyx_t_16;
+        __pyx_t_16 = 0;
+        goto __pyx_L4_return;
+      }
+    }
+  }
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":340
+ *                 free(json)
+ *         finally:
+ *             yyjson_mut_doc_free(doc)             # <<<<<<<<<<<<<<
+ * 
+ *     cdef yyjson_mut_val* _py_to_mut(self, object obj, yyjson_mut_doc* doc,
+*/
+  /*finally:*/ {
+    __pyx_L5_error:;
+    /*exception exit:*/{
+      __Pyx_PyThreadState_declare
+      __Pyx_PyThreadState_assign
+      __pyx_t_16 = 0; __pyx_t_15 = 0; __pyx_t_14 = 0; __pyx_t_13 = 0; __pyx_t_12 = 0; __pyx_t_11 = 0;
+      __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
+      __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+      __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
+      __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
+       __Pyx_ExceptionSwap(&__pyx_t_13, &__pyx_t_12, &__pyx_t_11);
+      if ( unlikely(__Pyx_GetException(&__pyx_t_16, &__pyx_t_15, &__pyx_t_14) < 0)) __Pyx_ErrFetch(&__pyx_t_16, &__pyx_t_15, &__pyx_t_14);
+      __Pyx_XGOTREF(__pyx_t_16);
+      __Pyx_XGOTREF(__pyx_t_15);
+      __Pyx_XGOTREF(__pyx_t_14);
+      __Pyx_XGOTREF(__pyx_t_13);
+      __Pyx_XGOTREF(__pyx_t_12);
+      __Pyx_XGOTREF(__pyx_t_11);
+      __pyx_t_9 = __pyx_lineno; __pyx_t_8 = __pyx_clineno; __pyx_t_17 = __pyx_filename;
+      {
+        yyjson_mut_doc_free(__pyx_v_doc);
+      }
+      __Pyx_XGIVEREF(__pyx_t_13);
+      __Pyx_XGIVEREF(__pyx_t_12);
+      __Pyx_XGIVEREF(__pyx_t_11);
+      __Pyx_ExceptionReset(__pyx_t_13, __pyx_t_12, __pyx_t_11);
+      __Pyx_XGIVEREF(__pyx_t_16);
+      __Pyx_XGIVEREF(__pyx_t_15);
+      __Pyx_XGIVEREF(__pyx_t_14);
+      __Pyx_ErrRestore(__pyx_t_16, __pyx_t_15, __pyx_t_14);
+      __pyx_t_16 = 0; __pyx_t_15 = 0; __pyx_t_14 = 0; __pyx_t_13 = 0; __pyx_t_12 = 0; __pyx_t_11 = 0;
+      __pyx_lineno = __pyx_t_9; __pyx_clineno = __pyx_t_8; __pyx_filename = __pyx_t_17;
+      goto __pyx_L1_error;
+    }
+    __pyx_L4_return: {
+      __pyx_t_11 = __pyx_r;
+      __pyx_r = 0;
+      yyjson_mut_doc_free(__pyx_v_doc);
+      __pyx_r = __pyx_t_11;
+      __pyx_t_11 = 0;
+      goto __pyx_L0;
+    }
+  }
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":301
+ *         return self.parse(data, flags)
+ * 
+ *     def dumps(self, object obj, object default_handler=None, unsigned int options=0):             # <<<<<<<<<<<<<<
+ *         """Serialize a Python object to JSON bytes using yyjson's mutable API.
+ * 
+*/
+
+  /* function exit code */
+  __pyx_L1_error:;
+  __Pyx_XDECREF(__pyx_t_2);
+  __Pyx_XDECREF(__pyx_t_3);
+  __Pyx_XDECREF(__pyx_t_6);
+  __Pyx_XDECREF(__pyx_t_7);
+  __Pyx_AddTraceback("opteryx.third_party.yyjson.cyyjson.Parser.dumps", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __pyx_r = NULL;
+  __pyx_L0:;
+  __Pyx_XDECREF(__pyx_v_result);
+  __Pyx_XGIVEREF(__pyx_r);
+  __Pyx_RefNannyFinishContext();
+  return __pyx_r;
+}
+
+/* "opteryx/third_party/yyjson/cyyjson.pyx":342
+ *             yyjson_mut_doc_free(doc)
+ * 
+ *     cdef yyjson_mut_val* _py_to_mut(self, object obj, yyjson_mut_doc* doc,             # <<<<<<<<<<<<<<
+ *                                      object default_handler):
+ *         """Recursively convert Python object to yyjson_mut_val."""
+*/
+
+static yyjson_mut_val *__pyx_f_7opteryx_11third_party_6yyjson_7cyyjson_6Parser__py_to_mut(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *__pyx_v_self, PyObject *__pyx_v_obj, yyjson_mut_doc *__pyx_v_doc, PyObject *__pyx_v_default_handler) {
+  yyjson_mut_val *__pyx_v_result;
+  yyjson_mut_val *__pyx_v_key_val;
+  PyObject *__pyx_v_key_bytes = 0;
+  PyObject *__pyx_v_value_bytes = 0;
+  char *__pyx_v_str_ptr;
+  size_t __pyx_v_str_len;
+  PyObject *__pyx_v_py_key = NULL;
+  PyObject *__pyx_v_py_val = NULL;
+  yyjson_mut_val *__pyx_v_mut_val;
+  PyObject *__pyx_v_item = NULL;
+  yyjson_mut_val *__pyx_r;
+  __Pyx_RefNannyDeclarations
+  int __pyx_t_1;
+  yyjson_mut_val *__pyx_t_2;
+  PyObject *__pyx_t_3 = NULL;
+  unsigned PY_LONG_LONG __pyx_t_4;
+  PY_LONG_LONG __pyx_t_5;
+  double __pyx_t_6;
+  PyObject *__pyx_t_7 = NULL;
+  size_t __pyx_t_8;
+  int __pyx_t_9;
+  Py_ssize_t __pyx_t_10;
+  Py_ssize_t __pyx_t_11;
+  PyObject *__pyx_t_12 = NULL;
+  int __pyx_t_13;
+  int __pyx_t_14;
+  PyObject *(*__pyx_t_15)(PyObject *);
+  PyObject *__pyx_t_16 = NULL;
+  PyObject *__pyx_t_17 = NULL;
+  PyObject *__pyx_t_18 = NULL;
+  int __pyx_lineno = 0;
+  const char *__pyx_filename = NULL;
+  int __pyx_clineno = 0;
+  __Pyx_RefNannySetupContext("_py_to_mut", 0);
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":352
+ *         cdef size_t str_len
+ * 
+ *         if obj is None:             # <<<<<<<<<<<<<<
+ *             return yyjson_mut_null(doc)
+ *         elif isinstance(obj, bool):
+*/
+  __pyx_t_1 = (__pyx_v_obj == Py_None);
+  if (__pyx_t_1) {
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":353
+ * 
+ *         if obj is None:
+ *             return yyjson_mut_null(doc)             # <<<<<<<<<<<<<<
+ *         elif isinstance(obj, bool):
+ *             return yyjson_mut_true(doc) if obj else yyjson_mut_false(doc)
+*/
+    __pyx_r = yyjson_mut_null(__pyx_v_doc);
+    goto __pyx_L0;
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":352
+ *         cdef size_t str_len
+ * 
+ *         if obj is None:             # <<<<<<<<<<<<<<
+ *             return yyjson_mut_null(doc)
+ *         elif isinstance(obj, bool):
+*/
+  }
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":354
+ *         if obj is None:
+ *             return yyjson_mut_null(doc)
+ *         elif isinstance(obj, bool):             # <<<<<<<<<<<<<<
+ *             return yyjson_mut_true(doc) if obj else yyjson_mut_false(doc)
+ *         elif isinstance(obj, int):
+*/
+  __pyx_t_1 = PyBool_Check(__pyx_v_obj); 
+  if (__pyx_t_1) {
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":355
+ *             return yyjson_mut_null(doc)
+ *         elif isinstance(obj, bool):
+ *             return yyjson_mut_true(doc) if obj else yyjson_mut_false(doc)             # <<<<<<<<<<<<<<
+ *         elif isinstance(obj, int):
+ *             if obj >= 0:
+*/
+    __pyx_t_1 = __Pyx_PyObject_IsTrue(__pyx_v_obj); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 355, __pyx_L1_error)
+    if (__pyx_t_1) {
+      __pyx_t_2 = yyjson_mut_true(__pyx_v_doc);
+    } else {
+      __pyx_t_2 = yyjson_mut_false(__pyx_v_doc);
+    }
+    __pyx_r = __pyx_t_2;
+    goto __pyx_L0;
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":354
+ *         if obj is None:
+ *             return yyjson_mut_null(doc)
+ *         elif isinstance(obj, bool):             # <<<<<<<<<<<<<<
+ *             return yyjson_mut_true(doc) if obj else yyjson_mut_false(doc)
+ *         elif isinstance(obj, int):
+*/
+  }
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":356
+ *         elif isinstance(obj, bool):
+ *             return yyjson_mut_true(doc) if obj else yyjson_mut_false(doc)
+ *         elif isinstance(obj, int):             # <<<<<<<<<<<<<<
+ *             if obj >= 0:
+ *                 return yyjson_mut_uint(doc, <unsigned long long>obj)
+*/
+  __pyx_t_1 = PyLong_Check(__pyx_v_obj); 
+  if (__pyx_t_1) {
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":357
+ *             return yyjson_mut_true(doc) if obj else yyjson_mut_false(doc)
+ *         elif isinstance(obj, int):
+ *             if obj >= 0:             # <<<<<<<<<<<<<<
+ *                 return yyjson_mut_uint(doc, <unsigned long long>obj)
+ *             else:
+*/
+    __pyx_t_3 = PyObject_RichCompare(__pyx_v_obj, __pyx_mstate_global->__pyx_int_0, Py_GE); __Pyx_XGOTREF(__pyx_t_3); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 357, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_IsTrue(__pyx_t_3); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 357, __pyx_L1_error)
+    __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+    if (__pyx_t_1) {
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":358
+ *         elif isinstance(obj, int):
+ *             if obj >= 0:
+ *                 return yyjson_mut_uint(doc, <unsigned long long>obj)             # <<<<<<<<<<<<<<
+ *             else:
+ *                 return yyjson_mut_sint(doc, <long long>obj)
+*/
+      __pyx_t_4 = __Pyx_PyLong_As_unsigned_PY_LONG_LONG(__pyx_v_obj); if (unlikely((__pyx_t_4 == (unsigned PY_LONG_LONG)-1) && PyErr_Occurred())) __PYX_ERR(0, 358, __pyx_L1_error)
+      __pyx_r = yyjson_mut_uint(__pyx_v_doc, ((unsigned PY_LONG_LONG)__pyx_t_4));
+      goto __pyx_L0;
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":357
+ *             return yyjson_mut_true(doc) if obj else yyjson_mut_false(doc)
+ *         elif isinstance(obj, int):
+ *             if obj >= 0:             # <<<<<<<<<<<<<<
+ *                 return yyjson_mut_uint(doc, <unsigned long long>obj)
+ *             else:
+*/
+    }
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":360
+ *                 return yyjson_mut_uint(doc, <unsigned long long>obj)
+ *             else:
+ *                 return yyjson_mut_sint(doc, <long long>obj)             # <<<<<<<<<<<<<<
+ *         elif isinstance(obj, float):
+ *             return yyjson_mut_real(doc, <double>obj)
+*/
+    /*else*/ {
+      __pyx_t_5 = __Pyx_PyLong_As_PY_LONG_LONG(__pyx_v_obj); if (unlikely((__pyx_t_5 == (PY_LONG_LONG)-1) && PyErr_Occurred())) __PYX_ERR(0, 360, __pyx_L1_error)
+      __pyx_r = yyjson_mut_sint(__pyx_v_doc, ((PY_LONG_LONG)__pyx_t_5));
+      goto __pyx_L0;
+    }
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":356
+ *         elif isinstance(obj, bool):
+ *             return yyjson_mut_true(doc) if obj else yyjson_mut_false(doc)
+ *         elif isinstance(obj, int):             # <<<<<<<<<<<<<<
+ *             if obj >= 0:
+ *                 return yyjson_mut_uint(doc, <unsigned long long>obj)
+*/
+  }
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":361
+ *             else:
+ *                 return yyjson_mut_sint(doc, <long long>obj)
+ *         elif isinstance(obj, float):             # <<<<<<<<<<<<<<
+ *             return yyjson_mut_real(doc, <double>obj)
+ *         elif isinstance(obj, str):
+*/
+  __pyx_t_1 = PyFloat_Check(__pyx_v_obj); 
+  if (__pyx_t_1) {
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":362
+ *                 return yyjson_mut_sint(doc, <long long>obj)
+ *         elif isinstance(obj, float):
+ *             return yyjson_mut_real(doc, <double>obj)             # <<<<<<<<<<<<<<
+ *         elif isinstance(obj, str):
+ *             value_bytes = obj.encode('utf-8')
+*/
+    __pyx_t_6 = __Pyx_PyFloat_AsDouble(__pyx_v_obj); if (unlikely((__pyx_t_6 == (double)-1) && PyErr_Occurred())) __PYX_ERR(0, 362, __pyx_L1_error)
+    __pyx_r = yyjson_mut_real(__pyx_v_doc, ((double)__pyx_t_6));
+    goto __pyx_L0;
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":361
+ *             else:
+ *                 return yyjson_mut_sint(doc, <long long>obj)
+ *         elif isinstance(obj, float):             # <<<<<<<<<<<<<<
+ *             return yyjson_mut_real(doc, <double>obj)
+ *         elif isinstance(obj, str):
+*/
+  }
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":363
+ *         elif isinstance(obj, float):
+ *             return yyjson_mut_real(doc, <double>obj)
+ *         elif isinstance(obj, str):             # <<<<<<<<<<<<<<
+ *             value_bytes = obj.encode('utf-8')
+ *             PyBytes_AsStringAndSize(value_bytes, &str_ptr, <Py_ssize_t*>&str_len)
+*/
+  __pyx_t_1 = PyUnicode_Check(__pyx_v_obj); 
+  if (__pyx_t_1) {
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":364
+ *             return yyjson_mut_real(doc, <double>obj)
+ *         elif isinstance(obj, str):
+ *             value_bytes = obj.encode('utf-8')             # <<<<<<<<<<<<<<
+ *             PyBytes_AsStringAndSize(value_bytes, &str_ptr, <Py_ssize_t*>&str_len)
+ *             return yyjson_mut_strncpy(doc, str_ptr, str_len)
+*/
+    __pyx_t_7 = __pyx_v_obj;
+    __Pyx_INCREF(__pyx_t_7);
+    __pyx_t_8 = 0;
+    {
+      PyObject *__pyx_callargs[2] = {__pyx_t_7, __pyx_mstate_global->__pyx_kp_u_utf_8};
+      __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_8, (2-__pyx_t_8) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+      __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
+      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 364, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_3);
+    }
+    if (!(likely(PyBytes_CheckExact(__pyx_t_3))||((__pyx_t_3) == Py_None) || __Pyx_RaiseUnexpectedTypeError("bytes", __pyx_t_3))) __PYX_ERR(0, 364, __pyx_L1_error)
+    __pyx_v_value_bytes = ((PyObject*)__pyx_t_3);
+    __pyx_t_3 = 0;
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":365
+ *         elif isinstance(obj, str):
+ *             value_bytes = obj.encode('utf-8')
+ *             PyBytes_AsStringAndSize(value_bytes, &str_ptr, <Py_ssize_t*>&str_len)             # <<<<<<<<<<<<<<
+ *             return yyjson_mut_strncpy(doc, str_ptr, str_len)
+ *         elif isinstance(obj, bytes):
+*/
+    __pyx_t_9 = PyBytes_AsStringAndSize(__pyx_v_value_bytes, (&__pyx_v_str_ptr), ((Py_ssize_t *)(&__pyx_v_str_len))); if (unlikely(__pyx_t_9 == ((int)-1))) __PYX_ERR(0, 365, __pyx_L1_error)
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":366
+ *             value_bytes = obj.encode('utf-8')
+ *             PyBytes_AsStringAndSize(value_bytes, &str_ptr, <Py_ssize_t*>&str_len)
+ *             return yyjson_mut_strncpy(doc, str_ptr, str_len)             # <<<<<<<<<<<<<<
+ *         elif isinstance(obj, bytes):
+ *             PyBytes_AsStringAndSize(obj, &str_ptr, <Py_ssize_t*>&str_len)
+*/
+    __pyx_r = yyjson_mut_strncpy(__pyx_v_doc, __pyx_v_str_ptr, __pyx_v_str_len);
+    goto __pyx_L0;
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":363
+ *         elif isinstance(obj, float):
+ *             return yyjson_mut_real(doc, <double>obj)
+ *         elif isinstance(obj, str):             # <<<<<<<<<<<<<<
+ *             value_bytes = obj.encode('utf-8')
+ *             PyBytes_AsStringAndSize(value_bytes, &str_ptr, <Py_ssize_t*>&str_len)
+*/
+  }
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":367
+ *             PyBytes_AsStringAndSize(value_bytes, &str_ptr, <Py_ssize_t*>&str_len)
+ *             return yyjson_mut_strncpy(doc, str_ptr, str_len)
+ *         elif isinstance(obj, bytes):             # <<<<<<<<<<<<<<
+ *             PyBytes_AsStringAndSize(obj, &str_ptr, <Py_ssize_t*>&str_len)
+ *             return yyjson_mut_strncpy(doc, str_ptr, str_len)
+*/
+  __pyx_t_1 = PyBytes_Check(__pyx_v_obj); 
+  if (__pyx_t_1) {
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":368
+ *             return yyjson_mut_strncpy(doc, str_ptr, str_len)
+ *         elif isinstance(obj, bytes):
+ *             PyBytes_AsStringAndSize(obj, &str_ptr, <Py_ssize_t*>&str_len)             # <<<<<<<<<<<<<<
+ *             return yyjson_mut_strncpy(doc, str_ptr, str_len)
+ *         elif isinstance(obj, dict):
+*/
+    __pyx_t_9 = PyBytes_AsStringAndSize(__pyx_v_obj, (&__pyx_v_str_ptr), ((Py_ssize_t *)(&__pyx_v_str_len))); if (unlikely(__pyx_t_9 == ((int)-1))) __PYX_ERR(0, 368, __pyx_L1_error)
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":369
+ *         elif isinstance(obj, bytes):
+ *             PyBytes_AsStringAndSize(obj, &str_ptr, <Py_ssize_t*>&str_len)
+ *             return yyjson_mut_strncpy(doc, str_ptr, str_len)             # <<<<<<<<<<<<<<
+ *         elif isinstance(obj, dict):
+ *             result = yyjson_mut_obj(doc)
+*/
+    __pyx_r = yyjson_mut_strncpy(__pyx_v_doc, __pyx_v_str_ptr, __pyx_v_str_len);
+    goto __pyx_L0;
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":367
+ *             PyBytes_AsStringAndSize(value_bytes, &str_ptr, <Py_ssize_t*>&str_len)
+ *             return yyjson_mut_strncpy(doc, str_ptr, str_len)
+ *         elif isinstance(obj, bytes):             # <<<<<<<<<<<<<<
+ *             PyBytes_AsStringAndSize(obj, &str_ptr, <Py_ssize_t*>&str_len)
+ *             return yyjson_mut_strncpy(doc, str_ptr, str_len)
+*/
+  }
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":370
+ *             PyBytes_AsStringAndSize(obj, &str_ptr, <Py_ssize_t*>&str_len)
+ *             return yyjson_mut_strncpy(doc, str_ptr, str_len)
+ *         elif isinstance(obj, dict):             # <<<<<<<<<<<<<<
+ *             result = yyjson_mut_obj(doc)
+ *             if result == NULL:
+*/
+  __pyx_t_1 = PyDict_Check(__pyx_v_obj); 
+  if (__pyx_t_1) {
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":371
+ *             return yyjson_mut_strncpy(doc, str_ptr, str_len)
+ *         elif isinstance(obj, dict):
+ *             result = yyjson_mut_obj(doc)             # <<<<<<<<<<<<<<
+ *             if result == NULL:
+ *                 return NULL
+*/
+    __pyx_v_result = yyjson_mut_obj(__pyx_v_doc);
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":372
+ *         elif isinstance(obj, dict):
+ *             result = yyjson_mut_obj(doc)
+ *             if result == NULL:             # <<<<<<<<<<<<<<
+ *                 return NULL
+ *             for py_key, py_val in obj.items():
+*/
+    __pyx_t_1 = (__pyx_v_result == NULL);
+    if (__pyx_t_1) {
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":373
+ *             result = yyjson_mut_obj(doc)
+ *             if result == NULL:
+ *                 return NULL             # <<<<<<<<<<<<<<
+ *             for py_key, py_val in obj.items():
+ *                 key_bytes = str(py_key).encode('utf-8')
+*/
+      __pyx_r = NULL;
+      goto __pyx_L0;
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":372
+ *         elif isinstance(obj, dict):
+ *             result = yyjson_mut_obj(doc)
+ *             if result == NULL:             # <<<<<<<<<<<<<<
+ *                 return NULL
+ *             for py_key, py_val in obj.items():
+*/
+    }
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":374
+ *             if result == NULL:
+ *                 return NULL
+ *             for py_key, py_val in obj.items():             # <<<<<<<<<<<<<<
+ *                 key_bytes = str(py_key).encode('utf-8')
+ *                 PyBytes_AsStringAndSize(key_bytes, &str_ptr, <Py_ssize_t*>&str_len)
+*/
+    __pyx_t_10 = 0;
+    if (unlikely(__pyx_v_obj == Py_None)) {
+      PyErr_Format(PyExc_AttributeError, "'NoneType' object has no attribute '%.30s'", "items");
+      __PYX_ERR(0, 374, __pyx_L1_error)
+    }
+    __pyx_t_7 = __Pyx_dict_iterator(__pyx_v_obj, 0, __pyx_mstate_global->__pyx_n_u_items, (&__pyx_t_11), (&__pyx_t_9)); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 374, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_7);
+    __Pyx_XDECREF(__pyx_t_3);
+    __pyx_t_3 = __pyx_t_7;
+    __pyx_t_7 = 0;
+    while (1) {
+      __pyx_t_13 = __Pyx_dict_iter_next(__pyx_t_3, __pyx_t_11, &__pyx_t_10, &__pyx_t_7, &__pyx_t_12, NULL, __pyx_t_9);
+      if (unlikely(__pyx_t_13 == 0)) break;
+      if (unlikely(__pyx_t_13 == -1)) __PYX_ERR(0, 374, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_7);
+      __Pyx_GOTREF(__pyx_t_12);
+      __Pyx_XDECREF_SET(__pyx_v_py_key, __pyx_t_7);
+      __pyx_t_7 = 0;
+      __Pyx_XDECREF_SET(__pyx_v_py_val, __pyx_t_12);
+      __pyx_t_12 = 0;
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":375
+ *                 return NULL
+ *             for py_key, py_val in obj.items():
+ *                 key_bytes = str(py_key).encode('utf-8')             # <<<<<<<<<<<<<<
+ *                 PyBytes_AsStringAndSize(key_bytes, &str_ptr, <Py_ssize_t*>&str_len)
+ *                 # Create the key as a yyjson_mut_val with copy
+*/
+      __pyx_t_12 = __Pyx_PyObject_Unicode(__pyx_v_py_key); if (unlikely(!__pyx_t_12)) __PYX_ERR(0, 375, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_12);
+      __pyx_t_7 = PyUnicode_AsUTF8String(((PyObject*)__pyx_t_12)); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 375, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_7);
+      __Pyx_DECREF(__pyx_t_12); __pyx_t_12 = 0;
+      __Pyx_XDECREF_SET(__pyx_v_key_bytes, ((PyObject*)__pyx_t_7));
+      __pyx_t_7 = 0;
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":376
+ *             for py_key, py_val in obj.items():
+ *                 key_bytes = str(py_key).encode('utf-8')
+ *                 PyBytes_AsStringAndSize(key_bytes, &str_ptr, <Py_ssize_t*>&str_len)             # <<<<<<<<<<<<<<
+ *                 # Create the key as a yyjson_mut_val with copy
+ *                 key_val = yyjson_mut_strncpy(doc, str_ptr, str_len)
+*/
+      __pyx_t_13 = PyBytes_AsStringAndSize(__pyx_v_key_bytes, (&__pyx_v_str_ptr), ((Py_ssize_t *)(&__pyx_v_str_len))); if (unlikely(__pyx_t_13 == ((int)-1))) __PYX_ERR(0, 376, __pyx_L1_error)
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":378
+ *                 PyBytes_AsStringAndSize(key_bytes, &str_ptr, <Py_ssize_t*>&str_len)
+ *                 # Create the key as a yyjson_mut_val with copy
+ *                 key_val = yyjson_mut_strncpy(doc, str_ptr, str_len)             # <<<<<<<<<<<<<<
+ *                 if key_val == NULL:
+ *                     return NULL
+*/
+      __pyx_v_key_val = yyjson_mut_strncpy(__pyx_v_doc, __pyx_v_str_ptr, __pyx_v_str_len);
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":379
+ *                 # Create the key as a yyjson_mut_val with copy
+ *                 key_val = yyjson_mut_strncpy(doc, str_ptr, str_len)
+ *                 if key_val == NULL:             # <<<<<<<<<<<<<<
+ *                     return NULL
+ *                 # Create the value
+*/
+      __pyx_t_1 = (__pyx_v_key_val == NULL);
+      if (__pyx_t_1) {
+
+        /* "opteryx/third_party/yyjson/cyyjson.pyx":380
+ *                 key_val = yyjson_mut_strncpy(doc, str_ptr, str_len)
+ *                 if key_val == NULL:
+ *                     return NULL             # <<<<<<<<<<<<<<
+ *                 # Create the value
+ *                 mut_val = self._py_to_mut(py_val, doc, default_handler)
+*/
+        __pyx_r = NULL;
+        __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+        goto __pyx_L0;
+
+        /* "opteryx/third_party/yyjson/cyyjson.pyx":379
+ *                 # Create the key as a yyjson_mut_val with copy
+ *                 key_val = yyjson_mut_strncpy(doc, str_ptr, str_len)
+ *                 if key_val == NULL:             # <<<<<<<<<<<<<<
+ *                     return NULL
+ *                 # Create the value
+*/
+      }
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":382
+ *                     return NULL
+ *                 # Create the value
+ *                 mut_val = self._py_to_mut(py_val, doc, default_handler)             # <<<<<<<<<<<<<<
+ *                 if mut_val == NULL:
+ *                     return NULL
+*/
+      __pyx_t_2 = ((struct __pyx_vtabstruct_7opteryx_11third_party_6yyjson_7cyyjson_Parser *)__pyx_v_self->__pyx_vtab)->_py_to_mut(__pyx_v_self, __pyx_v_py_val, __pyx_v_doc, __pyx_v_default_handler); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 382, __pyx_L1_error)
+      __pyx_v_mut_val = __pyx_t_2;
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":383
+ *                 # Create the value
+ *                 mut_val = self._py_to_mut(py_val, doc, default_handler)
+ *                 if mut_val == NULL:             # <<<<<<<<<<<<<<
+ *                     return NULL
+ *                 # Add key-value pair
+*/
+      __pyx_t_1 = (__pyx_v_mut_val == NULL);
+      if (__pyx_t_1) {
+
+        /* "opteryx/third_party/yyjson/cyyjson.pyx":384
+ *                 mut_val = self._py_to_mut(py_val, doc, default_handler)
+ *                 if mut_val == NULL:
+ *                     return NULL             # <<<<<<<<<<<<<<
+ *                 # Add key-value pair
+ *                 if not yyjson_mut_obj_add(result, key_val, mut_val):
+*/
+        __pyx_r = NULL;
+        __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+        goto __pyx_L0;
+
+        /* "opteryx/third_party/yyjson/cyyjson.pyx":383
+ *                 # Create the value
+ *                 mut_val = self._py_to_mut(py_val, doc, default_handler)
+ *                 if mut_val == NULL:             # <<<<<<<<<<<<<<
+ *                     return NULL
+ *                 # Add key-value pair
+*/
+      }
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":386
+ *                     return NULL
+ *                 # Add key-value pair
+ *                 if not yyjson_mut_obj_add(result, key_val, mut_val):             # <<<<<<<<<<<<<<
+ *                     return NULL
+ *             return result
+*/
+      __pyx_t_1 = (!yyjson_mut_obj_add(__pyx_v_result, __pyx_v_key_val, __pyx_v_mut_val));
+      if (__pyx_t_1) {
+
+        /* "opteryx/third_party/yyjson/cyyjson.pyx":387
+ *                 # Add key-value pair
+ *                 if not yyjson_mut_obj_add(result, key_val, mut_val):
+ *                     return NULL             # <<<<<<<<<<<<<<
+ *             return result
+ *         elif isinstance(obj, (list, tuple)):
+*/
+        __pyx_r = NULL;
+        __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+        goto __pyx_L0;
+
+        /* "opteryx/third_party/yyjson/cyyjson.pyx":386
+ *                     return NULL
+ *                 # Add key-value pair
+ *                 if not yyjson_mut_obj_add(result, key_val, mut_val):             # <<<<<<<<<<<<<<
+ *                     return NULL
+ *             return result
+*/
+      }
+    }
+    __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":388
+ *                 if not yyjson_mut_obj_add(result, key_val, mut_val):
+ *                     return NULL
+ *             return result             # <<<<<<<<<<<<<<
+ *         elif isinstance(obj, (list, tuple)):
+ *             result = yyjson_mut_arr(doc)
+*/
+    __pyx_r = __pyx_v_result;
+    goto __pyx_L0;
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":370
+ *             PyBytes_AsStringAndSize(obj, &str_ptr, <Py_ssize_t*>&str_len)
+ *             return yyjson_mut_strncpy(doc, str_ptr, str_len)
+ *         elif isinstance(obj, dict):             # <<<<<<<<<<<<<<
+ *             result = yyjson_mut_obj(doc)
+ *             if result == NULL:
+*/
+  }
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":389
+ *                     return NULL
+ *             return result
+ *         elif isinstance(obj, (list, tuple)):             # <<<<<<<<<<<<<<
+ *             result = yyjson_mut_arr(doc)
+ *             if result == NULL:
+*/
+  __pyx_t_14 = PyList_Check(__pyx_v_obj); 
+  if (!__pyx_t_14) {
+  } else {
+    __pyx_t_1 = __pyx_t_14;
+    goto __pyx_L11_bool_binop_done;
+  }
+  __pyx_t_14 = PyTuple_Check(__pyx_v_obj); 
+  __pyx_t_1 = __pyx_t_14;
+  __pyx_L11_bool_binop_done:;
+  if (__pyx_t_1) {
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":390
+ *             return result
+ *         elif isinstance(obj, (list, tuple)):
+ *             result = yyjson_mut_arr(doc)             # <<<<<<<<<<<<<<
+ *             if result == NULL:
+ *                 return NULL
+*/
+    __pyx_v_result = yyjson_mut_arr(__pyx_v_doc);
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":391
+ *         elif isinstance(obj, (list, tuple)):
+ *             result = yyjson_mut_arr(doc)
+ *             if result == NULL:             # <<<<<<<<<<<<<<
+ *                 return NULL
+ *             for item in obj:
+*/
+    __pyx_t_1 = (__pyx_v_result == NULL);
+    if (__pyx_t_1) {
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":392
+ *             result = yyjson_mut_arr(doc)
+ *             if result == NULL:
+ *                 return NULL             # <<<<<<<<<<<<<<
+ *             for item in obj:
+ *                 mut_val = self._py_to_mut(item, doc, default_handler)
+*/
+      __pyx_r = NULL;
+      goto __pyx_L0;
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":391
+ *         elif isinstance(obj, (list, tuple)):
+ *             result = yyjson_mut_arr(doc)
+ *             if result == NULL:             # <<<<<<<<<<<<<<
+ *                 return NULL
+ *             for item in obj:
+*/
+    }
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":393
+ *             if result == NULL:
+ *                 return NULL
+ *             for item in obj:             # <<<<<<<<<<<<<<
+ *                 mut_val = self._py_to_mut(item, doc, default_handler)
+ *                 if mut_val == NULL:
+*/
+    if (likely(PyList_CheckExact(__pyx_v_obj)) || PyTuple_CheckExact(__pyx_v_obj)) {
+      __pyx_t_3 = __pyx_v_obj; __Pyx_INCREF(__pyx_t_3);
+      __pyx_t_11 = 0;
+      __pyx_t_15 = NULL;
+    } else {
+      __pyx_t_11 = -1; __pyx_t_3 = PyObject_GetIter(__pyx_v_obj); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 393, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_3);
+      __pyx_t_15 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_3); if (unlikely(!__pyx_t_15)) __PYX_ERR(0, 393, __pyx_L1_error)
+    }
+    for (;;) {
+      if (likely(!__pyx_t_15)) {
+        if (likely(PyList_CheckExact(__pyx_t_3))) {
+          {
+            Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_3);
+            #if !CYTHON_ASSUME_SAFE_SIZE
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 393, __pyx_L1_error)
+            #endif
+            if (__pyx_t_11 >= __pyx_temp) break;
+          }
+          __pyx_t_7 = __Pyx_PyList_GetItemRefFast(__pyx_t_3, __pyx_t_11, __Pyx_ReferenceSharing_OwnStrongReference);
+          ++__pyx_t_11;
+        } else {
+          {
+            Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_3);
+            #if !CYTHON_ASSUME_SAFE_SIZE
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 393, __pyx_L1_error)
+            #endif
+            if (__pyx_t_11 >= __pyx_temp) break;
+          }
+          #if CYTHON_ASSUME_SAFE_MACROS && !CYTHON_AVOID_BORROWED_REFS
+          __pyx_t_7 = __Pyx_NewRef(PyTuple_GET_ITEM(__pyx_t_3, __pyx_t_11));
+          #else
+          __pyx_t_7 = __Pyx_PySequence_ITEM(__pyx_t_3, __pyx_t_11);
+          #endif
+          ++__pyx_t_11;
+        }
+        if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 393, __pyx_L1_error)
+      } else {
+        __pyx_t_7 = __pyx_t_15(__pyx_t_3);
+        if (unlikely(!__pyx_t_7)) {
+          PyObject* exc_type = PyErr_Occurred();
+          if (exc_type) {
+            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 393, __pyx_L1_error)
+            PyErr_Clear();
+          }
+          break;
+        }
+      }
+      __Pyx_GOTREF(__pyx_t_7);
+      __Pyx_XDECREF_SET(__pyx_v_item, __pyx_t_7);
+      __pyx_t_7 = 0;
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":394
+ *                 return NULL
+ *             for item in obj:
+ *                 mut_val = self._py_to_mut(item, doc, default_handler)             # <<<<<<<<<<<<<<
+ *                 if mut_val == NULL:
+ *                     return NULL
+*/
+      __pyx_t_2 = ((struct __pyx_vtabstruct_7opteryx_11third_party_6yyjson_7cyyjson_Parser *)__pyx_v_self->__pyx_vtab)->_py_to_mut(__pyx_v_self, __pyx_v_item, __pyx_v_doc, __pyx_v_default_handler); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 394, __pyx_L1_error)
+      __pyx_v_mut_val = __pyx_t_2;
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":395
+ *             for item in obj:
+ *                 mut_val = self._py_to_mut(item, doc, default_handler)
+ *                 if mut_val == NULL:             # <<<<<<<<<<<<<<
+ *                     return NULL
+ *                 if not yyjson_mut_arr_add_val(result, mut_val):
+*/
+      __pyx_t_1 = (__pyx_v_mut_val == NULL);
+      if (__pyx_t_1) {
+
+        /* "opteryx/third_party/yyjson/cyyjson.pyx":396
+ *                 mut_val = self._py_to_mut(item, doc, default_handler)
+ *                 if mut_val == NULL:
+ *                     return NULL             # <<<<<<<<<<<<<<
+ *                 if not yyjson_mut_arr_add_val(result, mut_val):
+ *                     return NULL
+*/
+        __pyx_r = NULL;
+        __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+        goto __pyx_L0;
+
+        /* "opteryx/third_party/yyjson/cyyjson.pyx":395
+ *             for item in obj:
+ *                 mut_val = self._py_to_mut(item, doc, default_handler)
+ *                 if mut_val == NULL:             # <<<<<<<<<<<<<<
+ *                     return NULL
+ *                 if not yyjson_mut_arr_add_val(result, mut_val):
+*/
+      }
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":397
+ *                 if mut_val == NULL:
+ *                     return NULL
+ *                 if not yyjson_mut_arr_add_val(result, mut_val):             # <<<<<<<<<<<<<<
+ *                     return NULL
+ *             return result
+*/
+      __pyx_t_1 = (!yyjson_mut_arr_add_val(__pyx_v_result, __pyx_v_mut_val));
+      if (__pyx_t_1) {
+
+        /* "opteryx/third_party/yyjson/cyyjson.pyx":398
+ *                     return NULL
+ *                 if not yyjson_mut_arr_add_val(result, mut_val):
+ *                     return NULL             # <<<<<<<<<<<<<<
+ *             return result
+ *         elif default_handler is not None:
+*/
+        __pyx_r = NULL;
+        __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+        goto __pyx_L0;
+
+        /* "opteryx/third_party/yyjson/cyyjson.pyx":397
+ *                 if mut_val == NULL:
+ *                     return NULL
+ *                 if not yyjson_mut_arr_add_val(result, mut_val):             # <<<<<<<<<<<<<<
+ *                     return NULL
+ *             return result
+*/
+      }
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":393
+ *             if result == NULL:
+ *                 return NULL
+ *             for item in obj:             # <<<<<<<<<<<<<<
+ *                 mut_val = self._py_to_mut(item, doc, default_handler)
+ *                 if mut_val == NULL:
+*/
+    }
+    __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":399
+ *                 if not yyjson_mut_arr_add_val(result, mut_val):
+ *                     return NULL
+ *             return result             # <<<<<<<<<<<<<<
+ *         elif default_handler is not None:
+ *             try:
+*/
+    __pyx_r = __pyx_v_result;
+    goto __pyx_L0;
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":389
+ *                     return NULL
+ *             return result
+ *         elif isinstance(obj, (list, tuple)):             # <<<<<<<<<<<<<<
+ *             result = yyjson_mut_arr(doc)
+ *             if result == NULL:
+*/
+  }
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":400
+ *                     return NULL
+ *             return result
+ *         elif default_handler is not None:             # <<<<<<<<<<<<<<
+ *             try:
+ *                 return self._py_to_mut(default_handler(obj), doc, default_handler)
+*/
+  __pyx_t_1 = (__pyx_v_default_handler != Py_None);
+  if (__pyx_t_1) {
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":401
+ *             return result
+ *         elif default_handler is not None:
+ *             try:             # <<<<<<<<<<<<<<
+ *                 return self._py_to_mut(default_handler(obj), doc, default_handler)
+ *             except (TypeError, ValueError):
+*/
+    {
+      __Pyx_PyThreadState_declare
+      __Pyx_PyThreadState_assign
+      __Pyx_ExceptionSave(&__pyx_t_16, &__pyx_t_17, &__pyx_t_18);
+      __Pyx_XGOTREF(__pyx_t_16);
+      __Pyx_XGOTREF(__pyx_t_17);
+      __Pyx_XGOTREF(__pyx_t_18);
+      /*try:*/ {
+
+        /* "opteryx/third_party/yyjson/cyyjson.pyx":402
+ *         elif default_handler is not None:
+ *             try:
+ *                 return self._py_to_mut(default_handler(obj), doc, default_handler)             # <<<<<<<<<<<<<<
+ *             except (TypeError, ValueError):
+ *                 return NULL
+*/
+        __pyx_t_7 = NULL;
+        __Pyx_INCREF(__pyx_v_default_handler);
+        __pyx_t_12 = __pyx_v_default_handler; 
+        __pyx_t_8 = 1;
+        #if CYTHON_UNPACK_METHODS
+        if (unlikely(PyMethod_Check(__pyx_t_12))) {
+          __pyx_t_7 = PyMethod_GET_SELF(__pyx_t_12);
+          assert(__pyx_t_7);
+          PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_12);
+          __Pyx_INCREF(__pyx_t_7);
+          __Pyx_INCREF(__pyx__function);
+          __Pyx_DECREF_SET(__pyx_t_12, __pyx__function);
+          __pyx_t_8 = 0;
+        }
+        #endif
+        {
+          PyObject *__pyx_callargs[2] = {__pyx_t_7, __pyx_v_obj};
+          __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_12, __pyx_callargs+__pyx_t_8, (2-__pyx_t_8) | (__pyx_t_8*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+          __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
+          __Pyx_DECREF(__pyx_t_12); __pyx_t_12 = 0;
+          if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 402, __pyx_L19_error)
+          __Pyx_GOTREF(__pyx_t_3);
+        }
+        __pyx_t_2 = ((struct __pyx_vtabstruct_7opteryx_11third_party_6yyjson_7cyyjson_Parser *)__pyx_v_self->__pyx_vtab)->_py_to_mut(__pyx_v_self, __pyx_t_3, __pyx_v_doc, __pyx_v_default_handler); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 402, __pyx_L19_error)
+        __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+        __pyx_r = __pyx_t_2;
+        goto __pyx_L23_try_return;
+
+        /* "opteryx/third_party/yyjson/cyyjson.pyx":401
+ *             return result
+ *         elif default_handler is not None:
+ *             try:             # <<<<<<<<<<<<<<
+ *                 return self._py_to_mut(default_handler(obj), doc, default_handler)
+ *             except (TypeError, ValueError):
+*/
+      }
+      __pyx_L19_error:;
+      __Pyx_XDECREF(__pyx_t_12); __pyx_t_12 = 0;
+      __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+      __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":403
+ *             try:
+ *                 return self._py_to_mut(default_handler(obj), doc, default_handler)
+ *             except (TypeError, ValueError):             # <<<<<<<<<<<<<<
+ *                 return NULL
+ *         else:
+*/
+      __pyx_t_9 = __Pyx_PyErr_ExceptionMatches2(((PyObject *)(((PyTypeObject*)PyExc_TypeError))), ((PyObject *)(((PyTypeObject*)PyExc_ValueError))));
+      if (__pyx_t_9) {
+        __Pyx_ErrRestore(0,0,0);
+
+        /* "opteryx/third_party/yyjson/cyyjson.pyx":404
+ *                 return self._py_to_mut(default_handler(obj), doc, default_handler)
+ *             except (TypeError, ValueError):
+ *                 return NULL             # <<<<<<<<<<<<<<
+ *         else:
+ *             return NULL
+*/
+        __pyx_r = NULL;
+        goto __pyx_L22_except_return;
+      }
+      goto __pyx_L21_except_error;
+
+      /* "opteryx/third_party/yyjson/cyyjson.pyx":401
+ *             return result
+ *         elif default_handler is not None:
+ *             try:             # <<<<<<<<<<<<<<
+ *                 return self._py_to_mut(default_handler(obj), doc, default_handler)
+ *             except (TypeError, ValueError):
+*/
+      __pyx_L21_except_error:;
+      __Pyx_XGIVEREF(__pyx_t_16);
+      __Pyx_XGIVEREF(__pyx_t_17);
+      __Pyx_XGIVEREF(__pyx_t_18);
+      __Pyx_ExceptionReset(__pyx_t_16, __pyx_t_17, __pyx_t_18);
+      goto __pyx_L1_error;
+      __pyx_L23_try_return:;
+      __Pyx_XGIVEREF(__pyx_t_16);
+      __Pyx_XGIVEREF(__pyx_t_17);
+      __Pyx_XGIVEREF(__pyx_t_18);
+      __Pyx_ExceptionReset(__pyx_t_16, __pyx_t_17, __pyx_t_18);
+      goto __pyx_L0;
+      __pyx_L22_except_return:;
+      __Pyx_XGIVEREF(__pyx_t_16);
+      __Pyx_XGIVEREF(__pyx_t_17);
+      __Pyx_XGIVEREF(__pyx_t_18);
+      __Pyx_ExceptionReset(__pyx_t_16, __pyx_t_17, __pyx_t_18);
+      goto __pyx_L0;
+    }
+
+    /* "opteryx/third_party/yyjson/cyyjson.pyx":400
+ *                     return NULL
+ *             return result
+ *         elif default_handler is not None:             # <<<<<<<<<<<<<<
+ *             try:
+ *                 return self._py_to_mut(default_handler(obj), doc, default_handler)
+*/
+  }
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":406
+ *                 return NULL
+ *         else:
+ *             return NULL             # <<<<<<<<<<<<<<
+*/
+  /*else*/ {
+    __pyx_r = NULL;
+    goto __pyx_L0;
+  }
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":342
+ *             yyjson_mut_doc_free(doc)
+ * 
+ *     cdef yyjson_mut_val* _py_to_mut(self, object obj, yyjson_mut_doc* doc,             # <<<<<<<<<<<<<<
+ *                                      object default_handler):
+ *         """Recursively convert Python object to yyjson_mut_val."""
+*/
+
+  /* function exit code */
+  __pyx_L1_error:;
+  __Pyx_XDECREF(__pyx_t_3);
+  __Pyx_XDECREF(__pyx_t_7);
+  __Pyx_XDECREF(__pyx_t_12);
+  __Pyx_AddTraceback("opteryx.third_party.yyjson.cyyjson.Parser._py_to_mut", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __pyx_r = 0;
+  __pyx_L0:;
+  __Pyx_XDECREF(__pyx_v_key_bytes);
+  __Pyx_XDECREF(__pyx_v_value_bytes);
+  __Pyx_XDECREF(__pyx_v_py_key);
+  __Pyx_XDECREF(__pyx_v_py_val);
+  __Pyx_XDECREF(__pyx_v_item);
+  __Pyx_RefNannyFinishContext();
+  return __pyx_r;
+}
+
 /* "(tree fragment)":1
  * def __reduce_cython__(self):             # <<<<<<<<<<<<<<
  *     cdef tuple state
@@ -7899,15 +9372,15 @@ static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_2loads
 */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_5__reduce_cython__(PyObject *__pyx_v_self, 
+static PyObject *__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_7__reduce_cython__(PyObject *__pyx_v_self, 
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
 PyObject *__pyx_args, PyObject *__pyx_kwds
 #endif
 ); /*proto*/
-static PyMethodDef __pyx_mdef_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_5__reduce_cython__ = {"__reduce_cython__", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_5__reduce_cython__, __Pyx_METH_FASTCALL|METH_KEYWORDS, 0};
-static PyObject *__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_5__reduce_cython__(PyObject *__pyx_v_self, 
+static PyMethodDef __pyx_mdef_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_7__reduce_cython__ = {"__reduce_cython__", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_7__reduce_cython__, __Pyx_METH_FASTCALL|METH_KEYWORDS, 0};
+static PyObject *__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_7__reduce_cython__(PyObject *__pyx_v_self, 
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
@@ -7933,14 +9406,14 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   const Py_ssize_t __pyx_kwds_len = unlikely(__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
   if (unlikely(__pyx_kwds_len < 0)) return NULL;
   if (unlikely(__pyx_kwds_len > 0)) {__Pyx_RejectKeywords("__reduce_cython__", __pyx_kwds); return NULL;}
-  __pyx_r = __pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_4__reduce_cython__(((struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *)__pyx_v_self));
+  __pyx_r = __pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_6__reduce_cython__(((struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *)__pyx_v_self));
 
   /* function exit code */
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_4__reduce_cython__(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *__pyx_v_self) {
+static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_6__reduce_cython__(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *__pyx_v_self) {
   PyObject *__pyx_v_state = 0;
   PyObject *__pyx_v__dict = 0;
   int __pyx_v_use_setstate;
@@ -8163,15 +9636,15 @@ static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_4__red
 */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_7__setstate_cython__(PyObject *__pyx_v_self, 
+static PyObject *__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_9__setstate_cython__(PyObject *__pyx_v_self, 
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
 PyObject *__pyx_args, PyObject *__pyx_kwds
 #endif
 ); /*proto*/
-static PyMethodDef __pyx_mdef_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_7__setstate_cython__ = {"__setstate_cython__", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_7__setstate_cython__, __Pyx_METH_FASTCALL|METH_KEYWORDS, 0};
-static PyObject *__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_7__setstate_cython__(PyObject *__pyx_v_self, 
+static PyMethodDef __pyx_mdef_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_9__setstate_cython__ = {"__setstate_cython__", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_9__setstate_cython__, __Pyx_METH_FASTCALL|METH_KEYWORDS, 0};
+static PyObject *__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_9__setstate_cython__(PyObject *__pyx_v_self, 
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
@@ -8237,7 +9710,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
-  __pyx_r = __pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_6__setstate_cython__(((struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *)__pyx_v_self), __pyx_v___pyx_state);
+  __pyx_r = __pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_8__setstate_cython__(((struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *)__pyx_v_self), __pyx_v___pyx_state);
 
   /* function exit code */
   for (Py_ssize_t __pyx_temp=0; __pyx_temp < (Py_ssize_t)(sizeof(values)/sizeof(values[0])); ++__pyx_temp) {
@@ -8247,7 +9720,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_6__setstate_cython__(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *__pyx_v_self, PyObject *__pyx_v___pyx_state) {
+static PyObject *__pyx_pf_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_8__setstate_cython__(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *__pyx_v_self, PyObject *__pyx_v___pyx_state) {
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
@@ -8956,11 +10429,15 @@ static PyTypeObject __pyx_type_7opteryx_11third_party_6yyjson_7cyyjson_YYVal = {
   #endif
 };
 #endif
+static struct __pyx_vtabstruct_7opteryx_11third_party_6yyjson_7cyyjson_Parser __pyx_vtable_7opteryx_11third_party_6yyjson_7cyyjson_Parser;
 
 static PyObject *__pyx_tp_new_7opteryx_11third_party_6yyjson_7cyyjson_Parser(PyTypeObject *t, CYTHON_UNUSED PyObject *a, CYTHON_UNUSED PyObject *k) {
+  struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *p;
   PyObject *o;
   o = __Pyx_AllocateExtensionType(t, 0);
   if (unlikely(!o)) return 0;
+  p = ((struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *)o);
+  p->__pyx_vtab = __pyx_vtabptr_7opteryx_11third_party_6yyjson_7cyyjson_Parser;
   return o;
 }
 
@@ -8989,8 +10466,9 @@ static void __pyx_tp_dealloc_7opteryx_11third_party_6yyjson_7cyyjson_Parser(PyOb
 static PyMethodDef __pyx_methods_7opteryx_11third_party_6yyjson_7cyyjson_Parser[] = {
   {"parse", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_1parse, __Pyx_METH_FASTCALL|METH_KEYWORDS, 0},
   {"loads", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_3loads, __Pyx_METH_FASTCALL|METH_KEYWORDS, 0},
-  {"__reduce_cython__", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_5__reduce_cython__, __Pyx_METH_FASTCALL|METH_KEYWORDS, 0},
-  {"__setstate_cython__", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_7__setstate_cython__, __Pyx_METH_FASTCALL|METH_KEYWORDS, 0},
+  {"dumps", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_5dumps, __Pyx_METH_FASTCALL|METH_KEYWORDS, __pyx_doc_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_4dumps},
+  {"__reduce_cython__", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_7__reduce_cython__, __Pyx_METH_FASTCALL|METH_KEYWORDS, 0},
+  {"__setstate_cython__", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_9__setstate_cython__, __Pyx_METH_FASTCALL|METH_KEYWORDS, 0},
   {0, 0, 0, 0}
 };
 #if CYTHON_USE_TYPE_SPECS
@@ -9182,6 +10660,8 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   if (__Pyx_MergeVtables(__pyx_mstate->__pyx_ptype_7opteryx_11third_party_6yyjson_7cyyjson_YYVal) < (0)) __PYX_ERR(0, 76, __pyx_L1_error)
   if (PyObject_SetAttr(__pyx_m, __pyx_mstate_global->__pyx_n_u_YYVal, (PyObject *) __pyx_mstate->__pyx_ptype_7opteryx_11third_party_6yyjson_7cyyjson_YYVal) < (0)) __PYX_ERR(0, 76, __pyx_L1_error)
   if (__Pyx_setup_reduce((PyObject *) __pyx_mstate->__pyx_ptype_7opteryx_11third_party_6yyjson_7cyyjson_YYVal) < (0)) __PYX_ERR(0, 76, __pyx_L1_error)
+  __pyx_vtabptr_7opteryx_11third_party_6yyjson_7cyyjson_Parser = &__pyx_vtable_7opteryx_11third_party_6yyjson_7cyyjson_Parser;
+  __pyx_vtable_7opteryx_11third_party_6yyjson_7cyyjson_Parser._py_to_mut = (yyjson_mut_val *(*)(struct __pyx_obj_7opteryx_11third_party_6yyjson_7cyyjson_Parser *, PyObject *, yyjson_mut_doc *, PyObject *))__pyx_f_7opteryx_11third_party_6yyjson_7cyyjson_6Parser__py_to_mut;
   #if CYTHON_USE_TYPE_SPECS
   __pyx_mstate->__pyx_ptype_7opteryx_11third_party_6yyjson_7cyyjson_Parser = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_11third_party_6yyjson_7cyyjson_Parser_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_11third_party_6yyjson_7cyyjson_Parser)) __PYX_ERR(0, 277, __pyx_L1_error)
   if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_11third_party_6yyjson_7cyyjson_Parser_spec, __pyx_mstate->__pyx_ptype_7opteryx_11third_party_6yyjson_7cyyjson_Parser) < (0)) __PYX_ERR(0, 277, __pyx_L1_error)
@@ -9201,6 +10681,8 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
     __pyx_mstate->__pyx_ptype_7opteryx_11third_party_6yyjson_7cyyjson_Parser->tp_getattro = PyObject_GenericGetAttr;
   }
   #endif
+  if (__Pyx_SetVtable(__pyx_mstate->__pyx_ptype_7opteryx_11third_party_6yyjson_7cyyjson_Parser, __pyx_vtabptr_7opteryx_11third_party_6yyjson_7cyyjson_Parser) < (0)) __PYX_ERR(0, 277, __pyx_L1_error)
+  if (__Pyx_MergeVtables(__pyx_mstate->__pyx_ptype_7opteryx_11third_party_6yyjson_7cyyjson_Parser) < (0)) __PYX_ERR(0, 277, __pyx_L1_error)
   if (PyObject_SetAttr(__pyx_m, __pyx_mstate_global->__pyx_n_u_Parser, (PyObject *) __pyx_mstate->__pyx_ptype_7opteryx_11third_party_6yyjson_7cyyjson_Parser) < (0)) __PYX_ERR(0, 277, __pyx_L1_error)
   if (__Pyx_setup_reduce((PyObject *) __pyx_mstate->__pyx_ptype_7opteryx_11third_party_6yyjson_7cyyjson_Parser) < (0)) __PYX_ERR(0, 277, __pyx_L1_error)
   __Pyx_RefNannyFinishContext();
@@ -9840,6 +11322,7 @@ __Pyx_RefNannySetupContext("PyInit_cyyjson", 0);
  * 
  *     def loads(self, object data, unsigned int flags=0):             # <<<<<<<<<<<<<<
  *         return self.parse(data, flags)
+ * 
 */
   __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_3loads, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_Parser_loads, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_third_party_yyjson_cyyjs, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[21])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 298, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
@@ -9850,12 +11333,28 @@ __Pyx_RefNannySetupContext("PyInit_cyyjson", 0);
   if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_7opteryx_11third_party_6yyjson_7cyyjson_Parser, __pyx_mstate_global->__pyx_n_u_loads, __pyx_t_2) < (0)) __PYX_ERR(0, 298, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":301
+ *         return self.parse(data, flags)
+ * 
+ *     def dumps(self, object obj, object default_handler=None, unsigned int options=0):             # <<<<<<<<<<<<<<
+ *         """Serialize a Python object to JSON bytes using yyjson's mutable API.
+ * 
+*/
+  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_5dumps, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_Parser_dumps, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_third_party_yyjson_cyyjs, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[22])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 301, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
+  PyUnstable_Object_EnableDeferredRefcount(__pyx_t_2);
+  #endif
+  __Pyx_CyFunction_SetDefaultsTuple(__pyx_t_2, __pyx_mstate_global->__pyx_tuple[2]);
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_7opteryx_11third_party_6yyjson_7cyyjson_Parser, __pyx_mstate_global->__pyx_n_u_dumps, __pyx_t_2) < (0)) __PYX_ERR(0, 301, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+
   /* "(tree fragment)":1
  * def __reduce_cython__(self):             # <<<<<<<<<<<<<<
  *     cdef tuple state
  *     cdef object _dict
 */
-  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_5__reduce_cython__, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_Parser___reduce_cython, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_third_party_yyjson_cyyjs, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[22])); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 1, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_7__reduce_cython__, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_Parser___reduce_cython, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_third_party_yyjson_cyyjs, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[23])); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 1, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_2);
@@ -9869,7 +11368,7 @@ __Pyx_RefNannySetupContext("PyInit_cyyjson", 0);
  * def __setstate_cython__(self, __pyx_state):             # <<<<<<<<<<<<<<
  *     __pyx_unpickle_Parser__set_state(self, __pyx_state)
 */
-  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_7__setstate_cython__, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_Parser___setstate_cython, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_third_party_yyjson_cyyjs, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[23])); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 16, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_11third_party_6yyjson_7cyyjson_6Parser_9__setstate_cython__, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_Parser___setstate_cython, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_third_party_yyjson_cyyjs, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[24])); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 16, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_2);
@@ -9884,7 +11383,7 @@ __Pyx_RefNannySetupContext("PyInit_cyyjson", 0);
  *     cdef object __pyx_result
  *     __Pyx_CheckUnpickleChecksum(__pyx_checksum, 0xe3b0c44, 0xda39a3e, 0xd41d8cd, b'')
 */
-  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_11third_party_6yyjson_7cyyjson_1__pyx_unpickle_Parser, 0, __pyx_mstate_global->__pyx_n_u_pyx_unpickle_Parser, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_third_party_yyjson_cyyjs, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[24])); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 4, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_11third_party_6yyjson_7cyyjson_1__pyx_unpickle_Parser, 0, __pyx_mstate_global->__pyx_n_u_pyx_unpickle_Parser, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_third_party_yyjson_cyyjs, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[25])); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 4, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_2);
@@ -9976,10 +11475,21 @@ static int __Pyx_InitCachedConstants(__pyx_mstatetype *__pyx_mstate) {
   __pyx_mstate_global->__pyx_tuple[1] = PyTuple_Pack(1, __pyx_mstate_global->__pyx_int_0); if (unlikely(!__pyx_mstate_global->__pyx_tuple[1])) __PYX_ERR(0, 278, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_mstate_global->__pyx_tuple[1]);
   __Pyx_GIVEREF(__pyx_mstate_global->__pyx_tuple[1]);
+
+  /* "opteryx/third_party/yyjson/cyyjson.pyx":301
+ *         return self.parse(data, flags)
+ * 
+ *     def dumps(self, object obj, object default_handler=None, unsigned int options=0):             # <<<<<<<<<<<<<<
+ *         """Serialize a Python object to JSON bytes using yyjson's mutable API.
+ * 
+*/
+  __pyx_mstate_global->__pyx_tuple[2] = PyTuple_Pack(2, Py_None, __pyx_mstate_global->__pyx_int_0); if (unlikely(!__pyx_mstate_global->__pyx_tuple[2])) __PYX_ERR(0, 301, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_mstate_global->__pyx_tuple[2]);
+  __Pyx_GIVEREF(__pyx_mstate_global->__pyx_tuple[2]);
   #if CYTHON_IMMORTAL_CONSTANTS
   {
     PyObject **table = __pyx_mstate->__pyx_tuple;
-    for (Py_ssize_t i=0; i<2; ++i) {
+    for (Py_ssize_t i=0; i<3; ++i) {
       #if CYTHON_COMPILING_IN_CPYTHON_FREETHREADING
       #if PY_VERSION_HEX < 0x030E0000
       if (_Py_IsOwnedByCurrentThread(table[i]) && Py_REFCNT(table[i]) == 1)
@@ -10006,34 +11516,34 @@ static int __Pyx_InitCachedConstants(__pyx_mstatetype *__pyx_mstate) {
 static int __Pyx_InitConstants(__pyx_mstatetype *__pyx_mstate) {
   CYTHON_UNUSED_VAR(__pyx_mstate);
   {
-    const struct { const unsigned int length: 8; } index[] = {{1},{29},{179},{19},{17},{1},{2},{1},{1},{1},{2},{1},{2},{8},{30},{24},{30},{25},{7},{6},{2},{15},{22},{9},{38},{72},{61},{14},{29},{5},{6},{24},{26},{12},{12},{20},{5},{23},{25},{16},{11},{9},{5},{23},{25},{11},{16},{11},{9},{12},{13},{12},{13},{12},{13},{13},{12},{13},{5},{18},{10},{5},{4},{4},{17},{18},{4},{6},{8},{5},{3},{5},{6},{3},{5},{8},{3},{12},{6},{6},{7},{13},{6},{7},{6},{7},{7},{6},{7},{7},{5},{4},{9},{8},{3},{5},{8},{6},{10},{3},{8},{7},{34},{3},{5},{7},{3},{3},{6},{14},{12},{11},{10},{21},{14},{12},{10},{17},{13},{6},{4},{4},{12},{10},{12},{19},{5},{8},{7},{6},{12},{3},{6},{166},{18},{11},{102},{89},{72},{15},{15},{15},{9},{99},{22},{55},{13},{13},{23}};
-    #if (CYTHON_COMPRESS_STRINGS) == 2 /* compression: bz2 (1445 bytes) */
-const char* const cstring = "BZh91AY&SY\231\240\220\010\000\000\232\177\377\357\377\374\366\377\377\357\335\257\263\377\256\277\377\377\345@@@@@@@@@@@@@\000@\000P\005>q\245\262\nJ\200\0300h\224!\221\232'\244\3624=D\332\2154\320\r4\032\0002h\001\265\000\320\320\003@i\210d8\000\000\001\240\000\000\006\200\032\000\001\240\000\006\200\000\000\001\240\020\223\"2jzi\031\r\006\206\215\000\032\0004\000\000\000\032\000=CA\2408\000\000\001\240\000\000\006\200\032\000\001\240\000\006\200\000\000\001)\250\2314\000I\232&F\251\262h2\230@\000\320\000\000\000\000\000\014\322i\264\211\375\321\273]\236^\331\332\356(\"\035\317\367\231\233\231\273\310r;\326\243\006T\325\377N\304\204\314\311\t\000\222A|\342\032{H\020fH\202\315\021\252\0231\252U`\024\332\261\221\261\251J\000+2\252\2162\240A3\314\2558)\024!\0301\352\323mL\\l@w\275a\207Jz_z\020\367\266%A\251\311J\330(\325%c[Z\266O\364b\001\320\336\344\254\017e\331\265\224\020\266\"\244\025%<\0300\031\222\026Y\203\030rB/w)\363&\370\261|\276\270yb8\001\323\305\024\3163\264\2015\333\237\007\370\214|\302\221B+\253\364!\016H\320q\322\331\2603 \034\006\314\263\021xn\357\245\255\303\203X*P\037%\034Z7?\017j\004\363Fl1\2200e\241\270\227m\332\320=\247G\\\247n\303\270\031g\302\0241\014\212\226]\275\210\022\265Y\252\245\010\327m a\240v{\213Ej\027r\022\334H\204\206\346`\346(\241\221\273A\242Ky~\236d\332S\352\216C\347\266\313\200\004%\224aH\014\307K\022\214\374}9\215\350C;\240\345\312\234\365\2639\207\365\311P\321G\007\033\231\216A\350\010\t\000Cj\277*\366\361\341\226R\\\357\345\332\246\342.\025w\231\330\252U\264\004X\021\200\016\242\025\003\032\032\013\270\360\304'\243\000*\005%\n\010\301\225\016\206\n\214\031\356\024\357O\036\370.^\022]\024JI\326\366\342\377\000\273\007\363i\000\274\356v?\270\0267\231Yn\263{ES'w[\2562%\246\367\342\333!\\M\033\241\236\200,{\246[&n>.\237I\335FM\233Q=\254Y\273\260;\003dnJs\237\026mo\035L\006\225\024c)\246j\341\264N\205#\364g\2018\"`<8>t\331XJ\236\355\032\354\275+\256\254\"P\372_\n\344!\245a\277\240\327pV\250\332\370\335\274\375.SG2\231F\016\202I$""\2263\340M\223\327V\330A\254\014z\334\025I-\003H\014\217h\007qY\321\250r\020\216d\014\\K\034\376\252\237A\014\t\232\3719as\3567a&BI0\371\210Xe\347\352:\272\216\334\267\033\024\252\304\247U\205\261r7H6\366\3104\374\025\224\243@\206n\273\026[\271\223r\270\231n\260\325Kx\301J\246\025 \243\336\234\205\362\014\315n\205,\261e\006C\233\321/\233\035g\260458\2334\030\257Z\227\252\314(<\322\311\310\242\341\273\020\204`\367\262 \005\373h\231\316Y\223\311\006\213\256b1)\244\220\263\334\347\227'\022\035E\317\231\236L\311\3657\024\375k\344\221\2242\002\006df\202U\235-4\244B\243\035S\na\250\177\271\207)X\014\352\225\3024\014P\232\005\221-45\n7\023\324-;\343,\307B\006\370rXRmml\200C\221#Q\276J\312\337\254\255\323\2210+G\022v\272\345\"\014\355\233\226\017\323&\213\307L\332e5uU\270\330\274\306\200-\331\247\217i\317\177':g\315\326\207\22115a\230d\214\331\016\026\343\207\262\313\022\030\016\275\314\211\334g\224\2475=\320N)!\300\t&L\010BjS\234\342\0318\331I\317tX\202\032q0Ei\245\313\234\257\360\177J\254\236\311\331\2530\274lV\304b\356\2135O\304.lm$&\025'e\316i\216\214\373\rS>\342\241-%s>\031\3278Q\026D\235;\035M\016'\203\005\017\214\236\360\026\202#\362 \366$pc\022\334\371\203\203\257;1\204J\344T\027>\312B7\333k\202\230\337@\027\231S$\263\261\302O\315Sm\032\275\262\037\201\014P\366\350C\225F\233\366\263\260M\n\341\236rn\031\242p\266\034S\032\231&e\267\026\257#\247\272\345\031\301g\325\000\313\374\221\254\002\360!\321\022[\244\337\304V\354Dh\305s\321[\347\230\272)\0215\305\203\322\t\242\334\006\013\252\253\326\243\n\310#\261\334)\230d\003;(\360\026V\353\255\361\256B\035\212`\225\021v\021\371\316o\364G\270A\372\243\216\272\337]\266'.*\226$\001B\033\037\014\0036\212N7\210\031\006+\2455z\342\226\024J\302d(\0250`\362Q\272\n\327\260\364\231\311\216\370\016\366\243\313\n\321\017\300\264\025\021\247F\236\230\277\256m*x\252\257\375\215\236$\2146r\357x$\r\nRX\262 y\346L\322q\205\016\225\250/\035\253\366\262Sn2\356rg\211\327\035K\315\026\364\357\240\312\366\247Ig\356\356\212\376h\331\3602$LF/\316""\371\222\302\240Ea\246k(x\017\376F9\207\250\030i\244\235'\037\361w$S\205\t\t\232\t\000\200";
-    PyObject *data = __Pyx_DecompressString(cstring, 1445, 2);
+    const struct { const unsigned int length: 8; } index[] = {{1},{32},{32},{29},{179},{19},{17},{1},{2},{1},{1},{1},{2},{1},{2},{8},{30},{24},{30},{25},{7},{6},{2},{15},{22},{9},{38},{72},{61},{14},{29},{5},{6},{24},{26},{12},{12},{12},{20},{5},{23},{25},{16},{11},{9},{5},{23},{25},{11},{16},{11},{9},{12},{13},{12},{13},{12},{13},{13},{12},{13},{5},{18},{10},{5},{4},{4},{17},{18},{4},{6},{15},{8},{5},{3},{5},{6},{3},{5},{8},{3},{12},{6},{6},{7},{13},{6},{7},{6},{7},{7},{6},{7},{7},{5},{4},{9},{8},{3},{5},{8},{6},{10},{3},{8},{7},{3},{34},{7},{3},{5},{7},{3},{3},{6},{14},{12},{11},{10},{21},{14},{12},{10},{17},{13},{6},{4},{4},{12},{10},{12},{19},{5},{8},{7},{6},{12},{3},{6},{166},{18},{168},{11},{102},{89},{72},{15},{15},{15},{9},{99},{22},{55},{13},{13},{23}};
+    #if (CYTHON_COMPRESS_STRINGS) == 2 /* compression: bz2 (1594 bytes) */
+const char* const cstring = "BZh91AY&SY\007\355hM\000\000\273\377\377\357\377\375\366\377\377\377\335\277\263\377\256\277\377\377\375@@@@@@@@@@@@@\000@\000P\005\251\214\232-1\tP\243\001\206\205\032\232e2M\243\321\223FQ=\252=\252z@\362&A\265411\006 m#\324\030F@\323\323F\005\036(%5\002h\010\304\004\321\224\315S\322hz\203M\0004\000\000\000\000\000\032\000z\200\001\246\201\010)\247\245G\265'\350'\251\006\3224\332\217Q\352\001\241\240\000\031\000h\000\320h\037\252\036\243OP\007\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\0008\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\003\020{\001[\264w.\204\267|\320\302\257\377p\021`,&\020\313\n\375)\013\014\222<i\030\231h\310\030\231\231! \022H'y13O!)\010L\t2h\2737\005\323\031\010\007\013R(\220B\233K\202\274\212\370=^F\312\351a\311\213\221\265\027\336\302\006\355$\275\022irV\302h\021\222\265d \217\253\255\003\215u\370\372\300\367\376\260\343\324\237C\366\262\016\273\353e\024\343\351`\346\003\016Dg-<\230\327\260D\212-\201\234\325\304F9\326\317\215\203\265\312\313 R\325W\357v\366\306\336\340\337fGNa\005!\367\367\003\306\367\027\273\251\230Zc\233\233\226\314\032\2027t5\221\223*\251\236$-),\362<\354\026g\346\354\302\325$Dd\215\016\215\005.\2703 \020-\024O\271=JV\274\351\256L\r\022\300)\324P\306\006\255T\370z\330%\231\204=\013\301K\021w\013\206N*\360\337\355LT\036w\247\251\216\027\346\\\342\032\335\021q\022\352\313M\235\256\"\303\225\254\"\316\034\326d\274P4[\005\0168\216\307\334\236K~\t\326^\331\307<r\325\311\007\213.D\n\327!\333T\013\276\016\267\330\320\346\303\355*0\276Z\2004\350\313\262\370\214\307c\211N\216\207v\343z#B\302\2362\254um\014\265\360^\022H\355\372\n\2108\003\020\024\"\200\245\356\376\014le\022\324\226\356\177\254\367V\004\346L;'\207K\231\257\002q\n\340\010a,\241\314\262\260\317\225\035\004\364\244\006P\310\301\202\020R\306\304%\234;(4b\303\337\025\372\365\304\372H\234\323\256\347\223\372\206O\303\010\177Z\300/?s\310\242%\255\341X+\266\037\214\016HQ\245\362\316\"1\036l\245\262\211\365I\214\034\234\004\311\r\000$\256\2127""\302\345\327\243\233I;d\202\256\002\213\230\267g\020\336 \332L\323\240\345\2237\013\307U\021\247M8N\020k#\320\023\243P\375\016\317\026\240\021d\200\356\250\204\320i\270\246\277\346\235\227\026\031*\311`PT\372\340\362\363PBW\024\325\240nc\230\r\203\375\341\332\227\254\362\333J\227\200\306\035\\\222I')\316\037\264X\303k\236\216ZE\371\345d%\312\334$,\207X\274\010\201\201\263\330\320D\264\220\204>\313b\257\302\353]\002r\016\2332\247,\315\230nEP\202I@\316F\343W\231\300v\334\r\373O3`\221^\005\\\026\227I\310\330E\266\361E\250\337a*\234h\020\315\333\261ivm-\316\342\013\265\273]u>\301\355T\n\234S\034gA\235\210B\027R\024m-\244\315\025\032]\235AX\272\t\311\352S\204$\2136:\031\363W\264&\215\341\253=o\327\214\244\346B\253\2516\003E\256wJM\266\235U\2704\345\315{\023\231e\215P\264^\347\266\005EB\335\223:3\222\001l\023~\235\366U \224\227P\200\224%E06\275\351@\t\270\217l\206!\354y* \nF(\246\354\302b\266\010\tH\030\270\3305\005*Y\n+da\270dbtb\333\203\232\322\255\213\240\316d\002\034\2053H\324+\314\303'\335\030\255E\004\014\nsJ\356\343Z\205\200\333\333]\230m5\002X+\246\232aeu\347\014^\330\322\005\334Z\373.3\215\3477!\007\220\351\307\300\201\006,\014Y\2221\3229\226g\017e\247\0027\232\337{\331\023q\242\232I\223{\242\234TGx$\231\014!\t\252Ns\210\351qO\n9]&\"\206\240L\022Z\252r\344Y{\216\265v\321m\000_h\262\215\202\341F\016\343\002\275\320\3042\2669\nD\302\254\375\034\346\200\347Sy6\335\266E\340\235#\002\354#\035\n\240\300<\241R\264A\301\241E%\000\263Jo{\002\320H~\222/bg&\022.\317\210rt\350f/\221d\312\253\014\220\266\266(\313E\316\n\245\226\2202\232j&\226v7\224\177u\266\341\254\3351\367\221\300FH\007F\\\352\212\357\334\316\3016RWK<\310o\205\006\366\307\226\006\266I\231n\314\326j;\016\007\034f\010\033\217(\204\335\010\341\340\004\300\215\0211\002\24072\245\273-\260\375s\027\017M\333;\345\301\302\000\257Z\227\274\026\351m\021\200+\332\310\335\240^\204#;\325\307\021\225\020\014\360\247 \356\003\300\347\005\253\020j\220\202\357\354p\2250d\036tC\260\227\253\233\336!`!\377\022\265\271\334\374W5""\347\016\202\2338\266r\337\347|\031\217i=\367\317?\001\226\201\2104\355\246e\255\312\233\360\226v\032\002\330\322\2303\003\374\264\320A\275\356\307\023n]\355K*M\211q6\007\035h\273\342]`\330\030\205\351\202-\252;p\365/\265\211\263\350\377h\314\236\276\213cXS\031\361U\253G{\260<\277N\313\370\004\357\326\037\036O\207a\212\215\346\016\034S\345j\312v\3530\303\034y$U_p\266\366\331\326\352\317\326\r\007\265)X\313\251g\216C9\3242\206;H\2757\030\006\301.F\035\216\351\222\321\226@\214\343\354-I\211XR\177\342\305kC70\257\300\321\002\262\266\2645D\254\323/\374]\311\024\341B@\037\265\2414";
+    PyObject *data = __Pyx_DecompressString(cstring, 1594, 2);
     if (unlikely(!data)) __PYX_ERR(0, 1, __pyx_L1_error)
     const char* const bytes = __Pyx_PyBytes_AsString(data);
     #if !CYTHON_ASSUME_SAFE_MACROS
     if (likely(bytes)); else { Py_DECREF(data); __PYX_ERR(0, 1, __pyx_L1_error) }
     #endif
-    #elif (CYTHON_COMPRESS_STRINGS) != 0 /* compression: zlib (1349 bytes) */
-const char* const cstring = "x\332\235TMo\333F\020\255\020\265Vk\247\251\222\000N\203\026Y5n\225O\271B\235:H\202\024B\035\007\r\320\324\212\323\030FR,V\344JbL-)\356\322\026\201\240\360QG\036\367\310#\217<\352\350\243\216<\362\250\237\320\237\320Y.-;\260\017E\001i9\273\2633\363\346\315\314\326_l\377\361\022\271\304\343\024Q\317s<D\004r\035n\t\313a\350\245#(\022}8\3725\020}8\26082\251mu\250G\004\265\003\304\205g\031\202z\352\022C[\317\266\356\257=\\C\204\231\310\243\357\251!8\342~\307\260\t\347\224#\247\213:\276e\013\213!\021\270\2247\320o]\0248>b\224\232H8\000\203\177d \372\224!N\205\022P\2350\346\010\242pa0\267X\257\216L\313\203 \326>U\326\233\304\346\264\261M=\213\330\026\317/\352\224\376d{\3149`(OUE\376e\245\361\366\257F\343\355\352#DL\023\203[J<\217\004\310b&\035\241\201\317\005\352PH\003\016\004\355A\262\247\264\216/T&\036a\275\023+\313\000\270\307v\205\0217\211 \363\303N \024\005\236\242\314\004x\035\233R\246\326\236QG}\302\021s\220MYO\364\353\212e\300\244\230\340\206g\271B]\263\270\276n:.\360\035\214VE\337\362L\014\225\023\301j\020\274\347\016[5\364\267\341\006#N\355n\003\233\216qOK\236\003\016\215\234B\205\306p\330>\365\204\246\235\240-]]\247\243j\206\272\200\322\265\214=\0338\326\326\373\304\376?\306OT{\200\017\307\367\014\372\324g\003\"\214>\230\325\337B\216E=\266\034E\227\347\213\356\375\207[\252\r=\27560\366\250\351\033\024\033\271\177\214\347\347\320\021\034\032\341\214\306v\210\311\0139\357h\320\004#\370o@\217\342\227t$^\321\356\356\356\206c\344\313\331\010\307\307g\002h\005\021\330\325h\365\336\364\007.\327b\217\212\335\3357\304\316\227\363\034\353\343s\034+\005\341\330\r\n\361T\014\265/b(\3618F\303\342\030\032o.w\034\307\236o\300t.3\337>Q@y\346\262G\311\211\202\2376\201\202\315e\037\02492\302\003fXN\303p<h~\213Q~\202\262\243\232\274\263G\203\216+<\214\363\311\305\200\324\022t\240\266p\0330a\341\021\203v\210\261\247\256\233\324pL(\216\251\312\242?\320\250y\246\224)\025Lm\327&=\216q\327g\006V\376\362Es\207\325\0342\241Y(\362\307\360\235\303\3234\024\004\350\324\213\244\213tu\242E""\212\0267\255\236\225\003\346jz\324\037+\230\271\000#\t\311\345\235\205\361\200@*x@\007\360\376\301\3271}\033\340\014x\017cF\006 \302\227\036`\\\214h\343\324\2106\212\321,F\024\200\346\035Z\260\350:.\274\271\256G\205\01000>\3020'\306\036\367\007z\347Q\356\333B\313\005\tJTo\231\226|\226\317\034-FA\037\356\347\017\207B5\364\211}\214\260hM|\246I\347\007t\204\213\210\352\325P/@\336\271E\216 \231\264Kr<\363~\306\347\364v\241\201g\017n\372\372\r\366]`\226\3720\232\307\327\341i\201\237OyZ^KZ\263\312\342\370Q\330\016\273\262\225-]\r7\344\202\034F\245\354\342r8\224\237I\242\316Z\263\245\313\341m\331\224p\371\206\034f\260\360\250\0265a\227\336X\215\207\311\342\344\321\321\316t3}\265\235n\277\316\300\341\332\230\207\265\014\254\356\310V\372\355\223Ik\262}\264p4\234^\230\256M\017\3227\357\322w8\305Vj\275\317*\337\310g\321\265\270\032\327\262\312\227\343~H\324\307J\227\357\304\265\270\231U.\215\2079J%\211\360gY\225?D\245\303RV^\211Z\321\233\270y\230\343_\017\357\312\266\302z%\\K\227o\203\267[I}R\235\301~]\326\243j\246\2006\223j\262\222\320\311\372\321\375\351\360\024\310+a\363|\024\375\320\224\265\034\302a\351\237\312'\237^\034\267\262\362\322\370y\330\0147\345\275\210d\345\205\303\375\361N\370L^\225\355\254r\031\234U\200\265\231Z\224\016\202\\J/\325#\0217\343\347\311\343I\357\250=\373\370\204\034Bb\327\345M\271\023\201\360]\324HJ\311\325dg\362\373\264\232\345i\335\014\333\377\r`A\320\003\271\0305\243\326\311\266,[\262}\274]\2275\271&\207\212\276/\306w\303vZ\276!\377\216\333*\362\367\321\207\244\231\351\352^WN\257k\317\037\240\352\033\321Bt\020\2238'\355Ax\001\340@e5\343\225\317AN/\337\205\2046\223\234\314\237\302\236\322\314\226\276\nKau\036B\303\201\206\222\243\010\020\314\340|\230\242\037\241u\036\037\355\245\355WY\371\n\224\367ZT\215j\212\273\017\nlV\271\025\227\342\257\223\306\021 ^\0347\323\362rx \007\020k#)\351\r\213[\361\353\244zz\263<\2710y:\255NW\246\344_\n\312\257\245";
-    PyObject *data = __Pyx_DecompressString(cstring, 1349, 1);
+    #elif (CYTHON_COMPRESS_STRINGS) != 0 /* compression: zlib (1508 bytes) */
+const char* const cstring = "x\332\235TMo\333F\020\215\020\245Vj%\266\354\240N\202\026^%n\225O\271j\2358H\202\024jl\007-\320\324\262\323\030FR,V\344JbL\221\024wi\213mP\370\250#\217<\362\310\243\216:\352\250#\217<\352'\344't\226K\311\016\354CQ@Z\316~\314\316\2337o\266\364\222\030\206\311\021\243\266Ft\355/\212\314\372\007\252pd6\020w-\212\266\210\246S\025q\023)6%\234\"\327\375\300L\003\251\246\342\264\251\301\177\335\375\3755\262\210\315(\242\266m\332\210pd\231L\343\032\034zm\202\003o\301\322K\227\267`AcH\245\272V\2476\\\245\273\210q[S8\265\305!\003mon?\\{\262\206\210\241\"\233\n\030\0141\247\256\350\2041\312\004\244\272\243\351\\3\022h\254\214~i \327t\220A%B\013\316\235v\340-j@f\\\030\250\224$J\004.\014\356\232\321,!U\263!\210vH\205\367\026\321\031-\357J\"XrP\246\364\207q`\230G\006JR\025\221\177Z)\277\373\263\\~\267\372\024\021U\305p-%\266M\\\244\031*\355\242\266\3038\252SH\003\0268mB\262\247vM'!\327&F\363\304KS\000\356\304/ub*\341d\272Xw\271\240\300\026\224\251\000\257\256Sj\210\261\251\224P\2130d\230H\247F\223\267J\202\345\244\246N\235)\266fqqLc\362\270jZ\300\267\333]\345-\315V1T\216\273\253\262\246\253\212\374\226-\267\313\250\336(c(\362\003i\331&\\\250H\255\000\032\3054\016\251\315%\355\004m\313\352\246\322i\000JKS\016t\340Xz\037\022\375\3778?\027\362\200;L\307V\350\013\307h\023\256\264\300\255\364\016rL\353\261m\n\272l\2077\036>\331\0262\264\345X\306\330\246\252\243P\254$\367c<]\007E0\020\302\231\035\325i[,\265u\223\250\023;Q7\234r\273\360\337\000\275\342\327\264\313whc\177\177\303T\222\341l\264\311\362\231`r\203plI\344r\236\304\226f\223\362\375\375\267DO\206\363.\226\313\347\\,6\010\303\226\233\232\247b\210y\032C\230\223\030e\215a\020\341\324\256\233\246>\235\200\353\3246\034\375d\003J5\265\341Q8\331`\247]\240xS\333\201\215\004\031a\256\241hfY1mh\004\315\240\354\004e]\010\276~@\335\272\305m\214\223.\306\200T\343\264-\246p\0320an\023\205\326\211r \216\253T1U\252\322\006qt\216\341\021Qu\n\276\252\250\222\374\200\206\223\304\251!NBC7t\322d\0307\034C\301\342\372d\220Tb\321\242\006\227\244""\244t`\370N\321JVR>$\023)\007i\3662\3574c\215\251ZSK\3603\321X\342\217\005\352\304\200n\205\\\023\241a\334&\220\031n\323v]\300o\233\252\243\003\2346kbl\2206\230\360\245GX\004L\033\270|\252\201\313i\343\246\r\014'\340\361\202\266\341\211tSz-\323\202\207\331\262)\347.\206Rt14\223r\300\234\266\234\331\224\t\016\023;\245C\230\342\301\223\226c$\215I\323~\221\213\207\311\353\"\360u\034\242O\260\246\232\305g\324;]\240]\234F\024O\213x&\022I\247\331\2025\251\351\211\320\3619\242Ow\340m\204\223\216|\250\035\0138\246\016\364\354\3448\274?\360s(\213\262k\375\35287\333{\352\325\274\206_\215\363\327\274\r\177\306\357\004\231\370\312\222\327\361\277\360\211X\253\216\363\013\336]\277\342\303\341e\277\023\303\300\202bP\201Y\264\274\032v\372\263\203\247\303\275\321V\264\263\033\355\276\211\341\302\265\036\363\2121x\335\363\253\3217\317\007\325\301\356pf\330\031]\034\255\215\216\242\267\357\243\3678\302Z\244}\210s_\373\233\301\365\260\020\026\343\334\325^\313#\342\243EK\367\302bX\211ss\275N\202RX\334{\354\027\374\357\202L\224]\217\326w \332\247[\027.\317EWQ\220\t\n\237\205\275\357\327|2\316]\216\363\213\336\232\3677\200}\024^\nkq~\256\347x/\275N<\377\225\247\371\235\010\375<,\016\327\000Xv\004I\336\016*\301fX\030\347!w\360\214\026\345\302\215~\261_\371\314\365 (\004\305q\376J<\177#\272\361\003l?\036\024\342y\360\032\317\003[^m\234_\026$\036g\342\354JP\r\336\206\225\343\204\347u\t,A\025-\335\205\254\357\364K\003\010\270\350\255\373%\221\003\020Z\351\027\372+}:X\037>\034uNe\265\350U\316g\253\345\251~1\241\3528\363)w\341\322\225^5\316\346{\257\274\212\267\345?\010H\234\2359>\354\355y\233\3765\277\026\347\026\340\262\234\300*\006\261\007A\346\242\271R\300\303J\370\252\377l\320\034\326\306\237\257\220c(\300M\377\266\277\027\200q+(\3673\375k\375\275\301o\243\204\366u\357\266W\373o\000\323B>\362g\201\332\352\3114\353W\375\332d\272\356\027\3755\277#\350\373\262w\337\253E\331e\377\037\250\036D\3766\370\010\265\220*\274).\275)o\376\010\352\334\010f\202\243\220\204\ti\217\274\213\000g\"\205XHa!Z""\270\017\tm\365\0232\177\364\232\211H\362\363^\306+LCH8 |\277\033\000\2021\254\203L\276\007\211?\033\036D\265\2358\273\0102\274.\004 \270\373(\300\306\271;a\006dR\036\002\342\331^%\312.yG~\033bm\3643rb\204\325\360M\277pz\2624\2708x1*\214VF\344_\312\327\030\265";
+    PyObject *data = __Pyx_DecompressString(cstring, 1508, 1);
     if (unlikely(!data)) __PYX_ERR(0, 1, __pyx_L1_error)
     const char* const bytes = __Pyx_PyBytes_AsString(data);
     #if !CYTHON_ASSUME_SAFE_MACROS
     if (likely(bytes)); else { Py_DECREF(data); __PYX_ERR(0, 1, __pyx_L1_error) }
     #endif
-    #else /* compression: none (2411 bytes) */
-const char* const bytes = "'JSON parse error at position Note that Cython is deliberately stricter than PEP-484 and rejects subclasses of builtin types. If you need to pass subclasses then set the 'annotation_typing' directive to False.Serialisation errorUnknown JSON type?$.[]..[/: add_notearray index must be an integerarray index out of rangearray indices must be integersdata must be bytes or strdisableenablegc' has no length' is not subscriptableisenabledopteryx/third_party/yyjson/cyyjson.pyxself._doc,self._root cannot be converted to a Python object for picklingself._val cannot be converted to a Python object for pickling<stringsource>unmatched '[' in JSON Pointerutf-8ParserParser.__reduce_cython__Parser.__setstate_cython__Parser.loadsParser.parse__Pyx_PyDict_NextRefYYDocYYDoc.__reduce_cython__YYDoc.__setstate_cython__YYDoc.at_pointerYYDoc.dumpsYYDoc.getYYValYYVal.__reduce_cython__YYVal.__setstate_cython__YYVal.as_pyYYVal.at_pointerYYVal.dumpsYYVal.getYYVal.is_arrYYVal.is_boolYYVal.is_intYYVal.is_nullYYVal.is_objYYVal.is_realYYVal.is_sintYYVal.is_strYYVal.is_uintas_pyasyncio.coroutinesat_pointerbdatabkeybptr__class_getitem__cline_in_tracebackdatadecode__dict___dictdocdumpsencodeerrflags__func__get__getstate__indentis_arris_bool_is_coroutineis_intis_nullis_objis_realis_sintis_stris_uintisdigititemsjsonjson_datajson_lenkeyloads__main__member__module__msg__name____new__opteryx.third_party.yyjson.cyyjsonoutparsepointerpoppospretty__pyx_checksum__pyx_result__pyx_state__pyx_type__pyx_unpickle_Parser__pyx_vtable____qualname____reduce____reduce_cython____reduce_ex__resultrootself__set_name__setdefault__setstate____setstate_cython__state__test__unknownupdateuse_setstatevalvalues\320\0044\260A\340\010\013\210:\220Q\220f\230A\330\014\024\220D\230\007\230q\240\001\330\r\027\220q\230\006\230a\330\014\024\220A\340\014\022\220)\2301\230A\340\010\037\230q\330\010\037\230s\240!\2401\340\010\037\320\037/\250q\260\013\270:\300W\310F\320RS\320ST\330\010\013\2104\210s\220!\330\014\022\220*\230A\320\035<\270A""\270S\300\007\300q\310\003\3104\310w\320V\\\320\\_\320_i\320ij\330\010\034\230E\240\030\250\021\250!\330\010\016\210h\220a\330\010\016\210i\320\027*\250!\2501\330\010\017\210q\320\0044\260A\330\010\017\210t\2206\230\021\230&\240\001\200\001\330\004$\240A\240V\2501\200A\340\010\013\2107\220+\230Q\230a\330\014\023\2204\320\027)\250\021\250(\260'\270\021\340\014\023\2207\230'\240\021\330\010\037\320\0371\260\021\260$\260e\2707\300-\310q\330\010\013\2104\210s\220!\330\014\023\2201\330\010\034\230E\240\030\250\021\250!\330\010\016\210h\220a\330\010\016\210h\220d\230!\330\010\017\210q\200\001\360\010\000\005\r\210A\330\004\014\210G\2201\220F\230,\240a\330\004\007\200v\210W\220E\230\024\230Q\330\010\022\220!\330\010\027\220q\340\010\027\220q\330\004\007\200q\330\010\017\320\017'\240t\2501\250G\260;\270g\300Q\340\010\017\320\017'\240t\2501\250G\260;\270a\200A\330\010\032\230#\230W\240A\330\010\"\240.\260\001\260\024\260W\270M\310\021\330\010\013\2107\220#\220Q\330\014\023\2201\330\010\034\230E\240\030\250\021\250!\330\010\016\210h\220a\330\010\016\210h\220d\230!\330\010\017\210q\200A\330\010\017\210t\2205\230\013\2401\240A\200A\330\010\017\210t\2205\230\004\230A\230Q\200A\330\010\017\210t\2207\230!\2304\230q\200\001\330\004\n\210+\220Q\320\004\037\230~\250Q\330\010\"\240%\240|\2601\330\010\037\230q\330\010\032\230!\330\010\032\230!\330\010\017\210|\2301\230D\240\007\240w\250a\250q\330\010\013\2105\220\003\2201\330\014\022\220+\230Q\230a\330\010\t\330\014\022\320\022+\2501\250F\260!\330\014\023\2203\220g\230Q\230a\340\014\020\220\001\220\021\320\004\037\230~\250Q\330\010\017\210t\2205\230\006\230a\230x\240q\200\001\340\004\037\230q\320 0\260\013\270;\300k\320QR\330\004\023\2206\230\030\240\021\240!\330\004\007\200|\2207\230!\330\010(\250\001\250\031\260.\300\001\330\004\013\2101\320\004\027\220w\230m\2501\250D\260\001\320\004\027\220w\230n\250A\250T\260\021\320\004\027\220w\230n\250A\250T\260\027\270\003\270>\310\021\310$\310a";
+    #else /* compression: none (2680 bytes) */
+const char* const bytes = "'Cannot serialize object of type Failed to create yyjson documentJSON parse error at position Note that Cython is deliberately stricter than PEP-484 and rejects subclasses of builtin types. If you need to pass subclasses then set the 'annotation_typing' directive to False.Serialisation errorUnknown JSON type?$.[]..[/: add_notearray index must be an integerarray index out of rangearray indices must be integersdata must be bytes or strdisableenablegc' has no length' is not subscriptableisenabledopteryx/third_party/yyjson/cyyjson.pyxself._doc,self._root cannot be converted to a Python object for picklingself._val cannot be converted to a Python object for pickling<stringsource>unmatched '[' in JSON Pointerutf-8ParserParser.__reduce_cython__Parser.__setstate_cython__Parser.dumpsParser.loadsParser.parse__Pyx_PyDict_NextRefYYDocYYDoc.__reduce_cython__YYDoc.__setstate_cython__YYDoc.at_pointerYYDoc.dumpsYYDoc.getYYValYYVal.__reduce_cython__YYVal.__setstate_cython__YYVal.as_pyYYVal.at_pointerYYVal.dumpsYYVal.getYYVal.is_arrYYVal.is_boolYYVal.is_intYYVal.is_nullYYVal.is_objYYVal.is_realYYVal.is_sintYYVal.is_strYYVal.is_uintas_pyasyncio.coroutinesat_pointerbdatabkeybptr__class_getitem__cline_in_tracebackdatadecodedefault_handler__dict___dictdocdumpsencodeerrflags__func__get__getstate__indentis_arris_bool_is_coroutineis_intis_nullis_objis_realis_sintis_stris_uintisdigititemsjsonjson_datajson_lenkeyloads__main__member__module__msg__name____new__objopteryx.third_party.yyjson.cyyjsonoptionsoutparsepointerpoppospretty__pyx_checksum__pyx_result__pyx_state__pyx_type__pyx_unpickle_Parser__pyx_vtable____qualname____reduce____reduce_cython____reduce_ex__resultrootself__set_name__setdefault__setstate____setstate_cython__state__test__unknownupdateuse_setstatevalvalues\320\0044\260A\340\010\013\210:\220Q\220f\230A\330\014\024\220D\230\007\230q\240\001\330\r\027\220q\230\006\230a\330\014\024\220A\340\014\022\220)\2301\230A\340\010\037\230q\330\010\037\230s\240!\2401\340\010\037\320\037/""\250q\260\013\270:\300W\310F\320RS\320ST\330\010\013\2104\210s\220!\330\014\022\220*\230A\320\035<\270A\270S\300\007\300q\310\003\3104\310w\320V\\\320\\_\320_i\320ij\330\010\034\230E\240\030\250\021\250!\330\010\016\210h\220a\330\010\016\210i\320\027*\250!\2501\330\010\017\210q\320\0044\260A\330\010\017\210t\2206\230\021\230&\240\001\320\0047\3207R\320RS\360\"\000\t\017\320\016 \240\001\240\021\330\010\013\2104\210s\220!\330\014\022\220+\230Q\230a\340\010\t\330\014\023\2204\220{\240!\2405\250\005\250Q\330\014\017\210u\220C\220q\330\020\026\220i\230q\320 B\300!\3004\300q\310\004\310A\340\014#\2401\240E\250\021\340\014\027\220q\330\014\023\320\023#\2401\240E\250\031\260!\2601\330\014\017\210u\220C\220q\330\020\026\220k\240\021\240!\340\014\r\330\020\031\320\0312\260!\2606\270\021\330\020\027\220q\340\020\024\220A\220Q\340\014\037\230q\240\001\200\001\330\004$\240A\240V\2501\200A\340\010\013\2107\220+\230Q\230a\330\014\023\2204\320\027)\250\021\250(\260'\270\021\340\014\023\2207\230'\240\021\330\010\037\320\0371\260\021\260$\260e\2707\300-\310q\330\010\013\2104\210s\220!\330\014\023\2201\330\010\034\230E\240\030\250\021\250!\330\010\016\210h\220a\330\010\016\210h\220d\230!\330\010\017\210q\200\001\360\010\000\005\r\210A\330\004\014\210G\2201\220F\230,\240a\330\004\007\200v\210W\220E\230\024\230Q\330\010\022\220!\330\010\027\220q\340\010\027\220q\330\004\007\200q\330\010\017\320\017'\240t\2501\250G\260;\270g\300Q\340\010\017\320\017'\240t\2501\250G\260;\270a\200A\330\010\032\230#\230W\240A\330\010\"\240.\260\001\260\024\260W\270M\310\021\330\010\013\2107\220#\220Q\330\014\023\2201\330\010\034\230E\240\030\250\021\250!\330\010\016\210h\220a\330\010\016\210h\220d\230!\330\010\017\210q\200A\330\010\017\210t\2205\230\013\2401\240A\200A\330\010\017\210t\2205\230\004\230A\230Q\200A\330\010\017\210t\2207\230!\2304\230q\200\001\330\004\n\210+\220Q\320\004\037\230~\250Q\330\010\"\240%\240|\2601\330\010\037\230q\330\010\032\230!\330\010\032\230!\330\010\017\210|\2301\230D\240""\007\240w\250a\250q\330\010\013\2105\220\003\2201\330\014\022\220+\230Q\230a\330\010\t\330\014\022\320\022+\2501\250F\260!\330\014\023\2203\220g\230Q\230a\340\014\020\220\001\220\021\320\004\037\230~\250Q\330\010\017\210t\2205\230\006\230a\230x\240q\200\001\340\004\037\230q\320 0\260\013\270;\300k\320QR\330\004\023\2206\230\030\240\021\240!\330\004\007\200|\2207\230!\330\010(\250\001\250\031\260.\300\001\330\004\013\2101\320\004\027\220w\230m\2501\250D\260\001\320\004\027\220w\230n\250A\250T\260\021\320\004\027\220w\230n\250A\250T\260\027\270\003\270>\310\021\310$\310a";
     PyObject *data = NULL;
     CYTHON_UNUSED_VAR(__Pyx_DecompressString);
     #endif
     PyObject **stringtab = __pyx_mstate->__pyx_string_tab;
     Py_ssize_t pos = 0;
-    for (int i = 0; i < 133; i++) {
+    for (int i = 0; i < 139; i++) {
       Py_ssize_t bytes_length = index[i].length;
       PyObject *string = PyUnicode_DecodeUTF8(bytes + pos, bytes_length, NULL);
-      if (likely(string) && i >= 30) PyUnicode_InternInPlace(&string);
+      if (likely(string) && i >= 32) PyUnicode_InternInPlace(&string);
       if (unlikely(!string)) {
         Py_XDECREF(data);
         __PYX_ERR(0, 1, __pyx_L1_error)
@@ -10041,7 +11551,7 @@ const char* const bytes = "'JSON parse error at position Note that Cython is del
       stringtab[i] = string;
       pos += bytes_length;
     }
-    for (int i = 133; i < 149; i++) {
+    for (int i = 139; i < 156; i++) {
       Py_ssize_t bytes_length = index[i].length;
       PyObject *string = PyBytes_FromStringAndSize(bytes + pos, bytes_length);
       stringtab[i] = string;
@@ -10052,15 +11562,15 @@ const char* const bytes = "'JSON parse error at position Note that Cython is del
       }
     }
     Py_XDECREF(data);
-    for (Py_ssize_t i = 0; i < 149; i++) {
+    for (Py_ssize_t i = 0; i < 156; i++) {
       if (unlikely(PyObject_Hash(stringtab[i]) == -1)) {
         __PYX_ERR(0, 1, __pyx_L1_error)
       }
     }
     #if CYTHON_IMMORTAL_CONSTANTS
     {
-      PyObject **table = stringtab + 133;
-      for (Py_ssize_t i=0; i<16; ++i) {
+      PyObject **table = stringtab + 139;
+      for (Py_ssize_t i=0; i<17; ++i) {
         #if CYTHON_COMPILING_IN_CPYTHON_FREETHREADING
         #if PY_VERSION_HEX < 0x030E0000
         if (_Py_IsOwnedByCurrentThread(table[i]) && Py_REFCNT(table[i]) == 1)
@@ -10111,7 +11621,7 @@ const char* const bytes = "'JSON parse error at position Note that Cython is del
 }
 /* #### Code section: init_codeobjects ### */
 typedef struct {
-    unsigned int argcount : 2;
+    unsigned int argcount : 3;
     unsigned int num_posonly_args : 1;
     unsigned int num_kwonly_args : 1;
     unsigned int nlocals : 4;
@@ -10243,19 +11753,24 @@ static int __Pyx_CreateCodeObjects(__pyx_mstatetype *__pyx_mstate) {
     __pyx_mstate_global->__pyx_codeobj_tab[21] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_third_party_yyjson_cyyjs_2, __pyx_mstate->__pyx_n_u_loads, __pyx_mstate->__pyx_kp_b_iso88591_4A_t6, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[21])) goto bad;
   }
   {
+    const __Pyx_PyCode_New_function_description descr = {4, 0, 0, 9, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 301};
+    PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_obj, __pyx_mstate->__pyx_n_u_default_handler, __pyx_mstate->__pyx_n_u_options, __pyx_mstate->__pyx_n_u_doc, __pyx_mstate->__pyx_n_u_root, __pyx_mstate->__pyx_n_u_json_len, __pyx_mstate->__pyx_n_u_json, __pyx_mstate->__pyx_n_u_result};
+    __pyx_mstate_global->__pyx_codeobj_tab[22] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_third_party_yyjson_cyyjs_2, __pyx_mstate->__pyx_n_u_dumps, __pyx_mstate->__pyx_kp_b_iso88591_77RRS_4s_Qa_4_5_Q_uCq_iq_B_4q_A, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[22])) goto bad;
+  }
+  {
     const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 1};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_state, __pyx_mstate->__pyx_n_u_dict_2, __pyx_mstate->__pyx_n_u_use_setstate};
-    __pyx_mstate_global->__pyx_codeobj_tab[22] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_stringsource, __pyx_mstate->__pyx_n_u_reduce_cython, __pyx_mstate->__pyx_kp_b_iso88591_A_G1F_a_vWE_Q_q_q_q_t1G_gQ_t1G, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[22])) goto bad;
+    __pyx_mstate_global->__pyx_codeobj_tab[23] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_stringsource, __pyx_mstate->__pyx_n_u_reduce_cython, __pyx_mstate->__pyx_kp_b_iso88591_A_G1F_a_vWE_Q_q_q_q_t1G_gQ_t1G, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[23])) goto bad;
   }
   {
     const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 16};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_pyx_state};
-    __pyx_mstate_global->__pyx_codeobj_tab[23] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_stringsource, __pyx_mstate->__pyx_n_u_setstate_cython, __pyx_mstate->__pyx_kp_b_iso88591_AV1, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[23])) goto bad;
+    __pyx_mstate_global->__pyx_codeobj_tab[24] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_stringsource, __pyx_mstate->__pyx_n_u_setstate_cython, __pyx_mstate->__pyx_kp_b_iso88591_AV1, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[24])) goto bad;
   }
   {
     const __Pyx_PyCode_New_function_description descr = {3, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 4};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_pyx_type, __pyx_mstate->__pyx_n_u_pyx_checksum, __pyx_mstate->__pyx_n_u_pyx_state, __pyx_mstate->__pyx_n_u_pyx_result};
-    __pyx_mstate_global->__pyx_codeobj_tab[24] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_stringsource, __pyx_mstate->__pyx_n_u_pyx_unpickle_Parser, __pyx_mstate->__pyx_kp_b_iso88591_q_0_kQR_6_7_1, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[24])) goto bad;
+    __pyx_mstate_global->__pyx_codeobj_tab[25] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_stringsource, __pyx_mstate->__pyx_n_u_pyx_unpickle_Parser, __pyx_mstate->__pyx_kp_b_iso88591_q_0_kQR_6_7_1, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[25])) goto bad;
   }
   Py_DECREF(tuple_dedup_map);
   return 0;
@@ -12409,6 +13924,495 @@ static CYTHON_INLINE PyObject* __Pyx_PyObject_CallNoArg(PyObject *func) {
     return __Pyx_PyObject_FastCall(func, arg + 1, 0 | __Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET);
 }
 
+/* IterFinish (used by dict_iter) */
+static CYTHON_INLINE int __Pyx_IterFinish(void) {
+    PyObject* exc_type;
+    __Pyx_PyThreadState_declare
+    __Pyx_PyThreadState_assign
+    exc_type = __Pyx_PyErr_CurrentExceptionType();
+    if (unlikely(exc_type)) {
+        if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration)))
+            return -1;
+        __Pyx_PyErr_Clear();
+        return 0;
+    }
+    return 0;
+}
+
+/* PyObjectGetMethod (used by PyObjectCallMethod0) */
+#if !(CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000)))
+static int __Pyx_PyObject_GetMethod(PyObject *obj, PyObject *name, PyObject **method) {
+    PyObject *attr;
+#if CYTHON_UNPACK_METHODS && CYTHON_COMPILING_IN_CPYTHON && CYTHON_USE_PYTYPE_LOOKUP
+    __Pyx_TypeName type_name;
+    PyTypeObject *tp = Py_TYPE(obj);
+    PyObject *descr;
+    descrgetfunc f = NULL;
+    PyObject **dictptr, *dict;
+    int meth_found = 0;
+    assert (*method == NULL);
+    if (unlikely(tp->tp_getattro != PyObject_GenericGetAttr)) {
+        attr = __Pyx_PyObject_GetAttrStr(obj, name);
+        goto try_unpack;
+    }
+    if (unlikely(tp->tp_dict == NULL) && unlikely(PyType_Ready(tp) < 0)) {
+        return 0;
+    }
+    descr = _PyType_Lookup(tp, name);
+    if (likely(descr != NULL)) {
+        Py_INCREF(descr);
+#if defined(Py_TPFLAGS_METHOD_DESCRIPTOR) && Py_TPFLAGS_METHOD_DESCRIPTOR
+        if (__Pyx_PyType_HasFeature(Py_TYPE(descr), Py_TPFLAGS_METHOD_DESCRIPTOR))
+#else
+        #ifdef __Pyx_CyFunction_USED
+        if (likely(PyFunction_Check(descr) || __Pyx_IS_TYPE(descr, &PyMethodDescr_Type) || __Pyx_CyFunction_Check(descr)))
+        #else
+        if (likely(PyFunction_Check(descr) || __Pyx_IS_TYPE(descr, &PyMethodDescr_Type)))
+        #endif
+#endif
+        {
+            meth_found = 1;
+        } else {
+            f = Py_TYPE(descr)->tp_descr_get;
+            if (f != NULL && PyDescr_IsData(descr)) {
+                attr = f(descr, obj, (PyObject *)Py_TYPE(obj));
+                Py_DECREF(descr);
+                goto try_unpack;
+            }
+        }
+    }
+    dictptr = _PyObject_GetDictPtr(obj);
+    if (dictptr != NULL && (dict = *dictptr) != NULL) {
+        Py_INCREF(dict);
+        attr = __Pyx_PyDict_GetItemStr(dict, name);
+        if (attr != NULL) {
+            Py_INCREF(attr);
+            Py_DECREF(dict);
+            Py_XDECREF(descr);
+            goto try_unpack;
+        }
+        Py_DECREF(dict);
+    }
+    if (meth_found) {
+        *method = descr;
+        return 1;
+    }
+    if (f != NULL) {
+        attr = f(descr, obj, (PyObject *)Py_TYPE(obj));
+        Py_DECREF(descr);
+        goto try_unpack;
+    }
+    if (likely(descr != NULL)) {
+        *method = descr;
+        return 0;
+    }
+    type_name = __Pyx_PyType_GetFullyQualifiedName(tp);
+    PyErr_Format(PyExc_AttributeError,
+                 "'" __Pyx_FMT_TYPENAME "' object has no attribute '%U'",
+                 type_name, name);
+    __Pyx_DECREF_TypeName(type_name);
+    return 0;
+#else
+    attr = __Pyx_PyObject_GetAttrStr(obj, name);
+    goto try_unpack;
+#endif
+try_unpack:
+#if CYTHON_UNPACK_METHODS
+    if (likely(attr) && PyMethod_Check(attr) && likely(PyMethod_GET_SELF(attr) == obj)) {
+        PyObject *function = PyMethod_GET_FUNCTION(attr);
+        Py_INCREF(function);
+        Py_DECREF(attr);
+        *method = function;
+        return 1;
+    }
+#endif
+    *method = attr;
+    return 0;
+}
+#endif
+
+/* PyObjectCallMethod0 (used by dict_iter) */
+static PyObject* __Pyx_PyObject_CallMethod0(PyObject* obj, PyObject* method_name) {
+#if CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000))
+    PyObject *args[1] = {obj};
+    (void) __Pyx_PyObject_CallOneArg;
+    (void) __Pyx_PyObject_CallNoArg;
+    return PyObject_VectorcallMethod(method_name, args, 1 | PY_VECTORCALL_ARGUMENTS_OFFSET, NULL);
+#else
+    PyObject *method = NULL, *result = NULL;
+    int is_method = __Pyx_PyObject_GetMethod(obj, method_name, &method);
+    if (likely(is_method)) {
+        result = __Pyx_PyObject_CallOneArg(method, obj);
+        Py_DECREF(method);
+        return result;
+    }
+    if (unlikely(!method)) goto bad;
+    result = __Pyx_PyObject_CallNoArg(method);
+    Py_DECREF(method);
+bad:
+    return result;
+#endif
+}
+
+/* RaiseNeedMoreValuesToUnpack (used by UnpackTuple2) */
+static CYTHON_INLINE void __Pyx_RaiseNeedMoreValuesError(Py_ssize_t index) {
+    PyErr_Format(PyExc_ValueError,
+                 "need more than %" CYTHON_FORMAT_SSIZE_T "d value%.1s to unpack",
+                 index, (index == 1) ? "" : "s");
+}
+
+/* RaiseTooManyValuesToUnpack (used by UnpackItemEndCheck) */
+static CYTHON_INLINE void __Pyx_RaiseTooManyValuesError(Py_ssize_t expected) {
+    PyErr_Format(PyExc_ValueError,
+                 "too many values to unpack (expected %" CYTHON_FORMAT_SSIZE_T "d)", expected);
+}
+
+/* UnpackItemEndCheck (used by UnpackTuple2) */
+static int __Pyx_IternextUnpackEndCheck(PyObject *retval, Py_ssize_t expected) {
+    if (unlikely(retval)) {
+        Py_DECREF(retval);
+        __Pyx_RaiseTooManyValuesError(expected);
+        return -1;
+    }
+    return __Pyx_IterFinish();
+}
+
+/* RaiseNoneIterError (used by UnpackTupleError) */
+static CYTHON_INLINE void __Pyx_RaiseNoneNotIterableError(void) {
+    PyErr_SetString(PyExc_TypeError, "'NoneType' object is not iterable");
+}
+
+/* UnpackTupleError (used by UnpackTuple2) */
+static void __Pyx_UnpackTupleError(PyObject *t, Py_ssize_t index) {
+    if (t == Py_None) {
+      __Pyx_RaiseNoneNotIterableError();
+    } else {
+      Py_ssize_t size = __Pyx_PyTuple_GET_SIZE(t);
+ #if !CYTHON_ASSUME_SAFE_SIZE
+      if (unlikely(size < 0)) return;
+ #endif
+      if (size < index) {
+        __Pyx_RaiseNeedMoreValuesError(size);
+      } else {
+        __Pyx_RaiseTooManyValuesError(index);
+      }
+    }
+}
+
+/* UnpackTuple2 (used by dict_iter) */
+static CYTHON_INLINE int __Pyx_unpack_tuple2(
+        PyObject* tuple, PyObject** value1, PyObject** value2, int is_tuple, int has_known_size, int decref_tuple) {
+    if (likely(is_tuple || PyTuple_Check(tuple))) {
+        Py_ssize_t size;
+        if (has_known_size) {
+            return __Pyx_unpack_tuple2_exact(tuple, value1, value2, decref_tuple);
+        }
+        size = __Pyx_PyTuple_GET_SIZE(tuple);
+        if (likely(size == 2)) {
+            return __Pyx_unpack_tuple2_exact(tuple, value1, value2, decref_tuple);
+        }
+        if (size >= 0) {
+            __Pyx_UnpackTupleError(tuple, 2);
+        }
+        return -1;
+    } else {
+        return __Pyx_unpack_tuple2_generic(tuple, value1, value2, has_known_size, decref_tuple);
+    }
+}
+static CYTHON_INLINE int __Pyx_unpack_tuple2_exact(
+        PyObject* tuple, PyObject** pvalue1, PyObject** pvalue2, int decref_tuple) {
+    PyObject *value1 = NULL, *value2 = NULL;
+#if CYTHON_AVOID_BORROWED_REFS || !CYTHON_ASSUME_SAFE_MACROS
+    value1 = __Pyx_PySequence_ITEM(tuple, 0);  if (unlikely(!value1)) goto bad;
+    value2 = __Pyx_PySequence_ITEM(tuple, 1);  if (unlikely(!value2)) goto bad;
+#else
+    value1 = PyTuple_GET_ITEM(tuple, 0);  Py_INCREF(value1);
+    value2 = PyTuple_GET_ITEM(tuple, 1);  Py_INCREF(value2);
+#endif
+    if (decref_tuple) {
+        Py_DECREF(tuple);
+    }
+    *pvalue1 = value1;
+    *pvalue2 = value2;
+    return 0;
+#if CYTHON_AVOID_BORROWED_REFS || !CYTHON_ASSUME_SAFE_MACROS
+bad:
+    Py_XDECREF(value1);
+    Py_XDECREF(value2);
+    if (decref_tuple) { Py_XDECREF(tuple); }
+    return -1;
+#endif
+}
+static int __Pyx_unpack_tuple2_generic(PyObject* tuple, PyObject** pvalue1, PyObject** pvalue2,
+                                       int has_known_size, int decref_tuple) {
+    Py_ssize_t index;
+    PyObject *value1 = NULL, *value2 = NULL, *iter = NULL;
+    iternextfunc iternext;
+    iter = PyObject_GetIter(tuple);
+    if (unlikely(!iter)) goto bad;
+    if (decref_tuple) { Py_DECREF(tuple); tuple = NULL; }
+    iternext = __Pyx_PyObject_GetIterNextFunc(iter);
+    value1 = iternext(iter); if (unlikely(!value1)) { index = 0; goto unpacking_failed; }
+    value2 = iternext(iter); if (unlikely(!value2)) { index = 1; goto unpacking_failed; }
+    if (!has_known_size && unlikely(__Pyx_IternextUnpackEndCheck(iternext(iter), 2))) goto bad;
+    Py_DECREF(iter);
+    *pvalue1 = value1;
+    *pvalue2 = value2;
+    return 0;
+unpacking_failed:
+    if (!has_known_size && __Pyx_IterFinish() == 0)
+        __Pyx_RaiseNeedMoreValuesError(index);
+bad:
+    Py_XDECREF(iter);
+    Py_XDECREF(value1);
+    Py_XDECREF(value2);
+    if (decref_tuple) { Py_XDECREF(tuple); }
+    return -1;
+}
+
+/* dict_iter */
+#if CYTHON_COMPILING_IN_PYPY
+#include <string.h>
+#endif
+static CYTHON_INLINE PyObject* __Pyx_dict_iterator(PyObject* iterable, int is_dict, PyObject* method_name,
+                                                   Py_ssize_t* p_orig_length, int* p_source_is_dict) {
+    is_dict = is_dict || likely(PyDict_CheckExact(iterable));
+    *p_source_is_dict = is_dict;
+    if (is_dict) {
+#if !CYTHON_COMPILING_IN_PYPY
+        *p_orig_length = PyDict_Size(iterable);
+        Py_INCREF(iterable);
+        return iterable;
+#else
+        static PyObject *py_items = NULL, *py_keys = NULL, *py_values = NULL;
+        PyObject **pp = NULL;
+        if (method_name) {
+            const char *name = PyUnicode_AsUTF8(method_name);
+            if (strcmp(name, "iteritems") == 0) pp = &py_items;
+            else if (strcmp(name, "iterkeys") == 0) pp = &py_keys;
+            else if (strcmp(name, "itervalues") == 0) pp = &py_values;
+            if (pp) {
+                if (!*pp) {
+                    *pp = PyUnicode_FromString(name + 4);
+                    if (!*pp)
+                        return NULL;
+                }
+                method_name = *pp;
+            }
+        }
+#endif
+    }
+    *p_orig_length = 0;
+    if (method_name) {
+        PyObject* iter;
+        iterable = __Pyx_PyObject_CallMethod0(iterable, method_name);
+        if (!iterable)
+            return NULL;
+#if !CYTHON_COMPILING_IN_PYPY
+        if (PyTuple_CheckExact(iterable) || PyList_CheckExact(iterable))
+            return iterable;
+#endif
+        iter = PyObject_GetIter(iterable);
+        Py_DECREF(iterable);
+        return iter;
+    }
+    return PyObject_GetIter(iterable);
+}
+#if !CYTHON_AVOID_BORROWED_REFS
+static CYTHON_INLINE int __Pyx_dict_iter_next_source_is_dict(
+        PyObject* iter_obj, CYTHON_NCP_UNUSED Py_ssize_t orig_length, CYTHON_NCP_UNUSED Py_ssize_t* ppos,
+        PyObject** pkey, PyObject** pvalue, PyObject** pitem) {
+    PyObject *key, *value;
+    if (unlikely(orig_length != PyDict_Size(iter_obj))) {
+        PyErr_SetString(PyExc_RuntimeError, "dictionary changed size during iteration");
+        return -1;
+    }
+    if (unlikely(!PyDict_Next(iter_obj, ppos, &key, &value))) {
+        return 0;
+    }
+    if (pitem) {
+        PyObject* tuple = PyTuple_New(2);
+        if (unlikely(!tuple)) {
+            return -1;
+        }
+        Py_INCREF(key);
+        Py_INCREF(value);
+        #if CYTHON_ASSUME_SAFE_MACROS
+        PyTuple_SET_ITEM(tuple, 0, key);
+        PyTuple_SET_ITEM(tuple, 1, value);
+        #else
+        if (unlikely(PyTuple_SetItem(tuple, 0, key) < 0)) {
+            Py_DECREF(value);
+            Py_DECREF(tuple);
+            return -1;
+        }
+        if (unlikely(PyTuple_SetItem(tuple, 1, value) < 0)) {
+            Py_DECREF(tuple);
+            return -1;
+        }
+        #endif
+        *pitem = tuple;
+    } else {
+        if (pkey) {
+            Py_INCREF(key);
+            *pkey = key;
+        }
+        if (pvalue) {
+            Py_INCREF(value);
+            *pvalue = value;
+        }
+    }
+    return 1;
+}
+#endif
+static CYTHON_INLINE int __Pyx_dict_iter_next(
+        PyObject* iter_obj, CYTHON_NCP_UNUSED Py_ssize_t orig_length, CYTHON_NCP_UNUSED Py_ssize_t* ppos,
+        PyObject** pkey, PyObject** pvalue, PyObject** pitem, int source_is_dict) {
+    PyObject* next_item;
+#if !CYTHON_AVOID_BORROWED_REFS
+    if (source_is_dict) {
+        int result;
+#if PY_VERSION_HEX >= 0x030d0000 && !CYTHON_COMPILING_IN_LIMITED_API
+        Py_BEGIN_CRITICAL_SECTION(iter_obj);
+#endif
+        result = __Pyx_dict_iter_next_source_is_dict(iter_obj, orig_length, ppos, pkey, pvalue, pitem);
+#if PY_VERSION_HEX >= 0x030d0000 && !CYTHON_COMPILING_IN_LIMITED_API
+        Py_END_CRITICAL_SECTION();
+#endif
+        return result;
+    } else if (PyTuple_CheckExact(iter_obj)) {
+        Py_ssize_t pos = *ppos;
+        Py_ssize_t tuple_size = __Pyx_PyTuple_GET_SIZE(iter_obj);
+        #if !CYTHON_ASSUME_SAFE_SIZE
+        if (unlikely(tuple_size < 0)) return -1;
+        #endif
+        if (unlikely(pos >= tuple_size)) return 0;
+        *ppos = pos + 1;
+        #if CYTHON_ASSUME_SAFE_MACROS
+        next_item = PyTuple_GET_ITEM(iter_obj, pos);
+        #else
+        next_item = PyTuple_GetItem(iter_obj, pos);
+        if (unlikely(!next_item)) return -1;
+        #endif
+        Py_INCREF(next_item);
+    } else if (PyList_CheckExact(iter_obj)) {
+        Py_ssize_t pos = *ppos;
+        Py_ssize_t list_size = __Pyx_PyList_GET_SIZE(iter_obj);
+        #if !CYTHON_ASSUME_SAFE_SIZE
+        if (unlikely(list_size < 0)) return -1;
+        #endif
+        if (unlikely(pos >= list_size)) return 0;
+        *ppos = pos + 1;
+        next_item = __Pyx_PyList_GetItemRef(iter_obj, pos);
+        if (unlikely(!next_item)) return -1;
+    } else
+#endif
+    {
+        next_item = PyIter_Next(iter_obj);
+        if (unlikely(!next_item)) {
+            return __Pyx_IterFinish();
+        }
+    }
+    if (pitem) {
+        *pitem = next_item;
+    } else if (pkey && pvalue) {
+        if (__Pyx_unpack_tuple2(next_item, pkey, pvalue, source_is_dict, source_is_dict, 1))
+            return -1;
+    } else if (pkey) {
+        *pkey = next_item;
+    } else {
+        *pvalue = next_item;
+    }
+    return 1;
+}
+
+/* FastTypeChecks */
+#if CYTHON_COMPILING_IN_CPYTHON
+static int __Pyx_InBases(PyTypeObject *a, PyTypeObject *b) {
+    while (a) {
+        a = __Pyx_PyType_GetSlot(a, tp_base, PyTypeObject*);
+        if (a == b)
+            return 1;
+    }
+    return b == &PyBaseObject_Type;
+}
+static CYTHON_INLINE int __Pyx_IsSubtype(PyTypeObject *a, PyTypeObject *b) {
+    PyObject *mro;
+    if (a == b) return 1;
+    mro = a->tp_mro;
+    if (likely(mro)) {
+        Py_ssize_t i, n;
+        n = PyTuple_GET_SIZE(mro);
+        for (i = 0; i < n; i++) {
+            if (PyTuple_GET_ITEM(mro, i) == (PyObject *)b)
+                return 1;
+        }
+        return 0;
+    }
+    return __Pyx_InBases(a, b);
+}
+static CYTHON_INLINE int __Pyx_IsAnySubtype2(PyTypeObject *cls, PyTypeObject *a, PyTypeObject *b) {
+    PyObject *mro;
+    if (cls == a || cls == b) return 1;
+    mro = cls->tp_mro;
+    if (likely(mro)) {
+        Py_ssize_t i, n;
+        n = PyTuple_GET_SIZE(mro);
+        for (i = 0; i < n; i++) {
+            PyObject *base = PyTuple_GET_ITEM(mro, i);
+            if (base == (PyObject *)a || base == (PyObject *)b)
+                return 1;
+        }
+        return 0;
+    }
+    return __Pyx_InBases(cls, a) || __Pyx_InBases(cls, b);
+}
+static CYTHON_INLINE int __Pyx_inner_PyErr_GivenExceptionMatches2(PyObject *err, PyObject* exc_type1, PyObject *exc_type2) {
+    if (exc_type1) {
+        return __Pyx_IsAnySubtype2((PyTypeObject*)err, (PyTypeObject*)exc_type1, (PyTypeObject*)exc_type2);
+    } else {
+        return __Pyx_IsSubtype((PyTypeObject*)err, (PyTypeObject*)exc_type2);
+    }
+}
+static int __Pyx_PyErr_GivenExceptionMatchesTuple(PyObject *exc_type, PyObject *tuple) {
+    Py_ssize_t i, n;
+    assert(PyExceptionClass_Check(exc_type));
+    n = PyTuple_GET_SIZE(tuple);
+    for (i=0; i<n; i++) {
+        if (exc_type == PyTuple_GET_ITEM(tuple, i)) return 1;
+    }
+    for (i=0; i<n; i++) {
+        PyObject *t = PyTuple_GET_ITEM(tuple, i);
+        if (likely(PyExceptionClass_Check(t))) {
+            if (__Pyx_inner_PyErr_GivenExceptionMatches2(exc_type, NULL, t)) return 1;
+        } else {
+        }
+    }
+    return 0;
+}
+static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches(PyObject *err, PyObject* exc_type) {
+    if (likely(err == exc_type)) return 1;
+    if (likely(PyExceptionClass_Check(err))) {
+        if (likely(PyExceptionClass_Check(exc_type))) {
+            return __Pyx_inner_PyErr_GivenExceptionMatches2(err, NULL, exc_type);
+        } else if (likely(PyTuple_Check(exc_type))) {
+            return __Pyx_PyErr_GivenExceptionMatchesTuple(err, exc_type);
+        } else {
+        }
+    }
+    return PyErr_GivenExceptionMatches(err, exc_type);
+}
+static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches2(PyObject *err, PyObject *exc_type1, PyObject *exc_type2) {
+    assert(PyExceptionClass_Check(exc_type1));
+    assert(PyExceptionClass_Check(exc_type2));
+    if (likely(err == exc_type1 || err == exc_type2)) return 1;
+    if (likely(PyExceptionClass_Check(err))) {
+        return __Pyx_inner_PyErr_GivenExceptionMatches2(err, exc_type1, exc_type2);
+    }
+    return (PyErr_GivenExceptionMatches(err, exc_type1) || PyErr_GivenExceptionMatches(err, exc_type2));
+}
+#endif
+
 /* GetAttr3 */
 #if __PYX_LIMITED_VERSION_HEX < 0x030d0000
 static PyObject *__Pyx_GetAttr3Default(PyObject *d) {
@@ -12711,121 +14715,6 @@ static int __Pyx_fix_up_extension_type_from_spec(PyType_Spec *spec, PyTypeObject
         PyType_Modified(type);
 #endif  // PY_VERSION_HEX > 0x030900B1
     return 0;
-}
-
-/* PyObjectGetMethod (used by PyObjectCallMethod0) */
-#if !(CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000)))
-static int __Pyx_PyObject_GetMethod(PyObject *obj, PyObject *name, PyObject **method) {
-    PyObject *attr;
-#if CYTHON_UNPACK_METHODS && CYTHON_COMPILING_IN_CPYTHON && CYTHON_USE_PYTYPE_LOOKUP
-    __Pyx_TypeName type_name;
-    PyTypeObject *tp = Py_TYPE(obj);
-    PyObject *descr;
-    descrgetfunc f = NULL;
-    PyObject **dictptr, *dict;
-    int meth_found = 0;
-    assert (*method == NULL);
-    if (unlikely(tp->tp_getattro != PyObject_GenericGetAttr)) {
-        attr = __Pyx_PyObject_GetAttrStr(obj, name);
-        goto try_unpack;
-    }
-    if (unlikely(tp->tp_dict == NULL) && unlikely(PyType_Ready(tp) < 0)) {
-        return 0;
-    }
-    descr = _PyType_Lookup(tp, name);
-    if (likely(descr != NULL)) {
-        Py_INCREF(descr);
-#if defined(Py_TPFLAGS_METHOD_DESCRIPTOR) && Py_TPFLAGS_METHOD_DESCRIPTOR
-        if (__Pyx_PyType_HasFeature(Py_TYPE(descr), Py_TPFLAGS_METHOD_DESCRIPTOR))
-#else
-        #ifdef __Pyx_CyFunction_USED
-        if (likely(PyFunction_Check(descr) || __Pyx_IS_TYPE(descr, &PyMethodDescr_Type) || __Pyx_CyFunction_Check(descr)))
-        #else
-        if (likely(PyFunction_Check(descr) || __Pyx_IS_TYPE(descr, &PyMethodDescr_Type)))
-        #endif
-#endif
-        {
-            meth_found = 1;
-        } else {
-            f = Py_TYPE(descr)->tp_descr_get;
-            if (f != NULL && PyDescr_IsData(descr)) {
-                attr = f(descr, obj, (PyObject *)Py_TYPE(obj));
-                Py_DECREF(descr);
-                goto try_unpack;
-            }
-        }
-    }
-    dictptr = _PyObject_GetDictPtr(obj);
-    if (dictptr != NULL && (dict = *dictptr) != NULL) {
-        Py_INCREF(dict);
-        attr = __Pyx_PyDict_GetItemStr(dict, name);
-        if (attr != NULL) {
-            Py_INCREF(attr);
-            Py_DECREF(dict);
-            Py_XDECREF(descr);
-            goto try_unpack;
-        }
-        Py_DECREF(dict);
-    }
-    if (meth_found) {
-        *method = descr;
-        return 1;
-    }
-    if (f != NULL) {
-        attr = f(descr, obj, (PyObject *)Py_TYPE(obj));
-        Py_DECREF(descr);
-        goto try_unpack;
-    }
-    if (likely(descr != NULL)) {
-        *method = descr;
-        return 0;
-    }
-    type_name = __Pyx_PyType_GetFullyQualifiedName(tp);
-    PyErr_Format(PyExc_AttributeError,
-                 "'" __Pyx_FMT_TYPENAME "' object has no attribute '%U'",
-                 type_name, name);
-    __Pyx_DECREF_TypeName(type_name);
-    return 0;
-#else
-    attr = __Pyx_PyObject_GetAttrStr(obj, name);
-    goto try_unpack;
-#endif
-try_unpack:
-#if CYTHON_UNPACK_METHODS
-    if (likely(attr) && PyMethod_Check(attr) && likely(PyMethod_GET_SELF(attr) == obj)) {
-        PyObject *function = PyMethod_GET_FUNCTION(attr);
-        Py_INCREF(function);
-        Py_DECREF(attr);
-        *method = function;
-        return 1;
-    }
-#endif
-    *method = attr;
-    return 0;
-}
-#endif
-
-/* PyObjectCallMethod0 (used by PyType_Ready) */
-static PyObject* __Pyx_PyObject_CallMethod0(PyObject* obj, PyObject* method_name) {
-#if CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000))
-    PyObject *args[1] = {obj};
-    (void) __Pyx_PyObject_CallOneArg;
-    (void) __Pyx_PyObject_CallNoArg;
-    return PyObject_VectorcallMethod(method_name, args, 1 | PY_VECTORCALL_ARGUMENTS_OFFSET, NULL);
-#else
-    PyObject *method = NULL, *result = NULL;
-    int is_method = __Pyx_PyObject_GetMethod(obj, method_name, &method);
-    if (likely(is_method)) {
-        result = __Pyx_PyObject_CallOneArg(method, obj);
-        Py_DECREF(method);
-        return result;
-    }
-    if (unlikely(!method)) goto bad;
-    result = __Pyx_PyObject_CallNoArg(method);
-    Py_DECREF(method);
-bad:
-    return result;
-#endif
 }
 
 /* ValidateBasesTuple (used by PyType_Ready) */
@@ -16293,6 +18182,256 @@ static CYTHON_INLINE PyObject* __Pyx_PyLong_From_int(int value) {
     }
 }
 
+/* CIntFromPy */
+static CYTHON_INLINE unsigned PY_LONG_LONG __Pyx_PyLong_As_unsigned_PY_LONG_LONG(PyObject *x) {
+#ifdef __Pyx_HAS_GCC_DIAGNOSTIC
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wconversion"
+#endif
+    const unsigned PY_LONG_LONG neg_one = (unsigned PY_LONG_LONG) -1, const_zero = (unsigned PY_LONG_LONG) 0;
+#ifdef __Pyx_HAS_GCC_DIAGNOSTIC
+#pragma GCC diagnostic pop
+#endif
+    const int is_unsigned = neg_one > const_zero;
+    if (unlikely(!PyLong_Check(x))) {
+        unsigned PY_LONG_LONG val;
+        PyObject *tmp = __Pyx_PyNumber_Long(x);
+        if (!tmp) return (unsigned PY_LONG_LONG) -1;
+        val = __Pyx_PyLong_As_unsigned_PY_LONG_LONG(tmp);
+        Py_DECREF(tmp);
+        return val;
+    }
+    if (is_unsigned) {
+#if CYTHON_USE_PYLONG_INTERNALS
+        if (unlikely(__Pyx_PyLong_IsNeg(x))) {
+            goto raise_neg_overflow;
+        } else if (__Pyx_PyLong_IsCompact(x)) {
+            __PYX_VERIFY_RETURN_INT(unsigned PY_LONG_LONG, __Pyx_compact_upylong, __Pyx_PyLong_CompactValueUnsigned(x))
+        } else {
+            const digit* digits = __Pyx_PyLong_Digits(x);
+            assert(__Pyx_PyLong_DigitCount(x) > 1);
+            switch (__Pyx_PyLong_DigitCount(x)) {
+                case 2:
+                    if ((8 * sizeof(unsigned PY_LONG_LONG) > 1 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 2 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(unsigned PY_LONG_LONG, unsigned long, (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(unsigned PY_LONG_LONG) >= 2 * PyLong_SHIFT)) {
+                            return (unsigned PY_LONG_LONG) (((((unsigned PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[0]));
+                        }
+                    }
+                    break;
+                case 3:
+                    if ((8 * sizeof(unsigned PY_LONG_LONG) > 2 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 3 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(unsigned PY_LONG_LONG, unsigned long, (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(unsigned PY_LONG_LONG) >= 3 * PyLong_SHIFT)) {
+                            return (unsigned PY_LONG_LONG) (((((((unsigned PY_LONG_LONG)digits[2]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[0]));
+                        }
+                    }
+                    break;
+                case 4:
+                    if ((8 * sizeof(unsigned PY_LONG_LONG) > 3 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 4 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(unsigned PY_LONG_LONG, unsigned long, (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(unsigned PY_LONG_LONG) >= 4 * PyLong_SHIFT)) {
+                            return (unsigned PY_LONG_LONG) (((((((((unsigned PY_LONG_LONG)digits[3]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[2]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[0]));
+                        }
+                    }
+                    break;
+            }
+        }
+#endif
+#if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX < 0x030C00A7
+        if (unlikely(Py_SIZE(x) < 0)) {
+            goto raise_neg_overflow;
+        }
+#else
+        {
+            int result = PyObject_RichCompareBool(x, Py_False, Py_LT);
+            if (unlikely(result < 0))
+                return (unsigned PY_LONG_LONG) -1;
+            if (unlikely(result == 1))
+                goto raise_neg_overflow;
+        }
+#endif
+        if ((sizeof(unsigned PY_LONG_LONG) <= sizeof(unsigned long))) {
+            __PYX_VERIFY_RETURN_INT_EXC(unsigned PY_LONG_LONG, unsigned long, PyLong_AsUnsignedLong(x))
+        } else if ((sizeof(unsigned PY_LONG_LONG) <= sizeof(unsigned PY_LONG_LONG))) {
+            __PYX_VERIFY_RETURN_INT_EXC(unsigned PY_LONG_LONG, unsigned PY_LONG_LONG, PyLong_AsUnsignedLongLong(x))
+        }
+    } else {
+#if CYTHON_USE_PYLONG_INTERNALS
+        if (__Pyx_PyLong_IsCompact(x)) {
+            __PYX_VERIFY_RETURN_INT(unsigned PY_LONG_LONG, __Pyx_compact_pylong, __Pyx_PyLong_CompactValue(x))
+        } else {
+            const digit* digits = __Pyx_PyLong_Digits(x);
+            assert(__Pyx_PyLong_DigitCount(x) > 1);
+            switch (__Pyx_PyLong_SignedDigitCount(x)) {
+                case -2:
+                    if ((8 * sizeof(unsigned PY_LONG_LONG) - 1 > 1 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 2 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(unsigned PY_LONG_LONG, long, -(long) (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(unsigned PY_LONG_LONG) - 1 > 2 * PyLong_SHIFT)) {
+                            return (unsigned PY_LONG_LONG) (((unsigned PY_LONG_LONG)-1)*(((((unsigned PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[0])));
+                        }
+                    }
+                    break;
+                case 2:
+                    if ((8 * sizeof(unsigned PY_LONG_LONG) > 1 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 2 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(unsigned PY_LONG_LONG, unsigned long, (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(unsigned PY_LONG_LONG) - 1 > 2 * PyLong_SHIFT)) {
+                            return (unsigned PY_LONG_LONG) ((((((unsigned PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[0])));
+                        }
+                    }
+                    break;
+                case -3:
+                    if ((8 * sizeof(unsigned PY_LONG_LONG) - 1 > 2 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 3 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(unsigned PY_LONG_LONG, long, -(long) (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(unsigned PY_LONG_LONG) - 1 > 3 * PyLong_SHIFT)) {
+                            return (unsigned PY_LONG_LONG) (((unsigned PY_LONG_LONG)-1)*(((((((unsigned PY_LONG_LONG)digits[2]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[0])));
+                        }
+                    }
+                    break;
+                case 3:
+                    if ((8 * sizeof(unsigned PY_LONG_LONG) > 2 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 3 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(unsigned PY_LONG_LONG, unsigned long, (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(unsigned PY_LONG_LONG) - 1 > 3 * PyLong_SHIFT)) {
+                            return (unsigned PY_LONG_LONG) ((((((((unsigned PY_LONG_LONG)digits[2]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[0])));
+                        }
+                    }
+                    break;
+                case -4:
+                    if ((8 * sizeof(unsigned PY_LONG_LONG) - 1 > 3 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 4 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(unsigned PY_LONG_LONG, long, -(long) (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(unsigned PY_LONG_LONG) - 1 > 4 * PyLong_SHIFT)) {
+                            return (unsigned PY_LONG_LONG) (((unsigned PY_LONG_LONG)-1)*(((((((((unsigned PY_LONG_LONG)digits[3]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[2]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[0])));
+                        }
+                    }
+                    break;
+                case 4:
+                    if ((8 * sizeof(unsigned PY_LONG_LONG) > 3 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 4 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(unsigned PY_LONG_LONG, unsigned long, (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(unsigned PY_LONG_LONG) - 1 > 4 * PyLong_SHIFT)) {
+                            return (unsigned PY_LONG_LONG) ((((((((((unsigned PY_LONG_LONG)digits[3]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[2]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (unsigned PY_LONG_LONG)digits[0])));
+                        }
+                    }
+                    break;
+            }
+        }
+#endif
+        if ((sizeof(unsigned PY_LONG_LONG) <= sizeof(long))) {
+            __PYX_VERIFY_RETURN_INT_EXC(unsigned PY_LONG_LONG, long, PyLong_AsLong(x))
+        } else if ((sizeof(unsigned PY_LONG_LONG) <= sizeof(PY_LONG_LONG))) {
+            __PYX_VERIFY_RETURN_INT_EXC(unsigned PY_LONG_LONG, PY_LONG_LONG, PyLong_AsLongLong(x))
+        }
+    }
+    {
+        unsigned PY_LONG_LONG val;
+        int ret = -1;
+#if PY_VERSION_HEX >= 0x030d00A6 && !CYTHON_COMPILING_IN_LIMITED_API
+        Py_ssize_t bytes_copied = PyLong_AsNativeBytes(
+            x, &val, sizeof(val), Py_ASNATIVEBYTES_NATIVE_ENDIAN | (is_unsigned ? Py_ASNATIVEBYTES_UNSIGNED_BUFFER | Py_ASNATIVEBYTES_REJECT_NEGATIVE : 0));
+        if (unlikely(bytes_copied == -1)) {
+        } else if (unlikely(bytes_copied > (Py_ssize_t) sizeof(val))) {
+            goto raise_overflow;
+        } else {
+            ret = 0;
+        }
+#elif PY_VERSION_HEX < 0x030d0000 && !(CYTHON_COMPILING_IN_PYPY || CYTHON_COMPILING_IN_LIMITED_API) || defined(_PyLong_AsByteArray)
+        int one = 1; int is_little = (int)*(unsigned char *)&one;
+        unsigned char *bytes = (unsigned char *)&val;
+        ret = _PyLong_AsByteArray((PyLongObject *)x,
+                                    bytes, sizeof(val),
+                                    is_little, !is_unsigned);
+#else
+        PyObject *v;
+        PyObject *stepval = NULL, *mask = NULL, *shift = NULL;
+        int bits, remaining_bits, is_negative = 0;
+        int chunk_size = (sizeof(long) < 8) ? 30 : 62;
+        if (likely(PyLong_CheckExact(x))) {
+            v = __Pyx_NewRef(x);
+        } else {
+            v = PyNumber_Long(x);
+            if (unlikely(!v)) return (unsigned PY_LONG_LONG) -1;
+            assert(PyLong_CheckExact(v));
+        }
+        {
+            int result = PyObject_RichCompareBool(v, Py_False, Py_LT);
+            if (unlikely(result < 0)) {
+                Py_DECREF(v);
+                return (unsigned PY_LONG_LONG) -1;
+            }
+            is_negative = result == 1;
+        }
+        if (is_unsigned && unlikely(is_negative)) {
+            Py_DECREF(v);
+            goto raise_neg_overflow;
+        } else if (is_negative) {
+            stepval = PyNumber_Invert(v);
+            Py_DECREF(v);
+            if (unlikely(!stepval))
+                return (unsigned PY_LONG_LONG) -1;
+        } else {
+            stepval = v;
+        }
+        v = NULL;
+        val = (unsigned PY_LONG_LONG) 0;
+        mask = PyLong_FromLong((1L << chunk_size) - 1); if (unlikely(!mask)) goto done;
+        shift = PyLong_FromLong(chunk_size); if (unlikely(!shift)) goto done;
+        for (bits = 0; bits < (int) sizeof(unsigned PY_LONG_LONG) * 8 - chunk_size; bits += chunk_size) {
+            PyObject *tmp, *digit;
+            long idigit;
+            digit = PyNumber_And(stepval, mask);
+            if (unlikely(!digit)) goto done;
+            idigit = PyLong_AsLong(digit);
+            Py_DECREF(digit);
+            if (unlikely(idigit < 0)) goto done;
+            val |= ((unsigned PY_LONG_LONG) idigit) << bits;
+            tmp = PyNumber_Rshift(stepval, shift);
+            if (unlikely(!tmp)) goto done;
+            Py_DECREF(stepval); stepval = tmp;
+        }
+        Py_DECREF(shift); shift = NULL;
+        Py_DECREF(mask); mask = NULL;
+        {
+            long idigit = PyLong_AsLong(stepval);
+            if (unlikely(idigit < 0)) goto done;
+            remaining_bits = ((int) sizeof(unsigned PY_LONG_LONG) * 8) - bits - (is_unsigned ? 0 : 1);
+            if (unlikely(idigit >= (1L << remaining_bits)))
+                goto raise_overflow;
+            val |= ((unsigned PY_LONG_LONG) idigit) << bits;
+        }
+        if (!is_unsigned) {
+            if (unlikely(val & (((unsigned PY_LONG_LONG) 1) << (sizeof(unsigned PY_LONG_LONG) * 8 - 1))))
+                goto raise_overflow;
+            if (is_negative)
+                val = ~val;
+        }
+        ret = 0;
+    done:
+        Py_XDECREF(shift);
+        Py_XDECREF(mask);
+        Py_XDECREF(stepval);
+#endif
+        if (unlikely(ret))
+            return (unsigned PY_LONG_LONG) -1;
+        return val;
+    }
+raise_overflow:
+    PyErr_SetString(PyExc_OverflowError,
+        "value too large to convert to unsigned PY_LONG_LONG");
+    return (unsigned PY_LONG_LONG) -1;
+raise_neg_overflow:
+    PyErr_SetString(PyExc_OverflowError,
+        "can't convert negative value to unsigned PY_LONG_LONG");
+    return (unsigned PY_LONG_LONG) -1;
+}
+
 /* CIntToPy */
 static CYTHON_INLINE PyObject* __Pyx_PyLong_From_unsigned_int(unsigned int value) {
 #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
@@ -16360,6 +18499,256 @@ static CYTHON_INLINE PyObject* __Pyx_PyLong_From_unsigned_int(unsigned int value
         return result;
 #endif
     }
+}
+
+/* CIntFromPy */
+static CYTHON_INLINE PY_LONG_LONG __Pyx_PyLong_As_PY_LONG_LONG(PyObject *x) {
+#ifdef __Pyx_HAS_GCC_DIAGNOSTIC
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wconversion"
+#endif
+    const PY_LONG_LONG neg_one = (PY_LONG_LONG) -1, const_zero = (PY_LONG_LONG) 0;
+#ifdef __Pyx_HAS_GCC_DIAGNOSTIC
+#pragma GCC diagnostic pop
+#endif
+    const int is_unsigned = neg_one > const_zero;
+    if (unlikely(!PyLong_Check(x))) {
+        PY_LONG_LONG val;
+        PyObject *tmp = __Pyx_PyNumber_Long(x);
+        if (!tmp) return (PY_LONG_LONG) -1;
+        val = __Pyx_PyLong_As_PY_LONG_LONG(tmp);
+        Py_DECREF(tmp);
+        return val;
+    }
+    if (is_unsigned) {
+#if CYTHON_USE_PYLONG_INTERNALS
+        if (unlikely(__Pyx_PyLong_IsNeg(x))) {
+            goto raise_neg_overflow;
+        } else if (__Pyx_PyLong_IsCompact(x)) {
+            __PYX_VERIFY_RETURN_INT(PY_LONG_LONG, __Pyx_compact_upylong, __Pyx_PyLong_CompactValueUnsigned(x))
+        } else {
+            const digit* digits = __Pyx_PyLong_Digits(x);
+            assert(__Pyx_PyLong_DigitCount(x) > 1);
+            switch (__Pyx_PyLong_DigitCount(x)) {
+                case 2:
+                    if ((8 * sizeof(PY_LONG_LONG) > 1 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 2 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(PY_LONG_LONG, unsigned long, (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(PY_LONG_LONG) >= 2 * PyLong_SHIFT)) {
+                            return (PY_LONG_LONG) (((((PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[0]));
+                        }
+                    }
+                    break;
+                case 3:
+                    if ((8 * sizeof(PY_LONG_LONG) > 2 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 3 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(PY_LONG_LONG, unsigned long, (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(PY_LONG_LONG) >= 3 * PyLong_SHIFT)) {
+                            return (PY_LONG_LONG) (((((((PY_LONG_LONG)digits[2]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[0]));
+                        }
+                    }
+                    break;
+                case 4:
+                    if ((8 * sizeof(PY_LONG_LONG) > 3 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 4 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(PY_LONG_LONG, unsigned long, (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(PY_LONG_LONG) >= 4 * PyLong_SHIFT)) {
+                            return (PY_LONG_LONG) (((((((((PY_LONG_LONG)digits[3]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[2]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[0]));
+                        }
+                    }
+                    break;
+            }
+        }
+#endif
+#if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX < 0x030C00A7
+        if (unlikely(Py_SIZE(x) < 0)) {
+            goto raise_neg_overflow;
+        }
+#else
+        {
+            int result = PyObject_RichCompareBool(x, Py_False, Py_LT);
+            if (unlikely(result < 0))
+                return (PY_LONG_LONG) -1;
+            if (unlikely(result == 1))
+                goto raise_neg_overflow;
+        }
+#endif
+        if ((sizeof(PY_LONG_LONG) <= sizeof(unsigned long))) {
+            __PYX_VERIFY_RETURN_INT_EXC(PY_LONG_LONG, unsigned long, PyLong_AsUnsignedLong(x))
+        } else if ((sizeof(PY_LONG_LONG) <= sizeof(unsigned PY_LONG_LONG))) {
+            __PYX_VERIFY_RETURN_INT_EXC(PY_LONG_LONG, unsigned PY_LONG_LONG, PyLong_AsUnsignedLongLong(x))
+        }
+    } else {
+#if CYTHON_USE_PYLONG_INTERNALS
+        if (__Pyx_PyLong_IsCompact(x)) {
+            __PYX_VERIFY_RETURN_INT(PY_LONG_LONG, __Pyx_compact_pylong, __Pyx_PyLong_CompactValue(x))
+        } else {
+            const digit* digits = __Pyx_PyLong_Digits(x);
+            assert(__Pyx_PyLong_DigitCount(x) > 1);
+            switch (__Pyx_PyLong_SignedDigitCount(x)) {
+                case -2:
+                    if ((8 * sizeof(PY_LONG_LONG) - 1 > 1 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 2 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(PY_LONG_LONG, long, -(long) (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(PY_LONG_LONG) - 1 > 2 * PyLong_SHIFT)) {
+                            return (PY_LONG_LONG) (((PY_LONG_LONG)-1)*(((((PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[0])));
+                        }
+                    }
+                    break;
+                case 2:
+                    if ((8 * sizeof(PY_LONG_LONG) > 1 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 2 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(PY_LONG_LONG, unsigned long, (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(PY_LONG_LONG) - 1 > 2 * PyLong_SHIFT)) {
+                            return (PY_LONG_LONG) ((((((PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[0])));
+                        }
+                    }
+                    break;
+                case -3:
+                    if ((8 * sizeof(PY_LONG_LONG) - 1 > 2 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 3 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(PY_LONG_LONG, long, -(long) (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(PY_LONG_LONG) - 1 > 3 * PyLong_SHIFT)) {
+                            return (PY_LONG_LONG) (((PY_LONG_LONG)-1)*(((((((PY_LONG_LONG)digits[2]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[0])));
+                        }
+                    }
+                    break;
+                case 3:
+                    if ((8 * sizeof(PY_LONG_LONG) > 2 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 3 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(PY_LONG_LONG, unsigned long, (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(PY_LONG_LONG) - 1 > 3 * PyLong_SHIFT)) {
+                            return (PY_LONG_LONG) ((((((((PY_LONG_LONG)digits[2]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[0])));
+                        }
+                    }
+                    break;
+                case -4:
+                    if ((8 * sizeof(PY_LONG_LONG) - 1 > 3 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 4 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(PY_LONG_LONG, long, -(long) (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(PY_LONG_LONG) - 1 > 4 * PyLong_SHIFT)) {
+                            return (PY_LONG_LONG) (((PY_LONG_LONG)-1)*(((((((((PY_LONG_LONG)digits[3]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[2]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[0])));
+                        }
+                    }
+                    break;
+                case 4:
+                    if ((8 * sizeof(PY_LONG_LONG) > 3 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 4 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(PY_LONG_LONG, unsigned long, (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(PY_LONG_LONG) - 1 > 4 * PyLong_SHIFT)) {
+                            return (PY_LONG_LONG) ((((((((((PY_LONG_LONG)digits[3]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[2]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[1]) << PyLong_SHIFT) | (PY_LONG_LONG)digits[0])));
+                        }
+                    }
+                    break;
+            }
+        }
+#endif
+        if ((sizeof(PY_LONG_LONG) <= sizeof(long))) {
+            __PYX_VERIFY_RETURN_INT_EXC(PY_LONG_LONG, long, PyLong_AsLong(x))
+        } else if ((sizeof(PY_LONG_LONG) <= sizeof(PY_LONG_LONG))) {
+            __PYX_VERIFY_RETURN_INT_EXC(PY_LONG_LONG, PY_LONG_LONG, PyLong_AsLongLong(x))
+        }
+    }
+    {
+        PY_LONG_LONG val;
+        int ret = -1;
+#if PY_VERSION_HEX >= 0x030d00A6 && !CYTHON_COMPILING_IN_LIMITED_API
+        Py_ssize_t bytes_copied = PyLong_AsNativeBytes(
+            x, &val, sizeof(val), Py_ASNATIVEBYTES_NATIVE_ENDIAN | (is_unsigned ? Py_ASNATIVEBYTES_UNSIGNED_BUFFER | Py_ASNATIVEBYTES_REJECT_NEGATIVE : 0));
+        if (unlikely(bytes_copied == -1)) {
+        } else if (unlikely(bytes_copied > (Py_ssize_t) sizeof(val))) {
+            goto raise_overflow;
+        } else {
+            ret = 0;
+        }
+#elif PY_VERSION_HEX < 0x030d0000 && !(CYTHON_COMPILING_IN_PYPY || CYTHON_COMPILING_IN_LIMITED_API) || defined(_PyLong_AsByteArray)
+        int one = 1; int is_little = (int)*(unsigned char *)&one;
+        unsigned char *bytes = (unsigned char *)&val;
+        ret = _PyLong_AsByteArray((PyLongObject *)x,
+                                    bytes, sizeof(val),
+                                    is_little, !is_unsigned);
+#else
+        PyObject *v;
+        PyObject *stepval = NULL, *mask = NULL, *shift = NULL;
+        int bits, remaining_bits, is_negative = 0;
+        int chunk_size = (sizeof(long) < 8) ? 30 : 62;
+        if (likely(PyLong_CheckExact(x))) {
+            v = __Pyx_NewRef(x);
+        } else {
+            v = PyNumber_Long(x);
+            if (unlikely(!v)) return (PY_LONG_LONG) -1;
+            assert(PyLong_CheckExact(v));
+        }
+        {
+            int result = PyObject_RichCompareBool(v, Py_False, Py_LT);
+            if (unlikely(result < 0)) {
+                Py_DECREF(v);
+                return (PY_LONG_LONG) -1;
+            }
+            is_negative = result == 1;
+        }
+        if (is_unsigned && unlikely(is_negative)) {
+            Py_DECREF(v);
+            goto raise_neg_overflow;
+        } else if (is_negative) {
+            stepval = PyNumber_Invert(v);
+            Py_DECREF(v);
+            if (unlikely(!stepval))
+                return (PY_LONG_LONG) -1;
+        } else {
+            stepval = v;
+        }
+        v = NULL;
+        val = (PY_LONG_LONG) 0;
+        mask = PyLong_FromLong((1L << chunk_size) - 1); if (unlikely(!mask)) goto done;
+        shift = PyLong_FromLong(chunk_size); if (unlikely(!shift)) goto done;
+        for (bits = 0; bits < (int) sizeof(PY_LONG_LONG) * 8 - chunk_size; bits += chunk_size) {
+            PyObject *tmp, *digit;
+            long idigit;
+            digit = PyNumber_And(stepval, mask);
+            if (unlikely(!digit)) goto done;
+            idigit = PyLong_AsLong(digit);
+            Py_DECREF(digit);
+            if (unlikely(idigit < 0)) goto done;
+            val |= ((PY_LONG_LONG) idigit) << bits;
+            tmp = PyNumber_Rshift(stepval, shift);
+            if (unlikely(!tmp)) goto done;
+            Py_DECREF(stepval); stepval = tmp;
+        }
+        Py_DECREF(shift); shift = NULL;
+        Py_DECREF(mask); mask = NULL;
+        {
+            long idigit = PyLong_AsLong(stepval);
+            if (unlikely(idigit < 0)) goto done;
+            remaining_bits = ((int) sizeof(PY_LONG_LONG) * 8) - bits - (is_unsigned ? 0 : 1);
+            if (unlikely(idigit >= (1L << remaining_bits)))
+                goto raise_overflow;
+            val |= ((PY_LONG_LONG) idigit) << bits;
+        }
+        if (!is_unsigned) {
+            if (unlikely(val & (((PY_LONG_LONG) 1) << (sizeof(PY_LONG_LONG) * 8 - 1))))
+                goto raise_overflow;
+            if (is_negative)
+                val = ~val;
+        }
+        ret = 0;
+    done:
+        Py_XDECREF(shift);
+        Py_XDECREF(mask);
+        Py_XDECREF(stepval);
+#endif
+        if (unlikely(ret))
+            return (PY_LONG_LONG) -1;
+        return val;
+    }
+raise_overflow:
+    PyErr_SetString(PyExc_OverflowError,
+        "value too large to convert to PY_LONG_LONG");
+    return (PY_LONG_LONG) -1;
+raise_neg_overflow:
+    PyErr_SetString(PyExc_OverflowError,
+        "can't convert negative value to PY_LONG_LONG");
+    return (PY_LONG_LONG) -1;
 }
 
 /* PyObjectCall2Args */
@@ -16552,93 +18941,6 @@ static CYTHON_INLINE PyObject* __Pyx_PyLong_From_long(long value) {
 #endif
     }
 }
-
-/* FastTypeChecks */
-#if CYTHON_COMPILING_IN_CPYTHON
-static int __Pyx_InBases(PyTypeObject *a, PyTypeObject *b) {
-    while (a) {
-        a = __Pyx_PyType_GetSlot(a, tp_base, PyTypeObject*);
-        if (a == b)
-            return 1;
-    }
-    return b == &PyBaseObject_Type;
-}
-static CYTHON_INLINE int __Pyx_IsSubtype(PyTypeObject *a, PyTypeObject *b) {
-    PyObject *mro;
-    if (a == b) return 1;
-    mro = a->tp_mro;
-    if (likely(mro)) {
-        Py_ssize_t i, n;
-        n = PyTuple_GET_SIZE(mro);
-        for (i = 0; i < n; i++) {
-            if (PyTuple_GET_ITEM(mro, i) == (PyObject *)b)
-                return 1;
-        }
-        return 0;
-    }
-    return __Pyx_InBases(a, b);
-}
-static CYTHON_INLINE int __Pyx_IsAnySubtype2(PyTypeObject *cls, PyTypeObject *a, PyTypeObject *b) {
-    PyObject *mro;
-    if (cls == a || cls == b) return 1;
-    mro = cls->tp_mro;
-    if (likely(mro)) {
-        Py_ssize_t i, n;
-        n = PyTuple_GET_SIZE(mro);
-        for (i = 0; i < n; i++) {
-            PyObject *base = PyTuple_GET_ITEM(mro, i);
-            if (base == (PyObject *)a || base == (PyObject *)b)
-                return 1;
-        }
-        return 0;
-    }
-    return __Pyx_InBases(cls, a) || __Pyx_InBases(cls, b);
-}
-static CYTHON_INLINE int __Pyx_inner_PyErr_GivenExceptionMatches2(PyObject *err, PyObject* exc_type1, PyObject *exc_type2) {
-    if (exc_type1) {
-        return __Pyx_IsAnySubtype2((PyTypeObject*)err, (PyTypeObject*)exc_type1, (PyTypeObject*)exc_type2);
-    } else {
-        return __Pyx_IsSubtype((PyTypeObject*)err, (PyTypeObject*)exc_type2);
-    }
-}
-static int __Pyx_PyErr_GivenExceptionMatchesTuple(PyObject *exc_type, PyObject *tuple) {
-    Py_ssize_t i, n;
-    assert(PyExceptionClass_Check(exc_type));
-    n = PyTuple_GET_SIZE(tuple);
-    for (i=0; i<n; i++) {
-        if (exc_type == PyTuple_GET_ITEM(tuple, i)) return 1;
-    }
-    for (i=0; i<n; i++) {
-        PyObject *t = PyTuple_GET_ITEM(tuple, i);
-        if (likely(PyExceptionClass_Check(t))) {
-            if (__Pyx_inner_PyErr_GivenExceptionMatches2(exc_type, NULL, t)) return 1;
-        } else {
-        }
-    }
-    return 0;
-}
-static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches(PyObject *err, PyObject* exc_type) {
-    if (likely(err == exc_type)) return 1;
-    if (likely(PyExceptionClass_Check(err))) {
-        if (likely(PyExceptionClass_Check(exc_type))) {
-            return __Pyx_inner_PyErr_GivenExceptionMatches2(err, NULL, exc_type);
-        } else if (likely(PyTuple_Check(exc_type))) {
-            return __Pyx_PyErr_GivenExceptionMatchesTuple(err, exc_type);
-        } else {
-        }
-    }
-    return PyErr_GivenExceptionMatches(err, exc_type);
-}
-static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches2(PyObject *err, PyObject *exc_type1, PyObject *exc_type2) {
-    assert(PyExceptionClass_Check(exc_type1));
-    assert(PyExceptionClass_Check(exc_type2));
-    if (likely(err == exc_type1 || err == exc_type2)) return 1;
-    if (likely(PyExceptionClass_Check(err))) {
-        return __Pyx_inner_PyErr_GivenExceptionMatches2(err, exc_type1, exc_type2);
-    }
-    return (PyErr_GivenExceptionMatches(err, exc_type1) || PyErr_GivenExceptionMatches(err, exc_type2));
-}
-#endif
 
 /* GetRuntimeVersion */
 #if __PYX_LIMITED_VERSION_HEX < 0x030b0000
