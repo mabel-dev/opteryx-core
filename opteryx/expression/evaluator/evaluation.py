@@ -178,6 +178,74 @@ def _unary_draken(op: str, centre_node, morsel):
     raise NotImplementedError(f"evaluate_draken: unsupported unary op {op!r}")
 
 
+def _is_temporal_type(orso_type):
+    """Check if an OrsoType is DATE or TIMESTAMP."""
+    from opteryx.types import OrsoTypes
+
+    if orso_type is None:
+        return False
+    return orso_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
+
+
+def _validate_temporal_comparison(left_node, right_node, op):
+    """
+    Validate that temporal comparisons have both sides explicitly cast.
+
+    When one side of a comparison is temporal, BOTH sides must be explicitly cast
+    to ensure explicit type resolution and prevent implicit coercion.
+
+    For columns and expressions: must be a CAST node (explicit :: or CAST() in SQL).
+    For literals: should have an explicit temporal type (ConstantColumn with DATE/TIMESTAMP type
+    indicates the literal was cast, not auto-inferred).
+
+    Args:
+        left_node: AST node for left operand
+        right_node: AST node for right operand
+        op: Comparison operator (Eq, Lt, Gt, etc.)
+
+    Raises:
+        IncompatibleTypesError: If a temporal comparison lacks explicit casting on both sides
+    """
+    from opteryx.expression import NodeType
+    from opteryx.types.schema import ConstantColumn
+
+    left_type = getattr(getattr(left_node, "schema_column", None), "type", None)
+    right_type = getattr(getattr(right_node, "schema_column", None), "type", None)
+
+    left_is_temporal = _is_temporal_type(left_type)
+    right_is_temporal = _is_temporal_type(right_type)
+
+    # If neither side is temporal, no validation needed
+    if not (left_is_temporal or right_is_temporal):
+        return
+
+    # At least one side is temporal - check that both are explicitly cast
+    # For non-CAST nodes (literals, etc.), we require them to have temporal types
+    # to indicate they were explicitly cast
+    left_is_cast_node = left_node.node_type == NodeType.CAST
+    right_is_cast_node = right_node.node_type == NodeType.CAST
+
+    # If both sides have temporal types, it's valid
+    # (one or both are CAST nodes, and non-CAST nodes with temporal types indicate explicit casts)
+    if left_is_temporal and right_is_temporal:
+        return
+
+    # At least one side is temporal but the other is not explicitly typed
+    from opteryx.exceptions import IncompatibleTypesError
+
+    uncast_side = "left" if not left_is_temporal else "right"
+
+    raise IncompatibleTypesError(
+        message=f"Temporal comparison requires both sides to be explicitly cast to temporal types.\n"
+        f"The {uncast_side} side is missing an explicit CAST or :: operator.\n\n"
+        f"Examples of valid syntax:\n"
+        f"  - col::TIMESTAMP[ms] {op} literal::DATE\n"
+        f"  - CAST(col AS TIMESTAMP[ms]) {op} CAST(literal AS DATE)\n"
+        f"  - col::DATE {op} literal::TIMESTAMP[ms]\n\n"
+        f"Supported temporal types: DATE, TIMESTAMP[ms], TIMESTAMP[us], TIMESTAMP[s], TIMESTAMP[ns], TIMESTAMP[d]"
+    )
+
+
 def evaluate_draken(node, morsel):
     from opteryx.expression import NodeType
 
@@ -220,6 +288,9 @@ def evaluate_draken(node, morsel):
         return BoolVector.from_constant(scalar, morsel.num_rows)
 
     if node_type == NodeType.COMPARISON_OPERATOR:
+        # Validate that temporal comparisons have both sides explicitly typed
+        _validate_temporal_comparison(node.left, node.right, node.value)
+
         left = _eval_value(node.left, morsel)
         right = _eval_value(node.right, morsel)
         from opteryx.types import OrsoTypes

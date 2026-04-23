@@ -448,9 +448,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                 precision=precision,
                 scale=scale,
             )
-            # CAST nodes must have unique identities distinct from source columns
-            # This ensures they're properly evaluated via _inner_evaluate in the Draken path
-            schema_column.identity = f"_cast__{column_name}__{target_type_name}"
+            schema_column.identity = column_name
             schemas["$derived"].columns.append(schema_column)
             node.derived_from = []
             node.schema_column = schema_column
