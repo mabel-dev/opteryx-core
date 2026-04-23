@@ -636,6 +636,7 @@ extensions = [
             "third_party/mabel/rugo/_jsonl/core/value_parser.cpp",
             "third_party/mabel/rugo/_jsonl/core/field_span.cpp",
             "third_party/mabel/rugo/_jsonl/core/jsonl_reader.cpp",
+            "third_party/mabel/rugo/_jsonl/core/column_builder.cpp",
             "src/cpp/simd_env.cpp",
             "src/cpp/cpu_features.cpp",
             "src/cpp/simd_search.cpp",

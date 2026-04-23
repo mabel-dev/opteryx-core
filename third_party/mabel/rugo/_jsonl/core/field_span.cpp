@@ -4,6 +4,7 @@
 #include "value_parser.hpp"
 #include <algorithm>
 #include <map>
+#include <unordered_map>
 #include <cctype>
 
 namespace rugo::_jsonl {
@@ -97,83 +98,81 @@ InterpreterResult interpret_jsonl(
         return result;
     }
 
-    // Build index: for quick lookup of marker positions
-    std::map<std::string, uint32_t> marker_index;  // Unused for now, but structure is ready
 
-    // Find record boundaries (NEWLINE markers)
-    std::vector<std::pair<uint32_t, uint32_t>> record_bounds;  // (start, end)
-    uint32_t record_start = 0;
+    // Fast hash-based field lookup to avoid string extraction
+    // Pre-compute hash of each predicate/projection column name once
+    auto hash_span = [](const uint8_t* data, size_t len) -> uint64_t {
+        uint64_t h = 0xcbf29ce484222325ULL;
+        for (size_t i = 0; i < len; ++i) {
+            h ^= data[i];
+            h *= 0x100000001b3ULL;
+        }
+        return h;
+    };
 
-    for (const auto& marker : markers) {
-        if (marker.marker_type == static_cast<uint8_t>(MarkerType::NEWLINE)) {
-            record_bounds.push_back({record_start, marker.position});
-            record_start = marker.position + 1;
+    // Build lookup maps: hash -> (ordinal, predicate_index)
+    std::unordered_map<uint64_t, int> pred_hash_to_idx;
+    std::unordered_map<uint64_t, int> proj_hash_to_idx;
+
+    for (size_t i = 0; i < context.predicates.size(); ++i) {
+        auto col_data = reinterpret_cast<const uint8_t*>(context.predicates[i].column.data());
+        auto col_len = context.predicates[i].column.size();
+        uint64_t h = hash_span(col_data, col_len);
+        if (pred_hash_to_idx.find(h) == pred_hash_to_idx.end()) {
+            pred_hash_to_idx[h] = i;
         }
     }
 
-    // Add final record if it doesn't end with newline
-    if (record_start < buffer_length) {
-        // Check if this record is complete (has closing brace)
-        bool has_closing_brace = false;
-        for (uint32_t i = record_start; i < buffer_length; ++i) {
-            if (buffer_data[i] == '}') {
-                has_closing_brace = true;
-                break;
-            }
-        }
-
-        if (has_closing_brace) {
-            record_bounds.push_back({record_start, static_cast<uint32_t>(buffer_length)});
-        } else {
-            // Incomplete record at end: will be consumed next time
-            // bytes_consumed = record_start means this partial record is not consumed
-            result.bytes_consumed = record_start;
-            return result;
+    for (size_t i = 0; i < context.projected_columns.size(); ++i) {
+        auto col_data = reinterpret_cast<const uint8_t*>(context.projected_columns[i].data());
+        auto col_len = context.projected_columns[i].size();
+        uint64_t h = hash_span(col_data, col_len);
+        if (proj_hash_to_idx.find(h) == proj_hash_to_idx.end()) {
+            proj_hash_to_idx[h] = i;
         }
     }
 
-    // Parse each record
-    RecordInterpreter rec_interp;
-    result.all_records.reserve(record_bounds.size());
+    // Build document map from markers (linear pass)
+    auto all_records = build_map(buffer_data, buffer_length, markers);
+    result.all_records.reserve(all_records.size());
 
-    for (const auto& [rec_start, rec_end] : record_bounds) {
-        auto all_fields = rec_interp.parse_record(buffer_data, rec_start, rec_end, markers, marker_index);
+    for (const auto& all_fields : all_records) {
 
         if (all_fields.empty()) {
             continue;  // Skip empty records
         }
 
-        // Apply predicates: filter records that don't match
-        bool passes_predicates = true;
-        for (const auto& pred : context.predicates) {
-            // Find the field with this column name
-            bool found = false;
-            for (const auto& field : all_fields) {
-                // Extract key name
-                uint32_t key_len = field.key_end - field.key_start + 1;
-                std::string field_name(
-                    reinterpret_cast<const char*>(buffer_data + field.key_start),
-                    key_len
-                );
+        // Build field lookup using hashes: O(n_fields) scan with O(1) hash lookups
+        std::unordered_map<int, const FieldSpan*> fields_by_pred_idx;
+        std::unordered_map<int, const FieldSpan*> fields_by_proj_idx;
 
-                if (field_name == pred.column) {
-                    // Evaluate predicate on this field
-                    if (!evaluate_predicate(buffer_data, field, pred)) {
-                        passes_predicates = false;
-                        break;
-                    }
-                    found = true;
-                    break;
-                }
+        for (const auto& field : all_fields) {
+            uint64_t field_hash = hash_span(buffer_data + field.key_start, field.key_width);
+
+            // O(1) lookup in predicate hash map
+            auto pred_it = pred_hash_to_idx.find(field_hash);
+            if (pred_it != pred_hash_to_idx.end()) {
+                fields_by_pred_idx[pred_it->second] = &field;
             }
 
-            // If predicate column not found in record, treat as NULL (fails predicate)
-            if (!found) {
+            // O(1) lookup in projection hash map
+            auto proj_it = proj_hash_to_idx.find(field_hash);
+            if (proj_it != proj_hash_to_idx.end()) {
+                fields_by_proj_idx[proj_it->second] = &field;
+            }
+        }
+
+        // Apply predicates: filter records that don't match
+        bool passes_predicates = true;
+        for (size_t i = 0; i < context.predicates.size(); ++i) {
+            auto it = fields_by_pred_idx.find(i);
+            if (it == fields_by_pred_idx.end()) {
                 passes_predicates = false;
                 break;
             }
 
-            if (!passes_predicates) {
+            if (!evaluate_predicate(buffer_data, *it->second, context.predicates[i])) {
+                passes_predicates = false;
                 break;
             }
         }
@@ -190,22 +189,12 @@ InterpreterResult interpret_jsonl(
             projected_fields = all_fields;
         } else {
             // Projection: include only requested columns in order
-            for (const auto& col_name : context.projected_columns) {
-                for (const auto& field : all_fields) {
-                    uint32_t key_len = field.key_end - field.key_start + 1;
-                    std::string field_name(
-                        reinterpret_cast<const char*>(buffer_data + field.key_start),
-                        key_len
-                    );
-
-                    if (field_name == col_name) {
-                        projected_fields.push_back(field);
-                        break;
-                    }
+            for (size_t i = 0; i < context.projected_columns.size(); ++i) {
+                auto it = fields_by_proj_idx.find(i);
+                if (it != fields_by_proj_idx.end()) {
+                    projected_fields.push_back(*it->second);
                 }
-
-                // If column not in record, add placeholder with NULL value
-                // TODO: Phase 6 - handle missing columns (emit NULL)
+                // If column not in record, skip (will be filled as NULL in Phase 6)
             }
         }
 
@@ -215,15 +204,17 @@ InterpreterResult interpret_jsonl(
         }
     }
 
-    // All complete records have been consumed
-    if (!record_bounds.empty()) {
-        result.bytes_consumed = record_bounds.back().second;
-        if (record_bounds.back().second < buffer_length &&
-            buffer_data[record_bounds.back().second] == '\n') {
-            result.bytes_consumed++;
+    // Bytes consumed: find the position after the last newline marker
+    result.bytes_consumed = 0;
+    for (const auto& marker : markers) {
+        if (marker.marker_type == static_cast<uint8_t>(MarkerType::NEWLINE)) {
+            result.bytes_consumed = marker.position + 1;
         }
-    } else {
-        result.bytes_consumed = 0;
+    }
+    // If no newlines, we consumed up to the end of the last complete record
+    // (build_map only returns complete records)
+    if (result.bytes_consumed == 0 && !all_records.empty()) {
+        result.bytes_consumed = buffer_length;
     }
 
     return result;

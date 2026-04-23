@@ -1,7 +1,7 @@
 # cython: language_level=3, cdivision=True
 # distutils: language = c++
 
-from libc.stdint cimport uint8_t, int64_t, uint32_t, size_t
+from libc.stdint cimport uint8_t, int64_t, uint32_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset, memcpy
 from libcpp.string cimport string
@@ -33,10 +33,16 @@ cdef extern from "core/parse_context.hpp" namespace "rugo::_jsonl":
 cdef extern from "core/markers.hpp" namespace "rugo::_jsonl":
     struct FieldSpan:
         uint32_t key_start
-        uint32_t key_end
+        uint32_t key_width
         uint32_t value_start
-        uint32_t value_end
+        uint32_t value_width
         uint8_t type
+
+
+cdef extern from "core/markers.hpp" namespace "rugo::_jsonl":
+    struct MarkerPosition:
+        uint32_t position
+        uint8_t marker_type
 
 
 cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
@@ -47,6 +53,21 @@ cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
 
     struct OrdinalPredictor:
         pass
+
+    InterpreterResult interpret_jsonl(
+        const uint8_t* buffer_data,
+        size_t buffer_length,
+        const vector[MarkerPosition]& markers,
+        const ParseContext& context,
+        OrdinalPredictor& predictor
+    )
+
+
+cdef extern from "core/structural_scan.hpp" namespace "rugo::_jsonl":
+    vector[MarkerPosition] scan_structural_markers(
+        const uint8_t* buffer,
+        size_t length
+    )
 
 
 cdef extern from "core/jsonl_reader.hpp" namespace "rugo::_jsonl":
@@ -79,18 +100,21 @@ cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
     struct ColumnResult:
         ColumnType col_type
         size_t num_rows
-        vector[uint8_t] null_flags
         vector[uint8_t] data
+        vector[uint8_t] null_bitmap
         vector[uint8_t]  str_data
         vector[uint32_t] str_offsets
         vector[uint32_t] str_lengths
+        uint8_t* data_ptr()
+        uint8_t* bitmap_ptr()
+        uint8_t* str_ptr()
 
     ColumnResult extract_column(
         const uint8_t* buffer,
         const vector[vector[FieldSpan]]& records,
         const string& column_name
     )
-    void merge_column(ColumnResult& dest, ColumnResult&& src)
+    void merge_column(ColumnResult& dest, ColumnResult& src)
 
 
 def read_jsonl(
@@ -210,6 +234,180 @@ def read_jsonl(
             del reader
 
 
+def benchmark_document_map(
+    data: bytes,
+):
+    """
+    Benchmark ONLY document map creation: structural scan + interpretation.
+    No predicates, no projection, no vector construction.
+
+    Returns:
+      dict with:
+        'num_records': int
+        'scan_ms': float (structural scan time)
+        'interpret_ms': float (document map building time)
+        'total_ms': float
+        'buffer_size_mb': float
+        'sample_map': first record as list of FieldSpans
+    """
+    import time
+
+    cdef:
+        const uint8_t* buf_data = <const uint8_t*><bytes>data
+        size_t buf_len = len(data)
+        size_t num_records = 0
+        ParseContext context
+        OrdinalPredictor predictor
+        vector[MarkerPosition] markers
+        InterpreterResult interp_result
+
+    # Step 1: Structural scan
+    scan_start = time.perf_counter()
+    markers = scan_structural_markers(buf_data, buf_len)
+    scan_ms = (time.perf_counter() - scan_start) * 1000
+
+    # Step 2: Document map interpretation
+    interp_start = time.perf_counter()
+    interp_result = interpret_jsonl(buf_data, buf_len, markers, context, predictor)
+    interp_ms = (time.perf_counter() - interp_start) * 1000
+
+    # Convert first record to Python for inspection
+    sample_map = []
+    if interp_result.all_records.size() > 0:
+        first_record = interp_result.all_records[0]
+        for field in first_record:
+            sample_map.append({
+                'key': (field.key_start, field.key_width),
+                'value': (field.value_start, field.value_width),
+                'type': field.type,
+            })
+
+    return {
+        'num_records': interp_result.num_records_passed,
+        'scan_ms': scan_ms,
+        'interpret_ms': interp_ms,
+        'total_ms': scan_ms + interp_ms,
+        'buffer_size_mb': len(data) / 1024 / 1024,
+        'sample_map': sample_map,
+    }
+
+
+def read_jsonl_raw(
+    data,
+    columns=None,
+    predicates=None,
+    infer_schema=False,
+):
+    """
+    Read JSONL data and return raw FieldSpan records (no vector construction).
+    Used for benchmarking interpretation phase in isolation.
+
+    Returns:
+      dict with keys:
+        'success': bool
+        'num_rows': int (records that passed predicates)
+        'column_names': list[str]
+        'buffer_size_mb': float
+        'elapsed_ms': float
+        'sample_record': first record as list of field info dicts
+    """
+    import time
+
+    cdef ParseContext context
+    cdef JsonlReader* reader = NULL
+    cdef Predicate pred
+    cdef ReadResult chunk_result
+    cdef list column_names = []
+    cdef size_t total_rows = 0
+    cdef double total_bytes = 0
+    cdef dict result = {
+        'success': False,
+        'num_rows': 0,
+        'column_names': [],
+        'buffer_size_mb': 0.0,
+        'elapsed_ms': 0.0,
+        'sample_record': []
+    }
+
+    try:
+        start_time = time.perf_counter()
+
+        # Build ParseContext
+        if columns:
+            for col in columns:
+                context.projected_columns.push_back(col.encode('utf-8'))
+
+        if predicates:
+            for col, op, val in predicates:
+                pred.column = col.encode('utf-8')
+                pred.op = <uint8_t>_parse_op(op)
+                pred.value = str(val).encode('utf-8')
+                context.predicates.push_back(pred)
+
+        context.infer_schema = infer_schema
+        context.infer_sample_size = 5
+        context.parse_arrays = False
+        context.parse_objects = False
+        context.fail_on_error = False
+
+        # Create reader
+        if isinstance(data, str):
+            reader = new JsonlReader(<string>data.encode('utf-8'), context)
+        elif isinstance(data, bytes):
+            reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
+        else:
+            data_bytes = bytes(data)
+            reader = new JsonlReader(<const uint8_t*><bytes>data_bytes, len(data_bytes), context)
+
+        # Read all chunks, accumulate row count
+        first_record = None
+        while True:
+            chunk_result = reader.next_chunk()
+
+            if not chunk_result.success:
+                break
+
+            if chunk_result.num_records > 0:
+                if not column_names:
+                    for col in chunk_result.column_names:
+                        column_names.append(col.decode('utf-8'))
+
+                total_rows += chunk_result.num_records
+                total_bytes += chunk_result.buffer_data.size()
+
+                # Capture first record as sample
+                if first_record is None and len(chunk_result.records) > 0:
+                    first_record = chunk_result.records[0]
+
+            if reader.is_eof():
+                break
+
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+        result['success'] = True
+        result['num_rows'] = total_rows
+        result['column_names'] = column_names
+        result['buffer_size_mb'] = total_bytes / 1024 / 1024
+        result['elapsed_ms'] = elapsed_ms
+
+        # Convert first record to Python format for inspection
+        if first_record is not None:
+            for field in first_record:
+                result['sample_record'].append({
+                    'key_start': field.key_start,
+                    'key_width': field.key_width,
+                    'value_start': field.value_start,
+                    'value_width': field.value_width,
+                    'type': field.type,
+                })
+
+        return result
+
+    finally:
+        if reader != NULL:
+            del reader
+
+
 cdef uint8_t _parse_op(str op):
     ops = {
         '==': 0,  # EQ
@@ -253,7 +451,7 @@ cdef list _build_vectors_from_chunks(
                 <const vector[vector[FieldSpan]]&>chunk_records[i],
                 col_name_cpp
             )
-            merge_column(merged, (<ColumnResult&&>chunk_col))
+            merge_column(merged, chunk_col)
 
         vec = _draken_from_column_result(merged)
         if vec is not None:
@@ -263,85 +461,77 @@ cdef list _build_vectors_from_chunks(
 
 
 cdef _draken_from_column_result(ColumnResult& cr):
-    """Wrap a merged ColumnResult into the appropriate Draken vector."""
+    """Wrap ColumnResult into Draken vector."""
     cdef size_t num_rows = cr.num_rows
     cdef size_t bitmap_bytes = (num_rows + 7) >> 3
-    cdef uint8_t* null_bmp = NULL
+    cdef uint8_t* owned_bitmap = NULL
+    cdef uint8_t* bdata = NULL
     cdef size_t i
+    cdef Int64Vector vec_i64
+    cdef Float64Vector vec_f64
+    cdef BoolVector vec_bool
+    cdef StringVectorBuilder builder
 
     if num_rows == 0:
         return None
 
-    # Build null bitmap if any nulls exist
-    cdef bint has_nulls = False
-    for i in range(num_rows):
-        if cr.null_flags[i] == 0:
-            has_nulls = True
-            break
-
-    if has_nulls:
-        null_bmp = <uint8_t*>malloc(bitmap_bytes)
-        if null_bmp == NULL:
+    # If null bitmap exists, copy it to owned heap memory (vectors require ownership)
+    if cr.null_bitmap.size() > 0:
+        owned_bitmap = <uint8_t*>malloc(bitmap_bytes)
+        if owned_bitmap == NULL:
             raise MemoryError()
-        memset(null_bmp, 0xFF, bitmap_bytes)
-        for i in range(num_rows):
-            if cr.null_flags[i] == 0:
-                null_bmp[i >> 3] &= ~(<uint8_t>1 << (i & 7))
+        memcpy(owned_bitmap, cr.null_bitmap.data(), bitmap_bytes)
 
     if cr.col_type == ColumnType.Int64:
-        vec = Int64Vector(num_rows)
+        vec_i64 = Int64Vector(num_rows)
         if cr.data.size() >= num_rows * 8:
-            memcpy(<void*>vec.ptr.data, cr.data.data(), num_rows * 8)
-        if has_nulls:
-            vec.ptr.null_bitmap = null_bmp
-        return vec
+            memcpy(<void*>vec_i64.ptr.data, cr.data.data(), num_rows * 8)
+        if owned_bitmap != NULL:
+            vec_i64.ptr.null_bitmap = owned_bitmap
+        return vec_i64
 
     elif cr.col_type == ColumnType.Float64:
-        vec = Float64Vector(num_rows)
+        vec_f64 = Float64Vector(num_rows)
         if cr.data.size() >= num_rows * 8:
-            memcpy(<void*>vec.ptr.data, cr.data.data(), num_rows * 8)
-        if has_nulls:
-            vec.ptr.null_bitmap = null_bmp
-        return vec
+            memcpy(<void*>vec_f64.ptr.data, cr.data.data(), num_rows * 8)
+        if owned_bitmap != NULL:
+            vec_f64.ptr.null_bitmap = owned_bitmap
+        return vec_f64
 
     elif cr.col_type == ColumnType.Bool:
-        vec = BoolVector(num_rows)
-        cdef uint8_t* bdata = <uint8_t*>vec.ptr.data
-        cdef size_t bdata_bytes = (num_rows + 7) >> 3
-        if bdata != NULL and bdata_bytes > 0:
-            memset(bdata, 0, bdata_bytes)
-        for i in range(num_rows):
-            if cr.data.size() > i and cr.data[i]:
-                bdata[i >> 3] |= (<uint8_t>1 << (i & 7))
-        if has_nulls:
-            vec.ptr.null_bitmap = null_bmp
-        return vec
+        vec_bool = BoolVector(num_rows)
+        bdata = <uint8_t*>vec_bool.ptr.data
+        if cr.data.size() > 0 and bdata != NULL:
+            memcpy(bdata, cr.data.data(), (num_rows + 7) >> 3)
+        if owned_bitmap != NULL:
+            vec_bool.ptr.null_bitmap = owned_bitmap
+        return vec_bool
 
     elif cr.col_type == ColumnType.String:
-        if has_nulls and null_bmp != NULL:
-            free(null_bmp)
-            null_bmp = NULL
-        # String: iterate spans — tight loop with direct C++ pointer access
-        cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(num_rows, 16)
-        cdef const uint8_t* sdata = cr.str_data.data() if cr.str_data.size() > 0 else NULL
+        if owned_bitmap != NULL:
+            free(owned_bitmap)
+        # String vector: build from spans
+        builder = StringVectorBuilder.with_estimate(num_rows, 16)
         for i in range(num_rows):
-            if cr.null_flags[i] == 0:
+            if i < cr.str_lengths.size() and cr.str_lengths[i] == 0:
                 builder.append_null()
-            else:
+            elif i < cr.str_lengths.size() and cr.str_data.size() > 0:
                 builder.append_bytes(
-                    <const char*>(sdata + cr.str_offsets[i]),
+                    <const char*>(cr.str_data.data() + cr.str_offsets[i]),
                     cr.str_lengths[i]
                 )
+            else:
+                builder.append_null()
         return builder.finish()
 
     else:
-        # Null column: return all-null string vector
-        if has_nulls and null_bmp != NULL:
-            free(null_bmp)
-        cdef StringVectorBuilder nb = StringVectorBuilder.with_estimate(num_rows, 0)
+        # Null column
+        if owned_bitmap != NULL:
+            free(owned_bitmap)
+        builder = StringVectorBuilder.with_estimate(num_rows, 0)
         for i in range(num_rows):
-            nb.append_null()
-        return nb.finish()
+            builder.append_null()
+        return builder.finish()
 
 
 def get_jsonl_schema(data, sample_size=5):

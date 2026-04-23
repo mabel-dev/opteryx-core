@@ -1,4 +1,5 @@
 #include "column_builder.hpp"
+#include "fast_parsers.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -10,16 +11,14 @@ namespace {
 static inline bool key_matches(
     const uint8_t* buf,
     uint32_t       key_start,
-    uint32_t       key_end,
+    uint32_t       key_width,
     const char*    name,
     size_t         name_len) noexcept
 {
-    size_t klen = static_cast<size_t>(key_end - key_start + 1);
-    return klen == name_len &&
+    return static_cast<size_t>(key_width) == name_len &&
            std::memcmp(buf + key_start, name, name_len) == 0;
 }
 
-// Resolve the dominant numeric type for a column by sampling up to 64 rows.
 static ColumnType infer_numeric_type(
     const uint8_t*                            buffer,
     const std::vector<std::vector<FieldSpan>>& records,
@@ -27,24 +26,21 @@ static ColumnType infer_numeric_type(
     size_t                                    col_len)
 {
     bool saw_float = false;
-    bool saw_int   = false;
     size_t limit   = std::min(records.size(), static_cast<size_t>(64));
 
     for (size_t row = 0; row < limit; ++row) {
         for (const auto& f : records[row]) {
-            if (!key_matches(buffer, f.key_start, f.key_end, col_ptr, col_len))
+            if (!key_matches(buffer, f.key_start, f.key_width, col_ptr, col_len))
                 continue;
-            if (is_null(buffer, f.value_start, f.value_end))
+            if (is_null(buffer, f.value_start, f.value_start + f.value_width - 1))
                 break;
             if (f.type == static_cast<uint8_t>(ValueType::Integer) ||
                 f.type == static_cast<uint8_t>(ValueType::Double))
             {
                 int64_t tmp_i = 0;
-                if (parse_int64(buffer, f.value_start, f.value_end, tmp_i)) {
-                    saw_int = true;
-                } else {
+                if (!fast_parse_int64(buffer, f.value_start, f.value_start + f.value_width - 1, tmp_i)) {
                     double tmp_d = 0.0;
-                    if (parse_float64(buffer, f.value_start, f.value_end, tmp_d))
+                    if (fast_parse_float64(buffer, f.value_start, f.value_start + f.value_width - 1, tmp_d))
                         saw_float = true;
                 }
             }
@@ -56,9 +52,6 @@ static ColumnType infer_numeric_type(
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// extract_column
-// ---------------------------------------------------------------------------
 ColumnResult extract_column(
     const uint8_t*                            buffer,
     const std::vector<std::vector<FieldSpan>>& records,
@@ -76,13 +69,13 @@ ColumnResult extract_column(
         return result;
     }
 
-    // --- Infer dominant type (scan first non-null row) ----------------------
+    // Infer dominant type
     ColumnType dom = ColumnType::Null;
     for (size_t row = 0; row < num_rows && dom == ColumnType::Null; ++row) {
         for (const auto& f : records[row]) {
-            if (!key_matches(buffer, f.key_start, f.key_end, col_ptr, col_len))
+            if (!key_matches(buffer, f.key_start, f.key_width, col_ptr, col_len))
                 continue;
-            if (is_null(buffer, f.value_start, f.value_end))
+            if (is_null(buffer, f.value_start, f.value_start + f.value_width - 1))
                 break;
             uint8_t vt = f.type;
             if (vt == static_cast<uint8_t>(ValueType::String))         dom = ColumnType::String;
@@ -96,8 +89,9 @@ ColumnResult extract_column(
 
     result.col_type = dom;
 
-    // --- Allocate output buffers --------------------------------------------
-    result.null_flags.resize(num_rows, 1);  // default: all valid
+    // Allocate buffers
+    const size_t bitmap_bytes = (num_rows + 7) >> 3;
+    result.null_bitmap.assign(bitmap_bytes, 0xFF);  // all valid
 
     switch (dom) {
     case ColumnType::Int64:
@@ -108,76 +102,79 @@ ColumnResult extract_column(
         result.data.resize(num_rows, 0);
         break;
     case ColumnType::String:
-        result.str_offsets.resize(num_rows, 0);
-        result.str_lengths.resize(num_rows, 0);
+        result.str_offsets.resize(num_rows);
+        result.str_lengths.resize(num_rows);
         result.str_data.reserve(num_rows * 8);
         break;
     case ColumnType::Null:
         break;
     }
 
-    // --- Fill buffers --------------------------------------------------------
+    // Fill buffers
+    uint8_t* data_ptr = result.data_ptr();
+    uint8_t* bitmap_ptr = result.bitmap_ptr();
+
     for (size_t row = 0; row < num_rows; ++row) {
         bool found = false;
 
         for (const auto& f : records[row]) {
-            if (!key_matches(buffer, f.key_start, f.key_end, col_ptr, col_len))
+            if (!key_matches(buffer, f.key_start, f.key_width, col_ptr, col_len))
                 continue;
 
             found = true;
 
-            if (is_null(buffer, f.value_start, f.value_end)) {
-                result.null_flags[row] = 0;
+            if (is_null(buffer, f.value_start, f.value_start + f.value_width - 1)) {
+                if (bitmap_ptr)
+                    bitmap_ptr[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
                 break;
             }
 
             switch (dom) {
             case ColumnType::Int64: {
                 int64_t v = 0;
-                if (parse_int64(buffer, f.value_start, f.value_end, v)) {
-                    std::memcpy(result.data.data() + row * 8, &v, 8);
+                if (fast_parse_int64(buffer, f.value_start, f.value_start + f.value_width - 1, v)) {
+                    std::memcpy(data_ptr + row * 8, &v, 8);
                 } else {
                     double dv = 0.0;
-                    if (parse_float64(buffer, f.value_start, f.value_end, dv)) {
+                    if (fast_parse_float64(buffer, f.value_start, f.value_start + f.value_width - 1, dv)) {
                         v = static_cast<int64_t>(dv);
-                        std::memcpy(result.data.data() + row * 8, &v, 8);
+                        std::memcpy(data_ptr + row * 8, &v, 8);
                     } else {
-                        result.null_flags[row] = 0;
+                        bitmap_ptr[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
                     }
                 }
                 break;
             }
             case ColumnType::Float64: {
                 double v = 0.0;
-                bool parsed = parse_float64(buffer, f.value_start, f.value_end, v);
+                bool parsed = fast_parse_float64(buffer, f.value_start, f.value_start + f.value_width - 1, v);
                 if (!parsed) {
                     int64_t iv = 0;
-                    if (parse_int64(buffer, f.value_start, f.value_end, iv)) {
+                    if (fast_parse_int64(buffer, f.value_start, f.value_start + f.value_width - 1, iv)) {
                         v = static_cast<double>(iv);
                         parsed = true;
                     }
                 }
                 if (parsed) {
-                    std::memcpy(result.data.data() + row * 8, &v, 8);
+                    std::memcpy(data_ptr + row * 8, &v, 8);
                 } else {
-                    result.null_flags[row] = 0;
+                    bitmap_ptr[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
                 }
                 break;
             }
             case ColumnType::Bool: {
-                uint32_t len = f.value_end - f.value_start + 1;
+                uint32_t len = f.value_width;
                 if (len == 4 && std::memcmp(buffer + f.value_start, "true", 4) == 0)
-                    result.data[row] = 1;
-                else if (len == 5 && std::memcmp(buffer + f.value_start, "false", 5) != 0)
-                    result.null_flags[row] = 0;
-                // false → data[row] stays 0
+                    data_ptr[row] = 1;
+                else if (len == 5 && std::memcmp(buffer + f.value_start, "false", 5) == 0)
+                    data_ptr[row] = 0;
+                else
+                    bitmap_ptr[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
                 break;
             }
             case ColumnType::String: {
                 uint32_t start = f.value_start;
-                uint32_t len   = (f.value_end >= f.value_start)
-                                    ? f.value_end - f.value_start + 1
-                                    : 0;
+                uint32_t len   = f.value_width;
                 result.str_offsets[row] = static_cast<uint32_t>(result.str_data.size());
                 result.str_lengths[row] = len;
                 if (len > 0)
@@ -189,32 +186,28 @@ ColumnResult extract_column(
             case ColumnType::Null:
                 break;
             }
-            break;  // matched field, move to next row
+            break;
         }
 
         if (!found)
-            result.null_flags[row] = 0;
+            bitmap_ptr[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
     }
 
     return result;
 }
 
-// ---------------------------------------------------------------------------
-// merge_column — append src onto dest
-// ---------------------------------------------------------------------------
-void merge_column(ColumnResult& dest, ColumnResult&& src) {
+void merge_column(ColumnResult& dest, ColumnResult& src) {
     if (src.num_rows == 0)
         return;
 
     if (dest.num_rows == 0) {
-        dest = std::move(src);
+        dest = src;
         return;
     }
 
-    // Type promotion: prefer non-Null type
+    // Type promotion
     if (dest.col_type == ColumnType::Null && src.col_type != ColumnType::Null) {
         dest.col_type = src.col_type;
-        // Retroactively allocate dest buffers for existing null rows
         size_t prev = dest.num_rows;
         switch (dest.col_type) {
         case ColumnType::Int64:
@@ -232,11 +225,10 @@ void merge_column(ColumnResult& dest, ColumnResult&& src) {
         }
     }
 
-    // Append null_flags
-    dest.null_flags.insert(dest.null_flags.end(),
-                           src.null_flags.begin(), src.null_flags.end());
-
     // Append data
+    dest.null_bitmap.insert(dest.null_bitmap.end(),
+                            src.null_bitmap.begin(), src.null_bitmap.end());
+
     if (dest.col_type == ColumnType::Int64 || dest.col_type == ColumnType::Float64) {
         dest.data.insert(dest.data.end(), src.data.begin(), src.data.end());
     } else if (dest.col_type == ColumnType::Bool) {

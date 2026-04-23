@@ -85,7 +85,7 @@ bool evaluate_predicate(
     const Predicate& pred) {
 
     // Handle NULL values
-    if (is_null(buffer, value_span.value_start, value_span.value_end)) {
+    if (is_null(buffer, value_span.value_start, value_span.value_start + value_span.value_width - 1)) {
         // NULL comparisons: NULL op anything = false (SQL semantics)
         // except NULL != anything might be true in some systems, but we'll use SQL
         return false;
@@ -117,7 +117,7 @@ bool evaluate_predicate(
     // Parse field value based on type
     if (value_span.type == static_cast<uint8_t>(ValueType::Integer)) {
         int64_t val_int;
-        if (!parse_int64(buffer, value_span.value_start, value_span.value_end, val_int)) {
+        if (!parse_int64(buffer, value_span.value_start, value_span.value_start + value_span.value_width - 1, val_int)) {
             return false;
         }
 
@@ -139,7 +139,7 @@ bool evaluate_predicate(
         }
     } else if (value_span.type == static_cast<uint8_t>(ValueType::Double)) {
         double val_float;
-        if (!parse_float64(buffer, value_span.value_start, value_span.value_end, val_float)) {
+        if (!parse_float64(buffer, value_span.value_start, value_span.value_start + value_span.value_width - 1, val_float)) {
             return false;
         }
 
@@ -160,7 +160,7 @@ bool evaluate_predicate(
                 return val_float >= cmp_val;
         }
     } else if (value_span.type == static_cast<uint8_t>(ValueType::String)) {
-        std::string val_str = extract_string(buffer, value_span.value_start, value_span.value_end);
+        std::string val_str = extract_string(buffer, value_span.value_start, value_span.value_start + value_span.value_width - 1);
 
         // String comparison
         int cmp = val_str.compare(pred.value);

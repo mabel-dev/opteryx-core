@@ -128,10 +128,9 @@ ReadResult JsonlReader::process_buffer() {
         if (!interp_result.all_records.empty()) {
             const auto& first_record = interp_result.all_records[0];
             for (const auto& field : first_record) {
-                uint32_t key_len = field.key_end - field.key_start + 1;
                 std::string key_name(
                     reinterpret_cast<const char*>(read_buffer.data() + field.key_start),
-                    key_len
+                    field.key_width
                 );
                 result.column_names.push_back(key_name);
             }

@@ -42,21 +42,21 @@ enum class ValueType : uint8_t {
 
 // FieldSpan: location and type of a key-value pair in the source buffer
 struct FieldSpan {
-    uint32_t key_start;    // Inclusive: first char of unquoted key
-    uint32_t key_end;      // Inclusive: last char of unquoted key
-    uint32_t value_start;  // Inclusive: first char of value (after opening quote/brace/bracket)
-    uint32_t value_end;    // Inclusive: last char of value (before closing quote/brace/bracket)
+    uint32_t key_start;    // First char of unquoted key
+    uint32_t key_width;    // Byte width of key
+    uint32_t value_start;  // First char of value (after opening quote/brace/bracket)
+    uint32_t value_width;  // Byte width of value
     uint8_t type;          // ValueType enum
     uint16_t ordinal;      // Position (key order) within object
 
     FieldSpan() = default;
-    FieldSpan(uint32_t ks, uint32_t ke, uint32_t vs, uint32_t ve, ValueType t, uint16_t ord)
-        : key_start(ks), key_end(ke), value_start(vs), value_end(ve),
+    FieldSpan(uint32_t ks, uint32_t kw, uint32_t vs, uint32_t vw, ValueType t, uint16_t ord)
+        : key_start(ks), key_width(kw), value_start(vs), value_width(vw),
           type(static_cast<uint8_t>(t)), ordinal(ord) {}
 
-    // Inclusive byte length
-    inline uint32_t key_length() const { return key_end - key_start + 1; }
-    inline uint32_t value_length() const { return value_end - value_start + 1; }
+    // Byte length accessors
+    inline uint32_t key_length() const { return key_width; }
+    inline uint32_t value_length() const { return value_width; }
 };
 
 }  // namespace rugo::_jsonl

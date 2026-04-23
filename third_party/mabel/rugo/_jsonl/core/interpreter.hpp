@@ -12,7 +12,14 @@
 
 namespace rugo::_jsonl {
 
-// Helper for interpreting a single JSON record
+// Build document map from structural markers (linear single pass)
+std::vector<std::vector<FieldSpan>> build_map(
+    const uint8_t* buffer,
+    size_t buffer_length,
+    const std::vector<MarkerPosition>& markers
+);
+
+// Helper for interpreting a single JSON record (deprecated, use build_map)
 class RecordInterpreter {
 public:
     // Parse a single record given marker positions and byte range
