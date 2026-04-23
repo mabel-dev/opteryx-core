@@ -513,24 +513,12 @@ cdef _string_vector_from_result(StringColumnResult& scr):
         else:
             builder.append_null()
 
-    string_vec = builder.build()
+    string_vec = builder.finish()
     if owned_bitmap != NULL:
         string_vec.ptr.null_bitmap = owned_bitmap
 
-    # Apply type casting based on inferred type
-    if scr.inferred_type == ColumnType.Int64:
-        # TODO: call vector_ops_cast_int_from_string(string_vec)
-        # For now, return string vector and let caller handle casting
-        return string_vec
-    elif scr.inferred_type == ColumnType.Float64:
-        # TODO: call vector_ops_cast_float_from_string(string_vec)
-        return string_vec
-    elif scr.inferred_type == ColumnType.Bool:
-        # TODO: call vector_ops_cast_bool_from_string(string_vec)
-        return string_vec
-    else:
-        # Keep as string
-        return string_vec
+    # For now, return string vector; type casting deferred to caller
+    return string_vec
 
 
 cdef _draken_from_column_result(ColumnResult& cr):
