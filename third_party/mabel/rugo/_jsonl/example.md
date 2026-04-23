@@ -64,4 +64,33 @@ This gives us enough information to build a map
   ]
 ]
 
-This is where the current step finishes - ask if you want to know how we use this to get actual values from the document
+So now when we read this chunk this is what we do, let's say we only want the 'name' column
+
+last_seen = 0  // default to any value
+key_width = len('name')
+vector_buffer = malloced buffer
+for map_of_record in list_of_maps:
+  if last_seen <= len(map_of_record):
+      map_of_field = map_of_record[last_seen]
+      if key_width = map_of_field.key_width:
+          if key = buffer[map_of_field.key_start:map_of_field.key_start+key_width]:
+            value = buffer[map_of_field.value_start:map_of_field.value_start+map_of_field.value_width]
+            malloced_buffer.append(value)
+            continue
+  for i in range(len(map_of_record)):
+      map_of_field = map_of_record[i]
+      if key_width = map_of_field.key_width:
+          if key = buffer[map_of_field.key_start:map_of_field.key_start+key_width]:
+            value = buffer[map_of_field.value_start:map_of_field.value_start+map_of_field.value_width]
+            malloced_buffer.append(value)
+            last_seen = i
+            continue
+  malloced_buffer.append(null)
+
+string_vector = StringVector(malloced_buffer)
+if column is float:
+    return vector_ops_cast_float_from_string(string_vector)
+if column is int:
+    return vector_ops_cast_int_from_string(string_vector)
+if column is bool:
+    return vector_ops_cast_bool_from_string(string_vector)

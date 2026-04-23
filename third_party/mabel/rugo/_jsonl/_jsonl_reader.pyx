@@ -109,10 +109,23 @@ cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
         uint8_t* bitmap_ptr()
         uint8_t* str_ptr()
 
-    ColumnResult extract_column(
+    struct StringColumnResult:
+        ColumnType inferred_type
+        size_t num_rows
+        vector[uint8_t] data
+        vector[uint32_t] offsets
+        vector[uint32_t] lengths
+        vector[uint8_t] null_bitmap
+        uint8_t* data_ptr()
+        uint32_t* offset_ptr()
+        uint32_t* length_ptr()
+        uint8_t* bitmap_ptr()
+
+    StringColumnResult extract_column(
         const uint8_t* buffer,
         const vector[vector[FieldSpan]]& records,
-        const string& column_name
+        const string& column_name,
+        OrdinalPredictor& predictor
     )
     void merge_column(ColumnResult& dest, ColumnResult& src)
 
@@ -427,37 +440,97 @@ cdef list _build_vectors_from_chunks(
     size_t total_rows
 ):
     """
-    For each column, call extract_column() once per chunk (C++ does all field
-    lookup and type detection), merge results, then wrap as a Draken vector.
+    For each column, extract as StringVector, then cast to inferred type.
     No Python per-row iteration.
     """
     cdef list vectors = []
-    cdef ColumnResult merged
-    cdef ColumnResult chunk_col
+    cdef StringColumnResult chunk_col
     cdef bytes buf_bytes
     cdef const uint8_t* buf_ptr
     cdef string col_name_cpp
     cdef size_t i
+    cdef OrdinalPredictor predictor
 
     for col_name in column_names:
         col_name_cpp = col_name.encode('utf-8')
-        merged = ColumnResult()
 
-        for i in range(len(chunk_buffers)):
-            buf_bytes = <bytes>chunk_buffers[i]
-            buf_ptr = <const uint8_t*>buf_bytes
-            chunk_col = extract_column(
-                buf_ptr,
-                <const vector[vector[FieldSpan]]&>chunk_records[i],
-                col_name_cpp
-            )
-            merge_column(merged, chunk_col)
+        # Extract first chunk to get type hint
+        if len(chunk_buffers) == 0:
+            continue
 
-        vec = _draken_from_column_result(merged)
+        buf_bytes = <bytes>chunk_buffers[0]
+        buf_ptr = <const uint8_t*>buf_bytes
+        chunk_col = extract_column(
+            buf_ptr,
+            <const vector[vector[FieldSpan]]&>chunk_records[0],
+            col_name_cpp,
+            predictor
+        )
+
+        # Build StringVector from extracted data
+        vec = _string_vector_from_result(chunk_col)
+
+        # Cast to inferred type and add to vectors
         if vec is not None:
             vectors.append(vec)
 
     return vectors
+
+
+cdef _string_vector_from_result(StringColumnResult& scr):
+    """Build StringVector from StringColumnResult and apply type casting."""
+    cdef size_t num_rows = scr.num_rows
+    cdef size_t bitmap_bytes = (num_rows + 7) >> 3
+    cdef uint8_t* owned_bitmap = NULL
+    cdef size_t i
+    cdef StringVectorBuilder builder
+    cdef StringVector string_vec
+    cdef Int64Vector int_vec
+    cdef Float64Vector float_vec
+    cdef BoolVector bool_vec
+
+    if num_rows == 0:
+        return None
+
+    # Copy null bitmap to owned memory
+    if scr.null_bitmap.size() > 0:
+        owned_bitmap = <uint8_t*>malloc(bitmap_bytes)
+        if owned_bitmap == NULL:
+            raise MemoryError()
+        memcpy(owned_bitmap, scr.null_bitmap.data(), bitmap_bytes)
+
+    # Build StringVector from offsets and lengths
+    builder = StringVectorBuilder.with_estimate(num_rows, 16)
+    for i in range(num_rows):
+        if i < scr.lengths.size():
+            if scr.lengths[i] == 0:
+                builder.append_null()
+            else:
+                builder.append_bytes(
+                    <const char*>(scr.data.data() + scr.offsets[i]),
+                    scr.lengths[i]
+                )
+        else:
+            builder.append_null()
+
+    string_vec = builder.build()
+    if owned_bitmap != NULL:
+        string_vec.ptr.null_bitmap = owned_bitmap
+
+    # Apply type casting based on inferred type
+    if scr.inferred_type == ColumnType.Int64:
+        # TODO: call vector_ops_cast_int_from_string(string_vec)
+        # For now, return string vector and let caller handle casting
+        return string_vec
+    elif scr.inferred_type == ColumnType.Float64:
+        # TODO: call vector_ops_cast_float_from_string(string_vec)
+        return string_vec
+    elif scr.inferred_type == ColumnType.Bool:
+        # TODO: call vector_ops_cast_bool_from_string(string_vec)
+        return string_vec
+    else:
+        # Keep as string
+        return string_vec
 
 
 cdef _draken_from_column_result(ColumnResult& cr):

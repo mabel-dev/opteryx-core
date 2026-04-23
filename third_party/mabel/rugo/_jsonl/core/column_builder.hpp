@@ -7,6 +7,7 @@
 
 #include "markers.hpp"
 #include "value_parser.hpp"
+#include "field_span.hpp"
 
 namespace rugo::_jsonl {
 
@@ -44,14 +45,31 @@ struct ColumnResult {
     uint8_t*  str_ptr()    { return str_data.empty() ? nullptr : str_data.data(); }
 };
 
-// Extract one column from records. Fills buffers once; ready for Draken wrapping.
-ColumnResult extract_column(
+// String column result: raw bytes extracted from JSON (no parsing)
+struct StringColumnResult {
+    ColumnType inferred_type = ColumnType::String;  // type hint from first non-null value
+    size_t num_rows = 0;
+    std::vector<uint8_t>  data;       // concatenated string values
+    std::vector<uint32_t> offsets;    // start position of each row in data
+    std::vector<uint32_t> lengths;    // length of each row's value
+    std::vector<uint8_t>  null_bitmap; // null marker: bit=1 (valid), bit=0 (null)
+
+    uint8_t*  data_ptr()   { return data.empty() ? nullptr : data.data(); }
+    uint32_t* offset_ptr() { return offsets.empty() ? nullptr : offsets.data(); }
+    uint32_t* length_ptr() { return lengths.empty() ? nullptr : lengths.data(); }
+    uint8_t*  bitmap_ptr() { return null_bitmap.empty() ? nullptr : null_bitmap.data(); }
+};
+
+// Extract one column as raw strings (ordinal prediction for fast key lookup).
+// Returns StringColumnResult; caller applies type casting with vector_ops_cast_*.
+StringColumnResult extract_column(
     const uint8_t*                            buffer,
     const std::vector<std::vector<FieldSpan>>& records,
-    const std::string&                         column_name
+    const std::string&                         column_name,
+    OrdinalPredictor&                         predictor
 );
 
-// Merge results from multiple chunks (same column, different buffers)
+// Legacy: Merge results from multiple chunks (same column, different buffers)
 void merge_column(ColumnResult& dest, ColumnResult& src);
 
 }  // namespace rugo::_jsonl

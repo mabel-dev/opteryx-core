@@ -52,145 +52,111 @@ static ColumnType infer_numeric_type(
 
 }  // namespace
 
-ColumnResult extract_column(
+StringColumnResult extract_column(
     const uint8_t*                            buffer,
     const std::vector<std::vector<FieldSpan>>& records,
-    const std::string&                         column_name)
+    const std::string&                         column_name,
+    OrdinalPredictor&                         predictor)
 {
     const size_t num_rows = records.size();
-    const char*  col_ptr  = column_name.data();
     const size_t col_len  = column_name.size();
 
-    ColumnResult result;
+    StringColumnResult result;
     result.num_rows = num_rows;
 
     if (num_rows == 0) {
-        result.col_type = ColumnType::Null;
         return result;
     }
 
-    // Infer dominant type
-    ColumnType dom = ColumnType::Null;
-    for (size_t row = 0; row < num_rows && dom == ColumnType::Null; ++row) {
-        for (const auto& f : records[row]) {
-            if (!key_matches(buffer, f.key_start, f.key_width, col_ptr, col_len))
-                continue;
-            if (is_null(buffer, f.value_start, f.value_start + f.value_width - 1))
+    // Allocate null bitmap (all valid by default)
+    const size_t bitmap_bytes = (num_rows + 7) >> 3;
+    result.null_bitmap.assign(bitmap_bytes, 0xFF);
+
+    // Infer type from first non-null value
+    for (size_t row = 0; row < num_rows; ++row) {
+        const auto& record = records[row];
+        for (const auto& f : record) {
+            if (f.key_width == col_len &&
+                std::memcmp(buffer + f.key_start, column_name.data(), col_len) == 0) {
+                if (!is_null(buffer, f.value_start, f.value_start + f.value_width - 1)) {
+                    uint8_t vt = f.type;
+                    if (vt == static_cast<uint8_t>(ValueType::String))
+                        result.inferred_type = ColumnType::String;
+                    else if (vt == static_cast<uint8_t>(ValueType::Boolean))
+                        result.inferred_type = ColumnType::Bool;
+                    else if (vt == static_cast<uint8_t>(ValueType::Integer))
+                        result.inferred_type = ColumnType::Int64;
+                    else if (vt == static_cast<uint8_t>(ValueType::Double))
+                        result.inferred_type = ColumnType::Float64;
+                    goto infer_done;
+                }
                 break;
-            uint8_t vt = f.type;
-            if (vt == static_cast<uint8_t>(ValueType::String))         dom = ColumnType::String;
-            else if (vt == static_cast<uint8_t>(ValueType::Boolean))   dom = ColumnType::Bool;
-            else if (vt == static_cast<uint8_t>(ValueType::Integer) ||
-                     vt == static_cast<uint8_t>(ValueType::Double))
-                dom = infer_numeric_type(buffer, records, col_ptr, col_len);
-            break;
+            }
         }
     }
+    infer_done:
 
-    result.col_type = dom;
+    // Preallocate estimated string data (rough estimate)
+    result.data.reserve(num_rows * 16);
+    result.offsets.resize(num_rows);
+    result.lengths.resize(num_rows);
 
-    // Allocate buffers
-    const size_t bitmap_bytes = (num_rows + 7) >> 3;
-    result.null_bitmap.assign(bitmap_bytes, 0xFF);  // all valid
-
-    switch (dom) {
-    case ColumnType::Int64:
-    case ColumnType::Float64:
-        result.data.resize(num_rows * 8, 0);
-        break;
-    case ColumnType::Bool:
-        result.data.resize(num_rows, 0);
-        break;
-    case ColumnType::String:
-        result.str_offsets.resize(num_rows);
-        result.str_lengths.resize(num_rows);
-        result.str_data.reserve(num_rows * 8);
-        break;
-    case ColumnType::Null:
-        break;
-    }
-
-    // Fill buffers
-    uint8_t* data_ptr = result.data_ptr();
-    uint8_t* bitmap_ptr = result.bitmap_ptr();
+    // Get ordinal prediction candidates for this column
+    auto candidates = predictor.get_candidates(column_name);
+    uint16_t last_seen = candidates.empty() ? 0xFFFF : candidates[0];
 
     for (size_t row = 0; row < num_rows; ++row) {
+        const auto& record = records[row];
         bool found = false;
 
-        for (const auto& f : records[row]) {
-            if (!key_matches(buffer, f.key_start, f.key_width, col_ptr, col_len))
-                continue;
-
-            found = true;
-
-            if (is_null(buffer, f.value_start, f.value_start + f.value_width - 1)) {
-                if (bitmap_ptr)
-                    bitmap_ptr[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
-                break;
-            }
-
-            switch (dom) {
-            case ColumnType::Int64: {
-                int64_t v = 0;
-                if (fast_parse_int64(buffer, f.value_start, f.value_start + f.value_width - 1, v)) {
-                    std::memcpy(data_ptr + row * 8, &v, 8);
+        // Fast path: try predicted ordinal first
+        if (last_seen != 0xFFFF && last_seen < record.size()) {
+            const auto& f = record[last_seen];
+            if (f.key_width == col_len &&
+                std::memcmp(buffer + f.key_start, column_name.data(), col_len) == 0) {
+                // Match! Extract value
+                if (is_null(buffer, f.value_start, f.value_start + f.value_width - 1)) {
+                    result.null_bitmap[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
                 } else {
-                    double dv = 0.0;
-                    if (fast_parse_float64(buffer, f.value_start, f.value_start + f.value_width - 1, dv)) {
-                        v = static_cast<int64_t>(dv);
-                        std::memcpy(data_ptr + row * 8, &v, 8);
-                    } else {
-                        bitmap_ptr[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
-                    }
+                    result.offsets[row] = static_cast<uint32_t>(result.data.size());
+                    result.lengths[row] = f.value_width;
+                    result.data.insert(result.data.end(),
+                                      buffer + f.value_start,
+                                      buffer + f.value_start + f.value_width);
                 }
-                break;
+                found = true;
             }
-            case ColumnType::Float64: {
-                double v = 0.0;
-                bool parsed = fast_parse_float64(buffer, f.value_start, f.value_start + f.value_width - 1, v);
-                if (!parsed) {
-                    int64_t iv = 0;
-                    if (fast_parse_int64(buffer, f.value_start, f.value_start + f.value_width - 1, iv)) {
-                        v = static_cast<double>(iv);
-                        parsed = true;
-                    }
-                }
-                if (parsed) {
-                    std::memcpy(data_ptr + row * 8, &v, 8);
-                } else {
-                    bitmap_ptr[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
-                }
-                break;
-            }
-            case ColumnType::Bool: {
-                uint32_t len = f.value_width;
-                if (len == 4 && std::memcmp(buffer + f.value_start, "true", 4) == 0)
-                    data_ptr[row] = 1;
-                else if (len == 5 && std::memcmp(buffer + f.value_start, "false", 5) == 0)
-                    data_ptr[row] = 0;
-                else
-                    bitmap_ptr[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
-                break;
-            }
-            case ColumnType::String: {
-                uint32_t start = f.value_start;
-                uint32_t len   = f.value_width;
-                result.str_offsets[row] = static_cast<uint32_t>(result.str_data.size());
-                result.str_lengths[row] = len;
-                if (len > 0)
-                    result.str_data.insert(result.str_data.end(),
-                                           buffer + start,
-                                           buffer + start + len);
-                break;
-            }
-            case ColumnType::Null:
-                break;
-            }
-            break;
         }
 
-        if (!found)
-            bitmap_ptr[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
+        // Slow path: linear scan (fallback if prediction missed)
+        if (!found) {
+            for (size_t i = 0; i < record.size(); ++i) {
+                const auto& f = record[i];
+                if (f.key_width == col_len &&
+                    std::memcmp(buffer + f.key_start, column_name.data(), col_len) == 0) {
+                    // Match! Update prediction and extract value
+                    last_seen = static_cast<uint16_t>(i);
+                    predictor.update_history(column_name, last_seen);
+
+                    if (is_null(buffer, f.value_start, f.value_start + f.value_width - 1)) {
+                        result.null_bitmap[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
+                    } else {
+                        result.offsets[row] = static_cast<uint32_t>(result.data.size());
+                        result.lengths[row] = f.value_width;
+                        result.data.insert(result.data.end(),
+                                          buffer + f.value_start,
+                                          buffer + f.value_start + f.value_width);
+                    }
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        // Column not found in this record
+        if (!found) {
+            result.null_bitmap[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
+        }
     }
 
     return result;
