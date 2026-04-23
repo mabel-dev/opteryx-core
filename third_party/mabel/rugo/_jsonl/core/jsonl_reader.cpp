@@ -21,6 +21,12 @@ JsonlReader::JsonlReader(const uint8_t* buffer, size_t length, const ParseContex
     read_buffer.reserve(CHUNK_SIZE);
 }
 
+JsonlReader::~JsonlReader() {
+    if (file_handle) {
+        std::fclose(file_handle);
+    }
+}
+
 ReadResult JsonlReader::next_chunk() {
     ReadResult result;
 
@@ -91,13 +97,64 @@ bool JsonlReader::read_next_chunk_from_source() {
 }
 
 ReadResult JsonlReader::process_buffer() {
-    // TODO: Phase 2-6 - implement:
-    // 1. SIMD scan for markers
-    // 2. Interpret buffer with projection/predicates
-    // 3. Build field spans
-    // 4. Extract and vectorize columns
-    // 5. Track unconsumed bytes
-    return ReadResult();
+    ReadResult result;
+
+    if (read_buffer.empty()) {
+        result.success = true;
+        result.num_records = 0;
+        return result;
+    }
+
+    // Step 1: SIMD scan for structural markers
+    std::vector<MarkerPosition> markers = scan_structural_markers(
+        read_buffer.data(),
+        read_buffer.size()
+    );
+
+    // Step 2: Interpret buffer with projection/predicates
+    InterpreterResult interp_result = interpret_jsonl(
+        read_buffer.data(),
+        read_buffer.size(),
+        markers,
+        context,
+        predictor
+    );
+
+    // Step 3: Extract column names from projected columns or all found keys
+    if (!context.projected_columns.empty()) {
+        result.column_names = context.projected_columns;
+    } else {
+        // Extract unique column names from first record
+        if (!interp_result.all_records.empty()) {
+            const auto& first_record = interp_result.all_records[0];
+            for (const auto& field : first_record) {
+                uint32_t key_len = field.key_end - field.key_start + 1;
+                std::string key_name(
+                    reinterpret_cast<const char*>(read_buffer.data() + field.key_start),
+                    key_len
+                );
+                result.column_names.push_back(key_name);
+            }
+        }
+    }
+
+    // Step 4: Copy records and buffer data
+    result.records = interp_result.all_records;
+    result.num_records = interp_result.num_records_passed;
+    result.buffer_data = read_buffer;
+
+    // Step 5: Track unconsumed bytes for next chunk
+    if (interp_result.bytes_consumed < read_buffer.size()) {
+        unconsumed_bytes.assign(
+            read_buffer.begin() + interp_result.bytes_consumed,
+            read_buffer.end()
+        );
+    } else {
+        unconsumed_bytes.clear();
+    }
+
+    result.success = true;
+    return result;
 }
 
 }  // namespace rugo::_jsonl

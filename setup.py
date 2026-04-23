@@ -632,6 +632,8 @@ extensions = [
         sources=[
             "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx",
             "third_party/mabel/rugo/_jsonl/core/structural_scan.cpp",
+            "third_party/mabel/rugo/_jsonl/core/interpreter.cpp",
+            "third_party/mabel/rugo/_jsonl/core/value_parser.cpp",
             "third_party/mabel/rugo/_jsonl/core/field_span.cpp",
             "third_party/mabel/rugo/_jsonl/core/jsonl_reader.cpp",
             "src/cpp/simd_env.cpp",

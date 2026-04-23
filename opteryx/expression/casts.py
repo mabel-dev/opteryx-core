@@ -297,12 +297,19 @@ def cast(arr: any, _type: str, args: tuple = (), unit: str = None) -> any:
             kwargs["element_type"] = args[0]
 
         if _type == "TIMESTAMP":
-            # Vectorized path for Int64Vector or DictionaryEncodedVector(int64)
+            # Vectorized path for temporal vector types
             if is_draken_vector_fn(arr) and unit is not None:
                 v_type = get_vector_type(arr)
                 if v_type in (VectorType.INT64, VectorType.DICTIONARY_ENCODED):
                     from opteryx.compiled.vector_ops import vector_cast_int64_to_timestamp
                     return vector_cast_int64_to_timestamp(arr, unit=unit)
+                elif v_type == VectorType.TIMESTAMP:
+                    # Timestamp-to-timestamp conversion: just return as-is if compatible unit
+                    return arr
+                elif v_type == VectorType.DATE32:
+                    # Date32-to-timestamp conversion: multiply days by microseconds per day
+                    from opteryx.compiled.vector_ops import vector_date32_to_timestamp
+                    return vector_date32_to_timestamp(arr)
 
             # Fallback: parse path (for non-numeric or non-Draken inputs)
             result = [parse_timestamp_value(i, unit=unit) for i in arr]
@@ -314,6 +321,17 @@ def cast(arr: any, _type: str, args: tuple = (), unit: str = None) -> any:
             )
 
             return _from_int64(int_vec, timestamp_unit="us")
+        if _type == "DATE":
+            # Vectorized path for temporal vector types
+            if is_draken_vector_fn(arr):
+                v_type = get_vector_type(arr)
+                if v_type == VectorType.DATE32:
+                    # Date32-to-date conversion: just return as-is
+                    return arr
+                elif v_type == VectorType.TIMESTAMP:
+                    # Timestamp-to-date conversion: divide by microseconds per day
+                    from opteryx.compiled.vector_ops import vector_timestamp_to_date32
+                    return vector_timestamp_to_date32(arr)
         if _type == "ARRAY":
             result = [_parse_array_value(i, args[0], safe_cast=False) for i in arr]
             return vector_from_sequence(result, dtype=OrsoTypes.ARRAY)

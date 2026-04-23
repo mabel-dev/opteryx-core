@@ -10,17 +10,9 @@ namespace rugo::_jsonl {
 
 // Predicate for filtering records during parsing
 struct Predicate {
-    enum class Op : uint8_t {
-        EQ,  // ==
-        NE,  // !=
-        LT,  // <
-        LE,  // <=
-        GT,  // >
-        GE   // >=
-    };
-
+    // Op codes: 0=EQ, 1=NE, 2=LT, 3=LE, 4=GT, 5=GE
     std::string column;
-    Op op;
+    uint8_t op;  // Op enum value (0-5)
     std::string value;  // Raw JSON value as string
 };
 

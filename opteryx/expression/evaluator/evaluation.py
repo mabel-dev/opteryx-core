@@ -189,14 +189,15 @@ def _is_temporal_type(orso_type):
 
 def _validate_temporal_comparison(left_node, right_node, op):
     """
-    Validate that temporal comparisons have both sides explicitly cast.
+    Validate that temporal comparisons have literals explicitly cast.
 
-    When one side of a comparison is temporal, BOTH sides must be explicitly cast
-    to ensure explicit type resolution and prevent implicit coercion.
+    When comparing temporal and non-temporal operands, literals must be explicitly cast.
+    Temporal columns do not require casting. Both operands must have temporal types.
 
-    For columns and expressions: must be a CAST node (explicit :: or CAST() in SQL).
-    For literals: should have an explicit temporal type (ConstantColumn with DATE/TIMESTAMP type
-    indicates the literal was cast, not auto-inferred).
+    Rules:
+    - Temporal columns (IDENTIFIER with temporal schema_column type) are implicitly valid
+    - Literals and other operands must be explicitly cast to temporal types
+    - Both operands must have temporal types in their schema_column
 
     Args:
         left_node: AST node for left operand
@@ -204,10 +205,9 @@ def _validate_temporal_comparison(left_node, right_node, op):
         op: Comparison operator (Eq, Lt, Gt, etc.)
 
     Raises:
-        IncompatibleTypesError: If a temporal comparison lacks explicit casting on both sides
+        IncompatibleTypesError: If a temporal comparison has an uncast literal operand
     """
     from opteryx.expression import NodeType
-    from opteryx.types.schema import ConstantColumn
 
     left_type = getattr(getattr(left_node, "schema_column", None), "type", None)
     right_type = getattr(getattr(right_node, "schema_column", None), "type", None)
@@ -219,31 +219,29 @@ def _validate_temporal_comparison(left_node, right_node, op):
     if not (left_is_temporal or right_is_temporal):
         return
 
-    # At least one side is temporal - check that both are explicitly cast
-    # For non-CAST nodes (literals, etc.), we require them to have temporal types
-    # to indicate they were explicitly cast
-    left_is_cast_node = left_node.node_type == NodeType.CAST
-    right_is_cast_node = right_node.node_type == NodeType.CAST
-
-    # If both sides have temporal types, it's valid
-    # (one or both are CAST nodes, and non-CAST nodes with temporal types indicate explicit casts)
+    # If both sides are temporal, validation passes
     if left_is_temporal and right_is_temporal:
         return
 
-    # At least one side is temporal but the other is not explicitly typed
+    # At least one side is temporal but the other is not
+    # Check if the non-temporal side is an uncast literal
     from opteryx.exceptions import IncompatibleTypesError
 
-    uncast_side = "left" if not left_is_temporal else "right"
+    non_temporal_node = right_node if left_is_temporal else left_node
+    non_temporal_side = "right" if left_is_temporal else "left"
 
-    raise IncompatibleTypesError(
-        message=f"Temporal comparison requires both sides to be explicitly cast to temporal types.\n"
-        f"The {uncast_side} side is missing an explicit CAST or :: operator.\n\n"
-        f"Examples of valid syntax:\n"
-        f"  - col::TIMESTAMP[ms] {op} literal::DATE\n"
-        f"  - CAST(col AS TIMESTAMP[ms]) {op} CAST(literal AS DATE)\n"
-        f"  - col::DATE {op} literal::TIMESTAMP[ms]\n\n"
-        f"Supported temporal types: DATE, TIMESTAMP[ms], TIMESTAMP[us], TIMESTAMP[s], TIMESTAMP[ns], TIMESTAMP[d]"
-    )
+    # IDENTIFIER nodes with temporal columns are allowed without casting
+    # All other non-temporal nodes (especially literals) must be cast
+    if non_temporal_node.node_type != NodeType.IDENTIFIER:
+        raise IncompatibleTypesError(
+            message=f"Temporal comparison requires literals to be explicitly cast to temporal types.\n"
+            f"The {non_temporal_side} side is missing an explicit CAST or :: operator.\n\n"
+            f"Examples of valid syntax:\n"
+            f"  - col {op} literal::DATE\n"
+            f"  - col {op} literal::TIMESTAMP[ms]\n"
+            f"  - col::TIMESTAMP[ms] {op} literal::DATE\n\n"
+            f"Supported temporal types: DATE, TIMESTAMP[ms], TIMESTAMP[us], TIMESTAMP[s], TIMESTAMP[ns], TIMESTAMP[d]"
+        )
 
 
 def evaluate_draken(node, morsel):

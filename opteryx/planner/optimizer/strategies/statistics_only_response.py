@@ -77,66 +77,72 @@ def find_exit_node(logical_plan):
 
 def is_simple_aggregate(aggregate_node) -> bool:
     """
-    Check if the aggregate node is a supported statistics-only aggregate.
+    Check if the aggregate node contains supported statistics-only aggregates.
 
     Supported:
     - COUNT(*)
     - MIN(column) where column is INTEGER or TIMESTAMP
     - MAX(column) where column is INTEGER or TIMESTAMP
 
+    Supports one or more aggregates, as long as each individually is supported.
+
     Parameters:
         aggregate_node: The Aggregate node to check
 
     Returns:
-        True if this is a supported aggregate, False otherwise
+        True if all aggregates are supported, False if any are unsupported
     """
     if not aggregate_node:
         return False
 
-    # Check that we have exactly one aggregate
+    # Check that we have at least one aggregate
     if not hasattr(aggregate_node, "aggregates") or not aggregate_node.aggregates:
         return False
 
-    if len(aggregate_node.aggregates) != 1:
+    # Validate each aggregate in the list
+    for aggregate in aggregate_node.aggregates:
+        # Check that it's an aggregator node
+        if not hasattr(aggregate, "node_type") or aggregate.node_type != NodeType.AGGREGATOR:
+            return False
+
+        agg_func = getattr(aggregate, "value", "").upper()
+
+        # COUNT(*) only - must not be DISTINCT/FILTER and must target wildcard
+        if agg_func == "COUNT":
+            if aggregate.duplicate_treatment == "Distinct":
+                return False
+
+            if aggregate.condition is not None:
+                return False
+
+            parameters = getattr(aggregate, "parameters", None)
+            if not parameters or len(parameters) != 1:
+                return False
+
+            if getattr(parameters[0], "node_type", None) != NodeType.WILDCARD:
+                return False
+            continue
+
+        # MIN/MAX - must have expression (column reference) and be a supported type
+        if agg_func in ("MIN", "MAX"):
+            if not hasattr(aggregate, "parameters") or not aggregate.parameters:
+                return False
+            # Get the column reference from parameters[0]
+            expr = aggregate.parameters[0]
+            if not hasattr(expr, "schema_column") or expr.schema_column is None:
+                return False
+            col_type = getattr(expr.schema_column, "type", None)
+            if col_type is None:
+                return False
+            # Only INTEGER and TIMESTAMP types preserve exact values in BRIN bounds
+            if col_type not in (OrsoTypes.INTEGER, OrsoTypes.TIMESTAMP):
+                return False
+            continue
+
+        # Unsupported aggregate type
         return False
 
-    aggregate = aggregate_node.aggregates[0]
-
-    # Check that it's an aggregator node
-    if not hasattr(aggregate, "node_type") or aggregate.node_type != NodeType.AGGREGATOR:
-        return False
-
-    agg_func = getattr(aggregate, "value", "").upper()
-
-    # COUNT(*) only - must not be DISTINCT/FILTER and must target wildcard
-    if agg_func == "COUNT":
-        if aggregate.duplicate_treatment == "Distinct":
-            return False
-
-        if aggregate.condition is not None:
-            return False
-
-        parameters = getattr(aggregate, "parameters", None)
-        if not parameters or len(parameters) != 1:
-            return False
-
-        return getattr(parameters[0], "node_type", None) == NodeType.WILDCARD
-
-    # MIN/MAX - must have expression (column reference) and be a supported type
-    if agg_func in ("MIN", "MAX"):
-        if not hasattr(aggregate, "parameters") or not aggregate.parameters:
-            return False
-        # Get the column reference from parameters[0]
-        expr = aggregate.parameters[0]
-        if not hasattr(expr, "schema_column") or expr.schema_column is None:
-            return False
-        col_type = getattr(expr.schema_column, "type", None)
-        if col_type is None:
-            return False
-        # Only INTEGER and TIMESTAMP types preserve exact values in BRIN bounds
-        return col_type in (OrsoTypes.INTEGER, OrsoTypes.TIMESTAMP)
-
-    return False
+    return True
 
 
 def is_statistics_only_query(logical_plan) -> bool:
@@ -215,7 +221,7 @@ def is_statistics_only_query(logical_plan) -> bool:
 
 def extract_column_alias(logical_plan) -> str:
     """
-    Extract the column name/alias for the COUNT(*) result.
+    Extract the column name/alias for a single aggregate result (deprecated for multi-aggregate).
 
     Looks at the Exit node's columns to determine the output column name.
     Falls back to "COUNT(*)" if no alias is found.
@@ -252,6 +258,41 @@ def extract_column_alias(logical_plan) -> str:
     return "COUNT(*)"
 
 
+def extract_all_column_aliases(logical_plan) -> list:
+    """
+    Extract all column name/aliases from the Exit node.
+
+    Returns aliases in the same order as the aggregates.
+    Falls back to default names if aliases not found.
+
+    Parameters:
+        logical_plan: The logical plan
+
+    Returns:
+        List of column names/aliases (one per aggregate)
+    """
+    exit_node = find_exit_node(logical_plan)
+    if not exit_node:
+        return []
+
+    if not hasattr(exit_node, "columns") or not exit_node.columns:
+        return []
+
+    aliases = []
+    for column in exit_node.columns:
+        # Try to get the alias
+        if hasattr(column, "alias") and column.alias:
+            aliases.append(column.alias)
+        # Try to get the source_column
+        elif hasattr(column, "source_column") and column.source_column:
+            aliases.append(column.source_column)
+        else:
+            # Default fallback
+            aliases.append(f"col_{len(aliases)}")
+
+    return aliases
+
+
 def get_count_from_manifest(manifest) -> int:
     """
     Get total row count from manifest statistics.
@@ -272,7 +313,7 @@ def get_count_from_manifest(manifest) -> int:
 
 def get_aggregate_type(aggregate_node) -> str:
     """
-    Get the aggregate function type (COUNT, MIN, MAX).
+    Get the aggregate function type (COUNT, MIN, MAX) for single aggregate (deprecated).
 
     Parameters:
         aggregate_node: The Aggregate node
@@ -285,9 +326,44 @@ def get_aggregate_type(aggregate_node) -> str:
     return aggregate_node.aggregates[0].value.upper()
 
 
+def get_all_aggregate_metadata(aggregate_node) -> list:
+    """
+    Extract metadata for all aggregates in the node.
+
+    Returns list of (agg_func, column_name, aggregate) tuples:
+    - agg_func: "COUNT", "MIN", or "MAX"
+    - column_name: column name (empty string for COUNT(*))
+    - aggregate: the aggregate node itself
+
+    Parameters:
+        aggregate_node: The Aggregate node
+
+    Returns:
+        List of tuples, empty list if no aggregates
+    """
+    if not aggregate_node or not aggregate_node.aggregates:
+        return []
+
+    metadata = []
+    for agg in aggregate_node.aggregates:
+        agg_func = getattr(agg, "value", "").upper()
+
+        if agg_func == "COUNT":
+            column_name = ""
+        elif agg_func in ("MIN", "MAX"):
+            param = agg.parameters[0] if hasattr(agg, "parameters") and agg.parameters else None
+            column_name = getattr(param, "source_column", "") if param else ""
+        else:
+            column_name = ""
+
+        metadata.append((agg_func, column_name, agg))
+
+    return metadata
+
+
 def get_column_name_from_aggregate(aggregate_node) -> str:
     """
-    Get the column name from MIN/MAX aggregate expression.
+    Get the column name from MIN/MAX aggregate expression (deprecated for single agg).
 
     Parameters:
         aggregate_node: The Aggregate node
@@ -412,40 +488,51 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         if manifest is None:
             return plan
 
-        # Determine aggregate type and extract the value
-        agg_type = get_aggregate_type(aggregate_node)
-        column_alias = extract_column_alias(plan)
-
-        # Get the aggregate value based on type
-        if agg_type == "COUNT":
-            result_value = get_count_from_manifest(manifest)
-            result_type = OrsoTypes.INTEGER
-        elif agg_type in ("MIN", "MAX"):
-            column_name = get_column_name_from_aggregate(aggregate_node)
-            if not column_name:
-                return plan
-            result_value = get_min_max_from_manifest(manifest, column_name, agg_type)
-            if result_value is None:
-                return plan
-            # Preserve the column type (INTEGER or TIMESTAMP)
-            agg_col_type = aggregate_node.aggregates[0].parameters[0].schema_column.type
-            result_type = agg_col_type
-        else:
-            # Unsupported aggregate type
+        # Extract metadata for all aggregates
+        agg_metadata = get_all_aggregate_metadata(aggregate_node)
+        if not agg_metadata:
             return plan
 
-        # Build a literal projection node to replace the aggregate
-        literal = build_literal_node(result_value, suggested_type=result_type)
+        # Extract aliases for all aggregates
+        column_aliases = extract_all_column_aliases(plan)
+        if len(column_aliases) != len(agg_metadata):
+            # Fallback to default naming if alias extraction fails
+            column_aliases = [f"agg_{i}" for i in range(len(agg_metadata))]
 
-        # Preserve the expected alias for downstream consumers
-        setattr(literal, "alias", column_alias)
-        # Ensure the literal uses the same schema identity as the original
-        # aggregate so downstream Exit/Projection nodes can match by identity.
-        if aggregate_node.aggregates:
-            agg_schema = aggregate_node.aggregates[0].schema_column
+        # Build literal nodes for each aggregate, collecting values
+        literals = []
+        for idx, (agg_func, column_name, agg_node) in enumerate(agg_metadata):
+            # Get the aggregate value based on type
+            if agg_func == "COUNT":
+                result_value = get_count_from_manifest(manifest)
+                result_type = OrsoTypes.INTEGER
+            elif agg_func in ("MIN", "MAX"):
+                if not column_name:
+                    return plan
+                result_value = get_min_max_from_manifest(manifest, column_name, agg_func)
+                if result_value is None:
+                    return plan
+                # Preserve the column type (INTEGER or TIMESTAMP)
+                agg_col_type = agg_node.parameters[0].schema_column.type
+                result_type = agg_col_type
+            else:
+                # Unsupported aggregate type
+                return plan
+
+            # Build a literal projection node to replace the aggregate
+            literal = build_literal_node(result_value, suggested_type=result_type)
+
+            # Preserve the expected alias for this column
+            setattr(literal, "alias", column_aliases[idx])
+
+            # Ensure the literal uses the same schema identity as the original
+            # aggregate so downstream Exit/Projection nodes can match by identity.
+            agg_schema = agg_node.schema_column
             if agg_schema is not None and literal.schema_column is not None:
                 literal.schema_column.identity = agg_schema.identity
                 literal.schema_column.type = agg_schema.type or literal.schema_column.type
+
+            literals.append(literal)
 
         # Point the source(s) to $no_table BEFORE we mutate the aggregate node.
         # Doing this early avoids potential iterator/side-effect issues when
@@ -458,32 +545,20 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
             scan_node.manifest.files = []
 
         # Replace any lingering AGGREGATOR expressions in Project/Exit nodes with
-        # our literal, to ensure no node still references COUNT(*) after the
-        # rewrite. This targets the exact aggregator identity or matching
-        # aggregator schema identity to be conservative.
+        # the corresponding literal, to ensure no node still references aggregators
+        # after the rewrite. Match by schema identity or alias.
         try:
-            target_agg = None
-            if hasattr(aggregate_node, "aggregates") and aggregate_node.aggregates:
-                target_agg = aggregate_node.aggregates[0]
+            # Build a mapping from aggregator schema identity to replacement literal
+            agg_identity_to_literal = {}
+            for agg_node, literal in zip(aggregate_node.aggregates, literals):
+                agg_id = getattr(getattr(agg_node, "schema_column", None), "identity", None)
+                if agg_id is not None:
+                    agg_identity_to_literal[agg_id] = literal
 
-            def _is_target_agg(expr):
-                if expr is None:
-                    return False
-                # direct object identity
-                if expr is target_agg:
-                    return True
-                # structural match: aggregator by schema identity and function name
-                try:
-                    if getattr(expr, "node_type", None) == NodeType.AGGREGATOR:
-                        expr_id = getattr(getattr(expr, "schema_column", None), "identity", None)
-                        agg_id = getattr(
-                            getattr(target_agg, "schema_column", None), "identity", None
-                        )
-                        if expr_id is not None and agg_id is not None and expr_id == agg_id:
-                            return True
-                except Exception:
-                    pass
-                return False
+            # Also build a mapping from alias to literal
+            alias_to_literal = {}
+            for alias, literal in zip(column_aliases, literals):
+                alias_to_literal[alias] = literal
 
             for nid, n in plan.nodes(data=True):
                 cols = getattr(n, "columns", None)
@@ -492,12 +567,21 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
                 changed = False
                 new_cols = []
                 for c in cols:
-                    # Replace explicit aggregator expressions
-                    if _is_target_agg(c) or getattr(c, "alias", None) == column_alias:
-                        new_cols.append(literal)
+                    # Try to match by schema identity first
+                    expr_id = getattr(getattr(c, "schema_column", None), "identity", None)
+                    replacement = None
+
+                    if expr_id in agg_identity_to_literal:
+                        replacement = agg_identity_to_literal[expr_id]
+                    elif getattr(c, "alias", None) in alias_to_literal:
+                        replacement = alias_to_literal[getattr(c, "alias", None)]
+
+                    if replacement is not None:
+                        new_cols.append(replacement)
                         changed = True
                     else:
                         new_cols.append(c)
+
                 if changed:
                     try:
                         n.columns = new_cols
@@ -513,9 +597,9 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
             # conservative: on unexpected errors, bail out and keep plan unchanged
             return plan
 
-        # Rewrite aggregate node into a Project with the literal column
+        # Rewrite aggregate node into a Project with the literal columns
         aggregate_node.node_type = LogicalPlanStepType.Project
-        aggregate_node.columns = [literal]
+        aggregate_node.columns = literals
         # Remove aggregate-specific attributes to avoid confusion downstream
         aggregate_node.aggregates = None
         aggregate_node.groups = None
@@ -527,7 +611,7 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         try:
             # We located the relevant scan node earlier; set it directly. This
             # avoids potential iterator-side-effects and is consistent with the
-            # conservative single-scan expectation in `is_count_star_query`.
+            # conservative single-scan expectation in `is_statistics_only_query`.
             scan_node.relation = "$no_table"
             scan_node.alias = "$no_table"
 
@@ -535,7 +619,6 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
             # the ReaderNode will produce the one-row $no_table morsel. This
             # avoids relying on the original connector's behavior after we
             # rewrote the plan to a projection-only query.
-            # Indicate we're about to attempt connector reassignment (diagnostic)
             from opteryx.connectors import connector_factory
 
             virt_gateway = connector_factory("$no_table", telemetry=self.telemetry)
@@ -558,10 +641,12 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
             return plan
 
         # Update exit node columns so aliasing is preserved
-        exit_node.columns = [literal]
+        if exit_node is not None:
+            exit_node.columns = literals
 
         # Update telemetry safely
-        self.telemetry.optimization_statistics_only_response += 1
+        if self.telemetry is not None:
+            self.telemetry.optimization_statistics_only_response += 1
 
         # Record connector assignment status on the plan for diagnostic purposes
         try:

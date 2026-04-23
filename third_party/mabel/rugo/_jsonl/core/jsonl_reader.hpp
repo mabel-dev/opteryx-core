@@ -22,6 +22,9 @@ struct ReadResult {
     // FieldSpans for each record: [record_idx][field_idx]
     std::vector<std::vector<FieldSpan>> records;
 
+    // Raw buffer data (needed for FieldSpan offset resolution)
+    std::vector<uint8_t> buffer_data;
+
     // Inferred schema (if applicable)
     std::map<std::string, std::string> inferred_schema;
 
@@ -38,6 +41,9 @@ public:
 
     // OR open from pre-loaded bytes/buffer
     JsonlReader(const uint8_t* buffer, size_t length, const ParseContext& context);
+
+    // Destructor
+    ~JsonlReader();
 
     // Get next chunk of parsed records
     // Returns success=false when EOF or error

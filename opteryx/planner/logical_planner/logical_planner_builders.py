@@ -1067,23 +1067,7 @@ def literal_number(branch, alias: Optional[List[str]] = None, key=None):
 
 
 def literal_string(branch, alias: Optional[List[str]] = None, key=None):
-    """create node for a string branch, this is either a date or a string"""
-    if not str(branch).isdigit():
-        dte_value = dates.parse_iso(branch)
-        if dte_value:
-            if len(branch) <= 10:
-                return Node(
-                    NodeType.LITERAL,
-                    type=OrsoTypes.DATE,
-                    value=(dte_value.date() - _EPOCH_DATE).days,
-                    alias=alias,
-                )
-            return Node(
-                NodeType.LITERAL,
-                type=OrsoTypes.TIMESTAMP,
-                value=int((dte_value - _EPOCH_DT).total_seconds() * 1_000_000),
-                alias=alias,
-            )
+    """create node for a string branch"""
     return Node(NodeType.LITERAL, type=OrsoTypes.VARCHAR, value=branch, alias=alias)
 
 

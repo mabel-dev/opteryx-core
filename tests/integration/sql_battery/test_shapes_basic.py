@@ -186,6 +186,18 @@ STATEMENTS = [
         ("SELECT 1::TIMESTAMP", 1, 1, UnsupportedSyntaxError),
         ("SELECT 1::TIMESTAMP[]", 1, 1, UnsupportedSyntaxError),
         ("SELECT 1::TIMESTAMP[milliseconds]", 1, 1, UnsupportedSyntaxError),
+
+        # Temporal comparison validation tests
+        # Temporal column + cast literal - should pass (column is already temporal, doesn't need cast)
+        ("SELECT COUNT(*) FROM testdata.missions WHERE Lauched_at >= '1957-10-04'::DATE", 1, 1, None),
+        ("SELECT COUNT(*) FROM testdata.missions WHERE Lauched_at >= '1957-10-04'::TIMESTAMP[ms]", 1, 1, None),
+
+        # Literal without cast - should fail with IncompatibleTypesError
+        ("SELECT COUNT(*) FROM testdata.missions WHERE Lauched_at >= '1957-10-04'", None, None, IncompatibleTypesError),
+
+        # Different temporal types but literal is cast - should pass
+        ("SELECT COUNT(*) FROM testdata.missions WHERE Lauched_at >= '1957-10-04'::DATE", 1, 1, None),
+        ("SELECT COUNT(*) FROM testdata.missions WHERE Lauched_at >= '2024-12-31'::TIMESTAMP[ms]", 1, 1, None),
 ]
 
 # fmt:on

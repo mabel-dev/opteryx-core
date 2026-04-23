@@ -13,7 +13,7 @@
 
 from libc.stdint cimport int64_t, uint8_t, INT64_MAX, INT64_MIN
 from libc.math cimport HUGE_VAL
-from libc.string cimport memset, memcpy
+from libc.string cimport memset, memcpy, memcmp
 from libc.stdlib cimport malloc, free
 
 from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
@@ -24,6 +24,7 @@ from opteryx.compiled.draken.core.fixed_vector cimport free_fixed_buffer
 from opteryx.compiled.draken.vectors.vector cimport Vector
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector, _StringVectorCIterator, StringElement
 
 
 cdef inline bint _num_bitmap_valid(uint8_t* bm, Py_ssize_t i) noexcept nogil:
@@ -790,17 +791,17 @@ cdef class MinMaxFloat64Collector(BaseCollector):
 # ---------------------------------------------------------------------------
 
 cdef class MinMaxObjectCollector(BaseCollector):
-    """Fallback for date/time/string MIN/MAX — uses Python comparison."""
-    cdef list _values
+    """Native MIN/MAX using C-level buffers (no Python in accumulate loop)."""
+    cdef vector[vector[uint8_t]] _values  # C-level string storage per group
     cdef vector[uint8_t] _seen
     cdef int8_t _direction    # +1 = MIN, -1 = MAX
 
     def __cinit__(self):
-        self._values = []
+        pass
 
     cdef void grow(self, int64_t new_count):
-        while len(self._values) < new_count:
-            self._values.append(None)
+        while <int64_t>self._values.size() < new_count:
+            self._values.push_back(vector[uint8_t]())
             self._seen.push_back(0)
 
     cdef void accumulate(
@@ -809,35 +810,111 @@ cdef class MinMaxObjectCollector(BaseCollector):
         const int64_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef list col = morsel.column(self.column_name).to_pylist()
+        cdef Vector vec = morsel.column(self.column_name)
         cdef uint8_t* seen = self._seen.data()
         cdef Py_ssize_t i
         cdef int64_t si
-        cdef object v, cur
+        cdef bytes cur, v
+        cdef object v_obj
+        cdef list col
+
+        # Fast path: StringVector with C-level iteration (no Python materialization)
+        if isinstance(vec, StringVector):
+            self._accumulate_string_vector_native(<StringVector>vec, state_indices, n_rows, seen)
+        else:
+            # Fallback for other types (dates, etc.)
+            col = vec.to_pylist()
+
+            if self._direction == 1:   # MIN
+                for i in range(n_rows):
+                    v_obj = col[i]
+                    if v_obj is None:
+                        continue
+                    v = v_obj if isinstance(v_obj, bytes) else str(v_obj).encode('utf-8')
+                    si = state_indices[i]
+                    cur = self._values[si]
+                    if not cur or v < cur:
+                        self._values[si] = v
+                    seen[si] = 1
+            else:                      # MAX
+                for i in range(n_rows):
+                    v_obj = col[i]
+                    if v_obj is None:
+                        continue
+                    v = v_obj if isinstance(v_obj, bytes) else str(v_obj).encode('utf-8')
+                    si = state_indices[i]
+                    cur = self._values[si]
+                    if not cur or v > cur:
+                        self._values[si] = v
+                    seen[si] = 1
+
+    cdef void _accumulate_string_vector_native(
+        self,
+        StringVector vec,
+        const int64_t* state_indices,
+        Py_ssize_t n_rows,
+        uint8_t* seen,
+    ):
+        cdef _StringVectorCIterator it = _StringVectorCIterator._from_ptr(vec.ptr)
+        cdef StringElement elem
+        cdef Py_ssize_t i
+        cdef int64_t si
+        cdef Py_ssize_t cur_len
+        cdef int cmp_result
+        cdef Py_ssize_t min_len
+        cdef vector[uint8_t]* cur_vec
+        cdef uint8_t* cur_ptr
+
         if self._direction == 1:   # MIN
             for i in range(n_rows):
-                v = col[i]
-                if v is None:
+                if not it.next(&elem):
+                    break
+                if elem.is_null:
                     continue
                 si = state_indices[i]
-                cur = self._values[si]
-                if cur is None or v < cur:
-                    self._values[si] = v
+                cur_vec = &self._values[si]
+                if cur_vec.empty():
+                    cur_vec.assign(elem.ptr, elem.ptr + elem.length)
+                else:
+                    cur_len = cur_vec.size()
+                    min_len = elem.length if elem.length < cur_len else cur_len
+                    cmp_result = memcmp(elem.ptr, cur_vec.data(), min_len)
+                    if cmp_result < 0 or (cmp_result == 0 and elem.length < cur_len):
+                        cur_vec.clear()
+                        cur_vec.assign(elem.ptr, elem.ptr + elem.length)
                 seen[si] = 1
         else:                      # MAX
             for i in range(n_rows):
-                v = col[i]
-                if v is None:
+                if not it.next(&elem):
+                    break
+                if elem.is_null:
                     continue
                 si = state_indices[i]
-                cur = self._values[si]
-                if cur is None or v > cur:
-                    self._values[si] = v
+                cur_vec = &self._values[si]
+                if cur_vec.empty():
+                    cur_vec.assign(elem.ptr, elem.ptr + elem.length)
+                else:
+                    cur_len = cur_vec.size()
+                    min_len = elem.length if elem.length < cur_len else cur_len
+                    cmp_result = memcmp(elem.ptr, cur_vec.data(), min_len)
+                    if cmp_result > 0 or (cmp_result == 0 and elem.length > cur_len):
+                        cur_vec.clear()
+                        cur_vec.assign(elem.ptr, elem.ptr + elem.length)
                 seen[si] = 1
 
     cpdef Vector finalize(self, int64_t num_groups):
         from opteryx.compiled.draken.interop.arrow import vector_from_sequence
-        return vector_from_sequence(self._values[:num_groups])
+        cdef list result = []
+        cdef int64_t i
+        cdef int64_t limit = min(<int64_t>self._values.size(), num_groups)
+        cdef vector[uint8_t]* vec
+        for i in range(limit):
+            vec = &self._values[i]
+            if vec.empty():
+                result.append(None)
+            else:
+                result.append(bytes(vec.data()[:vec.size()]).decode('utf-8'))
+        return vector_from_sequence(result)
 
 
 # ---------------------------------------------------------------------------
