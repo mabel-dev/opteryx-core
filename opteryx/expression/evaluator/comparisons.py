@@ -280,6 +280,23 @@ def _constant_compare(op: str, vec, right):
     if right is None:
         return BoolVector(len(vec))
 
+    # Extract scalar value from CONSTANT_ENCODED right operand if needed
+    if is_draken_vector(right) and get_vector_type(right) == VectorType.CONSTANT_ENCODED:
+        right = _constant_scalar_value(right)
+
+    # Handle vector-vector comparisons when right is still a vector
+    if is_draken_vector(right):
+        vec_ops = {
+            "Eq": lambda v, r: v.equals_vector(r),
+            "Lt": lambda v, r: v.less_than_vector(r),
+            "Gt": lambda v, r: v.greater_than_vector(r),
+            "LtEq": lambda v, r: v.less_than_or_equals_vector(r),
+            "GtEq": lambda v, r: v.greater_than_or_equals_vector(r),
+        }
+        fn = vec_ops.get(op)
+        if fn is not None:
+            return fn(vec, right)
+
     if isinstance(right, (list, tuple, set, frozenset)):
         right = _coerce_in_list_values(right)
 

@@ -15,8 +15,8 @@ enum class MarkerType : uint8_t {
     COLON = 4,         // :
     COMMA = 5,         // ,
     QUOTE = 6,         // "
-    BACKSLASH = 7,     // \
-    NEWLINE = 8        // \n
+    BACKSLASH = 7,     // Reverse solidus
+    NEWLINE = 8        // Newline
 };
 
 struct MarkerPosition {

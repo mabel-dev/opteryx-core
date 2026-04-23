@@ -627,6 +627,21 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
         extra_objects=["build/temp.yyjson.o"] if os.path.exists("build/temp.yyjson.o") else [],
     ),
+    Extension(
+        "opteryx.compiled.rugo._jsonl",
+        sources=[
+            "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx",
+            "third_party/mabel/rugo/_jsonl/core/structural_scan.cpp",
+            "third_party/mabel/rugo/_jsonl/core/field_span.cpp",
+            "third_party/mabel/rugo/_jsonl/core/jsonl_reader.cpp",
+            "src/cpp/simd_env.cpp",
+            "src/cpp/cpu_features.cpp",
+            "src/cpp/simd_search.cpp",
+        ],
+        include_dirs=include_dirs + ["third_party/mabel/rugo/_jsonl/core"],
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
     # Draken core components
     make_draken_extension("interop.arrow", "interop/arrow.pyx"),
     make_draken_extension("interop.vector_sequence", "interop/vector_sequence.pyx"),

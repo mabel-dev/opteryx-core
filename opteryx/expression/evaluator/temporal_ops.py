@@ -94,7 +94,9 @@ def _int64_temporal_compare(op: str, vec, right, temporal_type):
 
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = frozenset(coerce(value) for value in right)
-    elif right.__class__.__name__ == "Int64Vector":
+    elif right.__class__.__name__ in ("Int64Vector", "TimestampVector", "Date32Vector"):
+        # Handle vector-vector temporal comparisons
+        # TimestampVector and Date32Vector are physically int64 with temporal semantics
         vec_ops = {
             "Eq": vec.equals_vector,
             "Lt": vec.less_than_vector,
@@ -104,7 +106,7 @@ def _int64_temporal_compare(op: str, vec, right, temporal_type):
         }
         fn = vec_ops.get(op)
         if fn is None:
-            raise NotImplementedError(f"Int64Vector temporal vector-vector: unsupported op {op!r}")
+            raise NotImplementedError(f"{right.__class__.__name__} temporal vector-vector: unsupported op {op!r}")
         return fn(right)
     else:
         value = coerce(right)
