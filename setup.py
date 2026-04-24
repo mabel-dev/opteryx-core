@@ -862,6 +862,14 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
+    # Parquet footer cache using LRU eviction
+    Extension(
+        "opteryx.compiled.structures.footer_cache",
+        sources=["opteryx/compiled/structures/footer_cache.pyx"],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
     # C-backed integer buffer used across joins and other kernels
     Extension(
         "opteryx.compiled.structures.buffers",
@@ -1508,6 +1516,24 @@ if _ort_include and _ort_lib and os.path.exists(_ort_include) and os.path.exists
             language="c++",
         )
     )
+
+# C++ Parquet IO pipeline with lock-free queues
+extensions.append(
+    Extension(
+        "opteryx.connectors.parquet_io.pool_reader",
+        sources=[
+            "opteryx/connectors/parquet_io/pool_reader.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        depends=[
+            "third_party/mabel/rugo/parquet/io_pipeline.hpp",
+            "third_party/mabel/rugo/parquet/decode.hpp",
+            "third_party/mabel/rugo/parquet/metadata.hpp",
+        ],
+    )
+)
 
 # Setup configuration
 setup(

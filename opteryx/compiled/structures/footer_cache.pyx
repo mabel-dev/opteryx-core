@@ -1,3 +1,5 @@
+# cython: language_level=3
+
 """
 LRU cache for raw Parquet footer bytes using MemoryPool storage.
 
@@ -9,6 +11,7 @@ Value: raw footer envelope bytes (stored in MemoryPool, accessed via ref_id)
 """
 
 from typing import Optional
+from libc.stdint cimport int64_t
 
 from opteryx.compiled.structures.lru_k import LRU_K
 from opteryx.compiled.structures.memory_pool import MemoryPool
@@ -23,8 +26,8 @@ cdef class ParquetFooterBytesCache:
     Thread-safe: both MemoryPool and LRU_K use RLock internally.
     """
 
-    cdef MemoryPool pool
-    cdef LRU_K lru
+    cdef object pool
+    cdef object lru
     cdef dict _path_to_ref  # path -> ref_id mapping
 
     def __cinit__(self, int64_t pool_size_bytes=16*1024*1024):
