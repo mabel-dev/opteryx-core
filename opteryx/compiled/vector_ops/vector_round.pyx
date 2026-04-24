@@ -47,6 +47,87 @@ cdef inline double _round_to_digits(double value, int digits) nogil:
     return c_round(value / scale) * scale
 
 
+# Fused-type specialization for dict-encoded paths
+ctypedef fused _code_t_round:
+    uint8_t
+    uint16_t
+    uint32_t
+
+
+ctypedef fused _dict_t_round:
+    int8_t
+    int16_t
+    int32_t
+    int64_t
+    float
+    double
+
+
+cdef inline void _round_dict_no_null(
+    double* out_data,
+    _code_t_round* codes,
+    _dict_t_round* dict_data,
+    Py_ssize_t n,
+    int digits,
+) noexcept nogil:
+    cdef Py_ssize_t i
+    for i in range(n):
+        out_data[i] = _round_to_digits(<double>dict_data[codes[i]], digits)
+
+
+cdef inline void _round_dict_with_null(
+    double* out_data,
+    _code_t_round* codes,
+    _dict_t_round* dict_data,
+    uint8_t* nulls,
+    Py_ssize_t n,
+    int digits,
+) noexcept nogil:
+    cdef Py_ssize_t i
+    for i in range(n):
+        if ((nulls[i >> 3] >> (i & 7)) & 1) == 0:
+            out_data[i] = 0.0
+            continue
+        out_data[i] = _round_to_digits(<double>dict_data[codes[i]], digits)
+
+
+cdef inline void _dispatch_round_dict(
+    double* out_data,
+    _code_t_round* codes,
+    DrakenVarBuffer* dict_buf,
+    int d_val_type,
+    uint8_t* nulls,
+    Py_ssize_t n,
+    int digits,
+) noexcept nogil:
+    if nulls == NULL:
+        if d_val_type == DRAKEN_FLOAT64:
+            _round_dict_no_null(out_data, codes, <double*>dict_buf.data, n, digits)
+        elif d_val_type == DRAKEN_FLOAT32:
+            _round_dict_no_null(out_data, codes, <float*>dict_buf.data, n, digits)
+        elif d_val_type == DRAKEN_INT64:
+            _round_dict_no_null(out_data, codes, <int64_t*>dict_buf.data, n, digits)
+        elif d_val_type == DRAKEN_INT32:
+            _round_dict_no_null(out_data, codes, <int32_t*>dict_buf.data, n, digits)
+        elif d_val_type == DRAKEN_INT16:
+            _round_dict_no_null(out_data, codes, <int16_t*>dict_buf.data, n, digits)
+        elif d_val_type == DRAKEN_INT8:
+            _round_dict_no_null(out_data, codes, <int8_t*>dict_buf.data, n, digits)
+    else:
+        if d_val_type == DRAKEN_FLOAT64:
+            _round_dict_with_null(out_data, codes, <double*>dict_buf.data, nulls, n, digits)
+        elif d_val_type == DRAKEN_FLOAT32:
+            _round_dict_with_null(out_data, codes, <float*>dict_buf.data, nulls, n, digits)
+        elif d_val_type == DRAKEN_INT64:
+            _round_dict_with_null(out_data, codes, <int64_t*>dict_buf.data, nulls, n, digits)
+        elif d_val_type == DRAKEN_INT32:
+            _round_dict_with_null(out_data, codes, <int32_t*>dict_buf.data, nulls, n, digits)
+        elif d_val_type == DRAKEN_INT16:
+            _round_dict_with_null(out_data, codes, <int16_t*>dict_buf.data, nulls, n, digits)
+        elif d_val_type == DRAKEN_INT8:
+            _round_dict_with_null(out_data, codes, <int8_t*>dict_buf.data, nulls, n, digits)
+
+
 cdef object _constant_scalar_value(object values):
     if len(values) == 0:
         return None
@@ -93,30 +174,15 @@ cpdef Float64Vector vector_round_digits(object values, int digits):
             memcpy(out_null, in_null, (n + 7) >> 3)
             out_vec.ptr.null_bitmap = out_null
 
-        for i in range(n):
-            if in_null != NULL and ((in_null[i >> 3] >> (i & 7)) & 1) == 0:
+        if d_val_type not in (DRAKEN_FLOAT64, DRAKEN_FLOAT32, DRAKEN_INT64, DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8):
+            for i in range(n):
                 out_data[i] = 0.0
-                continue
-            if d_ptr.code_width == 1:
-                code = (<uint8_t*>d_ptr.codes)[i]
-            elif d_ptr.code_width == 2:
-                code = (<uint16_t*>d_ptr.codes)[i]
-            else:
-                code = (<uint32_t*>d_ptr.codes)[i]
-            if d_val_type == DRAKEN_FLOAT64:
-                out_data[i] = _round_to_digits((<double*>dict_buf.data)[code], digits)
-            elif d_val_type == DRAKEN_FLOAT32:
-                out_data[i] = _round_to_digits(<double>((<float*>dict_buf.data)[code]), digits)
-            elif d_val_type == DRAKEN_INT64:
-                out_data[i] = _round_to_digits(<double>((<int64_t*>dict_buf.data)[code]), digits)
-            elif d_val_type == DRAKEN_INT32:
-                out_data[i] = _round_to_digits(<double>((<int32_t*>dict_buf.data)[code]), digits)
-            elif d_val_type == DRAKEN_INT16:
-                out_data[i] = _round_to_digits(<double>((<int16_t*>dict_buf.data)[code]), digits)
-            elif d_val_type == DRAKEN_INT8:
-                out_data[i] = _round_to_digits(<double>((<int8_t*>dict_buf.data)[code]), digits)
-            else:
-                out_data[i] = 0.0
+        elif d_ptr.code_width == 1:
+            _dispatch_round_dict[uint8_t](out_data, <uint8_t*>d_ptr.codes, dict_buf, d_val_type, in_null, <Py_ssize_t>n, digits)
+        elif d_ptr.code_width == 2:
+            _dispatch_round_dict[uint16_t](out_data, <uint16_t*>d_ptr.codes, dict_buf, d_val_type, in_null, <Py_ssize_t>n, digits)
+        else:
+            _dispatch_round_dict[uint32_t](out_data, <uint32_t*>d_ptr.codes, dict_buf, d_val_type, in_null, <Py_ssize_t>n, digits)
 
     elif isinstance(values, Int64Vector):
         ivals = <Int64Vector> values

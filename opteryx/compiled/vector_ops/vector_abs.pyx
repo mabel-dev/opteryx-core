@@ -83,6 +83,9 @@ cpdef Int64Vector vector_abs_int64(object values):
         in_data = <int64_t*>(<Int64Vector>values).ptr.data
         in_null = <uint8_t*>(<Int64Vector>values).ptr.null_bitmap
 
+        if n > 0 and in_data == NULL:
+            raise ValueError("Int64Vector has NULL data pointer")
+
         if in_null != NULL and n > 0:
             out_null = <uint8_t*>malloc((n + 7) >> 3)
             if out_null == NULL:
@@ -160,6 +163,9 @@ cpdef Float64Vector vector_abs_float64(object values):
     else:
         in_data = <double*>(<Float64Vector>values).ptr.data
         in_null = <uint8_t*>(<Float64Vector>values).ptr.null_bitmap
+
+        if n > 0 and in_data == NULL:
+            raise ValueError("Float64Vector has NULL data pointer")
 
         if in_null != NULL and n > 0:
             out_null = <uint8_t*>malloc((n + 7) >> 3)

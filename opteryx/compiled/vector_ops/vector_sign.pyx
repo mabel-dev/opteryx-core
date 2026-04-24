@@ -28,6 +28,9 @@ cpdef Int64Vector vector_sign_int64(Int64Vector values):
     cdef Py_ssize_t i
     cdef int64_t val
 
+    if n > 0 and in_data == NULL:
+        raise ValueError("Int64Vector has NULL data pointer")
+
     if in_null != NULL and n > 0:
         out_null = <uint8_t*>malloc((n + 7) >> 3)
         if out_null == NULL:
@@ -56,6 +59,9 @@ cpdef Int64Vector vector_sign_float64(Float64Vector values):
     cdef uint8_t* out_null = NULL
     cdef Py_ssize_t i
     cdef double val
+
+    if n > 0 and in_data == NULL:
+        raise ValueError("Float64Vector has NULL data pointer")
 
     if in_null != NULL and n > 0:
         out_null = <uint8_t*>malloc((n + 7) >> 3)

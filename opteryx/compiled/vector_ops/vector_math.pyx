@@ -119,6 +119,222 @@ cdef inline double _trunc_scaled(double x, int scale) nogil:
 
 
 # ---------------------------------------------------------------------------
+# Fused-type specialization for dict-encoded paths
+# ---------------------------------------------------------------------------
+
+ctypedef fused _code_t:
+    uint8_t
+    uint16_t
+    uint32_t
+
+
+ctypedef fused _dict_t:
+    int8_t
+    int16_t
+    int32_t
+    int64_t
+    float
+    double
+
+
+cdef inline void _ceil_dict_no_null(
+    double* out_data,
+    _code_t* codes,
+    _dict_t* dict_data,
+    Py_ssize_t n,
+    int scale,
+) noexcept nogil:
+    cdef Py_ssize_t i
+    for i in range(n):
+        out_data[i] = _ceil_scaled(<double>dict_data[codes[i]], scale)
+
+
+cdef inline void _ceil_dict_with_null(
+    double* out_data,
+    _code_t* codes,
+    _dict_t* dict_data,
+    uint8_t* nulls,
+    Py_ssize_t n,
+    int scale,
+) noexcept nogil:
+    cdef Py_ssize_t i
+    for i in range(n):
+        if ((nulls[i >> 3] >> (i & 7)) & 1) == 0:
+            out_data[i] = 0.0
+            continue
+        out_data[i] = _ceil_scaled(<double>dict_data[codes[i]], scale)
+
+
+cdef inline void _dispatch_ceil_dict(
+    double* out_data,
+    _code_t* codes,
+    DrakenVarBuffer* dict_buf,
+    int d_val_type,
+    uint8_t* nulls,
+    Py_ssize_t n,
+    int scale,
+) noexcept nogil:
+    if nulls == NULL:
+        if d_val_type == DRAKEN_FLOAT64:
+            _ceil_dict_no_null(out_data, codes, <double*>dict_buf.data, n, scale)
+        elif d_val_type == DRAKEN_FLOAT32:
+            _ceil_dict_no_null(out_data, codes, <float*>dict_buf.data, n, scale)
+        elif d_val_type == DRAKEN_INT64:
+            _ceil_dict_no_null(out_data, codes, <int64_t*>dict_buf.data, n, scale)
+        elif d_val_type == DRAKEN_INT32:
+            _ceil_dict_no_null(out_data, codes, <int32_t*>dict_buf.data, n, scale)
+        elif d_val_type == DRAKEN_INT16:
+            _ceil_dict_no_null(out_data, codes, <int16_t*>dict_buf.data, n, scale)
+        elif d_val_type == DRAKEN_INT8:
+            _ceil_dict_no_null(out_data, codes, <int8_t*>dict_buf.data, n, scale)
+    else:
+        if d_val_type == DRAKEN_FLOAT64:
+            _ceil_dict_with_null(out_data, codes, <double*>dict_buf.data, nulls, n, scale)
+        elif d_val_type == DRAKEN_FLOAT32:
+            _ceil_dict_with_null(out_data, codes, <float*>dict_buf.data, nulls, n, scale)
+        elif d_val_type == DRAKEN_INT64:
+            _ceil_dict_with_null(out_data, codes, <int64_t*>dict_buf.data, nulls, n, scale)
+        elif d_val_type == DRAKEN_INT32:
+            _ceil_dict_with_null(out_data, codes, <int32_t*>dict_buf.data, nulls, n, scale)
+        elif d_val_type == DRAKEN_INT16:
+            _ceil_dict_with_null(out_data, codes, <int16_t*>dict_buf.data, nulls, n, scale)
+        elif d_val_type == DRAKEN_INT8:
+            _ceil_dict_with_null(out_data, codes, <int8_t*>dict_buf.data, nulls, n, scale)
+
+
+# Floor variants
+cdef inline void _floor_dict_no_null(
+    double* out_data,
+    _code_t* codes,
+    _dict_t* dict_data,
+    Py_ssize_t n,
+    int scale,
+) noexcept nogil:
+    cdef Py_ssize_t i
+    for i in range(n):
+        out_data[i] = _floor_scaled(<double>dict_data[codes[i]], scale)
+
+
+cdef inline void _floor_dict_with_null(
+    double* out_data,
+    _code_t* codes,
+    _dict_t* dict_data,
+    uint8_t* nulls,
+    Py_ssize_t n,
+    int scale,
+) noexcept nogil:
+    cdef Py_ssize_t i
+    for i in range(n):
+        if ((nulls[i >> 3] >> (i & 7)) & 1) == 0:
+            out_data[i] = 0.0
+            continue
+        out_data[i] = _floor_scaled(<double>dict_data[codes[i]], scale)
+
+
+cdef inline void _dispatch_floor_dict(
+    double* out_data,
+    _code_t* codes,
+    DrakenVarBuffer* dict_buf,
+    int d_val_type,
+    uint8_t* nulls,
+    Py_ssize_t n,
+    int scale,
+) noexcept nogil:
+    if nulls == NULL:
+        if d_val_type == DRAKEN_FLOAT64:
+            _floor_dict_no_null(out_data, codes, <double*>dict_buf.data, n, scale)
+        elif d_val_type == DRAKEN_FLOAT32:
+            _floor_dict_no_null(out_data, codes, <float*>dict_buf.data, n, scale)
+        elif d_val_type == DRAKEN_INT64:
+            _floor_dict_no_null(out_data, codes, <int64_t*>dict_buf.data, n, scale)
+        elif d_val_type == DRAKEN_INT32:
+            _floor_dict_no_null(out_data, codes, <int32_t*>dict_buf.data, n, scale)
+        elif d_val_type == DRAKEN_INT16:
+            _floor_dict_no_null(out_data, codes, <int16_t*>dict_buf.data, n, scale)
+        elif d_val_type == DRAKEN_INT8:
+            _floor_dict_no_null(out_data, codes, <int8_t*>dict_buf.data, n, scale)
+    else:
+        if d_val_type == DRAKEN_FLOAT64:
+            _floor_dict_with_null(out_data, codes, <double*>dict_buf.data, nulls, n, scale)
+        elif d_val_type == DRAKEN_FLOAT32:
+            _floor_dict_with_null(out_data, codes, <float*>dict_buf.data, nulls, n, scale)
+        elif d_val_type == DRAKEN_INT64:
+            _floor_dict_with_null(out_data, codes, <int64_t*>dict_buf.data, nulls, n, scale)
+        elif d_val_type == DRAKEN_INT32:
+            _floor_dict_with_null(out_data, codes, <int32_t*>dict_buf.data, nulls, n, scale)
+        elif d_val_type == DRAKEN_INT16:
+            _floor_dict_with_null(out_data, codes, <int16_t*>dict_buf.data, nulls, n, scale)
+        elif d_val_type == DRAKEN_INT8:
+            _floor_dict_with_null(out_data, codes, <int8_t*>dict_buf.data, nulls, n, scale)
+
+
+# Trunc variants
+cdef inline void _trunc_dict_no_null(
+    double* out_data,
+    _code_t* codes,
+    _dict_t* dict_data,
+    Py_ssize_t n,
+    int scale,
+) noexcept nogil:
+    cdef Py_ssize_t i
+    for i in range(n):
+        out_data[i] = _trunc_scaled(<double>dict_data[codes[i]], scale)
+
+
+cdef inline void _trunc_dict_with_null(
+    double* out_data,
+    _code_t* codes,
+    _dict_t* dict_data,
+    uint8_t* nulls,
+    Py_ssize_t n,
+    int scale,
+) noexcept nogil:
+    cdef Py_ssize_t i
+    for i in range(n):
+        if ((nulls[i >> 3] >> (i & 7)) & 1) == 0:
+            out_data[i] = 0.0
+            continue
+        out_data[i] = _trunc_scaled(<double>dict_data[codes[i]], scale)
+
+
+cdef inline void _dispatch_trunc_dict(
+    double* out_data,
+    _code_t* codes,
+    DrakenVarBuffer* dict_buf,
+    int d_val_type,
+    uint8_t* nulls,
+    Py_ssize_t n,
+    int scale,
+) noexcept nogil:
+    if nulls == NULL:
+        if d_val_type == DRAKEN_FLOAT64:
+            _trunc_dict_no_null(out_data, codes, <double*>dict_buf.data, n, scale)
+        elif d_val_type == DRAKEN_FLOAT32:
+            _trunc_dict_no_null(out_data, codes, <float*>dict_buf.data, n, scale)
+        elif d_val_type == DRAKEN_INT64:
+            _trunc_dict_no_null(out_data, codes, <int64_t*>dict_buf.data, n, scale)
+        elif d_val_type == DRAKEN_INT32:
+            _trunc_dict_no_null(out_data, codes, <int32_t*>dict_buf.data, n, scale)
+        elif d_val_type == DRAKEN_INT16:
+            _trunc_dict_no_null(out_data, codes, <int16_t*>dict_buf.data, n, scale)
+        elif d_val_type == DRAKEN_INT8:
+            _trunc_dict_no_null(out_data, codes, <int8_t*>dict_buf.data, n, scale)
+    else:
+        if d_val_type == DRAKEN_FLOAT64:
+            _trunc_dict_with_null(out_data, codes, <double*>dict_buf.data, nulls, n, scale)
+        elif d_val_type == DRAKEN_FLOAT32:
+            _trunc_dict_with_null(out_data, codes, <float*>dict_buf.data, nulls, n, scale)
+        elif d_val_type == DRAKEN_INT64:
+            _trunc_dict_with_null(out_data, codes, <int64_t*>dict_buf.data, nulls, n, scale)
+        elif d_val_type == DRAKEN_INT32:
+            _trunc_dict_with_null(out_data, codes, <int32_t*>dict_buf.data, nulls, n, scale)
+        elif d_val_type == DRAKEN_INT16:
+            _trunc_dict_with_null(out_data, codes, <int16_t*>dict_buf.data, nulls, n, scale)
+        elif d_val_type == DRAKEN_INT8:
+            _trunc_dict_with_null(out_data, codes, <int8_t*>dict_buf.data, nulls, n, scale)
+
+
+# ---------------------------------------------------------------------------
 # CEILING
 # ---------------------------------------------------------------------------
 
@@ -158,30 +374,15 @@ cpdef Float64Vector vector_ceil(object values, int scale=0):
             memcpy(out_null, in_null, (n + 7) >> 3)
             out_vec.ptr.null_bitmap = out_null
 
-        for i in range(n):
-            if in_null != NULL and ((in_null[i >> 3] >> (i & 7)) & 1) == 0:
+        if d_val_type not in (DRAKEN_FLOAT64, DRAKEN_FLOAT32, DRAKEN_INT64, DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8):
+            for i in range(n):
                 out_data[i] = 0.0
-                continue
-            if d_ptr.code_width == 1:
-                code = (<uint8_t*>d_ptr.codes)[i]
-            elif d_ptr.code_width == 2:
-                code = (<uint16_t*>d_ptr.codes)[i]
-            else:
-                code = (<uint32_t*>d_ptr.codes)[i]
-            if d_val_type == DRAKEN_FLOAT64:
-                out_data[i] = _ceil_scaled((<double*>dict_buf.data)[code], scale)
-            elif d_val_type == DRAKEN_FLOAT32:
-                out_data[i] = _ceil_scaled(<double>((<float*>dict_buf.data)[code]), scale)
-            elif d_val_type == DRAKEN_INT64:
-                out_data[i] = _ceil_scaled(<double>((<int64_t*>dict_buf.data)[code]), scale)
-            elif d_val_type == DRAKEN_INT32:
-                out_data[i] = _ceil_scaled(<double>((<int32_t*>dict_buf.data)[code]), scale)
-            elif d_val_type == DRAKEN_INT16:
-                out_data[i] = _ceil_scaled(<double>((<int16_t*>dict_buf.data)[code]), scale)
-            elif d_val_type == DRAKEN_INT8:
-                out_data[i] = _ceil_scaled(<double>((<int8_t*>dict_buf.data)[code]), scale)
-            else:
-                out_data[i] = 0.0
+        elif d_ptr.code_width == 1:
+            _dispatch_ceil_dict[uint8_t](out_data, <uint8_t*>d_ptr.codes, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
+        elif d_ptr.code_width == 2:
+            _dispatch_ceil_dict[uint16_t](out_data, <uint16_t*>d_ptr.codes, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
+        else:
+            _dispatch_ceil_dict[uint32_t](out_data, <uint32_t*>d_ptr.codes, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
 
     elif isinstance(values, Int64Vector):
         ivals    = <Int64Vector>values
@@ -265,30 +466,15 @@ cpdef Float64Vector vector_floor(object values, int scale=0):
             memcpy(out_null, in_null, (n + 7) >> 3)
             out_vec.ptr.null_bitmap = out_null
 
-        for i in range(n):
-            if in_null != NULL and ((in_null[i >> 3] >> (i & 7)) & 1) == 0:
+        if d_val_type not in (DRAKEN_FLOAT64, DRAKEN_FLOAT32, DRAKEN_INT64, DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8):
+            for i in range(n):
                 out_data[i] = 0.0
-                continue
-            if d_ptr.code_width == 1:
-                code = (<uint8_t*>d_ptr.codes)[i]
-            elif d_ptr.code_width == 2:
-                code = (<uint16_t*>d_ptr.codes)[i]
-            else:
-                code = (<uint32_t*>d_ptr.codes)[i]
-            if d_val_type == DRAKEN_FLOAT64:
-                out_data[i] = _floor_scaled((<double*>dict_buf.data)[code], scale)
-            elif d_val_type == DRAKEN_FLOAT32:
-                out_data[i] = _floor_scaled(<double>((<float*>dict_buf.data)[code]), scale)
-            elif d_val_type == DRAKEN_INT64:
-                out_data[i] = _floor_scaled(<double>((<int64_t*>dict_buf.data)[code]), scale)
-            elif d_val_type == DRAKEN_INT32:
-                out_data[i] = _floor_scaled(<double>((<int32_t*>dict_buf.data)[code]), scale)
-            elif d_val_type == DRAKEN_INT16:
-                out_data[i] = _floor_scaled(<double>((<int16_t*>dict_buf.data)[code]), scale)
-            elif d_val_type == DRAKEN_INT8:
-                out_data[i] = _floor_scaled(<double>((<int8_t*>dict_buf.data)[code]), scale)
-            else:
-                out_data[i] = 0.0
+        elif d_ptr.code_width == 1:
+            _dispatch_floor_dict[uint8_t](out_data, <uint8_t*>d_ptr.codes, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
+        elif d_ptr.code_width == 2:
+            _dispatch_floor_dict[uint16_t](out_data, <uint16_t*>d_ptr.codes, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
+        else:
+            _dispatch_floor_dict[uint32_t](out_data, <uint32_t*>d_ptr.codes, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
 
     elif isinstance(values, Int64Vector):
         ivals    = <Int64Vector>values
@@ -372,30 +558,15 @@ cpdef Float64Vector vector_trunc(object values, int scale=0):
             memcpy(out_null, in_null, (n + 7) >> 3)
             out_vec.ptr.null_bitmap = out_null
 
-        for i in range(n):
-            if in_null != NULL and ((in_null[i >> 3] >> (i & 7)) & 1) == 0:
+        if d_val_type not in (DRAKEN_FLOAT64, DRAKEN_FLOAT32, DRAKEN_INT64, DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8):
+            for i in range(n):
                 out_data[i] = 0.0
-                continue
-            if d_ptr.code_width == 1:
-                code = (<uint8_t*>d_ptr.codes)[i]
-            elif d_ptr.code_width == 2:
-                code = (<uint16_t*>d_ptr.codes)[i]
-            else:
-                code = (<uint32_t*>d_ptr.codes)[i]
-            if d_val_type == DRAKEN_FLOAT64:
-                out_data[i] = _trunc_scaled((<double*>dict_buf.data)[code], scale)
-            elif d_val_type == DRAKEN_FLOAT32:
-                out_data[i] = _trunc_scaled(<double>((<float*>dict_buf.data)[code]), scale)
-            elif d_val_type == DRAKEN_INT64:
-                out_data[i] = _trunc_scaled(<double>((<int64_t*>dict_buf.data)[code]), scale)
-            elif d_val_type == DRAKEN_INT32:
-                out_data[i] = _trunc_scaled(<double>((<int32_t*>dict_buf.data)[code]), scale)
-            elif d_val_type == DRAKEN_INT16:
-                out_data[i] = _trunc_scaled(<double>((<int16_t*>dict_buf.data)[code]), scale)
-            elif d_val_type == DRAKEN_INT8:
-                out_data[i] = _trunc_scaled(<double>((<int8_t*>dict_buf.data)[code]), scale)
-            else:
-                out_data[i] = 0.0
+        elif d_ptr.code_width == 1:
+            _dispatch_trunc_dict[uint8_t](out_data, <uint8_t*>d_ptr.codes, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
+        elif d_ptr.code_width == 2:
+            _dispatch_trunc_dict[uint16_t](out_data, <uint16_t*>d_ptr.codes, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
+        else:
+            _dispatch_trunc_dict[uint32_t](out_data, <uint32_t*>d_ptr.codes, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
 
     elif isinstance(values, Int64Vector):
         ivals    = <Int64Vector>values

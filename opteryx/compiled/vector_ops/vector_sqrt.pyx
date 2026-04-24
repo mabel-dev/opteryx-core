@@ -28,6 +28,9 @@ cpdef Float64Vector vector_sqrt_int64(Int64Vector values):
     cdef uint8_t* out_null = NULL
     cdef Py_ssize_t i
 
+    if n > 0 and in_data == NULL:
+        raise ValueError("Int64Vector has NULL data pointer")
+
     if in_null != NULL and n > 0:
         out_null = <uint8_t*>malloc((n + 7) >> 3)
         if out_null == NULL:
@@ -54,6 +57,9 @@ cpdef Float64Vector vector_sqrt_float64(Float64Vector values):
     cdef uint8_t* in_null = <uint8_t*>values.ptr.null_bitmap
     cdef uint8_t* out_null = NULL
     cdef Py_ssize_t i
+
+    if n > 0 and in_data == NULL:
+        raise ValueError("Float64Vector has NULL data pointer")
 
     if in_null != NULL and n > 0:
         out_null = <uint8_t*>malloc((n + 7) >> 3)
