@@ -55,7 +55,18 @@ class build_ext(build_ext_orig):
             self.compiler.src_extensions.append(".S")
 
         # Pre-compile yyjson.c as C code before C++ extensions need it
+        import shutil
         import subprocess
+
+        # Resolve C compiler: respect CC environment variable, otherwise prefer clang/gcc/cc from PATH.
+        # Fall back to "cc" as a last resort so CI that uses e.g. "cc" or has CC set will work.
+        compiler = (
+            os.environ.get("CC")
+            or shutil.which("clang")
+            or shutil.which("gcc")
+            or shutil.which("cc")
+            or "cc"
+        )
 
         os.makedirs("build/temp", exist_ok=True)
         yyjson_obj = "build/temp.yyjson.o"
@@ -63,10 +74,10 @@ class build_ext(build_ext_orig):
         if not os.path.exists(yyjson_obj) or os.path.getmtime(yyjson_src) > os.path.getmtime(
             yyjson_obj
         ):
-            print(f"Pre-compiling {yyjson_src} to {yyjson_obj}")
+            print(f"Pre-compiling {yyjson_src} to {yyjson_obj} using compiler: {compiler}")
             result = subprocess.run(
                 [
-                    "clang",
+                    compiler,
                     "-O3",
                     "-std=c11",
                     "-Wno-unused-function",
@@ -81,7 +92,7 @@ class build_ext(build_ext_orig):
                 text=True,
             )
             if result.returncode != 0:
-                print(f"Error compiling yyjson: {result.stderr}")
+                print(f"Error compiling yyjson with {compiler}: {result.stderr}")
             else:
                 print(f"Successfully compiled yyjson to {yyjson_obj}")
 
