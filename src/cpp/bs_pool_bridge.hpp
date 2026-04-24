@@ -217,12 +217,13 @@ public:
         // Create result container
         auto container = std::make_shared<ResultContainer>(py_future);
 
-        // Create task wrapper
-        auto task = TaskWrapper(container, callable, args, kwargs);
+        // Wrap in shared_ptr so the lambda can be moved into the pool's queue
+        // without invalidating PyObject* references (TaskWrapper owns them).
+        auto task_ptr = std::make_shared<TaskWrapper>(container, callable, args, kwargs);
 
-        // Submit to thread pool
+        // Submit to thread pool (detach — result tracked via ResultContainer/Future)
         try {
-            pool_->submit(task);
+            pool_->detach_task([task_ptr]() { (*task_ptr)(); });
         } catch (const std::exception& e) {
             PyErr_SetString(PyExc_RuntimeError, e.what());
             Py_DECREF(py_future);
@@ -239,7 +240,7 @@ public:
     void shutdown(bool wait = true) {
         if (pool_) {
             if (wait) {
-                pool_->wait_for_tasks();
+                pool_->wait();
             }
             pool_.reset();
         }

@@ -111,7 +111,7 @@ public:
      */
     void wait() {
         if (pool_) {
-            pool_->wait_for_tasks();
+            pool_->wait();
         }
     }
 
@@ -120,7 +120,7 @@ public:
      */
     void reset() {
         if (pool_) {
-            pool_->wait_for_tasks();
+            pool_->wait();
         }
     }
 };

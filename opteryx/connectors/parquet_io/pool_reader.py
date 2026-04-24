@@ -51,6 +51,7 @@ from typing import Tuple
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.compiled.draken.storage import read_morsel
 from opteryx.compiled.draken.storage import write_morsel
+from opteryx.compiled.pyobject_queue import MoodycamelQueue
 from opteryx.compiled.structures.memory_pool import MemoryPool
 from opteryx.connectors.io_systems import create_filesystem
 from opteryx.connectors.parquet_io.cache import InMemoryParquetCache
@@ -570,7 +571,7 @@ def _io_worker(
         scan_codec_metrics: Dict[str, _CodecMetrics] = {}
 
         ready_queue_cap = max(2, int(_cfg.PARQUET_READY_ROWGROUP_QUEUE_CAP))
-        ready_queue: "queue.Queue[_IORowGroupState | None]" = queue.Queue(maxsize=ready_queue_cap)
+        ready_queue: MoodycamelQueue = MoodycamelQueue(maxsize=ready_queue_cap)
         metrics_lock = threading.Lock()
         emitter: Optional[threading.Thread] = None
         read_pool: ThreadPoolExecutor = _persistent_read_pool

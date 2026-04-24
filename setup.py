@@ -370,6 +370,7 @@ include_dirs = [
     "third_party/nanobind",
     "third_party/crypto",
     "third_party/bshoshany",
+    "third_party/moodycamel",
 ]
 
 # Common SIMD / environment C++ sources used by multiple extensions
@@ -952,10 +953,18 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
-    # Thread pool (Cython wrapper for Python ThreadPoolExecutor)
+    # Thread pool (BS::thread_pool via BSThreadPoolBridge)
     Extension(
         name="opteryx.compiled.thread_pool",
         sources=["opteryx/compiled/thread_pool.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
+        language="c++",
+    ),
+    # Lock-free SPSC queue (moodycamel::ReaderWriterQueue for Python objects)
+    Extension(
+        name="opteryx.compiled.pyobject_queue",
+        sources=["opteryx/compiled/pyobject_queue.pyx"],
         include_dirs=include_dirs,
         extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
         language="c++",
