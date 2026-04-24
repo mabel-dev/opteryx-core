@@ -20,6 +20,9 @@ cdef const uint64_t NULL_HASH
 cdef extern from "simd_hash.h":
     void simd_mix_hash(uint64_t* dest, const uint64_t* values, size_t count) nogil
 
+cdef extern from "simd_bitops.h":
+    size_t simd_popcount(const uint8_t* data, size_t n) nogil
+
 cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:
     cdef uint64_t mixed = current ^ value
     mixed = mixed * MIX_HASH_CONSTANT + 1

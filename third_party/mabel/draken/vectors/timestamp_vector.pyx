@@ -44,7 +44,7 @@ from opteryx.compiled.draken.core.fixed_vector cimport buf_dtype
 from opteryx.compiled.draken.core.fixed_vector cimport buf_itemsize
 from opteryx.compiled.draken.core.fixed_vector cimport buf_length
 from opteryx.compiled.draken.core.fixed_vector cimport free_fixed_buffer
-from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
+from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash, simd_popcount
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.vectors.date32_vector cimport Date32Vector
@@ -926,17 +926,12 @@ cdef class TimestampVector(Vector):
     def null_count(self):
         """Return the number of nulls in the vector."""
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t i, n = ptr.length
-        cdef Py_ssize_t count = 0
-        cdef uint8_t byte, bit
+        cdef Py_ssize_t n = ptr.length
         if self._has_const:
             return n if self._const_is_null else 0
         if ptr.null_bitmap == NULL:
             return 0
-        for i in range(n):
-            if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
-                count += 1
-        return count
+        return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
 
     cpdef list to_pylist(self):
         cdef DrakenFixedBuffer* ptr = self.ptr

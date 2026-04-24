@@ -397,10 +397,11 @@ def make_draken_extension(module_path, source_file, language="c++", depends=None
         depends = ["third_party/mabel/draken/core/buffers.h"]
 
     sources = [f"third_party/mabel/draken/{source_file}"]
-    # Include SIMD hash implementation for all draken vector modules so
-    # simd_mix_hash and related functions are available at link time.
-    if "src/cpp/simd_hash.cpp" not in sources:
-        sources.append("src/cpp/simd_hash.cpp")
+    # Include SIMD implementations for all draken vector modules so
+    # simd_mix_hash, simd_popcount, and related functions are available at link time.
+    for s in ("src/cpp/simd_hash.cpp", "src/cpp/simd_bitops.cpp"):
+        if s not in sources:
+            sources.append(s)
 
     # Common SIMD/environment sources - CPU features and SIMDs
     for s in ("src/cpp/simd_env.cpp", "src/cpp/cpu_features.cpp", "src/cpp/simd_search.cpp"):
@@ -670,6 +671,7 @@ extensions = [
         sources=[
             "third_party/mabel/draken/vectors/string_vector.pyx",
             "src/cpp/simd_hash.cpp",
+            "src/cpp/simd_bitops.cpp",
             "src/cpp/simd_env.cpp",
             "src/cpp/simd_search.cpp",
             "src/cpp/simd_string_ops.cpp",
@@ -699,6 +701,7 @@ extensions = [
         sources=[
             "opteryx/compiled/draken/vectors/_hash_api.pyx",
             "src/cpp/simd_hash.cpp",
+            "src/cpp/simd_bitops.cpp",
             "src/cpp/cpu_features.cpp",
         ],
         include_dirs=include_dirs,

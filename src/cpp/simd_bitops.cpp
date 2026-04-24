@@ -54,8 +54,7 @@ void simd_and_mask(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n) 
     using fn_t = void(*)(uint8_t*, const uint8_t*, const uint8_t*, size_t);
     static std::atomic<fn_t> cache{nullptr};
 
-    #if defined(__AVX2__)
-        fn_t fn = simd::select_dispatch<fn_t>(cache, {
+    fn_t fn = simd::select_dispatch<fn_t>(cache, {
 #if defined(__AVX2__)
         { &cpu_supports_avx2, simd_and_mask_avx2 },
 #endif
@@ -106,7 +105,6 @@ void simd_or_mask(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n) {
     using fn_t = void(*)(uint8_t*, const uint8_t*, const uint8_t*, size_t);
     static std::atomic<fn_t> cache{nullptr};
 
-#if defined(__AVX2__)
     fn_t fn = simd::select_dispatch<fn_t>(cache, {
 #if defined(__AVX2__)
         { &cpu_supports_avx2, simd_or_mask_avx2 },
@@ -158,7 +156,6 @@ void simd_xor_mask(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n) 
     using fn_t = void(*)(uint8_t*, const uint8_t*, const uint8_t*, size_t);
     static std::atomic<fn_t> cache{nullptr};
 
-#if defined(__AVX2__)
     fn_t fn = simd::select_dispatch<fn_t>(cache, {
 #if defined(__AVX2__)
         { &cpu_supports_avx2, simd_xor_mask_avx2 },
@@ -209,7 +206,6 @@ void simd_not_mask(uint8_t* dest, const uint8_t* src, size_t n) {
     using fn_t = void(*)(uint8_t*, const uint8_t*, size_t);
     static std::atomic<fn_t> cache{nullptr};
 
-#if defined(__AVX2__)
     fn_t fn = simd::select_dispatch<fn_t>(cache, {
 #if defined(__AVX2__)
         { &cpu_supports_avx2, simd_not_mask_avx2 },
@@ -293,7 +289,6 @@ void simd_select_bytes(uint8_t* dest, const uint8_t* mask,
     using fn_t = void(*)(uint8_t*, const uint8_t*, const uint8_t*, const uint8_t*, size_t);
     static std::atomic<fn_t> cache{nullptr};
 
-#if defined(__AVX2__)
     fn_t fn = simd::select_dispatch<fn_t>(cache, {
 #if defined(__AVX2__)
         { &cpu_supports_avx2, simd_select_bytes_avx2 },

@@ -49,7 +49,7 @@ from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 from opteryx.compiled.draken.vectors.bool_vector cimport bool_vector_from_bits
 from opteryx.compiled.draken.vectors.date32_vector cimport Date32Vector
 from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, NULL_HASH, Vector, mix_hash, simd_mix_hash
+from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, NULL_HASH, Vector, mix_hash, simd_mix_hash, simd_popcount
 
 DEF INTERVAL_HASH_CHUNK = 512
 
@@ -812,14 +812,10 @@ cdef class IntervalVector(Vector):
     @property
     def null_count(self):
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t i, n = ptr.length
-        cdef Py_ssize_t count = 0
+        cdef Py_ssize_t n = ptr.length
         if ptr.null_bitmap == NULL:
             return 0
-        for i in range(n):
-            if not _is_valid(ptr, i):
-                count += 1
-        return count
+        return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
 
     cpdef list to_pylist(self):
         cdef DrakenFixedBuffer* ptr = self.ptr

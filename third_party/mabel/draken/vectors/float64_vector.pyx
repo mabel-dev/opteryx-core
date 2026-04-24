@@ -36,7 +36,7 @@ from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
 from opteryx.compiled.draken.core.buffers cimport DRAKEN_FLOAT64
 from opteryx.compiled.draken.core.fixed_vector cimport alloc_fixed_buffer, buf_dtype, buf_itemsize, buf_length, free_fixed_buffer
 from opteryx.compiled.draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
-from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
+from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash, simd_popcount
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 
 DEF FLOAT64_HASH_CHUNK = 1024
@@ -760,19 +760,12 @@ cdef class Float64Vector(Vector):
     @property
     def null_count(self):
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t i, n = ptr.length
-        cdef Py_ssize_t count = 0
-        cdef uint8_t byte, bit
+        cdef Py_ssize_t n = ptr.length
         if self._has_const:
             return n if self._const_is_null else 0
         if ptr.null_bitmap == NULL:
             return 0
-        for i in range(n):
-            byte = ptr.null_bitmap[i >> 3]
-            bit = (byte >> (i & 7)) & 1
-            if not bit:
-                count += 1
-        return count
+        return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
 
     cpdef list to_pylist(self):
         cdef DrakenFixedBuffer* ptr = self.ptr

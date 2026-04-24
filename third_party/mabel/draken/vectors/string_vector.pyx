@@ -89,7 +89,7 @@ cdef extern from *:
     void PREFETCH(const void* addr) nogil
     uint64_t BSWAP64(uint64_t x) nogil
 
-from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
+from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash, simd_popcount
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 
 DEF STRING_HASH_CHUNK = 256
@@ -730,19 +730,12 @@ cdef class StringVector(Vector):
     def null_count(self):
         """Return the number of nulls in the vector."""
         cdef DrakenVarBuffer* ptr = self.ptr
-        cdef Py_ssize_t i, n = ptr.length
-        cdef Py_ssize_t count = 0
-        cdef uint8_t byte, bit
+        cdef Py_ssize_t n = ptr.length
         if self._has_const:
             return n if self._const_is_null else 0
         if ptr.null_bitmap == NULL:
             return 0
-        for i in range(n):
-            byte = ptr.null_bitmap[i >> 3]
-            bit = (byte >> (i & 7)) & 1
-            if not bit:
-                count += 1
-        return count
+        return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
 
     cpdef int8_t[::1] is_null(self):
         """

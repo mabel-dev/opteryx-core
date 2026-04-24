@@ -44,6 +44,7 @@ from opteryx.compiled.draken.vectors.vector cimport (
     Vector,
     mix_hash,
     simd_mix_hash,
+    simd_popcount,
 )
 
 DEF ARRAY_HASH_CHUNK = 64
@@ -312,12 +313,8 @@ cdef class ArrayVector(Vector):
     def null_count(self):
         if self.ptr == NULL or self.ptr.null_bitmap == NULL:
             return 0
-        cdef Py_ssize_t i, n = <Py_ssize_t> self.ptr.length
-        cdef Py_ssize_t count = 0
-        for i in range(n):
-            if _row_is_null(self.ptr, i):
-                count += 1
-        return count
+        cdef Py_ssize_t n = <Py_ssize_t> self.ptr.length
+        return n - <Py_ssize_t>simd_popcount(self.ptr.null_bitmap, (<size_t>n + 7) >> 3)
 
     def to_pylist(self):
         if self.ptr == NULL:

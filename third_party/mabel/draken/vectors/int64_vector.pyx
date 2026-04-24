@@ -53,6 +53,7 @@ from opteryx.compiled.draken.vectors.vector cimport (
     Vector,
     mix_hash,
     simd_mix_hash,
+    simd_popcount,
 )
 
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
@@ -760,19 +761,12 @@ cdef class Int64Vector(Vector):
     def null_count(self):
         """Return the number of nulls in the vector."""
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t i, n = ptr.length
-        cdef Py_ssize_t count = 0
-        cdef uint8_t byte, bit
+        cdef Py_ssize_t n = ptr.length
         if self._has_const:
             return n if self._const_is_null else 0
         if ptr.null_bitmap == NULL:
             return 0
-        for i in range(n):
-            byte = ptr.null_bitmap[i >> 3]
-            bit = (byte >> (i & 7)) & 1
-            if not bit:
-                count += 1
-        return count
+        return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
 
     cpdef list to_pylist(self):
         cdef DrakenFixedBuffer* ptr = self.ptr
