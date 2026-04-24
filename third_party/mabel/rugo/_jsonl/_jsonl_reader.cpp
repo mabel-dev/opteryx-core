@@ -2529,23 +2529,15 @@ static struct __pyx_vtabstruct__memoryviewslice *__pyx_vtabptr__memoryviewslice;
 #define __Pyx_CLEAR(r)    do { PyObject* tmp = ((PyObject*)(r)); r = NULL; __Pyx_DECREF(tmp);} while(0)
 #define __Pyx_XCLEAR(r)   do { if((r) != NULL) {PyObject* tmp = ((PyObject*)(r)); r = NULL; __Pyx_DECREF(tmp);}} while(0)
 
-/* DictGetItem.proto */
-#if !CYTHON_COMPILING_IN_PYPY
-static PyObject *__Pyx_PyDict_GetItem(PyObject *d, PyObject* key);
-#define __Pyx_PyObject_Dict_GetItem(obj, name)\
-    (likely(PyDict_CheckExact(obj)) ?\
-     __Pyx_PyDict_GetItem(obj, name) : PyObject_GetItem(obj, name))
+/* PyErrExceptionMatches.proto (used by PyObjectGetAttrStrNoError) */
+#if CYTHON_FAST_THREAD_STATE
+#define __Pyx_PyErr_ExceptionMatches(err) __Pyx_PyErr_ExceptionMatchesInState(__pyx_tstate, err)
+static CYTHON_INLINE int __Pyx_PyErr_ExceptionMatchesInState(PyThreadState* tstate, PyObject* err);
 #else
-#define __Pyx_PyDict_GetItem(d, key) PyObject_GetItem(d, key)
-#define __Pyx_PyObject_Dict_GetItem(obj, name)  PyObject_GetItem(obj, name)
+#define __Pyx_PyErr_ExceptionMatches(err)  PyErr_ExceptionMatches(err)
 #endif
 
-/* GetTopmostException.proto (used by SaveResetException) */
-#if CYTHON_USE_EXC_INFO_STACK && CYTHON_FAST_THREAD_STATE
-static _PyErr_StackItem * __Pyx_PyErr_GetTopmostException(PyThreadState *tstate);
-#endif
-
-/* PyThreadStateGet.proto (used by SaveResetException) */
+/* PyThreadStateGet.proto (used by PyErrFetchRestore) */
 #if CYTHON_FAST_THREAD_STATE
 #define __Pyx_PyThreadState_declare  PyThreadState *__pyx_tstate;
 #define __Pyx_PyThreadState_assign  __pyx_tstate = __Pyx_PyThreadState_Current;
@@ -2563,6 +2555,60 @@ static _PyErr_StackItem * __Pyx_PyErr_GetTopmostException(PyThreadState *tstate)
 #define __Pyx_PyErr_CurrentExceptionType()  PyErr_Occurred()
 #endif
 
+/* PyErrFetchRestore.proto (used by PyObjectGetAttrStrNoError) */
+#if CYTHON_FAST_THREAD_STATE
+#define __Pyx_PyErr_Clear() __Pyx_ErrRestore(NULL, NULL, NULL)
+#define __Pyx_ErrRestoreWithState(type, value, tb)  __Pyx_ErrRestoreInState(PyThreadState_GET(), type, value, tb)
+#define __Pyx_ErrFetchWithState(type, value, tb)    __Pyx_ErrFetchInState(PyThreadState_GET(), type, value, tb)
+#define __Pyx_ErrRestore(type, value, tb)  __Pyx_ErrRestoreInState(__pyx_tstate, type, value, tb)
+#define __Pyx_ErrFetch(type, value, tb)    __Pyx_ErrFetchInState(__pyx_tstate, type, value, tb)
+static CYTHON_INLINE void __Pyx_ErrRestoreInState(PyThreadState *tstate, PyObject *type, PyObject *value, PyObject *tb);
+static CYTHON_INLINE void __Pyx_ErrFetchInState(PyThreadState *tstate, PyObject **type, PyObject **value, PyObject **tb);
+#if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX < 0x030C00A6
+#define __Pyx_PyErr_SetNone(exc) (Py_INCREF(exc), __Pyx_ErrRestore((exc), NULL, NULL))
+#else
+#define __Pyx_PyErr_SetNone(exc) PyErr_SetNone(exc)
+#endif
+#else
+#define __Pyx_PyErr_Clear() PyErr_Clear()
+#define __Pyx_PyErr_SetNone(exc) PyErr_SetNone(exc)
+#define __Pyx_ErrRestoreWithState(type, value, tb)  PyErr_Restore(type, value, tb)
+#define __Pyx_ErrFetchWithState(type, value, tb)  PyErr_Fetch(type, value, tb)
+#define __Pyx_ErrRestoreInState(tstate, type, value, tb)  PyErr_Restore(type, value, tb)
+#define __Pyx_ErrFetchInState(tstate, type, value, tb)  PyErr_Fetch(type, value, tb)
+#define __Pyx_ErrRestore(type, value, tb)  PyErr_Restore(type, value, tb)
+#define __Pyx_ErrFetch(type, value, tb)  PyErr_Fetch(type, value, tb)
+#endif
+
+/* PyObjectGetAttrStr.proto (used by PyObjectGetAttrStrNoError) */
+#if CYTHON_USE_TYPE_SLOTS
+static CYTHON_INLINE PyObject* __Pyx_PyObject_GetAttrStr(PyObject* obj, PyObject* attr_name);
+#else
+#define __Pyx_PyObject_GetAttrStr(o,n) PyObject_GetAttr(o,n)
+#endif
+
+/* PyObjectGetAttrStrNoError.proto (used by GetBuiltinName) */
+static CYTHON_INLINE PyObject* __Pyx_PyObject_GetAttrStrNoError(PyObject* obj, PyObject* attr_name);
+
+/* GetBuiltinName.proto */
+static PyObject *__Pyx_GetBuiltinName(PyObject *name);
+
+/* DictGetItem.proto */
+#if !CYTHON_COMPILING_IN_PYPY
+static PyObject *__Pyx_PyDict_GetItem(PyObject *d, PyObject* key);
+#define __Pyx_PyObject_Dict_GetItem(obj, name)\
+    (likely(PyDict_CheckExact(obj)) ?\
+     __Pyx_PyDict_GetItem(obj, name) : PyObject_GetItem(obj, name))
+#else
+#define __Pyx_PyDict_GetItem(d, key) PyObject_GetItem(d, key)
+#define __Pyx_PyObject_Dict_GetItem(obj, name)  PyObject_GetItem(obj, name)
+#endif
+
+/* GetTopmostException.proto (used by SaveResetException) */
+#if CYTHON_USE_EXC_INFO_STACK && CYTHON_FAST_THREAD_STATE
+static _PyErr_StackItem * __Pyx_PyErr_GetTopmostException(PyThreadState *tstate);
+#endif
+
 /* SaveResetException.proto */
 #if CYTHON_FAST_THREAD_STATE
 #define __Pyx_ExceptionSave(type, value, tb)  __Pyx__ExceptionSave(__pyx_tstate, type, value, tb)
@@ -2576,14 +2622,6 @@ static CYTHON_INLINE void __Pyx__ExceptionReset(PyThreadState *tstate, PyObject 
 
 /* PyKeyError_Check.proto */
 #define __Pyx_PyExc_KeyError_Check(obj)  __Pyx_TypeCheck(obj, PyExc_KeyError)
-
-/* PyErrExceptionMatches.proto */
-#if CYTHON_FAST_THREAD_STATE
-#define __Pyx_PyErr_ExceptionMatches(err) __Pyx_PyErr_ExceptionMatchesInState(__pyx_tstate, err)
-static CYTHON_INLINE int __Pyx_PyErr_ExceptionMatchesInState(PyThreadState* tstate, PyObject* err);
-#else
-#define __Pyx_PyErr_ExceptionMatches(err)  PyErr_ExceptionMatches(err)
-#endif
 
 /* GetException.proto */
 #if CYTHON_FAST_THREAD_STATE
@@ -2611,31 +2649,6 @@ static CYTHON_INLINE PyObject* __Pyx_PyObject_CallMethO(PyObject *func, PyObject
 /* PyObjectFastCall.proto */
 #define __Pyx_PyObject_FastCall(func, args, nargs)  __Pyx_PyObject_FastCallDict(func, args, (size_t)(nargs), NULL)
 static CYTHON_INLINE PyObject* __Pyx_PyObject_FastCallDict(PyObject *func, PyObject * const*args, size_t nargs, PyObject *kwargs);
-
-/* PyErrFetchRestore.proto (used by RaiseException) */
-#if CYTHON_FAST_THREAD_STATE
-#define __Pyx_PyErr_Clear() __Pyx_ErrRestore(NULL, NULL, NULL)
-#define __Pyx_ErrRestoreWithState(type, value, tb)  __Pyx_ErrRestoreInState(PyThreadState_GET(), type, value, tb)
-#define __Pyx_ErrFetchWithState(type, value, tb)    __Pyx_ErrFetchInState(PyThreadState_GET(), type, value, tb)
-#define __Pyx_ErrRestore(type, value, tb)  __Pyx_ErrRestoreInState(__pyx_tstate, type, value, tb)
-#define __Pyx_ErrFetch(type, value, tb)    __Pyx_ErrFetchInState(__pyx_tstate, type, value, tb)
-static CYTHON_INLINE void __Pyx_ErrRestoreInState(PyThreadState *tstate, PyObject *type, PyObject *value, PyObject *tb);
-static CYTHON_INLINE void __Pyx_ErrFetchInState(PyThreadState *tstate, PyObject **type, PyObject **value, PyObject **tb);
-#if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX < 0x030C00A6
-#define __Pyx_PyErr_SetNone(exc) (Py_INCREF(exc), __Pyx_ErrRestore((exc), NULL, NULL))
-#else
-#define __Pyx_PyErr_SetNone(exc) PyErr_SetNone(exc)
-#endif
-#else
-#define __Pyx_PyErr_Clear() PyErr_Clear()
-#define __Pyx_PyErr_SetNone(exc) PyErr_SetNone(exc)
-#define __Pyx_ErrRestoreWithState(type, value, tb)  PyErr_Restore(type, value, tb)
-#define __Pyx_ErrFetchWithState(type, value, tb)  PyErr_Fetch(type, value, tb)
-#define __Pyx_ErrRestoreInState(tstate, type, value, tb)  PyErr_Restore(type, value, tb)
-#define __Pyx_ErrFetchInState(tstate, type, value, tb)  PyErr_Fetch(type, value, tb)
-#define __Pyx_ErrRestore(type, value, tb)  PyErr_Restore(type, value, tb)
-#define __Pyx_ErrFetch(type, value, tb)  PyErr_Fetch(type, value, tb)
-#endif
 
 /* RaiseException.export */
 static void __Pyx_Raise(PyObject *type, PyObject *value, PyObject *tb, PyObject *cause);
@@ -2708,13 +2721,6 @@ static CYTHON_INLINE PyObject* __Pyx_PyDict_Items(PyObject* d);
 
 /* PyObjectCallOneArg.proto (used by CallUnboundCMethod0) */
 static CYTHON_INLINE PyObject* __Pyx_PyObject_CallOneArg(PyObject *func, PyObject *arg);
-
-/* PyObjectGetAttrStr.proto (used by UnpackUnboundCMethod) */
-#if CYTHON_USE_TYPE_SLOTS
-static CYTHON_INLINE PyObject* __Pyx_PyObject_GetAttrStr(PyObject* obj, PyObject* attr_name);
-#else
-#define __Pyx_PyObject_GetAttrStr(o,n) PyObject_GetAttr(o,n)
-#endif
 
 /* UnpackUnboundCMethod.proto (used by CallUnboundCMethod0) */
 typedef struct {
@@ -2831,12 +2837,6 @@ static int __Pyx__ArgTypeTest(PyObject *obj, PyTypeObject *type, const char *nam
 #define __Pyx_ArgTypeTest(obj, type, none_allowed, name, exact)\
     ((likely(__Pyx_IS_TYPE(obj, type) | (none_allowed && (obj == Py_None)))) ? 1 :\
         __Pyx__ArgTypeTest(obj, type, name, exact))
-
-/* PyObjectGetAttrStrNoError.proto (used by GetBuiltinName) */
-static CYTHON_INLINE PyObject* __Pyx_PyObject_GetAttrStrNoError(PyObject* obj, PyObject* attr_name);
-
-/* GetBuiltinName.proto */
-static PyObject *__Pyx_GetBuiltinName(PyObject *name);
 
 /* PyObjectFastCallMethod.proto */
 #if CYTHON_VECTORCALL && PY_VERSION_HEX >= 0x03090000
@@ -3172,6 +3172,37 @@ static int __Pyx_IternextUnpackEndCheck(PyObject *retval, Py_ssize_t expected);
 #define __Pyx_PyObject_Unicode(obj)\
     (likely(PyUnicode_CheckExact(obj)) ? __Pyx_NewRef(obj) : PyObject_Str(obj))
 
+/* PyObjectLookupSpecial.proto */
+#if CYTHON_USE_PYTYPE_LOOKUP && CYTHON_USE_TYPE_SLOTS
+#define __Pyx_PyObject_LookupSpecialNoError(obj, attr_name)  __Pyx__PyObject_LookupSpecial(obj, attr_name, 0)
+#define __Pyx_PyObject_LookupSpecial(obj, attr_name)  __Pyx__PyObject_LookupSpecial(obj, attr_name, 1)
+static CYTHON_INLINE PyObject* __Pyx__PyObject_LookupSpecial(PyObject* obj, PyObject* attr_name, int with_error);
+#else
+#define __Pyx_PyObject_LookupSpecialNoError(o,n) __Pyx_PyObject_GetAttrStrNoError(o,n)
+#define __Pyx_PyObject_LookupSpecial(o,n) __Pyx_PyObject_GetAttrStr(o,n)
+#endif
+
+/* ListAppend.proto */
+#if CYTHON_USE_PYLIST_INTERNALS && CYTHON_ASSUME_SAFE_MACROS
+static CYTHON_INLINE int __Pyx_PyList_Append(PyObject* list, PyObject* x) {
+    PyListObject* L = (PyListObject*) list;
+    Py_ssize_t len = Py_SIZE(list);
+    if (likely(L->allocated > len) & likely(len > (L->allocated >> 1))) {
+        Py_INCREF(x);
+        #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030d0000
+        L->ob_item[len] = x;
+        #else
+        PyList_SET_ITEM(list, len, x);
+        #endif
+        __Pyx_SET_SIZE(list, len + 1);
+        return 0;
+    }
+    return PyList_Append(list, x);
+}
+#else
+#define __Pyx_PyList_Append(L,x) PyList_Append(L,x)
+#endif
+
 /* IncludeCppStringH.proto (used by decode_cpp_string) */
 #include <string>
 
@@ -3204,27 +3235,6 @@ static CYTHON_INLINE PyObject* __Pyx_decode_cpp_string(
         cppstring.data(), (Py_ssize_t) cppstring.size(), start, stop, encoding, errors, decode_func);
 }
 
-/* ListAppend.proto */
-#if CYTHON_USE_PYLIST_INTERNALS && CYTHON_ASSUME_SAFE_MACROS
-static CYTHON_INLINE int __Pyx_PyList_Append(PyObject* list, PyObject* x) {
-    PyListObject* L = (PyListObject*) list;
-    Py_ssize_t len = Py_SIZE(list);
-    if (likely(L->allocated > len) & likely(len > (L->allocated >> 1))) {
-        Py_INCREF(x);
-        #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030d0000
-        L->ob_item[len] = x;
-        #else
-        PyList_SET_ITEM(list, len, x);
-        #endif
-        __Pyx_SET_SIZE(list, len + 1);
-        return 0;
-    }
-    return PyList_Append(list, x);
-}
-#else
-#define __Pyx_PyList_Append(L,x) PyList_Append(L,x)
-#endif
-
 /* PyLongBinop.proto */
 #if !CYTHON_COMPILING_IN_PYPY
 static CYTHON_INLINE PyObject* __Pyx_PyLong_MultiplyObjC(PyObject *op1, PyObject *op2, long intval, int inplace, int zerodivision_check);
@@ -3233,22 +3243,11 @@ static CYTHON_INLINE PyObject* __Pyx_PyLong_MultiplyObjC(PyObject *op1, PyObject
     (inplace ? PyNumber_InPlaceMultiply(op1, op2) : PyNumber_Multiply(op1, op2))
 #endif
 
-/* PyObjectCall2Args.proto (used by PyObjectCallMethod1) */
-static CYTHON_INLINE PyObject* __Pyx_PyObject_Call2Args(PyObject* function, PyObject* arg1, PyObject* arg2);
-
-/* PyObjectGetMethod.proto (used by PyObjectCallMethod1) */
-#if !(CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000)))
-static int __Pyx_PyObject_GetMethod(PyObject *obj, PyObject *name, PyObject **method);
-#endif
-
-/* PyObjectCallMethod1.proto (used by append) */
-static PyObject* __Pyx_PyObject_CallMethod1(PyObject* obj, PyObject* method_name, PyObject* arg);
-
-/* append.proto */
-static CYTHON_INLINE int __Pyx_PyObject_Append(PyObject* L, PyObject* x);
-
 /* dict_getitem_default.proto */
 static PyObject* __Pyx_PyDict_GetItemDefault(PyObject* d, PyObject* key, PyObject* default_value);
+
+/* PyObjectCall2Args.proto (used by CallUnboundCMethod1) */
+static CYTHON_INLINE PyObject* __Pyx_PyObject_Call2Args(PyObject* function, PyObject* arg1, PyObject* arg2);
 
 /* CallUnboundCMethod1.proto */
 CYTHON_UNUSED
@@ -3308,6 +3307,11 @@ static CYTHON_INLINE int __Pyx_fix_up_extension_type_from_spec(PyType_Spec *spec
 
 /* PyObjectCallNoArg.proto (used by PyObjectCallMethod0) */
 static CYTHON_INLINE PyObject* __Pyx_PyObject_CallNoArg(PyObject *func);
+
+/* PyObjectGetMethod.proto (used by PyObjectCallMethod0) */
+#if !(CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000)))
+static int __Pyx_PyObject_GetMethod(PyObject *obj, PyObject *name, PyObject **method);
+#endif
 
 /* PyObjectCallMethod0.proto (used by PyType_Ready) */
 static PyObject* __Pyx_PyObject_CallMethod0(PyObject* obj, PyObject* method_name);
@@ -3610,11 +3614,14 @@ static int __Pyx_init_memviewslice(
 /* CIntFromPy.proto */
 static CYTHON_INLINE uint32_t __Pyx_PyLong_As_uint32_t(PyObject *);
 
-/* CIntToPy.proto */
-static CYTHON_INLINE PyObject* __Pyx_PyLong_From_uint8_t(uint8_t value);
+/* CIntFromPy.proto */
+static CYTHON_INLINE size_t __Pyx_PyLong_As_size_t(PyObject *);
 
 /* CIntToPy.proto */
 static CYTHON_INLINE PyObject* __Pyx_PyLong_From_uint32_t(uint32_t value);
+
+/* CIntToPy.proto */
+static CYTHON_INLINE PyObject* __Pyx_PyLong_From_uint8_t(uint8_t value);
 
 /* CIntFromPy.proto */
 static CYTHON_INLINE uint8_t __Pyx_PyLong_As_uint8_t(PyObject *);
@@ -3622,15 +3629,15 @@ static CYTHON_INLINE uint8_t __Pyx_PyLong_As_uint8_t(PyObject *);
 /* CIntToPy.proto */
 static CYTHON_INLINE PyObject* __Pyx_PyLong_From_long(long value);
 
-/* CIntFromPy.proto */
-static CYTHON_INLINE size_t __Pyx_PyLong_As_size_t(PyObject *);
-
 /* MemviewSliceCopy.proto */
 static __Pyx_memviewslice
 __pyx_memoryview_copy_new_contig(const __Pyx_memviewslice *from_mvs,
                                  const char *mode, int ndim,
                                  size_t sizeof_dtype, int contig_flag,
                                  int dtype_is_object);
+
+/* PyObjectCallMethod1.proto (used by UpdateUnpickledDict) */
+static PyObject* __Pyx_PyObject_CallMethod1(PyObject* obj, PyObject* method_name, PyObject* arg);
 
 /* UpdateUnpickledDict.proto */
 static int __Pyx_UpdateUnpickledDict(PyObject *obj, PyObject *state, Py_ssize_t index);
@@ -3789,13 +3796,13 @@ static uint8_t __pyx_f_7opteryx_8compiled_4rugo_6_jsonl__parse_op(PyObject *); /
 static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_chunks(PyObject *, PyObject *, PyObject *, size_t); /*proto*/
 static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_result(struct rugo::_jsonl::StringColumnResult &); /*proto*/
 static std::string __pyx_convert_string_from_py_6libcpp_6string_std__in_string(PyObject *); /*proto*/
+static PyObject *__pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan(std::vector<struct rugo::_jsonl::FieldSpan>  const &); /*proto*/
+static PyObject *__pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(std::vector<std::vector<struct rugo::_jsonl::FieldSpan> >  const &); /*proto*/
 static CYTHON_INLINE PyObject *__pyx_convert_PyObject_string_to_py_6libcpp_6string_std__in_string(std::string const &); /*proto*/
 static CYTHON_INLINE PyObject *__pyx_convert_PyUnicode_string_to_py_6libcpp_6string_std__in_string(std::string const &); /*proto*/
 static CYTHON_INLINE PyObject *__pyx_convert_PyBytes_string_to_py_6libcpp_6string_std__in_string(std::string const &); /*proto*/
 static CYTHON_INLINE PyObject *__pyx_convert_PyByteArray_string_to_py_6libcpp_6string_std__in_string(std::string const &); /*proto*/
 static PyObject *__pyx_convert_vector_to_py_uint8_t(std::vector<uint8_t>  const &); /*proto*/
-static PyObject *__pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan(std::vector<struct rugo::_jsonl::FieldSpan>  const &); /*proto*/
-static PyObject *__pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(std::vector<std::vector<struct rugo::_jsonl::FieldSpan> >  const &); /*proto*/
 static PyObject *__pyx_convert_pair_to_py_std_3a__3a_string____std_3a__3a_string(std::pair<std::string,std::string>  const &); /*proto*/
 static struct rugo::_jsonl::FieldSpan __pyx_convert__from_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan(PyObject *); /*proto*/
 static std::vector<struct rugo::_jsonl::FieldSpan>  __pyx_convert_vector_from_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan(PyObject *); /*proto*/
@@ -3842,6 +3849,7 @@ int __pyx_module_is_main_opteryx__compiled__rugo___jsonl = 0;
 
 /* Implementation of "opteryx.compiled.rugo._jsonl" */
 /* #### Code section: global_var ### */
+static PyObject *__pyx_builtin_open;
 static PyObject *__pyx_builtin___import__;
 static PyObject *__pyx_builtin_enumerate;
 static PyObject *__pyx_builtin_Ellipsis;
@@ -3893,7 +3901,7 @@ static void __pyx_memoryviewslice___pyx_pf_15View_dot_MemoryView_16_memoryviewsl
 static PyObject *__pyx_pf___pyx_memoryviewslice___reduce_cython__(CYTHON_UNUSED struct __pyx_memoryviewslice_obj *__pyx_v_self); /* proto */
 static PyObject *__pyx_pf___pyx_memoryviewslice_2__setstate_cython__(CYTHON_UNUSED struct __pyx_memoryviewslice_obj *__pyx_v_self, CYTHON_UNUSED PyObject *__pyx_v___pyx_state); /* proto */
 static PyObject *__pyx_pf_15View_dot_MemoryView___pyx_unpickle_Enum(CYTHON_UNUSED PyObject *__pyx_self, PyObject *__pyx_v___pyx_type, long __pyx_v___pyx_checksum, PyObject *__pyx_v___pyx_state); /* proto */
-static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNUSED PyObject *__pyx_self, PyObject *__pyx_v_data, PyObject *__pyx_v_columns, PyObject *__pyx_v_predicates, CYTHON_UNUSED PyObject *__pyx_v_explicit_schema, PyObject *__pyx_v_infer_schema, PyObject *__pyx_v_infer_sample_size, PyObject *__pyx_v_parse_arrays, PyObject *__pyx_v_parse_objects, PyObject *__pyx_v_fail_on_error); /* proto */
+static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNUSED PyObject *__pyx_self, PyObject *__pyx_v_data, PyObject *__pyx_v_columns, PyObject *__pyx_v_predicates, CYTHON_UNUSED PyObject *__pyx_v_explicit_schema, PyObject *__pyx_v_infer_schema, PyObject *__pyx_v_infer_sample_size, PyObject *__pyx_v_parse_arrays, PyObject *__pyx_v_parse_objects, PyObject *__pyx_v_fail_on_error, PyObject *__pyx_v_use_threads, PyObject *__pyx_v_min_rows_per_thread); /* proto */
 static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_map(CYTHON_UNUSED PyObject *__pyx_self, PyObject *__pyx_v_data); /* proto */
 static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHON_UNUSED PyObject *__pyx_self, PyObject *__pyx_v_data, PyObject *__pyx_v_columns, PyObject *__pyx_v_predicates, PyObject *__pyx_v_infer_schema); /* proto */
 static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_6get_jsonl_schema(CYTHON_UNUSED PyObject *__pyx_self, PyObject *__pyx_v_data, PyObject *__pyx_v_sample_size); /* proto */
@@ -3942,10 +3950,10 @@ typedef struct {
   __Pyx_CachedCFunction __pyx_umethod_PyDict_Type_pop;
   __Pyx_CachedCFunction __pyx_umethod_PyDict_Type_values;
   PyObject *__pyx_slice[1];
-  PyObject *__pyx_tuple[4];
+  PyObject *__pyx_tuple[5];
   PyObject *__pyx_codeobj_tab[4];
-  PyObject *__pyx_string_tab[198];
-  PyObject *__pyx_number_tab[11];
+  PyObject *__pyx_string_tab[207];
+  PyObject *__pyx_number_tab[12];
 /* #### Code section: module_state_contents ### */
 /* CommonTypesMetaclass.module_state_decls */
 PyTypeObject *__pyx_CommonTypesMetaclassType;
@@ -4049,141 +4057,150 @@ static __pyx_mstatetype * const __pyx_mstate_global = &__pyx_mstate_global_stati
 #define __pyx_n_u_View_MemoryView __pyx_string_tab[60]
 #define __pyx_n_u_abc __pyx_string_tab[61]
 #define __pyx_n_u_allocate_buffer __pyx_string_tab[62]
-#define __pyx_n_u_append __pyx_string_tab[63]
-#define __pyx_n_u_asyncio_coroutines __pyx_string_tab[64]
-#define __pyx_n_u_base __pyx_string_tab[65]
-#define __pyx_n_u_benchmark_document_map __pyx_string_tab[66]
-#define __pyx_n_u_buf_data __pyx_string_tab[67]
-#define __pyx_n_u_buf_len __pyx_string_tab[68]
-#define __pyx_n_u_buffer_size_mb __pyx_string_tab[69]
-#define __pyx_n_u_bytes __pyx_string_tab[70]
-#define __pyx_n_u_c __pyx_string_tab[71]
-#define __pyx_n_u_chunk_buffers __pyx_string_tab[72]
-#define __pyx_n_u_chunk_records __pyx_string_tab[73]
-#define __pyx_n_u_chunk_result __pyx_string_tab[74]
-#define __pyx_n_u_class __pyx_string_tab[75]
-#define __pyx_n_u_class_getitem __pyx_string_tab[76]
-#define __pyx_n_u_cline_in_traceback __pyx_string_tab[77]
-#define __pyx_n_u_col __pyx_string_tab[78]
-#define __pyx_n_u_col_name __pyx_string_tab[79]
-#define __pyx_n_u_column_names __pyx_string_tab[80]
-#define __pyx_n_u_columns __pyx_string_tab[81]
-#define __pyx_n_u_context __pyx_string_tab[82]
-#define __pyx_n_u_count __pyx_string_tab[83]
-#define __pyx_n_u_data __pyx_string_tab[84]
-#define __pyx_n_u_data_bytes __pyx_string_tab[85]
-#define __pyx_n_u_decode __pyx_string_tab[86]
-#define __pyx_n_u_dict __pyx_string_tab[87]
-#define __pyx_n_u_dtype_is_object __pyx_string_tab[88]
-#define __pyx_n_u_elapsed_ms __pyx_string_tab[89]
-#define __pyx_n_u_encode __pyx_string_tab[90]
+#define __pyx_n_u_asyncio_coroutines __pyx_string_tab[63]
+#define __pyx_n_u_base __pyx_string_tab[64]
+#define __pyx_n_u_benchmark_document_map __pyx_string_tab[65]
+#define __pyx_n_u_buf_data __pyx_string_tab[66]
+#define __pyx_n_u_buf_len __pyx_string_tab[67]
+#define __pyx_n_u_buffer_size_mb __pyx_string_tab[68]
+#define __pyx_n_u_bytes __pyx_string_tab[69]
+#define __pyx_n_u_c __pyx_string_tab[70]
+#define __pyx_n_u_chunk_buffers __pyx_string_tab[71]
+#define __pyx_n_u_chunk_records __pyx_string_tab[72]
+#define __pyx_n_u_chunk_result __pyx_string_tab[73]
+#define __pyx_n_u_class __pyx_string_tab[74]
+#define __pyx_n_u_class_getitem __pyx_string_tab[75]
+#define __pyx_n_u_cline_in_traceback __pyx_string_tab[76]
+#define __pyx_n_u_col __pyx_string_tab[77]
+#define __pyx_n_u_col_name __pyx_string_tab[78]
+#define __pyx_n_u_column_names __pyx_string_tab[79]
+#define __pyx_n_u_columns __pyx_string_tab[80]
+#define __pyx_n_u_context __pyx_string_tab[81]
+#define __pyx_n_u_count __pyx_string_tab[82]
+#define __pyx_n_u_data __pyx_string_tab[83]
+#define __pyx_n_u_data_bytes __pyx_string_tab[84]
+#define __pyx_n_u_decode __pyx_string_tab[85]
+#define __pyx_n_u_dict __pyx_string_tab[86]
+#define __pyx_n_u_dtype_is_object __pyx_string_tab[87]
+#define __pyx_n_u_elapsed_ms __pyx_string_tab[88]
+#define __pyx_n_u_encode __pyx_string_tab[89]
+#define __pyx_n_u_enter __pyx_string_tab[90]
 #define __pyx_n_u_enumerate __pyx_string_tab[91]
 #define __pyx_n_u_error __pyx_string_tab[92]
-#define __pyx_n_u_explicit_schema __pyx_string_tab[93]
-#define __pyx_n_u_fail_on_error __pyx_string_tab[94]
-#define __pyx_n_u_field __pyx_string_tab[95]
-#define __pyx_n_u_first_record __pyx_string_tab[96]
-#define __pyx_n_u_flags __pyx_string_tab[97]
-#define __pyx_n_u_format __pyx_string_tab[98]
-#define __pyx_n_u_fortran __pyx_string_tab[99]
-#define __pyx_n_u_func __pyx_string_tab[100]
-#define __pyx_n_u_get __pyx_string_tab[101]
-#define __pyx_n_u_get_jsonl_schema __pyx_string_tab[102]
-#define __pyx_n_u_getstate __pyx_string_tab[103]
-#define __pyx_n_u_id __pyx_string_tab[104]
-#define __pyx_n_u_import __pyx_string_tab[105]
-#define __pyx_n_u_index __pyx_string_tab[106]
-#define __pyx_n_u_infer_sample_size __pyx_string_tab[107]
-#define __pyx_n_u_infer_schema __pyx_string_tab[108]
-#define __pyx_n_u_interp_ms __pyx_string_tab[109]
-#define __pyx_n_u_interp_result __pyx_string_tab[110]
-#define __pyx_n_u_interp_start __pyx_string_tab[111]
-#define __pyx_n_u_interpret_ms __pyx_string_tab[112]
-#define __pyx_n_u_is_coroutine __pyx_string_tab[113]
-#define __pyx_n_u_items __pyx_string_tab[114]
-#define __pyx_n_u_itemsize __pyx_string_tab[115]
-#define __pyx_n_u_key __pyx_string_tab[116]
-#define __pyx_n_u_key_start __pyx_string_tab[117]
-#define __pyx_n_u_key_width __pyx_string_tab[118]
-#define __pyx_n_u_main __pyx_string_tab[119]
-#define __pyx_n_u_markers __pyx_string_tab[120]
-#define __pyx_n_u_memview __pyx_string_tab[121]
-#define __pyx_n_u_mode __pyx_string_tab[122]
-#define __pyx_n_u_module __pyx_string_tab[123]
-#define __pyx_n_u_name __pyx_string_tab[124]
-#define __pyx_n_u_name_2 __pyx_string_tab[125]
-#define __pyx_n_u_ndim __pyx_string_tab[126]
-#define __pyx_n_u_new __pyx_string_tab[127]
-#define __pyx_n_u_nullable __pyx_string_tab[128]
-#define __pyx_n_u_num_records __pyx_string_tab[129]
-#define __pyx_n_u_num_rows __pyx_string_tab[130]
-#define __pyx_n_u_obj __pyx_string_tab[131]
-#define __pyx_n_u_object_2 __pyx_string_tab[132]
-#define __pyx_n_u_op __pyx_string_tab[133]
-#define __pyx_n_u_opteryx_compiled_rugo__jsonl __pyx_string_tab[134]
-#define __pyx_n_u_pack __pyx_string_tab[135]
-#define __pyx_n_u_parse_arrays __pyx_string_tab[136]
-#define __pyx_n_u_parse_objects __pyx_string_tab[137]
-#define __pyx_n_u_perf_counter __pyx_string_tab[138]
-#define __pyx_n_u_pop __pyx_string_tab[139]
-#define __pyx_n_u_pred __pyx_string_tab[140]
-#define __pyx_n_u_predicates __pyx_string_tab[141]
-#define __pyx_n_u_predictor __pyx_string_tab[142]
-#define __pyx_n_u_pyx_checksum __pyx_string_tab[143]
-#define __pyx_n_u_pyx_state __pyx_string_tab[144]
-#define __pyx_n_u_pyx_type __pyx_string_tab[145]
-#define __pyx_n_u_pyx_unpickle_Enum __pyx_string_tab[146]
-#define __pyx_n_u_pyx_vtable __pyx_string_tab[147]
-#define __pyx_n_u_qualname __pyx_string_tab[148]
-#define __pyx_n_u_read_jsonl __pyx_string_tab[149]
-#define __pyx_n_u_read_jsonl_raw __pyx_string_tab[150]
-#define __pyx_n_u_reader __pyx_string_tab[151]
-#define __pyx_n_u_reduce __pyx_string_tab[152]
-#define __pyx_n_u_reduce_cython __pyx_string_tab[153]
-#define __pyx_n_u_reduce_ex __pyx_string_tab[154]
-#define __pyx_n_u_register __pyx_string_tab[155]
-#define __pyx_n_u_result __pyx_string_tab[156]
-#define __pyx_n_u_sample_map __pyx_string_tab[157]
-#define __pyx_n_u_sample_record __pyx_string_tab[158]
-#define __pyx_n_u_sample_size __pyx_string_tab[159]
-#define __pyx_n_u_scan_ms __pyx_string_tab[160]
-#define __pyx_n_u_scan_start __pyx_string_tab[161]
-#define __pyx_n_u_schema __pyx_string_tab[162]
-#define __pyx_n_u_schema_list __pyx_string_tab[163]
-#define __pyx_n_u_set_name __pyx_string_tab[164]
-#define __pyx_n_u_setdefault __pyx_string_tab[165]
-#define __pyx_n_u_setstate __pyx_string_tab[166]
-#define __pyx_n_u_setstate_cython __pyx_string_tab[167]
-#define __pyx_n_u_shape __pyx_string_tab[168]
-#define __pyx_n_u_size __pyx_string_tab[169]
-#define __pyx_n_u_start __pyx_string_tab[170]
-#define __pyx_n_u_start_time __pyx_string_tab[171]
-#define __pyx_n_u_step __pyx_string_tab[172]
-#define __pyx_n_u_stop __pyx_string_tab[173]
-#define __pyx_n_u_struct __pyx_string_tab[174]
-#define __pyx_n_u_success __pyx_string_tab[175]
-#define __pyx_n_u_test __pyx_string_tab[176]
-#define __pyx_n_u_time __pyx_string_tab[177]
-#define __pyx_n_u_total_bytes __pyx_string_tab[178]
-#define __pyx_n_u_total_ms __pyx_string_tab[179]
-#define __pyx_n_u_total_rows __pyx_string_tab[180]
-#define __pyx_n_u_type __pyx_string_tab[181]
-#define __pyx_n_u_unpack __pyx_string_tab[182]
-#define __pyx_n_u_update __pyx_string_tab[183]
-#define __pyx_n_u_val __pyx_string_tab[184]
-#define __pyx_n_u_value __pyx_string_tab[185]
-#define __pyx_n_u_value_start __pyx_string_tab[186]
-#define __pyx_n_u_value_width __pyx_string_tab[187]
-#define __pyx_n_u_values __pyx_string_tab[188]
-#define __pyx_n_u_vectors __pyx_string_tab[189]
-#define __pyx_n_u_with_estimate __pyx_string_tab[190]
-#define __pyx_n_u_x __pyx_string_tab[191]
-#define __pyx_kp_b_iso88591_1_Zq_1_Q_vQa_a_L_aq_wa_ay_AZq_A __pyx_string_tab[192]
-#define __pyx_kp_b_iso88591_2_AQ_Q_Qj_t_2_1_4_A_O1Jiy_R_Rq __pyx_string_tab[193]
-#define __pyx_kp_b_iso88591_q_Q_Q_a_1_A_a_T_a_1_q_1Cwaq_1_T __pyx_string_tab[194]
-#define __pyx_kp_b_iso88591_q_Q_a_a_Q_q_1_A_1_1_q_1Cwaq_1_T __pyx_string_tab[195]
-#define __pyx_kp_b_uint64_t_const_MIX_HASH_CONSTANT __pyx_string_tab[196]
-#define __pyx_n_b_O __pyx_string_tab[197]
+#define __pyx_n_u_exit __pyx_string_tab[93]
+#define __pyx_n_u_explicit_schema __pyx_string_tab[94]
+#define __pyx_n_u_f __pyx_string_tab[95]
+#define __pyx_n_u_fail_on_error __pyx_string_tab[96]
+#define __pyx_n_u_field __pyx_string_tab[97]
+#define __pyx_n_u_first_record __pyx_string_tab[98]
+#define __pyx_n_u_flags __pyx_string_tab[99]
+#define __pyx_n_u_format __pyx_string_tab[100]
+#define __pyx_n_u_fortran __pyx_string_tab[101]
+#define __pyx_n_u_func __pyx_string_tab[102]
+#define __pyx_n_u_get __pyx_string_tab[103]
+#define __pyx_n_u_get_jsonl_schema __pyx_string_tab[104]
+#define __pyx_n_u_getstate __pyx_string_tab[105]
+#define __pyx_n_u_id __pyx_string_tab[106]
+#define __pyx_n_u_import __pyx_string_tab[107]
+#define __pyx_n_u_index __pyx_string_tab[108]
+#define __pyx_n_u_infer_sample_size __pyx_string_tab[109]
+#define __pyx_n_u_infer_schema __pyx_string_tab[110]
+#define __pyx_n_u_interp_ms __pyx_string_tab[111]
+#define __pyx_n_u_interp_result __pyx_string_tab[112]
+#define __pyx_n_u_interp_start __pyx_string_tab[113]
+#define __pyx_n_u_interpret_ms __pyx_string_tab[114]
+#define __pyx_n_u_is_coroutine __pyx_string_tab[115]
+#define __pyx_n_u_items __pyx_string_tab[116]
+#define __pyx_n_u_itemsize __pyx_string_tab[117]
+#define __pyx_n_u_key __pyx_string_tab[118]
+#define __pyx_n_u_key_start __pyx_string_tab[119]
+#define __pyx_n_u_key_width __pyx_string_tab[120]
+#define __pyx_n_u_main __pyx_string_tab[121]
+#define __pyx_n_u_markers __pyx_string_tab[122]
+#define __pyx_n_u_memview __pyx_string_tab[123]
+#define __pyx_n_u_min_rows_per_thread __pyx_string_tab[124]
+#define __pyx_n_u_mode __pyx_string_tab[125]
+#define __pyx_n_u_module __pyx_string_tab[126]
+#define __pyx_n_u_name __pyx_string_tab[127]
+#define __pyx_n_u_name_2 __pyx_string_tab[128]
+#define __pyx_n_u_ndim __pyx_string_tab[129]
+#define __pyx_n_u_new __pyx_string_tab[130]
+#define __pyx_n_u_nullable __pyx_string_tab[131]
+#define __pyx_n_u_num_records __pyx_string_tab[132]
+#define __pyx_n_u_num_rows __pyx_string_tab[133]
+#define __pyx_n_u_obj __pyx_string_tab[134]
+#define __pyx_n_u_object_2 __pyx_string_tab[135]
+#define __pyx_n_u_op __pyx_string_tab[136]
+#define __pyx_n_u_open __pyx_string_tab[137]
+#define __pyx_n_u_opteryx_compiled_rugo__jsonl __pyx_string_tab[138]
+#define __pyx_n_u_os __pyx_string_tab[139]
+#define __pyx_n_u_pack __pyx_string_tab[140]
+#define __pyx_n_u_parse_arrays __pyx_string_tab[141]
+#define __pyx_n_u_parse_objects __pyx_string_tab[142]
+#define __pyx_n_u_perf_counter __pyx_string_tab[143]
+#define __pyx_n_u_pop __pyx_string_tab[144]
+#define __pyx_n_u_pred __pyx_string_tab[145]
+#define __pyx_n_u_predicates __pyx_string_tab[146]
+#define __pyx_n_u_predictor __pyx_string_tab[147]
+#define __pyx_n_u_pyx_checksum __pyx_string_tab[148]
+#define __pyx_n_u_pyx_state __pyx_string_tab[149]
+#define __pyx_n_u_pyx_type __pyx_string_tab[150]
+#define __pyx_n_u_pyx_unpickle_Enum __pyx_string_tab[151]
+#define __pyx_n_u_pyx_vtable __pyx_string_tab[152]
+#define __pyx_n_u_qualname __pyx_string_tab[153]
+#define __pyx_n_u_rb __pyx_string_tab[154]
+#define __pyx_n_u_read __pyx_string_tab[155]
+#define __pyx_n_u_read_jsonl __pyx_string_tab[156]
+#define __pyx_n_u_read_jsonl_raw __pyx_string_tab[157]
+#define __pyx_n_u_reader __pyx_string_tab[158]
+#define __pyx_n_u_reduce __pyx_string_tab[159]
+#define __pyx_n_u_reduce_cython __pyx_string_tab[160]
+#define __pyx_n_u_reduce_ex __pyx_string_tab[161]
+#define __pyx_n_u_register __pyx_string_tab[162]
+#define __pyx_n_u_result __pyx_string_tab[163]
+#define __pyx_n_u_sample_map __pyx_string_tab[164]
+#define __pyx_n_u_sample_record __pyx_string_tab[165]
+#define __pyx_n_u_sample_size __pyx_string_tab[166]
+#define __pyx_n_u_scan_ms __pyx_string_tab[167]
+#define __pyx_n_u_scan_start __pyx_string_tab[168]
+#define __pyx_n_u_schema __pyx_string_tab[169]
+#define __pyx_n_u_schema_list __pyx_string_tab[170]
+#define __pyx_n_u_set_name __pyx_string_tab[171]
+#define __pyx_n_u_setdefault __pyx_string_tab[172]
+#define __pyx_n_u_setstate __pyx_string_tab[173]
+#define __pyx_n_u_setstate_cython __pyx_string_tab[174]
+#define __pyx_n_u_shape __pyx_string_tab[175]
+#define __pyx_n_u_size __pyx_string_tab[176]
+#define __pyx_n_u_start __pyx_string_tab[177]
+#define __pyx_n_u_start_time __pyx_string_tab[178]
+#define __pyx_n_u_step __pyx_string_tab[179]
+#define __pyx_n_u_stop __pyx_string_tab[180]
+#define __pyx_n_u_struct __pyx_string_tab[181]
+#define __pyx_n_u_success __pyx_string_tab[182]
+#define __pyx_n_u_test __pyx_string_tab[183]
+#define __pyx_n_u_threaded_succeeded __pyx_string_tab[184]
+#define __pyx_n_u_time __pyx_string_tab[185]
+#define __pyx_n_u_total_bytes __pyx_string_tab[186]
+#define __pyx_n_u_total_ms __pyx_string_tab[187]
+#define __pyx_n_u_total_rows __pyx_string_tab[188]
+#define __pyx_n_u_type __pyx_string_tab[189]
+#define __pyx_n_u_unpack __pyx_string_tab[190]
+#define __pyx_n_u_update __pyx_string_tab[191]
+#define __pyx_n_u_use_threads __pyx_string_tab[192]
+#define __pyx_n_u_val __pyx_string_tab[193]
+#define __pyx_n_u_value __pyx_string_tab[194]
+#define __pyx_n_u_value_start __pyx_string_tab[195]
+#define __pyx_n_u_value_width __pyx_string_tab[196]
+#define __pyx_n_u_values __pyx_string_tab[197]
+#define __pyx_n_u_vectors __pyx_string_tab[198]
+#define __pyx_n_u_with_estimate __pyx_string_tab[199]
+#define __pyx_n_u_x __pyx_string_tab[200]
+#define __pyx_kp_b_iso88591_1_Zq_1_Q_vQa_a_L_aq_wa_ay_AZq_A __pyx_string_tab[201]
+#define __pyx_kp_b_iso88591_2_AQ_Q_Qj_t_2_1_4_A_O1Jiy_R_Rq __pyx_string_tab[202]
+#define __pyx_kp_b_iso88591_q_Q_Q_a_1_A_a_T_a_1_q_1Cwaq_1_T __pyx_string_tab[203]
+#define __pyx_kp_b_iso88591_q_Q_a_a_Q_q_1_1_A_1_1_q_1Cwaq_1 __pyx_string_tab[204]
+#define __pyx_kp_b_uint64_t_const_MIX_HASH_CONSTANT __pyx_string_tab[205]
+#define __pyx_n_b_O __pyx_string_tab[206]
 #define __pyx_float_0_0 __pyx_number_tab[0]
 #define __pyx_int_0 __pyx_number_tab[1]
 #define __pyx_int_neg_1 __pyx_number_tab[2]
@@ -4194,7 +4211,8 @@ static __pyx_mstatetype * const __pyx_mstate_global = &__pyx_mstate_global_stati
 #define __pyx_int_5 __pyx_number_tab[7]
 #define __pyx_int_16 __pyx_number_tab[8]
 #define __pyx_int_1000 __pyx_number_tab[9]
-#define __pyx_int_136983863 __pyx_number_tab[10]
+#define __pyx_int_2048 __pyx_number_tab[10]
+#define __pyx_int_136983863 __pyx_number_tab[11]
 /* #### Code section: module_state_clear ### */
 #if CYTHON_USE_MODULE_STATE
 static CYTHON_SMALL_CODE int __pyx_m_clear(PyObject *m) {
@@ -4226,10 +4244,10 @@ static CYTHON_SMALL_CODE int __pyx_m_clear(PyObject *m) {
   Py_CLEAR(clear_module_state->__pyx_memoryviewslice_type);
   Py_CLEAR(clear_module_state->__pyx_type___pyx_memoryviewslice);
   for (int i=0; i<1; ++i) { Py_CLEAR(clear_module_state->__pyx_slice[i]); }
-  for (int i=0; i<4; ++i) { Py_CLEAR(clear_module_state->__pyx_tuple[i]); }
+  for (int i=0; i<5; ++i) { Py_CLEAR(clear_module_state->__pyx_tuple[i]); }
   for (int i=0; i<4; ++i) { Py_CLEAR(clear_module_state->__pyx_codeobj_tab[i]); }
-  for (int i=0; i<198; ++i) { Py_CLEAR(clear_module_state->__pyx_string_tab[i]); }
-  for (int i=0; i<11; ++i) { Py_CLEAR(clear_module_state->__pyx_number_tab[i]); }
+  for (int i=0; i<207; ++i) { Py_CLEAR(clear_module_state->__pyx_string_tab[i]); }
+  for (int i=0; i<12; ++i) { Py_CLEAR(clear_module_state->__pyx_number_tab[i]); }
 /* #### Code section: module_state_clear_contents ### */
 /* CommonTypesMetaclass.module_state_clear */
 Py_CLEAR(clear_module_state->__pyx_CommonTypesMetaclassType);
@@ -4269,10 +4287,10 @@ static CYTHON_SMALL_CODE int __pyx_m_traverse(PyObject *m, visitproc visit, void
   Py_VISIT(traverse_module_state->__pyx_memoryviewslice_type);
   Py_VISIT(traverse_module_state->__pyx_type___pyx_memoryviewslice);
   for (int i=0; i<1; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_slice[i]); }
-  for (int i=0; i<4; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_tuple[i]); }
+  for (int i=0; i<5; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_tuple[i]); }
   for (int i=0; i<4; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_codeobj_tab[i]); }
-  for (int i=0; i<198; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_string_tab[i]); }
-  for (int i=0; i<11; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_number_tab[i]); }
+  for (int i=0; i<207; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_string_tab[i]); }
+  for (int i=0; i<12; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_number_tab[i]); }
 /* #### Code section: module_state_traverse_contents ### */
 /* CommonTypesMetaclass.module_state_traverse */
 Py_VISIT(traverse_module_state->__pyx_CommonTypesMetaclassType);
@@ -4351,6 +4369,296 @@ static std::string __pyx_convert_string_from_py_6libcpp_6string_std__in_string(P
   __Pyx_AddTraceback("string.from_py.__pyx_convert_string_from_py_6libcpp_6string_std__in_string", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __Pyx_pretend_to_initialize(&__pyx_r);
   __pyx_L0:;
+  return __pyx_r;
+}
+
+/* "vector.to_py":79
+ *     const Py_ssize_t PY_SSIZE_T_MAX
+ * 
+ * @cname("__pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan")             # <<<<<<<<<<<<<<
+ * cdef object __pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan(const vector[X]& v):
+ *     if v.size() > <size_t> PY_SSIZE_T_MAX:
+*/
+
+static PyObject *__pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan(std::vector<struct rugo::_jsonl::FieldSpan>  const &__pyx_v_v) {
+  Py_ssize_t __pyx_v_v_size_signed;
+  PyObject *__pyx_v_o = NULL;
+  Py_ssize_t __pyx_v_i;
+  PyObject *__pyx_v_item = 0;
+  PyObject *__pyx_r = NULL;
+  __Pyx_RefNannyDeclarations
+  int __pyx_t_1;
+  PyObject *__pyx_t_2 = NULL;
+  Py_ssize_t __pyx_t_3;
+  Py_ssize_t __pyx_t_4;
+  Py_ssize_t __pyx_t_5;
+  int __pyx_t_6;
+  int __pyx_lineno = 0;
+  const char *__pyx_filename = NULL;
+  int __pyx_clineno = 0;
+  __Pyx_RefNannySetupContext("__pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan", 0);
+
+  /* "vector.to_py":81
+ * @cname("__pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan")
+ * cdef object __pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan(const vector[X]& v):
+ *     if v.size() > <size_t> PY_SSIZE_T_MAX:             # <<<<<<<<<<<<<<
+ *         raise MemoryError()
+ *     v_size_signed = <Py_ssize_t> v.size()
+*/
+  __pyx_t_1 = (__pyx_v_v.size() > ((size_t)PY_SSIZE_T_MAX));
+  if (unlikely(__pyx_t_1)) {
+
+    /* "vector.to_py":82
+ * cdef object __pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan(const vector[X]& v):
+ *     if v.size() > <size_t> PY_SSIZE_T_MAX:
+ *         raise MemoryError()             # <<<<<<<<<<<<<<
+ *     v_size_signed = <Py_ssize_t> v.size()
+ * 
+*/
+    PyErr_NoMemory(); __PYX_ERR(1, 82, __pyx_L1_error)
+
+    /* "vector.to_py":81
+ * @cname("__pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan")
+ * cdef object __pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan(const vector[X]& v):
+ *     if v.size() > <size_t> PY_SSIZE_T_MAX:             # <<<<<<<<<<<<<<
+ *         raise MemoryError()
+ *     v_size_signed = <Py_ssize_t> v.size()
+*/
+  }
+
+  /* "vector.to_py":83
+ *     if v.size() > <size_t> PY_SSIZE_T_MAX:
+ *         raise MemoryError()
+ *     v_size_signed = <Py_ssize_t> v.size()             # <<<<<<<<<<<<<<
+ * 
+ *     o = PyList_New(v_size_signed)
+*/
+  __pyx_v_v_size_signed = ((Py_ssize_t)__pyx_v_v.size());
+
+  /* "vector.to_py":85
+ *     v_size_signed = <Py_ssize_t> v.size()
+ * 
+ *     o = PyList_New(v_size_signed)             # <<<<<<<<<<<<<<
+ * 
+ *     cdef Py_ssize_t i
+*/
+  __pyx_t_2 = PyList_New(__pyx_v_v_size_signed); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 85, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __pyx_v_o = ((PyObject*)__pyx_t_2);
+  __pyx_t_2 = 0;
+
+  /* "vector.to_py":90
+ *     cdef object item
+ * 
+ *     for i in range(v_size_signed):             # <<<<<<<<<<<<<<
+ *         item = v[i]
+ *         Py_INCREF(item)
+*/
+  __pyx_t_3 = __pyx_v_v_size_signed;
+  __pyx_t_4 = __pyx_t_3;
+  for (__pyx_t_5 = 0; __pyx_t_5 < __pyx_t_4; __pyx_t_5+=1) {
+    __pyx_v_i = __pyx_t_5;
+
+    /* "vector.to_py":91
+ * 
+ *     for i in range(v_size_signed):
+ *         item = v[i]             # <<<<<<<<<<<<<<
+ *         Py_INCREF(item)
+ *         __Pyx_PyList_SET_ITEM(o, i, item)
+*/
+    __pyx_t_2 = __pyx_convert__to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan((__pyx_v_v[__pyx_v_i])); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 91, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_2);
+    __Pyx_XDECREF_SET(__pyx_v_item, __pyx_t_2);
+    __pyx_t_2 = 0;
+
+    /* "vector.to_py":92
+ *     for i in range(v_size_signed):
+ *         item = v[i]
+ *         Py_INCREF(item)             # <<<<<<<<<<<<<<
+ *         __Pyx_PyList_SET_ITEM(o, i, item)
+ * 
+*/
+    Py_INCREF(__pyx_v_item);
+
+    /* "vector.to_py":93
+ *         item = v[i]
+ *         Py_INCREF(item)
+ *         __Pyx_PyList_SET_ITEM(o, i, item)             # <<<<<<<<<<<<<<
+ * 
+ *     return o
+*/
+    __pyx_t_6 = __Pyx_PyList_SET_ITEM(__pyx_v_o, __pyx_v_i, __pyx_v_item); if (unlikely(__pyx_t_6 == ((int)-1))) __PYX_ERR(1, 93, __pyx_L1_error)
+  }
+
+  /* "vector.to_py":95
+ *         __Pyx_PyList_SET_ITEM(o, i, item)
+ * 
+ *     return o             # <<<<<<<<<<<<<<
+*/
+  __Pyx_XDECREF(__pyx_r);
+  __Pyx_INCREF(__pyx_v_o);
+  __pyx_r = __pyx_v_o;
+  goto __pyx_L0;
+
+  /* "vector.to_py":79
+ *     const Py_ssize_t PY_SSIZE_T_MAX
+ * 
+ * @cname("__pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan")             # <<<<<<<<<<<<<<
+ * cdef object __pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan(const vector[X]& v):
+ *     if v.size() > <size_t> PY_SSIZE_T_MAX:
+*/
+
+  /* function exit code */
+  __pyx_L1_error:;
+  __Pyx_XDECREF(__pyx_t_2);
+  __Pyx_AddTraceback("vector.to_py.__pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __pyx_r = 0;
+  __pyx_L0:;
+  __Pyx_XDECREF(__pyx_v_o);
+  __Pyx_XDECREF(__pyx_v_item);
+  __Pyx_XGIVEREF(__pyx_r);
+  __Pyx_RefNannyFinishContext();
+  return __pyx_r;
+}
+
+static PyObject *__pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(std::vector<std::vector<struct rugo::_jsonl::FieldSpan> >  const &__pyx_v_v) {
+  Py_ssize_t __pyx_v_v_size_signed;
+  PyObject *__pyx_v_o = NULL;
+  Py_ssize_t __pyx_v_i;
+  PyObject *__pyx_v_item = 0;
+  PyObject *__pyx_r = NULL;
+  __Pyx_RefNannyDeclarations
+  int __pyx_t_1;
+  PyObject *__pyx_t_2 = NULL;
+  Py_ssize_t __pyx_t_3;
+  Py_ssize_t __pyx_t_4;
+  Py_ssize_t __pyx_t_5;
+  int __pyx_t_6;
+  int __pyx_lineno = 0;
+  const char *__pyx_filename = NULL;
+  int __pyx_clineno = 0;
+  __Pyx_RefNannySetupContext("__pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___", 0);
+
+  /* "vector.to_py":81
+ * @cname("__pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___")
+ * cdef object __pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(const vector[X]& v):
+ *     if v.size() > <size_t> PY_SSIZE_T_MAX:             # <<<<<<<<<<<<<<
+ *         raise MemoryError()
+ *     v_size_signed = <Py_ssize_t> v.size()
+*/
+  __pyx_t_1 = (__pyx_v_v.size() > ((size_t)PY_SSIZE_T_MAX));
+  if (unlikely(__pyx_t_1)) {
+
+    /* "vector.to_py":82
+ * cdef object __pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(const vector[X]& v):
+ *     if v.size() > <size_t> PY_SSIZE_T_MAX:
+ *         raise MemoryError()             # <<<<<<<<<<<<<<
+ *     v_size_signed = <Py_ssize_t> v.size()
+ * 
+*/
+    PyErr_NoMemory(); __PYX_ERR(1, 82, __pyx_L1_error)
+
+    /* "vector.to_py":81
+ * @cname("__pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___")
+ * cdef object __pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(const vector[X]& v):
+ *     if v.size() > <size_t> PY_SSIZE_T_MAX:             # <<<<<<<<<<<<<<
+ *         raise MemoryError()
+ *     v_size_signed = <Py_ssize_t> v.size()
+*/
+  }
+
+  /* "vector.to_py":83
+ *     if v.size() > <size_t> PY_SSIZE_T_MAX:
+ *         raise MemoryError()
+ *     v_size_signed = <Py_ssize_t> v.size()             # <<<<<<<<<<<<<<
+ * 
+ *     o = PyList_New(v_size_signed)
+*/
+  __pyx_v_v_size_signed = ((Py_ssize_t)__pyx_v_v.size());
+
+  /* "vector.to_py":85
+ *     v_size_signed = <Py_ssize_t> v.size()
+ * 
+ *     o = PyList_New(v_size_signed)             # <<<<<<<<<<<<<<
+ * 
+ *     cdef Py_ssize_t i
+*/
+  __pyx_t_2 = PyList_New(__pyx_v_v_size_signed); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 85, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __pyx_v_o = ((PyObject*)__pyx_t_2);
+  __pyx_t_2 = 0;
+
+  /* "vector.to_py":90
+ *     cdef object item
+ * 
+ *     for i in range(v_size_signed):             # <<<<<<<<<<<<<<
+ *         item = v[i]
+ *         Py_INCREF(item)
+*/
+  __pyx_t_3 = __pyx_v_v_size_signed;
+  __pyx_t_4 = __pyx_t_3;
+  for (__pyx_t_5 = 0; __pyx_t_5 < __pyx_t_4; __pyx_t_5+=1) {
+    __pyx_v_i = __pyx_t_5;
+
+    /* "vector.to_py":91
+ * 
+ *     for i in range(v_size_signed):
+ *         item = v[i]             # <<<<<<<<<<<<<<
+ *         Py_INCREF(item)
+ *         __Pyx_PyList_SET_ITEM(o, i, item)
+*/
+    __pyx_t_2 = __pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan((__pyx_v_v[__pyx_v_i])); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 91, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_2);
+    __Pyx_XDECREF_SET(__pyx_v_item, __pyx_t_2);
+    __pyx_t_2 = 0;
+
+    /* "vector.to_py":92
+ *     for i in range(v_size_signed):
+ *         item = v[i]
+ *         Py_INCREF(item)             # <<<<<<<<<<<<<<
+ *         __Pyx_PyList_SET_ITEM(o, i, item)
+ * 
+*/
+    Py_INCREF(__pyx_v_item);
+
+    /* "vector.to_py":93
+ *         item = v[i]
+ *         Py_INCREF(item)
+ *         __Pyx_PyList_SET_ITEM(o, i, item)             # <<<<<<<<<<<<<<
+ * 
+ *     return o
+*/
+    __pyx_t_6 = __Pyx_PyList_SET_ITEM(__pyx_v_o, __pyx_v_i, __pyx_v_item); if (unlikely(__pyx_t_6 == ((int)-1))) __PYX_ERR(1, 93, __pyx_L1_error)
+  }
+
+  /* "vector.to_py":95
+ *         __Pyx_PyList_SET_ITEM(o, i, item)
+ * 
+ *     return o             # <<<<<<<<<<<<<<
+*/
+  __Pyx_XDECREF(__pyx_r);
+  __Pyx_INCREF(__pyx_v_o);
+  __pyx_r = __pyx_v_o;
+  goto __pyx_L0;
+
+  /* "vector.to_py":79
+ *     const Py_ssize_t PY_SSIZE_T_MAX
+ * 
+ * @cname("__pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___")             # <<<<<<<<<<<<<<
+ * cdef object __pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(const vector[X]& v):
+ *     if v.size() > <size_t> PY_SSIZE_T_MAX:
+*/
+
+  /* function exit code */
+  __pyx_L1_error:;
+  __Pyx_XDECREF(__pyx_t_2);
+  __Pyx_AddTraceback("vector.to_py.__pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __pyx_r = 0;
+  __pyx_L0:;
+  __Pyx_XDECREF(__pyx_v_o);
+  __Pyx_XDECREF(__pyx_v_item);
+  __Pyx_XGIVEREF(__pyx_r);
+  __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
@@ -4807,288 +5115,6 @@ static PyObject *__pyx_convert_vector_to_py_uint8_t(std::vector<uint8_t>  const 
   __pyx_L1_error:;
   __Pyx_XDECREF(__pyx_t_2);
   __Pyx_AddTraceback("vector.to_py.__pyx_convert_vector_to_py_uint8_t", __pyx_clineno, __pyx_lineno, __pyx_filename);
-  __pyx_r = 0;
-  __pyx_L0:;
-  __Pyx_XDECREF(__pyx_v_o);
-  __Pyx_XDECREF(__pyx_v_item);
-  __Pyx_XGIVEREF(__pyx_r);
-  __Pyx_RefNannyFinishContext();
-  return __pyx_r;
-}
-
-static PyObject *__pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan(std::vector<struct rugo::_jsonl::FieldSpan>  const &__pyx_v_v) {
-  Py_ssize_t __pyx_v_v_size_signed;
-  PyObject *__pyx_v_o = NULL;
-  Py_ssize_t __pyx_v_i;
-  PyObject *__pyx_v_item = 0;
-  PyObject *__pyx_r = NULL;
-  __Pyx_RefNannyDeclarations
-  int __pyx_t_1;
-  PyObject *__pyx_t_2 = NULL;
-  Py_ssize_t __pyx_t_3;
-  Py_ssize_t __pyx_t_4;
-  Py_ssize_t __pyx_t_5;
-  int __pyx_t_6;
-  int __pyx_lineno = 0;
-  const char *__pyx_filename = NULL;
-  int __pyx_clineno = 0;
-  __Pyx_RefNannySetupContext("__pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan", 0);
-
-  /* "vector.to_py":81
- * @cname("__pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan")
- * cdef object __pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan(const vector[X]& v):
- *     if v.size() > <size_t> PY_SSIZE_T_MAX:             # <<<<<<<<<<<<<<
- *         raise MemoryError()
- *     v_size_signed = <Py_ssize_t> v.size()
-*/
-  __pyx_t_1 = (__pyx_v_v.size() > ((size_t)PY_SSIZE_T_MAX));
-  if (unlikely(__pyx_t_1)) {
-
-    /* "vector.to_py":82
- * cdef object __pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan(const vector[X]& v):
- *     if v.size() > <size_t> PY_SSIZE_T_MAX:
- *         raise MemoryError()             # <<<<<<<<<<<<<<
- *     v_size_signed = <Py_ssize_t> v.size()
- * 
-*/
-    PyErr_NoMemory(); __PYX_ERR(1, 82, __pyx_L1_error)
-
-    /* "vector.to_py":81
- * @cname("__pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan")
- * cdef object __pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan(const vector[X]& v):
- *     if v.size() > <size_t> PY_SSIZE_T_MAX:             # <<<<<<<<<<<<<<
- *         raise MemoryError()
- *     v_size_signed = <Py_ssize_t> v.size()
-*/
-  }
-
-  /* "vector.to_py":83
- *     if v.size() > <size_t> PY_SSIZE_T_MAX:
- *         raise MemoryError()
- *     v_size_signed = <Py_ssize_t> v.size()             # <<<<<<<<<<<<<<
- * 
- *     o = PyList_New(v_size_signed)
-*/
-  __pyx_v_v_size_signed = ((Py_ssize_t)__pyx_v_v.size());
-
-  /* "vector.to_py":85
- *     v_size_signed = <Py_ssize_t> v.size()
- * 
- *     o = PyList_New(v_size_signed)             # <<<<<<<<<<<<<<
- * 
- *     cdef Py_ssize_t i
-*/
-  __pyx_t_2 = PyList_New(__pyx_v_v_size_signed); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 85, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  __pyx_v_o = ((PyObject*)__pyx_t_2);
-  __pyx_t_2 = 0;
-
-  /* "vector.to_py":90
- *     cdef object item
- * 
- *     for i in range(v_size_signed):             # <<<<<<<<<<<<<<
- *         item = v[i]
- *         Py_INCREF(item)
-*/
-  __pyx_t_3 = __pyx_v_v_size_signed;
-  __pyx_t_4 = __pyx_t_3;
-  for (__pyx_t_5 = 0; __pyx_t_5 < __pyx_t_4; __pyx_t_5+=1) {
-    __pyx_v_i = __pyx_t_5;
-
-    /* "vector.to_py":91
- * 
- *     for i in range(v_size_signed):
- *         item = v[i]             # <<<<<<<<<<<<<<
- *         Py_INCREF(item)
- *         __Pyx_PyList_SET_ITEM(o, i, item)
-*/
-    __pyx_t_2 = __pyx_convert__to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan((__pyx_v_v[__pyx_v_i])); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 91, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_2);
-    __Pyx_XDECREF_SET(__pyx_v_item, __pyx_t_2);
-    __pyx_t_2 = 0;
-
-    /* "vector.to_py":92
- *     for i in range(v_size_signed):
- *         item = v[i]
- *         Py_INCREF(item)             # <<<<<<<<<<<<<<
- *         __Pyx_PyList_SET_ITEM(o, i, item)
- * 
-*/
-    Py_INCREF(__pyx_v_item);
-
-    /* "vector.to_py":93
- *         item = v[i]
- *         Py_INCREF(item)
- *         __Pyx_PyList_SET_ITEM(o, i, item)             # <<<<<<<<<<<<<<
- * 
- *     return o
-*/
-    __pyx_t_6 = __Pyx_PyList_SET_ITEM(__pyx_v_o, __pyx_v_i, __pyx_v_item); if (unlikely(__pyx_t_6 == ((int)-1))) __PYX_ERR(1, 93, __pyx_L1_error)
-  }
-
-  /* "vector.to_py":95
- *         __Pyx_PyList_SET_ITEM(o, i, item)
- * 
- *     return o             # <<<<<<<<<<<<<<
-*/
-  __Pyx_XDECREF(__pyx_r);
-  __Pyx_INCREF(__pyx_v_o);
-  __pyx_r = __pyx_v_o;
-  goto __pyx_L0;
-
-  /* "vector.to_py":79
- *     const Py_ssize_t PY_SSIZE_T_MAX
- * 
- * @cname("__pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan")             # <<<<<<<<<<<<<<
- * cdef object __pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan(const vector[X]& v):
- *     if v.size() > <size_t> PY_SSIZE_T_MAX:
-*/
-
-  /* function exit code */
-  __pyx_L1_error:;
-  __Pyx_XDECREF(__pyx_t_2);
-  __Pyx_AddTraceback("vector.to_py.__pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan", __pyx_clineno, __pyx_lineno, __pyx_filename);
-  __pyx_r = 0;
-  __pyx_L0:;
-  __Pyx_XDECREF(__pyx_v_o);
-  __Pyx_XDECREF(__pyx_v_item);
-  __Pyx_XGIVEREF(__pyx_r);
-  __Pyx_RefNannyFinishContext();
-  return __pyx_r;
-}
-
-static PyObject *__pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(std::vector<std::vector<struct rugo::_jsonl::FieldSpan> >  const &__pyx_v_v) {
-  Py_ssize_t __pyx_v_v_size_signed;
-  PyObject *__pyx_v_o = NULL;
-  Py_ssize_t __pyx_v_i;
-  PyObject *__pyx_v_item = 0;
-  PyObject *__pyx_r = NULL;
-  __Pyx_RefNannyDeclarations
-  int __pyx_t_1;
-  PyObject *__pyx_t_2 = NULL;
-  Py_ssize_t __pyx_t_3;
-  Py_ssize_t __pyx_t_4;
-  Py_ssize_t __pyx_t_5;
-  int __pyx_t_6;
-  int __pyx_lineno = 0;
-  const char *__pyx_filename = NULL;
-  int __pyx_clineno = 0;
-  __Pyx_RefNannySetupContext("__pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___", 0);
-
-  /* "vector.to_py":81
- * @cname("__pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___")
- * cdef object __pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(const vector[X]& v):
- *     if v.size() > <size_t> PY_SSIZE_T_MAX:             # <<<<<<<<<<<<<<
- *         raise MemoryError()
- *     v_size_signed = <Py_ssize_t> v.size()
-*/
-  __pyx_t_1 = (__pyx_v_v.size() > ((size_t)PY_SSIZE_T_MAX));
-  if (unlikely(__pyx_t_1)) {
-
-    /* "vector.to_py":82
- * cdef object __pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(const vector[X]& v):
- *     if v.size() > <size_t> PY_SSIZE_T_MAX:
- *         raise MemoryError()             # <<<<<<<<<<<<<<
- *     v_size_signed = <Py_ssize_t> v.size()
- * 
-*/
-    PyErr_NoMemory(); __PYX_ERR(1, 82, __pyx_L1_error)
-
-    /* "vector.to_py":81
- * @cname("__pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___")
- * cdef object __pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(const vector[X]& v):
- *     if v.size() > <size_t> PY_SSIZE_T_MAX:             # <<<<<<<<<<<<<<
- *         raise MemoryError()
- *     v_size_signed = <Py_ssize_t> v.size()
-*/
-  }
-
-  /* "vector.to_py":83
- *     if v.size() > <size_t> PY_SSIZE_T_MAX:
- *         raise MemoryError()
- *     v_size_signed = <Py_ssize_t> v.size()             # <<<<<<<<<<<<<<
- * 
- *     o = PyList_New(v_size_signed)
-*/
-  __pyx_v_v_size_signed = ((Py_ssize_t)__pyx_v_v.size());
-
-  /* "vector.to_py":85
- *     v_size_signed = <Py_ssize_t> v.size()
- * 
- *     o = PyList_New(v_size_signed)             # <<<<<<<<<<<<<<
- * 
- *     cdef Py_ssize_t i
-*/
-  __pyx_t_2 = PyList_New(__pyx_v_v_size_signed); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 85, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  __pyx_v_o = ((PyObject*)__pyx_t_2);
-  __pyx_t_2 = 0;
-
-  /* "vector.to_py":90
- *     cdef object item
- * 
- *     for i in range(v_size_signed):             # <<<<<<<<<<<<<<
- *         item = v[i]
- *         Py_INCREF(item)
-*/
-  __pyx_t_3 = __pyx_v_v_size_signed;
-  __pyx_t_4 = __pyx_t_3;
-  for (__pyx_t_5 = 0; __pyx_t_5 < __pyx_t_4; __pyx_t_5+=1) {
-    __pyx_v_i = __pyx_t_5;
-
-    /* "vector.to_py":91
- * 
- *     for i in range(v_size_signed):
- *         item = v[i]             # <<<<<<<<<<<<<<
- *         Py_INCREF(item)
- *         __Pyx_PyList_SET_ITEM(o, i, item)
-*/
-    __pyx_t_2 = __pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan((__pyx_v_v[__pyx_v_i])); if (unlikely(!__pyx_t_2)) __PYX_ERR(1, 91, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_2);
-    __Pyx_XDECREF_SET(__pyx_v_item, __pyx_t_2);
-    __pyx_t_2 = 0;
-
-    /* "vector.to_py":92
- *     for i in range(v_size_signed):
- *         item = v[i]
- *         Py_INCREF(item)             # <<<<<<<<<<<<<<
- *         __Pyx_PyList_SET_ITEM(o, i, item)
- * 
-*/
-    Py_INCREF(__pyx_v_item);
-
-    /* "vector.to_py":93
- *         item = v[i]
- *         Py_INCREF(item)
- *         __Pyx_PyList_SET_ITEM(o, i, item)             # <<<<<<<<<<<<<<
- * 
- *     return o
-*/
-    __pyx_t_6 = __Pyx_PyList_SET_ITEM(__pyx_v_o, __pyx_v_i, __pyx_v_item); if (unlikely(__pyx_t_6 == ((int)-1))) __PYX_ERR(1, 93, __pyx_L1_error)
-  }
-
-  /* "vector.to_py":95
- *         __Pyx_PyList_SET_ITEM(o, i, item)
- * 
- *     return o             # <<<<<<<<<<<<<<
-*/
-  __Pyx_XDECREF(__pyx_r);
-  __Pyx_INCREF(__pyx_v_o);
-  __pyx_r = __pyx_v_o;
-  goto __pyx_L0;
-
-  /* "vector.to_py":79
- *     const Py_ssize_t PY_SSIZE_T_MAX
- * 
- * @cname("__pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___")             # <<<<<<<<<<<<<<
- * cdef object __pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(const vector[X]& v):
- *     if v.size() > <size_t> PY_SSIZE_T_MAX:
-*/
-
-  /* function exit code */
-  __pyx_L1_error:;
-  __Pyx_XDECREF(__pyx_t_2);
-  __Pyx_AddTraceback("vector.to_py.__pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __pyx_r = 0;
   __pyx_L0:;
   __Pyx_XDECREF(__pyx_v_o);
@@ -19472,7 +19498,7 @@ static CYTHON_INLINE uint64_t __pyx_f_7opteryx_8compiled_6draken_7vectors_6vecto
   return __pyx_r;
 }
 
-/* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":133
+/* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":145
  * 
  * 
  * def read_jsonl(             # <<<<<<<<<<<<<<
@@ -19506,11 +19532,13 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   PyObject *__pyx_v_parse_arrays = 0;
   PyObject *__pyx_v_parse_objects = 0;
   PyObject *__pyx_v_fail_on_error = 0;
+  PyObject *__pyx_v_use_threads = 0;
+  PyObject *__pyx_v_min_rows_per_thread = 0;
   #if !CYTHON_METH_FASTCALL
   CYTHON_UNUSED Py_ssize_t __pyx_nargs;
   #endif
   CYTHON_UNUSED PyObject *const *__pyx_kwvalues;
-  PyObject* values[9] = {0,0,0,0,0,0,0,0,0};
+  PyObject* values[11] = {0,0,0,0,0,0,0,0,0,0,0};
   int __pyx_lineno = 0;
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
@@ -19526,54 +19554,62 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   #endif
   __pyx_kwvalues = __Pyx_KwValues_FASTCALL(__pyx_args, __pyx_nargs);
   {
-    PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_data,&__pyx_mstate_global->__pyx_n_u_columns,&__pyx_mstate_global->__pyx_n_u_predicates,&__pyx_mstate_global->__pyx_n_u_explicit_schema,&__pyx_mstate_global->__pyx_n_u_infer_schema,&__pyx_mstate_global->__pyx_n_u_infer_sample_size,&__pyx_mstate_global->__pyx_n_u_parse_arrays,&__pyx_mstate_global->__pyx_n_u_parse_objects,&__pyx_mstate_global->__pyx_n_u_fail_on_error,0};
+    PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_data,&__pyx_mstate_global->__pyx_n_u_columns,&__pyx_mstate_global->__pyx_n_u_predicates,&__pyx_mstate_global->__pyx_n_u_explicit_schema,&__pyx_mstate_global->__pyx_n_u_infer_schema,&__pyx_mstate_global->__pyx_n_u_infer_sample_size,&__pyx_mstate_global->__pyx_n_u_parse_arrays,&__pyx_mstate_global->__pyx_n_u_parse_objects,&__pyx_mstate_global->__pyx_n_u_fail_on_error,&__pyx_mstate_global->__pyx_n_u_use_threads,&__pyx_mstate_global->__pyx_n_u_min_rows_per_thread,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 133, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 145, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
+        case 11:
+        values[10] = __Pyx_ArgRef_FASTCALL(__pyx_args, 10);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[10])) __PYX_ERR(0, 145, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
+        case 10:
+        values[9] = __Pyx_ArgRef_FASTCALL(__pyx_args, 9);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[9])) __PYX_ERR(0, 145, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
         case  9:
         values[8] = __Pyx_ArgRef_FASTCALL(__pyx_args, 8);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[8])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[8])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  8:
         values[7] = __Pyx_ArgRef_FASTCALL(__pyx_args, 7);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[7])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[7])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  7:
         values[6] = __Pyx_ArgRef_FASTCALL(__pyx_args, 6);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[6])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[6])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  6:
         values[5] = __Pyx_ArgRef_FASTCALL(__pyx_args, 5);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[5])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[5])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  5:
         values[4] = __Pyx_ArgRef_FASTCALL(__pyx_args, 4);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[4])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[4])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  4:
         values[3] = __Pyx_ArgRef_FASTCALL(__pyx_args, 3);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[3])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[3])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  3:
         values[2] = __Pyx_ArgRef_FASTCALL(__pyx_args, 2);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "read_jsonl", 0) < (0)) __PYX_ERR(0, 133, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "read_jsonl", 0) < (0)) __PYX_ERR(0, 145, __pyx_L3_error)
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":135
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":147
  * def read_jsonl(
  *     data,
  *     columns=None,             # <<<<<<<<<<<<<<
@@ -19582,7 +19618,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 */
       if (!values[1]) values[1] = __Pyx_NewRef(((PyObject *)Py_None));
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":136
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":148
  *     data,
  *     columns=None,
  *     predicates=None,             # <<<<<<<<<<<<<<
@@ -19591,7 +19627,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 */
       if (!values[2]) values[2] = __Pyx_NewRef(((PyObject *)Py_None));
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":137
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":149
  *     columns=None,
  *     predicates=None,
  *     explicit_schema=None,             # <<<<<<<<<<<<<<
@@ -19600,7 +19636,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 */
       if (!values[3]) values[3] = __Pyx_NewRef(((PyObject *)Py_None));
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":138
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":150
  *     predicates=None,
  *     explicit_schema=None,
  *     infer_schema=True,             # <<<<<<<<<<<<<<
@@ -19610,77 +19646,95 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
       if (!values[4]) values[4] = __Pyx_NewRef(((PyObject *)((PyObject*)Py_True)));
       if (!values[5]) values[5] = __Pyx_NewRef(((PyObject *)((PyObject*)__pyx_mstate_global->__pyx_int_5)));
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":140
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":152
  *     infer_schema=True,
  *     infer_sample_size=5,
  *     parse_arrays=True,             # <<<<<<<<<<<<<<
  *     parse_objects=True,
- *     fail_on_error=True
+ *     fail_on_error=True,
 */
       if (!values[6]) values[6] = __Pyx_NewRef(((PyObject *)((PyObject*)Py_True)));
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":141
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":153
  *     infer_sample_size=5,
  *     parse_arrays=True,
  *     parse_objects=True,             # <<<<<<<<<<<<<<
- *     fail_on_error=True
- * ):
+ *     fail_on_error=True,
+ *     use_threads=True,
 */
       if (!values[7]) values[7] = __Pyx_NewRef(((PyObject *)((PyObject*)Py_True)));
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":142
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":154
  *     parse_arrays=True,
  *     parse_objects=True,
- *     fail_on_error=True             # <<<<<<<<<<<<<<
- * ):
- *     """
+ *     fail_on_error=True,             # <<<<<<<<<<<<<<
+ *     use_threads=True,
+ *     min_rows_per_thread=2048
 */
       if (!values[8]) values[8] = __Pyx_NewRef(((PyObject *)((PyObject*)Py_True)));
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":155
+ *     parse_objects=True,
+ *     fail_on_error=True,
+ *     use_threads=True,             # <<<<<<<<<<<<<<
+ *     min_rows_per_thread=2048
+ * ):
+*/
+      if (!values[9]) values[9] = __Pyx_NewRef(((PyObject *)((PyObject*)Py_True)));
+      if (!values[10]) values[10] = __Pyx_NewRef(((PyObject *)((PyObject*)__pyx_mstate_global->__pyx_int_2048)));
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("read_jsonl", 0, 1, 9, i); __PYX_ERR(0, 133, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("read_jsonl", 0, 1, 11, i); __PYX_ERR(0, 145, __pyx_L3_error) }
       }
     } else {
       switch (__pyx_nargs) {
+        case 11:
+        values[10] = __Pyx_ArgRef_FASTCALL(__pyx_args, 10);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[10])) __PYX_ERR(0, 145, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
+        case 10:
+        values[9] = __Pyx_ArgRef_FASTCALL(__pyx_args, 9);
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[9])) __PYX_ERR(0, 145, __pyx_L3_error)
+        CYTHON_FALLTHROUGH;
         case  9:
         values[8] = __Pyx_ArgRef_FASTCALL(__pyx_args, 8);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[8])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[8])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  8:
         values[7] = __Pyx_ArgRef_FASTCALL(__pyx_args, 7);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[7])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[7])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  7:
         values[6] = __Pyx_ArgRef_FASTCALL(__pyx_args, 6);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[6])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[6])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  6:
         values[5] = __Pyx_ArgRef_FASTCALL(__pyx_args, 5);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[5])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[5])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  5:
         values[4] = __Pyx_ArgRef_FASTCALL(__pyx_args, 4);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[4])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[4])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  4:
         values[3] = __Pyx_ArgRef_FASTCALL(__pyx_args, 3);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[3])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[3])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  3:
         values[2] = __Pyx_ArgRef_FASTCALL(__pyx_args, 2);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 145, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 133, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 145, __pyx_L3_error)
         break;
         default: goto __pyx_L5_argtuple_error;
       }
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":135
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":147
  * def read_jsonl(
  *     data,
  *     columns=None,             # <<<<<<<<<<<<<<
@@ -19689,7 +19743,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 */
       if (!values[1]) values[1] = __Pyx_NewRef(((PyObject *)Py_None));
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":136
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":148
  *     data,
  *     columns=None,
  *     predicates=None,             # <<<<<<<<<<<<<<
@@ -19698,7 +19752,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 */
       if (!values[2]) values[2] = __Pyx_NewRef(((PyObject *)Py_None));
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":137
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":149
  *     columns=None,
  *     predicates=None,
  *     explicit_schema=None,             # <<<<<<<<<<<<<<
@@ -19711,6 +19765,8 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
       if (!values[6]) values[6] = __Pyx_NewRef(((PyObject *)((PyObject*)Py_True)));
       if (!values[7]) values[7] = __Pyx_NewRef(((PyObject *)((PyObject*)Py_True)));
       if (!values[8]) values[8] = __Pyx_NewRef(((PyObject *)((PyObject*)Py_True)));
+      if (!values[9]) values[9] = __Pyx_NewRef(((PyObject *)((PyObject*)Py_True)));
+      if (!values[10]) values[10] = __Pyx_NewRef(((PyObject *)((PyObject*)__pyx_mstate_global->__pyx_int_2048)));
     }
     __pyx_v_data = values[0];
     __pyx_v_columns = values[1];
@@ -19721,10 +19777,12 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
     __pyx_v_parse_arrays = values[6];
     __pyx_v_parse_objects = values[7];
     __pyx_v_fail_on_error = values[8];
+    __pyx_v_use_threads = values[9];
+    __pyx_v_min_rows_per_thread = values[10];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("read_jsonl", 0, 1, 9, __pyx_nargs); __PYX_ERR(0, 133, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("read_jsonl", 0, 1, 11, __pyx_nargs); __PYX_ERR(0, 145, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -19735,9 +19793,9 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
-  __pyx_r = __pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(__pyx_self, __pyx_v_data, __pyx_v_columns, __pyx_v_predicates, __pyx_v_explicit_schema, __pyx_v_infer_schema, __pyx_v_infer_sample_size, __pyx_v_parse_arrays, __pyx_v_parse_objects, __pyx_v_fail_on_error);
+  __pyx_r = __pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(__pyx_self, __pyx_v_data, __pyx_v_columns, __pyx_v_predicates, __pyx_v_explicit_schema, __pyx_v_infer_schema, __pyx_v_infer_sample_size, __pyx_v_parse_arrays, __pyx_v_parse_objects, __pyx_v_fail_on_error, __pyx_v_use_threads, __pyx_v_min_rows_per_thread);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":133
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":145
  * 
  * 
  * def read_jsonl(             # <<<<<<<<<<<<<<
@@ -19753,7 +19811,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   return __pyx_r;
 }
 
-static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNUSED PyObject *__pyx_self, PyObject *__pyx_v_data, PyObject *__pyx_v_columns, PyObject *__pyx_v_predicates, CYTHON_UNUSED PyObject *__pyx_v_explicit_schema, PyObject *__pyx_v_infer_schema, PyObject *__pyx_v_infer_sample_size, PyObject *__pyx_v_parse_arrays, PyObject *__pyx_v_parse_objects, PyObject *__pyx_v_fail_on_error) {
+static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNUSED PyObject *__pyx_self, PyObject *__pyx_v_data, PyObject *__pyx_v_columns, PyObject *__pyx_v_predicates, CYTHON_UNUSED PyObject *__pyx_v_explicit_schema, PyObject *__pyx_v_infer_schema, PyObject *__pyx_v_infer_sample_size, PyObject *__pyx_v_parse_arrays, PyObject *__pyx_v_parse_objects, PyObject *__pyx_v_fail_on_error, PyObject *__pyx_v_use_threads, PyObject *__pyx_v_min_rows_per_thread) {
   struct rugo::_jsonl::ParseContext __pyx_v_context;
   rugo::_jsonl::JsonlReader *__pyx_v_reader;
   struct rugo::_jsonl::Predicate __pyx_v_pred;
@@ -19763,10 +19821,17 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
   PyObject *__pyx_v_chunk_records = 0;
   size_t __pyx_v_total_rows;
   PyObject *__pyx_v_schema = 0;
+  uint8_t const *__pyx_v_buf_data;
+  size_t __pyx_v_buf_len;
+  std::vector<struct rugo::_jsonl::MarkerPosition>  __pyx_v_markers;
+  struct rugo::_jsonl::InterpreterResult __pyx_v_interp_result;
+  struct rugo::_jsonl::OrdinalPredictor __pyx_v_predictor;
+  int __pyx_v_threaded_succeeded;
   PyObject *__pyx_v_result = 0;
   PyObject *__pyx_v_col = NULL;
   PyObject *__pyx_v_op = NULL;
   PyObject *__pyx_v_val = NULL;
+  PyObject *__pyx_v_f = NULL;
   PyObject *__pyx_v_data_bytes = NULL;
   PyObject *__pyx_v_key = NULL;
   PyObject *__pyx_v_value = NULL;
@@ -19787,28 +19852,29 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
   PyObject *(*__pyx_t_12)(PyObject *);
   uint8_t __pyx_t_13;
   uint32_t __pyx_t_14;
-  uint8_t const *__pyx_t_15;
-  uint8_t const *__pyx_t_16;
-  int __pyx_t_17;
-  std::vector<std::string> ::iterator __pyx_t_18;
-  int __pyx_t_19;
-  std::map<std::string,std::string> ::iterator __pyx_t_20;
-  std::pair<std::string,std::string>  __pyx_t_21;
+  PyObject *__pyx_t_15 = NULL;
+  PyObject *__pyx_t_16 = NULL;
+  PyObject *__pyx_t_17 = NULL;
+  PyObject *__pyx_t_18 = NULL;
+  PyObject *__pyx_t_19 = NULL;
+  int __pyx_t_20;
+  uint8_t const *__pyx_t_21;
   int __pyx_t_22;
-  int __pyx_t_23;
-  char const *__pyx_t_24;
-  PyObject *__pyx_t_25 = NULL;
-  PyObject *__pyx_t_26 = NULL;
-  PyObject *__pyx_t_27 = NULL;
-  PyObject *__pyx_t_28 = NULL;
-  PyObject *__pyx_t_29 = NULL;
-  PyObject *__pyx_t_30 = NULL;
+  uint8_t const *__pyx_t_23;
+  uint8_t const *__pyx_t_24;
+  std::vector<std::string> ::iterator __pyx_t_25;
+  std::map<std::string,std::string> ::iterator __pyx_t_26;
+  std::pair<std::string,std::string>  __pyx_t_27;
+  int __pyx_t_28;
+  int __pyx_t_29;
+  char const *__pyx_t_30;
+  PyObject *__pyx_t_31 = NULL;
   int __pyx_lineno = 0;
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("read_jsonl", 0);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":161
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":175
  *     """
  *     cdef ParseContext context
  *     cdef JsonlReader* reader = NULL             # <<<<<<<<<<<<<<
@@ -19817,114 +19883,123 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
 */
   __pyx_v_reader = NULL;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":164
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":178
  *     cdef Predicate pred
  *     cdef ReadResult chunk_result
  *     cdef list column_names = []             # <<<<<<<<<<<<<<
  *     cdef list chunk_buffers = []
  *     cdef list chunk_records = []   # list of C++ vector[vector[FieldSpan]]
 */
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 164, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 178, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_column_names = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":165
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":179
  *     cdef ReadResult chunk_result
  *     cdef list column_names = []
  *     cdef list chunk_buffers = []             # <<<<<<<<<<<<<<
  *     cdef list chunk_records = []   # list of C++ vector[vector[FieldSpan]]
  *     cdef size_t total_rows = 0
 */
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 165, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 179, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_chunk_buffers = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":166
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":180
  *     cdef list column_names = []
  *     cdef list chunk_buffers = []
  *     cdef list chunk_records = []   # list of C++ vector[vector[FieldSpan]]             # <<<<<<<<<<<<<<
  *     cdef size_t total_rows = 0
  *     cdef dict schema = {}
 */
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 166, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 180, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_chunk_records = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":167
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":181
  *     cdef list chunk_buffers = []
  *     cdef list chunk_records = []   # list of C++ vector[vector[FieldSpan]]
  *     cdef size_t total_rows = 0             # <<<<<<<<<<<<<<
  *     cdef dict schema = {}
- *     cdef dict result = {
+ *     cdef const uint8_t* buf_data
 */
   __pyx_v_total_rows = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":168
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":182
  *     cdef list chunk_records = []   # list of C++ vector[vector[FieldSpan]]
  *     cdef size_t total_rows = 0
  *     cdef dict schema = {}             # <<<<<<<<<<<<<<
- *     cdef dict result = {
- *         'success': False,
+ *     cdef const uint8_t* buf_data
+ *     cdef size_t buf_len
 */
-  __pyx_t_1 = __Pyx_PyDict_NewPresized(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 168, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyDict_NewPresized(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 182, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_schema = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":170
- *     cdef dict schema = {}
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":188
+ *     cdef InterpreterResult interp_result
+ *     cdef OrdinalPredictor predictor
+ *     cdef bint threaded_succeeded = False             # <<<<<<<<<<<<<<
+ *     cdef dict result = {
+ *         'success': False,
+*/
+  __pyx_v_threaded_succeeded = 0;
+
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":190
+ *     cdef bint threaded_succeeded = False
  *     cdef dict result = {
  *         'success': False,             # <<<<<<<<<<<<<<
  *         'column_names': [],
  *         'num_rows': 0,
 */
-  __pyx_t_1 = __Pyx_PyDict_NewPresized(5); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 170, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyDict_NewPresized(5); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 190, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_success, Py_False) < (0)) __PYX_ERR(0, 170, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_success, Py_False) < (0)) __PYX_ERR(0, 190, __pyx_L1_error)
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":171
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":191
  *     cdef dict result = {
  *         'success': False,
  *         'column_names': [],             # <<<<<<<<<<<<<<
  *         'num_rows': 0,
  *         'columns': [],
 */
-  __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 171, __pyx_L1_error)
+  __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 191, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_column_names, __pyx_t_2) < (0)) __PYX_ERR(0, 170, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_column_names, __pyx_t_2) < (0)) __PYX_ERR(0, 190, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_num_rows, __pyx_mstate_global->__pyx_int_0) < (0)) __PYX_ERR(0, 170, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_num_rows, __pyx_mstate_global->__pyx_int_0) < (0)) __PYX_ERR(0, 190, __pyx_L1_error)
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":173
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":193
  *         'column_names': [],
  *         'num_rows': 0,
  *         'columns': [],             # <<<<<<<<<<<<<<
  *         'schema': {}
  *     }
 */
-  __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 173, __pyx_L1_error)
+  __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 193, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_columns, __pyx_t_2) < (0)) __PYX_ERR(0, 170, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_columns, __pyx_t_2) < (0)) __PYX_ERR(0, 190, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":174
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":194
  *         'num_rows': 0,
  *         'columns': [],
  *         'schema': {}             # <<<<<<<<<<<<<<
  *     }
  * 
 */
-  __pyx_t_2 = __Pyx_PyDict_NewPresized(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 174, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyDict_NewPresized(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 194, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_schema, __pyx_t_2) < (0)) __PYX_ERR(0, 170, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_schema, __pyx_t_2) < (0)) __PYX_ERR(0, 190, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   __pyx_v_result = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":177
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":197
  *     }
  * 
  *     try:             # <<<<<<<<<<<<<<
@@ -19933,17 +20008,17 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
 */
   /*try:*/ {
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":179
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":199
  *     try:
  *         # Build ParseContext
  *         if columns:             # <<<<<<<<<<<<<<
  *             for col in columns:
  *                 context.projected_columns.push_back(col.encode('utf-8'))
 */
-    __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_v_columns); if (unlikely((__pyx_t_3 < 0))) __PYX_ERR(0, 179, __pyx_L4_error)
+    __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_v_columns); if (unlikely((__pyx_t_3 < 0))) __PYX_ERR(0, 199, __pyx_L4_error)
     if (__pyx_t_3) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":180
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":200
  *         # Build ParseContext
  *         if columns:
  *             for col in columns:             # <<<<<<<<<<<<<<
@@ -19955,9 +20030,9 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
         __pyx_t_4 = 0;
         __pyx_t_5 = NULL;
       } else {
-        __pyx_t_4 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_v_columns); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 180, __pyx_L4_error)
+        __pyx_t_4 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_v_columns); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 200, __pyx_L4_error)
         __Pyx_GOTREF(__pyx_t_1);
-        __pyx_t_5 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 180, __pyx_L4_error)
+        __pyx_t_5 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 200, __pyx_L4_error)
       }
       for (;;) {
         if (likely(!__pyx_t_5)) {
@@ -19965,7 +20040,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
             {
               Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_1);
               #if !CYTHON_ASSUME_SAFE_SIZE
-              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 180, __pyx_L4_error)
+              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 200, __pyx_L4_error)
               #endif
               if (__pyx_t_4 >= __pyx_temp) break;
             }
@@ -19975,7 +20050,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
             {
               Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_1);
               #if !CYTHON_ASSUME_SAFE_SIZE
-              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 180, __pyx_L4_error)
+              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 200, __pyx_L4_error)
               #endif
               if (__pyx_t_4 >= __pyx_temp) break;
             }
@@ -19986,13 +20061,13 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
             #endif
             ++__pyx_t_4;
           }
-          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 180, __pyx_L4_error)
+          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 200, __pyx_L4_error)
         } else {
           __pyx_t_2 = __pyx_t_5(__pyx_t_1);
           if (unlikely(!__pyx_t_2)) {
             PyObject* exc_type = PyErr_Occurred();
             if (exc_type) {
-              if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 180, __pyx_L4_error)
+              if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 200, __pyx_L4_error)
               PyErr_Clear();
             }
             break;
@@ -20002,7 +20077,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
         __Pyx_XDECREF_SET(__pyx_v_col, __pyx_t_2);
         __pyx_t_2 = 0;
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":181
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":201
  *         if columns:
  *             for col in columns:
  *                 context.projected_columns.push_back(col.encode('utf-8'))             # <<<<<<<<<<<<<<
@@ -20016,19 +20091,19 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
           PyObject *__pyx_callargs[2] = {__pyx_t_6, __pyx_mstate_global->__pyx_kp_u_utf_8};
           __pyx_t_2 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
           __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
-          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 181, __pyx_L4_error)
+          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 201, __pyx_L4_error)
           __Pyx_GOTREF(__pyx_t_2);
         }
-        __pyx_t_8 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_2); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 181, __pyx_L4_error)
+        __pyx_t_8 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_2); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 201, __pyx_L4_error)
         __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
         try {
           __pyx_v_context.projected_columns.push_back(__pyx_t_8);
         } catch(...) {
           __Pyx_CppExn2PyErr();
-          __PYX_ERR(0, 181, __pyx_L4_error)
+          __PYX_ERR(0, 201, __pyx_L4_error)
         }
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":180
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":200
  *         # Build ParseContext
  *         if columns:
  *             for col in columns:             # <<<<<<<<<<<<<<
@@ -20038,7 +20113,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
       }
       __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":179
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":199
  *     try:
  *         # Build ParseContext
  *         if columns:             # <<<<<<<<<<<<<<
@@ -20047,17 +20122,17 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":183
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":203
  *                 context.projected_columns.push_back(col.encode('utf-8'))
  * 
  *         if predicates:             # <<<<<<<<<<<<<<
  *             for col, op, val in predicates:
  *                 pred.column = col.encode('utf-8')
 */
-    __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_v_predicates); if (unlikely((__pyx_t_3 < 0))) __PYX_ERR(0, 183, __pyx_L4_error)
+    __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_v_predicates); if (unlikely((__pyx_t_3 < 0))) __PYX_ERR(0, 203, __pyx_L4_error)
     if (__pyx_t_3) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":184
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":204
  * 
  *         if predicates:
  *             for col, op, val in predicates:             # <<<<<<<<<<<<<<
@@ -20069,9 +20144,9 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
         __pyx_t_4 = 0;
         __pyx_t_5 = NULL;
       } else {
-        __pyx_t_4 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_v_predicates); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 184, __pyx_L4_error)
+        __pyx_t_4 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_v_predicates); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 204, __pyx_L4_error)
         __Pyx_GOTREF(__pyx_t_1);
-        __pyx_t_5 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 184, __pyx_L4_error)
+        __pyx_t_5 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 204, __pyx_L4_error)
       }
       for (;;) {
         if (likely(!__pyx_t_5)) {
@@ -20079,7 +20154,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
             {
               Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_1);
               #if !CYTHON_ASSUME_SAFE_SIZE
-              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 184, __pyx_L4_error)
+              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 204, __pyx_L4_error)
               #endif
               if (__pyx_t_4 >= __pyx_temp) break;
             }
@@ -20089,7 +20164,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
             {
               Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_1);
               #if !CYTHON_ASSUME_SAFE_SIZE
-              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 184, __pyx_L4_error)
+              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 204, __pyx_L4_error)
               #endif
               if (__pyx_t_4 >= __pyx_temp) break;
             }
@@ -20100,13 +20175,13 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
             #endif
             ++__pyx_t_4;
           }
-          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 184, __pyx_L4_error)
+          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 204, __pyx_L4_error)
         } else {
           __pyx_t_2 = __pyx_t_5(__pyx_t_1);
           if (unlikely(!__pyx_t_2)) {
             PyObject* exc_type = PyErr_Occurred();
             if (exc_type) {
-              if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 184, __pyx_L4_error)
+              if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 204, __pyx_L4_error)
               PyErr_Clear();
             }
             break;
@@ -20119,7 +20194,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
           if (unlikely(size != 3)) {
             if (size > 3) __Pyx_RaiseTooManyValuesError(3);
             else if (size >= 0) __Pyx_RaiseNeedMoreValuesError(size);
-            __PYX_ERR(0, 184, __pyx_L4_error)
+            __PYX_ERR(0, 204, __pyx_L4_error)
           }
           #if CYTHON_ASSUME_SAFE_MACROS && !CYTHON_AVOID_BORROWED_REFS
           if (likely(PyTuple_CheckExact(sequence))) {
@@ -20131,27 +20206,27 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
             __Pyx_INCREF(__pyx_t_10);
           } else {
             __pyx_t_6 = __Pyx_PyList_GetItemRefFast(sequence, 0, __Pyx_ReferenceSharing_SharedReference);
-            if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 184, __pyx_L4_error)
+            if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 204, __pyx_L4_error)
             __Pyx_XGOTREF(__pyx_t_6);
             __pyx_t_9 = __Pyx_PyList_GetItemRefFast(sequence, 1, __Pyx_ReferenceSharing_SharedReference);
-            if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 184, __pyx_L4_error)
+            if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 204, __pyx_L4_error)
             __Pyx_XGOTREF(__pyx_t_9);
             __pyx_t_10 = __Pyx_PyList_GetItemRefFast(sequence, 2, __Pyx_ReferenceSharing_SharedReference);
-            if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 184, __pyx_L4_error)
+            if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 204, __pyx_L4_error)
             __Pyx_XGOTREF(__pyx_t_10);
           }
           #else
-          __pyx_t_6 = __Pyx_PySequence_ITEM(sequence, 0); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 184, __pyx_L4_error)
+          __pyx_t_6 = __Pyx_PySequence_ITEM(sequence, 0); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 204, __pyx_L4_error)
           __Pyx_GOTREF(__pyx_t_6);
-          __pyx_t_9 = __Pyx_PySequence_ITEM(sequence, 1); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 184, __pyx_L4_error)
+          __pyx_t_9 = __Pyx_PySequence_ITEM(sequence, 1); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 204, __pyx_L4_error)
           __Pyx_GOTREF(__pyx_t_9);
-          __pyx_t_10 = __Pyx_PySequence_ITEM(sequence, 2); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 184, __pyx_L4_error)
+          __pyx_t_10 = __Pyx_PySequence_ITEM(sequence, 2); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 204, __pyx_L4_error)
           __Pyx_GOTREF(__pyx_t_10);
           #endif
           __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
         } else {
           Py_ssize_t index = -1;
-          __pyx_t_11 = PyObject_GetIter(__pyx_t_2); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 184, __pyx_L4_error)
+          __pyx_t_11 = PyObject_GetIter(__pyx_t_2); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 204, __pyx_L4_error)
           __Pyx_GOTREF(__pyx_t_11);
           __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
           __pyx_t_12 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_11);
@@ -20161,7 +20236,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
           __Pyx_GOTREF(__pyx_t_9);
           index = 2; __pyx_t_10 = __pyx_t_12(__pyx_t_11); if (unlikely(!__pyx_t_10)) goto __pyx_L13_unpacking_failed;
           __Pyx_GOTREF(__pyx_t_10);
-          if (__Pyx_IternextUnpackEndCheck(__pyx_t_12(__pyx_t_11), 3) < (0)) __PYX_ERR(0, 184, __pyx_L4_error)
+          if (__Pyx_IternextUnpackEndCheck(__pyx_t_12(__pyx_t_11), 3) < (0)) __PYX_ERR(0, 204, __pyx_L4_error)
           __pyx_t_12 = NULL;
           __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
           goto __pyx_L14_unpacking_done;
@@ -20169,7 +20244,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
           __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
           __pyx_t_12 = NULL;
           if (__Pyx_IterFinish() == 0) __Pyx_RaiseNeedMoreValuesError(index);
-          __PYX_ERR(0, 184, __pyx_L4_error)
+          __PYX_ERR(0, 204, __pyx_L4_error)
           __pyx_L14_unpacking_done:;
         }
         __Pyx_XDECREF_SET(__pyx_v_col, __pyx_t_6);
@@ -20179,7 +20254,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
         __Pyx_XDECREF_SET(__pyx_v_val, __pyx_t_10);
         __pyx_t_10 = 0;
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":185
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":205
  *         if predicates:
  *             for col, op, val in predicates:
  *                 pred.column = col.encode('utf-8')             # <<<<<<<<<<<<<<
@@ -20193,14 +20268,14 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
           PyObject *__pyx_callargs[2] = {__pyx_t_10, __pyx_mstate_global->__pyx_kp_u_utf_8};
           __pyx_t_2 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
           __Pyx_XDECREF(__pyx_t_10); __pyx_t_10 = 0;
-          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 185, __pyx_L4_error)
+          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 205, __pyx_L4_error)
           __Pyx_GOTREF(__pyx_t_2);
         }
-        __pyx_t_8 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_2); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 185, __pyx_L4_error)
+        __pyx_t_8 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_2); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 205, __pyx_L4_error)
         __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
         __pyx_v_pred.column = __PYX_STD_MOVE_IF_SUPPORTED(__pyx_t_8);
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":186
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":206
  *             for col, op, val in predicates:
  *                 pred.column = col.encode('utf-8')
  *                 pred.op = <uint8_t>_parse_op(op)             # <<<<<<<<<<<<<<
@@ -20209,28 +20284,28 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
 */
         __pyx_t_2 = __pyx_v_op;
         __Pyx_INCREF(__pyx_t_2);
-        if (!(likely(PyUnicode_CheckExact(__pyx_t_2))||((__pyx_t_2) == Py_None) || __Pyx_RaiseUnexpectedTypeError("str", __pyx_t_2))) __PYX_ERR(0, 186, __pyx_L4_error)
-        __pyx_t_13 = __pyx_f_7opteryx_8compiled_4rugo_6_jsonl__parse_op(((PyObject*)__pyx_t_2)); if (unlikely(__pyx_t_13 == ((uint8_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 186, __pyx_L4_error)
+        if (!(likely(PyUnicode_CheckExact(__pyx_t_2))||((__pyx_t_2) == Py_None) || __Pyx_RaiseUnexpectedTypeError("str", __pyx_t_2))) __PYX_ERR(0, 206, __pyx_L4_error)
+        __pyx_t_13 = __pyx_f_7opteryx_8compiled_4rugo_6_jsonl__parse_op(((PyObject*)__pyx_t_2)); if (unlikely(__pyx_t_13 == ((uint8_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 206, __pyx_L4_error)
         __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
         __pyx_v_pred.op = ((uint8_t)__pyx_t_13);
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":187
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":207
  *                 pred.column = col.encode('utf-8')
  *                 pred.op = <uint8_t>_parse_op(op)
  *                 pred.value = str(val).encode('utf-8')             # <<<<<<<<<<<<<<
  *                 context.predicates.push_back(pred)
  * 
 */
-        __pyx_t_2 = __Pyx_PyObject_Unicode(__pyx_v_val); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 187, __pyx_L4_error)
+        __pyx_t_2 = __Pyx_PyObject_Unicode(__pyx_v_val); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 207, __pyx_L4_error)
         __Pyx_GOTREF(__pyx_t_2);
-        __pyx_t_10 = PyUnicode_AsUTF8String(((PyObject*)__pyx_t_2)); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 187, __pyx_L4_error)
+        __pyx_t_10 = PyUnicode_AsUTF8String(((PyObject*)__pyx_t_2)); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 207, __pyx_L4_error)
         __Pyx_GOTREF(__pyx_t_10);
         __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-        __pyx_t_8 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_10); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 187, __pyx_L4_error)
+        __pyx_t_8 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_10); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 207, __pyx_L4_error)
         __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
         __pyx_v_pred.value = __PYX_STD_MOVE_IF_SUPPORTED(__pyx_t_8);
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":188
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":208
  *                 pred.op = <uint8_t>_parse_op(op)
  *                 pred.value = str(val).encode('utf-8')
  *                 context.predicates.push_back(pred)             # <<<<<<<<<<<<<<
@@ -20241,10 +20316,10 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
           __pyx_v_context.predicates.push_back(__pyx_v_pred);
         } catch(...) {
           __Pyx_CppExn2PyErr();
-          __PYX_ERR(0, 188, __pyx_L4_error)
+          __PYX_ERR(0, 208, __pyx_L4_error)
         }
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":184
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":204
  * 
  *         if predicates:
  *             for col, op, val in predicates:             # <<<<<<<<<<<<<<
@@ -20254,7 +20329,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
       }
       __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":183
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":203
  *                 context.projected_columns.push_back(col.encode('utf-8'))
  * 
  *         if predicates:             # <<<<<<<<<<<<<<
@@ -20263,617 +20338,1026 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":190
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":210
  *                 context.predicates.push_back(pred)
  * 
  *         context.infer_schema = infer_schema             # <<<<<<<<<<<<<<
  *         context.infer_sample_size = infer_sample_size
  *         context.parse_arrays = parse_arrays
 */
-    __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_v_infer_schema); if (unlikely((__pyx_t_3 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 190, __pyx_L4_error)
+    __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_v_infer_schema); if (unlikely((__pyx_t_3 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 210, __pyx_L4_error)
     __pyx_v_context.infer_schema = __pyx_t_3;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":191
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":211
  * 
  *         context.infer_schema = infer_schema
  *         context.infer_sample_size = infer_sample_size             # <<<<<<<<<<<<<<
  *         context.parse_arrays = parse_arrays
  *         context.parse_objects = parse_objects
 */
-    __pyx_t_14 = __Pyx_PyLong_As_uint32_t(__pyx_v_infer_sample_size); if (unlikely((__pyx_t_14 == ((uint32_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 191, __pyx_L4_error)
+    __pyx_t_14 = __Pyx_PyLong_As_uint32_t(__pyx_v_infer_sample_size); if (unlikely((__pyx_t_14 == ((uint32_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 211, __pyx_L4_error)
     __pyx_v_context.infer_sample_size = __pyx_t_14;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":192
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":212
  *         context.infer_schema = infer_schema
  *         context.infer_sample_size = infer_sample_size
  *         context.parse_arrays = parse_arrays             # <<<<<<<<<<<<<<
  *         context.parse_objects = parse_objects
  *         context.fail_on_error = fail_on_error
 */
-    __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_v_parse_arrays); if (unlikely((__pyx_t_3 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 192, __pyx_L4_error)
+    __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_v_parse_arrays); if (unlikely((__pyx_t_3 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 212, __pyx_L4_error)
     __pyx_v_context.parse_arrays = __pyx_t_3;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":193
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":213
  *         context.infer_sample_size = infer_sample_size
  *         context.parse_arrays = parse_arrays
  *         context.parse_objects = parse_objects             # <<<<<<<<<<<<<<
  *         context.fail_on_error = fail_on_error
  * 
 */
-    __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_v_parse_objects); if (unlikely((__pyx_t_3 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 193, __pyx_L4_error)
+    __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_v_parse_objects); if (unlikely((__pyx_t_3 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 213, __pyx_L4_error)
     __pyx_v_context.parse_objects = __pyx_t_3;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":194
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":214
  *         context.parse_arrays = parse_arrays
  *         context.parse_objects = parse_objects
  *         context.fail_on_error = fail_on_error             # <<<<<<<<<<<<<<
  * 
- *         # Create reader
+ *         # Try threaded path first if requested
 */
-    __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_v_fail_on_error); if (unlikely((__pyx_t_3 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 194, __pyx_L4_error)
+    __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_v_fail_on_error); if (unlikely((__pyx_t_3 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 214, __pyx_L4_error)
     __pyx_v_context.fail_on_error = __pyx_t_3;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":197
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":217
  * 
- *         # Create reader
- *         if isinstance(data, str):             # <<<<<<<<<<<<<<
- *             reader = new JsonlReader(<string>data.encode('utf-8'), context)
- *         elif isinstance(data, bytes):
+ *         # Try threaded path first if requested
+ *         threaded_succeeded = False             # <<<<<<<<<<<<<<
+ *         if use_threads:
+ *             # Load entire buffer
 */
-    __pyx_t_3 = PyUnicode_Check(__pyx_v_data); 
+    __pyx_v_threaded_succeeded = 0;
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":218
+ *         # Try threaded path first if requested
+ *         threaded_succeeded = False
+ *         if use_threads:             # <<<<<<<<<<<<<<
+ *             # Load entire buffer
+ *             if isinstance(data, str):
+*/
+    __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_v_use_threads); if (unlikely((__pyx_t_3 < 0))) __PYX_ERR(0, 218, __pyx_L4_error)
     if (__pyx_t_3) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":198
- *         # Create reader
- *         if isinstance(data, str):
- *             reader = new JsonlReader(<string>data.encode('utf-8'), context)             # <<<<<<<<<<<<<<
- *         elif isinstance(data, bytes):
- *             reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":220
+ *         if use_threads:
+ *             # Load entire buffer
+ *             if isinstance(data, str):             # <<<<<<<<<<<<<<
+ *                 with open(data, 'rb') as f:
+ *                     data_bytes = f.read()
 */
-      __pyx_t_10 = __pyx_v_data;
-      __Pyx_INCREF(__pyx_t_10);
-      __pyx_t_7 = 0;
-      {
-        PyObject *__pyx_callargs[2] = {__pyx_t_10, __pyx_mstate_global->__pyx_kp_u_utf_8};
-        __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-        __Pyx_XDECREF(__pyx_t_10); __pyx_t_10 = 0;
-        if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 198, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_1);
-      }
-      __pyx_t_8 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_1); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 198, __pyx_L4_error)
-      __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-      __pyx_v_reader = new rugo::_jsonl::JsonlReader(((std::string)__pyx_t_8), __pyx_v_context);
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":197
- * 
- *         # Create reader
- *         if isinstance(data, str):             # <<<<<<<<<<<<<<
- *             reader = new JsonlReader(<string>data.encode('utf-8'), context)
- *         elif isinstance(data, bytes):
-*/
-      goto __pyx_L16;
-    }
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":199
- *         if isinstance(data, str):
- *             reader = new JsonlReader(<string>data.encode('utf-8'), context)
- *         elif isinstance(data, bytes):             # <<<<<<<<<<<<<<
- *             reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
- *         else:
-*/
-    __pyx_t_3 = PyBytes_Check(__pyx_v_data); 
-    if (__pyx_t_3) {
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":200
- *             reader = new JsonlReader(<string>data.encode('utf-8'), context)
- *         elif isinstance(data, bytes):
- *             reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)             # <<<<<<<<<<<<<<
- *         else:
- *             data_bytes = bytes(data)
-*/
-      if (unlikely(__pyx_v_data == Py_None)) {
-        PyErr_SetString(PyExc_TypeError, "expected bytes, NoneType found");
-        __PYX_ERR(0, 200, __pyx_L4_error)
-      }
-      __pyx_t_15 = __Pyx_PyBytes_AsUString(__pyx_v_data); if (unlikely((!__pyx_t_15) && PyErr_Occurred())) __PYX_ERR(0, 200, __pyx_L4_error)
-      __pyx_t_4 = PyObject_Length(__pyx_v_data); if (unlikely(__pyx_t_4 == ((Py_ssize_t)-1))) __PYX_ERR(0, 200, __pyx_L4_error)
-      __pyx_v_reader = new rugo::_jsonl::JsonlReader(((uint8_t const *)__pyx_t_15), __pyx_t_4, __pyx_v_context);
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":199
- *         if isinstance(data, str):
- *             reader = new JsonlReader(<string>data.encode('utf-8'), context)
- *         elif isinstance(data, bytes):             # <<<<<<<<<<<<<<
- *             reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
- *         else:
-*/
-      goto __pyx_L16;
-    }
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":202
- *             reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
- *         else:
- *             data_bytes = bytes(data)             # <<<<<<<<<<<<<<
- *             reader = new JsonlReader(<const uint8_t*><bytes>data_bytes, len(data_bytes), context)
- * 
-*/
-    /*else*/ {
-      __pyx_t_10 = NULL;
-      __pyx_t_7 = 1;
-      {
-        PyObject *__pyx_callargs[2] = {__pyx_t_10, __pyx_v_data};
-        __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)(&PyBytes_Type), __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (__pyx_t_7*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-        __Pyx_XDECREF(__pyx_t_10); __pyx_t_10 = 0;
-        if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 202, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_1);
-      }
-      __pyx_v_data_bytes = ((PyObject*)__pyx_t_1);
-      __pyx_t_1 = 0;
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":203
- *         else:
- *             data_bytes = bytes(data)
- *             reader = new JsonlReader(<const uint8_t*><bytes>data_bytes, len(data_bytes), context)             # <<<<<<<<<<<<<<
- * 
- *         # Accumulate chunks; each chunk keeps its own buffer so FieldSpan
-*/
-      if (unlikely(__pyx_v_data_bytes == Py_None)) {
-        PyErr_SetString(PyExc_TypeError, "expected bytes, NoneType found");
-        __PYX_ERR(0, 203, __pyx_L4_error)
-      }
-      __pyx_t_16 = __Pyx_PyBytes_AsUString(__pyx_v_data_bytes); if (unlikely((!__pyx_t_16) && PyErr_Occurred())) __PYX_ERR(0, 203, __pyx_L4_error)
-      __pyx_t_4 = __Pyx_PyBytes_GET_SIZE(__pyx_v_data_bytes); if (unlikely(__pyx_t_4 == ((Py_ssize_t)-1))) __PYX_ERR(0, 203, __pyx_L4_error)
-      __pyx_v_reader = new rugo::_jsonl::JsonlReader(((uint8_t const *)__pyx_t_16), __pyx_t_4, __pyx_v_context);
-    }
-    __pyx_L16:;
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":207
- *         # Accumulate chunks; each chunk keeps its own buffer so FieldSpan
- *         # offsets remain valid when we later call extract_column per chunk.
- *         while True:             # <<<<<<<<<<<<<<
- *             chunk_result = reader.next_chunk()
- * 
-*/
-    while (1) {
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":208
- *         # offsets remain valid when we later call extract_column per chunk.
- *         while True:
- *             chunk_result = reader.next_chunk()             # <<<<<<<<<<<<<<
- * 
- *             if not chunk_result.success:
-*/
-      __pyx_v_chunk_result = __pyx_v_reader->next_chunk();
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":210
- *             chunk_result = reader.next_chunk()
- * 
- *             if not chunk_result.success:             # <<<<<<<<<<<<<<
- *                 if reader.has_error():
- *                     result['error'] = reader.get_error().decode('utf-8')
-*/
-      __pyx_t_3 = (!__pyx_v_chunk_result.success);
+      __pyx_t_3 = PyUnicode_Check(__pyx_v_data); 
       if (__pyx_t_3) {
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":211
- * 
- *             if not chunk_result.success:
- *                 if reader.has_error():             # <<<<<<<<<<<<<<
- *                     result['error'] = reader.get_error().decode('utf-8')
- *                 break
-*/
-        __pyx_t_3 = __pyx_v_reader->has_error();
-        if (__pyx_t_3) {
-
-          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":212
- *             if not chunk_result.success:
- *                 if reader.has_error():
- *                     result['error'] = reader.get_error().decode('utf-8')             # <<<<<<<<<<<<<<
- *                 break
- * 
-*/
-          __pyx_t_1 = __Pyx_decode_cpp_string(__pyx_v_reader->get_error(), 0, PY_SSIZE_T_MAX, NULL, NULL, PyUnicode_DecodeUTF8); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 212, __pyx_L4_error)
-          __Pyx_GOTREF(__pyx_t_1);
-          if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_error, __pyx_t_1) < 0))) __PYX_ERR(0, 212, __pyx_L4_error)
-          __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-
-          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":211
- * 
- *             if not chunk_result.success:
- *                 if reader.has_error():             # <<<<<<<<<<<<<<
- *                     result['error'] = reader.get_error().decode('utf-8')
- *                 break
-*/
-        }
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":213
- *                 if reader.has_error():
- *                     result['error'] = reader.get_error().decode('utf-8')
- *                 break             # <<<<<<<<<<<<<<
- * 
- *             if chunk_result.num_records > 0:
-*/
-        goto __pyx_L18_break;
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":210
- *             chunk_result = reader.next_chunk()
- * 
- *             if not chunk_result.success:             # <<<<<<<<<<<<<<
- *                 if reader.has_error():
- *                     result['error'] = reader.get_error().decode('utf-8')
-*/
-      }
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":215
- *                 break
- * 
- *             if chunk_result.num_records > 0:             # <<<<<<<<<<<<<<
- *                 if not column_names:
- *                     for col in chunk_result.column_names:
-*/
-      __pyx_t_3 = (__pyx_v_chunk_result.num_records > 0);
-      if (__pyx_t_3) {
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":216
- * 
- *             if chunk_result.num_records > 0:
- *                 if not column_names:             # <<<<<<<<<<<<<<
- *                     for col in chunk_result.column_names:
- *                         column_names.append(col.decode('utf-8'))
-*/
-        {
-          Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_v_column_names);
-          if (unlikely(((!CYTHON_ASSUME_SAFE_SIZE) && __pyx_temp < 0))) __PYX_ERR(0, 216, __pyx_L4_error)
-          __pyx_t_3 = (__pyx_temp != 0);
-        }
-
-        __pyx_t_17 = (!__pyx_t_3);
-        if (__pyx_t_17) {
-
-          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":217
- *             if chunk_result.num_records > 0:
- *                 if not column_names:
- *                     for col in chunk_result.column_names:             # <<<<<<<<<<<<<<
- *                         column_names.append(col.decode('utf-8'))
- * 
-*/
-          __pyx_t_18 = __pyx_v_chunk_result.column_names.begin();
-          for (; __pyx_t_18 != __pyx_v_chunk_result.column_names.end(); ++__pyx_t_18) {
-            __pyx_t_8 = *__pyx_t_18;
-            __pyx_t_1 = __pyx_convert_PyBytes_string_to_py_6libcpp_6string_std__in_string(__pyx_t_8); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 217, __pyx_L4_error)
-            __Pyx_GOTREF(__pyx_t_1);
-            __Pyx_XDECREF_SET(__pyx_v_col, __pyx_t_1);
-            __pyx_t_1 = 0;
-
-            /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":218
- *                 if not column_names:
- *                     for col in chunk_result.column_names:
- *                         column_names.append(col.decode('utf-8'))             # <<<<<<<<<<<<<<
- * 
- *                 # Keep buffer as bytes (owns the memory) and records as C++ object
-*/
-            __pyx_t_10 = __pyx_v_col;
-            __Pyx_INCREF(__pyx_t_10);
-            __pyx_t_7 = 0;
-            {
-              PyObject *__pyx_callargs[2] = {__pyx_t_10, __pyx_mstate_global->__pyx_kp_u_utf_8};
-              __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_decode, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-              __Pyx_XDECREF(__pyx_t_10); __pyx_t_10 = 0;
-              if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 218, __pyx_L4_error)
-              __Pyx_GOTREF(__pyx_t_1);
-            }
-            __pyx_t_19 = __Pyx_PyList_Append(__pyx_v_column_names, __pyx_t_1); if (unlikely(__pyx_t_19 == ((int)-1))) __PYX_ERR(0, 218, __pyx_L4_error)
-            __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-
-            /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":217
- *             if chunk_result.num_records > 0:
- *                 if not column_names:
- *                     for col in chunk_result.column_names:             # <<<<<<<<<<<<<<
- *                         column_names.append(col.decode('utf-8'))
- * 
-*/
-          }
-
-          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":216
- * 
- *             if chunk_result.num_records > 0:
- *                 if not column_names:             # <<<<<<<<<<<<<<
- *                     for col in chunk_result.column_names:
- *                         column_names.append(col.decode('utf-8'))
-*/
-        }
 
         /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":221
- * 
- *                 # Keep buffer as bytes (owns the memory) and records as C++ object
- *                 chunk_buffers.append(bytes(chunk_result.buffer_data))             # <<<<<<<<<<<<<<
- *                 chunk_records.append(chunk_result.records)
- *                 total_rows += chunk_result.num_records
+ *             # Load entire buffer
+ *             if isinstance(data, str):
+ *                 with open(data, 'rb') as f:             # <<<<<<<<<<<<<<
+ *                     data_bytes = f.read()
+ *             elif isinstance(data, bytes):
 */
-        __pyx_t_10 = NULL;
-        __pyx_t_2 = __pyx_convert_vector_to_py_uint8_t(__pyx_v_chunk_result.buffer_data); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 221, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_2);
-        __pyx_t_7 = 1;
-        {
-          PyObject *__pyx_callargs[2] = {__pyx_t_10, __pyx_t_2};
-          __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)(&PyBytes_Type), __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (__pyx_t_7*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-          __Pyx_XDECREF(__pyx_t_10); __pyx_t_10 = 0;
-          __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-          if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 221, __pyx_L4_error)
-          __Pyx_GOTREF(__pyx_t_1);
-        }
-        __pyx_t_19 = __Pyx_PyList_Append(__pyx_v_chunk_buffers, __pyx_t_1); if (unlikely(__pyx_t_19 == ((int)-1))) __PYX_ERR(0, 221, __pyx_L4_error)
-        __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+        /*with:*/ {
+          __pyx_t_10 = NULL;
+          __pyx_t_7 = 1;
+          {
+            PyObject *__pyx_callargs[3] = {__pyx_t_10, __pyx_v_data, __pyx_mstate_global->__pyx_n_u_rb};
+            __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_builtin_open, __pyx_callargs+__pyx_t_7, (3-__pyx_t_7) | (__pyx_t_7*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+            __Pyx_XDECREF(__pyx_t_10); __pyx_t_10 = 0;
+            if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 221, __pyx_L4_error)
+            __Pyx_GOTREF(__pyx_t_1);
+          }
+          __pyx_t_15 = __Pyx_PyObject_LookupSpecial(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_exit); if (unlikely(!__pyx_t_15)) __PYX_ERR(0, 221, __pyx_L4_error)
+          __Pyx_GOTREF(__pyx_t_15);
+          __pyx_t_2 = NULL;
+          __pyx_t_9 = __Pyx_PyObject_LookupSpecial(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_enter); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 221, __pyx_L18_error)
+          __Pyx_GOTREF(__pyx_t_9);
+          __pyx_t_7 = 1;
+          #if CYTHON_UNPACK_METHODS
+          if (likely(PyMethod_Check(__pyx_t_9))) {
+            __pyx_t_2 = PyMethod_GET_SELF(__pyx_t_9);
+            assert(__pyx_t_2);
+            PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_9);
+            __Pyx_INCREF(__pyx_t_2);
+            __Pyx_INCREF(__pyx__function);
+            __Pyx_DECREF_SET(__pyx_t_9, __pyx__function);
+            __pyx_t_7 = 0;
+          }
+          #endif
+          {
+            PyObject *__pyx_callargs[2] = {__pyx_t_2, NULL};
+            __pyx_t_10 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_9, __pyx_callargs+__pyx_t_7, (1-__pyx_t_7) | (__pyx_t_7*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+            __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
+            __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
+            if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 221, __pyx_L18_error)
+            __Pyx_GOTREF(__pyx_t_10);
+          }
+          __pyx_t_9 = __pyx_t_10;
+          __pyx_t_10 = 0;
+          __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+          /*try:*/ {
+            {
+              __Pyx_PyThreadState_declare
+              __Pyx_PyThreadState_assign
+              __Pyx_ExceptionSave(&__pyx_t_16, &__pyx_t_17, &__pyx_t_18);
+              __Pyx_XGOTREF(__pyx_t_16);
+              __Pyx_XGOTREF(__pyx_t_17);
+              __Pyx_XGOTREF(__pyx_t_18);
+              /*try:*/ {
+                __pyx_v_f = __pyx_t_9;
+                __pyx_t_9 = 0;
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":222
- *                 # Keep buffer as bytes (owns the memory) and records as C++ object
- *                 chunk_buffers.append(bytes(chunk_result.buffer_data))
- *                 chunk_records.append(chunk_result.records)             # <<<<<<<<<<<<<<
- *                 total_rows += chunk_result.num_records
- * 
+                /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":222
+ *             if isinstance(data, str):
+ *                 with open(data, 'rb') as f:
+ *                     data_bytes = f.read()             # <<<<<<<<<<<<<<
+ *             elif isinstance(data, bytes):
+ *                 data_bytes = data
 */
-        __pyx_t_1 = __pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(__pyx_v_chunk_result.records); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 222, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_1);
-        __pyx_t_19 = __Pyx_PyList_Append(__pyx_v_chunk_records, __pyx_t_1); if (unlikely(__pyx_t_19 == ((int)-1))) __PYX_ERR(0, 222, __pyx_L4_error)
-        __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+                __pyx_t_1 = __pyx_v_f;
+                __Pyx_INCREF(__pyx_t_1);
+                __pyx_t_7 = 0;
+                {
+                  PyObject *__pyx_callargs[2] = {__pyx_t_1, NULL};
+                  __pyx_t_9 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_read, __pyx_callargs+__pyx_t_7, (1-__pyx_t_7) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+                  __Pyx_XDECREF(__pyx_t_1); __pyx_t_1 = 0;
+                  if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 222, __pyx_L22_error)
+                  __Pyx_GOTREF(__pyx_t_9);
+                }
+                __pyx_v_data_bytes = __pyx_t_9;
+                __pyx_t_9 = 0;
+
+                /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":221
+ *             # Load entire buffer
+ *             if isinstance(data, str):
+ *                 with open(data, 'rb') as f:             # <<<<<<<<<<<<<<
+ *                     data_bytes = f.read()
+ *             elif isinstance(data, bytes):
+*/
+              }
+              __Pyx_XDECREF(__pyx_t_16); __pyx_t_16 = 0;
+              __Pyx_XDECREF(__pyx_t_17); __pyx_t_17 = 0;
+              __Pyx_XDECREF(__pyx_t_18); __pyx_t_18 = 0;
+              goto __pyx_L27_try_end;
+              __pyx_L22_error:;
+              __Pyx_XDECREF(__pyx_t_1); __pyx_t_1 = 0;
+              __Pyx_XDECREF(__pyx_t_10); __pyx_t_10 = 0;
+              __Pyx_XDECREF(__pyx_t_11); __pyx_t_11 = 0;
+              __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
+              __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
+              __Pyx_XDECREF(__pyx_t_9); __pyx_t_9 = 0;
+              /*except:*/ {
+                __Pyx_AddTraceback("opteryx.compiled.rugo._jsonl.read_jsonl", __pyx_clineno, __pyx_lineno, __pyx_filename);
+                if (__Pyx_GetException(&__pyx_t_9, &__pyx_t_1, &__pyx_t_10) < 0) __PYX_ERR(0, 221, __pyx_L24_except_error)
+                __Pyx_XGOTREF(__pyx_t_9);
+                __Pyx_XGOTREF(__pyx_t_1);
+                __Pyx_XGOTREF(__pyx_t_10);
+                __pyx_t_2 = PyTuple_Pack(3, __pyx_t_9, __pyx_t_1, __pyx_t_10); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 221, __pyx_L24_except_error)
+                __Pyx_GOTREF(__pyx_t_2);
+                __pyx_t_19 = __Pyx_PyObject_Call(__pyx_t_15, __pyx_t_2, NULL);
+                __Pyx_DECREF(__pyx_t_15); __pyx_t_15 = 0;
+                __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+                if (unlikely(!__pyx_t_19)) __PYX_ERR(0, 221, __pyx_L24_except_error)
+                __Pyx_GOTREF(__pyx_t_19);
+                __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_t_19);
+                __Pyx_DECREF(__pyx_t_19); __pyx_t_19 = 0;
+                if (__pyx_t_3 < (0)) __PYX_ERR(0, 221, __pyx_L24_except_error)
+                __pyx_t_20 = (!__pyx_t_3);
+                if (unlikely(__pyx_t_20)) {
+                  __Pyx_GIVEREF(__pyx_t_9);
+                  __Pyx_GIVEREF(__pyx_t_1);
+                  __Pyx_XGIVEREF(__pyx_t_10);
+                  __Pyx_ErrRestoreWithState(__pyx_t_9, __pyx_t_1, __pyx_t_10);
+                  __pyx_t_9 = 0;  __pyx_t_1 = 0;  __pyx_t_10 = 0; 
+                  __PYX_ERR(0, 221, __pyx_L24_except_error)
+                }
+                __Pyx_XDECREF(__pyx_t_9); __pyx_t_9 = 0;
+                __Pyx_XDECREF(__pyx_t_1); __pyx_t_1 = 0;
+                __Pyx_XDECREF(__pyx_t_10); __pyx_t_10 = 0;
+                goto __pyx_L23_exception_handled;
+              }
+              __pyx_L24_except_error:;
+              __Pyx_XGIVEREF(__pyx_t_16);
+              __Pyx_XGIVEREF(__pyx_t_17);
+              __Pyx_XGIVEREF(__pyx_t_18);
+              __Pyx_ExceptionReset(__pyx_t_16, __pyx_t_17, __pyx_t_18);
+              goto __pyx_L4_error;
+              __pyx_L23_exception_handled:;
+              __Pyx_XGIVEREF(__pyx_t_16);
+              __Pyx_XGIVEREF(__pyx_t_17);
+              __Pyx_XGIVEREF(__pyx_t_18);
+              __Pyx_ExceptionReset(__pyx_t_16, __pyx_t_17, __pyx_t_18);
+              __pyx_L27_try_end:;
+            }
+          }
+          /*finally:*/ {
+            /*normal exit:*/{
+              if (__pyx_t_15) {
+                __pyx_t_18 = __Pyx_PyObject_Call(__pyx_t_15, __pyx_mstate_global->__pyx_tuple[1], NULL);
+                __Pyx_DECREF(__pyx_t_15); __pyx_t_15 = 0;
+                if (unlikely(!__pyx_t_18)) __PYX_ERR(0, 221, __pyx_L4_error)
+                __Pyx_GOTREF(__pyx_t_18);
+                __Pyx_DECREF(__pyx_t_18); __pyx_t_18 = 0;
+              }
+              goto __pyx_L21;
+            }
+            __pyx_L21:;
+          }
+          goto __pyx_L31;
+          __pyx_L18_error:;
+          __Pyx_DECREF(__pyx_t_15); __pyx_t_15 = 0;
+          goto __pyx_L4_error;
+          __pyx_L31:;
+        }
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":220
+ *         if use_threads:
+ *             # Load entire buffer
+ *             if isinstance(data, str):             # <<<<<<<<<<<<<<
+ *                 with open(data, 'rb') as f:
+ *                     data_bytes = f.read()
+*/
+        goto __pyx_L17;
+      }
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":223
+ *                 with open(data, 'rb') as f:
+ *                     data_bytes = f.read()
+ *             elif isinstance(data, bytes):             # <<<<<<<<<<<<<<
+ *                 data_bytes = data
+ *             else:
+*/
+      __pyx_t_20 = PyBytes_Check(__pyx_v_data); 
+      if (__pyx_t_20) {
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":224
+ *                     data_bytes = f.read()
+ *             elif isinstance(data, bytes):
+ *                 data_bytes = data             # <<<<<<<<<<<<<<
+ *             else:
+ *                 data_bytes = bytes(data)
+*/
+        __Pyx_INCREF(__pyx_v_data);
+        __pyx_v_data_bytes = __pyx_v_data;
 
         /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":223
- *                 chunk_buffers.append(bytes(chunk_result.buffer_data))
- *                 chunk_records.append(chunk_result.records)
- *                 total_rows += chunk_result.num_records             # <<<<<<<<<<<<<<
- * 
- *                 if chunk_result.inferred_schema.size() > 0:
+ *                 with open(data, 'rb') as f:
+ *                     data_bytes = f.read()
+ *             elif isinstance(data, bytes):             # <<<<<<<<<<<<<<
+ *                 data_bytes = data
+ *             else:
 */
-        __pyx_v_total_rows = (__pyx_v_total_rows + __pyx_v_chunk_result.num_records);
+        goto __pyx_L17;
+      }
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":225
- *                 total_rows += chunk_result.num_records
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":226
+ *                 data_bytes = data
+ *             else:
+ *                 data_bytes = bytes(data)             # <<<<<<<<<<<<<<
  * 
- *                 if chunk_result.inferred_schema.size() > 0:             # <<<<<<<<<<<<<<
- *                     for key, value in chunk_result.inferred_schema:
- *                         schema[key.decode('utf-8')] = value.decode('utf-8')
+ *             if len(data_bytes) > 0:
 */
-        __pyx_t_17 = (__pyx_v_chunk_result.inferred_schema.size() > 0);
-        if (__pyx_t_17) {
+      /*else*/ {
+        __pyx_t_1 = NULL;
+        __pyx_t_7 = 1;
+        {
+          PyObject *__pyx_callargs[2] = {__pyx_t_1, __pyx_v_data};
+          __pyx_t_10 = __Pyx_PyObject_FastCall((PyObject*)(&PyBytes_Type), __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (__pyx_t_7*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+          __Pyx_XDECREF(__pyx_t_1); __pyx_t_1 = 0;
+          if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 226, __pyx_L4_error)
+          __Pyx_GOTREF(__pyx_t_10);
+        }
+        __pyx_v_data_bytes = __pyx_t_10;
+        __pyx_t_10 = 0;
+      }
+      __pyx_L17:;
 
-          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":226
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":228
+ *                 data_bytes = bytes(data)
  * 
- *                 if chunk_result.inferred_schema.size() > 0:
- *                     for key, value in chunk_result.inferred_schema:             # <<<<<<<<<<<<<<
- *                         schema[key.decode('utf-8')] = value.decode('utf-8')
- * 
+ *             if len(data_bytes) > 0:             # <<<<<<<<<<<<<<
+ *                 buf_data = <const uint8_t*>data_bytes
+ *                 buf_len = len(data_bytes)
 */
-          __pyx_t_20 = __pyx_v_chunk_result.inferred_schema.begin();
-          for (; __pyx_t_20 != __pyx_v_chunk_result.inferred_schema.end(); ++__pyx_t_20) {
-            __pyx_t_21 = *__pyx_t_20;
-            __pyx_t_1 = __pyx_convert_pair_to_py_std_3a__3a_string____std_3a__3a_string(__pyx_t_21); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 226, __pyx_L4_error)
-            __Pyx_GOTREF(__pyx_t_1);
-            if ((likely(PyTuple_CheckExact(__pyx_t_1))) || (PyList_CheckExact(__pyx_t_1))) {
-              PyObject* sequence = __pyx_t_1;
-              Py_ssize_t size = __Pyx_PySequence_SIZE(sequence);
-              if (unlikely(size != 2)) {
-                if (size > 2) __Pyx_RaiseTooManyValuesError(2);
-                else if (size >= 0) __Pyx_RaiseNeedMoreValuesError(size);
-                __PYX_ERR(0, 226, __pyx_L4_error)
-              }
-              #if CYTHON_ASSUME_SAFE_MACROS && !CYTHON_AVOID_BORROWED_REFS
-              if (likely(PyTuple_CheckExact(sequence))) {
-                __pyx_t_2 = PyTuple_GET_ITEM(sequence, 0);
-                __Pyx_INCREF(__pyx_t_2);
-                __pyx_t_10 = PyTuple_GET_ITEM(sequence, 1);
-                __Pyx_INCREF(__pyx_t_10);
-              } else {
-                __pyx_t_2 = __Pyx_PyList_GetItemRefFast(sequence, 0, __Pyx_ReferenceSharing_SharedReference);
-                if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 226, __pyx_L4_error)
-                __Pyx_XGOTREF(__pyx_t_2);
-                __pyx_t_10 = __Pyx_PyList_GetItemRefFast(sequence, 1, __Pyx_ReferenceSharing_SharedReference);
-                if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 226, __pyx_L4_error)
-                __Pyx_XGOTREF(__pyx_t_10);
-              }
-              #else
-              __pyx_t_2 = __Pyx_PySequence_ITEM(sequence, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 226, __pyx_L4_error)
-              __Pyx_GOTREF(__pyx_t_2);
-              __pyx_t_10 = __Pyx_PySequence_ITEM(sequence, 1); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 226, __pyx_L4_error)
-              __Pyx_GOTREF(__pyx_t_10);
-              #endif
-              __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-            } else {
-              Py_ssize_t index = -1;
-              __pyx_t_9 = PyObject_GetIter(__pyx_t_1); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 226, __pyx_L4_error)
-              __Pyx_GOTREF(__pyx_t_9);
-              __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-              __pyx_t_12 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_9);
-              index = 0; __pyx_t_2 = __pyx_t_12(__pyx_t_9); if (unlikely(!__pyx_t_2)) goto __pyx_L29_unpacking_failed;
-              __Pyx_GOTREF(__pyx_t_2);
-              index = 1; __pyx_t_10 = __pyx_t_12(__pyx_t_9); if (unlikely(!__pyx_t_10)) goto __pyx_L29_unpacking_failed;
-              __Pyx_GOTREF(__pyx_t_10);
-              if (__Pyx_IternextUnpackEndCheck(__pyx_t_12(__pyx_t_9), 2) < (0)) __PYX_ERR(0, 226, __pyx_L4_error)
-              __pyx_t_12 = NULL;
-              __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
-              goto __pyx_L30_unpacking_done;
-              __pyx_L29_unpacking_failed:;
-              __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
-              __pyx_t_12 = NULL;
-              if (__Pyx_IterFinish() == 0) __Pyx_RaiseNeedMoreValuesError(index);
-              __PYX_ERR(0, 226, __pyx_L4_error)
-              __pyx_L30_unpacking_done:;
-            }
-            __Pyx_XDECREF_SET(__pyx_v_key, __pyx_t_2);
-            __pyx_t_2 = 0;
-            __Pyx_XDECREF_SET(__pyx_v_value, __pyx_t_10);
-            __pyx_t_10 = 0;
+      if (unlikely(!__pyx_v_data_bytes)) { __Pyx_RaiseUnboundLocalError("data_bytes"); __PYX_ERR(0, 228, __pyx_L4_error) }
+      __pyx_t_4 = PyObject_Length(__pyx_v_data_bytes); if (unlikely(__pyx_t_4 == ((Py_ssize_t)-1))) __PYX_ERR(0, 228, __pyx_L4_error)
+      __pyx_t_20 = (__pyx_t_4 > 0);
+      if (__pyx_t_20) {
 
-            /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":227
- *                 if chunk_result.inferred_schema.size() > 0:
- *                     for key, value in chunk_result.inferred_schema:
- *                         schema[key.decode('utf-8')] = value.decode('utf-8')             # <<<<<<<<<<<<<<
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":229
  * 
- *             if reader.is_eof():
-*/
-            __pyx_t_10 = __pyx_v_value;
-            __Pyx_INCREF(__pyx_t_10);
-            __pyx_t_7 = 0;
-            {
-              PyObject *__pyx_callargs[2] = {__pyx_t_10, __pyx_mstate_global->__pyx_kp_u_utf_8};
-              __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_decode, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-              __Pyx_XDECREF(__pyx_t_10); __pyx_t_10 = 0;
-              if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 227, __pyx_L4_error)
-              __Pyx_GOTREF(__pyx_t_1);
-            }
-            __pyx_t_2 = __pyx_v_key;
-            __Pyx_INCREF(__pyx_t_2);
-            __pyx_t_7 = 0;
-            {
-              PyObject *__pyx_callargs[2] = {__pyx_t_2, __pyx_mstate_global->__pyx_kp_u_utf_8};
-              __pyx_t_10 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_decode, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-              __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-              if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 227, __pyx_L4_error)
-              __Pyx_GOTREF(__pyx_t_10);
-            }
-            if (unlikely((PyDict_SetItem(__pyx_v_schema, __pyx_t_10, __pyx_t_1) < 0))) __PYX_ERR(0, 227, __pyx_L4_error)
-            __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
-            __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-
-            /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":226
- * 
- *                 if chunk_result.inferred_schema.size() > 0:
- *                     for key, value in chunk_result.inferred_schema:             # <<<<<<<<<<<<<<
- *                         schema[key.decode('utf-8')] = value.decode('utf-8')
+ *             if len(data_bytes) > 0:
+ *                 buf_data = <const uint8_t*>data_bytes             # <<<<<<<<<<<<<<
+ *                 buf_len = len(data_bytes)
  * 
 */
-          }
+        if (unlikely(!__pyx_v_data_bytes)) { __Pyx_RaiseUnboundLocalError("data_bytes"); __PYX_ERR(0, 229, __pyx_L4_error) }
+        __pyx_t_21 = __Pyx_PyObject_AsUString(__pyx_v_data_bytes); if (unlikely((!__pyx_t_21) && PyErr_Occurred())) __PYX_ERR(0, 229, __pyx_L4_error)
+        __pyx_v_buf_data = ((uint8_t const *)__pyx_t_21);
 
-          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":225
- *                 total_rows += chunk_result.num_records
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":230
+ *             if len(data_bytes) > 0:
+ *                 buf_data = <const uint8_t*>data_bytes
+ *                 buf_len = len(data_bytes)             # <<<<<<<<<<<<<<
  * 
- *                 if chunk_result.inferred_schema.size() > 0:             # <<<<<<<<<<<<<<
- *                     for key, value in chunk_result.inferred_schema:
- *                         schema[key.decode('utf-8')] = value.decode('utf-8')
+ *                 # Scan for markers once
+*/
+        if (unlikely(!__pyx_v_data_bytes)) { __Pyx_RaiseUnboundLocalError("data_bytes"); __PYX_ERR(0, 230, __pyx_L4_error) }
+        __pyx_t_4 = PyObject_Length(__pyx_v_data_bytes); if (unlikely(__pyx_t_4 == ((Py_ssize_t)-1))) __PYX_ERR(0, 230, __pyx_L4_error)
+        __pyx_v_buf_len = __pyx_t_4;
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":233
+ * 
+ *                 # Scan for markers once
+ *                 markers = scan_structural_markers(buf_data, buf_len)             # <<<<<<<<<<<<<<
+ * 
+ *                 # Process in parallel
+*/
+        __pyx_v_markers = rugo::_jsonl::scan_structural_markers(__pyx_v_buf_data, __pyx_v_buf_len);
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":242
+ *                     context,
+ *                     predictor,
+ *                     <size_t>min_rows_per_thread             # <<<<<<<<<<<<<<
+ *                 )
+ * 
+*/
+        __pyx_t_7 = __Pyx_PyLong_As_size_t(__pyx_v_min_rows_per_thread); if (unlikely((__pyx_t_7 == (size_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 242, __pyx_L4_error)
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":236
+ * 
+ *                 # Process in parallel
+ *                 interp_result = interpret_jsonl_parallel(             # <<<<<<<<<<<<<<
+ *                     buf_data,
+ *                     buf_len,
+*/
+        __pyx_v_interp_result = rugo::_jsonl::interpret_jsonl_parallel(__pyx_v_buf_data, __pyx_v_buf_len, __pyx_v_markers, __pyx_v_context, __pyx_v_predictor, ((size_t)__pyx_t_7));
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":246
+ * 
+ *                 # Store result as single "chunk"
+ *                 if interp_result.all_records.size() > 0:             # <<<<<<<<<<<<<<
+ *                     chunk_buffers.append(data_bytes)
+ *                     chunk_records.append(interp_result.all_records)
+*/
+        __pyx_t_20 = (__pyx_v_interp_result.all_records.size() > 0);
+        if (__pyx_t_20) {
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":247
+ *                 # Store result as single "chunk"
+ *                 if interp_result.all_records.size() > 0:
+ *                     chunk_buffers.append(data_bytes)             # <<<<<<<<<<<<<<
+ *                     chunk_records.append(interp_result.all_records)
+ *                     total_rows = interp_result.num_records_passed
+*/
+          if (unlikely(!__pyx_v_data_bytes)) { __Pyx_RaiseUnboundLocalError("data_bytes"); __PYX_ERR(0, 247, __pyx_L4_error) }
+          __pyx_t_22 = __Pyx_PyList_Append(__pyx_v_chunk_buffers, __pyx_v_data_bytes); if (unlikely(__pyx_t_22 == ((int)-1))) __PYX_ERR(0, 247, __pyx_L4_error)
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":248
+ *                 if interp_result.all_records.size() > 0:
+ *                     chunk_buffers.append(data_bytes)
+ *                     chunk_records.append(interp_result.all_records)             # <<<<<<<<<<<<<<
+ *                     total_rows = interp_result.num_records_passed
+ *                     threaded_succeeded = True
+*/
+          __pyx_t_10 = __pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(__pyx_v_interp_result.all_records); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 248, __pyx_L4_error)
+          __Pyx_GOTREF(__pyx_t_10);
+          __pyx_t_22 = __Pyx_PyList_Append(__pyx_v_chunk_records, __pyx_t_10); if (unlikely(__pyx_t_22 == ((int)-1))) __PYX_ERR(0, 248, __pyx_L4_error)
+          __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":249
+ *                     chunk_buffers.append(data_bytes)
+ *                     chunk_records.append(interp_result.all_records)
+ *                     total_rows = interp_result.num_records_passed             # <<<<<<<<<<<<<<
+ *                     threaded_succeeded = True
+ * 
+*/
+          __pyx_t_7 = __pyx_v_interp_result.num_records_passed;
+          __pyx_v_total_rows = __pyx_t_7;
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":250
+ *                     chunk_records.append(interp_result.all_records)
+ *                     total_rows = interp_result.num_records_passed
+ *                     threaded_succeeded = True             # <<<<<<<<<<<<<<
+ * 
+ *         # Fall back to sequential if threaded path failed or wasn't requested
+*/
+          __pyx_v_threaded_succeeded = 1;
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":246
+ * 
+ *                 # Store result as single "chunk"
+ *                 if interp_result.all_records.size() > 0:             # <<<<<<<<<<<<<<
+ *                     chunk_buffers.append(data_bytes)
+ *                     chunk_records.append(interp_result.all_records)
 */
         }
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":215
- *                 break
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":228
+ *                 data_bytes = bytes(data)
  * 
- *             if chunk_result.num_records > 0:             # <<<<<<<<<<<<<<
- *                 if not column_names:
- *                     for col in chunk_result.column_names:
+ *             if len(data_bytes) > 0:             # <<<<<<<<<<<<<<
+ *                 buf_data = <const uint8_t*>data_bytes
+ *                 buf_len = len(data_bytes)
 */
       }
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":229
- *                         schema[key.decode('utf-8')] = value.decode('utf-8')
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":218
+ *         # Try threaded path first if requested
+ *         threaded_succeeded = False
+ *         if use_threads:             # <<<<<<<<<<<<<<
+ *             # Load entire buffer
+ *             if isinstance(data, str):
+*/
+    }
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":253
  * 
- *             if reader.is_eof():             # <<<<<<<<<<<<<<
- *                 break
+ *         # Fall back to sequential if threaded path failed or wasn't requested
+ *         if not threaded_succeeded:             # <<<<<<<<<<<<<<
+ *             # Sequential path: use JsonlReader chunking
+ *             if isinstance(data, str):
+*/
+    __pyx_t_20 = (!__pyx_v_threaded_succeeded);
+    if (__pyx_t_20) {
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":255
+ *         if not threaded_succeeded:
+ *             # Sequential path: use JsonlReader chunking
+ *             if isinstance(data, str):             # <<<<<<<<<<<<<<
+ *                 reader = new JsonlReader(<string>data.encode('utf-8'), context)
+ *             elif isinstance(data, bytes):
+*/
+      __pyx_t_20 = PyUnicode_Check(__pyx_v_data); 
+      if (__pyx_t_20) {
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":256
+ *             # Sequential path: use JsonlReader chunking
+ *             if isinstance(data, str):
+ *                 reader = new JsonlReader(<string>data.encode('utf-8'), context)             # <<<<<<<<<<<<<<
+ *             elif isinstance(data, bytes):
+ *                 reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
+*/
+        __pyx_t_1 = __pyx_v_data;
+        __Pyx_INCREF(__pyx_t_1);
+        __pyx_t_7 = 0;
+        {
+          PyObject *__pyx_callargs[2] = {__pyx_t_1, __pyx_mstate_global->__pyx_kp_u_utf_8};
+          __pyx_t_10 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+          __Pyx_XDECREF(__pyx_t_1); __pyx_t_1 = 0;
+          if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 256, __pyx_L4_error)
+          __Pyx_GOTREF(__pyx_t_10);
+        }
+        __pyx_t_8 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_10); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 256, __pyx_L4_error)
+        __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
+        __pyx_v_reader = new rugo::_jsonl::JsonlReader(((std::string)__pyx_t_8), __pyx_v_context);
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":255
+ *         if not threaded_succeeded:
+ *             # Sequential path: use JsonlReader chunking
+ *             if isinstance(data, str):             # <<<<<<<<<<<<<<
+ *                 reader = new JsonlReader(<string>data.encode('utf-8'), context)
+ *             elif isinstance(data, bytes):
+*/
+        goto __pyx_L35;
+      }
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":257
+ *             if isinstance(data, str):
+ *                 reader = new JsonlReader(<string>data.encode('utf-8'), context)
+ *             elif isinstance(data, bytes):             # <<<<<<<<<<<<<<
+ *                 reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
+ *             else:
+*/
+      __pyx_t_20 = PyBytes_Check(__pyx_v_data); 
+      if (__pyx_t_20) {
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":258
+ *                 reader = new JsonlReader(<string>data.encode('utf-8'), context)
+ *             elif isinstance(data, bytes):
+ *                 reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)             # <<<<<<<<<<<<<<
+ *             else:
+ *                 data_bytes = bytes(data)
+*/
+        if (unlikely(__pyx_v_data == Py_None)) {
+          PyErr_SetString(PyExc_TypeError, "expected bytes, NoneType found");
+          __PYX_ERR(0, 258, __pyx_L4_error)
+        }
+        __pyx_t_23 = __Pyx_PyBytes_AsUString(__pyx_v_data); if (unlikely((!__pyx_t_23) && PyErr_Occurred())) __PYX_ERR(0, 258, __pyx_L4_error)
+        __pyx_t_4 = PyObject_Length(__pyx_v_data); if (unlikely(__pyx_t_4 == ((Py_ssize_t)-1))) __PYX_ERR(0, 258, __pyx_L4_error)
+        __pyx_v_reader = new rugo::_jsonl::JsonlReader(((uint8_t const *)__pyx_t_23), __pyx_t_4, __pyx_v_context);
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":257
+ *             if isinstance(data, str):
+ *                 reader = new JsonlReader(<string>data.encode('utf-8'), context)
+ *             elif isinstance(data, bytes):             # <<<<<<<<<<<<<<
+ *                 reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
+ *             else:
+*/
+        goto __pyx_L35;
+      }
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":260
+ *                 reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
+ *             else:
+ *                 data_bytes = bytes(data)             # <<<<<<<<<<<<<<
+ *                 reader = new JsonlReader(<const uint8_t*><bytes>data_bytes, len(data_bytes), context)
  * 
 */
-      __pyx_t_17 = __pyx_v_reader->is_eof();
-      if (__pyx_t_17) {
+      /*else*/ {
+        __pyx_t_1 = NULL;
+        __pyx_t_7 = 1;
+        {
+          PyObject *__pyx_callargs[2] = {__pyx_t_1, __pyx_v_data};
+          __pyx_t_10 = __Pyx_PyObject_FastCall((PyObject*)(&PyBytes_Type), __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (__pyx_t_7*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+          __Pyx_XDECREF(__pyx_t_1); __pyx_t_1 = 0;
+          if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 260, __pyx_L4_error)
+          __Pyx_GOTREF(__pyx_t_10);
+        }
+        __Pyx_XDECREF_SET(__pyx_v_data_bytes, __pyx_t_10);
+        __pyx_t_10 = 0;
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":230
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":261
+ *             else:
+ *                 data_bytes = bytes(data)
+ *                 reader = new JsonlReader(<const uint8_t*><bytes>data_bytes, len(data_bytes), context)             # <<<<<<<<<<<<<<
  * 
- *             if reader.is_eof():
- *                 break             # <<<<<<<<<<<<<<
+ *             # Accumulate chunks; each chunk keeps its own buffer so FieldSpan
+*/
+        if (unlikely(__pyx_v_data_bytes == Py_None)) {
+          PyErr_SetString(PyExc_TypeError, "expected bytes, NoneType found");
+          __PYX_ERR(0, 261, __pyx_L4_error)
+        }
+        __pyx_t_24 = __Pyx_PyBytes_AsUString(__pyx_v_data_bytes); if (unlikely((!__pyx_t_24) && PyErr_Occurred())) __PYX_ERR(0, 261, __pyx_L4_error)
+        __pyx_t_4 = PyObject_Length(__pyx_v_data_bytes); if (unlikely(__pyx_t_4 == ((Py_ssize_t)-1))) __PYX_ERR(0, 261, __pyx_L4_error)
+        __pyx_v_reader = new rugo::_jsonl::JsonlReader(((uint8_t const *)__pyx_t_24), __pyx_t_4, __pyx_v_context);
+      }
+      __pyx_L35:;
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":265
+ *             # Accumulate chunks; each chunk keeps its own buffer so FieldSpan
+ *             # offsets remain valid when we later call extract_column per chunk.
+ *             while True:             # <<<<<<<<<<<<<<
+ *                 chunk_result = reader.next_chunk()
+ * 
+*/
+      while (1) {
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":266
+ *             # offsets remain valid when we later call extract_column per chunk.
+ *             while True:
+ *                 chunk_result = reader.next_chunk()             # <<<<<<<<<<<<<<
+ * 
+ *                 if not chunk_result.success:
+*/
+        __pyx_v_chunk_result = __pyx_v_reader->next_chunk();
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":268
+ *                 chunk_result = reader.next_chunk()
+ * 
+ *                 if not chunk_result.success:             # <<<<<<<<<<<<<<
+ *                     if reader.has_error():
+ *                         result['error'] = reader.get_error().decode('utf-8')
+*/
+        __pyx_t_20 = (!__pyx_v_chunk_result.success);
+        if (__pyx_t_20) {
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":269
+ * 
+ *                 if not chunk_result.success:
+ *                     if reader.has_error():             # <<<<<<<<<<<<<<
+ *                         result['error'] = reader.get_error().decode('utf-8')
+ *                     break
+*/
+          __pyx_t_20 = __pyx_v_reader->has_error();
+          if (__pyx_t_20) {
+
+            /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":270
+ *                 if not chunk_result.success:
+ *                     if reader.has_error():
+ *                         result['error'] = reader.get_error().decode('utf-8')             # <<<<<<<<<<<<<<
+ *                     break
+ * 
+*/
+            __pyx_t_10 = __Pyx_decode_cpp_string(__pyx_v_reader->get_error(), 0, PY_SSIZE_T_MAX, NULL, NULL, PyUnicode_DecodeUTF8); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 270, __pyx_L4_error)
+            __Pyx_GOTREF(__pyx_t_10);
+            if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_error, __pyx_t_10) < 0))) __PYX_ERR(0, 270, __pyx_L4_error)
+            __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
+
+            /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":269
+ * 
+ *                 if not chunk_result.success:
+ *                     if reader.has_error():             # <<<<<<<<<<<<<<
+ *                         result['error'] = reader.get_error().decode('utf-8')
+ *                     break
+*/
+          }
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":271
+ *                     if reader.has_error():
+ *                         result['error'] = reader.get_error().decode('utf-8')
+ *                     break             # <<<<<<<<<<<<<<
+ * 
+ *                 if chunk_result.num_records > 0:
+*/
+          goto __pyx_L37_break;
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":268
+ *                 chunk_result = reader.next_chunk()
+ * 
+ *                 if not chunk_result.success:             # <<<<<<<<<<<<<<
+ *                     if reader.has_error():
+ *                         result['error'] = reader.get_error().decode('utf-8')
+*/
+        }
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":273
+ *                     break
+ * 
+ *                 if chunk_result.num_records > 0:             # <<<<<<<<<<<<<<
+ *                     if not column_names:
+ *                         for col in chunk_result.column_names:
+*/
+        __pyx_t_20 = (__pyx_v_chunk_result.num_records > 0);
+        if (__pyx_t_20) {
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":274
+ * 
+ *                 if chunk_result.num_records > 0:
+ *                     if not column_names:             # <<<<<<<<<<<<<<
+ *                         for col in chunk_result.column_names:
+ *                             column_names.append(col.decode('utf-8'))
+*/
+          {
+            Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_v_column_names);
+            if (unlikely(((!CYTHON_ASSUME_SAFE_SIZE) && __pyx_temp < 0))) __PYX_ERR(0, 274, __pyx_L4_error)
+            __pyx_t_20 = (__pyx_temp != 0);
+          }
+
+          __pyx_t_3 = (!__pyx_t_20);
+          if (__pyx_t_3) {
+
+            /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":275
+ *                 if chunk_result.num_records > 0:
+ *                     if not column_names:
+ *                         for col in chunk_result.column_names:             # <<<<<<<<<<<<<<
+ *                             column_names.append(col.decode('utf-8'))
+ * 
+*/
+            __pyx_t_25 = __pyx_v_chunk_result.column_names.begin();
+            for (; __pyx_t_25 != __pyx_v_chunk_result.column_names.end(); ++__pyx_t_25) {
+              __pyx_t_8 = *__pyx_t_25;
+              __pyx_t_10 = __pyx_convert_PyBytes_string_to_py_6libcpp_6string_std__in_string(__pyx_t_8); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 275, __pyx_L4_error)
+              __Pyx_GOTREF(__pyx_t_10);
+              __Pyx_XDECREF_SET(__pyx_v_col, __pyx_t_10);
+              __pyx_t_10 = 0;
+
+              /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":276
+ *                     if not column_names:
+ *                         for col in chunk_result.column_names:
+ *                             column_names.append(col.decode('utf-8'))             # <<<<<<<<<<<<<<
+ * 
+ *                     # Keep buffer as bytes (owns the memory) and records as C++ object
+*/
+              __pyx_t_1 = __pyx_v_col;
+              __Pyx_INCREF(__pyx_t_1);
+              __pyx_t_7 = 0;
+              {
+                PyObject *__pyx_callargs[2] = {__pyx_t_1, __pyx_mstate_global->__pyx_kp_u_utf_8};
+                __pyx_t_10 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_decode, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+                __Pyx_XDECREF(__pyx_t_1); __pyx_t_1 = 0;
+                if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 276, __pyx_L4_error)
+                __Pyx_GOTREF(__pyx_t_10);
+              }
+              __pyx_t_22 = __Pyx_PyList_Append(__pyx_v_column_names, __pyx_t_10); if (unlikely(__pyx_t_22 == ((int)-1))) __PYX_ERR(0, 276, __pyx_L4_error)
+              __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
+
+              /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":275
+ *                 if chunk_result.num_records > 0:
+ *                     if not column_names:
+ *                         for col in chunk_result.column_names:             # <<<<<<<<<<<<<<
+ *                             column_names.append(col.decode('utf-8'))
+ * 
+*/
+            }
+
+            /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":274
+ * 
+ *                 if chunk_result.num_records > 0:
+ *                     if not column_names:             # <<<<<<<<<<<<<<
+ *                         for col in chunk_result.column_names:
+ *                             column_names.append(col.decode('utf-8'))
+*/
+          }
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":279
+ * 
+ *                     # Keep buffer as bytes (owns the memory) and records as C++ object
+ *                     chunk_buffers.append(bytes(chunk_result.buffer_data))             # <<<<<<<<<<<<<<
+ *                     chunk_records.append(chunk_result.records)
+ *                     total_rows += chunk_result.num_records
+*/
+          __pyx_t_1 = NULL;
+          __pyx_t_9 = __pyx_convert_vector_to_py_uint8_t(__pyx_v_chunk_result.buffer_data); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 279, __pyx_L4_error)
+          __Pyx_GOTREF(__pyx_t_9);
+          __pyx_t_7 = 1;
+          {
+            PyObject *__pyx_callargs[2] = {__pyx_t_1, __pyx_t_9};
+            __pyx_t_10 = __Pyx_PyObject_FastCall((PyObject*)(&PyBytes_Type), __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (__pyx_t_7*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+            __Pyx_XDECREF(__pyx_t_1); __pyx_t_1 = 0;
+            __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
+            if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 279, __pyx_L4_error)
+            __Pyx_GOTREF(__pyx_t_10);
+          }
+          __pyx_t_22 = __Pyx_PyList_Append(__pyx_v_chunk_buffers, __pyx_t_10); if (unlikely(__pyx_t_22 == ((int)-1))) __PYX_ERR(0, 279, __pyx_L4_error)
+          __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":280
+ *                     # Keep buffer as bytes (owns the memory) and records as C++ object
+ *                     chunk_buffers.append(bytes(chunk_result.buffer_data))
+ *                     chunk_records.append(chunk_result.records)             # <<<<<<<<<<<<<<
+ *                     total_rows += chunk_result.num_records
+ * 
+*/
+          __pyx_t_10 = __pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(__pyx_v_chunk_result.records); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 280, __pyx_L4_error)
+          __Pyx_GOTREF(__pyx_t_10);
+          __pyx_t_22 = __Pyx_PyList_Append(__pyx_v_chunk_records, __pyx_t_10); if (unlikely(__pyx_t_22 == ((int)-1))) __PYX_ERR(0, 280, __pyx_L4_error)
+          __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":281
+ *                     chunk_buffers.append(bytes(chunk_result.buffer_data))
+ *                     chunk_records.append(chunk_result.records)
+ *                     total_rows += chunk_result.num_records             # <<<<<<<<<<<<<<
+ * 
+ *                     if chunk_result.inferred_schema.size() > 0:
+*/
+          __pyx_v_total_rows = (__pyx_v_total_rows + __pyx_v_chunk_result.num_records);
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":283
+ *                     total_rows += chunk_result.num_records
+ * 
+ *                     if chunk_result.inferred_schema.size() > 0:             # <<<<<<<<<<<<<<
+ *                         for key, value in chunk_result.inferred_schema:
+ *                             schema[key.decode('utf-8')] = value.decode('utf-8')
+*/
+          __pyx_t_3 = (__pyx_v_chunk_result.inferred_schema.size() > 0);
+          if (__pyx_t_3) {
+
+            /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":284
+ * 
+ *                     if chunk_result.inferred_schema.size() > 0:
+ *                         for key, value in chunk_result.inferred_schema:             # <<<<<<<<<<<<<<
+ *                             schema[key.decode('utf-8')] = value.decode('utf-8')
+ * 
+*/
+            __pyx_t_26 = __pyx_v_chunk_result.inferred_schema.begin();
+            for (; __pyx_t_26 != __pyx_v_chunk_result.inferred_schema.end(); ++__pyx_t_26) {
+              __pyx_t_27 = *__pyx_t_26;
+              __pyx_t_10 = __pyx_convert_pair_to_py_std_3a__3a_string____std_3a__3a_string(__pyx_t_27); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 284, __pyx_L4_error)
+              __Pyx_GOTREF(__pyx_t_10);
+              if ((likely(PyTuple_CheckExact(__pyx_t_10))) || (PyList_CheckExact(__pyx_t_10))) {
+                PyObject* sequence = __pyx_t_10;
+                Py_ssize_t size = __Pyx_PySequence_SIZE(sequence);
+                if (unlikely(size != 2)) {
+                  if (size > 2) __Pyx_RaiseTooManyValuesError(2);
+                  else if (size >= 0) __Pyx_RaiseNeedMoreValuesError(size);
+                  __PYX_ERR(0, 284, __pyx_L4_error)
+                }
+                #if CYTHON_ASSUME_SAFE_MACROS && !CYTHON_AVOID_BORROWED_REFS
+                if (likely(PyTuple_CheckExact(sequence))) {
+                  __pyx_t_9 = PyTuple_GET_ITEM(sequence, 0);
+                  __Pyx_INCREF(__pyx_t_9);
+                  __pyx_t_1 = PyTuple_GET_ITEM(sequence, 1);
+                  __Pyx_INCREF(__pyx_t_1);
+                } else {
+                  __pyx_t_9 = __Pyx_PyList_GetItemRefFast(sequence, 0, __Pyx_ReferenceSharing_SharedReference);
+                  if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 284, __pyx_L4_error)
+                  __Pyx_XGOTREF(__pyx_t_9);
+                  __pyx_t_1 = __Pyx_PyList_GetItemRefFast(sequence, 1, __Pyx_ReferenceSharing_SharedReference);
+                  if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 284, __pyx_L4_error)
+                  __Pyx_XGOTREF(__pyx_t_1);
+                }
+                #else
+                __pyx_t_9 = __Pyx_PySequence_ITEM(sequence, 0); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 284, __pyx_L4_error)
+                __Pyx_GOTREF(__pyx_t_9);
+                __pyx_t_1 = __Pyx_PySequence_ITEM(sequence, 1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 284, __pyx_L4_error)
+                __Pyx_GOTREF(__pyx_t_1);
+                #endif
+                __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
+              } else {
+                Py_ssize_t index = -1;
+                __pyx_t_2 = PyObject_GetIter(__pyx_t_10); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 284, __pyx_L4_error)
+                __Pyx_GOTREF(__pyx_t_2);
+                __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
+                __pyx_t_12 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_2);
+                index = 0; __pyx_t_9 = __pyx_t_12(__pyx_t_2); if (unlikely(!__pyx_t_9)) goto __pyx_L48_unpacking_failed;
+                __Pyx_GOTREF(__pyx_t_9);
+                index = 1; __pyx_t_1 = __pyx_t_12(__pyx_t_2); if (unlikely(!__pyx_t_1)) goto __pyx_L48_unpacking_failed;
+                __Pyx_GOTREF(__pyx_t_1);
+                if (__Pyx_IternextUnpackEndCheck(__pyx_t_12(__pyx_t_2), 2) < (0)) __PYX_ERR(0, 284, __pyx_L4_error)
+                __pyx_t_12 = NULL;
+                __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+                goto __pyx_L49_unpacking_done;
+                __pyx_L48_unpacking_failed:;
+                __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+                __pyx_t_12 = NULL;
+                if (__Pyx_IterFinish() == 0) __Pyx_RaiseNeedMoreValuesError(index);
+                __PYX_ERR(0, 284, __pyx_L4_error)
+                __pyx_L49_unpacking_done:;
+              }
+              __Pyx_XDECREF_SET(__pyx_v_key, __pyx_t_9);
+              __pyx_t_9 = 0;
+              __Pyx_XDECREF_SET(__pyx_v_value, __pyx_t_1);
+              __pyx_t_1 = 0;
+
+              /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":285
+ *                     if chunk_result.inferred_schema.size() > 0:
+ *                         for key, value in chunk_result.inferred_schema:
+ *                             schema[key.decode('utf-8')] = value.decode('utf-8')             # <<<<<<<<<<<<<<
+ * 
+ *                 if reader.is_eof():
+*/
+              __pyx_t_1 = __pyx_v_value;
+              __Pyx_INCREF(__pyx_t_1);
+              __pyx_t_7 = 0;
+              {
+                PyObject *__pyx_callargs[2] = {__pyx_t_1, __pyx_mstate_global->__pyx_kp_u_utf_8};
+                __pyx_t_10 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_decode, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+                __Pyx_XDECREF(__pyx_t_1); __pyx_t_1 = 0;
+                if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 285, __pyx_L4_error)
+                __Pyx_GOTREF(__pyx_t_10);
+              }
+              __pyx_t_9 = __pyx_v_key;
+              __Pyx_INCREF(__pyx_t_9);
+              __pyx_t_7 = 0;
+              {
+                PyObject *__pyx_callargs[2] = {__pyx_t_9, __pyx_mstate_global->__pyx_kp_u_utf_8};
+                __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_decode, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+                __Pyx_XDECREF(__pyx_t_9); __pyx_t_9 = 0;
+                if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 285, __pyx_L4_error)
+                __Pyx_GOTREF(__pyx_t_1);
+              }
+              if (unlikely((PyDict_SetItem(__pyx_v_schema, __pyx_t_1, __pyx_t_10) < 0))) __PYX_ERR(0, 285, __pyx_L4_error)
+              __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+              __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
+
+              /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":284
+ * 
+ *                     if chunk_result.inferred_schema.size() > 0:
+ *                         for key, value in chunk_result.inferred_schema:             # <<<<<<<<<<<<<<
+ *                             schema[key.decode('utf-8')] = value.decode('utf-8')
+ * 
+*/
+            }
+
+            /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":283
+ *                     total_rows += chunk_result.num_records
+ * 
+ *                     if chunk_result.inferred_schema.size() > 0:             # <<<<<<<<<<<<<<
+ *                         for key, value in chunk_result.inferred_schema:
+ *                             schema[key.decode('utf-8')] = value.decode('utf-8')
+*/
+          }
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":273
+ *                     break
+ * 
+ *                 if chunk_result.num_records > 0:             # <<<<<<<<<<<<<<
+ *                     if not column_names:
+ *                         for col in chunk_result.column_names:
+*/
+        }
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":287
+ *                             schema[key.decode('utf-8')] = value.decode('utf-8')
+ * 
+ *                 if reader.is_eof():             # <<<<<<<<<<<<<<
+ *                     break
+ * 
+*/
+        __pyx_t_3 = __pyx_v_reader->is_eof();
+        if (__pyx_t_3) {
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":288
+ * 
+ *                 if reader.is_eof():
+ *                     break             # <<<<<<<<<<<<<<
  * 
  *         # Build Draken vectors  one C++ call per column per chunk
 */
-        goto __pyx_L18_break;
+          goto __pyx_L37_break;
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":229
- *                         schema[key.decode('utf-8')] = value.decode('utf-8')
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":287
+ *                             schema[key.decode('utf-8')] = value.decode('utf-8')
  * 
- *             if reader.is_eof():             # <<<<<<<<<<<<<<
- *                 break
+ *                 if reader.is_eof():             # <<<<<<<<<<<<<<
+ *                     break
  * 
 */
+        }
       }
-    }
-    __pyx_L18_break:;
+      __pyx_L37_break:;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":233
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":253
+ * 
+ *         # Fall back to sequential if threaded path failed or wasn't requested
+ *         if not threaded_succeeded:             # <<<<<<<<<<<<<<
+ *             # Sequential path: use JsonlReader chunking
+ *             if isinstance(data, str):
+*/
+    }
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":291
  * 
  *         # Build Draken vectors  one C++ call per column per chunk
  *         if total_rows > 0 and column_names:             # <<<<<<<<<<<<<<
  *             vectors = _build_vectors_from_chunks(
  *                 chunk_buffers, chunk_records, column_names, total_rows
 */
-    __pyx_t_3 = (__pyx_v_total_rows > 0);
-    if (__pyx_t_3) {
+    __pyx_t_20 = (__pyx_v_total_rows > 0);
+    if (__pyx_t_20) {
     } else {
-      __pyx_t_17 = __pyx_t_3;
-      goto __pyx_L34_bool_binop_done;
+      __pyx_t_3 = __pyx_t_20;
+      goto __pyx_L53_bool_binop_done;
     }
     {
       Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_v_column_names);
-      if (unlikely(((!CYTHON_ASSUME_SAFE_SIZE) && __pyx_temp < 0))) __PYX_ERR(0, 233, __pyx_L4_error)
-      __pyx_t_3 = (__pyx_temp != 0);
+      if (unlikely(((!CYTHON_ASSUME_SAFE_SIZE) && __pyx_temp < 0))) __PYX_ERR(0, 291, __pyx_L4_error)
+      __pyx_t_20 = (__pyx_temp != 0);
     }
 
-    __pyx_t_17 = __pyx_t_3;
-    __pyx_L34_bool_binop_done:;
-    if (__pyx_t_17) {
+    __pyx_t_3 = __pyx_t_20;
+    __pyx_L53_bool_binop_done:;
+    if (__pyx_t_3) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":234
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":292
  *         # Build Draken vectors  one C++ call per column per chunk
  *         if total_rows > 0 and column_names:
  *             vectors = _build_vectors_from_chunks(             # <<<<<<<<<<<<<<
  *                 chunk_buffers, chunk_records, column_names, total_rows
  *             )
 */
-      __pyx_t_1 = __pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_chunks(__pyx_v_chunk_buffers, __pyx_v_chunk_records, __pyx_v_column_names, __pyx_v_total_rows); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 234, __pyx_L4_error)
-      __Pyx_GOTREF(__pyx_t_1);
-      __pyx_v_vectors = ((PyObject*)__pyx_t_1);
-      __pyx_t_1 = 0;
+      __pyx_t_10 = __pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_chunks(__pyx_v_chunk_buffers, __pyx_v_chunk_records, __pyx_v_column_names, __pyx_v_total_rows); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 292, __pyx_L4_error)
+      __Pyx_GOTREF(__pyx_t_10);
+      __pyx_v_vectors = ((PyObject*)__pyx_t_10);
+      __pyx_t_10 = 0;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":237
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":295
  *                 chunk_buffers, chunk_records, column_names, total_rows
  *             )
  *             result['columns'] = vectors             # <<<<<<<<<<<<<<
  *             result['column_names'] = column_names
  *             result['num_rows'] = total_rows
 */
-      if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_columns, __pyx_v_vectors) < 0))) __PYX_ERR(0, 237, __pyx_L4_error)
+      if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_columns, __pyx_v_vectors) < 0))) __PYX_ERR(0, 295, __pyx_L4_error)
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":238
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":296
  *             )
  *             result['columns'] = vectors
  *             result['column_names'] = column_names             # <<<<<<<<<<<<<<
  *             result['num_rows'] = total_rows
  *             result['schema'] = schema
 */
-      if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_column_names, __pyx_v_column_names) < 0))) __PYX_ERR(0, 238, __pyx_L4_error)
+      if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_column_names, __pyx_v_column_names) < 0))) __PYX_ERR(0, 296, __pyx_L4_error)
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":239
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":297
  *             result['columns'] = vectors
  *             result['column_names'] = column_names
  *             result['num_rows'] = total_rows             # <<<<<<<<<<<<<<
  *             result['schema'] = schema
  *             result['success'] = True
 */
-      __pyx_t_1 = __Pyx_PyLong_FromSize_t(__pyx_v_total_rows); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 239, __pyx_L4_error)
-      __Pyx_GOTREF(__pyx_t_1);
-      if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_num_rows, __pyx_t_1) < 0))) __PYX_ERR(0, 239, __pyx_L4_error)
-      __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+      __pyx_t_10 = __Pyx_PyLong_FromSize_t(__pyx_v_total_rows); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 297, __pyx_L4_error)
+      __Pyx_GOTREF(__pyx_t_10);
+      if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_num_rows, __pyx_t_10) < 0))) __PYX_ERR(0, 297, __pyx_L4_error)
+      __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":240
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":298
  *             result['column_names'] = column_names
  *             result['num_rows'] = total_rows
  *             result['schema'] = schema             # <<<<<<<<<<<<<<
  *             result['success'] = True
  * 
 */
-      if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_schema, __pyx_v_schema) < 0))) __PYX_ERR(0, 240, __pyx_L4_error)
+      if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_schema, __pyx_v_schema) < 0))) __PYX_ERR(0, 298, __pyx_L4_error)
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":241
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":299
  *             result['num_rows'] = total_rows
  *             result['schema'] = schema
  *             result['success'] = True             # <<<<<<<<<<<<<<
  * 
  *         return result
 */
-      if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_success, Py_True) < 0))) __PYX_ERR(0, 241, __pyx_L4_error)
+      if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_success, Py_True) < 0))) __PYX_ERR(0, 299, __pyx_L4_error)
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":233
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":291
  * 
  *         # Build Draken vectors  one C++ call per column per chunk
  *         if total_rows > 0 and column_names:             # <<<<<<<<<<<<<<
@@ -20882,7 +21366,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":243
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":301
  *             result['success'] = True
  * 
  *         return result             # <<<<<<<<<<<<<<
@@ -20895,7 +21379,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
     goto __pyx_L3_return;
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":246
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":304
  * 
  *     finally:
  *         if reader != NULL:             # <<<<<<<<<<<<<<
@@ -20907,27 +21391,27 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
     /*exception exit:*/{
       __Pyx_PyThreadState_declare
       __Pyx_PyThreadState_assign
-      __pyx_t_25 = 0; __pyx_t_26 = 0; __pyx_t_27 = 0; __pyx_t_28 = 0; __pyx_t_29 = 0; __pyx_t_30 = 0;
+      __pyx_t_15 = 0; __pyx_t_18 = 0; __pyx_t_17 = 0; __pyx_t_16 = 0; __pyx_t_19 = 0; __pyx_t_31 = 0;
       __Pyx_XDECREF(__pyx_t_1); __pyx_t_1 = 0;
       __Pyx_XDECREF(__pyx_t_10); __pyx_t_10 = 0;
       __Pyx_XDECREF(__pyx_t_11); __pyx_t_11 = 0;
       __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
       __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
       __Pyx_XDECREF(__pyx_t_9); __pyx_t_9 = 0;
-       __Pyx_ExceptionSwap(&__pyx_t_28, &__pyx_t_29, &__pyx_t_30);
-      if ( unlikely(__Pyx_GetException(&__pyx_t_25, &__pyx_t_26, &__pyx_t_27) < 0)) __Pyx_ErrFetch(&__pyx_t_25, &__pyx_t_26, &__pyx_t_27);
-      __Pyx_XGOTREF(__pyx_t_25);
-      __Pyx_XGOTREF(__pyx_t_26);
-      __Pyx_XGOTREF(__pyx_t_27);
-      __Pyx_XGOTREF(__pyx_t_28);
-      __Pyx_XGOTREF(__pyx_t_29);
-      __Pyx_XGOTREF(__pyx_t_30);
-      __pyx_t_22 = __pyx_lineno; __pyx_t_23 = __pyx_clineno; __pyx_t_24 = __pyx_filename;
+       __Pyx_ExceptionSwap(&__pyx_t_16, &__pyx_t_19, &__pyx_t_31);
+      if ( unlikely(__Pyx_GetException(&__pyx_t_15, &__pyx_t_18, &__pyx_t_17) < 0)) __Pyx_ErrFetch(&__pyx_t_15, &__pyx_t_18, &__pyx_t_17);
+      __Pyx_XGOTREF(__pyx_t_15);
+      __Pyx_XGOTREF(__pyx_t_18);
+      __Pyx_XGOTREF(__pyx_t_17);
+      __Pyx_XGOTREF(__pyx_t_16);
+      __Pyx_XGOTREF(__pyx_t_19);
+      __Pyx_XGOTREF(__pyx_t_31);
+      __pyx_t_28 = __pyx_lineno; __pyx_t_29 = __pyx_clineno; __pyx_t_30 = __pyx_filename;
       {
-        __pyx_t_17 = (__pyx_v_reader != NULL);
-        if (__pyx_t_17) {
+        __pyx_t_3 = (__pyx_v_reader != NULL);
+        if (__pyx_t_3) {
 
-          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":247
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":305
  *     finally:
  *         if reader != NULL:
  *             del reader             # <<<<<<<<<<<<<<
@@ -20936,7 +21420,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
 */
           delete __pyx_v_reader;
 
-          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":246
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":304
  * 
  *     finally:
  *         if reader != NULL:             # <<<<<<<<<<<<<<
@@ -20945,25 +21429,25 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
 */
         }
       }
-      __Pyx_XGIVEREF(__pyx_t_28);
-      __Pyx_XGIVEREF(__pyx_t_29);
-      __Pyx_XGIVEREF(__pyx_t_30);
-      __Pyx_ExceptionReset(__pyx_t_28, __pyx_t_29, __pyx_t_30);
-      __Pyx_XGIVEREF(__pyx_t_25);
-      __Pyx_XGIVEREF(__pyx_t_26);
-      __Pyx_XGIVEREF(__pyx_t_27);
-      __Pyx_ErrRestore(__pyx_t_25, __pyx_t_26, __pyx_t_27);
-      __pyx_t_25 = 0; __pyx_t_26 = 0; __pyx_t_27 = 0; __pyx_t_28 = 0; __pyx_t_29 = 0; __pyx_t_30 = 0;
-      __pyx_lineno = __pyx_t_22; __pyx_clineno = __pyx_t_23; __pyx_filename = __pyx_t_24;
+      __Pyx_XGIVEREF(__pyx_t_16);
+      __Pyx_XGIVEREF(__pyx_t_19);
+      __Pyx_XGIVEREF(__pyx_t_31);
+      __Pyx_ExceptionReset(__pyx_t_16, __pyx_t_19, __pyx_t_31);
+      __Pyx_XGIVEREF(__pyx_t_15);
+      __Pyx_XGIVEREF(__pyx_t_18);
+      __Pyx_XGIVEREF(__pyx_t_17);
+      __Pyx_ErrRestore(__pyx_t_15, __pyx_t_18, __pyx_t_17);
+      __pyx_t_15 = 0; __pyx_t_18 = 0; __pyx_t_17 = 0; __pyx_t_16 = 0; __pyx_t_19 = 0; __pyx_t_31 = 0;
+      __pyx_lineno = __pyx_t_28; __pyx_clineno = __pyx_t_29; __pyx_filename = __pyx_t_30;
       goto __pyx_L1_error;
     }
     __pyx_L3_return: {
-      __pyx_t_30 = __pyx_r;
+      __pyx_t_31 = __pyx_r;
       __pyx_r = 0;
-      __pyx_t_17 = (__pyx_v_reader != NULL);
-      if (__pyx_t_17) {
+      __pyx_t_3 = (__pyx_v_reader != NULL);
+      if (__pyx_t_3) {
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":247
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":305
  *     finally:
  *         if reader != NULL:
  *             del reader             # <<<<<<<<<<<<<<
@@ -20972,7 +21456,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
 */
         delete __pyx_v_reader;
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":246
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":304
  * 
  *     finally:
  *         if reader != NULL:             # <<<<<<<<<<<<<<
@@ -20980,13 +21464,13 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
  * 
 */
       }
-      __pyx_r = __pyx_t_30;
-      __pyx_t_30 = 0;
+      __pyx_r = __pyx_t_31;
+      __pyx_t_31 = 0;
       goto __pyx_L0;
     }
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":133
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":145
  * 
  * 
  * def read_jsonl(             # <<<<<<<<<<<<<<
@@ -21013,6 +21497,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
   __Pyx_XDECREF(__pyx_v_col);
   __Pyx_XDECREF(__pyx_v_op);
   __Pyx_XDECREF(__pyx_v_val);
+  __Pyx_XDECREF(__pyx_v_f);
   __Pyx_XDECREF(__pyx_v_data_bytes);
   __Pyx_XDECREF(__pyx_v_key);
   __Pyx_XDECREF(__pyx_v_value);
@@ -21022,7 +21507,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_read_jsonl(CYTHON_UNU
   return __pyx_r;
 }
 
-/* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":250
+/* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":308
  * 
  * 
  * def benchmark_document_map(             # <<<<<<<<<<<<<<
@@ -21070,32 +21555,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_data,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 250, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 308, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 250, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 308, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "benchmark_document_map", 0) < (0)) __PYX_ERR(0, 250, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "benchmark_document_map", 0) < (0)) __PYX_ERR(0, 308, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("benchmark_document_map", 1, 1, 1, i); __PYX_ERR(0, 250, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("benchmark_document_map", 1, 1, 1, i); __PYX_ERR(0, 308, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 250, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 308, __pyx_L3_error)
     }
     __pyx_v_data = ((PyObject*)values[0]);
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("benchmark_document_map", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 250, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("benchmark_document_map", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 308, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -21106,7 +21591,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
-  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_data), (&PyBytes_Type), 0, "data", 2))) __PYX_ERR(0, 251, __pyx_L1_error)
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_data), (&PyBytes_Type), 0, "data", 2))) __PYX_ERR(0, 309, __pyx_L1_error)
   __pyx_r = __pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_map(__pyx_self, __pyx_v_data);
 
   /* function exit code */
@@ -21161,20 +21646,20 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_m
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("benchmark_document_map", 0);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":266
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":324
  *         'sample_map': first record as list of FieldSpans
  *     """
  *     import time             # <<<<<<<<<<<<<<
  * 
  *     cdef:
 */
-  __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_time, 0, 0, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 266, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_time, 0, 0, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 324, __pyx_L1_error)
   __pyx_t_1 = __pyx_t_2;
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_time = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":269
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":327
  * 
  *     cdef:
  *         const uint8_t* buf_data = <const uint8_t*><bytes>data             # <<<<<<<<<<<<<<
@@ -21183,22 +21668,22 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_m
 */
   if (unlikely(__pyx_v_data == Py_None)) {
     PyErr_SetString(PyExc_TypeError, "expected bytes, NoneType found");
-    __PYX_ERR(0, 269, __pyx_L1_error)
+    __PYX_ERR(0, 327, __pyx_L1_error)
   }
-  __pyx_t_3 = __Pyx_PyBytes_AsUString(__pyx_v_data); if (unlikely((!__pyx_t_3) && PyErr_Occurred())) __PYX_ERR(0, 269, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyBytes_AsUString(__pyx_v_data); if (unlikely((!__pyx_t_3) && PyErr_Occurred())) __PYX_ERR(0, 327, __pyx_L1_error)
   __pyx_v_buf_data = ((uint8_t const *)__pyx_t_3);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":270
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":328
  *     cdef:
  *         const uint8_t* buf_data = <const uint8_t*><bytes>data
  *         size_t buf_len = len(data)             # <<<<<<<<<<<<<<
  *         size_t num_records = 0
  *         ParseContext context
 */
-  __pyx_t_4 = __Pyx_PyBytes_GET_SIZE(__pyx_v_data); if (unlikely(__pyx_t_4 == ((Py_ssize_t)-1))) __PYX_ERR(0, 270, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyBytes_GET_SIZE(__pyx_v_data); if (unlikely(__pyx_t_4 == ((Py_ssize_t)-1))) __PYX_ERR(0, 328, __pyx_L1_error)
   __pyx_v_buf_len = __pyx_t_4;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":271
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":329
  *         const uint8_t* buf_data = <const uint8_t*><bytes>data
  *         size_t buf_len = len(data)
  *         size_t num_records = 0             # <<<<<<<<<<<<<<
@@ -21207,7 +21692,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_m
 */
   __pyx_v_num_records = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":278
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":336
  * 
  *     # Step 1: Structural scan
  *     scan_start = time.perf_counter()             # <<<<<<<<<<<<<<
@@ -21221,13 +21706,13 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_m
     PyObject *__pyx_callargs[2] = {__pyx_t_5, NULL};
     __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_perf_counter, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 278, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 336, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __pyx_v_scan_start = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":279
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":337
  *     # Step 1: Structural scan
  *     scan_start = time.perf_counter()
  *     markers = scan_structural_markers(buf_data, buf_len)             # <<<<<<<<<<<<<<
@@ -21236,7 +21721,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_m
 */
   __pyx_v_markers = rugo::_jsonl::scan_structural_markers(__pyx_v_buf_data, __pyx_v_buf_len);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":280
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":338
  *     scan_start = time.perf_counter()
  *     markers = scan_structural_markers(buf_data, buf_len)
  *     scan_ms = (time.perf_counter() - scan_start) * 1000             # <<<<<<<<<<<<<<
@@ -21250,19 +21735,19 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_m
     PyObject *__pyx_callargs[2] = {__pyx_t_5, NULL};
     __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_perf_counter, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 280, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 338, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
-  __pyx_t_5 = PyNumber_Subtract(__pyx_t_1, __pyx_v_scan_start); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 280, __pyx_L1_error)
+  __pyx_t_5 = PyNumber_Subtract(__pyx_t_1, __pyx_v_scan_start); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 338, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __pyx_t_1 = __Pyx_PyLong_MultiplyObjC(__pyx_t_5, __pyx_mstate_global->__pyx_int_1000, 0x3E8, 0, 0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 280, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyLong_MultiplyObjC(__pyx_t_5, __pyx_mstate_global->__pyx_int_1000, 0x3E8, 0, 0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 338, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
   __pyx_v_scan_ms = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":283
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":341
  * 
  *     # Step 2: Document map interpretation
  *     interp_start = time.perf_counter()             # <<<<<<<<<<<<<<
@@ -21276,13 +21761,13 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_m
     PyObject *__pyx_callargs[2] = {__pyx_t_5, NULL};
     __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_perf_counter, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 283, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 341, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __pyx_v_interp_start = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":284
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":342
  *     # Step 2: Document map interpretation
  *     interp_start = time.perf_counter()
  *     interp_result = interpret_jsonl(buf_data, buf_len, markers, context, predictor)             # <<<<<<<<<<<<<<
@@ -21291,7 +21776,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_m
 */
   __pyx_v_interp_result = rugo::_jsonl::interpret_jsonl(__pyx_v_buf_data, __pyx_v_buf_len, __pyx_v_markers, __pyx_v_context, __pyx_v_predictor);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":285
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":343
  *     interp_start = time.perf_counter()
  *     interp_result = interpret_jsonl(buf_data, buf_len, markers, context, predictor)
  *     interp_ms = (time.perf_counter() - interp_start) * 1000             # <<<<<<<<<<<<<<
@@ -21305,31 +21790,31 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_m
     PyObject *__pyx_callargs[2] = {__pyx_t_5, NULL};
     __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_perf_counter, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 285, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 343, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
-  __pyx_t_5 = PyNumber_Subtract(__pyx_t_1, __pyx_v_interp_start); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 285, __pyx_L1_error)
+  __pyx_t_5 = PyNumber_Subtract(__pyx_t_1, __pyx_v_interp_start); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 343, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __pyx_t_1 = __Pyx_PyLong_MultiplyObjC(__pyx_t_5, __pyx_mstate_global->__pyx_int_1000, 0x3E8, 0, 0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 285, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyLong_MultiplyObjC(__pyx_t_5, __pyx_mstate_global->__pyx_int_1000, 0x3E8, 0, 0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 343, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
   __pyx_v_interp_ms = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":288
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":346
  * 
  *     # Convert first record to Python for inspection
  *     sample_map = []             # <<<<<<<<<<<<<<
  *     if interp_result.all_records.size() > 0:
  *         first_record = interp_result.all_records[0]
 */
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 288, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 346, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_sample_map = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":289
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":347
  *     # Convert first record to Python for inspection
  *     sample_map = []
  *     if interp_result.all_records.size() > 0:             # <<<<<<<<<<<<<<
@@ -21339,7 +21824,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_m
   __pyx_t_7 = (__pyx_v_interp_result.all_records.size() > 0);
   if (__pyx_t_7) {
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":290
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":348
  *     sample_map = []
  *     if interp_result.all_records.size() > 0:
  *         first_record = interp_result.all_records[0]             # <<<<<<<<<<<<<<
@@ -21348,7 +21833,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_m
 */
     __pyx_v_first_record = (__pyx_v_interp_result.all_records[0]);
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":291
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":349
  *     if interp_result.all_records.size() > 0:
  *         first_record = interp_result.all_records[0]
  *         for field in first_record:             # <<<<<<<<<<<<<<
@@ -21360,75 +21845,75 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_m
       __pyx_t_9 = *__pyx_t_8;
       __pyx_v_field = __pyx_t_9;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":293
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":351
  *         for field in first_record:
  *             sample_map.append({
  *                 'key': (field.key_start, field.key_width),             # <<<<<<<<<<<<<<
  *                 'value': (field.value_start, field.value_width),
  *                 'type': field.type,
 */
-      __pyx_t_1 = __Pyx_PyDict_NewPresized(3); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 293, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyDict_NewPresized(3); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 351, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
-      __pyx_t_5 = __Pyx_PyLong_From_uint32_t(__pyx_v_field.key_start); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 293, __pyx_L1_error)
+      __pyx_t_5 = __Pyx_PyLong_From_uint32_t(__pyx_v_field.key_start); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 351, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_5);
-      __pyx_t_10 = __Pyx_PyLong_From_uint32_t(__pyx_v_field.key_width); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 293, __pyx_L1_error)
+      __pyx_t_10 = __Pyx_PyLong_From_uint32_t(__pyx_v_field.key_width); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 351, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_10);
-      __pyx_t_11 = PyTuple_New(2); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 293, __pyx_L1_error)
+      __pyx_t_11 = PyTuple_New(2); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 351, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_11);
       __Pyx_GIVEREF(__pyx_t_5);
-      if (__Pyx_PyTuple_SET_ITEM(__pyx_t_11, 0, __pyx_t_5) != (0)) __PYX_ERR(0, 293, __pyx_L1_error);
+      if (__Pyx_PyTuple_SET_ITEM(__pyx_t_11, 0, __pyx_t_5) != (0)) __PYX_ERR(0, 351, __pyx_L1_error);
       __Pyx_GIVEREF(__pyx_t_10);
-      if (__Pyx_PyTuple_SET_ITEM(__pyx_t_11, 1, __pyx_t_10) != (0)) __PYX_ERR(0, 293, __pyx_L1_error);
+      if (__Pyx_PyTuple_SET_ITEM(__pyx_t_11, 1, __pyx_t_10) != (0)) __PYX_ERR(0, 351, __pyx_L1_error);
       __pyx_t_5 = 0;
       __pyx_t_10 = 0;
-      if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_key, __pyx_t_11) < (0)) __PYX_ERR(0, 293, __pyx_L1_error)
+      if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_key, __pyx_t_11) < (0)) __PYX_ERR(0, 351, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":294
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":352
  *             sample_map.append({
  *                 'key': (field.key_start, field.key_width),
  *                 'value': (field.value_start, field.value_width),             # <<<<<<<<<<<<<<
  *                 'type': field.type,
  *             })
 */
-      __pyx_t_11 = __Pyx_PyLong_From_uint32_t(__pyx_v_field.value_start); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 294, __pyx_L1_error)
+      __pyx_t_11 = __Pyx_PyLong_From_uint32_t(__pyx_v_field.value_start); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 352, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_11);
-      __pyx_t_10 = __Pyx_PyLong_From_uint32_t(__pyx_v_field.value_width); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 294, __pyx_L1_error)
+      __pyx_t_10 = __Pyx_PyLong_From_uint32_t(__pyx_v_field.value_width); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 352, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_10);
-      __pyx_t_5 = PyTuple_New(2); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 294, __pyx_L1_error)
+      __pyx_t_5 = PyTuple_New(2); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 352, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_5);
       __Pyx_GIVEREF(__pyx_t_11);
-      if (__Pyx_PyTuple_SET_ITEM(__pyx_t_5, 0, __pyx_t_11) != (0)) __PYX_ERR(0, 294, __pyx_L1_error);
+      if (__Pyx_PyTuple_SET_ITEM(__pyx_t_5, 0, __pyx_t_11) != (0)) __PYX_ERR(0, 352, __pyx_L1_error);
       __Pyx_GIVEREF(__pyx_t_10);
-      if (__Pyx_PyTuple_SET_ITEM(__pyx_t_5, 1, __pyx_t_10) != (0)) __PYX_ERR(0, 294, __pyx_L1_error);
+      if (__Pyx_PyTuple_SET_ITEM(__pyx_t_5, 1, __pyx_t_10) != (0)) __PYX_ERR(0, 352, __pyx_L1_error);
       __pyx_t_11 = 0;
       __pyx_t_10 = 0;
-      if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_value, __pyx_t_5) < (0)) __PYX_ERR(0, 293, __pyx_L1_error)
+      if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_value, __pyx_t_5) < (0)) __PYX_ERR(0, 351, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":295
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":353
  *                 'key': (field.key_start, field.key_width),
  *                 'value': (field.value_start, field.value_width),
  *                 'type': field.type,             # <<<<<<<<<<<<<<
  *             })
  * 
 */
-      __pyx_t_5 = __Pyx_PyLong_From_uint8_t(__pyx_v_field.type); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 295, __pyx_L1_error)
+      __pyx_t_5 = __Pyx_PyLong_From_uint8_t(__pyx_v_field.type); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 353, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_5);
-      if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_type, __pyx_t_5) < (0)) __PYX_ERR(0, 293, __pyx_L1_error)
+      if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_type, __pyx_t_5) < (0)) __PYX_ERR(0, 351, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":292
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":350
  *         first_record = interp_result.all_records[0]
  *         for field in first_record:
  *             sample_map.append({             # <<<<<<<<<<<<<<
  *                 'key': (field.key_start, field.key_width),
  *                 'value': (field.value_start, field.value_width),
 */
-      __pyx_t_12 = __Pyx_PyList_Append(__pyx_v_sample_map, __pyx_t_1); if (unlikely(__pyx_t_12 == ((int)-1))) __PYX_ERR(0, 292, __pyx_L1_error)
+      __pyx_t_12 = __Pyx_PyList_Append(__pyx_v_sample_map, __pyx_t_1); if (unlikely(__pyx_t_12 == ((int)-1))) __PYX_ERR(0, 350, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":291
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":349
  *     if interp_result.all_records.size() > 0:
  *         first_record = interp_result.all_records[0]
  *         for field in first_record:             # <<<<<<<<<<<<<<
@@ -21437,7 +21922,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_m
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":289
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":347
  *     # Convert first record to Python for inspection
  *     sample_map = []
  *     if interp_result.all_records.size() > 0:             # <<<<<<<<<<<<<<
@@ -21446,7 +21931,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_m
 */
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":298
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":356
  *             })
  * 
  *     return {             # <<<<<<<<<<<<<<
@@ -21455,76 +21940,76 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_m
 */
   __Pyx_XDECREF(__pyx_r);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":299
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":357
  * 
  *     return {
  *         'num_records': interp_result.num_records_passed,             # <<<<<<<<<<<<<<
  *         'scan_ms': scan_ms,
  *         'interpret_ms': interp_ms,
 */
-  __pyx_t_1 = __Pyx_PyDict_NewPresized(6); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 299, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyDict_NewPresized(6); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 357, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_5 = __Pyx_PyLong_FromSize_t(__pyx_v_interp_result.num_records_passed); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 299, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_PyLong_FromSize_t(__pyx_v_interp_result.num_records_passed); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 357, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_num_records, __pyx_t_5) < (0)) __PYX_ERR(0, 299, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_num_records, __pyx_t_5) < (0)) __PYX_ERR(0, 357, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":300
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":358
  *     return {
  *         'num_records': interp_result.num_records_passed,
  *         'scan_ms': scan_ms,             # <<<<<<<<<<<<<<
  *         'interpret_ms': interp_ms,
  *         'total_ms': scan_ms + interp_ms,
 */
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_scan_ms, __pyx_v_scan_ms) < (0)) __PYX_ERR(0, 299, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_scan_ms, __pyx_v_scan_ms) < (0)) __PYX_ERR(0, 357, __pyx_L1_error)
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":301
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":359
  *         'num_records': interp_result.num_records_passed,
  *         'scan_ms': scan_ms,
  *         'interpret_ms': interp_ms,             # <<<<<<<<<<<<<<
  *         'total_ms': scan_ms + interp_ms,
  *         'buffer_size_mb': len(data) / 1024 / 1024,
 */
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_interpret_ms, __pyx_v_interp_ms) < (0)) __PYX_ERR(0, 299, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_interpret_ms, __pyx_v_interp_ms) < (0)) __PYX_ERR(0, 357, __pyx_L1_error)
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":302
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":360
  *         'scan_ms': scan_ms,
  *         'interpret_ms': interp_ms,
  *         'total_ms': scan_ms + interp_ms,             # <<<<<<<<<<<<<<
  *         'buffer_size_mb': len(data) / 1024 / 1024,
  *         'sample_map': sample_map,
 */
-  __pyx_t_5 = PyNumber_Add(__pyx_v_scan_ms, __pyx_v_interp_ms); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 302, __pyx_L1_error)
+  __pyx_t_5 = PyNumber_Add(__pyx_v_scan_ms, __pyx_v_interp_ms); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 360, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_total_ms, __pyx_t_5) < (0)) __PYX_ERR(0, 299, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_total_ms, __pyx_t_5) < (0)) __PYX_ERR(0, 357, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":303
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":361
  *         'interpret_ms': interp_ms,
  *         'total_ms': scan_ms + interp_ms,
  *         'buffer_size_mb': len(data) / 1024 / 1024,             # <<<<<<<<<<<<<<
  *         'sample_map': sample_map,
  *     }
 */
-  __pyx_t_4 = __Pyx_PyBytes_GET_SIZE(__pyx_v_data); if (unlikely(__pyx_t_4 == ((Py_ssize_t)-1))) __PYX_ERR(0, 303, __pyx_L1_error)
-  __pyx_t_5 = PyLong_FromSsize_t(((__pyx_t_4 / 0x400) / 0x400)); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 303, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyBytes_GET_SIZE(__pyx_v_data); if (unlikely(__pyx_t_4 == ((Py_ssize_t)-1))) __PYX_ERR(0, 361, __pyx_L1_error)
+  __pyx_t_5 = PyLong_FromSsize_t(((__pyx_t_4 / 0x400) / 0x400)); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 361, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_buffer_size_mb, __pyx_t_5) < (0)) __PYX_ERR(0, 299, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_buffer_size_mb, __pyx_t_5) < (0)) __PYX_ERR(0, 357, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":304
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":362
  *         'total_ms': scan_ms + interp_ms,
  *         'buffer_size_mb': len(data) / 1024 / 1024,
  *         'sample_map': sample_map,             # <<<<<<<<<<<<<<
  *     }
  * 
 */
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_sample_map, __pyx_v_sample_map) < (0)) __PYX_ERR(0, 299, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_sample_map, __pyx_v_sample_map) < (0)) __PYX_ERR(0, 357, __pyx_L1_error)
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":250
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":308
  * 
  * 
  * def benchmark_document_map(             # <<<<<<<<<<<<<<
@@ -21552,7 +22037,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_2benchmark_document_m
   return __pyx_r;
 }
 
-/* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":308
+/* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":366
  * 
  * 
  * def read_jsonl_raw(             # <<<<<<<<<<<<<<
@@ -21603,32 +22088,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_data,&__pyx_mstate_global->__pyx_n_u_columns,&__pyx_mstate_global->__pyx_n_u_predicates,&__pyx_mstate_global->__pyx_n_u_infer_schema,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 308, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 366, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  4:
         values[3] = __Pyx_ArgRef_FASTCALL(__pyx_args, 3);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[3])) __PYX_ERR(0, 308, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[3])) __PYX_ERR(0, 366, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  3:
         values[2] = __Pyx_ArgRef_FASTCALL(__pyx_args, 2);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 308, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 366, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 308, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 366, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 308, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 366, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "read_jsonl_raw", 0) < (0)) __PYX_ERR(0, 308, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "read_jsonl_raw", 0) < (0)) __PYX_ERR(0, 366, __pyx_L3_error)
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":310
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":368
  * def read_jsonl_raw(
  *     data,
  *     columns=None,             # <<<<<<<<<<<<<<
@@ -21637,7 +22122,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 */
       if (!values[1]) values[1] = __Pyx_NewRef(((PyObject *)Py_None));
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":311
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":369
  *     data,
  *     columns=None,
  *     predicates=None,             # <<<<<<<<<<<<<<
@@ -21646,7 +22131,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 */
       if (!values[2]) values[2] = __Pyx_NewRef(((PyObject *)Py_None));
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":312
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":370
  *     columns=None,
  *     predicates=None,
  *     infer_schema=False,             # <<<<<<<<<<<<<<
@@ -21655,30 +22140,30 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 */
       if (!values[3]) values[3] = __Pyx_NewRef(((PyObject *)((PyObject*)Py_False)));
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("read_jsonl_raw", 0, 1, 4, i); __PYX_ERR(0, 308, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("read_jsonl_raw", 0, 1, 4, i); __PYX_ERR(0, 366, __pyx_L3_error) }
       }
     } else {
       switch (__pyx_nargs) {
         case  4:
         values[3] = __Pyx_ArgRef_FASTCALL(__pyx_args, 3);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[3])) __PYX_ERR(0, 308, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[3])) __PYX_ERR(0, 366, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  3:
         values[2] = __Pyx_ArgRef_FASTCALL(__pyx_args, 2);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 308, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 366, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 308, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 366, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 308, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 366, __pyx_L3_error)
         break;
         default: goto __pyx_L5_argtuple_error;
       }
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":310
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":368
  * def read_jsonl_raw(
  *     data,
  *     columns=None,             # <<<<<<<<<<<<<<
@@ -21687,7 +22172,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 */
       if (!values[1]) values[1] = __Pyx_NewRef(((PyObject *)Py_None));
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":311
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":369
  *     data,
  *     columns=None,
  *     predicates=None,             # <<<<<<<<<<<<<<
@@ -21704,7 +22189,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("read_jsonl_raw", 0, 1, 4, __pyx_nargs); __PYX_ERR(0, 308, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("read_jsonl_raw", 0, 1, 4, __pyx_nargs); __PYX_ERR(0, 366, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -21717,7 +22202,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   __pyx_L4_argument_unpacking_done:;
   __pyx_r = __pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(__pyx_self, __pyx_v_data, __pyx_v_columns, __pyx_v_predicates, __pyx_v_infer_schema);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":308
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":366
  * 
  * 
  * def read_jsonl_raw(             # <<<<<<<<<<<<<<
@@ -21750,7 +22235,6 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
   PyObject *__pyx_v_data_bytes = NULL;
   PyObject *__pyx_v_first_record = NULL;
   PyObject *__pyx_v_elapsed_ms = NULL;
-  PyObject *__pyx_v_field = NULL;
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
@@ -21785,20 +22269,20 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("read_jsonl_raw", 0);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":327
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":385
  *         'sample_record': first record as list of field info dicts
  *     """
  *     import time             # <<<<<<<<<<<<<<
  * 
  *     cdef ParseContext context
 */
-  __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_time, 0, 0, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 327, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_time, 0, 0, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 385, __pyx_L1_error)
   __pyx_t_1 = __pyx_t_2;
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_time = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":330
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":388
  * 
  *     cdef ParseContext context
  *     cdef JsonlReader* reader = NULL             # <<<<<<<<<<<<<<
@@ -21807,19 +22291,19 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
 */
   __pyx_v_reader = NULL;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":333
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":391
  *     cdef Predicate pred
  *     cdef ReadResult chunk_result
  *     cdef list column_names = []             # <<<<<<<<<<<<<<
  *     cdef size_t total_rows = 0
  *     cdef double total_bytes = 0
 */
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 333, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 391, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_column_names = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":334
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":392
  *     cdef ReadResult chunk_result
  *     cdef list column_names = []
  *     cdef size_t total_rows = 0             # <<<<<<<<<<<<<<
@@ -21828,7 +22312,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
 */
   __pyx_v_total_rows = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":335
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":393
  *     cdef list column_names = []
  *     cdef size_t total_rows = 0
  *     cdef double total_bytes = 0             # <<<<<<<<<<<<<<
@@ -21837,47 +22321,47 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
 */
   __pyx_v_total_bytes = 0.0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":337
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":395
  *     cdef double total_bytes = 0
  *     cdef dict result = {
  *         'success': False,             # <<<<<<<<<<<<<<
  *         'num_rows': 0,
  *         'column_names': [],
 */
-  __pyx_t_1 = __Pyx_PyDict_NewPresized(6); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 337, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyDict_NewPresized(6); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 395, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_success, Py_False) < (0)) __PYX_ERR(0, 337, __pyx_L1_error)
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_num_rows, __pyx_mstate_global->__pyx_int_0) < (0)) __PYX_ERR(0, 337, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_success, Py_False) < (0)) __PYX_ERR(0, 395, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_num_rows, __pyx_mstate_global->__pyx_int_0) < (0)) __PYX_ERR(0, 395, __pyx_L1_error)
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":339
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":397
  *         'success': False,
  *         'num_rows': 0,
  *         'column_names': [],             # <<<<<<<<<<<<<<
  *         'buffer_size_mb': 0.0,
  *         'elapsed_ms': 0.0,
 */
-  __pyx_t_3 = PyList_New(0); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 339, __pyx_L1_error)
+  __pyx_t_3 = PyList_New(0); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 397, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_column_names, __pyx_t_3) < (0)) __PYX_ERR(0, 337, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_column_names, __pyx_t_3) < (0)) __PYX_ERR(0, 395, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_buffer_size_mb, __pyx_mstate_global->__pyx_float_0_0) < (0)) __PYX_ERR(0, 337, __pyx_L1_error)
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_elapsed_ms, __pyx_mstate_global->__pyx_float_0_0) < (0)) __PYX_ERR(0, 337, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_buffer_size_mb, __pyx_mstate_global->__pyx_float_0_0) < (0)) __PYX_ERR(0, 395, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_elapsed_ms, __pyx_mstate_global->__pyx_float_0_0) < (0)) __PYX_ERR(0, 395, __pyx_L1_error)
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":342
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":400
  *         'buffer_size_mb': 0.0,
  *         'elapsed_ms': 0.0,
  *         'sample_record': []             # <<<<<<<<<<<<<<
  *     }
  * 
 */
-  __pyx_t_3 = PyList_New(0); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 342, __pyx_L1_error)
+  __pyx_t_3 = PyList_New(0); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 400, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_sample_record, __pyx_t_3) < (0)) __PYX_ERR(0, 337, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_sample_record, __pyx_t_3) < (0)) __PYX_ERR(0, 395, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
   __pyx_v_result = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":345
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":403
  *     }
  * 
  *     try:             # <<<<<<<<<<<<<<
@@ -21886,7 +22370,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
 */
   /*try:*/ {
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":346
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":404
  * 
  *     try:
  *         start_time = time.perf_counter()             # <<<<<<<<<<<<<<
@@ -21900,23 +22384,23 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
       PyObject *__pyx_callargs[2] = {__pyx_t_3, NULL};
       __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_perf_counter, __pyx_callargs+__pyx_t_4, (1-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 346, __pyx_L4_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 404, __pyx_L4_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __pyx_v_start_time = __pyx_t_1;
     __pyx_t_1 = 0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":349
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":407
  * 
  *         # Build ParseContext
  *         if columns:             # <<<<<<<<<<<<<<
  *             for col in columns:
  *                 context.projected_columns.push_back(col.encode('utf-8'))
 */
-    __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_v_columns); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(0, 349, __pyx_L4_error)
+    __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_v_columns); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(0, 407, __pyx_L4_error)
     if (__pyx_t_5) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":350
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":408
  *         # Build ParseContext
  *         if columns:
  *             for col in columns:             # <<<<<<<<<<<<<<
@@ -21928,808 +22412,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
         __pyx_t_6 = 0;
         __pyx_t_7 = NULL;
       } else {
-        __pyx_t_6 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_v_columns); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 350, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_1);
-        __pyx_t_7 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 350, __pyx_L4_error)
-      }
-      for (;;) {
-        if (likely(!__pyx_t_7)) {
-          if (likely(PyList_CheckExact(__pyx_t_1))) {
-            {
-              Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_1);
-              #if !CYTHON_ASSUME_SAFE_SIZE
-              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 350, __pyx_L4_error)
-              #endif
-              if (__pyx_t_6 >= __pyx_temp) break;
-            }
-            __pyx_t_3 = __Pyx_PyList_GetItemRefFast(__pyx_t_1, __pyx_t_6, __Pyx_ReferenceSharing_OwnStrongReference);
-            ++__pyx_t_6;
-          } else {
-            {
-              Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_1);
-              #if !CYTHON_ASSUME_SAFE_SIZE
-              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 350, __pyx_L4_error)
-              #endif
-              if (__pyx_t_6 >= __pyx_temp) break;
-            }
-            #if CYTHON_ASSUME_SAFE_MACROS && !CYTHON_AVOID_BORROWED_REFS
-            __pyx_t_3 = __Pyx_NewRef(PyTuple_GET_ITEM(__pyx_t_1, __pyx_t_6));
-            #else
-            __pyx_t_3 = __Pyx_PySequence_ITEM(__pyx_t_1, __pyx_t_6);
-            #endif
-            ++__pyx_t_6;
-          }
-          if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 350, __pyx_L4_error)
-        } else {
-          __pyx_t_3 = __pyx_t_7(__pyx_t_1);
-          if (unlikely(!__pyx_t_3)) {
-            PyObject* exc_type = PyErr_Occurred();
-            if (exc_type) {
-              if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 350, __pyx_L4_error)
-              PyErr_Clear();
-            }
-            break;
-          }
-        }
-        __Pyx_GOTREF(__pyx_t_3);
-        __Pyx_XDECREF_SET(__pyx_v_col, __pyx_t_3);
-        __pyx_t_3 = 0;
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":351
- *         if columns:
- *             for col in columns:
- *                 context.projected_columns.push_back(col.encode('utf-8'))             # <<<<<<<<<<<<<<
- * 
- *         if predicates:
-*/
-        __pyx_t_8 = __pyx_v_col;
-        __Pyx_INCREF(__pyx_t_8);
-        __pyx_t_4 = 0;
-        {
-          PyObject *__pyx_callargs[2] = {__pyx_t_8, __pyx_mstate_global->__pyx_kp_u_utf_8};
-          __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-          __Pyx_XDECREF(__pyx_t_8); __pyx_t_8 = 0;
-          if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 351, __pyx_L4_error)
-          __Pyx_GOTREF(__pyx_t_3);
-        }
-        __pyx_t_9 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_3); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 351, __pyx_L4_error)
-        __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-        try {
-          __pyx_v_context.projected_columns.push_back(__pyx_t_9);
-        } catch(...) {
-          __Pyx_CppExn2PyErr();
-          __PYX_ERR(0, 351, __pyx_L4_error)
-        }
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":350
- *         # Build ParseContext
- *         if columns:
- *             for col in columns:             # <<<<<<<<<<<<<<
- *                 context.projected_columns.push_back(col.encode('utf-8'))
- * 
-*/
-      }
-      __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":349
- * 
- *         # Build ParseContext
- *         if columns:             # <<<<<<<<<<<<<<
- *             for col in columns:
- *                 context.projected_columns.push_back(col.encode('utf-8'))
-*/
-    }
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":353
- *                 context.projected_columns.push_back(col.encode('utf-8'))
- * 
- *         if predicates:             # <<<<<<<<<<<<<<
- *             for col, op, val in predicates:
- *                 pred.column = col.encode('utf-8')
-*/
-    __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_v_predicates); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(0, 353, __pyx_L4_error)
-    if (__pyx_t_5) {
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":354
- * 
- *         if predicates:
- *             for col, op, val in predicates:             # <<<<<<<<<<<<<<
- *                 pred.column = col.encode('utf-8')
- *                 pred.op = <uint8_t>_parse_op(op)
-*/
-      if (likely(PyList_CheckExact(__pyx_v_predicates)) || PyTuple_CheckExact(__pyx_v_predicates)) {
-        __pyx_t_1 = __pyx_v_predicates; __Pyx_INCREF(__pyx_t_1);
-        __pyx_t_6 = 0;
-        __pyx_t_7 = NULL;
-      } else {
-        __pyx_t_6 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_v_predicates); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 354, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_1);
-        __pyx_t_7 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 354, __pyx_L4_error)
-      }
-      for (;;) {
-        if (likely(!__pyx_t_7)) {
-          if (likely(PyList_CheckExact(__pyx_t_1))) {
-            {
-              Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_1);
-              #if !CYTHON_ASSUME_SAFE_SIZE
-              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 354, __pyx_L4_error)
-              #endif
-              if (__pyx_t_6 >= __pyx_temp) break;
-            }
-            __pyx_t_3 = __Pyx_PyList_GetItemRefFast(__pyx_t_1, __pyx_t_6, __Pyx_ReferenceSharing_OwnStrongReference);
-            ++__pyx_t_6;
-          } else {
-            {
-              Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_1);
-              #if !CYTHON_ASSUME_SAFE_SIZE
-              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 354, __pyx_L4_error)
-              #endif
-              if (__pyx_t_6 >= __pyx_temp) break;
-            }
-            #if CYTHON_ASSUME_SAFE_MACROS && !CYTHON_AVOID_BORROWED_REFS
-            __pyx_t_3 = __Pyx_NewRef(PyTuple_GET_ITEM(__pyx_t_1, __pyx_t_6));
-            #else
-            __pyx_t_3 = __Pyx_PySequence_ITEM(__pyx_t_1, __pyx_t_6);
-            #endif
-            ++__pyx_t_6;
-          }
-          if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 354, __pyx_L4_error)
-        } else {
-          __pyx_t_3 = __pyx_t_7(__pyx_t_1);
-          if (unlikely(!__pyx_t_3)) {
-            PyObject* exc_type = PyErr_Occurred();
-            if (exc_type) {
-              if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 354, __pyx_L4_error)
-              PyErr_Clear();
-            }
-            break;
-          }
-        }
-        __Pyx_GOTREF(__pyx_t_3);
-        if ((likely(PyTuple_CheckExact(__pyx_t_3))) || (PyList_CheckExact(__pyx_t_3))) {
-          PyObject* sequence = __pyx_t_3;
-          Py_ssize_t size = __Pyx_PySequence_SIZE(sequence);
-          if (unlikely(size != 3)) {
-            if (size > 3) __Pyx_RaiseTooManyValuesError(3);
-            else if (size >= 0) __Pyx_RaiseNeedMoreValuesError(size);
-            __PYX_ERR(0, 354, __pyx_L4_error)
-          }
-          #if CYTHON_ASSUME_SAFE_MACROS && !CYTHON_AVOID_BORROWED_REFS
-          if (likely(PyTuple_CheckExact(sequence))) {
-            __pyx_t_8 = PyTuple_GET_ITEM(sequence, 0);
-            __Pyx_INCREF(__pyx_t_8);
-            __pyx_t_10 = PyTuple_GET_ITEM(sequence, 1);
-            __Pyx_INCREF(__pyx_t_10);
-            __pyx_t_11 = PyTuple_GET_ITEM(sequence, 2);
-            __Pyx_INCREF(__pyx_t_11);
-          } else {
-            __pyx_t_8 = __Pyx_PyList_GetItemRefFast(sequence, 0, __Pyx_ReferenceSharing_SharedReference);
-            if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 354, __pyx_L4_error)
-            __Pyx_XGOTREF(__pyx_t_8);
-            __pyx_t_10 = __Pyx_PyList_GetItemRefFast(sequence, 1, __Pyx_ReferenceSharing_SharedReference);
-            if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 354, __pyx_L4_error)
-            __Pyx_XGOTREF(__pyx_t_10);
-            __pyx_t_11 = __Pyx_PyList_GetItemRefFast(sequence, 2, __Pyx_ReferenceSharing_SharedReference);
-            if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 354, __pyx_L4_error)
-            __Pyx_XGOTREF(__pyx_t_11);
-          }
-          #else
-          __pyx_t_8 = __Pyx_PySequence_ITEM(sequence, 0); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 354, __pyx_L4_error)
-          __Pyx_GOTREF(__pyx_t_8);
-          __pyx_t_10 = __Pyx_PySequence_ITEM(sequence, 1); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 354, __pyx_L4_error)
-          __Pyx_GOTREF(__pyx_t_10);
-          __pyx_t_11 = __Pyx_PySequence_ITEM(sequence, 2); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 354, __pyx_L4_error)
-          __Pyx_GOTREF(__pyx_t_11);
-          #endif
-          __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-        } else {
-          Py_ssize_t index = -1;
-          __pyx_t_12 = PyObject_GetIter(__pyx_t_3); if (unlikely(!__pyx_t_12)) __PYX_ERR(0, 354, __pyx_L4_error)
-          __Pyx_GOTREF(__pyx_t_12);
-          __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-          __pyx_t_13 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_12);
-          index = 0; __pyx_t_8 = __pyx_t_13(__pyx_t_12); if (unlikely(!__pyx_t_8)) goto __pyx_L13_unpacking_failed;
-          __Pyx_GOTREF(__pyx_t_8);
-          index = 1; __pyx_t_10 = __pyx_t_13(__pyx_t_12); if (unlikely(!__pyx_t_10)) goto __pyx_L13_unpacking_failed;
-          __Pyx_GOTREF(__pyx_t_10);
-          index = 2; __pyx_t_11 = __pyx_t_13(__pyx_t_12); if (unlikely(!__pyx_t_11)) goto __pyx_L13_unpacking_failed;
-          __Pyx_GOTREF(__pyx_t_11);
-          if (__Pyx_IternextUnpackEndCheck(__pyx_t_13(__pyx_t_12), 3) < (0)) __PYX_ERR(0, 354, __pyx_L4_error)
-          __pyx_t_13 = NULL;
-          __Pyx_DECREF(__pyx_t_12); __pyx_t_12 = 0;
-          goto __pyx_L14_unpacking_done;
-          __pyx_L13_unpacking_failed:;
-          __Pyx_DECREF(__pyx_t_12); __pyx_t_12 = 0;
-          __pyx_t_13 = NULL;
-          if (__Pyx_IterFinish() == 0) __Pyx_RaiseNeedMoreValuesError(index);
-          __PYX_ERR(0, 354, __pyx_L4_error)
-          __pyx_L14_unpacking_done:;
-        }
-        __Pyx_XDECREF_SET(__pyx_v_col, __pyx_t_8);
-        __pyx_t_8 = 0;
-        __Pyx_XDECREF_SET(__pyx_v_op, __pyx_t_10);
-        __pyx_t_10 = 0;
-        __Pyx_XDECREF_SET(__pyx_v_val, __pyx_t_11);
-        __pyx_t_11 = 0;
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":355
- *         if predicates:
- *             for col, op, val in predicates:
- *                 pred.column = col.encode('utf-8')             # <<<<<<<<<<<<<<
- *                 pred.op = <uint8_t>_parse_op(op)
- *                 pred.value = str(val).encode('utf-8')
-*/
-        __pyx_t_11 = __pyx_v_col;
-        __Pyx_INCREF(__pyx_t_11);
-        __pyx_t_4 = 0;
-        {
-          PyObject *__pyx_callargs[2] = {__pyx_t_11, __pyx_mstate_global->__pyx_kp_u_utf_8};
-          __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-          __Pyx_XDECREF(__pyx_t_11); __pyx_t_11 = 0;
-          if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 355, __pyx_L4_error)
-          __Pyx_GOTREF(__pyx_t_3);
-        }
-        __pyx_t_9 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_3); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 355, __pyx_L4_error)
-        __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-        __pyx_v_pred.column = __PYX_STD_MOVE_IF_SUPPORTED(__pyx_t_9);
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":356
- *             for col, op, val in predicates:
- *                 pred.column = col.encode('utf-8')
- *                 pred.op = <uint8_t>_parse_op(op)             # <<<<<<<<<<<<<<
- *                 pred.value = str(val).encode('utf-8')
- *                 context.predicates.push_back(pred)
-*/
-        __pyx_t_3 = __pyx_v_op;
-        __Pyx_INCREF(__pyx_t_3);
-        if (!(likely(PyUnicode_CheckExact(__pyx_t_3))||((__pyx_t_3) == Py_None) || __Pyx_RaiseUnexpectedTypeError("str", __pyx_t_3))) __PYX_ERR(0, 356, __pyx_L4_error)
-        __pyx_t_14 = __pyx_f_7opteryx_8compiled_4rugo_6_jsonl__parse_op(((PyObject*)__pyx_t_3)); if (unlikely(__pyx_t_14 == ((uint8_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 356, __pyx_L4_error)
-        __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-        __pyx_v_pred.op = ((uint8_t)__pyx_t_14);
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":357
- *                 pred.column = col.encode('utf-8')
- *                 pred.op = <uint8_t>_parse_op(op)
- *                 pred.value = str(val).encode('utf-8')             # <<<<<<<<<<<<<<
- *                 context.predicates.push_back(pred)
- * 
-*/
-        __pyx_t_3 = __Pyx_PyObject_Unicode(__pyx_v_val); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 357, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_3);
-        __pyx_t_11 = PyUnicode_AsUTF8String(((PyObject*)__pyx_t_3)); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 357, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_11);
-        __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-        __pyx_t_9 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_11); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 357, __pyx_L4_error)
-        __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
-        __pyx_v_pred.value = __PYX_STD_MOVE_IF_SUPPORTED(__pyx_t_9);
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":358
- *                 pred.op = <uint8_t>_parse_op(op)
- *                 pred.value = str(val).encode('utf-8')
- *                 context.predicates.push_back(pred)             # <<<<<<<<<<<<<<
- * 
- *         context.infer_schema = infer_schema
-*/
-        try {
-          __pyx_v_context.predicates.push_back(__pyx_v_pred);
-        } catch(...) {
-          __Pyx_CppExn2PyErr();
-          __PYX_ERR(0, 358, __pyx_L4_error)
-        }
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":354
- * 
- *         if predicates:
- *             for col, op, val in predicates:             # <<<<<<<<<<<<<<
- *                 pred.column = col.encode('utf-8')
- *                 pred.op = <uint8_t>_parse_op(op)
-*/
-      }
-      __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":353
- *                 context.projected_columns.push_back(col.encode('utf-8'))
- * 
- *         if predicates:             # <<<<<<<<<<<<<<
- *             for col, op, val in predicates:
- *                 pred.column = col.encode('utf-8')
-*/
-    }
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":360
- *                 context.predicates.push_back(pred)
- * 
- *         context.infer_schema = infer_schema             # <<<<<<<<<<<<<<
- *         context.infer_sample_size = 5
- *         context.parse_arrays = False
-*/
-    __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_v_infer_schema); if (unlikely((__pyx_t_5 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 360, __pyx_L4_error)
-    __pyx_v_context.infer_schema = __pyx_t_5;
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":361
- * 
- *         context.infer_schema = infer_schema
- *         context.infer_sample_size = 5             # <<<<<<<<<<<<<<
- *         context.parse_arrays = False
- *         context.parse_objects = False
-*/
-    __pyx_v_context.infer_sample_size = 5;
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":362
- *         context.infer_schema = infer_schema
- *         context.infer_sample_size = 5
- *         context.parse_arrays = False             # <<<<<<<<<<<<<<
- *         context.parse_objects = False
- *         context.fail_on_error = False
-*/
-    __pyx_v_context.parse_arrays = 0;
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":363
- *         context.infer_sample_size = 5
- *         context.parse_arrays = False
- *         context.parse_objects = False             # <<<<<<<<<<<<<<
- *         context.fail_on_error = False
- * 
-*/
-    __pyx_v_context.parse_objects = 0;
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":364
- *         context.parse_arrays = False
- *         context.parse_objects = False
- *         context.fail_on_error = False             # <<<<<<<<<<<<<<
- * 
- *         # Create reader
-*/
-    __pyx_v_context.fail_on_error = 0;
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":367
- * 
- *         # Create reader
- *         if isinstance(data, str):             # <<<<<<<<<<<<<<
- *             reader = new JsonlReader(<string>data.encode('utf-8'), context)
- *         elif isinstance(data, bytes):
-*/
-    __pyx_t_5 = PyUnicode_Check(__pyx_v_data); 
-    if (__pyx_t_5) {
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":368
- *         # Create reader
- *         if isinstance(data, str):
- *             reader = new JsonlReader(<string>data.encode('utf-8'), context)             # <<<<<<<<<<<<<<
- *         elif isinstance(data, bytes):
- *             reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
-*/
-      __pyx_t_11 = __pyx_v_data;
-      __Pyx_INCREF(__pyx_t_11);
-      __pyx_t_4 = 0;
-      {
-        PyObject *__pyx_callargs[2] = {__pyx_t_11, __pyx_mstate_global->__pyx_kp_u_utf_8};
-        __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-        __Pyx_XDECREF(__pyx_t_11); __pyx_t_11 = 0;
-        if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 368, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_1);
-      }
-      __pyx_t_9 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_1); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 368, __pyx_L4_error)
-      __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-      __pyx_v_reader = new rugo::_jsonl::JsonlReader(((std::string)__pyx_t_9), __pyx_v_context);
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":367
- * 
- *         # Create reader
- *         if isinstance(data, str):             # <<<<<<<<<<<<<<
- *             reader = new JsonlReader(<string>data.encode('utf-8'), context)
- *         elif isinstance(data, bytes):
-*/
-      goto __pyx_L16;
-    }
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":369
- *         if isinstance(data, str):
- *             reader = new JsonlReader(<string>data.encode('utf-8'), context)
- *         elif isinstance(data, bytes):             # <<<<<<<<<<<<<<
- *             reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
- *         else:
-*/
-    __pyx_t_5 = PyBytes_Check(__pyx_v_data); 
-    if (__pyx_t_5) {
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":370
- *             reader = new JsonlReader(<string>data.encode('utf-8'), context)
- *         elif isinstance(data, bytes):
- *             reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)             # <<<<<<<<<<<<<<
- *         else:
- *             data_bytes = bytes(data)
-*/
-      if (unlikely(__pyx_v_data == Py_None)) {
-        PyErr_SetString(PyExc_TypeError, "expected bytes, NoneType found");
-        __PYX_ERR(0, 370, __pyx_L4_error)
-      }
-      __pyx_t_15 = __Pyx_PyBytes_AsUString(__pyx_v_data); if (unlikely((!__pyx_t_15) && PyErr_Occurred())) __PYX_ERR(0, 370, __pyx_L4_error)
-      __pyx_t_6 = PyObject_Length(__pyx_v_data); if (unlikely(__pyx_t_6 == ((Py_ssize_t)-1))) __PYX_ERR(0, 370, __pyx_L4_error)
-      __pyx_v_reader = new rugo::_jsonl::JsonlReader(((uint8_t const *)__pyx_t_15), __pyx_t_6, __pyx_v_context);
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":369
- *         if isinstance(data, str):
- *             reader = new JsonlReader(<string>data.encode('utf-8'), context)
- *         elif isinstance(data, bytes):             # <<<<<<<<<<<<<<
- *             reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
- *         else:
-*/
-      goto __pyx_L16;
-    }
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":372
- *             reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
- *         else:
- *             data_bytes = bytes(data)             # <<<<<<<<<<<<<<
- *             reader = new JsonlReader(<const uint8_t*><bytes>data_bytes, len(data_bytes), context)
- * 
-*/
-    /*else*/ {
-      __pyx_t_11 = NULL;
-      __pyx_t_4 = 1;
-      {
-        PyObject *__pyx_callargs[2] = {__pyx_t_11, __pyx_v_data};
-        __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)(&PyBytes_Type), __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-        __Pyx_XDECREF(__pyx_t_11); __pyx_t_11 = 0;
-        if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 372, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_1);
-      }
-      __pyx_v_data_bytes = ((PyObject*)__pyx_t_1);
-      __pyx_t_1 = 0;
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":373
- *         else:
- *             data_bytes = bytes(data)
- *             reader = new JsonlReader(<const uint8_t*><bytes>data_bytes, len(data_bytes), context)             # <<<<<<<<<<<<<<
- * 
- *         # Read all chunks, accumulate row count
-*/
-      if (unlikely(__pyx_v_data_bytes == Py_None)) {
-        PyErr_SetString(PyExc_TypeError, "expected bytes, NoneType found");
-        __PYX_ERR(0, 373, __pyx_L4_error)
-      }
-      __pyx_t_16 = __Pyx_PyBytes_AsUString(__pyx_v_data_bytes); if (unlikely((!__pyx_t_16) && PyErr_Occurred())) __PYX_ERR(0, 373, __pyx_L4_error)
-      __pyx_t_6 = __Pyx_PyBytes_GET_SIZE(__pyx_v_data_bytes); if (unlikely(__pyx_t_6 == ((Py_ssize_t)-1))) __PYX_ERR(0, 373, __pyx_L4_error)
-      __pyx_v_reader = new rugo::_jsonl::JsonlReader(((uint8_t const *)__pyx_t_16), __pyx_t_6, __pyx_v_context);
-    }
-    __pyx_L16:;
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":376
- * 
- *         # Read all chunks, accumulate row count
- *         first_record = None             # <<<<<<<<<<<<<<
- *         while True:
- *             chunk_result = reader.next_chunk()
-*/
-    __Pyx_INCREF(Py_None);
-    __pyx_v_first_record = Py_None;
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":377
- *         # Read all chunks, accumulate row count
- *         first_record = None
- *         while True:             # <<<<<<<<<<<<<<
- *             chunk_result = reader.next_chunk()
- * 
-*/
-    while (1) {
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":378
- *         first_record = None
- *         while True:
- *             chunk_result = reader.next_chunk()             # <<<<<<<<<<<<<<
- * 
- *             if not chunk_result.success:
-*/
-      __pyx_v_chunk_result = __pyx_v_reader->next_chunk();
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":380
- *             chunk_result = reader.next_chunk()
- * 
- *             if not chunk_result.success:             # <<<<<<<<<<<<<<
- *                 break
- * 
-*/
-      __pyx_t_5 = (!__pyx_v_chunk_result.success);
-      if (__pyx_t_5) {
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":381
- * 
- *             if not chunk_result.success:
- *                 break             # <<<<<<<<<<<<<<
- * 
- *             if chunk_result.num_records > 0:
-*/
-        goto __pyx_L18_break;
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":380
- *             chunk_result = reader.next_chunk()
- * 
- *             if not chunk_result.success:             # <<<<<<<<<<<<<<
- *                 break
- * 
-*/
-      }
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":383
- *                 break
- * 
- *             if chunk_result.num_records > 0:             # <<<<<<<<<<<<<<
- *                 if not column_names:
- *                     for col in chunk_result.column_names:
-*/
-      __pyx_t_5 = (__pyx_v_chunk_result.num_records > 0);
-      if (__pyx_t_5) {
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":384
- * 
- *             if chunk_result.num_records > 0:
- *                 if not column_names:             # <<<<<<<<<<<<<<
- *                     for col in chunk_result.column_names:
- *                         column_names.append(col.decode('utf-8'))
-*/
-        {
-          Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_v_column_names);
-          if (unlikely(((!CYTHON_ASSUME_SAFE_SIZE) && __pyx_temp < 0))) __PYX_ERR(0, 384, __pyx_L4_error)
-          __pyx_t_5 = (__pyx_temp != 0);
-        }
-
-        __pyx_t_17 = (!__pyx_t_5);
-        if (__pyx_t_17) {
-
-          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":385
- *             if chunk_result.num_records > 0:
- *                 if not column_names:
- *                     for col in chunk_result.column_names:             # <<<<<<<<<<<<<<
- *                         column_names.append(col.decode('utf-8'))
- * 
-*/
-          __pyx_t_18 = __pyx_v_chunk_result.column_names.begin();
-          for (; __pyx_t_18 != __pyx_v_chunk_result.column_names.end(); ++__pyx_t_18) {
-            __pyx_t_9 = *__pyx_t_18;
-            __pyx_t_1 = __pyx_convert_PyBytes_string_to_py_6libcpp_6string_std__in_string(__pyx_t_9); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 385, __pyx_L4_error)
-            __Pyx_GOTREF(__pyx_t_1);
-            __Pyx_XDECREF_SET(__pyx_v_col, __pyx_t_1);
-            __pyx_t_1 = 0;
-
-            /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":386
- *                 if not column_names:
- *                     for col in chunk_result.column_names:
- *                         column_names.append(col.decode('utf-8'))             # <<<<<<<<<<<<<<
- * 
- *                 total_rows += chunk_result.num_records
-*/
-            __pyx_t_11 = __pyx_v_col;
-            __Pyx_INCREF(__pyx_t_11);
-            __pyx_t_4 = 0;
-            {
-              PyObject *__pyx_callargs[2] = {__pyx_t_11, __pyx_mstate_global->__pyx_kp_u_utf_8};
-              __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_decode, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-              __Pyx_XDECREF(__pyx_t_11); __pyx_t_11 = 0;
-              if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 386, __pyx_L4_error)
-              __Pyx_GOTREF(__pyx_t_1);
-            }
-            __pyx_t_19 = __Pyx_PyList_Append(__pyx_v_column_names, __pyx_t_1); if (unlikely(__pyx_t_19 == ((int)-1))) __PYX_ERR(0, 386, __pyx_L4_error)
-            __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-
-            /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":385
- *             if chunk_result.num_records > 0:
- *                 if not column_names:
- *                     for col in chunk_result.column_names:             # <<<<<<<<<<<<<<
- *                         column_names.append(col.decode('utf-8'))
- * 
-*/
-          }
-
-          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":384
- * 
- *             if chunk_result.num_records > 0:
- *                 if not column_names:             # <<<<<<<<<<<<<<
- *                     for col in chunk_result.column_names:
- *                         column_names.append(col.decode('utf-8'))
-*/
-        }
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":388
- *                         column_names.append(col.decode('utf-8'))
- * 
- *                 total_rows += chunk_result.num_records             # <<<<<<<<<<<<<<
- *                 total_bytes += chunk_result.buffer_data.size()
- * 
-*/
-        __pyx_v_total_rows = (__pyx_v_total_rows + __pyx_v_chunk_result.num_records);
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":389
- * 
- *                 total_rows += chunk_result.num_records
- *                 total_bytes += chunk_result.buffer_data.size()             # <<<<<<<<<<<<<<
- * 
- *                 # Capture first record as sample
-*/
-        __pyx_v_total_bytes = (__pyx_v_total_bytes + __pyx_v_chunk_result.buffer_data.size());
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":392
- * 
- *                 # Capture first record as sample
- *                 if first_record is None and len(chunk_result.records) > 0:             # <<<<<<<<<<<<<<
- *                     first_record = chunk_result.records[0]
- * 
-*/
-        __pyx_t_5 = (__pyx_v_first_record == Py_None);
-        if (__pyx_t_5) {
-        } else {
-          __pyx_t_17 = __pyx_t_5;
-          goto __pyx_L26_bool_binop_done;
-        }
-        __pyx_t_1 = __pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(__pyx_v_chunk_result.records); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 392, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_1);
-        __pyx_t_6 = PyObject_Length(__pyx_t_1); if (unlikely(__pyx_t_6 == ((Py_ssize_t)-1))) __PYX_ERR(0, 392, __pyx_L4_error)
-        __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-        __pyx_t_5 = (__pyx_t_6 > 0);
-        __pyx_t_17 = __pyx_t_5;
-        __pyx_L26_bool_binop_done:;
-        if (__pyx_t_17) {
-
-          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":393
- *                 # Capture first record as sample
- *                 if first_record is None and len(chunk_result.records) > 0:
- *                     first_record = chunk_result.records[0]             # <<<<<<<<<<<<<<
- * 
- *             if reader.is_eof():
-*/
-          __pyx_t_1 = __pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan((__pyx_v_chunk_result.records[0])); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 393, __pyx_L4_error)
-          __Pyx_GOTREF(__pyx_t_1);
-          __Pyx_DECREF_SET(__pyx_v_first_record, __pyx_t_1);
-          __pyx_t_1 = 0;
-
-          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":392
- * 
- *                 # Capture first record as sample
- *                 if first_record is None and len(chunk_result.records) > 0:             # <<<<<<<<<<<<<<
- *                     first_record = chunk_result.records[0]
- * 
-*/
-        }
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":383
- *                 break
- * 
- *             if chunk_result.num_records > 0:             # <<<<<<<<<<<<<<
- *                 if not column_names:
- *                     for col in chunk_result.column_names:
-*/
-      }
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":395
- *                     first_record = chunk_result.records[0]
- * 
- *             if reader.is_eof():             # <<<<<<<<<<<<<<
- *                 break
- * 
-*/
-      __pyx_t_17 = __pyx_v_reader->is_eof();
-      if (__pyx_t_17) {
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":396
- * 
- *             if reader.is_eof():
- *                 break             # <<<<<<<<<<<<<<
- * 
- *         elapsed_ms = (time.perf_counter() - start_time) * 1000
-*/
-        goto __pyx_L18_break;
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":395
- *                     first_record = chunk_result.records[0]
- * 
- *             if reader.is_eof():             # <<<<<<<<<<<<<<
- *                 break
- * 
-*/
-      }
-    }
-    __pyx_L18_break:;
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":398
- *                 break
- * 
- *         elapsed_ms = (time.perf_counter() - start_time) * 1000             # <<<<<<<<<<<<<<
- * 
- *         result['success'] = True
-*/
-    __pyx_t_11 = __pyx_v_time;
-    __Pyx_INCREF(__pyx_t_11);
-    __pyx_t_4 = 0;
-    {
-      PyObject *__pyx_callargs[2] = {__pyx_t_11, NULL};
-      __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_perf_counter, __pyx_callargs+__pyx_t_4, (1-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-      __Pyx_XDECREF(__pyx_t_11); __pyx_t_11 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 398, __pyx_L4_error)
-      __Pyx_GOTREF(__pyx_t_1);
-    }
-    __pyx_t_11 = PyNumber_Subtract(__pyx_t_1, __pyx_v_start_time); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 398, __pyx_L4_error)
-    __Pyx_GOTREF(__pyx_t_11);
-    __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    __pyx_t_1 = __Pyx_PyLong_MultiplyObjC(__pyx_t_11, __pyx_mstate_global->__pyx_int_1000, 0x3E8, 0, 0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 398, __pyx_L4_error)
-    __Pyx_GOTREF(__pyx_t_1);
-    __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
-    __pyx_v_elapsed_ms = __pyx_t_1;
-    __pyx_t_1 = 0;
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":400
- *         elapsed_ms = (time.perf_counter() - start_time) * 1000
- * 
- *         result['success'] = True             # <<<<<<<<<<<<<<
- *         result['num_rows'] = total_rows
- *         result['column_names'] = column_names
-*/
-    if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_success, Py_True) < 0))) __PYX_ERR(0, 400, __pyx_L4_error)
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":401
- * 
- *         result['success'] = True
- *         result['num_rows'] = total_rows             # <<<<<<<<<<<<<<
- *         result['column_names'] = column_names
- *         result['buffer_size_mb'] = total_bytes / 1024 / 1024
-*/
-    __pyx_t_1 = __Pyx_PyLong_FromSize_t(__pyx_v_total_rows); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 401, __pyx_L4_error)
-    __Pyx_GOTREF(__pyx_t_1);
-    if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_num_rows, __pyx_t_1) < 0))) __PYX_ERR(0, 401, __pyx_L4_error)
-    __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":402
- *         result['success'] = True
- *         result['num_rows'] = total_rows
- *         result['column_names'] = column_names             # <<<<<<<<<<<<<<
- *         result['buffer_size_mb'] = total_bytes / 1024 / 1024
- *         result['elapsed_ms'] = elapsed_ms
-*/
-    if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_column_names, __pyx_v_column_names) < 0))) __PYX_ERR(0, 402, __pyx_L4_error)
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":403
- *         result['num_rows'] = total_rows
- *         result['column_names'] = column_names
- *         result['buffer_size_mb'] = total_bytes / 1024 / 1024             # <<<<<<<<<<<<<<
- *         result['elapsed_ms'] = elapsed_ms
- * 
-*/
-    __pyx_t_1 = PyFloat_FromDouble(((__pyx_v_total_bytes / 1024.0) / 1024.0)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 403, __pyx_L4_error)
-    __Pyx_GOTREF(__pyx_t_1);
-    if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_buffer_size_mb, __pyx_t_1) < 0))) __PYX_ERR(0, 403, __pyx_L4_error)
-    __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":404
- *         result['column_names'] = column_names
- *         result['buffer_size_mb'] = total_bytes / 1024 / 1024
- *         result['elapsed_ms'] = elapsed_ms             # <<<<<<<<<<<<<<
- * 
- *         # Convert first record to Python format for inspection
-*/
-    if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_elapsed_ms, __pyx_v_elapsed_ms) < 0))) __PYX_ERR(0, 404, __pyx_L4_error)
-
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":407
- * 
- *         # Convert first record to Python format for inspection
- *         if first_record is not None:             # <<<<<<<<<<<<<<
- *             for field in first_record:
- *                 result['sample_record'].append({
-*/
-    __pyx_t_17 = (__pyx_v_first_record != Py_None);
-    if (__pyx_t_17) {
-
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":408
- *         # Convert first record to Python format for inspection
- *         if first_record is not None:
- *             for field in first_record:             # <<<<<<<<<<<<<<
- *                 result['sample_record'].append({
- *                     'key_start': field.key_start,
-*/
-      if (likely(PyList_CheckExact(__pyx_v_first_record)) || PyTuple_CheckExact(__pyx_v_first_record)) {
-        __pyx_t_1 = __pyx_v_first_record; __Pyx_INCREF(__pyx_t_1);
-        __pyx_t_6 = 0;
-        __pyx_t_7 = NULL;
-      } else {
-        __pyx_t_6 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_v_first_record); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 408, __pyx_L4_error)
+        __pyx_t_6 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_v_columns); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 408, __pyx_L4_error)
         __Pyx_GOTREF(__pyx_t_1);
         __pyx_t_7 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 408, __pyx_L4_error)
       }
@@ -22743,7 +22426,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
               #endif
               if (__pyx_t_6 >= __pyx_temp) break;
             }
-            __pyx_t_11 = __Pyx_PyList_GetItemRefFast(__pyx_t_1, __pyx_t_6, __Pyx_ReferenceSharing_OwnStrongReference);
+            __pyx_t_3 = __Pyx_PyList_GetItemRefFast(__pyx_t_1, __pyx_t_6, __Pyx_ReferenceSharing_OwnStrongReference);
             ++__pyx_t_6;
           } else {
             {
@@ -22754,16 +22437,16 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
               if (__pyx_t_6 >= __pyx_temp) break;
             }
             #if CYTHON_ASSUME_SAFE_MACROS && !CYTHON_AVOID_BORROWED_REFS
-            __pyx_t_11 = __Pyx_NewRef(PyTuple_GET_ITEM(__pyx_t_1, __pyx_t_6));
+            __pyx_t_3 = __Pyx_NewRef(PyTuple_GET_ITEM(__pyx_t_1, __pyx_t_6));
             #else
-            __pyx_t_11 = __Pyx_PySequence_ITEM(__pyx_t_1, __pyx_t_6);
+            __pyx_t_3 = __Pyx_PySequence_ITEM(__pyx_t_1, __pyx_t_6);
             #endif
             ++__pyx_t_6;
           }
-          if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 408, __pyx_L4_error)
+          if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 408, __pyx_L4_error)
         } else {
-          __pyx_t_11 = __pyx_t_7(__pyx_t_1);
-          if (unlikely(!__pyx_t_11)) {
+          __pyx_t_3 = __pyx_t_7(__pyx_t_1);
+          if (unlikely(!__pyx_t_3)) {
             PyObject* exc_type = PyErr_Occurred();
             if (exc_type) {
               if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 408, __pyx_L4_error)
@@ -22772,114 +22455,744 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
             break;
           }
         }
-        __Pyx_GOTREF(__pyx_t_11);
-        __Pyx_XDECREF_SET(__pyx_v_field, __pyx_t_11);
-        __pyx_t_11 = 0;
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":409
- *         if first_record is not None:
- *             for field in first_record:
- *                 result['sample_record'].append({             # <<<<<<<<<<<<<<
- *                     'key_start': field.key_start,
- *                     'key_width': field.key_width,
-*/
-        __pyx_t_11 = __Pyx_PyDict_GetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_sample_record); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 409, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_11);
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":410
- *             for field in first_record:
- *                 result['sample_record'].append({
- *                     'key_start': field.key_start,             # <<<<<<<<<<<<<<
- *                     'key_width': field.key_width,
- *                     'value_start': field.value_start,
-*/
-        __pyx_t_3 = __Pyx_PyDict_NewPresized(5); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 410, __pyx_L4_error)
         __Pyx_GOTREF(__pyx_t_3);
-        __pyx_t_10 = __Pyx_PyObject_GetAttrStr(__pyx_v_field, __pyx_mstate_global->__pyx_n_u_key_start); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 410, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_10);
-        if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_key_start, __pyx_t_10) < (0)) __PYX_ERR(0, 410, __pyx_L4_error)
-        __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":411
- *                 result['sample_record'].append({
- *                     'key_start': field.key_start,
- *                     'key_width': field.key_width,             # <<<<<<<<<<<<<<
- *                     'value_start': field.value_start,
- *                     'value_width': field.value_width,
-*/
-        __pyx_t_10 = __Pyx_PyObject_GetAttrStr(__pyx_v_field, __pyx_mstate_global->__pyx_n_u_key_width); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 411, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_10);
-        if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_key_width, __pyx_t_10) < (0)) __PYX_ERR(0, 410, __pyx_L4_error)
-        __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":412
- *                     'key_start': field.key_start,
- *                     'key_width': field.key_width,
- *                     'value_start': field.value_start,             # <<<<<<<<<<<<<<
- *                     'value_width': field.value_width,
- *                     'type': field.type,
-*/
-        __pyx_t_10 = __Pyx_PyObject_GetAttrStr(__pyx_v_field, __pyx_mstate_global->__pyx_n_u_value_start); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 412, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_10);
-        if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_value_start, __pyx_t_10) < (0)) __PYX_ERR(0, 410, __pyx_L4_error)
-        __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":413
- *                     'key_width': field.key_width,
- *                     'value_start': field.value_start,
- *                     'value_width': field.value_width,             # <<<<<<<<<<<<<<
- *                     'type': field.type,
- *                 })
-*/
-        __pyx_t_10 = __Pyx_PyObject_GetAttrStr(__pyx_v_field, __pyx_mstate_global->__pyx_n_u_value_width); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 413, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_10);
-        if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_value_width, __pyx_t_10) < (0)) __PYX_ERR(0, 410, __pyx_L4_error)
-        __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
-
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":414
- *                     'value_start': field.value_start,
- *                     'value_width': field.value_width,
- *                     'type': field.type,             # <<<<<<<<<<<<<<
- *                 })
- * 
-*/
-        __pyx_t_10 = __Pyx_PyObject_GetAttrStr(__pyx_v_field, __pyx_mstate_global->__pyx_n_u_type); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 414, __pyx_L4_error)
-        __Pyx_GOTREF(__pyx_t_10);
-        if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_type, __pyx_t_10) < (0)) __PYX_ERR(0, 410, __pyx_L4_error)
-        __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
+        __Pyx_XDECREF_SET(__pyx_v_col, __pyx_t_3);
+        __pyx_t_3 = 0;
 
         /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":409
- *         if first_record is not None:
- *             for field in first_record:
- *                 result['sample_record'].append({             # <<<<<<<<<<<<<<
- *                     'key_start': field.key_start,
- *                     'key_width': field.key_width,
+ *         if columns:
+ *             for col in columns:
+ *                 context.projected_columns.push_back(col.encode('utf-8'))             # <<<<<<<<<<<<<<
+ * 
+ *         if predicates:
 */
-        __pyx_t_19 = __Pyx_PyObject_Append(__pyx_t_11, __pyx_t_3); if (unlikely(__pyx_t_19 == ((int)-1))) __PYX_ERR(0, 409, __pyx_L4_error)
-        __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
+        __pyx_t_8 = __pyx_v_col;
+        __Pyx_INCREF(__pyx_t_8);
+        __pyx_t_4 = 0;
+        {
+          PyObject *__pyx_callargs[2] = {__pyx_t_8, __pyx_mstate_global->__pyx_kp_u_utf_8};
+          __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+          __Pyx_XDECREF(__pyx_t_8); __pyx_t_8 = 0;
+          if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 409, __pyx_L4_error)
+          __Pyx_GOTREF(__pyx_t_3);
+        }
+        __pyx_t_9 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_3); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 409, __pyx_L4_error)
         __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+        try {
+          __pyx_v_context.projected_columns.push_back(__pyx_t_9);
+        } catch(...) {
+          __Pyx_CppExn2PyErr();
+          __PYX_ERR(0, 409, __pyx_L4_error)
+        }
 
         /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":408
- *         # Convert first record to Python format for inspection
- *         if first_record is not None:
- *             for field in first_record:             # <<<<<<<<<<<<<<
- *                 result['sample_record'].append({
- *                     'key_start': field.key_start,
+ *         # Build ParseContext
+ *         if columns:
+ *             for col in columns:             # <<<<<<<<<<<<<<
+ *                 context.projected_columns.push_back(col.encode('utf-8'))
+ * 
 */
       }
       __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
       /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":407
  * 
- *         # Convert first record to Python format for inspection
- *         if first_record is not None:             # <<<<<<<<<<<<<<
- *             for field in first_record:
- *                 result['sample_record'].append({
+ *         # Build ParseContext
+ *         if columns:             # <<<<<<<<<<<<<<
+ *             for col in columns:
+ *                 context.projected_columns.push_back(col.encode('utf-8'))
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":417
- *                 })
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":411
+ *                 context.projected_columns.push_back(col.encode('utf-8'))
+ * 
+ *         if predicates:             # <<<<<<<<<<<<<<
+ *             for col, op, val in predicates:
+ *                 pred.column = col.encode('utf-8')
+*/
+    __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_v_predicates); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(0, 411, __pyx_L4_error)
+    if (__pyx_t_5) {
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":412
+ * 
+ *         if predicates:
+ *             for col, op, val in predicates:             # <<<<<<<<<<<<<<
+ *                 pred.column = col.encode('utf-8')
+ *                 pred.op = <uint8_t>_parse_op(op)
+*/
+      if (likely(PyList_CheckExact(__pyx_v_predicates)) || PyTuple_CheckExact(__pyx_v_predicates)) {
+        __pyx_t_1 = __pyx_v_predicates; __Pyx_INCREF(__pyx_t_1);
+        __pyx_t_6 = 0;
+        __pyx_t_7 = NULL;
+      } else {
+        __pyx_t_6 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_v_predicates); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 412, __pyx_L4_error)
+        __Pyx_GOTREF(__pyx_t_1);
+        __pyx_t_7 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 412, __pyx_L4_error)
+      }
+      for (;;) {
+        if (likely(!__pyx_t_7)) {
+          if (likely(PyList_CheckExact(__pyx_t_1))) {
+            {
+              Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_1);
+              #if !CYTHON_ASSUME_SAFE_SIZE
+              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 412, __pyx_L4_error)
+              #endif
+              if (__pyx_t_6 >= __pyx_temp) break;
+            }
+            __pyx_t_3 = __Pyx_PyList_GetItemRefFast(__pyx_t_1, __pyx_t_6, __Pyx_ReferenceSharing_OwnStrongReference);
+            ++__pyx_t_6;
+          } else {
+            {
+              Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_1);
+              #if !CYTHON_ASSUME_SAFE_SIZE
+              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 412, __pyx_L4_error)
+              #endif
+              if (__pyx_t_6 >= __pyx_temp) break;
+            }
+            #if CYTHON_ASSUME_SAFE_MACROS && !CYTHON_AVOID_BORROWED_REFS
+            __pyx_t_3 = __Pyx_NewRef(PyTuple_GET_ITEM(__pyx_t_1, __pyx_t_6));
+            #else
+            __pyx_t_3 = __Pyx_PySequence_ITEM(__pyx_t_1, __pyx_t_6);
+            #endif
+            ++__pyx_t_6;
+          }
+          if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 412, __pyx_L4_error)
+        } else {
+          __pyx_t_3 = __pyx_t_7(__pyx_t_1);
+          if (unlikely(!__pyx_t_3)) {
+            PyObject* exc_type = PyErr_Occurred();
+            if (exc_type) {
+              if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 412, __pyx_L4_error)
+              PyErr_Clear();
+            }
+            break;
+          }
+        }
+        __Pyx_GOTREF(__pyx_t_3);
+        if ((likely(PyTuple_CheckExact(__pyx_t_3))) || (PyList_CheckExact(__pyx_t_3))) {
+          PyObject* sequence = __pyx_t_3;
+          Py_ssize_t size = __Pyx_PySequence_SIZE(sequence);
+          if (unlikely(size != 3)) {
+            if (size > 3) __Pyx_RaiseTooManyValuesError(3);
+            else if (size >= 0) __Pyx_RaiseNeedMoreValuesError(size);
+            __PYX_ERR(0, 412, __pyx_L4_error)
+          }
+          #if CYTHON_ASSUME_SAFE_MACROS && !CYTHON_AVOID_BORROWED_REFS
+          if (likely(PyTuple_CheckExact(sequence))) {
+            __pyx_t_8 = PyTuple_GET_ITEM(sequence, 0);
+            __Pyx_INCREF(__pyx_t_8);
+            __pyx_t_10 = PyTuple_GET_ITEM(sequence, 1);
+            __Pyx_INCREF(__pyx_t_10);
+            __pyx_t_11 = PyTuple_GET_ITEM(sequence, 2);
+            __Pyx_INCREF(__pyx_t_11);
+          } else {
+            __pyx_t_8 = __Pyx_PyList_GetItemRefFast(sequence, 0, __Pyx_ReferenceSharing_SharedReference);
+            if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 412, __pyx_L4_error)
+            __Pyx_XGOTREF(__pyx_t_8);
+            __pyx_t_10 = __Pyx_PyList_GetItemRefFast(sequence, 1, __Pyx_ReferenceSharing_SharedReference);
+            if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 412, __pyx_L4_error)
+            __Pyx_XGOTREF(__pyx_t_10);
+            __pyx_t_11 = __Pyx_PyList_GetItemRefFast(sequence, 2, __Pyx_ReferenceSharing_SharedReference);
+            if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 412, __pyx_L4_error)
+            __Pyx_XGOTREF(__pyx_t_11);
+          }
+          #else
+          __pyx_t_8 = __Pyx_PySequence_ITEM(sequence, 0); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 412, __pyx_L4_error)
+          __Pyx_GOTREF(__pyx_t_8);
+          __pyx_t_10 = __Pyx_PySequence_ITEM(sequence, 1); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 412, __pyx_L4_error)
+          __Pyx_GOTREF(__pyx_t_10);
+          __pyx_t_11 = __Pyx_PySequence_ITEM(sequence, 2); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 412, __pyx_L4_error)
+          __Pyx_GOTREF(__pyx_t_11);
+          #endif
+          __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+        } else {
+          Py_ssize_t index = -1;
+          __pyx_t_12 = PyObject_GetIter(__pyx_t_3); if (unlikely(!__pyx_t_12)) __PYX_ERR(0, 412, __pyx_L4_error)
+          __Pyx_GOTREF(__pyx_t_12);
+          __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+          __pyx_t_13 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_12);
+          index = 0; __pyx_t_8 = __pyx_t_13(__pyx_t_12); if (unlikely(!__pyx_t_8)) goto __pyx_L13_unpacking_failed;
+          __Pyx_GOTREF(__pyx_t_8);
+          index = 1; __pyx_t_10 = __pyx_t_13(__pyx_t_12); if (unlikely(!__pyx_t_10)) goto __pyx_L13_unpacking_failed;
+          __Pyx_GOTREF(__pyx_t_10);
+          index = 2; __pyx_t_11 = __pyx_t_13(__pyx_t_12); if (unlikely(!__pyx_t_11)) goto __pyx_L13_unpacking_failed;
+          __Pyx_GOTREF(__pyx_t_11);
+          if (__Pyx_IternextUnpackEndCheck(__pyx_t_13(__pyx_t_12), 3) < (0)) __PYX_ERR(0, 412, __pyx_L4_error)
+          __pyx_t_13 = NULL;
+          __Pyx_DECREF(__pyx_t_12); __pyx_t_12 = 0;
+          goto __pyx_L14_unpacking_done;
+          __pyx_L13_unpacking_failed:;
+          __Pyx_DECREF(__pyx_t_12); __pyx_t_12 = 0;
+          __pyx_t_13 = NULL;
+          if (__Pyx_IterFinish() == 0) __Pyx_RaiseNeedMoreValuesError(index);
+          __PYX_ERR(0, 412, __pyx_L4_error)
+          __pyx_L14_unpacking_done:;
+        }
+        __Pyx_XDECREF_SET(__pyx_v_col, __pyx_t_8);
+        __pyx_t_8 = 0;
+        __Pyx_XDECREF_SET(__pyx_v_op, __pyx_t_10);
+        __pyx_t_10 = 0;
+        __Pyx_XDECREF_SET(__pyx_v_val, __pyx_t_11);
+        __pyx_t_11 = 0;
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":413
+ *         if predicates:
+ *             for col, op, val in predicates:
+ *                 pred.column = col.encode('utf-8')             # <<<<<<<<<<<<<<
+ *                 pred.op = <uint8_t>_parse_op(op)
+ *                 pred.value = str(val).encode('utf-8')
+*/
+        __pyx_t_11 = __pyx_v_col;
+        __Pyx_INCREF(__pyx_t_11);
+        __pyx_t_4 = 0;
+        {
+          PyObject *__pyx_callargs[2] = {__pyx_t_11, __pyx_mstate_global->__pyx_kp_u_utf_8};
+          __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+          __Pyx_XDECREF(__pyx_t_11); __pyx_t_11 = 0;
+          if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 413, __pyx_L4_error)
+          __Pyx_GOTREF(__pyx_t_3);
+        }
+        __pyx_t_9 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_3); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 413, __pyx_L4_error)
+        __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+        __pyx_v_pred.column = __PYX_STD_MOVE_IF_SUPPORTED(__pyx_t_9);
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":414
+ *             for col, op, val in predicates:
+ *                 pred.column = col.encode('utf-8')
+ *                 pred.op = <uint8_t>_parse_op(op)             # <<<<<<<<<<<<<<
+ *                 pred.value = str(val).encode('utf-8')
+ *                 context.predicates.push_back(pred)
+*/
+        __pyx_t_3 = __pyx_v_op;
+        __Pyx_INCREF(__pyx_t_3);
+        if (!(likely(PyUnicode_CheckExact(__pyx_t_3))||((__pyx_t_3) == Py_None) || __Pyx_RaiseUnexpectedTypeError("str", __pyx_t_3))) __PYX_ERR(0, 414, __pyx_L4_error)
+        __pyx_t_14 = __pyx_f_7opteryx_8compiled_4rugo_6_jsonl__parse_op(((PyObject*)__pyx_t_3)); if (unlikely(__pyx_t_14 == ((uint8_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 414, __pyx_L4_error)
+        __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+        __pyx_v_pred.op = ((uint8_t)__pyx_t_14);
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":415
+ *                 pred.column = col.encode('utf-8')
+ *                 pred.op = <uint8_t>_parse_op(op)
+ *                 pred.value = str(val).encode('utf-8')             # <<<<<<<<<<<<<<
+ *                 context.predicates.push_back(pred)
+ * 
+*/
+        __pyx_t_3 = __Pyx_PyObject_Unicode(__pyx_v_val); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 415, __pyx_L4_error)
+        __Pyx_GOTREF(__pyx_t_3);
+        __pyx_t_11 = PyUnicode_AsUTF8String(((PyObject*)__pyx_t_3)); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 415, __pyx_L4_error)
+        __Pyx_GOTREF(__pyx_t_11);
+        __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+        __pyx_t_9 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_11); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 415, __pyx_L4_error)
+        __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
+        __pyx_v_pred.value = __PYX_STD_MOVE_IF_SUPPORTED(__pyx_t_9);
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":416
+ *                 pred.op = <uint8_t>_parse_op(op)
+ *                 pred.value = str(val).encode('utf-8')
+ *                 context.predicates.push_back(pred)             # <<<<<<<<<<<<<<
+ * 
+ *         context.infer_schema = infer_schema
+*/
+        try {
+          __pyx_v_context.predicates.push_back(__pyx_v_pred);
+        } catch(...) {
+          __Pyx_CppExn2PyErr();
+          __PYX_ERR(0, 416, __pyx_L4_error)
+        }
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":412
+ * 
+ *         if predicates:
+ *             for col, op, val in predicates:             # <<<<<<<<<<<<<<
+ *                 pred.column = col.encode('utf-8')
+ *                 pred.op = <uint8_t>_parse_op(op)
+*/
+      }
+      __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":411
+ *                 context.projected_columns.push_back(col.encode('utf-8'))
+ * 
+ *         if predicates:             # <<<<<<<<<<<<<<
+ *             for col, op, val in predicates:
+ *                 pred.column = col.encode('utf-8')
+*/
+    }
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":418
+ *                 context.predicates.push_back(pred)
+ * 
+ *         context.infer_schema = infer_schema             # <<<<<<<<<<<<<<
+ *         context.infer_sample_size = 5
+ *         context.parse_arrays = False
+*/
+    __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_v_infer_schema); if (unlikely((__pyx_t_5 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 418, __pyx_L4_error)
+    __pyx_v_context.infer_schema = __pyx_t_5;
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":419
+ * 
+ *         context.infer_schema = infer_schema
+ *         context.infer_sample_size = 5             # <<<<<<<<<<<<<<
+ *         context.parse_arrays = False
+ *         context.parse_objects = False
+*/
+    __pyx_v_context.infer_sample_size = 5;
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":420
+ *         context.infer_schema = infer_schema
+ *         context.infer_sample_size = 5
+ *         context.parse_arrays = False             # <<<<<<<<<<<<<<
+ *         context.parse_objects = False
+ *         context.fail_on_error = False
+*/
+    __pyx_v_context.parse_arrays = 0;
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":421
+ *         context.infer_sample_size = 5
+ *         context.parse_arrays = False
+ *         context.parse_objects = False             # <<<<<<<<<<<<<<
+ *         context.fail_on_error = False
+ * 
+*/
+    __pyx_v_context.parse_objects = 0;
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":422
+ *         context.parse_arrays = False
+ *         context.parse_objects = False
+ *         context.fail_on_error = False             # <<<<<<<<<<<<<<
+ * 
+ *         # Create reader
+*/
+    __pyx_v_context.fail_on_error = 0;
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":425
+ * 
+ *         # Create reader
+ *         if isinstance(data, str):             # <<<<<<<<<<<<<<
+ *             reader = new JsonlReader(<string>data.encode('utf-8'), context)
+ *         elif isinstance(data, bytes):
+*/
+    __pyx_t_5 = PyUnicode_Check(__pyx_v_data); 
+    if (__pyx_t_5) {
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":426
+ *         # Create reader
+ *         if isinstance(data, str):
+ *             reader = new JsonlReader(<string>data.encode('utf-8'), context)             # <<<<<<<<<<<<<<
+ *         elif isinstance(data, bytes):
+ *             reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
+*/
+      __pyx_t_11 = __pyx_v_data;
+      __Pyx_INCREF(__pyx_t_11);
+      __pyx_t_4 = 0;
+      {
+        PyObject *__pyx_callargs[2] = {__pyx_t_11, __pyx_mstate_global->__pyx_kp_u_utf_8};
+        __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+        __Pyx_XDECREF(__pyx_t_11); __pyx_t_11 = 0;
+        if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 426, __pyx_L4_error)
+        __Pyx_GOTREF(__pyx_t_1);
+      }
+      __pyx_t_9 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_1); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 426, __pyx_L4_error)
+      __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+      __pyx_v_reader = new rugo::_jsonl::JsonlReader(((std::string)__pyx_t_9), __pyx_v_context);
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":425
+ * 
+ *         # Create reader
+ *         if isinstance(data, str):             # <<<<<<<<<<<<<<
+ *             reader = new JsonlReader(<string>data.encode('utf-8'), context)
+ *         elif isinstance(data, bytes):
+*/
+      goto __pyx_L16;
+    }
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":427
+ *         if isinstance(data, str):
+ *             reader = new JsonlReader(<string>data.encode('utf-8'), context)
+ *         elif isinstance(data, bytes):             # <<<<<<<<<<<<<<
+ *             reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
+ *         else:
+*/
+    __pyx_t_5 = PyBytes_Check(__pyx_v_data); 
+    if (__pyx_t_5) {
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":428
+ *             reader = new JsonlReader(<string>data.encode('utf-8'), context)
+ *         elif isinstance(data, bytes):
+ *             reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)             # <<<<<<<<<<<<<<
+ *         else:
+ *             data_bytes = bytes(data)
+*/
+      if (unlikely(__pyx_v_data == Py_None)) {
+        PyErr_SetString(PyExc_TypeError, "expected bytes, NoneType found");
+        __PYX_ERR(0, 428, __pyx_L4_error)
+      }
+      __pyx_t_15 = __Pyx_PyBytes_AsUString(__pyx_v_data); if (unlikely((!__pyx_t_15) && PyErr_Occurred())) __PYX_ERR(0, 428, __pyx_L4_error)
+      __pyx_t_6 = PyObject_Length(__pyx_v_data); if (unlikely(__pyx_t_6 == ((Py_ssize_t)-1))) __PYX_ERR(0, 428, __pyx_L4_error)
+      __pyx_v_reader = new rugo::_jsonl::JsonlReader(((uint8_t const *)__pyx_t_15), __pyx_t_6, __pyx_v_context);
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":427
+ *         if isinstance(data, str):
+ *             reader = new JsonlReader(<string>data.encode('utf-8'), context)
+ *         elif isinstance(data, bytes):             # <<<<<<<<<<<<<<
+ *             reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
+ *         else:
+*/
+      goto __pyx_L16;
+    }
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":430
+ *             reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
+ *         else:
+ *             data_bytes = bytes(data)             # <<<<<<<<<<<<<<
+ *             reader = new JsonlReader(<const uint8_t*><bytes>data_bytes, len(data_bytes), context)
+ * 
+*/
+    /*else*/ {
+      __pyx_t_11 = NULL;
+      __pyx_t_4 = 1;
+      {
+        PyObject *__pyx_callargs[2] = {__pyx_t_11, __pyx_v_data};
+        __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)(&PyBytes_Type), __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+        __Pyx_XDECREF(__pyx_t_11); __pyx_t_11 = 0;
+        if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 430, __pyx_L4_error)
+        __Pyx_GOTREF(__pyx_t_1);
+      }
+      __pyx_v_data_bytes = ((PyObject*)__pyx_t_1);
+      __pyx_t_1 = 0;
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":431
+ *         else:
+ *             data_bytes = bytes(data)
+ *             reader = new JsonlReader(<const uint8_t*><bytes>data_bytes, len(data_bytes), context)             # <<<<<<<<<<<<<<
+ * 
+ *         # Read all chunks, accumulate row count
+*/
+      if (unlikely(__pyx_v_data_bytes == Py_None)) {
+        PyErr_SetString(PyExc_TypeError, "expected bytes, NoneType found");
+        __PYX_ERR(0, 431, __pyx_L4_error)
+      }
+      __pyx_t_16 = __Pyx_PyBytes_AsUString(__pyx_v_data_bytes); if (unlikely((!__pyx_t_16) && PyErr_Occurred())) __PYX_ERR(0, 431, __pyx_L4_error)
+      __pyx_t_6 = __Pyx_PyBytes_GET_SIZE(__pyx_v_data_bytes); if (unlikely(__pyx_t_6 == ((Py_ssize_t)-1))) __PYX_ERR(0, 431, __pyx_L4_error)
+      __pyx_v_reader = new rugo::_jsonl::JsonlReader(((uint8_t const *)__pyx_t_16), __pyx_t_6, __pyx_v_context);
+    }
+    __pyx_L16:;
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":434
+ * 
+ *         # Read all chunks, accumulate row count
+ *         first_record = None             # <<<<<<<<<<<<<<
+ *         while True:
+ *             chunk_result = reader.next_chunk()
+*/
+    __Pyx_INCREF(Py_None);
+    __pyx_v_first_record = Py_None;
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":435
+ *         # Read all chunks, accumulate row count
+ *         first_record = None
+ *         while True:             # <<<<<<<<<<<<<<
+ *             chunk_result = reader.next_chunk()
+ * 
+*/
+    while (1) {
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":436
+ *         first_record = None
+ *         while True:
+ *             chunk_result = reader.next_chunk()             # <<<<<<<<<<<<<<
+ * 
+ *             if not chunk_result.success:
+*/
+      __pyx_v_chunk_result = __pyx_v_reader->next_chunk();
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":438
+ *             chunk_result = reader.next_chunk()
+ * 
+ *             if not chunk_result.success:             # <<<<<<<<<<<<<<
+ *                 break
+ * 
+*/
+      __pyx_t_5 = (!__pyx_v_chunk_result.success);
+      if (__pyx_t_5) {
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":439
+ * 
+ *             if not chunk_result.success:
+ *                 break             # <<<<<<<<<<<<<<
+ * 
+ *             if chunk_result.num_records > 0:
+*/
+        goto __pyx_L18_break;
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":438
+ *             chunk_result = reader.next_chunk()
+ * 
+ *             if not chunk_result.success:             # <<<<<<<<<<<<<<
+ *                 break
+ * 
+*/
+      }
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":441
+ *                 break
+ * 
+ *             if chunk_result.num_records > 0:             # <<<<<<<<<<<<<<
+ *                 if not column_names:
+ *                     for col in chunk_result.column_names:
+*/
+      __pyx_t_5 = (__pyx_v_chunk_result.num_records > 0);
+      if (__pyx_t_5) {
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":442
+ * 
+ *             if chunk_result.num_records > 0:
+ *                 if not column_names:             # <<<<<<<<<<<<<<
+ *                     for col in chunk_result.column_names:
+ *                         column_names.append(col.decode('utf-8'))
+*/
+        {
+          Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_v_column_names);
+          if (unlikely(((!CYTHON_ASSUME_SAFE_SIZE) && __pyx_temp < 0))) __PYX_ERR(0, 442, __pyx_L4_error)
+          __pyx_t_5 = (__pyx_temp != 0);
+        }
+
+        __pyx_t_17 = (!__pyx_t_5);
+        if (__pyx_t_17) {
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":443
+ *             if chunk_result.num_records > 0:
+ *                 if not column_names:
+ *                     for col in chunk_result.column_names:             # <<<<<<<<<<<<<<
+ *                         column_names.append(col.decode('utf-8'))
+ * 
+*/
+          __pyx_t_18 = __pyx_v_chunk_result.column_names.begin();
+          for (; __pyx_t_18 != __pyx_v_chunk_result.column_names.end(); ++__pyx_t_18) {
+            __pyx_t_9 = *__pyx_t_18;
+            __pyx_t_1 = __pyx_convert_PyBytes_string_to_py_6libcpp_6string_std__in_string(__pyx_t_9); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 443, __pyx_L4_error)
+            __Pyx_GOTREF(__pyx_t_1);
+            __Pyx_XDECREF_SET(__pyx_v_col, __pyx_t_1);
+            __pyx_t_1 = 0;
+
+            /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":444
+ *                 if not column_names:
+ *                     for col in chunk_result.column_names:
+ *                         column_names.append(col.decode('utf-8'))             # <<<<<<<<<<<<<<
+ * 
+ *                 total_rows += chunk_result.num_records
+*/
+            __pyx_t_11 = __pyx_v_col;
+            __Pyx_INCREF(__pyx_t_11);
+            __pyx_t_4 = 0;
+            {
+              PyObject *__pyx_callargs[2] = {__pyx_t_11, __pyx_mstate_global->__pyx_kp_u_utf_8};
+              __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_decode, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+              __Pyx_XDECREF(__pyx_t_11); __pyx_t_11 = 0;
+              if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 444, __pyx_L4_error)
+              __Pyx_GOTREF(__pyx_t_1);
+            }
+            __pyx_t_19 = __Pyx_PyList_Append(__pyx_v_column_names, __pyx_t_1); if (unlikely(__pyx_t_19 == ((int)-1))) __PYX_ERR(0, 444, __pyx_L4_error)
+            __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+
+            /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":443
+ *             if chunk_result.num_records > 0:
+ *                 if not column_names:
+ *                     for col in chunk_result.column_names:             # <<<<<<<<<<<<<<
+ *                         column_names.append(col.decode('utf-8'))
+ * 
+*/
+          }
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":442
+ * 
+ *             if chunk_result.num_records > 0:
+ *                 if not column_names:             # <<<<<<<<<<<<<<
+ *                     for col in chunk_result.column_names:
+ *                         column_names.append(col.decode('utf-8'))
+*/
+        }
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":446
+ *                         column_names.append(col.decode('utf-8'))
+ * 
+ *                 total_rows += chunk_result.num_records             # <<<<<<<<<<<<<<
+ *                 total_bytes += chunk_result.buffer_data.size()
+ * 
+*/
+        __pyx_v_total_rows = (__pyx_v_total_rows + __pyx_v_chunk_result.num_records);
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":447
+ * 
+ *                 total_rows += chunk_result.num_records
+ *                 total_bytes += chunk_result.buffer_data.size()             # <<<<<<<<<<<<<<
+ * 
+ *                 # Capture first record as sample
+*/
+        __pyx_v_total_bytes = (__pyx_v_total_bytes + __pyx_v_chunk_result.buffer_data.size());
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":450
+ * 
+ *                 # Capture first record as sample
+ *                 if first_record is None and len(chunk_result.records) > 0:             # <<<<<<<<<<<<<<
+ *                     first_record = chunk_result.records[0]
+ * 
+*/
+        __pyx_t_5 = (__pyx_v_first_record == Py_None);
+        if (__pyx_t_5) {
+        } else {
+          __pyx_t_17 = __pyx_t_5;
+          goto __pyx_L26_bool_binop_done;
+        }
+        __pyx_t_1 = __pyx_convert_vector_to_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(__pyx_v_chunk_result.records); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 450, __pyx_L4_error)
+        __Pyx_GOTREF(__pyx_t_1);
+        __pyx_t_6 = PyObject_Length(__pyx_t_1); if (unlikely(__pyx_t_6 == ((Py_ssize_t)-1))) __PYX_ERR(0, 450, __pyx_L4_error)
+        __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+        __pyx_t_5 = (__pyx_t_6 > 0);
+        __pyx_t_17 = __pyx_t_5;
+        __pyx_L26_bool_binop_done:;
+        if (__pyx_t_17) {
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":451
+ *                 # Capture first record as sample
+ *                 if first_record is None and len(chunk_result.records) > 0:
+ *                     first_record = chunk_result.records[0]             # <<<<<<<<<<<<<<
+ * 
+ *             if reader.is_eof():
+*/
+          __pyx_t_1 = __pyx_convert_vector_to_py_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan((__pyx_v_chunk_result.records[0])); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 451, __pyx_L4_error)
+          __Pyx_GOTREF(__pyx_t_1);
+          __Pyx_DECREF_SET(__pyx_v_first_record, __pyx_t_1);
+          __pyx_t_1 = 0;
+
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":450
+ * 
+ *                 # Capture first record as sample
+ *                 if first_record is None and len(chunk_result.records) > 0:             # <<<<<<<<<<<<<<
+ *                     first_record = chunk_result.records[0]
+ * 
+*/
+        }
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":441
+ *                 break
+ * 
+ *             if chunk_result.num_records > 0:             # <<<<<<<<<<<<<<
+ *                 if not column_names:
+ *                     for col in chunk_result.column_names:
+*/
+      }
+
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":453
+ *                     first_record = chunk_result.records[0]
+ * 
+ *             if reader.is_eof():             # <<<<<<<<<<<<<<
+ *                 break
+ * 
+*/
+      __pyx_t_17 = __pyx_v_reader->is_eof();
+      if (__pyx_t_17) {
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":454
+ * 
+ *             if reader.is_eof():
+ *                 break             # <<<<<<<<<<<<<<
+ * 
+ *         elapsed_ms = (time.perf_counter() - start_time) * 1000
+*/
+        goto __pyx_L18_break;
+
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":453
+ *                     first_record = chunk_result.records[0]
+ * 
+ *             if reader.is_eof():             # <<<<<<<<<<<<<<
+ *                 break
+ * 
+*/
+      }
+    }
+    __pyx_L18_break:;
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":456
+ *                 break
+ * 
+ *         elapsed_ms = (time.perf_counter() - start_time) * 1000             # <<<<<<<<<<<<<<
+ * 
+ *         result['success'] = True
+*/
+    __pyx_t_11 = __pyx_v_time;
+    __Pyx_INCREF(__pyx_t_11);
+    __pyx_t_4 = 0;
+    {
+      PyObject *__pyx_callargs[2] = {__pyx_t_11, NULL};
+      __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_perf_counter, __pyx_callargs+__pyx_t_4, (1-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+      __Pyx_XDECREF(__pyx_t_11); __pyx_t_11 = 0;
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 456, __pyx_L4_error)
+      __Pyx_GOTREF(__pyx_t_1);
+    }
+    __pyx_t_11 = PyNumber_Subtract(__pyx_t_1, __pyx_v_start_time); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 456, __pyx_L4_error)
+    __Pyx_GOTREF(__pyx_t_11);
+    __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+    __pyx_t_1 = __Pyx_PyLong_MultiplyObjC(__pyx_t_11, __pyx_mstate_global->__pyx_int_1000, 0x3E8, 0, 0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 456, __pyx_L4_error)
+    __Pyx_GOTREF(__pyx_t_1);
+    __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
+    __pyx_v_elapsed_ms = __pyx_t_1;
+    __pyx_t_1 = 0;
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":458
+ *         elapsed_ms = (time.perf_counter() - start_time) * 1000
+ * 
+ *         result['success'] = True             # <<<<<<<<<<<<<<
+ *         result['num_rows'] = total_rows
+ *         result['column_names'] = column_names
+*/
+    if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_success, Py_True) < 0))) __PYX_ERR(0, 458, __pyx_L4_error)
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":459
+ * 
+ *         result['success'] = True
+ *         result['num_rows'] = total_rows             # <<<<<<<<<<<<<<
+ *         result['column_names'] = column_names
+ *         result['buffer_size_mb'] = total_bytes / 1024 / 1024
+*/
+    __pyx_t_1 = __Pyx_PyLong_FromSize_t(__pyx_v_total_rows); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 459, __pyx_L4_error)
+    __Pyx_GOTREF(__pyx_t_1);
+    if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_num_rows, __pyx_t_1) < 0))) __PYX_ERR(0, 459, __pyx_L4_error)
+    __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":460
+ *         result['success'] = True
+ *         result['num_rows'] = total_rows
+ *         result['column_names'] = column_names             # <<<<<<<<<<<<<<
+ *         result['buffer_size_mb'] = total_bytes / 1024 / 1024
+ *         result['elapsed_ms'] = elapsed_ms
+*/
+    if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_column_names, __pyx_v_column_names) < 0))) __PYX_ERR(0, 460, __pyx_L4_error)
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":461
+ *         result['num_rows'] = total_rows
+ *         result['column_names'] = column_names
+ *         result['buffer_size_mb'] = total_bytes / 1024 / 1024             # <<<<<<<<<<<<<<
+ *         result['elapsed_ms'] = elapsed_ms
+ * 
+*/
+    __pyx_t_1 = PyFloat_FromDouble(((__pyx_v_total_bytes / 1024.0) / 1024.0)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 461, __pyx_L4_error)
+    __Pyx_GOTREF(__pyx_t_1);
+    if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_buffer_size_mb, __pyx_t_1) < 0))) __PYX_ERR(0, 461, __pyx_L4_error)
+    __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":462
+ *         result['column_names'] = column_names
+ *         result['buffer_size_mb'] = total_bytes / 1024 / 1024
+ *         result['elapsed_ms'] = elapsed_ms             # <<<<<<<<<<<<<<
+ * 
+ *         return result
+*/
+    if (unlikely((PyDict_SetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_elapsed_ms, __pyx_v_elapsed_ms) < 0))) __PYX_ERR(0, 462, __pyx_L4_error)
+
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":464
+ *         result['elapsed_ms'] = elapsed_ms
  * 
  *         return result             # <<<<<<<<<<<<<<
  * 
@@ -22891,7 +23204,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
     goto __pyx_L3_return;
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":420
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":467
  * 
  *     finally:
  *         if reader != NULL:             # <<<<<<<<<<<<<<
@@ -22923,7 +23236,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
         __pyx_t_17 = (__pyx_v_reader != NULL);
         if (__pyx_t_17) {
 
-          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":421
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":468
  *     finally:
  *         if reader != NULL:
  *             del reader             # <<<<<<<<<<<<<<
@@ -22932,7 +23245,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
 */
           delete __pyx_v_reader;
 
-          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":420
+          /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":467
  * 
  *     finally:
  *         if reader != NULL:             # <<<<<<<<<<<<<<
@@ -22959,7 +23272,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
       __pyx_t_17 = (__pyx_v_reader != NULL);
       if (__pyx_t_17) {
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":421
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":468
  *     finally:
  *         if reader != NULL:
  *             del reader             # <<<<<<<<<<<<<<
@@ -22968,7 +23281,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
 */
         delete __pyx_v_reader;
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":420
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":467
  * 
  *     finally:
  *         if reader != NULL:             # <<<<<<<<<<<<<<
@@ -22982,7 +23295,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
     }
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":308
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":366
  * 
  * 
  * def read_jsonl_raw(             # <<<<<<<<<<<<<<
@@ -23011,13 +23324,12 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_4read_jsonl_raw(CYTHO
   __Pyx_XDECREF(__pyx_v_data_bytes);
   __Pyx_XDECREF(__pyx_v_first_record);
   __Pyx_XDECREF(__pyx_v_elapsed_ms);
-  __Pyx_XDECREF(__pyx_v_field);
   __Pyx_XGIVEREF(__pyx_r);
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-/* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":424
+/* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":471
  * 
  * 
  * cdef uint8_t _parse_op(str op):             # <<<<<<<<<<<<<<
@@ -23036,39 +23348,39 @@ static uint8_t __pyx_f_7opteryx_8compiled_4rugo_6_jsonl__parse_op(PyObject *__py
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_parse_op", 0);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":426
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":473
  * cdef uint8_t _parse_op(str op):
  *     ops = {
  *         '==': 0,  # EQ             # <<<<<<<<<<<<<<
  *         '!=': 1,  # NE
  *         '<': 2,   # LT
 */
-  __pyx_t_1 = __Pyx_PyDict_NewPresized(6); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 426, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyDict_NewPresized(6); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 473, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_kp_u__6, __pyx_mstate_global->__pyx_int_0) < (0)) __PYX_ERR(0, 426, __pyx_L1_error)
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_kp_u__7, __pyx_mstate_global->__pyx_int_1) < (0)) __PYX_ERR(0, 426, __pyx_L1_error)
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_kp_u__8, __pyx_mstate_global->__pyx_int_2) < (0)) __PYX_ERR(0, 426, __pyx_L1_error)
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_kp_u__9, __pyx_mstate_global->__pyx_int_3) < (0)) __PYX_ERR(0, 426, __pyx_L1_error)
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_kp_u__3, __pyx_mstate_global->__pyx_int_4) < (0)) __PYX_ERR(0, 426, __pyx_L1_error)
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_kp_u__10, __pyx_mstate_global->__pyx_int_5) < (0)) __PYX_ERR(0, 426, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_kp_u__6, __pyx_mstate_global->__pyx_int_0) < (0)) __PYX_ERR(0, 473, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_kp_u__7, __pyx_mstate_global->__pyx_int_1) < (0)) __PYX_ERR(0, 473, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_kp_u__8, __pyx_mstate_global->__pyx_int_2) < (0)) __PYX_ERR(0, 473, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_kp_u__9, __pyx_mstate_global->__pyx_int_3) < (0)) __PYX_ERR(0, 473, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_kp_u__3, __pyx_mstate_global->__pyx_int_4) < (0)) __PYX_ERR(0, 473, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_kp_u__10, __pyx_mstate_global->__pyx_int_5) < (0)) __PYX_ERR(0, 473, __pyx_L1_error)
   __pyx_v_ops = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":433
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":480
  *         '>=': 5,  # GE
  *     }
  *     return ops.get(op, 0)             # <<<<<<<<<<<<<<
  * 
  * 
 */
-  __pyx_t_1 = __Pyx_PyDict_GetItemDefault(__pyx_v_ops, __pyx_v_op, __pyx_mstate_global->__pyx_int_0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 433, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyDict_GetItemDefault(__pyx_v_ops, __pyx_v_op, __pyx_mstate_global->__pyx_int_0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 480, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_2 = __Pyx_PyLong_As_uint8_t(__pyx_t_1); if (unlikely((__pyx_t_2 == ((uint8_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 433, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_As_uint8_t(__pyx_t_1); if (unlikely((__pyx_t_2 == ((uint8_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 480, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_r = __pyx_t_2;
   goto __pyx_L0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":424
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":471
  * 
  * 
  * cdef uint8_t _parse_op(str op):             # <<<<<<<<<<<<<<
@@ -23087,7 +23399,7 @@ static uint8_t __pyx_f_7opteryx_8compiled_4rugo_6_jsonl__parse_op(PyObject *__py
   return __pyx_r;
 }
 
-/* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":436
+/* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":483
  * 
  * 
  * cdef list _build_vectors_from_chunks(             # <<<<<<<<<<<<<<
@@ -23122,19 +23434,19 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_build_vectors_from_chunks", 0);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":446
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":493
  *     No Python per-row iteration.
  *     """
  *     cdef list vectors = []             # <<<<<<<<<<<<<<
  *     cdef StringColumnResult chunk_col
  *     cdef bytes buf_bytes
 */
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 446, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 493, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_vectors = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":454
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":501
  *     cdef OrdinalPredictor predictor
  * 
  *     for col_name in column_names:             # <<<<<<<<<<<<<<
@@ -23143,7 +23455,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
 */
   if (unlikely(__pyx_v_column_names == Py_None)) {
     PyErr_SetString(PyExc_TypeError, "'NoneType' object is not iterable");
-    __PYX_ERR(0, 454, __pyx_L1_error)
+    __PYX_ERR(0, 501, __pyx_L1_error)
   }
   __pyx_t_1 = __pyx_v_column_names; __Pyx_INCREF(__pyx_t_1);
   __pyx_t_2 = 0;
@@ -23151,18 +23463,18 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
     {
       Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_1);
       #if !CYTHON_ASSUME_SAFE_SIZE
-      if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 454, __pyx_L1_error)
+      if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 501, __pyx_L1_error)
       #endif
       if (__pyx_t_2 >= __pyx_temp) break;
     }
     __pyx_t_3 = __Pyx_PyList_GetItemRefFast(__pyx_t_1, __pyx_t_2, __Pyx_ReferenceSharing_OwnStrongReference);
     ++__pyx_t_2;
-    if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 454, __pyx_L1_error)
+    if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 501, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __Pyx_XDECREF_SET(__pyx_v_col_name, __pyx_t_3);
     __pyx_t_3 = 0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":455
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":502
  * 
  *     for col_name in column_names:
  *         col_name_cpp = col_name.encode('utf-8')             # <<<<<<<<<<<<<<
@@ -23176,14 +23488,14 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
       PyObject *__pyx_callargs[2] = {__pyx_t_4, __pyx_mstate_global->__pyx_kp_u_utf_8};
       __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_5, (2-__pyx_t_5) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
-      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 455, __pyx_L1_error)
+      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 502, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
     }
-    __pyx_t_6 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_3); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 455, __pyx_L1_error)
+    __pyx_t_6 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_3); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 502, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
     __pyx_v_col_name_cpp = __PYX_STD_MOVE_IF_SUPPORTED(__pyx_t_6);
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":458
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":505
  * 
  *         # Extract first chunk to get type hint
  *         if len(chunk_buffers) == 0:             # <<<<<<<<<<<<<<
@@ -23192,13 +23504,13 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
 */
     if (unlikely(__pyx_v_chunk_buffers == Py_None)) {
       PyErr_SetString(PyExc_TypeError, "object of type 'NoneType' has no len()");
-      __PYX_ERR(0, 458, __pyx_L1_error)
+      __PYX_ERR(0, 505, __pyx_L1_error)
     }
-    __pyx_t_7 = __Pyx_PyList_GET_SIZE(__pyx_v_chunk_buffers); if (unlikely(__pyx_t_7 == ((Py_ssize_t)-1))) __PYX_ERR(0, 458, __pyx_L1_error)
+    __pyx_t_7 = __Pyx_PyList_GET_SIZE(__pyx_v_chunk_buffers); if (unlikely(__pyx_t_7 == ((Py_ssize_t)-1))) __PYX_ERR(0, 505, __pyx_L1_error)
     __pyx_t_8 = (__pyx_t_7 == 0);
     if (__pyx_t_8) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":459
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":506
  *         # Extract first chunk to get type hint
  *         if len(chunk_buffers) == 0:
  *             continue             # <<<<<<<<<<<<<<
@@ -23207,7 +23519,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
 */
       goto __pyx_L3_continue;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":458
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":505
  * 
  *         # Extract first chunk to get type hint
  *         if len(chunk_buffers) == 0:             # <<<<<<<<<<<<<<
@@ -23216,7 +23528,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":461
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":508
  *             continue
  * 
  *         buf_bytes = <bytes>chunk_buffers[0]             # <<<<<<<<<<<<<<
@@ -23225,9 +23537,9 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
 */
     if (unlikely(__pyx_v_chunk_buffers == Py_None)) {
       PyErr_SetString(PyExc_TypeError, "'NoneType' object is not subscriptable");
-      __PYX_ERR(0, 461, __pyx_L1_error)
+      __PYX_ERR(0, 508, __pyx_L1_error)
     }
-    __pyx_t_3 = __Pyx_GetItemInt_List(__pyx_v_chunk_buffers, 0, long, 1, __Pyx_PyLong_From_long, 1, 0, 1, 1, __Pyx_ReferenceSharing_FunctionArgument); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 461, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_GetItemInt_List(__pyx_v_chunk_buffers, 0, long, 1, __Pyx_PyLong_From_long, 1, 0, 1, 1, __Pyx_ReferenceSharing_FunctionArgument); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 508, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __pyx_t_4 = __pyx_t_3;
     __Pyx_INCREF(__pyx_t_4);
@@ -23235,7 +23547,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
     __Pyx_XDECREF_SET(__pyx_v_buf_bytes, ((PyObject*)__pyx_t_4));
     __pyx_t_4 = 0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":462
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":509
  * 
  *         buf_bytes = <bytes>chunk_buffers[0]
  *         buf_ptr = <const uint8_t*>buf_bytes             # <<<<<<<<<<<<<<
@@ -23244,12 +23556,12 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
 */
     if (unlikely(__pyx_v_buf_bytes == Py_None)) {
       PyErr_SetString(PyExc_TypeError, "expected bytes, NoneType found");
-      __PYX_ERR(0, 462, __pyx_L1_error)
+      __PYX_ERR(0, 509, __pyx_L1_error)
     }
-    __pyx_t_9 = __Pyx_PyBytes_AsUString(__pyx_v_buf_bytes); if (unlikely((!__pyx_t_9) && PyErr_Occurred())) __PYX_ERR(0, 462, __pyx_L1_error)
+    __pyx_t_9 = __Pyx_PyBytes_AsUString(__pyx_v_buf_bytes); if (unlikely((!__pyx_t_9) && PyErr_Occurred())) __PYX_ERR(0, 509, __pyx_L1_error)
     __pyx_v_buf_ptr = ((uint8_t const *)__pyx_t_9);
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":465
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":512
  *         chunk_col = extract_column(
  *             buf_ptr,
  *             <const vector[vector[FieldSpan]]&>chunk_records[0],             # <<<<<<<<<<<<<<
@@ -23258,14 +23570,14 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
 */
     if (unlikely(__pyx_v_chunk_records == Py_None)) {
       PyErr_SetString(PyExc_TypeError, "'NoneType' object is not subscriptable");
-      __PYX_ERR(0, 465, __pyx_L1_error)
+      __PYX_ERR(0, 512, __pyx_L1_error)
     }
-    __pyx_t_4 = __Pyx_GetItemInt_List(__pyx_v_chunk_records, 0, long, 1, __Pyx_PyLong_From_long, 1, 0, 1, 1, __Pyx_ReferenceSharing_FunctionArgument); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 465, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_GetItemInt_List(__pyx_v_chunk_records, 0, long, 1, __Pyx_PyLong_From_long, 1, 0, 1, 1, __Pyx_ReferenceSharing_FunctionArgument); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 512, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
-    __pyx_t_10 = __pyx_convert_vector_from_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(__pyx_t_4); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 465, __pyx_L1_error)
+    __pyx_t_10 = __pyx_convert_vector_from_py_std_3a__3a_vector_3c_struct__rugo_3a__3a__jsonl_3a__3a_FieldSpan_3e___(__pyx_t_4); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 512, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":463
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":510
  *         buf_bytes = <bytes>chunk_buffers[0]
  *         buf_ptr = <const uint8_t*>buf_bytes
  *         chunk_col = extract_column(             # <<<<<<<<<<<<<<
@@ -23274,19 +23586,19 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
 */
     __pyx_v_chunk_col = rugo::_jsonl::extract_column(__pyx_v_buf_ptr, ((std::vector<std::vector<struct rugo::_jsonl::FieldSpan> >  const &)__pyx_t_10), __pyx_v_col_name_cpp, __pyx_v_predictor);
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":471
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":518
  * 
  *         # Build StringVector from extracted data
  *         vec = _string_vector_from_result(chunk_col)             # <<<<<<<<<<<<<<
  * 
  *         # Cast to inferred type and add to vectors
 */
-    __pyx_t_4 = __pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_result(__pyx_v_chunk_col); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 471, __pyx_L1_error)
+    __pyx_t_4 = __pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_result(__pyx_v_chunk_col); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 518, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __Pyx_XDECREF_SET(__pyx_v_vec, __pyx_t_4);
     __pyx_t_4 = 0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":474
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":521
  * 
  *         # Cast to inferred type and add to vectors
  *         if vec is not None:             # <<<<<<<<<<<<<<
@@ -23296,16 +23608,16 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
     __pyx_t_8 = (__pyx_v_vec != Py_None);
     if (__pyx_t_8) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":475
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":522
  *         # Cast to inferred type and add to vectors
  *         if vec is not None:
  *             vectors.append(vec)             # <<<<<<<<<<<<<<
  * 
  *     return vectors
 */
-      __pyx_t_11 = __Pyx_PyList_Append(__pyx_v_vectors, __pyx_v_vec); if (unlikely(__pyx_t_11 == ((int)-1))) __PYX_ERR(0, 475, __pyx_L1_error)
+      __pyx_t_11 = __Pyx_PyList_Append(__pyx_v_vectors, __pyx_v_vec); if (unlikely(__pyx_t_11 == ((int)-1))) __PYX_ERR(0, 522, __pyx_L1_error)
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":474
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":521
  * 
  *         # Cast to inferred type and add to vectors
  *         if vec is not None:             # <<<<<<<<<<<<<<
@@ -23314,7 +23626,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":454
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":501
  *     cdef OrdinalPredictor predictor
  * 
  *     for col_name in column_names:             # <<<<<<<<<<<<<<
@@ -23325,7 +23637,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":477
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":524
  *             vectors.append(vec)
  * 
  *     return vectors             # <<<<<<<<<<<<<<
@@ -23337,7 +23649,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
   __pyx_r = __pyx_v_vectors;
   goto __pyx_L0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":436
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":483
  * 
  * 
  * cdef list _build_vectors_from_chunks(             # <<<<<<<<<<<<<<
@@ -23362,7 +23674,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__build_vectors_from_ch
   return __pyx_r;
 }
 
-/* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":480
+/* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":527
  * 
  * 
  * cdef _string_vector_from_result(StringColumnResult& scr):             # <<<<<<<<<<<<<<
@@ -23391,7 +23703,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_string_vector_from_result", 0);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":482
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":529
  * cdef _string_vector_from_result(StringColumnResult& scr):
  *     """Build StringVector from StringColumnResult and apply type casting."""
  *     cdef size_t num_rows = scr.num_rows             # <<<<<<<<<<<<<<
@@ -23401,7 +23713,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
   __pyx_t_1 = __pyx_v_scr.num_rows;
   __pyx_v_num_rows = __pyx_t_1;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":483
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":530
  *     """Build StringVector from StringColumnResult and apply type casting."""
  *     cdef size_t num_rows = scr.num_rows
  *     cdef size_t bitmap_bytes = (num_rows + 7) >> 3             # <<<<<<<<<<<<<<
@@ -23410,7 +23722,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
 */
   __pyx_v_bitmap_bytes = ((__pyx_v_num_rows + 7) >> 3);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":484
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":531
  *     cdef size_t num_rows = scr.num_rows
  *     cdef size_t bitmap_bytes = (num_rows + 7) >> 3
  *     cdef uint8_t* owned_bitmap = NULL             # <<<<<<<<<<<<<<
@@ -23419,7 +23731,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
 */
   __pyx_v_owned_bitmap = NULL;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":492
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":539
  *     cdef BoolVector bool_vec
  * 
  *     if num_rows == 0:             # <<<<<<<<<<<<<<
@@ -23429,7 +23741,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
   __pyx_t_2 = (__pyx_v_num_rows == 0);
   if (__pyx_t_2) {
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":493
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":540
  * 
  *     if num_rows == 0:
  *         return None             # <<<<<<<<<<<<<<
@@ -23440,7 +23752,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":492
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":539
  *     cdef BoolVector bool_vec
  * 
  *     if num_rows == 0:             # <<<<<<<<<<<<<<
@@ -23449,7 +23761,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
 */
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":496
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":543
  * 
  *     # Copy null bitmap to owned memory
  *     if scr.null_bitmap.size() > 0:             # <<<<<<<<<<<<<<
@@ -23459,7 +23771,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
   __pyx_t_2 = (__pyx_v_scr.null_bitmap.size() > 0);
   if (__pyx_t_2) {
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":497
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":544
  *     # Copy null bitmap to owned memory
  *     if scr.null_bitmap.size() > 0:
  *         owned_bitmap = <uint8_t*>malloc(bitmap_bytes)             # <<<<<<<<<<<<<<
@@ -23468,7 +23780,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
 */
     __pyx_v_owned_bitmap = ((uint8_t *)malloc(__pyx_v_bitmap_bytes));
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":498
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":545
  *     if scr.null_bitmap.size() > 0:
  *         owned_bitmap = <uint8_t*>malloc(bitmap_bytes)
  *         if owned_bitmap == NULL:             # <<<<<<<<<<<<<<
@@ -23478,16 +23790,16 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
     __pyx_t_2 = (__pyx_v_owned_bitmap == NULL);
     if (unlikely(__pyx_t_2)) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":499
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":546
  *         owned_bitmap = <uint8_t*>malloc(bitmap_bytes)
  *         if owned_bitmap == NULL:
  *             raise MemoryError()             # <<<<<<<<<<<<<<
  *         memcpy(owned_bitmap, scr.null_bitmap.data(), bitmap_bytes)
  * 
 */
-      PyErr_NoMemory(); __PYX_ERR(0, 499, __pyx_L1_error)
+      PyErr_NoMemory(); __PYX_ERR(0, 546, __pyx_L1_error)
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":498
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":545
  *     if scr.null_bitmap.size() > 0:
  *         owned_bitmap = <uint8_t*>malloc(bitmap_bytes)
  *         if owned_bitmap == NULL:             # <<<<<<<<<<<<<<
@@ -23496,7 +23808,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":500
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":547
  *         if owned_bitmap == NULL:
  *             raise MemoryError()
  *         memcpy(owned_bitmap, scr.null_bitmap.data(), bitmap_bytes)             # <<<<<<<<<<<<<<
@@ -23505,7 +23817,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
 */
     (void)(memcpy(__pyx_v_owned_bitmap, __pyx_v_scr.null_bitmap.data(), __pyx_v_bitmap_bytes));
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":496
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":543
  * 
  *     # Copy null bitmap to owned memory
  *     if scr.null_bitmap.size() > 0:             # <<<<<<<<<<<<<<
@@ -23514,7 +23826,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
 */
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":503
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":550
  * 
  *     # Build StringVector from offsets and lengths
  *     builder = StringVectorBuilder.with_estimate(num_rows, 16)             # <<<<<<<<<<<<<<
@@ -23523,7 +23835,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
 */
   __pyx_t_4 = ((PyObject *)__pyx_mstate_global->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder);
   __Pyx_INCREF(__pyx_t_4);
-  __pyx_t_5 = __Pyx_PyLong_FromSize_t(__pyx_v_num_rows); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 503, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_PyLong_FromSize_t(__pyx_v_num_rows); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 550, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   __pyx_t_1 = 0;
   {
@@ -23531,14 +23843,14 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
     __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_with_estimate, __pyx_callargs+__pyx_t_1, (3-__pyx_t_1) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
     __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 503, __pyx_L1_error)
+    if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 550, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
   }
-  if (!(likely(((__pyx_t_3) == Py_None) || likely(__Pyx_TypeTest(__pyx_t_3, __pyx_mstate_global->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder))))) __PYX_ERR(0, 503, __pyx_L1_error)
+  if (!(likely(((__pyx_t_3) == Py_None) || likely(__Pyx_TypeTest(__pyx_t_3, __pyx_mstate_global->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder))))) __PYX_ERR(0, 550, __pyx_L1_error)
   __pyx_v_builder = ((struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_t_3);
   __pyx_t_3 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":504
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":551
  *     # Build StringVector from offsets and lengths
  *     builder = StringVectorBuilder.with_estimate(num_rows, 16)
  *     for i in range(num_rows):             # <<<<<<<<<<<<<<
@@ -23550,7 +23862,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
   for (__pyx_t_7 = 0; __pyx_t_7 < __pyx_t_6; __pyx_t_7+=1) {
     __pyx_v_i = __pyx_t_7;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":505
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":552
  *     builder = StringVectorBuilder.with_estimate(num_rows, 16)
  *     for i in range(num_rows):
  *         if i < scr.lengths.size():             # <<<<<<<<<<<<<<
@@ -23560,7 +23872,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
     __pyx_t_2 = (__pyx_v_i < __pyx_v_scr.lengths.size());
     if (__pyx_t_2) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":506
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":553
  *     for i in range(num_rows):
  *         if i < scr.lengths.size():
  *             if scr.lengths[i] == 0:             # <<<<<<<<<<<<<<
@@ -23570,16 +23882,16 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
       __pyx_t_2 = ((__pyx_v_scr.lengths[__pyx_v_i]) == 0);
       if (__pyx_t_2) {
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":507
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":554
  *         if i < scr.lengths.size():
  *             if scr.lengths[i] == 0:
  *                 builder.append_null()             # <<<<<<<<<<<<<<
  *             else:
  *                 builder.append_bytes(
 */
-        ((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->append_null(__pyx_v_builder, 0); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 507, __pyx_L1_error)
+        ((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->append_null(__pyx_v_builder, 0); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 554, __pyx_L1_error)
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":506
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":553
  *     for i in range(num_rows):
  *         if i < scr.lengths.size():
  *             if scr.lengths[i] == 0:             # <<<<<<<<<<<<<<
@@ -23589,7 +23901,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
         goto __pyx_L9;
       }
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":509
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":556
  *                 builder.append_null()
  *             else:
  *                 builder.append_bytes(             # <<<<<<<<<<<<<<
@@ -23598,18 +23910,18 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
 */
       /*else*/ {
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":511
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":558
  *                 builder.append_bytes(
  *                     <const char*>(scr.data.data() + scr.offsets[i]),
  *                     scr.lengths[i]             # <<<<<<<<<<<<<<
  *                 )
  *         else:
 */
-        ((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->append_bytes(__pyx_v_builder, ((char const *)(__pyx_v_scr.data.data() + (__pyx_v_scr.offsets[__pyx_v_i]))), (__pyx_v_scr.lengths[__pyx_v_i]), 0); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 509, __pyx_L1_error)
+        ((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->append_bytes(__pyx_v_builder, ((char const *)(__pyx_v_scr.data.data() + (__pyx_v_scr.offsets[__pyx_v_i]))), (__pyx_v_scr.lengths[__pyx_v_i]), 0); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 556, __pyx_L1_error)
       }
       __pyx_L9:;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":505
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":552
  *     builder = StringVectorBuilder.with_estimate(num_rows, 16)
  *     for i in range(num_rows):
  *         if i < scr.lengths.size():             # <<<<<<<<<<<<<<
@@ -23619,7 +23931,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
       goto __pyx_L8;
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":514
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":561
  *                 )
  *         else:
  *             builder.append_null()             # <<<<<<<<<<<<<<
@@ -23627,24 +23939,24 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
  *     string_vec = builder.finish()
 */
     /*else*/ {
-      ((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->append_null(__pyx_v_builder, 0); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 514, __pyx_L1_error)
+      ((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->append_null(__pyx_v_builder, 0); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 561, __pyx_L1_error)
     }
     __pyx_L8:;
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":516
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":563
  *             builder.append_null()
  * 
  *     string_vec = builder.finish()             # <<<<<<<<<<<<<<
  *     if owned_bitmap != NULL:
  *         string_vec.ptr.null_bitmap = owned_bitmap
 */
-  __pyx_t_3 = ((PyObject *)((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->finish(__pyx_v_builder, 0)); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 516, __pyx_L1_error)
+  __pyx_t_3 = ((PyObject *)((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->finish(__pyx_v_builder, 0)); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 563, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __pyx_v_string_vec = ((struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVector *)__pyx_t_3);
   __pyx_t_3 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":517
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":564
  * 
  *     string_vec = builder.finish()
  *     if owned_bitmap != NULL:             # <<<<<<<<<<<<<<
@@ -23654,7 +23966,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
   __pyx_t_2 = (__pyx_v_owned_bitmap != NULL);
   if (__pyx_t_2) {
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":518
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":565
  *     string_vec = builder.finish()
  *     if owned_bitmap != NULL:
  *         string_vec.ptr.null_bitmap = owned_bitmap             # <<<<<<<<<<<<<<
@@ -23663,7 +23975,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
 */
     __pyx_v_string_vec->ptr->null_bitmap = __pyx_v_owned_bitmap;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":517
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":564
  * 
  *     string_vec = builder.finish()
  *     if owned_bitmap != NULL:             # <<<<<<<<<<<<<<
@@ -23672,7 +23984,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
 */
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":521
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":568
  * 
  *     # For now, return string vector; type casting deferred to caller
  *     return string_vec             # <<<<<<<<<<<<<<
@@ -23684,7 +23996,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
   __pyx_r = ((PyObject *)__pyx_v_string_vec);
   goto __pyx_L0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":480
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":527
  * 
  * 
  * cdef _string_vector_from_result(StringColumnResult& scr):             # <<<<<<<<<<<<<<
@@ -23707,7 +24019,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__string_vector_from_re
   return __pyx_r;
 }
 
-/* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":524
+/* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":571
  * 
  * 
  * cdef _draken_from_column_result(ColumnResult& cr):             # <<<<<<<<<<<<<<
@@ -23740,7 +24052,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_draken_from_column_result", 0);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":526
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":573
  * cdef _draken_from_column_result(ColumnResult& cr):
  *     """Wrap ColumnResult into Draken vector."""
  *     cdef size_t num_rows = cr.num_rows             # <<<<<<<<<<<<<<
@@ -23750,7 +24062,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
   __pyx_t_1 = __pyx_v_cr.num_rows;
   __pyx_v_num_rows = __pyx_t_1;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":527
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":574
  *     """Wrap ColumnResult into Draken vector."""
  *     cdef size_t num_rows = cr.num_rows
  *     cdef size_t bitmap_bytes = (num_rows + 7) >> 3             # <<<<<<<<<<<<<<
@@ -23759,7 +24071,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
   __pyx_v_bitmap_bytes = ((__pyx_v_num_rows + 7) >> 3);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":528
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":575
  *     cdef size_t num_rows = cr.num_rows
  *     cdef size_t bitmap_bytes = (num_rows + 7) >> 3
  *     cdef uint8_t* owned_bitmap = NULL             # <<<<<<<<<<<<<<
@@ -23768,7 +24080,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
   __pyx_v_owned_bitmap = NULL;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":529
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":576
  *     cdef size_t bitmap_bytes = (num_rows + 7) >> 3
  *     cdef uint8_t* owned_bitmap = NULL
  *     cdef uint8_t* bdata = NULL             # <<<<<<<<<<<<<<
@@ -23777,7 +24089,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
   __pyx_v_bdata = NULL;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":536
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":583
  *     cdef StringVectorBuilder builder
  * 
  *     if num_rows == 0:             # <<<<<<<<<<<<<<
@@ -23787,7 +24099,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
   __pyx_t_2 = (__pyx_v_num_rows == 0);
   if (__pyx_t_2) {
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":537
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":584
  * 
  *     if num_rows == 0:
  *         return None             # <<<<<<<<<<<<<<
@@ -23798,7 +24110,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":536
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":583
  *     cdef StringVectorBuilder builder
  * 
  *     if num_rows == 0:             # <<<<<<<<<<<<<<
@@ -23807,7 +24119,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":540
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":587
  * 
  *     # If null bitmap exists, copy it to owned heap memory (vectors require ownership)
  *     if cr.null_bitmap.size() > 0:             # <<<<<<<<<<<<<<
@@ -23817,7 +24129,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
   __pyx_t_2 = (__pyx_v_cr.null_bitmap.size() > 0);
   if (__pyx_t_2) {
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":541
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":588
  *     # If null bitmap exists, copy it to owned heap memory (vectors require ownership)
  *     if cr.null_bitmap.size() > 0:
  *         owned_bitmap = <uint8_t*>malloc(bitmap_bytes)             # <<<<<<<<<<<<<<
@@ -23826,7 +24138,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
     __pyx_v_owned_bitmap = ((uint8_t *)malloc(__pyx_v_bitmap_bytes));
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":542
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":589
  *     if cr.null_bitmap.size() > 0:
  *         owned_bitmap = <uint8_t*>malloc(bitmap_bytes)
  *         if owned_bitmap == NULL:             # <<<<<<<<<<<<<<
@@ -23836,16 +24148,16 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
     __pyx_t_2 = (__pyx_v_owned_bitmap == NULL);
     if (unlikely(__pyx_t_2)) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":543
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":590
  *         owned_bitmap = <uint8_t*>malloc(bitmap_bytes)
  *         if owned_bitmap == NULL:
  *             raise MemoryError()             # <<<<<<<<<<<<<<
  *         memcpy(owned_bitmap, cr.null_bitmap.data(), bitmap_bytes)
  * 
 */
-      PyErr_NoMemory(); __PYX_ERR(0, 543, __pyx_L1_error)
+      PyErr_NoMemory(); __PYX_ERR(0, 590, __pyx_L1_error)
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":542
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":589
  *     if cr.null_bitmap.size() > 0:
  *         owned_bitmap = <uint8_t*>malloc(bitmap_bytes)
  *         if owned_bitmap == NULL:             # <<<<<<<<<<<<<<
@@ -23854,7 +24166,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":544
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":591
  *         if owned_bitmap == NULL:
  *             raise MemoryError()
  *         memcpy(owned_bitmap, cr.null_bitmap.data(), bitmap_bytes)             # <<<<<<<<<<<<<<
@@ -23863,7 +24175,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
     (void)(memcpy(__pyx_v_owned_bitmap, __pyx_v_cr.null_bitmap.data(), __pyx_v_bitmap_bytes));
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":540
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":587
  * 
  *     # If null bitmap exists, copy it to owned heap memory (vectors require ownership)
  *     if cr.null_bitmap.size() > 0:             # <<<<<<<<<<<<<<
@@ -23872,7 +24184,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":546
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":593
  *         memcpy(owned_bitmap, cr.null_bitmap.data(), bitmap_bytes)
  * 
  *     if cr.col_type == ColumnType.Int64:             # <<<<<<<<<<<<<<
@@ -23882,7 +24194,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
   __pyx_t_2 = (__pyx_v_cr.col_type == rugo::_jsonl::ColumnType::Int64);
   if (__pyx_t_2) {
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":547
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":594
  * 
  *     if cr.col_type == ColumnType.Int64:
  *         vec_i64 = Int64Vector(num_rows)             # <<<<<<<<<<<<<<
@@ -23890,7 +24202,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
  *             memcpy(<void*>vec_i64.ptr.data, cr.data.data(), num_rows * 8)
 */
     __pyx_t_4 = NULL;
-    __pyx_t_5 = __Pyx_PyLong_FromSize_t(__pyx_v_num_rows); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 547, __pyx_L1_error)
+    __pyx_t_5 = __Pyx_PyLong_FromSize_t(__pyx_v_num_rows); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 594, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_5);
     __pyx_t_1 = 1;
     {
@@ -23898,13 +24210,13 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
       __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)__pyx_mstate_global->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_12int64_vector_Int64Vector, __pyx_callargs+__pyx_t_1, (2-__pyx_t_1) | (__pyx_t_1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 547, __pyx_L1_error)
+      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 594, __pyx_L1_error)
       __Pyx_GOTREF((PyObject *)__pyx_t_3);
     }
     __pyx_v_vec_i64 = ((struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_12int64_vector_Int64Vector *)__pyx_t_3);
     __pyx_t_3 = 0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":548
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":595
  *     if cr.col_type == ColumnType.Int64:
  *         vec_i64 = Int64Vector(num_rows)
  *         if cr.data.size() >= num_rows * 8:             # <<<<<<<<<<<<<<
@@ -23914,7 +24226,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
     __pyx_t_2 = (__pyx_v_cr.data.size() >= (__pyx_v_num_rows * 8));
     if (__pyx_t_2) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":549
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":596
  *         vec_i64 = Int64Vector(num_rows)
  *         if cr.data.size() >= num_rows * 8:
  *             memcpy(<void*>vec_i64.ptr.data, cr.data.data(), num_rows * 8)             # <<<<<<<<<<<<<<
@@ -23923,7 +24235,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
       (void)(memcpy(((void *)__pyx_v_vec_i64->ptr->data), __pyx_v_cr.data.data(), (__pyx_v_num_rows * 8)));
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":548
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":595
  *     if cr.col_type == ColumnType.Int64:
  *         vec_i64 = Int64Vector(num_rows)
  *         if cr.data.size() >= num_rows * 8:             # <<<<<<<<<<<<<<
@@ -23932,7 +24244,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":550
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":597
  *         if cr.data.size() >= num_rows * 8:
  *             memcpy(<void*>vec_i64.ptr.data, cr.data.data(), num_rows * 8)
  *         if owned_bitmap != NULL:             # <<<<<<<<<<<<<<
@@ -23942,7 +24254,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
     __pyx_t_2 = (__pyx_v_owned_bitmap != NULL);
     if (__pyx_t_2) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":551
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":598
  *             memcpy(<void*>vec_i64.ptr.data, cr.data.data(), num_rows * 8)
  *         if owned_bitmap != NULL:
  *             vec_i64.ptr.null_bitmap = owned_bitmap             # <<<<<<<<<<<<<<
@@ -23951,7 +24263,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
       __pyx_v_vec_i64->ptr->null_bitmap = __pyx_v_owned_bitmap;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":550
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":597
  *         if cr.data.size() >= num_rows * 8:
  *             memcpy(<void*>vec_i64.ptr.data, cr.data.data(), num_rows * 8)
  *         if owned_bitmap != NULL:             # <<<<<<<<<<<<<<
@@ -23960,7 +24272,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":552
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":599
  *         if owned_bitmap != NULL:
  *             vec_i64.ptr.null_bitmap = owned_bitmap
  *         return vec_i64             # <<<<<<<<<<<<<<
@@ -23972,7 +24284,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
     __pyx_r = ((PyObject *)__pyx_v_vec_i64);
     goto __pyx_L0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":546
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":593
  *         memcpy(owned_bitmap, cr.null_bitmap.data(), bitmap_bytes)
  * 
  *     if cr.col_type == ColumnType.Int64:             # <<<<<<<<<<<<<<
@@ -23981,7 +24293,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":554
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":601
  *         return vec_i64
  * 
  *     elif cr.col_type == ColumnType.Float64:             # <<<<<<<<<<<<<<
@@ -23991,7 +24303,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
   __pyx_t_2 = (__pyx_v_cr.col_type == rugo::_jsonl::ColumnType::Float64);
   if (__pyx_t_2) {
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":555
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":602
  * 
  *     elif cr.col_type == ColumnType.Float64:
  *         vec_f64 = Float64Vector(num_rows)             # <<<<<<<<<<<<<<
@@ -23999,7 +24311,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
  *             memcpy(<void*>vec_f64.ptr.data, cr.data.data(), num_rows * 8)
 */
     __pyx_t_5 = NULL;
-    __pyx_t_4 = __Pyx_PyLong_FromSize_t(__pyx_v_num_rows); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 555, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyLong_FromSize_t(__pyx_v_num_rows); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 602, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __pyx_t_1 = 1;
     {
@@ -24007,13 +24319,13 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
       __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)__pyx_mstate_global->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_14float64_vector_Float64Vector, __pyx_callargs+__pyx_t_1, (2-__pyx_t_1) | (__pyx_t_1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
       __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 555, __pyx_L1_error)
+      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 602, __pyx_L1_error)
       __Pyx_GOTREF((PyObject *)__pyx_t_3);
     }
     __pyx_v_vec_f64 = ((struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14float64_vector_Float64Vector *)__pyx_t_3);
     __pyx_t_3 = 0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":556
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":603
  *     elif cr.col_type == ColumnType.Float64:
  *         vec_f64 = Float64Vector(num_rows)
  *         if cr.data.size() >= num_rows * 8:             # <<<<<<<<<<<<<<
@@ -24023,7 +24335,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
     __pyx_t_2 = (__pyx_v_cr.data.size() >= (__pyx_v_num_rows * 8));
     if (__pyx_t_2) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":557
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":604
  *         vec_f64 = Float64Vector(num_rows)
  *         if cr.data.size() >= num_rows * 8:
  *             memcpy(<void*>vec_f64.ptr.data, cr.data.data(), num_rows * 8)             # <<<<<<<<<<<<<<
@@ -24032,7 +24344,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
       (void)(memcpy(((void *)__pyx_v_vec_f64->ptr->data), __pyx_v_cr.data.data(), (__pyx_v_num_rows * 8)));
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":556
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":603
  *     elif cr.col_type == ColumnType.Float64:
  *         vec_f64 = Float64Vector(num_rows)
  *         if cr.data.size() >= num_rows * 8:             # <<<<<<<<<<<<<<
@@ -24041,7 +24353,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":558
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":605
  *         if cr.data.size() >= num_rows * 8:
  *             memcpy(<void*>vec_f64.ptr.data, cr.data.data(), num_rows * 8)
  *         if owned_bitmap != NULL:             # <<<<<<<<<<<<<<
@@ -24051,7 +24363,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
     __pyx_t_2 = (__pyx_v_owned_bitmap != NULL);
     if (__pyx_t_2) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":559
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":606
  *             memcpy(<void*>vec_f64.ptr.data, cr.data.data(), num_rows * 8)
  *         if owned_bitmap != NULL:
  *             vec_f64.ptr.null_bitmap = owned_bitmap             # <<<<<<<<<<<<<<
@@ -24060,7 +24372,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
       __pyx_v_vec_f64->ptr->null_bitmap = __pyx_v_owned_bitmap;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":558
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":605
  *         if cr.data.size() >= num_rows * 8:
  *             memcpy(<void*>vec_f64.ptr.data, cr.data.data(), num_rows * 8)
  *         if owned_bitmap != NULL:             # <<<<<<<<<<<<<<
@@ -24069,7 +24381,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":560
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":607
  *         if owned_bitmap != NULL:
  *             vec_f64.ptr.null_bitmap = owned_bitmap
  *         return vec_f64             # <<<<<<<<<<<<<<
@@ -24081,7 +24393,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
     __pyx_r = ((PyObject *)__pyx_v_vec_f64);
     goto __pyx_L0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":554
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":601
  *         return vec_i64
  * 
  *     elif cr.col_type == ColumnType.Float64:             # <<<<<<<<<<<<<<
@@ -24090,7 +24402,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":562
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":609
  *         return vec_f64
  * 
  *     elif cr.col_type == ColumnType.Bool:             # <<<<<<<<<<<<<<
@@ -24100,7 +24412,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
   __pyx_t_2 = (__pyx_v_cr.col_type == rugo::_jsonl::ColumnType::Bool);
   if (__pyx_t_2) {
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":563
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":610
  * 
  *     elif cr.col_type == ColumnType.Bool:
  *         vec_bool = BoolVector(num_rows)             # <<<<<<<<<<<<<<
@@ -24108,7 +24420,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
  *         if cr.data.size() > 0 and bdata != NULL:
 */
     __pyx_t_4 = NULL;
-    __pyx_t_5 = __Pyx_PyLong_FromSize_t(__pyx_v_num_rows); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 563, __pyx_L1_error)
+    __pyx_t_5 = __Pyx_PyLong_FromSize_t(__pyx_v_num_rows); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 610, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_5);
     __pyx_t_1 = 1;
     {
@@ -24116,13 +24428,13 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
       __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)__pyx_mstate_global->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_11bool_vector_BoolVector, __pyx_callargs+__pyx_t_1, (2-__pyx_t_1) | (__pyx_t_1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 563, __pyx_L1_error)
+      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 610, __pyx_L1_error)
       __Pyx_GOTREF((PyObject *)__pyx_t_3);
     }
     __pyx_v_vec_bool = ((struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_11bool_vector_BoolVector *)__pyx_t_3);
     __pyx_t_3 = 0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":564
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":611
  *     elif cr.col_type == ColumnType.Bool:
  *         vec_bool = BoolVector(num_rows)
  *         bdata = <uint8_t*>vec_bool.ptr.data             # <<<<<<<<<<<<<<
@@ -24131,7 +24443,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
     __pyx_v_bdata = ((uint8_t *)__pyx_v_vec_bool->ptr->data);
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":565
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":612
  *         vec_bool = BoolVector(num_rows)
  *         bdata = <uint8_t*>vec_bool.ptr.data
  *         if cr.data.size() > 0 and bdata != NULL:             # <<<<<<<<<<<<<<
@@ -24149,7 +24461,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
     __pyx_L12_bool_binop_done:;
     if (__pyx_t_2) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":566
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":613
  *         bdata = <uint8_t*>vec_bool.ptr.data
  *         if cr.data.size() > 0 and bdata != NULL:
  *             memcpy(bdata, cr.data.data(), (num_rows + 7) >> 3)             # <<<<<<<<<<<<<<
@@ -24158,7 +24470,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
       (void)(memcpy(__pyx_v_bdata, __pyx_v_cr.data.data(), ((__pyx_v_num_rows + 7) >> 3)));
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":565
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":612
  *         vec_bool = BoolVector(num_rows)
  *         bdata = <uint8_t*>vec_bool.ptr.data
  *         if cr.data.size() > 0 and bdata != NULL:             # <<<<<<<<<<<<<<
@@ -24167,7 +24479,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":567
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":614
  *         if cr.data.size() > 0 and bdata != NULL:
  *             memcpy(bdata, cr.data.data(), (num_rows + 7) >> 3)
  *         if owned_bitmap != NULL:             # <<<<<<<<<<<<<<
@@ -24177,7 +24489,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
     __pyx_t_2 = (__pyx_v_owned_bitmap != NULL);
     if (__pyx_t_2) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":568
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":615
  *             memcpy(bdata, cr.data.data(), (num_rows + 7) >> 3)
  *         if owned_bitmap != NULL:
  *             vec_bool.ptr.null_bitmap = owned_bitmap             # <<<<<<<<<<<<<<
@@ -24186,7 +24498,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
       __pyx_v_vec_bool->ptr->null_bitmap = __pyx_v_owned_bitmap;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":567
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":614
  *         if cr.data.size() > 0 and bdata != NULL:
  *             memcpy(bdata, cr.data.data(), (num_rows + 7) >> 3)
  *         if owned_bitmap != NULL:             # <<<<<<<<<<<<<<
@@ -24195,7 +24507,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":569
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":616
  *         if owned_bitmap != NULL:
  *             vec_bool.ptr.null_bitmap = owned_bitmap
  *         return vec_bool             # <<<<<<<<<<<<<<
@@ -24207,7 +24519,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
     __pyx_r = ((PyObject *)__pyx_v_vec_bool);
     goto __pyx_L0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":562
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":609
  *         return vec_f64
  * 
  *     elif cr.col_type == ColumnType.Bool:             # <<<<<<<<<<<<<<
@@ -24216,7 +24528,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":571
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":618
  *         return vec_bool
  * 
  *     elif cr.col_type == ColumnType.String:             # <<<<<<<<<<<<<<
@@ -24226,7 +24538,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
   __pyx_t_2 = (__pyx_v_cr.col_type == rugo::_jsonl::ColumnType::String);
   if (__pyx_t_2) {
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":572
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":619
  * 
  *     elif cr.col_type == ColumnType.String:
  *         if owned_bitmap != NULL:             # <<<<<<<<<<<<<<
@@ -24236,7 +24548,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
     __pyx_t_2 = (__pyx_v_owned_bitmap != NULL);
     if (__pyx_t_2) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":573
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":620
  *     elif cr.col_type == ColumnType.String:
  *         if owned_bitmap != NULL:
  *             free(owned_bitmap)             # <<<<<<<<<<<<<<
@@ -24245,7 +24557,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
       free(__pyx_v_owned_bitmap);
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":572
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":619
  * 
  *     elif cr.col_type == ColumnType.String:
  *         if owned_bitmap != NULL:             # <<<<<<<<<<<<<<
@@ -24254,7 +24566,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":575
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":622
  *             free(owned_bitmap)
  *         # String vector: build from spans
  *         builder = StringVectorBuilder.with_estimate(num_rows, 16)             # <<<<<<<<<<<<<<
@@ -24263,7 +24575,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
     __pyx_t_5 = ((PyObject *)__pyx_mstate_global->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder);
     __Pyx_INCREF(__pyx_t_5);
-    __pyx_t_4 = __Pyx_PyLong_FromSize_t(__pyx_v_num_rows); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 575, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyLong_FromSize_t(__pyx_v_num_rows); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 622, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __pyx_t_1 = 0;
     {
@@ -24271,14 +24583,14 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
       __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_with_estimate, __pyx_callargs+__pyx_t_1, (3-__pyx_t_1) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
       __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 575, __pyx_L1_error)
+      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 622, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
     }
-    if (!(likely(((__pyx_t_3) == Py_None) || likely(__Pyx_TypeTest(__pyx_t_3, __pyx_mstate_global->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder))))) __PYX_ERR(0, 575, __pyx_L1_error)
+    if (!(likely(((__pyx_t_3) == Py_None) || likely(__Pyx_TypeTest(__pyx_t_3, __pyx_mstate_global->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder))))) __PYX_ERR(0, 622, __pyx_L1_error)
     __pyx_v_builder = ((struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_t_3);
     __pyx_t_3 = 0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":576
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":623
  *         # String vector: build from spans
  *         builder = StringVectorBuilder.with_estimate(num_rows, 16)
  *         for i in range(num_rows):             # <<<<<<<<<<<<<<
@@ -24290,7 +24602,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
     for (__pyx_t_8 = 0; __pyx_t_8 < __pyx_t_7; __pyx_t_8+=1) {
       __pyx_v_i = __pyx_t_8;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":577
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":624
  *         builder = StringVectorBuilder.with_estimate(num_rows, 16)
  *         for i in range(num_rows):
  *             if i < cr.str_lengths.size() and cr.str_lengths[i] == 0:             # <<<<<<<<<<<<<<
@@ -24308,16 +24620,16 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
       __pyx_L19_bool_binop_done:;
       if (__pyx_t_2) {
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":578
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":625
  *         for i in range(num_rows):
  *             if i < cr.str_lengths.size() and cr.str_lengths[i] == 0:
  *                 builder.append_null()             # <<<<<<<<<<<<<<
  *             elif i < cr.str_lengths.size() and cr.str_data.size() > 0:
  *                 builder.append_bytes(
 */
-        ((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->append_null(__pyx_v_builder, 0); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 578, __pyx_L1_error)
+        ((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->append_null(__pyx_v_builder, 0); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 625, __pyx_L1_error)
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":577
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":624
  *         builder = StringVectorBuilder.with_estimate(num_rows, 16)
  *         for i in range(num_rows):
  *             if i < cr.str_lengths.size() and cr.str_lengths[i] == 0:             # <<<<<<<<<<<<<<
@@ -24327,7 +24639,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
         goto __pyx_L18;
       }
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":579
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":626
  *             if i < cr.str_lengths.size() and cr.str_lengths[i] == 0:
  *                 builder.append_null()
  *             elif i < cr.str_lengths.size() and cr.str_data.size() > 0:             # <<<<<<<<<<<<<<
@@ -24345,16 +24657,16 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
       __pyx_L21_bool_binop_done:;
       if (__pyx_t_2) {
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":580
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":627
  *                 builder.append_null()
  *             elif i < cr.str_lengths.size() and cr.str_data.size() > 0:
  *                 builder.append_bytes(             # <<<<<<<<<<<<<<
  *                     <const char*>(cr.str_data.data() + cr.str_offsets[i]),
  *                     cr.str_lengths[i]
 */
-        ((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->append_bytes(__pyx_v_builder, ((char const *)(__pyx_v_cr.str_data.data() + (__pyx_v_cr.str_offsets[__pyx_v_i]))), (__pyx_v_cr.str_lengths[__pyx_v_i]), 0); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 580, __pyx_L1_error)
+        ((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->append_bytes(__pyx_v_builder, ((char const *)(__pyx_v_cr.str_data.data() + (__pyx_v_cr.str_offsets[__pyx_v_i]))), (__pyx_v_cr.str_lengths[__pyx_v_i]), 0); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 627, __pyx_L1_error)
 
-        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":579
+        /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":626
  *             if i < cr.str_lengths.size() and cr.str_lengths[i] == 0:
  *                 builder.append_null()
  *             elif i < cr.str_lengths.size() and cr.str_data.size() > 0:             # <<<<<<<<<<<<<<
@@ -24364,7 +24676,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
         goto __pyx_L18;
       }
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":585
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":632
  *                 )
  *             else:
  *                 builder.append_null()             # <<<<<<<<<<<<<<
@@ -24372,12 +24684,12 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
  * 
 */
       /*else*/ {
-        ((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->append_null(__pyx_v_builder, 0); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 585, __pyx_L1_error)
+        ((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->append_null(__pyx_v_builder, 0); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 632, __pyx_L1_error)
       }
       __pyx_L18:;
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":586
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":633
  *             else:
  *                 builder.append_null()
  *         return builder.finish()             # <<<<<<<<<<<<<<
@@ -24385,13 +24697,13 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
  *     else:
 */
     __Pyx_XDECREF(__pyx_r);
-    __pyx_t_3 = ((PyObject *)((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->finish(__pyx_v_builder, 0)); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 586, __pyx_L1_error)
+    __pyx_t_3 = ((PyObject *)((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->finish(__pyx_v_builder, 0)); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 633, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __pyx_r = __pyx_t_3;
     __pyx_t_3 = 0;
     goto __pyx_L0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":571
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":618
  *         return vec_bool
  * 
  *     elif cr.col_type == ColumnType.String:             # <<<<<<<<<<<<<<
@@ -24400,7 +24712,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":590
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":637
  *     else:
  *         # Null column
  *         if owned_bitmap != NULL:             # <<<<<<<<<<<<<<
@@ -24411,7 +24723,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
     __pyx_t_2 = (__pyx_v_owned_bitmap != NULL);
     if (__pyx_t_2) {
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":591
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":638
  *         # Null column
  *         if owned_bitmap != NULL:
  *             free(owned_bitmap)             # <<<<<<<<<<<<<<
@@ -24420,7 +24732,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
       free(__pyx_v_owned_bitmap);
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":590
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":637
  *     else:
  *         # Null column
  *         if owned_bitmap != NULL:             # <<<<<<<<<<<<<<
@@ -24429,7 +24741,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":592
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":639
  *         if owned_bitmap != NULL:
  *             free(owned_bitmap)
  *         builder = StringVectorBuilder.with_estimate(num_rows, 0)             # <<<<<<<<<<<<<<
@@ -24438,7 +24750,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
 */
     __pyx_t_4 = ((PyObject *)__pyx_mstate_global->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder);
     __Pyx_INCREF(__pyx_t_4);
-    __pyx_t_5 = __Pyx_PyLong_FromSize_t(__pyx_v_num_rows); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 592, __pyx_L1_error)
+    __pyx_t_5 = __Pyx_PyLong_FromSize_t(__pyx_v_num_rows); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 639, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_5);
     __pyx_t_1 = 0;
     {
@@ -24446,14 +24758,14 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
       __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_with_estimate, __pyx_callargs+__pyx_t_1, (3-__pyx_t_1) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 592, __pyx_L1_error)
+      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 639, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
     }
-    if (!(likely(((__pyx_t_3) == Py_None) || likely(__Pyx_TypeTest(__pyx_t_3, __pyx_mstate_global->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder))))) __PYX_ERR(0, 592, __pyx_L1_error)
+    if (!(likely(((__pyx_t_3) == Py_None) || likely(__Pyx_TypeTest(__pyx_t_3, __pyx_mstate_global->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder))))) __PYX_ERR(0, 639, __pyx_L1_error)
     __pyx_v_builder = ((struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_t_3);
     __pyx_t_3 = 0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":593
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":640
  *             free(owned_bitmap)
  *         builder = StringVectorBuilder.with_estimate(num_rows, 0)
  *         for i in range(num_rows):             # <<<<<<<<<<<<<<
@@ -24465,17 +24777,17 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
     for (__pyx_t_8 = 0; __pyx_t_8 < __pyx_t_7; __pyx_t_8+=1) {
       __pyx_v_i = __pyx_t_8;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":594
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":641
  *         builder = StringVectorBuilder.with_estimate(num_rows, 0)
  *         for i in range(num_rows):
  *             builder.append_null()             # <<<<<<<<<<<<<<
  *         return builder.finish()
  * 
 */
-      ((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->append_null(__pyx_v_builder, 0); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 594, __pyx_L1_error)
+      ((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->append_null(__pyx_v_builder, 0); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 641, __pyx_L1_error)
     }
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":595
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":642
  *         for i in range(num_rows):
  *             builder.append_null()
  *         return builder.finish()             # <<<<<<<<<<<<<<
@@ -24483,14 +24795,14 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
  * 
 */
     __Pyx_XDECREF(__pyx_r);
-    __pyx_t_3 = ((PyObject *)((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->finish(__pyx_v_builder, 0)); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 595, __pyx_L1_error)
+    __pyx_t_3 = ((PyObject *)((struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder *)__pyx_v_builder->__pyx_vtab)->finish(__pyx_v_builder, 0)); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 642, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __pyx_r = __pyx_t_3;
     __pyx_t_3 = 0;
     goto __pyx_L0;
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":524
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":571
  * 
  * 
  * cdef _draken_from_column_result(ColumnResult& cr):             # <<<<<<<<<<<<<<
@@ -24515,7 +24827,7 @@ static PyObject *__pyx_f_7opteryx_8compiled_4rugo_6_jsonl__draken_from_column_re
   return __pyx_r;
 }
 
-/* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":598
+/* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":645
  * 
  * 
  * def get_jsonl_schema(data, sample_size=5):             # <<<<<<<<<<<<<<
@@ -24564,35 +24876,35 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_data,&__pyx_mstate_global->__pyx_n_u_sample_size,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 598, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 645, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 598, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 645, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 598, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 645, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "get_jsonl_schema", 0) < (0)) __PYX_ERR(0, 598, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "get_jsonl_schema", 0) < (0)) __PYX_ERR(0, 645, __pyx_L3_error)
       if (!values[1]) values[1] = __Pyx_NewRef(((PyObject *)((PyObject*)__pyx_mstate_global->__pyx_int_5)));
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("get_jsonl_schema", 0, 1, 2, i); __PYX_ERR(0, 598, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("get_jsonl_schema", 0, 1, 2, i); __PYX_ERR(0, 645, __pyx_L3_error) }
       }
     } else {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 598, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 645, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 598, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 645, __pyx_L3_error)
         break;
         default: goto __pyx_L5_argtuple_error;
       }
@@ -24603,7 +24915,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("get_jsonl_schema", 0, 1, 2, __pyx_nargs); __PYX_ERR(0, 598, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("get_jsonl_schema", 0, 1, 2, __pyx_nargs); __PYX_ERR(0, 645, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -24645,7 +24957,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_6get_jsonl_schema(CYT
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("get_jsonl_schema", 0);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":600
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":647
  * def get_jsonl_schema(data, sample_size=5):
  *     """Infer schema from first N rows."""
  *     result = read_jsonl(             # <<<<<<<<<<<<<<
@@ -24653,10 +24965,10 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_6get_jsonl_schema(CYT
  *         columns=None,
 */
   __pyx_t_2 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_read_jsonl); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 600, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_read_jsonl); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 647, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":606
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":653
  *         explicit_schema=None,
  *         infer_schema=True,
  *         infer_sample_size=sample_size             # <<<<<<<<<<<<<<
@@ -24677,65 +24989,65 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_6get_jsonl_schema(CYT
   #endif
   {
     PyObject *__pyx_callargs[2 + ((CYTHON_VECTORCALL) ? 5 : 0)] = {__pyx_t_2, __pyx_v_data};
-    __pyx_t_5 = __Pyx_MakeVectorcallBuilderKwds(5); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 600, __pyx_L1_error)
+    __pyx_t_5 = __Pyx_MakeVectorcallBuilderKwds(5); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 647, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_5);
-    if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_columns, Py_None, __pyx_t_5, __pyx_callargs+2, 0) < (0)) __PYX_ERR(0, 600, __pyx_L1_error)
-    if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_predicates, Py_None, __pyx_t_5, __pyx_callargs+2, 1) < (0)) __PYX_ERR(0, 600, __pyx_L1_error)
-    if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_explicit_schema, Py_None, __pyx_t_5, __pyx_callargs+2, 2) < (0)) __PYX_ERR(0, 600, __pyx_L1_error)
-    if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_infer_schema, Py_True, __pyx_t_5, __pyx_callargs+2, 3) < (0)) __PYX_ERR(0, 600, __pyx_L1_error)
-    if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_infer_sample_size, __pyx_v_sample_size, __pyx_t_5, __pyx_callargs+2, 4) < (0)) __PYX_ERR(0, 600, __pyx_L1_error)
+    if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_columns, Py_None, __pyx_t_5, __pyx_callargs+2, 0) < (0)) __PYX_ERR(0, 647, __pyx_L1_error)
+    if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_predicates, Py_None, __pyx_t_5, __pyx_callargs+2, 1) < (0)) __PYX_ERR(0, 647, __pyx_L1_error)
+    if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_explicit_schema, Py_None, __pyx_t_5, __pyx_callargs+2, 2) < (0)) __PYX_ERR(0, 647, __pyx_L1_error)
+    if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_infer_schema, Py_True, __pyx_t_5, __pyx_callargs+2, 3) < (0)) __PYX_ERR(0, 647, __pyx_L1_error)
+    if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_infer_sample_size, __pyx_v_sample_size, __pyx_t_5, __pyx_callargs+2, 4) < (0)) __PYX_ERR(0, 647, __pyx_L1_error)
     __pyx_t_1 = __Pyx_Object_Vectorcall_CallFromBuilder((PyObject*)__pyx_t_3, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET), __pyx_t_5);
     __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
     __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 600, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 647, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __pyx_v_result = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":609
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":656
  *     )
  * 
  *     if result['success']:             # <<<<<<<<<<<<<<
  *         schema_list = []
  *         for col_name in result['column_names']:
 */
-  __pyx_t_1 = __Pyx_PyObject_Dict_GetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_success); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 609, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_Dict_GetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_success); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 656, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_6 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_6 < 0))) __PYX_ERR(0, 609, __pyx_L1_error)
+  __pyx_t_6 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_6 < 0))) __PYX_ERR(0, 656, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (__pyx_t_6) {
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":610
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":657
  * 
  *     if result['success']:
  *         schema_list = []             # <<<<<<<<<<<<<<
  *         for col_name in result['column_names']:
  *             schema_list.append({
 */
-    __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 610, __pyx_L1_error)
+    __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 657, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __pyx_v_schema_list = ((PyObject*)__pyx_t_1);
     __pyx_t_1 = 0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":611
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":658
  *     if result['success']:
  *         schema_list = []
  *         for col_name in result['column_names']:             # <<<<<<<<<<<<<<
  *             schema_list.append({
  *                 'name': col_name,
 */
-    __pyx_t_1 = __Pyx_PyObject_Dict_GetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_column_names); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 611, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_Dict_GetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_column_names); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 658, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     if (likely(PyList_CheckExact(__pyx_t_1)) || PyTuple_CheckExact(__pyx_t_1)) {
       __pyx_t_3 = __pyx_t_1; __Pyx_INCREF(__pyx_t_3);
       __pyx_t_7 = 0;
       __pyx_t_8 = NULL;
     } else {
-      __pyx_t_7 = -1; __pyx_t_3 = PyObject_GetIter(__pyx_t_1); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 611, __pyx_L1_error)
+      __pyx_t_7 = -1; __pyx_t_3 = PyObject_GetIter(__pyx_t_1); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 658, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
-      __pyx_t_8 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_3); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 611, __pyx_L1_error)
+      __pyx_t_8 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_3); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 658, __pyx_L1_error)
     }
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     for (;;) {
@@ -24744,7 +25056,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_6get_jsonl_schema(CYT
           {
             Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_3);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 611, __pyx_L1_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 658, __pyx_L1_error)
             #endif
             if (__pyx_t_7 >= __pyx_temp) break;
           }
@@ -24754,7 +25066,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_6get_jsonl_schema(CYT
           {
             Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_3);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 611, __pyx_L1_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 658, __pyx_L1_error)
             #endif
             if (__pyx_t_7 >= __pyx_temp) break;
           }
@@ -24765,13 +25077,13 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_6get_jsonl_schema(CYT
           #endif
           ++__pyx_t_7;
         }
-        if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 611, __pyx_L1_error)
+        if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 658, __pyx_L1_error)
       } else {
         __pyx_t_1 = __pyx_t_8(__pyx_t_3);
         if (unlikely(!__pyx_t_1)) {
           PyObject* exc_type = PyErr_Occurred();
           if (exc_type) {
-            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 611, __pyx_L1_error)
+            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 658, __pyx_L1_error)
             PyErr_Clear();
           }
           break;
@@ -24781,25 +25093,25 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_6get_jsonl_schema(CYT
       __Pyx_XDECREF_SET(__pyx_v_col_name, __pyx_t_1);
       __pyx_t_1 = 0;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":613
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":660
  *         for col_name in result['column_names']:
  *             schema_list.append({
  *                 'name': col_name,             # <<<<<<<<<<<<<<
  *                 'type': result['schema'].get(col_name, 'object'),
  *                 'nullable': True
 */
-      __pyx_t_1 = __Pyx_PyDict_NewPresized(3); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 613, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyDict_NewPresized(3); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 660, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
-      if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_name, __pyx_v_col_name) < (0)) __PYX_ERR(0, 613, __pyx_L1_error)
+      if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_name, __pyx_v_col_name) < (0)) __PYX_ERR(0, 660, __pyx_L1_error)
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":614
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":661
  *             schema_list.append({
  *                 'name': col_name,
  *                 'type': result['schema'].get(col_name, 'object'),             # <<<<<<<<<<<<<<
  *                 'nullable': True
  *             })
 */
-      __pyx_t_9 = __Pyx_PyObject_Dict_GetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_schema); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 614, __pyx_L1_error)
+      __pyx_t_9 = __Pyx_PyObject_Dict_GetItem(__pyx_v_result, __pyx_mstate_global->__pyx_n_u_schema); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 661, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_9);
       __pyx_t_2 = __pyx_t_9;
       __Pyx_INCREF(__pyx_t_2);
@@ -24809,32 +25121,32 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_6get_jsonl_schema(CYT
         __pyx_t_5 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_get, __pyx_callargs+__pyx_t_4, (3-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
         __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
         __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
-        if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 614, __pyx_L1_error)
+        if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 661, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_5);
       }
-      if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_type, __pyx_t_5) < (0)) __PYX_ERR(0, 613, __pyx_L1_error)
+      if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_type, __pyx_t_5) < (0)) __PYX_ERR(0, 660, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":615
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":662
  *                 'name': col_name,
  *                 'type': result['schema'].get(col_name, 'object'),
  *                 'nullable': True             # <<<<<<<<<<<<<<
  *             })
  *         return {'columns': schema_list}
 */
-      if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_nullable, Py_True) < (0)) __PYX_ERR(0, 613, __pyx_L1_error)
+      if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_nullable, Py_True) < (0)) __PYX_ERR(0, 660, __pyx_L1_error)
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":612
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":659
  *         schema_list = []
  *         for col_name in result['column_names']:
  *             schema_list.append({             # <<<<<<<<<<<<<<
  *                 'name': col_name,
  *                 'type': result['schema'].get(col_name, 'object'),
 */
-      __pyx_t_10 = __Pyx_PyList_Append(__pyx_v_schema_list, __pyx_t_1); if (unlikely(__pyx_t_10 == ((int)-1))) __PYX_ERR(0, 612, __pyx_L1_error)
+      __pyx_t_10 = __Pyx_PyList_Append(__pyx_v_schema_list, __pyx_t_1); if (unlikely(__pyx_t_10 == ((int)-1))) __PYX_ERR(0, 659, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":611
+      /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":658
  *     if result['success']:
  *         schema_list = []
  *         for col_name in result['column_names']:             # <<<<<<<<<<<<<<
@@ -24844,7 +25156,7 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_6get_jsonl_schema(CYT
     }
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":617
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":664
  *                 'nullable': True
  *             })
  *         return {'columns': schema_list}             # <<<<<<<<<<<<<<
@@ -24852,14 +25164,14 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_6get_jsonl_schema(CYT
  *     return {'columns': []}
 */
     __Pyx_XDECREF(__pyx_r);
-    __pyx_t_3 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 617, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 664, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
-    if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_columns, __pyx_v_schema_list) < (0)) __PYX_ERR(0, 617, __pyx_L1_error)
+    if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_columns, __pyx_v_schema_list) < (0)) __PYX_ERR(0, 664, __pyx_L1_error)
     __pyx_r = __pyx_t_3;
     __pyx_t_3 = 0;
     goto __pyx_L0;
 
-    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":609
+    /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":656
  *     )
  * 
  *     if result['success']:             # <<<<<<<<<<<<<<
@@ -24868,23 +25180,23 @@ static PyObject *__pyx_pf_7opteryx_8compiled_4rugo_6_jsonl_6get_jsonl_schema(CYT
 */
   }
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":619
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":666
  *         return {'columns': schema_list}
  * 
  *     return {'columns': []}             # <<<<<<<<<<<<<<
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_3 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 619, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 666, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 619, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 666, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_columns, __pyx_t_1) < (0)) __PYX_ERR(0, 619, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_columns, __pyx_t_1) < (0)) __PYX_ERR(0, 666, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_r = __pyx_t_3;
   __pyx_t_3 = 0;
   goto __pyx_L0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":598
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":645
  * 
  * 
  * def get_jsonl_schema(data, sample_size=5):             # <<<<<<<<<<<<<<
@@ -26875,72 +27187,85 @@ __Pyx_RefNannySetupContext("PyInit__jsonl", 0);
   if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_pyx_unpickle_Enum, __pyx_t_4) < (0)) __PYX_ERR(1, 4, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":133
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":142
+ * 
+ * 
+ * import os             # <<<<<<<<<<<<<<
+ * 
+ * 
+*/
+  __pyx_t_1 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_os, 0, 0, NULL, 0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 142, __pyx_L1_error)
+  __pyx_t_4 = __pyx_t_1;
+  __Pyx_GOTREF(__pyx_t_4);
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_os, __pyx_t_4) < (0)) __PYX_ERR(0, 142, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
+
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":145
  * 
  * 
  * def read_jsonl(             # <<<<<<<<<<<<<<
  *     data,
  *     columns=None,
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_8compiled_4rugo_6_jsonl_1read_jsonl, 0, __pyx_mstate_global->__pyx_n_u_read_jsonl, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_compiled_rugo__jsonl, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[0])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 133, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_8compiled_4rugo_6_jsonl_1read_jsonl, 0, __pyx_mstate_global->__pyx_n_u_read_jsonl, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_compiled_rugo__jsonl, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[0])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 145, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  __Pyx_CyFunction_SetDefaultsTuple(__pyx_t_4, __pyx_mstate_global->__pyx_tuple[1]);
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_read_jsonl, __pyx_t_4) < (0)) __PYX_ERR(0, 133, __pyx_L1_error)
+  __Pyx_CyFunction_SetDefaultsTuple(__pyx_t_4, __pyx_mstate_global->__pyx_tuple[2]);
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_read_jsonl, __pyx_t_4) < (0)) __PYX_ERR(0, 145, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":250
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":308
  * 
  * 
  * def benchmark_document_map(             # <<<<<<<<<<<<<<
  *     data: bytes,
  * ):
 */
-  __pyx_t_4 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 250, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 308, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
-  if (PyDict_SetItem(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_data, __pyx_mstate_global->__pyx_n_u_bytes) < (0)) __PYX_ERR(0, 250, __pyx_L1_error)
-  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_8compiled_4rugo_6_jsonl_3benchmark_document_map, 0, __pyx_mstate_global->__pyx_n_u_benchmark_document_map, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_compiled_rugo__jsonl, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[1])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 250, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_data, __pyx_mstate_global->__pyx_n_u_bytes) < (0)) __PYX_ERR(0, 308, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_8compiled_4rugo_6_jsonl_3benchmark_document_map, 0, __pyx_mstate_global->__pyx_n_u_benchmark_document_map, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_compiled_rugo__jsonl, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[1])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 308, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_5);
   #endif
   __Pyx_CyFunction_SetAnnotationsDict(__pyx_t_5, __pyx_t_4);
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_benchmark_document_map, __pyx_t_5) < (0)) __PYX_ERR(0, 250, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_benchmark_document_map, __pyx_t_5) < (0)) __PYX_ERR(0, 308, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":308
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":366
  * 
  * 
  * def read_jsonl_raw(             # <<<<<<<<<<<<<<
  *     data,
  *     columns=None,
 */
-  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_8compiled_4rugo_6_jsonl_5read_jsonl_raw, 0, __pyx_mstate_global->__pyx_n_u_read_jsonl_raw, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_compiled_rugo__jsonl, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[2])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 308, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_8compiled_4rugo_6_jsonl_5read_jsonl_raw, 0, __pyx_mstate_global->__pyx_n_u_read_jsonl_raw, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_compiled_rugo__jsonl, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[2])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 366, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_5);
   #endif
-  __Pyx_CyFunction_SetDefaultsTuple(__pyx_t_5, __pyx_mstate_global->__pyx_tuple[2]);
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_read_jsonl_raw, __pyx_t_5) < (0)) __PYX_ERR(0, 308, __pyx_L1_error)
+  __Pyx_CyFunction_SetDefaultsTuple(__pyx_t_5, __pyx_mstate_global->__pyx_tuple[3]);
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_read_jsonl_raw, __pyx_t_5) < (0)) __PYX_ERR(0, 366, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":598
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":645
  * 
  * 
  * def get_jsonl_schema(data, sample_size=5):             # <<<<<<<<<<<<<<
  *     """Infer schema from first N rows."""
  *     result = read_jsonl(
 */
-  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_8compiled_4rugo_6_jsonl_7get_jsonl_schema, 0, __pyx_mstate_global->__pyx_n_u_get_jsonl_schema, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_compiled_rugo__jsonl, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[3])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 598, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_8compiled_4rugo_6_jsonl_7get_jsonl_schema, 0, __pyx_mstate_global->__pyx_n_u_get_jsonl_schema, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_compiled_rugo__jsonl, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[3])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 645, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_5);
   #endif
-  __Pyx_CyFunction_SetDefaultsTuple(__pyx_t_5, __pyx_mstate_global->__pyx_tuple[3]);
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_get_jsonl_schema, __pyx_t_5) < (0)) __PYX_ERR(0, 598, __pyx_L1_error)
+  __Pyx_CyFunction_SetDefaultsTuple(__pyx_t_5, __pyx_mstate_global->__pyx_tuple[4]);
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_get_jsonl_schema, __pyx_t_5) < (0)) __PYX_ERR(0, 645, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
   /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":1
@@ -26990,6 +27315,7 @@ __Pyx_RefNannySetupContext("PyInit__jsonl", 0);
 
 static int __Pyx_InitCachedBuiltins(__pyx_mstatetype *__pyx_mstate) {
   CYTHON_UNUSED_VAR(__pyx_mstate);
+  __pyx_builtin_open = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_open); if (!__pyx_builtin_open) __PYX_ERR(0, 221, __pyx_L1_error)
   __pyx_builtin___import__ = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_import); if (!__pyx_builtin___import__) __PYX_ERR(1, 101, __pyx_L1_error)
   __pyx_builtin_enumerate = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_enumerate); if (!__pyx_builtin_enumerate) __PYX_ERR(1, 157, __pyx_L1_error)
   __pyx_builtin_Ellipsis = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_Ellipsis); if (!__pyx_builtin_Ellipsis) __PYX_ERR(1, 409, __pyx_L1_error)
@@ -27040,42 +27366,53 @@ static int __Pyx_InitCachedConstants(__pyx_mstatetype *__pyx_mstate) {
   __Pyx_GOTREF(__pyx_mstate_global->__pyx_slice[0]);
   __Pyx_GIVEREF(__pyx_mstate_global->__pyx_slice[0]);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":133
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":221
+ *             # Load entire buffer
+ *             if isinstance(data, str):
+ *                 with open(data, 'rb') as f:             # <<<<<<<<<<<<<<
+ *                     data_bytes = f.read()
+ *             elif isinstance(data, bytes):
+*/
+  __pyx_mstate_global->__pyx_tuple[1] = PyTuple_Pack(3, Py_None, Py_None, Py_None); if (unlikely(!__pyx_mstate_global->__pyx_tuple[1])) __PYX_ERR(0, 221, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_mstate_global->__pyx_tuple[1]);
+  __Pyx_GIVEREF(__pyx_mstate_global->__pyx_tuple[1]);
+
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":145
  * 
  * 
  * def read_jsonl(             # <<<<<<<<<<<<<<
  *     data,
  *     columns=None,
 */
-  __pyx_mstate_global->__pyx_tuple[1] = PyTuple_Pack(8, Py_None, Py_None, Py_None, ((PyObject*)Py_True), ((PyObject*)__pyx_mstate_global->__pyx_int_5), ((PyObject*)Py_True), ((PyObject*)Py_True), ((PyObject*)Py_True)); if (unlikely(!__pyx_mstate_global->__pyx_tuple[1])) __PYX_ERR(0, 133, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_mstate_global->__pyx_tuple[1]);
-  __Pyx_GIVEREF(__pyx_mstate_global->__pyx_tuple[1]);
+  __pyx_mstate_global->__pyx_tuple[2] = PyTuple_Pack(10, Py_None, Py_None, Py_None, ((PyObject*)Py_True), ((PyObject*)__pyx_mstate_global->__pyx_int_5), ((PyObject*)Py_True), ((PyObject*)Py_True), ((PyObject*)Py_True), ((PyObject*)Py_True), ((PyObject*)__pyx_mstate_global->__pyx_int_2048)); if (unlikely(!__pyx_mstate_global->__pyx_tuple[2])) __PYX_ERR(0, 145, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_mstate_global->__pyx_tuple[2]);
+  __Pyx_GIVEREF(__pyx_mstate_global->__pyx_tuple[2]);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":308
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":366
  * 
  * 
  * def read_jsonl_raw(             # <<<<<<<<<<<<<<
  *     data,
  *     columns=None,
 */
-  __pyx_mstate_global->__pyx_tuple[2] = PyTuple_Pack(3, Py_None, Py_None, ((PyObject*)Py_False)); if (unlikely(!__pyx_mstate_global->__pyx_tuple[2])) __PYX_ERR(0, 308, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_mstate_global->__pyx_tuple[2]);
-  __Pyx_GIVEREF(__pyx_mstate_global->__pyx_tuple[2]);
+  __pyx_mstate_global->__pyx_tuple[3] = PyTuple_Pack(3, Py_None, Py_None, ((PyObject*)Py_False)); if (unlikely(!__pyx_mstate_global->__pyx_tuple[3])) __PYX_ERR(0, 366, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_mstate_global->__pyx_tuple[3]);
+  __Pyx_GIVEREF(__pyx_mstate_global->__pyx_tuple[3]);
 
-  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":598
+  /* "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx":645
  * 
  * 
  * def get_jsonl_schema(data, sample_size=5):             # <<<<<<<<<<<<<<
  *     """Infer schema from first N rows."""
  *     result = read_jsonl(
 */
-  __pyx_mstate_global->__pyx_tuple[3] = PyTuple_Pack(1, ((PyObject*)__pyx_mstate_global->__pyx_int_5)); if (unlikely(!__pyx_mstate_global->__pyx_tuple[3])) __PYX_ERR(0, 598, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_mstate_global->__pyx_tuple[3]);
-  __Pyx_GIVEREF(__pyx_mstate_global->__pyx_tuple[3]);
+  __pyx_mstate_global->__pyx_tuple[4] = PyTuple_Pack(1, ((PyObject*)__pyx_mstate_global->__pyx_int_5)); if (unlikely(!__pyx_mstate_global->__pyx_tuple[4])) __PYX_ERR(0, 645, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_mstate_global->__pyx_tuple[4]);
+  __Pyx_GIVEREF(__pyx_mstate_global->__pyx_tuple[4]);
   #if CYTHON_IMMORTAL_CONSTANTS
   {
     PyObject **table = __pyx_mstate->__pyx_tuple;
-    for (Py_ssize_t i=0; i<4; ++i) {
+    for (Py_ssize_t i=0; i<5; ++i) {
       #if CYTHON_COMPILING_IN_CPYTHON_FREETHREADING
       #if PY_VERSION_HEX < 0x030E0000
       if (_Py_IsOwnedByCurrentThread(table[i]) && Py_REFCNT(table[i]) == 1)
@@ -27121,31 +27458,31 @@ static int __Pyx_InitCachedConstants(__pyx_mstatetype *__pyx_mstate) {
 static int __Pyx_InitConstants(__pyx_mstatetype *__pyx_mstate) {
   CYTHON_UNUSED_VAR(__pyx_mstate);
   {
-    const struct { const unsigned int length: 10; } index[] = {{2},{68},{35},{54},{37},{60},{24},{52},{26},{34},{29},{33},{45},{22},{15},{51},{51},{53},{53},{46},{179},{37},{30},{32},{2},{1},{1},{1},{1},{1},{2},{2},{1},{2},{8},{5},{6},{15},{23},{25},{7},{6},{2},{6},{35},{9},{30},{50},{8},{20},{32},{22},{47},{30},{37},{5},{5},{8},{20},{8},{15},{3},{15},{6},{18},{4},{22},{8},{7},{14},{5},{1},{13},{13},{12},{9},{17},{18},{3},{8},{12},{7},{7},{5},{4},{10},{6},{8},{15},{10},{6},{9},{5},{15},{13},{5},{12},{5},{6},{7},{8},{3},{16},{12},{2},{10},{5},{17},{12},{9},{13},{12},{12},{13},{5},{8},{3},{9},{9},{8},{7},{7},{4},{10},{4},{8},{4},{7},{8},{11},{8},{3},{6},{2},{28},{4},{12},{13},{12},{3},{4},{10},{9},{14},{11},{10},{19},{14},{12},{10},{14},{6},{10},{17},{13},{8},{6},{10},{13},{11},{7},{10},{6},{11},{12},{10},{12},{19},{5},{4},{5},{10},{4},{4},{6},{7},{8},{4},{11},{8},{10},{4},{6},{6},{3},{5},{11},{11},{6},{7},{13},{1},{115},{250},{624},{618},{44},{1}};
-    #if (CYTHON_COMPRESS_STRINGS) == 2 /* compression: bz2 (2438 bytes) */
-const char* const cstring = "BZh91AY&SY\354\341\010\337\000\001\311\177\377\377\377\377\377\377\367\367\377\277\377\377\366\277\377\377\377\300@@@@@@@@@@@@\000@\000`\t_\003\332#\216{\315M`\354l\330Zf\203m\340\016\307\tDB\021\032i\350b\236\247\240i\350M2jh\320\032224i\243L\232\006OI\350\321=&L\215\032y&L\21516\220h\200)\344\230\214\224\366\246\247\244\364\305\017(z\200\000\000\000\000\000\000\003@\320\000\000\001\024\306\243\325\032\236\243\322i\240\000h\323\324h\032\006\236\210\320\006A\240d\000\006\231\000i\246\200d\0000Jh@BL\022\247\232\233P\323S\324\375$\036\220\000\311\220\006\200\000\000\000\000\000\003M4\320\0102`\004\300\000L\001\032a\030\000\000\000&M14\030\001\030\000\000\000\001\"\200\246\231\r\021\251\206\200Si\2414\032i\352h\000\000\000\000\000\032\000\0004\036\221\223M\033\225FF\034\213`#pgV\276\217\264\216#\372?\263\247\324\033\211.\240t\343\37624\251\325\241<\014\244\324bL\353u\201\260\030\304L\304\221i\201WU\013\376B\"\032\3523\"\255\235\206\024\306\301\261\215&\304\233\005[\022+\217L\236\304\024\266h`\025\000l\023\031D\251s\313\";e\331\350\211A\n\022\"\302\002&\226\006 m`\221&\207aL\267f\2736W34\245\274\242\347\244\\\213\253|\021@\256A\025\353\246Ll1\343-$Z+\010\230\256\272\2265R+\274f(P\301\202\344\2337\n\204\035\210C\227\035\332/\251\274\343cB\267\324\204\330V\2442\035\364\004x\207)\006\033\373;\206\371\2647}\2107y~\371\260]s1\257x\331\267b\366\354\337K\217\255RG\310\202\276Rc\010\310\377\265\342\370\364\243A\342g\370]\366[2\363\377\307\225\361\346\373\376U\330\265kM\007\177\345\321bvt\376\205ao(z<#$\256\211\333$\230\337\036\225h\275\034[W\322\360\303\303\356b\345\036\023\3041jZ\223\321\030b\370\327Ks]\342\340$`\004\246\314'\365\335\276y\304\300U\240\307\\\230\326\215\202BX0\216\243\256\227\304 |\034\302\305\241*u)\020n.\005\214\3201\341\305h^]\226c\303\304\007cm[\3019\360\237\322\223&\305\367`\027\215~\302{\316O\260\\\253S\"\326\320\210a\022\320\346\tc\317\021\006\300q\314\312Y\337\013\004y=\241t\230\010\214\232\367\270g,\231\251\263\333<X\200\211<X\010cy\3756\252\014\002""\003i9\022_\301\2474L\351@\224\210\310 \303\214\320A\"\201}+\365l\360K\214d\214\013,\260\267'\222\230W|\342q0X\230)\336\034\347Ir\204\324\340!bEz\375\010c\030\301\303\273V!\1775t\327\270B\355/\257\365\322\245\3625\262\362\310#4\240\3118\204Yy\003D\366\262\257\303\266\305R\222\332\265ZGD\343\261\302\350`&\\\033p;\302Y\254\350\221\231\200\323KV\355\256\216~}\0058\357\305\016#&\246O-\007\033\246E\204\360\324\020\002\267~t\001\214\252(Z\t\211c\240>\026~K\244V\004\006A,n\244\025L\351\337\362oZ\366Fv\275,\351=>&\233\250Q\342\n--I\226\035*\316\334(\317\210\256\365g\250+\035\325g\3228{{]RR)Qu\r\316\332\245\307<#bo+\311\032\344\342\274\270'\303\003\016\014\360:T]2\323_\313\374\344\013 \257\r\216\313\211s\014\020\036\302v\250;\364\"\275'W3x\n\235/`\267Z\310\341\323\270v(;\210K\t*\2439O\250\213\204\332\326\3407\321\3138H\251I88#\224rVM\\<sd\306B{^\020\242\202F\244 l\353\220\2425\342d\314v\236.\325,w\230\226\025\227\025\016\000\201^\254(\211 $\034\005 \021MC\030L8\n\201\305J\353V\005[\027\007\301\003\204\202\311\356BE\350\232FA\215\246\3242\310\231\240\307D4\320\316\377\003\200\352 \342;K\217\336\356\327\024\306\275\310\325\267\350\317j\252\022\\9g]\025\250\230w\035\223#\316\211\207\222\215`\244\2053\327\267\177f=4B\331\373o\276y\260\357\340\226\232\315_\225\273\226IVR\216\351\025r\261T\271R\272U\333!\310\013K\325\215\264\322X?\312I\250\370\207\334\215\254\335\316\2269\337j\355\222%\330\336\370\257\240\344S\205]\370\333K;pc\201\347\t\241\224m\273^Y\236Vf\275l\347\271\365\216\215D\025\305\343uA:\245^\317.\252\341\361\024A\222\032\316\3205*)\244\254V\300\224\004\006!\006\365\262\321\024\014\270\302\315\026\276\342\260yQ\301\301\230;y\361\254\306n\304\324W\214$\213\333E2\030\322\315\301lsn\234|\330\226:\321B\354E\2072\371+yE\211c\006\264\t\215\241\247\261\267\244\215(\032\375\030\311\310\313\024sCPX\016&\330\335mE\327+\361iRX\340\210\033rg\264@\220tI\331\323n\032m\256\233`\227gBY\357\340c\206\241\263Wp\264\266\365\270J\270\314\352\324\022\230\220Y0\200\323\022\002\271\026\230\212.""\353\016\017X\024N\345$^\272\240\223],h\rE\271@\276u$\007AE9\266\313$\020sv\265\243\267h\014)B&\2612\t\024\034\225\333\306y\304\255B\007=\334\331\262\341=M\022\271\020Fi\213\004\270\344\370\225\2736\226\013o\243Q\221g\251Z\272Bx\353\210\220N\343\370\024FOyc\007$\317(\353W`]\230j\273\205E\252%\r\r\226\0131z\364\244\204\204Z\245C\\\215x\304Q\331(\010\256\347\336\265)\343q\361Cd\036K\034\265[\315\274+nM\344r\353I=\202\030\331d\216\333\356p\314dj|\022\002\242\311\264\334\367F\321\031\005\244`FdLI@\277\022ll&\231\226\253\301\342\242\214@\266eC\363,Ym\307\305\004d\262\030'BTo\260\206\240\006\307)/z\354\2550\352\322\266T\343_\200\267\0329\274\351\362\326\3173\206+\220\220\310\214\211\002'\010\341mX\014\033\r\200j\334\201\216a\244kL\337\320i\304*\"\n\006Q\325\230\234eh\314>_\2313\343\330\202\344\261@@\205\244\274\016\222\020\202\303s\354\226jt\360\271\333\355\271\324#.\366\353UzVHB\244\tx\216S\217E\356\032i\224\303&b\353\035qia\325\241\030\212$*o$\222\245\310\t\310\n\006r2\025\355`\033\306\243\034t\271\274KD\321\313\2055\330\272hN$\362\267,g\332\262f\235\316Z\255\335\207\316\335~O(;]\245\342\261/\301\020 \245\370\223&T\234\244\017!s\321\351\244+\331\017Zd\177\\\346Z\200\3137\276\214V\210Hm2\356\262\305\375\216i\226\037\237h\277C\275\026\253m\016\246\\\230\366\227bn\332d\343\240\267\353\273e\032\200\367D\271z\024\365\014H\336\0046\227\315\235a\237,bw\247\360\353\2724\216\373t\372r\325\014\002\304\2100\2239!\373\2651\374\224\313\222\306\324\025\356\303[\203\223\214\346,\371\242o\255\332\244Qa=\355\222\021H\307\216q\224B\344\247\031\254\2532W!\302\361Mg\271\226\036@$\006\007\307Tp<=\234\216E\215\204\230\372\216`\020\321G\341(\\\237\307\037\317\230(\306\350\262y\021\221\223\016\344 \204'\304\276\263\214\026*Z\021\007R+\032\212\333e\224\375\235-\177\231MU\002\206\246r\037\3124\325\022\300b\006\311\361Q7\212H\224\327:\354c\0065\212\201\312\265\r\252\306>\250\333A\341\202i\007\002\332\013\303Q8\265\244\036\361\304U\032\205\005M\005\222Qa\257T*\032\253X*\2553&n\342\\\362\222n\374""\307\031\275\362W\377[\252\265\351\346\336\2734y\215&\033\316*\247\261\207\005\036Bs\305P\233K\264\212x\207\03283\350\272#\244\333\361X)>\353F\2460\323(\236r\231\225\312T8_\026\250\302\366\210\252\023\256E\234\303\211\261\310\022\246\367\305N;\322l\337\004\312\332\272\225e\034\204\311f\223^|\257 \373b%1\374\272\346\031\247=\225\311es\217\030Ye\357\014\233\3018\014VJ\304\304\346\326\357\326`\316\365]\237L\231&\306Yy&\327\010\320\253\034\2134\"\021b\362V\317\213\223\326X\355Sc\004\317\217n\316\254y\006\005\376\334i\306\252\221OD2\313\261\247\236]\0308\305\276\031m\020\243\220q\317P\335\350t\0033\0063\027\301\035\263z\376pt\217!*j\300\357\260\357B\271\352\306\352J&\224\230(H\216\\g\002\241\010\372w\306aQ\2539\265\241:(\031\242\211\251RIw\317\375\271Y\263\340\214\030(;\220b\221H\222\224\227\202\321A%H\034D\231\231\261{\242-\004IKLA\024G\343\303\227,\353\326\323\023\017\223\260\177\361w$S\205\t\016\316\020\215\360";
-    PyObject *data = __Pyx_DecompressString(cstring, 2438, 2);
+    const struct { const unsigned int length: 10; } index[] = {{2},{68},{35},{54},{37},{60},{24},{52},{26},{34},{29},{33},{45},{22},{15},{51},{51},{53},{53},{46},{179},{37},{30},{32},{2},{1},{1},{1},{1},{1},{2},{2},{1},{2},{8},{5},{6},{15},{23},{25},{7},{6},{2},{6},{35},{9},{30},{50},{8},{20},{32},{22},{47},{30},{37},{5},{5},{8},{20},{8},{15},{3},{15},{18},{4},{22},{8},{7},{14},{5},{1},{13},{13},{12},{9},{17},{18},{3},{8},{12},{7},{7},{5},{4},{10},{6},{8},{15},{10},{6},{9},{9},{5},{8},{15},{1},{13},{5},{12},{5},{6},{7},{8},{3},{16},{12},{2},{10},{5},{17},{12},{9},{13},{12},{12},{13},{5},{8},{3},{9},{9},{8},{7},{7},{19},{4},{10},{4},{8},{4},{7},{8},{11},{8},{3},{6},{2},{4},{28},{2},{4},{12},{13},{12},{3},{4},{10},{9},{14},{11},{10},{19},{14},{12},{2},{4},{10},{14},{6},{10},{17},{13},{8},{6},{10},{13},{11},{7},{10},{6},{11},{12},{10},{12},{19},{5},{4},{5},{10},{4},{4},{6},{7},{8},{18},{4},{11},{8},{10},{4},{6},{6},{11},{3},{5},{11},{11},{6},{7},{13},{1},{115},{250},{557},{829},{44},{1}};
+    #if (CYTHON_COMPRESS_STRINGS) == 2 /* compression: bz2 (2630 bytes) */
+const char* const cstring = "BZh91AY&SY\201\013\233\342\000\001\366\377\377\377\377\377\377\377\377\377\377\277\377\377\377\277\377\377\377\300@@@@@@@@@@@@\000@\000`\t\337y\322x\327\227\035\252\327](\352\242\025*\222\007\236\007\327{\340J\232!CA\250\365\003h\032\236\201\261\010\364\246CA\240\036\322d\200\006!\243\324\364\215\244z\231\000\332\232\r\2506\200\202Q\002di\240SL\232G\246\224\36156\202\031\000\032\000\000\000\000\000\006\200\000\000\000\006\246\004)\251\352mH\310z\215\014\2156\220m\010h1\000\032\000\320\000\000\000\0004\032\032\r\000\tM\020\"d51M\017S\322h\365S\324\321\352i\200h\323S\004\3200LFLC\000\000\000\320\214!\241\241\351\014\223M12`&\021\203L\246\232d\323##\000h4\020\311\220\302d\030\0104110M0\000\003B\212\006\2324\3654\032\001\352\006\215\r\006\215\000\000\032\000\032\001\211\220\0312\0322\000\000\310\005\345\21020\032\262B\001q4\206e\367.\357t\207\260\370\037$R$\240DP+$\t\n\022)\315\377\352\230\242NN\244\240\223\323\255\326\031 \020\206(`\ryqw%\231\276\361\230\206\373\366\264\250J\324./d\311\002\020\204\314\220\314\2205o@\256\274\207\321\201f\252\342V%H\212\250\n\272\204\252\213evF\250g+\315$\035\307\0144\023$\201\306(\3302\031\204\311\240\204\n\304\010\236M\206\034\032S\306\245\250H\347\225}f,cm\016\305B\262\316\301\241\014[yR\242Au\305\244\243}E\251:\020\344\"]\000\200\303\031\274u\243 I&$\260 Z\031\252\006\204m\341qc\322\2728j\254\n\335\201|b\332\246-\234Ew\216\232\227\311\373\"\344\\Np\225\374\001Bp\315\363\374\006h\365\004\3158\004\371\027\263\227+\016\334\225\216I\345\333?\305em t\271\021\016:\007\302(\t\220\254\017,\322S\316J\001\242\257\276GIS\002\311\373\341qVUeJ\002.\355@3\314\257\020\264\231\037\321\320\252\014>\327\tX)WZk\005\023\2513\235\213\355\272\270>kC\017\017\235\213\023xO\020\305gY\313D\\\305\256\3035u\255\347\030n\304\200\325\241\001\201\013K\256K\355`\303@n\355\252\303\340V\214Z\"\"\207\236.\013Wq\2031d\006\372=x\22706\250\256\343S\221o&H\227\254\002>R\302<c\027\014\212^BqH\224n-Z\342|pm\310\327\017T\225*\341\346\355\007X\364I\3165:\"]\224n\210\321\263x""\343\327\315\276\243\200\032e\242b[1\004i26R'#\257\320\353N\332\017\315\024_\255.\027\036y\371\216x\364\304l\333\266V\255\001H\023\205\324*\363,\251\325!wi\202#c\340f\350\227F\224D\320\304j\222Ua\245^\364f\362\301\331\376\216\317\177\016#\233H\2217x#\315\370s\316\351W\220\323\025\301\2200\037/{\345\2258\331\233\271\020\234\333\364\374\314{\357\207\207\271\247>\367E\371\251\266\206\254\322\247\305\016\276\"\340\375&8\353h\214s\024r\264\033\271\261\006\2516\352\323\253\255\272\275=6+.<[\010\335B8\273\225K\030\2679\365\353\272\355_\326\222T\270\337\363\321B\027u\357s,c8\203%\224\200$\030\345a\270\210e\220\r\2612\033Z\333\267P%jf\201+\343\033IW\007\203\374\341\335\327CW}E\025Mvy\300Q3\247\177wJ\303\243\027\343f\211\221\033eQn\301\215\0201Q\026TX\004\"v\246\341\240s\232\306\242\221\304\002\221\275Y\355\031a\323\261i\335Z\244E\205\265\265\323\024\2706<\\\311d\264\305p\377\031\030\003\372\306\t\\s0\375`\237\301a\247\307\373\034\tp\227\207\033\237\211\022H\r\016\245\326\300\026\204Sa\312\326i\001Oc\324+r\270\332\0333\212\366uA\345y*\261\260\246\260\304[h\250\362\307B\\\331\206KjmN-\026\016\016\010\2111\234(\366\370\206\001\024[r?P\320\301#O& \342\332=X\333\006Yj\3618\251r\310\316\327\351\305J\216\021-;Z\3360\021C\013\000\252\316D\244\273J\300\325\364\330\026V\265\355\311\343\003\n\004\332\360\324U\0016c@\204\231&|\244L\345\2334U\204\311\204~{\223\216\242\rC\264\234~~\327\276W\343\2661\014\257h\265\252\240\221\200k\315\\\312\263L;\216\311\221\337D\231Q\030<\016@+\220\017E\3357\324\300~H![\235\203\251n\240\014\354\254\025\325\317Uy\225IRBQ\306E\034\244Q-s\246j;^:5\203V\036\214c\2334\230?\332I\246\367C\347F5nf\3065\333\032cY\336N\217$\032e*\377j\021L\252\357\301\\\325v\311\214\216\374M\014\243>|5_-Uf\341\272\256\347S\242\350\305\323\265Ud\326\335\001''n\347~\325\tL\330\262\026\253\327dW:m\314\230\327\276\326\014 \306,\241\016C6d`^\205\265.\245]d\307]\220wR\331\226&\310\023g\020sd\306\204\230\205\305\250\230p\330\3345\357\332\224\203\321\226L\211\313\243\222\274x+D\240*i\021EP""\023-\274Z\230\324\347+\352\211)\034\020\307f\034#X\376\351!*\346c\014\033,u\322Tb\014-\330FU\251\316\025B\367\234\031\343\214\351l\351!\314F(\253^\364\2041\230Z\220\240\366\325\257MV]\t\337+3#\240\3219\233\301R\224\023j\332\224\2335s\326\311<61\213\232n\352p\325~hT\0253E\301\322.\323B690Z\262\205\245\221\253\241\\\373Z\202\215\240y\266(vb\202\223a\277\2218+Ps\270X$nO>\035\262\301\207c\202c\\I\316\\\023\333[\231\260\260[)\264\331\025z\024\243\244'\215\321\022\004\356?\024:\213\317\002\245\306\264\317$nV`\37475\035\302\202\301\022CC^\301F-Kr\035!!\026\251P\302\203Z.\211\247gP\021L\357\222\230\374\331q\302\325\016\0242\232\336[\313[rL\331m\2122\240j\026\255ct2\214\013\342\361\247\372\310\n\215\273JWS\214I\214\322\240<9\024 \305\231\314\372nd\242\250A\024\303kp\254\332KmCB\246\022\326\314\241\267\033\030\212\217C{MMs\326Y2,\010\306\306\345'\302\026h|#a\263tK(\207O\316\177\021\3079\375\273N\000\024o/\222\325N\221N\225*A\005s\336\200L!1\304\t\263\360\002\312a\3108\370w\323\361>\265\326ixV \304a\234Z\324\233\255\266\210\203&\315#\235\275P\322(\344\036\010\020\263I\340t\220\204\025\033\227\370\344\315=\234\253\032\2679\304\"\367z\363\225\035\360p\325\025\355\025w\031\202\303\033\345\"*\333\324\206\020}\213q\241\345%d\351i\261D\315\276\324k\237A\"\301\302\255!;\260\344\t\206\364\020\312r0\025f\250\334q}\264\"\255\t\304\236KB\272\376\223&ihr\326\253t%\224f\317\315\337\256\r\\+s\022|Q\002\t\333Q)\027\251\032\344\007Al\314\357<\322V\252\036s\274~\301\313\332`\312\270\306\304 \365\025D\262\2661kB<\352\337X\214\315\240\215\314c\326km\206(\271!\325E\t#\344\2265\270\330-\363\245\252\331\200\311(\346\022x\375\224\034'\022\2118\327S\026H\312\320\223\257Vt\323\243lns\221\263\374\274*\t\tD\030\240\3458C\361Tx\275\030c|\225Q\211\202\310\323\303\322\320\344\246\316M8\023wM\256Ho\263\273\311\t\264\345^iCnKe\330\333\272\261dMiv>\356\255\\\253\220\036\021,n\226\342\225r\2629\265\024\025P\365\030H\025\021\260f.Qv\031\254gr\346\217B\215\244\021\031\264\235\ra\020\227\000\233\0134\002d\305""\000\236\022\210\210\026J\025P\225C\2616\265\253ps\305\020L\030\002\322\023\342\032.\237\220\014\007\030\003\240q\032\346C\304o\221@=\252\303C\010\240C ?\017\222\023\340\352\010R~T-U\025a8\311\375\253\265[\000\274hR\" \305\020!\242\230I\234W\017Y\246\213V\240k\247%T\312U\211\017\254\336\301\223\233gX\252\226\004\304?\033\010\206\376\227\201\247\221\361\007\330\367\334\266\017\032\366|\3236\304r\300z2\204\\\"\326\303\031l\325]1\303Z\003e\021l\020\201\213\347\025;\223\316\350\326\272\036\334\225\326\032\371N\023\225\2765\245\177k\002~\321+\233\223\017J\262-D\310\\\346H\034~\022\t\273X\370\326fD\237Z\273\301-\004%\273Sn\273\305\204\277M\344X\204\363O\303+3\013rUT\335'\233\245\2322\226\357\236\010q]\025c1t\007\237\263\014\276\t\372\260\210\224!\330\367\357\350RK\267_\241\241K>\215\365\014\362X\217b\225\002 B\262\003\2740\303\340\264(.\202\014\n\"\371\344\t1\213+\300K=\306\227-;\201kf\340\233,\332\r\343\347\341\027\347n\362\222gO\307\231\337\266\351\350\365\035\271\303\301\362v\271\227\274\213\256\303\363kV\013\224\004\020\223\251\034\2443>\376\243\222s9\177\277\243\346\240S&\0333\223+\343T\242\255\202\271\256{\234\321\343\2054I\322\024\310F\353]|)\265%}k\t\3210\225\361*RRw\276\263\213X\251a\005\022dPq\n\356\267$\350\013\024\t\234d\315%S9\271\221\253\222\232\204\006(\232\243\211\312&\314\212\254\315<UJ\321I\205\231\017#\272\t\316\360\336\210\224\277\307**\356\227\374]\311\024\341BB\004.o\210";
+    PyObject *data = __Pyx_DecompressString(cstring, 2630, 2);
     if (unlikely(!data)) __PYX_ERR(0, 1, __pyx_L1_error)
     const char* const bytes = __Pyx_PyBytes_AsString(data);
     #if !CYTHON_ASSUME_SAFE_MACROS
     if (likely(bytes)); else { Py_DECREF(data); __PYX_ERR(0, 1, __pyx_L1_error) }
     #endif
-    #elif (CYTHON_COMPRESS_STRINGS) != 0 /* compression: zlib (2282 bytes) */
-const char* const cstring = "x\332\345W\315s\323H\026\217\231\004\314` \001\207\3601@g\002\353a\013\014\246\030fv&a\313d`\t\033>B`\231\241\330\352jKmGD_VKI<;\260\034s\324QG\035u\324\321\307\034s\364Q\307\374\t\374\t\373\353\226\222\230ajk9o\225-=\265\336{\375\336\373\375\336k\373\007\3224M\242\033\026\267\205\341\330\202\270\036\327\270n\330\235\375ErY'V |\322\342\304\260u\276\301u\302l\235\330\216O\204i@\375n\320ns\217\254\031|\235\350\016\027\352\025\337p\035\301\211\360=C\347b\236\331\304\261\315\036\321<\316|N\030i\345F\376\n\363\211!\210\346\330\276\321\t\234@`\023bq\313\361zuXIWL\010\243c\023\337!0\326\257)?\271\206\334\262P*\034\257{\206\317Z&/\024\362\240\332\236c\3757[\225\026Y7\374\025\342\367\\Nj\305\272\3571[\2504\366Mr5X\030(\225?T\273\237\206\013f\344E\310\225\356Y\256\337#b\205\301\265\037\270\010\256\355xD\353\371+\216]g\236\307z\013*\000'\360\211\323&-'\260uA\276a\033\360rY\277\262\360\351^y\361\003\327u<\237\353\013\366\0323\r\240\344\350\374\252,<\224\001RM\253\021\354S\303f2\221\332U\322\201\325\256r\036\016j\255\266\231}\244\022\374\207L\020!<v\010\264\002\300\007_F\333\2007\0312\300\014\020\007\363\001j+@\265k\253\274G\205\317<\277\366Y&\353\206\356\257\374\357&J\353s\367\311\215>s'\t?\264!*b\316+\214$\232:7\215\026\367@1\020H\222\032%V\354\265\311\323{O\257\335\372\376\226j\n\217\277A\361\005\260ii&x\213f\220\210\006\206\351\243\324\322\273\250\223\2056\3519\001\2619\302\000\251]\350\r\033\370+\334&\202\373R 5\305D\346\003u\nstf\255`\225\261\306\245\365}f\n^\177\362\021u\020r\321^L\323\270\330\345\322\262\317]b\261\236b\017\272\371W\3569\3734{a\253\276\201K\364\342\032\367\320\026>\267\344\263\323\222I\335\231\373k\375N\355\312\334\334\364\334\354\354\034\323uj\313:\311\254QArcCsLS\306\005~\326YK\233\035ji\251\224G}\347\367\313\273\235tG7\204\014\200\2530:\032\371F\262\265\243\232H\246\"g\022\337\360\271\355\253\t\261?\236\014\221\233\3502\\a\374\312\311\354\034\271\361I\213\331\0160l\263\300\364\t\245\036\327\003\215SJ\364@el;\3665`\272f0\023o5\3036|\274,\362\236\315g""\230\376Q\026\237\256\311^\333K\346\243\367{\253\376\212\341\351\324\005\215{\327-\326\342\346u/\3508\327\351\033\201\271T\334\250\234S\334\253\273\275\215`\017\021f\232\216\246\346\246L\205\350\314g\365?x\233\367\264\334\262\030\273\365\300o_\373\276\271<\277\260p\3174\rW\030\202\322\247\275\r|\177\002\203\351cT\364\031o/\363n\300m\215\313\366\257\357O\002\200\270\353\232\346|b\256\313m\235\211\236\255\031N]s<\214,\303\346\242\305\004o\301\303\212\305\274U\252;Z\000t|j1\027vT\206+\357&\267s7T\302D\255V\253\347s\241i+\201\275Zl \362\007T\313\361\364\275\007\001\324\000\213\354\017Jw\205\016\367%\342\362\021!P\003\375\3411\215\267\230\266\n&\342Cmf\301\217\031X\266\022E.\013I@\344\255\241W|\031\232\374R\025\212\016u\035\264\320em\250.\333\225\242b9\017\270\311\\\301uj\201oR\215\333HR\016\004\356y\216\207\251\213\263\020\264A\320\334bmf\230\024-\253\336a\336\230z\333\360\204_$\3266YG\200\240\026\363\213\341Li;\2605*\223\302\247`B\356J-b\366\001\004j\350\370Zr\352\343.\317\014\303V\345d\026N\025U\325bAY\032\310\323s\021p!\344\205,\036\3244\315e\017;ZBf\272\207h\336KECab\357\315\371\275\351M\251\334@^\275U\340\206\003R\236\216\226\252\037\256\001\342QU\337\273\242cq\345\353\270\004\246)\271\213\002\356\"\255Dg]\240\324y\265\035\327q\021[o\003,\263\\\003\355]\227\275R\317K\343\002d\264\221\340T5\204\310\345\334\022#\336kS\205.rs\\\244\247\313\257!y,r\311w<J\321a\024u\322V\0056WOE\225\245\250\260WR`\273\206\266\212t\356\331\273zk\352'\206\244b7`f\236\237l\333<\270}\211zl=o\347\375\221\263'\345\303ih\201oH\261c\010\304\235CU\340\2126*\244\242Z\373p\013\r\334\261\204\272)|r\344\013\346\230\360E)\216\222\002\003H\305\014Tr\221\356\220\274\033\223\032$\312\277\362)/\324\307\304Eh\256\0006\371\301)\002u\272P\212\272\302\243T\360qV\231y3\345\242U\334%\270\262\246\250&\260\013\\4\035\307\221\254N\345\241\343}\350\320V\242X\223\\\360\204\374\321E\341\323@\313\360\215\301\310\271\250\2613zt\363U\330\315\312\207\263\362xX\312\312'\303FV>\035A\232\014\227\262\362\331h\372\303\301""\221\261\362\373\265\315\245M\226\225O\205\270T6\027\243\203\021\213\272Ye*\\\217X6.\rp\221\213\275d4i&\257\322n6\376U\324\334\201\327#r\233\312\346\337\303\356\373R\366\345\221\017\027F*G\341\364\360\314\340\353\233i\255?\221\225\317D'\243f\204\355\316GK\037\216\215\214\235\010\253\341?\343\351l\364\330\340\330\345x)~\223\226\262\321\343\233~8\027\177\021\337\214_\247'\322\206\014\253\032\336\n\337\306\315l\264\032>\211\033\361\303\304H{[\207\267'\262\321\t\345a&~\026\277K\237\245]\251|\"\304\372\241\367o\303\305x,^N\016$\323Yy\n\346\213i)\235\220I- \341\312\251\260\203@\220\313X\364:\231L\220\333\331\350r\364.y\221N\347\253K\322\327\301\334\2649\\\257j\370 \272\213b\240f3\321R\324\216\357\306<\271\231,\251\242\275/\355\214\216e\352\263\233\377\030\211T\\\027\260\337\350yy\271\000k\250\344>\253a\263p\014\014\212\302\237\211&\212\335'\303\347\321\371\230\3112V6\033Ye<<\004\024\307\247\006SW\222\263i#\235O\327\373\254\337\335)\037\311\337\216A\177*\006H\325\360a\244\305SI)\231\220\017\367\243+\361_\200\327\222|X\210\226\343R\\\215_\346\013S\341\277\342?Kq\247||p\374\"\340\226\367K2\353\241g\002\257\305=\217\346\207p)lG\315\2542\031\322\270\031\377\234<O\247\372\245\376\331\255Fvt*\354J\222\024\357\006\227\277M_\366\357o\315l-mu\266\227v*g\242\311\234VC\257\027\267\277\330nl?\032\374\362J\272?\235s\265r.\272\035\237K\232;\025\311\212Y\230\214OH\371\267hN\001;~\022\314\350f\325\323\321\241\350\267\244\221\235\276\024\377-i$\363\311z\312\322\356\316\370\205\310\224Z\027\361r6\r\372M\270\236\250*v}\013\372\316'\335\264\322\177\270\325\332.e\325\231x6\331H\273\375\222\364\277\026\276Df\330\013x\350\321\265X$_'\213\375\003\375\351\235\362\261M\266\371\026/\225\360N\222\031\302\340\370t<QH\322\221\227N\246\255~\251X\271\250\010\200\222\315!\314\256\204\351p\004T\000\365`\252\026\257\203|\325\351x2\336\277\315 \274\322\336\355\253\350^,\371px|\263\360\363]8#9\214F\036\342\333\357>\037\376\3641\363\024\351\324Eq\020\010\355s\260\340\365.\315O\204j\030\034\334c\325\377\001""\347\312#\207\277\374#\272\235\014oGg\343FVEwF?\306\355\344!\200=\324\357n\225>\213\212\222x\027\242\227\210\371E2\r.\302\363y\365\370\0323)\247\351\016<\314\016.^O\002T\330\303\270\254\3121\364Klb\"\235\006p\221\210k\311Dr5\345\375\357\266\246\267\032\303<\315\253\363c\330\212\016D\227d\rN\rN\335\3000\005\363\377\235\330}$\004L\301\373R&\205\301I\014[%\205w@[%\310dw\225\200\311\247L\013\360\363\347\366-\352\313?<\302'##\217\026~\246\017\232\313\017\350\374\223\307\313\317\233\217\237\217<~\261\270\250\226\236\374\0071\315\233g";
-    PyObject *data = __Pyx_DecompressString(cstring, 2282, 1);
+    #elif (CYTHON_COMPRESS_STRINGS) != 0 /* compression: zlib (2502 bytes) */
+const char* const cstring = "x\332\315W\317w\323V\026\216K\002\2415\020\203C\370\215BHS:\340\326\224\376\234\2049&\2056\235\0240\201i\207iG\347Yzv\324\310\222\255'%q\013\035\226Yj\251\245\226Zj\351\245\227Yz\251e\376\004\376\204\371\356{Jb\246=s\246\2739\307\226\256\236\356\275\357\336\373}\367>\373\013\255f\333\232i\265\271#,\327\021Z\307\343\0067-\247u\270\250\315\233Z;\020\276\326\340\232\345\230|\233\233\032sL\315q}M\330\026\324\357\005\315&\367\264M\213oi\246\313\205|\305\267;\256\340\232\360=\313\344b\2319\232\353\330=\315\3608\363\271\306\264\2062\362\327\231\257YB3\\\307\267Z\201\033\010l\242\265y\333\365z\025X\221+&\204\325r4\337\325`l\336\222~\224\006m\231+\345\216\267<\313g\r\233\347\n*\250\246\347\266\377\233\255LK\333\262\374u\315\357u\270\266\220\257\373\036s\204L\343\320D\251\301\302B\251\374\221\332}9Z0K\025A)\335ow\374\236&\326\031\\\373A\007\3015]O3z\376\272\353T\230\347\261\336\212\014\300\r|\315mj\r7pL\241\275\307\266\341e\336\274\261\362\333\275T\361\203N\307\365|n\2568\233\314\266\200\222k\362\233Tx(\003\244\005cA\303>\013\330\214\022Y\270\251\265`\265\257\254\302A\255\3456\213\337\312\004\377F\t\"\204\207\256\006\255\000\360\301\227\325\264\340\215B\006\230\001\342`>@m\004\250\366\302\006\357\351\302g\236\277\360\207L\266,\323_\377\337M\244\326\037\335G\031\375\301\235\010~hC\224\304\\\226\030\021\232&\267\255\006\367@1\020\210H\215\022K\366:\332\343\373\217o\335\371\354\216l\n\217\377\204\342\013`\3230l\360\026\315@\210\006\226\355\243\324\344]T\264\225\246\326s\003\315\341\010\003\244\356@o\324\300_\347\216&\270O\202\266 \231\310|\240\256\303\034\235\271\220\263\312\332\344d\375\200\331\202W\036\275A\035\204\234\267\0273\014.\366\271\264\346\363\216\326f=\311\036t\363\317\334s\017i\366\314\221}\003\227\350\305M\356\241-|\336\246g\267AI\335]\372K\345\356\302\215\245\245\331\245\305\305%f\232\272Cu\242\254QA\355\303m\303\265m\212\013\374\254\260\206\2618\322\322\244\244\242\276\373\237\313\373\235t\327\264\004\005\300e\030-C{\217\330\332\222MD\251\320L\342\333>w|9!\016""\307\223%\224\211I\341\n\353g\256-.i\037\376\246\305\034\027\0306Y`\373\232\256{\334\014\014\256\353\232\031\310\214\035\327\271\005L7-f\343\255a9\226\217\227y\336\213j\206\231od\361\3335\352\265\203d\336x\177\260\352\257[\236\251w@\343\336\007m\326\340\366\007^\320r?\320\177\022\230K\371M\2479\305\275J\247\267\035\034 \302l\3335\344\334\244T4\223\371\254\362;oUO\323\226\371\330\255\004~\363\326g\265\265\345\225\225\373\266mu\204%t\375qo\033\337/\301`\375!*\372\2047\327x7\340\216\301\251\375+\207\223\000 \356\273\326\025\237\230\3509\206\345V\014\327\303\260\262\034.\032L\360\006l\327\333\314\333\320M\327\010\200\213\257\267Y\007\026:\005Jw\233;\312\201N\000\351\355F\243\347sa\030\353\201\263\221\273\026\352\001ur=\363\340A\000/\000B\235\241\353\373B\213\373\2045=\"\004\335Bgx\314\340\rfl\200\203\370\350\016k\303\217\035\264\035)\n%\013\242\03626\320%>\205F_]\206bB\335\004!L\252\212nR\243\352\250\225b\000\267YGpSo\203iJ\r)\"\027\334\220-\315\004\356y.=o\023o0\200q,BB\026\274\315\232Mf\331:\332W*a\366\330f\323\362\204\237\247\332\264YK\200\254m\346\347\203Z\327\233\201c\350\224&>9+\224/\271\2109\010@t\313\304\267M'\000\356t~X\216,0k\343\204\221u\316\027\244\245E\021w\220B.\250\322\346\017r\262*\331\303\216mA\271\037`\254\372*o.L\357\203\231\1770\311u\2356\240\253\267\001$qX\322I\331\306\222\347n\t\275\203(\374u\342u[V\017\327\000!Jh\016\256hh\\\371\026.\201m\023\265Q\334}:H\021\256\200\207\202\304\355\270\035\356\270\035\204\334\333\006\035\333\035\013\023\240B\355TQ\025sE\007|@\257\t\256\313\256\021JV\3668\007\274\246.\211\200\244\335\016\3626\351k\021\331\205\222|\202\024m\250\243\200\306\206@\010\362)/?\211\222&R\n\234\216el \251\373\316\276\336\246\374\035B\254\355\006\314VYz\r\252\002}U\220\207\222\356\261-\325\371\207\323\351@Rsld\201o\223\330\262\004\242WH\346\260\243\357r)\257\334!\033\204\001j\265\205\274I\370\0241rb\331\360\245\3538ur< \345\343R\312y\322#\362~Lr\346H\377\322']t\037\303\031\241u\004pRg\254\010\344A\244\353\250.<*6\240\245\344:\207D&>\016:[""\365\243\022\333\371\235\240\247Z\243\312\3004\350\240oy\000,\225\033\201\243]\236\356#?\023F\016\177)\212M\"\215'\350\307\233\016\367\026\332\215o\017\307.F\325\275\361\023;\317\303n6y<\233\234\n\013\331\344\231\260\232M\236\213 M\207\365l\362B4\373\372\350\330\304\344\253\315\235\372\016\313&\317\206\270\024wV\243\243\021\213\272Yq&\334\212X6E\006\270\320b/\031Oj\311\363\264\233M]\212j{\360\372\016mS\334\371k\330}U\310\336~\347\365\225\261\342\t8=>7\274v;]\350\227\262\311\363\321\231\250\026a\273\313Q\375\365\311\261\211\323a9\3741\236\315\306O\016O\316\307\365\370\247\264\220\215\237\332\361\303\245\370H|;\376!=\235V)\254rx'|\031\327\262\361r\370(\256\306\337$V\332\033\034\337-e\343%\351a.~\022\377\232>I\273\244|:\304\372\261W/\303\325x\"^K\336Jf\263\311\031\230\257\246\205\264DI\255 \341\342\331\260\205@\220\313D\364C2\235 \267\013\321|\364k\362,\235U\253u\362uT\231\326F\353U\016\277\216\356\241\030\250\331\\T\217\232\361\275\230'\267\223\272,\332\253\302\336\370D&?\373\371Oh\221\214\353\n\366\033\277L\227+\260\206\212\362Y\016k\271c`\220\027\376|T\312w\237\016\237F\227cFe,\356T\263\342Tx\014(N\315\014gn$\027\322j\272\234n\365Y\277\2737\371\216z;\001\375\231\030 \225\303o\"#\236I\nI\211\036\036D7\342\317\201W\235\036V\242\265\270\020\227\343\357\324\302L\370K\374>\211{\223\247\206\247\256\002n\272_\247\254G\2365x\315\357*\232/\302z\330\214jYq:\324\343Z\374}\3624\235\351\027\372\027\006\325\354\304L\330%\222\344\357\206\363\037\247\337\365\037\014\346\006\365Ak\267\276W<\037M+Z\215\274^\335=\262[\335\375v\370\367\347\344\376\234\342j\361b\364I|1\251\355\025\211\025\2130\231*\221\374\"Z\222\300N\235\0013\272Y\371\\t,z\221T\263s\327\343\257\222j\262\234l\245,\355\356M]\211l\322\272\212\227\213i\320\257\301u\251,\331\3651\350\273\234t\323b\377\233Ac\267\220\225\347\342\305d;\355\366\013\344\1773\374\016\231a/\340aF\267b\221\\KV\373o\365g\367&O\356\260\235\227x)\205_\211\314\020\206\247f\343R.\221#/\235N\033\375B\276\202\022\242\264;]U\267O\3039\" \272p\204,\277\373y""\375\356\233\344\221\274\221\027I#\024\371uql\342z\\=dS\316\320}\302\236\016e[\037=\340\307\377\t{(\035\332\224j\375sT\212\336\305\353\351\363R8\216-\313\250f<\037w\263\022FW\364\000\023b\n\031\357\341\362,\236\215\245\225\010g\301\007\017U\237\2728\274\370'`?\245\372\221z\245tqx\241\232\226\322\367\025\342\263C\3553\200Q\236~\363\203\261\365zR\361\241\230\334O\317\244\367RF[\253\264s\341\262Z\273\214\tQ\276\221\224\024\204wv\272\243\221O\235\217\256B\365\\Z\006\217k\375\347\203\321\300\345\273\341\215\317\3733\203\243\003c\267\264\2730\254?9H\345\215\367\305\335\345\335\356\360\361\217\303\037\377\211\300N\234$\342n\306\377H\013{\222\347/\240^\236\t7\243\347\250\3149\360 \372%y7}\273\177\255\377\325\240:\250!'\322[\214^&\367(\332\231\320\217\320\021\227\242\257@\310nv\351\275\344\030\370~$\375\264?\333\247\251:}M&\210\331\227\274\350W\367\363\275\224\326\263\362\265\370f\302\366\340\341\305p\356\243\364\343\376\221\376\355~\235\\\335\217\317'7Q\221K\327\020\374Gq+\251'v\177\276\2775`\203.m\376\211\244OyZ\225\351\317a#z+\272Ns\340\354\360\354\207\030\356H\350_\211\323G?\203\231\250{!#ax\006\303_J\341]\000*\005\352\365}\245\337m\236\000?\345>\271\243\373\364GN\370\332\330\330\267+\337\353_\327\326\276\326\227\037=\\{Z{\370t\354\341\263\325U\271\364\350\337\227\036\353\333";
+    PyObject *data = __Pyx_DecompressString(cstring, 2502, 1);
     if (unlikely(!data)) __PYX_ERR(0, 1, __pyx_L1_error)
     const char* const bytes = __Pyx_PyBytes_AsString(data);
     #if !CYTHON_ASSUME_SAFE_MACROS
     if (likely(bytes)); else { Py_DECREF(data); __PYX_ERR(0, 1, __pyx_L1_error) }
     #endif
-    #else /* compression: none (4395 bytes) */
-const char* const bytes = ": All dimensions preceding dimension %d must be indexed and not slicedBuffer view does not expose stridesCan only create a buffer that is contiguous in memory.Cannot assign to read-only memoryviewCannot create writable memory view from read-only memoryviewCannot index with type 'Cannot transpose memoryview with indirect dimensionsDimension %d is not directEmpty shape tuple for cython.arrayIndex out of bounds (axis %d)Indirect dimensions not supportedInvalid mode, expected 'c' or 'fortran', got Invalid shape in axis <MemoryView of No value specified for struct attribute 'key_start'No value specified for struct attribute 'key_width'No value specified for struct attribute 'value_start'No value specified for struct attribute 'value_width'No value specified for struct attribute 'type'Note that Cython is deliberately stricter than PEP-484 and rejects subclasses of builtin types. If you need to pass subclasses then set the 'annotation_typing' directive to False.Out of bounds on buffer access (axis Step may not be zero (axis %d)Unable to convert item to object>=?.>')==!=<<=add_note and  at 0xcollections.abc<contiguous and direct><contiguous and indirect>disableenablegc (got got differing extents in dimension isenableditemsize <= 0 for cython.arrayno default __reduce__ due to non-trivial __cinit__ object><strided and direct><strided and direct or indirect><strided and indirect>third_party/mabel/rugo/_jsonl/_jsonl_reader.pyxunable to allocate array data.unable to allocate shape and strides.utf-8ASCIIEllipsis__Pyx_PyDict_NextRefSequenceView.MemoryViewabcallocate_bufferappendasyncio.coroutinesbasebenchmark_document_mapbuf_databuf_lenbuffer_size_mbbytescchunk_bufferschunk_recordschunk_result__class____class_getitem__cline_in_tracebackcolcol_namecolumn_namescolumnscontextcountdatadata_bytesdecode__dict__dtype_is_objectelapsed_msencodeenumerateerrorexplicit_schemafail_on_errorfieldfirst_recordflagsformatfortran__func__getget_jsonl_schema__getstate__id__import__indexinfer_sample_si""zeinfer_schemainterp_msinterp_resultinterp_startinterpret_ms_is_coroutineitemsitemsizekeykey_startkey_width__main__markersmemviewmode__module__name__name__ndim__new__nullablenum_recordsnum_rowsobjobjectopopteryx.compiled.rugo._jsonlpackparse_arraysparse_objectsperf_counterpoppredpredicatespredictor__pyx_checksum__pyx_state__pyx_type__pyx_unpickle_Enum__pyx_vtable____qualname__read_jsonlread_jsonl_rawreader__reduce____reduce_cython____reduce_ex__registerresultsample_mapsample_recordsample_sizescan_msscan_startschemaschema_list__set_name__setdefault__setstate____setstate_cython__shapesizestartstart_timestepstopstructsuccess__test__timetotal_bytestotal_mstotal_rowstypeunpackupdatevalvaluevalue_startvalue_widthvaluesvectorswith_estimatex\320\000\033\2301\340\004\r\210Z\220q\330\010\t\330\010\020\220\001\330\010\023\2201\330\010\030\230\001\330\010\025\220Q\330\010\032\230!\360\006\000\005\010\200v\210Q\210a\330\010\026\220a\330\010\014\210L\230\006\230a\230q\330\014\027\220w\230a\330\020\030\230\001\330\020\030\230\006\230a\230y\250\004\250A\250Z\260q\330\020\034\230A\340\010\020\220\013\2301\340\004\014\210K\220q\200\001\330\n\013\360\036\000\014\r\360\006\000\t#\320\"2\260'\270\021\330\010\031\230\023\230A\230Q\330\010\035\230Q\360\016\000\005\022\220\024\220]\240!\330\004\016\320\016%\240Q\240j\260\001\330\004\017\210t\220=\240\003\2402\240\\\260\022\2601\360\006\000\005\024\2204\220}\240A\330\004\024\220O\2401\240J\250i\260y\300\t\310\021\330\004\021\220\024\220]\240#\240R\240~\260R\260q\360\006\000\005\022\220\021\330\004\007\200}\220L\240\005\240S\250\002\250!\330\010\027\220}\240L\260\001\260\021\330\010\014\210I\220Q\330\014\026\220g\230Q\330\020\030\230\005\230\\\250\025\250a\330\020\032\230%\230~\250U\260!\330\020\030\230\005\230Q\360\006\000\005\006\330\010\027\220}\240A\330\010\023\2201\330\010\030\230\001\330\010\024\220H\230B\230a\330\010\032\230#\230Q\230f\240B\240e\2502\250Q\330\010\026\220a\200\001\340\004\005\330\004\005\330\004\005\360\036\000\014""\r\360\006\000\005 \230q\360\006\000\005\036\230Q\330\004\035\230Q\330\004\036\230a\330\004\005\330\010\023\2201\330\010\024\220A\330\010\030\230\001\330\010\032\230!\330\010\026\220a\330\010\031\230\021\360\006\000\005\006\330\010\025\220T\230\035\240a\360\006\000\t\014\2101\330\014\020\220\007\220q\330\020\027\320\027)\250\032\2601\260C\260w\270a\270q\340\010\013\2101\330\014\020\220\005\220T\230\027\240\001\330\020\024\220J\230c\240\027\250\001\250\021\330\020\024\220F\230)\2409\250A\250Q\330\020\024\220I\230S\240\001\240\024\240W\250A\250Q\330\020\027\220{\240*\250A\250Q\340\010\017\320\017\037\230q\330\010\017\320\017$\240A\330\010\017\320\017\037\230q\330\010\017\320\017 \240\001\330\010\017\320\017 \240\001\360\006\000\t\014\210:\220Q\220f\230A\330\014\025\220_\240A\240X\250T\260\027\270\001\270\032\3001\330\r\027\220q\230\006\230a\330\014\025\220_\240A\320%5\260W\270F\300#\300Q\300g\310Q\340\014\031\230\025\230a\230q\330\014\025\220_\240A\320%5\260W\270L\310\003\3101\310M\320YZ\360\006\000\t\030\220q\330\010\t\330\014\033\2306\240\033\250A\340\014\017\210t\220<\230q\330\020\021\340\014\017\210|\230=\250\002\250!\330\020\023\2204\220q\330\024\030\230\007\230|\2501\330\030$\240G\2501\250C\250w\260a\260q\340\020\036\230l\250!\330\020\037\230|\250<\260u\270A\360\006\000\021\024\220=\240\003\2405\250\004\250C\250q\260\014\270J\300b\310\001\330\024#\240<\250x\260q\270\001\340\014\017\210v\220W\230A\330\020\021\340\010\026\220d\230-\240s\250\"\250L\270\002\270!\340\010\016\210a\210}\230A\330\010\016\210a\210~\230Q\330\010\016\210a\320\017!\240\021\330\010\016\210a\320\017#\240<\250r\260\025\260b\270\001\330\010\016\210a\320\017\037\230q\360\006\000\t\014\210=\230\007\230q\330\014\020\220\t\230\021\330\020\026\220a\320\027'\240w\250a\330\024!\240\025\240a\330\024!\240\025\240a\330\024#\2405\250\001\330\024#\2405\250\001\330\024\034\230E\240\021\360\006\000\t\020\210q\360\006\000\t\014\2107\220#\220Q\330\014\020\220\001\200\001\340\004\005\330\004\005\330\004\005""\330\004\005\330\004\005\330\004\005\330\004\005\330\004\005\360&\000\005 \230q\360\006\000\005\036\230Q\330\004\036\230a\330\004\036\230a\330\004\035\230Q\330\004\027\220q\330\004\005\330\010\023\2201\330\010\030\230\001\330\010\024\220A\330\010\023\2201\330\010\022\220!\360\006\000\005\006\340\010\013\2101\330\014\020\220\007\220q\330\020\027\320\027)\250\032\2601\260C\260w\270a\270q\340\010\013\2101\330\014\020\220\005\220T\230\027\240\001\330\020\024\220J\230c\240\027\250\001\250\021\330\020\024\220F\230)\2409\250A\250Q\330\020\024\220I\230S\240\001\240\024\240W\250A\250Q\330\020\027\220{\240*\250A\250Q\340\010\017\320\017\037\230q\330\010\017\320\017$\240A\330\010\017\320\017\037\230q\330\010\017\320\017 \240\001\330\010\017\320\017 \240\001\360\006\000\t\014\210:\220Q\220f\230A\330\014\025\220_\240A\240X\250T\260\027\270\001\270\032\3001\330\r\027\220q\230\006\230a\330\014\025\220_\240A\320%5\260W\270F\300#\300Q\300g\310Q\340\014\031\230\025\230a\230q\330\014\025\220_\240A\320%5\260W\270L\310\003\3101\310M\320YZ\360\010\000\t\n\330\014\033\2306\240\033\250A\340\014\017\210t\220<\230q\330\020\023\2206\230\032\2401\330\024\032\230!\230;\240f\250J\260b\270\007\270q\300\001\330\020\021\340\014\017\210|\230=\250\002\250!\330\020\023\2204\220q\330\024\030\230\007\230|\2501\330\030$\240G\2501\250C\250w\260a\260q\360\006\000\021\036\230W\240A\240U\250!\250<\260q\330\020\035\230W\240A\240\\\260\021\330\020\036\230l\250!\340\020\023\220<\320\037/\250u\260C\260r\270\021\330\024\030\230\005\230Y\240l\260!\330\030\036\230a\230s\240'\250\021\250,\260e\2707\300!\3001\340\014\017\210v\220W\230A\330\020\021\360\006\000\t\014\210;\220b\230\002\230$\230a\330\014\026\320\0260\260\001\330\020\037\230\177\250n\270A\340\014\022\220!\220=\240\001\330\014\022\220!\320\023%\240Q\330\014\022\220!\220>\240\021\330\014\022\220!\220<\230q\330\014\022\220!\220=\240\001\340\010\017\210q\360\006\000\t\014\2107\220#\220Q\330\014\020\220\001uint64_t const \000\000MIX_HASH_CONSTANT\000NULL_HASHO";
+    #else /* compression: none (4611 bytes) */
+const char* const bytes = ": All dimensions preceding dimension %d must be indexed and not slicedBuffer view does not expose stridesCan only create a buffer that is contiguous in memory.Cannot assign to read-only memoryviewCannot create writable memory view from read-only memoryviewCannot index with type 'Cannot transpose memoryview with indirect dimensionsDimension %d is not directEmpty shape tuple for cython.arrayIndex out of bounds (axis %d)Indirect dimensions not supportedInvalid mode, expected 'c' or 'fortran', got Invalid shape in axis <MemoryView of No value specified for struct attribute 'key_start'No value specified for struct attribute 'key_width'No value specified for struct attribute 'value_start'No value specified for struct attribute 'value_width'No value specified for struct attribute 'type'Note that Cython is deliberately stricter than PEP-484 and rejects subclasses of builtin types. If you need to pass subclasses then set the 'annotation_typing' directive to False.Out of bounds on buffer access (axis Step may not be zero (axis %d)Unable to convert item to object>=?.>')==!=<<=add_note and  at 0xcollections.abc<contiguous and direct><contiguous and indirect>disableenablegc (got got differing extents in dimension isenableditemsize <= 0 for cython.arrayno default __reduce__ due to non-trivial __cinit__ object><strided and direct><strided and direct or indirect><strided and indirect>third_party/mabel/rugo/_jsonl/_jsonl_reader.pyxunable to allocate array data.unable to allocate shape and strides.utf-8ASCIIEllipsis__Pyx_PyDict_NextRefSequenceView.MemoryViewabcallocate_bufferasyncio.coroutinesbasebenchmark_document_mapbuf_databuf_lenbuffer_size_mbbytescchunk_bufferschunk_recordschunk_result__class____class_getitem__cline_in_tracebackcolcol_namecolumn_namescolumnscontextcountdatadata_bytesdecode__dict__dtype_is_objectelapsed_msencode__enter__enumerateerror__exit__explicit_schemaffail_on_errorfieldfirst_recordflagsformatfortran__func__getget_jsonl_schema__getstate__id__import__indexinf""er_sample_sizeinfer_schemainterp_msinterp_resultinterp_startinterpret_ms_is_coroutineitemsitemsizekeykey_startkey_width__main__markersmemviewmin_rows_per_threadmode__module__name__name__ndim__new__nullablenum_recordsnum_rowsobjobjectopopenopteryx.compiled.rugo._jsonlospackparse_arraysparse_objectsperf_counterpoppredpredicatespredictor__pyx_checksum__pyx_state__pyx_type__pyx_unpickle_Enum__pyx_vtable____qualname__rbreadread_jsonlread_jsonl_rawreader__reduce____reduce_cython____reduce_ex__registerresultsample_mapsample_recordsample_sizescan_msscan_startschemaschema_list__set_name__setdefault__setstate____setstate_cython__shapesizestartstart_timestepstopstructsuccess__test__threaded_succeededtimetotal_bytestotal_mstotal_rowstypeunpackupdateuse_threadsvalvaluevalue_startvalue_widthvaluesvectorswith_estimatex\320\000\033\2301\340\004\r\210Z\220q\330\010\t\330\010\020\220\001\330\010\023\2201\330\010\030\230\001\330\010\025\220Q\330\010\032\230!\360\006\000\005\010\200v\210Q\210a\330\010\026\220a\330\010\014\210L\230\006\230a\230q\330\014\027\220w\230a\330\020\030\230\001\330\020\030\230\006\230a\230y\250\004\250A\250Z\260q\330\020\034\230A\340\010\020\220\013\2301\340\004\014\210K\220q\200\001\330\n\013\360\036\000\014\r\360\006\000\t#\320\"2\260'\270\021\330\010\031\230\023\230A\230Q\330\010\035\230Q\360\016\000\005\022\220\024\220]\240!\330\004\016\320\016%\240Q\240j\260\001\330\004\017\210t\220=\240\003\2402\240\\\260\022\2601\360\006\000\005\024\2204\220}\240A\330\004\024\220O\2401\240J\250i\260y\300\t\310\021\330\004\021\220\024\220]\240#\240R\240~\260R\260q\360\006\000\005\022\220\021\330\004\007\200}\220L\240\005\240S\250\002\250!\330\010\027\220}\240L\260\001\260\021\330\010\014\210I\220Q\330\014\026\220g\230Q\330\020\030\230\005\230\\\250\025\250a\330\020\032\230%\230~\250U\260!\330\020\030\230\005\230Q\360\006\000\005\006\330\010\027\220}\240A\330\010\023\2201\330\010\030\230\001\330\010\024\220H\230B\230a\330\010\032\230#\230Q\230f\240B\240e\2502\250Q\330\010""\026\220a\200\001\340\004\005\330\004\005\330\004\005\360\036\000\014\r\360\006\000\005 \230q\360\006\000\005\036\230Q\330\004\035\230Q\330\004\036\230a\330\004\005\330\010\023\2201\330\010\024\220A\330\010\030\230\001\330\010\032\230!\330\010\026\220a\330\010\031\230\021\360\006\000\005\006\330\010\025\220T\230\035\240a\360\006\000\t\014\2101\330\014\020\220\007\220q\330\020\027\320\027)\250\032\2601\260C\260w\270a\270q\340\010\013\2101\330\014\020\220\005\220T\230\027\240\001\330\020\024\220J\230c\240\027\250\001\250\021\330\020\024\220F\230)\2409\250A\250Q\330\020\024\220I\230S\240\001\240\024\240W\250A\250Q\330\020\027\220{\240*\250A\250Q\340\010\017\320\017\037\230q\330\010\017\320\017$\240A\330\010\017\320\017\037\230q\330\010\017\320\017 \240\001\330\010\017\320\017 \240\001\360\006\000\t\014\210:\220Q\220f\230A\330\014\025\220_\240A\240X\250T\260\027\270\001\270\032\3001\330\r\027\220q\230\006\230a\330\014\025\220_\240A\320%5\260W\270F\300#\300Q\300g\310Q\340\014\031\230\025\230a\230q\330\014\025\220_\240A\320%5\260W\270L\310\003\3101\310M\320YZ\360\006\000\t\030\220q\330\010\t\330\014\033\2306\240\033\250A\340\014\017\210t\220<\230q\330\020\021\340\014\017\210|\230=\250\002\250!\330\020\023\2204\220q\330\024\030\230\007\230|\2501\330\030$\240G\2501\250C\250w\260a\260q\340\020\036\230l\250!\330\020\037\230|\250<\260u\270A\360\006\000\021\024\220=\240\003\2405\250\004\250C\250q\260\014\270J\300b\310\001\330\024#\240<\250x\260q\270\001\340\014\017\210v\220W\230A\330\020\021\340\010\026\220d\230-\240s\250\"\250L\270\002\270!\340\010\016\210a\210}\230A\330\010\016\210a\210~\230Q\330\010\016\210a\320\017!\240\021\330\010\016\210a\320\017#\240<\250r\260\025\260b\270\001\330\010\016\210a\320\017\037\230q\340\010\017\210q\360\006\000\t\014\2107\220#\220Q\330\014\020\220\001\200\001\340\004\005\330\004\005\330\004\005\330\004\005\330\004\005\330\004\005\330\004\005\330\004\005\330\004\005\330\004\005\360&\000\005 \230q\360\006\000\005\036\230Q\330\004\036\230a\330""\004\036\230a\330\004\035\230Q\330\004\027\220q\360\014\000\005$\2401\330\004\005\330\010\023\2201\330\010\030\230\001\330\010\024\220A\330\010\023\2201\330\010\022\220!\360\006\000\005\006\340\010\013\2101\330\014\020\220\007\220q\330\020\027\320\027)\250\032\2601\260C\260w\270a\270q\340\010\013\2101\330\014\020\220\005\220T\230\027\240\001\330\020\024\220J\230c\240\027\250\001\250\021\330\020\024\220F\230)\2409\250A\250Q\330\020\024\220I\230S\240\001\240\024\240W\250A\250Q\330\020\027\220{\240*\250A\250Q\340\010\017\320\017\037\230q\330\010\017\320\017$\240A\330\010\017\320\017\037\230q\330\010\017\320\017 \240\001\330\010\017\320\017 \240\001\360\006\000\t\036\230Q\330\010\013\2101\340\014\017\210z\230\021\230&\240\001\330\025\031\230\021\230&\240\t\250\021\330\024!\240\021\240%\240q\330\021\033\2301\230F\240!\330\020\035\230Q\340\020\035\230U\240!\2401\340\014\017\210s\220!\220<\230r\240\021\330\020\033\320\033+\2501\330\020\032\230#\230Q\230a\360\006\000\021\033\320\0321\260\021\260*\270A\360\006\000\021!\320 8\270\001\330\024\025\330\024\025\330\024\025\330\024\025\330\024\025\330\024\034\230A\360\010\000\021\024\220=\240\014\250E\260\023\260B\260a\330\024!\240\027\250\001\250\021\330\024!\240\027\250\001\250\035\260a\330\024!\240\035\250a\330\024)\250\021\360\006\000\t\014\2104\210q\340\014\017\210z\230\021\230&\240\001\330\020\031\230\037\250\001\250\030\260\024\260W\270A\270Z\300q\330\021\033\2301\230F\240!\330\020\031\230\037\250\001\320)9\270\027\300\006\300c\310\021\310'\320QR\340\020\035\230U\240!\2401\330\020\031\230\037\250\001\320)9\270\027\300\014\310C\310q\320P]\320]^\360\010\000\r\016\330\020\037\230v\240[\260\001\340\020\023\2204\220|\2401\330\024\027\220v\230Z\240q\330\030\036\230a\230{\250&\260\n\270\"\270G\3001\300A\330\024\025\340\020\023\220<\230}\250B\250a\330\024\027\220t\2301\330\030\034\230G\240<\250q\330\034(\250\007\250q\260\003\2607\270!\2701\360\006\000\025\"\240\027\250\001\250\025\250a\250|\2701\330\024!\240\027\250\001\250\034""\260Q\330\024\"\240,\250a\340\024\027\220|\320#3\2605\270\003\2702\270Q\330\030\034\230E\240\031\250,\260a\330\034\"\240!\2403\240g\250Q\250l\270%\270w\300a\300q\340\020\023\2206\230\027\240\001\330\024\025\360\006\000\t\014\210;\220b\230\002\230$\230a\330\014\026\320\0260\260\001\330\020\037\230\177\250n\270A\340\014\022\220!\220=\240\001\330\014\022\220!\320\023%\240Q\330\014\022\220!\220>\240\021\330\014\022\220!\220<\230q\330\014\022\220!\220=\240\001\340\010\017\210q\360\006\000\t\014\2107\220#\220Q\330\014\020\220\001uint64_t const \000\000MIX_HASH_CONSTANT\000NULL_HASHO";
     PyObject *data = NULL;
     CYTHON_UNUSED_VAR(__Pyx_DecompressString);
     #endif
     PyObject **stringtab = __pyx_mstate->__pyx_string_tab;
     Py_ssize_t pos = 0;
-    for (int i = 0; i < 192; i++) {
+    for (int i = 0; i < 201; i++) {
       Py_ssize_t bytes_length = index[i].length;
       PyObject *string = PyUnicode_DecodeUTF8(bytes + pos, bytes_length, NULL);
       if (likely(string) && i >= 56) PyUnicode_InternInPlace(&string);
@@ -27156,7 +27493,7 @@ const char* const bytes = ": All dimensions preceding dimension %d must be index
       stringtab[i] = string;
       pos += bytes_length;
     }
-    for (int i = 192; i < 198; i++) {
+    for (int i = 201; i < 207; i++) {
       Py_ssize_t bytes_length = index[i].length;
       PyObject *string = PyBytes_FromStringAndSize(bytes + pos, bytes_length);
       stringtab[i] = string;
@@ -27167,14 +27504,14 @@ const char* const bytes = ": All dimensions preceding dimension %d must be index
       }
     }
     Py_XDECREF(data);
-    for (Py_ssize_t i = 0; i < 198; i++) {
+    for (Py_ssize_t i = 0; i < 207; i++) {
       if (unlikely(PyObject_Hash(stringtab[i]) == -1)) {
         __PYX_ERR(0, 1, __pyx_L1_error)
       }
     }
     #if CYTHON_IMMORTAL_CONSTANTS
     {
-      PyObject **table = stringtab + 192;
+      PyObject **table = stringtab + 201;
       for (Py_ssize_t i=0; i<6; ++i) {
         #if CYTHON_COMPILING_IN_CPYTHON_FREETHREADING
         #if PY_VERSION_HEX < 0x030E0000
@@ -27203,17 +27540,17 @@ const char* const bytes = ": All dimensions preceding dimension %d must be index
   {
     PyObject **numbertab = __pyx_mstate->__pyx_number_tab + 1;
     int8_t const cint_constants_1[] = {0,-1,1,2,3,4,5,16};
-    int16_t const cint_constants_2[] = {1000};
+    int16_t const cint_constants_2[] = {1000,2048};
     int32_t const cint_constants_4[] = {136983863L};
-    for (int i = 0; i < 10; i++) {
-      numbertab[i] = PyLong_FromLong((i < 8 ? cint_constants_1[i - 0] : (i < 9 ? cint_constants_2[i - 8] : cint_constants_4[i - 9])));
+    for (int i = 0; i < 11; i++) {
+      numbertab[i] = PyLong_FromLong((i < 8 ? cint_constants_1[i - 0] : (i < 10 ? cint_constants_2[i - 8] : cint_constants_4[i - 10])));
       if (unlikely(!numbertab[i])) __PYX_ERR(0, 1, __pyx_L1_error)
     }
   }
   #if CYTHON_IMMORTAL_CONSTANTS
   {
     PyObject **table = __pyx_mstate->__pyx_number_tab;
-    for (Py_ssize_t i=0; i<11; ++i) {
+    for (Py_ssize_t i=0; i<12; ++i) {
       #if CYTHON_COMPILING_IN_CPYTHON_FREETHREADING
       #if PY_VERSION_HEX < 0x030E0000
       if (_Py_IsOwnedByCurrentThread(table[i]) && Py_REFCNT(table[i]) == 1)
@@ -27238,7 +27575,7 @@ typedef struct {
     unsigned int argcount : 4;
     unsigned int num_posonly_args : 1;
     unsigned int num_kwonly_args : 1;
-    unsigned int nlocals : 5;
+    unsigned int nlocals : 6;
     unsigned int flags : 10;
     unsigned int first_line : 10;
 } __Pyx_PyCode_New_function_description;
@@ -27257,22 +27594,22 @@ static int __Pyx_CreateCodeObjects(__pyx_mstatetype *__pyx_mstate) {
   PyObject* tuple_dedup_map = PyDict_New();
   if (unlikely(!tuple_dedup_map)) return -1;
   {
-    const __Pyx_PyCode_New_function_description descr = {9, 0, 0, 26, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 133};
-    PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_data, __pyx_mstate->__pyx_n_u_columns, __pyx_mstate->__pyx_n_u_predicates, __pyx_mstate->__pyx_n_u_explicit_schema, __pyx_mstate->__pyx_n_u_infer_schema, __pyx_mstate->__pyx_n_u_infer_sample_size, __pyx_mstate->__pyx_n_u_parse_arrays, __pyx_mstate->__pyx_n_u_parse_objects, __pyx_mstate->__pyx_n_u_fail_on_error, __pyx_mstate->__pyx_n_u_context, __pyx_mstate->__pyx_n_u_reader, __pyx_mstate->__pyx_n_u_pred, __pyx_mstate->__pyx_n_u_chunk_result, __pyx_mstate->__pyx_n_u_column_names, __pyx_mstate->__pyx_n_u_chunk_buffers, __pyx_mstate->__pyx_n_u_chunk_records, __pyx_mstate->__pyx_n_u_total_rows, __pyx_mstate->__pyx_n_u_schema, __pyx_mstate->__pyx_n_u_result, __pyx_mstate->__pyx_n_u_col, __pyx_mstate->__pyx_n_u_op, __pyx_mstate->__pyx_n_u_val, __pyx_mstate->__pyx_n_u_data_bytes, __pyx_mstate->__pyx_n_u_key, __pyx_mstate->__pyx_n_u_value, __pyx_mstate->__pyx_n_u_vectors};
-    __pyx_mstate_global->__pyx_codeobj_tab[0] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_third_party_mabel_rugo__jsonl__j, __pyx_mstate->__pyx_n_u_read_jsonl, __pyx_mstate->__pyx_kp_b_iso88591_q_Q_a_a_Q_q_1_A_1_1_q_1Cwaq_1_T, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[0])) goto bad;
+    const __Pyx_PyCode_New_function_description descr = {11, 0, 0, 35, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 145};
+    PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_data, __pyx_mstate->__pyx_n_u_columns, __pyx_mstate->__pyx_n_u_predicates, __pyx_mstate->__pyx_n_u_explicit_schema, __pyx_mstate->__pyx_n_u_infer_schema, __pyx_mstate->__pyx_n_u_infer_sample_size, __pyx_mstate->__pyx_n_u_parse_arrays, __pyx_mstate->__pyx_n_u_parse_objects, __pyx_mstate->__pyx_n_u_fail_on_error, __pyx_mstate->__pyx_n_u_use_threads, __pyx_mstate->__pyx_n_u_min_rows_per_thread, __pyx_mstate->__pyx_n_u_context, __pyx_mstate->__pyx_n_u_reader, __pyx_mstate->__pyx_n_u_pred, __pyx_mstate->__pyx_n_u_chunk_result, __pyx_mstate->__pyx_n_u_column_names, __pyx_mstate->__pyx_n_u_chunk_buffers, __pyx_mstate->__pyx_n_u_chunk_records, __pyx_mstate->__pyx_n_u_total_rows, __pyx_mstate->__pyx_n_u_schema, __pyx_mstate->__pyx_n_u_buf_data, __pyx_mstate->__pyx_n_u_buf_len, __pyx_mstate->__pyx_n_u_markers, __pyx_mstate->__pyx_n_u_interp_result, __pyx_mstate->__pyx_n_u_predictor, __pyx_mstate->__pyx_n_u_threaded_succeeded, __pyx_mstate->__pyx_n_u_result, __pyx_mstate->__pyx_n_u_col, __pyx_mstate->__pyx_n_u_op, __pyx_mstate->__pyx_n_u_val, __pyx_mstate->__pyx_n_u_f, __pyx_mstate->__pyx_n_u_data_bytes, __pyx_mstate->__pyx_n_u_key, __pyx_mstate->__pyx_n_u_value, __pyx_mstate->__pyx_n_u_vectors};
+    __pyx_mstate_global->__pyx_codeobj_tab[0] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_third_party_mabel_rugo__jsonl__j, __pyx_mstate->__pyx_n_u_read_jsonl, __pyx_mstate->__pyx_kp_b_iso88591_q_Q_a_a_Q_q_1_1_A_1_1_q_1Cwaq_1, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[0])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 16, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 250};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 16, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 308};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_data, __pyx_mstate->__pyx_n_u_time, __pyx_mstate->__pyx_n_u_buf_data, __pyx_mstate->__pyx_n_u_buf_len, __pyx_mstate->__pyx_n_u_num_records, __pyx_mstate->__pyx_n_u_context, __pyx_mstate->__pyx_n_u_predictor, __pyx_mstate->__pyx_n_u_markers, __pyx_mstate->__pyx_n_u_interp_result, __pyx_mstate->__pyx_n_u_scan_start, __pyx_mstate->__pyx_n_u_scan_ms, __pyx_mstate->__pyx_n_u_interp_start, __pyx_mstate->__pyx_n_u_interp_ms, __pyx_mstate->__pyx_n_u_sample_map, __pyx_mstate->__pyx_n_u_first_record, __pyx_mstate->__pyx_n_u_field};
     __pyx_mstate_global->__pyx_codeobj_tab[1] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_third_party_mabel_rugo__jsonl__j, __pyx_mstate->__pyx_n_u_benchmark_document_map, __pyx_mstate->__pyx_kp_b_iso88591_2_AQ_Q_Qj_t_2_1_4_A_O1Jiy_R_Rq, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[1])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {4, 0, 0, 21, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 308};
-    PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_data, __pyx_mstate->__pyx_n_u_columns, __pyx_mstate->__pyx_n_u_predicates, __pyx_mstate->__pyx_n_u_infer_schema, __pyx_mstate->__pyx_n_u_time, __pyx_mstate->__pyx_n_u_context, __pyx_mstate->__pyx_n_u_reader, __pyx_mstate->__pyx_n_u_pred, __pyx_mstate->__pyx_n_u_chunk_result, __pyx_mstate->__pyx_n_u_column_names, __pyx_mstate->__pyx_n_u_total_rows, __pyx_mstate->__pyx_n_u_total_bytes, __pyx_mstate->__pyx_n_u_result, __pyx_mstate->__pyx_n_u_start_time, __pyx_mstate->__pyx_n_u_col, __pyx_mstate->__pyx_n_u_op, __pyx_mstate->__pyx_n_u_val, __pyx_mstate->__pyx_n_u_data_bytes, __pyx_mstate->__pyx_n_u_first_record, __pyx_mstate->__pyx_n_u_elapsed_ms, __pyx_mstate->__pyx_n_u_field};
+    const __Pyx_PyCode_New_function_description descr = {4, 0, 0, 20, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 366};
+    PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_data, __pyx_mstate->__pyx_n_u_columns, __pyx_mstate->__pyx_n_u_predicates, __pyx_mstate->__pyx_n_u_infer_schema, __pyx_mstate->__pyx_n_u_time, __pyx_mstate->__pyx_n_u_context, __pyx_mstate->__pyx_n_u_reader, __pyx_mstate->__pyx_n_u_pred, __pyx_mstate->__pyx_n_u_chunk_result, __pyx_mstate->__pyx_n_u_column_names, __pyx_mstate->__pyx_n_u_total_rows, __pyx_mstate->__pyx_n_u_total_bytes, __pyx_mstate->__pyx_n_u_result, __pyx_mstate->__pyx_n_u_start_time, __pyx_mstate->__pyx_n_u_col, __pyx_mstate->__pyx_n_u_op, __pyx_mstate->__pyx_n_u_val, __pyx_mstate->__pyx_n_u_data_bytes, __pyx_mstate->__pyx_n_u_first_record, __pyx_mstate->__pyx_n_u_elapsed_ms};
     __pyx_mstate_global->__pyx_codeobj_tab[2] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_third_party_mabel_rugo__jsonl__j, __pyx_mstate->__pyx_n_u_read_jsonl_raw, __pyx_mstate->__pyx_kp_b_iso88591_q_Q_Q_a_1_A_a_T_a_1_q_1Cwaq_1_T, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[2])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 5, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 598};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 5, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 645};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_data, __pyx_mstate->__pyx_n_u_sample_size, __pyx_mstate->__pyx_n_u_result, __pyx_mstate->__pyx_n_u_schema_list, __pyx_mstate->__pyx_n_u_col_name};
     __pyx_mstate_global->__pyx_codeobj_tab[3] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_third_party_mabel_rugo__jsonl__j, __pyx_mstate->__pyx_n_u_get_jsonl_schema, __pyx_mstate->__pyx_kp_b_iso88591_1_Zq_1_Q_vQa_a_L_aq_wa_ay_AZq_A, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[3])) goto bad;
   }
@@ -27357,6 +27694,155 @@ end:
     return (__Pyx_RefNannyAPIStruct *)r;
 }
 #endif
+
+/* PyErrExceptionMatches (used by PyObjectGetAttrStrNoError) */
+#if CYTHON_FAST_THREAD_STATE
+static int __Pyx_PyErr_ExceptionMatchesTuple(PyObject *exc_type, PyObject *tuple) {
+    Py_ssize_t i, n;
+    n = PyTuple_GET_SIZE(tuple);
+    for (i=0; i<n; i++) {
+        if (exc_type == PyTuple_GET_ITEM(tuple, i)) return 1;
+    }
+    for (i=0; i<n; i++) {
+        if (__Pyx_PyErr_GivenExceptionMatches(exc_type, PyTuple_GET_ITEM(tuple, i))) return 1;
+    }
+    return 0;
+}
+static CYTHON_INLINE int __Pyx_PyErr_ExceptionMatchesInState(PyThreadState* tstate, PyObject* err) {
+    int result;
+    PyObject *exc_type;
+#if PY_VERSION_HEX >= 0x030C00A6
+    PyObject *current_exception = tstate->current_exception;
+    if (unlikely(!current_exception)) return 0;
+    exc_type = (PyObject*) Py_TYPE(current_exception);
+    if (exc_type == err) return 1;
+#else
+    exc_type = tstate->curexc_type;
+    if (exc_type == err) return 1;
+    if (unlikely(!exc_type)) return 0;
+#endif
+    #if CYTHON_AVOID_BORROWED_REFS
+    Py_INCREF(exc_type);
+    #endif
+    if (unlikely(PyTuple_Check(err))) {
+        result = __Pyx_PyErr_ExceptionMatchesTuple(exc_type, err);
+    } else {
+        result = __Pyx_PyErr_GivenExceptionMatches(exc_type, err);
+    }
+    #if CYTHON_AVOID_BORROWED_REFS
+    Py_DECREF(exc_type);
+    #endif
+    return result;
+}
+#endif
+
+/* PyErrFetchRestore (used by PyObjectGetAttrStrNoError) */
+#if CYTHON_FAST_THREAD_STATE
+static CYTHON_INLINE void __Pyx_ErrRestoreInState(PyThreadState *tstate, PyObject *type, PyObject *value, PyObject *tb) {
+#if PY_VERSION_HEX >= 0x030C00A6
+    PyObject *tmp_value;
+    assert(type == NULL || (value != NULL && type == (PyObject*) Py_TYPE(value)));
+    if (value) {
+        #if CYTHON_COMPILING_IN_CPYTHON
+        if (unlikely(((PyBaseExceptionObject*) value)->traceback != tb))
+        #endif
+            PyException_SetTraceback(value, tb);
+    }
+    tmp_value = tstate->current_exception;
+    tstate->current_exception = value;
+    Py_XDECREF(tmp_value);
+    Py_XDECREF(type);
+    Py_XDECREF(tb);
+#else
+    PyObject *tmp_type, *tmp_value, *tmp_tb;
+    tmp_type = tstate->curexc_type;
+    tmp_value = tstate->curexc_value;
+    tmp_tb = tstate->curexc_traceback;
+    tstate->curexc_type = type;
+    tstate->curexc_value = value;
+    tstate->curexc_traceback = tb;
+    Py_XDECREF(tmp_type);
+    Py_XDECREF(tmp_value);
+    Py_XDECREF(tmp_tb);
+#endif
+}
+static CYTHON_INLINE void __Pyx_ErrFetchInState(PyThreadState *tstate, PyObject **type, PyObject **value, PyObject **tb) {
+#if PY_VERSION_HEX >= 0x030C00A6
+    PyObject* exc_value;
+    exc_value = tstate->current_exception;
+    tstate->current_exception = 0;
+    *value = exc_value;
+    *type = NULL;
+    *tb = NULL;
+    if (exc_value) {
+        *type = (PyObject*) Py_TYPE(exc_value);
+        Py_INCREF(*type);
+        #if CYTHON_COMPILING_IN_CPYTHON
+        *tb = ((PyBaseExceptionObject*) exc_value)->traceback;
+        Py_XINCREF(*tb);
+        #else
+        *tb = PyException_GetTraceback(exc_value);
+        #endif
+    }
+#else
+    *type = tstate->curexc_type;
+    *value = tstate->curexc_value;
+    *tb = tstate->curexc_traceback;
+    tstate->curexc_type = 0;
+    tstate->curexc_value = 0;
+    tstate->curexc_traceback = 0;
+#endif
+}
+#endif
+
+/* PyObjectGetAttrStr (used by PyObjectGetAttrStrNoError) */
+#if CYTHON_USE_TYPE_SLOTS
+static CYTHON_INLINE PyObject* __Pyx_PyObject_GetAttrStr(PyObject* obj, PyObject* attr_name) {
+    PyTypeObject* tp = Py_TYPE(obj);
+    if (likely(tp->tp_getattro))
+        return tp->tp_getattro(obj, attr_name);
+    return PyObject_GetAttr(obj, attr_name);
+}
+#endif
+
+/* PyObjectGetAttrStrNoError (used by GetBuiltinName) */
+#if __PYX_LIMITED_VERSION_HEX < 0x030d0000
+static void __Pyx_PyObject_GetAttrStr_ClearAttributeError(void) {
+    __Pyx_PyThreadState_declare
+    __Pyx_PyThreadState_assign
+    if (likely(__Pyx_PyErr_ExceptionMatches(PyExc_AttributeError)))
+        __Pyx_PyErr_Clear();
+}
+#endif
+static CYTHON_INLINE PyObject* __Pyx_PyObject_GetAttrStrNoError(PyObject* obj, PyObject* attr_name) {
+    PyObject *result;
+#if __PYX_LIMITED_VERSION_HEX >= 0x030d0000
+    (void) PyObject_GetOptionalAttr(obj, attr_name, &result);
+    return result;
+#else
+#if CYTHON_COMPILING_IN_CPYTHON && CYTHON_USE_TYPE_SLOTS
+    PyTypeObject* tp = Py_TYPE(obj);
+    if (likely(tp->tp_getattro == PyObject_GenericGetAttr)) {
+        return _PyObject_GenericGetAttrWithDict(obj, attr_name, NULL, 1);
+    }
+#endif
+    result = __Pyx_PyObject_GetAttrStr(obj, attr_name);
+    if (unlikely(!result)) {
+        __Pyx_PyObject_GetAttrStr_ClearAttributeError();
+    }
+    return result;
+#endif
+}
+
+/* GetBuiltinName */
+static PyObject *__Pyx_GetBuiltinName(PyObject *name) {
+    PyObject* result = __Pyx_PyObject_GetAttrStrNoError(__pyx_mstate_global->__pyx_b, name);
+    if (unlikely(!result) && !PyErr_Occurred()) {
+        PyErr_Format(PyExc_NameError,
+            "name '%U' is not defined", name);
+    }
+    return result;
+}
 
 /* DictGetItem */
 #if !CYTHON_COMPILING_IN_PYPY
@@ -27456,47 +27942,6 @@ static CYTHON_INLINE void __Pyx__ExceptionReset(PyThreadState *tstate, PyObject 
     Py_XDECREF(tmp_value);
     Py_XDECREF(tmp_tb);
   #endif
-}
-#endif
-
-/* PyErrExceptionMatches */
-#if CYTHON_FAST_THREAD_STATE
-static int __Pyx_PyErr_ExceptionMatchesTuple(PyObject *exc_type, PyObject *tuple) {
-    Py_ssize_t i, n;
-    n = PyTuple_GET_SIZE(tuple);
-    for (i=0; i<n; i++) {
-        if (exc_type == PyTuple_GET_ITEM(tuple, i)) return 1;
-    }
-    for (i=0; i<n; i++) {
-        if (__Pyx_PyErr_GivenExceptionMatches(exc_type, PyTuple_GET_ITEM(tuple, i))) return 1;
-    }
-    return 0;
-}
-static CYTHON_INLINE int __Pyx_PyErr_ExceptionMatchesInState(PyThreadState* tstate, PyObject* err) {
-    int result;
-    PyObject *exc_type;
-#if PY_VERSION_HEX >= 0x030C00A6
-    PyObject *current_exception = tstate->current_exception;
-    if (unlikely(!current_exception)) return 0;
-    exc_type = (PyObject*) Py_TYPE(current_exception);
-    if (exc_type == err) return 1;
-#else
-    exc_type = tstate->curexc_type;
-    if (exc_type == err) return 1;
-    if (unlikely(!exc_type)) return 0;
-#endif
-    #if CYTHON_AVOID_BORROWED_REFS
-    Py_INCREF(exc_type);
-    #endif
-    if (unlikely(PyTuple_Check(err))) {
-        result = __Pyx_PyErr_ExceptionMatchesTuple(exc_type, err);
-    } else {
-        result = __Pyx_PyErr_GivenExceptionMatches(exc_type, err);
-    }
-    #if CYTHON_AVOID_BORROWED_REFS
-    Py_DECREF(exc_type);
-    #endif
-    return result;
 }
 #endif
 
@@ -27719,65 +28164,6 @@ static CYTHON_INLINE PyObject* __Pyx_PyObject_FastCallDict(PyObject *func, PyObj
     return __Pyx_PyObject_FastCall_fallback(func, args, (size_t)nargs, kwargs);
     #endif
 }
-
-/* PyErrFetchRestore (used by RaiseException) */
-#if CYTHON_FAST_THREAD_STATE
-static CYTHON_INLINE void __Pyx_ErrRestoreInState(PyThreadState *tstate, PyObject *type, PyObject *value, PyObject *tb) {
-#if PY_VERSION_HEX >= 0x030C00A6
-    PyObject *tmp_value;
-    assert(type == NULL || (value != NULL && type == (PyObject*) Py_TYPE(value)));
-    if (value) {
-        #if CYTHON_COMPILING_IN_CPYTHON
-        if (unlikely(((PyBaseExceptionObject*) value)->traceback != tb))
-        #endif
-            PyException_SetTraceback(value, tb);
-    }
-    tmp_value = tstate->current_exception;
-    tstate->current_exception = value;
-    Py_XDECREF(tmp_value);
-    Py_XDECREF(type);
-    Py_XDECREF(tb);
-#else
-    PyObject *tmp_type, *tmp_value, *tmp_tb;
-    tmp_type = tstate->curexc_type;
-    tmp_value = tstate->curexc_value;
-    tmp_tb = tstate->curexc_traceback;
-    tstate->curexc_type = type;
-    tstate->curexc_value = value;
-    tstate->curexc_traceback = tb;
-    Py_XDECREF(tmp_type);
-    Py_XDECREF(tmp_value);
-    Py_XDECREF(tmp_tb);
-#endif
-}
-static CYTHON_INLINE void __Pyx_ErrFetchInState(PyThreadState *tstate, PyObject **type, PyObject **value, PyObject **tb) {
-#if PY_VERSION_HEX >= 0x030C00A6
-    PyObject* exc_value;
-    exc_value = tstate->current_exception;
-    tstate->current_exception = 0;
-    *value = exc_value;
-    *type = NULL;
-    *tb = NULL;
-    if (exc_value) {
-        *type = (PyObject*) Py_TYPE(exc_value);
-        Py_INCREF(*type);
-        #if CYTHON_COMPILING_IN_CPYTHON
-        *tb = ((PyBaseExceptionObject*) exc_value)->traceback;
-        Py_XINCREF(*tb);
-        #else
-        *tb = PyException_GetTraceback(exc_value);
-        #endif
-    }
-#else
-    *type = tstate->curexc_type;
-    *value = tstate->curexc_value;
-    *tb = tstate->curexc_traceback;
-    tstate->curexc_type = 0;
-    tstate->curexc_value = 0;
-    tstate->curexc_traceback = 0;
-#endif
-}
-#endif
 
 /* RaiseException */
 static void __Pyx_Raise(PyObject *type, PyObject *value, PyObject *tb, PyObject *cause) {
@@ -28131,16 +28517,6 @@ static CYTHON_INLINE PyObject* __Pyx_PyObject_CallOneArg(PyObject *func, PyObjec
     PyObject *args[2] = {NULL, arg};
     return __Pyx_PyObject_FastCall(func, args+1, 1 | __Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET);
 }
-
-/* PyObjectGetAttrStr (used by UnpackUnboundCMethod) */
-#if CYTHON_USE_TYPE_SLOTS
-static CYTHON_INLINE PyObject* __Pyx_PyObject_GetAttrStr(PyObject* obj, PyObject* attr_name) {
-    PyTypeObject* tp = Py_TYPE(obj);
-    if (likely(tp->tp_getattro))
-        return tp->tp_getattro(obj, attr_name);
-    return PyObject_GetAttr(obj, attr_name);
-}
-#endif
 
 /* UnpackUnboundCMethod (used by CallUnboundCMethod0) */
 #if CYTHON_COMPILING_IN_LIMITED_API && __PYX_LIMITED_VERSION_HEX < 0x030C0000
@@ -28855,45 +29231,6 @@ static int __Pyx__ArgTypeTest(PyObject *obj, PyTypeObject *type, const char *nam
     __Pyx_DECREF_TypeName(type_name);
     __Pyx_DECREF_TypeName(obj_type_name);
     return 0;
-}
-
-/* PyObjectGetAttrStrNoError (used by GetBuiltinName) */
-#if __PYX_LIMITED_VERSION_HEX < 0x030d0000
-static void __Pyx_PyObject_GetAttrStr_ClearAttributeError(void) {
-    __Pyx_PyThreadState_declare
-    __Pyx_PyThreadState_assign
-    if (likely(__Pyx_PyErr_ExceptionMatches(PyExc_AttributeError)))
-        __Pyx_PyErr_Clear();
-}
-#endif
-static CYTHON_INLINE PyObject* __Pyx_PyObject_GetAttrStrNoError(PyObject* obj, PyObject* attr_name) {
-    PyObject *result;
-#if __PYX_LIMITED_VERSION_HEX >= 0x030d0000
-    (void) PyObject_GetOptionalAttr(obj, attr_name, &result);
-    return result;
-#else
-#if CYTHON_COMPILING_IN_CPYTHON && CYTHON_USE_TYPE_SLOTS
-    PyTypeObject* tp = Py_TYPE(obj);
-    if (likely(tp->tp_getattro == PyObject_GenericGetAttr)) {
-        return _PyObject_GenericGetAttrWithDict(obj, attr_name, NULL, 1);
-    }
-#endif
-    result = __Pyx_PyObject_GetAttrStr(obj, attr_name);
-    if (unlikely(!result)) {
-        __Pyx_PyObject_GetAttrStr_ClearAttributeError();
-    }
-    return result;
-#endif
-}
-
-/* GetBuiltinName */
-static PyObject *__Pyx_GetBuiltinName(PyObject *name) {
-    PyObject* result = __Pyx_PyObject_GetAttrStrNoError(__pyx_mstate_global->__pyx_b, name);
-    if (unlikely(!result) && !PyErr_Occurred()) {
-        PyErr_Format(PyExc_NameError,
-            "name '%U' is not defined", name);
-    }
-    return result;
 }
 
 /* PyObjectFastCallMethod */
@@ -30112,6 +30449,26 @@ static int __Pyx_IternextUnpackEndCheck(PyObject *retval, Py_ssize_t expected) {
     return __Pyx_IterFinish();
 }
 
+/* PyObjectLookupSpecial */
+#if CYTHON_USE_PYTYPE_LOOKUP && CYTHON_USE_TYPE_SLOTS
+static CYTHON_INLINE PyObject* __Pyx__PyObject_LookupSpecial(PyObject* obj, PyObject* attr_name, int with_error) {
+    PyObject *res;
+    PyTypeObject *tp = Py_TYPE(obj);
+    res = _PyType_Lookup(tp, attr_name);
+    if (likely(res)) {
+        descrgetfunc f = Py_TYPE(res)->tp_descr_get;
+        if (!f) {
+            Py_INCREF(res);
+        } else {
+            res = f(res, obj, (PyObject *)tp);
+        }
+    } else if (with_error) {
+        PyErr_SetObject(PyExc_AttributeError, attr_name);
+    }
+    return res;
+}
+#endif
+
 /* decode_c_bytes (used by decode_cpp_string) */
 static CYTHON_INLINE PyObject* __Pyx_decode_c_bytes(
          const char* cstring, Py_ssize_t length, Py_ssize_t start, Py_ssize_t stop,
@@ -30237,142 +30594,10 @@ static CYTHON_INLINE PyObject* __Pyx_PyLong_MultiplyObjC(PyObject *op1, PyObject
 }
 #endif
 
-/* PyObjectCall2Args (used by PyObjectCallMethod1) */
+/* PyObjectCall2Args (used by CallUnboundCMethod1) */
 static CYTHON_INLINE PyObject* __Pyx_PyObject_Call2Args(PyObject* function, PyObject* arg1, PyObject* arg2) {
     PyObject *args[3] = {NULL, arg1, arg2};
     return __Pyx_PyObject_FastCall(function, args+1, 2 | __Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET);
-}
-
-/* PyObjectGetMethod (used by PyObjectCallMethod1) */
-#if !(CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000)))
-static int __Pyx_PyObject_GetMethod(PyObject *obj, PyObject *name, PyObject **method) {
-    PyObject *attr;
-#if CYTHON_UNPACK_METHODS && CYTHON_COMPILING_IN_CPYTHON && CYTHON_USE_PYTYPE_LOOKUP
-    __Pyx_TypeName type_name;
-    PyTypeObject *tp = Py_TYPE(obj);
-    PyObject *descr;
-    descrgetfunc f = NULL;
-    PyObject **dictptr, *dict;
-    int meth_found = 0;
-    assert (*method == NULL);
-    if (unlikely(tp->tp_getattro != PyObject_GenericGetAttr)) {
-        attr = __Pyx_PyObject_GetAttrStr(obj, name);
-        goto try_unpack;
-    }
-    if (unlikely(tp->tp_dict == NULL) && unlikely(PyType_Ready(tp) < 0)) {
-        return 0;
-    }
-    descr = _PyType_Lookup(tp, name);
-    if (likely(descr != NULL)) {
-        Py_INCREF(descr);
-#if defined(Py_TPFLAGS_METHOD_DESCRIPTOR) && Py_TPFLAGS_METHOD_DESCRIPTOR
-        if (__Pyx_PyType_HasFeature(Py_TYPE(descr), Py_TPFLAGS_METHOD_DESCRIPTOR))
-#else
-        #ifdef __Pyx_CyFunction_USED
-        if (likely(PyFunction_Check(descr) || __Pyx_IS_TYPE(descr, &PyMethodDescr_Type) || __Pyx_CyFunction_Check(descr)))
-        #else
-        if (likely(PyFunction_Check(descr) || __Pyx_IS_TYPE(descr, &PyMethodDescr_Type)))
-        #endif
-#endif
-        {
-            meth_found = 1;
-        } else {
-            f = Py_TYPE(descr)->tp_descr_get;
-            if (f != NULL && PyDescr_IsData(descr)) {
-                attr = f(descr, obj, (PyObject *)Py_TYPE(obj));
-                Py_DECREF(descr);
-                goto try_unpack;
-            }
-        }
-    }
-    dictptr = _PyObject_GetDictPtr(obj);
-    if (dictptr != NULL && (dict = *dictptr) != NULL) {
-        Py_INCREF(dict);
-        attr = __Pyx_PyDict_GetItemStr(dict, name);
-        if (attr != NULL) {
-            Py_INCREF(attr);
-            Py_DECREF(dict);
-            Py_XDECREF(descr);
-            goto try_unpack;
-        }
-        Py_DECREF(dict);
-    }
-    if (meth_found) {
-        *method = descr;
-        return 1;
-    }
-    if (f != NULL) {
-        attr = f(descr, obj, (PyObject *)Py_TYPE(obj));
-        Py_DECREF(descr);
-        goto try_unpack;
-    }
-    if (likely(descr != NULL)) {
-        *method = descr;
-        return 0;
-    }
-    type_name = __Pyx_PyType_GetFullyQualifiedName(tp);
-    PyErr_Format(PyExc_AttributeError,
-                 "'" __Pyx_FMT_TYPENAME "' object has no attribute '%U'",
-                 type_name, name);
-    __Pyx_DECREF_TypeName(type_name);
-    return 0;
-#else
-    attr = __Pyx_PyObject_GetAttrStr(obj, name);
-    goto try_unpack;
-#endif
-try_unpack:
-#if CYTHON_UNPACK_METHODS
-    if (likely(attr) && PyMethod_Check(attr) && likely(PyMethod_GET_SELF(attr) == obj)) {
-        PyObject *function = PyMethod_GET_FUNCTION(attr);
-        Py_INCREF(function);
-        Py_DECREF(attr);
-        *method = function;
-        return 1;
-    }
-#endif
-    *method = attr;
-    return 0;
-}
-#endif
-
-/* PyObjectCallMethod1 (used by append) */
-#if !(CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000)))
-static PyObject* __Pyx__PyObject_CallMethod1(PyObject* method, PyObject* arg) {
-    PyObject *result = __Pyx_PyObject_CallOneArg(method, arg);
-    Py_DECREF(method);
-    return result;
-}
-#endif
-static PyObject* __Pyx_PyObject_CallMethod1(PyObject* obj, PyObject* method_name, PyObject* arg) {
-#if CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000))
-    PyObject *args[2] = {obj, arg};
-    (void) __Pyx_PyObject_CallOneArg;
-    (void) __Pyx_PyObject_Call2Args;
-    return PyObject_VectorcallMethod(method_name, args, 2 | PY_VECTORCALL_ARGUMENTS_OFFSET, NULL);
-#else
-    PyObject *method = NULL, *result;
-    int is_method = __Pyx_PyObject_GetMethod(obj, method_name, &method);
-    if (likely(is_method)) {
-        result = __Pyx_PyObject_Call2Args(method, obj, arg);
-        Py_DECREF(method);
-        return result;
-    }
-    if (unlikely(!method)) return NULL;
-    return __Pyx__PyObject_CallMethod1(method, arg);
-#endif
-}
-
-/* append */
-static CYTHON_INLINE int __Pyx_PyObject_Append(PyObject* L, PyObject* x) {
-    if (likely(PyList_CheckExact(L))) {
-        if (unlikely(__Pyx_PyList_Append(L, x) < 0)) return -1;
-    } else {
-        PyObject* retval = __Pyx_PyObject_CallMethod1(L, __pyx_mstate_global->__pyx_n_u_append, x);
-        if (unlikely(!retval))
-            return -1;
-        Py_DECREF(retval);
-    }
-    return 0;
 }
 
 /* CallUnboundCMethod1 */
@@ -30695,6 +30920,98 @@ static CYTHON_INLINE PyObject* __Pyx_PyObject_CallNoArg(PyObject *func) {
     PyObject *arg[2] = {NULL, NULL};
     return __Pyx_PyObject_FastCall(func, arg + 1, 0 | __Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET);
 }
+
+/* PyObjectGetMethod (used by PyObjectCallMethod0) */
+#if !(CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000)))
+static int __Pyx_PyObject_GetMethod(PyObject *obj, PyObject *name, PyObject **method) {
+    PyObject *attr;
+#if CYTHON_UNPACK_METHODS && CYTHON_COMPILING_IN_CPYTHON && CYTHON_USE_PYTYPE_LOOKUP
+    __Pyx_TypeName type_name;
+    PyTypeObject *tp = Py_TYPE(obj);
+    PyObject *descr;
+    descrgetfunc f = NULL;
+    PyObject **dictptr, *dict;
+    int meth_found = 0;
+    assert (*method == NULL);
+    if (unlikely(tp->tp_getattro != PyObject_GenericGetAttr)) {
+        attr = __Pyx_PyObject_GetAttrStr(obj, name);
+        goto try_unpack;
+    }
+    if (unlikely(tp->tp_dict == NULL) && unlikely(PyType_Ready(tp) < 0)) {
+        return 0;
+    }
+    descr = _PyType_Lookup(tp, name);
+    if (likely(descr != NULL)) {
+        Py_INCREF(descr);
+#if defined(Py_TPFLAGS_METHOD_DESCRIPTOR) && Py_TPFLAGS_METHOD_DESCRIPTOR
+        if (__Pyx_PyType_HasFeature(Py_TYPE(descr), Py_TPFLAGS_METHOD_DESCRIPTOR))
+#else
+        #ifdef __Pyx_CyFunction_USED
+        if (likely(PyFunction_Check(descr) || __Pyx_IS_TYPE(descr, &PyMethodDescr_Type) || __Pyx_CyFunction_Check(descr)))
+        #else
+        if (likely(PyFunction_Check(descr) || __Pyx_IS_TYPE(descr, &PyMethodDescr_Type)))
+        #endif
+#endif
+        {
+            meth_found = 1;
+        } else {
+            f = Py_TYPE(descr)->tp_descr_get;
+            if (f != NULL && PyDescr_IsData(descr)) {
+                attr = f(descr, obj, (PyObject *)Py_TYPE(obj));
+                Py_DECREF(descr);
+                goto try_unpack;
+            }
+        }
+    }
+    dictptr = _PyObject_GetDictPtr(obj);
+    if (dictptr != NULL && (dict = *dictptr) != NULL) {
+        Py_INCREF(dict);
+        attr = __Pyx_PyDict_GetItemStr(dict, name);
+        if (attr != NULL) {
+            Py_INCREF(attr);
+            Py_DECREF(dict);
+            Py_XDECREF(descr);
+            goto try_unpack;
+        }
+        Py_DECREF(dict);
+    }
+    if (meth_found) {
+        *method = descr;
+        return 1;
+    }
+    if (f != NULL) {
+        attr = f(descr, obj, (PyObject *)Py_TYPE(obj));
+        Py_DECREF(descr);
+        goto try_unpack;
+    }
+    if (likely(descr != NULL)) {
+        *method = descr;
+        return 0;
+    }
+    type_name = __Pyx_PyType_GetFullyQualifiedName(tp);
+    PyErr_Format(PyExc_AttributeError,
+                 "'" __Pyx_FMT_TYPENAME "' object has no attribute '%U'",
+                 type_name, name);
+    __Pyx_DECREF_TypeName(type_name);
+    return 0;
+#else
+    attr = __Pyx_PyObject_GetAttrStr(obj, name);
+    goto try_unpack;
+#endif
+try_unpack:
+#if CYTHON_UNPACK_METHODS
+    if (likely(attr) && PyMethod_Check(attr) && likely(PyMethod_GET_SELF(attr) == obj)) {
+        PyObject *function = PyMethod_GET_FUNCTION(attr);
+        Py_INCREF(function);
+        Py_DECREF(attr);
+        *method = function;
+        return 1;
+    }
+#endif
+    *method = attr;
+    return 0;
+}
+#endif
 
 /* PyObjectCallMethod0 (used by PyType_Ready) */
 static PyObject* __Pyx_PyObject_CallMethod0(PyObject* obj, PyObject* method_name) {
@@ -33425,73 +33742,254 @@ raise_neg_overflow:
     return (uint32_t) -1;
 }
 
-/* CIntToPy */
-static CYTHON_INLINE PyObject* __Pyx_PyLong_From_uint8_t(uint8_t value) {
+/* CIntFromPy */
+static CYTHON_INLINE size_t __Pyx_PyLong_As_size_t(PyObject *x) {
 #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wconversion"
 #endif
-    const uint8_t neg_one = (uint8_t) -1, const_zero = (uint8_t) 0;
+    const size_t neg_one = (size_t) -1, const_zero = (size_t) 0;
 #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
 #pragma GCC diagnostic pop
 #endif
     const int is_unsigned = neg_one > const_zero;
+    if (unlikely(!PyLong_Check(x))) {
+        size_t val;
+        PyObject *tmp = __Pyx_PyNumber_Long(x);
+        if (!tmp) return (size_t) -1;
+        val = __Pyx_PyLong_As_size_t(tmp);
+        Py_DECREF(tmp);
+        return val;
+    }
     if (is_unsigned) {
-        if (sizeof(uint8_t) < sizeof(long)) {
-            return PyLong_FromLong((long) value);
-        } else if (sizeof(uint8_t) <= sizeof(unsigned long)) {
-            return PyLong_FromUnsignedLong((unsigned long) value);
-#if !CYTHON_COMPILING_IN_PYPY
-        } else if (sizeof(uint8_t) <= sizeof(unsigned PY_LONG_LONG)) {
-            return PyLong_FromUnsignedLongLong((unsigned PY_LONG_LONG) value);
+#if CYTHON_USE_PYLONG_INTERNALS
+        if (unlikely(__Pyx_PyLong_IsNeg(x))) {
+            goto raise_neg_overflow;
+        } else if (__Pyx_PyLong_IsCompact(x)) {
+            __PYX_VERIFY_RETURN_INT(size_t, __Pyx_compact_upylong, __Pyx_PyLong_CompactValueUnsigned(x))
+        } else {
+            const digit* digits = __Pyx_PyLong_Digits(x);
+            assert(__Pyx_PyLong_DigitCount(x) > 1);
+            switch (__Pyx_PyLong_DigitCount(x)) {
+                case 2:
+                    if ((8 * sizeof(size_t) > 1 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 2 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(size_t) >= 2 * PyLong_SHIFT)) {
+                            return (size_t) (((((size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0]));
+                        }
+                    }
+                    break;
+                case 3:
+                    if ((8 * sizeof(size_t) > 2 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 3 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(size_t) >= 3 * PyLong_SHIFT)) {
+                            return (size_t) (((((((size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0]));
+                        }
+                    }
+                    break;
+                case 4:
+                    if ((8 * sizeof(size_t) > 3 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 4 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(size_t) >= 4 * PyLong_SHIFT)) {
+                            return (size_t) (((((((((size_t)digits[3]) << PyLong_SHIFT) | (size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0]));
+                        }
+                    }
+                    break;
+            }
+        }
 #endif
+#if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX < 0x030C00A7
+        if (unlikely(Py_SIZE(x) < 0)) {
+            goto raise_neg_overflow;
+        }
+#else
+        {
+            int result = PyObject_RichCompareBool(x, Py_False, Py_LT);
+            if (unlikely(result < 0))
+                return (size_t) -1;
+            if (unlikely(result == 1))
+                goto raise_neg_overflow;
+        }
+#endif
+        if ((sizeof(size_t) <= sizeof(unsigned long))) {
+            __PYX_VERIFY_RETURN_INT_EXC(size_t, unsigned long, PyLong_AsUnsignedLong(x))
+        } else if ((sizeof(size_t) <= sizeof(unsigned PY_LONG_LONG))) {
+            __PYX_VERIFY_RETURN_INT_EXC(size_t, unsigned PY_LONG_LONG, PyLong_AsUnsignedLongLong(x))
         }
     } else {
-        if (sizeof(uint8_t) <= sizeof(long)) {
-            return PyLong_FromLong((long) value);
-        } else if (sizeof(uint8_t) <= sizeof(PY_LONG_LONG)) {
-            return PyLong_FromLongLong((PY_LONG_LONG) value);
+#if CYTHON_USE_PYLONG_INTERNALS
+        if (__Pyx_PyLong_IsCompact(x)) {
+            __PYX_VERIFY_RETURN_INT(size_t, __Pyx_compact_pylong, __Pyx_PyLong_CompactValue(x))
+        } else {
+            const digit* digits = __Pyx_PyLong_Digits(x);
+            assert(__Pyx_PyLong_DigitCount(x) > 1);
+            switch (__Pyx_PyLong_SignedDigitCount(x)) {
+                case -2:
+                    if ((8 * sizeof(size_t) - 1 > 1 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 2 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(size_t, long, -(long) (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(size_t) - 1 > 2 * PyLong_SHIFT)) {
+                            return (size_t) (((size_t)-1)*(((((size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
+                        }
+                    }
+                    break;
+                case 2:
+                    if ((8 * sizeof(size_t) > 1 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 2 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(size_t) - 1 > 2 * PyLong_SHIFT)) {
+                            return (size_t) ((((((size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
+                        }
+                    }
+                    break;
+                case -3:
+                    if ((8 * sizeof(size_t) - 1 > 2 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 3 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(size_t, long, -(long) (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(size_t) - 1 > 3 * PyLong_SHIFT)) {
+                            return (size_t) (((size_t)-1)*(((((((size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
+                        }
+                    }
+                    break;
+                case 3:
+                    if ((8 * sizeof(size_t) > 2 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 3 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(size_t) - 1 > 3 * PyLong_SHIFT)) {
+                            return (size_t) ((((((((size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
+                        }
+                    }
+                    break;
+                case -4:
+                    if ((8 * sizeof(size_t) - 1 > 3 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 4 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(size_t, long, -(long) (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(size_t) - 1 > 4 * PyLong_SHIFT)) {
+                            return (size_t) (((size_t)-1)*(((((((((size_t)digits[3]) << PyLong_SHIFT) | (size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
+                        }
+                    }
+                    break;
+                case 4:
+                    if ((8 * sizeof(size_t) > 3 * PyLong_SHIFT)) {
+                        if ((8 * sizeof(unsigned long) > 4 * PyLong_SHIFT)) {
+                            __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
+                        } else if ((8 * sizeof(size_t) - 1 > 4 * PyLong_SHIFT)) {
+                            return (size_t) ((((((((((size_t)digits[3]) << PyLong_SHIFT) | (size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
+                        }
+                    }
+                    break;
+            }
+        }
+#endif
+        if ((sizeof(size_t) <= sizeof(long))) {
+            __PYX_VERIFY_RETURN_INT_EXC(size_t, long, PyLong_AsLong(x))
+        } else if ((sizeof(size_t) <= sizeof(PY_LONG_LONG))) {
+            __PYX_VERIFY_RETURN_INT_EXC(size_t, PY_LONG_LONG, PyLong_AsLongLong(x))
         }
     }
     {
-        unsigned char *bytes = (unsigned char *)&value;
-#if !CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x030d00A4
-        if (is_unsigned) {
-            return PyLong_FromUnsignedNativeBytes(bytes, sizeof(value), -1);
+        size_t val;
+        int ret = -1;
+#if PY_VERSION_HEX >= 0x030d00A6 && !CYTHON_COMPILING_IN_LIMITED_API
+        Py_ssize_t bytes_copied = PyLong_AsNativeBytes(
+            x, &val, sizeof(val), Py_ASNATIVEBYTES_NATIVE_ENDIAN | (is_unsigned ? Py_ASNATIVEBYTES_UNSIGNED_BUFFER | Py_ASNATIVEBYTES_REJECT_NEGATIVE : 0));
+        if (unlikely(bytes_copied == -1)) {
+        } else if (unlikely(bytes_copied > (Py_ssize_t) sizeof(val))) {
+            goto raise_overflow;
         } else {
-            return PyLong_FromNativeBytes(bytes, sizeof(value), -1);
+            ret = 0;
         }
-#elif !CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX < 0x030d0000
-        int one = 1; int little = (int)*(unsigned char *)&one;
-        return _PyLong_FromByteArray(bytes, sizeof(uint8_t),
-                                     little, !is_unsigned);
+#elif PY_VERSION_HEX < 0x030d0000 && !(CYTHON_COMPILING_IN_PYPY || CYTHON_COMPILING_IN_LIMITED_API) || defined(_PyLong_AsByteArray)
+        int one = 1; int is_little = (int)*(unsigned char *)&one;
+        unsigned char *bytes = (unsigned char *)&val;
+        ret = _PyLong_AsByteArray((PyLongObject *)x,
+                                    bytes, sizeof(val),
+                                    is_little, !is_unsigned);
 #else
-        int one = 1; int little = (int)*(unsigned char *)&one;
-        PyObject *from_bytes, *result = NULL, *kwds = NULL;
-        PyObject *py_bytes = NULL, *order_str = NULL;
-        from_bytes = PyObject_GetAttrString((PyObject*)&PyLong_Type, "from_bytes");
-        if (!from_bytes) return NULL;
-        py_bytes = PyBytes_FromStringAndSize((char*)bytes, sizeof(uint8_t));
-        if (!py_bytes) goto limited_bad;
-        order_str = PyUnicode_FromString(little ? "little" : "big");
-        if (!order_str) goto limited_bad;
-        {
-            PyObject *args[3+(CYTHON_VECTORCALL ? 1 : 0)] = { NULL, py_bytes, order_str };
-            if (!is_unsigned) {
-                kwds = __Pyx_MakeVectorcallBuilderKwds(1);
-                if (!kwds) goto limited_bad;
-                if (__Pyx_VectorcallBuilder_AddArgStr("signed", __Pyx_NewRef(Py_True), kwds, args+3, 0) < 0) goto limited_bad;
-            }
-            result = __Pyx_Object_Vectorcall_CallFromBuilder(from_bytes, args+1, 2 | __Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET, kwds);
+        PyObject *v;
+        PyObject *stepval = NULL, *mask = NULL, *shift = NULL;
+        int bits, remaining_bits, is_negative = 0;
+        int chunk_size = (sizeof(long) < 8) ? 30 : 62;
+        if (likely(PyLong_CheckExact(x))) {
+            v = __Pyx_NewRef(x);
+        } else {
+            v = PyNumber_Long(x);
+            if (unlikely(!v)) return (size_t) -1;
+            assert(PyLong_CheckExact(v));
         }
-        limited_bad:
-        Py_XDECREF(kwds);
-        Py_XDECREF(order_str);
-        Py_XDECREF(py_bytes);
-        Py_XDECREF(from_bytes);
-        return result;
+        {
+            int result = PyObject_RichCompareBool(v, Py_False, Py_LT);
+            if (unlikely(result < 0)) {
+                Py_DECREF(v);
+                return (size_t) -1;
+            }
+            is_negative = result == 1;
+        }
+        if (is_unsigned && unlikely(is_negative)) {
+            Py_DECREF(v);
+            goto raise_neg_overflow;
+        } else if (is_negative) {
+            stepval = PyNumber_Invert(v);
+            Py_DECREF(v);
+            if (unlikely(!stepval))
+                return (size_t) -1;
+        } else {
+            stepval = v;
+        }
+        v = NULL;
+        val = (size_t) 0;
+        mask = PyLong_FromLong((1L << chunk_size) - 1); if (unlikely(!mask)) goto done;
+        shift = PyLong_FromLong(chunk_size); if (unlikely(!shift)) goto done;
+        for (bits = 0; bits < (int) sizeof(size_t) * 8 - chunk_size; bits += chunk_size) {
+            PyObject *tmp, *digit;
+            long idigit;
+            digit = PyNumber_And(stepval, mask);
+            if (unlikely(!digit)) goto done;
+            idigit = PyLong_AsLong(digit);
+            Py_DECREF(digit);
+            if (unlikely(idigit < 0)) goto done;
+            val |= ((size_t) idigit) << bits;
+            tmp = PyNumber_Rshift(stepval, shift);
+            if (unlikely(!tmp)) goto done;
+            Py_DECREF(stepval); stepval = tmp;
+        }
+        Py_DECREF(shift); shift = NULL;
+        Py_DECREF(mask); mask = NULL;
+        {
+            long idigit = PyLong_AsLong(stepval);
+            if (unlikely(idigit < 0)) goto done;
+            remaining_bits = ((int) sizeof(size_t) * 8) - bits - (is_unsigned ? 0 : 1);
+            if (unlikely(idigit >= (1L << remaining_bits)))
+                goto raise_overflow;
+            val |= ((size_t) idigit) << bits;
+        }
+        if (!is_unsigned) {
+            if (unlikely(val & (((size_t) 1) << (sizeof(size_t) * 8 - 1))))
+                goto raise_overflow;
+            if (is_negative)
+                val = ~val;
+        }
+        ret = 0;
+    done:
+        Py_XDECREF(shift);
+        Py_XDECREF(mask);
+        Py_XDECREF(stepval);
 #endif
+        if (unlikely(ret))
+            return (size_t) -1;
+        return val;
     }
+raise_overflow:
+    PyErr_SetString(PyExc_OverflowError,
+        "value too large to convert to size_t");
+    return (size_t) -1;
+raise_neg_overflow:
+    PyErr_SetString(PyExc_OverflowError,
+        "can't convert negative value to size_t");
+    return (size_t) -1;
 }
 
 /* CIntToPy */
@@ -33541,6 +34039,75 @@ static CYTHON_INLINE PyObject* __Pyx_PyLong_From_uint32_t(uint32_t value) {
         from_bytes = PyObject_GetAttrString((PyObject*)&PyLong_Type, "from_bytes");
         if (!from_bytes) return NULL;
         py_bytes = PyBytes_FromStringAndSize((char*)bytes, sizeof(uint32_t));
+        if (!py_bytes) goto limited_bad;
+        order_str = PyUnicode_FromString(little ? "little" : "big");
+        if (!order_str) goto limited_bad;
+        {
+            PyObject *args[3+(CYTHON_VECTORCALL ? 1 : 0)] = { NULL, py_bytes, order_str };
+            if (!is_unsigned) {
+                kwds = __Pyx_MakeVectorcallBuilderKwds(1);
+                if (!kwds) goto limited_bad;
+                if (__Pyx_VectorcallBuilder_AddArgStr("signed", __Pyx_NewRef(Py_True), kwds, args+3, 0) < 0) goto limited_bad;
+            }
+            result = __Pyx_Object_Vectorcall_CallFromBuilder(from_bytes, args+1, 2 | __Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET, kwds);
+        }
+        limited_bad:
+        Py_XDECREF(kwds);
+        Py_XDECREF(order_str);
+        Py_XDECREF(py_bytes);
+        Py_XDECREF(from_bytes);
+        return result;
+#endif
+    }
+}
+
+/* CIntToPy */
+static CYTHON_INLINE PyObject* __Pyx_PyLong_From_uint8_t(uint8_t value) {
+#ifdef __Pyx_HAS_GCC_DIAGNOSTIC
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wconversion"
+#endif
+    const uint8_t neg_one = (uint8_t) -1, const_zero = (uint8_t) 0;
+#ifdef __Pyx_HAS_GCC_DIAGNOSTIC
+#pragma GCC diagnostic pop
+#endif
+    const int is_unsigned = neg_one > const_zero;
+    if (is_unsigned) {
+        if (sizeof(uint8_t) < sizeof(long)) {
+            return PyLong_FromLong((long) value);
+        } else if (sizeof(uint8_t) <= sizeof(unsigned long)) {
+            return PyLong_FromUnsignedLong((unsigned long) value);
+#if !CYTHON_COMPILING_IN_PYPY
+        } else if (sizeof(uint8_t) <= sizeof(unsigned PY_LONG_LONG)) {
+            return PyLong_FromUnsignedLongLong((unsigned PY_LONG_LONG) value);
+#endif
+        }
+    } else {
+        if (sizeof(uint8_t) <= sizeof(long)) {
+            return PyLong_FromLong((long) value);
+        } else if (sizeof(uint8_t) <= sizeof(PY_LONG_LONG)) {
+            return PyLong_FromLongLong((PY_LONG_LONG) value);
+        }
+    }
+    {
+        unsigned char *bytes = (unsigned char *)&value;
+#if !CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x030d00A4
+        if (is_unsigned) {
+            return PyLong_FromUnsignedNativeBytes(bytes, sizeof(value), -1);
+        } else {
+            return PyLong_FromNativeBytes(bytes, sizeof(value), -1);
+        }
+#elif !CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX < 0x030d0000
+        int one = 1; int little = (int)*(unsigned char *)&one;
+        return _PyLong_FromByteArray(bytes, sizeof(uint8_t),
+                                     little, !is_unsigned);
+#else
+        int one = 1; int little = (int)*(unsigned char *)&one;
+        PyObject *from_bytes, *result = NULL, *kwds = NULL;
+        PyObject *py_bytes = NULL, *order_str = NULL;
+        from_bytes = PyObject_GetAttrString((PyObject*)&PyLong_Type, "from_bytes");
+        if (!from_bytes) return NULL;
+        py_bytes = PyBytes_FromStringAndSize((char*)bytes, sizeof(uint8_t));
         if (!py_bytes) goto limited_bad;
         order_str = PyUnicode_FromString(little ? "little" : "big");
         if (!order_str) goto limited_bad;
@@ -33882,256 +34449,6 @@ static CYTHON_INLINE PyObject* __Pyx_PyLong_From_long(long value) {
     }
 }
 
-/* CIntFromPy */
-static CYTHON_INLINE size_t __Pyx_PyLong_As_size_t(PyObject *x) {
-#ifdef __Pyx_HAS_GCC_DIAGNOSTIC
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wconversion"
-#endif
-    const size_t neg_one = (size_t) -1, const_zero = (size_t) 0;
-#ifdef __Pyx_HAS_GCC_DIAGNOSTIC
-#pragma GCC diagnostic pop
-#endif
-    const int is_unsigned = neg_one > const_zero;
-    if (unlikely(!PyLong_Check(x))) {
-        size_t val;
-        PyObject *tmp = __Pyx_PyNumber_Long(x);
-        if (!tmp) return (size_t) -1;
-        val = __Pyx_PyLong_As_size_t(tmp);
-        Py_DECREF(tmp);
-        return val;
-    }
-    if (is_unsigned) {
-#if CYTHON_USE_PYLONG_INTERNALS
-        if (unlikely(__Pyx_PyLong_IsNeg(x))) {
-            goto raise_neg_overflow;
-        } else if (__Pyx_PyLong_IsCompact(x)) {
-            __PYX_VERIFY_RETURN_INT(size_t, __Pyx_compact_upylong, __Pyx_PyLong_CompactValueUnsigned(x))
-        } else {
-            const digit* digits = __Pyx_PyLong_Digits(x);
-            assert(__Pyx_PyLong_DigitCount(x) > 1);
-            switch (__Pyx_PyLong_DigitCount(x)) {
-                case 2:
-                    if ((8 * sizeof(size_t) > 1 * PyLong_SHIFT)) {
-                        if ((8 * sizeof(unsigned long) > 2 * PyLong_SHIFT)) {
-                            __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if ((8 * sizeof(size_t) >= 2 * PyLong_SHIFT)) {
-                            return (size_t) (((((size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0]));
-                        }
-                    }
-                    break;
-                case 3:
-                    if ((8 * sizeof(size_t) > 2 * PyLong_SHIFT)) {
-                        if ((8 * sizeof(unsigned long) > 3 * PyLong_SHIFT)) {
-                            __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if ((8 * sizeof(size_t) >= 3 * PyLong_SHIFT)) {
-                            return (size_t) (((((((size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0]));
-                        }
-                    }
-                    break;
-                case 4:
-                    if ((8 * sizeof(size_t) > 3 * PyLong_SHIFT)) {
-                        if ((8 * sizeof(unsigned long) > 4 * PyLong_SHIFT)) {
-                            __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if ((8 * sizeof(size_t) >= 4 * PyLong_SHIFT)) {
-                            return (size_t) (((((((((size_t)digits[3]) << PyLong_SHIFT) | (size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0]));
-                        }
-                    }
-                    break;
-            }
-        }
-#endif
-#if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX < 0x030C00A7
-        if (unlikely(Py_SIZE(x) < 0)) {
-            goto raise_neg_overflow;
-        }
-#else
-        {
-            int result = PyObject_RichCompareBool(x, Py_False, Py_LT);
-            if (unlikely(result < 0))
-                return (size_t) -1;
-            if (unlikely(result == 1))
-                goto raise_neg_overflow;
-        }
-#endif
-        if ((sizeof(size_t) <= sizeof(unsigned long))) {
-            __PYX_VERIFY_RETURN_INT_EXC(size_t, unsigned long, PyLong_AsUnsignedLong(x))
-        } else if ((sizeof(size_t) <= sizeof(unsigned PY_LONG_LONG))) {
-            __PYX_VERIFY_RETURN_INT_EXC(size_t, unsigned PY_LONG_LONG, PyLong_AsUnsignedLongLong(x))
-        }
-    } else {
-#if CYTHON_USE_PYLONG_INTERNALS
-        if (__Pyx_PyLong_IsCompact(x)) {
-            __PYX_VERIFY_RETURN_INT(size_t, __Pyx_compact_pylong, __Pyx_PyLong_CompactValue(x))
-        } else {
-            const digit* digits = __Pyx_PyLong_Digits(x);
-            assert(__Pyx_PyLong_DigitCount(x) > 1);
-            switch (__Pyx_PyLong_SignedDigitCount(x)) {
-                case -2:
-                    if ((8 * sizeof(size_t) - 1 > 1 * PyLong_SHIFT)) {
-                        if ((8 * sizeof(unsigned long) > 2 * PyLong_SHIFT)) {
-                            __PYX_VERIFY_RETURN_INT(size_t, long, -(long) (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if ((8 * sizeof(size_t) - 1 > 2 * PyLong_SHIFT)) {
-                            return (size_t) (((size_t)-1)*(((((size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
-                        }
-                    }
-                    break;
-                case 2:
-                    if ((8 * sizeof(size_t) > 1 * PyLong_SHIFT)) {
-                        if ((8 * sizeof(unsigned long) > 2 * PyLong_SHIFT)) {
-                            __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if ((8 * sizeof(size_t) - 1 > 2 * PyLong_SHIFT)) {
-                            return (size_t) ((((((size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
-                        }
-                    }
-                    break;
-                case -3:
-                    if ((8 * sizeof(size_t) - 1 > 2 * PyLong_SHIFT)) {
-                        if ((8 * sizeof(unsigned long) > 3 * PyLong_SHIFT)) {
-                            __PYX_VERIFY_RETURN_INT(size_t, long, -(long) (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if ((8 * sizeof(size_t) - 1 > 3 * PyLong_SHIFT)) {
-                            return (size_t) (((size_t)-1)*(((((((size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
-                        }
-                    }
-                    break;
-                case 3:
-                    if ((8 * sizeof(size_t) > 2 * PyLong_SHIFT)) {
-                        if ((8 * sizeof(unsigned long) > 3 * PyLong_SHIFT)) {
-                            __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((((unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if ((8 * sizeof(size_t) - 1 > 3 * PyLong_SHIFT)) {
-                            return (size_t) ((((((((size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
-                        }
-                    }
-                    break;
-                case -4:
-                    if ((8 * sizeof(size_t) - 1 > 3 * PyLong_SHIFT)) {
-                        if ((8 * sizeof(unsigned long) > 4 * PyLong_SHIFT)) {
-                            __PYX_VERIFY_RETURN_INT(size_t, long, -(long) (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if ((8 * sizeof(size_t) - 1 > 4 * PyLong_SHIFT)) {
-                            return (size_t) (((size_t)-1)*(((((((((size_t)digits[3]) << PyLong_SHIFT) | (size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
-                        }
-                    }
-                    break;
-                case 4:
-                    if ((8 * sizeof(size_t) > 3 * PyLong_SHIFT)) {
-                        if ((8 * sizeof(unsigned long) > 4 * PyLong_SHIFT)) {
-                            __PYX_VERIFY_RETURN_INT(size_t, unsigned long, (((((((((unsigned long)digits[3]) << PyLong_SHIFT) | (unsigned long)digits[2]) << PyLong_SHIFT) | (unsigned long)digits[1]) << PyLong_SHIFT) | (unsigned long)digits[0])))
-                        } else if ((8 * sizeof(size_t) - 1 > 4 * PyLong_SHIFT)) {
-                            return (size_t) ((((((((((size_t)digits[3]) << PyLong_SHIFT) | (size_t)digits[2]) << PyLong_SHIFT) | (size_t)digits[1]) << PyLong_SHIFT) | (size_t)digits[0])));
-                        }
-                    }
-                    break;
-            }
-        }
-#endif
-        if ((sizeof(size_t) <= sizeof(long))) {
-            __PYX_VERIFY_RETURN_INT_EXC(size_t, long, PyLong_AsLong(x))
-        } else if ((sizeof(size_t) <= sizeof(PY_LONG_LONG))) {
-            __PYX_VERIFY_RETURN_INT_EXC(size_t, PY_LONG_LONG, PyLong_AsLongLong(x))
-        }
-    }
-    {
-        size_t val;
-        int ret = -1;
-#if PY_VERSION_HEX >= 0x030d00A6 && !CYTHON_COMPILING_IN_LIMITED_API
-        Py_ssize_t bytes_copied = PyLong_AsNativeBytes(
-            x, &val, sizeof(val), Py_ASNATIVEBYTES_NATIVE_ENDIAN | (is_unsigned ? Py_ASNATIVEBYTES_UNSIGNED_BUFFER | Py_ASNATIVEBYTES_REJECT_NEGATIVE : 0));
-        if (unlikely(bytes_copied == -1)) {
-        } else if (unlikely(bytes_copied > (Py_ssize_t) sizeof(val))) {
-            goto raise_overflow;
-        } else {
-            ret = 0;
-        }
-#elif PY_VERSION_HEX < 0x030d0000 && !(CYTHON_COMPILING_IN_PYPY || CYTHON_COMPILING_IN_LIMITED_API) || defined(_PyLong_AsByteArray)
-        int one = 1; int is_little = (int)*(unsigned char *)&one;
-        unsigned char *bytes = (unsigned char *)&val;
-        ret = _PyLong_AsByteArray((PyLongObject *)x,
-                                    bytes, sizeof(val),
-                                    is_little, !is_unsigned);
-#else
-        PyObject *v;
-        PyObject *stepval = NULL, *mask = NULL, *shift = NULL;
-        int bits, remaining_bits, is_negative = 0;
-        int chunk_size = (sizeof(long) < 8) ? 30 : 62;
-        if (likely(PyLong_CheckExact(x))) {
-            v = __Pyx_NewRef(x);
-        } else {
-            v = PyNumber_Long(x);
-            if (unlikely(!v)) return (size_t) -1;
-            assert(PyLong_CheckExact(v));
-        }
-        {
-            int result = PyObject_RichCompareBool(v, Py_False, Py_LT);
-            if (unlikely(result < 0)) {
-                Py_DECREF(v);
-                return (size_t) -1;
-            }
-            is_negative = result == 1;
-        }
-        if (is_unsigned && unlikely(is_negative)) {
-            Py_DECREF(v);
-            goto raise_neg_overflow;
-        } else if (is_negative) {
-            stepval = PyNumber_Invert(v);
-            Py_DECREF(v);
-            if (unlikely(!stepval))
-                return (size_t) -1;
-        } else {
-            stepval = v;
-        }
-        v = NULL;
-        val = (size_t) 0;
-        mask = PyLong_FromLong((1L << chunk_size) - 1); if (unlikely(!mask)) goto done;
-        shift = PyLong_FromLong(chunk_size); if (unlikely(!shift)) goto done;
-        for (bits = 0; bits < (int) sizeof(size_t) * 8 - chunk_size; bits += chunk_size) {
-            PyObject *tmp, *digit;
-            long idigit;
-            digit = PyNumber_And(stepval, mask);
-            if (unlikely(!digit)) goto done;
-            idigit = PyLong_AsLong(digit);
-            Py_DECREF(digit);
-            if (unlikely(idigit < 0)) goto done;
-            val |= ((size_t) idigit) << bits;
-            tmp = PyNumber_Rshift(stepval, shift);
-            if (unlikely(!tmp)) goto done;
-            Py_DECREF(stepval); stepval = tmp;
-        }
-        Py_DECREF(shift); shift = NULL;
-        Py_DECREF(mask); mask = NULL;
-        {
-            long idigit = PyLong_AsLong(stepval);
-            if (unlikely(idigit < 0)) goto done;
-            remaining_bits = ((int) sizeof(size_t) * 8) - bits - (is_unsigned ? 0 : 1);
-            if (unlikely(idigit >= (1L << remaining_bits)))
-                goto raise_overflow;
-            val |= ((size_t) idigit) << bits;
-        }
-        if (!is_unsigned) {
-            if (unlikely(val & (((size_t) 1) << (sizeof(size_t) * 8 - 1))))
-                goto raise_overflow;
-            if (is_negative)
-                val = ~val;
-        }
-        ret = 0;
-    done:
-        Py_XDECREF(shift);
-        Py_XDECREF(mask);
-        Py_XDECREF(stepval);
-#endif
-        if (unlikely(ret))
-            return (size_t) -1;
-        return val;
-    }
-raise_overflow:
-    PyErr_SetString(PyExc_OverflowError,
-        "value too large to convert to size_t");
-    return (size_t) -1;
-raise_neg_overflow:
-    PyErr_SetString(PyExc_OverflowError,
-        "can't convert negative value to size_t");
-    return (size_t) -1;
-}
-
 /* MemviewSliceCopy */
 static __Pyx_memviewslice
 __pyx_memoryview_copy_new_contig(const __Pyx_memviewslice *from_mvs,
@@ -34203,6 +34520,33 @@ no_fail:
     __Pyx_XDECREF((PyObject *) array_obj);
     __Pyx_RefNannyFinishContext();
     return new_mvs;
+}
+
+/* PyObjectCallMethod1 (used by UpdateUnpickledDict) */
+#if !(CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000)))
+static PyObject* __Pyx__PyObject_CallMethod1(PyObject* method, PyObject* arg) {
+    PyObject *result = __Pyx_PyObject_CallOneArg(method, arg);
+    Py_DECREF(method);
+    return result;
+}
+#endif
+static PyObject* __Pyx_PyObject_CallMethod1(PyObject* obj, PyObject* method_name, PyObject* arg) {
+#if CYTHON_VECTORCALL && (__PYX_LIMITED_VERSION_HEX >= 0x030C0000 || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x03090000))
+    PyObject *args[2] = {obj, arg};
+    (void) __Pyx_PyObject_CallOneArg;
+    (void) __Pyx_PyObject_Call2Args;
+    return PyObject_VectorcallMethod(method_name, args, 2 | PY_VECTORCALL_ARGUMENTS_OFFSET, NULL);
+#else
+    PyObject *method = NULL, *result;
+    int is_method = __Pyx_PyObject_GetMethod(obj, method_name, &method);
+    if (likely(is_method)) {
+        result = __Pyx_PyObject_Call2Args(method, obj, arg);
+        Py_DECREF(method);
+        return result;
+    }
+    if (unlikely(!method)) return NULL;
+    return __Pyx__PyObject_CallMethod1(method, arg);
+#endif
 }
 
 /* UpdateUnpickledDict */

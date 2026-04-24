@@ -58,6 +58,17 @@ InterpreterResult interpret_jsonl(
     OrdinalPredictor& predictor  // Updated in-place
 );
 
+// Parallel variant: uses BS::thread_pool to process chunks in parallel
+// min_rows_per_thread: minimum rows per thread (default 2048)
+InterpreterResult interpret_jsonl_parallel(
+    const uint8_t* buffer_data,
+    size_t buffer_length,
+    const std::vector<MarkerPosition>& markers,
+    const ParseContext& context,
+    OrdinalPredictor& predictor,
+    size_t min_rows_per_thread = 2048
+);
+
 }  // namespace rugo::_jsonl
 
 #endif  // _JSONL_FIELD_SPAN_HPP_

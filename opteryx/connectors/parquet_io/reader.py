@@ -35,6 +35,7 @@ from typing import Optional
 from typing import Tuple
 from typing import Union
 
+from opteryx.compiled.structures.footer_cache import ParquetFooterBytesCache
 from opteryx.connectors.parquet_io.cache import InMemoryParquetCache
 from opteryx.connectors.parquet_io.cache import ParquetCache
 from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
@@ -227,6 +228,7 @@ def _read_footer_payload(
     path: str,
     file_size: Optional[int] = None,
     connector: Optional[str] = None,
+    footer_cache: Optional[ParquetFooterBytesCache] = None,
 ) -> Tuple[bytes, int, int]:
     if _trace_enabled():
         _trace_io_started(file_id=path, component="footer", connector=connector)
@@ -238,6 +240,12 @@ def _read_footer_payload(
         file_size = file_info.size
     if file_size is None or file_size < _PARQUET_FOOTER_SUFFIX:
         raise ValueError(f"File {path!r} is too small to be a valid Parquet file ({file_size} B)")
+
+    # Check footer bytes cache before I/O
+    if footer_cache is not None:
+        cached = footer_cache.get(path)
+        if cached is not None:
+            return cached, 0, 0
 
     prefetch_size = min(_FOOTER_PREFETCH, file_size)
     prefetch_offset = file_size - prefetch_size
@@ -276,6 +284,11 @@ def _read_footer_payload(
     envelope = (
         _PARQUET_MAGIC + footer_bytes_data + struct.pack("<I", footer_length) + _PARQUET_MAGIC
     )
+
+    # Store in footer bytes cache
+    if footer_cache is not None:
+        footer_cache.put(path, envelope)
+
     return envelope, bytes_fetched, (time.monotonic_ns() - start_ns)
 
 
@@ -303,6 +316,7 @@ def fetch_footer(
     cache: Optional[ParquetCache] = None,
     file_size: Optional[int] = None,
     connector: Optional[str] = None,
+    footer_bytes_cache: Optional[ParquetFooterBytesCache] = None,
 ) -> dict:
     if cache is not None:
         cached = cache.get_footer(path)
@@ -310,9 +324,13 @@ def fetch_footer(
             return cached
 
     if file_size is None:
-        envelope, footer_bytes, _ = _read_footer_payload(filesystem, path, connector=connector)
+        envelope, footer_bytes, _ = _read_footer_payload(
+            filesystem, path, connector=connector, footer_cache=footer_bytes_cache
+        )
     else:
-        envelope, footer_bytes, _ = _read_footer_payload(filesystem, path, file_size, connector)
+        envelope, footer_bytes, _ = _read_footer_payload(
+            filesystem, path, file_size, connector, footer_cache=footer_bytes_cache
+        )
     meta = _parse_footer_envelope(path, envelope, footer_bytes)
 
     if cache is not None:
@@ -329,12 +347,13 @@ def fetch_columns(
     decoder: Optional[Any] = None,
     connector: Optional[str] = None,
     row_mask=None,
+    footer_bytes_cache: Optional[ParquetFooterBytesCache] = None,
 ) -> Dict[str, Any]:
     if cache is None:
         cache = InMemoryParquetCache()
 
     decoder = _resolve_decoder(decoder)
-    meta = fetch_footer(filesystem, path, cache=cache)
+    meta = fetch_footer(filesystem, path, cache=cache, footer_bytes_cache=footer_bytes_cache)
 
     if rg_idx < 0 or rg_idx >= len(meta["row_groups"]):
         raise IndexError(f"Row group {rg_idx} out of range [0, {len(meta['row_groups'])})")
@@ -579,6 +598,7 @@ def iter_row_groups(
     connector: Optional[str] = None,
     query_id: Optional[str] = None,
     prefetched_footers: Optional[Dict[str, dict]] = None,
+    footer_bytes_cache: Optional[ParquetFooterBytesCache] = None,
 ) -> Iterator[Dict[str, Any]]:
     """
     Yield assembled row groups.
@@ -599,7 +619,9 @@ def iter_row_groups(
     # happens here.
     work_items: List[Tuple[str, int]] = []
     for path in paths:
-        meta = fetch_footer(filesystem, path, cache=cache, connector=connector)
+        meta = fetch_footer(
+            filesystem, path, cache=cache, connector=connector, footer_bytes_cache=footer_bytes_cache
+        )
         for rg_idx, rg_meta in enumerate(meta.get("row_groups", [])):
             if predicates and not row_group_may_satisfy(rg_meta, predicates):
                 continue

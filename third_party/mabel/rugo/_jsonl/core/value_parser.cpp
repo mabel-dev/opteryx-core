@@ -5,6 +5,11 @@
 
 namespace rugo::_jsonl {
 
+// LIVE: is_null(), evaluate_predicate() — used for predicate filtering
+// DEAD: parse_int64, parse_float64, parse_bool, extract_string — legacy type parsing
+// Current pipeline extracts columns as raw strings (StringVector), no type conversion yet.
+// See ARCHITECTURE.md for roadmap on implementing direct typed vector conversion.
+
 bool parse_int64(const uint8_t* buffer, uint32_t start, uint32_t end, int64_t& out) {
     if (start > end) {
         return false;

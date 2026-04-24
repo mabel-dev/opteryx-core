@@ -22,7 +22,7 @@ class Dataset(enum.Enum):
     FULL_SINGLE = "scratch.hits_single"
 
 
-DATASET = Dataset.MID
+DATASET = Dataset.FULL_SINGLE
 
 # fmt:off
 STATEMENTS = [
@@ -61,7 +61,7 @@ STATEMENTS = [
         ("/* 32 */ SELECT WatchID, ClientIP, COUNT(*) AS c, SUM(IsRefresh), AVG(ResolutionWidth) FROM {DATASET} WHERE SearchPhrase <> '' GROUP BY WatchID, ClientIP ORDER BY c DESC LIMIT 10;", None),
         ("--/* 33 */ SELECT WatchID, ClientIP, COUNT(*) AS c, SUM(IsRefresh), AVG(ResolutionWidth) FROM {DATASET} GROUP BY WatchID, ClientIP ORDER BY c DESC LIMIT 10;", None),
         ("--/* 34 */ SELECT URL, COUNT(*) AS c FROM {DATASET} GROUP BY URL ORDER BY c DESC LIMIT 10;", None),
-        ("/* 35 */ SELECT 1, URL, COUNT(*) AS c FROM {DATASET} GROUP BY 1, URL ORDER BY c DESC LIMIT 10;", None),
+        ("--/* 35 */ SELECT 1, URL, COUNT(*) AS c FROM {DATASET} GROUP BY 1, URL ORDER BY c DESC LIMIT 10;", None),
         ("/* 36 */ SELECT ClientIP, ClientIP - 1, ClientIP - 2, ClientIP - 3, COUNT(*) AS c FROM {DATASET} GROUP BY ClientIP, ClientIP - 1, ClientIP - 2, ClientIP - 3 ORDER BY c DESC LIMIT 10;", None),
         ("/* 37 */ SELECT URL, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::TIMESTAMP[ms] >= '2013-07-01'::TIMESTAMP[ms] AND EventDate::TIMESTAMP[ms] <= '2013-07-31'::TIMESTAMP[ms] AND DontCountHits = 0 AND IsRefresh = 0 AND URL <> '' GROUP BY URL ORDER BY PageViews DESC LIMIT 10;", None),
         ("/* 38 */ SELECT Title, COUNT(*) AS PageViews FROM {DATASET} WHERE CounterID = 62 AND EventDate::TIMESTAMP[ms] >= '2013-07-01'::TIMESTAMP[ms] AND EventDate::TIMESTAMP[ms] <= '2013-07-31'::TIMESTAMP[ms] AND DontCountHits = 0 AND IsRefresh = 0 AND Title <> '' GROUP BY Title ORDER BY PageViews DESC LIMIT 10;", None),
@@ -114,6 +114,7 @@ if __name__ == "__main__":  # pragma: no cover
 
     import argparse
     import gc
+    import json
     import shutil
     import time
 
@@ -132,7 +133,44 @@ if __name__ == "__main__":  # pragma: no cover
         default=2,
         help="Number of iterations for warm queries (default: 3)",
     )
+    parser.add_argument(
+        "--duckdb-baseline",
+        type=str,
+        default="tests/performance/clickbench/duckdb.c6a.4xlarge.json",
+        help="Path to DuckDB baseline results JSON",
+    )
     args = parser.parse_args()
+
+    # Load DuckDB baseline results
+    duckdb_results = None
+    if os.path.exists(args.duckdb_baseline):
+        try:
+            with open(args.duckdb_baseline, "r") as f:
+                duckdb_data = json.load(f)
+                # Use the warm2 (second warm run) for comparison
+                duckdb_results = [result[2] for result in duckdb_data.get("result", [])]
+        except Exception as e:
+            print(f"Warning: Could not load DuckDB baseline: {e}\n")
+            duckdb_results = None
+
+    def format_ratio(opteryx_ms: float, duckdb_ms: float) -> str:
+        """Format ratio with color coding based on performance."""
+        ratio = opteryx_ms / duckdb_ms
+        ratio_str = f"[{ratio:.2f}x]"
+
+        # Color codes based on ratio thresholds
+        if ratio < 1.0:
+            # Deep green: faster than DuckDB
+            return f"\033[38;2;34;197;94m{ratio_str}\033[0m"
+        elif ratio <= 1.1:
+            # Light green: within 10%
+            return f"\033[38;2;72;209;204m{ratio_str}\033[0m"
+        elif ratio <= 1.5:
+            # Orange: 10-50% slower
+            return f"\033[38;2;255;165;0m{ratio_str}\033[0m"
+        else:
+            # Red: 50%+ slower
+            return f"\033[38;2;255;69;69m{ratio_str}\033[0m"
 
     start_suite = time.monotonic_ns()
     width = shutil.get_terminal_size((80, 20))[0] - 18
@@ -140,7 +178,6 @@ if __name__ == "__main__":  # pragma: no cover
     failed: int = 0
     nl: str = "\n"
     failures = []
-    warm_results = []
 
     if args.warm:
         print(f"{'=' * 80}")
@@ -148,6 +185,8 @@ if __name__ == "__main__":  # pragma: no cover
         print(f"Version: {opteryx.__version__}")
         print(f"Iterations per query: {args.iterations}")
         print(f"Dataset: {DATASET.name} ({DATASET.value})")
+        if duckdb_results:
+            print(f"Baseline: DuckDB (comparing to warm2 times)")
         print()
         print(f"{'=' * 80}\n")
 
@@ -167,10 +206,11 @@ if __name__ == "__main__":  # pragma: no cover
             if warm_session is not None:
                 warm_session.close()
 
-        print(
-            f"{'Query':<8} {'Iteration 1':>14} {'Iteration 2':>14} {'Iteration 3':>14}         {'Avg':<13} {'Min':<13} {'Max':<13}"
-        )
-        print("-" * 102)
+        header = f"{'Query':<8} {'Iteration 1':>14} {'Iteration 2':>14} {'Iteration 3':>14}         {'Avg':<13} {'Min':<13} {'Max':<13}"
+        if duckdb_results:
+            header += "vs DuckDB"
+        print(header)
+        print("-" * (102 + (12 if duckdb_results else 0)))
 
     print(f"RUNNING CLICKBENCH BATTERY OF {len(STATEMENTS)} QUERIES\n")
     for index, (statement, err) in enumerate(STATEMENTS):
@@ -218,26 +258,19 @@ if __name__ == "__main__":  # pragma: no cover
                 while len(iter_strs) < 3:
                     iter_strs.append("-")
 
-                status = ""
-                if min_time > 5000:
-                    status = " ⚠️ VERY SLOW"
-                elif min_time > 2000:
-                    status = " ⚠️ SLOW"
-
-                print(
+                result_str = (
                     f"{query_num:<8} {iter_strs[0]:>14} {iter_strs[1]:>14} {iter_strs[2]:>14} "
-                    f"{avg_time:>9.2f}ms   {min_time:>9.2f}ms   {max_time:>9.2f}ms{status}"
+                    f"{avg_time:>9.2f}ms   {min_time:>9.2f}ms   {max_time:>9.2f}ms"
                 )
 
-                warm_results.append(
-                    {
-                        "query": query_num,
-                        "avg": avg_time,
-                        "min": min_time,
-                        "max": max_time,
-                        "times": times,
-                    }
-                )
+                # Add DuckDB comparison if available
+                if duckdb_results and index < len(duckdb_results):
+                    duckdb_ms = duckdb_results[index] * 1000  # Convert from seconds to ms
+                    ratio_str = format_ratio(min_time, duckdb_ms)
+                    result_str += f"  {ratio_str}"
+
+                print(result_str)
+
                 passed += 1
         else:
             # Original single-run mode
@@ -279,53 +312,3 @@ if __name__ == "__main__":  # pragma: no cover
         f"  \033[38;2;26;185;67m{passed} passed ({(passed * 100) // (passed + failed)}%)\033[0m\n"
         f"  \033[38;2;255;121;198m{failed} failed\033[0m"
     )
-
-    # Analysis for warm mode
-    if args.warm and warm_results:
-        print(f"\n{'=' * 80}")
-        print("PERFORMANCE ANALYSIS")
-        print(f"{'=' * 80}\n")
-
-        # Find slow queries
-        very_slow = [r for r in warm_results if r["avg"] > 1000]
-        slow = [r for r in warm_results if 500 < r["avg"] <= 1000]
-        moderate = [r for r in warm_results if 100 < r["avg"] <= 500]
-
-        if very_slow:
-            print(f"⚠️  VERY SLOW queries (>1000ms):")
-            for r in sorted(very_slow, key=lambda x: x["avg"], reverse=True):
-                print(f"  {r['query']}: {r['avg']:.2f}ms")
-
-        if slow:
-            print(f"\n⚠️  Slow queries (>500ms):")
-            for r in sorted(slow, key=lambda x: x["avg"], reverse=True):
-                print(f"  {r['query']}: {r['avg']:.2f}ms")
-
-        if moderate:
-            print(f"\n⚠️  Moderate queries (>100ms):")
-            for r in sorted(moderate, key=lambda x: x["avg"], reverse=True):
-                print(f"  {r['query']}: {r['avg']:.2f}ms")
-
-        if not (very_slow or slow or moderate):
-            print("✅ All queries completed in good time (<100ms)")
-
-        # Check variance
-        high_variance = []
-        for r in warm_results:
-            if r["min"] > 0 and r["max"] / r["min"] > 2.0:
-                high_variance.append((r["query"], r["min"], r["max"], r["max"] / r["min"]))
-
-        if high_variance:
-            print(f"\n⚠️  High variance queries (max/min > 2x):")
-            for query, min_t, max_t, ratio in sorted(
-                high_variance, key=lambda x: x[3], reverse=True
-            ):
-                print(f"  {query}: {min_t:.2f}ms - {max_t:.2f}ms (ratio: {ratio:.1f}x)")
-
-        # Overall stats
-        all_times = [r["avg"] for r in warm_results]
-        if all_times:
-            avg_overall = sum(all_times) / len(all_times)
-            print(f"\nOverall average time: {avg_overall:.2f}ms")
-            print(f"Fastest query: {min(all_times):.2f}ms")
-            print(f"Slowest query: {max(all_times):.2f}ms")

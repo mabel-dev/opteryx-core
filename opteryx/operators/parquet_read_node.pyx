@@ -33,6 +33,7 @@ from typing import Generator
 
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+from opteryx.compiled.structures.footer_cache import ParquetFooterBytesCache
 from opteryx.connectors.parquet_io import InMemoryParquetCache
 from opteryx.connectors.parquet_io import fetch_columns
 from opteryx.connectors.parquet_io import fetch_footer
@@ -571,6 +572,7 @@ class ParquetReadNode(ReaderNode):
         # the same file; column chunks cached for reuse across row groups with
         # identical content (rare but free).
         cache = InMemoryParquetCache()
+        footer_bytes_cache = ParquetFooterBytesCache()
 
         prefetched_footers: dict[str, dict] = {}
 
@@ -583,6 +585,7 @@ class ParquetReadNode(ReaderNode):
                     blob_name,
                     cache,
                     file_sizes.get(blob_name),
+                    footer_bytes_cache=footer_bytes_cache,
                 ): blob_name
                 for blob_name in unique_blob_paths
             }
@@ -609,6 +612,7 @@ class ParquetReadNode(ReaderNode):
                 connector=connector_type,
                 query_id=getattr(self.properties, "query_id", None),
                 prefetched_footers=prefetched_footers,
+                footer_bytes_cache=footer_bytes_cache,
             ):
                 path = row_group.pop("__path__")
                 rg_idx = row_group.pop("__row_group__")

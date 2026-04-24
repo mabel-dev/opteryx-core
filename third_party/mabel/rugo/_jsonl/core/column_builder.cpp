@@ -4,6 +4,10 @@
 #include <algorithm>
 #include <cstring>
 
+// LIVE: extract_column() — extracts one column as raw strings (StringColumnResult)
+// DEAD: ColumnResult, merge_column(), type parsing functions — legacy implementation
+// See ARCHITECTURE.md for current pipeline
+
 namespace rugo::_jsonl {
 
 namespace {

@@ -62,6 +62,15 @@ cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
         OrdinalPredictor& predictor
     )
 
+    InterpreterResult interpret_jsonl_parallel(
+        const uint8_t* buffer_data,
+        size_t buffer_length,
+        const vector[MarkerPosition]& markers,
+        const ParseContext& context,
+        OrdinalPredictor& predictor,
+        size_t min_rows_per_thread
+    )
+
 
 cdef extern from "core/structural_scan.hpp" namespace "rugo::_jsonl":
     vector[MarkerPosition] scan_structural_markers(
@@ -130,6 +139,9 @@ cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
     void merge_column(ColumnResult& dest, ColumnResult& src)
 
 
+import os
+
+
 def read_jsonl(
     data,
     columns=None,
@@ -139,7 +151,9 @@ def read_jsonl(
     infer_sample_size=5,
     parse_arrays=True,
     parse_objects=True,
-    fail_on_error=True
+    fail_on_error=True,
+    use_threads=True,
+    min_rows_per_thread=2048
 ):
     """
     Read JSONL data into Draken vectors with projection and predicate pushdown.
@@ -166,6 +180,12 @@ def read_jsonl(
     cdef list chunk_records = []   # list of C++ vector[vector[FieldSpan]]
     cdef size_t total_rows = 0
     cdef dict schema = {}
+    cdef const uint8_t* buf_data
+    cdef size_t buf_len
+    cdef vector[MarkerPosition] markers
+    cdef InterpreterResult interp_result
+    cdef OrdinalPredictor predictor
+    cdef bint threaded_succeeded = False
     cdef dict result = {
         'success': False,
         'column_names': [],
@@ -193,41 +213,79 @@ def read_jsonl(
         context.parse_objects = parse_objects
         context.fail_on_error = fail_on_error
 
-        # Create reader
-        if isinstance(data, str):
-            reader = new JsonlReader(<string>data.encode('utf-8'), context)
-        elif isinstance(data, bytes):
-            reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
-        else:
-            data_bytes = bytes(data)
-            reader = new JsonlReader(<const uint8_t*><bytes>data_bytes, len(data_bytes), context)
+        # Try threaded path first if requested
+        threaded_succeeded = False
+        if use_threads:
+            # Load entire buffer
+            if isinstance(data, str):
+                with open(data, 'rb') as f:
+                    data_bytes = f.read()
+            elif isinstance(data, bytes):
+                data_bytes = data
+            else:
+                data_bytes = bytes(data)
 
-        # Accumulate chunks; each chunk keeps its own buffer so FieldSpan
-        # offsets remain valid when we later call extract_column per chunk.
-        while True:
-            chunk_result = reader.next_chunk()
+            if len(data_bytes) > 0:
+                buf_data = <const uint8_t*>data_bytes
+                buf_len = len(data_bytes)
 
-            if not chunk_result.success:
-                if reader.has_error():
-                    result['error'] = reader.get_error().decode('utf-8')
-                break
+                # Scan for markers once
+                markers = scan_structural_markers(buf_data, buf_len)
 
-            if chunk_result.num_records > 0:
-                if not column_names:
-                    for col in chunk_result.column_names:
-                        column_names.append(col.decode('utf-8'))
+                # Process in parallel
+                interp_result = interpret_jsonl_parallel(
+                    buf_data,
+                    buf_len,
+                    markers,
+                    context,
+                    predictor,
+                    <size_t>min_rows_per_thread
+                )
 
-                # Keep buffer as bytes (owns the memory) and records as C++ object
-                chunk_buffers.append(bytes(chunk_result.buffer_data))
-                chunk_records.append(chunk_result.records)
-                total_rows += chunk_result.num_records
+                # Store result as single "chunk"
+                if interp_result.all_records.size() > 0:
+                    chunk_buffers.append(data_bytes)
+                    chunk_records.append(interp_result.all_records)
+                    total_rows = interp_result.num_records_passed
+                    threaded_succeeded = True
 
-                if chunk_result.inferred_schema.size() > 0:
-                    for key, value in chunk_result.inferred_schema:
-                        schema[key.decode('utf-8')] = value.decode('utf-8')
+        # Fall back to sequential if threaded path failed or wasn't requested
+        if not threaded_succeeded:
+            # Sequential path: use JsonlReader chunking
+            if isinstance(data, str):
+                reader = new JsonlReader(<string>data.encode('utf-8'), context)
+            elif isinstance(data, bytes):
+                reader = new JsonlReader(<const uint8_t*><bytes>data, len(data), context)
+            else:
+                data_bytes = bytes(data)
+                reader = new JsonlReader(<const uint8_t*><bytes>data_bytes, len(data_bytes), context)
 
-            if reader.is_eof():
-                break
+            # Accumulate chunks; each chunk keeps its own buffer so FieldSpan
+            # offsets remain valid when we later call extract_column per chunk.
+            while True:
+                chunk_result = reader.next_chunk()
+
+                if not chunk_result.success:
+                    if reader.has_error():
+                        result['error'] = reader.get_error().decode('utf-8')
+                    break
+
+                if chunk_result.num_records > 0:
+                    if not column_names:
+                        for col in chunk_result.column_names:
+                            column_names.append(col.decode('utf-8'))
+
+                    # Keep buffer as bytes (owns the memory) and records as C++ object
+                    chunk_buffers.append(bytes(chunk_result.buffer_data))
+                    chunk_records.append(chunk_result.records)
+                    total_rows += chunk_result.num_records
+
+                    if chunk_result.inferred_schema.size() > 0:
+                        for key, value in chunk_result.inferred_schema:
+                            schema[key.decode('utf-8')] = value.decode('utf-8')
+
+                if reader.is_eof():
+                    break
 
         # Build Draken vectors — one C++ call per column per chunk
         if total_rows > 0 and column_names:
@@ -402,17 +460,6 @@ def read_jsonl_raw(
         result['column_names'] = column_names
         result['buffer_size_mb'] = total_bytes / 1024 / 1024
         result['elapsed_ms'] = elapsed_ms
-
-        # Convert first record to Python format for inspection
-        if first_record is not None:
-            for field in first_record:
-                result['sample_record'].append({
-                    'key_start': field.key_start,
-                    'key_width': field.key_width,
-                    'value_start': field.value_start,
-                    'value_width': field.value_width,
-                    'type': field.type,
-                })
 
         return result
 
