@@ -118,8 +118,10 @@ char* bintob16(char* restrict dest, const void* restrict src, size_t size) {
         return bintob16_avx2(dest, src, size);
     } else if (features.avx2 && size >= 24) {
         return bintob16_avx2(dest, src, size);
+#if defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(__aarch64__)
     } else if (features.neon && size >= 12) {
         return bintob16_neon(dest, src, size);
+#endif
     } else {
         return bintob16_scalar(dest, src, size);
     }
