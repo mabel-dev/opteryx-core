@@ -13,8 +13,8 @@ Value: raw footer envelope bytes (stored in MemoryPool, accessed via ref_id)
 from typing import Optional
 from libc.stdint cimport int64_t
 
-from opteryx.compiled.structures.lru_k import LRU_K
-from opteryx.compiled.structures.memory_pool import MemoryPool
+from opteryx.compiled.structures.lru_k cimport LRU_K
+from opteryx.compiled.structures.memory_pool cimport MemoryPool
 
 
 cdef class ParquetFooterBytesCache:
@@ -26,8 +26,8 @@ cdef class ParquetFooterBytesCache:
     Thread-safe: both MemoryPool and LRU_K use RLock internally.
     """
 
-    cdef object pool
-    cdef object lru
+    cdef MemoryPool pool
+    cdef LRU_K lru
     cdef dict _path_to_ref  # path -> ref_id mapping
 
     def __cinit__(self, int64_t pool_size_bytes=16*1024*1024):
@@ -73,7 +73,7 @@ cdef class ParquetFooterBytesCache:
             ref_id = self.pool.commit(envelope)
             if ref_id != -1:  # Success
                 self._path_to_ref[path] = ref_id
-                self.lru.set(path.encode(), b'')  # Dummy value
+                self.lru.set(path.encode(), b'', True)  # Dummy value, evict=True
                 return True
 
             # Pool exhausted, evict oldest LRU entry and retry

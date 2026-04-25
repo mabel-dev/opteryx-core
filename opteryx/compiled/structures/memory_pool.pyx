@@ -56,21 +56,14 @@ cdef inline int64_t _align_size(int64_t size, int64_t alignment=8):
     """Align size to the specified boundary for better memory access patterns."""
     return (size + alignment - 1) & ~(alignment - 1)
 
-cdef class MemoryPool:
-    cdef:
-        unsigned char* pool
-        public int64_t size
-        public int64_t used_size
-        public vector[MemorySegment] segments
-        unordered_map[int64_t, SegmentMetadata] c_metadata  # C++ map: ref_id -> metadata
-        public str name
-        public int64_t commits, failed_commits, reads, read_locks
-        public int64_t l1_compaction, l2_compaction, releases, resizes
-        object lock  # Python RLock (Cython has issues with C++ mutex embedding)
-        int64_t next_ref_id
-        int64_t alignment
-        bint auto_resize
+cdef struct SegmentMetadata:
+    # C++ struct for fast metadata access without Python dicts
+    int64_t start
+    int64_t length
+    int64_t latches
+    int64_t orig_length
 
+cdef class MemoryPool:
     def __cinit__(self, int64_t size, str name="Memory Pool", bint auto_resize=False, int64_t alignment=1):
         if size <= 0:
             raise ValueError("MemoryPool size must be a positive integer")
