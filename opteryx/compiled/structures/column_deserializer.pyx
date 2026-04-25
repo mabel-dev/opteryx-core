@@ -13,10 +13,11 @@ from libc.stdint cimport int32_t, int64_t
 import struct
 import json
 from typing import Dict, Any
+from array import array
 
 from opteryx.compiled.structures.memory_pool cimport MemoryPool
 from opteryx.compiled.structures.column_descriptor cimport ColumnDescriptor
-from opteryx.compiled.draken.vectors.integer_vector cimport Int64Vector
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.vectors.string_vector cimport StringVector
 
 
@@ -83,8 +84,11 @@ cdef _deserialize_int64(bytes raw_bytes, ColumnDescriptor descriptor):
         val = struct.unpack('<q', data_bytes[i*8:(i+1)*8])[0]
         values.append(val)
 
-    # Create Int64Vector
-    vector = Int64Vector.from_list(values)
+    # Create Int64Vector from a typed sequence
+    # Build a native int64 array and call the declared from_sequence factory
+    arr = array('q', values)
+    cdef int64_t[::1] mv = arr
+    vector = Int64Vector.from_sequence(mv)
 
     return {
         'vector': vector,
@@ -121,8 +125,10 @@ cdef _deserialize_int32(bytes raw_bytes, ColumnDescriptor descriptor):
         val = struct.unpack('<i', data_bytes[i*4:(i+1)*4])[0]
         values.append(val)
 
-    # Create Int64Vector (convert from int32)
-    vector = Int64Vector.from_list([int(v) for v in values])
+    # Create Int64Vector (convert from int32) using a typed sequence
+    arr = array('q', [int(v) for v in values])
+    cdef int64_t[::1] mv = arr
+    vector = Int64Vector.from_sequence(mv)
 
     return {
         'vector': vector,
@@ -264,6 +270,10 @@ cdef _deserialize_string(bytes raw_bytes, ColumnDescriptor descriptor):
     is_dict = struct.unpack('<I', data_bytes[0:4])[0]
     data_offset = 4
 
+    # Pre-declare Cython variables at function scope
+    cdef int num_indices
+    cdef list values
+
     if is_dict:
         # Dictionary-encoded: indices + dictionary
         indices_len = struct.unpack('<Q', data_bytes[data_offset:data_offset+8])[0]
@@ -279,8 +289,8 @@ cdef _deserialize_string(bytes raw_bytes, ColumnDescriptor descriptor):
         dictionary = json.loads(dict_bytes.decode('utf-8'))
 
         # Reconstruct values using indices
-        cdef int num_indices = indices_len // 4
-        cdef list values = []
+        num_indices = indices_len // 4
+        values = []
         for i in range(num_indices):
             idx = struct.unpack('<i', indices_bytes[i*4:(i+1)*4])[0]
             if 0 <= idx < len(dictionary):
@@ -292,8 +302,10 @@ cdef _deserialize_string(bytes raw_bytes, ColumnDescriptor descriptor):
         string_json = data_bytes[4:].decode('utf-8')
         values = json.loads(string_json)
 
-    # Create StringVector
-    vector = StringVector.from_list(values)
+    # Create StringVector using the from_arrow-compatible constructor.
+    # The upstream Cython wrapper exposes `from_arrow(object)` — pass the Python list
+    # (the implementation will adapt or convert to the internal representation).
+    vector = StringVector.from_arrow(values)
 
     return {
         'vector': vector,

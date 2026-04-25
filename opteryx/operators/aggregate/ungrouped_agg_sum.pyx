@@ -32,6 +32,16 @@ cdef class SumInt64Aggregate(UngroupedAggregate):
         if raw is None:
             return
 
+        if hasattr(raw, 'sum'):
+            try:
+                val = raw.sum()
+                if val is not None:
+                    self._total += <int64_t>val
+                    self._seen   = True
+                return
+            except (ValueError, NotImplementedError):
+                pass
+
         for val_py in raw.to_pylist():
             if val_py is not None:
                 self._total += <int64_t>val_py
@@ -83,6 +93,16 @@ cdef class SumFloat64Aggregate(UngroupedAggregate):
 
         if raw is None:
             return
+
+        if hasattr(raw, 'sum'):
+            try:
+                val = raw.sum()
+                if val is not None:
+                    self._total += <double>val
+                    self._seen   = True
+                return
+            except (ValueError, NotImplementedError):
+                pass
 
         for val_py in raw.to_pylist():
             if val_py is not None:

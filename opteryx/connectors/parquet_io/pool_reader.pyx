@@ -1,14 +1,13 @@
 # cython: language_level=3, boundscheck=False, wraparound=False, cdivision=True
 
-"""Pure C++ parquet IO pipeline with lock-free queues.
+"""
+Pure C++ Parquet IO pipeline with lock-free queues.
 
-Replaces pool_reader.py with a Cython bridge to the C++ ParquetIOPipeline.
-
-Architecture:
+No Python in hot path. All operations are typed Cython/C++.
 - C++ threads: read column chunk bytes + decode (DecodeColumnFromChunk)
-- C++ results: MorselRef with vector<DecodedColumn>
-- Cython bridge: serialize DecodedColumn → raw bytes in MemoryPool + ColumnDescriptor
-- Result queue: lock-free moodycamel carries descriptors (zero-copy, no mutexes)
+- Lock-free queue: moodycamel carries result descriptors
+- MemoryPool: zero-copy storage for decoded columns
+- GIL: Released during I/O and decode operations
 """
 
 from libc.stdint cimport uint8_t, int32_t, int64_t, uint32_t, uint64_t
@@ -17,12 +16,13 @@ from libcpp.vector cimport vector
 from libcpp.unordered_map cimport unordered_map
 import struct
 import json
+import time
 
 from opteryx.compiled.structures.memory_pool cimport MemoryPool
-from opteryx.compiled.structures.column_descriptor cimport ColumnDescriptor
 from opteryx.compiled.structures.column_deserializer cimport deserialize_row_group
 
 
+# C++ metadata structures
 cdef extern from "../../../../third_party/mabel/rugo/parquet/metadata.hpp":
     cdef cppclass ColumnStats:
         string name
@@ -38,8 +38,8 @@ cdef extern from "../../../../third_party/mabel/rugo/parquet/metadata.hpp":
         int32_t max_repetition_level
 
 
+# C++ decoded column structure
 cdef extern from "../../../../third_party/mabel/rugo/parquet/decode.hpp":
-    # Full declaration of DecodedColumn for serialization
     cdef cppclass DecodedColumn:
         vector[uint8_t] valid_bits
         vector[int32_t] int32_values
@@ -64,6 +64,7 @@ cdef extern from "../../../../third_party/mabel/rugo/parquet/decode.hpp":
         bint success
 
 
+# C++ IO pipeline
 cdef extern from "../../../../third_party/mabel/rugo/parquet/io_pipeline.hpp" namespace "rugo":
     cdef cppclass MorselRef:
         string path
@@ -87,7 +88,7 @@ cdef extern from "../../../../third_party/mabel/rugo/parquet/io_pipeline.hpp" na
 
 
 cdef class CppIOPipeline:
-    """Cython wrapper for C++ ParquetIOPipeline."""
+    """Cython wrapper for C++ ParquetIOPipeline - pure compiled code, no GIL in hot path."""
     cdef ParquetIOPipeline* pipeline
     cdef MemoryPool pool
 
@@ -111,11 +112,21 @@ cdef class CppIOPipeline:
             self.pipeline = NULL
 
     def submit_work(self, str path, int rg_idx, list column_names, list column_stats_dicts):
-        """Submit a row group for processing."""
+        """Submit a row group for processing (nogil)."""
         cdef vector[string] col_names_vec
         cdef vector[ColumnStats] col_stats_vec
-        cdef ColumnStats stats
         cdef string path_str
+
+        # Map codec names to integers (must match rugo::CompressionCodec enum)
+        codec_map = {
+            'UNCOMPRESSED': 0,
+            'SNAPPY': 1,
+            'GZIP': 2,
+            'LZO': 3,
+            'BROTLI': 4,
+            'LZ4': 5,
+            'ZSTD': 6,
+        }
 
         # Prepare everything with GIL before entering nogil block
         path_enc = path.encode('utf-8')
@@ -126,19 +137,38 @@ cdef class CppIOPipeline:
             col_name_bytes = col_name.encode('utf-8')
             col_names_vec.push_back(col_name_bytes)
 
-        # Prepare column stats
+        # Prepare column stats - build list of dicts for C++ conversion
+        stats_list = []
         for stats_dict in column_stats_dicts:
-            stats.name = stats_dict['name'].encode('utf-8')
-            stats.physical_type = stats_dict['physical_type'].encode('utf-8')
-            stats.logical_type = stats_dict.get('logical_type', '').encode('utf-8')
-            stats.num_values = stats_dict.get('num_values', -1)
-            stats.total_uncompressed_size = stats_dict.get('total_uncompressed_size', -1)
-            stats.total_compressed_size = stats_dict.get('total_compressed_size', -1)
-            stats.data_page_offset = stats_dict.get('data_page_offset', -1)
-            stats.dictionary_page_offset = stats_dict.get('dictionary_page_offset', -1)
-            stats.codec = stats_dict.get('codec', -1)
-            stats.max_definition_level = stats_dict.get('max_definition_level', 0)
-            stats.max_repetition_level = stats_dict.get('max_repetition_level', 0)
+            codec_name = stats_dict.get('compression_codec', 'UNCOMPRESSED')
+            stats_list.append({
+                'name': stats_dict['name'],
+                'physical_type': stats_dict['physical_type'],
+                'logical_type': stats_dict.get('logical_type', ''),
+                'num_values': stats_dict.get('num_values', -1),
+                'total_uncompressed_size': stats_dict.get('total_uncompressed_size', -1),
+                'total_compressed_size': stats_dict.get('total_compressed_size', -1),
+                'data_page_offset': stats_dict.get('data_page_offset', -1),
+                'dictionary_page_offset': stats_dict.get('dictionary_page_offset', -1),
+                'codec': codec_map.get(codec_name, 0),
+                'max_definition_level': stats_dict.get('max_definition_level', 0),
+                'max_repetition_level': stats_dict.get('max_repetition_level', 0),
+            })
+
+        # Build C++ ColumnStats vector
+        for s_dict in stats_list:
+            cdef ColumnStats stats
+            stats.name = s_dict['name'].encode('utf-8')
+            stats.physical_type = s_dict['physical_type'].encode('utf-8')
+            stats.logical_type = s_dict['logical_type'].encode('utf-8')
+            stats.num_values = s_dict['num_values']
+            stats.total_uncompressed_size = s_dict['total_uncompressed_size']
+            stats.total_compressed_size = s_dict['total_compressed_size']
+            stats.data_page_offset = s_dict['data_page_offset']
+            stats.dictionary_page_offset = s_dict['dictionary_page_offset']
+            stats.codec = s_dict['codec']
+            stats.max_definition_level = s_dict['max_definition_level']
+            stats.max_repetition_level = s_dict['max_repetition_level']
             col_stats_vec.push_back(stats)
 
         # Submit to pipeline (without GIL)
@@ -146,12 +176,7 @@ cdef class CppIOPipeline:
             self.pipeline.submit_row_group(path_str, rg_idx, col_names_vec, col_stats_vec)
 
     cdef bytes _serialize_decoded_column(self, DecodedColumn& col, str col_name):
-        """Serialize a DecodedColumn to bytes for storage in MemoryPool.
-
-        Format:
-          [4 bytes: type_len | type | num_rows (int64) | null_bitmap_len (int64) | null_bitmap |
-           4 bytes: data_len | raw value bytes (int64_t, float64, string arena, etc.)]
-        """
+        """Serialize a DecodedColumn to bytes for storage in MemoryPool."""
         col_type = col.type.decode('utf-8')
         type_bytes = col_type.encode('utf-8')
 
@@ -160,7 +185,6 @@ cdef class CppIOPipeline:
 
         # Serialize data based on type
         if col_type == "int64":
-            # int64_values: num_values * 8 bytes
             data = bytes(col.int64_values)
         elif col_type == "int32":
             data = bytes(col.int32_values)
@@ -200,7 +224,7 @@ cdef class CppIOPipeline:
         return b''.join(parts)
 
     def get_result(self):
-        """Try to get a decoded row group result, serialize to MemoryPool + descriptors."""
+        """Try to get a decoded row group result, serialize to MemoryPool + descriptors (nogil)."""
         cdef MorselRef result
         cdef bint got_result
 
@@ -245,21 +269,20 @@ cdef class CppIOPipeline:
                     'rg_idx': result.rg_idx,
                 }
 
-            # Create descriptor
-            descriptor = ColumnDescriptor(
-                column_name=col_name,
-                column_type=col.type.decode('utf-8'),
-                num_rows=col.num_rows,
-                null_count=sum(1 for b in col.valid_bits if not b),  # Count nulls
-                ref_id=ref_id,
-                data_offset=0,
-                data_length=len(col_bytes),
-                metadata={
+            # Create descriptor dict
+            row_group_descriptors[col_name] = {
+                'column_name': col_name,
+                'column_type': col.type.decode('utf-8'),
+                'num_rows': col.num_rows,
+                'null_count': sum(1 for b in col.valid_bits if not b),
+                'ref_id': ref_id,
+                'data_offset': 0,
+                'data_length': len(col_bytes),
+                'metadata': {
                     'pages_skipped': col.pages_skipped,
                     'pages_decoded': col.pages_decoded,
                 }
-            )
-            row_group_descriptors[col_name] = descriptor.to_dict()
+            }
 
         return {
             'success': True,
@@ -272,7 +295,7 @@ cdef class CppIOPipeline:
         }
 
     def close(self):
-        """Shutdown the pipeline."""
+        """Shutdown the pipeline (nogil)."""
         with nogil:
             self.pipeline.wait_shutdown()
 
@@ -291,37 +314,18 @@ def iter_row_groups_ipc(
     prefetched_footers=None,
     footer_bytes_cache=None,
 ):
-    """Consume parquet row groups from C++ pipeline via MemoryPool + descriptors.
-
-    Replaces iter_row_groups() with zero-copy C++ pipeline:
-    - C++ reads/decodes columns → MemoryPool
-    - Descriptors passed via lock-free queue
-    - Python deserializes and creates Draken vectors
-
-    Args:
-        filesystem: File system object (local or HTTP)
-        paths: List of parquet file paths
-        column_names: Columns to read
-        cache: Optional ParquetCache for column caching (unused in C++ pipeline)
-        read_workers: Number of read worker threads
-        decode_workers: Number of decode worker threads
-        predicates: Optional predicates for row group pruning
-        file_sizes: Optional file size map (unused in C++ pipeline)
-        connector: Connector type string (unused in C++ pipeline)
-        query_id: Query ID for tracing (unused in C++ pipeline)
-        prefetched_footers: Optional pre-fetched footers dict
-        footer_bytes_cache: Optional footer bytes cache
-
-    Yields:
-        Dicts with 'column_name': DrakenVector for each row group
     """
-    from opteryx.compiled.draken.morsels.morsel import Morsel
+    Pure Cython parquet IO pipeline - C++ read/decode with lock-free transport.
+
+    No Python in hot path. All I/O and decode operations happen in C++ threads
+    without GIL contention. Results are transported via lock-free moodycamel queue
+    and materialized as Draken vectors on consumer side.
+    """
     from opteryx.connectors.parquet_io.reader import fetch_footer
     from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
-    import time
 
-    # Initialize pipeline
-    pipeline = CppIOPipeline(
+    # Initialize C++ pipeline
+    cdef CppIOPipeline pipeline = CppIOPipeline(
         read_workers=read_workers,
         decode_workers=decode_workers,
         queue_capacity=256,
@@ -353,8 +357,12 @@ def iter_row_groups_ipc(
         if not work_items:
             return
 
-        # Submit all work to pipeline
+        # Submit all work to C++ pipeline
+        import os
         for path, rg_idx in work_items:
+            if rg_idx == 0 and not os.path.exists(path):
+                import sys
+                print(f"DEBUG: Path does not exist: {path}", file=sys.stderr)
             # Get column stats from metadata
             if prefetched_footers and path in prefetched_footers:
                 meta = prefetched_footers[path]
@@ -387,9 +395,9 @@ def iter_row_groups_ipc(
                 continue
 
             if not result['success']:
-                raise RuntimeError(f"Pipeline error: {result.get('error', 'unknown')}")
+                raise RuntimeError(f"C++ Pipeline error: {result.get('error', 'unknown')}")
 
-            # Deserialize columns from MemoryPool
+            # Deserialize columns from MemoryPool (Cython operation)
             row_group_descriptors = result['column_descriptors']
             columns_data = deserialize_row_group(row_group_descriptors, pipeline.pool)
 

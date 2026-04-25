@@ -850,6 +850,19 @@ extensions = [
         include_dirs=include_dirs,
         extra_compile_args=C_FLAGS,
     ),
+    Extension(
+        "opteryx.compiled.structures.column_descriptor",
+        sources=["opteryx/compiled/structures/column_descriptor.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=C_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.structures.column_deserializer",
+        sources=["opteryx/compiled/structures/column_deserializer.pyx"],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
     # MemoryViewStream: high-performance memoryview-backed stream (Cython)
     Extension(
         "opteryx.compiled.structures.memory_view_stream",
@@ -1531,10 +1544,35 @@ if _ort_include and _ort_lib and os.path.exists(_ort_include) and os.path.exists
 extensions.append(
     Extension(
         "opteryx.connectors.parquet_io.pool_reader",
-        sources=[
-            "opteryx/connectors/parquet_io/pool_reader.pyx",
-        ],
-        include_dirs=include_dirs,
+        sources=(
+            [
+                "opteryx/connectors/parquet_io/pool_reader.pyx",
+                # Rugo parquet sources for DecodeColumnFromChunk and infrastructure
+                "third_party/mabel/rugo/parquet/decode_column.cpp",
+                "third_party/mabel/rugo/parquet/decode.cpp",
+                "third_party/mabel/rugo/parquet/compression.cpp",
+                "third_party/mabel/rugo/parquet/metadata.cpp",
+                "third_party/mabel/rugo/parquet/bloom_filter.cpp",
+                "third_party/mabel/rugo/parquet/page_value_decoder.cpp",
+                "third_party/mabel/rugo/parquet/decode_encodings.cpp",
+                "third_party/mabel/rugo/parquet/decode_page.cpp",
+                "src/cpp/cpu_features.cpp",
+            ]
+            + get_parquet_vendor_sources()
+        ),
+        include_dirs=(
+            include_dirs
+            + [
+                "third_party/mabel/rugo/parquet",
+                "third_party/mabel/rugo/parquet/vendor/snappy",
+                "third_party/mabel/rugo/parquet/vendor/zstd",
+                "third_party/mabel/rugo/parquet/vendor/zstd/common",
+                "third_party/mabel/rugo/parquet/vendor/zstd/decompress",
+                "third_party/bshoshany",
+                "third_party/moodycamel",
+            ]
+        ),
+        define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1")],
         language="c++",
         extra_compile_args=CPP_FLAGS,
         depends=[

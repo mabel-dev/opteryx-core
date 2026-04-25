@@ -18,15 +18,6 @@ from typing import Dict, Any
 cdef class ColumnDescriptor:
     """Lightweight descriptor for a column in MemoryPool."""
 
-    cdef public str column_name
-    cdef public str column_type
-    cdef public int64_t num_rows
-    cdef public int64_t null_count
-    cdef public int64_t ref_id
-    cdef public int64_t data_offset
-    cdef public int64_t data_length
-    cdef public dict metadata
-
     def __cinit__(self, str column_name, str column_type, int64_t num_rows,
                   int64_t null_count=0, int64_t ref_id=-1,
                   int64_t data_offset=0, int64_t data_length=0, dict metadata=None):
@@ -39,7 +30,7 @@ cdef class ColumnDescriptor:
         self.data_length = data_length
         self.metadata = metadata or {}
 
-    def to_dict(self) -> Dict[str, Any]:
+    cpdef dict to_dict(self):
         """Convert descriptor to dict for transport."""
         return {
             'column_name': self.column_name,
@@ -53,7 +44,7 @@ cdef class ColumnDescriptor:
         }
 
     @staticmethod
-    def from_dict(d: Dict[str, Any]) -> ColumnDescriptor:
+    def from_dict(d):
         """Create descriptor from dict."""
         return ColumnDescriptor(
             column_name=d['column_name'],
