@@ -66,4 +66,6 @@ void* b16tobin_scalar(void* restrict dest, const char* restrict src, size_t len)
 // Pull in auto-dispatch and SIMD implementations
 #include "_base16_dispatch.c"
 #include "_base16_avx2.c"
+#if defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(__aarch64__)
 #include "_base16_neon.c"
+#endif

@@ -1,6 +1,7 @@
 #ifndef _JSONL_STRUCTURAL_SCAN_HPP_
 #define _JSONL_STRUCTURAL_SCAN_HPP_
 
+#include <cstddef>
 #include <vector>
 #include <cstdint>
 #include "markers.hpp"
