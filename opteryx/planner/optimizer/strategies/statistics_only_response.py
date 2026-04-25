@@ -12,14 +12,14 @@ reading any data, or optimizes file access when LIMIT is present.
 Currently supports:
 
   - SELECT COUNT(*) FROM table (no filters, no GROUP BY)
-  - SELECT MIN(column) FROM table (for INTEGER and TIMESTAMP columns)
-  - SELECT MAX(column) FROM table (for INTEGER and TIMESTAMP columns)
+  - SELECT MIN(column) FROM table (for DATE, INTEGER and TIMESTAMP columns)
+  - SELECT MAX(column) FROM table (for DATE, INTEGER and TIMESTAMP columns)
 
 Expected Speedup:
   - COUNT(*): ~400-800x (no file I/O)
   - MIN/MAX: ~400-800x (no file I/O, uses BRIN bounds)
 
-Note: MIN/MAX only work for INTEGER and TIMESTAMP types. FLOAT, STRING,
+Note: MIN/MAX work for DATE, INTEGER and TIMESTAMP types. FLOAT, STRING,
 and complex types lose precision in BRIN bounds and cannot be answered.
 """
 
@@ -134,8 +134,8 @@ def is_simple_aggregate(aggregate_node) -> bool:
             col_type = getattr(expr.schema_column, "type", None)
             if col_type is None:
                 return False
-            # Only INTEGER and TIMESTAMP types preserve exact values in BRIN bounds
-            if col_type not in (OrsoTypes.INTEGER, OrsoTypes.TIMESTAMP):
+            # DATE, INTEGER and TIMESTAMP types preserve exact values in BRIN bounds
+            if col_type not in (OrsoTypes.DATE, OrsoTypes.INTEGER, OrsoTypes.TIMESTAMP):
                 return False
             continue
 

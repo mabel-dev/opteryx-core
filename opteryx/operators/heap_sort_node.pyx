@@ -47,7 +47,7 @@ sorting smaller chunks over and over again.
 """
 
 
-_DATA_FORMAT = "arrow,draken"
+_DATA_FORMAT = "draken"
 
 
 # ── Module-level C helpers ────────────────────────────────────────────────────
@@ -67,39 +67,43 @@ cdef inline bint _is_nearest_neighbor_order(str function_name, object direction)
     )
 
 
-cdef int _compare_rows_py(
+cdef int _compare_rows_vectors(
     Py_ssize_t left_index,
     Py_ssize_t right_index,
-    list key_values,
+    list vectors,
     list directions,
 ) except *:
     """
-    Compare two rows across an ordered list of (values, descending) pairs.
-    Returns -1, 0, or 1.  Nulls sort last.
+    Compare two rows across an ordered list of vectors using native methods only.
+    Returns -1, 0, or 1. Nulls sort last. No Python materialization.
+    All vectors MUST support is_null_at() and compare_at() methods.
     """
-    cdef Py_ssize_t i, ncols = len(key_values)
+    cdef Py_ssize_t i, ncols = len(vectors)
     cdef bint descending, left_null, right_null
-    cdef object values, left_value, right_value
+    cdef object vector
+    cdef int cmp_result
 
     for i in range(ncols):
-        values = key_values[i]
-        left_value = (<list>values)[left_index]
-        right_value = (<list>values)[right_index]
+        vector = vectors[i]
         descending = <bint>directions[i]
 
-        left_null = left_value is None
-        right_null = right_value is None
+        left_null = vector.is_null_at(left_index)
+        right_null = vector.is_null_at(right_index)
+
         if left_null and right_null:
             continue
         if left_null:
             return 1
         if right_null:
             return -1
-        if left_value == right_value:
+
+        cmp_result = vector.compare_at(left_index, right_index)
+
+        if cmp_result == 0:
             continue
-        if descending:
-            return -1 if left_value > right_value else 1
-        return -1 if left_value < right_value else 1
+
+        return -cmp_result if descending else cmp_result
+
     return 0
 
 
@@ -107,7 +111,7 @@ cdef bint _mh_sift_down(
     int32_t* buf,
     Py_ssize_t pos,
     Py_ssize_t size,
-    list key_values,
+    list vectors,
     list directions,
 ) except False:
     """Sift down in a worst-first heap of int32 row indices."""
@@ -117,9 +121,9 @@ cdef bint _mh_sift_down(
         left = (pos << 1) + 1
         right = left + 1
         worst = pos
-        if left < size and _compare_rows_py(buf[left], buf[worst], key_values, directions) > 0:
+        if left < size and _compare_rows_vectors(buf[left], buf[worst], vectors, directions) > 0:
             worst = left
-        if right < size and _compare_rows_py(buf[right], buf[worst], key_values, directions) > 0:
+        if right < size and _compare_rows_vectors(buf[right], buf[worst], vectors, directions) > 0:
             worst = right
         if worst == pos:
             break
@@ -131,7 +135,7 @@ cdef bint _mh_sift_down(
 cdef bint _mh_sift_up(
     int32_t* buf,
     Py_ssize_t pos,
-    list key_values,
+    list vectors,
     list directions,
 ) except False:
     """Sift up in a worst-first heap of int32 row indices."""
@@ -139,7 +143,7 @@ cdef bint _mh_sift_up(
     cdef int32_t tmp
     while pos > 0:
         parent = (pos - 1) >> 1
-        if _compare_rows_py(buf[pos], buf[parent], key_values, directions) > 0:
+        if _compare_rows_vectors(buf[pos], buf[parent], vectors, directions) > 0:
             tmp = buf[pos]; buf[pos] = buf[parent]; buf[parent] = tmp
             pos = parent
         else:
@@ -327,6 +331,49 @@ cdef object _compressed_threshold_candidates(
     return candidates if len(candidates) >= k else None
 
 
+cdef inline int _compare_single_vector(
+    Py_ssize_t left, Py_ssize_t right, vector, bint descending
+) except *:
+    """Compare two values at given indices in a vector. Returns -1, 0, 1."""
+    cdef int cmp = vector.compare_at(left, right)
+    return -cmp if descending else cmp
+
+
+cdef _sift_up_single_vector(
+    int32_t* buf, Py_ssize_t pos, vector, bint descending
+):
+    """Sift up in a worst-first heap of row indices."""
+    cdef Py_ssize_t parent
+    cdef int32_t tmp
+    while pos > 0:
+        parent = (pos - 1) >> 1
+        if _compare_single_vector(buf[pos], buf[parent], vector, descending) > 0:
+            tmp = buf[pos]; buf[pos] = buf[parent]; buf[parent] = tmp
+            pos = parent
+        else:
+            break
+
+
+cdef _sift_down_single_vector(
+    int32_t* buf, Py_ssize_t pos, Py_ssize_t size, vector, bint descending
+):
+    """Sift down in a worst-first heap of row indices."""
+    cdef Py_ssize_t left, right, worst
+    cdef int32_t tmp
+    while True:
+        left = (pos << 1) + 1
+        right = left + 1
+        worst = pos
+        if left < size and _compare_single_vector(buf[left], buf[worst], vector, descending) > 0:
+            worst = left
+        if right < size and _compare_single_vector(buf[right], buf[worst], vector, descending) > 0:
+            worst = right
+        if worst == pos:
+            break
+        tmp = buf[pos]; buf[pos] = buf[worst]; buf[worst] = tmp
+        pos = worst
+
+
 # ── Node ──────────────────────────────────────────────────────────────────────
 
 class HeapSortNode(BasePlanNode):
@@ -440,23 +487,18 @@ class HeapSortNode(BasePlanNode):
         yield None
 
     def _sorted_indices(self, morsel):
-        cdef Py_ssize_t i, n = morsel.num_rows
-        cdef bint reverse
-
         if not self.mapped_order:
-            return list(range(n))
+            return list(range(morsel.num_rows))
 
-        indices = list(range(n))
-        for column_name, direction in reversed(self.mapped_order):
-            values = morsel.column(column_name.encode()).to_pylist()
-            reverse = _is_descending(direction)
+        vectors = [morsel.column(col.encode()) for col, _ in self.mapped_order]
+        directions = [_is_descending(direction) for _, direction in self.mapped_order]
 
-            non_null = []
-            nulls = []
-            for i in range(n):
-                (nulls if values[i] is None else non_null).append(i)
-            non_null.sort(key=lambda idx: values[idx], reverse=reverse)
-            indices = non_null + nulls
+        indices = list(range(morsel.num_rows))
+
+        from functools import cmp_to_key
+        indices.sort(key=cmp_to_key(
+            lambda i, j: _compare_rows_vectors(i, j, vectors, directions)
+        ))
         return indices
 
     def _materialize_rows(self, morsel, list row_indices):
@@ -515,7 +557,6 @@ class HeapSortNode(BasePlanNode):
             return self._top_n_multi_key_uniform(morsel, k, descending=<bint>uniform_direction)
 
         key_vectors = [morsel.column(column.encode()) for column, _ in self.mapped_order]
-        key_values  = [vec.to_pylist() for vec in key_vectors]
         directions  = [_is_descending(direction) for _, direction in self.mapped_order]
 
         heap_buf = <int32_t*>PyMem_Malloc(k * sizeof(int32_t))
@@ -526,16 +567,16 @@ class HeapSortNode(BasePlanNode):
                 if heap_size < k:
                     heap_buf[heap_size] = <int32_t>row_idx
                     heap_size += 1
-                    _mh_sift_up(heap_buf, heap_size - 1, key_values, directions)
-                elif _compare_rows_py(row_idx, heap_buf[0], key_values, directions) < 0:
+                    _mh_sift_up(heap_buf, heap_size - 1, key_vectors, directions)
+                elif _compare_rows_vectors(row_idx, heap_buf[0], key_vectors, directions) < 0:
                     heap_buf[0] = <int32_t>row_idx
-                    _mh_sift_down(heap_buf, 0, heap_size, key_values, directions)
+                    _mh_sift_down(heap_buf, 0, heap_size, key_vectors, directions)
 
             # Insertion-sort the heap by row ordering.
             for i in range(1, heap_size):
                 pivot_idx = heap_buf[i]
                 j = i
-                while j > 0 and _compare_rows_py(heap_buf[j - 1], pivot_idx, key_values, directions) > 0:
+                while j > 0 and _compare_rows_vectors(heap_buf[j - 1], pivot_idx, key_vectors, directions) > 0:
                     heap_buf[j] = heap_buf[j - 1]
                     j -= 1
                 heap_buf[j] = pivot_idx
@@ -572,40 +613,96 @@ class HeapSortNode(BasePlanNode):
         if fast_path is not None:
             return fast_path
 
-        values = vector.to_pylist()
-        non_null_indices = []
-        null_indices = []
-        for i, value in enumerate(values):
-            (null_indices if value is None else non_null_indices).append(i)
-        take_count = k if k < len(non_null_indices) else len(non_null_indices)
+        return self._top_n_single_key_vector(morsel, vector, descending, k)
 
-        if descending:
-            top_indices = heapq.nlargest(take_count, non_null_indices, key=values.__getitem__)
-        else:
-            top_indices = heapq.nsmallest(take_count, non_null_indices, key=values.__getitem__)
+    def _top_n_single_key_vector(self, morsel, vector, bint descending, Py_ssize_t k):
+        """Top-k on single column using native vector comparators only. No Python fallback."""
+        cdef Py_ssize_t n = morsel.num_rows
+        cdef Py_ssize_t i, heap_size = 0, pivot_idx, j
+        cdef int32_t* heap_buf = <int32_t*>PyMem_Malloc(k * sizeof(int32_t))
 
-        if len(top_indices) < k and null_indices:
-            top_indices.extend(null_indices[: k - len(top_indices)])
+        if heap_buf == NULL:
+            raise MemoryError()
 
-        return self._materialize_rows(morsel, top_indices)
+        try:
+            for i in range(n):
+                if vector.is_null_at(i):
+                    continue
+
+                if heap_size < k:
+                    heap_buf[heap_size] = <int32_t>i
+                    heap_size += 1
+                    _sift_up_single_vector(heap_buf, heap_size - 1, vector, descending)
+                elif _compare_single_vector(heap_buf[0], i, vector, descending) < 0:
+                    heap_buf[0] = <int32_t>i
+                    _sift_down_single_vector(heap_buf, 0, heap_size, vector, descending)
+
+            # Insertion-sort heap
+            for i in range(1, heap_size):
+                pivot_idx = heap_buf[i]
+                j = i
+                while j > 0 and _compare_single_vector(heap_buf[j - 1], pivot_idx, vector, descending) > 0:
+                    heap_buf[j] = heap_buf[j - 1]
+                    j -= 1
+                heap_buf[j] = pivot_idx
+
+            result = [<int>heap_buf[i] for i in range(heap_size)]
+
+            # Append nulls if needed
+            needed = k - heap_size
+            if needed > 0:
+                for i in range(morsel.num_rows):
+                    if vector.is_null_at(i):
+                        if len(result) < k:
+                            result.append(<int>i)
+
+            return self._materialize_rows(morsel, result)
+        finally:
+            PyMem_Free(heap_buf)
 
     def _top_n_multi_key_uniform(self, morsel, Py_ssize_t k, bint descending):
-        key_values = [morsel.column(column.encode()).to_pylist() for column, _ in self.mapped_order]
+        vectors = [morsel.column(col.encode()) for col, _ in self.mapped_order]
+        directions = [_is_descending(direction) for _, direction in self.mapped_order]
+
         candidate_indices = self._candidate_indices_from_first_key(morsel, k, descending)
         search_space = (
             candidate_indices if candidate_indices is not None else range(morsel.num_rows)
         )
 
-        if descending:
-            def row_key(index):
-                return tuple((values[index] is not None, values[index]) for values in key_values)
-            top_indices = heapq.nlargest(k, search_space, key=row_key)
-        else:
-            def row_key(index):
-                return tuple((values[index] is None, values[index]) for values in key_values)
-            top_indices = heapq.nsmallest(k, search_space, key=row_key)
+        return self._heap_top_k_multi_vector(morsel, vectors, directions, k, search_space)
 
-        return self._materialize_rows(morsel, top_indices)
+    def _heap_top_k_multi_vector(self, morsel, list vectors, list directions, Py_ssize_t k, search_space):
+        """Top-k multi-column using vector comparator, no Python materialization."""
+        cdef Py_ssize_t heap_size = 0, idx, i, j
+        cdef int32_t* heap_buf = <int32_t*>PyMem_Malloc(k * sizeof(int32_t))
+        cdef int32_t pivot_idx
+
+        if heap_buf == NULL:
+            raise MemoryError()
+
+        try:
+            for idx in search_space:
+                if heap_size < k:
+                    heap_buf[heap_size] = <int32_t>idx
+                    heap_size += 1
+                    _mh_sift_up(heap_buf, heap_size - 1, vectors, directions)
+                elif _compare_rows_vectors(idx, heap_buf[0], vectors, directions) < 0:
+                    heap_buf[0] = <int32_t>idx
+                    _mh_sift_down(heap_buf, 0, heap_size, vectors, directions)
+
+            # Insertion-sort heap
+            for i in range(1, heap_size):
+                pivot_idx = heap_buf[i]
+                j = i
+                while j > 0 and _compare_rows_vectors(heap_buf[j - 1], pivot_idx, vectors, directions) > 0:
+                    heap_buf[j] = heap_buf[j - 1]
+                    j -= 1
+                heap_buf[j] = pivot_idx
+
+            result = [<int>heap_buf[i] for i in range(heap_size)]
+            return self._materialize_rows(morsel, result)
+        finally:
+            PyMem_Free(heap_buf)
 
     def _candidate_indices_from_first_key(self, morsel, Py_ssize_t k, bint descending):
         cdef int64_t[::1] compressed
@@ -681,23 +778,26 @@ class HeapSortNode(BasePlanNode):
             getattr(source_identifier, "source_column", None),
             getattr(source_identifier.schema_column, "name", None),
         ]
-        source_values = None
+        source_vector = None
         for source_key in source_keys:
             if not source_key:
                 continue
             try:
-                source_values = morsel.column(source_key.encode()).to_pylist()
+                source_vector = morsel.column(source_key.encode())
                 break
             except Exception:
                 continue
-        if source_values is None:
+        if source_vector is None:
             return None
 
-        # Pass 1: Filter and count valid rows
+        # Pass 1: Filter and count valid rows (no Python materialization yet)
         source_indices_list = []
         valid_rows_list = []
-        for row_index in range(<Py_ssize_t>len(source_values)):
-            row_vector = self._coerce_numeric_vector(source_values[row_index])
+        for row_index in range(<Py_ssize_t>morsel.num_rows):
+            if source_vector.is_null_at(row_index):
+                continue
+            # Get row vector value (materializes one row, not all)
+            row_vector = self._coerce_numeric_vector(source_vector[row_index])
             if row_vector is None:
                 continue
             if len(row_vector) != dims:

@@ -665,6 +665,37 @@ cdef class BoolVector(Vector):
                 total += 1
         return total
 
+    cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
+        """Compare bool values at two indices. Returns -1 (left < right), 0 (equal), or 1 (left > right)."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef uint8_t left_val, right_val
+        cdef bint left_is_null, right_is_null
+
+        # Check nulls
+        left_is_null = ptr.null_bitmap != NULL and not _bitmap_is_valid(ptr.null_bitmap, left_idx, 0)
+        right_is_null = ptr.null_bitmap != NULL and not _bitmap_is_valid(ptr.null_bitmap, right_idx, 0)
+
+        if left_is_null or right_is_null:
+            return 0  # Nulls are considered equal for comparison purposes
+
+        # Extract bit values
+        left_val = ((<uint8_t*>ptr.data)[left_idx >> 3] >> (left_idx & 7)) & 1
+        right_val = ((<uint8_t*>ptr.data)[right_idx >> 3] >> (right_idx & 7)) & 1
+
+        if left_val < right_val:
+            return -1
+        elif left_val > right_val:
+            return 1
+        else:
+            return 0
+
+    cpdef bint is_null_at(self, Py_ssize_t idx) except? False:
+        """Check if value at index is null."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        if ptr.null_bitmap == NULL:
+            return False
+        return not _bitmap_is_valid(ptr.null_bitmap, idx, 0)
+
     cdef void hash_into(
         self,
         uint64_t[::1] out_buf,

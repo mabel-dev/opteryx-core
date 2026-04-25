@@ -727,6 +727,37 @@ cdef class Int64Vector(Vector):
                 m = data[i]
         return m
 
+    cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
+        """Compare two values at given indices. Returns -1, 0, 1. Assumes non-null."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef int64_t* data = <int64_t*> ptr.data
+        cdef int64_t left_val, right_val
+
+        if self._has_const:
+            return 0
+
+        left_val = data[left_idx]
+        right_val = data[right_idx]
+
+        if left_val < right_val:
+            return -1
+        elif left_val > right_val:
+            return 1
+        return 0
+
+    cpdef bint is_null_at(self, Py_ssize_t idx) except? False:
+        """Check if value at index is null."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+
+        if self._has_const:
+            return self._const_is_null
+
+        if ptr.null_bitmap == NULL:
+            return False
+
+        cdef uint8_t byte = ptr.null_bitmap[idx >> 3]
+        return ((byte >> (idx & 7)) & 1) == 0
+
     cpdef int8_t[::1] is_null(self):
         """
         Return a memoryview of int8_t, where each element is 1 if the value is null, 0 otherwise.

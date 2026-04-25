@@ -47,3 +47,10 @@ cdef class Vector:
     # Convenience Python-callable constructor that allocates the output
     # buffer, calls `compress_into`, and returns it.
     cpdef int64_t[::1] compress(self)
+
+    # Compare two values at given indices. Returns -1, 0, 1.
+    # Does not check nulls; caller must handle via is_null_at.
+    cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0
+
+    # Check if value at index is null.
+    cpdef bint is_null_at(self, Py_ssize_t idx) except? False

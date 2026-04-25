@@ -40,6 +40,7 @@
             "third_party/nanobind",
             "third_party/crypto",
             "third_party/bshoshany",
+            "third_party/moodycamel",
             "third_party/mabel/rugo/_jsonl/core"
         ],
         "language": "c++",
@@ -1785,7 +1786,7 @@ struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_6vector_6Vector_compre
 };
 struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_11bool_vector_10BoolVector_hash_into;
 
-/* "opteryx/compiled/draken/vectors/bool_vector.pxd":32
+/* "opteryx/compiled/draken/vectors/bool_vector.pxd":34
  *     cpdef int64_t max(self)
  *     cpdef int64_t sum(self)
  *     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
@@ -1799,7 +1800,7 @@ struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_11bool_vector_10BoolVe
 struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_12int64_vector_11Int64Vector_hash_into;
 struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_12int64_vector_from_packed_dict;
 
-/* "opteryx/compiled/draken/vectors/int64_vector.pxd":61
+/* "opteryx/compiled/draken/vectors/int64_vector.pxd":64
  *     cpdef int64_t max(self)
  * 
  *     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
@@ -1811,7 +1812,7 @@ struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_12int64_vector_11Int64
   Py_ssize_t offset;
 };
 
-/* "opteryx/compiled/draken/vectors/int64_vector.pxd":70
+/* "opteryx/compiled/draken/vectors/int64_vector.pxd":73
  *     const uint8_t[::1] row_validity,
  * )
  * cdef Int64Vector from_packed_dict(             # <<<<<<<<<<<<<<
@@ -1827,7 +1828,7 @@ struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_12int64_vector_from_pa
 struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_14float64_vector_13Float64Vector_hash_into;
 struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_14float64_vector_from_packed_dict;
 
-/* "opteryx/compiled/draken/vectors/float64_vector.pxd":62
+/* "opteryx/compiled/draken/vectors/float64_vector.pxd":65
  *     cpdef double max(self)
  * 
  *     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
@@ -1839,7 +1840,7 @@ struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_14float64_vector_13Flo
   Py_ssize_t offset;
 };
 
-/* "opteryx/compiled/draken/vectors/float64_vector.pxd":71
+/* "opteryx/compiled/draken/vectors/float64_vector.pxd":74
  *     const uint8_t[::1] row_validity,
  * )
  * cdef Float64Vector from_packed_dict(             # <<<<<<<<<<<<<<
@@ -1908,7 +1909,7 @@ struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_13string_vector_12Stri
   Py_ssize_t offset;
 };
 
-/* "opteryx/compiled/draken/vectors/string_vector.pxd":138
+/* "opteryx/compiled/draken/vectors/string_vector.pxd":141
  *     const uint8_t[::1] row_validity,
  * )
  * cdef StringVector from_dict_buffers(             # <<<<<<<<<<<<<<
@@ -1920,7 +1921,7 @@ struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_13string_vector_from_d
   PyObject *row_validity;
 };
 
-/* "opteryx/compiled/draken/vectors/string_vector.pxd":145
+/* "opteryx/compiled/draken/vectors/string_vector.pxd":148
  *     object row_validity=*,
  * )
  * cdef StringVector from_packed_dict(             # <<<<<<<<<<<<<<
@@ -2045,7 +2046,7 @@ struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVecto
 };
 
 
-/* "opteryx/compiled/draken/vectors/string_vector.pxd":66
+/* "opteryx/compiled/draken/vectors/string_vector.pxd":69
  * 
  * 
  * cdef class _StringVectorCIterator:             # <<<<<<<<<<<<<<
@@ -2065,7 +2066,7 @@ struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVect
 };
 
 
-/* "opteryx/compiled/draken/vectors/string_vector.pxd":83
+/* "opteryx/compiled/draken/vectors/string_vector.pxd":86
  * 
  * 
  * cdef class _StringVectorView:             # <<<<<<<<<<<<<<
@@ -2082,7 +2083,7 @@ struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVect
 };
 
 
-/* "opteryx/compiled/draken/vectors/string_vector.pxd":94
+/* "opteryx/compiled/draken/vectors/string_vector.pxd":97
  * 
  * 
  * cdef class StringVectorBuilder:             # <<<<<<<<<<<<<<
@@ -2204,6 +2205,8 @@ struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_6vector_Vector {
   __Pyx_memviewslice (*hash)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_6vector_Vector *, int __pyx_skip_dispatch);
   void (*compress_into)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_6vector_Vector *, __Pyx_memviewslice, struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_6vector_6Vector_compress_into *__pyx_optional_args);
   __Pyx_memviewslice (*compress)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_6vector_Vector *, int __pyx_skip_dispatch);
+  int (*compare_at)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_6vector_Vector *, Py_ssize_t, Py_ssize_t, int __pyx_skip_dispatch);
+  int (*is_null_at)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_6vector_Vector *, Py_ssize_t, int __pyx_skip_dispatch);
 };
 static struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_6vector_Vector *__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_6vector_Vector;
 
@@ -2343,7 +2346,7 @@ struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_Stri
 static struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVector *__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVector;
 
 
-/* "opteryx/compiled/draken/vectors/string_vector.pxd":66
+/* "opteryx/compiled/draken/vectors/string_vector.pxd":69
  * 
  * 
  * cdef class _StringVectorCIterator:             # <<<<<<<<<<<<<<
@@ -2360,7 +2363,7 @@ struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector__Str
 static struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorCIterator *__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorCIterator;
 
 
-/* "opteryx/compiled/draken/vectors/string_vector.pxd":83
+/* "opteryx/compiled/draken/vectors/string_vector.pxd":86
  * 
  * 
  * cdef class _StringVectorView:             # <<<<<<<<<<<<<<
@@ -2376,7 +2379,7 @@ struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector__Str
 static struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView *__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView;
 
 
-/* "opteryx/compiled/draken/vectors/string_vector.pxd":94
+/* "opteryx/compiled/draken/vectors/string_vector.pxd":97
  * 
  * 
  * cdef class StringVectorBuilder:             # <<<<<<<<<<<<<<
@@ -26347,8 +26350,8 @@ static int __Pyx_modinit_type_import_code(__pyx_mstatetype *__pyx_mstate) {
   #else
   sizeof(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorCIterator), __PYX_GET_STRUCT_ALIGNMENT_3_2_4(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorCIterator),
   #endif
-  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorCIterator) __PYX_ERR(6, 66, __pyx_L1_error)
-  __pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorCIterator = (struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorCIterator*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorCIterator); if (unlikely(!__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorCIterator)) __PYX_ERR(6, 66, __pyx_L1_error)
+  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorCIterator) __PYX_ERR(6, 69, __pyx_L1_error)
+  __pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorCIterator = (struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorCIterator*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorCIterator); if (unlikely(!__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorCIterator)) __PYX_ERR(6, 69, __pyx_L1_error)
   __pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView = __Pyx_ImportType_3_2_4(__pyx_t_1, "opteryx.compiled.draken.vectors.string_vector", "_StringVectorView",
   #if defined(PYPY_VERSION_NUM) && PYPY_VERSION_NUM < 0x050B0000
   sizeof(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView), __PYX_GET_STRUCT_ALIGNMENT_3_2_4(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView),
@@ -26357,8 +26360,8 @@ static int __Pyx_modinit_type_import_code(__pyx_mstatetype *__pyx_mstate) {
   #else
   sizeof(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView), __PYX_GET_STRUCT_ALIGNMENT_3_2_4(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView),
   #endif
-  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView) __PYX_ERR(6, 83, __pyx_L1_error)
-  __pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView = (struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView); if (unlikely(!__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView)) __PYX_ERR(6, 83, __pyx_L1_error)
+  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView) __PYX_ERR(6, 86, __pyx_L1_error)
+  __pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView = (struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView); if (unlikely(!__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_13string_vector__StringVectorView)) __PYX_ERR(6, 86, __pyx_L1_error)
   __pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder = __Pyx_ImportType_3_2_4(__pyx_t_1, "opteryx.compiled.draken.vectors.string_vector", "StringVectorBuilder",
   #if defined(PYPY_VERSION_NUM) && PYPY_VERSION_NUM < 0x050B0000
   sizeof(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder), __PYX_GET_STRUCT_ALIGNMENT_3_2_4(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder),
@@ -26367,8 +26370,8 @@ static int __Pyx_modinit_type_import_code(__pyx_mstatetype *__pyx_mstate) {
   #else
   sizeof(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder), __PYX_GET_STRUCT_ALIGNMENT_3_2_4(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder),
   #endif
-  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder) __PYX_ERR(6, 94, __pyx_L1_error)
-  __pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder = (struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder); if (unlikely(!__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder)) __PYX_ERR(6, 94, __pyx_L1_error)
+  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder) __PYX_ERR(6, 97, __pyx_L1_error)
+  __pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder = (struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder); if (unlikely(!__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_13string_vector_StringVectorBuilder)) __PYX_ERR(6, 97, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __Pyx_RefNannyFinishContext();
   return 0;

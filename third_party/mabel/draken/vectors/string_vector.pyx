@@ -2165,6 +2165,49 @@ cdef class StringVector(Vector):
             return None
         return PyBytes_FromStringAndSize(max_ptr, max_end - max_start)
 
+    cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
+        """Compare two strings at given indices lexicographically. Returns -1, 0, 1. Assumes non-null."""
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef char* data = <char*> ptr.data
+        cdef int32_t left_start, left_end, right_start, right_end
+        cdef Py_ssize_t left_len, right_len
+        cdef int cmp_result
+
+        if self._has_const:
+            return 0
+
+        left_start = ptr.offsets[left_idx]
+        left_end = ptr.offsets[left_idx + 1]
+        right_start = ptr.offsets[right_idx]
+        right_end = ptr.offsets[right_idx + 1]
+
+        left_len = left_end - left_start
+        right_len = right_end - right_start
+
+        cmp_result = memcmp(data + left_start, data + right_start, min(left_len, right_len))
+
+        if cmp_result != 0:
+            return -1 if cmp_result < 0 else 1
+
+        if left_len < right_len:
+            return -1
+        elif left_len > right_len:
+            return 1
+        return 0
+
+    cpdef bint is_null_at(self, Py_ssize_t idx) except? False:
+        """Check if value at index is null."""
+        cdef DrakenVarBuffer* ptr = self.ptr
+
+        if self._has_const:
+            return self._const_is_null
+
+        if ptr.null_bitmap == NULL:
+            return False
+
+        cdef uint8_t byte = ptr.null_bitmap[idx >> 3]
+        return ((byte >> (idx & 7)) & 1) == 0
+
     cpdef sum(self):
         """Sum is not defined for string vectors."""
         raise NotImplementedError("sum() is not supported for StringVector")

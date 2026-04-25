@@ -57,6 +57,8 @@ cdef class TimestampVector(Vector):
     cpdef int64_t min(self)
     cpdef int64_t max(self)
     cpdef int64_t sum(self)
+    cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0
+    cpdef bint is_null_at(self, Py_ssize_t idx) except? False
 
     # Temporal arithmetic operations (Phase 5b)
     cpdef Int64Vector subtract_timestamp_vector(self, TimestampVector other)

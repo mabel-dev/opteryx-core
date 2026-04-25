@@ -54,6 +54,9 @@ cdef class StringVector(Vector):
     cpdef object max(self)
     cpdef sum(self)
 
+    cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0
+    cpdef bint is_null_at(self, Py_ssize_t idx) except? False
+
     cpdef list to_pylist(self)
     cpdef Py_ssize_t byte_length(self, Py_ssize_t i)
     cpdef object buffers(self)

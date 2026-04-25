@@ -23,6 +23,8 @@ cdef class IntegerVector(Vector):
     cpdef int64_t min(self)
     cpdef int64_t max(self)
     cpdef int64_t sum(self)
+    cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0
+    cpdef bint is_null_at(self, Py_ssize_t idx) except? False
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 
     cdef bint _compare_int_values(self, int64_t left, int64_t right, int op) nogil

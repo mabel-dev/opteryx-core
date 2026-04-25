@@ -296,6 +296,9 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                 except Exception:
                     pass
 
+                min_values = None
+                max_values = None
+
                 try:
                     from opteryx.connectors.parquet_io.reader import fetch_footer
 
@@ -303,6 +306,9 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     record_count = sum(rg.get("num_rows", 0) for rg in meta.get("row_groups", []))
                     if file_size == 0:
                         file_size = meta.get("__footer_bytes__", 0)
+
+                    # Extract min/max statistics from row groups
+                    min_values, max_values = self._extract_column_stats(meta, schema)
                 except Exception:
                     record_count = 0
 
@@ -311,6 +317,8 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     file_format=file_format,
                     record_count=record_count,
                     file_size_in_bytes=file_size,
+                    min_values=min_values,
+                    max_values=max_values,
                 )
                 file_entries.append(entry)
 
@@ -321,6 +329,65 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         # Create and return manifest
         manifest = Manifest(file_entries, schema)
         return schema, manifest
+
+    def _extract_column_stats(self, footer_meta: dict, schema: RelationSchema) -> tuple:
+        """
+        Extract min/max column statistics from parquet footer metadata.
+
+        Returns tuple of (min_values, max_values) lists indexed by field position,
+        with values aggregated across all row groups.
+        """
+        if not footer_meta or not footer_meta.get("row_groups"):
+            return None, None
+
+        # Initialize min/max lists by column count
+        num_columns = len(schema.columns)
+        min_values = [None] * num_columns
+        max_values = [None] * num_columns
+
+        # Aggregate statistics across all row groups
+        for rg in footer_meta.get("row_groups", []):
+            for col_meta in rg.get("columns", []):
+                # Get column name and find its field_id in schema
+                col_name = col_meta.get("name", "")
+                field_id = None
+                for i, col in enumerate(schema.columns):
+                    if col.name == col_name:
+                        field_id = i
+                        break
+
+                if field_id is None:
+                    continue
+
+                # Extract min/max from column metadata
+                min_val = col_meta.get("min")
+                max_val = col_meta.get("max")
+
+                if min_val is not None:
+                    if min_values[field_id] is None:
+                        min_values[field_id] = min_val
+                    else:
+                        try:
+                            if min_val < min_values[field_id]:
+                                min_values[field_id] = min_val
+                        except TypeError:
+                            # Skip comparison if types don't match
+                            pass
+
+                if max_val is not None:
+                    if max_values[field_id] is None:
+                        max_values[field_id] = max_val
+                    else:
+                        try:
+                            if max_val > max_values[field_id]:
+                                max_values[field_id] = max_val
+                        except TypeError:
+                            # Skip comparison if types don't match
+                            pass
+
+        # Return None if no stats were found
+        return (min_values if any(v is not None for v in min_values) else None,
+                max_values if any(v is not None for v in max_values) else None)
 
 
 class FileSystemConnector(BaseConnector):

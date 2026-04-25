@@ -421,6 +421,44 @@ cdef class IntegerVector(Vector):
                 total += <int64_t>d32[i]
         return total
 
+    cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
+        """Compare int values at two indices. Returns -1, 0, or 1."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef int64_t left_val, right_val
+        cdef bint left_is_null, right_is_null
+
+        # Check nulls
+        left_is_null = ptr.null_bitmap != NULL and not _bitmap_is_valid(ptr.null_bitmap, left_idx, 0)
+        right_is_null = ptr.null_bitmap != NULL and not _bitmap_is_valid(ptr.null_bitmap, right_idx, 0)
+
+        if left_is_null or right_is_null:
+            return 0  # Nulls are considered equal
+
+        # Extract and compare based on itemsize
+        if ptr.itemsize == 1:
+            left_val = <int64_t>(<int8_t*>ptr.data)[left_idx]
+            right_val = <int64_t>(<int8_t*>ptr.data)[right_idx]
+        elif ptr.itemsize == 2:
+            left_val = <int64_t>(<int16_t*>ptr.data)[left_idx]
+            right_val = <int64_t>(<int16_t*>ptr.data)[right_idx]
+        else:  # itemsize == 4
+            left_val = <int64_t>(<int32_t*>ptr.data)[left_idx]
+            right_val = <int64_t>(<int32_t*>ptr.data)[right_idx]
+
+        if left_val < right_val:
+            return -1
+        elif left_val > right_val:
+            return 1
+        else:
+            return 0
+
+    cpdef bint is_null_at(self, Py_ssize_t idx) except? False:
+        """Check if value at index is null."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        if ptr.null_bitmap == NULL:
+            return False
+        return not _bitmap_is_valid(ptr.null_bitmap, idx, 0)
+
     cpdef IntegerVector take(self, int32_t[::1] indices):
         cdef Py_ssize_t i, n = indices.shape[0]
         if self._has_const:
