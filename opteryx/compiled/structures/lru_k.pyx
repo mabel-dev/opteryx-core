@@ -64,7 +64,7 @@ cdef class LRU_K:
             self.misses += 1
         return value
 
-    cpdef tuple set(self, bytes key, bytes value, bint evict=True):
+    cpdef tuple set(self, bytes key, bytes value, bint evict):
         """
         Set key-value pair, optionally evicting if needed.
 
@@ -130,7 +130,7 @@ cdef class LRU_K:
         cdef bytes evicted_value = None
 
         while self._should_evict():
-            evicted_key, evicted_value = self._evict_one()
+            evicted_key, evicted_value = self._evict_one(False)
             if evicted_key is None:
                 break  # No more items to evict
 
@@ -144,7 +144,7 @@ cdef class LRU_K:
             return True
         return False
 
-    cpdef object evict(self, bint details=False):
+    cpdef object evict(self, bint details):
         """Evict one item according to LRU-K policy.
 
         If details is False (default) return the evicted key or None.
@@ -156,7 +156,7 @@ cdef class LRU_K:
         # return only the key when details is False
         return result[0]
 
-    cdef tuple _evict_one(self, bint details=False):
+    cdef tuple _evict_one(self, bint details):
         """Evict one item using simplified LRU-K algorithm."""
         cdef bytes candidate_key = None
         cdef bytes candidate_value = None
@@ -235,7 +235,7 @@ cdef class LRU_K:
             return True
         return False
 
-    cpdef void clear(self, bint reset_stats=False):
+    cpdef void clear(self, bint reset_stats):
         """Clear all items from cache."""
         self.slots.clear()
         self.access_history.clear()
