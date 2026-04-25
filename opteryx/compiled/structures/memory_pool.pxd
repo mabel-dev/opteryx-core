@@ -32,3 +32,22 @@ cdef class MemoryPool:
         int64_t next_ref_id
         int64_t alignment
         bint auto_resize
+
+    cpdef int64_t commit(self, object data)
+    cpdef bytes read(self, int64_t ref_id, bint zero_copy, bint latch)
+    cpdef void release(self, int64_t ref_id)
+    cpdef void latch(self, int64_t ref_id)
+    cpdef void unlatch(self, int64_t ref_id)
+    cpdef void clear(self)
+    cpdef dict get_stats(self)
+    cpdef list get_free_segments(self)
+    cpdef int64_t get_fragmentation(self)
+    cpdef tuple reserve_for_write_ptr(self, int64_t size)
+    cpdef void finalize_commit(self, int64_t ref_id, int64_t actual_length)
+    cpdef void _level1_compaction(self)
+    cpdef void _level2_compaction(self)
+    cdef void _print_stats(self)
+    cdef bint _resize_pool(self, int64_t new_size)
+    cdef inline int64_t _find_best_fit_segment(self, int64_t size)
+    cdef inline void _merge_adjacent_free_segments(self)
+    cdef void _defragment_memory(self)

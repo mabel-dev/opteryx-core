@@ -292,7 +292,7 @@ cdef class MemoryPool:
 
             return 100 - (largest_free_block * 100 // total_free)
 
-    def commit(self, object data) -> int64_t:
+    cpdef int64_t commit(self, object data):
         cdef int64_t len_data
         cdef int64_t segment_index
         cdef MemorySegment segment, new_segment
@@ -480,7 +480,7 @@ cdef class MemoryPool:
         # Return (ref_id, pointer as integer, capacity)
         return (ref_id, <unsigned long long>ptr_val, cap)
 
-    cpdef finalize_commit(self, int64_t ref_id, int64_t actual_length):
+    cpdef void finalize_commit(self, int64_t ref_id, int64_t actual_length):
         """Finalize a previous `reserve_for_write_ptr` by setting the actual
         length and unlatching the segment so readers can access it."""
         cdef int64_t segment_index
@@ -515,7 +515,7 @@ cdef class MemoryPool:
             self.segments[segment_index] = segment
             self.c_metadata[ref_id] = metadata
 
-    cpdef read(self, int64_t ref_id, bint zero_copy=False, bint latch=False):
+    cpdef bytes read(self, int64_t ref_id, bint zero_copy, bint latch):
         cdef int64_t segment_index
         cdef MemorySegment segment
         cdef char* char_ptr = <char*>self.pool
@@ -563,7 +563,7 @@ cdef class MemoryPool:
             else:
                 return PyBytes_FromStringAndSize(char_ptr + segment.start, orig_len)
 
-    cpdef unlatch(self, int64_t ref_id):
+    cpdef void unlatch(self, int64_t ref_id):
         cdef int64_t segment_index
         cdef MemorySegment segment
         cdef SegmentMetadata metadata
@@ -596,7 +596,39 @@ cdef class MemoryPool:
             metadata.latches = segment.latches
             self.c_metadata[ref_id] = metadata
 
-    cpdef release(self, int64_t ref_id):
+    cpdef void latch(self, int64_t ref_id):
+        cdef int64_t segment_index
+        cdef MemorySegment segment
+        cdef SegmentMetadata metadata
+
+        with self.lock:
+            if self.c_metadata.find(ref_id) == self.c_metadata.end():
+                raise ValueError(f"Invalid reference ID - {ref_id}.")
+
+            metadata = self.c_metadata[ref_id]
+
+            if metadata.start == -1:  # Zero-length data
+                return
+
+            # find segment index
+            segment_index = -1
+            for i in range(self.segments.size()):
+                if not self.segments[i].is_free and self.segments[i].start == metadata.start:
+                    segment_index = i
+                    break
+
+            if segment_index == -1:
+                raise ValueError("Invalid reference ID.")
+
+            segment = self.segments[segment_index]
+            segment.latches += 1
+            self.segments[segment_index] = segment
+            # update metadata
+            metadata.latches = segment.latches
+            self.c_metadata[ref_id] = metadata
+            self.read_locks += 1
+
+    cpdef void release(self, int64_t ref_id):
         cdef int64_t segment_index
         cdef MemorySegment segment
         cdef SegmentMetadata metadata
@@ -636,6 +668,32 @@ cdef class MemoryPool:
             self.segments[segment_index] = segment
             self.used_size -= segment.length
 
+    cpdef void clear(self):
+        """Clear all segments and reset the memory pool."""
+        cdef MemorySegment initial_segment
+        with self.lock:
+            # Clear all data structures
+            self.segments.clear()
+            self.c_metadata.clear()
+            self.used_size = 0
+            self.next_ref_id = 0
+            self.commits = 0
+            self.failed_commits = 0
+            self.reads = 0
+            self.read_locks = 0
+            self.l1_compaction = 0
+            self.l2_compaction = 0
+            self.releases = 0
+            self.resizes = 0
+
+            # Reinitialize the pool with one free segment
+            initial_segment.start = 0
+            initial_segment.length = self.size
+            initial_segment.latches = 0
+            initial_segment.ref_id = -1
+            initial_segment.is_free = True
+            self.segments.push_back(initial_segment)
+
     def available_space(self) -> int64_t:
         cdef int64_t total_free = 0
         with self.lock:
@@ -644,7 +702,7 @@ cdef class MemoryPool:
                     total_free += self.segments[i].length
         return total_free
 
-    def get_stats(self) -> dict:
+    cpdef dict get_stats(self):
         """Get detailed statistics about the memory pool."""
         cdef int64_t total_free = 0
         cdef int64_t total_used = 0
@@ -718,8 +776,7 @@ cdef class MemoryPool:
                 preincrement(it)
         return out
 
-    @property
-    def free_segments(self):
+    cpdef list get_free_segments(self):
         """Return a list of free segments as dictionaries for tests."""
         cdef list out = []
         cdef int64_t i
@@ -731,11 +788,11 @@ cdef class MemoryPool:
                     out.append({"start": seg.start, "length": seg.length})
         return out
 
-    cpdef _level1_compaction(self):
+    cpdef void _level1_compaction(self):
         with self.lock:
             self._merge_adjacent_free_segments()
 
-    cpdef _level2_compaction(self):
+    cpdef void _level2_compaction(self):
         cdef list ordered_refs
         cdef list _ordered
         cdef int64_t i

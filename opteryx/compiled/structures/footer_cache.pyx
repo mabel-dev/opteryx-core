@@ -54,7 +54,7 @@ cdef class ParquetFooterBytesCache:
 
         # Read from pool and return as bytes (one copy for safety)
         ref_id = self._path_to_ref[path]
-        return self.pool.read(ref_id, zero_copy=False)
+        return self.pool.read(ref_id, False, False)
 
     cpdef bint put(self, str path, bytes envelope):
         """Store footer envelope in cache with LRU tracking.
@@ -77,7 +77,7 @@ cdef class ParquetFooterBytesCache:
                 return True
 
             # Pool exhausted, evict oldest LRU entry and retry
-            evict_key, _ = self.lru.evict()
+            evict_key, _ = self.lru.evict(False)
             if evict_key is None:
                 # Nothing to evict
                 return False
@@ -93,7 +93,7 @@ cdef class ParquetFooterBytesCache:
             self.pool.release(ref_id)
 
         self._path_to_ref.clear()
-        self.lru.clear()
+        self.lru.clear(False)
 
     cpdef dict stats(self):
         """Return cache statistics.
