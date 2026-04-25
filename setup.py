@@ -313,14 +313,6 @@ elif is_linux():
     CPP_FLAGS.append("-fvisibility=default")
     C_FLAGS.append("-fvisibility=default")
 
-# Enable LTO for non-Windows when requested
-if OPTERYX_ENABLE_LTO and not is_win():
-    CPP_FLAGS.append("-flto")
-    C_FLAGS.append("-flto")
-    # ensure linker uses LTO as well
-    LD_EXTRA = list(LD_EXTRA) if "LD_EXTRA" in globals() else []
-    LD_EXTRA.append("-flto")
-
 # PGO support (opt-in). The CI/release pipeline may run a profile-generate
 # build followed by exercising the binary and then a profile-use rebuild.
 if OPTERYX_ENABLE_PGO and not is_win():
@@ -339,6 +331,13 @@ if OPTERYX_ENABLE_PGO and not is_win():
 # GLIBCXX/GLIBC versions not available on older manylinux targets.
 # macOS/Clang does not support -static-libgcc
 LD_EXTRA = ["-static-libstdc++"] if is_mac() else ["-static-libstdc++", "-static-libgcc"]
+
+# Enable LTO for non-Windows when requested (must be after LD_EXTRA initialization)
+if OPTERYX_ENABLE_LTO and not is_win():
+    CPP_FLAGS.append("-flto")
+    C_FLAGS.append("-flto")
+    # ensure linker uses LTO as well
+    LD_EXTRA.append("-flto")
 
 # MSVC LTO linker flag when requested
 if is_win() and OPTERYX_ENABLE_LTO:
