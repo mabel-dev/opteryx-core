@@ -256,7 +256,7 @@ class Manifest:
 
         return combined
 
-    def estimate_cardinality(self, column: str) -> Optional[int]:
+    def estimate_cardinality(self, column) -> Optional[int]:
         """
         Estimate distinct values in column using K-Minimum Values (KMV).
 
@@ -266,7 +266,9 @@ class Manifest:
         K = 32
         HASH_RANGE = 2**64
 
-        field_id = self._resolve_field_id(column)
+        # identity may be bytes; resolve to str for field mapping
+        col_name = column.decode("utf-8") if isinstance(column, bytes) else column
+        field_id = self._resolve_field_id(col_name)
         if field_id is None:
             return None
 
@@ -291,9 +293,10 @@ class Manifest:
         # Estimate: (k-1) * hash_range / kth_smallest_hash
         return int((K - 1) * HASH_RANGE / min_k_hashes[K - 1])
 
-    def estimate_null_fraction(self, column: str) -> Optional[float]:
+    def estimate_null_fraction(self, column) -> Optional[float]:
         """Estimate fraction of nulls in column using catalog null counts if present."""
-        field_id = self._resolve_field_id(column)
+        col_name = column.decode("utf-8") if isinstance(column, bytes) else column
+        field_id = self._resolve_field_id(col_name)
         if field_id is None:
             return None
 

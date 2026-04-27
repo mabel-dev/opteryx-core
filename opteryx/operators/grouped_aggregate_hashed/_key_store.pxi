@@ -20,12 +20,13 @@ from libcpp.vector cimport vector
 from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenType
 from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT64
 from opteryx.compiled.draken.core.buffers cimport DRAKEN_STRING
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 from opteryx.compiled.draken.core.fixed_vector cimport alloc_fixed_buffer, free_fixed_buffer
 from opteryx.compiled.draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
 from opteryx.compiled.draken.vectors.vector cimport Vector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
+from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector, _materialize_dict_string
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 
 
@@ -708,6 +709,8 @@ cdef class KeyStore:
 
             if key_kind == KEY_MULTI_ENCODED_STRING:
                 sv = <StringVector>vec
+                if sv._encoding == DRAKEN_ENCODING_DICTIONARY and sv.ptr.data == NULL:
+                    sv = _materialize_dict_string(sv)
                 vbuf = sv.ptr
                 if self._single_string_direct:
                     for ri in range(n_new):
@@ -733,6 +736,9 @@ cdef class KeyStore:
 
             elif isinstance(vec, Int64Vector):
                 iv = <Int64Vector>vec
+                if iv._encoding == DRAKEN_ENCODING_DICTIONARY and iv.ptr.data == NULL:
+                    iv = _materialize_dict_int64(iv)
+                    nulls = iv.null_bitmap_ptr()
                 if self._single_fixed_direct:
                     if iv._has_const:
                         const_i64 = iv._const_value
@@ -800,6 +806,9 @@ cdef class KeyStore:
             else:
                 # Float64Vector and other fixed-width types — store as raw int64 bits
                 fv = <Float64Vector>vec
+                if fv._encoding == DRAKEN_ENCODING_DICTIONARY and fv.ptr.data == NULL:
+                    fv = _materialize_dict_float64(fv)
+                    nulls = fv.null_bitmap_ptr()
                 i64_data = <int64_t*>fv.dense_ptr()
                 if self._single_fixed_direct:
                     _ks_store_single_fixed_bulk_int64(
@@ -840,12 +849,18 @@ cdef class KeyStore:
                 if key_kind == KEY_MULTI_ENCODED_STRING:
                     col_dispatch[col_idx]   = _DISPATCH_STRING
                     sv = <StringVector>vec
+                    if sv._encoding == DRAKEN_ENCODING_DICTIONARY and sv.ptr.data == NULL:
+                        sv = _materialize_dict_string(sv)
+                        vecs[col_idx] = sv
                     col_null_ptrs[col_idx]  = <size_t>sv.null_bitmap_ptr()
                     col_varbuf_ptrs[col_idx] = <size_t>sv.ptr
 
                 elif isinstance(vec, Int64Vector):
                     col_dispatch[col_idx] = _DISPATCH_INT64
                     iv = <Int64Vector>vec
+                    if iv._encoding == DRAKEN_ENCODING_DICTIONARY and iv.ptr.data == NULL:
+                        iv = _materialize_dict_int64(iv)
+                        vecs[col_idx] = iv
                     col_null_ptrs[col_idx] = <size_t>iv.null_bitmap_ptr()
                     if iv._has_const:
                         col_has_const[col_idx] = True
@@ -868,6 +883,9 @@ cdef class KeyStore:
                     # Float64Vector and other fixed-width types
                     col_dispatch[col_idx] = _DISPATCH_FLOAT64
                     fv = <Float64Vector>vec
+                    if fv._encoding == DRAKEN_ENCODING_DICTIONARY and fv.ptr.data == NULL:
+                        fv = _materialize_dict_float64(fv)
+                        vecs[col_idx] = fv
                     col_null_ptrs[col_idx] = <size_t>fv.null_bitmap_ptr()
                     col_dense_ptrs[col_idx] = <size_t>fv.dense_ptr()
 

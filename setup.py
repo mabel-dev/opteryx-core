@@ -502,7 +502,7 @@ extensions = [
             "opteryx/third_party/mabel/base64/_base64_avx2.c",
             "opteryx/third_party/mabel/base64/_base64_avx512.c",
         ],
-        include_dirs=include_dirs,
+        include_dirs=include_dirs + ["opteryx/third_party/mabel"],
         extra_compile_args=C_FLAGS + ["-std=c99", "-DBASE64_IMPLEMENTATION"],
     ),
     Extension(
@@ -663,6 +663,7 @@ extensions = [
     make_draken_extension("vectors.vector", "vectors/vector.pyx"),
     make_draken_extension("vectors.bool_vector", "vectors/bool_vector.pyx"),
     make_draken_extension("vectors.float64_vector", "vectors/float64_vector.pyx"),
+    make_draken_extension("vectors.float32_vector", "vectors/float32_vector.pyx"),
     make_draken_extension("vectors.array_vector", "vectors/array_vector.pyx"),
     make_draken_extension("vectors.vector_vector", "vectors/vector_vector.pyx"),
     make_draken_extension("vectors.time_vector", "vectors/time_vector.pyx"),
@@ -851,12 +852,6 @@ extensions = [
         extra_compile_args=C_FLAGS,
     ),
     Extension(
-        "opteryx.compiled.structures.column_descriptor",
-        sources=["opteryx/compiled/structures/column_descriptor.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
         "opteryx.compiled.structures.column_deserializer",
         sources=["opteryx/compiled/structures/column_deserializer.pyx"],
         include_dirs=include_dirs,
@@ -914,15 +909,15 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
-    # Grouped aggregate (hashed) — new ground-up rewrite, single .so
+    # All operator plan nodes — single consolidated .so
     Extension(
-        "opteryx.operators.grouped_aggregate_hashed._grouped_agg",
+        "opteryx.operators._operators",
         sources=[
-            "opteryx/operators/grouped_aggregate_hashed/_grouped_agg.pyx",
+            "opteryx/operators/_operators.pyx",
             "src/cpp/hllpp.cpp",
             "third_party/tdigest-c/src/tdigest_cpp.cpp",
         ],
-        include_dirs=include_dirs,
+        include_dirs=include_dirs + ["opteryx/operators/aggregate"],
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA,
@@ -932,14 +927,6 @@ extensions = [
             "third_party/mabel/carchar/carchar_common.hpp",
             "third_party/mabel/carchar/carchar_simd.hpp",
         ],
-    ),
-    # Ungrouped (global) aggregate engine — single .so
-    Extension(
-        "opteryx.operators.aggregate.ungrouped_agg",
-        sources=["opteryx/operators/aggregate/ungrouped_agg.pyx"],
-        include_dirs=include_dirs + ["opteryx/operators/aggregate"],
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
     ),
     Extension(
         "opteryx.compiled.structures.shuffle_partition",
@@ -1001,179 +988,6 @@ extensions = [
         language="c++",
     ),
     # HTTP Client (libcurl-based HTTP with connection pooling and Range request support)
-    # Operators - physical execution plan nodes
-    Extension(
-        "opteryx.operators.cross_join_node",
-        sources=["opteryx/operators/cross_join_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.distinct_node",
-        sources=["opteryx/operators/distinct_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.aggregate.aggregate_node",
-        sources=["opteryx/operators/aggregate/aggregate_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.draken_inner_join_node",
-        sources=["opteryx/operators/draken_inner_join_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.exit_node",
-        sources=["opteryx/operators/exit_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.explain_node",
-        sources=["opteryx/operators/explain_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.filter_join_node",
-        sources=["opteryx/operators/filter_join_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=CPP_FLAGS,
-        extra_link_args=LD_EXTRA,
-        language="c++",
-    ),
-    Extension(
-        "opteryx.operators.filter_node",
-        sources=["opteryx/operators/filter_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.function_dataset_node",
-        sources=["opteryx/operators/function_dataset_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.heap_sort_node",
-        sources=["opteryx/operators/heap_sort_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.limit_node",
-        sources=["opteryx/operators/limit_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.nested_loop_join_node",
-        sources=["opteryx/operators/nested_loop_join_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.non_equi_join_node",
-        sources=["opteryx/operators/non_equi_join_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.null_reader_node",
-        sources=["opteryx/operators/null_reader_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.outer_join_node",
-        sources=["opteryx/operators/outer_join_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=CPP_FLAGS,
-        extra_link_args=LD_EXTRA,
-        language="c++",
-    ),
-    Extension(
-        "opteryx.operators.parquet_read_node",
-        sources=["opteryx/operators/parquet_read_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.projection_node",
-        sources=["opteryx/operators/projection_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.read_node",
-        sources=["opteryx/operators/read_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.set_variable_node",
-        sources=["opteryx/operators/set_variable_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.show_columns_node",
-        sources=["opteryx/operators/show_columns_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.show_create_node",
-        sources=["opteryx/operators/show_create_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.show_value_node",
-        sources=["opteryx/operators/show_value_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.shuffle_node",
-        sources=["opteryx/operators/shuffle_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.sort_node",
-        sources=["opteryx/operators/sort_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.table_management_node",
-        sources=["opteryx/operators/table_management_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.union_node",
-        sources=["opteryx/operators/union_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.unnest_join_node",
-        sources=["opteryx/operators/unnest_join_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.view_management_node",
-        sources=["opteryx/operators/view_management_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
 ]
 
 # Build libcurl first - REQUIRED for http_client extension
@@ -1557,12 +1371,15 @@ extensions.append(
                 "third_party/mabel/rugo/parquet/decode_encodings.cpp",
                 "third_party/mabel/rugo/parquet/decode_page.cpp",
                 "src/cpp/cpu_features.cpp",
+                "src/cpp/http_client.cpp",
             ]
             + get_parquet_vendor_sources()
         ),
         include_dirs=(
             include_dirs
             + [
+                "src/cpp",
+                "third_party/curl/include",
                 "third_party/mabel/rugo/parquet",
                 "third_party/mabel/rugo/parquet/vendor/snappy",
                 "third_party/mabel/rugo/parquet/vendor/zstd",
@@ -1575,10 +1392,17 @@ extensions.append(
         define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1")],
         language="c++",
         extra_compile_args=CPP_FLAGS,
+        extra_link_args=[
+            _libcurl_path,
+            "-lssl",
+            "-lcrypto",
+        ] + ([] if is_win() else ["-lm"]),
         depends=[
             "third_party/mabel/rugo/parquet/io_pipeline.hpp",
+            "third_party/mabel/rugo/parquet/ipc_serialize.hpp",
             "third_party/mabel/rugo/parquet/decode.hpp",
             "third_party/mabel/rugo/parquet/metadata.hpp",
+            "src/cpp/http_client.hpp",
         ],
     )
 )

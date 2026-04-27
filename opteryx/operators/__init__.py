@@ -8,7 +8,7 @@
 
 from .base_plan_node import BasePlanNode, JoinNode  # isort: skip
 from .catalog import OperatorCategory, ParallelStrategy, get_registry
-from .read_node import ReaderNode
+from .read import ReaderNode
 
 __all__ = [
     "BasePlanNode",

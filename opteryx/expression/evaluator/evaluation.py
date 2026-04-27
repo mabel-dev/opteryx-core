@@ -72,13 +72,13 @@ def _eval_value(node, morsel):
         return node.value
 
     if node_type == NodeType.IDENTIFIER:
-        vec = morsel.column(node.schema_column.identity.encode(), node.schema_column.name.encode())
+        vec = morsel.column(node.schema_column.identity, node.schema_column.name.encode())
         return vec
 
     if node_type in (NodeType.EVALUATED, NodeType.AGGREGATOR):
         try:
             vec = morsel.column(
-                node.schema_column.identity.encode(), node.schema_column.name.encode()
+                node.schema_column.identity, node.schema_column.name.encode()
             )
         except KeyError:
             raise ColumnReferencedBeforeEvaluationError(column=node.schema_column.name)
@@ -131,7 +131,7 @@ def _eval_value(node, morsel):
         identity = getattr(getattr(node, "schema_column", None), "identity", None)
         if identity is not None:
             try:
-                vec = morsel.column(identity if isinstance(identity, bytes) else identity.encode())
+                vec = morsel.column(identity)
             except KeyError:
                 vec = None
             if vec is not None:

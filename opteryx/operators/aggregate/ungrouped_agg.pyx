@@ -11,19 +11,12 @@ from libc.float cimport DBL_MAX
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
-from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.draken.vectors.vector cimport Vector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.vectors.integer_vector cimport IntegerVector
-from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
 from opteryx.compiled.draken.core.buffers cimport (
     ConstAccessor, DictAccessor, DrakenFixedBuffer, DrakenVarBuffer,
-    DrakenConstantStringPayload,
+    DrakenConstantStringPayload, DRAKEN_ENCODING_RLE,
 )
-from opteryx.compiled.draken.interop.vector_sequence cimport vector_from_sequence
-from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
-
 cdef extern from "_agg_kernels.hpp" namespace "opteryx::ungrouped":
     int compare_bytes(const char* a, size_t la, const char* b, size_t lb) noexcept
 
@@ -112,6 +105,11 @@ cdef class UngroupedAggregate:
     """
     Base class for all ungrouped (global) aggregate accumulators.
     """
+    cdef bytes      column_name
+    cdef bytes      alias
+    cdef int        result_type
+    cdef Py_ssize_t _col_idx
+    cdef int        _col_type
 
     def __cinit__(self):
         self.column_name = b""

@@ -10,11 +10,14 @@
 
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
+from opteryx.compiled.draken.vectors.int64_vector cimport from_rle_builder as int64_from_rle_builder
 from opteryx.compiled.draken.vectors.vector cimport Vector
 from opteryx.compiled.draken.interop.vector_sequence cimport vector_from_sequence
 from opteryx.compiled.structures.buffers cimport IntBuffer
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
-from libc.stdint cimport int64_t
+from libc.stdint cimport int32_t, int64_t
+from libc.stdlib cimport malloc, free
+from libc.string cimport memcpy
 
 
 cpdef tuple build_rows_indices_and_column_draken(object column_vector):
@@ -137,38 +140,54 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
     """
     Build row indices for a Cartesian product (CROSS JOIN) (Draken-native).
 
+    Left index is RLE-encoded (left_rows runs of length right_rows each).
+    Right index is dense ([0..right_rows-1] repeated left_rows times).
+
     Parameters:
         left_rows: Number of rows in the left table
         right_rows: Number of rows in the right table
 
     Returns:
         tuple of (Int64Vector, Int64Vector)
-            Left and right row indices
+            Left (RLE) and right (dense) row indices
     """
     cdef int64_t total_rows = left_rows * right_rows
-    cdef IntBuffer left_indices_buf = IntBuffer(total_rows)
-    cdef IntBuffer right_indices_buf = IntBuffer(total_rows)
     cdef int64_t i
+    cdef int64_t j
+    cdef int64_t* left_run_vals
+    cdef int32_t* left_run_lens
+    cdef Int64Vector left_vec
+    cdef IntBuffer right_indices_buf
+    cdef const int64_t[::1] right_mv
+    cdef Int64Vector right_vec
 
     if total_rows == 0:
-        return (int64_from_sequence(None), int64_from_sequence(None))
+        return (Int64Vector(0), Int64Vector(0))
+
+    # Build RLE left index: left_rows runs, run value i with run length right_rows
+    left_run_vals = <int64_t*>malloc(left_rows * sizeof(int64_t))
+    left_run_lens = <int32_t*>malloc(left_rows * sizeof(int32_t))
+    if left_run_vals == NULL or left_run_lens == NULL:
+        free(left_run_vals)
+        free(left_run_lens)
+        raise MemoryError()
 
     for i in range(left_rows):
-        # Repeat each left index right_rows times
-        left_indices_buf.append_repeated(i, right_rows)
-        # For each left row, we need all right rows
-        # We could optimize this by building the right_rows sequence once and extending
-        # but for now we'll just loop or use a small helper if available
+        left_run_vals[i] = i
+        left_run_lens[i] = <int32_t>right_rows
+
+    left_vec = int64_from_rle_builder(left_run_vals, left_run_lens, <size_t>left_rows)
+    free(left_run_vals)
+    free(left_run_lens)
+
+    # Build dense right index: [0, 1, ..., right_rows-1] repeated left_rows times
+    right_indices_buf = IntBuffer(total_rows)
+    for i in range(left_rows):
         for j in range(right_rows):
             right_indices_buf.append(j)
 
-    # Create Int64Vectors for indices
-    cdef const int64_t[::1] left_mv = left_indices_buf.get_buffer()
-    cdef Int64Vector left_vec = int64_from_sequence(left_mv)
-    left_vec._arrow_data_buf = left_indices_buf
-
-    cdef const int64_t[::1] right_mv = right_indices_buf.get_buffer()
-    cdef Int64Vector right_vec = int64_from_sequence(right_mv)
+    right_mv = right_indices_buf.get_buffer()
+    right_vec = int64_from_sequence(right_mv)
     right_vec._arrow_data_buf = right_indices_buf
 
     return (left_vec, right_vec)

@@ -448,7 +448,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                 precision=precision,
                 scale=scale,
             )
-            schema_column.identity = column_name
+            schema_column.identity = column_name.encode("utf-8") if isinstance(column_name, str) else column_name
             schemas["$derived"].columns.append(schema_column)
             node.derived_from = []
             node.schema_column = schema_column

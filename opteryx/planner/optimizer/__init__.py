@@ -4,35 +4,6 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-~~~
-                      ┌───────────┐
-                      │   USER    │
-         ┌────────────┤           ◄────────────┐
-         │SQL         └───────────┘            │
-  ───────┼─────────────────────────────────────┼──────
-         │                                     │
-   ┌─────▼─────┐                               │
-   │ SQL       │                               │
-   │ Rewriter  │                               │
-   └─────┬─────┘                               │
-         │SQL                                  │Results
-   ┌─────▼─────┐                         ┌─────┴─────┐
-   │           │                         │           │
-   │ Parser    │                         │ Executor  │
-   └─────┬─────┘                         └─────▲─────┘
-         │AST                                  │Plan
-   ┌─────▼─────┐      ┌───────────┐      ┌─────┴─────┐
-   │ AST       │      │           │      │ Physical  │
-   │ Rewriter  │      │ Catalogue │      │ Planner   │
-   └─────┬─────┘      └───────────┘      └─────▲─────┘
-         │AST               │Schemas           │Plan
-   ┌─────▼─────┐      ┌─────▼─────┐      ┌─────┴─────┐
-   │ Logical   │ Plan │           │ Plan │           │
-   │   Planner ├──────► Binder    ├──────► Optimizer │
-   └───────────┘      └───────────┘      └───────────┘
-
-~~~
-
 This module implements a cost-based query optimizer using the Visitor pattern. Unlike the binder,
 which processes the logical plan from the scanners up to the projection, this optimizer starts at
 the projection and traverses down towards the scanners. This top-down approach is effective for
@@ -61,26 +32,29 @@ This module aims to enhance query performance through systematic and incremental
 from opteryx.config import DISABLE_OPTIMIZER
 from opteryx.models import QueryTelemetry
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.optimizer.strategies import BooleanSimplificationStrategy
-from opteryx.planner.optimizer.strategies import CastSimplificationStrategy
-from opteryx.planner.optimizer.strategies import ConstantFoldingStrategy
-from opteryx.planner.optimizer.strategies import CorrelatedFiltersStrategy
-from opteryx.planner.optimizer.strategies import DistinctPushdownStrategy
-from opteryx.planner.optimizer.strategies import HashMapVariantStrategy
-from opteryx.planner.optimizer.strategies import JoinOrderingStrategy
-from opteryx.planner.optimizer.strategies import JoinRewriteStrategy
-from opteryx.planner.optimizer.strategies import LimitFilesPruningStrategy
-from opteryx.planner.optimizer.strategies import LimitPushdownStrategy
-from opteryx.planner.optimizer.strategies import ManifestPruningStrategy
-from opteryx.planner.optimizer.strategies import OperatorFusionStrategy
-from opteryx.planner.optimizer.strategies import PredicateCompactionStrategy
-from opteryx.planner.optimizer.strategies import PredicateOrderingStrategy
-from opteryx.planner.optimizer.strategies import PredicatePushdownStrategy
-from opteryx.planner.optimizer.strategies import PredicateRewriteStrategy
-from opteryx.planner.optimizer.strategies import ProjectionPushdownStrategy
-from opteryx.planner.optimizer.strategies import RedundantOperationsStrategy
-from opteryx.planner.optimizer.strategies import SplitConjunctivePredicatesStrategy
-from opteryx.planner.optimizer.strategies import StatisticsOnlyResponseStrategy
+from opteryx.planner.optimizer.strategies import (
+    BooleanSimplificationStrategy,
+    CastSimplificationStrategy,
+    ConstantFoldingStrategy,
+    CorrelatedFiltersStrategy,
+    CrossJoinFilterPushdownStrategy,
+    DistinctPushdownStrategy,
+    HashMapVariantStrategy,
+    JoinOrderingStrategy,
+    JoinRewriteStrategy,
+    LimitFilesPruningStrategy,
+    LimitPushdownStrategy,
+    ManifestPruningStrategy,
+    OperatorFusionStrategy,
+    PredicateCompactionStrategy,
+    PredicateOrderingStrategy,
+    PredicatePushdownStrategy,
+    PredicateRewriteStrategy,
+    ProjectionPushdownStrategy,
+    RedundantOperationsStrategy,
+    SplitConjunctivePredicatesStrategy,
+    StatisticsOnlyResponseStrategy,
+)
 
 from .strategies.optimization_strategy import OptimizerContext
 
@@ -103,6 +77,9 @@ class OptimizerVisitor:
             PredicateRewriteStrategy(telemetry),
             PredicateCompactionStrategy(telemetry),
             PredicatePushdownStrategy(telemetry),
+            CrossJoinFilterPushdownStrategy(
+                telemetry
+            ),  # Convert CROSS JOIN + filters to INNER JOIN
             ManifestPruningStrategy(telemetry),  # Apply after predicate pushdown
             ProjectionPushdownStrategy(telemetry),
             JoinRewriteStrategy(telemetry),

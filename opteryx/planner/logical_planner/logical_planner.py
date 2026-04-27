@@ -31,7 +31,9 @@ from opteryx.vectors.vector_types import (
 class LogicalPlanStepType(int, Enum):
     Project = auto()  # field selection
     Filter = auto()  # tuple filtering
-    Union = auto()  #  appending relations
+    Union = auto()  # appending relations (UNION/UNION ALL)
+    Intersect = auto()  # set intersection (INTERSECT/INTERSECT ALL)
+    Except = auto()  # set difference (EXCEPT/EXCEPT ALL)
     Explain = auto()  # EXPLAIN
     Difference = auto()  # relation interection
     Join = auto()  # all joins
@@ -338,6 +340,11 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         # functions are in parenthesis)
         return plan_query(ast_branch)
 
+    # Handle nested SetOperations (chained UNION/INTERSECT/EXCEPT)
+    if "SetOperation" in ast_branch:
+        # Recursively call plan_query to handle the nested set operation
+        return plan_query({"Query": {"body": ast_branch}})
+
     inner_plan = LogicalPlan()
     step_id = None
 
@@ -349,25 +356,49 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
 
     # from
     _relations = ast_branch["Select"].get("from", [])
-    for relation in _relations:
-        step_id, sub_plan = create_node_relation(relation)
+
+    # Process first relation if any
+    if len(_relations) > 0:
+        step_id, sub_plan = create_node_relation(_relations[0])
         inner_plan += sub_plan
 
-    # If there's any peer relations, they are implicit cross joins
-    if len(_relations) > 1:
-        join_step = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
-        join_step.type = "cross join"
-        join_step.implied_join = True
+        # If there are multiple relations, build sequential binary implicit cross joins
+        # This converts FROM A, B, C into A CROSS JOIN B CROSS JOIN C
+        if len(_relations) > 1:
+            for i in range(1, len(_relations)):
+                # Process the next relation
+                right_step_id, right_sub_plan = create_node_relation(_relations[i])
 
-        join_step.relation_names = [_table_name(_relation) for _relation in _relations]
+                # Get relation names BEFORE adding right_sub_plan to inner_plan
+                left_relation_names = get_subplan_schemas(inner_plan)
+                left_readers = get_subplan_reads(inner_plan)
+                right_relation_names = get_subplan_schemas(right_sub_plan)
+                right_readers = get_subplan_reads(right_sub_plan)
 
-        reader_nodes = list(inner_plan._nodes.values())
-        join_step.readers = [r.uuid for r in reader_nodes]
+                # Create binary cross join node
+                join_step = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+                join_step.type = "cross join"
+                join_step.implied_join = True
+                join_step.left_relation_names = left_relation_names
+                join_step.left_readers = left_readers
+                join_step.right_relation_names = right_relation_names
+                join_step.right_readers = right_readers
 
-        step_id = random_string()
-        inner_plan.add_node(step_id, join_step)
-        for relation in _relations:
-            inner_plan.add_edge(relation["step_id"], step_id)
+                # For compatibility with binder's fallback extraction (if left_relation_names not set)
+                # Don't set readers to avoid triggering the >2 relations check in the binder
+                join_step.relation_names = [left_relation_names, right_relation_names]
+
+                # Add the right sub_plan to inner_plan
+                inner_plan += right_sub_plan
+
+                # Add join node and wire it
+                join_step_id = random_string()
+                inner_plan.add_node(join_step_id, join_step)
+                inner_plan.add_edge(step_id, join_step_id)
+                inner_plan.add_edge(right_step_id, join_step_id)
+
+                # Update step_id for next iteration
+                step_id = join_step_id
 
     # If there's no relations, use $no_table
     if len(_relations) == 0:
@@ -945,14 +976,19 @@ def plan_query(statement: dict) -> LogicalPlan:
     if "Query" in root_node:
         root_node = root_node["Query"]
 
-    # union?
+    # set operations (UNION, INTERSECT, EXCEPT)
     if "SetOperation" in root_node["body"]:
         set_operation = root_node["body"]["SetOperation"]
 
-        if set_operation["op"] == "Union":
+        op_type = set_operation["op"]
+        if op_type == "Union":
             set_op_node = LogicalPlanNode(node_type=LogicalPlanStepType.Union)
+        elif op_type == "Intersect":
+            set_op_node = LogicalPlanNode(node_type=LogicalPlanStepType.Intersect)
+        elif op_type == "Except":
+            set_op_node = LogicalPlanNode(node_type=LogicalPlanStepType.Except)
         else:
-            raise UnsupportedSyntaxError(f"Unsupported SET operator '{set_operation['op']}'")
+            raise UnsupportedSyntaxError(f"Unsupported SET operator '{op_type}'")
 
         set_op_node.modifier = (
             None if set_operation["set_quantifier"] == "None" else set_operation["set_quantifier"]
@@ -963,6 +999,8 @@ def plan_query(statement: dict) -> LogicalPlan:
         head_nid = step_id
 
         left_plan = inner_query_planner(set_operation["left"])
+        from opteryx.planner.binder import rename_relations
+        left_plan = rename_relations(left_plan, prefix="$union-")
         plan += left_plan
         subquery_entry_id = left_plan.get_exit_points()[0]
         plan.add_edge(subquery_entry_id, step_id)
@@ -970,6 +1008,7 @@ def plan_query(statement: dict) -> LogicalPlan:
         plan.remove_node(subquery_entry_id, heal=True)
 
         right_plan = inner_query_planner(set_operation["right"])
+        right_plan = rename_relations(right_plan, prefix="$union-")
         plan += right_plan
         subquery_entry_id = right_plan.get_exit_points()[0]
         plan.add_edge(subquery_entry_id, step_id)

@@ -54,23 +54,26 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         node.right_readers = node.readers[1]
 
     if node.type == "cross join" and node.implied_join:
-        # 1438
-        if len(node.readers) > 2:
+        # 1438 - Check only if readers is set (not set for sequential binary joins)
+        if node.readers and len(node.readers) > 2:
             from opteryx.exceptions import UnsupportedSyntaxError
 
             raise UnsupportedSyntaxError("Cannot CROSS JOIN more than two relations.")
-        node.left_relation_names = (
-            node.relation_names[0]
-            if isinstance(node.relation_names[0], list)
-            else [node.relation_names[0]]
-        )
-        node.right_relation_names = (
-            node.relation_names[1]
-            if isinstance(node.relation_names[1], list)
-            else [node.relation_names[1]]
-        )
-        node.left_readers = node.readers[0]
-        node.right_readers = node.readers[1]
+        # Extract from readers only if it's set (backward compat for old-style implicit joins)
+        # For new sequential binary joins, left/right are already set in logical planner
+        if node.readers:
+            node.left_relation_names = (
+                node.relation_names[0]
+                if isinstance(node.relation_names[0], list)
+                else [node.relation_names[0]]
+            )
+            node.right_relation_names = (
+                node.relation_names[1]
+                if isinstance(node.relation_names[1], list)
+                else [node.relation_names[1]]
+            )
+            node.left_readers = node.readers[0]
+            node.right_readers = node.readers[1]
         node.type = "cross join"
 
     # Handle 'natural join' by converting to an inner join with a 'using'

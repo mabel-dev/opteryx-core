@@ -22,9 +22,10 @@ from opteryx.compiled.draken.core.buffers cimport DRAKEN_FLOAT64
 from opteryx.compiled.draken.core.fixed_vector cimport alloc_fixed_buffer
 from opteryx.compiled.draken.core.fixed_vector cimport free_fixed_buffer
 from opteryx.compiled.draken.vectors.vector cimport Vector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector, _StringVectorCIterator, StringElement
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
+from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector, _StringVectorCIterator, StringElement, _materialize_dict_string
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 
 
 cdef inline bint _num_bitmap_valid(uint8_t* bm, Py_ssize_t i) noexcept nogil:
@@ -374,6 +375,8 @@ cdef class SumInt64Collector(BaseCollector):
                     _bitmap_set(seen, si)
             return
 
+        if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec.ptr.data == NULL:
+            vec = _materialize_dict_int64(vec)
         data = <int64_t*>vec.dense_ptr()
         nulls = vec.null_bitmap_ptr()
         for i in range(n_rows):
@@ -480,6 +483,8 @@ cdef class SumFloat64Collector(BaseCollector):
                     _bitmap_set(seen, si)
             return
 
+        if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec.ptr.data == NULL:
+            vec = _materialize_dict_float64(vec)
         data = <double*>vec.dense_ptr()
         nulls = vec.null_bitmap_ptr()
         for i in range(n_rows):
@@ -597,6 +602,8 @@ cdef class MinMaxInt64Collector(BaseCollector):
                         _bitmap_set(seen, si)
             return
 
+        if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec.ptr.data == NULL:
+            vec = _materialize_dict_int64(vec)
         data = <int64_t*>vec.dense_ptr()
         nulls = vec.null_bitmap_ptr()
         if self._direction == 1:   # MIN
@@ -726,6 +733,8 @@ cdef class MinMaxFloat64Collector(BaseCollector):
                         _bitmap_set(seen, si)
             return
 
+        if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec.ptr.data == NULL:
+            vec = _materialize_dict_float64(vec)
         data = <double*>vec.dense_ptr()
         nulls = vec.null_bitmap_ptr()
         if self._direction == 1:   # MIN
@@ -817,10 +826,14 @@ cdef class MinMaxObjectCollector(BaseCollector):
         cdef bytes cur, v
         cdef object v_obj
         cdef list col
+        cdef StringVector sv_native
 
         # Fast path: StringVector with C-level iteration (no Python materialization)
         if isinstance(vec, StringVector):
-            self._accumulate_string_vector_native(<StringVector>vec, state_indices, n_rows, seen)
+            sv_native = <StringVector>vec
+            if sv_native._encoding == DRAKEN_ENCODING_DICTIONARY and sv_native.ptr.data == NULL:
+                sv_native = _materialize_dict_string(sv_native)
+            self._accumulate_string_vector_native(sv_native, state_indices, n_rows, seen)
         else:
             # Fallback for other types (dates, etc.)
             col = vec.to_pylist()
@@ -974,6 +987,8 @@ cdef class AvgCollector(BaseCollector):
                         sums[si] += const_i64
                         counts[si] += 1
                 return
+            if iv._encoding == DRAKEN_ENCODING_DICTIONARY and iv.ptr.data == NULL:
+                iv = _materialize_dict_int64(iv)
             i64 = <int64_t*>iv.dense_ptr()
             nulls = iv.null_bitmap_ptr()
             for i in range(n_rows):
@@ -991,6 +1006,8 @@ cdef class AvgCollector(BaseCollector):
                         sums[si] += const_f64
                         counts[si] += 1
                 return
+            if fv._encoding == DRAKEN_ENCODING_DICTIONARY and fv.ptr.data == NULL:
+                fv = _materialize_dict_float64(fv)
             f64 = <double*>fv.dense_ptr()
             nulls = fv.null_bitmap_ptr()
             for i in range(n_rows):

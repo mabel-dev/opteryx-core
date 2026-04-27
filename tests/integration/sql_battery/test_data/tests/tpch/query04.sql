@@ -9,8 +9,8 @@ select
 from
     testdata.tpch_tiny.orders as o
 where
-    o_orderdate >= '1996-05-01'
-    and o_orderdate < '1996-08-01'
+    o_orderdate >= '1996-05-01'::DATE
+    and o_orderdate < '1996-08-01'::DATE
     and exists (
         select
             *
@@ -26,23 +26,23 @@ order by
     o_orderpriority;
 */
 
-SELECT 
-  o_orderpriority, 
-  Count(*) AS order_count 
-FROM 
-  testdata.tpch_tiny.orders AS o LEFT semi 
+SELECT
+  o_orderpriority,
+  Count(*) AS order_count
+FROM
+  testdata.tpch_tiny.orders AS o LEFT semi
   JOIN (
-    SELECT 
-      * 
-    FROM 
-      testdata.tpch_tiny.lineitem AS l 
-    WHERE 
+    SELECT
+      *
+    FROM
+      testdata.tpch_tiny.lineitem AS l
+    WHERE
       l_commitdate < l_receiptdate
-  ) AS l ON l.l_orderkey = o.o_orderkey 
-WHERE 
-  o_orderdate >= '1996-05-01' 
-  AND o_orderdate < '1996-08-01' 
-GROUP BY 
-  o_orderpriority 
-ORDER BY 
+  ) AS l ON l.l_orderkey = o.o_orderkey
+WHERE
+  o_orderdate >= '1996-05-01'::DATE
+  AND o_orderdate < '1996-08-01'::DATE
+GROUP BY
+  o_orderpriority
+ORDER BY
   o_orderpriority;

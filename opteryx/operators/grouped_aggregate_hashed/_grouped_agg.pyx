@@ -30,12 +30,6 @@ from libcpp.vector cimport vector
 
 from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenType
 from opteryx.compiled.draken.vectors.vector cimport Vector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.morsels.morsel cimport Morsel
-
-
 include "_key_store.pxi"
 include "_collectors_base.pxi"
 include "_collectors_numeric.pxi"

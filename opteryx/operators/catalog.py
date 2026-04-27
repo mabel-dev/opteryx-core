@@ -142,37 +142,36 @@ _registry_lock = RLock()
 def _build_registry() -> OperatorRegistry:
     """Explicitly register every operator with its metadata. No magic."""
     # Local imports to avoid circular dependencies at module load time.
-    from opteryx.operators.aggregate.aggregate_node import UngroupedAggregateNode
-    from opteryx.operators.cross_join_node import CrossJoinNode
-    from opteryx.operators.distinct_node import DistinctNode
-    from opteryx.operators.draken_inner_join_node import DrakenInnerJoinNode
-    from opteryx.operators.exit_node import ExitNode
-    from opteryx.operators.explain_node import ExplainNode
-    from opteryx.operators.filter_join_node import FilterJoinNode
-    from opteryx.operators.filter_node import FilterNode
-    from opteryx.operators.function_dataset_node import FunctionDatasetNode
+    from opteryx.operators.aggregate import UngroupedAggregateNode
+    from opteryx.operators.cross_join import CrossJoinNode
+    from opteryx.operators.distinct import DistinctNode
+    from opteryx.operators.hashed_inner_join import DrakenInnerJoinNode
+    from opteryx.operators.exit import ExitNode
+    from opteryx.operators.explain import ExplainNode
+    from opteryx.operators.filter_join import FilterJoinNode
+    from opteryx.operators.filter import FilterNode
+    from opteryx.operators.function_dataset import FunctionDatasetNode
     from opteryx.operators.grouped_aggregate_hashed import (
         GroupedAggregateHashedNode as DrakenAggregateAndGroupNode,
     )
-    from opteryx.operators.heap_sort_node import HeapSortNode
-    from opteryx.operators.limit_node import LimitNode
-    from opteryx.operators.nested_loop_join_node import NestedLoopJoinNode
-    from opteryx.operators.non_equi_join_node import NonEquiJoinNode
-    from opteryx.operators.null_reader_node import NullReaderNode
-    from opteryx.operators.outer_join_node import OuterJoinNode
-    from opteryx.operators.parquet_read_node import ParquetReadNode
-    from opteryx.operators.projection_node import ProjectionNode
-    from opteryx.operators.read_node import ReaderNode
-    from opteryx.operators.set_variable_node import SetVariableNode
-    from opteryx.operators.show_columns_node import ShowColumnsNode
-    from opteryx.operators.show_create_node import ShowCreateNode
-    from opteryx.operators.show_value_node import ShowValueNode
-    from opteryx.operators.shuffle_node import ShuffleNode
-    from opteryx.operators.sort_node import SortNode
-    from opteryx.operators.table_management_node import TableManagementNode
-    from opteryx.operators.union_node import UnionNode
-    from opteryx.operators.unnest_join_node import UnnestJoinNode
-    from opteryx.operators.view_management_node import ViewManagementNode
+    from opteryx.operators.heap_sort import HeapSortNode
+    from opteryx.operators.limit import LimitNode
+    from opteryx.operators.nested_loop_join import NestedLoopJoinNode
+    from opteryx.operators.non_equi_join import NonEquiJoinNode
+    from opteryx.operators.null_reader import NullReaderNode
+    from opteryx.operators.outer_join import OuterJoinNode
+    from opteryx.operators.parquet_read import ParquetReadNode
+    from opteryx.operators.projection import ProjectionNode
+    from opteryx.operators.read import ReaderNode
+    from opteryx.operators.set_variable import SetVariableNode
+    from opteryx.operators.show_columns import ShowColumnsNode
+    from opteryx.operators.show_create import ShowCreateNode
+    from opteryx.operators.show_value import ShowValueNode
+    from opteryx.operators.sort import SortNode
+    from opteryx.operators.table_management import TableManagementNode
+    from opteryx.operators.union import UnionNode
+    from opteryx.operators.unnest_join import UnnestJoinNode
+    from opteryx.operators.view_management import ViewManagementNode
 
     r = OperatorRegistry()
 
@@ -263,12 +262,6 @@ def _build_registry() -> OperatorRegistry:
     r.register(
         UnionNode,
         name="Union",
-        category=OperatorCategory.SET_OP,
-        is_pipeline_breaking=True,
-    )
-    r.register(
-        ShuffleNode,
-        name="Shuffle",
         category=OperatorCategory.SET_OP,
         is_pipeline_breaking=True,
     )

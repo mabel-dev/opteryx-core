@@ -11,7 +11,9 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import glob
+
 import pytest
+
 import opteryx
 
 EXPECTED_OUTCOME = {
@@ -39,24 +41,29 @@ EXPECTED_OUTCOME = {
     "query22.sql": False,
 }
 
+
 def get_tests():
     tests = sorted(glob.glob(f"**/tpch/**.sql", recursive=True))
     for test in tests:
         with open(test, mode="r") as test_file:
             yield (test.split("/")[-1], test_file.read())
 
+
 TPCH_TESTS = list(get_tests())
+
 
 @pytest.mark.parametrize("test_id, statement", TPCH_TESTS)
 def test_tpch(test_id, statement):
     try:
-        opteryx.query_to_arrow(statement)
+        session = opteryx.session()
+        morsels = session.execute_to_morsels(statement)
+        for _ in morsels:
+            pass
         outcome = True
     except Exception as err:
         outcome = False
 
     assert EXPECTED_OUTCOME[test_id] == outcome
-
 
 
 if __name__ == "__main__":  # pragma: no cover
@@ -68,8 +75,11 @@ if __name__ == "__main__":  # pragma: no cover
     import shutil
     import time
 
+    from opteryx.connectors import DiskConnector
     from opteryx.utils.formatter import format_sql
     from tests import trunc_printable
+
+    opteryx.register_workspace("testdata", DiskConnector)
 
     width = shutil.get_terminal_size((80, 20))[0]
 
@@ -85,9 +95,9 @@ if __name__ == "__main__":  # pragma: no cover
             start = time.monotonic_ns()
             test_tpch(test, statement)
             print(
-                f"\033[38;2;26;185;67m{str(int((time.monotonic_ns() - start)/1e6)).rjust(4)}ms\033[0m ✅",
+                f"\033[38;2;26;185;67m{str(int((time.monotonic_ns() - start) / 1e6)).rjust(4)}ms\033[0m ✅",
             )
         except AssertionError as err:
-            print(f"\033[0;31m{str(int((time.monotonic_ns() - start)/1e6)).rjust(4)}ms ❌\033[0m")
+            print(f"\033[0;31m{str(int((time.monotonic_ns() - start) / 1e6)).rjust(4)}ms ❌\033[0m")
 
     print("--- ✅ \033[0;32mdone\033[0m")

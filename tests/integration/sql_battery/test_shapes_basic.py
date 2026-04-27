@@ -198,6 +198,33 @@ STATEMENTS = [
         # Different temporal types but literal is cast - should pass
         ("SELECT COUNT(*) FROM testdata.missions WHERE Lauched_at >= '1957-10-04'::DATE", 1, 1, None),
         ("SELECT COUNT(*) FROM testdata.missions WHERE Lauched_at >= '2024-12-31'::TIMESTAMP[ms]", 1, 1, None),
+
+        # Set operations - UNION (SQL92 compatibility) - NEW
+        # NOTE: Opteryx requires dataset aliases in set operations when the same dataset is referenced
+        # in multiple branches, even though SQL doesn't require this. This is a known limitation of the
+        # context merging logic in the binder's traversal phase.
+        # Baseline: Single UNION removes duplicates
+        ("SELECT * FROM (SELECT name, id FROM $planets AS A UNION SELECT name, id FROM $planets AS B) AS C WHERE name = 'Earth'", 1, 2, None),
+        # Baseline: UNION ALL keeps duplicates
+        ("SELECT * FROM (SELECT name, id FROM $planets AS A UNION ALL SELECT name, id FROM $planets AS B) AS C WHERE name = 'Earth'", 2, 2, None),
+        # TODO: Chained UNION (three relations) - WIP: Schema binding issue with nested Union nodes
+        # ("SELECT * FROM (SELECT name, id FROM $planets AS A WHERE id = 1 UNION SELECT name, id FROM $planets AS B WHERE id = 2 UNION SELECT name, id FROM $planets AS C WHERE id = 3) D", 3, 2, None),
+
+        # Set operations - INTERSECT (SQL92 compatibility) - NEW, BLOCKED: Operators not compiled
+        # INTERSECT keeps only rows in both inputs
+        ("SELECT * FROM (SELECT name, id FROM $planets AS A WHERE id <= 5 INTERSECT SELECT name, id FROM $planets AS B WHERE id >= 3) C", 3, 2, None),
+        # INTERSECT with no matches should return 0 rows
+        ("SELECT * FROM (SELECT name, id FROM $planets AS A WHERE id < 3 INTERSECT SELECT name, id FROM $planets AS B WHERE id > 7) C", 0, 2, None),
+        # INTERSECT with same input (all rows match)
+        ("SELECT * FROM (SELECT name, id FROM $planets AS A INTERSECT SELECT name, id FROM $planets AS B) C", 9, 2, None),
+
+        # Set operations - EXCEPT (SQL92 compatibility) - NEW, BLOCKED: Operators not compiled
+        # EXCEPT keeps rows from first input not in second
+        ("SELECT * FROM (SELECT name, id FROM $planets AS A WHERE id <= 5 EXCEPT SELECT name, id FROM $planets AS B WHERE id >= 3) C", 2, 2, None),
+        # EXCEPT with empty right side returns all from left
+        ("SELECT * FROM (SELECT name, id FROM $planets AS A WHERE id < 3 EXCEPT SELECT name, id FROM $planets AS B WHERE id > 7) C", 2, 2, None),
+        # EXCEPT with same input should return 0 rows
+        ("SELECT * FROM (SELECT name, id FROM $planets AS A EXCEPT SELECT name, id FROM $planets AS B) C", 0, 2, None),
 ]
 
 # fmt:on

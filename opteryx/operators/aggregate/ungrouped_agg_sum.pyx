@@ -2,6 +2,8 @@
 
 
 cdef class SumInt64Aggregate(UngroupedAggregate):
+    cdef int64_t _total
+    cdef bint    _seen
 
     def __cinit__(self, bytes column_name, bytes alias):
         self.column_name = column_name
@@ -64,6 +66,8 @@ cdef class SumInt64Aggregate(UngroupedAggregate):
 
 
 cdef class SumFloat64Aggregate(UngroupedAggregate):
+    cdef double _total
+    cdef bint   _seen
 
     def __cinit__(self, bytes column_name, bytes alias):
         self.column_name = column_name

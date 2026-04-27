@@ -2,13 +2,15 @@
 
 
 cdef class CountDistinctAggregate(UngroupedAggregate):
-
     """
     COUNT(DISTINCT col).
 
     Hashes are written directly into a malloc'd buffer via c_hash_into()
     (no Python memoryview) then inserted into a CarcharSetWrapper under nogil.
     """
+    cdef CarcharSetWrapper _set
+    cdef uint64_t* _scratch_buf
+    cdef Py_ssize_t _scratch_capacity
 
     def __cinit__(self, bytes column_name, bytes alias):
         self.column_name = column_name

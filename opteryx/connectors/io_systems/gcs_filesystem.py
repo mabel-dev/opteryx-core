@@ -281,6 +281,54 @@ class OpteryxGcsFileSystem:
             total += chunk_size if i + chunk_size <= len(data) else len(data) - i
         return total
 
+    def rewrite_to_signed_url(self, path: str, expiry_seconds: int = 3600) -> str:
+        """Convert a gs:// path to a V4 signed HTTPS URL valid for expiry_seconds.
+
+        The signed URL embeds authentication in its query parameters so the C++
+        pipeline can fetch it via libcurl without any Authorization header.
+
+        For service-account credentials (key file), the client library signs
+        directly.  For Compute Engine / Cloud Run workload-identity credentials,
+        it delegates to the IAM signBlob API using the service account email and
+        a fresh access token.
+        """
+        import datetime
+
+        from google.cloud import storage
+        from google.oauth2.service_account import Credentials as SACredentials
+
+        from opteryx.utils import paths as path_utils
+
+        if path.startswith("gs://"):
+            path = path[5:]
+
+        bucket_name, _, _, _ = path_utils.get_parts(path)
+        blob_name_str = path[len(bucket_name) + 1:]
+
+        creds = self.client_credentials
+        client = storage.Client(credentials=creds)
+        blob = client.bucket(bucket_name).blob(blob_name_str)
+
+        expiration = datetime.timedelta(seconds=expiry_seconds)
+
+        if isinstance(creds, SACredentials):
+            return blob.generate_signed_url(
+                expiration=expiration,
+                method="GET",
+                version="v4",
+            )
+
+        # Compute Engine / Cloud Run: sign via IAM using the service account email
+        # and a fresh access token so we never need the private key.
+        _ = self._bearer  # ensure token is fresh
+        return blob.generate_signed_url(
+            expiration=expiration,
+            method="GET",
+            version="v4",
+            service_account_email=creds.service_account_email,
+            access_token=creds.token,
+        )
+
     def _refresh_credentials(self) -> None:
         """Synchronous credential refresh — safe to call from ``asyncio.to_thread``.
 

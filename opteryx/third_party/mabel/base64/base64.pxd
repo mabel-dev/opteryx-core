@@ -38,3 +38,9 @@ cdef extern from "_base64.h":
     int b64_has_neon()
     int b64_has_avx2()
     int b64_has_avx512()
+
+
+cpdef bytes encode(bytes data)
+cpdef bytes decode(bytes data)
+cpdef bint has_neon()
+cpdef bint has_avx2()

@@ -22,12 +22,12 @@ from opteryx.types import OrsoTypes
 def execute(
     plan: PhysicalPlan, head_node: str = None, telemetry: QueryTelemetry = None
 ) -> Tuple[Generator[Morsel, Any, Any], ResultType]:
-    from opteryx.operators.explain_node import ExplainNode
-    from opteryx.operators.set_variable_node import SetVariableNode
-    from opteryx.operators.show_create_node import ShowCreateNode
-    from opteryx.operators.show_value_node import ShowValueNode
-    from opteryx.operators.table_management_node import TableManagementNode
-    from opteryx.operators.view_management_node import ViewManagementNode
+    from opteryx.operators.explain import ExplainNode
+    from opteryx.operators.set_variable import SetVariableNode
+    from opteryx.operators.show_create import ShowCreateNode
+    from opteryx.operators.show_value import ShowValueNode
+    from opteryx.operators.table_management import TableManagementNode
+    from opteryx.operators.view_management import ViewManagementNode
 
     # Retrieve the tail of the query plan, which should ideally be a single head node
     head_nodes = list(set(plan.get_exit_points()))
@@ -71,8 +71,8 @@ def execute(
 
 def explain(plan: PhysicalPlan, analyze: bool, _format: str) -> Generator[Morsel, None, None]:
     from opteryx.operators.base_plan_node import BasePlanNode
-    from opteryx.operators.exit_node import ExitNode
-    from opteryx.operators.explain_node import ExplainNode
+    from opteryx.operators.exit import ExitNode
+    from opteryx.operators.explain import ExplainNode
 
     def _inner_explain(node, depth):
         incoming_operators = plan.ingoing_edges(node)

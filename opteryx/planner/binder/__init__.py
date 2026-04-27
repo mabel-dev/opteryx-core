@@ -4,51 +4,30 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-This is Binder, it sits between the Logical Planner and the Optimizers.
+The Binder sits between the Plan Rewriter and the Optimizer. It is responsible for
+resolving all names, types, and references in the logical plan against the live
+catalogues and execution context.
 
-~~~
-                      ┌───────────┐
-                      │   USER    │
-         ┌────────────┤           ◄────────────┐
-         │SQL         └───────────┘            │
-  ───────┼─────────────────────────────────────┼──────
-         │                                     │
-   ┌─────▼─────┐                               │
-   │ SQL       │                               │
-   │ Rewriter  │                               │
-   └─────┬─────┘                               │
-         │SQL                                  │Results
-   ┌─────▼─────┐                         ┌─────┴─────┐
-   │           │                         │           │
-   │ Parser    │                         │ Executor  │
-   └─────┬─────┘                         └─────▲─────┘
-         │AST                                  │Plan
-   ┌─────▼─────┐      ┌───────────┐      ┌─────┴─────┐
-   │ AST       │      │           │      │ Physical  │
-   │ Rewriter  │      │ Catalogue │      │ Planner   │
-   └─────┬─────┘      └───────────┘      └─────▲─────┘
-         │AST               │Schemas           │Plan
-   ┌─────▼─────┐      ┌─────▼─────┐      ┌─────┴─────┐
-   │ Logical   │ Plan │           │ Plan │           │
-   │   Planner ├──────► Binder    ├──────► Optimizer │
-   └───────────┘      └───────────┘      └───────────┘
+Input:  unbound LogicalPlan — nodes carry raw identifiers and AST fragments
+Output: bound LogicalPlan — nodes carry resolved column identities, types, and schemas
 
-~~~
+The Binder performs three passes:
 
-The Binder is responsible for adding information about the database and engine into the
-Logical Plan.
+1. Relation expansion (bind_logical_relations) — Scan nodes that reference a VIEW or
+   CTE are replaced with the corresponding sub-plan. Relation names are randomised to
+   avoid conflicts when the same view or CTE is referenced more than once.
 
-The binder takes the the logical plan, and adds information from various catalogues
-into that planand then performs some validation checks.
+2. Visibility filter injection — row-level security predicates are inserted as Filter
+   nodes immediately above the relevant Scan nodes.
 
-These catalogues include:
-- The Data Catalogue (e.g. data schemas)
-- The Function Catalogue (e.g. function inputs and data types)
-- The Variable Catalogue (i.e. the @ variables)
+3. Node binding (BinderVisitor) — a bottom-up traversal resolves every column reference
+   against the relation schemas accumulated from the scans upward, validates types,
+   checks function signatures, and attaches schema_column metadata to each identifier
+   node. The bound plan carries enough information for the Optimizer and Physical
+   Planner to operate without further catalogue access.
 
-The Binder performs these activities:
-- schema lookup and propagation (add columns and types, add aliases)
-
+The Binder does NOT restructure the plan or make cost-based decisions; that is the
+Optimizer's responsibility.
 """
 
 from opteryx.exceptions import InvalidInternalStateError
@@ -62,7 +41,7 @@ from opteryx.planner.logical_planner import (
 )
 
 
-def rename_relations(plan: LogicalPlan):
+def rename_relations(plan: LogicalPlan, prefix: str = "$view-"):
     """
     When we include VIEWs and CTEs in a plan, we randomize the name of the
     relations to avoid conflicts.
@@ -80,7 +59,7 @@ def rename_relations(plan: LogicalPlan):
         for (nid, node) in plan.nodes(True)
         if node.node_type == LogicalPlanStepType.Scan
     ]:
-        alias = f"$view-{random_string(4)}"
+        alias = f"{prefix}{random_string(4)}"
         unique_id = str(uuid.uuid4())
         relations[node.alias] = (node.relation, alias, unique_id)
         node.alias = alias
@@ -153,7 +132,7 @@ def bind_logical_relations(plan: LogicalPlan, ctes: dict, telemetry) -> LogicalP
     from opteryx.expression import NodeType
     from opteryx.models import Node
     from opteryx.planner.logical_planner import LogicalPlanStepType
-    from opteryx.planner.views import get_view_plan
+    from opteryx.managers.views import get_view_plan
 
     if ctes is None:
         ctes = {}

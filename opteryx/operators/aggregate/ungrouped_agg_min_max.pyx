@@ -6,6 +6,8 @@
 # ---------------------------------------------------------------------------
 
 cdef class MinInt64Aggregate(UngroupedAggregate):
+    cdef int64_t _result
+    cdef bint    _seen
 
     def __cinit__(self, bytes column_name, bytes alias):
         self.column_name = column_name
@@ -58,6 +60,8 @@ cdef class MinInt64Aggregate(UngroupedAggregate):
 # ---------------------------------------------------------------------------
 
 cdef class MaxInt64Aggregate(UngroupedAggregate):
+    cdef int64_t _result
+    cdef bint    _seen
 
     def __cinit__(self, bytes column_name, bytes alias):
         self.column_name = column_name
@@ -110,6 +114,8 @@ cdef class MaxInt64Aggregate(UngroupedAggregate):
 # ---------------------------------------------------------------------------
 
 cdef class MinFloat64Aggregate(UngroupedAggregate):
+    cdef double _result
+    cdef bint   _seen
 
     def __cinit__(self, bytes column_name, bytes alias):
         self.column_name = column_name
@@ -162,6 +168,8 @@ cdef class MinFloat64Aggregate(UngroupedAggregate):
 # ---------------------------------------------------------------------------
 
 cdef class MaxFloat64Aggregate(UngroupedAggregate):
+    cdef double _result
+    cdef bint   _seen
 
     def __cinit__(self, bytes column_name, bytes alias):
         self.column_name = column_name
@@ -214,6 +222,7 @@ cdef class MaxFloat64Aggregate(UngroupedAggregate):
 # ---------------------------------------------------------------------------
 
 cdef class MinBytesAggregate(UngroupedAggregate):
+    cdef bytes _result
 
     def __cinit__(self, bytes column_name, bytes alias):
         self.column_name = column_name
@@ -241,6 +250,12 @@ cdef class MinBytesAggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_STRING:
             svec = <StringVector>raw
+            if svec._encoding == DRAKEN_ENCODING_RLE:
+                morsel_min = svec.min()
+                if morsel_min is not None:
+                    if self._result is None or morsel_min < self._result:
+                        self._result = morsel_min
+                return
             if svec._has_const:
                 if not svec._const_is_null:
                     ptr_b = <const char*>svec._const_value.data
@@ -255,7 +270,7 @@ cdef class MinBytesAggregate(UngroupedAggregate):
             buf   = svec.ptr
             nulls = buf.null_bitmap
             for i in range(nrows):
-                if _bitmap_is_valid(nulls, i):
+                if nulls == NULL or _bitmap_is_valid(nulls, i):
                     ptr_b = <const char*>(buf.data + buf.offsets[i])
                     len_b = <size_t>(buf.offsets[i + 1] - buf.offsets[i])
                     if self._result is None:
@@ -292,6 +307,7 @@ cdef class MinBytesAggregate(UngroupedAggregate):
 
 
 cdef class MaxBytesAggregate(UngroupedAggregate):
+    cdef bytes _result
 
     def __cinit__(self, bytes column_name, bytes alias):
         self.column_name = column_name
@@ -319,6 +335,12 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_STRING:
             svec = <StringVector>raw
+            if svec._encoding == DRAKEN_ENCODING_RLE:
+                morsel_max = svec.max()
+                if morsel_max is not None:
+                    if self._result is None or morsel_max > self._result:
+                        self._result = morsel_max
+                return
             if svec._has_const:
                 if not svec._const_is_null:
                     ptr_b = <const char*>svec._const_value.data
@@ -333,7 +355,7 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
             buf   = svec.ptr
             nulls = buf.null_bitmap
             for i in range(nrows):
-                if _bitmap_is_valid(nulls, i):
+                if nulls == NULL or _bitmap_is_valid(nulls, i):
                     ptr_b = <const char*>(buf.data + buf.offsets[i])
                     len_b = <size_t>(buf.offsets[i + 1] - buf.offsets[i])
                     if self._result is None:

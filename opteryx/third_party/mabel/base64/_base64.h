@@ -5,7 +5,10 @@
 #include <stdint.h>
 
 #ifdef __cplusplus
+  #define B64_RESTRICT __restrict__
 extern "C" {
+#else
+  #define B64_RESTRICT restrict
 #endif
 
 // Lookup tables - all entries initialized to 64 (invalid marker) except valid base64 chars
@@ -13,20 +16,20 @@ extern const uint8_t B64_DECODE_LUT[256];
 extern const char B64_ENCODE_LUT[64];
 
 // Basic functions (with auto-dispatch)
-void* b64tobin(void* restrict dest, const char* restrict src);
-void* b64tobin_len(void* restrict dest, const char* restrict src, size_t len);
-char* bintob64(char* restrict dest, const void* restrict src, size_t size);
+void* b64tobin(void* B64_RESTRICT dest, const char* B64_RESTRICT src);
+void* b64tobin_len(void* B64_RESTRICT dest, const char* B64_RESTRICT src, size_t len);
+char* bintob64(char* B64_RESTRICT dest, const void* B64_RESTRICT src, size_t size);
 
 // Optimized versions (for direct use if needed)
-void* b64tobin_scalar(void* restrict dest, const char* restrict src, size_t len);
-void* b64tobin_neon(void* restrict dest, const char* restrict src, size_t len);
-void* b64tobin_avx2(void* restrict dest, const char* restrict src, size_t len);
-void* b64tobin_avx512(void* restrict dest, const char* restrict src, size_t len);
+void* b64tobin_scalar(void* B64_RESTRICT dest, const char* B64_RESTRICT src, size_t len);
+void* b64tobin_neon(void* B64_RESTRICT dest, const char* B64_RESTRICT src, size_t len);
+void* b64tobin_avx2(void* B64_RESTRICT dest, const char* B64_RESTRICT src, size_t len);
+void* b64tobin_avx512(void* B64_RESTRICT dest, const char* B64_RESTRICT src, size_t len);
 
-char* bintob64_scalar(char* restrict dest, const void* restrict src, size_t size);
-char* bintob64_neon(char* restrict dest, const void* restrict src, size_t size);
-char* bintob64_avx2(char* restrict dest, const void* restrict src, size_t size);
-char* bintob64_avx512(char* restrict dest, const void* restrict src, size_t size);
+char* bintob64_scalar(char* B64_RESTRICT dest, const void* B64_RESTRICT src, size_t size);
+char* bintob64_neon(char* B64_RESTRICT dest, const void* B64_RESTRICT src, size_t size);
+char* bintob64_avx2(char* B64_RESTRICT dest, const void* B64_RESTRICT src, size_t size);
+char* bintob64_avx512(char* B64_RESTRICT dest, const void* B64_RESTRICT src, size_t size);
 
 // Utility functions
 size_t b64_encoded_size(size_t bin_size);

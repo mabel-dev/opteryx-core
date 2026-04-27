@@ -207,8 +207,11 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
             if not info:
                 continue
             column_id, operator, value = info
+            # Key includes filter node ID to prevent cross-filter compaction
+            # (e.g., don't compact 'id < 3' from filter A with 'id > 7' from filter B)
+            column_key = (context.node_id, column_id)
             occurrences: List[PredicateOccurrence] = state["column_occurrences"].setdefault(
-                column_id, []
+                column_key, []
             )
             occurrences.append(
                 PredicateOccurrence(

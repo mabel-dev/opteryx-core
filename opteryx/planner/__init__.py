@@ -4,34 +4,36 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-~~~
                       ┌───────────┐
                       │   USER    │
-         ┌────────────┤           ◄────────────┐
-         │SQL         └───────────┘            │
-  ───────┼─────────────────────────────────────┼──────
-         │                                     │
-   ┌─────▼─────┐                               │
-   │ SQL       │                               │
-   │ Rewriter  │                               │
-   └─────┬─────┘                               │
-         │SQL                                  │Results
-   ┌─────▼─────┐                         ┌─────┴─────┐
-   │           │                         │           │
-   │ Parser    │                         │ Executor  │
-   └─────┬─────┘                         └─────▲─────┘
-         │AST                                  │Plan
-   ┌─────▼─────┐      ┌───────────┐      ┌─────┴─────┐
-   │ AST       │      │           │      │ Physical  │
-   │ Rewriter  │      │ Catalogue │      │ Planner   │
-   └─────┬─────┘      └───────────┘      └─────▲─────┘
-         │AST               │Schemas           │Plan
-   ┌─────▼─────┐      ┌─────▼─────┐      ┌─────┴─────┐
-   │ Logical   │ Plan │           │ Plan │           │
-   │   Planner ├──────► Binder    ├──────► Optimizer │
-   └───────────┘      └───────────┘      └───────────┘
-
-~~~
+       ┌──────────────┤           ◄──────────────┐
+       │              └───────────┘              │
+───────┼─────────────────────────────────────────┼──────
+       │ SQL                                     │ Results
+ ┌─────▼─────┐                             ┌─────┴─────┐
+ │ SQL       │                             │           │
+ │ Rewriter  │                             │ Executor  │
+ └─────┬─────┘                             └─────▲─────┘
+       │ SQL                                     │ Plan
+ ┌─────▼─────┐                             ┌─────┴─────┐
+ │           │                             │ Physical  │
+ │ Parser    │                             │ Planner   │
+ └─────┬─────┘                             └─────▲─────┘
+       │ AST                                     │ Plan
+ ┌─────▼─────┐                             ┌─────┴─────┐
+ │ AST       │                             │           │
+ │ Rewriter  │                             │ Optimizer │
+ └─────┬─────┘                             └─────▲─────┘
+       │ AST                                     │ Plan
+ ┌─────▼─────┐        ┌───────────┐        ┌─────┴─────┐
+ │ Logical   │ Plan   │ Plan      │ Plan   │           │
+ │   Planner ├────────► Rewriter  ├────────► Binder    │
+ └───────────┘        └───────────┘        └─────▲─────┘
+                                                 │ Stats & Schemas
+                                           ┌─────┴─────┐
+                                           │           │
+                                           │ Catalogue │
+                                           └───────────┘
 """
 
 import datetime
@@ -155,6 +157,7 @@ def query_planner(
     from opteryx.planner.logical_planner import do_logical_planning_phase
     from opteryx.planner.optimizer import do_optimizer
     from opteryx.planner.physical_planner import create_physical_plan
+    from opteryx.planner.plan_rewriter import do_plan_rewrite
     from opteryx.planner.sql_rewriter import do_sql_rewrite
     from opteryx.third_party import sqloxide
 
@@ -186,6 +189,12 @@ def query_planner(
     # Logical Planner converts ASTs to logical plans
 
     logical_plan, ast, ctes = do_logical_planning_phase(parsed_statement)  # type: ignore
+
+    # Plan Rewriter: structural rewrites on the unbound logical plan
+    start = time.monotonic_ns()
+    logical_plan = do_plan_rewrite(logical_plan, ctes, telemetry)
+    telemetry.time_planning_plan_rewriter += time.monotonic_ns() - start
+
     # check user has permission for this query type
     query_type = next(iter(ast))
     # Special-case DROP VIEW -> treat as DropView permission

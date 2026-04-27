@@ -14,6 +14,9 @@ cdef class UngroupedAggregateEngine:
             engine.ingest(morsel)
         result_morsel = engine.finalize()
     """
+    cdef list _aggregates
+    cdef list _avg_finalizers
+    cdef set  _internal_aliases
 
     def __cinit__(self):
         self._aggregates = []

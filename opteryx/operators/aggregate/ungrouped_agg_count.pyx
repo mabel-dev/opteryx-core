@@ -3,6 +3,7 @@
 
 cdef class CountStarAggregate(UngroupedAggregate):
     """COUNT(*) — counts every row unconditionally."""
+    cdef int64_t _count
 
     def __cinit__(self, bytes alias):
         self.column_name = b""
@@ -31,6 +32,7 @@ cdef class CountStarAggregate(UngroupedAggregate):
 
 cdef class CountAggregate(UngroupedAggregate):
     """COUNT(col) — counts non-null values in the named column."""
+    cdef int64_t _count
 
     def __cinit__(self, bytes column_name, bytes alias):
         self.column_name = column_name

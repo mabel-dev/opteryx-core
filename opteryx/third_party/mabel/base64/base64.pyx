@@ -16,6 +16,8 @@ cdef extern from "_base64.h":
     char* bintob64(char* dest, const void* src, size_t size)
     int b64_has_neon()
     int b64_has_avx2()
+#
+# Note: _base64.h is in the same directory as this .pyx file
 
 cdef inline size_t calc_encoded_size(size_t length):
     """Base64-encoded output length (without newlines)."""

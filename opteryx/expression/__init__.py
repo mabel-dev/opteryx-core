@@ -397,18 +397,14 @@ def _inner_evaluate(root: Node, table):
     if node_type == NodeType.SUBQUERY:
         raise UnsupportedSyntaxError("IN (<subquery>) temporarily not supported.")
 
-    identity = root.schema_column.identity if root.schema_column else random_string()
+    identity = root.schema_column.identity if root.schema_column else random_string().encode("utf-8")
 
     # if we have this column already, return it from the Morsel
-    # Morsels use bytes for column names
+    # Morsels use bytes for column names; identity is now always bytes
     col_names = table.column_names
-    col_identity = identity
 
-    if isinstance(identity, str):
-        col_identity = identity.encode("utf-8")
-
-    if col_identity in col_names:
-        col = table.column(col_identity)
+    if identity in col_names:
+        col = table.column(identity)
         return col
 
     # LITERAL TYPES - return Draken constant vectors
@@ -589,9 +585,6 @@ def _inner_evaluate(root: Node, table):
             col_names = table.column_names
             col_identity = root.schema_column.identity
 
-            if isinstance(col_identity, str):
-                col_identity = col_identity.encode("utf-8")
-
             if col_identity not in col_names:
                 raise ColumnReferencedBeforeEvaluationError(column=root.schema_column.name)
 
@@ -652,23 +645,15 @@ def _inner_evaluate(root: Node, table):
 
             if right is None:
                 if root.right.node_type == NodeType.IDENTIFIER:
-                    # Get the column from the Morsel
-                    col_identity = root.right.schema_column.identity
-
-                    if isinstance(col_identity, str):
-                        col_identity = col_identity.encode("utf-8")
-                    col = table.column(col_identity)
+                    # Get the column from the Morsel; identity is bytes
+                    col = table.column(root.right.schema_column.identity)
                     right = col
                 else:
                     right = _inner_evaluate(root.right, table)
             if left is None:
                 if root.left.node_type == NodeType.IDENTIFIER:
-                    # Get the column from the Morsel
-                    col_identity = root.left.schema_column.identity
-
-                    if isinstance(col_identity, str):
-                        col_identity = col_identity.encode("utf-8")
-                    col = table.column(col_identity)
+                    # Get the column from the Morsel; identity is bytes
+                    col = table.column(root.left.schema_column.identity)
                     left = col
                 else:
                     left = _inner_evaluate(root.left, table)
@@ -798,8 +783,8 @@ def _evaluate_and_append_morsel(expressions, morsel):
     names = list(morsel.column_names)
     vectors = [morsel.column(name) for name in morsel.column_names]
 
-    # Track existing columns as strings for identity checking
-    existing_cols = {name.decode("utf-8") if isinstance(name, bytes) else name for name in names}
+    # Track existing columns as bytes for identity checking; identity is bytes
+    existing_cols = set(names)
 
     for statement in prioritized_expressions:
         identity = statement.schema_column.identity
@@ -816,8 +801,7 @@ def _evaluate_and_append_morsel(expressions, morsel):
             if literal_vec is None:
                 literal_vec = constant_from_scalar(statement.value, morsel.num_rows)
             if literal_vec is not None:
-                # Convert identity to bytes for consistency with morsel column names
-                names.append(identity.encode("utf-8") if isinstance(identity, str) else identity)
+                names.append(identity)
                 vectors.append(literal_vec)
                 existing_cols.add(identity)
                 continue
@@ -825,8 +809,7 @@ def _evaluate_and_append_morsel(expressions, morsel):
         # Non-literal expressions evaluate directly using Draken vectors
         working_morsel = Morsel.from_vectors(names, vectors)
         result = evaluate_statement(statement, working_morsel)
-        # Convert identity to bytes for consistency with morsel column names
-        names.append(identity.encode("utf-8") if isinstance(identity, str) else identity)
+        names.append(identity)
         vectors.append(result)
         existing_cols.add(identity)
         continue

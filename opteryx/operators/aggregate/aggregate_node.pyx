@@ -15,35 +15,16 @@ bridges planner-bound aggregate nodes to that engine and handles a few literal
 edge cases.
 """
 
-from __future__ import annotations
-
 import time
 
 from libc.stdint cimport uint8_t
 
-from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
-from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.draken.vectors.vector cimport Vector
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 from opteryx.operators.aggregate.helpers import extract_evaluations
-from opteryx.operators.aggregate.ungrouped_agg import (
-    AnyValueAggregate,
-    CountAggregate,
-    CountDistinctAggregate,
-    CountStarAggregate,
-    MaxBytesAggregate,
-    MaxFloat64Aggregate,
-    MaxInt64Aggregate,
-    MinBytesAggregate,
-    MinFloat64Aggregate,
-    MinInt64Aggregate,
-    SumFloat64Aggregate,
-    SumInt64Aggregate,
-    UngroupedAggregateEngine,
-)
 from opteryx.types import OrsoTypes
 
 from opteryx import EOS

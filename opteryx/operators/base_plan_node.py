@@ -352,16 +352,15 @@ class JoinNode(BasePlanNode):
         from opteryx.expression.casts import cast_to_double, cast_to_int
 
         names = list(morsel.column_names)
-        names_str = [n.decode() if isinstance(n, bytes) else n for n in names]
-        vectors = [morsel.column(n if isinstance(n, bytes) else n.encode()) for n in names]
+        vectors = [morsel.column(n) for n in names]
 
         changed = False
         for cast_rule in self._join_key_cast_plan:
             column_name = cast_rule["left_column"] if is_left else cast_rule["right_column"]
-            if column_name not in names_str:
+            if column_name not in names:
                 continue
 
-            idx = names_str.index(column_name)
+            idx = names.index(column_name)
             target_type = cast_rule["target_type"]
 
             if target_type == OrsoTypes.DOUBLE:
@@ -377,7 +376,7 @@ class JoinNode(BasePlanNode):
         if not changed:
             return morsel
 
-        return _Morsel.from_vectors(names_str, vectors)
+        return _Morsel.from_vectors(names, vectors)
 
     def to_mermaid(self, nid):
         """

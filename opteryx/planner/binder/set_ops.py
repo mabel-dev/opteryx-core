@@ -3,13 +3,13 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-from typing import Tuple
+from typing import List, Tuple
 
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.binder import merge_schemas
 from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.types import OrsoTypes
+from opteryx.types import OrsoTypes, find_compatible_type
 from opteryx.types.schema import ConstantColumn, FlatColumn, RelationSchema
 
 
@@ -19,7 +19,46 @@ def visit_set(self, node: Node, context: BindingContext) -> Tuple[Node, BindingC
     return node, context
 
 
+def _validate_set_operation_types(
+    left_relations: List[str],
+    right_relations: List[str],
+    context: BindingContext,
+    operation_name: str = "SET OPERATION",
+) -> List[OrsoTypes]:
+    """Validate and find compatible types for columns in set operations.
+
+    For each column position across left and right relations, find a compatible type.
+    Returns list of coerced types in column order.
+    """
+    # Get all columns from left and right
+    left_columns = []
+    for rel_name in left_relations:
+        left_columns.extend(context.schemas[rel_name].columns)
+
+    right_columns = []
+    for rel_name in right_relations:
+        right_columns.extend(context.schemas[rel_name].columns)
+
+    if len(left_columns) != len(right_columns):
+        raise ValueError(
+            f"{operation_name}: column count mismatch — left has {len(left_columns)}, right has {len(right_columns)}"
+        )
+
+    coerced_types = []
+    for left_col, right_col in zip(left_columns, right_columns):
+        coerced_type = find_compatible_type([left_col.type, right_col.type])
+        coerced_types.append(coerced_type)
+
+    return coerced_types
+
+
 def visit_union(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    # Validate and determine coerced types for UNION/INTERSECT/EXCEPT
+    coerced_types = _validate_set_operation_types(
+        node.left_relation_names, node.right_relation_names, context, "UNION"
+    )
+    node.coerced_types = coerced_types
+
     for relation in node.right_relation_names:
         context.schemas.pop(relation, None)
     context.relations = {n: "union" for n in node.left_relation_names}
@@ -32,6 +71,66 @@ def visit_union(self, node: Node, context: BindingContext) -> Tuple[Node, Bindin
                     LogicalColumn(
                         node_type=NodeType.IDENTIFIER,  # column type
                         source_column=schema_column.name,  # the source column
+                        schema_column=schema_column,
+                    )
+                )
+        node.columns = columns
+
+    from opteryx.planner.binder.project import visit_exit
+
+    node, context = visit_exit(self, node, context)
+    return node, context
+
+
+def visit_intersect(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    # Validate and determine coerced types for INTERSECT
+    coerced_types = _validate_set_operation_types(
+        node.left_relation_names, node.right_relation_names, context, "INTERSECT"
+    )
+    node.coerced_types = coerced_types
+
+    for relation in node.right_relation_names:
+        context.schemas.pop(relation, None)
+    context.relations = {n: "intersect" for n in node.left_relation_names}
+
+    if len(node.columns) == 1 and node.columns[0].node_type == NodeType.WILDCARD:
+        columns = []
+        for schema_name in node.left_relation_names:
+            for schema_column in context.schemas[schema_name].columns:
+                columns.append(
+                    LogicalColumn(
+                        node_type=NodeType.IDENTIFIER,
+                        source_column=schema_column.name,
+                        schema_column=schema_column,
+                    )
+                )
+        node.columns = columns
+
+    from opteryx.planner.binder.project import visit_exit
+
+    node, context = visit_exit(self, node, context)
+    return node, context
+
+
+def visit_except(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    # Validate and determine coerced types for EXCEPT
+    coerced_types = _validate_set_operation_types(
+        node.left_relation_names, node.right_relation_names, context, "EXCEPT"
+    )
+    node.coerced_types = coerced_types
+
+    for relation in node.right_relation_names:
+        context.schemas.pop(relation, None)
+    context.relations = {n: "except" for n in node.left_relation_names}
+
+    if len(node.columns) == 1 and node.columns[0].node_type == NodeType.WILDCARD:
+        columns = []
+        for schema_name in node.left_relation_names:
+            for schema_column in context.schemas[schema_name].columns:
+                columns.append(
+                    LogicalColumn(
+                        node_type=NodeType.IDENTIFIER,
+                        source_column=schema_column.name,
                         schema_column=schema_column,
                     )
                 )

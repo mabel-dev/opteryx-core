@@ -81,7 +81,7 @@ class FlatColumn:
     name: str
     type: OrsoTypes
     nullable: bool = True
-    identity: Optional[str] = None
+    identity: Optional[bytes] = None
     default: Optional[Any] = None
     description: Optional[str] = None
     disposition: Optional[str] = None
@@ -98,9 +98,15 @@ class FlatColumn:
     origin: Optional[List[str]] = None  # Deferred to Phase 9
 
     def __post_init__(self):
-        """Auto-generate identity from name if not provided."""
+        """Auto-generate identity from name if not provided; ensure identity is bytes."""
         if self.identity is None:
-            self.identity = self.name
+            raw = self.name
+        else:
+            raw = self.identity
+        if isinstance(raw, str):
+            self.identity = raw.encode("utf-8")
+        else:
+            self.identity = raw
 
     def __str__(self) -> str:
         """String representation: name:type."""
@@ -143,7 +149,7 @@ class FlatColumn:
         return {
             "name": self.name,
             "type": self.type.value,
-            "identity": self.identity,
+            "identity": self.identity.decode("utf-8") if isinstance(self.identity, bytes) else self.identity,
             "nullable": self.nullable,
             "default": self.default,
             "description": self.description,

@@ -1,0 +1,17 @@
+# Opteryx Monorepo Meson Build Options
+
+option('enable_lto',
+       type: 'boolean',
+       value: false,
+       description: 'Enable Link-Time Optimization (LTO) for better performance but slower builds')
+
+option('enable_pgo',
+       type: 'boolean',
+       value: false,
+       description: 'Enable Profile-Guided Optimization (PGO) for best performance')
+
+option('pgo_phase',
+       type: 'combo',
+       choices: ['generate', 'use'],
+       value: 'generate',
+       description: 'PGO phase: generate (collect profile data) or use (apply optimizations)')

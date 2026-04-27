@@ -1,25 +1,10 @@
 """
-Parquet column-chunk reader orchestration.
+Parquet column-chunk reader: footer parsing and column fetch.
 
 Public API:
 - fetch_footer(...)
 - fetch_columns(...)
-- iter_row_groups(...)
 - ListColumnError
-
-This module coordinates footer fetching, selective column reads, and row-group
-assembly for parquet-backed scans. It also emits trace events for IO, buffering,
-and decode phases so the execution timeline can be visualized and profiled.
-
-Design notes
-------------
-- Footer reads are always performed first to discover row groups and column
-  metadata.
-- Column reads are batched by row group where possible.
-- The row-group iterator is the public entry point used by the parquet scan
-  transport layer.
-- Tracing uses semantic phase names so performance tooling can distinguish IO,
-  buffering, and decode work.
 """
 
 from __future__ import annotations
@@ -29,7 +14,6 @@ import time
 from dataclasses import dataclass
 from typing import Any
 from typing import Dict
-from typing import Iterator
 from typing import List
 from typing import Optional
 from typing import Tuple
@@ -38,7 +22,6 @@ from typing import Union
 from opteryx.compiled.structures.footer_cache import ParquetFooterBytesCache
 from opteryx.connectors.parquet_io.cache import InMemoryParquetCache
 from opteryx.connectors.parquet_io.cache import ParquetCache
-from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
 from opteryx.tracing.event_recorder import record_event as _record_event
 
 from opteryx import config as _cfg
@@ -136,9 +119,6 @@ def _trace_decode_started(**kwargs) -> None:
 def _trace_decode_completed(**kwargs) -> None:
     _trace(event_type="decode_complete", **kwargs)
 
-
-def _trace_rowgroup_fetched(**kwargs) -> None:
-    _trace(event_type="rowgroup_fetch", **kwargs)
 
 
 def _resolve_decoder(decoder: Optional[Any]) -> Any:
@@ -562,111 +542,3 @@ class _ColumnWorkItem:
     length: int
 
 
-def _connector_name(filesystem: Any, connector: Optional[str]) -> Optional[str]:
-    if connector:
-        return str(connector).upper()
-
-    try:
-        from opteryx.connectors.io_systems.local_filesystem import OpteryxLocalFileSystem
-
-        if isinstance(filesystem, OpteryxLocalFileSystem):
-            return "LOCAL"
-    except Exception:
-        pass
-
-    return None
-
-
-def _yield_with_scan_strategy(
-    row_groups: Iterator[Dict[str, Any]],
-    strategy: str,
-) -> Iterator[Dict[str, Any]]:
-    for row_group in row_groups:
-        row_group["__parquet_scan_strategy__"] = strategy
-        yield row_group
-
-
-def iter_row_groups(
-    filesystem: Any,
-    paths: List[str],
-    column_names: List[str],
-    cache: Optional[ParquetCache] = None,
-    max_workers: int = 32,
-    decoder: Optional[Any] = None,
-    predicates: Optional[List] = None,
-    file_sizes: Optional[Dict[str, int]] = None,
-    connector: Optional[str] = None,
-    query_id: Optional[str] = None,
-    prefetched_footers: Optional[Dict[str, dict]] = None,
-    footer_bytes_cache: Optional[ParquetFooterBytesCache] = None,
-) -> Iterator[Dict[str, Any]]:
-    """
-    Yield assembled row groups.
-
-    Row groups across all paths are fetched in parallel using a dedicated
-    reader-rowgroup pool (cross-file IO) while fetch_columns uses the
-    separate decode and local-range pools internally — no nested-pool deadlock.
-    """
-    if cache is None:
-        cache = InMemoryParquetCache()
-
-    _ = file_sizes, query_id, prefetched_footers  # resolved via cache / filesystem already
-    decoder_fn = _resolve_decoder(decoder)
-    trace_enabled = bool(_cfg.OPTERYX_TRACE)
-
-    # Build all work items up front.  Footer reads are cache hits when the
-    # caller (ParquetReadNode) has pre-fetched them; otherwise a real read
-    # happens here.
-    work_items: List[Tuple[str, int]] = []
-    for path in paths:
-        meta = fetch_footer(
-            filesystem, path, cache=cache, connector=connector, footer_bytes_cache=footer_bytes_cache
-        )
-        for rg_idx, rg_meta in enumerate(meta.get("row_groups", [])):
-            if predicates and not row_group_may_satisfy(rg_meta, predicates):
-                continue
-            work_items.append((path, rg_idx))
-
-    if not work_items:
-        return
-
-    def _fetch_one(path: str, rg_idx: int) -> Dict[str, Any]:
-        row_group = fetch_columns(
-            filesystem,
-            path,
-            rg_idx,
-            column_names,
-            cache=cache,
-            decoder=decoder_fn,
-            connector=connector,
-        )
-        row_group["__path__"] = path
-        row_group["__row_group__"] = rg_idx
-        row_group["__parquet_scan_strategy__"] = "reader"
-        if trace_enabled:
-            rows_fetched = (
-                len(row_group) if isinstance(row_group, dict) else getattr(row_group, "num_rows", 0)
-            )
-            _trace_rowgroup_fetched(
-                file_id=path, rg_idx=rg_idx, connector=connector, rows_out=rows_fetched
-            )
-        return row_group
-
-    if len(work_items) == 1 or max_workers <= 1:
-        for path, rg_idx in work_items:
-            yield _fetch_one(path, rg_idx)
-        return
-
-    # Parallel path — fan out all (path, rg_idx) work items.
-    # We use a *separate* pool from "parquet-decode" (used inside fetch_columns)
-    # to avoid nested-pool starvation.
-    from concurrent.futures import as_completed
-
-    from opteryx.connectors.parquet_io.thread_pool_manager import get_range_pool
-
-    rg_pool = get_range_pool(name="reader-rowgroup", max_workers=max_workers)
-    futures = {
-        rg_pool.submit(_fetch_one, path, rg_idx): (path, rg_idx) for path, rg_idx in work_items
-    }
-    for future in as_completed(futures):
-        yield future.result()

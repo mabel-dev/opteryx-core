@@ -12,10 +12,6 @@ select
 from
     testdata.tpch_tiny.lineitem
 where
-    l_shipdate <= '1998-09-16'
-group by
-    l_returnflag,
-    l_linestatus
-order by
-    l_returnflag,
-    l_linestatus;
+    l_shipdate <= '1998-09-16'::DATE
+group by l_returnflag, l_linestatus
+order by l_returnflag, l_linestatus;

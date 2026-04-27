@@ -29,7 +29,7 @@ from opteryx.planner.binder.filter import visit_filter
 # from opteryx.planner.binder.join import visit_join
 from opteryx.planner.binder.order import visit_order
 from opteryx.planner.binder.project import visit_exit, visit_project
-from opteryx.planner.binder.set_ops import visit_set, visit_union, visit_unnest
+from opteryx.planner.binder.set_ops import visit_set, visit_union, visit_intersect, visit_except, visit_unnest
 from opteryx.planner.binder.subquery import visit_comment, visit_subquery
 from opteryx.planner.binder.traversal import post_bind, traverse
 from opteryx.planner.binder.view import (
@@ -393,11 +393,19 @@ class BinderVisitor:
     def visit_union_impl(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
         return visit_union(self, node, context)
 
+    def visit_intersect_impl(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+        return visit_intersect(self, node, context)
+
+    def visit_except_impl(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+        return visit_except(self, node, context)
+
     def visit_unnest_impl(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
         return visit_unnest(self, node, context)
 
     visit_set = visit_set_impl
     visit_union = visit_union_impl
+    visit_intersect = visit_intersect_impl
+    visit_except = visit_except_impl
     visit_unnest = visit_unnest_impl
 
     # Delegation methods for view operations

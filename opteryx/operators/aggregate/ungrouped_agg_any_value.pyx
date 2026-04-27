@@ -8,6 +8,8 @@ cdef class AnyValueAggregate(UngroupedAggregate):
     Once a value is found, all subsequent morsels are skipped entirely
     without even touching the column.
     """
+    cdef object _value
+    cdef bint   _seen
 
     def __cinit__(self, bytes column_name, bytes alias):
         self.column_name = column_name

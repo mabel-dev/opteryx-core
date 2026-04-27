@@ -3,7 +3,7 @@ select
 from
     testdata.tpch_tiny.lineitem
 where
-    l_shipdate >= '1993-01-01'
-    and l_shipdate < '1994-01-01'
+    l_shipdate >= '1993-01-01'::DATE
+    and l_shipdate < '1994-01-01'::DATE
     and l_discount between 0.06 - 0.01 and 0.06 + 0.01
     and l_quantity < 25;
