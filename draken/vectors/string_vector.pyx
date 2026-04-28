@@ -1674,6 +1674,8 @@ cdef class StringVector(Vector):
         cdef int32_t start, end
         cdef char* data
         cdef uint8_t byte, bit
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_string(self).to_pylist()
         if self._encoding == DRAKEN_ENCODING_RLE:
             # Expand RLE inline — avoids a full dense materialize just for the list.
             rle_n = self._rle_buffer.num_runs

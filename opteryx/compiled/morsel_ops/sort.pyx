@@ -56,6 +56,7 @@ from draken.core.buffers cimport (
     DRAKEN_TIME32,
     DRAKEN_TIME64,
 )
+from draken.morsels.morsel cimport Morsel
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.vector cimport Vector
 
@@ -113,6 +114,24 @@ cdef extern from * nogil:
             });
     }
 
+    static void _sort_strings(
+        uint32_t* perm,
+        uint32_t n,
+        const char* data,
+        const int32_t* offsets,
+        bool ascending
+    ) {
+        std::sort(perm, perm + n,
+            [data, offsets, ascending](uint32_t a, uint32_t b) {
+                int32_t sa = offsets[a], la = offsets[a + 1] - sa;
+                int32_t sb = offsets[b], lb = offsets[b + 1] - sb;
+                int32_t cm = (la < lb) ? la : lb;
+                int r = cm ? std::memcmp(data + sa, data + sb, (size_t)cm) : 0;
+                if (r == 0) r = la - lb;
+                return ascending ? (r < 0) : (r > 0);
+            });
+    }
+
     // O(D log D) sort for numeric dictionary remap building.
     // Sorts the order[] array by sort_keys[order[i]] ascending.
     static void _sort_numeric_remap(
@@ -148,6 +167,14 @@ cdef extern from * nogil:
     void _do_tiebreak_sort(
         uint32_t* begin,
         uint32_t* end,
+        const char* data,
+        const int32_t* offsets,
+        bint ascending,
+    ) nogil
+
+    void _sort_strings(
+        uint32_t* perm,
+        uint32_t n,
         const char* data,
         const int32_t* offsets,
         bint ascending,
@@ -420,7 +447,7 @@ cdef uint32_t* _build_string_dict_remap(
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def morsel_sort(morsel, list column_names, list ascending):
+cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
     """
     Compute a sort permutation for a Draken Morsel.
 
@@ -544,24 +571,21 @@ def morsel_sort(morsel, list column_names, list ascending):
 
             elif isinstance(vec, StringVector):
                 # ── String column ────────────────────────────────────────────
-                # compress_into packs the first 7 bytes as a big-endian int64.
-                # Constant StringVectors (all rows identical) need no tiebreak;
-                # dense StringVectors need a memcmp pass for strings > 7 bytes.
+                # std::sort with memcmp: correct for all byte values including
+                # multibyte UTF-8. The previous prefix-radix approach cast the
+                # 7-byte prefix to signed int64, which caused strings with
+                # leading bytes >= 0x80 (Cyrillic, CJK, etc.) to sort before
+                # ASCII — a correctness bug.
                 sv = <StringVector>vec
-                signed_mv = sv.compress()
-                with nogil:
-                    for i in range(n):
-                        keys[i] = <uint64_t>signed_mv[i] ^ key_xor
-                    _radix_sort(perm_buf, tmp_buf, keys, n, 8)
-
                 if not sv._has_const:
                     sv_ptr = sv.ptr
-                    _tiebreak_strings(
-                        perm_buf, n, keys,
-                        <const char*>sv_ptr.data,
-                        sv_ptr.offsets,
-                        asc,
-                    )
+                    with nogil:
+                        _sort_strings(
+                            perm_buf, <uint32_t>n,
+                            <const char*>sv_ptr.data,
+                            sv_ptr.offsets,
+                            asc,
+                        )
 
             else:
                 # ── Numeric / timestamp / date / bool / other ────────────────

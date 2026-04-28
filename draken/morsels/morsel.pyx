@@ -40,6 +40,7 @@ from draken.core.buffers cimport (
     DRAKEN_CONSTANT,
     DRAKEN_DATE32,
     DRAKEN_DICTIONARY,
+    DRAKEN_ENCODING_DICTIONARY,
     DRAKEN_ENCODING_RLE,
     DRAKEN_FLOAT32,
     DRAKEN_FLOAT64,
@@ -61,7 +62,7 @@ from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.int64_vector cimport Int64Vector
 from draken.vectors.integer_vector cimport IntegerVector
 from draken.vectors.interval_vector cimport IntervalVector
-from draken.vectors.string_vector cimport StringVector
+from draken.vectors.string_vector cimport StringVector, _materialize_dict_string
 from draken.vectors.time_vector cimport TimeVector
 from draken.vectors.timestamp_vector cimport TimestampVector
 from draken.interop.arrow cimport vector_from_arrow
@@ -770,11 +771,23 @@ cdef class Morsel:
                 new_vec = <Vector> out_interval
 
             elif isinstance(current_vec, StringVector):
+                # Materialize dict/RLE-encoded source StringVectors up front so the
+                # byte-counting and copy passes can rely on a dense ptr.data /
+                # ptr.offsets layout.  Holds references for the duration of combine.
+                str_sources = [None] * n_morsels
+                for j in range(n_morsels):
+                    src_str = <StringVector> (<Morsel> morsels[j]).ptr.columns[i]
+                    if src_str._has_const:
+                        str_sources[j] = src_str
+                    elif src_str._encoding == DRAKEN_ENCODING_DICTIONARY and (src_str.ptr == NULL or src_str.ptr.data == NULL):
+                        str_sources[j] = _materialize_dict_string(src_str)
+                    else:
+                        str_sources[j] = src_str
+
                 total_string_bytes = 0
-                for morsel_obj in morsels:
-                    morsel = <Morsel> morsel_obj
-                    src_str = <StringVector> morsel.ptr.columns[i]
-                    current_rows = morsel.ptr.num_rows
+                for j in range(n_morsels):
+                    src_str = <StringVector> str_sources[j]
+                    current_rows = (<Morsel> morsels[j]).ptr.num_rows
                     # Handle constant-encoded StringVectors which do not have offsets/data
                     if src_str._has_const:
                         if src_str._const_is_null:
@@ -797,10 +810,9 @@ cdef class Morsel:
                 null_bitmap = NULL
                 const_len = 0
                 out_str.ptr.offsets[0] = 0
-                for morsel_obj in morsels:
-                    morsel = <Morsel> morsel_obj
-                    src_str = <StringVector> morsel.ptr.columns[i]
-                    current_rows = morsel.ptr.num_rows
+                for j in range(n_morsels):
+                    src_str = <StringVector> str_sources[j]
+                    current_rows = (<Morsel> morsels[j]).ptr.num_rows
                     if src_str._has_const:
                         if src_str._const_is_null:
                             current_bytes = 0
