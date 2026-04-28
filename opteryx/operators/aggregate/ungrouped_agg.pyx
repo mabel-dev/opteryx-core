@@ -11,9 +11,9 @@ from libc.float cimport DBL_MAX
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
-from opteryx.compiled.draken.vectors.vector cimport Vector
-from opteryx.compiled.draken.vectors.integer_vector cimport IntegerVector
-from opteryx.compiled.draken.core.buffers cimport (
+from draken.vectors.vector cimport Vector
+from draken.vectors.integer_vector cimport IntegerVector
+from draken.core.buffers cimport (
     ConstAccessor, DictAccessor, DrakenFixedBuffer, DrakenVarBuffer,
     DrakenConstantStringPayload, DRAKEN_ENCODING_RLE,
 )

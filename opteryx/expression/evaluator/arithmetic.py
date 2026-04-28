@@ -90,11 +90,11 @@ def _eval_binary_op_draken(node, morsel):
         OrsoTypes.TIMESTAMP,
     ):
         if node.left.schema_column.type == OrsoTypes.DATE:
-            from opteryx.compiled.draken.vectors.date32_vector import Date32Vector
+            from draken.vectors.date32_vector import Date32Vector
 
             left = Date32Vector.from_constant(_coerce_date32(left), morsel.num_rows)
         else:
-            from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
+            from draken.vectors.timestamp_vector import TimestampVector
 
             left = TimestampVector.from_constant(_coerce_timestamp(left), morsel.num_rows)
 
@@ -103,11 +103,11 @@ def _eval_binary_op_draken(node, morsel):
         OrsoTypes.TIMESTAMP,
     ):
         if node.right.schema_column.type == OrsoTypes.DATE:
-            from opteryx.compiled.draken.vectors.date32_vector import Date32Vector
+            from draken.vectors.date32_vector import Date32Vector
 
             right = Date32Vector.from_constant(_coerce_date32(right), morsel.num_rows)
         else:
-            from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
+            from draken.vectors.timestamp_vector import TimestampVector
 
             right = TimestampVector.from_constant(_coerce_timestamp(right), morsel.num_rows)
 

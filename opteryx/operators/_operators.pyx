@@ -4,14 +4,14 @@
 #
 # Common cimports declared here are visible to all included files.
 
-from opteryx.compiled.draken.morsels.morsel cimport Morsel
-from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
-from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from draken.morsels.morsel cimport Morsel
+from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.float64_vector cimport Float64Vector
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.string_vector cimport StringVector
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 from opteryx.compiled.structures.buffers cimport IntBuffer, Int32Buffer
-from opteryx.compiled.draken.interop.vector_sequence cimport vector_from_sequence
+from draken.interop.vector_sequence cimport vector_from_sequence
 from cpython.array cimport array
 
 # Include order: base classes / shared types before their consumers.

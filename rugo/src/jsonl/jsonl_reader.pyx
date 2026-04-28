@@ -18,11 +18,11 @@ from cpython.buffer cimport PyBUF_CONTIG_RO, PyObject_GetBuffer, PyBuffer_Releas
 from cpython.ref cimport PyObject
 from cpython.exc cimport PyErr_Occurred, PyErr_Clear
 
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector, StringVectorBuilder
-from opteryx.compiled.draken.vectors.array_vector cimport ArrayVector, from_sequence as array_from_sequence
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.float64_vector cimport Float64Vector
+from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
+from draken.vectors.array_vector cimport ArrayVector, from_sequence as array_from_sequence
 
 
 

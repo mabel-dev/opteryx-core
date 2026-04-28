@@ -12,8 +12,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from opteryx.compiled.draken import Morsel
-from opteryx.compiled.draken.storage import write_morsel
+from draken import Morsel
+from draken.storage import write_morsel
 
 
 def build_draken_file(codec: str = "lz4") -> Path:

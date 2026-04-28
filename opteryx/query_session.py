@@ -453,7 +453,7 @@ class Session(DataFrame):
         This is a *Draken-native* API: it avoids converting morsels to Arrow (or
         any other intermediate format) except when absolutely required.
         """
-        from opteryx.compiled.draken.morsels.morsel import Morsel
+        from draken.morsels.morsel import Morsel
 
         _DRAKEN_TO_ORSO = {
             1: OrsoTypes.INTEGER,  # INT8

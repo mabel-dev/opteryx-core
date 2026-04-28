@@ -16,8 +16,6 @@ from opteryx.types import OrsoTypes
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "draken"
-
 
 class ShowCreateNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):

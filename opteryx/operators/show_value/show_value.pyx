@@ -17,8 +17,6 @@ from opteryx.types import OrsoTypes
 
 from opteryx import EOS
 
-_DATA_FORMAT = "draken"
-
 
 class ShowValueNode(ReaderNode):
     def __init__(self, properties: QueryProperties, **parameters):

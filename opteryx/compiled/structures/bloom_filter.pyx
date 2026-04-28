@@ -39,8 +39,8 @@ from libc.stdlib cimport calloc, free
 from libc.stdint cimport uint8_t, uint64_t, uint32_t, int64_t
 from cpython.array cimport array, clone
 
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.morsels.morsel cimport Morsel
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.morsels.morsel cimport Morsel
 from opteryx.compiled.morsel_ops.null_filter cimport non_null_row_indices
 
 # Reusable template arrays for zero-copy clone allocations

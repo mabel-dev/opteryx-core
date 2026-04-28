@@ -13,8 +13,8 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-from opteryx.compiled.draken.vectors.string_vector import StringVector
+from draken.interop.arrow import vector_from_arrow
+from draken.vectors.string_vector import StringVector
 
 
 def _vec(values):

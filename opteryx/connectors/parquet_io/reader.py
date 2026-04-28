@@ -74,8 +74,8 @@ def _coerce_temporal_vector(decoded: Any, col_stats: dict) -> Any:
     if not (logical_type.startswith("date32") or logical_type.startswith("timestamp")):
         return decoded
 
-    from opteryx.compiled.draken.vectors.date32_vector import from_int64_vector as int64_to_date32
-    from opteryx.compiled.draken.vectors.timestamp_vector import (
+    from draken.vectors.date32_vector import from_int64_vector as int64_to_date32
+    from draken.vectors.timestamp_vector import (
         from_int64_vector as int64_to_timestamp,
     )
 
@@ -123,10 +123,10 @@ def _resolve_decoder(decoder: Optional[Any]) -> Any:
     if decoder is not None:
         return decoder
     try:
-        from opteryx.compiled.rugo.parquet import decode_column_from_chunk  # type: ignore[import]
+        from rugo.parquet_reader import decode_column_from_chunk  # type: ignore[import]
     except ImportError:
         raise RuntimeError(
-            "rugo.parquet is required but not available. "
+            "rugo.parquet_reader is required but not available. "
             "Ensure rugo is compiled and in the Python path."
         )
     return decode_column_from_chunk
@@ -272,10 +272,10 @@ def _read_footer_payload(
 
 def _parse_footer_envelope(path: str, envelope: bytes, footer_bytes: int) -> dict:
     try:
-        from opteryx.compiled.rugo.parquet import read_metadata_from_bytes  # type: ignore[import]
+        from rugo.parquet_reader import read_metadata_from_bytes  # type: ignore[import]
     except ImportError:
         raise RuntimeError(
-            "rugo.parquet is required but not available. "
+            "rugo.parquet_reader is required but not available. "
             "Ensure rugo is compiled and in the Python path."
         )
 
@@ -345,7 +345,7 @@ def fetch_columns(
     _pages_skipped_before: int = 0
     _pages_decoded_before: int = 0
     if row_mask is not None and misses:
-        from opteryx.compiled.rugo.parquet import get_telemetry  # type: ignore[import]
+        from rugo.parquet_reader import get_telemetry  # type: ignore[import]
 
         _tel_before = get_telemetry()
         _pages_skipped_before = _tel_before.get("parquet_pages_skipped", 0)
@@ -494,7 +494,7 @@ def fetch_columns(
     result_dict["__time_decode_columns_ns__"] = time_decode_columns_ns
 
     if row_mask is not None:
-        from opteryx.compiled.rugo.parquet import get_telemetry  # type: ignore[import]
+        from rugo.parquet_reader import get_telemetry  # type: ignore[import]
 
         _tel_after = get_telemetry()
         result_dict["__pages_skipped__"] = (

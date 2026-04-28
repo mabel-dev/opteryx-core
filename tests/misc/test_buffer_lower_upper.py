@@ -2,7 +2,7 @@
 Test buffer-level lower/upper functions
 """
 import pyarrow as pa
-from opteryx.compiled.draken.vectors.string_vector import StringVector, lowercase, uppercase
+from draken.vectors.string_vector import StringVector, lowercase, uppercase
 
 
 def test_basic_operations():

@@ -8,10 +8,10 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.map cimport map as cmap
 
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector, StringVectorBuilder
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.float64_vector cimport Float64Vector
+from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
 
 
 cdef extern from "core/parse_context.hpp" namespace "rugo::_jsonl":

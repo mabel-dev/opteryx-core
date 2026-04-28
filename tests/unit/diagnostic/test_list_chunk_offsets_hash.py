@@ -9,7 +9,7 @@ import pyarrow as pa
 
 def test_list_chunk_offsets_hash_consistency():
     try:
-        import opteryx.compiled.draken as draken
+        import draken as draken
     except ImportError:
         import pytest
 

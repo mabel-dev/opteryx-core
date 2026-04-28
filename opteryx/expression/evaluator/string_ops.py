@@ -43,7 +43,7 @@ _NEGATED_OPS = {
 
 
 def _string_compare(op: str, vec, right):
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    from draken.vectors.bool_vector import BoolVector
 
     if right is None:
         return BoolVector(len(vec))
@@ -93,7 +93,7 @@ def _string_anyop_like(vec, patterns, ignore_case: bool):
         mask = vector_like(vec, pat_bytes, ignore_case)
         result = mask if result is None else result.or_vector(mask)
     if result is None:
-        from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+        from draken.vectors.bool_vector import BoolVector
 
         return BoolVector(len(vec))
     return result

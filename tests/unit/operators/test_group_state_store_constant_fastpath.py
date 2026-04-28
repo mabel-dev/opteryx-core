@@ -6,10 +6,10 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
-from opteryx.compiled.draken.morsels.morsel import Morsel
-from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
-from opteryx.compiled.draken.vectors.string_vector import StringVector
+from draken.interop.vector_sequence import vector_from_sequence
+from draken.morsels.morsel import Morsel
+from draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
+from draken.vectors.string_vector import StringVector
 from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
 
 from opteryx.exceptions import UnsupportedSyntaxError

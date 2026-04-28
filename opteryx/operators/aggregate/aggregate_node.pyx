@@ -19,7 +19,7 @@ import time
 
 from libc.stdint cimport uint8_t
 
-from opteryx.compiled.draken.vectors.vector cimport Vector
+from draken.vectors.vector cimport Vector
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.evaluator import evaluate_and_append_draken

@@ -175,10 +175,10 @@ cdef class _BufferCleanup:
             free(self.ptr)
 
 from cpython.bytes cimport PyBytes_FromStringAndSize
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors.array_vector cimport array_vector_from_parts
-from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer, DRAKEN_ENCODING_DICTIONARY, DRAKEN_STRING
-from opteryx.compiled.draken.vectors.string_vector cimport from_arrow as string_vector_from_arrow
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors.array_vector cimport array_vector_from_parts
+from draken.core.buffers cimport DrakenVarBuffer, DRAKEN_ENCODING_DICTIONARY, DRAKEN_STRING
+from draken.vectors.string_vector cimport from_arrow as string_vector_from_arrow
 
 def vector_split(StringVector vec, char delimiter):
     """
@@ -227,7 +227,7 @@ def vector_split(StringVector vec, char delimiter):
         parts = const_bytes.split(bytes([delimiter]))
 
         # Build StringVector from constant split parts
-        from opteryx.compiled.draken.vectors.string_vector import StringVectorBuilder
+        from draken.vectors.string_vector import StringVectorBuilder
         builder = StringVectorBuilder.with_estimate(len(parts), 8)
         for part in parts:
             if part is None:
@@ -263,7 +263,7 @@ def vector_split(StringVector vec, char delimiter):
                 result.append(val.split(delim_bytes))
 
         # Build ArrayVector from split results
-        from opteryx.compiled.draken.vectors.string_vector import StringVectorBuilder
+        from draken.vectors.string_vector import StringVectorBuilder
         flat_builder = StringVectorBuilder.with_estimate(sum(len(r) if r else 1 for r in result), 8)
 
         list_offs = <int32_t*>malloc((n + 1) * sizeof(int32_t))

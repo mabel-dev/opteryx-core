@@ -7,7 +7,7 @@ from opteryx.expression.operations.fastpath_telemetry import record_dict_fastpat
 
 def _dictionary_arrow_type(arr):
     """Extract dictionary type information from a Draken vector."""
-    if not arr.__class__.__module__.startswith("opteryx.compiled.draken.vectors."):
+    if not arr.__class__.__module__.startswith("draken.vectors."):
         return None
     return getattr(arr, "dictionary_value_type", None)
 

@@ -53,7 +53,7 @@ def get_vector_type(obj) -> VectorType:
 
     Examples:
         >>> from opteryx.utils.vector_types import get_vector_type, VectorType
-        >>> from opteryx.compiled.draken.vectors import StringVector
+        >>> from draken.vectors import StringVector
         >>> vec = StringVector.from_constant("a", 3)
         >>> get_vector_type(vec) == VectorType.STRING
         True
@@ -141,7 +141,7 @@ def is_scalar(obj) -> bool:
         >>> is_scalar(datetime.date(2024, 1, 1))
         True
         >>> # For vectors, False:
-        >>> from opteryx.compiled.draken.vectors import Int64Vector
+        >>> from draken.vectors import Int64Vector
         >>> vec = Int64Vector.from_constant(1, 3)
         >>> is_scalar(vec)
         False

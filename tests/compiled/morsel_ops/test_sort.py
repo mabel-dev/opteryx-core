@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.morsels.morsel import Morsel
 
 morsel_sort = pytest.importorskip(
     "opteryx.compiled.morsel_ops.sort",

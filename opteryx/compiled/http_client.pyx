@@ -1,4 +1,5 @@
 # cython: language_level=3, boundscheck=False, wraparound=False
+# distutils: sources = src/cpp/http_client.cpp, src/cpp/cpu_features.cpp
 
 """Cython bindings for the C++ HTTP client.
 

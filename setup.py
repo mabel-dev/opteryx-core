@@ -420,7 +420,7 @@ def make_draken_extension(module_path, source_file, language="c++", depends=None
             sources.append(s)
 
     return Extension(
-        name=f"opteryx.compiled.draken.{module_path}",
+        name=f"draken.{module_path}",
         sources=sources,
         include_dirs=include_dirs,
         extra_compile_args=CPP_FLAGS if language == "c++" else C_FLAGS,
@@ -594,7 +594,7 @@ extensions = [
     ),
     # File format readers
     Extension(
-        "opteryx.compiled.rugo.parquet",
+        "rugo.parquet",
         sources=(
             [
                 "third_party/mabel/rugo/parquet/parquet_reader.pyx",
@@ -625,7 +625,7 @@ extensions = [
         extra_link_args=parquet_link_args + LD_EXTRA,
     ),
     Extension(
-        "opteryx.compiled.rugo.jsonl",
+        "rugo.jsonl",
         sources=[
             "third_party/mabel/rugo/jsonl/jsonl_reader.pyx",
             "third_party/mabel/rugo/jsonl/decode.cpp",
@@ -640,7 +640,7 @@ extensions = [
         extra_objects=["build/temp.yyjson.o"] if os.path.exists("build/temp.yyjson.o") else [],
     ),
     Extension(
-        "opteryx.compiled.rugo._jsonl",
+        "rugo._jsonl",
         sources=[
             "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx",
             "third_party/mabel/rugo/_jsonl/core/structural_scan.cpp",
@@ -670,8 +670,8 @@ extensions = [
     make_draken_extension("vectors.interval_vector", "vectors/interval_vector.pyx"),
     make_draken_extension("vectors.scalar_constructors", "vectors/scalar_constructors.pyx"),
     Extension(
-        "opteryx.compiled.draken.vectors.arithmetic_kernels",
-        sources=["opteryx/compiled/draken/vectors/arithmetic_kernels.pyx"],
+        "draken.vectors.arithmetic_kernels",
+        sources=["draken/src/vectors/arithmetic_kernels.pyx"],
         include_dirs=include_dirs,
         language="c",
         extra_compile_args=C_FLAGS,
@@ -679,7 +679,7 @@ extensions = [
     make_draken_extension("vectors.int64_vector", "vectors/int64_vector.pyx", language="c++"),
     make_draken_extension("vectors.integer_vector", "vectors/integer_vector.pyx", language="c++"),
     Extension(
-        "opteryx.compiled.draken.vectors.string_vector",
+        "draken.vectors.string_vector",
         sources=[
             "third_party/mabel/draken/vectors/string_vector.pyx",
             "src/cpp/simd_hash.cpp",
@@ -701,7 +701,7 @@ extensions = [
     make_draken_extension("storage.morsel_io", "storage/morsel_io.pyx"),
     # Pre-generated C module for morsels.align (Cython-generated C source)
     Extension(
-        "opteryx.compiled.draken.morsels.align",
+        "draken.morsels.align",
         sources=["third_party/mabel/draken/morsels/align.pyx"],
         include_dirs=include_dirs,
         extra_compile_args=C_FLAGS,
@@ -709,9 +709,9 @@ extensions = [
     ),
     # Hash API shim used by a few draken helpers (Cython wrapper)
     Extension(
-        "opteryx.compiled.draken.vectors._hash_api",
+        "draken.vectors._hash_api",
         sources=[
-            "opteryx/compiled/draken/vectors/_hash_api.pyx",
+            "draken/src/vectors/_hash_api.pyx",
             "src/cpp/simd_hash.cpp",
             "src/cpp/simd_bitops.cpp",
             "src/cpp/cpu_features.cpp",

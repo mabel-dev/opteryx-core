@@ -34,7 +34,7 @@ from opteryx.compiled.aggregations.key_codec import (
     smoke_test_native_single_encoded_key_codec,
     smoke_test_native_single_fixed_key_codec,
 )
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.morsels.morsel import Morsel
 
 from opteryx.operators.shuffle import AggregationSpec, ShuffleGroupByOperation
 

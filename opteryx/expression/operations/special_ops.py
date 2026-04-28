@@ -6,7 +6,7 @@ def json_path_exists(arr, value):
 
     Returns BoolVector to match registrar expectations.
     """
-    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+    from draken.interop.vector_sequence import vector_from_sequence
     from opteryx.third_party import yyjson
 
     # Convert to list of strings for processing

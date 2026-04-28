@@ -20,10 +20,10 @@ _logger = logging.getLogger(__name__)
 from collections import defaultdict
 from typing import Generator
 
-from opteryx.compiled.draken.vectors.date32_vector import Date32Vector
-from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
-from opteryx.compiled.draken.vectors.time_vector import TimeVector
-from opteryx.compiled.draken.vectors.interval_vector import IntervalVector
+from draken.vectors.date32_vector import Date32Vector
+from draken.vectors.timestamp_vector import TimestampVector
+from draken.vectors.time_vector import TimeVector
+from draken.vectors.interval_vector import IntervalVector
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryProperties
 from opteryx.types.schema import RelationSchema
@@ -32,8 +32,6 @@ from opteryx.types import OrsoTypes
 from opteryx import EOS
 
 from . import BasePlanNode
-
-_DATA_FORMAT = "draken"
 
 
 def _create_null_vector(column, num_rows):

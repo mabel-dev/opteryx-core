@@ -11,11 +11,11 @@ from cython import Py_ssize_t
 from libc.stdint cimport int64_t, uint8_t, int32_t
 from libc.string cimport memset
 
-from opteryx.compiled.draken.vectors.vector cimport Vector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
-from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
+from draken.vectors.vector cimport Vector
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors.bool_vector cimport BoolVector
+from draken.core.buffers cimport DrakenVarBuffer
 
 cdef BoolVector vector_in_list_int64_vector(Int64Vector vec, set values):
     cdef Py_ssize_t i, n = vec.ptr.length

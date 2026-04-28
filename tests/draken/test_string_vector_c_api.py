@@ -2,7 +2,7 @@
 Quick test of the new StringVector C-level API features.
 """
 
-from opteryx.compiled.draken.vectors.string_vector import StringVector, StringVectorBuilder
+from draken.vectors.string_vector import StringVector, StringVectorBuilder
 
 
 def test_c_iter():

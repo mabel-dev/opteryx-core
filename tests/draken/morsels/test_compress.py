@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-import opteryx.compiled.draken as draken
+import draken as draken
 from opteryx.compiled.structures.relation_statistics import to_int
 
 
@@ -18,7 +18,7 @@ def _vector_compress_to_list(vector):
     """Return Python list of compressed int64 values using the pure-Python
     fallback helper to ensure deterministic behavior while extensions are
     rebuilt during development."""
-    from opteryx.compiled.draken.vectors import _compress_vector
+    from draken.vectors import _compress_vector
     buf = _compress_vector(vector)
     mv = memoryview(buf)
     assert mv.format == "q"

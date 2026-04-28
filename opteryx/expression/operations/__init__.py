@@ -7,7 +7,7 @@ If you get AttributeError, your input isn't Draken - that's a bug upstream.
 
 import datetime
 
-from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+from draken.interop.vector_sequence import vector_from_sequence
 from opteryx.compiled.vector_ops import vector_contains
 from opteryx.expression.evaluator.comparisons import draken_compare
 from opteryx.expression.operations import (
@@ -108,7 +108,7 @@ def _coerce_temporal_scalar(value, source_type, target_type):
 
 def to_temporal_array(values, source_type, target_type):
     """Coerce values to a Draken temporal vector without Arrow/Numpy conversion."""
-    if values.__class__.__module__.startswith("opteryx.compiled.draken.vectors."):
+    if values.__class__.__module__.startswith("draken.vectors."):
         values = values.to_pylist()
     elif not isinstance(values, (list, tuple)):
         values = [values]
@@ -120,11 +120,11 @@ def to_temporal_array(values, source_type, target_type):
 
     source_vec = vector_from_sequence(coerced, dtype=OrsoTypes.INTEGER)
     if target_type == OrsoTypes.DATE:
-        from opteryx.compiled.draken.vectors.date32_vector import from_int64_vector as _from_int64
+        from draken.vectors.date32_vector import from_int64_vector as _from_int64
 
         return _from_int64(source_vec)
     if target_type == OrsoTypes.TIMESTAMP:
-        from opteryx.compiled.draken.vectors.timestamp_vector import (
+        from draken.vectors.timestamp_vector import (
             from_int64_vector as _from_int64,
         )
 
@@ -141,7 +141,7 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
 
     # Empty arrays return empty result
     if len(left_arr) == 0 or len(right_arr) == 0:
-        from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+        from draken.vectors.bool_vector import BoolVector
 
         return BoolVector.from_scalar(None, 0)
 

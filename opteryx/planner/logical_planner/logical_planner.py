@@ -509,8 +509,23 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             )
             for item in _order_by["kind"]["Expressions"]
         ]
-        if any(c[0].node_type == NodeType.LITERAL for c in _order_by):
-            raise UnsupportedSyntaxError("Cannot ORDER BY constant values")
+        # Resolve positional ORDER BY (SQL-92): an integer literal refers to the
+        # 1-based position in the SELECT list. Replace it with the projection
+        # expression so downstream stages see a normal column reference.
+        # Any other literal (string, float, NULL, ...) is rejected.
+        rewritten = []
+        for expr, ascending in _order_by:
+            if expr.node_type == NodeType.LITERAL:
+                if expr.type != OrsoTypes.INTEGER:
+                    raise UnsupportedSyntaxError("Cannot ORDER BY constant values")
+                position = int(expr.value)
+                if position < 1 or position > len(_projection):
+                    raise UnsupportedSyntaxError(
+                        f"ORDER BY position {position} is out of range — SELECT has {len(_projection)} column(s)."
+                    )
+                expr = _projection[position - 1]
+            rewritten.append((expr, ascending))
+        _order_by = rewritten
         _order_by_columns = [exp[0] for exp in _order_by]
 
     # projection

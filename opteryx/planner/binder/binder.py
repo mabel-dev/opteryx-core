@@ -20,6 +20,7 @@ from opteryx.expression.functions import get_catalog as _get_function_catalog
 from opteryx.expression.functions.registrar.constant import fixed_value_function
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
+from opteryx.planner.binder.join_helpers import get_mismatched_condition_column_types
 from opteryx.planner.binder.operator_map import determine_type
 from opteryx.types import OrsoTypes
 from opteryx.types.schema import ConstantColumn, FlatColumn, FunctionColumn, RelationSchema
@@ -488,10 +489,6 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
             node.schema_column = schema_column
             schemas["$derived"].columns.append(schema_column)
         else:
-            # fmt:off
-            from opteryx.planner.binder.common import get_mismatched_condition_column_types
-
-            # fmt:on
             mismatches = get_mismatched_condition_column_types(node, relaxed=True)
             if mismatches:
                 raise IncompatibleTypesError(**mismatches)

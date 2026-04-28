@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from opteryx.compiled.rugo import parquet
+from rugo import parquet
 
 FILES = glob.glob("tests/data/*.parquet")
 

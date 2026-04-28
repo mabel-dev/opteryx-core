@@ -16,16 +16,16 @@ from libc.math cimport HUGE_VAL
 from libc.string cimport memset, memcpy, memcmp
 from libc.stdlib cimport malloc, free
 
-from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
-from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT64
-from opteryx.compiled.draken.core.buffers cimport DRAKEN_FLOAT64
-from opteryx.compiled.draken.core.fixed_vector cimport alloc_fixed_buffer
-from opteryx.compiled.draken.core.fixed_vector cimport free_fixed_buffer
-from opteryx.compiled.draken.vectors.vector cimport Vector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
-from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector, _StringVectorCIterator, StringElement, _materialize_dict_string
-from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
+from draken.core.buffers cimport DrakenFixedBuffer
+from draken.core.buffers cimport DRAKEN_INT64
+from draken.core.buffers cimport DRAKEN_FLOAT64
+from draken.core.fixed_vector cimport alloc_fixed_buffer
+from draken.core.fixed_vector cimport free_fixed_buffer
+from draken.vectors.vector cimport Vector
+from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
+from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
+from draken.vectors.string_vector cimport StringVector, _StringVectorCIterator, StringElement, _materialize_dict_string
+from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 
 
 cdef inline bint _num_bitmap_valid(uint8_t* bm, Py_ssize_t i) noexcept nogil:
@@ -916,7 +916,7 @@ cdef class MinMaxObjectCollector(BaseCollector):
                 seen[si] = 1
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+        from draken.interop.arrow import vector_from_sequence
         cdef list result = []
         cdef int64_t i
         cdef int64_t limit = min(<int64_t>self._values.size(), num_groups)

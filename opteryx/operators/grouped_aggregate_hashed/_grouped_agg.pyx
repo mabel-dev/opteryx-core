@@ -28,8 +28,8 @@ from libc.stdlib cimport malloc, free
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
-from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenType
-from opteryx.compiled.draken.vectors.vector cimport Vector
+from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenType
+from draken.vectors.vector cimport Vector
 include "_key_store.pxi"
 include "_collectors_base.pxi"
 include "_collectors_numeric.pxi"

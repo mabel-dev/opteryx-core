@@ -12,11 +12,11 @@ cio = pytest.importorskip("opteryx.compiled.io")
 if not hasattr(cio, "morsel_to_json_rows") or not hasattr(cio, "morsel_to_json_strings"):
     pytest.skip("compiled json row functions not available")
 
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.morsels.morsel import Morsel
 from opteryx.compiled.io import morsel_to_json_rows
 from opteryx.compiled.io import morsel_to_json_strings
-from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
-from opteryx.compiled.draken.vectors.string_vector import StringVector
+from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.string_vector import StringVector
 
 
 def test_morsel_to_json_strings_basic_scalars():

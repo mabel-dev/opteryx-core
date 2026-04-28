@@ -16,10 +16,10 @@ from libc.stdint cimport int32_t, int64_t, uint8_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
-from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.compiled.draken.vectors.date32_vector cimport Date32Vector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
-from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
+from draken.vectors.timestamp_vector cimport TimestampVector
+from draken.vectors.date32_vector cimport Date32Vector
+from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.core.buffers cimport DrakenFixedBuffer
 
 
 cpdef Int64Vector vector_unixtime_timestamp(TimestampVector ts_vec):

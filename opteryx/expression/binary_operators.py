@@ -11,7 +11,7 @@ from opteryx.types import OrsoTypes
 
 def ArrowOp(documents, elements):
     """JSON selector returning a Draken vector."""
-    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+    from draken.interop.vector_sequence import vector_from_sequence
     from opteryx.compiled.vector_ops import vector_json_extract_variant
     from opteryx.exceptions import IncorrectTypeError
 
@@ -37,8 +37,8 @@ def LongArrowOp(documents, elements):
 
 
 def _json_key_constant(key) -> bytes:
-    from opteryx.compiled.draken import encoding as draken_encoding
-    from opteryx.compiled.draken.vectors.string_vector import StringVector
+    from draken import encoding as draken_encoding
+    from draken.vectors.string_vector import StringVector
     from opteryx.exceptions import IncorrectTypeError
 
     if not isinstance(key, StringVector):
@@ -55,11 +55,11 @@ def _json_key_constant(key) -> bytes:
 def MapAccessOp(array, key):
     """Map/iterable subscript accessor over Draken vectors."""
 
-    from opteryx.compiled.draken import encoding as draken_encoding
-    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
-    from opteryx.compiled.draken.vectors.array_vector import ArrayVector
-    from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
-    from opteryx.compiled.draken.vectors.string_vector import StringVector
+    from draken import encoding as draken_encoding
+    from draken.interop.vector_sequence import vector_from_sequence
+    from draken.vectors.array_vector import ArrayVector
+    from draken.vectors.int64_vector import Int64Vector
+    from draken.vectors.string_vector import StringVector
     from opteryx.compiled.vector_ops import vector_map_access_array, vector_map_access_string
     from opteryx.exceptions import IncorrectTypeError
 

@@ -21,9 +21,9 @@ All operations:
 
 from libc.stdint cimport int64_t, uint8_t
 
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
-from opteryx.compiled.draken.interop.vector_sequence cimport vector_from_sequence
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.core.buffers cimport DrakenFixedBuffer
+from draken.interop.vector_sequence cimport vector_from_sequence
 
 
 cpdef object vector_bitwise_and(Int64Vector left, Int64Vector right):

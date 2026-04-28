@@ -11,10 +11,10 @@
 
 from libc.stdint cimport int64_t
 
-from opteryx.compiled.draken.vectors.vector cimport Vector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from draken.vectors.vector cimport Vector
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.float64_vector cimport Float64Vector
+from draken.vectors.string_vector cimport StringVector
 
 
 # ---------------------------------------------------------------------------

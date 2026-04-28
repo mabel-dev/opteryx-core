@@ -6,15 +6,15 @@ import pyarrow as pa
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from opteryx.compiled.draken.vectors.bool_vector import BoolVector
-from opteryx.compiled.draken.vectors.date32_vector import Date32Vector
-from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
-from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
-from opteryx.compiled.draken.vectors.integer_vector import IntegerVector
-from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar
-from opteryx.compiled.draken.vectors.string_vector import StringVector
-from opteryx.compiled.draken.vectors.time_vector import TimeVector
-from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
+from draken.vectors.bool_vector import BoolVector
+from draken.vectors.date32_vector import Date32Vector
+from draken.vectors.float64_vector import Float64Vector
+from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer_vector import IntegerVector
+from draken.vectors.scalar_constructors import from_scalar
+from draken.vectors.string_vector import StringVector
+from draken.vectors.time_vector import TimeVector
+from draken.vectors.timestamp_vector import TimestampVector
 from opteryx.operators.group_state_store import (
     DRAKEN_ENCODING_CONSTANT,
     DRAKEN_ENCODING_DENSE,

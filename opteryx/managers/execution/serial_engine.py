@@ -11,8 +11,8 @@ This module provides the execution engine for processing physical plans in a ser
 from typing import Any, Generator, Tuple
 
 from opteryx import EOS
-from opteryx.compiled.draken import Morsel
-from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+from draken import Morsel
+from draken.interop.vector_sequence import vector_from_sequence
 from opteryx.constants import ResultType
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import PhysicalPlan, QueryTelemetry

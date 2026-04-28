@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import pytest
 
-from opteryx.compiled.rugo import parquet
+from rugo import parquet
 
 DATASET = Path("testdata/parquet_tests/data_index_bloom_encoding_stats.parquet")
 

@@ -12,9 +12,9 @@ from opteryx.types.schema import ConstantColumn, FlatColumn, FunctionColumn
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.compiled.draken.morsels.morsel import Morsel
-from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
-from opteryx.compiled.draken.vectors.string_vector import StringVector
+from draken.morsels.morsel import Morsel
+from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.string_vector import StringVector
 from opteryx.operators.heap_sort_node import HeapSortNode
 from opteryx.operators.sort_node import SortNode
 
@@ -438,7 +438,7 @@ def test_sort_node_evaluates_functional_vector_order_by():
 
     out = _run_sort(
         table,
-        [(_vector_order_node("COSINE_DISTANCE"), "ascending")],
+        [(_vector_order_node("COSINE_DISTANCE"), True)],
     )
 
     assert out["label"].to_pylist() == ["match", "diagonal", "orthogonal"]

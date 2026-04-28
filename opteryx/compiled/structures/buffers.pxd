@@ -10,7 +10,7 @@ from libc.stdint cimport int64_t, int32_t
 from libc.stddef cimport size_t
 from libcpp.vector cimport vector
 
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.int64_vector cimport Int64Vector
 
 cdef extern from "intbuffer.h" namespace "" nogil:
     cdef cppclass CIntBuffer:

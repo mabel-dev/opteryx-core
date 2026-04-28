@@ -1,4 +1,5 @@
 # distutils: language = c++
+# distutils: sources = src/cpp/platform.cpp
 # cython: language_level=3
 
 """

@@ -9,8 +9,8 @@
 from libc.stdlib cimport malloc, free
 from libc.stdint cimport uint8_t, uint32_t, uint64_t
 
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors import string_vector as string_vector_module
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors import string_vector as string_vector_module
 from opteryx.third_party.pcg.pcg cimport oneseq_xsh_rs_32_16, static_arbitrary_seed
 
 

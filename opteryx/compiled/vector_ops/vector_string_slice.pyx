@@ -9,10 +9,10 @@
 from libc.stdint cimport int32_t, int64_t, uint8_t
 from cpython.array cimport array, clone
 
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
-from opteryx.compiled.draken.vectors import string_vector as string_vector_module
-from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.vectors import string_vector as string_vector_module
+from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload
 
 # ---------------------------------------------------------------------------
 # additional utilities

@@ -45,20 +45,26 @@ endif
 # Optional optimizations (handled by root project)
 
 # Include directories
-inc = include_directories(
+# Common includes (no reader-specific subdirs to avoid decode.hpp shadowing)
+inc_common = include_directories(
   'src/h',
   'src/cpp',
   '../src/cpp',
-  'src/parquet',
-  'src/jsonl',
   '../draken/src',
-  '../draken/src/core',
+  '..',                         # draken .pxd resolution
   '../third_party/bshoshany',
   '../third_party/moodycamel',
   '../third_party/fastfloat',
   '../third_party/fastfloat/fast_float',
   '../third_party/yyjson/src',
 )
+
+# Parquet-specific include (has its own decode.hpp)
+inc_parquet = include_directories('src/parquet')
+
+# JSONL-specific include (has its own decode.hpp — must not mix with parquet)
+inc_jsonl = include_directories('src/jsonl')
+inc__jsonl = include_directories('src/_jsonl/core', 'src/_jsonl')
 
 # ============================================================================
 # VENDORED COMPRESSION LIBRARIES (Static linking)
@@ -82,22 +88,23 @@ zstd_sources = [
 
 # Snappy sources (3 files)
 snappy_sources = [
-  '../third_party/snappy/snappy.cc',
-  '../third_party/snappy/snappy-sinksource.cc',
-  '../third_party/snappy/snappy-stubs-internal.cc',
+  'src/parquet/vendor/snappy/snappy.cc',
+  'src/parquet/vendor/snappy/snappy-sinksource.cc',
+  'src/parquet/vendor/snappy/snappy-stubs-internal.cc',
 ]
 
 # LZ4 sources (1 file)
 lz4_sources = [
-  '../third_party/lz4/lz4.c',
+  'src/parquet/vendor/lz4/lz4.c',
 ]
 
 # ============================================================================
 # A. PARQUET READER EXTENSION (1)
 # ============================================================================
 
-python.extension_module('opteryx_compiled_rugo_parquet',
-  'src/parquet/parquet_reader.cpp',
+python.extension_module('opteryx_compiled_rugo_parquet_reader',
+  'src/parquet/parquet_reader.pyx',
+  override_options: ['cython_language=cpp'],
   sources: [
     'src/parquet/decode.cpp',
     'src/parquet/decode_page.cpp',
@@ -109,7 +116,7 @@ python.extension_module('opteryx_compiled_rugo_parquet',
     'src/parquet/bloom_filter.cpp',
     '../src/cpp/cpu_features.cpp',
   ] + zstd_sources + snappy_sources + lz4_sources,
-  include_directories: inc,
+  include_directories: [inc_common, inc_parquet],
   cpp_args: ['-DHAVE_SNAPPY=1', '-DHAVE_LZ4=1', '-DHAVE_ZSTD=1', '-DZSTD_STATIC_LINKING_ONLY=1'],
 )
 
@@ -117,9 +124,10 @@ python.extension_module('opteryx_compiled_rugo_parquet',
 # B. JSONL READER EXTENSIONS (2)
 # ============================================================================
 
-# High-level JSONL reader (pre-generated C++ output)
+# High-level JSONL reader
 python.extension_module('opteryx_compiled_rugo_jsonl',
-  'src/jsonl/jsonl_reader.cpp',
+  'src/jsonl/jsonl_reader.pyx',
+  override_options: ['cython_language=cpp'],
   sources: [
     'src/jsonl/decode.cpp',
     'src/jsonl/yyjson_wrapper.cpp',
@@ -128,12 +136,13 @@ python.extension_module('opteryx_compiled_rugo_jsonl',
     '../src/cpp/simd_search.cpp',
     '../third_party/yyjson/src/yyjson.c',
   ],
-  include_directories: inc,
+  include_directories: [inc_common, inc_jsonl],
 )
 
-# Pure C++ JSONL reader (pre-generated C++ output)
+# Pure C++ JSONL reader
 python.extension_module('opteryx_compiled_rugo__jsonl',
-  'src/_jsonl/_jsonl_reader.cpp',
+  'src/_jsonl/_jsonl_reader.pyx',
+  override_options: ['cython_language=cpp'],
   sources: [
     'src/_jsonl/core/column_builder.cpp',
     'src/_jsonl/core/field_span.cpp',
@@ -143,7 +152,7 @@ python.extension_module('opteryx_compiled_rugo__jsonl',
     'src/_jsonl/core/value_parser.cpp',
     '../src/cpp/cpu_features.cpp',
   ],
-  include_directories: inc,
+  include_directories: [inc_common, inc__jsonl],
 )
 
 # ============================================================================

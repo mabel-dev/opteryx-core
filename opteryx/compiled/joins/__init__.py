@@ -11,4 +11,4 @@ Import functions directly from opteryx.compiled.joins
 """
 
 # This is created by the setup.py build process
-from .join_definitions import *  # noqa: F403,F401
+from .joins import *  # noqa: F403,F401

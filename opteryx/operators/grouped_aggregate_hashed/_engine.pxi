@@ -23,7 +23,7 @@ from libc.stdint cimport int64_t, uint64_t, uint8_t
 from libc.stddef cimport size_t
 from libcpp.vector cimport vector
 
-from opteryx.compiled.draken.morsels.morsel cimport Morsel
+from draken.morsels.morsel cimport Morsel
 
 
 cdef extern from "carchar_index.hpp" namespace "opteryx::carchar":
@@ -327,7 +327,7 @@ cdef class GroupHashEngine:
                        If provided, filter is applied once to the complete result before chunking.
                        This avoids reconstructing groups that don't pass the filter.
         """
-        from opteryx.compiled.draken.morsels.morsel import Morsel as _Morsel
+        from draken.morsels.morsel import Morsel as _Morsel
 
         cdef long long start_ns
         cdef long long phase_start

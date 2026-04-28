@@ -6,11 +6,11 @@ import pyarrow
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-from opteryx.compiled.draken.vectors.string_vector import StringVector
+from draken.interop.arrow import vector_from_arrow
+from draken.vectors.string_vector import StringVector
 
 from opteryx.compiled import vector_ops as compiled_vector_ops
-from opteryx.compiled.draken import Vector
+from draken import Vector
 from opteryx.expression.functions.implementations import text as string_functions
 
 vector_initcap = getattr(compiled_vector_ops, "vector_initcap")
@@ -122,8 +122,8 @@ def test_compiled_trim_kernels():
 
 def test_compiled_trim_from_literal():
     import pyarrow as pa
-    from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar
-    from opteryx.compiled.draken.vectors.string_vector import StringVector
+    from draken.vectors.scalar_constructors import from_scalar
+    from draken.vectors.string_vector import StringVector
 
     arr = StringVector.from_arrow(pa.array(["xxxhelloxxx"]))
     assert _sv_to_list(vector_trim(arr, "x")) == ["hello"]

@@ -18,14 +18,12 @@ import logging
 from typing import Generator
 
 
-from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar
+from draken.vectors.scalar_constructors import from_scalar
 from opteryx.types.schema import RelationSchema
 
 from opteryx import EOS
 
 from . import BasePlanNode
-
-_DATA_FORMAT = "arrow,draken"
 
 
 logger = logging.getLogger(__name__)

@@ -18,7 +18,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.compiled.io import morsel_to_csv_rows
 from opteryx.compiled.io import morsel_to_csv_strings
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.morsels.morsel import Morsel
 
 
 def _measure(fn, repeat: int = 5):

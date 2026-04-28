@@ -8,11 +8,11 @@
 
 from libc.stdint cimport int32_t, int64_t, uint8_t
 
-from opteryx.compiled.draken.core.buffers cimport DrakenConstantStringPayload, DrakenVarBuffer
-from opteryx.compiled.draken.vectors.array_vector cimport ArrayVector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVectorBuilder
+from draken.core.buffers cimport DrakenConstantStringPayload, DrakenVarBuffer
+from draken.vectors.array_vector cimport ArrayVector
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors.string_vector cimport StringVectorBuilder
 from opteryx.third_party import yyjson
 
 

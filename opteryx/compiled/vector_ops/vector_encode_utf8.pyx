@@ -6,7 +6,7 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from draken.vectors.string_vector cimport StringVector
 
 
 cpdef StringVector vector_encode_utf8(StringVector vec):

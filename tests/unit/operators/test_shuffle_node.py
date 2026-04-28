@@ -1,8 +1,8 @@
 from uuid import uuid4
 
 import pyarrow as pa
-from opteryx.compiled.draken.morsels.morsel import Morsel
-from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
+from draken.morsels.morsel import Morsel
+from draken.vectors.int64_vector import Int64Vector
 
 from opteryx import EOS
 from opteryx.managers.kvstores import create_kv_store

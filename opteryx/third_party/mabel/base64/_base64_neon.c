@@ -1,217 +1,140 @@
+/*
+ * NEON base64 encode/decode using deinterleaving loads and stores.
+ *
+ * Encode: vld3q_u8 splits 48 input bytes into three 16-byte vectors of
+ * "first/second/third byte of each triplet". A 64-entry table lookup via
+ * vqtbl4q_u8 maps 6-bit indices to ASCII.
+ *
+ * Decode: vld4q_u8 splits 64 input chars into four 16-byte vectors of
+ * "first/second/third/fourth char of each quad". Range-based lookups
+ * convert each char to a 6-bit value (rejecting invalid bytes), and
+ * the 4 vectors are bit-packed into 3 vectors that are stored back via
+ * vst3q_u8.
+ */
 #include "_base64.h"
 
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
-#include <string.h>
 
-void* b64tobin_neon(void* restrict dest, const char* restrict src, size_t len) {
-    // Base64 decoding: 4 base64 chars -> 3 bytes
-    if (len < 128 || len % 4 != 0) {
+static inline uint8x16x4_t b64_alphabet_table(void) {
+    static const uint8_t alphabet[64] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    uint8x16x4_t lut;
+    lut.val[0] = vld1q_u8(alphabet);
+    lut.val[1] = vld1q_u8(alphabet + 16);
+    lut.val[2] = vld1q_u8(alphabet + 32);
+    lut.val[3] = vld1q_u8(alphabet + 48);
+    return lut;
+}
+
+char* bintob64_neon(char* B64_RESTRICT dest, const void* B64_RESTRICT src, size_t size) {
+    if (size < 48) {
+        return bintob64_scalar(dest, src, size);
+    }
+
+    const uint8_t* in = (const uint8_t*)src;
+    char* out = dest;
+
+    const uint8x16x4_t lut = b64_alphabet_table();
+    const uint8x16_t mask3f = vdupq_n_u8(0x3F);
+
+    while (size >= 48) {
+        uint8x16x3_t triplets = vld3q_u8(in);
+        const uint8x16_t a = triplets.val[0];
+        const uint8x16_t b = triplets.val[1];
+        const uint8x16_t c = triplets.val[2];
+
+        /* Four 6-bit indices per triplet (a, b, c). */
+        uint8x16_t i0 = vshrq_n_u8(a, 2);
+        uint8x16_t i1 = vandq_u8(vorrq_u8(vshlq_n_u8(a, 4), vshrq_n_u8(b, 4)), mask3f);
+        uint8x16_t i2 = vandq_u8(vorrq_u8(vshlq_n_u8(b, 2), vshrq_n_u8(c, 6)), mask3f);
+        uint8x16_t i3 = vandq_u8(c, mask3f);
+
+        uint8x16x4_t chars;
+        chars.val[0] = vqtbl4q_u8(lut, i0);
+        chars.val[1] = vqtbl4q_u8(lut, i1);
+        chars.val[2] = vqtbl4q_u8(lut, i2);
+        chars.val[3] = vqtbl4q_u8(lut, i3);
+
+        vst4q_u8((uint8_t*)out, chars);
+
+        in   += 48;
+        out  += 64;
+        size -= 48;
+    }
+
+    return bintob64_scalar(out, in, size);
+}
+
+/*
+ * Range-based decode of one 16-char vector. Returns the 6-bit values; sets
+ * `*valid` to 0xFF for in-alphabet bytes and 0x00 otherwise.
+ */
+static inline uint8x16_t b64_dec_chunk(uint8x16_t c, uint8x16_t* valid) {
+    uint8x16_t is_upper = vandq_u8(vcgeq_u8(c, vdupq_n_u8('A')), vcleq_u8(c, vdupq_n_u8('Z')));
+    uint8x16_t is_lower = vandq_u8(vcgeq_u8(c, vdupq_n_u8('a')), vcleq_u8(c, vdupq_n_u8('z')));
+    uint8x16_t is_digit = vandq_u8(vcgeq_u8(c, vdupq_n_u8('0')), vcleq_u8(c, vdupq_n_u8('9')));
+    uint8x16_t is_plus  = vceqq_u8(c, vdupq_n_u8('+'));
+    uint8x16_t is_slash = vceqq_u8(c, vdupq_n_u8('/'));
+
+    uint8x16_t v_upper = vsubq_u8(c, vdupq_n_u8('A'));
+    uint8x16_t v_lower = vsubq_u8(c, vdupq_n_u8('a' - 26));
+    uint8x16_t v_digit = vsubq_u8(c, vdupq_n_u8((uint8_t)('0' - 52)));
+
+    uint8x16_t value = vandq_u8(is_upper, v_upper);
+    value = vorrq_u8(value, vandq_u8(is_lower, v_lower));
+    value = vorrq_u8(value, vandq_u8(is_digit, v_digit));
+    value = vorrq_u8(value, vandq_u8(is_plus,  vdupq_n_u8(62)));
+    value = vorrq_u8(value, vandq_u8(is_slash, vdupq_n_u8(63)));
+
+    *valid = vorrq_u8(vorrq_u8(is_upper, is_lower),
+                      vorrq_u8(vorrq_u8(is_digit, is_plus), is_slash));
+    return value;
+}
+
+void* b64tobin_neon(void* B64_RESTRICT dest, const char* B64_RESTRICT src, size_t len) {
+    if (len < 64 || (len & 3) != 0) {
         return b64tobin_scalar(dest, src, len);
     }
 
     uint8_t* out = (uint8_t*)dest;
     const uint8_t* in = (const uint8_t*)src;
-    const uint8_t* end = in + len;
 
-    // Process 128 input bytes at a time (32 groups of 4 -> 96 output bytes)
-    while (end - in >= 128) {
-        const uint8_t* in_ptr = in;
-        uint8_t* out_ptr = out;
-        
-        // Check for padding in this block (padding char is '=' = ASCII 61)
-        uint8x16_t pad = vdupq_n_u8('=');
-        uint8x16_t v0 = vld1q_u8(in_ptr);
-        uint8x16_t v1 = vld1q_u8(in_ptr + 16);
-        uint8x16_t v2 = vld1q_u8(in_ptr + 32);
-        uint8x16_t v3 = vld1q_u8(in_ptr + 48);
-        uint8x16_t v4 = vld1q_u8(in_ptr + 64);
-        uint8x16_t v5 = vld1q_u8(in_ptr + 80);
-        uint8x16_t v6 = vld1q_u8(in_ptr + 96);
-        uint8x16_t v7 = vld1q_u8(in_ptr + 112);
-        
-        uint16_t has_pad = vmaxvq_u8(vceqq_u8(v0, pad)) | vmaxvq_u8(vceqq_u8(v1, pad)) |
-                           vmaxvq_u8(vceqq_u8(v2, pad)) | vmaxvq_u8(vceqq_u8(v3, pad)) |
-                           vmaxvq_u8(vceqq_u8(v4, pad)) | vmaxvq_u8(vceqq_u8(v5, pad)) |
-                           vmaxvq_u8(vceqq_u8(v6, pad)) | vmaxvq_u8(vceqq_u8(v7, pad));
-        
-        if (has_pad) {
-            // Padding detected, use scalar for this block
-            out = b64tobin_scalar(out, (const char*)in, 128);
-            if (out == NULL) return NULL;
-            in += 128;
-            continue;
+    /* Reserve last full quad for scalar so it can resolve '=' padding. */
+    while (len >= 68) {
+        uint8x16x4_t chars = vld4q_u8(in);
+
+        uint8x16_t valid_a, valid_b, valid_c, valid_d;
+        uint8x16_t va = b64_dec_chunk(chars.val[0], &valid_a);
+        uint8x16_t vb = b64_dec_chunk(chars.val[1], &valid_b);
+        uint8x16_t vc = b64_dec_chunk(chars.val[2], &valid_c);
+        uint8x16_t vd = b64_dec_chunk(chars.val[3], &valid_d);
+
+        uint8x16_t valid = vandq_u8(vandq_u8(valid_a, valid_b), vandq_u8(valid_c, valid_d));
+        if (vminvq_u8(valid) == 0) {
+            break;
         }
-        
-        // Decode 32 groups with aggressive unrolling
-        for (int g = 0; g < 32; g += 8) {
-            // Decode 8 groups in parallel
-            uint8_t a0 = B64_DECODE_LUT[in_ptr[0]], b0 = B64_DECODE_LUT[in_ptr[1]];
-            uint8_t c0 = B64_DECODE_LUT[in_ptr[2]], d0 = B64_DECODE_LUT[in_ptr[3]];
-            uint8_t a1 = B64_DECODE_LUT[in_ptr[4]], b1 = B64_DECODE_LUT[in_ptr[5]];
-            uint8_t c1 = B64_DECODE_LUT[in_ptr[6]], d1 = B64_DECODE_LUT[in_ptr[7]];
-            uint8_t a2 = B64_DECODE_LUT[in_ptr[8]], b2 = B64_DECODE_LUT[in_ptr[9]];
-            uint8_t c2 = B64_DECODE_LUT[in_ptr[10]], d2 = B64_DECODE_LUT[in_ptr[11]];
-            uint8_t a3 = B64_DECODE_LUT[in_ptr[12]], b3 = B64_DECODE_LUT[in_ptr[13]];
-            uint8_t c3 = B64_DECODE_LUT[in_ptr[14]], d3 = B64_DECODE_LUT[in_ptr[15]];
-            uint8_t a4 = B64_DECODE_LUT[in_ptr[16]], b4 = B64_DECODE_LUT[in_ptr[17]];
-            uint8_t c4 = B64_DECODE_LUT[in_ptr[18]], d4 = B64_DECODE_LUT[in_ptr[19]];
-            uint8_t a5 = B64_DECODE_LUT[in_ptr[20]], b5 = B64_DECODE_LUT[in_ptr[21]];
-            uint8_t c5 = B64_DECODE_LUT[in_ptr[22]], d5 = B64_DECODE_LUT[in_ptr[23]];
-            uint8_t a6 = B64_DECODE_LUT[in_ptr[24]], b6 = B64_DECODE_LUT[in_ptr[25]];
-            uint8_t c6 = B64_DECODE_LUT[in_ptr[26]], d6 = B64_DECODE_LUT[in_ptr[27]];
-            uint8_t a7 = B64_DECODE_LUT[in_ptr[28]], b7 = B64_DECODE_LUT[in_ptr[29]];
-            uint8_t c7 = B64_DECODE_LUT[in_ptr[30]], d7 = B64_DECODE_LUT[in_ptr[31]];
-            
-            // Quick error check (branchless OR)
-            if (((a0|b0|c0|d0|a1|b1|c1|d1|a2|b2|c2|d2|a3|b3|c3|d3|
-                  a4|b4|c4|d4|a5|b5|c5|d5|a6|b6|c6|d6|a7|b7|c7|d7) & 0xC0)) {
-                return NULL;
-            }
-            
-            // Decode all groups
-            out_ptr[0] = (a0 << 2) | (b0 >> 4);
-            out_ptr[1] = (b0 << 4) | (c0 >> 2);
-            out_ptr[2] = (c0 << 6) | d0;
-            
-            out_ptr[3] = (a1 << 2) | (b1 >> 4);
-            out_ptr[4] = (b1 << 4) | (c1 >> 2);
-            out_ptr[5] = (c1 << 6) | d1;
-            
-            out_ptr[6] = (a2 << 2) | (b2 >> 4);
-            out_ptr[7] = (b2 << 4) | (c2 >> 2);
-            out_ptr[8] = (c2 << 6) | d2;
-            
-            out_ptr[9] = (a3 << 2) | (b3 >> 4);
-            out_ptr[10] = (b3 << 4) | (c3 >> 2);
-            out_ptr[11] = (c3 << 6) | d3;
-            
-            out_ptr[12] = (a4 << 2) | (b4 >> 4);
-            out_ptr[13] = (b4 << 4) | (c4 >> 2);
-            out_ptr[14] = (c4 << 6) | d4;
-            
-            out_ptr[15] = (a5 << 2) | (b5 >> 4);
-            out_ptr[16] = (b5 << 4) | (c5 >> 2);
-            out_ptr[17] = (c5 << 6) | d5;
-            
-            out_ptr[18] = (a6 << 2) | (b6 >> 4);
-            out_ptr[19] = (b6 << 4) | (c6 >> 2);
-            out_ptr[20] = (c6 << 6) | d6;
-            
-            out_ptr[21] = (a7 << 2) | (b7 >> 4);
-            out_ptr[22] = (b7 << 4) | (c7 >> 2);
-            out_ptr[23] = (c7 << 6) | d7;
-            
-            in_ptr += 32;
-            out_ptr += 24;
-        }
-        
-        in += 128;
-        out += 96;
+
+        uint8x16x3_t out_triplets;
+        out_triplets.val[0] = vorrq_u8(vshlq_n_u8(va, 2), vshrq_n_u8(vb, 4));
+        out_triplets.val[1] = vorrq_u8(vshlq_n_u8(vb, 4), vshrq_n_u8(vc, 2));
+        out_triplets.val[2] = vorrq_u8(vshlq_n_u8(vc, 6), vd);
+
+        vst3q_u8(out, out_triplets);
+
+        in  += 64;
+        out += 48;
+        len -= 64;
     }
 
-    // Handle remainder with scalar
-    if (end > in) {
-        out = b64tobin_scalar(out, (const char*)in, end - in);
-    }
-
-    return out;
-}
-
-char* bintob64_neon(char* restrict dest, const void* restrict src, size_t size) {
-    // Base64 encoding: 3 bytes -> 4 base64 chars
-    // Optimized NEON implementation processing multiple groups in parallel
-    if (size < 96) {
-        return bintob64_scalar(dest, src, size);
-    }
-
-    const uint8_t* in = (const uint8_t*)src;
-    const uint8_t* end = in + size;
-    char* out = dest;
-
-    // Process 96 input bytes at a time (32 groups of 3 -> 128 output chars)
-    // Larger chunks = better throughput
-    while (end - in >= 96) {
-        const uint8_t* in_ptr = in;
-        char* out_ptr = out;
-        
-        // Process 32 groups in parallel with aggressive unrolling
-        // This allows the CPU to execute multiple independent operations simultaneously
-        for (int g = 0; g < 32; g += 8) {
-            // Load and process 8 groups at once
-            uint8_t a0 = in_ptr[0], b0 = in_ptr[1], c0 = in_ptr[2];
-            uint8_t a1 = in_ptr[3], b1 = in_ptr[4], c1 = in_ptr[5];
-            uint8_t a2 = in_ptr[6], b2 = in_ptr[7], c2 = in_ptr[8];
-            uint8_t a3 = in_ptr[9], b3 = in_ptr[10], c3 = in_ptr[11];
-            uint8_t a4 = in_ptr[12], b4 = in_ptr[13], c4 = in_ptr[14];
-            uint8_t a5 = in_ptr[15], b5 = in_ptr[16], c5 = in_ptr[17];
-            uint8_t a6 = in_ptr[18], b6 = in_ptr[19], c6 = in_ptr[20];
-            uint8_t a7 = in_ptr[21], b7 = in_ptr[22], c7 = in_ptr[23];
-            
-            // Encode all 8 groups - compiler can parallelize these
-            out_ptr[0] = B64_ENCODE_LUT[a0 >> 2];
-            out_ptr[1] = B64_ENCODE_LUT[((a0 & 3) << 4) | (b0 >> 4)];
-            out_ptr[2] = B64_ENCODE_LUT[((b0 & 15) << 2) | (c0 >> 6)];
-            out_ptr[3] = B64_ENCODE_LUT[c0 & 63];
-            
-            out_ptr[4] = B64_ENCODE_LUT[a1 >> 2];
-            out_ptr[5] = B64_ENCODE_LUT[((a1 & 3) << 4) | (b1 >> 4)];
-            out_ptr[6] = B64_ENCODE_LUT[((b1 & 15) << 2) | (c1 >> 6)];
-            out_ptr[7] = B64_ENCODE_LUT[c1 & 63];
-            
-            out_ptr[8] = B64_ENCODE_LUT[a2 >> 2];
-            out_ptr[9] = B64_ENCODE_LUT[((a2 & 3) << 4) | (b2 >> 4)];
-            out_ptr[10] = B64_ENCODE_LUT[((b2 & 15) << 2) | (c2 >> 6)];
-            out_ptr[11] = B64_ENCODE_LUT[c2 & 63];
-            
-            out_ptr[12] = B64_ENCODE_LUT[a3 >> 2];
-            out_ptr[13] = B64_ENCODE_LUT[((a3 & 3) << 4) | (b3 >> 4)];
-            out_ptr[14] = B64_ENCODE_LUT[((b3 & 15) << 2) | (c3 >> 6)];
-            out_ptr[15] = B64_ENCODE_LUT[c3 & 63];
-            
-            out_ptr[16] = B64_ENCODE_LUT[a4 >> 2];
-            out_ptr[17] = B64_ENCODE_LUT[((a4 & 3) << 4) | (b4 >> 4)];
-            out_ptr[18] = B64_ENCODE_LUT[((b4 & 15) << 2) | (c4 >> 6)];
-            out_ptr[19] = B64_ENCODE_LUT[c4 & 63];
-            
-            out_ptr[20] = B64_ENCODE_LUT[a5 >> 2];
-            out_ptr[21] = B64_ENCODE_LUT[((a5 & 3) << 4) | (b5 >> 4)];
-            out_ptr[22] = B64_ENCODE_LUT[((b5 & 15) << 2) | (c5 >> 6)];
-            out_ptr[23] = B64_ENCODE_LUT[c5 & 63];
-            
-            out_ptr[24] = B64_ENCODE_LUT[a6 >> 2];
-            out_ptr[25] = B64_ENCODE_LUT[((a6 & 3) << 4) | (b6 >> 4)];
-            out_ptr[26] = B64_ENCODE_LUT[((b6 & 15) << 2) | (c6 >> 6)];
-            out_ptr[27] = B64_ENCODE_LUT[c6 & 63];
-            
-            out_ptr[28] = B64_ENCODE_LUT[a7 >> 2];
-            out_ptr[29] = B64_ENCODE_LUT[((a7 & 3) << 4) | (b7 >> 4)];
-            out_ptr[30] = B64_ENCODE_LUT[((b7 & 15) << 2) | (c7 >> 6)];
-            out_ptr[31] = B64_ENCODE_LUT[c7 & 63];
-            
-            in_ptr += 24;
-            out_ptr += 32;
-        }
-        
-        in += 96;
-        out += 128;
-    }
-
-    // Handle remainder with scalar
-    if (end > in) {
-        out = bintob64_scalar(out, in, end - in);
-    }
-
-    return out;
+    return b64tobin_scalar(out, (const char*)in, len);
 }
 
 #else
-// Stub implementations when NEON is not available
-void* b64tobin_neon(void* restrict dest, const char* restrict src, size_t len) {
-    return b64tobin_scalar(dest, src, len);
-}
-
-char* bintob64_neon(char* restrict dest, const void* restrict src, size_t size) {
+char* bintob64_neon(char* B64_RESTRICT dest, const void* B64_RESTRICT src, size_t size) {
     return bintob64_scalar(dest, src, size);
+}
+void* b64tobin_neon(void* B64_RESTRICT dest, const char* B64_RESTRICT src, size_t len) {
+    return b64tobin_scalar(dest, src, len);
 }
 #endif

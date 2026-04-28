@@ -31,11 +31,11 @@ def if_null(values, replacements):
     IIF(IS_NULL(values), replacements, values)
     """
     from opteryx.compiled.vector_ops import vector_iif
-    from opteryx.compiled.vector_ops.function_definitions import bool_vector_from_int8_mask
+    from opteryx.compiled.vector_ops import bool_vector_from_int8_mask
 
-    if not values.__class__.__module__.startswith("opteryx.compiled.draken.vectors."):
+    if not values.__class__.__module__.startswith("draken.vectors."):
         raise TypeError(f"IFNULL expects Draken vector input, got {type(values).__name__}.")
-    if not replacements.__class__.__module__.startswith("opteryx.compiled.draken.vectors."):
+    if not replacements.__class__.__module__.startswith("draken.vectors."):
         raise TypeError(f"IFNULL expects Draken vector replacement, got {type(replacements).__name__}.")
 
     # Draken vector — is_null() returns int8_t[::1] memoryview
@@ -57,11 +57,11 @@ def if_not_null(values, replacements):
     from array import array as _array
 
     from opteryx.compiled.vector_ops import vector_iif
-    from opteryx.compiled.vector_ops.function_definitions import bool_vector_from_int8_mask
+    from opteryx.compiled.vector_ops import bool_vector_from_int8_mask
 
-    if not values.__class__.__module__.startswith("opteryx.compiled.draken.vectors."):
+    if not values.__class__.__module__.startswith("draken.vectors."):
         raise TypeError(f"IFNOTNULL expects Draken vector input, got {type(values).__name__}.")
-    if not replacements.__class__.__module__.startswith("opteryx.compiled.draken.vectors."):
+    if not replacements.__class__.__module__.startswith("draken.vectors."):
         raise TypeError(
             f"IFNOTNULL expects Draken vector replacement, got {type(replacements).__name__}."
         )

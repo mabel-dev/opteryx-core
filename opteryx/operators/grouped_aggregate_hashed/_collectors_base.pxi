@@ -8,7 +8,7 @@
 
 from libc.stdint cimport int64_t
 
-from opteryx.compiled.draken.vectors.vector cimport Vector
+from draken.vectors.vector cimport Vector
 
 
 cdef class BaseCollector:

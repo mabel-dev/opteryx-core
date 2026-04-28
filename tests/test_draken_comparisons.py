@@ -14,11 +14,11 @@ Tests cover:
 
 import pyarrow as pa
 import pytest
-from opteryx.compiled.draken.vectors.bool_vector import BoolVector
-from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
-from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
-from opteryx.compiled.draken.vectors.integer_vector import IntegerVector
-from opteryx.compiled.draken.vectors.string_vector import StringVector
+from draken.vectors.bool_vector import BoolVector
+from draken.vectors.float64_vector import Float64Vector
+from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer_vector import IntegerVector
+from draken.vectors.string_vector import StringVector
 
 from opteryx.expression.evaluator.comparisons import draken_compare
 

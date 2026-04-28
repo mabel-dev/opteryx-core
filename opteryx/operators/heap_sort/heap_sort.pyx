@@ -46,21 +46,17 @@ sorting smaller chunks over and over again.
 """
 
 
-_DATA_FORMAT = "draken"
-
 
 # ── Module-level C helpers ────────────────────────────────────────────────────
 
-cdef inline bint _is_descending(object direction) noexcept:
+cdef inline bint _is_descending(bint ascending) noexcept:
     """Return True if the sort direction is descending."""
-    if isinstance(direction, bool):
-        return not <bint>direction
-    return str(direction).upper().startswith("DESC")
+    return not ascending
 
 
-cdef inline bint _is_nearest_neighbor_order(str function_name, object direction) noexcept:
+cdef inline bint _is_nearest_neighbor_order(str function_name, bint ascending) noexcept:
     """Return True if this vector ordering corresponds to nearest-neighbour semantics."""
-    cdef bint descending = _is_descending(direction)
+    cdef bint descending = not ascending
     return (function_name == "COSINE_DISTANCE" and not descending) or (
         function_name == "COSINE_SIMILARITY" and descending
     )
@@ -422,7 +418,8 @@ class HeapSortNode(BasePlanNode):
     @property
     def config(self):  # pragma: no cover
         order = ", ".join(
-            f"{col.schema_column.name} {dir[:3].upper()}" for col, dir in self.order_by
+            f"{col.schema_column.name} {'ASC' if ascending else 'DESC'}"
+            for col, ascending in self.order_by
         )
         return f"LIMIT = {self.limit}, ORDER = {order}"
 

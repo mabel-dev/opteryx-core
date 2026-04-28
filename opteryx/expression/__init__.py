@@ -96,27 +96,27 @@ def _typed_constant_vector(value, length: int, schema_column):
     is_null = value is None
 
     if target_type == OrsoTypes.BOOLEAN:
-        from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+        from draken.vectors.bool_vector import BoolVector
 
         return BoolVector.from_constant(False if is_null else value, length, is_null=is_null)
 
     if target_type == OrsoTypes.INTEGER:
-        from opteryx.compiled.draken.vectors.integer_vector import IntegerVector
+        from draken.vectors.integer_vector import IntegerVector
 
         return IntegerVector.from_constant(0 if is_null else value, length, is_null=is_null)
 
     if target_type == OrsoTypes.DOUBLE:
-        from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
+        from draken.vectors.float64_vector import Float64Vector
 
         return Float64Vector.from_constant(0.0 if is_null else value, length, is_null=is_null)
 
     if target_type in (OrsoTypes.VARCHAR, OrsoTypes.BLOB):
-        from opteryx.compiled.draken.vectors.string_vector import StringVector
+        from draken.vectors.string_vector import StringVector
 
         return StringVector.from_constant(b"" if is_null else value, length, is_null=is_null)
 
     if target_type == OrsoTypes.DATE:
-        from opteryx.compiled.draken.vectors.date32_vector import Date32Vector
+        from draken.vectors.date32_vector import Date32Vector
 
         if not is_null:
             if isinstance(value, datetime.datetime):
@@ -133,7 +133,7 @@ def _typed_constant_vector(value, length: int, schema_column):
         return Date32Vector.from_constant(0 if is_null else value, length, is_null=is_null)
 
     if target_type == OrsoTypes.TIMESTAMP:
-        from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
+        from draken.vectors.timestamp_vector import TimestampVector
 
         # Default to microsecond precision for constant-encoded timestamps
         timestamp_unit = "us"
@@ -147,7 +147,7 @@ def _typed_constant_vector(value, length: int, schema_column):
         )
 
     if target_type == OrsoTypes.TIME:
-        from opteryx.compiled.draken.vectors.time_vector import TimeVector
+        from draken.vectors.time_vector import TimeVector
 
         # Default to time64 (microsecond precision) for constant-encoded times
         is_time64 = True
@@ -172,7 +172,7 @@ def _typed_constant_vector(value, length: int, schema_column):
         )
 
     if target_type == OrsoTypes.DECIMAL:
-        from opteryx.compiled.draken.vectors._decimal_vector import DecimalVector
+        from draken.vectors._decimal_vector import DecimalVector
 
         return DecimalVector.from_constant(None if is_null else value, length, is_null=is_null)
 
@@ -409,10 +409,10 @@ def _inner_evaluate(root: Node, table):
 
     # LITERAL TYPES - return Draken constant vectors
     if node_type == NodeType.LITERAL:
-        from opteryx.compiled.draken.vectors.bool_vector import BoolVector
-        from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
-        from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
-        from opteryx.compiled.draken.vectors.string_vector import StringVector
+        from draken.vectors.bool_vector import BoolVector
+        from draken.vectors.float64_vector import Float64Vector
+        from draken.vectors.int64_vector import Int64Vector
+        from draken.vectors.string_vector import StringVector
 
         literal_type = root.type or (
             root.schema_column.type if getattr(root, "schema_column", None) else None
@@ -459,7 +459,7 @@ def _inner_evaluate(root: Node, table):
             return StringVector.from_constant(value, length)
 
         if literal_type in (OrsoTypes.ARRAY, OrsoTypes.VECTOR):
-            from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+            from draken.interop.vector_sequence import vector_from_sequence
 
             return vector_from_sequence([value] * length)
 
@@ -500,7 +500,7 @@ def _inner_evaluate(root: Node, table):
             if root.centre:
                 centre = _inner_evaluate(root.centre, table)
             else:
-                from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+                from draken.vectors.bool_vector import BoolVector
 
                 centre = BoolVector.from_constant(None, 1, is_null=True)
             if centre.__class__.__name__ == "BoolVector":
@@ -772,8 +772,8 @@ def _evaluate_and_append_morsel(expressions, morsel):
     Typed literal expressions are appended natively as typed constant-encoded vectors.
     Non-literal expressions are evaluated directly against the Draken morsel.
     """
-    from opteryx.compiled.draken.morsels.morsel import Morsel
-    from opteryx.compiled.draken.vectors.scalar_constructors import (
+    from draken.morsels.morsel import Morsel
+    from draken.vectors.scalar_constructors import (
         from_scalar as constant_from_scalar,
     )
 

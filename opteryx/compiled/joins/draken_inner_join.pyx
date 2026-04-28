@@ -19,9 +19,9 @@ from libcpp.vector cimport vector
 from time import perf_counter_ns
 
 from opteryx.compiled.structures.bloom_filter cimport BloomFilter, create_bloom_filter_from_hashes
-from opteryx.compiled.draken.morsels.align cimport align_tables
-from opteryx.compiled.draken.morsels.morsel cimport Morsel
-from opteryx.compiled.draken.vectors.vector cimport NULL_HASH
+from draken.morsels.align cimport align_tables
+from draken.morsels.morsel cimport Morsel
+from draken.vectors.vector cimport NULL_HASH
 from time import perf_counter_ns
 
 

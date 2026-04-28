@@ -66,7 +66,7 @@ def call_arithmetic_op(op, left, right):
         return None
 
     # Try to find a kernel for this combination
-    from opteryx.compiled.draken.vectors.arithmetic_kernels import get_arithmetic_kernel
+    from draken.vectors.arithmetic_kernels import get_arithmetic_kernel
 
     kernel = get_arithmetic_kernel(left_type, right_type, op)
     if kernel is None:

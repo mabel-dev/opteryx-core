@@ -11,7 +11,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from opteryx.compiled.rugo._jsonl import read_jsonl_raw
+from rugo._jsonl import read_jsonl_raw
 
 def generate_test_data(num_rows: int) -> bytes:
     """Generate JSONL test data."""

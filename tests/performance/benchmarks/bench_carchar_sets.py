@@ -34,7 +34,7 @@ import pyarrow as pa
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 
-import opteryx.compiled.draken as draken
+import draken as draken
 
 DEFAULT_CPP_MODULE = "opteryx.compiled.nanobind.carchar_native"
 

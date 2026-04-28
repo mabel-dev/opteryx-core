@@ -6,7 +6,7 @@ import pyarrow as pa
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.morsels.morsel import Morsel
 from opteryx.expression import NodeType, evaluate_and_append
 from opteryx.models import Node
 from opteryx.types import OrsoTypes

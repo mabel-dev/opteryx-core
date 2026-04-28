@@ -157,11 +157,11 @@ if _arch in ("arm64", "aarch64"):
 else:
     simd_find_char = avx_search
 
-from opteryx.compiled.draken.core.buffers cimport (
+from draken.core.buffers cimport (
     DrakenVarBuffer,
     DRAKEN_ENCODING_DICTIONARY,
 )
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from draken.vectors.string_vector cimport StringVector
 
 
 cdef enum DfaOpType:

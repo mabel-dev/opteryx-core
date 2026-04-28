@@ -21,7 +21,7 @@ import pytest
 def maskops_module():
     """Import the maskops module or skip if not available."""
     try:
-        from opteryx.compiled.draken.compiled import maskops
+        from draken.compiled import maskops
         return maskops
     except ImportError:
         pytest.skip("maskops module not available")

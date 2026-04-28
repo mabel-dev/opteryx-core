@@ -5,8 +5,8 @@ import pyarrow as pa
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.interop.vector_sequence import vector_from_sequence
+from draken.morsels.morsel import Morsel
 from opteryx.operators.group_state_store import DRAKEN_ENCODING_CONSTANT
 from opteryx.operators.projection_node import ProjectionNode
 

@@ -20,8 +20,8 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from opteryx.compiled.draken.interop.arrow import vector_from_arrow, vector_from_sequence
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.interop.arrow import vector_from_arrow, vector_from_sequence
+from draken.morsels.morsel import Morsel
 
 from opteryx.expression import NodeType
 from opteryx.expression.evaluator import draken_compare, evaluate_draken

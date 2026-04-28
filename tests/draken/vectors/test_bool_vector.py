@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import pytest
 import pyarrow as pa
 
-from opteryx.compiled.draken import Vector
+from draken import Vector
 
 
 class TestBoolVectorAnyAll:

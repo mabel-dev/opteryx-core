@@ -142,10 +142,10 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
 
         # Schema-only read using rugo metadata extraction
         try:
-            from opteryx.compiled.rugo.converters.orso import (
+            from rugo.converters.orso import (
                 rugo_to_orso_schema,  # type: ignore[import]
             )
-            from opteryx.compiled.rugo.parquet import (
+            from rugo.parquet_reader import (
                 read_metadata_from_memoryview,  # type: ignore[import]
             )
         except ImportError as e:

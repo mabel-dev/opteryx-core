@@ -18,7 +18,7 @@ Supports: !=, >, >=, <, <=
 from libc.stdint cimport int64_t
 
 from opteryx.compiled.structures.buffers cimport IntBuffer, Int32Buffer
-from opteryx.compiled.draken.morsels.morsel cimport Morsel
+from draken.morsels.morsel cimport Morsel
 
 cpdef tuple non_equi_nested_loop_join(
     Morsel left_morsel,
@@ -44,7 +44,7 @@ cpdef tuple non_equi_nested_loop_join(
     Returns:
         Tuple of (left_indices, right_indices) as numpy arrays
     """
-    from opteryx.compiled.draken.morsels.morsel import Morsel
+    from draken.morsels.morsel import Morsel
 
     cdef int64_t left_rows = left_morsel.num_rows
     cdef int64_t right_rows = right_morsel.num_rows

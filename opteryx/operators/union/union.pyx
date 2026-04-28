@@ -15,8 +15,6 @@ from opteryx import EOS
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "draken"
-
 
 class UnionNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):

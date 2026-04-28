@@ -40,7 +40,7 @@ class OperatorFusionStrategy(OptimizationStrategy):
         if len(order_by) != 1:
             return False
 
-        expression, direction = order_by[0]
+        expression, ascending = order_by[0]
         if expression.node_type != NodeType.FUNCTION:
             return False
         if expression.value not in ("COSINE_SIMILARITY", "COSINE_DISTANCE"):
@@ -54,7 +54,7 @@ class OperatorFusionStrategy(OptimizationStrategy):
         if not node_is_vector_query_expression(expression.parameters[1]):
             return False
 
-        descending = direction == "descending"
+        descending = not ascending
         return (expression.value == "COSINE_DISTANCE" and not descending) or (
             expression.value == "COSINE_SIMILARITY" and descending
         )

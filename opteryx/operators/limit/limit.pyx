@@ -20,8 +20,6 @@ from opteryx import EOS
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "draken"
-
 
 class LimitNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):

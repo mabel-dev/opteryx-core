@@ -24,7 +24,7 @@ import pyarrow.parquet as pq
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-import opteryx.compiled.rugo.parquet as rp
+import rugo.parquet as rp
 
 
 def _storage_size_bytes(arr: pa.Array) -> int:

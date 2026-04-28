@@ -9,9 +9,9 @@
 from libc.stdint cimport int64_t, uint8_t
 from libc.stdlib cimport malloc, free
 
-from opteryx.compiled.draken.vectors.array_vector cimport ArrayVector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
-from opteryx.compiled.draken.core.buffers cimport DrakenArrayBuffer
+from draken.vectors.array_vector cimport ArrayVector
+from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.core.buffers cimport DrakenArrayBuffer
 
 
 cpdef Int64Vector vector_length(ArrayVector vec):

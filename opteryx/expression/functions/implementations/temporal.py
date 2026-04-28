@@ -49,13 +49,13 @@ def date_part(part, arr):
 
     # Date32Vector: convert to TimestampVector so the timestamp kernels can be reused.
     if vector_type == "Date32Vector":
-        from opteryx.compiled.vector_ops.function_definitions import vector_date32_to_timestamp
+        from opteryx.compiled.vector_ops import vector_date32_to_timestamp
 
         arr = vector_date32_to_timestamp(arr)
         vector_type = "TimestampVector"
 
     if vector_type == "TimestampVector":
-        from opteryx.compiled.vector_ops.function_definitions import (
+        from opteryx.compiled.vector_ops import (
             vector_datepart_day,
             vector_datepart_dayofweek,
             vector_datepart_dayofyear,
@@ -137,7 +137,7 @@ def date_diff(part, start, end):
         if type_name == "TimestampVector":
             return arr
         if type_name == "Date32Vector":
-            from opteryx.compiled.vector_ops.function_definitions import vector_date32_to_timestamp
+            from opteryx.compiled.vector_ops import vector_date32_to_timestamp
 
             return vector_date32_to_timestamp(arr)
         raise InvalidFunctionParameterError(
@@ -161,7 +161,7 @@ def date_format(dates, pattern):  # [#325]
     Inputs: dates is a Draken TimestampVector or Date32Vector, pattern is a bytes scalar.
     Returns: List of formatted strings.
     """
-    from opteryx.compiled.vector_ops.function_definitions import vector_date_format
+    from opteryx.compiled.vector_ops import vector_date_format
 
     pattern = pattern[0]
 
@@ -173,7 +173,7 @@ def date_floor(dates, magnitude, units):  # [#325]
 
     Inputs: dates (Draken vector), magnitude (scalar), units (str scalar).
     """
-    from opteryx.compiled.vector_ops.function_definitions import vector_floor_temporal
+    from opteryx.compiled.vector_ops import vector_floor_temporal
 
     # Extract scalars from constant vectors if needed
     mag_type = magnitude.__class__.__name__
@@ -213,7 +213,7 @@ def unixtime(array):
       - TimestampVector → Int64Vector of seconds since epoch
       - Date32Vector → Int64Vector of seconds since epoch
     """
-    from opteryx.compiled.vector_ops.function_definitions import vector_unixtime
+    from opteryx.compiled.vector_ops import vector_unixtime
 
     vector_type = array.__class__.__name__
 

@@ -6,7 +6,7 @@ Measures throughput for case-insensitive string comparison.
 import time
 
 import pyarrow as pa
-from opteryx.compiled.draken.vectors.string_vector import StringVector
+from draken.vectors.string_vector import StringVector
 
 
 def measure_throughput(vec, search_value, iterations=100):

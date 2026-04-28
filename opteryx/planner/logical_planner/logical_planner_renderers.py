@@ -139,8 +139,8 @@ def render_function_dataset(node: LogicalPlanNode) -> str:
 @register_render(LogicalPlanStepType.HeapSort)
 def render_heapsort(node: LogicalPlanNode) -> str:
     order = ", ".join(
-        format_expression(expr) + (" DESC" if direction == "descending" else "")
-        for expr, direction in node.order_by
+        format_expression(expr) + ("" if ascending else " DESC")
+        for expr, ascending in node.order_by
     )
     qualifier = " VECTOR TOPK" if getattr(node, "vector_topk_candidate", False) else ""
     return f"HEAP SORT{qualifier} (LIMIT {node.limit}, ORDER BY [{order}])"
@@ -156,8 +156,8 @@ def render_limit(node: LogicalPlanNode) -> str:
 @register_render(LogicalPlanStepType.Order)
 def render_order(node: LogicalPlanNode) -> str:
     order = ", ".join(
-        format_expression(expr) + (" DESC" if direction == "descending" else "")
-        for expr, direction in node.order_by
+        format_expression(expr) + ("" if ascending else " DESC")
+        for expr, ascending in node.order_by
     )
     return f"ORDER BY [{order}]"
 

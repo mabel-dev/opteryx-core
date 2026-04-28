@@ -24,7 +24,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-import opteryx.compiled.rugo.parquet as rp
+import rugo.parquet as rp
 
 # Encoding constants
 DRAKEN_ENCODING_DENSE = 0

@@ -13,15 +13,10 @@ from opteryx.planner.binder.binding_context import BindingContext
 def visit_order(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     order_by = []
     columns = []
-    for column, direction in node.order_by:
+    for column, ascending in node.order_by:
         bound_column, context = inner_binder(column, context)
 
-        order_by.append(
-            (
-                bound_column,
-                "ascending" if direction else "descending",
-            )
-        )
+        order_by.append((bound_column, bool(ascending)))
         columns.append(bound_column)
 
     node.order_by = order_by

@@ -40,16 +40,16 @@ from libc.stdint cimport uint8_t, uint16_t, uint32_t, int64_t, int32_t, int16_t,
 from libc.stdlib cimport malloc
 from libc.string cimport memcpy
 
-from opteryx.compiled.draken.core.buffers cimport DictAccessor
-from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
-from opteryx.compiled.draken.core.buffers cimport (
+from draken.core.buffers cimport DictAccessor
+from draken.core.buffers cimport DrakenVarBuffer
+from draken.core.buffers cimport (
     DRAKEN_FLOAT64, DRAKEN_FLOAT32,
     DRAKEN_INT64,  DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8,
 )
-from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.compiled.draken.vectors.int64_vector   cimport Int64Vector
-from opteryx.compiled.draken.vectors.scalar_constructors cimport from_scalar
-from opteryx.compiled.draken.vectors.vector cimport Vector
+from draken.vectors.float64_vector cimport Float64Vector
+from draken.vectors.int64_vector   cimport Int64Vector
+from draken.vectors.scalar_constructors cimport from_scalar
+from draken.vectors.vector cimport Vector
 from opteryx.third_party.pcg.pcg cimport oneseq_xsh_rs_32_16, static_arbitrary_seed
 
 

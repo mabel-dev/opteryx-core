@@ -7,14 +7,13 @@
 import time
 from collections import defaultdict
 
+from draken import Morsel
 from opteryx import EMPTY, EOS
-from opteryx.compiled.draken import Morsel
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.tracing.event_recorder import record_event as _trace_record
 from opteryx.types import OrsoTypes
 from opteryx.utils import random_string
 
-_DATA_FORMAT = "arrow,draken"
 END = object()
 
 
@@ -348,7 +347,8 @@ class JoinNode(BasePlanNode):
         if not self._join_key_cast_plan:
             return morsel
 
-        from opteryx.compiled.draken.morsels.morsel import Morsel as _Morsel
+        from draken.morsels.morsel import Morsel as _Morsel
+
         from opteryx.expression.casts import cast_to_double, cast_to_int
 
         names = list(morsel.column_names)

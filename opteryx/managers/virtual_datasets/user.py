@@ -9,8 +9,8 @@ This is a virtual dataset which is calculated at access time.
 It is the user attributes collection.
 """
 
-from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.interop.vector_sequence import vector_from_sequence
+from draken.morsels.morsel import Morsel
 from opteryx.exceptions import VariableNotFoundError
 from opteryx.types import OrsoTypes
 from opteryx.types.schema import FlatColumn, RelationSchema

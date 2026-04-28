@@ -15,8 +15,8 @@ non-null, using Draken vector capabilities.
 """
 
 
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
 from opteryx.compiled.structures.buffers cimport IntBuffer
 
 from libc.stdint cimport int64_t, uint8_t, uintptr_t

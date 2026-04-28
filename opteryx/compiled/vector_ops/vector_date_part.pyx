@@ -30,12 +30,12 @@ from libc.stdint cimport int64_t
 from libc.stddef cimport size_t
 from cpython.array cimport array, clone
 
-from opteryx.compiled.draken.core.buffers cimport DictAccessor
-from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_packed_dict as int64_from_packed_dict, from_sequence as int64_from_sequence
-from opteryx.compiled.draken.vectors.scalar_constructors cimport from_scalar
-from opteryx.compiled.draken.vectors.vector cimport Vector
-from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT64
+from draken.core.buffers cimport DictAccessor
+from draken.vectors.timestamp_vector cimport TimestampVector
+from draken.vectors.int64_vector cimport Int64Vector, from_packed_dict as int64_from_packed_dict, from_sequence as int64_from_sequence
+from draken.vectors.scalar_constructors cimport from_scalar
+from draken.vectors.vector cimport Vector
+from draken.core.buffers cimport DRAKEN_INT64
 
 # ---------------------------------------------------------------------------
 # SIMD-accelerated kernels for minute / hour / second extraction.

@@ -5,7 +5,7 @@ Cython binding for the minimal C++ ParquetIOPipeline.
 
 This module exposes a small, safe Python wrapper around the native
 `rugo::ParquetIOPipeline` implemented in C++. It is intended to be imported
-as `opteryx.compiled.rugo.io_pipeline`.
+as `rugo.io_pipeline`.
 
 The wrapper expects a C ABI MemoryPoolApi pointer (created by
 `opteryx.compiled.structures.memory_pool_api.create_memory_pool_api`) to be
@@ -175,7 +175,7 @@ cdef class ParquetIOPipelineWrapper:
 
 # Expose module-level names for convenience and compatibility.
 # This module is intended to be imported as:
-#   from opteryx.compiled.rugo import io_pipeline
+#   from rugo import io_pipeline
 #
 # Provide a thin factory that mirrors the C++ wrapper class.
 

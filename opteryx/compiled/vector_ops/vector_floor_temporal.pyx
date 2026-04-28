@@ -16,9 +16,9 @@ from libc.stdint cimport int64_t, uint8_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
-from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
-from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
+from draken.vectors.timestamp_vector cimport TimestampVector
+from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.core.buffers cimport DrakenFixedBuffer
 
 
 cpdef TimestampVector vector_floor_temporal(object temporal_vec, int64_t magnitude, str units):

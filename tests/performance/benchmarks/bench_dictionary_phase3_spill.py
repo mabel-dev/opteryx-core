@@ -22,8 +22,8 @@ import pyarrow as pa
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.compiled.draken import Morsel
-from opteryx.compiled.draken.storage import read_morsel, write_morsel
+from draken import Morsel
+from draken.storage import read_morsel, write_morsel
 
 
 def _median_ms(samples_ns: list[int]) -> float:

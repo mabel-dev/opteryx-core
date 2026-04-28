@@ -23,7 +23,7 @@ from typing import List
 
 # Draken BoolVector helpers for converting bit-packed bloom results
 from libc.stdint cimport uint8_t, uint64_t, int64_t
-from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
+from draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
 
 # Telemetry: number of times the outer-join bloom-filter Draken fast-path was applied.
 # Incremented when a probe morsel is filtered via the Draken bit-packed result path.
@@ -32,15 +32,13 @@ BLOOM_FASTPATH_COUNTER = 0
 from opteryx.compiled.structures.bloom_filter import create_bloom_filter_morsel
 from opteryx.compiled.structures.bloom_filter import bloom_filter_check_morsel
 from opteryx.compiled.structures.carchar_index cimport CarcharJoinIndexWrapper
-from opteryx.compiled.draken.morsels.align import align_tables_pyarray
+from draken.morsels.align import align_tables_pyarray
 from opteryx.compiled.morsel_ops.null_filter cimport non_null_row_indices
 from opteryx.models import QueryProperties
 
 from opteryx import EOS, EMPTY
 
 from . import JoinNode
-
-_DATA_FORMAT = "draken"
 
 
 cpdef CarcharJoinIndexWrapper _build_probe_hash_map(Morsel morsel, list join_columns):

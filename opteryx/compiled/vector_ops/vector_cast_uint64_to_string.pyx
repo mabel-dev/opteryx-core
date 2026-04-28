@@ -9,9 +9,9 @@
 from libc.stdint cimport uint64_t, uint8_t
 from libc.stdint cimport uint64_t, uint8_t
 
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors import string_vector as string_vector_module
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors import string_vector as string_vector_module
 
 
 cdef inline int uint64_to_str_buf(uint64_t value, char* buf) nogil:

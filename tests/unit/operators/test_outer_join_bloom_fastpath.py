@@ -14,7 +14,7 @@
 import opteryx.operators.outer_join_node as outer_join_node
 import pyarrow as pa
 import pytest
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.morsels.morsel import Morsel
 from opteryx.compiled.structures.bloom_filter import (
     bloom_filter_check_morsel,
     create_bloom_filter_morsel,

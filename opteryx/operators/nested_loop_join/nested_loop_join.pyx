@@ -13,15 +13,13 @@ Uses Draken Morsel buffering, Morsel.hash() for hashing, Draken-native alignment
 from typing import Generator, Optional
 import time
 from libc.stdint cimport uint8_t, int32_t, uint64_t
-from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
-from opteryx.compiled.draken.morsels.align cimport align_tables
+from draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
+from draken.morsels.align cimport align_tables
 from opteryx.models import QueryProperties
 
 from opteryx import EOS, EMPTY
 
 from . import JoinNode
-
-_DATA_FORMAT = "draken"
 
 
 # Helper to convert bit-packed results memoryview to BoolVector (avoids cdef in method)

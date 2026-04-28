@@ -17,9 +17,6 @@ from opteryx.types import OrsoTypes
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "draken"
-
-
 def _simple_collector(schema):
     """
     We've been given the schema, so just translate to a Draken morsel

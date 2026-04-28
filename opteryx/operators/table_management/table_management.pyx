@@ -17,9 +17,6 @@ from opteryx.models import QueryProperties
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "none"
-
-
 class TableManagementNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)

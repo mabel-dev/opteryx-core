@@ -120,7 +120,7 @@ def cast_to_double(arr, *args):
     Returns:
         Float64Vector or Python float/list
     """
-    from opteryx.compiled.draken.vectors.float64_vector import from_sequence
+    from draken.vectors.float64_vector import from_sequence
     from opteryx.third_party.fastfloat.fast_float import (
         parse_ascii_array_to_double,
         parse_byte_array_to_double,
@@ -160,7 +160,7 @@ def cast_to_int(arr, *args):
     Returns:
         Int64Vector or Python int/list
     """
-    from opteryx.compiled.draken.vectors.int64_vector import from_sequence
+    from draken.vectors.int64_vector import from_sequence
     from opteryx.compiled.vector_ops import vector_cast_ascii_to_int
     from opteryx.utils.vector_types import VectorType, get_vector_type
 
@@ -191,7 +191,7 @@ def cast_to_int(arr, *args):
 
 def cast_to_varchar(arr, *args):
     """Cast array to VARCHAR type."""
-    from opteryx.compiled.draken.vectors.string_vector import StringVector
+    from draken.vectors.string_vector import StringVector
     from opteryx.utils.vector_types import VectorType, get_vector_type
 
     if is_draken_vector_fn(arr):
@@ -212,7 +212,7 @@ def cast_to_varchar(arr, *args):
 
 def cast_to_boolean(arr, *args):
     """Cast array to BOOLEAN type."""
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    from draken.vectors.bool_vector import BoolVector
     from opteryx.utils.vector_types import VectorType, get_vector_type
 
     if is_draken_vector_fn(arr):
@@ -270,7 +270,7 @@ def cast(arr: any, _type: str, args: tuple = (), unit: str = None) -> any:
     """
 
     def _inner(arr):
-        from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+        from draken.interop.vector_sequence import vector_from_sequence
 
         kwargs = {}
 
@@ -316,7 +316,7 @@ def cast(arr: any, _type: str, args: tuple = (), unit: str = None) -> any:
             # Convert datetime objects to int64 microseconds, then create TimestampVector
             int64_values = [timestamp_to_int64_us(dt) if dt is not None else None for dt in result]
             int_vec = vector_from_sequence(int64_values, dtype=OrsoTypes.INTEGER)
-            from opteryx.compiled.draken.vectors.timestamp_vector import (
+            from draken.vectors.timestamp_vector import (
                 from_int64_vector as _from_int64,
             )
 

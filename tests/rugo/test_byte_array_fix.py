@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-import opteryx.compiled.rugo.jsonl as jsonl
+import rugo.jsonl as jsonl
 
 print("=" * 70)
 print("BYTE ARRAY HANDLING - KEEPING BINARY DATA AS BYTES")

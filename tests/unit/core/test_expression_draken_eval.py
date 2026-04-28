@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.morsels.morsel import Morsel
 from opteryx.expression.evaluator.draken import _eval_value, _is_null_as_boolvector, evaluate_draken
 
 import opteryx

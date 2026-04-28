@@ -13,7 +13,7 @@ from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t
 from libc.stdlib cimport free, malloc
 from libc.string cimport memcpy, memset
 
-from opteryx.compiled.draken.core.buffers cimport (
+from draken.core.buffers cimport (
     ConstAccessor,
     DRAKEN_BOOL,
     DRAKEN_DATE32,
@@ -29,20 +29,20 @@ from opteryx.compiled.draken.core.buffers cimport (
     DrakenConstantStringPayload,
     DrakenFixedBuffer,
 )
-from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
-from opteryx.compiled.draken.vectors.scalar_constructors cimport from_scalar
-from opteryx.compiled.draken.vectors.date32_vector cimport Date32Vector
-from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.vectors.integer_vector cimport IntegerVector
-from opteryx.compiled.draken.vectors.string_vector cimport (
+from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.scalar_constructors cimport from_scalar
+from draken.vectors.date32_vector cimport Date32Vector
+from draken.vectors.float64_vector cimport Float64Vector
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer_vector cimport IntegerVector
+from draken.vectors.string_vector cimport (
     StringVector,
     StringVectorBuilder,
     _StringVectorView,
 )
-from opteryx.compiled.draken.vectors.time_vector cimport TimeVector
-from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.compiled.draken.vectors.vector cimport Vector
+from draken.vectors.time_vector cimport TimeVector
+from draken.vectors.timestamp_vector cimport TimestampVector
+from draken.vectors.vector cimport Vector
 
 
 cdef int BRANCH_UNSUPPORTED = 0
@@ -134,7 +134,7 @@ def _normalize_value(value):
             pass
 
     if hasattr(value, "to_pylist"):
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+        from draken.interop.arrow import vector_from_arrow
         return vector_from_arrow(value)
 
     if hasattr(value, "as_py"):
@@ -152,7 +152,7 @@ def _normalize_value(value):
 
     # Normalize Python sequences into Draken vectors so the Draken IIF kernel
     # can operate on them directly.
-    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+    from draken.interop.vector_sequence import vector_from_sequence
 
     if isinstance(value, (tuple, list)):
         if len(value) == 1:

@@ -4,7 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import pyarrow as pa
-from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+from draken.interop.arrow import vector_from_arrow
 
 DRAKEN_ENCODING_CONSTANT = 3
 

@@ -9,10 +9,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 import pyarrow as pa
 import pytest
-from opteryx.compiled.draken.vectors._hash_api import hash_into as hash_into_vector
-from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
+from draken.vectors._hash_api import hash_into as hash_into_vector
+from draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
 
-import opteryx.compiled.draken as draken
+import draken as draken
 
 
 def _hash_view_to_list(buffer):

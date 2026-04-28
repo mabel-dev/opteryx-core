@@ -5,8 +5,8 @@
 
 from typing import List
 
-from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
-from opteryx.compiled.draken.vectors.string_vector import StringVector
+from draken.interop.vector_sequence import vector_from_sequence
+from draken.vectors.string_vector import StringVector
 from opteryx.compiled.vector_ops import vector_match_against
 from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.vectors.embeddings import get_embedding_provider
@@ -68,24 +68,6 @@ def get_sha384(item):
     import hashlib
 
     return hashlib.sha384(str(item).encode()).hexdigest()
-
-
-def get_base85_encode(item):
-    """calculate BASE85 encoding of a string"""
-    import base64
-
-    if not isinstance(item, bytes):
-        item = str(item).encode()
-    return base64.b85encode(item).decode("UTF8")
-
-
-def get_base85_decode(item):
-    """calculate BASE85 decoding of a string"""
-    import base64
-
-    if not isinstance(item, bytes):
-        item = str(item).encode()
-    return base64.b85decode(item).decode("UTF8")
 
 
 def substring(arr: List[str], from_pos, count=None) -> List[List[str]]:

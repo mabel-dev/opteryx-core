@@ -2,8 +2,8 @@ import numpy as np
 import pytest
 
 import pyarrow as pa
-from opteryx.compiled.draken.morsels.morsel import Morsel
-from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
+from draken.morsels.morsel import Morsel
+from draken.vectors.int64_vector import Int64Vector
 from opteryx.exceptions import IncorrectTypeError
 from opteryx.expression.binary_operators import MapAccessOp
 

@@ -28,8 +28,6 @@ from opteryx import EOS
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "draken"
-
 
 class ExitNode(BasePlanNode):
 
@@ -84,7 +82,7 @@ class ExitNode(BasePlanNode):
         if morsel == EOS:
             if not self.at_least_one:
                 # Return empty Draken morsel with correct schema
-                from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+                from draken.interop.vector_sequence import vector_from_sequence
 
                 # Create empty vectors with correct types
                 vectors = []

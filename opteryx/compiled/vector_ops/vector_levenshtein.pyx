@@ -10,9 +10,9 @@ from libc.stdint cimport int64_t, int32_t, uint8_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
-from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.core.buffers cimport DrakenVarBuffer
 
 
 cdef inline int64_t _min3(int64_t x, int64_t y, int64_t z) nogil:

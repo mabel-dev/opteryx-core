@@ -5,7 +5,7 @@ import datetime
 import pyarrow as pa
 import pytest
 
-from opteryx.compiled.draken import Vector
+from draken import Vector
 
 MICROSECONDS_PER_DAY = 24 * 60 * 60 * 1_000_000
 _MONTH_INTERVAL_FACTORY = getattr(pa, "month_interval", None)

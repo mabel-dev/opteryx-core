@@ -41,7 +41,7 @@ class FilterNode(BasePlanNode):
         return "Filter"
 
     def execute(self, Morsel morsel):
-        from opteryx.compiled.draken.morsels.morsel import Morsel
+        from draken.morsels.morsel import Morsel
         from opteryx.expression.evaluator import evaluate_draken
 
         if morsel is EOS:

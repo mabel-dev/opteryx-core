@@ -8,7 +8,7 @@ import pytest
 def test_extension_imports():
     """Verify the compiled extension can be imported."""
     try:
-        import opteryx.compiled.rugo._jsonl as _jsonl
+        import rugo._jsonl as _jsonl
         assert _jsonl is not None
     except ImportError as e:
         pytest.skip(f"_jsonl extension not built: {e}")

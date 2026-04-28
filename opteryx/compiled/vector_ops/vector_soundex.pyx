@@ -9,9 +9,9 @@
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.stdint cimport int32_t, uint8_t
 
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors import string_vector as string_vector_module
-from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors import string_vector as string_vector_module
+from draken.core.buffers cimport DrakenVarBuffer
 
 
 cpdef StringVector vector_soundex(StringVector vec):

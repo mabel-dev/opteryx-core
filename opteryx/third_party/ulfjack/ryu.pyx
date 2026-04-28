@@ -9,7 +9,7 @@
 from libc.stdint cimport uint32_t
 from libc.math cimport isnan, isinf, isfinite
 
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector, StringVectorBuilder
+from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
 
 
 cdef extern from "ryu.h":

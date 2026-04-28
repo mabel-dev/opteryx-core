@@ -19,7 +19,7 @@ from typing import Tuple
 
 _logger = logging.getLogger(__name__)
 
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.morsels.morsel import Morsel
 from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.types.schema import RelationSchema

@@ -15,10 +15,10 @@ from libc.stdlib cimport malloc, free
 from libc.string cimport memcmp, memset
 from cython cimport Py_ssize_t
 
-from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
-from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
-from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
+from draken.core.buffers cimport DrakenVarBuffer
+from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.string_vector cimport StringVector
 
 
 # ----------------------------------------------------------------------

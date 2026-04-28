@@ -46,8 +46,6 @@ from opteryx import EOS
 from opteryx import config
 
 
-_DATA_FORMAT = "arrow,draken"
-
 
 def _get_footer_pool():
     """Get footer prefetch pool via thread_pool_manager."""

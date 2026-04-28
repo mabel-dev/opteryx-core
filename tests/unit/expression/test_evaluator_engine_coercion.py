@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
-from opteryx.compiled.draken.vectors.vector import Vector
+from draken.interop.vector_sequence import vector_from_sequence
+from draken.vectors.vector import Vector
 from opteryx.expression.evaluator import apply_bounded_function
 
 

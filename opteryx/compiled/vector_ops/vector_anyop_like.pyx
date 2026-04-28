@@ -14,10 +14,10 @@ from cpython.bytes cimport PyBytes_AsStringAndSize, PyBytes_FromStringAndSize
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
-from opteryx.compiled.draken.core.buffers cimport DRAKEN_STRING, DrakenArrayBuffer, DrakenVarBuffer
-from opteryx.compiled.draken.vectors.array_vector cimport ArrayVector
-from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from draken.core.buffers cimport DRAKEN_STRING, DrakenArrayBuffer, DrakenVarBuffer
+from draken.vectors.array_vector cimport ArrayVector
+from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.string_vector cimport StringVector
 
 
 cdef extern from "re2/stringpiece.h":

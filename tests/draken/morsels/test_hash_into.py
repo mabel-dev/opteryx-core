@@ -10,9 +10,9 @@ from array import array
 
 import pyarrow as pa
 import pytest
-from opteryx.compiled.draken.vectors._hash_api import hash_into as hash_into_vector
+from draken.vectors._hash_api import hash_into as hash_into_vector
 
-import opteryx.compiled.draken as draken
+import draken as draken
 
 MIX_HASH_CONSTANT = 0x9E3779B97F4A7C15
 NULL_HASH = 0x4C3F95A36AB8ECCA

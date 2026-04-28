@@ -19,13 +19,10 @@ from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
-from opteryx.types import OrsoTypes
 
 from opteryx import EOS
 
 from . import BasePlanNode
-
-_DATA_FORMAT = "draken"
 
 
 class SortNode(BasePlanNode):
@@ -36,7 +33,10 @@ class SortNode(BasePlanNode):
 
     @property
     def config(self):  # pragma: no cover
-        return ", ".join([f"{i[0].value} {i[1][0:3].upper()}" for i in self.order_by])
+        return ", ".join(
+            f"{col.value} {'ASC' if ascending else 'DESC'}"
+            for col, ascending in self.order_by
+        )
 
     @property
     def name(self):  # pragma: no cover
@@ -59,24 +59,18 @@ class SortNode(BasePlanNode):
         ascending_flags = []
         evaluations = []
 
-        for column, direction in self.order_by:
-            if column.node_type == NodeType.LITERAL and column.type == OrsoTypes.INTEGER:
-                # ORDER BY <position> — natural number, 1-based
-                col_name = combined.column_names[int(column.value) - 1]
-                column_names.append(col_name)
-            else:
-                if column.node_type != NodeType.IDENTIFIER:
-                    evaluations.append(column)
-                try:
-                    identity = column.schema_column.identity
-                    column_names.append(identity)
-                except ColumnNotFoundError as cnfe:  # pragma: no cover
-                    raise ColumnNotFoundError(
-                        f"`ORDER BY` must reference columns as they appear in the `SELECT` clause. {cnfe}"
-                    ) from cnfe
+        for column, ascending in self.order_by:
+            if column.node_type != NodeType.IDENTIFIER:
+                evaluations.append(column)
+            try:
+                identity = column.schema_column.identity
+                column_names.append(identity)
+            except ColumnNotFoundError as cnfe:  # pragma: no cover
+                raise ColumnNotFoundError(
+                    f"`ORDER BY` must reference columns as they appear in the `SELECT` clause. {cnfe}"
+                ) from cnfe
 
-            asc = not str(direction).upper().startswith("DESC")
-            ascending_flags.append(asc)
+            ascending_flags.append(bool(ascending))
 
         if evaluations:
             combined = evaluate_and_append(evaluations, combined)

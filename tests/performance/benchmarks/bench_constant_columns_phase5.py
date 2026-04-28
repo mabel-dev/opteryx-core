@@ -24,10 +24,10 @@ from opteryx.types import OrsoTypes
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-from opteryx.compiled.draken.morsels.morsel import Morsel
-from opteryx.compiled.draken.storage.morsel_io import write_morsel
-from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
+from draken.interop.arrow import vector_from_arrow
+from draken.morsels.morsel import Morsel
+from draken.storage.morsel_io import write_morsel
+from draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
 from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
 
 from opteryx.expression.operations import filter_operations

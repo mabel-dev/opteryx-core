@@ -2,7 +2,7 @@
 
 """Common helper functions for string vector operations."""
 
-from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.bool_vector cimport BoolVector
 from libc.string cimport memset
 from libc.stdlib cimport malloc, free
 

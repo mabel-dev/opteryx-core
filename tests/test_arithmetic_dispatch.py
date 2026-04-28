@@ -12,9 +12,9 @@ Coverage:
 
 import pyarrow as pa
 import pytest
-from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
-from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
-from opteryx.compiled.draken.vectors.integer_vector import IntegerVector
+from draken.vectors.float64_vector import Float64Vector
+from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer_vector import IntegerVector
 
 from opteryx import session
 from opteryx.utils.vector_types import (
@@ -225,7 +225,7 @@ class TestArithmeticDispatchRefactoring:
         """Verify call_arithmetic_op returns None in Phase 4.4 (delegating to binary_operations)."""
         import pyarrow as pa
 
-        from opteryx.compiled.draken.vectors import Int64Vector
+        from draken.vectors import Int64Vector
         from opteryx.expression.evaluator.arithmetic_dispatch import call_arithmetic_op
 
         v1 = Int64Vector.from_arrow(pa.array([1, 2, 3]))

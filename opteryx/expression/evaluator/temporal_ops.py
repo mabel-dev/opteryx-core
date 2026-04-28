@@ -64,7 +64,7 @@ def _compare_nullable_temporal(op: str, left, right):
 
 
 def _compare_timestamp_date32_vectors(op: str, ts_vec, d_vec):
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    from draken.vectors.bool_vector import BoolVector
 
     ts_values = ts_vec.to_pylist()
     d_values = d_vec.to_pylist()
@@ -79,7 +79,7 @@ def _compare_timestamp_date32_vectors(op: str, ts_vec, d_vec):
 
 
 def _int64_temporal_compare(op: str, vec, right, temporal_type):
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    from draken.vectors.bool_vector import BoolVector
     from opteryx.types import OrsoTypes
 
     if right is None:
@@ -127,7 +127,7 @@ def _int64_temporal_compare(op: str, vec, right, temporal_type):
 
 
 def _timestamp_compare(op: str, vec, right):
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    from draken.vectors.bool_vector import BoolVector
 
     if right is None:
         return BoolVector(len(vec))
@@ -170,7 +170,7 @@ def _timestamp_compare(op: str, vec, right):
 
 
 def _date32_compare(op: str, vec, right):
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    from draken.vectors.bool_vector import BoolVector
 
     if right is None:
         return BoolVector(len(vec))
@@ -210,7 +210,7 @@ def _date32_compare(op: str, vec, right):
 
 
 def _interval_compare(op: str, vec, right):
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    from draken.vectors.bool_vector import BoolVector
 
     if right is None:
         return BoolVector(len(vec))

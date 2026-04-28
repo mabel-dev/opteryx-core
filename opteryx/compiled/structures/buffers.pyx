@@ -1,4 +1,5 @@
 # distutils: language = c++
+# distutils: sources = src/cpp/intbuffer.cpp
 # cython: language_level=3
 # cython: nonecheck=False
 # cython: cdivision=True
@@ -12,7 +13,7 @@ from libc.stdint cimport int64_t, int32_t
 from libcpp.vector cimport vector
 from libc.string cimport memcpy
 
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
 
 cdef extern from "intbuffer.h":
     cdef cppclass CIntBuffer:

@@ -12,11 +12,11 @@ from libc.stdint cimport int64_t, uint8_t, uint64_t
 from libc.stdlib cimport malloc, free
 from libcpp.vector cimport vector
 
-from opteryx.compiled.draken.vectors.vector cimport Vector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
+from draken.vectors.vector cimport Vector
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.float64_vector cimport Float64Vector
+from draken.vectors.string_vector cimport StringVector
+from draken.core.buffers cimport DrakenVarBuffer
 
 
 cdef extern from "carchar_set.hpp" namespace "opteryx::carchar":
@@ -84,7 +84,7 @@ cdef class CountDistinctCollector(BaseCollector):
         self._time_finalize_ns += _now_ns() - start_ns
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+        from draken.interop.arrow import vector_from_sequence
         cdef list vals = []
         cdef Py_ssize_t i
 
@@ -145,7 +145,7 @@ cdef class AnyValueInt64Collector(BaseCollector):
                     seen[si] = 1
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+        from draken.interop.arrow import vector_from_sequence
         cdef long long start_ns = _now_ns()
         cdef list vals = []
         cdef Py_ssize_t i
@@ -204,7 +204,7 @@ cdef class AnyValueFloat64Collector(BaseCollector):
                     seen[si] = 1
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+        from draken.interop.arrow import vector_from_sequence
         cdef long long start_ns = _now_ns()
         cdef list vals = []
         cdef Py_ssize_t i
@@ -254,7 +254,7 @@ cdef class AnyValueObjectCollector(BaseCollector):
                     seen[si] = 1
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+        from draken.interop.arrow import vector_from_sequence
         cdef long long start_ns = _now_ns()
         result = vector_from_sequence(self._values[:num_groups])
         self._time_finalize_ns += _now_ns() - start_ns

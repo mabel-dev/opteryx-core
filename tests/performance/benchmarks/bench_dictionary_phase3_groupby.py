@@ -18,7 +18,7 @@ import pyarrow as pa
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.morsels.morsel import Morsel
 from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
 
 from opteryx.operators.shuffle import AggregationSpec

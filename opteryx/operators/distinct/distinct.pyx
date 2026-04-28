@@ -18,8 +18,6 @@ from opteryx import EOS
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "draken"
-
 
 class DistinctNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):

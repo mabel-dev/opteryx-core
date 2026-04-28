@@ -26,8 +26,8 @@
 # encoding for secondary inputs (needle, search, replace_val, etc.).
 
 from libc.stdint cimport int32_t, uint8_t, uint16_t, uint32_t
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.core.buffers cimport (
+from draken.vectors.string_vector cimport StringVector
+from draken.core.buffers cimport (
     DrakenVarBuffer, DrakenConstantStringPayload,
     DrakenEncoding, DRAKEN_ENCODING_DICTIONARY,
     DictAccessor,

@@ -25,8 +25,8 @@ inc = include_directories(
   '../third_party/bshoshany',
   '../third_party/moodycamel',
   '../third_party/crypto',
-  '../draken/src',
-  '../draken/src/core',
+  '../draken/src',              # C headers (core/buffers.h, interop/*.h)
+  '..',                         # draken .pxd resolution (draken/core/, draken/vectors/, …)
   'third_party/mabel',
   'third_party/pcg',
 )
@@ -43,37 +43,44 @@ inc_mabel = include_directories(
 # ============================================================================
 
 python.extension_module('opteryx_compiled_http_client',
-  'compiled/http_client.cpp',
+  'compiled/http_client.pyx',
   sources: [
     '../src/cpp/http_client.cpp',
+    '../src/cpp/cpu_features.cpp',
   ],
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
   link_args: ['-lcurl'],
 )
 
 python.extension_module('opteryx_compiled_platform',
-  'compiled/platform.cpp',
+  'compiled/platform.pyx',
   sources: [
     '../src/cpp/platform.cpp',
   ],
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_pyobject_queue',
-  'compiled/pyobject_queue.cpp',
+  'compiled/pyobject_queue.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_simd_probe',
-  'compiled/simd_probe.cpp',
+  'compiled/simd_probe.pyx',
   sources: [
     '../src/cpp/simd_env.cpp',
+    '../src/cpp/simd_hash.cpp',
+    '../src/cpp/simd_bitops.cpp',
+    '../src/cpp/cpu_features.cpp',
   ],
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_thread_pool',
-  'compiled/thread_pool.cpp',
+  'compiled/thread_pool.pyx',
   include_directories: inc,
 )
 
@@ -83,17 +90,18 @@ python.extension_module('opteryx_compiled_thread_pool',
 # ============================================================================
 
 python.extension_module('opteryx_compiled_functions_strings',
-  'compiled/functions/strings.cpp',
+  'compiled/functions/strings.pyx',
   sources: [
     '../src/cpp/simd_search.cpp',
     '../src/cpp/simd_string_ops.cpp',
     '../src/cpp/cpu_features.cpp',
   ],
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_functions_timestamp',
-  'compiled/functions/timestamp.c',
+  'compiled/functions/timestamp.pyx',
   include_directories: inc,
 )
 
@@ -103,17 +111,17 @@ python.extension_module('opteryx_compiled_functions_timestamp',
 # ============================================================================
 
 python.extension_module('opteryx_compiled_io_csv_rows',
-  'compiled/io/csv_rows.cpp',
+  'compiled/io/csv_rows.pyx',
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_io_json_rows',
-  'compiled/io/json_rows.cpp',
+  'compiled/io/json_rows.pyx',
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_io_process_ring',
-  'compiled/io/process_ring.c',
+  'compiled/io/process_ring.pyx',
   include_directories: inc,
 )
 
@@ -122,12 +130,9 @@ python.extension_module('opteryx_compiled_io_process_ring',
 # JOIN EXTENSIONS
 # ============================================================================
 
-python.extension_module('opteryx_compiled_joins_join_definitions',
-  'compiled/joins/joins.cpp',
-  sources: [
-    '../src/cpp/intbuffer.cpp',
-    '../src/cpp/cpu_features.cpp',
-  ],
+python.extension_module('opteryx_compiled_joins_joins',
+  'compiled/joins/joins.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: [inc, inc_mabel],
 )
 
@@ -137,25 +142,24 @@ python.extension_module('opteryx_compiled_joins_join_definitions',
 # ============================================================================
 
 python.extension_module('opteryx_compiled_morsel_ops_distinct',
-  'compiled/morsel_ops/distinct.cpp',
-  sources: [
-    '../src/cpp/cpu_features.cpp',
-  ],
+  'compiled/morsel_ops/distinct.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: [inc, inc_mabel],
 )
 
 python.extension_module('opteryx_compiled_morsel_ops_null_filter',
-  'compiled/morsel_ops/null_filter.cpp',
+  'compiled/morsel_ops/null_filter.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_morsel_ops_sort',
-  'compiled/morsel_ops/sort.cpp',
+  'compiled/morsel_ops/sort.pyx',
   sources: [
     '../src/cpp/simd_remap.cpp',
-    '../src/cpp/simd_env.cpp',
     '../src/cpp/cpu_features.cpp',
   ],
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
 )
 
@@ -165,97 +169,96 @@ python.extension_module('opteryx_compiled_morsel_ops_sort',
 # ============================================================================
 
 python.extension_module('opteryx_compiled_structures_bloom_filter',
-  'compiled/structures/bloom_filter.c',
+  'compiled/structures/bloom_filter.pyx',
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_structures_buffers',
-  'compiled/structures/buffers.cpp',
+  'compiled/structures/buffers.pyx',
   sources: [
     '../src/cpp/intbuffer.cpp',
   ],
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_structures_carchar_index',
-  'compiled/structures/carchar_index.cpp',
-  sources: [
-    '../src/cpp/cpu_features.cpp',
-  ],
+  'compiled/structures/carchar_index.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: [inc, inc_mabel],
 )
 
 python.extension_module('opteryx_compiled_structures_carchar_set',
-  'compiled/structures/carchar_set.cpp',
-  sources: [
-    '../src/cpp/cpu_features.cpp',
-  ],
+  'compiled/structures/carchar_set.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: [inc, inc_mabel],
 )
 
 python.extension_module('opteryx_compiled_structures_column_descriptor',
-  'compiled/structures/column_descriptor.c',
+  'compiled/structures/column_descriptor.pyx',
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_structures_column_deserializer',
-  'compiled/structures/column_deserializer.cpp',
+  'compiled/structures/column_deserializer.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_structures_footer_cache',
-  'compiled/structures/footer_cache.cpp',
+  'compiled/structures/footer_cache.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_structures_lru_k',
-  'compiled/structures/lru_k.cpp',
+  'compiled/structures/lru_k.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_structures_memory_pool',
-  'compiled/structures/memory_pool.cpp',
+  'compiled/structures/memory_pool.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_structures_memory_pool_api',
-  'compiled/structures/memory_pool_api.cpp',
+  'compiled/structures/memory_pool_api.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_structures_memory_view_stream',
-  'compiled/structures/memory_view_stream.c',
+  'compiled/structures/memory_view_stream.pyx',
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_structures_node',
-  'compiled/structures/node.c',
+  'compiled/structures/node.pyx',
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_structures_parvi_index',
-  'compiled/structures/parvi_index.cpp',
-  sources: [
-    '../src/cpp/cpu_features.cpp',
-  ],
+  'compiled/structures/parvi_index.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: [inc, inc_mabel],
 )
 
 python.extension_module('opteryx_compiled_structures_parvi_set',
-  'compiled/structures/parvi_set.cpp',
-  sources: [
-    '../src/cpp/cpu_features.cpp',
-  ],
+  'compiled/structures/parvi_set.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: [inc, inc_mabel],
 )
 
 python.extension_module('opteryx_compiled_structures_relation_statistics',
-  'compiled/structures/relation_statistics.cpp',
+  'compiled/structures/relation_statistics.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
 )
 
 python.extension_module('opteryx_compiled_structures_shuffle_partition',
-  'compiled/structures/shuffle_partition.cpp',
+  'compiled/structures/shuffle_partition.pyx',
   include_directories: inc,
 )
 
@@ -265,7 +268,8 @@ python.extension_module('opteryx_compiled_structures_shuffle_partition',
 # ============================================================================
 
 python.extension_module('opteryx_compiled_utils_random_helper',
-  'compiled/utils/random_helper.cpp',
+  'compiled/utils/random_helper.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
 )
 
@@ -274,18 +278,14 @@ python.extension_module('opteryx_compiled_utils_random_helper',
 # VECTOR OPERATION EXTENSIONS
 # ============================================================================
 
-python.extension_module('opteryx_compiled_vector_ops_function_definitions',
-  'compiled/vector_ops/vector_ops.cpp',
+python.extension_module('opteryx_compiled_vector_ops_vector_ops',
+  'compiled/vector_ops/vector_ops.pyx',
   sources: [
-    '../src/cpp/cpu_features.cpp',
-    '../src/cpp/simd_datepart.cpp',
-    '../src/cpp/simd_env.cpp',
     '../src/cpp/simd_search.cpp',
     '../src/cpp/simd_string_ops.cpp',
-    '../third_party/crypto/md5.cpp',
-    '../third_party/crypto/sha1.cpp',
-    '../third_party/crypto/sha2.cpp',
-    '../third_party/crypto/sha512.cpp',
+    '../src/cpp/simd_datepart.cpp',
+    '../src/cpp/simd_env.cpp',
+    '../src/cpp/cpu_features.cpp',
     '../third_party/re2/re2/bitstate.cc',
     '../third_party/re2/re2/compile.cc',
     '../third_party/re2/re2/dfa.cc',
@@ -309,9 +309,14 @@ python.extension_module('opteryx_compiled_vector_ops_function_definitions',
     '../third_party/re2/util/rune.cc',
     '../third_party/re2/util/strutil.cc',
   ],
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
-  cpp_args: ['-DVENDORED_DIGESTS=1'],
 )
+
+# ============================================================================
+# Python package installation
+# ============================================================================
+# Note: Python source file installation is handled by mesonpy build backend
 
 # ============================================================================
 # THIRD-PARTY EXTENSION INCLUDES
@@ -319,23 +324,23 @@ python.extension_module('opteryx_compiled_vector_ops_function_definitions',
 
 # Zstd vendor include dirs (for third_party/facebook/zstd and pool_reader)
 inc_zstd_vendor = include_directories(
-  '../third_party/mabel/rugo/parquet/vendor/zstd',
-  '../third_party/mabel/rugo/parquet/vendor/zstd/common',
-  '../third_party/mabel/rugo/parquet/vendor/zstd/decompress',
+  '../third_party/zstd',
+  '../third_party/zstd/common',
+  '../third_party/zstd/decompress',
 )
 
 # LZ4 vendor include dirs
 inc_lz4_vendor = include_directories(
-  '../third_party/mabel/rugo/parquet/vendor/lz4',
+  '../third_party/lz4',
 )
 
 # Pool reader extra includes
 inc_pool_reader = include_directories(
-  '../third_party/mabel/rugo/parquet',
-  '../third_party/mabel/rugo/parquet/vendor/snappy',
-  '../third_party/mabel/rugo/parquet/vendor/zstd',
-  '../third_party/mabel/rugo/parquet/vendor/zstd/common',
-  '../third_party/mabel/rugo/parquet/vendor/zstd/decompress',
+  '../rugo/src/parquet',
+  '../third_party/snappy',
+  '../third_party/zstd',
+  '../third_party/zstd/common',
+  '../third_party/zstd/decompress',
 )
 
 # ============================================================================
@@ -344,58 +349,59 @@ inc_pool_reader = include_directories(
 
 # xxhash (cyan4973) — used for fast hashing
 python.extension_module('xxhash',
-  'third_party/cyan4973/xxhash.cpp',
+  'third_party/cyan4973/xxhash.pyx',
   sources: [
     '../third_party/cyan4973/xxhash.c',
     '../src/cpp/xxhash_build_info.c',
     '../src/cpp/cpu_features.cpp',
   ],
   include_directories: inc,
-  cpp_args: ['-DXXH_NO_XXH128=1'],
+  c_args: ['-DXXH_NO_XXH128=1'],
 )
 
 # zstd (facebook) — decompression wrapper
 python.extension_module('zstd',
-  'third_party/facebook/zstd.cpp',
+  'third_party/facebook/zstd.pyx',
   sources: [
-    '../third_party/mabel/rugo/parquet/vendor/zstd/common/entropy_common.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/common/fse_decompress.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/common/zstd_common.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/common/xxhash.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/common/error_private.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/decompress/zstd_decompress.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/decompress/zstd_decompress_block.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/decompress/huf_decompress.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/decompress/zstd_ddict.cpp',
+    '../third_party/zstd/common/entropy_common.cpp',
+    '../third_party/zstd/common/fse_decompress.cpp',
+    '../third_party/zstd/common/zstd_common.cpp',
+    '../third_party/zstd/common/xxhash.cpp',
+    '../third_party/zstd/common/error_private.cpp',
+    '../third_party/zstd/decompress/zstd_decompress.cpp',
+    '../third_party/zstd/decompress/zstd_decompress_block.cpp',
+    '../third_party/zstd/decompress/huf_decompress.cpp',
+    '../third_party/zstd/decompress/zstd_ddict.cpp',
   ],
   include_directories: [inc, inc_zstd_vendor],
-  cpp_args: ['-DZSTD_STATIC_LINKING_ONLY=1'],
+  c_args: ['-DZSTD_STATIC_LINKING_ONLY=1'],
 )
 
 # fast_float (fastfloat) — fast string-to-float parsing
 python.extension_module('fast_float',
-  'third_party/fastfloat/fast_float.cpp',
+  'third_party/fastfloat/fast_float.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
 )
 
 # fuzzy (soundex) — phonetic hashing
 python.extension_module('fuzzy',
-  'third_party/fuzzy/soundex.c',
+  'third_party/fuzzy/soundex.pyx',
   include_directories: inc,
 )
 
 # lz4 — LZ4 decompression wrapper
 python.extension_module('lz4',
-  'third_party/lz4/lz4.c',
+  'third_party/lz4/lz4.pyx',
   sources: [
-    '../third_party/mabel/rugo/parquet/vendor/lz4/lz4.c',
+    '../third_party/lz4/lz4.c',
   ],
   include_directories: [inc, inc_lz4_vendor],
 )
 
 # base16 (mabel) — base16 encoding/decoding
 python.extension_module('base16',
-  'third_party/mabel/base16/base16.c',
+  'third_party/mabel/base16/base16.pyx',
   sources: [
     'third_party/mabel/base16/_base16.c',
   ],
@@ -404,32 +410,41 @@ python.extension_module('base16',
 
 # base64 (mabel) — base64 encoding/decoding
 python.extension_module('base64',
-  'third_party/mabel/base64/base64.c',
+  'third_party/mabel/base64/base64.pyx',
   sources: [
     'third_party/mabel/base64/_base64.c',
     'third_party/mabel/base64/_base64_dispatch.c',
     'third_party/mabel/base64/_base64_neon.c',
     'third_party/mabel/base64/_base64_avx2.c',
-    'third_party/mabel/base64/_base64_avx512.c',
   ],
   include_directories: [inc, include_directories('third_party/mabel/base64')],
 )
 
+# base85 (mabel) — base85 encoding/decoding
+python.extension_module('base85',
+  'third_party/mabel/base85/base85.pyx',
+  sources: [
+    'third_party/mabel/base85/_base85.c',
+  ],
+  include_directories: [inc, include_directories('third_party/mabel/base85')],
+)
+
 # distogram (maki_nage) — statistical histograms for cost-based optimization
 python.extension_module('distogram',
-  'third_party/maki_nage/distogram.c',
+  'third_party/maki_nage/distogram.pyx',
+  override_options: ['cython_language=cpp'],
   include_directories: inc,
 )
 
 # mbleven — edit-distance computation
 python.extension_module('mbleven',
-  'third_party/mbleven.c',
+  'third_party/mbleven.pyx',
   include_directories: inc,
 )
 
 # ryu (ulfjack) — fast double-to-string conversion
 python.extension_module('ryu',
-  'third_party/ulfjack/ryu.c',
+  'third_party/ulfjack/ryu.pyx',
   sources: [
     '../third_party/ulfjack/ryu/d2fixed.c',
   ],
@@ -438,7 +453,7 @@ python.extension_module('ryu',
 
 # cyyjson (yyjson) — fast JSON parser wrapper
 python.extension_module('cyyjson',
-  'third_party/yyjson/cyyjson.c',
+  'third_party/yyjson/cyyjson.pyx',
   sources: [
     '../third_party/yyjson/src/yyjson.c',
   ],
@@ -450,7 +465,8 @@ python.extension_module('cyyjson',
 # ============================================================================
 
 python.extension_module('_operators',
-  'operators/_operators.cpp',
+  'operators/_operators.pyx',
+  override_options: ['cython_language=cpp'],
   sources: [
     '../src/cpp/hllpp.cpp',
     '../third_party/tdigest-c/src/tdigest_cpp.cpp',
@@ -487,37 +503,33 @@ python.extension_module('disk_reader',
 # ============================================================================
 
 python.extension_module('pool_reader',
-  'connectors/parquet_io/pool_reader.cpp',
+  'connectors/parquet_io/pool_reader.pyx',
+  override_options: ['cython_language=cpp'],
   sources: [
-    '../third_party/mabel/rugo/parquet/decode_column.cpp',
-    '../third_party/mabel/rugo/parquet/decode.cpp',
-    '../third_party/mabel/rugo/parquet/compression.cpp',
-    '../third_party/mabel/rugo/parquet/metadata.cpp',
-    '../third_party/mabel/rugo/parquet/bloom_filter.cpp',
-    '../third_party/mabel/rugo/parquet/page_value_decoder.cpp',
-    '../third_party/mabel/rugo/parquet/decode_encodings.cpp',
-    '../third_party/mabel/rugo/parquet/decode_page.cpp',
+    '../rugo/src/parquet/decode_column.cpp',
+    '../rugo/src/parquet/decode.cpp',
+    '../rugo/src/parquet/compression.cpp',
+    '../rugo/src/parquet/metadata.cpp',
+    '../rugo/src/parquet/bloom_filter.cpp',
+    '../rugo/src/parquet/page_value_decoder.cpp',
+    '../rugo/src/parquet/decode_encodings.cpp',
+    '../rugo/src/parquet/decode_page.cpp',
     '../src/cpp/cpu_features.cpp',
     '../src/cpp/http_client.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/snappy/snappy.cc',
-    '../third_party/mabel/rugo/parquet/vendor/snappy/snappy-sinksource.cc',
-    '../third_party/mabel/rugo/parquet/vendor/snappy/snappy-stubs-internal.cc',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/common/entropy_common.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/common/fse_decompress.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/common/zstd_common.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/common/xxhash.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/common/error_private.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/decompress/zstd_decompress.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/decompress/zstd_decompress_block.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/decompress/huf_decompress.cpp',
-    '../third_party/mabel/rugo/parquet/vendor/zstd/decompress/zstd_ddict.cpp',
+    '../third_party/snappy/snappy.cc',
+    '../third_party/snappy/snappy-sinksource.cc',
+    '../third_party/snappy/snappy-stubs-internal.cc',
+    '../third_party/zstd/common/entropy_common.cpp',
+    '../third_party/zstd/common/fse_decompress.cpp',
+    '../third_party/zstd/common/zstd_common.cpp',
+    '../third_party/zstd/common/xxhash.cpp',
+    '../third_party/zstd/common/error_private.cpp',
+    '../third_party/zstd/decompress/zstd_decompress.cpp',
+    '../third_party/zstd/decompress/zstd_decompress_block.cpp',
+    '../third_party/zstd/decompress/huf_decompress.cpp',
+    '../third_party/zstd/decompress/zstd_ddict.cpp',
   ],
   include_directories: [inc, inc_mabel, inc_pool_reader],
   cpp_args: ['-DHAVE_SNAPPY=1', '-DHAVE_ZSTD=1', '-DZSTD_STATIC_LINKING_ONLY=1'],
   link_args: ['-lcurl'],
 )
-
-# ============================================================================
-# Python package installation
-# ============================================================================
-# Note: Python source file installation is handled by mesonpy build backend

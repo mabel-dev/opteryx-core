@@ -1,8 +1,8 @@
 import pytest
 
 import pyarrow as pa
-from opteryx.compiled.draken.morsels.morsel import Morsel
-from opteryx.compiled.draken.vectors.string_vector import StringVector
+from draken.morsels.morsel import Morsel
+from draken.vectors.string_vector import StringVector
 from opteryx.exceptions import IncorrectTypeError
 from opteryx.expression.binary_operators import ArrowOp
 from opteryx.expression.binary_operators import LongArrowOp

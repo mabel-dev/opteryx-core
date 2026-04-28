@@ -15,7 +15,7 @@ that performs column renames.
 from typing import Generator, Optional
 from collections.abc import Iterable
 
-from opteryx.compiled.draken.encoding import DRAKEN_ENCODING_CONSTANT
+from draken.encoding import DRAKEN_ENCODING_CONSTANT
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
@@ -23,8 +23,6 @@ from opteryx.models import QueryProperties
 from opteryx import EOS
 
 from . import BasePlanNode
-
-_DATA_FORMAT = "draken"
 
 
 class ProjectionNode(BasePlanNode):

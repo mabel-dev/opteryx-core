@@ -60,7 +60,7 @@ def _coerce_text_scalar(value):
 
 
 def _as_text_vector(values):
-    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+    from draken.interop.vector_sequence import vector_from_sequence
 
     # Assume values is iterable; vector_from_sequence handles conversion
     return vector_from_sequence(values)
@@ -336,7 +336,7 @@ def humanize(arr):
 
 def array_contains(arr, val):
     """Check if array contains value. Assumes Draken vectors."""
-    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+    from draken.interop.vector_sequence import vector_from_sequence
 
     needle = val[0] if hasattr(val, "__getitem__") else val
     bool_list = []
@@ -352,7 +352,7 @@ def array_contains(arr, val):
 
 
 def array_contains_any(arr, val):
-    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+    from draken.interop.vector_sequence import vector_from_sequence
 
     needles = frozenset(_normalize_membership_values(val))
     bool_list = []
@@ -368,7 +368,7 @@ def array_contains_any(arr, val):
 
 
 def array_contains_all(arr, val):
-    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+    from draken.interop.vector_sequence import vector_from_sequence
 
     needles = frozenset(_normalize_membership_values(val))
     bool_list = []

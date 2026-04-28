@@ -206,7 +206,7 @@ def test_rle_less_than_scalar():
 
 def test_rle_hash_into_consistent_within_run():
     """All elements in the same run must hash to the same value."""
-    from opteryx.compiled.draken.vectors._hash_api import hash_into
+    from draken.vectors._hash_api import hash_into
 
     L, R = 4, 3
     vec = _make_rle_left(L, R)
@@ -223,7 +223,7 @@ def test_rle_hash_into_consistent_within_run():
 
 def test_rle_hash_into_different_runs_differ():
     """Different run values must produce different hashes (no trivial collision)."""
-    from opteryx.compiled.draken.vectors._hash_api import hash_into
+    from draken.vectors._hash_api import hash_into
 
     vec = _make_rle_left(4, 2)  # values 0, 1, 2, 3
     out = array("Q", [0] * len(vec))

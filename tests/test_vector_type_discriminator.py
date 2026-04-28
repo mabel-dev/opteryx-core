@@ -104,28 +104,28 @@ class TestGetVectorType:
 
     def test_int64_vector(self):
         """Int64Vector should be discriminated correctly."""
-        from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
+        from draken.vectors.int64_vector import Int64Vector
 
         vec = Int64Vector.from_arrow(pa.array([1, 2, 3], type=pa.int64()))
         assert get_vector_type(vec) == VectorType.INT64
 
     def test_float64_vector(self):
         """Float64Vector should be discriminated correctly."""
-        from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
+        from draken.vectors.float64_vector import Float64Vector
 
         vec = Float64Vector.from_arrow(pa.array([1.0, 2.0, 3.0], type=pa.float64()))
         assert get_vector_type(vec) == VectorType.FLOAT64
 
     def test_bool_vector(self):
         """BoolVector should be discriminated correctly."""
-        from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+        from draken.vectors.bool_vector import BoolVector
 
         vec = BoolVector.from_arrow(pa.array([True, False, True], type=pa.bool_()))
         assert get_vector_type(vec) == VectorType.BOOL
 
     def test_string_vector(self):
         """StringVector should be discriminated correctly."""
-        from opteryx.compiled.draken.vectors.string_vector import StringVector
+        from draken.vectors.string_vector import StringVector
 
         arr = pa.array(["a", "b", "c"], type=pa.utf8())
         vec = StringVector.from_arrow(arr)
@@ -133,7 +133,7 @@ class TestGetVectorType:
 
     def test_timestamp_vector(self):
         """TimestampVector should be discriminated correctly."""
-        from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
+        from draken.vectors.timestamp_vector import TimestampVector
 
         arr = pa.array(
             [datetime.datetime(2024, 1, 1), datetime.datetime(2024, 1, 2)], type=pa.timestamp("us")
@@ -143,7 +143,7 @@ class TestGetVectorType:
 
     def test_date32_vector(self):
         """Date32Vector should be discriminated correctly."""
-        from opteryx.compiled.draken.vectors.date32_vector import Date32Vector
+        from draken.vectors.date32_vector import Date32Vector
 
         arr = pa.array([datetime.date(2024, 1, 1), datetime.date(2024, 1, 2)], type=pa.date32())
         vec = Date32Vector.from_arrow(arr)
@@ -161,28 +161,28 @@ class TestIsDrakenVector:
 
     def test_int64_vector_is_draken(self):
         """Int64Vector should be recognized as a Draken vector."""
-        from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
+        from draken.vectors.int64_vector import Int64Vector
 
         vec = Int64Vector.from_arrow(pa.array([1, 2, 3], type=pa.int64()))
         assert is_draken_vector(vec) is True
 
     def test_float64_vector_is_draken(self):
         """Float64Vector should be recognized as a Draken vector."""
-        from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
+        from draken.vectors.float64_vector import Float64Vector
 
         vec = Float64Vector.from_arrow(pa.array([1.0, 2.0, 3.0], type=pa.float64()))
         assert is_draken_vector(vec) is True
 
     def test_bool_vector_is_draken(self):
         """BoolVector should be recognized as a Draken vector."""
-        from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+        from draken.vectors.bool_vector import BoolVector
 
         vec = BoolVector.from_arrow(pa.array([True, False, True], type=pa.bool_()))
         assert is_draken_vector(vec) is True
 
     def test_string_vector_is_draken(self):
         """StringVector should be recognized as a Draken vector."""
-        from opteryx.compiled.draken.vectors.string_vector import StringVector
+        from draken.vectors.string_vector import StringVector
 
         arr = pa.array(["a", "b", "c"], type=pa.utf8())
         vec = StringVector.from_arrow(arr)

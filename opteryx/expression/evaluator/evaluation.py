@@ -62,7 +62,7 @@ def _eval_value(node, morsel):
         # bool must stay as raw Python — bint Cython params coerce any non-None
         # object to True, so wrapping False in a BoolVector breaks bint params.
         if not isinstance(node.value, bool):
-            from opteryx.compiled.draken.vectors.scalar_constructors import (
+            from draken.vectors.scalar_constructors import (
                 from_scalar as _const_scalar,
             )
 
@@ -96,7 +96,7 @@ def _eval_value(node, morsel):
         op = node.value
 
         if op == "MapAccess":
-            from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
+            from draken.vectors.int64_vector import Int64Vector
             from opteryx.expression.binary_operators import MapAccessOp
 
             # Keep MapAccess in native vector space where possible to avoid
@@ -110,7 +110,7 @@ def _eval_value(node, morsel):
             )
 
         if op in ("Arrow", "LongArrow"):
-            from opteryx.compiled.draken.vectors.string_vector import StringVector
+            from draken.vectors.string_vector import StringVector
             from opteryx.expression.binary_operators import ArrowOp, LongArrowOp
 
             key_vec = StringVector.from_constant(right_val, 1)
@@ -279,7 +279,7 @@ def evaluate_draken(node, morsel):
         return result
 
     if node_type == NodeType.LITERAL:
-        from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+        from draken.vectors.bool_vector import BoolVector
 
         val = node.value
         scalar = bool(val) if val is not None else False
@@ -303,7 +303,7 @@ def evaluate_draken(node, morsel):
                 right = _coerce_temporal_scalar_for_arrow(right, right_schema_type)
 
         if is_scalar(left) and is_scalar(right):
-            from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+            from draken.vectors.bool_vector import BoolVector
 
             scalar_result = draken_compare(
                 node.value,
@@ -331,7 +331,7 @@ def evaluate_draken(node, morsel):
             parameters = [morsel.num_rows]
         result = apply_bounded_function(node, *parameters)
         if isinstance(result, list):
-            from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+            from draken.interop.vector_sequence import vector_from_sequence
 
             result = vector_from_sequence(result)
         if get_vector_type(result) != VectorType.BOOL:
@@ -354,7 +354,7 @@ def evaluate_draken(node, morsel):
 
 
 def evaluate_and_append_draken(nodes, morsel):
-    from opteryx.compiled.draken.morsels.morsel import Morsel
+    from draken.morsels.morsel import Morsel
     from opteryx.expression import NodeType
 
     col_names = list(morsel.column_names)

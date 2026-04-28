@@ -7,9 +7,9 @@
 # cython: boundscheck=False
 
 
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors import string_vector as string_vector_module
-from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors import string_vector as string_vector_module
+from draken.core.buffers cimport DrakenVarBuffer
 from opteryx.third_party.mabel.base64 cimport encode as b64_encode, decode as b64_decode
 
 

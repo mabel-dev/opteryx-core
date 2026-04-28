@@ -13,10 +13,10 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.compiled.draken.vectors.string_vector import StringVector
+from draken.vectors.string_vector import StringVector
 
 import opteryx
-from opteryx.compiled.draken import Morsel
+from draken import Morsel
 from opteryx.connectors import DiskConnector
 from opteryx.embeddings import (
     create_hybrid_embedding_provider,

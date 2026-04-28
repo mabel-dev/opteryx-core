@@ -11,7 +11,7 @@ import glob
 
 import pytest
 
-from opteryx.compiled.rugo import parquet
+from rugo import parquet
 
 
 def test_all_metadata_fields_exposed():

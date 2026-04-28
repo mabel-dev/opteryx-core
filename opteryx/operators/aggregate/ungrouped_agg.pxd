@@ -1,7 +1,7 @@
 from libc.stdint cimport int32_t, int64_t, uint64_t
 from libc.stddef cimport size_t
 
-from opteryx.compiled.draken.morsels.morsel cimport Morsel
+from draken.morsels.morsel cimport Morsel
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 
 

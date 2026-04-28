@@ -19,16 +19,16 @@ from libc.string cimport memcpy
 
 from opteryx.compiled.structures.memory_pool cimport MemoryPool
 
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.vectors.int64_vector cimport from_packed_dict as int64_from_packed_dict
-from opteryx.compiled.draken.vectors.int64_vector cimport make_int64_dict_only
-from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.compiled.draken.vectors.float64_vector cimport from_packed_dict as float64_from_packed_dict
-from opteryx.compiled.draken.vectors.float64_vector cimport make_float64_dict_only
-from opteryx.compiled.draken.vectors.float32_vector cimport Float32Vector
-from opteryx.compiled.draken.vectors.float32_vector cimport from_packed_dict as float32_from_packed_dict
-from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector, from_packed_dict, from_dict_buffers, make_string_dict_only
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.int64_vector cimport from_packed_dict as int64_from_packed_dict
+from draken.vectors.int64_vector cimport make_int64_dict_only
+from draken.vectors.float64_vector cimport Float64Vector
+from draken.vectors.float64_vector cimport from_packed_dict as float64_from_packed_dict
+from draken.vectors.float64_vector cimport make_float64_dict_only
+from draken.vectors.float32_vector cimport Float32Vector
+from draken.vectors.float32_vector cimport from_packed_dict as float32_from_packed_dict
+from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.string_vector cimport StringVector, from_packed_dict, from_dict_buffers, make_string_dict_only
 
 # Type tags — must match ipc_serialize.hpp
 DEF TAG_INT64       = 1

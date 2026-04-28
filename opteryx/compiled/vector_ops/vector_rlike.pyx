@@ -1,8 +1,8 @@
 # cython: language_level=3, boundscheck=False, wraparound=False, cdivision=True, initializedcheck=False
 
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector, DrakenVarBuffer
-from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
-from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
+from draken.vectors.string_vector cimport StringVector, DrakenVarBuffer
+from draken.vectors.bool_vector cimport BoolVector
+from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free

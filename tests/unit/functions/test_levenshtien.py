@@ -5,7 +5,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import pyarrow as pa
 import pytest
-from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+from draken.interop.arrow import vector_from_arrow
 
 from opteryx.compiled.vector_ops import vector_levenshtein
 

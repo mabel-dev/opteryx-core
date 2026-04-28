@@ -31,7 +31,7 @@ from opteryx.compiled.aggregations.key_codec import (
     decode_multi_payload_keys,
     decode_single_payload_key,
 )
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.morsels.morsel import Morsel
 
 from opteryx.operators.shuffle import AggregationSpec, ShuffleGroupByOperation
 

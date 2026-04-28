@@ -18,7 +18,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import numpy
 import pyarrow as pa
 import pyarrow.compute as pc
-from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
+from draken.vectors.int64_vector import Int64Vector
 from opteryx.compiled.vector_ops.function_definitions import (
     vector_datepart_day_i64,
     vector_datepart_dayofweek_i64,

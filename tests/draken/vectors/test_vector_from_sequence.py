@@ -9,10 +9,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 import pyarrow as pa
 import pytest
-from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
-from opteryx.compiled.draken.vectors.bool_vector import BoolVector
-from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
-from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
+from draken.interop.vector_sequence import vector_from_sequence
+from draken.vectors.bool_vector import BoolVector
+from draken.vectors.float64_vector import Float64Vector
+from draken.vectors.int64_vector import Int64Vector
 
 
 class TestVectorFromSequenceInt64:
@@ -260,7 +260,7 @@ class TestVectorFromSequenceFallback:
 
     def test_string_fallback(self):
         """Test that string data falls back to Arrow conversion."""
-        from opteryx.compiled.draken.vectors.string_vector import StringVector
+        from draken.vectors.string_vector import StringVector
 
         arr = ["hello", "world", "test"]
         vec = vector_from_sequence(arr)
@@ -462,7 +462,7 @@ class TestVectorFromSequenceIntegration:
 
     def test_with_morsel_creation(self):
         """Test using vector_from_sequence with Morsel.from_arrow."""
-        from opteryx.compiled.draken.morsels.morsel import Morsel
+        from draken.morsels.morsel import Morsel
 
         int_arr = array("q", [1, 2, 3, 4, 5])
         float_arr = array("d", [1.1, 2.2, 3.3, 4.4, 5.5])

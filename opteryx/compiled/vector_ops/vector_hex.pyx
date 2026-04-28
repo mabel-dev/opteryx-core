@@ -8,9 +8,9 @@
 
 """Vectorized HEX (base16) encoding/decoding using mabel.base16 Cython module."""
 
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors import string_vector as string_vector_module
-from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors import string_vector as string_vector_module
+from draken.core.buffers cimport DrakenVarBuffer
 from opteryx.third_party.mabel.base16 import encode as b16_encode, decode as b16_decode
 
 

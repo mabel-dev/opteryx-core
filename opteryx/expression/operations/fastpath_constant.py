@@ -50,7 +50,7 @@ def _coerce_in_list_values(value):
 
 def _typed_constant_fastpath(arr, operator, value):
     """Execute comparison for typed constant vector (fallback from compiled fastpath)."""
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    from draken.vectors.bool_vector import BoolVector
 
     scalar = _typed_constant_scalar(arr)
     value = _normalize_typed_constant_compare_value(scalar, value)

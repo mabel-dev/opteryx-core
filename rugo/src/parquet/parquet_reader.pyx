@@ -100,26 +100,26 @@ cdef extern from "type_widening_wrappers.hpp":
     void rugo_widen_float32_to_float64(const float* src, double* dst, size_t count) nogil
 
 # Import Draken vector types and components
-from opteryx.compiled.draken.vectors.int64_vector cimport (
+from draken.vectors.int64_vector cimport (
     Int64Vector,
     from_dict as int64_from_dict,
     from_dict_nullable as int64_from_dict_nullable,
     make_int64_dict_only,
 )
-from opteryx.compiled.draken.vectors.float64_vector cimport (
+from draken.vectors.float64_vector cimport (
     Float64Vector,
     from_dict as float64_from_dict,
     from_dict_nullable as float64_from_dict_nullable,
     make_float64_dict_only,
 )
-from opteryx.compiled.draken.vectors.string_vector cimport (
+from draken.vectors.string_vector cimport (
     StringVector,
     StringVectorBuilder,
     from_dict_buffers as string_from_dict_buffers,
     make_string_dict_only,
 )
-from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
-from opteryx.compiled.draken.core.buffers cimport (
+from draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
+from draken.core.buffers cimport (
     DRAKEN_FLOAT32,
     DRAKEN_FLOAT64,
     DRAKEN_INT32,
@@ -127,9 +127,9 @@ from opteryx.compiled.draken.core.buffers cimport (
     DRAKEN_STRING,
     DrakenVarBuffer,
 )
-from opteryx.compiled.draken.vectors.array_vector cimport ArrayVector, array_vector_from_parts
-from opteryx.compiled.draken.vectors.vector cimport Vector
-from opteryx.compiled.draken.morsels.morsel cimport Morsel
+from draken.vectors.array_vector cimport ArrayVector, array_vector_from_parts
+from draken.vectors.vector cimport Vector
+from draken.morsels.morsel cimport Morsel
 
 
 # --- value decoder ---

@@ -11,7 +11,7 @@ from cpython.bytes cimport PyBytes_AS_STRING, PyBytes_GET_SIZE
 from cpython.unicode cimport PyUnicode_AsUTF8String
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 
-from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector, from_sequence
+from draken.vectors.float64_vector cimport Float64Vector, from_sequence
 
 
 cdef extern from "fast_float.h" namespace "fast_float":

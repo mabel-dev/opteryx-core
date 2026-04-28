@@ -5,7 +5,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import pyarrow as pa
 
-import opteryx.compiled.draken as draken
+import draken as draken
 
 
 def test_list_of_ints_matches_per_element_hashing():

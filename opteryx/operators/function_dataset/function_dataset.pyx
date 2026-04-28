@@ -23,8 +23,6 @@ from opteryx.models import QueryProperties
 from opteryx.utils import series
 from opteryx.types import OrsoTypes
 
-
-_DATA_FORMAT = "draken"
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DT = datetime.datetime(1970, 1, 1)
 

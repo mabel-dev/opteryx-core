@@ -1,7 +1,7 @@
 import pyarrow as pa
 from decimal import Decimal
 
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.morsels.morsel import Morsel
 
 
 def test_decimal_column_empty_and_take_empty():

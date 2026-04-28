@@ -32,7 +32,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
-from opteryx.compiled.draken.vectors._decimal_vector import DecimalVector
+from draken.vectors._decimal_vector import DecimalVector
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -598,7 +598,7 @@ class TestHashingViaMorel:
     """Hashing is exercised via Morsel.hash() which calls hash_into internally."""
 
     def test_hash_no_crash(self):
-        from opteryx.compiled.draken.morsels.morsel import Morsel
+        from draken.morsels.morsel import Morsel
 
         arr = pa.array([D("1.00"), D("2.00"), None], type=pa.decimal128(5, 2))
         tbl = pa.table({"d": arr})
@@ -607,7 +607,7 @@ class TestHashingViaMorel:
         morsel.hash([b"d"])
 
     def test_hash_deterministic(self):
-        from opteryx.compiled.draken.morsels.morsel import Morsel
+        from draken.morsels.morsel import Morsel
 
         arr = pa.array([D("1.00"), D("2.00"), D("3.00")], type=pa.decimal128(5, 2))
         tbl = pa.table({"d": arr})
@@ -618,7 +618,7 @@ class TestHashingViaMorel:
         assert h1 == h2
 
     def test_null_rows_hash_consistently(self):
-        from opteryx.compiled.draken.morsels.morsel import Morsel
+        from draken.morsels.morsel import Morsel
 
         arr = pa.array([None, None], type=pa.decimal128(5, 2))
         tbl = pa.table({"d": arr})
@@ -628,7 +628,7 @@ class TestHashingViaMorel:
         assert hashes[0] == hashes[1]
 
     def test_const_rows_hash_consistently(self):
-        from opteryx.compiled.draken.morsels.morsel import Morsel
+        from draken.morsels.morsel import Morsel
 
         # Build a morsel whose decimal column is const-encoded by round-tripping
         # a single-value array through from_constant materialised into a morsel.
@@ -648,7 +648,7 @@ class TestCompressionViaSort:
 
     def test_dense_round_trip_preserves_values(self):
         import numpy as np
-        from opteryx.compiled.draken.morsels.morsel import Morsel
+        from draken.morsels.morsel import Morsel
 
         arr = pa.array([D("1.00"), D("2.00"), D("3.00")], type=pa.decimal128(5, 2))
         tbl = pa.table({"d": arr})
@@ -661,7 +661,7 @@ class TestCompressionViaSort:
 
     def test_null_rows_preserved_after_take(self):
         import numpy as np
-        from opteryx.compiled.draken.morsels.morsel import Morsel
+        from draken.morsels.morsel import Morsel
 
         arr = pa.array([D("1.00"), None, D("3.00")], type=pa.decimal128(5, 2))
         tbl = pa.table({"d": arr})
@@ -669,7 +669,7 @@ class TestCompressionViaSort:
         col = morsel.column(b"d")
         # Select only rows where value is not null (is_null returns 0 for valid)
         null_flags = list(col.is_null())
-        from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+        from draken.vectors.bool_vector import BoolVector
 
         mask_list = [null_flags[i] == 0 for i in range(len(null_flags))]
         mask_arr = pa.array(mask_list, type=pa.bool_())
@@ -710,7 +710,7 @@ class TestStr:
 
 class TestMorselIntegration:
     def test_morsel_from_arrow_with_decimal(self):
-        from opteryx.compiled.draken.morsels.morsel import Morsel
+        from draken.morsels.morsel import Morsel
 
         arr = pa.array([D("1.5"), D("2.5"), None], type=pa.decimal128(5, 1))
         tbl = pa.table({"price": arr})
@@ -721,7 +721,7 @@ class TestMorselIntegration:
         assert result.num_rows == 3
 
     def test_morsel_filter_decimal_column(self):
-        from opteryx.compiled.draken.morsels.morsel import Morsel
+        from draken.morsels.morsel import Morsel
 
         arr = pa.array([D("1.0"), D("2.0"), D("3.0"), D("4.0")], type=pa.decimal128(5, 1))
         tbl = pa.table({"d": arr})
@@ -733,7 +733,7 @@ class TestMorselIntegration:
         assert morsel.num_rows == 2
 
     def test_morsel_take_decimal_column(self):
-        from opteryx.compiled.draken.morsels.morsel import Morsel
+        from draken.morsels.morsel import Morsel
 
         arr = pa.array([D("10.0"), D("20.0"), D("30.0")], type=pa.decimal128(5, 1))
         tbl = pa.table({"v": arr})

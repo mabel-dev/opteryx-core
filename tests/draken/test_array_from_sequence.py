@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 try:
     import pyarrow as pa
-    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+    from draken.interop.vector_sequence import vector_from_sequence
 
     print("Testing ArrayVector.from_sequence...")
 

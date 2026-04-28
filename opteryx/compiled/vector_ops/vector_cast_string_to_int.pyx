@@ -9,9 +9,9 @@
 from libc.stdint cimport int32_t, int64_t
 from libc.stdlib cimport malloc, free
 
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
-from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.core.buffers cimport DrakenVarBuffer
 
 
 cdef inline int64_t parse_int64(const char* data, int32_t length) except -1:

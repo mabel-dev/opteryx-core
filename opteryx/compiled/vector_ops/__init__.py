@@ -1,10 +1,3 @@
-"""Package init for compiled list ops
+"""Package init for compiled vector ops."""
 
-This module provides the compiled (Cython/C++) function implementations as
-convenience re-exports at the package level. The build process creates a
-compiled extension named `function_definitions`, so we import all public
-symbols from it into the package namespace for compatibility with code that
-imports directly from `opteryx.compiled.vector_ops`.
-"""
-
-from .function_definitions import *  # noqa: F401,F403
+from .vector_ops import *  # noqa: F401,F403

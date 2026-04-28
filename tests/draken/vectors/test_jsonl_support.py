@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 import pyarrow as pa
 import pytest
 
-from opteryx.compiled.draken import Morsel, Vector
+from draken import Morsel, Vector
 
 
 class TestJSONLBasicTypes:

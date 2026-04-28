@@ -33,8 +33,6 @@ from opteryx import config
 
 from . import JoinNode
 
-_DATA_FORMAT = "draken"
-
 
 class DrakenInnerJoinNode(JoinNode):
     join_type = "inner"

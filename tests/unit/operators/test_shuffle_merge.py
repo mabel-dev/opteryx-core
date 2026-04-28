@@ -1,5 +1,5 @@
 import pyarrow as pa
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.morsels.morsel import Morsel
 
 from opteryx import EOS
 from opteryx.models import QueryProperties

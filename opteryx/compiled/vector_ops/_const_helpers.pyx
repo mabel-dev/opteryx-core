@@ -1,8 +1,8 @@
 # Shared helper functions for constant-encoded string vectors
 # Used by vector_trim, vector_uppercase, vector_lowercase, etc.
 
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DrakenConstantStringPayload, DRAKEN_ENCODING_CONSTANT
+from draken.vectors.string_vector cimport StringVector
+from draken.core.buffers cimport ConstAccessor, DrakenConstantStringPayload, DRAKEN_ENCODING_CONSTANT
 from libc.stdint cimport int32_t, uint8_t
 
 

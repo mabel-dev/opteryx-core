@@ -13,8 +13,8 @@ from libc.stdint cimport uint8_t, int64_t
 from libc.stdlib cimport malloc
 from libc.string cimport memcpy
 
-from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.float64_vector cimport Float64Vector
+from draken.vectors.int64_vector cimport Int64Vector
 
 
 cpdef Float64Vector vector_sqrt_int64(Int64Vector values):

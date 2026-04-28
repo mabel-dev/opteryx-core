@@ -15,7 +15,7 @@ from typing import Dict, List
 
 import pyarrow as pa
 import pytest
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.morsels.morsel import Morsel
 from opteryx.operators.shuffle_node import ShuffleNode
 
 from opteryx import EOS

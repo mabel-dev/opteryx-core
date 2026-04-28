@@ -23,8 +23,6 @@ from opteryx import EOS
 
 from . import JoinNode
 
-_DATA_FORMAT = "arrow"
-
 
 cdef CarcharSetWrapper _build_filter_hash_set(Morsel morsel, list columns, CarcharSetWrapper seen_hashes):
     cdef Py_ssize_t num_rows = morsel.num_rows

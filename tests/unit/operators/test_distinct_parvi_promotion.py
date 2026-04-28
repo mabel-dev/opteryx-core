@@ -1,7 +1,7 @@
 import pyarrow as pa
 
 from opteryx import EOS
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.morsels.morsel import Morsel
 from opteryx.compiled.morsel_ops.distinct import distinct
 from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
 from opteryx.compiled.structures.parvi_set import ParviSetWrapper

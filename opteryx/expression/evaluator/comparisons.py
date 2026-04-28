@@ -14,7 +14,7 @@ type-specific comparison logic.
 
 import datetime
 
-from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+from draken.vectors.bool_vector import BoolVector
 from opteryx.compiled.vector_ops import vector_contains, vector_in_list, vector_like, vector_rlike
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 
@@ -80,8 +80,8 @@ def _call_vector_vector_op(op: str, left_vec, right_vec):
         NotImplementedError: If operation not supported for this vector type
 
     Examples:
-        >>> from opteryx.compiled.draken.vectors import Int64Vector
-        >>> from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+        >>> from draken.vectors import Int64Vector
+        >>> from draken.interop.vector_sequence import vector_from_sequence
         >>> v1 = vector_from_sequence([1, 2, 3])
         >>> v2 = vector_from_sequence([1, 2, 4])
         >>> result = _call_vector_vector_op("Eq", v1, v2)
@@ -138,7 +138,7 @@ def _int64_compare(op: str, vec, right):
 
 
 def _float64_compare(op: str, vec, right):
-    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+    from draken.interop.vector_sequence import vector_from_sequence
 
     if right is None:
         return BoolVector(len(vec))
@@ -337,7 +337,7 @@ def _decimal_compare(op: str, vec, right):
     by the Cython _coerce_scalar method, so the raw Python value is passed
     straight through to the comparison methods.
     """
-    from opteryx.compiled.draken.vectors._decimal_vector import DecimalVector
+    from draken.vectors._decimal_vector import DecimalVector
 
     # Set membership (InList is handled before the scalar/vector branch)
     if op == "InList":
@@ -434,28 +434,28 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
 
         return _json_array_contains_all(left, right)
     if op == "AnyOpLike":
-        from opteryx.compiled.draken.vectors.string_vector import StringVector
+        from draken.vectors.string_vector import StringVector
         from opteryx.compiled.vector_ops import vector_anyop_like
 
         if isinstance(left, StringVector):
             return _string_anyop_like(left, right, ignore_case=False)
         return vector_anyop_like(right, left)
     if op == "AnyOpNotLike":
-        from opteryx.compiled.draken.vectors.string_vector import StringVector
+        from draken.vectors.string_vector import StringVector
         from opteryx.compiled.vector_ops import vector_anyop_like
 
         if isinstance(left, StringVector):
             return _string_anyop_like(left, right, ignore_case=False).not_vector()
         return vector_anyop_like(right, left).not_vector()
     if op == "AnyOpILike":
-        from opteryx.compiled.draken.vectors.string_vector import StringVector
+        from draken.vectors.string_vector import StringVector
         from opteryx.compiled.vector_ops import vector_anyop_ilike
 
         if isinstance(left, StringVector):
             return _string_anyop_like(left, right, ignore_case=True)
         return vector_anyop_ilike(right, left)
     if op == "AnyOpNotILike":
-        from opteryx.compiled.draken.vectors.string_vector import StringVector
+        from draken.vectors.string_vector import StringVector
         from opteryx.compiled.vector_ops import vector_anyop_ilike
 
         if isinstance(left, StringVector):

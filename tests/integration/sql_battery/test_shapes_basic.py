@@ -104,6 +104,11 @@ STATEMENTS = [
         ("SELECT * FROM $planets ORDER BY LENGTH(name)", 9, 20, None),
         ("SELECT * FROM $planets ORDER BY LENGTH(name) LIMIT 2", 2, 20, None),
 
+        # Positional ORDER BY (SQL-92)
+        ("SELECT name FROM $planets ORDER BY 1", 9, 1, None),
+        ("SELECT name, mass FROM $planets ORDER BY 2 DESC", 9, 2, None),
+        ("SELECT name FROM $planets ORDER BY 99", None, None, UnsupportedSyntaxError),
+
         # DISTINCT variations
         ("SELECT DISTINCT id FROM $planets", 9, 1, None),
         ("SELECT DISTINCT ON (id) * FROM $planets", 9, 20, None),

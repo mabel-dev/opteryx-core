@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pyarrow as pa
 from opteryx.compiled.aggregations.group_by_engine import CarcharGroupStateEngine
-from opteryx.compiled.draken.morsels.morsel import Morsel
+from draken.morsels.morsel import Morsel
 
 
 def _make_morsel_from_arrow(table: pa.Table) -> Morsel:

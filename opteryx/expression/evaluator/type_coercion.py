@@ -9,7 +9,7 @@ _DRAKEN_ENCODING_CONSTANT = 3
 
 
 def _dictionary_arrow_type(vec):
-    if not vec.__class__.__module__.startswith("opteryx.compiled.draken.vectors."):
+    if not vec.__class__.__module__.startswith("draken.vectors."):
         return None
     return getattr(vec, "dictionary_value_type", None)
 
@@ -184,8 +184,8 @@ _FIXED_BUFFER_VECTOR_CLASSES = frozenset(
 
 
 def _is_null_as_boolvector(vec):
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
-    from opteryx.compiled.vector_ops.function_definitions import (
+    from draken.vectors.bool_vector import BoolVector
+    from opteryx.compiled.vector_ops import (
         bool_vector_all_true,
         bool_vector_from_int8_mask,
         bool_vector_from_inverted_null_bitmap,

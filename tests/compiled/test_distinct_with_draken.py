@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import pyarrow as pa
 from opteryx.compiled.morsel_ops.distinct import distinct
 
-import opteryx.compiled.draken as draken
+import draken as draken
 
 
 def test_distinct_with_draken_basic():

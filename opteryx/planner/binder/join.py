@@ -10,7 +10,7 @@ from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
 from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.planner.binder.common import (
+from opteryx.planner.binder.join_helpers import (
     convert_using_to_on,
     extract_join_fields,
     get_mismatched_condition_column_types,

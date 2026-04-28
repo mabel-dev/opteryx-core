@@ -16,8 +16,6 @@ from opteryx.models import QueryProperties
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "arrow,draken"
-
 
 class ExplainNode(BasePlanNode):
 

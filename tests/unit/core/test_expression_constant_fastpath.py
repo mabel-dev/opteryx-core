@@ -6,9 +6,9 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from opteryx.compiled.draken.vectors.integer_vector import IntegerVector
-from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar
-from opteryx.compiled.draken.vectors.string_vector import StringVector
+from draken.vectors.integer_vector import IntegerVector
+from draken.vectors.scalar_constructors import from_scalar
+from draken.vectors.string_vector import StringVector
 
 from opteryx.expression.operations import (
     _inner_filter_operations,

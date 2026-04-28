@@ -69,7 +69,7 @@ def allop_not_eq(literal, column):
 
 def array_contains_any(arr, value):
     """Check if array contains any of the values (@>)."""
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    from draken.vectors.bool_vector import BoolVector
 
     if len(arr) == 0:
         return BoolVector(0)

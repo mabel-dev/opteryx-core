@@ -5,8 +5,8 @@ import time
 # GroupedAggregateHashedNode — the Python operator boundary.
 # Expression pre-evaluation and HAVING logic moved from draken_aggregate_and_group_node.pyx.
 
-from opteryx.compiled.draken.morsels.morsel cimport Morsel
-from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
+from draken.morsels.morsel cimport Morsel
+from draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type

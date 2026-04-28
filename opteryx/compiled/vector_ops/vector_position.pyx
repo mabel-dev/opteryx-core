@@ -21,9 +21,9 @@ from libc.stdint cimport int32_t, int64_t, uint8_t
 from libc.string cimport memchr, memcmp
 from libc.stdlib cimport malloc, free
 
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
-from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.core.buffers cimport DrakenVarBuffer
 
 
 cdef inline int64_t _find_position(const char *haystack, size_t haystack_len,

@@ -4,7 +4,7 @@ import datetime
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+from draken.interop.vector_sequence import vector_from_sequence
 from opteryx.expression.operations import filter_operations, to_temporal_array
 from opteryx.types import OrsoTypes
 

@@ -15,8 +15,8 @@ from __future__ import annotations
 from typing import List
 
 from opteryx.compiled import vector_ops as compiled_vector_ops
-from opteryx.compiled.draken.vectors.string_vector import lowercase as vector_lowercase
-from opteryx.compiled.draken.vectors.string_vector import uppercase as vector_uppercase
+from draken.vectors.string_vector import lowercase as vector_lowercase
+from draken.vectors.string_vector import uppercase as vector_uppercase
 from opteryx.compiled.vector_ops import (
     vector_ends_with,
     vector_initcap,

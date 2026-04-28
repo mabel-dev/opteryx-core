@@ -9,7 +9,7 @@
 from libc.stdint cimport int8_t, uint8_t
 from libc.string cimport memset
 
-from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.bool_vector cimport BoolVector
 
 
 cpdef BoolVector bool_vector_from_int8_mask(object mask_obj, Py_ssize_t n):

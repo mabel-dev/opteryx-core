@@ -41,7 +41,7 @@ def _cross_join(left_morsel: Morsel, right_morsel: Morsel) -> Generator[Morsel, 
         left_count = left_morsel.column(encoded_count_identity)[0]
         right_count = right_morsel.column(encoded_count_identity)[0]
 
-        from opteryx.compiled.draken.vectors.int64_vector import from_sequence
+        from draken.vectors.int64_vector import from_sequence
         res = Morsel.from_vectors(
             [encoded_count_identity],
             [from_sequence([left_count * right_count])]

@@ -11,7 +11,7 @@ import time
 import numpy as np
 import pyarrow as pa
 
-import opteryx.compiled.draken as draken
+import draken as draken
 
 
 def make_int_table(n):

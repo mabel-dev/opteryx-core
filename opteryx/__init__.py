@@ -34,7 +34,7 @@ getcontext().prec = 28
 # end-of-stream marker
 def _generate_eos_marker() -> int:
     """Create an end-of-stream marker using the Morsel class."""
-    from opteryx.compiled.draken import Morsel
+    from draken import Morsel
 
     return Morsel()
 

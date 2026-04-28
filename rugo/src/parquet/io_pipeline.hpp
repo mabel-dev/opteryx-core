@@ -24,9 +24,9 @@
 #include <unistd.h>
 #include <map>
 
-#include "../../../../third_party/bshoshany/BS_thread_pool.hpp"
-#include "../../../../third_party/moodycamel/readerwriterqueue.h"
-#include "../../../../src/cpp/http_client.hpp"
+#include "BS_thread_pool.hpp"
+#include "readerwriterqueue.h"
+#include "http_client.hpp"
 #include "decode.hpp"
 #include "ipc_serialize.hpp"
 #include "metadata.hpp"

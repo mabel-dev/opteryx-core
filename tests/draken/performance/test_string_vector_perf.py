@@ -66,7 +66,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from opteryx.compiled.draken.vectors import string_vector as _sv
+from draken.vectors import string_vector as _sv
 
 # `string_vector` is a Cython module; bind the builder symbol through the module
 StringVectorBuilder = _sv.StringVectorBuilder

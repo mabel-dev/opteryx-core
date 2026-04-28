@@ -18,7 +18,7 @@ Draken-native implementation (no PyArrow).
 
 from typing import Generator, Set, Tuple
 
-from opteryx.compiled.draken.vectors.vector cimport Vector
+from draken.vectors.vector cimport Vector
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, QueryProperties
 from opteryx.types.schema import FlatColumn
@@ -26,8 +26,6 @@ from opteryx.types.schema import FlatColumn
 from opteryx import EOS
 
 from . import BasePlanNode
-
-_DATA_FORMAT = "draken"
 
 INTERNAL_BATCH_SIZE: int = 10000
 
@@ -110,7 +108,7 @@ def _cross_join_unnest_literal(
     Yields:
         Morsel objects with unnested literal values repeated.
     """
-    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+    from draken.interop.vector_sequence import vector_from_sequence
 
     if morsel.num_rows == 0:
         return

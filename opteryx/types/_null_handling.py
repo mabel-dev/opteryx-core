@@ -205,7 +205,7 @@ def is_null_vector(vector: Any) -> bool:
         - O(1) operation (uses cached null count)
 
     Examples:
-        >>> from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+        >>> from draken.interop.vector_sequence import vector_from_sequence
         >>> from opteryx.types import OrsoTypes
         >>> v = vector_from_sequence([1, None, 3], dtype=OrsoTypes.INTEGER)
         >>> is_null_vector(v)
@@ -234,7 +234,7 @@ def null_count_vector(vector: Any) -> int:
         - O(1) operation (uses cached null count)
 
     Examples:
-        >>> from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+        >>> from draken.interop.vector_sequence import vector_from_sequence
         >>> from opteryx.types import OrsoTypes
         >>> v = vector_from_sequence([1, None, 3, None], dtype=OrsoTypes.INTEGER)
         >>> null_count_vector(v)

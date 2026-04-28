@@ -7,10 +7,10 @@ from array import array
 
 import pyarrow as pa
 import pytest
-from opteryx.compiled.draken.vectors._hash_api import hash_into as hash_into_vector
+from draken.vectors._hash_api import hash_into as hash_into_vector
 from opteryx.third_party.cyan4973.xxhash import hash_bytes  # type: ignore[attr-defined]
 
-from opteryx.compiled.draken import Vector
+from draken import Vector
 
 NULL_HASH = 0x4C3F95A36AB8ECCA
 MASK = 0xFFFFFFFFFFFFFFFF

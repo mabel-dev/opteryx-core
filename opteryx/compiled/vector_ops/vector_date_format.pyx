@@ -15,8 +15,8 @@ Returns a Python list of formatted strings (including None for nulls).
 from libc.stdint cimport int64_t, int32_t
 from libc.time cimport time_t, gmtime_r, strftime, tm
 
-from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.compiled.draken.vectors.date32_vector cimport Date32Vector
+from draken.vectors.timestamp_vector cimport TimestampVector
+from draken.vectors.date32_vector cimport Date32Vector
 
 
 cpdef list vector_date_format(object temporal_vec, bytes pattern):

@@ -11,12 +11,12 @@ from libc.stdint cimport uint8_t, uint16_t, uint32_t, int64_t
 from libc.string cimport memset
 from cpython.array cimport array, clone
 
-from opteryx.compiled.draken.core.buffers cimport DictAccessor
-from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors.string_vector cimport _StringVectorCIterator
-from opteryx.compiled.draken.vectors.string_vector cimport StringElement
-from opteryx.compiled.draken.vectors.vector cimport Vector
+from draken.core.buffers cimport DictAccessor
+from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors.string_vector cimport _StringVectorCIterator
+from draken.vectors.string_vector cimport StringElement
+from draken.vectors.vector cimport Vector
 
 from cpython.unicode cimport PyUnicode_DecodeUTF8
 

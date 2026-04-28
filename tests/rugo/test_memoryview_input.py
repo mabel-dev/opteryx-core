@@ -1,4 +1,4 @@
-import opteryx.compiled.rugo.jsonl as rj
+import rugo.jsonl as rj
 
 
 def test_get_jsonl_schema_with_memoryview():

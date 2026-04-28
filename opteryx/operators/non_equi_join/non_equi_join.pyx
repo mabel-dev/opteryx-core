@@ -31,14 +31,12 @@ No PyArrow is used in this operator.
 
 from libc.stdint cimport int32_t
 
-from opteryx.compiled.draken.morsels.align cimport align_tables
+from draken.morsels.align cimport align_tables
 from opteryx.models import QueryProperties
 
 from opteryx import EOS, EMPTY
 
 from . import JoinNode
-
-_DATA_FORMAT = "draken"
 
 
 def _compare_vector_with_scalar(vector, value, comparison_op, swapped=False):

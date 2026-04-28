@@ -1,9 +1,7 @@
 # Draken package build configuration
 # Defines 22 compiled extensions: 18 core + 4 additional
 #
-# Strategy: build from pre-generated Cython C++ output files (.cpp) directly.
-# Meson's Cython→C++ pipeline incorrectly treats --cplus output as C.
-# The pre-generated .cpp files in src/ are correct, tested, ready to compile.
+# All extensions are compiled directly from .pyx source files.
 
 # Architecture detection
 cpu_family = host_machine.cpu_family()
@@ -12,12 +10,10 @@ os = host_machine.system()
 # Include directories
 inc = include_directories(
   'src',
-  'src/h',
-  'src/cpp',
   'src/interop',
   'src/core',
   '../src/cpp',
-  '..',                           # resolves opteryx/compiled/draken/core/*.pxd references
+  '..',                           # resolves draken/core/*.pxd, draken/vectors/*.pxd etc.
   '../third_party/mabel/carchar',
   '../third_party/mabel/parvi',
   '../third_party/cyan4973',
@@ -35,149 +31,139 @@ simd_sources = [
 ]
 
 # ============================================================================
-# A. CORE DRAKEN EXTENSIONS (18) - Vector types, Morsels, Interop
+# A. CORE DRAKEN EXTENSIONS (22) - Vector types, Morsels, Interop
 # ============================================================================
 
 # Interop extensions (2)
 python.extension_module('opteryx_compiled_draken_interop_arrow',
-  'src/interop/arrow.cpp',
+  'interop/arrow.pyx',
   sources: simd_sources,
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
 python.extension_module('opteryx_compiled_draken_interop_vector_sequence',
-  'src/interop/vector_sequence.cpp',
+  'interop/vector_sequence.pyx',
   sources: simd_sources,
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
-# Vector extensions (13)
+# Vector extensions (17)
 python.extension_module('opteryx_compiled_draken_vectors_vector',
-  'src/vectors/vector.cpp',
+  'vectors/vector.pyx',
   sources: simd_sources,
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
 python.extension_module('opteryx_compiled_draken_vectors_bool_vector',
-  'src/vectors/bool_vector.cpp',
+  'vectors/bool_vector.pyx',
   sources: simd_sources,
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
 python.extension_module('opteryx_compiled_draken_vectors_float64_vector',
-  'src/vectors/float64_vector.cpp',
+  'vectors/float64_vector.pyx',
   sources: simd_sources,
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
 python.extension_module('opteryx_compiled_draken_vectors_float32_vector',
-  'src/vectors/float32_vector.cpp',
+  'vectors/float32_vector.pyx',
   sources: simd_sources,
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
 python.extension_module('opteryx_compiled_draken_vectors_int64_vector',
-  'src/vectors/int64_vector.cpp',
+  'vectors/int64_vector.pyx',
   sources: simd_sources,
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
 python.extension_module('opteryx_compiled_draken_vectors_integer_vector',
-  'src/vectors/integer_vector.cpp',
+  'vectors/integer_vector.pyx',
   sources: simd_sources,
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
 python.extension_module('opteryx_compiled_draken_vectors_date32_vector',
-  'src/vectors/date32_vector.cpp',
+  'vectors/date32_vector.pyx',
   sources: simd_sources,
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
 python.extension_module('opteryx_compiled_draken_vectors_timestamp_vector',
-  'src/vectors/timestamp_vector.cpp',
+  'vectors/timestamp_vector.pyx',
   sources: simd_sources,
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
 python.extension_module('opteryx_compiled_draken_vectors_time_vector',
-  'src/vectors/time_vector.cpp',
+  'vectors/time_vector.pyx',
   sources: simd_sources,
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
 python.extension_module('opteryx_compiled_draken_vectors_interval_vector',
-  'src/vectors/interval_vector.cpp',
+  'vectors/interval_vector.pyx',
   sources: simd_sources,
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
 python.extension_module('opteryx_compiled_draken_vectors_array_vector',
-  'src/vectors/array_vector.cpp',
+  'vectors/array_vector.pyx',
   sources: simd_sources,
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
 python.extension_module('opteryx_compiled_draken_vectors_vector_vector',
-  'src/vectors/vector_vector.cpp',
+  'vectors/vector_vector.pyx',
   sources: simd_sources,
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
 python.extension_module('opteryx_compiled_draken_vectors_scalar_constructors',
-  'src/vectors/scalar_constructors.cpp',
+  'vectors/scalar_constructors.pyx',
   sources: simd_sources,
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
 python.extension_module('opteryx_compiled_draken_vectors__decimal_vector',
-  'src/vectors/_decimal_vector.cpp',
+  'vectors/_decimal_vector.pyx',
   sources: simd_sources,
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
-# Data structure extensions (2)
-python.extension_module('opteryx_compiled_draken_morsels_morsel',
-  'src/morsels/morsel.cpp',
-  sources: simd_sources,
-  include_directories: inc,
-)
-
-python.extension_module('opteryx_compiled_draken_storage_morsel_io',
-  'src/storage/morsel_io.cpp',
-  sources: simd_sources,
-  include_directories: inc,
-)
-
-# ============================================================================
-# B. ADDITIONAL DRAKEN EXTENSIONS (4)
-# ============================================================================
-
-# String vector with extended SIMD helpers
-# XXH_INLINE_ALL: inline xxhash functions rather than linking a separate object
-# Also needs simd_string_ops.cpp for simd_to_lower etc.
 python.extension_module('opteryx_compiled_draken_vectors_string_vector',
-  'src/vectors/string_vector.cpp',
+  'vectors/string_vector.pyx',
   sources: simd_sources + ['../src/cpp/simd_string_ops.cpp'],
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
   cpp_args: ['-DXXH_INLINE_ALL=1'],
 )
 
-# Arithmetic kernels (pre-generated Cython C output)
 python.extension_module('opteryx_compiled_draken_vectors_arithmetic_kernels',
-  'src/vectors/arithmetic_kernels.c',
+  'vectors/arithmetic_kernels.pyx',
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
-# Align helper (pre-generated Cython C output)
-python.extension_module('opteryx_compiled_draken_morsels_align',
-  'src/morsels/align.c',
-  include_directories: inc,
-)
-
-# Hash API shim
 python.extension_module('opteryx_compiled_draken_vectors__hash_api',
-  'src/vectors/_hash_api.cpp',
+  'vectors/_hash_api.pyx',
   sources: [
     '../src/cpp/simd_hash.cpp',
     '../src/cpp/simd_bitops.cpp',
@@ -185,6 +171,28 @@ python.extension_module('opteryx_compiled_draken_vectors__hash_api',
     '../src/cpp/cpu_features.cpp',
   ],
   include_directories: inc,
+  override_options: ['cython_language=cpp'],
+)
+
+# Data structure extensions (3)
+python.extension_module('opteryx_compiled_draken_morsels_morsel',
+  'morsels/morsel.pyx',
+  sources: simd_sources,
+  include_directories: inc,
+  override_options: ['cython_language=cpp'],
+)
+
+python.extension_module('opteryx_compiled_draken_morsels_align',
+  'morsels/align.pyx',
+  include_directories: inc,
+  override_options: ['cython_language=cpp'],
+)
+
+python.extension_module('opteryx_compiled_draken_storage_morsel_io',
+  'storage/morsel_io.pyx',
+  sources: simd_sources,
+  include_directories: inc,
+  override_options: ['cython_language=cpp'],
 )
 
 # ============================================================================

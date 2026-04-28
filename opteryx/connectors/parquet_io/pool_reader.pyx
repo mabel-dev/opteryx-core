@@ -19,7 +19,7 @@ from opteryx.compiled.structures.memory_pool cimport MemoryPool
 from opteryx.compiled.structures.column_deserializer cimport deserialize_row_group
 
 
-cdef extern from "../../../../third_party/mabel/rugo/parquet/metadata.hpp":
+cdef extern from "metadata.hpp":
     cdef cppclass ColumnStats:
         string name
         string physical_type
@@ -35,7 +35,7 @@ cdef extern from "../../../../third_party/mabel/rugo/parquet/metadata.hpp":
         vector[int32_t] encodings
 
 
-cdef extern from "../../../../third_party/mabel/rugo/parquet/io_pipeline.hpp" namespace "rugo":
+cdef extern from "io_pipeline.hpp" namespace "rugo":
     cdef cppclass MorselRef:
         string path
         int rg_idx

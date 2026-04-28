@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import opteryx.compiled.rugo.jsonl as rj
+import rugo.jsonl as rj
 import pytest
 
 

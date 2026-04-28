@@ -3,6 +3,7 @@
 # cython: wraparound=False
 # cython: nonecheck=False
 # cython: cdivision=True
+# distutils: sources = src/cpp/simd_remap.cpp, src/cpp/cpu_features.cpp
 # cython: infer_types=True
 
 """opteryx.compiled.morsel_ops.sort
@@ -38,7 +39,7 @@ from libc.stddef cimport size_t
 from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t
 from libc.string cimport memset, memcpy
 
-from opteryx.compiled.draken.core.buffers cimport (
+from draken.core.buffers cimport (
     DictAccessor,
     DrakenVarBuffer,
     DrakenType,
@@ -55,8 +56,8 @@ from opteryx.compiled.draken.core.buffers cimport (
     DRAKEN_TIME32,
     DRAKEN_TIME64,
 )
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors.vector cimport Vector
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors.vector cimport Vector
 
 
 # ── Inline helpers (replaces phantom vector_readers cimport) ──────────────────

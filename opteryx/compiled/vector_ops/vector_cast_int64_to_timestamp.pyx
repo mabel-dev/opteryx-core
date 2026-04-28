@@ -16,10 +16,10 @@ from libc.stdint cimport int64_t, uint8_t, uint16_t, uint32_t, int32_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy
 
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DRAKEN_ENCODING_DICTIONARY, DRAKEN_TIMESTAMP64
-from opteryx.compiled.draken.core.var_vector cimport alloc_var_buffer
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.timestamp_vector cimport TimestampVector
+from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DRAKEN_ENCODING_DICTIONARY, DRAKEN_TIMESTAMP64
+from draken.core.var_vector cimport alloc_var_buffer
 
 # C++ SIMD dispatch functions
 cdef extern from "../../src/cpp/simd_timestamp_cast.h":

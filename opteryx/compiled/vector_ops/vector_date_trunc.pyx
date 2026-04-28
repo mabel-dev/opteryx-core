@@ -9,9 +9,9 @@
 from libc.stdint cimport int32_t, int64_t, uint8_t
 from cpython.array cimport array, clone
 
-from opteryx.compiled.draken.vectors.date32_vector cimport Date32Vector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
+from draken.vectors.date32_vector cimport Date32Vector
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors.timestamp_vector cimport TimestampVector
 
 # Constants
 cdef const int64_t SECONDS_PER_MINUTE = 60

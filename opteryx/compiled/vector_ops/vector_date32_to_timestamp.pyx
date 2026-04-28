@@ -14,9 +14,9 @@ Pure Draken conversion without pyarrow dependency.
 
 from libc.stdint cimport int32_t, int64_t
 
-from opteryx.compiled.draken.vectors.date32_vector cimport Date32Vector
-from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
+from draken.vectors.date32_vector cimport Date32Vector
+from draken.vectors.timestamp_vector cimport TimestampVector
+from draken.core.buffers cimport DrakenFixedBuffer
 
 
 cpdef TimestampVector vector_date32_to_timestamp(Date32Vector date_vec):

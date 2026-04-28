@@ -9,9 +9,9 @@
 from libc.stdint cimport uint8_t, uint32_t, int8_t, int32_t
 from libc.string cimport memset
 
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
-from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors.bool_vector cimport BoolVector
+from draken.core.buffers cimport DrakenVarBuffer
 
 
 cdef inline int parse_ip_to_int(const char* ip, size_t length, uint32_t* out) nogil:
@@ -67,7 +67,7 @@ cpdef BoolVector vector_ip_in_cidr(StringVector vec, StringVector cidr):
     Returns:
         BoolVector: True where the IP is inside the CIDR block.
     """
-    from opteryx.compiled.draken import encoding as draken_encoding
+    from draken import encoding as draken_encoding
     from opteryx.exceptions import IncorrectTypeError
 
     cdef bytes cidr_bytes
