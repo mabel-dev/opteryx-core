@@ -122,7 +122,7 @@ python.extension_module('opteryx_compiled_io_process_ring',
 # JOIN EXTENSIONS
 # ============================================================================
 
-python.extension_module('opteryx_compiled_joins_joins',
+python.extension_module('opteryx_compiled_joins_join_definitions',
   'compiled/joins/joins.cpp',
   sources: [
     '../src/cpp/intbuffer.cpp',
@@ -274,7 +274,7 @@ python.extension_module('opteryx_compiled_utils_random_helper',
 # VECTOR OPERATION EXTENSIONS
 # ============================================================================
 
-python.extension_module('opteryx_compiled_vector_ops_vector_ops',
+python.extension_module('opteryx_compiled_vector_ops_function_definitions',
   'compiled/vector_ops/vector_ops.cpp',
   sources: [
     '../src/cpp/cpu_features.cpp',
@@ -311,6 +311,210 @@ python.extension_module('opteryx_compiled_vector_ops_vector_ops',
   ],
   include_directories: inc,
   cpp_args: ['-DVENDORED_DIGESTS=1'],
+)
+
+# ============================================================================
+# THIRD-PARTY EXTENSION INCLUDES
+# ============================================================================
+
+# Zstd vendor include dirs (for third_party/facebook/zstd and pool_reader)
+inc_zstd_vendor = include_directories(
+  '../third_party/mabel/rugo/parquet/vendor/zstd',
+  '../third_party/mabel/rugo/parquet/vendor/zstd/common',
+  '../third_party/mabel/rugo/parquet/vendor/zstd/decompress',
+)
+
+# LZ4 vendor include dirs
+inc_lz4_vendor = include_directories(
+  '../third_party/mabel/rugo/parquet/vendor/lz4',
+)
+
+# Pool reader extra includes
+inc_pool_reader = include_directories(
+  '../third_party/mabel/rugo/parquet',
+  '../third_party/mabel/rugo/parquet/vendor/snappy',
+  '../third_party/mabel/rugo/parquet/vendor/zstd',
+  '../third_party/mabel/rugo/parquet/vendor/zstd/common',
+  '../third_party/mabel/rugo/parquet/vendor/zstd/decompress',
+)
+
+# ============================================================================
+# THIRD-PARTY EXTENSIONS
+# ============================================================================
+
+# xxhash (cyan4973) — used for fast hashing
+python.extension_module('xxhash',
+  'third_party/cyan4973/xxhash.cpp',
+  sources: [
+    '../third_party/cyan4973/xxhash.c',
+    '../src/cpp/xxhash_build_info.c',
+    '../src/cpp/cpu_features.cpp',
+  ],
+  include_directories: inc,
+  cpp_args: ['-DXXH_NO_XXH128=1'],
+)
+
+# zstd (facebook) — decompression wrapper
+python.extension_module('zstd',
+  'third_party/facebook/zstd.cpp',
+  sources: [
+    '../third_party/mabel/rugo/parquet/vendor/zstd/common/entropy_common.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/common/fse_decompress.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/common/zstd_common.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/common/xxhash.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/common/error_private.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/decompress/zstd_decompress.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/decompress/zstd_decompress_block.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/decompress/huf_decompress.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/decompress/zstd_ddict.cpp',
+  ],
+  include_directories: [inc, inc_zstd_vendor],
+  cpp_args: ['-DZSTD_STATIC_LINKING_ONLY=1'],
+)
+
+# fast_float (fastfloat) — fast string-to-float parsing
+python.extension_module('fast_float',
+  'third_party/fastfloat/fast_float.cpp',
+  include_directories: inc,
+)
+
+# fuzzy (soundex) — phonetic hashing
+python.extension_module('fuzzy',
+  'third_party/fuzzy/soundex.c',
+  include_directories: inc,
+)
+
+# lz4 — LZ4 decompression wrapper
+python.extension_module('lz4',
+  'third_party/lz4/lz4.c',
+  sources: [
+    '../third_party/mabel/rugo/parquet/vendor/lz4/lz4.c',
+  ],
+  include_directories: [inc, inc_lz4_vendor],
+)
+
+# base16 (mabel) — base16 encoding/decoding
+python.extension_module('base16',
+  'third_party/mabel/base16/base16.c',
+  sources: [
+    'third_party/mabel/base16/_base16.c',
+  ],
+  include_directories: [inc, include_directories('third_party/mabel/base16')],
+)
+
+# base64 (mabel) — base64 encoding/decoding
+python.extension_module('base64',
+  'third_party/mabel/base64/base64.c',
+  sources: [
+    'third_party/mabel/base64/_base64.c',
+    'third_party/mabel/base64/_base64_dispatch.c',
+    'third_party/mabel/base64/_base64_neon.c',
+    'third_party/mabel/base64/_base64_avx2.c',
+    'third_party/mabel/base64/_base64_avx512.c',
+  ],
+  include_directories: [inc, include_directories('third_party/mabel/base64')],
+)
+
+# distogram (maki_nage) — statistical histograms for cost-based optimization
+python.extension_module('distogram',
+  'third_party/maki_nage/distogram.c',
+  include_directories: inc,
+)
+
+# mbleven — edit-distance computation
+python.extension_module('mbleven',
+  'third_party/mbleven.c',
+  include_directories: inc,
+)
+
+# ryu (ulfjack) — fast double-to-string conversion
+python.extension_module('ryu',
+  'third_party/ulfjack/ryu.c',
+  sources: [
+    '../third_party/ulfjack/ryu/d2fixed.c',
+  ],
+  include_directories: inc,
+)
+
+# cyyjson (yyjson) — fast JSON parser wrapper
+python.extension_module('cyyjson',
+  'third_party/yyjson/cyyjson.c',
+  sources: [
+    '../third_party/yyjson/src/yyjson.c',
+  ],
+  include_directories: inc,
+)
+
+# ============================================================================
+# OPERATOR EXTENSIONS
+# ============================================================================
+
+python.extension_module('_operators',
+  'operators/_operators.cpp',
+  sources: [
+    '../src/cpp/hllpp.cpp',
+    '../third_party/tdigest-c/src/tdigest_cpp.cpp',
+  ],
+  include_directories: [inc, inc_mabel, include_directories('operators/aggregate')],
+)
+
+# ============================================================================
+# NANOBIND EXTENSIONS (pure C++ with nanobind Python bindings)
+# ============================================================================
+
+inc_nanobind = include_directories(
+  '../third_party/nanobind',
+  '../third_party/nanobind/src',
+  '../third_party/nanobind/ext/robin_map/include',
+)
+
+nb_cpp_args = ['-fno-strict-aliasing', '-DNB_COMPACT_ASSERTIONS']
+
+# disk_reader — memory-mapped file I/O and directory listing
+python.extension_module('disk_reader',
+  '../src/cpp/disk_reader_native.cpp',
+  sources: [
+    '../src/cpp/disk_io.cpp',
+    '../src/cpp/directories.cpp',
+    '../third_party/nanobind/src/nb_combined.cpp',
+  ],
+  include_directories: [inc, inc_nanobind],
+  cpp_args: nb_cpp_args,
+)
+
+# ============================================================================
+# CONNECTOR EXTENSIONS
+# ============================================================================
+
+python.extension_module('pool_reader',
+  'connectors/parquet_io/pool_reader.cpp',
+  sources: [
+    '../third_party/mabel/rugo/parquet/decode_column.cpp',
+    '../third_party/mabel/rugo/parquet/decode.cpp',
+    '../third_party/mabel/rugo/parquet/compression.cpp',
+    '../third_party/mabel/rugo/parquet/metadata.cpp',
+    '../third_party/mabel/rugo/parquet/bloom_filter.cpp',
+    '../third_party/mabel/rugo/parquet/page_value_decoder.cpp',
+    '../third_party/mabel/rugo/parquet/decode_encodings.cpp',
+    '../third_party/mabel/rugo/parquet/decode_page.cpp',
+    '../src/cpp/cpu_features.cpp',
+    '../src/cpp/http_client.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/snappy/snappy.cc',
+    '../third_party/mabel/rugo/parquet/vendor/snappy/snappy-sinksource.cc',
+    '../third_party/mabel/rugo/parquet/vendor/snappy/snappy-stubs-internal.cc',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/common/entropy_common.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/common/fse_decompress.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/common/zstd_common.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/common/xxhash.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/common/error_private.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/decompress/zstd_decompress.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/decompress/zstd_decompress_block.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/decompress/huf_decompress.cpp',
+    '../third_party/mabel/rugo/parquet/vendor/zstd/decompress/zstd_ddict.cpp',
+  ],
+  include_directories: [inc, inc_mabel, inc_pool_reader],
+  cpp_args: ['-DHAVE_SNAPPY=1', '-DHAVE_ZSTD=1', '-DZSTD_STATIC_LINKING_ONLY=1'],
+  link_args: ['-lcurl'],
 )
 
 # ============================================================================

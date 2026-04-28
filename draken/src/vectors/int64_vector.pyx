@@ -354,6 +354,9 @@ cdef class Int64Vector(Vector):
         """Convert to a PyArrow array."""
         import pyarrow as pa
 
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY:
+            return _materialize_dict_int64(self).to_arrow()
+
         if self._has_const:
             if self._const_is_null:
                 return pa.nulls(self.ptr.length, type=pa.int64())
@@ -634,6 +637,8 @@ cdef class Int64Vector(Vector):
         """Return mask: 1 if element is in value_set, else 0. Propagates NULLs."""
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_int64(self).in_list(value_set)
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_int64(self).in_list(value_set)
 
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n

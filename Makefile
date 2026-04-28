@@ -172,24 +172,29 @@ mypy: ## Run type checking
 #   OPTERYX_ENABLE_LTO=1   - Enable link-time optimization
 #   OPTERYX_ENABLE_PGO=1   - Enable profile-guided optimization
 
-compile: check-python clean ## Compile all extensions via Meson
+compile: check-python clean ## Compile all extensions via Meson + Rust
 	$(call print_blue,Building Opteryx monorepo with Meson...)
 	@command -v meson >/dev/null 2>&1 || $(PYTHON) -m pip install --user meson ninja cython
 	@meson setup build \
 		-Denable_lto=$(if $(OPTERYX_ENABLE_LTO),true,false) \
 		-Denable_pgo=$(if $(OPTERYX_ENABLE_PGO),true,false)
 	@meson compile -C build -j $(JOBS)
-	$(call print_green,Compilation complete! All 122+ extensions built.)
+	$(call print_blue,Building Rust compute extension...)
+	@cargo build --release
+	@$(PYTHON) scripts/install_compiled_modules.py --quiet
+	$(call print_green,Compilation complete! All 71 extensions built and installed.)
 	$(call print_blue,Build artifacts in: $(BUILD_DIR)/)
 
 compile-quick: check-python ## Incremental compilation (alias: c)
-	$(call print_blue,"Incremental build - Meson...")
+	$(call print_blue,"Incremental build - Meson + Rust...")
 	@if [ ! -d build ]; then \
 		$(UV) run meson setup build \
 			-Denable_lto=$(if $(OPTERYX_ENABLE_LTO),true,false) \
 			-Denable_pgo=$(if $(OPTERYX_ENABLE_PGO),true,false); \
 	fi
 	@$(UV) run meson compile -C build -j $(JOBS)
+	@cargo build --release
+	@$(PYTHON) scripts/install_compiled_modules.py --quiet
 	$(call print_green,"Incremental build complete!")
 
 # Alias for backward compatibility

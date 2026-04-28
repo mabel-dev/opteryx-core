@@ -27,6 +27,31 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).parent.parent
 BUILD_DIR = REPO_ROOT / "build"
 OPTERYX_COMPILED = REPO_ROOT / "opteryx" / "compiled"
+OPTERYX_ROOT = REPO_ROOT / "opteryx"
+
+# Explicit mapping for non-opteryx_compiled_ modules.
+# Keys are the Meson module name (short form, matches PyInit_<name>).
+# Values are relative paths within opteryx/ (without .so suffix).
+EXTRA_MODULE_MAP: dict[str, str] = {
+    # third_party
+    "xxhash": "third_party/cyan4973/xxhash",
+    "zstd": "third_party/facebook/zstd",
+    "fast_float": "third_party/fastfloat/fast_float",
+    "fuzzy": "third_party/fuzzy",
+    "lz4": "third_party/lz4/lz4",
+    "base16": "third_party/mabel/base16",
+    "base64": "third_party/mabel/base64",
+    "distogram": "third_party/maki_nage/distogram",
+    "mbleven": "third_party/mbleven",
+    "ryu": "third_party/ulfjack/ryu",
+    "cyyjson": "third_party/yyjson/cyyjson",
+    # operators
+    "_operators": "operators/_operators",
+    # connectors
+    "pool_reader": "connectors/parquet_io/pool_reader",
+    # nanobind extensions
+    "disk_reader": "compiled/io/disk_reader",
+}
 
 
 def so_suffix(path: Path) -> str:
@@ -90,6 +115,14 @@ def module_name_to_target(long_name: str, so_sfx: str) -> Path | None:
     return target
 
 
+def extra_module_target(short_name: str, so_sfx: str) -> Path | None:
+    """Look up install path for a non-opteryx_compiled_ module."""
+    rel = EXTRA_MODULE_MAP.get(short_name)
+    if rel is None:
+        return None
+    return OPTERYX_ROOT / (rel + so_sfx)
+
+
 def install_modules(build_subdir: str, verbose: bool = True) -> int:
     """Install all .so files from build/<subdir> to their package locations."""
     src_dir = BUILD_DIR / build_subdir
@@ -99,15 +132,21 @@ def install_modules(build_subdir: str, verbose: bool = True) -> int:
 
     copied = 0
     skipped = 0
-    errors = 0
 
     for so_file in sorted(src_dir.glob("*.so")):
         sfx = so_suffix(so_file)
         long_name = so_file.name[: -len(sfx)]
 
+        # Try opteryx_compiled_ mapping first
         target = module_name_to_target(long_name, sfx)
+
+        # Fall back to EXTRA_MODULE_MAP for short-named modules
         if target is None:
-            print(f"  SKIP (no mapping): {so_file.name}")
+            target = extra_module_target(long_name, sfx)
+
+        if target is None:
+            if verbose:
+                print(f"  SKIP (no mapping): {so_file.name}")
             skipped += 1
             continue
 
@@ -134,12 +173,37 @@ def verify_imports(sample_modules: list[str]) -> bool:
     return ok
 
 
+def install_rust_module(verbose: bool = True) -> int:
+    """Copy the Rust compute extension to opteryx/compute.<suffix>.so."""
+    import subprocess
+    import sys
+
+    ext_suffix = subprocess.check_output(
+        [sys.executable, "-c", "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))"],
+        text=True,
+    ).strip()
+
+    dylib = REPO_ROOT / "target" / "release" / "libcompute.dylib"
+    target = OPTERYX_ROOT / ("compute" + ext_suffix)
+
+    if not dylib.exists():
+        print(f"  Rust build artifact not found: {dylib}", file=sys.stderr)
+        print("  Run 'cargo build --release' first.", file=sys.stderr)
+        return 0
+
+    shutil.copy2(dylib, target)
+    if verbose:
+        print(f"  target/release/libcompute.dylib → {target.relative_to(REPO_ROOT)}")
+    return 1
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Install Meson-built extension modules")
     parser.add_argument("--verify", action="store_true", help="Run import smoke-tests after install")
     parser.add_argument("--quiet", action="store_true", help="Suppress per-file output")
+    parser.add_argument("--no-rust", action="store_true", help="Skip Rust extension install")
     args = parser.parse_args()
 
     verbose = not args.quiet
@@ -153,6 +217,10 @@ if __name__ == "__main__":
 
     print("Installing Opteryx modules...")
     total += install_modules("opteryx", verbose=verbose)
+
+    if not args.no_rust:
+        print("Installing Rust modules...")
+        total += install_rust_module(verbose=verbose)
 
     print(f"\nInstalled {total} extension modules.")
 

@@ -169,7 +169,6 @@ def iter_row_groups_ipc(
     filesystem,
     paths,
     column_names,
-    cache=None,
     decode_workers=4,
     predicates=None,
     file_sizes=None,
@@ -215,7 +214,7 @@ def iter_row_groups_ipc(
                 meta = prefetched_footers[path]
             else:
                 meta = fetch_footer(
-                    filesystem, path, cache=cache,
+                    filesystem, path,
                     connector=connector, footer_bytes_cache=footer_bytes_cache,
                 )
             for rg_idx, rg_meta in enumerate(meta.get("row_groups", [])):
@@ -231,7 +230,7 @@ def iter_row_groups_ipc(
                 meta = prefetched_footers[path]
             else:
                 meta = fetch_footer(
-                    filesystem, path, cache=cache,
+                    filesystem, path,
                     connector=connector, footer_bytes_cache=footer_bytes_cache,
                 )
             rg_meta = meta["row_groups"][rg_idx]

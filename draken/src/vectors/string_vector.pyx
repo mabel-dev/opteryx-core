@@ -812,6 +812,8 @@ cdef class StringVector(Vector):
         """
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_string(self).equals(value)
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_string(self).equals(value)
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -873,6 +875,8 @@ cdef class StringVector(Vector):
         """Return mask: 1 if not equal to value, else 0. Propagates NULLs."""
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_string(self).not_equals(value)
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_string(self).not_equals(value)
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -928,6 +932,8 @@ cdef class StringVector(Vector):
         """Return mask: 1 if element < value (lexicographic bytes), else 0. Propagates NULLs."""
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_string(self).less_than(value)
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_string(self).less_than(value)
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -985,6 +991,8 @@ cdef class StringVector(Vector):
         """Return mask: 1 if element > value (lexicographic bytes), else 0. Propagates NULLs."""
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_string(self).greater_than(value)
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_string(self).greater_than(value)
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -1042,6 +1050,8 @@ cdef class StringVector(Vector):
         """Return mask: 1 if element <= value (lexicographic bytes), else 0. Propagates NULLs."""
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_string(self).less_than_or_equals(value)
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_string(self).less_than_or_equals(value)
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -1099,6 +1109,8 @@ cdef class StringVector(Vector):
         """Return mask: 1 if element >= value (lexicographic bytes), else 0. Propagates NULLs."""
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_string(self).greater_than_or_equals(value)
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_string(self).greater_than_or_equals(value)
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -1159,6 +1171,8 @@ cdef class StringVector(Vector):
         """
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_string(self).in_list(value_set)
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_string(self).in_list(value_set)
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3

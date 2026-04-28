@@ -542,6 +542,8 @@ cdef Int64Vector _make_int64_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
     """Build an Int64Vector from a DecodedColumn with int64_t values."""
+    if num_rows == 0:
+        return Int64Vector(0)
     cdef Int64Vector vec = Int64Vector(num_rows)
     cdef int64_t* dst = <int64_t*> vec.ptr.data
     cdef Py_ssize_t i, val_idx = 0
@@ -586,7 +588,8 @@ cdef Int64Vector _make_int64_vector(
                 dst[i] = decoded_col.dict_int64_values[code]
         else:
             # No nulls: bulk copy via memcpy (avoids Cython loop overhead)
-            memcpy(dst, decoded_col.int64_values.data(), <size_t>num_rows * sizeof(int64_t))
+            if num_rows > 0:
+                memcpy(dst, decoded_col.int64_values.data(), <size_t>num_rows * sizeof(int64_t))
 
     return vec
 
@@ -595,6 +598,8 @@ cdef Float64Vector _make_float64_from_float32_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
     """Build a Float64Vector from float32 values (upcasting), including dict-mode."""
+    if num_rows == 0:
+        return Float64Vector(0)
     cdef Float64Vector vec = Float64Vector(num_rows)
     cdef double* dst = <double*> vec.ptr.data
     cdef Py_ssize_t i, val_idx = 0
@@ -639,7 +644,8 @@ cdef Float64Vector _make_float64_from_float32_vector(
         else:
             # Dense case: use SIMD-accelerated type widening (Tier 2C)
             # rugo_widen_float32_to_float64 uses AVX2 instructions when available
-            rugo_widen_float32_to_float64(decoded_col.float32_values.data(), dst, <size_t>num_rows)
+            if num_rows > 0:
+                rugo_widen_float32_to_float64(decoded_col.float32_values.data(), dst, <size_t>num_rows)
     return vec
 
 
@@ -647,6 +653,8 @@ cdef Int64Vector _make_int32_as_int64_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
     """Build an Int64Vector from a DecodedColumn with int32 values (upcasts int32→int64)."""
+    if num_rows == 0:
+        return Int64Vector(0)
     cdef Int64Vector vec = Int64Vector(num_rows)
     cdef int64_t* dst = <int64_t*> vec.ptr.data
     cdef Py_ssize_t i, val_idx = 0
@@ -670,7 +678,8 @@ cdef Int64Vector _make_int32_as_int64_vector(
     else:
         # Dense case: use SIMD-accelerated type widening (Tier 2C)
         # rugo_widen_int32_to_int64 uses AVX2 instructions when available
-        rugo_widen_int32_to_int64(decoded_col.int32_values.data(), dst, <size_t>num_rows)
+        if num_rows > 0:
+            rugo_widen_int32_to_int64(decoded_col.int32_values.data(), dst, <size_t>num_rows)
 
     return vec
 
@@ -679,6 +688,8 @@ cdef Float64Vector _make_float64_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
     """Build a Float64Vector from a DecodedColumn with float64 values."""
+    if num_rows == 0:
+        return Float64Vector(0)
     cdef Float64Vector vec = Float64Vector(num_rows)
     cdef double* dst = <double*> vec.ptr.data
     cdef Py_ssize_t i, val_idx = 0
@@ -721,7 +732,8 @@ cdef Float64Vector _make_float64_vector(
                 dst[i] = decoded_col.dict_float64_values[code]
         else:
             # No nulls: bulk copy via memcpy (avoids Cython loop overhead)
-            memcpy(dst, decoded_col.float64_values.data(), <size_t>num_rows * sizeof(double))
+            if num_rows > 0:
+                memcpy(dst, decoded_col.float64_values.data(), <size_t>num_rows * sizeof(double))
 
     return vec
 
@@ -871,6 +883,21 @@ cdef inline uint8_t _code_width_from_dict_size(Py_ssize_t dict_size):
 
 cdef inline bint _decoded_has_dictionary(parquet_reader.DecodedColumn& decoded_col):
     cdef bytes col_type = decoded_col.type
+    # dict_codes_array path: nullable dict column where C++ scatters codes into a
+    # packed array instead of populating dict_indices (mutually exclusive paths).
+    if not decoded_col.dict_codes_array.empty():
+        if col_type == b"byte_array":
+            return decoded_col.string_dict_lens.size() > 0
+        if col_type == b"int32":
+            return decoded_col.dict_int32_values.size() > 0
+        if col_type == b"int64":
+            return decoded_col.dict_int64_values.size() > 0
+        if col_type == b"float32":
+            return decoded_col.dict_float32_values.size() > 0
+        if col_type == b"float64":
+            return decoded_col.dict_float64_values.size() > 0
+        return False
+    # dict_indices path: standard dict column (non-nullable or rle).
     if decoded_col.dict_indices.size() == 0:
         return False
     if col_type == b"byte_array":
@@ -980,10 +1007,6 @@ cdef tuple _expanded_dict_codes_and_validity(
         for i in range(num_rows):
             if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
                 if val_idx >= decoded_col.dict_indices.size():
-                    import sys
-                    sys.stderr.write(
-                        f"DEBUG: num_rows={num_rows} valid_bits_bytes={decoded_col.valid_bits.size()} dict_indices={decoded_col.dict_indices.size()} val_idx={val_idx}\n"
-                    )
                     raise ValueError("dictionary index stream shorter than number of valid rows")
                 codes[i] = decoded_col.dict_indices[val_idx]
                 validity[i] = 1

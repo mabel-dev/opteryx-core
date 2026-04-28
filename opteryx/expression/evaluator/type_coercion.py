@@ -28,9 +28,6 @@ def _dictionary_compare_vector(vec):
             "equals",
             "not_equals",
             "in_list",
-            "like",
-            "rlike",
-            "contains",
             "less_than",
             "greater_than",
             "less_than_or_equals",
@@ -39,7 +36,10 @@ def _dictionary_compare_vector(vec):
     ):
         return vec
 
-    return type(vec).from_arrow(vec.to_arrow())
+    raise TypeError(
+        f"Dictionary-encoded vector {type(vec).__name__!r} is missing required "
+        "comparison methods. Vector types must implement native comparison operations."
+    )
 
 
 def _coerce_str(value) -> bytes:

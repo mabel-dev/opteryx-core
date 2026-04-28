@@ -152,7 +152,7 @@ def _float64_compare(op: str, vec, right):
     right_type = get_vector_type(right)
 
     # Float64 vs Int64 vector — extract scalar if constant-encoded, otherwise convert to float
-    if right_type == VectorType.INT64:
+    if right_type in (VectorType.INT64, VectorType.CONSTANT_ENCODED):
         if _is_constant_vector_like(right):
             right = _constant_scalar_value(right)
         else:

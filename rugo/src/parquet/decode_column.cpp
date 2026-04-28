@@ -515,9 +515,12 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                   float32_dict_mode || float64_dict_mode) &&
                  target_col->max_definition_level > 0 &&
                  result.ext_int64 == nullptr && result.ext_int32 == nullptr &&
-                 result.ext_float64 == nullptr && result.ext_float32 == nullptr) {
-        // Nullable dict column with no caller-provided dense buffer:
+                 result.ext_float64 == nullptr && result.ext_float32 == nullptr &&
+                 row_mask == nullptr) {
+        // Nullable dict column with no caller-provided dense buffer and no row-mask:
         // pre-allocate packed codes array (zero = null sentinel) for dict-only output.
+        // When row_mask is active the dict_codes_array would not be filtered, so
+        // fall through to the dict_indices path which IS correctly compacted.
         result.dict_codes_array.assign(
             static_cast<size_t>(tn) * result.code_width, 0);
       } else if (dict_size > 0) {

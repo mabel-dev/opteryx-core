@@ -46,7 +46,7 @@ from opteryx.compiled.draken.core.fixed_vector cimport buf_length
 from opteryx.compiled.draken.core.fixed_vector cimport free_fixed_buffer
 from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash, simd_popcount
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
 from opteryx.compiled.draken.vectors.date32_vector cimport Date32Vector
 
 # Constants for microseconds conversions
@@ -1480,6 +1480,9 @@ cpdef TimestampVector from_int64_vector(Int64Vector source, str timestamp_unit="
     cdef uint8_t* src_null
     cdef size_t nb_bytes
     cdef uint8_t* out_null
+
+    if source._encoding == DRAKEN_ENCODING_DICTIONARY and source.ptr.data == NULL:
+        source = _materialize_dict_int64(source)
 
     if source._has_const:
         if source._const_is_null:

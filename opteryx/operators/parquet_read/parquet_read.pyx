@@ -30,7 +30,6 @@ from copy import deepcopy
 from typing import Generator
 
 from opteryx.compiled.structures.footer_cache import ParquetFooterBytesCache
-from opteryx.connectors.parquet_io import InMemoryParquetCache
 from opteryx.connectors.parquet_io import fetch_columns
 from opteryx.connectors.parquet_io import fetch_footer
 from opteryx.connectors.parquet_io import iter_row_groups
@@ -276,11 +275,6 @@ class ParquetReadNode(ReaderNode):
         range_bytes = self.readings.get("parquet_range_bytes_requested", 0)
         if range_requests:
             base["parquet_avg_range_bytes"] = int(range_bytes / range_requests)
-        cache_hits = self.readings.get("parquet_column_cache_hits", 0)
-        cache_misses = self.readings.get("parquet_column_cache_misses", 0)
-        cache_lookups = cache_hits + cache_misses
-        if cache_lookups:
-            base["parquet_column_cache_hit_ratio"] = cache_hits / cache_lookups
         if base["row_groups_read"] > 0:
             base["parquet_avg_emit_wait_ns"] = (
                 self.readings.get("time_parquet_emit_wait_ns", 0) / base["row_groups_read"]
@@ -481,8 +475,6 @@ class ParquetReadNode(ReaderNode):
         self.readings["parquet_range_request_count"] += 0
         self.readings["parquet_range_bytes_requested"] += 0
         self.readings["parquet_footer_bytes"] += 0
-        self.readings["parquet_column_cache_hits"] += 0
-        self.readings["parquet_column_cache_misses"] += 0
         self.readings["time_parquet_read_ranges_ns"] += 0
         self.readings["time_parquet_decode_columns_ns"] += 0
         self.readings["time_parquet_task_queue_wait_ns"] += 0
@@ -566,10 +558,6 @@ class ParquetReadNode(ReaderNode):
             for col in read_schema.columns
         }
 
-        # One cache per execute() call: footers shared across all row groups of
-        # the same file; column chunks cached for reuse across row groups with
-        # identical content (rare but free).
-        cache = InMemoryParquetCache()
         footer_bytes_cache = ParquetFooterBytesCache()
 
         prefetched_footers: dict[str, dict] = {}
@@ -581,8 +569,7 @@ class ParquetReadNode(ReaderNode):
                     fetch_footer,
                     filesystem,
                     blob_name,
-                    cache,
-                    file_sizes.get(blob_name),
+                    file_size=file_sizes.get(blob_name),
                     footer_bytes_cache=footer_bytes_cache,
                 ): blob_name
                 for blob_name in unique_blob_paths
@@ -604,7 +591,6 @@ class ParquetReadNode(ReaderNode):
                 filesystem,
                 blob_paths,
                 scan_column_names,
-                cache,
                 predicates=predicate_stats,
                 file_sizes=file_sizes or None,
                 connector=connector_type,
@@ -630,12 +616,6 @@ class ParquetReadNode(ReaderNode):
                 )
                 self.readings["time_parquet_decode_columns_ns"] += row_group.pop(
                     "__time_decode_columns_ns__", 0
-                )
-                self.readings["parquet_column_cache_hits"] += row_group.pop(
-                    "__cache_column_hits__", 0
-                )
-                self.readings["parquet_column_cache_misses"] += row_group.pop(
-                    "__cache_column_misses__", 0
                 )
                 self.readings["time_parquet_task_queue_wait_ns"] += row_group.pop(
                     "__task_queue_wait_ns__", 0
@@ -801,7 +781,6 @@ class ParquetReadNode(ReaderNode):
                         path,
                         rg_idx,
                         pass2_column_names,
-                        cache,
                         connector=connector_type,
                         row_mask=_mask_arr,
                     )

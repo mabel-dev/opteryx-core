@@ -35,7 +35,8 @@ from libc.stdlib cimport malloc, free
 
 from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenRLEBuffer
 from opteryx.compiled.draken.core.buffers cimport DRAKEN_DATE32
-from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT, DRAKEN_ENCODING_RLE
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT, DRAKEN_ENCODING_DICTIONARY, DRAKEN_ENCODING_RLE
+from opteryx.compiled.draken.vectors.int64_vector cimport _materialize_dict_int64
 from opteryx.compiled.draken.core.fixed_vector cimport alloc_fixed_buffer
 from opteryx.compiled.draken.core.fixed_vector cimport buf_dtype
 from opteryx.compiled.draken.core.fixed_vector cimport buf_itemsize
@@ -1243,6 +1244,9 @@ cpdef Date32Vector from_int64_vector(Int64Vector source):
     cdef int64_t value64
     cdef int64_t int32_min = -2147483648
     cdef int64_t int32_max = 2147483647
+
+    if source._encoding == DRAKEN_ENCODING_DICTIONARY and source.ptr.data == NULL:
+        source = _materialize_dict_int64(source)
 
     if source._has_const:
         if source._const_is_null:

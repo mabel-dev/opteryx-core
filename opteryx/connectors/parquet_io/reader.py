@@ -20,8 +20,6 @@ from typing import Tuple
 from typing import Union
 
 from opteryx.compiled.structures.footer_cache import ParquetFooterBytesCache
-from opteryx.connectors.parquet_io.cache import InMemoryParquetCache
-from opteryx.connectors.parquet_io.cache import ParquetCache
 from opteryx.tracing.event_recorder import record_event as _record_event
 
 from opteryx import config as _cfg
@@ -293,16 +291,10 @@ def _parse_footer_envelope(path: str, envelope: bytes, footer_bytes: int) -> dic
 def fetch_footer(
     filesystem: Any,
     path: str,
-    cache: Optional[ParquetCache] = None,
     file_size: Optional[int] = None,
     connector: Optional[str] = None,
     footer_bytes_cache: Optional[ParquetFooterBytesCache] = None,
 ) -> dict:
-    if cache is not None:
-        cached = cache.get_footer(path)
-        if cached is not None:
-            return cached
-
     if file_size is None:
         envelope, footer_bytes, _ = _read_footer_payload(
             filesystem, path, connector=connector, footer_cache=footer_bytes_cache
@@ -311,11 +303,7 @@ def fetch_footer(
         envelope, footer_bytes, _ = _read_footer_payload(
             filesystem, path, file_size, connector, footer_cache=footer_bytes_cache
         )
-    meta = _parse_footer_envelope(path, envelope, footer_bytes)
-
-    if cache is not None:
-        cache.set_footer(path, meta)
-    return meta
+    return _parse_footer_envelope(path, envelope, footer_bytes)
 
 
 def fetch_columns(
@@ -323,17 +311,13 @@ def fetch_columns(
     path: str,
     rg_idx: int,
     column_names: List[str],
-    cache: Optional[ParquetCache] = None,
     decoder: Optional[Any] = None,
     connector: Optional[str] = None,
     row_mask=None,
     footer_bytes_cache: Optional[ParquetFooterBytesCache] = None,
 ) -> Dict[str, Any]:
-    if cache is None:
-        cache = InMemoryParquetCache()
-
     decoder = _resolve_decoder(decoder)
-    meta = fetch_footer(filesystem, path, cache=cache, footer_bytes_cache=footer_bytes_cache)
+    meta = fetch_footer(filesystem, path, footer_bytes_cache=footer_bytes_cache)
 
     if rg_idx < 0 or rg_idx >= len(meta["row_groups"]):
         raise IndexError(f"Row group {rg_idx} out of range [0, {len(meta['row_groups'])})")
@@ -344,8 +328,6 @@ def fetch_columns(
     results: Dict[str, Any] = {}
     misses: List[str] = []
     bytes_fetched: int = 0
-    cache_hits: int = 0
-    cache_misses: int = 0
     range_request_count: int = 0
     range_bytes_requested: int = 0
     time_read_ranges_ns: int = 0
@@ -358,13 +340,7 @@ def fetch_columns(
                 f"Available columns: {list(name_to_stats.keys())}"
             )
 
-        cached = cache.get_column(path, rg_idx, col_name)
-        if cached is not None:
-            results[col_name] = cached
-            cache_hits += 1
-        else:
-            misses.append(col_name)
-            cache_misses += 1
+        misses.append(col_name)
 
     _pages_skipped_before: int = 0
     _pages_decoded_before: int = 0
@@ -482,7 +458,6 @@ def fetch_columns(
                 raise RuntimeError(
                     f"Failed to decode column '{path}:{rg_idx}:{col_name}': {e}"
                 ) from e
-            cache.set_column(path, rg_idx, col_name, decoded)
             results[col_name] = decoded
         else:
             # Inline sequential decode: fetch_columns is typically called from
@@ -507,7 +482,6 @@ def fetch_columns(
                     raise RuntimeError(
                         f"Failed to decode column '{path}:{rg_idx}:{col_name}': {e}"
                     ) from e
-                cache.set_column(path, rg_idx, col_name, decoded)
                 results[col_name] = decoded
 
         time_decode_columns_ns = time.monotonic_ns() - decode_start_ns
@@ -518,8 +492,6 @@ def fetch_columns(
     result_dict["__range_bytes_requested__"] = range_bytes_requested
     result_dict["__time_read_ranges_ns__"] = time_read_ranges_ns
     result_dict["__time_decode_columns_ns__"] = time_decode_columns_ns
-    result_dict["__cache_column_hits__"] = cache_hits
-    result_dict["__cache_column_misses__"] = cache_misses
 
     if row_mask is not None:
         from opteryx.compiled.rugo.parquet import get_telemetry  # type: ignore[import]
