@@ -612,7 +612,7 @@ cdef class Date32Vector(Vector):
         # Find first non-null value
         for i in range(n):
             if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):  # null
                     continue
             m = data[i]
             found = True
@@ -624,7 +624,7 @@ cdef class Date32Vector(Vector):
         # Find minimum among remaining values
         for i in range(i + 1, n):
             if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):  # null
                     continue
             if data[i] < m:
                 m = data[i]
@@ -646,7 +646,7 @@ cdef class Date32Vector(Vector):
 
         for i in range(n):
             if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):  # null
                     continue
             m = data[i]
             found = True
@@ -657,7 +657,7 @@ cdef class Date32Vector(Vector):
 
         for i in range(i + 1, n):
             if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):  # null
                     continue
             if data[i] > m:
                 m = data[i]
@@ -674,7 +674,7 @@ cdef class Date32Vector(Vector):
         cdef int64_t total = 0
         for i in range(n):
             if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):  # null
                     continue
             total += data[i]
         return total

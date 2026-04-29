@@ -412,13 +412,17 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     types = set()
                     if predicate.condition.left and predicate.condition.left.schema_column:
                         types.add(predicate.condition.left.schema_column.type)
+                    # For InList/NotInList the right side is always an ARRAY literal; its type
+                    # is an implementation detail of the IN operator, not a column type the
+                    # connector needs to handle. Including it causes can_push to spuriously
+                    # return False (ARRAY not in PUSHABLE_TYPES), leaving the column out of
+                    # pass-1 and breaking two-pass late-materialization for downstream filters.
                     if predicate.condition.right and predicate.condition.right.schema_column:
-                        types.add(predicate.condition.right.schema_column.type)
-                    import os as _os
-                    can = node.connector.supports_predicate_pushdown and node.connector.can_push(predicate, types)
-                    if _os.environ.get("OPTERYX_Q41_DEBUG"):
-                        print(f"[Q41_PUSH] predicate={predicate.condition.value} can_push={can} types={types}")
-                    if can:
+                        if predicate.condition.value not in ("InList", "NotInList"):
+                            types.add(predicate.condition.right.schema_column.type)
+                    if node.connector.supports_predicate_pushdown and node.connector.can_push(
+                        predicate, types
+                    ):
                         if not node.predicates:
                             node.predicates = []
                         node.predicates.append(predicate.condition)

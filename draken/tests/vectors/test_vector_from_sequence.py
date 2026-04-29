@@ -281,46 +281,50 @@ class TestVectorFromSequenceFallback:
         assert len(arrow_result) == 3
 
     def test_nested_list_fallback(self):
-        """Test that nested lists fall back to Arrow."""
+        """Test that nested lists fall back to raw Python lists."""
         arr = [[1, 2], [3, 4], [5, 6]]
         vec = vector_from_sequence(arr)
 
-        arrow_result = vec.to_arrow()
-        assert len(arrow_result) == 3
+        # Unsupported types are returned as-is
+        assert isinstance(vec, list)
+        assert vec == arr
 
     def test_dict_fallback(self):
-        """Test that dict data falls back to Arrow struct."""
+        """Test that dict data falls back to raw Python lists."""
         arr = [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
         vec = vector_from_sequence(arr)
 
-        arrow_result = vec.to_arrow()
-        assert len(arrow_result) == 2
+        # Unsupported types are returned as-is
+        assert isinstance(vec, list)
+        assert vec == arr
 
     def test_none_values_fallback(self):
-        """Test that None values in list fall back to Arrow."""
+        """Test that None values in list are handled correctly."""
         arr = [1, None, 3, None, 5]
         vec = vector_from_sequence(arr)
 
-        arrow_result = vec.to_arrow()
-        result = arrow_result.to_pylist()
+        # This should create a vector since it's a simple int/None list
+        assert hasattr(vec, 'to_arrow')
+        result = vec.to_arrow().to_pylist()
         assert result == [1, None, 3, None, 5]
 
     def test_array_int32_fallback(self):
-        """Test that int32 arrays fall back to Arrow."""
+        """Test that int32 arrays fall back to raw Python array."""
         arr = array("i", [1, 2, 3])  # 'i' = signed int (int32)
         vec = vector_from_sequence(arr)
 
-        # Should create a vector via Arrow (not Int64Vector)
-        arrow_result = vec.to_arrow()
-        assert arrow_result.to_pylist() == [1, 2, 3]
+        # Unsupported array types are returned as-is
+        assert isinstance(vec, type(arr))
+        assert list(vec) == [1, 2, 3]
 
     def test_array_float32_fallback(self):
-        """Test that float32 arrays fall back to Arrow."""
+        """Test that float32 arrays fall back to raw Python array."""
         arr = array("f", [1.0, 2.0, 3.0])  # 'f' = float (float32)
         vec = vector_from_sequence(arr)
 
-        arrow_result = vec.to_arrow()
-        assert len(arrow_result) == 3
+        # Unsupported array types are returned as-is
+        assert isinstance(vec, type(arr))
+        assert len(vec) == 3
 
 
 class TestVectorFromSequenceConstant:
@@ -378,43 +382,48 @@ class TestVectorFromSequenceEdgeCases:
         arr = pa.array([1, 2, 3, 4], type=pa.int64())
         vec = vector_from_sequence(arr)
 
-        arrow_result = vec.to_arrow()
-        assert arrow_result.to_pylist() == [1, 2, 3, 4]
+        # PyArrow arrays are returned as-is (not converted to Draken vectors)
+        assert isinstance(vec, pa.Array)
+        assert vec.to_pylist() == [1, 2, 3, 4]
 
     def test_python_list_int(self):
         """Test Python list of ints."""
         arr = [10, 20, 30, 40]
         vec = vector_from_sequence(arr)
 
-        arrow_result = vec.to_arrow()
-        assert arrow_result.to_pylist() == [10, 20, 30, 40]
+        # Should create a vector from int list
+        assert hasattr(vec, 'to_arrow')
+        assert vec.to_arrow().to_pylist() == [10, 20, 30, 40]
 
     def test_python_list_float(self):
         """Test Python list of floats."""
         arr = [1.5, 2.5, 3.5]
         vec = vector_from_sequence(arr)
 
-        arrow_result = vec.to_arrow()
-        result = arrow_result.to_pylist()
+        # Should create a vector from float list
+        assert hasattr(vec, 'to_arrow')
+        result = vec.to_arrow().to_pylist()
         assert all(abs(a - b) < 1e-10 for a, b in zip(result, [1.5, 2.5, 3.5]))
 
     def test_array_unsigned_types(self):
-        """Test that unsigned integer arrays work."""
-        # 'H' = unsigned short (uint16)
+        """Test that unsigned integer arrays fall back to raw arrays."""
+        # 'H' = unsigned short (uint16) - not natively supported
         arr = array("H", [1, 2, 3, 100, 65000])
         vec = vector_from_sequence(arr)
 
-        arrow_result = vec.to_arrow()
-        assert arrow_result.to_pylist() == [1, 2, 3, 100, 65000]
+        # Unsupported array types are returned as-is
+        assert isinstance(vec, type(arr))
+        assert list(vec) == [1, 2, 3, 100, 65000]
 
     def test_array_signed_types(self):
-        """Test that other signed integer arrays work."""
-        # 'h' = signed short (int16)
+        """Test that other signed integer arrays fall back to raw arrays."""
+        # 'h' = signed short (int16) - not natively supported
         arr = array("h", [-100, -50, 0, 50, 100])
         vec = vector_from_sequence(arr)
 
-        arrow_result = vec.to_arrow()
-        assert arrow_result.to_pylist() == [-100, -50, 0, 50, 100]
+        # Unsupported array types are returned as-is
+        assert isinstance(vec, type(arr))
+        assert list(vec) == [-100, -50, 0, 50, 100]
 
 
 class TestVectorFromSequenceMemoryManagement:

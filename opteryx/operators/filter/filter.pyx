@@ -47,10 +47,6 @@ class FilterNode(BasePlanNode):
         if morsel is EOS:
             return
 
-        import os as _os
-        if _os.environ.get("OPTERYX_Q41_DEBUG"):
-            import sys
-            print(f"[FILTER_DEBUG] morsel col names={morsel.column_names} num_rows={morsel.num_rows}", flush=True)
         mask = evaluate_draken(self.filter, morsel)
         filtered = morsel.filter_mask(mask)
 

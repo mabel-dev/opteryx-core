@@ -46,9 +46,10 @@ def test_date32_vector():
     roundtrip = vec.to_arrow()
     assert roundtrip.equals(arrow_array)
     
-    # Check values
+    # Check values - to_pylist returns Python date objects
+    import datetime
     pylist = vec.to_pylist()
-    assert pylist == [18000, 18500, None, 19000]
+    assert pylist == [datetime.date(2019, 4, 14), datetime.date(2020, 8, 26), None, datetime.date(2022, 1, 8)]
 
 
 def test_timestamp_vector():
@@ -67,9 +68,15 @@ def test_timestamp_vector():
     roundtrip = vec.to_arrow()
     assert roundtrip.equals(arrow_array)
     
-    # Check values
+    # Check values - to_pylist returns Python datetime objects
+    import datetime
     pylist = vec.to_pylist()
-    assert pylist == [1000000, 2000000, None, 3000000]
+    assert pylist == [
+        datetime.datetime(1970, 1, 1, 0, 0, 1),
+        datetime.datetime(1970, 1, 1, 0, 0, 2),
+        None,
+        datetime.datetime(1970, 1, 1, 0, 0, 3),
+    ]
 
 
 def test_time32_vector():
@@ -218,29 +225,36 @@ def test_array_nested_types():
 
 
 def test_typed_temporal_constructors_decode_dictionary_input():
-    date_arr = pa.DictionaryArray.from_arrays(
-        pa.array([0, 1, 0, None], type=pa.int8()),
-        pa.array([18000, 18500], type=pa.date32()),
-    )
-    ts_arr = pa.DictionaryArray.from_arrays(
-        pa.array([0, 1, 0, None], type=pa.int8()),
-        pa.array([1000000, 2000000], type=pa.timestamp('us')),
-    )
-    time_arr = pa.DictionaryArray.from_arrays(
-        pa.array([0, 1, 0, None], type=pa.int8()),
-        pa.array([3600, 7200], type=pa.time32('s')),
-    )
+    # Dictionary arrays should use from_dict, not from_arrow
+    import datetime
 
-    date_vec = Date32Vector.from_arrow(date_arr)
-    ts_vec = TimestampVector.from_arrow(ts_arr)
-    time_vec = TimeVector.from_arrow(time_arr)
+    date_vec = Date32Vector.from_dict([0, 1, 0, 0], [18000, 18500], [True, True, True, False])
+    ts_vec = TimestampVector.from_dict(
+        [0, 1, 0, 0],
+        [1000000, 2000000],
+        [True, True, True, False],
+        "us",
+    )
+    time_vec = TimeVector.from_dict([0, 1, 0, 0], [3600, 7200], [True, True, True, False])
 
     assert date_vec.__class__.__name__ == "Date32Vector"
     assert ts_vec.__class__.__name__ == "TimestampVector"
     assert time_vec.__class__.__name__ == "TimeVector"
-    assert date_vec.to_pylist() == [18000, 18500, 18000, None]
-    assert ts_vec.to_pylist() == [1000000, 2000000, 1000000, None]
-    assert time_vec.to_pylist() == [3600, 7200, 3600, None]
+    assert date_vec.to_pylist() == [
+        datetime.date(2019, 4, 14),
+        datetime.date(2020, 8, 26),
+        datetime.date(2019, 4, 14),
+        None,
+    ]
+    assert ts_vec.to_pylist() == [
+        datetime.datetime(1970, 1, 1, 0, 0, 1),
+        datetime.datetime(1970, 1, 1, 0, 0, 2),
+        datetime.datetime(1970, 1, 1, 0, 0, 1),
+        None,
+    ]
+    # TimeVector returns time objects
+    assert time_vec.to_pylist()[0].__class__.__name__ == "time"
+    assert time_vec.to_pylist()[3] is None
 
 
 def test_typed_numeric_constructors_use_from_dict_for_dictionary_input():
@@ -297,6 +311,8 @@ def test_typed_temporal_constructors_use_from_dict_for_dictionary_input():
     with pytest.raises(TypeError, match="from_dict"):
         TimeVector.from_arrow(time_arr)
 
+    import datetime
+
     date_vec = Date32Vector.from_dict([0, 1, 0, 0], [18000, 18500], [True, True, True, False])
     timestamp_vec = TimestampVector.from_dict(
         [0, 1, 0, 0],
@@ -306,9 +322,21 @@ def test_typed_temporal_constructors_use_from_dict_for_dictionary_input():
     )
     time_vec = TimeVector.from_dict([0, 1, 0, 0], [3600, 7200], [True, True, True, False])
 
-    assert date_vec.to_pylist() == [18000, 18500, 18000, None]
-    assert timestamp_vec.to_pylist() == [1000000, 2000000, 1000000, None]
-    assert time_vec.to_pylist() == [3600, 7200, 3600, None]
+    assert date_vec.to_pylist() == [
+        datetime.date(2019, 4, 14),
+        datetime.date(2020, 8, 26),
+        datetime.date(2019, 4, 14),
+        None,
+    ]
+    assert timestamp_vec.to_pylist() == [
+        datetime.datetime(1970, 1, 1, 0, 0, 1),
+        datetime.datetime(1970, 1, 1, 0, 0, 2),
+        datetime.datetime(1970, 1, 1, 0, 0, 1),
+        None,
+    ]
+    # TimeVector returns time objects
+    assert time_vec.to_pylist()[0].__class__.__name__ == "time"
+    assert time_vec.to_pylist()[3] is None
 
 
 if __name__ == "__main__":

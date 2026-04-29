@@ -758,23 +758,30 @@ cdef class StringVector(Vector):
     @property
     def null_count(self):
         """Return the number of nulls in the vector."""
+        cdef DrakenVarBuffer* ptr
+        cdef Py_ssize_t n
+        cdef Py_ssize_t nb_size
+        cdef Py_ssize_t bits_in_last
+        cdef Py_ssize_t valid_count
+        cdef uint8_t last_byte_mask
+        cdef uint8_t byte_val
+
         if self._encoding == DRAKEN_ENCODING_RLE:
             if self._rle_buffer.null_bitmap == NULL:
                 return 0
             return <Py_ssize_t>self._rle_buffer.length - <Py_ssize_t>simd_popcount(
                 self._rle_buffer.null_bitmap,
                 (self._rle_buffer.length + 7) >> 3)
-        cdef DrakenVarBuffer* ptr = self.ptr
-        cdef Py_ssize_t n = ptr.length
+
+        ptr = self.ptr
+        n = ptr.length
         if self._has_const:
             return n if self._const_is_null else 0
         if ptr.null_bitmap == NULL:
             return 0
 
-        cdef Py_ssize_t nb_size = (n + 7) >> 3
-        cdef Py_ssize_t bits_in_last = n & 7
-        cdef Py_ssize_t valid_count
-        cdef uint8_t last_byte_mask
+        nb_size = (n + 7) >> 3
+        bits_in_last = n & 7
 
         if bits_in_last == 0:
             # All bytes are fully used
@@ -789,7 +796,7 @@ cdef class StringVector(Vector):
             # Count only the valid bits in the last byte
             last_byte_mask = ptr.null_bitmap[nb_size - 1] & ((1 << bits_in_last) - 1)
             # Count 1 bits manually for the last byte
-            cdef uint8_t byte_val = last_byte_mask
+            byte_val = last_byte_mask
             while byte_val:
                 valid_count += (byte_val & 1)
                 byte_val >>= 1

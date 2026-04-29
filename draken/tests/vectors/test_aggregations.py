@@ -246,7 +246,7 @@ class TestConstantAggregations:
 
     def test_constant_sum_rejects_non_numeric(self):
         vec = Vector.from_arrow(pa.array(["alpha", "alpha"], type=pa.string()))
-        with pytest.raises(TypeError, match="numeric"):
+        with pytest.raises(NotImplementedError, match="not supported"):
             vec.sum()
 
     def test_constant_min_all_null_raises(self):

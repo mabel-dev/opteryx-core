@@ -62,9 +62,9 @@ def test_integration():
     # Test null count
     assert vec.null_count == 1
 
-    # Test equality
+    # Test equality - returns BoolVector with None for nulls
     mask = vec.equals(b"beta")
-    assert list(mask) == [0, 1, 0, 0, 0]
+    assert list(mask) == [False, True, None, False, False]
 
     # Test view
     view = vec.view()
