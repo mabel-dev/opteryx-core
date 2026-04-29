@@ -93,6 +93,18 @@ cdef BoolVector _regex_match_any_literal(ArrayVector arr, object patterns, int f
     options.set_log_errors(False)
 
     try:
+        if patterns is None:
+            n = <Py_ssize_t>aptr.length
+            nbytes = (n + 7) >> 3
+            out = BoolVector(<size_t>n)
+            dst = <uint8_t*>out.ptr.data
+            if nbytes != 0:
+                memset(dst, 0, nbytes)
+            return out
+
+        if isinstance(patterns, (str, bytes)):
+            patterns = [patterns]
+
         for p in patterns:
             if p is None:
                 continue

@@ -439,28 +439,28 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
 
         if isinstance(left, StringVector):
             return _string_anyop_like(left, right, ignore_case=False)
-        return vector_anyop_like(right, left)
+        return vector_anyop_like(left, right)
     if op == "AnyOpNotLike":
         from draken.vectors.string_vector import StringVector
         from opteryx.compiled.vector_ops import vector_anyop_like
 
         if isinstance(left, StringVector):
             return _string_anyop_like(left, right, ignore_case=False).not_vector()
-        return vector_anyop_like(right, left).not_vector()
+        return vector_anyop_like(left, right).not_vector()
     if op == "AnyOpILike":
         from draken.vectors.string_vector import StringVector
         from opteryx.compiled.vector_ops import vector_anyop_ilike
 
         if isinstance(left, StringVector):
             return _string_anyop_like(left, right, ignore_case=True)
-        return vector_anyop_ilike(right, left)
+        return vector_anyop_ilike(left, right)
     if op == "AnyOpNotILike":
         from draken.vectors.string_vector import StringVector
         from opteryx.compiled.vector_ops import vector_anyop_ilike
 
         if isinstance(left, StringVector):
             return _string_anyop_like(left, right, ignore_case=True).not_vector()
-        return vector_anyop_ilike(right, left).not_vector()
+        return vector_anyop_ilike(left, right).not_vector()
     if op == "AtQuestion":
         from .json_ops import _json_at_question
 

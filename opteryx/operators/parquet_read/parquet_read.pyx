@@ -457,6 +457,18 @@ class ParquetReadNode(ReaderNode):
             pass1_name_to_identity = {name: _planner_name_to_identity.get(name, name.encode("utf-8")) for name in pass1_column_names}
             pass2_name_to_identity = {name: _planner_name_to_identity.get(name, name.encode("utf-8")) for name in pass2_column_names}
 
+        import os as _os
+        if _os.environ.get("OPTERYX_Q41_DEBUG"):
+            print(f"[Q41_DEBUG] two_pass_eligible={two_pass_eligible}")
+            print(f"[Q41_DEBUG] _filter_names={_filter_names}")
+            print(f"[Q41_DEBUG] _projected_names={_projected_names}")
+            print(f"[Q41_DEBUG] _pass2_names={_pass2_names}")
+            print(f"[Q41_DEBUG] predicate_root={predicate_root}")
+            print(f"[Q41_DEBUG] self.predicates={self.predicates}")
+            print(f"[Q41_DEBUG] pass1_column_names={pass1_column_names}")
+            print(f"[Q41_DEBUG] pass2_column_names={pass2_column_names}")
+            print(f"[Q41_DEBUG] output_identity_order={output_identity_order}")
+
         # ── Empty manifest ────────────────────────────────────────────────────
         if not self.manifest or self.manifest.get_file_count() == 0:
             # Yield empty Morsel with the correct column names
@@ -799,6 +811,11 @@ class ParquetReadNode(ReaderNode):
 
                     # Pass 2 vectors are already K rows (decoder applied the mask).
                     p2_identity_names = [pass2_name_to_identity[col] for col in pass2_raw]
+                    import os as _os2
+                    if _os2.environ.get("OPTERYX_Q41_DEBUG"):
+                        print(f"[Q41_DEBUG2] pass2_raw keys={list(pass2_raw.keys())}")
+                        print(f"[Q41_DEBUG2] p2_identity_names={p2_identity_names}")
+                        print(f"[Q41_DEBUG2] p1_identity_names={p1_identity_names}")
                     result_morsel = Morsel.from_vectors(
                         p1_identity_names + p2_identity_names,
                         [
@@ -807,6 +824,8 @@ class ParquetReadNode(ReaderNode):
                         ]
                         + list(pass2_raw.values()),
                     )
+                    if _os2.environ.get("OPTERYX_Q41_DEBUG"):
+                        print(f"[Q41_DEBUG2] result_morsel col names={result_morsel.column_names}")
                     rows_after_filter = result_morsel.num_rows
 
                     self.readings["parquet_latmat_pass2_row_groups"] += 1
@@ -847,8 +866,14 @@ class ParquetReadNode(ReaderNode):
                         )
                 total_rows_before_filter += rows_before_filter
                 total_rows_after_filter += rows_after_filter
+                import os as _os3
+                if _os3.environ.get("OPTERYX_Q41_DEBUG") and output_identity_order:
+                    print(f"[Q41_DEBUG3] before select: result_morsel col names={result_morsel.column_names}")
+                    print(f"[Q41_DEBUG3] output_identity_order={output_identity_order}")
                 if output_identity_order:
                     result_morsel = result_morsel.select(output_identity_order)
+                    if _os3.environ.get("OPTERYX_Q41_DEBUG"):
+                        print(f"[Q41_DEBUG3] after select: result_morsel col names={result_morsel.column_names}")
                 elif not two_pass_eligible:
                     # No output columns (e.g. COUNT(*) with a filter-only read).
                     # Replace the post-filter morsel with the smallest valid morsel:

@@ -414,9 +414,11 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                         types.add(predicate.condition.left.schema_column.type)
                     if predicate.condition.right and predicate.condition.right.schema_column:
                         types.add(predicate.condition.right.schema_column.type)
-                    if node.connector.supports_predicate_pushdown and node.connector.can_push(
-                        predicate, types
-                    ):
+                    import os as _os
+                    can = node.connector.supports_predicate_pushdown and node.connector.can_push(predicate, types)
+                    if _os.environ.get("OPTERYX_Q41_DEBUG"):
+                        print(f"[Q41_PUSH] predicate={predicate.condition.value} can_push={can} types={types}")
+                    if can:
                         if not node.predicates:
                             node.predicates = []
                         node.predicates.append(predicate.condition)

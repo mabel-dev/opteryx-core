@@ -372,7 +372,7 @@ cpdef DrakenType arrow_type_to_draken(object dtype):
         return DrakenType.DRAKEN_INTERVAL
     elif pa.types.is_boolean(dtype):
         return DrakenType.DRAKEN_BOOL
-    elif pa.types.is_string(dtype) or pa.types.is_large_string(dtype):
+    elif pa.types.is_string(dtype) or pa.types.is_large_string(dtype) or pa.types.is_binary(dtype) or pa.types.is_large_binary(dtype):
         return DrakenType.DRAKEN_STRING
     elif pa.types.is_dictionary(dtype):
         if (
