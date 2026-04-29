@@ -27,24 +27,14 @@ from pathlib import Path
 from decimal import getcontext
 from typing import Dict, Any, Iterable, Optional
 
-from draken import Morsel
-
 logger = logging.getLogger(__name__)
 
 # Set Decimal precision to 28 globally
 getcontext().prec = 28
 
-
-# End-of-stream marker: a singleton empty Morsel signalling that a producer has
-# finished. Compared by identity (`morsel is EOS`).
-EOS: Morsel = Morsel()
-
-
-# Empty-morsel marker: a singleton Morsel yielded by nodes that absorbed input but
-# produced no output (e.g. Group By during accumulation). __call__ intercepts this,
-# records a trace event, and dead-ends it — nothing is forwarded downstream.
-# Compared by identity (`morsel is EMPTY`).
-EMPTY: Morsel = Morsel()
+# Morsel singletons will be initialized after imports are complete
+EOS = None
+EMPTY = None
 
 
 def is_mac() -> bool:  # pragma: no cover
@@ -177,4 +167,11 @@ __all__ = [
     "__version__",
     "__lib__",
     "OPTERYX_DEBUG",
+    "EOS",
+    "EMPTY",
 ]
+
+# Initialize Morsel singletons after imports to avoid circular dependency
+from draken.morsels.morsel import Morsel
+EOS = Morsel()
+EMPTY = Morsel()

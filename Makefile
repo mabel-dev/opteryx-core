@@ -46,7 +46,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-quick test-battery coverage mypy compile compile-quick clean distclean update dev-install all check-python
+.PHONY: help lint format check test test-quick test-battery coverage mypy compile compile-quick clean distclean update dev-install all check-python dt
 
 # Default target
 .DEFAULT_GOAL := help
@@ -123,6 +123,11 @@ test-quick: check-python compile ## Run quick test (alias: t)
 q:
 	@clear
 	@$(PYTHON) tests/integration/sql_battery/test_shapes_basic.py
+
+dt: ## Run draken unit tests
+	$(call print_blue,"Running draken unit tests...")
+	@clear || true
+	@$(PYTEST) draken/tests/ -v --tb=short
 
 b: check-python
 	@clear || true

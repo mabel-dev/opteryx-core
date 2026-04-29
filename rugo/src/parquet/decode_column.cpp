@@ -1952,16 +1952,25 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
 
     result.num_rows = total_collected;
 
-    if (result.type == "byte_array" && !result.string_dict_lens.empty()) {
-      result.code_width = CodeWidthForDictSize(result.string_dict_lens.size());
-    } else if (result.type == "int32" && !result.dict_int32_values.empty()) {
-      result.code_width = CodeWidthForDictSize(result.dict_int32_values.size());
-    } else if (result.type == "int64" && !result.dict_int64_values.empty()) {
-      result.code_width = CodeWidthForDictSize(result.dict_int64_values.size());
-    } else if (result.type == "float32" && !result.dict_float32_values.empty()) {
-      result.code_width = CodeWidthForDictSize(result.dict_float32_values.size());
-    } else if (result.type == "float64" && !result.dict_float64_values.empty()) {
-      result.code_width = CodeWidthForDictSize(result.dict_float64_values.size());
+    // dict_codes_array (nullable path) was allocated and packed with the initial code_width
+    // set at dict-page decode time.  Updating code_width here when dict_codes_array is
+    // non-empty would make the serialiser write codes_len = num_rows * new_cw, which
+    // overreads the num_rows * old_cw buffer when new_cw > old_cw (buffer overread →
+    // garbage codes in IPC → out-of-bounds offsets access → crash in materialize).
+    // Only recalculate for the dict_indices path (rle_path, plain pages, or non-nullable),
+    // where the final dict size is authoritative and no pre-packed array exists.
+    if (result.dict_codes_array.empty()) {
+      if (result.type == "byte_array" && !result.string_dict_lens.empty()) {
+        result.code_width = CodeWidthForDictSize(result.string_dict_lens.size());
+      } else if (result.type == "int32" && !result.dict_int32_values.empty()) {
+        result.code_width = CodeWidthForDictSize(result.dict_int32_values.size());
+      } else if (result.type == "int64" && !result.dict_int64_values.empty()) {
+        result.code_width = CodeWidthForDictSize(result.dict_int64_values.size());
+      } else if (result.type == "float32" && !result.dict_float32_values.empty()) {
+        result.code_width = CodeWidthForDictSize(result.dict_float32_values.size());
+      } else if (result.type == "float64" && !result.dict_float64_values.empty()) {
+        result.code_width = CodeWidthForDictSize(result.dict_float64_values.size());
+      }
     }
 
     // If every byte_array page used dictionary encoding, string_values is still empty

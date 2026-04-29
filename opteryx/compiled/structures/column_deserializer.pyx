@@ -220,21 +220,30 @@ cdef object _build_string_dict(const uint8_t* p, uint32_t num_rows,
 
     cdef uint32_t offsets_count
     p = _read_u32(p, &offsets_count)
-    cdef const int32_t* offsets_ptr = <const int32_t*>p
+
+    # On ARM, direct pointer cast to int32_t* from unaligned IPC bytes causes SIGBUS.
+    # Copy to an aligned buffer before any int32 reads.
+    cdef uint32_t* offsets_buf = <uint32_t*>malloc(offsets_count * sizeof(uint32_t))
+    if offsets_buf == NULL:
+        raise MemoryError()
+    memcpy(offsets_buf, p, offsets_count * sizeof(uint32_t))
     p += offsets_count * 4
 
-    cdef int32_t arena_len = offsets_ptr[dict_size]  # sentinel value
+    cdef int32_t arena_len = <int32_t>offsets_buf[dict_size]  # sentinel value
 
-    return make_string_dict_only(
-        codes_ptr,
-        code_width,
-        <Py_ssize_t>num_rows,
-        <const uint32_t*>offsets_ptr,
-        p,                    # arena_ptr
-        <Py_ssize_t>dict_size,
-        <Py_ssize_t>arena_len,
-        null_bitmap if null_bitmap_len > 0 else NULL,
-    )
+    try:
+        return make_string_dict_only(
+            codes_ptr,
+            code_width,
+            <Py_ssize_t>num_rows,
+            offsets_buf,
+            p,                    # arena_ptr
+            <Py_ssize_t>dict_size,
+            <Py_ssize_t>arena_len,
+            null_bitmap if null_bitmap_len > 0 else NULL,
+        )
+    finally:
+        free(offsets_buf)
 
 
 cdef object _build_string_plain(const uint8_t* p, uint32_t num_rows,
