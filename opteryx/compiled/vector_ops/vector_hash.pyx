@@ -17,47 +17,25 @@ from draken.core.buffers cimport (
     DRAKEN_ENCODING_DICTIONARY,
 )
 
-cdef extern from *:
-    """
-    #if defined(__APPLE__)
-    #include <CommonCrypto/CommonDigest.h>
-    typedef CC_MD5_CTX MD5_CTX;
-    typedef CC_SHA1_CTX SHA_CTX;
-    typedef CC_SHA256_CTX SHA256_CTX;
-    typedef CC_SHA512_CTX SHA512_CTX;
-    #define MD5_Init CC_MD5_Init
-    #define MD5_Update CC_MD5_Update
-    #define MD5_Final CC_MD5_Final
-    #define SHA1_Init CC_SHA1_Init
-    #define SHA1_Update CC_SHA1_Update
-    #define SHA1_Final CC_SHA1_Final
-    #define SHA256_Init CC_SHA256_Init
-    #define SHA256_Update CC_SHA256_Update
-    #define SHA256_Final CC_SHA256_Final
-    #define SHA512_Init CC_SHA512_Init
-    #define SHA512_Update CC_SHA512_Update
-    #define SHA512_Final CC_SHA512_Final
-    #else
-    #include "md5.h"
-    #include "sha1.h"
-    #include "sha2.h"
-    #endif
-    """
+cdef extern from "md5.h":
     ctypedef struct MD5_CTX:
         pass
+    int MD5_Init(MD5_CTX *c) nogil
+    int MD5_Update(MD5_CTX *c, const void *data, size_t len) nogil
+    int MD5_Final(unsigned char *md, MD5_CTX *c) nogil
+
+cdef extern from "sha1.h":
     ctypedef struct SHA_CTX:
         pass
+    int SHA1_Init(SHA_CTX *c) nogil
+    int SHA1_Update(SHA_CTX *c, const void *data, size_t len) nogil
+    int SHA1_Final(unsigned char *md, SHA_CTX *c) nogil
+
+cdef extern from "sha2.h":
     ctypedef struct SHA256_CTX:
         pass
     ctypedef struct SHA512_CTX:
         pass
-
-    int MD5_Init(MD5_CTX *c) nogil
-    int MD5_Update(MD5_CTX *c, const void *data, size_t len) nogil
-    int MD5_Final(unsigned char *md, MD5_CTX *c) nogil
-    int SHA1_Init(SHA_CTX *c) nogil
-    int SHA1_Update(SHA_CTX *c, const void *data, size_t len) nogil
-    int SHA1_Final(unsigned char *md, SHA_CTX *c) nogil
     int SHA256_Init(SHA256_CTX *c) nogil
     int SHA256_Update(SHA256_CTX *c, const void *data, size_t len) nogil
     int SHA256_Final(unsigned char *md, SHA256_CTX *c) nogil

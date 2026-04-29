@@ -256,6 +256,73 @@ def build_vendored_libcurl():
         return None
 
 
+def detect_system_libcurl():
+    """Probe the system for a usable libcurl via pkg-config.
+
+    Returns (include_dirs, link_args) tuple if found, else None.
+    Used as the preferred link mode for local dev — vendored static is reserved
+    for self-contained wheels (manylinux/CI), where pkg-config is unavailable
+    or system curl is too old.
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("pkg-config"):
+        return None
+
+    cflags = subprocess.run(
+        ["pkg-config", "--cflags", "libcurl"], capture_output=True, text=True
+    )
+    libs = subprocess.run(
+        ["pkg-config", "--libs", "libcurl"], capture_output=True, text=True
+    )
+    if cflags.returncode != 0 or libs.returncode != 0:
+        return None
+
+    include_dirs = [tok[2:] for tok in cflags.stdout.split() if tok.startswith("-I")]
+    link_args = libs.stdout.split()
+    if not link_args:
+        return None
+    return include_dirs, link_args
+
+
+def resolve_libcurl():
+    """Return (include_dirs, link_args) for libcurl, preferring system over vendored.
+
+    Resolution order:
+      1. OPTERYX_VENDOR_CURL=1 → force vendored static (CI/wheel builds).
+      2. System libcurl via pkg-config → use it (fast, reliable for local dev).
+      3. Vendored static build → fallback.
+    Hard-fails if none succeed; the http_client extension is mandatory.
+    """
+    force_vendor = os.environ.get("OPTERYX_VENDOR_CURL", "0").lower() in ("1", "true", "yes")
+
+    if not force_vendor:
+        sys_curl = detect_system_libcurl()
+        if sys_curl is not None:
+            sys_inc, sys_libs = sys_curl
+            print(f"Using system libcurl (pkg-config): {' '.join(sys_libs)}")
+            return sys_inc, sys_libs
+
+    # Fall back to vendored static build
+    libcurl_a = build_vendored_libcurl()
+    if libcurl_a and os.path.exists(libcurl_a):
+        return ["third_party/curl/include"], [libcurl_a, "-lssl", "-lcrypto"]
+
+    raise RuntimeError(
+        "Failed to resolve libcurl. The http_client extension is REQUIRED.\n\n"
+        "Either install system libcurl + pkg-config:\n"
+        "  - macOS:           brew install curl pkg-config\n"
+        "  - Ubuntu/Debian:   apt-get install libcurl4-openssl-dev pkg-config\n"
+        "  - RHEL/Fedora:     yum install libcurl-devel pkgconfig\n\n"
+        "Or install OpenSSL headers so the vendored static build can run:\n"
+        "  - macOS:           brew install openssl\n"
+        "  - Ubuntu/Debian:   apt-get install libssl-dev\n"
+        "  - RHEL/Fedora:     yum install openssl-devel\n\n"
+        "CI/wheel builds set OPTERYX_VENDOR_CURL=1 to force the vendored path."
+    )
+
+
 # Skip extension building for clean command
 if "clean" in [arg.lower() for arg in sys.argv[1:] if arg and not arg.startswith("-")]:
     print("Skipping native extension build for clean command")
@@ -364,14 +431,17 @@ C_FLAGS.extend(WARNING_FLAGS)
 
 # Include directories
 include_dirs = [
+    ".",                              # repo root for Cython cimport (draken.core.buffers etc.)
     "src/cpp",
     "src/c",
-    "third_party/mabel/draken",
+    "draken/src",                     # draken C++ headers (e.g. <core/buffers.h>)
+    "draken/src/core",                # draken C++ headers, quote-include form
+    "draken/src/interop",             # draken arrow_c_data_interface.h
     "third_party/mabel/carchar",
     "third_party/mabel/parvi",
     "third_party/fastfloat",
     "third_party/fastfloat/fast_float",
-    "third_party/mabel/rugo/parquet",
+    "rugo/src/parquet",
     "third_party/yyjson/src",
     "third_party/re2",
     "third_party/cyan4973",
@@ -405,9 +475,9 @@ with open("README.md", "r", encoding="UTF8") as f:
 
 def make_draken_extension(module_path, source_file, language="c++", depends=None):
     if depends is None:
-        depends = ["third_party/mabel/draken/core/buffers.h"]
+        depends = ["draken/src/core/buffers.h"]
 
-    sources = [f"third_party/mabel/draken/{source_file}"]
+    sources = [f"draken/{source_file}"]
     # Include SIMD implementations for all draken vector modules so
     # simd_mix_hash, simd_popcount, and related functions are available at link time.
     for s in ("src/cpp/simd_hash.cpp", "src/cpp/simd_bitops.cpp"):
@@ -432,7 +502,7 @@ def make_draken_extension(module_path, source_file, language="c++", depends=None
 
 def get_zstd_vendor_sources():
     """Return the vendored zstd sources so other extensions can link to the same files."""
-    RUGO_PARQUET = "third_party/mabel/rugo/parquet"
+    RUGO_PARQUET = "rugo/src/parquet"
     sources = [
         f"{RUGO_PARQUET}/vendor/zstd/common/entropy_common.cpp",
         f"{RUGO_PARQUET}/vendor/zstd/common/fse_decompress.cpp",
@@ -452,7 +522,7 @@ def get_zstd_vendor_sources():
 
 def get_lz4_vendor_sources():
     """Return vendored lz4 block-codec sources."""
-    RUGO_PARQUET = "third_party/mabel/rugo/parquet"
+    RUGO_PARQUET = "rugo/src/parquet"
     return [f"{RUGO_PARQUET}/vendor/lz4/lz4.c"]
 
 
@@ -465,7 +535,7 @@ def get_parquet_vendor_sources():
     avoids runtime missing symbol errors.
     """
     vendor_sources = []
-    RUGO_PARQUET = "third_party/mabel/rugo/parquet"
+    RUGO_PARQUET = "rugo/src/parquet"
 
     # Snappy sources (minimal subset for decompress)
     snappy_sources = [
@@ -500,7 +570,6 @@ extensions = [
             "opteryx/third_party/mabel/base64/_base64_dispatch.c",
             "opteryx/third_party/mabel/base64/_base64_neon.c",
             "opteryx/third_party/mabel/base64/_base64_avx2.c",
-            "opteryx/third_party/mabel/base64/_base64_avx512.c",
         ],
         include_dirs=include_dirs + ["opteryx/third_party/mabel"],
         extra_compile_args=C_FLAGS + ["-std=c99", "-DBASE64_IMPLEMENTATION"],
@@ -512,6 +581,15 @@ extensions = [
             "opteryx/third_party/mabel/base16/_base16.c",
         ],
         include_dirs=include_dirs,
+        extra_compile_args=C_FLAGS + ["-std=c99"],
+    ),
+    Extension(
+        "opteryx.third_party.mabel.base85",
+        sources=[
+            "opteryx/third_party/mabel/base85/base85.pyx",
+            "opteryx/third_party/mabel/base85/_base85.c",
+        ],
+        include_dirs=include_dirs + ["opteryx/third_party/mabel"],
         extra_compile_args=C_FLAGS + ["-std=c99"],
     ),
     Extension(
@@ -554,9 +632,9 @@ extensions = [
         sources=["opteryx/third_party/facebook/zstd.pyx"] + get_zstd_vendor_sources(),
         include_dirs=include_dirs
         + [
-            "third_party/mabel/rugo/parquet/vendor/zstd",
-            "third_party/mabel/rugo/parquet/vendor/zstd/common",
-            "third_party/mabel/rugo/parquet/vendor/zstd/decompress",
+            "rugo/src/parquet/vendor/zstd",
+            "rugo/src/parquet/vendor/zstd/common",
+            "rugo/src/parquet/vendor/zstd/decompress",
         ],
         define_macros=[("ZSTD_STATIC_LINKING_ONLY", "1")],
         language="c++",
@@ -566,7 +644,7 @@ extensions = [
     Extension(
         "opteryx.third_party.lz4.lz4",
         sources=["opteryx/third_party/lz4/lz4.pyx"] + get_lz4_vendor_sources(),
-        include_dirs=include_dirs + ["third_party/mabel/rugo/parquet/vendor/lz4"],
+        include_dirs=include_dirs + ["rugo/src/parquet/vendor/lz4"],
         extra_compile_args=C_FLAGS,
         language="c",
     ),
@@ -594,18 +672,18 @@ extensions = [
     ),
     # File format readers
     Extension(
-        "rugo.parquet",
+        "rugo.parquet_reader",
         sources=(
             [
-                "third_party/mabel/rugo/parquet/parquet_reader.pyx",
-                "third_party/mabel/rugo/parquet/metadata.cpp",
-                "third_party/mabel/rugo/parquet/decode_encodings.cpp",
-                "third_party/mabel/rugo/parquet/decode_page.cpp",
-                "third_party/mabel/rugo/parquet/decode_column.cpp",
-                "third_party/mabel/rugo/parquet/decode.cpp",
-                "third_party/mabel/rugo/parquet/page_value_decoder.cpp",
-                "third_party/mabel/rugo/parquet/compression.cpp",
-                "third_party/mabel/rugo/parquet/bloom_filter.cpp",
+                "rugo/src/parquet/parquet_reader.pyx",
+                "rugo/src/parquet/metadata.cpp",
+                "rugo/src/parquet/decode_encodings.cpp",
+                "rugo/src/parquet/decode_page.cpp",
+                "rugo/src/parquet/decode_column.cpp",
+                "rugo/src/parquet/decode.cpp",
+                "rugo/src/parquet/page_value_decoder.cpp",
+                "rugo/src/parquet/compression.cpp",
+                "rugo/src/parquet/bloom_filter.cpp",
                 "src/cpp/cpu_features.cpp",
             ]
             + get_parquet_vendor_sources()
@@ -613,10 +691,10 @@ extensions = [
         include_dirs=(
             include_dirs
             + [
-                "third_party/mabel/rugo/parquet/vendor/snappy",
-                "third_party/mabel/rugo/parquet/vendor/zstd",
-                "third_party/mabel/rugo/parquet/vendor/zstd/common",
-                "third_party/mabel/rugo/parquet/vendor/zstd/decompress",
+                "rugo/src/parquet/vendor/snappy",
+                "rugo/src/parquet/vendor/zstd",
+                "rugo/src/parquet/vendor/zstd/common",
+                "rugo/src/parquet/vendor/zstd/decompress",
             ]
         ),
         define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1")],
@@ -627,9 +705,9 @@ extensions = [
     Extension(
         "rugo.jsonl",
         sources=[
-            "third_party/mabel/rugo/jsonl/jsonl_reader.pyx",
-            "third_party/mabel/rugo/jsonl/decode.cpp",
-            "third_party/mabel/rugo/jsonl/yyjson_wrapper.cpp",
+            "rugo/src/jsonl/jsonl_reader.pyx",
+            "rugo/src/jsonl/decode.cpp",
+            "rugo/src/jsonl/yyjson_wrapper.cpp",
             "src/cpp/simd_env.cpp",
             "src/cpp/cpu_features.cpp",
             "src/cpp/simd_search.cpp",
@@ -642,18 +720,18 @@ extensions = [
     Extension(
         "rugo._jsonl",
         sources=[
-            "third_party/mabel/rugo/_jsonl/_jsonl_reader.pyx",
-            "third_party/mabel/rugo/_jsonl/core/structural_scan.cpp",
-            "third_party/mabel/rugo/_jsonl/core/interpreter.cpp",
-            "third_party/mabel/rugo/_jsonl/core/value_parser.cpp",
-            "third_party/mabel/rugo/_jsonl/core/field_span.cpp",
-            "third_party/mabel/rugo/_jsonl/core/jsonl_reader.cpp",
-            "third_party/mabel/rugo/_jsonl/core/column_builder.cpp",
+            "rugo/src/_jsonl/_jsonl_reader.pyx",
+            "rugo/src/_jsonl/core/structural_scan.cpp",
+            "rugo/src/_jsonl/core/interpreter.cpp",
+            "rugo/src/_jsonl/core/value_parser.cpp",
+            "rugo/src/_jsonl/core/field_span.cpp",
+            "rugo/src/_jsonl/core/jsonl_reader.cpp",
+            "rugo/src/_jsonl/core/column_builder.cpp",
             "src/cpp/simd_env.cpp",
             "src/cpp/cpu_features.cpp",
             "src/cpp/simd_search.cpp",
         ],
-        include_dirs=include_dirs + ["third_party/mabel/rugo/_jsonl/core"],
+        include_dirs=include_dirs + ["rugo/src/_jsonl/core"],
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
@@ -671,7 +749,7 @@ extensions = [
     make_draken_extension("vectors.scalar_constructors", "vectors/scalar_constructors.pyx"),
     Extension(
         "draken.vectors.arithmetic_kernels",
-        sources=["draken/src/vectors/arithmetic_kernels.pyx"],
+        sources=["draken/vectors/arithmetic_kernels.pyx"],
         include_dirs=include_dirs,
         language="c",
         extra_compile_args=C_FLAGS,
@@ -681,7 +759,7 @@ extensions = [
     Extension(
         "draken.vectors.string_vector",
         sources=[
-            "third_party/mabel/draken/vectors/string_vector.pyx",
+            "draken/vectors/string_vector.pyx",
             "src/cpp/simd_hash.cpp",
             "src/cpp/simd_bitops.cpp",
             "src/cpp/simd_env.cpp",
@@ -702,7 +780,7 @@ extensions = [
     # Pre-generated C module for morsels.align (Cython-generated C source)
     Extension(
         "draken.morsels.align",
-        sources=["third_party/mabel/draken/morsels/align.pyx"],
+        sources=["draken/morsels/align.pyx"],
         include_dirs=include_dirs,
         extra_compile_args=C_FLAGS,
         language="c",
@@ -711,7 +789,7 @@ extensions = [
     Extension(
         "draken.vectors._hash_api",
         sources=[
-            "draken/src/vectors/_hash_api.pyx",
+            "draken/vectors/_hash_api.pyx",
             "src/cpp/simd_hash.cpp",
             "src/cpp/simd_bitops.cpp",
             "src/cpp/cpu_features.cpp",
@@ -990,25 +1068,16 @@ extensions = [
     # HTTP Client (libcurl-based HTTP with connection pooling and Range request support)
 ]
 
-# Build libcurl first - REQUIRED for http_client extension
+# Resolve libcurl - REQUIRED for http_client extension
 # Skip for sdist (source distribution packaging) and clean - no compilation needed
 _build_commands = {"build", "build_ext", "install", "bdist_wheel", "bdist", "develop"}
 _skip_build = not any(
     arg.lower() in _build_commands for arg in sys.argv[1:] if arg and not arg.startswith("-")
 )
-_libcurl_path = None
+_curl_include_dirs: list[str] = []
+_curl_link_args: list[str] = []
 if not _skip_build:
-    _libcurl_path = build_vendored_libcurl()
-
-    if not _libcurl_path or not os.path.exists(_libcurl_path):
-        raise RuntimeError(
-            f"Failed to build vendored libcurl. HTTP client extension is REQUIRED.\n\n"
-            "Ensure OpenSSL development headers are installed:\n"
-            "  - macOS: brew install openssl\n"
-            "  - Ubuntu/Debian: apt-get install libssl-dev\n"
-            "  - RHEL/CentOS/Fedora: yum install openssl-devel\n\n"
-            "Then rebuild with: python setup.py build_ext --inplace"
-        )
+    _curl_include_dirs, _curl_link_args = resolve_libcurl()
 
     # HTTP client extension - MANDATORY (only add if not cleaning)
     extensions.append(
@@ -1018,14 +1087,9 @@ if not _skip_build:
                 "opteryx/compiled/http_client.pyx",
                 "src/cpp/http_client.cpp",
             ],
-            include_dirs=include_dirs + ["src/cpp", "third_party/curl/include"],
+            include_dirs=include_dirs + ["src/cpp"] + _curl_include_dirs,
             extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
-            extra_link_args=[
-                _libcurl_path,
-                "-lssl",  # OpenSSL SSL library
-                "-lcrypto",  # OpenSSL crypto library
-            ]
-            + ([] if is_win() else ["-lm"]),  # Link math library on non-Windows
+            extra_link_args=_curl_link_args + ([] if is_win() else ["-lm"]),
             language="c++",
         )
     )
@@ -1078,7 +1142,7 @@ if not is_win():
 extensions.extend(
     [
         Extension(
-            "opteryx.compiled.vector_ops.function_definitions",
+            "opteryx.compiled.vector_ops.vector_ops",
             sources=(
                 ["opteryx/compiled/vector_ops/vector_ops.pyx"]
                 + sorted(
@@ -1105,7 +1169,7 @@ extensions.extend(
             define_macros=[("VENDORED_DIGESTS", "1")],
         ),
         Extension(
-            "opteryx.compiled.joins.join_definitions",
+            "opteryx.compiled.joins.joins",
             sources=[
                 "opteryx/compiled/joins/joins.pyx",
                 "src/cpp/intbuffer.cpp",
@@ -1362,14 +1426,14 @@ extensions.append(
             [
                 "opteryx/connectors/parquet_io/pool_reader.pyx",
                 # Rugo parquet sources for DecodeColumnFromChunk and infrastructure
-                "third_party/mabel/rugo/parquet/decode_column.cpp",
-                "third_party/mabel/rugo/parquet/decode.cpp",
-                "third_party/mabel/rugo/parquet/compression.cpp",
-                "third_party/mabel/rugo/parquet/metadata.cpp",
-                "third_party/mabel/rugo/parquet/bloom_filter.cpp",
-                "third_party/mabel/rugo/parquet/page_value_decoder.cpp",
-                "third_party/mabel/rugo/parquet/decode_encodings.cpp",
-                "third_party/mabel/rugo/parquet/decode_page.cpp",
+                "rugo/src/parquet/decode_column.cpp",
+                "rugo/src/parquet/decode.cpp",
+                "rugo/src/parquet/compression.cpp",
+                "rugo/src/parquet/metadata.cpp",
+                "rugo/src/parquet/bloom_filter.cpp",
+                "rugo/src/parquet/page_value_decoder.cpp",
+                "rugo/src/parquet/decode_encodings.cpp",
+                "rugo/src/parquet/decode_page.cpp",
                 "src/cpp/cpu_features.cpp",
                 "src/cpp/http_client.cpp",
             ]
@@ -1379,29 +1443,25 @@ extensions.append(
             include_dirs
             + [
                 "src/cpp",
-                "third_party/curl/include",
-                "third_party/mabel/rugo/parquet",
-                "third_party/mabel/rugo/parquet/vendor/snappy",
-                "third_party/mabel/rugo/parquet/vendor/zstd",
-                "third_party/mabel/rugo/parquet/vendor/zstd/common",
-                "third_party/mabel/rugo/parquet/vendor/zstd/decompress",
+                "rugo/src/parquet",
+                "rugo/src/parquet/vendor/snappy",
+                "rugo/src/parquet/vendor/zstd",
+                "rugo/src/parquet/vendor/zstd/common",
+                "rugo/src/parquet/vendor/zstd/decompress",
                 "third_party/bshoshany",
                 "third_party/moodycamel",
             ]
+            + _curl_include_dirs
         ),
         define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1")],
         language="c++",
         extra_compile_args=CPP_FLAGS,
-        extra_link_args=[
-            _libcurl_path,
-            "-lssl",
-            "-lcrypto",
-        ] + ([] if is_win() else ["-lm"]),
+        extra_link_args=_curl_link_args + ([] if is_win() else ["-lm"]),
         depends=[
-            "third_party/mabel/rugo/parquet/io_pipeline.hpp",
-            "third_party/mabel/rugo/parquet/ipc_serialize.hpp",
-            "third_party/mabel/rugo/parquet/decode.hpp",
-            "third_party/mabel/rugo/parquet/metadata.hpp",
+            "rugo/src/parquet/io_pipeline.hpp",
+            "rugo/src/parquet/ipc_serialize.hpp",
+            "rugo/src/parquet/decode.hpp",
+            "rugo/src/parquet/metadata.hpp",
             "src/cpp/http_client.hpp",
         ],
     )
@@ -1414,7 +1474,7 @@ setup(
     description="Python SQL Query Engine",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    packages=find_packages(include=[LIBRARY, f"{LIBRARY}.*", "opteryx_core", "opteryx_core.*"]),
+    packages=find_packages(include=[LIBRARY, f"{LIBRARY}.*"]),
     python_requires=">=3.13",
     url="https://github.com/mabel-dev/opteryx/",
     ext_modules=cythonize(

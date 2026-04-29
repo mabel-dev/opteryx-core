@@ -20,37 +20,28 @@ For more information check out https://opteryx.app.
 import datetime
 import os
 import platform
-import secrets
 import warnings
 from pathlib import Path
 
 from decimal import getcontext
 from typing import Dict, Any, Iterable, Optional
 
+from draken import Morsel
+
 # Set Decimal precision to 28 globally
 getcontext().prec = 28
 
 
-# end-of-stream marker
-def _generate_eos_marker() -> int:
-    """Create an end-of-stream marker using the Morsel class."""
-    from draken import Morsel
-
-    return Morsel()
+# End-of-stream marker: a singleton empty Morsel signalling that a producer has
+# finished. Compared by identity (`morsel is EOS`).
+EOS: Morsel = Morsel()
 
 
-EOS: int = _generate_eos_marker()
-
-
-# empty-morsel marker — yielded by nodes that absorbed a morsel but produced no output
-# (e.g. Group By during accumulation).  __call__ intercepts this, records a trace
-# event, and dead-ends it — nothing is forwarded downstream.
-def _generate_empty_marker() -> int:
-    """Generate a random 64-bit signed empty-morsel marker."""
-    return secrets.randbits(64) - (1 << 63)
-
-
-EMPTY: int = _generate_empty_marker()
+# Empty-morsel marker: a singleton Morsel yielded by nodes that absorbed input but
+# produced no output (e.g. Group By during accumulation). __call__ intercepts this,
+# records a trace event, and dead-ends it — nothing is forwarded downstream.
+# Compared by identity (`morsel is EMPTY`).
+EMPTY: Morsel = Morsel()
 
 
 def is_mac() -> bool:  # pragma: no cover

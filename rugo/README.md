@@ -110,16 +110,13 @@ Rugo reads and converts these Parquet logical types to Draken vectors:
 
 ## Building from Source
 
+Rugo is part of the opteryx-core repo and is built via the parent project — it is not separately publishable.
+
 ```bash
 git clone https://github.com/joocer/opteryx.git
-cd opteryx/rugo
-
-# Build with Meson
-meson setup build
-meson compile -C build
-
-# Run tests
-meson test -C build
+cd opteryx
+make compile
+make q
 ```
 
 ## Architecture

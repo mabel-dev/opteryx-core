@@ -3,7 +3,7 @@
 # cython: wraparound=False
 # cython: nonecheck=False
 # cython: cdivision=True
-# distutils: sources = src/cpp/simd_remap.cpp, src/cpp/cpu_features.cpp
+# distutils: sources = src/cpp/simd_remap.cpp src/cpp/cpu_features.cpp
 # cython: infer_types=True
 
 """opteryx.compiled.morsel_ops.sort

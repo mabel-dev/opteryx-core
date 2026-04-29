@@ -68,6 +68,7 @@ cdef inline uint8_t _dict_code_width_for_size(Py_ssize_t dict_size) noexcept:
         return 2
     return 4
 
+cdef const int64_t INT64_MIN_VALUE = <int64_t>0x8000000000000000
 
 cdef inline uint32_t _read_packed_code(const uint8_t* codes, uint8_t code_width, Py_ssize_t row_idx) noexcept nogil:
     if code_width == 1:
@@ -1193,7 +1194,7 @@ cdef class Int64Vector(Vector):
                 run_len = rle_lens[r]
                 for i in range(run_len):
                     if rle_nulls != NULL and not ((rle_nulls[(pos + i) >> 3] >> ((pos + i) & 7)) & 1):
-                        dst[pos + i] = <int64_t>-9223372036854775808
+                        dst[pos + i] = INT64_MIN_VALUE
                     else:
                         dst[pos + i] = run_val
                 pos += run_len
@@ -1206,7 +1207,7 @@ cdef class Int64Vector(Vector):
             null_bitmap    = ptr.null_bitmap
             for i in range(n):
                 if null_bitmap != NULL and not ((null_bitmap[i >> 3] >> (i & 7)) & 1):
-                    dst[i] = <int64_t>-9223372036854775808
+                    dst[i] = INT64_MIN_VALUE
                 else:
                     dst[i] = _ci_dict_data[
                         <Py_ssize_t>_read_packed_code(_ci_dict_codes, _ci_dict_cw, i)
@@ -1215,7 +1216,7 @@ cdef class Int64Vector(Vector):
 
         if self._has_const:
             for i in range(n):
-                dst[i] = <int64_t>-9223372036854775808 if self._const_is_null else self._const_value
+                dst[i] = INT64_MIN_VALUE if self._const_is_null else self._const_value
             return
 
         null_bitmap = ptr.null_bitmap

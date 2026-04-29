@@ -53,7 +53,8 @@ from draken.vectors.date32_vector cimport Date32Vector
 cdef int64_t MICROSECONDS_PER_DAY = 86_400_000_000
 cdef int64_t MICROSECONDS_PER_SECOND = 1_000_000
 cdef int64_t MICROSECONDS_PER_MILLISECOND = 1_000
-cdef int64_t NULL_FLAG = <int64_t>-9223372036854775808
+cdef const int64_t INT64_MIN_VALUE = <int64_t>0x8000000000000000
+cdef int64_t NULL_FLAG = INT64_MIN_VALUE
 
 # Integer unit codes — avoids Python str comparison in the compress hot loop
 DEF TIMESTAMP_HASH_CHUNK = 1024
@@ -174,7 +175,7 @@ cdef inline int64_t _apply_unit_scale(int64_t v, int unit_code):
     if v > 0 and v > 9223372036854775807 // factor:
         return 9223372036854775807
     if v < 0 and v < (-9223372036854775807 - 1) // factor:
-        return -9223372036854775808
+        return INT64_MIN_VALUE
     return v * factor
 
 
@@ -188,8 +189,8 @@ cdef int64_t _safe_multiply_int64(int64_t value, int64_t factor):
     if factor > 0:
         if value > 0 and value > 9223372036854775807 // factor:
             return 9223372036854775807
-        if value < 0 and value < -9223372036854775808 // factor:
-            return -9223372036854775808
+        if value < 0 and value < INT64_MIN_VALUE // factor:
+            return INT64_MIN_VALUE
     return value * factor
 
 cdef int64_t scale_timestamp_to_micros(int64_t value, str unit):

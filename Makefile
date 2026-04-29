@@ -46,7 +46,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-quick test-battery coverage mypy compile compile-quick clean distclean install update dev-install all check-python build-info
+.PHONY: help lint format check test test-quick test-battery coverage mypy compile compile-quick clean distclean update dev-install all check-python
 
 # Default target
 .DEFAULT_GOAL := help
@@ -96,10 +96,6 @@ check: ## Check code without fixing
 	@$(PYTHON) -m isort --check-only .
 
 # === DEPENDENCIES ===
-
-install: ## Install package in development mode
-	$(call print_blue,"Installing package...")
-	@$(PIP) install -e .
 
 dev-install: ## Install development dependencies
 	$(call print_blue,"Installing development dependencies...")
@@ -167,57 +163,39 @@ mypy: ## Run type checking
 
 # === COMPILATION ===
 
-# Build system: Meson (with optional setuptools fallback)
-# Meson options can be controlled via environment variables:
-#   OPTERYX_ENABLE_LTO=1   - Enable link-time optimization
-#   OPTERYX_ENABLE_PGO=1   - Enable profile-guided optimization
+# Build system: setuptools (Cython) + setuptools-rust (Rust compute crate).
+# `make compile` is the only supported local path — never use `pip install`.
+# Wheels for PyPI are built in CI via the same setup.py path.
 
-compile: check-python clean ## Compile all extensions via Meson + Rust
-	$(call print_blue,Building Opteryx monorepo with Meson...)
-	@command -v meson >/dev/null 2>&1 || $(PYTHON) -m pip install --user meson ninja cython
-	@meson setup build \
-		-Denable_lto=$(if $(OPTERYX_ENABLE_LTO),true,false) \
-		-Denable_pgo=$(if $(OPTERYX_ENABLE_PGO),true,false)
-	@meson compile -C build -j $(JOBS)
-	$(call print_blue,Building Rust compute extension...)
-	@cargo build --release
-	@$(PYTHON) scripts/install_compiled_modules.py --quiet
-	$(call print_green,Compilation complete! All 71 extensions built and installed.)
-	$(call print_blue,Build artifacts in: $(BUILD_DIR)/)
+compile: check-python clean ## Compile all extensions in-place
+	$(call print_blue,Building Opteryx extensions...)
+	@$(PYTHON) -m pip install --quiet --upgrade setuptools wheel setuptools-rust cython
+	@$(PYTHON) setup.py build_ext --inplace -j $(JOBS)
+	$(call print_green,Compilation complete.)
 
 compile-quick: check-python ## Incremental compilation (alias: c)
-	$(call print_blue,"Incremental build - Meson + Rust...")
-	@if [ ! -d build ]; then \
-		$(UV) run meson setup build \
-			-Denable_lto=$(if $(OPTERYX_ENABLE_LTO),true,false) \
-			-Denable_pgo=$(if $(OPTERYX_ENABLE_PGO),true,false); \
-	fi
-	@$(UV) run meson compile -C build -j $(JOBS)
-	@cargo build --release
-	@$(PYTHON) scripts/install_compiled_modules.py --quiet
-	$(call print_green,"Incremental build complete!")
+	$(call print_blue,Incremental build...)
+	@$(PYTHON) setup.py build_ext --inplace -j $(JOBS)
+	$(call print_green,Incremental build complete.)
 
 # Alias for backward compatibility
 c: compile-quick
 
 # === CLEANUP ===
 
-clean: ## Clean build artifacts (Meson-based)
+clean: ## Clean build artifacts
 	$(call print_blue,"Cleaning build artifacts...")
-	@if [ -d build ]; then $(UV) run meson setup --wipe build 2>/dev/null || true; fi
 	@find . -name '*.so' -delete
 	@find . -name '*.pyc' -delete
 	@find . -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 	@find . -name '*.egg-info' -type d -exec rm -rf {} + 2>/dev/null || true
-	@rm -rf $(BUILD_DIR) $(DIST_DIR) .coverage htmlcov/ .pytest_cache/ .mypy_cache/
+	@rm -rf $(BUILD_DIR) $(DIST_DIR) target/ .coverage htmlcov/ .pytest_cache/ .mypy_cache/
 	$(call print_green,"Cleanup complete!")
 
 distclean: clean ## Deep clean including generated source files
 	$(call print_blue,"Deep cleaning (removing generated files)...")
-	@find . -name '*.so' -delete
 	@find . -name '*.c' -path '*/opteryx/compiled/*' -delete
 	@find . -name '*.cpp' -path '*/opteryx/compiled/*' -delete
-	@rm -rf build/
 	$(call print_green,"Deep clean complete!")
 
 # === CONVENIENCE TARGETS ===
@@ -225,20 +203,6 @@ distclean: clean ## Deep clean including generated source files
 all: compile test ## Full build and test workflow
 
 check-all: lint mypy test coverage ## Run all checks without compilation
-
-# Meson-specific helpers
-build-info: ## Show Meson build information
-	@if [ -d build ]; then \
-		$(UV) run meson configure build; \
-	else \
-		echo "Build directory not configured. Run 'make compile' first."; \
-	fi
-
-test-meson: check-python ## Run Meson tests only (not full pytest suite)
-	$(call print_blue,"Running Meson-built extension tests...")
-	@if [ ! -d build ]; then $(UV) run meson setup build; fi
-	@$(UV) run meson test -C build
-	$(call print_green,"Meson tests complete!")
 
 waterfall: ## Run IO waterfall profiler (usage: make waterfall ARGS="trace scratch/io_trace.jsonl")
 	@PYTHONPATH=dev $(PYTHON) -m io_waterfall $(ARGS)

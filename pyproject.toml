@@ -1,6 +1,6 @@
 [project]
 name = "opteryx_core"
-version = "0.6.65"
+version = "0.7.0"
 description = "Opteryx Query Engine"
 requires-python = '>=3.13'
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -42,9 +42,7 @@ skips = ["B101", "B105", "B324", "B608"]
 # B324 - Use of weak crypto
 # B608 - Hardcoded SQL
 
-# Build system: Meson (run: make compile)
-# For development, use: meson setup build && meson compile -C build
-# For distribution, mesonpy or equivalent Python build backend would be used
+# Build system: setuptools (run: make compile). See setup.py.
 
 [tool.ruff]
 line-length = 100
@@ -72,7 +70,7 @@ ignore = ["SIM105"]
 
 [tool.coverage.run]
 branch = true
-source = ["opteryx", "opteryx/**", "opteryx_core", "opteryx_core/**"]
+source = ["opteryx", "opteryx/**"]
 omit = ["**/third_party/**"]
 
 [tool.coverage.report]

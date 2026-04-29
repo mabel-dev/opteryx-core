@@ -52,6 +52,7 @@ cdef extern from "simd_hash.h":
 
 # Constants for temporal arithmetic (Phase 5b)
 cdef int64_t MICROSECONDS_PER_DAY = 86_400_000_000
+cdef const int64_t INT64_MIN_VALUE = <int64_t>0x8000000000000000
 
 DEF DATE32_HASH_CHUNK = 1024
 _DATE_EPOCH_ORDINAL = _dt.date(1970, 1, 1).toordinal()
@@ -1044,7 +1045,7 @@ cdef class Date32Vector(Vector):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int32_t* data = <int32_t*> ptr.data
         cdef Py_ssize_t n = ptr.length
-        cdef int64_t NULL_FLAG = <int64_t> -9223372036854775808
+        cdef int64_t NULL_FLAG = INT64_MIN_VALUE
         cdef int64_t MICROSECONDS_PER_DAY = <int64_t>86400000000
         cdef int64_t* dst = &out_buf[offset]
         cdef uint8_t* null_bitmap = ptr.null_bitmap

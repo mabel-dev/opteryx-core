@@ -120,16 +120,13 @@ morsel = draken.read_morsel(bytes_data)
 
 ## Building from Source
 
+Draken is part of the opteryx-core repo and is built via the parent project — it is not separately publishable.
+
 ```bash
 git clone https://github.com/joocer/opteryx.git
-cd opteryx/draken
-
-# Build with Meson
-meson setup build
-meson compile -C build
-
-# Run tests
-meson test -C build
+cd opteryx
+make compile
+make q
 ```
 
 ## Architecture

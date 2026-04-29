@@ -488,6 +488,38 @@ def can_decode_from_memory(data):
 
 # --- Helper functions to build Draken vectors from DecodedColumn ---
 
+cdef inline void _expand_rle_int64_into(int64_t* dst,
+                                         parquet_reader.DecodedColumn& decoded_col,
+                                         int32_t num_rows):
+    """Expand rle_int64_values × rle_run_lengths into dense int64 output."""
+    cdef Py_ssize_t off = 0
+    cdef Py_ssize_t r, j
+    cdef Py_ssize_t cnt
+    cdef int64_t val
+    for r in range(decoded_col.rle_run_lengths.size()):
+        val = decoded_col.rle_int64_values[r]
+        cnt = decoded_col.rle_run_lengths[r]
+        for j in range(cnt):
+            dst[off + j] = val
+        off += cnt
+
+
+cdef inline void _expand_rle_float64_into(double* dst,
+                                           parquet_reader.DecodedColumn& decoded_col,
+                                           int32_t num_rows):
+    """Expand rle_float64_values × rle_run_lengths into dense float64 output."""
+    cdef Py_ssize_t off = 0
+    cdef Py_ssize_t r, j
+    cdef Py_ssize_t cnt
+    cdef double val
+    for r in range(decoded_col.rle_run_lengths.size()):
+        val = decoded_col.rle_float64_values[r]
+        cnt = decoded_col.rle_run_lengths[r]
+        for j in range(cnt):
+            dst[off + j] = val
+        off += cnt
+
+
 cdef Int64Vector _make_int64_from_int32_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
@@ -498,6 +530,10 @@ cdef Int64Vector _make_int64_from_int32_vector(
     cdef Py_ssize_t nb_bytes
     cdef uint8_t* nb
     cdef int32_t code
+    # RLE skip-dense path: int32 widened to int64 in C++; expand runs.
+    if decoded_col.rle_run_lengths.size() > 0 and decoded_col.rle_int64_values.size() > 0:
+        _expand_rle_int64_into(dst, decoded_col, num_rows)
+        return vec
     cdef bint dict_mode = (
         decoded_col.dict_indices.size() > 0
         and decoded_col.dict_int32_values.size() > 0
@@ -550,6 +586,10 @@ cdef Int64Vector _make_int64_vector(
     cdef Py_ssize_t nb_bytes
     cdef uint8_t* nb
     cdef int32_t code
+    # RLE skip-dense path: expand runs into dense.
+    if decoded_col.rle_run_lengths.size() > 0 and decoded_col.rle_int64_values.size() > 0:
+        _expand_rle_int64_into(dst, decoded_col, num_rows)
+        return vec
     cdef bint dict_mode = (
         decoded_col.dict_indices.size() > 0
         and decoded_col.dict_int64_values.size() > 0
@@ -606,6 +646,10 @@ cdef Float64Vector _make_float64_from_float32_vector(
     cdef Py_ssize_t nb_bytes
     cdef uint8_t* nb
     cdef int32_t code
+    # RLE skip-dense path: float32 widened to float64 in C++; expand runs.
+    if decoded_col.rle_run_lengths.size() > 0 and decoded_col.rle_float64_values.size() > 0:
+        _expand_rle_float64_into(dst, decoded_col, num_rows)
+        return vec
     cdef bint dict_mode = (
         decoded_col.dict_indices.size() > 0
         and decoded_col.dict_float32_values.size() > 0
@@ -661,6 +705,11 @@ cdef Int64Vector _make_int32_as_int64_vector(
     cdef Py_ssize_t nb_bytes
     cdef uint8_t* nb
 
+    # RLE skip-dense path: int32 widened to int64 in C++; expand runs.
+    if decoded_col.rle_run_lengths.size() > 0 and decoded_col.rle_int64_values.size() > 0:
+        _expand_rle_int64_into(dst, decoded_col, num_rows)
+        return vec
+
     if decoded_col.valid_bits.size() > 0:
         # Sparse case: iterate valid_bits and widen selected values
         for i in range(num_rows):
@@ -696,6 +745,10 @@ cdef Float64Vector _make_float64_vector(
     cdef Py_ssize_t nb_bytes
     cdef uint8_t* nb
     cdef int32_t code
+    # RLE skip-dense path: expand runs into dense.
+    if decoded_col.rle_run_lengths.size() > 0 and decoded_col.rle_float64_values.size() > 0:
+        _expand_rle_float64_into(dst, decoded_col, num_rows)
+        return vec
     cdef bint dict_mode = (
         decoded_col.dict_indices.size() > 0
         and decoded_col.dict_float64_values.size() > 0
@@ -769,6 +822,42 @@ cdef StringVector _make_string_vector(
     cdef uint8_t* nb
     cdef StringVectorBuilder builder
     cdef const uint8_t* arena_data
+    cdef Py_ssize_t r, j, num_runs, run_cnt, rtotal_bytes
+    cdef int32_t roff, rlen
+    cdef const uint8_t* rle_arena
+    cdef int32_t* roffsets
+
+    # ── RLE skip-dense path ──────────────────────────────────────────────────
+    # Non-nullable byte_array dict columns produce rle_str_arena/offsets/lens
+    # plus rle_run_lengths instead of dict_indices. Expand into the dense
+    # offset+arena layout the StringVector expects.
+    num_runs = <Py_ssize_t>decoded_col.rle_run_lengths.size()
+    if num_runs > 0 and decoded_col.rle_str_lens.size() > 0:
+        rle_arena = decoded_col.rle_str_arena.data()
+        rtotal_bytes = 0
+        for r in range(num_runs):
+            rtotal_bytes += <Py_ssize_t>decoded_col.rle_str_lens[r] * \
+                            <Py_ssize_t>decoded_col.rle_run_lengths[r]
+        if rtotal_bytes == 0:
+            rtotal_bytes = 1
+        vec = StringVector(num_rows, <int32_t>rtotal_bytes)
+        buf = vec.ptr
+        dst = <char*>buf.data
+        roffsets = buf.offsets
+        offset = 0
+        i = 0
+        for r in range(num_runs):
+            roff = <int32_t>decoded_col.rle_str_offsets[r]
+            rlen = decoded_col.rle_str_lens[r]
+            run_cnt = decoded_col.rle_run_lengths[r]
+            for j in range(run_cnt):
+                roffsets[i] = offset
+                if rlen > 0:
+                    memcpy(dst + offset, rle_arena + roff, rlen)
+                offset += rlen
+                i += 1
+        roffsets[num_rows] = offset
+        return vec
 
     # ── Dict mode ─────────────────────────────────────────────────────────────
     # C++ stores: string_dict_arena = flat packed bytes, string_dict_offsets/lens

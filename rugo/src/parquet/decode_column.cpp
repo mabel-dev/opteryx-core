@@ -1247,6 +1247,133 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         // PLAIN or DELTA encoding
         int32_t page_encoding = page_header.encoding;
 
+        // ── Mixed-encoding transition ──────────────────────────────────────
+        // When a column starts with dict-encoded pages and then switches to
+        // PLAIN/DELTA pages mid-chunk, the rle_path has already accumulated
+        // runs into rle_*_values / rle_run_lengths. The PLAIN branch below
+        // writes into dict_indices (or *_values), so materialize the rle_*
+        // accumulation into the same dense form before continuing.
+        if (rle_path && !result.rle_run_lengths.empty()) {
+          if (byte_array_dict_mode && !result.rle_str_lens.empty()) {
+            if (unified_dict_map.empty()) {
+              SeedDictionaryMapFromArena(
+                  unified_dict_map,
+                  result.string_dict_arena,
+                  result.string_dict_offsets,
+                  result.string_dict_lens);
+            }
+            const size_t n_runs = result.rle_run_lengths.size();
+            result.dict_indices.reserve(result.dict_indices.size() +
+                                        result.rle_total_length);
+            for (size_t r = 0; r < n_runs; ++r) {
+              const uint32_t off = result.rle_str_offsets[r];
+              const int32_t  len = result.rle_str_lens[r];
+              const int32_t  cnt = result.rle_run_lengths[r];
+              const int32_t code = InternByteArrayToDictionary(
+                  reinterpret_cast<const char*>(result.rle_str_arena.data() + off),
+                  len,
+                  unified_dict_map,
+                  result.string_dict_arena,
+                  result.string_dict_offsets,
+                  result.string_dict_lens);
+              for (int32_t j = 0; j < cnt; ++j) result.dict_indices.push_back(code);
+            }
+            result.rle_str_arena.clear();
+            result.rle_str_offsets.clear();
+            result.rle_str_lens.clear();
+          } else if ((int32_dict_mode || int64_dict_mode) &&
+                     !result.rle_int64_values.empty()) {
+            const bool is_i32 = int32_dict_mode;
+            if (is_i32) {
+              if (int32_dict_map.empty()) {
+                SeedPrimitiveDictionaryMap(int32_dict_map, result.dict_int32_values);
+              }
+            } else {
+              if (int64_dict_map.empty()) {
+                SeedPrimitiveDictionaryMap(int64_dict_map, result.dict_int64_values);
+              }
+            }
+            const size_t n_runs = result.rle_run_lengths.size();
+            result.dict_indices.reserve(result.dict_indices.size() +
+                                        result.rle_total_length);
+            for (size_t r = 0; r < n_runs; ++r) {
+              const int64_t val = result.rle_int64_values[r];
+              const int32_t cnt = result.rle_run_lengths[r];
+              int32_t code;
+              if (is_i32) {
+                code = InternPrimitiveToDictionary(
+                    static_cast<int32_t>(val), int32_dict_map,
+                    result.dict_int32_values);
+              } else {
+                code = InternPrimitiveToDictionary(
+                    val, int64_dict_map, result.dict_int64_values);
+              }
+              for (int32_t j = 0; j < cnt; ++j) result.dict_indices.push_back(code);
+            }
+            result.rle_int64_values.clear();
+          } else if ((float32_dict_mode || float64_dict_mode) &&
+                     !result.rle_float64_values.empty()) {
+            // float32_dict_map / float64_dict_map are keyed by the float's
+            // raw bit pattern (so NaNs, +0/-0 are interned per-bits-pattern,
+            // matching the manual PLAIN-path code further down).
+            if (float32_dict_mode) {
+              if (float32_dict_map.empty()) {
+                float32_dict_map.reserve(result.dict_float32_values.size() * 2 + 1);
+                for (size_t i = 0; i < result.dict_float32_values.size(); ++i) {
+                  float32_dict_map.emplace(
+                      Float32Bits(result.dict_float32_values[i]),
+                      static_cast<int32_t>(i));
+                }
+              }
+            } else {
+              if (float64_dict_map.empty()) {
+                float64_dict_map.reserve(result.dict_float64_values.size() * 2 + 1);
+                for (size_t i = 0; i < result.dict_float64_values.size(); ++i) {
+                  float64_dict_map.emplace(
+                      Float64Bits(result.dict_float64_values[i]),
+                      static_cast<int32_t>(i));
+                }
+              }
+            }
+            const size_t n_runs = result.rle_run_lengths.size();
+            result.dict_indices.reserve(result.dict_indices.size() +
+                                        result.rle_total_length);
+            for (size_t r = 0; r < n_runs; ++r) {
+              const double  val = result.rle_float64_values[r];
+              const int32_t cnt = result.rle_run_lengths[r];
+              int32_t code;
+              if (float32_dict_mode) {
+                const float fv = static_cast<float>(val);
+                const uint32_t key = Float32Bits(fv);
+                auto it = float32_dict_map.find(key);
+                if (it != float32_dict_map.end()) {
+                  code = it->second;
+                } else {
+                  code = static_cast<int32_t>(result.dict_float32_values.size());
+                  result.dict_float32_values.push_back(fv);
+                  float32_dict_map.emplace(key, code);
+                }
+              } else {
+                const uint64_t key = Float64Bits(val);
+                auto it = float64_dict_map.find(key);
+                if (it != float64_dict_map.end()) {
+                  code = it->second;
+                } else {
+                  code = static_cast<int32_t>(result.dict_float64_values.size());
+                  result.dict_float64_values.push_back(val);
+                  float64_dict_map.emplace(key, code);
+                }
+              }
+              for (int32_t j = 0; j < cnt; ++j) result.dict_indices.push_back(code);
+            }
+            result.rle_float64_values.clear();
+          }
+          result.rle_run_lengths.clear();
+          result.rle_total_length = 0;
+          result.rle_last_code = -1;
+        }
+        // ──────────────────────────────────────────────────────────────────
+
         if (result.type == "int32") {
           if (int32_dict_mode) {
             if (int32_dict_map.empty()) {

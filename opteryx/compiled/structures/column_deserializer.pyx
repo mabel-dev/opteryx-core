@@ -52,9 +52,9 @@ cdef inline const uint8_t* _read_u32(const uint8_t* p, uint32_t* out) noexcept n
 
 
 cdef inline uint8_t* _copy_null_bitmap(const uint8_t* src, uint32_t nbytes) except NULL:
-    """Allocate and memcpy the null bitmap. Returns NULL on zero length."""
-    if nbytes == 0:
-        return NULL
+    """Allocate and memcpy the null bitmap. Caller must guarantee nbytes > 0
+    (because Cython's `except NULL` reserves NULL as the exception sentinel,
+    so this function may not legitimately return NULL on success)."""
     cdef uint8_t* dst = <uint8_t*>malloc(nbytes)
     if dst == NULL:
         raise MemoryError()
@@ -71,7 +71,10 @@ cdef object _build_int64(const uint8_t* p, uint32_t num_rows,
     cdef Int64Vector vec = Int64Vector(<size_t>n)
     if data_len > 0:
         memcpy(vec.ptr.data, p, data_len)
-    vec.ptr.null_bitmap = _copy_null_bitmap(null_bitmap, null_bitmap_len)
+    if null_bitmap_len > 0:
+        vec.ptr.null_bitmap = _copy_null_bitmap(null_bitmap, null_bitmap_len)
+    else:
+        vec.ptr.null_bitmap = NULL
     return vec
 
 
@@ -88,7 +91,10 @@ cdef object _build_int32(const uint8_t* p, uint32_t num_rows,
     cdef uint32_t i
     for i in range(n):
         dst[i] = <int64_t>src[i]
-    vec.ptr.null_bitmap = _copy_null_bitmap(null_bitmap, null_bitmap_len)
+    if null_bitmap_len > 0:
+        vec.ptr.null_bitmap = _copy_null_bitmap(null_bitmap, null_bitmap_len)
+    else:
+        vec.ptr.null_bitmap = NULL
     return vec
 
 
@@ -101,7 +107,10 @@ cdef object _build_float32(const uint8_t* p, uint32_t num_rows,
     cdef Float32Vector vec = Float32Vector(<size_t>n)
     if data_len > 0:
         memcpy(vec.ptr.data, p, data_len)
-    vec.ptr.null_bitmap = _copy_null_bitmap(null_bitmap, null_bitmap_len)
+    if null_bitmap_len > 0:
+        vec.ptr.null_bitmap = _copy_null_bitmap(null_bitmap, null_bitmap_len)
+    else:
+        vec.ptr.null_bitmap = NULL
     return vec
 
 
@@ -114,7 +123,10 @@ cdef object _build_float64(const uint8_t* p, uint32_t num_rows,
     cdef Float64Vector vec = Float64Vector(<size_t>n)
     if data_len > 0:
         memcpy(vec.ptr.data, p, data_len)
-    vec.ptr.null_bitmap = _copy_null_bitmap(null_bitmap, null_bitmap_len)
+    if null_bitmap_len > 0:
+        vec.ptr.null_bitmap = _copy_null_bitmap(null_bitmap, null_bitmap_len)
+    else:
+        vec.ptr.null_bitmap = NULL
     return vec
 
 
@@ -126,7 +138,10 @@ cdef object _build_bool(const uint8_t* p, uint32_t num_rows,
     cdef BoolVector vec = BoolVector(<size_t>data_len)
     if data_len > 0:
         memcpy(vec.ptr.data, p, data_len)
-    vec.ptr.null_bitmap = _copy_null_bitmap(null_bitmap, null_bitmap_len)
+    if null_bitmap_len > 0:
+        vec.ptr.null_bitmap = _copy_null_bitmap(null_bitmap, null_bitmap_len)
+    else:
+        vec.ptr.null_bitmap = NULL
     return vec
 
 

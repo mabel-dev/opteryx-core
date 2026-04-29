@@ -42,6 +42,7 @@ from draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_has
 
 DEF TIME32_HASH_CHUNK = 1024
 
+cdef const int64_t INT64_MIN_VALUE = <int64_t>0x8000000000000000
 
 cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx) noexcept nogil:
     cdef uint8_t byte = bitmap[idx >> 3]
@@ -744,7 +745,7 @@ cdef class TimeVector(Vector):
             return
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
-        cdef int64_t NULL_FLAG = <int64_t> -9223372036854775808
+        cdef int64_t NULL_FLAG = INT64_MIN_VALUE
         cdef Py_ssize_t i
         cdef int64_t* dst = &out_buf[offset]
         cdef uint8_t* null_bitmap = ptr.null_bitmap

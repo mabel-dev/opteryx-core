@@ -68,6 +68,7 @@ jobs:
             -e PYTHON_VERSION=${{ matrix.pybuild }} \
             -e OPTERYX_ENABLE_LTO=1 \
             -e OPTERYX_ENABLE_PGO=0 \
+            -e OPTERYX_VENDOR_CURL=1 \
             -v `pwd`:/io \
             --workdir /io \
             "${IMAGE}" \

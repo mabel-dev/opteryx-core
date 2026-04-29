@@ -58,6 +58,8 @@ DEF LTE = 3
 DEF GT  = 4
 DEF GTE = 5
 
+cdef const int64_t INT64_MIN_VALUE = <int64_t>0x8000000000000000
+
 DEF DECIMAL_HASH_CHUNK = 1024
 
 
@@ -984,7 +986,7 @@ cdef class DecimalVector(Vector):
 
         # Constant-encoding path
         if self._has_const:
-            fill = <int64_t>-9223372036854775808 if self._const_is_null else self._const_value
+            fill = INT64_MIN_VALUE if self._const_is_null else self._const_value
             for i in range(n):
                 dst[i] = fill
             return
@@ -1003,7 +1005,7 @@ cdef class DecimalVector(Vector):
             if (null_bitmap[i >> 3] >> (i & 7)) & 1:
                 dst[i] = src[i]
             else:
-                dst[i] = <int64_t>-9223372036854775808
+                dst[i] = INT64_MIN_VALUE
 
     # ------------------------------------------------------------------
     # Debug representation

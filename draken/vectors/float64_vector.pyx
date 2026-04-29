@@ -43,6 +43,8 @@ from draken.vectors.bool_vector cimport BoolVector
 
 DEF FLOAT64_HASH_CHUNK = 1024
 
+cdef const int64_t INT64_MIN_VALUE = <int64_t>0x8000000000000000
+
 cdef inline uint8_t _dict_code_width_for_size(Py_ssize_t dict_size) noexcept:
     if dict_size <= 256:
         return 1
@@ -1152,7 +1154,7 @@ cdef class Float64Vector(Vector):
         cdef long long rv
         cdef int64_t MIN_SIGNED = <int64_t> -9223372036854775807
         cdef int64_t MAX_SIGNED = <int64_t> 9223372036854775807
-        cdef int64_t NULL_FLAG = <int64_t> -9223372036854775808
+        cdef int64_t NULL_FLAG = INT64_MIN_VALUE
         cdef double* rle_vals_c
         cdef int32_t* rle_lens_c
         cdef size_t rle_runs_c

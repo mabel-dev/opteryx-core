@@ -2159,7 +2159,7 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
 
                 if dtype == DRAKEN_DICTIONARY and dict_len > 0:
                     for row_idx in range(row_count):
-                        code = _dict_read_code(dict_ptr, row_idx)
+                        code = _dict_read_packed_code(<const uint8_t*>PyBytes_AS_STRING(codes_bytes), code_width, row_idx)
                         if code >= <uint32_t>dict_len:
                             raise DrakenMorselCorruptionError(
                                 f"dictionary code out of range in column {i}: code={code}, dict_len={dict_len}"

@@ -55,6 +55,8 @@ from draken.vectors.vector cimport MIX_HASH_CONSTANT, NULL_HASH, Vector, mix_has
 
 DEF INTERVAL_HASH_CHUNK = 512
 
+cdef const int64_t INT64_MIN_VALUE = <int64_t>0x8000000000000000
+
 cdef struct IntervalValue:
     int64_t months
     int64_t microseconds
@@ -1009,7 +1011,7 @@ cdef class IntervalVector(Vector):
             return
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
-        cdef int64_t NULL_FLAG = <int64_t> -9223372036854775808
+        cdef int64_t NULL_FLAG = INT64_MIN_VALUE
 
         if n == 0:
             return

@@ -3,7 +3,7 @@
 # cython: cdivision=True
 # cython: initializedcheck=False
 # cython: infer_types=True
-# distutils: sources = src/cpp/simd_env.cpp, src/cpp/simd_hash.cpp, src/cpp/simd_bitops.cpp, src/cpp/cpu_features.cpp
+# distutils: sources = src/cpp/simd_env.cpp src/cpp/simd_hash.cpp src/cpp/simd_bitops.cpp src/cpp/cpu_features.cpp
 # cython: wraparound=False
 # cython: boundscheck=False
 

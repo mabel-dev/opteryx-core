@@ -16,16 +16,18 @@
 #include <vector>
 #include <memory>
 #include <atomic>
+#include <deque>
 #include <exception>
 #include <cstdint>
 #include <utility>
 #include <chrono>
+#include <mutex>
+#include <thread>
 #include <fcntl.h>
 #include <unistd.h>
 #include <map>
 
 #include "BS_thread_pool.hpp"
-#include "readerwriterqueue.h"
 #include "http_client.hpp"
 #include "decode.hpp"
 #include "ipc_serialize.hpp"
@@ -55,7 +57,11 @@ class ParquetIOPipeline {
     };
 
     std::shared_ptr<BS::light_thread_pool> decode_pool_;
-    moodycamel::ReaderWriterQueue<MorselRef> result_queue_;
+    // Multi-producer (4 decode workers) / single-consumer (Python-side caller)
+    // queue. Lock contention is negligible vs the IO/decode cost per item.
+    std::deque<MorselRef> result_queue_;
+    std::mutex queue_mutex_;
+    size_t queue_capacity_;
     HttpClient http_client_;
 
     std::atomic<int> pending_work_{0};
@@ -168,7 +174,18 @@ class ParquetIOPipeline {
 
         result.read_ns = total_read_ns;
         result.decode_ns = total_decode_ns;
-        result_queue_.try_enqueue(std::move(result));
+        // Apply soft back-pressure: if the consumer is far behind, yield
+        // until it drains rather than letting the queue grow unbounded.
+        for (;;) {
+            {
+                std::lock_guard<std::mutex> lk(queue_mutex_);
+                if (result_queue_.size() < queue_capacity_) {
+                    result_queue_.push_back(std::move(result));
+                    break;
+                }
+            }
+            std::this_thread::yield();
+        }
         pending_work_--;
     }
 
@@ -176,7 +193,7 @@ class ParquetIOPipeline {
     ParquetIOPipeline(int decode_workers = 4,
                       size_t result_queue_capacity = 256)
         : decode_pool_(std::make_shared<BS::light_thread_pool>(decode_workers)),
-          result_queue_(result_queue_capacity),
+          queue_capacity_(result_queue_capacity),
           http_client_() {}
 
     ~ParquetIOPipeline() {
@@ -206,7 +223,11 @@ class ParquetIOPipeline {
     }
 
     bool try_get_result(MorselRef& out) {
-        return result_queue_.try_dequeue(out);
+        std::lock_guard<std::mutex> lk(queue_mutex_);
+        if (result_queue_.empty()) return false;
+        out = std::move(result_queue_.front());
+        result_queue_.pop_front();
+        return true;
     }
 
     void wait_shutdown() {

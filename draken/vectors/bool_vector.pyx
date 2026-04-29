@@ -29,8 +29,8 @@ from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT, DRAKEN_ENCODING_RLE
 from draken.core.fixed_vector cimport alloc_fixed_buffer, buf_dtype, buf_length, free_fixed_buffer
 from draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash, simd_popcount
 
-cdef const uint64_t TRUE_HASH = <uint64_t>0x4f112caa54efa882
-cdef const uint64_t FALSE_HASH = <uint64_t>0xc2fd8b2343f83ce7
+cdef const uint64_t TRUE_HASH = <uint64_t>0x4f112caa54efa882ULL
+cdef const uint64_t FALSE_HASH = <uint64_t>0xc2fd8b2343f83ce7ULL
 
 DEF BOOL_HASH_CHUNK = 1024
 

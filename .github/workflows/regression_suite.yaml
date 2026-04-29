@@ -35,13 +35,18 @@ jobs:
           # We only need libssl-dev/pkg-config for libcrypto and build tooling
           sudo apt-get install -y libssl-dev pkg-config
         
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install Requirements
         run: |
           python -m pip install --upgrade pip uv
-          python -m uv pip install --upgrade numpy cython
+          python -m uv pip install --upgrade numpy cython setuptools-rust
           python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/tests/requirements.txt
           python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/pyproject.toml
-          python setup.py build_ext --inplace -j 1
+
+      - name: Compile
+        run: make compile
 
       - name: Print 'parquet' shared object dependencies
         if: matrix.os == 'ubuntu-latest'

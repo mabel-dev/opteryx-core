@@ -1,6 +1,7 @@
 #pragma once
 #include "decode.hpp"
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -109,6 +110,79 @@ static inline void write_null_bitmap(std::vector<uint8_t>& out,
     }
 }
 
+// ── RLE-output expanders ────────────────────────────────────────────────────
+// Non-nullable dict-encoded columns take the "rle skip-dense" path in
+// DecodeColumnFromChunk and produce rle_*_values + rle_run_lengths instead of
+// the usual int32_values / dict_indices / dict_codes_array layout. The IPC
+// format is dense, so we expand here at serialize time.
+
+static void serialize_rle_int_as_int64(std::vector<uint8_t>& out,
+                                       const DecodedColumn& col) {
+    write_u8(out, 1);  // TAG_INT64
+    write_u32(out, static_cast<uint32_t>(col.num_rows));
+    write_null_bitmap(out, col);  // empty: rle path is non-nullable
+
+    uint32_t data_len = static_cast<uint32_t>(col.num_rows) * 8;
+    write_u32(out, data_len);
+    size_t pos = out.size();
+    out.resize(pos + data_len);
+    int64_t* dst = reinterpret_cast<int64_t*>(out.data() + pos);
+
+    size_t off = 0;
+    const size_t n_runs = col.rle_run_lengths.size();
+    for (size_t r = 0; r < n_runs; ++r) {
+        const int64_t v = col.rle_int64_values[r];
+        const int32_t cnt = col.rle_run_lengths[r];
+        for (int32_t j = 0; j < cnt; ++j) dst[off + j] = v;
+        off += static_cast<size_t>(cnt);
+    }
+}
+
+static void serialize_rle_float_as_float64(std::vector<uint8_t>& out,
+                                           const DecodedColumn& col) {
+    write_u8(out, 4);  // TAG_FLOAT64
+    write_u32(out, static_cast<uint32_t>(col.num_rows));
+    write_null_bitmap(out, col);  // empty: rle path is non-nullable
+
+    uint32_t data_len = static_cast<uint32_t>(col.num_rows) * 8;
+    write_u32(out, data_len);
+    size_t pos = out.size();
+    out.resize(pos + data_len);
+    double* dst = reinterpret_cast<double*>(out.data() + pos);
+
+    size_t off = 0;
+    const size_t n_runs = col.rle_run_lengths.size();
+    for (size_t r = 0; r < n_runs; ++r) {
+        const double v = col.rle_float64_values[r];
+        const int32_t cnt = col.rle_run_lengths[r];
+        for (int32_t j = 0; j < cnt; ++j) dst[off + j] = v;
+        off += static_cast<size_t>(cnt);
+    }
+}
+
+static void serialize_rle_string_as_plain(std::vector<uint8_t>& out,
+                                          const DecodedColumn& col) {
+    // Expand RLE strings to plain length-prefixed string list (tag=7).
+    write_u8(out, 7);  // TAG_STR_PLAIN
+    write_u32(out, static_cast<uint32_t>(col.num_rows));
+    write_null_bitmap(out, col);  // empty: rle path is non-nullable
+
+    write_u32(out, static_cast<uint32_t>(col.num_rows));  // num_strings
+    const size_t n_runs = col.rle_run_lengths.size();
+    for (size_t r = 0; r < n_runs; ++r) {
+        const uint32_t off  = col.rle_str_offsets[r];
+        const int32_t  slen = col.rle_str_lens[r];
+        const int32_t  cnt  = col.rle_run_lengths[r];
+        for (int32_t j = 0; j < cnt; ++j) {
+            write_u32(out, static_cast<uint32_t>(slen));
+            if (slen > 0) {
+                write_bytes(out, col.rle_str_arena.data() + off,
+                            static_cast<size_t>(slen));
+            }
+        }
+    }
+}
+
 // ── per-type serializers ────────────────────────────────────────────────────
 
 // ── numeric dict serializer ─────────────────────────────────────────────────
@@ -163,6 +237,10 @@ static void serialize_numeric_dict(std::vector<uint8_t>& out,
 }
 
 static void serialize_int64(std::vector<uint8_t>& out, const DecodedColumn& col) {
+    if (!col.rle_int64_values.empty()) {
+        serialize_rle_int_as_int64(out, col);
+        return;
+    }
     if ((!col.dict_indices.empty() || !col.dict_codes_array.empty()) &&
         !col.dict_int64_values.empty()) {
         serialize_numeric_dict(out, 8, col,
@@ -180,6 +258,11 @@ static void serialize_int64(std::vector<uint8_t>& out, const DecodedColumn& col)
 }
 
 static void serialize_int32(std::vector<uint8_t>& out, const DecodedColumn& col) {
+    if (!col.rle_int64_values.empty()) {
+        // RLE path widened int32 → int64 in C++; emit as plain int64.
+        serialize_rle_int_as_int64(out, col);
+        return;
+    }
     if ((!col.dict_indices.empty() || !col.dict_codes_array.empty()) &&
         !col.dict_int32_values.empty()) {
         // Widen int32 dictionary to int64 — Draken has no Int32 dict vector type.
@@ -201,6 +284,11 @@ static void serialize_int32(std::vector<uint8_t>& out, const DecodedColumn& col)
 }
 
 static void serialize_float32(std::vector<uint8_t>& out, const DecodedColumn& col) {
+    if (!col.rle_float64_values.empty()) {
+        // RLE path widened float32 → float64 in C++; emit as plain float64.
+        serialize_rle_float_as_float64(out, col);
+        return;
+    }
     if ((!col.dict_indices.empty() || !col.dict_codes_array.empty()) &&
         !col.dict_float32_values.empty()) {
         serialize_numeric_dict(out, 9, col,
@@ -218,6 +306,10 @@ static void serialize_float32(std::vector<uint8_t>& out, const DecodedColumn& co
 }
 
 static void serialize_float64(std::vector<uint8_t>& out, const DecodedColumn& col) {
+    if (!col.rle_float64_values.empty()) {
+        serialize_rle_float_as_float64(out, col);
+        return;
+    }
     if ((!col.dict_indices.empty() || !col.dict_codes_array.empty()) &&
         !col.dict_float64_values.empty()) {
         serialize_numeric_dict(out, 10, col,
@@ -339,7 +431,10 @@ static void serialize_decoded_column(const DecodedColumn& col,
     } else if (t == "boolean") {
         serialize_bool(out, col);
     } else if (t == "string" || t == "byte_array") {
-        if ((!col.dict_indices.empty() || !col.dict_codes_array.empty()) &&
+        if (!col.rle_str_lens.empty()) {
+            // RLE path: non-nullable dict-encoded byte_array column.
+            serialize_rle_string_as_plain(out, col);
+        } else if ((!col.dict_indices.empty() || !col.dict_codes_array.empty()) &&
             !col.string_dict_arena.empty()) {
             serialize_string_dict(out, col);
         } else if (!col.dict_indices.empty() && !col.string_values.empty()) {
