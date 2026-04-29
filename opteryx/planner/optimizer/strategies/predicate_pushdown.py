@@ -303,10 +303,13 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     remaining_predicates = []
                     non_equi_ops = {"NotEq", "Gt", "GtEq", "Lt", "LtEq"}
 
+                    all_join_rels = set(node.left_relation_names) | set(node.right_relation_names)
                     for predicate in context.collected_predicates:
-                        if set(node.right_relation_names).issubset(predicate.relations) and set(
-                            node.left_relation_names
-                        ).issubset(predicate.relations):
+                        if (
+                            predicate.relations.intersection(set(node.left_relation_names))
+                            and predicate.relations.intersection(set(node.right_relation_names))
+                            and predicate.relations.issubset(all_join_rels)
+                        ):
                             # This predicate references both sides of the join
                             if predicate.condition.value == "Eq":
                                 # Only convert when the predicate can be represented as join fields.
