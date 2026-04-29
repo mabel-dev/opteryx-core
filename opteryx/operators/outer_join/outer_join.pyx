@@ -399,7 +399,7 @@ class OuterJoinNode(JoinNode):
                     candidates = [c.schema_column.identity for c in self.columns]
                     keep_columns = [c for c in candidates if c in result_morsel.column_names]
                     result_morsel = result_morsel.select(keep_columns)
-                yield result_morsel.to_arrow()
+                yield result_morsel
             yield EOS
         else:
             if morsel is not None and morsel != EMPTY:

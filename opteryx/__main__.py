@@ -181,18 +181,9 @@ def main():
                 f"[ {result.rowcount} rows x {result.columncount} columns ] ( {duration / 1e9} seconds )"
             )
     else:
-        table = result.arrow()
         ext = args.output.lower().split(".")[-1]
 
-        if ext == "parquet":
-            from pyarrow import parquet
-
-            parquet.write_table(table, args.output)
-        elif ext == "csv":
-            from pyarrow import csv
-
-            csv.write_csv(table, args.output)
-        elif ext == "jsonl":
+        if ext == "jsonl":
             with open(args.output, mode="wb") as file:
                 for row in result:
                     file.write(row.as_json + b"\n")
@@ -200,7 +191,7 @@ def main():
             with open(args.output, mode="w") as file:
                 file.write(result.markdown(limit=-1))
         else:
-            raise ValueError(f"Unknown output format '{ext}'")
+            raise ValueError(f"Unsupported output format '{ext}' (supported: jsonl, md)")
         print(
             f"[ {result.rowcount} rows x {result.columncount} columns ] ( {duration / 1e9} seconds )"
         )

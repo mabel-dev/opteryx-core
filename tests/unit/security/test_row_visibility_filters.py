@@ -11,6 +11,7 @@ import pytest
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import opteryx
+from tests.helpers import execute_and_get_arrow, execute_and_get_rowcount, execute_and_get_shape, execute_and_fetch_all, execute_with_visibility_filters
 
 test_cases = [
     # empty filters give no results
@@ -133,10 +134,9 @@ test_cases = [
 @pytest.mark.parametrize("sql, filters, shape", test_cases)
 def test_visibility_filters(sql, filters, shape):
     """test we can stop users performing some query types"""
-    
-    cur = opteryx.query(sql, visibility_filters=filters)
-    cur.materialize()
-    assert cur.shape ==  shape, cur.shape
+
+    result_shape = execute_with_visibility_filters(sql, filters)
+    assert result_shape == shape, result_shape
 
 
 if __name__ == "__main__":  # pragma: no cover

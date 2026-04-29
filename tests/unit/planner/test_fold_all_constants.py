@@ -14,18 +14,19 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import numpy
 
-import opteryx
+from tests.helpers import execute_and_get_arrow
 from tests import is_version, skip_if
 
 
 @skip_if(is_version("3.9"))
 def test_we_dont_fold_random():
     SQL = "SELECT random() AS r FROM GENERATE_SERIES(5000) AS g"
-    df = opteryx.query(SQL)["r"]
-    p25, p50, p75, p95, p99 = numpy.percentile(df, [25, 50, 75, 95, 99])
+    table = execute_and_get_arrow(SQL)
+    values = table["r"].to_numpy()
+    p25, p50, p75, p95, p99 = numpy.percentile(values, [25, 50, 75, 95, 99])
 
     # as we are dealing with random values these tests may fail.
-    assert 0.4 < numpy.mean(df) < 0.6
+    assert 0.4 < numpy.mean(values) < 0.6
     assert 0.2 < p25 < 0.3, p25
     assert 0.7 < p75 < 0.8, p75
 

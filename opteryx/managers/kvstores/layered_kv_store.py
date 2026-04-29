@@ -7,6 +7,7 @@ capacity thresholds. Reads use key-placement metadata first, then fallback scan.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from threading import RLock
 from typing import Iterable
@@ -14,6 +15,8 @@ from typing import Union
 
 from opteryx.config import MAX_CONSECUTIVE_CACHE_FAILURES
 from opteryx.managers.kvstores.base_kv_store import BaseKeyValueStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -135,8 +138,8 @@ class LayeredKeyValueStore(BaseKeyValueStore):
                         old_layer.used_bytes = max(0, old_layer.used_bytes - existing[1])
                     try:
                         old_layer.store.delete(normalized_key)
-                    except Exception:
-                        pass
+                    except Exception as err:
+                        logger.debug(f"Failed to delete from old layer: {err}")
 
                 if layer.max_bytes is not None:
                     if existing is not None and existing[0] == layer_index:
@@ -168,15 +171,15 @@ class LayeredKeyValueStore(BaseKeyValueStore):
                     layer.used_bytes = max(0, layer.used_bytes - size)
                 try:
                     layer.store.delete(normalized_key)
-                except Exception:
-                    pass
+                except Exception as err:
+                    logger.debug(f"Failed to delete from layer {layer_index}: {err}")
                 return
 
-        for layer in self._layers:
+        for layer_index, layer in enumerate(self._layers):
             try:
                 layer.store.delete(normalized_key)
-            except Exception:
-                continue
+            except Exception as err:
+                logger.debug(f"Failed to delete from layer {layer_index}: {err}")
 
     def touch(self, key: bytes):
         normalized_key = self._normalize_key(key)
@@ -186,16 +189,15 @@ class LayeredKeyValueStore(BaseKeyValueStore):
         if placement is not None:
             try:
                 self._layers[placement[0]].store.touch(normalized_key)
-            except Exception:
-                return None
+            except Exception as err:
+                logger.debug(f"Failed to touch in layer {placement[0]}: {err}")
             return None
 
-        for layer in self._layers:
+        for layer_index, layer in enumerate(self._layers):
             try:
                 layer.touch(normalized_key)
-            except Exception:
-                continue
-        return None
+            except Exception as err:
+                logger.debug(f"Failed to touch in layer {layer_index}: {err}")
 
     # Testing and telemetry helpers.
     def layer_usage_bytes(self) -> list[int]:

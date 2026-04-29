@@ -22,7 +22,6 @@ class DataFrame:
     This class is:
     - A base class for Session
     - Used for metadata result tables (e.g., rows_affected counts)
-    - Convertible to PyArrow tables for return to users
     """
 
     def __init__(
@@ -55,40 +54,6 @@ class DataFrame:
             self._schema = RelationSchema(name="table", columns=columns)
         else:
             self._schema = schema
-
-    def arrow(self) -> Any:
-        """Convert DataFrame to PyArrow Table.
-
-        Returns:
-            PyArrow Table with the data from this DataFrame
-        """
-        import pyarrow
-
-        if not self._schema or not self._schema.columns:
-            # Empty schema - return empty table
-            return pyarrow.table({})
-
-        # Convert rows to column-oriented format for PyArrow
-        columns_data: Dict[str, List[Any]] = {col.name: [] for col in self._schema.columns}
-
-        for row in self._rows:
-            if isinstance(row, (list, tuple)):
-                for i, col in enumerate(self._schema.columns):
-                    if i < len(row):
-                        columns_data[col.name].append(row[i])
-                    else:
-                        columns_data[col.name].append(None)
-            elif isinstance(row, dict):
-                for col in self._schema.columns:
-                    columns_data[col.name].append(row.get(col.name))
-
-        # Create PyArrow arrays from column data
-        arrays = []
-        for col in self._schema.columns:
-            arrays.append(pyarrow.array(columns_data[col.name]))
-
-        # Create PyArrow table
-        return pyarrow.table({col.name: arr for col, arr in zip(self._schema.columns, arrays)})
 
     @property
     def description(self) -> Optional[Tuple[Tuple[Any, ...], ...]]:

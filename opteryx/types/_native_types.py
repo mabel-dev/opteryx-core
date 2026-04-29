@@ -96,5 +96,9 @@ def get_native_type(orso_type_or_value: str) -> str:
         "datetime64[us]"
     """
     # Handle both OrsoTypes enum and string values
-    key = orso_type_or_value.value if hasattr(orso_type_or_value, "value") else orso_type_or_value
+    from enum import Enum
+    if isinstance(orso_type_or_value, Enum):
+        key = orso_type_or_value.value
+    else:
+        key = orso_type_or_value
     return ORSO_TO_NATIVE_TYPE.get(key, TYPE_OBJECT)

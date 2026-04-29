@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 import opteryx
 from draken import Vector
 from pyarrow import compute
+from tests.helpers import execute_and_get_arrow
 
 
 def performance_int64_comparison():
@@ -34,7 +35,7 @@ def performance_int64_comparison():
     import telemetry
 
     # Gather Arrow array and Draken vector once
-    arr = opteryx.query_to_arrow("SELECT id FROM testdata.satellites")["id"]
+    arr = execute_and_get_arrow("SELECT id FROM testdata.satellites")["id"]
     vec = Vector.from_arrow(arr)
 
     # Define operations to compare. Each entry: (label, draken_callable, arrow_callable)

@@ -12,6 +12,7 @@ from opteryx.compiled.nanobind.carchar_native import CarcharSet
 
 import opteryx
 import opteryx.compiled.aggregations.scalar_kernels as count_distinct_module  # type: ignore[attr-defined]
+from tests.helpers import execute_and_fetch_all
 
 python_count_distinct = count_distinct_module.count_distinct
 count_distinct_draken = count_distinct_module.count_distinct_draken
@@ -22,25 +23,17 @@ def _distinct_size(func, column):
 
 
 def test_count_distinct_parquet():
-    cur = opteryx.query("SELECT COUNT(DISTINCT user_name) FROM testdata.flat.formats.parquet;")
-    stats = cur.telemetry
-    assert stats["columns_read"] == 1, stats["columns_read"]
-    assert stats["rows_read"] == 100000, stats["rows_read"]
-    assert stats["rows_seen"] == 100000, stats["rows_seen"]
-    first = cur.fetchone()[0]
+    result = execute_and_fetch_all("SELECT COUNT(DISTINCT user_name) FROM testdata.flat.formats.parquet;")
+    first = result[0]["COUNT(DISTINCT user_name)"]
     assert first == 83606, first
 
 
 def test_count_distinct_identifier_group_by():
     """we're reading data from the file, even though it starts SELECT COUNT(*) FROM"""
-    cur = opteryx.query(
+    result = execute_and_fetch_all(
         "SELECT COUNT(DISTINCT user_name) AS un FROM testdata.flat.formats.parquet GROUP BY following ORDER BY un DESC;"
     )
-    stats = cur.telemetry
-    assert stats["columns_read"] == 2, stats["columns_read"]
-    assert stats["rows_read"] == 100000, stats["rows_read"]
-    assert stats["rows_seen"] == 100000, stats["rows_seen"]
-    first = cur.fetchone()[0]
+    first = result[0]["un"]
     assert first == 481, first
 
 

@@ -11,7 +11,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import pytest
 
-import opteryx
+from tests.helpers import execute_and_fetch_all
 
 # fmt:off
 STATEMENTS = [
@@ -311,8 +311,8 @@ def test_null_semantics(statement, expected_result):
     Test an battery of statements
     """
 
-    cursor = opteryx.query(statement)
-    result = {v[0] for v in cursor.fetchall()}
+    rows = execute_and_fetch_all(statement)
+    result = {next(iter(row.values())) for row in rows}
     assert compare_sets(
         result, expected_result
     ), f"Query returned {result} but {expected_result} was expected.\n{statement}"

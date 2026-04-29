@@ -14,6 +14,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../../orso"))
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
+from tests.helpers import execute_and_get_arrow, execute_and_get_rowcount, execute_and_get_shape, execute_and_fetch_all, execute_with_memberships
 
 from opteryx.exceptions import (
     DatasetNotFoundError,
@@ -42,7 +43,7 @@ def test_sql_battery(statement:str, exception: Optional[Exception]):
     Test a battery of statements
     """
     try:
-        opteryx.query(statement, memberships=["Apollo 11", "opteryx"])
+        execute_with_memberships(statement, memberships=["Apollo 11", "opteryx"])
         assert (
             exception is None
         ), f"Exception {exception} not raised but expected\n{format_sql(statement)}"

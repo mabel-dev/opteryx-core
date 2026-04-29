@@ -8,6 +8,7 @@ import pytest
 import sys
 
 #import opteryx
+from tests.helpers import execute_and_get_arrow, execute_and_get_rowcount, execute_and_get_shape, execute_and_fetch_all
 
 from typing import Optional
 
@@ -118,7 +119,7 @@ def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[E
 
     try:
         # query to arrow is the fastest way to query
-        result = opteryx.query_to_arrow(statement, memberships=["Apollo 11", "opteryx"])
+        result = execute_and_get_arrow(statement, memberships=["Apollo 11", "opteryx"])
         actual_rows, actual_columns = result.shape
         assert (
             rows == actual_rows

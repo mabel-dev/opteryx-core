@@ -18,6 +18,7 @@ For more information check out https://opteryx.app.
 """
 
 import datetime
+import logging
 import os
 import platform
 import warnings
@@ -27,6 +28,8 @@ from decimal import getcontext
 from typing import Dict, Any, Iterable, Optional
 
 from draken import Morsel
+
+logger = logging.getLogger(__name__)
 
 # Set Decimal precision to 28 globally
 getcontext().prec = 28
@@ -159,9 +162,9 @@ try:  # pragma: no cover - startup prewarm path is environment-dependent
         from opteryx.managers.kvstores import initialize_global_memory_pools
 
         initialize_global_memory_pools()
-except Exception:
-    # Prewarm failures should not block module import.
-    pass
+except Exception as err:
+    # Prewarm failures should not block module import, but log for visibility.
+    logger.debug(f"KVSTORE memory pool prewarm failed (non-blocking): {err}")
 
 __all__ = [
     "analyze_query",

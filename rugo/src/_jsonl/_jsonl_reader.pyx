@@ -51,7 +51,7 @@ cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
         size_t num_records_passed
         uint32_t bytes_consumed
 
-    struct OrdinalPredictor:
+    cppclass OrdinalPredictor:
         pass
 
     InterpreterResult interpret_jsonl(

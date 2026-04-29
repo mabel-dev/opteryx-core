@@ -66,17 +66,10 @@ def test_performance():
 def test_sql_functions():
     """Test through SQL function interface"""
     print("Testing SQL UPPER/LOWER functions...")
-    import opteryx
-    
-    # Create test table
-    data = {
-        "text": ["Hello", "WORLD", "MiXeD", "test"]
-    }
-    
-    result = opteryx.query("SELECT text, UPPER(text) AS upper, LOWER(text) AS lower FROM $data")
-    result_df = result.to_pandas()
-    
-    print(result_df.to_string(index=False))
+    from tests.helpers import execute_and_get_arrow
+
+    result = execute_and_get_arrow("SELECT UPPER('Hello') AS upper, LOWER('WORLD') AS lower")
+    print(result)
     print("✓ SQL functions working")
     print()
 

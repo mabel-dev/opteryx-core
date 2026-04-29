@@ -137,12 +137,6 @@ def _normalize_value(value):
         from draken.interop.arrow import vector_from_arrow
         return vector_from_arrow(value)
 
-    if hasattr(value, "as_py"):
-        try:
-            value = value.as_py()
-        except Exception:
-            pass
-
     # Scalars are normalized through the shared helper so typed scalar branches
     # participate in the constant-encoding migration.
     if value is None or isinstance(value, (bool, int, float, bytes, str)):

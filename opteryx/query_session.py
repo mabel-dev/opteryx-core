@@ -22,10 +22,13 @@ lets us collapse Connection+Cursor into a single object with minimal
 code churn.
 """
 
+import logging
 import re
 import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 from opteryx import EOS, config, utils
 from opteryx.constants import QueryStatus, ResultType
@@ -345,7 +348,11 @@ class Session(DataFrame):
                     token = token.replace(" ", "_").replace("-", "_")
                     token = token[0].upper() + token[1:] if token else token
                     return f"{token}Rel"
-                except Exception:
+                except (AttributeError, TypeError, KeyError) as err:
+                    logger.debug(f"Could not determine logical relation type: {err}")
+                    return None
+                except Exception as err:
+                    logger.warning(f"Unexpected error determining logical relation type: {err}")
                     return None
 
             logical_type = _logical_rel_name(node)
@@ -354,21 +361,36 @@ class Session(DataFrame):
             try:
                 class_name = node.__class__.__name__
                 physical_type = _humanize_physical_type(class_name)
-            except Exception:
+            except (AttributeError, TypeError) as err:
+                logger.debug(f"Could not determine physical type, falling back to __class__: {err}")
+                physical_type = str(getattr(node, "__class__", type(node)))
+            except Exception as err:
+                logger.warning(f"Unexpected error determining physical type: {err}")
                 physical_type = str(getattr(node, "__class__", type(node)))
 
             # config / plan_config
+            # Try primary config source first, fallback to direct config attribute
             try:
                 config_val = (
                     node.plan_config()
                     if hasattr(node, "plan_config")
                     else getattr(node, "config", None)
                 )
-            except Exception as err:
-                # Don't silently drop errors from plan_config — include them in the output
+            except (AttributeError, TypeError, ValueError) as err:
+                logger.debug(f"plan_config() failed, attempting fallback: {err}")
+                # Fallback: try direct config attribute
                 try:
                     cfg_str = getattr(node, "config", None)
-                except Exception:
+                except Exception as fallback_err:
+                    logger.debug(f"Fallback config extraction also failed: {fallback_err}")
+                    cfg_str = None
+                config_val = {"_plan_error": str(err), "config": cfg_str}
+            except Exception as err:
+                logger.warning(f"Unexpected error extracting config: {err}")
+                try:
+                    cfg_str = getattr(node, "config", None)
+                except Exception as fallback_err:
+                    logger.debug(f"Fallback config extraction failed: {fallback_err}")
                     cfg_str = None
                 config_val = {"_plan_error": str(err), "config": cfg_str}
 

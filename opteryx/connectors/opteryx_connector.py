@@ -11,9 +11,12 @@ Architecture:
 - OpteryxTable: Transient table-specific engine (handles data reading for one table)
 """
 
+import logging
 from typing import Any, Dict, Optional, Tuple
 
 from opteryx.connectors import TableType
+
+logger = logging.getLogger(__name__)
 from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable
 from opteryx.exceptions import DatasetNotFoundError, DatasetReadError
 from opteryx.models import FileEntry, Manifest
@@ -375,9 +378,42 @@ class OpteryxConnector(Eidetic, PredicatePushable):
         else:
             return "default", str(name)
 
+    def _try_load_dataset(self, catalog, identifier):
+        """
+        Attempt to load an object as a dataset.
+
+        Returns (found: bool, dataset_or_error_msg: Any).
+        If found, returns (True, dataset_object).
+        If not found, returns (False, error_message) for diagnostics.
+        """
+        try:
+            dataset = catalog.load_dataset(identifier)
+            return True, dataset
+        except Exception as err:
+            logger.debug(f"Not a dataset '{identifier}': {err}")
+            return False, str(err)
+
+    def _try_load_view(self, catalog, identifier):
+        """
+        Attempt to load an object as a view.
+
+        Returns (found: bool, view_or_error_msg: Any).
+        If found, returns (True, view_object).
+        If not found, returns (False, error_message) for diagnostics.
+        """
+        try:
+            view = catalog.load_view(identifier)
+            return True, view
+        except Exception as err:
+            logger.debug(f"Not a view '{identifier}': {err}")
+            return False, str(err)
+
     def locate_object(self, name: str) -> Tuple[Optional[TableType], any]:
         """
         Ask the connector if it knows about a specific object (table or view).
+
+        Attempts to load the object as a dataset first, then as a view.
+        The order matters: if both exist with the same name, dataset takes precedence.
 
         Args:
             name: The fully qualified table/view name (catalog.namespace.name)
@@ -392,20 +428,17 @@ class OpteryxConnector(Eidetic, PredicatePushable):
         catalog_name, relative_id = self._parse_identifier(name)
         catalog = self._get_catalog(catalog_name)
 
-        # Check if it is a dataset
-        try:
-            dataset = catalog.load_dataset(relative_id)
-            return TableType.Table, dataset
-        except Exception:
-            pass
+        # Try to load as dataset first (explicit attempt, logged on failure)
+        found, result = self._try_load_dataset(catalog, relative_id)
+        if found:
+            return TableType.Table, result
 
-        # Check if it is a view
-        try:
-            view = catalog.load_view(relative_id)
-            return TableType.View, view
-        except Exception:
-            pass
+        # Try to load as view (explicit attempt, logged on failure)
+        found, result = self._try_load_view(catalog, relative_id)
+        if found:
+            return TableType.View, result
 
+        # Not found as either type
         return None, None
 
     def table_engine(self, name: str, **kwargs):

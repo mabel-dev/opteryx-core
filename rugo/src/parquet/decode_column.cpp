@@ -1696,6 +1696,94 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     // skipped above; here we handle partial selections within decoded pages.
     RUGO_TEL_START(_mf_t0);
     if (row_mask != nullptr && !decoded_row_mask.empty()) {
+      // ── RLE → dense materialisation ──────────────────────────────────────
+      // The row_mask filter compacts dense vectors; rle_*_values are run-
+      // length encoded and would slip through unfiltered, leaving a column
+      // with rle_total_length entries while the engine sees num_rows = K.
+      // Expand rle runs into the type's natural dense vector first; the
+      // compact pass below then filters them like any other dense vector.
+      if (!result.rle_run_lengths.empty()) {
+        const size_t total = result.rle_total_length;
+        if (!result.rle_int64_values.empty()) {
+          if (result.type == "int32") {
+            result.int32_values.resize(total);
+            int32_t* out = result.int32_values.data();
+            size_t off = 0;
+            for (size_t r = 0; r < result.rle_run_lengths.size(); ++r) {
+              const int32_t v = static_cast<int32_t>(result.rle_int64_values[r]);
+              const int32_t cnt = result.rle_run_lengths[r];
+              for (int32_t j = 0; j < cnt; ++j) out[off + j] = v;
+              off += cnt;
+            }
+          } else {
+            result.int64_values.resize(total);
+            int64_t* out = result.int64_values.data();
+            size_t off = 0;
+            for (size_t r = 0; r < result.rle_run_lengths.size(); ++r) {
+              const int64_t v = result.rle_int64_values[r];
+              const int32_t cnt = result.rle_run_lengths[r];
+              for (int32_t j = 0; j < cnt; ++j) out[off + j] = v;
+              off += cnt;
+            }
+          }
+          result.rle_int64_values.clear();
+        } else if (!result.rle_float64_values.empty()) {
+          if (result.type == "float32") {
+            result.float32_values.resize(total);
+            float* out = result.float32_values.data();
+            size_t off = 0;
+            for (size_t r = 0; r < result.rle_run_lengths.size(); ++r) {
+              const float v = static_cast<float>(result.rle_float64_values[r]);
+              const int32_t cnt = result.rle_run_lengths[r];
+              for (int32_t j = 0; j < cnt; ++j) out[off + j] = v;
+              off += cnt;
+            }
+          } else {
+            result.float64_values.resize(total);
+            double* out = result.float64_values.data();
+            size_t off = 0;
+            for (size_t r = 0; r < result.rle_run_lengths.size(); ++r) {
+              const double v = result.rle_float64_values[r];
+              const int32_t cnt = result.rle_run_lengths[r];
+              for (int32_t j = 0; j < cnt; ++j) out[off + j] = v;
+              off += cnt;
+            }
+          }
+          result.rle_float64_values.clear();
+        } else if (!result.rle_str_lens.empty()) {
+          // Materialise into the unified byte_array dict form: append run
+          // strings into string_dict_arena (interning per run) and emit one
+          // dict_indices entry per logical row.
+          if (unified_dict_map.empty()) {
+            SeedDictionaryMapFromArena(
+                unified_dict_map,
+                result.string_dict_arena,
+                result.string_dict_offsets,
+                result.string_dict_lens);
+          }
+          result.dict_indices.reserve(result.dict_indices.size() + total);
+          for (size_t r = 0; r < result.rle_run_lengths.size(); ++r) {
+            const uint32_t off = result.rle_str_offsets[r];
+            const int32_t  len = result.rle_str_lens[r];
+            const int32_t  cnt = result.rle_run_lengths[r];
+            const int32_t  code = InternByteArrayToDictionary(
+                reinterpret_cast<const char*>(result.rle_str_arena.data() + off),
+                len,
+                unified_dict_map,
+                result.string_dict_arena,
+                result.string_dict_offsets,
+                result.string_dict_lens);
+            for (int32_t j = 0; j < cnt; ++j) result.dict_indices.push_back(code);
+          }
+          result.rle_str_arena.clear();
+          result.rle_str_offsets.clear();
+          result.rle_str_lens.clear();
+        }
+        result.rle_run_lengths.clear();
+        result.rle_total_length = 0;
+        result.rle_last_code = -1;
+      }
+
       const int32_t total_decoded = (int32_t)decoded_row_mask.size();
       int32_t K = 0;
       for (uint8_t m : decoded_row_mask) K += (int32_t)m;

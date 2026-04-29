@@ -15,7 +15,7 @@ import time
 
 import pytest
 
-import opteryx
+from tests.helpers import execute_and_get_arrow, execute_and_get_rowcount, execute_and_get_shape, execute_and_fetch_all
 from opteryx.models import QueryTelemetry
 from opteryx.types import OrsoTypes
 from opteryx.utils import random_int, random_string
@@ -210,10 +210,10 @@ def test_sql_fuzzing_join(i):
 
     start_time = time.time()  # Start timing the query execution
     try:
-        res = opteryx.query(statement)
+        shape = execute_and_get_shape(statement)
         execution_time = time.time() - start_time  # Measure execution time
         print(
-            f"Shape: {res.shape}, Execution Time: {execution_time:.2f} seconds, Seed: {seed} ({i})"
+            f"Shape: {shape}, Execution Time: {execution_time:.2f} seconds, Seed: {seed} ({i})"
         )
         # Additional success criteria checks can be added here
     except Exception as e:

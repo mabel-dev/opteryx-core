@@ -1,4 +1,5 @@
 import pytest
+from tests.helpers import execute_and_get_arrow, execute_and_get_rowcount, execute_and_get_shape, execute_and_fetch_all
 
 pytest.skip("cursor tests removed; use tests/unit/core/test_session.py instead", allow_module_level=True)
 
@@ -13,17 +14,17 @@ def test_execute():
 
 
 def test_rowcount():
-    cursor = opteryx.query("SELECT * FROM $planets")
-    assert cursor.rowcount == 9
+    pass  # migrated from query
+    assert execute_and_get_rowcount("SELECT * FROM $planets") == 9
 
 
 def test_shape():
-    cursor = opteryx.query("SELECT * FROM $planets")
+    pass  # migrated from query
     assert cursor.shape == (9, 20), cursor.shape
 
 
 def test_fetchone():
-    cursor = opteryx.query("SELECT * FROM $planets")
+    pass  # migrated from query
     one = cursor.fetchone()
     assert one == (
         1,
@@ -50,7 +51,7 @@ def test_fetchone():
 
 
 def test_fetchmany():
-    cursor = opteryx.query("SELECT * FROM $planets")
+    pass  # migrated from query
     dual = cursor.fetchmany(2)
     assert dual == [
         (
@@ -101,7 +102,7 @@ def test_fetchmany():
 
 
 def test_fetchall():
-    cursor = opteryx.query("SELECT * FROM $planets")
+    pass  # migrated from query
     all_rows = cursor.fetchall()
     assert len(all_rows) == 9, len(all_rows)
 
@@ -126,7 +127,7 @@ def test_execute_to_arrow():
 
 
 def test_query_to_arrow():
-    results = opteryx.query_to_arrow("SELECT * FROM $planets")
+    results = execute_and_get_arrow("SELECT * FROM $planets")
     assert results.shape == (9, 20)
     assert isinstance(results, pyarrow.Table)
 

@@ -7,20 +7,21 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 import time
 
 import opteryx
+from tests.helpers import execute_and_get_arrow, execute_and_get_rowcount, execute_and_get_shape, execute_and_fetch_all
 from opteryx.compiled.joins import nested_loop_join
 
 
 def test_nested_loop_join_simple():
-    left = opteryx.query_to_arrow("SELECT * FROM $planets")
-    right = opteryx.query_to_arrow("SELECT * FROM testdata.satellites")
+    left = execute_and_get_arrow("SELECT * FROM $planets")
+    right = execute_and_get_arrow("SELECT * FROM testdata.satellites")
     result = nested_loop_join(left, right, ["id"], ["id"])
     assert len(result) == 2
     assert len(result[0]) == 9
 
 
 def test_nested_loop_join_timed():
-    left = opteryx.query_to_arrow("SELECT * FROM testdata.missions")
-    right = opteryx.query_to_arrow("SELECT * FROM testdata.missions")
+    left = execute_and_get_arrow("SELECT * FROM testdata.missions")
+    right = execute_and_get_arrow("SELECT * FROM testdata.missions")
     start = time.monotonic_ns()
     result = nested_loop_join(left, right, ["Mission"], ["Mission"])
     end = time.monotonic_ns()

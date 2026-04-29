@@ -83,8 +83,6 @@ def _constant_scalar_value(value):
 
 def _coerce_int64(value) -> int:
     value = _constant_scalar_value(value)
-    if hasattr(value, "as_py"):
-        value = value.as_py()
     if isinstance(value, datetime.datetime):
         return int(value.timestamp() * 1_000)
     if isinstance(value, datetime.date):
@@ -98,8 +96,6 @@ def _coerce_int64_set(values) -> frozenset:
 
 def _coerce_date32(value) -> int:
     value = _constant_scalar_value(value)
-    if hasattr(value, "as_py"):
-        value = value.as_py()
     if isinstance(value, datetime.datetime):
         return (value.date() - _EPOCH_DATE).days
     if isinstance(value, datetime.date):
@@ -113,8 +109,6 @@ def _coerce_date32_set(values) -> frozenset:
 
 def _coerce_timestamp(value) -> int:
     value = _constant_scalar_value(value)
-    if hasattr(value, "as_py"):
-        value = value.as_py()
     if isinstance(value, (bytes, bytearray, memoryview, str)):
         from opteryx.expression.casts import parse_timestamp_value
 
@@ -147,9 +141,6 @@ def _coerce_interval(value) -> tuple:
 def _coerce_temporal_scalar_for_arrow(value, target_type):
     from opteryx.expression.casts import parse_timestamp_value
     from opteryx.types import OrsoTypes
-
-    if hasattr(value, "as_py"):
-        value = value.as_py()
 
     if target_type == OrsoTypes.DATE:
         if isinstance(value, datetime.datetime):

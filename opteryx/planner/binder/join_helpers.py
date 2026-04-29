@@ -113,7 +113,7 @@ def extract_join_fields(
     condition_node: Node,
     left_relation_names: List[str],
     right_relation_names: List[str],
-) -> Tuple[List[str], List[str]]:
+) -> Tuple[List, List]:
     """
     Extracts join fields from a condition node that may have multiple ANDed conditions.
 

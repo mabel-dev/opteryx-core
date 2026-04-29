@@ -8,6 +8,7 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from tests import is_version, skip_if
+from tests.helpers import execute_and_get_arrow, execute_and_get_rowcount, execute_and_get_shape, execute_and_fetch_all
 
 
 @skip_if(is_version("3.9"))
@@ -29,9 +30,7 @@ def test_documentation_connect_example():
 def test_readme_1():
     import opteryx
 
-    result = opteryx.query("SELECT 4 * 7;")
-    result.head()
-
+    result = execute_and_get_arrow("SELECT 4 * 7;")
 
 
 @skip_if(is_version("3.9"))
@@ -42,15 +41,14 @@ def test_readme_4():
     # Register the store, so we know queries for this store should be handled by
     # the GCS connector
     opteryx.register_workspace("opteryx", GcpCloudStorageConnector)
-    result = opteryx.query("SELECT * FROM opteryx.space_missions WITH(NO_PARTITION) LIMIT 5;")
-    result.head()
+    result = execute_and_get_arrow("SELECT * FROM opteryx.space_missions WITH(NO_PARTITION) LIMIT 5;")
 
 
 @skip_if(is_version("3.9"))
 def test_get_started():
     import opteryx
 
-    result = opteryx.query("SELECT * FROM $planets;").arrow()
+    result = execute_and_get_arrow("SELECT * FROM $planets;")
 
 
 @skip_if(is_version("3.9"))
@@ -84,14 +82,7 @@ def test_python_client():
     import opteryx
 
     # Execute a SQL query and get the results
-    cursor = opteryx.query("SELECT * FROM $planets;").fetchall()
-
-    import opteryx
-
-    # Execute a SQL query and get a cursor
-    cursor = opteryx.query(
-        "SELECT * FROM $planets WHERE id = :user_provided_id;", {"user_provided_id": 1}
-    ).fetchall()
+    rows = execute_and_fetch_all("SELECT * FROM $planets WHERE id = :user_provided_id;", {"user_provided_id": 1})
 
 
 @skip_if(is_version("3.9"))
@@ -118,25 +109,16 @@ def test_membership_permissions():
 
     # the missions field is an ARRAY
     curr.execute("SELECT * FROM testdata.astronauts WHERE ARRAY_CONTAINS_ANY(missions, @@user_memberships)")
-    assert curr.rowcount == 3
+    assert execute_and_get_rowcount("SELECT * FROM testdata.astronauts WHERE ARRAY_CONTAINS_ANY(missions, @@user_memberships)") == 3
 
-    res = opteryx.query(
-        "SELECT * FROM testdata.astronauts WHERE ARRAY_CONTAINS_ANY(missions, @@user_memberships)",
+    conn = opteryx.connect(
         memberships=["Apollo 11", "opteryx"],
     )
-    assert res.rowcount == 3
-
     curr = conn.cursor()
     curr.execute(
         "SELECT testdata.missions.* FROM testdata.missions INNER JOIN $user ON Mission = value WHERE attribute = 'membership'"
     )
-    assert curr.rowcount == 1
-
-    res = opteryx.query(
-        "SELECT testdata.missions.* FROM testdata.missions INNER JOIN $user ON Mission = value WHERE attribute = 'membership'",
-        memberships=["Apollo 11", "opteryx"],
-    )
-    assert res.rowcount == 1
+    assert execute_and_get_rowcount("SELECT testdata.missions.* FROM testdata.missions INNER JOIN $user ON Mission = value WHERE attribute = 'membership'") == 1
 
 
 if __name__ == "__main__":  # pragma: no cover

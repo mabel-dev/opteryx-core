@@ -18,6 +18,7 @@ import pytest
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
+from tests.helpers import execute_and_get_arrow, execute_and_get_rowcount, execute_and_get_shape, execute_and_fetch_all
 
 
 @pytest.fixture

@@ -7,6 +7,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
 from opteryx.utils.formatter import format_sql
+from tests.helpers import execute_and_get_arrow
 
 # fmt: off
 STATEMENTS = [
@@ -43,7 +44,7 @@ def test_sql_battery(statement, rows, columns, exception):
     """
     try:
         # query to arrow is the fastest way to query
-        result = opteryx.query_to_arrow(statement)
+        result = execute_and_get_arrow(statement)
         actual_rows, actual_columns = result.shape
         assert (
             rows == actual_rows

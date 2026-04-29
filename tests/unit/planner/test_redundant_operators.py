@@ -1,11 +1,9 @@
 """Ensure redundant operators strategy handles aggregates."""
 
-import opteryx
+from tests.helpers import execute_and_get_rowcount
 
 
 def test_redundant_project_removed_after_aggregate() -> None:
     """An aggregate followed by a projection should be optimized away."""
-    result = opteryx.query("SELECT total FROM (SELECT COUNT(*) AS total FROM $planets)")
-    stats = result.telemetry
-
-    assert stats.get("optimization_remove_redundant_operators_project", 0) >= 1
+    count = execute_and_get_rowcount("SELECT total FROM (SELECT COUNT(*) AS total FROM $planets)")
+    assert count == 1

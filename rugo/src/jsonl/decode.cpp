@@ -27,7 +27,6 @@ public:
         // continue parsing so callers (like ReadJsonl) can process all rows.
         while (pos_ < size_) {
             SkipWhitespace();
-            size_t line_start = pos_;
             if (pos_ >= size_) return false;
 
             // Expect '{'
@@ -432,7 +431,6 @@ private:
         if (c == '"') {
             type = JsonType::String;
             size_t s_start = 0, s_len = 0;
-            size_t saved_pos = pos_;
             // Try to parse slice; note ParseStringSlice advances pos_
             bool ok = ParseStringSlice(s_start, s_len);
             if (!ok) return false;
@@ -528,9 +526,6 @@ private:
                             type = JsonType::Object;
                         }
                         out_has_escape = false; // leave as raw JSON slice
-                        // Debug: print short preview of slice
-                        size_t preview_len = out_len < 64 ? out_len : 64;
-                        // parsed slice instrument removed
                         return true;
                     }
                 }
@@ -800,7 +795,6 @@ JsonlTable ReadJsonl(const uint8_t* data, size_t size, const std::vector<std::st
             // Debug: log key and detected type and a short preview of the value slice
             {
                 std::string key(key_ptr, key_len);
-                size_t preview_len = val_len < 64 ? val_len : 64;
                 const char* type_str = "UNKNOWN";
                 switch (type) {
                     case JsonType::Null: type_str = "Null"; break;
@@ -808,8 +802,9 @@ JsonlTable ReadJsonl(const uint8_t* data, size_t size, const std::vector<std::st
                     case JsonType::Integer: type_str = "Integer"; break;
                     case JsonType::Double: type_str = "Double"; break;
                     case JsonType::String: type_str = "Bytes"; break;
+                    case JsonType::Array: type_str = "Array"; break;
+                    case JsonType::Object: type_str = "Object"; break;
                 }
-                // KV instrumentation removed
             }
 
             std::string key(key_ptr, key_len);
@@ -836,10 +831,6 @@ JsonlTable ReadJsonl(const uint8_t* data, size_t size, const std::vector<std::st
             } else {
                 // Non-null
                 col.null_mask.push_back(0);
-                // Log non-null push and a short preview of slice
-                size_t preview_len = val_len < 64 ? val_len : 64;
-                // non-null push instrumentation removed
-
                 if (col.type == "int64") {
                     // Parse int directly from slice
                     col.int_values.push_back(FastParseInt(val_ptr, val_len));

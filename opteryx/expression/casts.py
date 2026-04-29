@@ -31,9 +31,7 @@ def _is_nullish(value) -> bool:
 
 
 def _unwrap_vector_value(value):
-    """Unwrap PyArrow scalar wrappers to Python native types."""
-    if hasattr(value, "as_py"):
-        return value.as_py()
+    """Return value as-is (no PyArrow support)."""
     return value
 
 
@@ -254,10 +252,16 @@ def cast_to_date(arr, *args):
 
 
 def safe(func, value, **kwargs):
-    """Safely call a function with kwargs, returning None on exception."""
+    """
+    Safely call a function with kwargs, returning None on exception.
+
+    Failures are logged at debug level for visibility when cast fallbacks occur.
+    """
     try:
         return func(value, **kwargs)
-    except Exception:
+    except Exception as err:
+        import logging
+        logging.getLogger(__name__).debug(f"Cast function {func.__name__} failed on value {value!r}: {err}")
         return None
 
 

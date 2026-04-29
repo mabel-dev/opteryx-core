@@ -3,7 +3,7 @@ Internal scalar type system.
 
 Replaces numpy type checking with internal type identification.
 This module provides canonical scalar type classification without runtime
-dependency on numpy or pyarrow for type checks.
+dependency on numpy for type checks.
 
 Key design: Use type() + dictionary lookup for common types, module/name
 inspection only for external libraries. Minimize attribute access.
@@ -50,7 +50,6 @@ class ScalarType(Enum):
 
     # Special
     NONE = "none"
-    PYARROW_SCALAR = "pyarrow_scalar"
     GENERIC_OBJECT = "generic_object"
 
 
@@ -135,10 +134,6 @@ def classify_scalar(value: Any) -> Optional[ScalarType]:
         # Generic numpy scalar
         return ScalarType.GENERIC_OBJECT
 
-    # PyArrow scalars (by module prefix)
-    if type_module.startswith("pyarrow"):
-        return ScalarType.PYARROW_SCALAR
-
     # Unknown or complex object (not a scalar)
     return None
 
@@ -195,15 +190,13 @@ def is_null_scalar(value: Any) -> bool:
 
 def extract_python_scalar(value: Any) -> Any:
     """
-    Convert numpy/pyarrow scalars to native Python types.
+    Convert numpy scalars to native Python types.
 
     Replaces patterns like:
         if isinstance(p, numpy.generic):
             p = p.item()
-        if hasattr(value, "as_py"):
-            value = value.as_py()
 
-    Uses duck typing via hasattr to check for conversion methods.
+    Uses duck typing via getattr to check for conversion methods.
 
     Args:
         value: The value to extract
@@ -211,17 +204,6 @@ def extract_python_scalar(value: Any) -> Any:
     Returns:
         Native Python scalar, or the original value if already native
     """
-    scalar_type = classify_scalar(value)
-
-    # PyArrow scalars: use .as_py() method if available
-    if scalar_type == ScalarType.PYARROW_SCALAR:
-        as_py = getattr(value, "as_py", None)
-        if as_py is not None and callable(as_py):
-            try:
-                return as_py()
-            except (TypeError, ValueError, AttributeError):
-                pass
-
     # NumPy scalars and other types with .item(): use it
     item = getattr(value, "item", None)
     if item is not None and callable(item):
@@ -241,7 +223,6 @@ def unwrap_scalar(value: Any) -> Any:
     Handles:
     - numpy.ndarray (0-d or 1-element)
     - numpy.generic scalars
-    - pyarrow scalars
     - Native Python scalars (pass-through)
 
     Args:

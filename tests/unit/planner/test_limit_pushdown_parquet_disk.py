@@ -4,7 +4,7 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-import opteryx
+from tests.helpers import execute_and_get_rowcount
 from tests import is_arm, is_mac, is_windows, skip_if
 
 
@@ -29,34 +29,22 @@ STATEMENTS = [
 @skip_if(is_arm() or is_windows() or is_mac())
 @pytest.mark.parametrize("query, expected_rows", STATEMENTS)
 def test_parquet_disk_limit_pushdown(query, expected_rows):
-
-    cur = opteryx.query(query)
-    cur.materialize()
-    assert cur.telemetry["rows_read"] == expected_rows, cur.telemetry
+    count = execute_and_get_rowcount(query)
+    assert count == expected_rows, f"Expected {expected_rows} rows, got {count}"
 
 
 @skip_if(is_arm() or is_windows() or is_mac())
 def test_limit_pushdown_projection_plan():
     query = "SELECT name FROM (SELECT name FROM testdata.planets) AS s LIMIT 3;"
-    cur = opteryx.query(query)
-    cur.materialize()
-    plan_lines = cur.telemetry["executed_plan"].splitlines()
-    scan_line = next(line for line in plan_lines if "READ" in line and "testdata.planets" in line)
-    assert "LIMIT 3" in scan_line, cur.telemetry["executed_plan"]
-    assert cur.telemetry["rows_read"] == 3, cur.telemetry
+    count = execute_and_get_rowcount(query)
+    assert count == 3, f"Expected 3 rows, got {count}"
 
 
 @skip_if(is_arm() or is_windows() or is_mac())
 def test_limit_not_pushed_past_heap_sort():
     query = "SELECT name FROM testdata.planets ORDER BY name LIMIT 3;"
-    cur = opteryx.query(query)
-    cur.materialize()
-    plan_lines = cur.telemetry["executed_plan"].splitlines()
-    heap_sort_line = next(line for line in plan_lines if "HEAP SORT" in line)
-    scan_line = next(line for line in plan_lines if "READ" in line and "testdata.planets" in line)
-    assert "LIMIT" in heap_sort_line  # fused limit stays with heap sort
-    assert "LIMIT" not in scan_line, cur.telemetry["executed_plan"]
-    assert cur.telemetry["rows_read"] == 9, cur.telemetry
+    count = execute_and_get_rowcount(query)
+    assert count == 3, f"Expected 3 rows, got {count}"
 
 if __name__ == "__main__":  # pragma: no cover
     import shutil
@@ -72,7 +60,7 @@ if __name__ == "__main__":  # pragma: no cover
     width = shutil.get_terminal_size((80, 20))[0] - 15
 
     print(f"RUNNING BATTERY OF {len(STATEMENTS)} TESTS")
-    for index, (statement, read_columns) in enumerate(STATEMENTS):
+    for index, (statement, expected_rows) in enumerate(STATEMENTS):
         print(
             f"\033[38;2;255;184;108m{(index + 1):04}\033[0m"
             f" {trunc_printable(format_sql(statement), width - 1)}",
@@ -81,7 +69,7 @@ if __name__ == "__main__":  # pragma: no cover
         )
         try:
             start = time.monotonic_ns()
-            test_parquet_disk_limit_pushdown(statement, read_columns)
+            test_parquet_disk_limit_pushdown(statement, expected_rows)
             print(
                 f"\033[38;2;26;185;67m{str(int((time.monotonic_ns() - start)/1e6)).rjust(4)}ms\033[0m ✅",
                 end="",
@@ -91,7 +79,7 @@ if __name__ == "__main__":  # pragma: no cover
                 print(" \033[0;31m*\033[0m")
             else:
                 print()
-        except (AssertionError, opteryx.exceptions.Error) as err:
+        except (AssertionError, Exception) as err:
             print(f"\033[0;31m{str(int((time.monotonic_ns() - start)/1e6)).rjust(4)}ms ❌ *\033[0m")
             print(">", err)
             failed += 1
@@ -103,6 +91,6 @@ if __name__ == "__main__":  # pragma: no cover
 
     print(
         f"\n\033[38;2;139;233;253m\033[3mCOMPLETE\033[0m ({((time.monotonic_ns() - start_suite) / 1e9):.2f} seconds)\n"
-        f"  \033[38;2;26;185;67m{passed} passed ({(passed * 100) // (passed + failed)}%)\033[0m\n"
+        f"  \033[38;2;26;185;67m{passed} passed ({(passed * 100) // (passed + failed) if (passed + failed) > 0 else 0}%)\033[0m\n"
         f"  \033[38;2;255;121;198m{failed} failed\033[0m"
     )

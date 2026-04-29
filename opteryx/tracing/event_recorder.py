@@ -18,11 +18,14 @@ analysis, and waterfall visualizations.
 from __future__ import annotations
 
 import atexit
+import logging
 import random
 import threading
 import time
 from typing import Optional
 from typing import TypedDict
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Global state
@@ -194,8 +197,8 @@ def reset() -> None:
     if _trace_writer:
         try:
             _trace_writer.close()
-        except Exception:
-            pass
+        except Exception as err:
+            logger.debug(f"Failed to close trace writer during reset: {err}")
         _trace_writer = None
 
 
@@ -208,8 +211,8 @@ def _cleanup_on_exit() -> None:
             writer.flush()
             writer.close()
             _trace_writer = None
-        except Exception:
-            pass
+        except Exception as err:
+            logger.debug(f"Failed to close trace writer on exit: {err}")
 
 
 atexit.register(_cleanup_on_exit)

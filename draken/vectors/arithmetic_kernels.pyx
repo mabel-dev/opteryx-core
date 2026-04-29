@@ -2005,14 +2005,14 @@ def float64_multiply(left, right):
     if len(left) == 0:
         return Float64Vector(0)
 
-    # Detect encodings
-    left_enc = getattr(left, 'encoding', 0)
-    right_enc = getattr(right, 'encoding', 0)
     cdef Float64Vector left_vec = <Float64Vector>left
     cdef Float64Vector right_vec = <Float64Vector>right
     cdef size_t length = len(left)
 
-    # Route to handler based on encoding pair
+    # Detect encodings
+    cdef int left_enc = left_vec._encoding
+    cdef int right_enc = right_vec._encoding
+
     if left_enc == 0 and right_enc == 0:
         # Both dense
         return _float64_float64_multiply_dense(left_vec, right_vec, length)

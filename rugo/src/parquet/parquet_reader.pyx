@@ -531,7 +531,9 @@ cdef Int64Vector _make_int64_from_int32_vector(
     cdef uint8_t* nb
     cdef int32_t code
     # RLE skip-dense path: int32 widened to int64 in C++; expand runs.
-    if decoded_col.rle_run_lengths.size() > 0 and decoded_col.rle_int64_values.size() > 0:
+    if (decoded_col.rle_run_lengths.size() > 0
+            and decoded_col.rle_int64_values.size() > 0
+            and decoded_col.rle_total_length == <size_t>num_rows):
         _expand_rle_int64_into(dst, decoded_col, num_rows)
         return vec
     cdef bint dict_mode = (
@@ -587,7 +589,9 @@ cdef Int64Vector _make_int64_vector(
     cdef uint8_t* nb
     cdef int32_t code
     # RLE skip-dense path: expand runs into dense.
-    if decoded_col.rle_run_lengths.size() > 0 and decoded_col.rle_int64_values.size() > 0:
+    if (decoded_col.rle_run_lengths.size() > 0
+            and decoded_col.rle_int64_values.size() > 0
+            and decoded_col.rle_total_length == <size_t>num_rows):
         _expand_rle_int64_into(dst, decoded_col, num_rows)
         return vec
     cdef bint dict_mode = (
@@ -647,7 +651,9 @@ cdef Float64Vector _make_float64_from_float32_vector(
     cdef uint8_t* nb
     cdef int32_t code
     # RLE skip-dense path: float32 widened to float64 in C++; expand runs.
-    if decoded_col.rle_run_lengths.size() > 0 and decoded_col.rle_float64_values.size() > 0:
+    if (decoded_col.rle_run_lengths.size() > 0
+            and decoded_col.rle_float64_values.size() > 0
+            and decoded_col.rle_total_length == <size_t>num_rows):
         _expand_rle_float64_into(dst, decoded_col, num_rows)
         return vec
     cdef bint dict_mode = (
@@ -706,7 +712,9 @@ cdef Int64Vector _make_int32_as_int64_vector(
     cdef uint8_t* nb
 
     # RLE skip-dense path: int32 widened to int64 in C++; expand runs.
-    if decoded_col.rle_run_lengths.size() > 0 and decoded_col.rle_int64_values.size() > 0:
+    if (decoded_col.rle_run_lengths.size() > 0
+            and decoded_col.rle_int64_values.size() > 0
+            and decoded_col.rle_total_length == <size_t>num_rows):
         _expand_rle_int64_into(dst, decoded_col, num_rows)
         return vec
 
@@ -746,7 +754,9 @@ cdef Float64Vector _make_float64_vector(
     cdef uint8_t* nb
     cdef int32_t code
     # RLE skip-dense path: expand runs into dense.
-    if decoded_col.rle_run_lengths.size() > 0 and decoded_col.rle_float64_values.size() > 0:
+    if (decoded_col.rle_run_lengths.size() > 0
+            and decoded_col.rle_float64_values.size() > 0
+            and decoded_col.rle_total_length == <size_t>num_rows):
         _expand_rle_float64_into(dst, decoded_col, num_rows)
         return vec
     cdef bint dict_mode = (
@@ -831,8 +841,13 @@ cdef StringVector _make_string_vector(
     # Non-nullable byte_array dict columns produce rle_str_arena/offsets/lens
     # plus rle_run_lengths instead of dict_indices. Expand into the dense
     # offset+arena layout the StringVector expects.
+    # Only enter this path when the run accumulation actually represents every
+    # logical row (no row_mask filtering and no PLAIN fallback in the chunk):
+    # decode_column.cpp materialises rle_* into dict_indices when transitioning
+    # to PLAIN pages, so a non-empty rle_str_lens here is the pure-RLE case.
     num_runs = <Py_ssize_t>decoded_col.rle_run_lengths.size()
-    if num_runs > 0 and decoded_col.rle_str_lens.size() > 0:
+    if num_runs > 0 and decoded_col.rle_str_lens.size() > 0 \
+            and decoded_col.rle_total_length == <size_t>num_rows:
         rle_arena = decoded_col.rle_str_arena.data()
         rtotal_bytes = 0
         for r in range(num_runs):
