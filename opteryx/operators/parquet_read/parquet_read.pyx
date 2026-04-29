@@ -457,6 +457,7 @@ class ParquetReadNode(ReaderNode):
             pass1_name_to_identity = {name: _planner_name_to_identity.get(name, name.encode("utf-8")) for name in pass1_column_names}
             pass2_name_to_identity = {name: _planner_name_to_identity.get(name, name.encode("utf-8")) for name in pass2_column_names}
 
+        print("[UNIQUE_TEST_PRINT_XYZ123]", flush=True)
         import os as _os
         if _os.environ.get("OPTERYX_Q41_DEBUG"):
             print(f"[Q41_DEBUG] two_pass_eligible={two_pass_eligible}")

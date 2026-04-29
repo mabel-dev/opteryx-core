@@ -33,7 +33,7 @@ from draken.core.buffers cimport ConstAccessor, DRAKEN_ENCODING_CONSTANT, DRAKEN
 from draken.core.fixed_vector cimport (
     alloc_fixed_buffer, buf_dtype, buf_itemsize, buf_length, free_fixed_buffer,
 )
-from draken.vectors.vector cimport MIX_HASH_CONSTANT, NULL_HASH, Vector, mix_hash, simd_mix_hash
+from draken.vectors.vector cimport MIX_HASH_CONSTANT, NULL_HASH, Vector, mix_hash, simd_mix_hash, simd_popcount
 from draken.vectors.bool_vector cimport BoolVector
 
 DEF INTEGER_HASH_CHUNK = 1024
@@ -169,6 +169,23 @@ cdef class IntegerVector(Vector):
     @property
     def dtype(self):
         return buf_dtype(self.ptr)
+
+    @property
+    def null_count(self):
+        """Return the number of nulls in the vector."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        if self._encoding == DRAKEN_ENCODING_RLE:
+            if self._rle_buffer.null_bitmap == NULL:
+                return 0
+            return <Py_ssize_t>self._rle_buffer.length - <Py_ssize_t>simd_popcount(
+                self._rle_buffer.null_bitmap, (self._rle_buffer.length + 7) >> 3
+            )
+        if self._has_const:
+            return n if self._const_is_null else 0
+        if ptr.null_bitmap == NULL:
+            return 0
+        return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
 
     def __getitem__(self, Py_ssize_t i):
         cdef DrakenFixedBuffer* ptr = self.ptr

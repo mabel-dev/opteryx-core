@@ -770,7 +770,31 @@ cdef class StringVector(Vector):
             return n if self._const_is_null else 0
         if ptr.null_bitmap == NULL:
             return 0
-        return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
+
+        cdef Py_ssize_t nb_size = (n + 7) >> 3
+        cdef Py_ssize_t bits_in_last = n & 7
+        cdef Py_ssize_t valid_count
+        cdef uint8_t last_byte_mask
+
+        if bits_in_last == 0:
+            # All bytes are fully used
+            valid_count = <Py_ssize_t>simd_popcount(ptr.null_bitmap, <size_t>nb_size)
+        else:
+            # Mask last byte to only count valid bits
+            if nb_size > 1:
+                valid_count = <Py_ssize_t>simd_popcount(ptr.null_bitmap, <size_t>(nb_size - 1))
+            else:
+                valid_count = 0
+
+            # Count only the valid bits in the last byte
+            last_byte_mask = ptr.null_bitmap[nb_size - 1] & ((1 << bits_in_last) - 1)
+            # Count 1 bits manually for the last byte
+            cdef uint8_t byte_val = last_byte_mask
+            while byte_val:
+                valid_count += (byte_val & 1)
+                byte_val >>= 1
+
+        return n - valid_count
 
     cpdef Vector materialize(self):
         """Return a dense StringVector, expanding dict/const/RLE encodings if needed."""
@@ -2181,7 +2205,7 @@ cdef class StringVector(Vector):
             dst_ptr.null_bitmap = <uint8_t*> malloc(nb_size)
             if dst_ptr.null_bitmap == NULL:
                 raise MemoryError()
-            memset(dst_ptr.null_bitmap, 0xFF, nb_size)
+            memset(dst_ptr.null_bitmap, 0, nb_size)
         else:
             dst_ptr.null_bitmap = NULL
 
@@ -2201,8 +2225,8 @@ cdef class StringVector(Vector):
                 src_bit = (
                     (src_ptr.null_bitmap[src_idx >> 3] >> (src_idx & 7)) & 1
                 )
-                if not src_bit:
-                    dst_ptr.null_bitmap[i >> 3] &= ~(1 << (i & 7))
+                if src_bit:
+                    dst_ptr.null_bitmap[i >> 3] |= (1 << (i & 7))
 
         return result
 
