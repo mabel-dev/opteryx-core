@@ -333,6 +333,18 @@ cdef class TimeVector(Vector):
             return 0
         return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
 
+    @property
+    def nbytes(self):
+        """Return the approximate memory footprint of this vector in bytes."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t data_bytes, bm_bytes
+        if self._has_const:
+            return buf_itemsize(ptr)
+        data_bytes = <Py_ssize_t>(buf_length(ptr) * buf_itemsize(ptr))
+        bm_bytes = (n + 7) >> 3 if ptr.null_bitmap != NULL else 0
+        return data_bytes + bm_bytes
+
     cpdef list to_pylist(self):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length

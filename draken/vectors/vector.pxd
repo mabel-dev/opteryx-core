@@ -54,3 +54,7 @@ cdef class Vector:
 
     # Check if value at index is null.
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False
+
+    # Return a dense (non-encoded) version of this vector.
+    # Default: return self (already dense). Subclasses override for dict/const/RLE.
+    cpdef Vector materialize(self)

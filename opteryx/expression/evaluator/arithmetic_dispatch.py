@@ -33,13 +33,14 @@ def call_arithmetic_op(op, left, right):
     left_type_before = get_vector_type(left) if is_draken_vector(left) else None
     right_type_before = get_vector_type(right) if is_draken_vector(right) else None
 
-    # Materialize DICTIONARY_ENCODED and CONSTANT_ENCODED vectors to their base types
+    # Materialize DICTIONARY_ENCODED and CONSTANT_ENCODED vectors to their base types.
     # The kernel registry only has handlers for INT64, FLOAT64, STRING, etc.
+    # materialize() expands to dense without any Arrow round-trip.
     if left_type_before in (VectorType.DICTIONARY_ENCODED, VectorType.CONSTANT_ENCODED):
-        left = type(left).from_arrow(left.to_arrow())
+        left = left.materialize()
 
     if right_type_before in (VectorType.DICTIONARY_ENCODED, VectorType.CONSTANT_ENCODED):
-        right = type(right).from_arrow(right.to_arrow())
+        right = right.materialize()
 
     # Only process if at least one operand is a Draken vector
     left_is_draken = is_draken_vector(left)
