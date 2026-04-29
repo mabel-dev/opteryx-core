@@ -971,55 +971,22 @@ cdef class Morsel:
         """
         Return the approximate number of bytes used by this morsel.
 
-        Strategy:
-        - Prefer `Vector.nbytes` when exposed by the vector implementation.
-        - Fall back to converting the vector to an Arrow array and using
-          `array.nbytes` when available.
-        - If neither is available, attempt a fixed-width approximation using
-          the Arrow type's `bit_width` when possible.
-        This keeps the property safe (never raises) and conservative.
+        Delegates to Vector.nbytes on each column. All concrete vector types
+        implement nbytes directly so no Arrow conversion is needed.
         """
         cdef Py_ssize_t i
-        cdef object vec
-        cdef object arr
-        cdef object nb
+        cdef void* raw_ptr
+        cdef Vector vec
         cdef uint64_t total = 0
 
         for i in range(self.ptr.num_columns):
-            try:
-                vec = <Vector>self.ptr.columns[i]
-            except Exception:
+            raw_ptr = self.ptr.columns[i]
+            if raw_ptr == NULL:
                 continue
-
-            # Prefer vector-level reporting
-            try:
-                nb = getattr(vec, "nbytes", None)
-                if nb is not None:
-                    total += <uint64_t>nb
-                    continue
-            except Exception:
-                nb = None
-
-            # Fall back to Arrow array size
-            try:
-                arr = vec.to_arrow()
-                nb = getattr(arr, "nbytes", None)
-                if nb is not None:
-                    total += <uint64_t>nb
-                    continue
-
-                # Try a naive fixed-width estimate
-                try:
-                    bit_width = arr.type.bit_width
-                    itemsize = bit_width // 8
-                    total += <uint64_t>(itemsize * len(arr))
-                    continue
-                except Exception:
-                    # Unknown/variable-width: best-effort zero contribution
-                    continue
-            except Exception:
-                # If all else fails, ignore this column
+            vec = <Vector>raw_ptr
+            if vec is None:
                 continue
+            total += <uint64_t>vec.nbytes
 
         return total
 
@@ -1837,13 +1804,10 @@ cdef class Morsel:
         except Exception:
             candidate = None
 
-        # Fall back to an empty Arrow round-trip. This preserves the source
-        # logical type for vectors that cannot be instantiated with a bare
-        # size argument, including Arrow-backed non-native vectors.
+        # Second attempt: no-arg construction for vectors whose __cinit__
+        # takes no positional arguments (e.g. ArrayVector).
         try:
-            import pyarrow as pa
-
-            candidate = vector_from_arrow(pa.array([], type=src_vec.to_arrow().type))
+            candidate = src_vec.__class__()
             if candidate is not None and self._vector_dtype_matches(candidate, expected):
                 return candidate
         except Exception:

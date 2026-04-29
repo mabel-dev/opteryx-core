@@ -902,6 +902,65 @@ cdef class Int64Vector(Vector):
             return 0
         return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
 
+    cpdef Vector materialize(self):
+        """Return a dense Int64Vector, expanding dict/const/RLE encodings if needed."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Int64Vector dense
+        cdef int64_t* dst
+        cdef Py_ssize_t i, nb_bytes
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY:
+            if ptr.data == NULL:
+                # dict-only path: codes in _dict_codes
+                return _materialize_dict_int64(self)
+            else:
+                # from_dict path: dense data already in ptr.data, copy to new dense vector
+                dense = Int64Vector(<size_t>n)
+                dst = <int64_t*>dense.ptr.data
+                memcpy(dst, ptr.data, <size_t>n * sizeof(int64_t))
+                if ptr.null_bitmap != NULL:
+                    nb_bytes = (n + 7) >> 3
+                    dense.ptr.null_bitmap = <uint8_t*>malloc(<size_t>nb_bytes)
+                    if dense.ptr.null_bitmap == NULL:
+                        raise MemoryError()
+                    memcpy(dense.ptr.null_bitmap, ptr.null_bitmap, <size_t>nb_bytes)
+                return dense
+        if self._encoding == DRAKEN_ENCODING_RLE:
+            return _materialize_rle_int64(self)
+        if self._has_const:
+            dense = Int64Vector(<size_t>n)
+            dst = <int64_t*>dense.ptr.data
+            if self._const_is_null:
+                nb_bytes = (n + 7) >> 3
+                dense.ptr.null_bitmap = <uint8_t*>malloc(<size_t>nb_bytes)
+                if dense.ptr.null_bitmap == NULL:
+                    raise MemoryError()
+                memset(dense.ptr.null_bitmap, 0, <size_t>nb_bytes)
+                memset(dst, 0, <size_t>n * sizeof(int64_t))
+            else:
+                for i in range(n):
+                    dst[i] = self._const_value
+                dense.ptr.null_bitmap = NULL
+            return dense
+        return self
+
+    @property
+    def nbytes(self):
+        """Return the approximate memory footprint of this vector in bytes."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t dict_bytes, code_bytes, null_bytes, data_bytes, bm_bytes
+        if self._has_const:
+            return 8  # sizeof(int64_t)
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and ptr.data == NULL:
+            dict_bytes = self._dict_values.length * 8 if self._dict_values != NULL else 0
+            code_bytes = n * self._dict_code_width
+            null_bytes = (n + 7) >> 3 if ptr.null_bitmap != NULL else 0
+            return dict_bytes + code_bytes + null_bytes
+        data_bytes = <Py_ssize_t>(buf_length(ptr) * buf_itemsize(ptr))
+        bm_bytes = (n + 7) >> 3 if ptr.null_bitmap != NULL else 0
+        return data_bytes + bm_bytes
+
     cpdef list to_pylist(self):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length

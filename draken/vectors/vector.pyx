@@ -178,3 +178,21 @@ cdef class Vector:
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False:
         """Check if value at index is null. Subclasses must override."""
         raise NotImplementedError(f"{type(self).__name__} does not implement is_null_at")
+
+    cpdef Vector materialize(self):
+        """Return a dense (non-encoded) version of this vector.
+
+        Default implementation returns self — the vector is already dense.
+        Subclasses with dictionary, constant, or RLE encoding must override
+        to expand to a dense representation without going through Arrow.
+        """
+        return self
+
+    @property
+    def nbytes(self):
+        """Approximate memory footprint in bytes.
+
+        Default returns 0. Concrete vector types override with accurate counts
+        so Morsel.nbytes can sum all columns without touching Arrow.
+        """
+        return 0

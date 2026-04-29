@@ -772,6 +772,70 @@ cdef class StringVector(Vector):
             return 0
         return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
 
+    cpdef Vector materialize(self):
+        """Return a dense StringVector, expanding dict/const/RLE encodings if needed."""
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef StringVectorBuilder builder
+        cdef Py_ssize_t i, val_len, data_bytes, off_start, off_end
+        cdef const char* data_ptr
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY:
+            if ptr.data == NULL:
+                # dict-only path (make_string_dict_only): codes in _dict_codes, expand via dict
+                return _materialize_dict_string(self)
+            else:
+                # from_dict_buffers path: dense data already in ptr.data + ptr.offsets
+                data_bytes = <Py_ssize_t>ptr.offsets[n] if ptr.offsets != NULL else 0
+                builder = StringVectorBuilder(n, data_bytes)
+                data_ptr = <const char*>ptr.data
+                for i in range(n):
+                    if ptr.null_bitmap != NULL and not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
+                        builder.append_null()
+                    else:
+                        off_start = <Py_ssize_t>ptr.offsets[i]
+                        off_end = <Py_ssize_t>ptr.offsets[i + 1]
+                        builder.append_bytes(data_ptr + off_start, off_end - off_start)
+                return builder.finish()
+        if self._encoding == DRAKEN_ENCODING_RLE:
+            return _materialize_rle_string(self)
+        if self._has_const:
+            if self._const_is_null or self._const_value == NULL:
+                builder = StringVectorBuilder(n, 0)
+                for i in range(n):
+                    builder.append_null()
+            else:
+                val_len = <Py_ssize_t>self._const_value.length
+                builder = StringVectorBuilder(n, n * val_len)
+                for i in range(n):
+                    builder.append_bytes(<char*>self._const_value.data, val_len)
+            return builder.finish()
+        return self
+
+    @property
+    def nbytes(self):
+        """Return the approximate memory footprint of this vector in bytes."""
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t data_bytes, offset_bytes, null_bytes
+        cdef Py_ssize_t dict_data_bytes, dict_offset_bytes, code_bytes
+        if self._has_const:
+            return <Py_ssize_t>self._const_value.length if self._const_value != NULL else 0
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and ptr.data == NULL:
+            code_bytes = n * self._dict_code_width
+            if self._dict_values != NULL and self._dict_values.offsets != NULL:
+                dict_data_bytes = <Py_ssize_t>self._dict_values.offsets[self._dict_values.length]
+                dict_offset_bytes = (<Py_ssize_t>self._dict_values.length + 1) * sizeof(int32_t)
+            else:
+                dict_data_bytes = 0
+                dict_offset_bytes = 0
+            null_bytes = (n + 7) >> 3 if ptr.null_bitmap != NULL else 0
+            return code_bytes + dict_data_bytes + dict_offset_bytes + null_bytes
+        # Dense
+        data_bytes = <Py_ssize_t>ptr.offsets[n] if ptr.offsets != NULL else 0
+        offset_bytes = (n + 1) * sizeof(int32_t)
+        null_bytes = (n + 7) >> 3 if ptr.null_bitmap != NULL else 0
+        return data_bytes + offset_bytes + null_bytes
+
     cpdef int8_t[::1] is_null(self):
         """
         Return a memoryview of int8_t, where each element is 1 if the value is null, 0 otherwise.
