@@ -45,6 +45,29 @@ class CarcharJoinEngine {
 
     std::size_t size() const noexcept { return size_; }
 
+    // Adaptive join statistics — Phase 1 (per docs/adaptive_join_statistics.md).
+    // unique_key_count() is the number of distinct join keys in the build side.
+    // total_row_count() is the sum of all chain lengths across partitions, i.e.
+    // the total rows that were inserted (NULL keys excluded by the caller).
+    // average_chain_length() is total_row_count() / unique_key_count(); 0 when empty.
+    std::size_t unique_key_count() const noexcept { return size_; }
+
+    std::uint64_t total_row_count() const noexcept {
+        std::uint64_t total = 0;
+        for (const auto& partition : partitions_) {
+            total += partition.total_row_count();
+        }
+        return total;
+    }
+
+    double average_chain_length() const noexcept {
+        const std::size_t unique = unique_key_count();
+        if (unique == 0) {
+            return 0.0;
+        }
+        return static_cast<double>(total_row_count()) / static_cast<double>(unique);
+    }
+
     std::size_t capacity() const noexcept {
         std::size_t total = 0;
         for (const auto& partition : partitions_) {

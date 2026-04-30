@@ -221,21 +221,31 @@ class DrakenInnerJoinNode(JoinNode):
                     )
                     self.readings["feature_inner_join_backend_carchar"] += 1
                     self.readings["feature_inner_join_draken"] += 1
+                    (
+                        _hash_time,
+                        _probe_time,
+                        _bloom_time,
+                        _rows_hashed,
+                        _candidate_rows,
+                        _matched_rows,
+                        _materialize_time,
+                        _align_time,
+                        _rows_eliminated,
+                        bloom_build_time,
+                        build_unique_keys,
+                        build_total_rows,
+                        build_avg_chain_length,
+                    ) = get_last_draken_inner_join_metrics()
                     if self.left_hash.has_bloom_filter():
-                        (
-                            _hash_time,
-                            _probe_time,
-                            _bloom_time,
-                            _rows_hashed,
-                            _candidate_rows,
-                            _matched_rows,
-                            _materialize_time,
-                            _align_time,
-                            _rows_eliminated,
-                            bloom_build_time,
-                        ) = get_last_draken_inner_join_metrics()
                         self.readings["feature_bloom_filter"] += 1
                         self.readings["time_build_bloom_filter"] += bloom_build_time
+                    # Adaptive join statistics (Phase 1, per docs/adaptive_join_statistics.md):
+                    # surface chain-length distribution from the build side.
+                    self.readings["build_unique_keys"] += build_unique_keys
+                    self.readings["build_total_rows"] += build_total_rows
+                    # avg chain length is per-build; we report the latest build's value
+                    # rather than summing across multiple builds in a join chain.
+                    self.readings["build_avg_chain_length"] = build_avg_chain_length
                     yield None
                     return
 
@@ -308,6 +318,9 @@ class DrakenInnerJoinNode(JoinNode):
                         align_time,
                         rows_eliminated_by_bloom_filter,
                         _bloom_build_time,
+                        _build_unique_keys,
+                        _build_total_rows,
+                        _build_avg_chain_length,
                     ) = get_last_draken_inner_join_metrics()
                     self.readings["time_inner_join_hash"] += hash_time
                     self.readings["time_inner_join_probe"] += probe_time

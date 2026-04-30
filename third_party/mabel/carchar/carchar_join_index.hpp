@@ -107,6 +107,17 @@ class CarcharJoinIndex {
 
     std::vector<std::pair<std::uint64_t, std::int64_t>> items() const { return index_.items(); }
 
+    // Sum of all chain lengths — i.e. total rows inserted into this index.
+    // Used by adaptive join statistics (Phase 1) to compute average chain length
+    // (per docs/adaptive_join_statistics.md).
+    std::uint64_t total_row_count() const noexcept {
+        std::uint64_t total = 0;
+        for (const std::uint32_t count : row_counts_) {
+            total += count;
+        }
+        return total;
+    }
+
     std::size_t row_count_for(std::uint64_t key) const {
         std::int64_t payload_ref = -1;
         if (!index_.lookup_fast(key, payload_ref)) {

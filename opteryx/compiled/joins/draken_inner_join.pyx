@@ -35,6 +35,9 @@ cdef extern from "carchar.hpp" namespace "opteryx::carchar":
         ) except +
         void insert_batch(const uint64_t* keys, const int64_t* row_ids, size_t length) except +
         void seal() except +
+        size_t unique_key_count() noexcept
+        uint64_t total_row_count() noexcept
+        double average_chain_length() noexcept
         pair[vector[int64_t], vector[int64_t]] probe_join_indices(
             const uint64_t* keys,
             const int64_t* probe_rows,
@@ -54,6 +57,10 @@ cdef public Py_ssize_t last_draken_inner_join_rows_hashed = 0
 cdef public Py_ssize_t last_draken_inner_join_candidate_rows = 0
 cdef public Py_ssize_t last_draken_inner_join_result_rows = 0
 cdef public Py_ssize_t last_draken_inner_join_rows_eliminated_by_bloom_filter = 0
+# Adaptive join statistics — Phase 1 (per docs/adaptive_join_statistics.md).
+cdef public Py_ssize_t last_draken_inner_join_build_unique_keys = 0
+cdef public Py_ssize_t last_draken_inner_join_build_total_rows = 0
+cdef public double last_draken_inner_join_build_avg_chain_length = 0.0
 
 
 cdef class DrakenCarcharJoinMap:
@@ -161,6 +168,9 @@ cpdef DrakenCarcharJoinMap build_side_carchar_morsel_map(
     double probe_load_factor=0.35,
 ):
     global last_draken_inner_join_build_bloom_time_ns
+    global last_draken_inner_join_build_unique_keys
+    global last_draken_inner_join_build_total_rows
+    global last_draken_inner_join_build_avg_chain_length
     cdef DrakenCarcharJoinMap ht
     cdef Py_ssize_t num_rows = relation.num_rows
     cdef uint64_t[::1] row_hashes
@@ -172,6 +182,9 @@ cpdef DrakenCarcharJoinMap build_side_carchar_morsel_map(
 
     ht = DrakenCarcharJoinMap(num_rows, probe_load_factor)
     last_draken_inner_join_build_bloom_time_ns = 0
+    last_draken_inner_join_build_unique_keys = 0
+    last_draken_inner_join_build_total_rows = 0
+    last_draken_inner_join_build_avg_chain_length = 0.0
     if num_rows == 0:
         ht.seal()
         return ht
@@ -193,6 +206,9 @@ cpdef DrakenCarcharJoinMap build_side_carchar_morsel_map(
             last_draken_inner_join_build_bloom_time_ns = perf_counter_ns() - bloom_start
 
     ht.seal()
+    last_draken_inner_join_build_unique_keys = <Py_ssize_t> ht.engine.unique_key_count()
+    last_draken_inner_join_build_total_rows = <Py_ssize_t> ht.engine.total_row_count()
+    last_draken_inner_join_build_avg_chain_length = ht.engine.average_chain_length()
     return ht
 
 
@@ -426,4 +442,7 @@ cpdef tuple get_last_draken_inner_join_metrics():
         last_draken_inner_join_align_time_ns,
         last_draken_inner_join_rows_eliminated_by_bloom_filter,
         last_draken_inner_join_build_bloom_time_ns,
+        last_draken_inner_join_build_unique_keys,
+        last_draken_inner_join_build_total_rows,
+        last_draken_inner_join_build_avg_chain_length,
     )
