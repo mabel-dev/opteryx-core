@@ -242,6 +242,29 @@ cdef class Float32Vector(Vector):
             return NULL
         return self.ptr.null_bitmap
 
+    def to_arrow(self):
+        """Convert to a PyArrow array."""
+        import pyarrow as pa
+
+        if self._has_const:
+            if self._const_is_null:
+                return pa.nulls(self.ptr.length, type=pa.float32())
+            return pa.array([self._const_value] * self.ptr.length, type=pa.float32())
+
+        cdef size_t nbytes = buf_length(self.ptr) * sizeof(float)
+        addr = <intptr_t> self.ptr.data
+        data_buf = pa.foreign_buffer(addr, nbytes, base=self)
+
+        buffers = []
+        if self.ptr.null_bitmap != NULL:
+            buffers.append(pa.foreign_buffer(<intptr_t> self.ptr.null_bitmap, (self.ptr.length + 7) // 8, base=self))
+        else:
+            buffers.append(None)
+
+        buffers.append(data_buf)
+
+        return pa.Array.from_buffers(pa.float32(), buf_length(self.ptr), buffers)
+
     @property
     def length(self):
         return buf_length(self.ptr)

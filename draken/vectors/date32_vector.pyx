@@ -314,6 +314,10 @@ cdef class Date32Vector(Vector):
         return self._compare_scalar(value, 5)
 
     cpdef BoolVector equals_vector(self, Date32Vector other):
+        if self._has_const:
+            return _materialize_const_date32(self).equals_vector(other)
+        if other._has_const:
+            return self.equals_vector(_materialize_const_date32(other))
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int32_t* data1 = <int32_t*> ptr1.data
@@ -355,6 +359,10 @@ cdef class Date32Vector(Vector):
         return out
 
     cpdef BoolVector not_equals_vector(self, Date32Vector other):
+        if self._has_const:
+            return _materialize_const_date32(self).not_equals_vector(other)
+        if other._has_const:
+            return self.not_equals_vector(_materialize_const_date32(other))
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int32_t* data1 = <int32_t*> ptr1.data
@@ -396,6 +404,10 @@ cdef class Date32Vector(Vector):
         return out
 
     cpdef BoolVector greater_than_vector(self, Date32Vector other):
+        if self._has_const:
+            return _materialize_const_date32(self).greater_than_vector(other)
+        if other._has_const:
+            return self.greater_than_vector(_materialize_const_date32(other))
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int32_t* data1 = <int32_t*> ptr1.data
@@ -437,6 +449,10 @@ cdef class Date32Vector(Vector):
         return out
 
     cpdef BoolVector greater_than_or_equals_vector(self, Date32Vector other):
+        if self._has_const:
+            return _materialize_const_date32(self).greater_than_or_equals_vector(other)
+        if other._has_const:
+            return self.greater_than_or_equals_vector(_materialize_const_date32(other))
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int32_t* data1 = <int32_t*> ptr1.data
@@ -478,6 +494,10 @@ cdef class Date32Vector(Vector):
         return out
 
     cpdef BoolVector less_than_vector(self, Date32Vector other):
+        if self._has_const:
+            return _materialize_const_date32(self).less_than_vector(other)
+        if other._has_const:
+            return self.less_than_vector(_materialize_const_date32(other))
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int32_t* data1 = <int32_t*> ptr1.data
@@ -519,6 +539,10 @@ cdef class Date32Vector(Vector):
         return out
 
     cpdef BoolVector less_than_or_equals_vector(self, Date32Vector other):
+        if self._has_const:
+            return _materialize_const_date32(self).less_than_or_equals_vector(other)
+        if other._has_const:
+            return self.less_than_or_equals_vector(_materialize_const_date32(other))
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int32_t* data1 = <int32_t*> ptr1.data
@@ -1296,6 +1320,30 @@ cpdef Date32Vector from_int64_vector(Int64Vector source):
         dst_data[i] = <int32_t>value64
 
     return out
+
+
+cdef Date32Vector _materialize_const_date32(Date32Vector const_vec):
+    """Expand a CONSTANT Date32Vector to a dense Date32Vector."""
+    cdef size_t n = const_vec.ptr.length
+    cdef Date32Vector dense = Date32Vector(n)
+    cdef int32_t* dst = <int32_t*>dense.ptr.data
+    cdef int32_t val = const_vec._const_value
+    cdef bint is_null = const_vec._const_is_null
+    cdef size_t i
+    cdef size_t null_bytes
+    cdef uint8_t* null_bm
+
+    if is_null:
+        null_bytes = (n + 7) >> 3
+        null_bm = <uint8_t*>malloc(null_bytes)
+        if null_bm == NULL:
+            raise MemoryError()
+        memset(null_bm, 0, null_bytes)
+        dense.ptr.null_bitmap = null_bm
+    else:
+        for i in range(n):
+            dst[i] = val
+    return dense
 
 
 cdef Date32Vector _materialize_rle_date32(Date32Vector rle_vec):

@@ -557,6 +557,14 @@ cdef class Int64Vector(Vector):
             return _materialize_rle_int64(self)._compare_vector(other, op)
         if other._encoding == DRAKEN_ENCODING_RLE:
             return self._compare_vector(_materialize_rle_int64(other), op)
+        if self._has_const:
+            return _materialize_const_int64(self)._compare_vector(other, op)
+        if other._has_const:
+            return self._compare_vector(_materialize_const_int64(other), op)
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_int64(self)._compare_vector(other, op)
+        if other._encoding == DRAKEN_ENCODING_DICTIONARY and other.ptr.data == NULL:
+            return self._compare_vector(_materialize_dict_int64(other), op)
 
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
@@ -1309,6 +1317,30 @@ cdef class Int64Vector(Vector):
         for i in range(k):
             vals.append(data[i])
         return f"<Int64Vector len={buf_length(self.ptr)} values={vals}>"
+
+
+cdef Int64Vector _materialize_const_int64(Int64Vector const_vec):
+    """Expand a CONSTANT Int64Vector to a dense Int64Vector."""
+    cdef size_t n = const_vec.ptr.length
+    cdef Int64Vector dense = Int64Vector(n)
+    cdef int64_t* dst = <int64_t*>dense.ptr.data
+    cdef int64_t val = const_vec._const_value
+    cdef bint is_null = const_vec._const_is_null
+    cdef size_t i
+    cdef size_t null_bytes
+    cdef uint8_t* null_bm
+
+    if is_null:
+        null_bytes = (n + 7) >> 3
+        null_bm = <uint8_t*>malloc(null_bytes)
+        if null_bm == NULL:
+            raise MemoryError()
+        memset(null_bm, 0, null_bytes)
+        dense.ptr.null_bitmap = null_bm
+    else:
+        for i in range(n):
+            dst[i] = val
+    return dense
 
 
 cdef Int64Vector _materialize_rle_int64(Int64Vector rle_vec):

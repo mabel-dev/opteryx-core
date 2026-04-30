@@ -1250,6 +1250,8 @@ cdef IntegerVector from_dict_nullable(
             else:
                 (<int32_t*>vec.ptr.data)[i] = 0
 
+    return vec
+
 
 cdef IntegerVector _materialize_rle_integer(IntegerVector rle_vec):
     """Expand an RLE IntegerVector to a dense IntegerVector.

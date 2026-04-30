@@ -520,6 +520,10 @@ cdef class Float64Vector(Vector):
             return _materialize_rle_float64(self)._compare_vector(other, op)
         if other._encoding == DRAKEN_ENCODING_RLE:
             return self._compare_vector(_materialize_rle_float64(other), op)
+        if self._has_const:
+            return _materialize_const_float64(self)._compare_vector(other, op)
+        if other._has_const:
+            return self._compare_vector(_materialize_const_float64(other), op)
 
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
@@ -1364,6 +1368,30 @@ cdef class Float64Vector(Vector):
         for i in range(k):
             vals.append(data[i])
         return f"<Float64Vector len={buf_length(self.ptr)} values={vals}>"
+
+
+cdef Float64Vector _materialize_const_float64(Float64Vector const_vec):
+    """Expand a CONSTANT Float64Vector to a dense Float64Vector."""
+    cdef size_t n = const_vec.ptr.length
+    cdef Float64Vector dense = Float64Vector(n)
+    cdef double* dst = <double*>dense.ptr.data
+    cdef double val = const_vec._const_value
+    cdef bint is_null = const_vec._const_is_null
+    cdef size_t i
+    cdef size_t null_bytes
+    cdef uint8_t* null_bm
+
+    if is_null:
+        null_bytes = (n + 7) >> 3
+        null_bm = <uint8_t*>malloc(null_bytes)
+        if null_bm == NULL:
+            raise MemoryError()
+        memset(null_bm, 0, null_bytes)
+        dense.ptr.null_bitmap = null_bm
+    else:
+        for i in range(n):
+            dst[i] = val
+    return dense
 
 
 cdef Float64Vector _materialize_rle_float64(Float64Vector rle_vec):

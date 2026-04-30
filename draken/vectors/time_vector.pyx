@@ -38,6 +38,7 @@ from draken.core.fixed_vector cimport buf_dtype
 from draken.core.fixed_vector cimport buf_itemsize
 from draken.core.fixed_vector cimport buf_length
 from draken.core.fixed_vector cimport free_fixed_buffer
+import datetime
 from draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash, simd_popcount
 
 DEF TIME32_HASH_CHUNK = 1024
@@ -59,6 +60,24 @@ cdef void _release_rle_storage_time(TimeVector vec) noexcept:
             free(vec._rle_buffer.null_bitmap)
         free(vec._rle_buffer)
         vec._rle_buffer = NULL
+
+
+cdef inline object _us_to_time(int64_t us):
+    """Convert microseconds-since-midnight to datetime.time."""
+    cdef int64_t us_rem = us % 1000000
+    cdef int64_t s_total = us // 1000000
+    cdef int64_t s = s_total % 60
+    cdef int64_t m = (s_total // 60) % 60
+    cdef int64_t h = s_total // 3600
+    return datetime.time(<int>h, <int>m, <int>s, <int>us_rem)
+
+
+cdef inline object _s_to_time(int32_t s_val):
+    """Convert seconds-since-midnight to datetime.time."""
+    cdef int32_t s = s_val % 60
+    cdef int32_t m = (s_val // 60) % 60
+    cdef int32_t h = s_val // 3600
+    return datetime.time(<int>h, <int>m, <int>s)
 
 
 cdef class TimeVector(Vector):
@@ -257,6 +276,10 @@ cdef class TimeVector(Vector):
         cdef int64_t* dst64
         cdef int32_t* src32
         cdef int32_t* dst32
+        cdef uint8_t* src_null = self.ptr.null_bitmap
+        cdef uint8_t* dst_null
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef int32_t idx
 
         if self.is_time64:
             src64 = <int64_t*> self.ptr.data
@@ -268,6 +291,17 @@ cdef class TimeVector(Vector):
             dst32 = <int32_t*> out.ptr.data
             for i in range(n):
                 dst32[i] = src32[indices[i]]
+
+        if src_null != NULL and nbytes != 0:
+            dst_null = <uint8_t*>malloc(nbytes)
+            if dst_null == NULL:
+                raise MemoryError()
+            memset(dst_null, 0, nbytes)
+            for i in range(n):
+                idx = indices[i]
+                if (src_null[idx >> 3] >> (idx & 7)) & 1:
+                    dst_null[i >> 3] |= (1 << (i & 7))
+            out.ptr.null_bitmap = dst_null
         return out
 
     cpdef int8_t[::1] is_null(self):
@@ -372,7 +406,10 @@ cdef class TimeVector(Vector):
                     if rle_nulls_tv != NULL and not ((rle_nulls_tv[(tv_pos + i) >> 3] >> ((tv_pos + i) & 7)) & 1):
                         out.append(None)
                     else:
-                        out.append(rle_tv_tp[tvr] if self.is_time64 else <int32_t>rle_tv_tp[tvr])
+                        if self.is_time64:
+                            out.append(_us_to_time(rle_tv_tp[tvr]))
+                        else:
+                            out.append(_s_to_time(<int32_t>rle_tv_tp[tvr]))
                 tv_pos += tv_run_len
             return out
 
@@ -381,33 +418,37 @@ cdef class TimeVector(Vector):
                 for i in range(n):
                     out.append(None)
             else:
+                if self.is_time64:
+                    t = _us_to_time(self._const_value)
+                else:
+                    t = _s_to_time(<int32_t>self._const_value)
                 for i in range(n):
-                    out.append(self._const_value if self.is_time64 else <int32_t>self._const_value)
+                    out.append(t)
             return out
         if self.is_time64:
             data64 = <int64_t*> ptr.data
             if ptr.null_bitmap == NULL:
                 for i in range(n):
-                    out.append(data64[i])
+                    out.append(_us_to_time(data64[i]))
             else:
                 for i in range(n):
                     byte = ptr.null_bitmap[i >> 3]
                     bit = (byte >> (i & 7)) & 1
                     if bit:
-                        out.append(data64[i])
+                        out.append(_us_to_time(data64[i]))
                     else:
                         out.append(None)
         else:
             data32 = <int32_t*> ptr.data
             if ptr.null_bitmap == NULL:
                 for i in range(n):
-                    out.append(data32[i])
+                    out.append(_s_to_time(data32[i]))
             else:
                 for i in range(n):
                     byte = ptr.null_bitmap[i >> 3]
                     bit = (byte >> (i & 7)) & 1
                     if bit:
-                        out.append(data32[i])
+                        out.append(_s_to_time(data32[i]))
                     else:
                         out.append(None)
 

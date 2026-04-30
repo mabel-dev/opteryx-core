@@ -1259,6 +1259,300 @@ cdef class StringVector(Vector):
 
         return out
 
+    cpdef BoolVector equals_vector(self, StringVector other):
+        """Element-wise equality between two StringVectors with null propagation."""
+        if self._encoding == DRAKEN_ENCODING_RLE:
+            return _materialize_rle_string(self).equals_vector(other)
+        if other._encoding == DRAKEN_ENCODING_RLE:
+            return self.equals_vector(_materialize_rle_string(other))
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_string(self).equals_vector(other)
+        if other._encoding == DRAKEN_ENCODING_DICTIONARY and other.ptr.data == NULL:
+            return self.equals_vector(_materialize_dict_string(other))
+        if self._has_const:
+            return _materialize_const_string(self).equals_vector(other)
+        if other._has_const:
+            return self.equals_vector(_materialize_const_string(other))
+        cdef DrakenVarBuffer* ptr1 = self.ptr
+        cdef DrakenVarBuffer* ptr2 = other.ptr
+        cdef Py_ssize_t n = ptr1.length
+        if n != ptr2.length:
+            raise ValueError("Vectors must have the same length")
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
+        cdef uint8_t* null1 = ptr1.null_bitmap
+        cdef uint8_t* null2 = ptr2.null_bitmap
+        cdef uint8_t* out_null = NULL
+        cdef int32_t s1, e1, l1, s2, l2
+        cdef bint v1, v2
+        cdef Py_ssize_t i
+        memset(dst, 0, nbytes)
+        if (null1 != NULL or null2 != NULL) and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+        for i in range(n):
+            v1 = 1 if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1)
+            v2 = 1 if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1)
+            if v1 and v2:
+                if out_null != NULL:
+                    out_null[i >> 3] |= (1 << (i & 7))
+                s1 = ptr1.offsets[i]; e1 = ptr1.offsets[i + 1]; l1 = e1 - s1
+                s2 = ptr2.offsets[i]; l2 = ptr2.offsets[i + 1] - s2
+                if l1 == l2 and (l1 == 0 or memcmp(<char*>ptr1.data + s1, <char*>ptr2.data + s2, <size_t>l1) == 0):
+                    dst[i >> 3] |= (1 << (i & 7))
+        out.ptr.null_bitmap = out_null
+        return out
+
+    cpdef BoolVector not_equals_vector(self, StringVector other):
+        """Element-wise inequality between two StringVectors with null propagation."""
+        if self._encoding == DRAKEN_ENCODING_RLE:
+            return _materialize_rle_string(self).not_equals_vector(other)
+        if other._encoding == DRAKEN_ENCODING_RLE:
+            return self.not_equals_vector(_materialize_rle_string(other))
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_string(self).not_equals_vector(other)
+        if other._encoding == DRAKEN_ENCODING_DICTIONARY and other.ptr.data == NULL:
+            return self.not_equals_vector(_materialize_dict_string(other))
+        if self._has_const:
+            return _materialize_const_string(self).not_equals_vector(other)
+        if other._has_const:
+            return self.not_equals_vector(_materialize_const_string(other))
+        cdef DrakenVarBuffer* ptr1 = self.ptr
+        cdef DrakenVarBuffer* ptr2 = other.ptr
+        cdef Py_ssize_t n = ptr1.length
+        if n != ptr2.length:
+            raise ValueError("Vectors must have the same length")
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
+        cdef uint8_t* null1 = ptr1.null_bitmap
+        cdef uint8_t* null2 = ptr2.null_bitmap
+        cdef uint8_t* out_null = NULL
+        cdef int32_t s1, e1, l1, s2, l2
+        cdef bint v1, v2
+        cdef Py_ssize_t i
+        memset(dst, 0, nbytes)
+        if (null1 != NULL or null2 != NULL) and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+        for i in range(n):
+            v1 = 1 if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1)
+            v2 = 1 if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1)
+            if v1 and v2:
+                if out_null != NULL:
+                    out_null[i >> 3] |= (1 << (i & 7))
+                s1 = ptr1.offsets[i]; e1 = ptr1.offsets[i + 1]; l1 = e1 - s1
+                s2 = ptr2.offsets[i]; l2 = ptr2.offsets[i + 1] - s2
+                if l1 != l2 or (l1 > 0 and memcmp(<char*>ptr1.data + s1, <char*>ptr2.data + s2, <size_t>l1) != 0):
+                    dst[i >> 3] |= (1 << (i & 7))
+        out.ptr.null_bitmap = out_null
+        return out
+
+    cpdef BoolVector less_than_vector(self, StringVector other):
+        """Element-wise less-than between two StringVectors with null propagation."""
+        if self._encoding == DRAKEN_ENCODING_RLE:
+            return _materialize_rle_string(self).less_than_vector(other)
+        if other._encoding == DRAKEN_ENCODING_RLE:
+            return self.less_than_vector(_materialize_rle_string(other))
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_string(self).less_than_vector(other)
+        if other._encoding == DRAKEN_ENCODING_DICTIONARY and other.ptr.data == NULL:
+            return self.less_than_vector(_materialize_dict_string(other))
+        if self._has_const:
+            return _materialize_const_string(self).less_than_vector(other)
+        if other._has_const:
+            return self.less_than_vector(_materialize_const_string(other))
+        cdef DrakenVarBuffer* ptr1 = self.ptr
+        cdef DrakenVarBuffer* ptr2 = other.ptr
+        cdef Py_ssize_t n = ptr1.length
+        if n != ptr2.length:
+            raise ValueError("Vectors must have the same length")
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
+        cdef uint8_t* null1 = ptr1.null_bitmap
+        cdef uint8_t* null2 = ptr2.null_bitmap
+        cdef uint8_t* out_null = NULL
+        cdef int32_t s1, e1, l1, s2, l2, min_len
+        cdef int cmp_res
+        cdef bint v1, v2
+        cdef Py_ssize_t i
+        memset(dst, 0, nbytes)
+        if (null1 != NULL or null2 != NULL) and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+        for i in range(n):
+            v1 = 1 if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1)
+            v2 = 1 if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1)
+            if v1 and v2:
+                if out_null != NULL:
+                    out_null[i >> 3] |= (1 << (i & 7))
+                s1 = ptr1.offsets[i]; e1 = ptr1.offsets[i + 1]; l1 = e1 - s1
+                s2 = ptr2.offsets[i]; l2 = ptr2.offsets[i + 1] - s2
+                min_len = l1 if l1 < l2 else l2
+                cmp_res = memcmp(<char*>ptr1.data + s1, <char*>ptr2.data + s2, <size_t>min_len) if min_len > 0 else 0
+                if cmp_res < 0 or (cmp_res == 0 and l1 < l2):
+                    dst[i >> 3] |= (1 << (i & 7))
+        out.ptr.null_bitmap = out_null
+        return out
+
+    cpdef BoolVector less_than_or_equals_vector(self, StringVector other):
+        """Element-wise less-than-or-equal between two StringVectors with null propagation."""
+        if self._encoding == DRAKEN_ENCODING_RLE:
+            return _materialize_rle_string(self).less_than_or_equals_vector(other)
+        if other._encoding == DRAKEN_ENCODING_RLE:
+            return self.less_than_or_equals_vector(_materialize_rle_string(other))
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_string(self).less_than_or_equals_vector(other)
+        if other._encoding == DRAKEN_ENCODING_DICTIONARY and other.ptr.data == NULL:
+            return self.less_than_or_equals_vector(_materialize_dict_string(other))
+        if self._has_const:
+            return _materialize_const_string(self).less_than_or_equals_vector(other)
+        if other._has_const:
+            return self.less_than_or_equals_vector(_materialize_const_string(other))
+        cdef DrakenVarBuffer* ptr1 = self.ptr
+        cdef DrakenVarBuffer* ptr2 = other.ptr
+        cdef Py_ssize_t n = ptr1.length
+        if n != ptr2.length:
+            raise ValueError("Vectors must have the same length")
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
+        cdef uint8_t* null1 = ptr1.null_bitmap
+        cdef uint8_t* null2 = ptr2.null_bitmap
+        cdef uint8_t* out_null = NULL
+        cdef int32_t s1, e1, l1, s2, l2, min_len
+        cdef int cmp_res
+        cdef bint v1, v2
+        cdef Py_ssize_t i
+        memset(dst, 0, nbytes)
+        if (null1 != NULL or null2 != NULL) and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+        for i in range(n):
+            v1 = 1 if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1)
+            v2 = 1 if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1)
+            if v1 and v2:
+                if out_null != NULL:
+                    out_null[i >> 3] |= (1 << (i & 7))
+                s1 = ptr1.offsets[i]; e1 = ptr1.offsets[i + 1]; l1 = e1 - s1
+                s2 = ptr2.offsets[i]; l2 = ptr2.offsets[i + 1] - s2
+                min_len = l1 if l1 < l2 else l2
+                cmp_res = memcmp(<char*>ptr1.data + s1, <char*>ptr2.data + s2, <size_t>min_len) if min_len > 0 else 0
+                if cmp_res < 0 or (cmp_res == 0 and l1 <= l2):
+                    dst[i >> 3] |= (1 << (i & 7))
+        out.ptr.null_bitmap = out_null
+        return out
+
+    cpdef BoolVector greater_than_vector(self, StringVector other):
+        """Element-wise greater-than between two StringVectors with null propagation."""
+        if self._encoding == DRAKEN_ENCODING_RLE:
+            return _materialize_rle_string(self).greater_than_vector(other)
+        if other._encoding == DRAKEN_ENCODING_RLE:
+            return self.greater_than_vector(_materialize_rle_string(other))
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_string(self).greater_than_vector(other)
+        if other._encoding == DRAKEN_ENCODING_DICTIONARY and other.ptr.data == NULL:
+            return self.greater_than_vector(_materialize_dict_string(other))
+        if self._has_const:
+            return _materialize_const_string(self).greater_than_vector(other)
+        if other._has_const:
+            return self.greater_than_vector(_materialize_const_string(other))
+        cdef DrakenVarBuffer* ptr1 = self.ptr
+        cdef DrakenVarBuffer* ptr2 = other.ptr
+        cdef Py_ssize_t n = ptr1.length
+        if n != ptr2.length:
+            raise ValueError("Vectors must have the same length")
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
+        cdef uint8_t* null1 = ptr1.null_bitmap
+        cdef uint8_t* null2 = ptr2.null_bitmap
+        cdef uint8_t* out_null = NULL
+        cdef int32_t s1, e1, l1, s2, l2, min_len
+        cdef int cmp_res
+        cdef bint v1, v2
+        cdef Py_ssize_t i
+        memset(dst, 0, nbytes)
+        if (null1 != NULL or null2 != NULL) and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+        for i in range(n):
+            v1 = 1 if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1)
+            v2 = 1 if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1)
+            if v1 and v2:
+                if out_null != NULL:
+                    out_null[i >> 3] |= (1 << (i & 7))
+                s1 = ptr1.offsets[i]; e1 = ptr1.offsets[i + 1]; l1 = e1 - s1
+                s2 = ptr2.offsets[i]; l2 = ptr2.offsets[i + 1] - s2
+                min_len = l1 if l1 < l2 else l2
+                cmp_res = memcmp(<char*>ptr1.data + s1, <char*>ptr2.data + s2, <size_t>min_len) if min_len > 0 else 0
+                if cmp_res > 0 or (cmp_res == 0 and l1 > l2):
+                    dst[i >> 3] |= (1 << (i & 7))
+        out.ptr.null_bitmap = out_null
+        return out
+
+    cpdef BoolVector greater_than_or_equals_vector(self, StringVector other):
+        """Element-wise greater-than-or-equal between two StringVectors with null propagation."""
+        if self._encoding == DRAKEN_ENCODING_RLE:
+            return _materialize_rle_string(self).greater_than_or_equals_vector(other)
+        if other._encoding == DRAKEN_ENCODING_RLE:
+            return self.greater_than_or_equals_vector(_materialize_rle_string(other))
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_string(self).greater_than_or_equals_vector(other)
+        if other._encoding == DRAKEN_ENCODING_DICTIONARY and other.ptr.data == NULL:
+            return self.greater_than_or_equals_vector(_materialize_dict_string(other))
+        if self._has_const:
+            return _materialize_const_string(self).greater_than_or_equals_vector(other)
+        if other._has_const:
+            return self.greater_than_or_equals_vector(_materialize_const_string(other))
+        cdef DrakenVarBuffer* ptr1 = self.ptr
+        cdef DrakenVarBuffer* ptr2 = other.ptr
+        cdef Py_ssize_t n = ptr1.length
+        if n != ptr2.length:
+            raise ValueError("Vectors must have the same length")
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
+        cdef uint8_t* null1 = ptr1.null_bitmap
+        cdef uint8_t* null2 = ptr2.null_bitmap
+        cdef uint8_t* out_null = NULL
+        cdef int32_t s1, e1, l1, s2, l2, min_len
+        cdef int cmp_res
+        cdef bint v1, v2
+        cdef Py_ssize_t i
+        memset(dst, 0, nbytes)
+        if (null1 != NULL or null2 != NULL) and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+        for i in range(n):
+            v1 = 1 if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1)
+            v2 = 1 if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1)
+            if v1 and v2:
+                if out_null != NULL:
+                    out_null[i >> 3] |= (1 << (i & 7))
+                s1 = ptr1.offsets[i]; e1 = ptr1.offsets[i + 1]; l1 = e1 - s1
+                s2 = ptr2.offsets[i]; l2 = ptr2.offsets[i + 1] - s2
+                min_len = l1 if l1 < l2 else l2
+                cmp_res = memcmp(<char*>ptr1.data + s1, <char*>ptr2.data + s2, <size_t>min_len) if min_len > 0 else 0
+                if cmp_res > 0 or (cmp_res == 0 and l1 >= l2):
+                    dst[i >> 3] |= (1 << (i & 7))
+        out.ptr.null_bitmap = out_null
+        return out
+
     cpdef BoolVector in_list(self, object value_set):
         """
         Return mask: 1 if element is a member of value_set, else 0. Propagates NULLs.
@@ -3497,6 +3791,25 @@ cdef StringVector from_arrow_struct(object array):
         ptr.offsets[i+1] = offset
 
     return vec
+
+cdef StringVector _materialize_const_string(StringVector const_vec):
+    """Expand a CONSTANT StringVector to a dense StringVector."""
+    cdef Py_ssize_t n = <Py_ssize_t>const_vec.ptr.length
+    cdef StringVectorBuilder builder
+    cdef Py_ssize_t val_len
+    cdef Py_ssize_t i
+
+    if const_vec._const_is_null or const_vec._const_value == NULL:
+        builder = StringVectorBuilder(n, 0)
+        for i in range(n):
+            builder.append_null()
+    else:
+        val_len = <Py_ssize_t>const_vec._const_value.length
+        builder = StringVectorBuilder(n, n * val_len)
+        for i in range(n):
+            builder.append_bytes(<char*>const_vec._const_value.data, val_len)
+    return builder.finish()
+
 
 cdef StringVector _materialize_rle_string(StringVector rle_vec):
     """Expand an RLE-encoded StringVector into a dense StringVector."""

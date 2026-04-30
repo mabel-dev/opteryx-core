@@ -37,6 +37,8 @@ cdef class BoolVector(Vector):
     cpdef BoolVector or_vector(self, BoolVector other)
     cpdef BoolVector xor_vector(self, BoolVector other)
     cpdef BoolVector not_vector(self)
+    cpdef BoolVector equals_vector(self, BoolVector other)
+    cpdef BoolVector not_equals_vector(self, BoolVector other)
 
 cdef BoolVector from_arrow(object array)
 cdef BoolVector from_sequence(uint8_t[::1] data)

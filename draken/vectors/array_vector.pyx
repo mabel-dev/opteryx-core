@@ -391,10 +391,11 @@ cdef class ArrayVector(Vector):
                 out_buf[offset + i] = NULL_HASH
                 continue
 
-            # Hash the offset pair (defines the structure of this row)
             start = ptr.offsets[i]
             end = ptr.offsets[i + 1]
-            offset_hash = mix_hash(<uint64_t>start, <uint64_t>end)
+            # Hash the row length (structure), not absolute offsets — identical
+            # content at different positions must hash equally.
+            offset_hash = mix_hash(<uint64_t>(end - start), MIX_HASH_CONSTANT)
 
             # XOR together child hashes for elements in this row's range
             row_hash = offset_hash

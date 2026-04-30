@@ -478,6 +478,10 @@ cdef class TimestampVector(Vector):
         return self._compare_scalar(value, 5)
 
     cpdef BoolVector equals_vector(self, TimestampVector other):
+        if self._has_const:
+            return _materialize_const_timestamp(self).equals_vector(other)
+        if other._has_const:
+            return self.equals_vector(_materialize_const_timestamp(other))
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int64_t* data1 = <int64_t*> ptr1.data
@@ -519,6 +523,10 @@ cdef class TimestampVector(Vector):
         return out
 
     cpdef BoolVector not_equals_vector(self, TimestampVector other):
+        if self._has_const:
+            return _materialize_const_timestamp(self).not_equals_vector(other)
+        if other._has_const:
+            return self.not_equals_vector(_materialize_const_timestamp(other))
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int64_t* data1 = <int64_t*> ptr1.data
@@ -560,6 +568,10 @@ cdef class TimestampVector(Vector):
         return out
 
     cpdef BoolVector greater_than_vector(self, TimestampVector other):
+        if self._has_const:
+            return _materialize_const_timestamp(self).greater_than_vector(other)
+        if other._has_const:
+            return self.greater_than_vector(_materialize_const_timestamp(other))
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int64_t* data1 = <int64_t*> ptr1.data
@@ -601,6 +613,10 @@ cdef class TimestampVector(Vector):
         return out
 
     cpdef BoolVector greater_than_or_equals_vector(self, TimestampVector other):
+        if self._has_const:
+            return _materialize_const_timestamp(self).greater_than_or_equals_vector(other)
+        if other._has_const:
+            return self.greater_than_or_equals_vector(_materialize_const_timestamp(other))
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int64_t* data1 = <int64_t*> ptr1.data
@@ -642,6 +658,10 @@ cdef class TimestampVector(Vector):
         return out
 
     cpdef BoolVector less_than_vector(self, TimestampVector other):
+        if self._has_const:
+            return _materialize_const_timestamp(self).less_than_vector(other)
+        if other._has_const:
+            return self.less_than_vector(_materialize_const_timestamp(other))
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int64_t* data1 = <int64_t*> ptr1.data
@@ -683,6 +703,10 @@ cdef class TimestampVector(Vector):
         return out
 
     cpdef BoolVector less_than_or_equals_vector(self, TimestampVector other):
+        if self._has_const:
+            return _materialize_const_timestamp(self).less_than_or_equals_vector(other)
+        if other._has_const:
+            return self.less_than_or_equals_vector(_materialize_const_timestamp(other))
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int64_t* data1 = <int64_t*> ptr1.data
@@ -1220,6 +1244,9 @@ cdef class TimestampVector(Vector):
                 is_valid = <uint64_t>_bitmap_is_valid(ptr.null_bitmap, i + j, self.null_bit_offset)
                 scratch[j] = (as_uint64[i + j] * is_valid) | (NULL_HASH * (1 - is_valid))
             simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
+            for j in range(block):
+                if not _bitmap_is_valid(ptr.null_bitmap, i + j, self.null_bit_offset):
+                    dst[i + j] = NULL_HASH
             i += block
 
     cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
@@ -1261,6 +1288,9 @@ cdef class TimestampVector(Vector):
                 is_valid = <uint64_t>_bitmap_is_valid(ptr.null_bitmap, i + j, self.null_bit_offset)
                 scratch[j] = (as_uint64[i + j] * is_valid) | (NULL_HASH * (1 - is_valid))
             simd_mix_hash(out + i, scratch_ptr, <size_t> block)
+            for j in range(block):
+                if not _bitmap_is_valid(ptr.null_bitmap, i + j, self.null_bit_offset):
+                    out[i + j] = NULL_HASH
             i += block
         return 0
 
@@ -1527,6 +1557,32 @@ cpdef TimestampVector from_int64_vector(Int64Vector source, str timestamp_unit="
         out.null_bit_offset = 0
 
     return out
+
+
+cdef TimestampVector _materialize_const_timestamp(TimestampVector const_vec):
+    """Expand a CONSTANT TimestampVector to a dense TimestampVector."""
+    cdef size_t n = const_vec.ptr.length
+    cdef TimestampVector dense = TimestampVector(n)
+    dense.timestamp_unit = const_vec.timestamp_unit
+    dense._unit_code = const_vec._unit_code
+    cdef int64_t* dst = <int64_t*>dense.ptr.data
+    cdef int64_t val = const_vec._const_value
+    cdef bint is_null = const_vec._const_is_null
+    cdef size_t i
+    cdef size_t null_bytes
+    cdef uint8_t* null_bm
+
+    if is_null:
+        null_bytes = (n + 7) >> 3
+        null_bm = <uint8_t*>malloc(null_bytes)
+        if null_bm == NULL:
+            raise MemoryError()
+        memset(null_bm, 0, null_bytes)
+        dense.ptr.null_bitmap = null_bm
+    else:
+        for i in range(n):
+            dst[i] = val
+    return dense
 
 
 cdef TimestampVector _materialize_rle_timestamp(TimestampVector rle_vec):
