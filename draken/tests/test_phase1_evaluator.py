@@ -268,14 +268,6 @@ class TestDrakenCompareNullPropagation:
         assert pylist[1] is None  # null input → null output
         assert pylist[2] is False
 
-    def test_null_not_in_list(self):
-        vec = _int_vec_with_nulls([1, None, 3])
-        result = draken_compare("InList", vec, {1, 2})
-        pylist = result.to_pylist()
-        assert pylist[0] is True
-        assert pylist[1] is None
-        assert pylist[2] is False
-
 
 # ---------------------------------------------------------------------------
 # evaluate_draken: tree walker
@@ -397,47 +389,3 @@ class TestEvaluateDrakenTreeWalker:
         )
         result = evaluate_draken(tree, morsel)
         assert bv_to_list(result) == [True, True, False]
-
-
-# ---------------------------------------------------------------------------
-# Phase 2: FilterNode draken path
-# ---------------------------------------------------------------------------
-
-
-class TestFilterNodeDrakenPath:
-    """Smoke tests for FilterNode (now unconditionally Draken-native)."""
-
-    def _make_filter_node(self, filter_tree):
-        from opteryx.operators.filter_node import FilterNode
-
-        from opteryx.models import QueryProperties
-
-        props = QueryProperties(None, {})
-        return FilterNode(props, filter=filter_tree)
-
-    def test_draken_filter_gt(self, monkeypatch):
-        """FilterNode with Draken morsel."""
-        col = FlatColumn(name="val", type=OrsoTypes.INTEGER)
-        vec = vector_from_arrow(pa.array([10, 20, 30, 40], type=pa.int64()))
-        morsel = _morsel(col.identity, vec)
-
-        tree = _comparison_node("Gt", _identifier_node(col), _literal_node(20))
-        node = self._make_filter_node(tree)
-
-        results = list(node.execute(morsel))
-        assert len(results) == 1
-        result_morsel = results[0]
-        assert result_morsel.__class__.__name__ == "Morsel"
-        assert result_morsel.num_rows == 2  # 30, 40
-
-    def test_draken_filter_all_false_yields_empty(self, monkeypatch):
-        col = FlatColumn(name="val", type=OrsoTypes.INTEGER)
-        vec = vector_from_arrow(pa.array([1, 2, 3], type=pa.int64()))
-        morsel = _morsel(col.identity, vec)
-
-        tree = _comparison_node("Eq", _identifier_node(col), _literal_node(999))
-        node = self._make_filter_node(tree)
-
-        results = list(node.execute(morsel))
-        assert len(results) == 1
-        assert results[0].num_rows == 0

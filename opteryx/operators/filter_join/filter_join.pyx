@@ -120,7 +120,9 @@ class FilterJoinNode(JoinNode):
                 yield EOS
                 return
             morsel = self._apply_join_key_casts(morsel, is_left=True)
-            if self.join_type == "left anti":
+            if morsel.num_rows == 0:
+                yield morsel
+            elif self.join_type == "left anti":
                 yield _anti_join_filter(morsel, self.left_columns, self.right_hash_set)
             elif self.join_type == "left semi":
                 yield _semi_join_filter(morsel, self.left_columns, self.right_hash_set)

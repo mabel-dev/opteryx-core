@@ -1000,6 +1000,9 @@ cdef class Int64Vector(Vector):
                     out.append(self._const_value)
             return out
 
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and ptr.data == NULL:
+            return _materialize_dict_int64(self).to_pylist()
+
         cdef int64_t* data = <int64_t*> ptr.data
         cdef uint8_t byte, bit
 

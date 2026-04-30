@@ -181,13 +181,15 @@ class TestTypeSpecificErrors:
         assert list(result) == [1, 0]
     
     def test_all_nulls_min_max(self):
-        """Test min/max on vector with all nulls."""
+        """Test min/max on vector with all nulls raises ValueError."""
         arr = pa.array([None, None, None], type=pa.int64())
         vec = Vector.from_arrow(arr)
-        
-        # Current implementation: all nulls returns 0
-        assert vec.min() == 0
-        assert vec.max() == 0
+
+        # All-null columns cannot compute min/max - raise ValueError
+        with pytest.raises(ValueError, match="all-null"):
+            vec.min()
+        with pytest.raises(ValueError, match="all-null"):
+            vec.max()
 
 
 class TestBoundaryConditions:

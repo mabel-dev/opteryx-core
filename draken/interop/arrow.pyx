@@ -28,7 +28,9 @@ from draken.interop.arrow_c_data_interface cimport ArrowArray
 from draken.interop.arrow_c_data_interface cimport ArrowSchema
 from draken.vectors.bool_vector cimport from_arrow as bool_from_arrow
 from draken.vectors.float64_vector cimport from_arrow as float64_from_arrow
+from draken.vectors.float32_vector cimport from_arrow as float32_from_arrow
 from draken.vectors.int64_vector cimport from_arrow as int64_from_arrow
+from draken.vectors.int64_vector cimport make_int64_dict_only as int64_make_dict_only
 from draken.vectors.integer_vector cimport from_arrow as integer_from_arrow
 from draken.vectors.string_vector cimport from_arrow as string_from_arrow
 from draken.vectors.string_vector cimport from_arrow_struct as string_from_arrow_struct
@@ -193,6 +195,124 @@ cdef void expose_draken_fixed_as_arrow(
     schema.private_data = NULL
 
 
+cdef object _int64_vector_from_dictionary_array(object pa_dict_array):
+    """Create a dict-encoded Int64Vector from a PyArrow integer DictionaryArray."""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import struct as _struct
+
+    cdef Py_ssize_t row_count = len(pa_dict_array)
+    cdef Py_ssize_t dict_size
+    cdef uint8_t code_width
+    cdef const uint8_t* codes_ptr = NULL
+    cdef const int64_t* dict_ptr = NULL
+    cdef const uint8_t* valid_ptr = NULL
+    cdef uint8_t[::1] codes_view
+    cdef uint8_t[::1] dict_view
+    cdef uint8_t[::1] valid_view
+    cdef Py_ssize_t i
+    cdef Py_ssize_t byte_offset
+
+    indices = pa_dict_array.indices
+    dictionary = pa_dict_array.dictionary
+    dict_size = len(dictionary)
+
+    idx_type = indices.type
+    if idx_type.equals(pa.int8()) or idx_type.equals(pa.uint8()):
+        code_width = 1
+    elif idx_type.equals(pa.int16()) or idx_type.equals(pa.uint16()):
+        code_width = 2
+    elif idx_type.equals(pa.int32()) or idx_type.equals(pa.uint32()):
+        code_width = 4
+    else:
+        return vector_from_arrow(pa_dict_array.dictionary_decode())
+
+    # Build int64 dictionary bytes (native little-endian int64s)
+    dict_ba = bytearray(_struct.pack(f'{dict_size}q', *(int(dictionary[i].as_py()) for i in range(dict_size))))
+    dict_view = dict_ba
+    if dict_size > 0:
+        dict_ptr = <const int64_t*>&dict_view[0]
+
+    # Extract codes from indices data buffer
+    idx_bufs = indices.buffers()
+    byte_offset = <Py_ssize_t>indices.offset * code_width
+    codes_ba = bytearray(bytes(idx_bufs[1])[byte_offset:byte_offset + row_count * code_width])
+    codes_view = codes_ba
+    if row_count > 0:
+        codes_ptr = &codes_view[0]
+
+    # Build validity bitmap (Arrow-style: 1=valid, 0=null)
+    null_mask = pc.is_null(pa_dict_array).to_pylist()
+    if any(null_mask):
+        nb_bytes = (row_count + 7) // 8
+        valid_ba = bytearray(nb_bytes)
+        for i in range(row_count):
+            if not null_mask[i]:
+                valid_ba[i >> 3] |= (1 << (i & 7))
+        valid_view = valid_ba
+        valid_ptr = &valid_view[0]
+
+    return int64_make_dict_only(codes_ptr, code_width, row_count, dict_ptr, dict_size, valid_ptr)
+
+
+cdef object _string_vector_from_dictionary_array(object pa_dict_array):
+    """Create a dictionary-encoded StringVector from a PyArrow DictionaryArray."""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    from array import array as pyarray
+
+    dictionary = pa_dict_array.dictionary
+    indices = pa_dict_array.indices
+    row_count = len(pa_dict_array)
+    dict_size = len(dictionary)
+
+    # Convert dictionary to binary strings and build arena
+    dict_values = []
+    dict_offsets = []
+    dict_lengths = []
+    arena_bytes = bytearray()
+    current_offset = 0
+
+    for i in range(dict_size):
+        val = dictionary[i].as_py()
+        if val is None:
+            val_bytes = b""
+        else:
+            if isinstance(val, str):
+                val_bytes = val.encode("utf-8")
+            else:
+                val_bytes = val
+        dict_values.append(val_bytes)
+        dict_offsets.append(current_offset)
+        dict_lengths.append(len(val_bytes))
+        arena_bytes.extend(val_bytes)
+        current_offset += len(val_bytes)
+
+    # Get null mask for the array
+    null_mask = pc.is_null(pa_dict_array).to_pylist()
+
+    # Convert indices to int32 list, handling nulls
+    codes_list = []
+    validity_list = []
+    for i in range(row_count):
+        if null_mask[i]:
+            codes_list.append(0)  # placeholder
+            validity_list.append(0)
+        else:
+            codes_list.append(int(indices[i].as_py()))
+            validity_list.append(1)
+
+    codes_array = pyarray('i', codes_list)
+    dict_offsets_array = pyarray('i', dict_offsets)
+    dict_lengths_array = pyarray('i', dict_lengths)
+
+    # Create the dictionary-encoded StringVector
+    from draken.vectors.string_vector import StringVector
+    validity_array = bytearray(validity_list) if any(v == 0 for v in validity_list) else None
+
+    return StringVector.from_dict_buffers(codes_array, dict_offsets_array, dict_lengths_array, bytes(arena_bytes), validity_array)
+
+
 cpdef object vector_from_arrow(object array):
     import pyarrow as pa
     import pyarrow.compute as pc
@@ -223,6 +343,13 @@ cpdef object vector_from_arrow(object array):
         const_vec = _maybe_constant_from_dictionary_array(array)
         if const_vec is not None:
             return const_vec
+        # Preserve dictionary encoding for string-valued dictionaries
+        value_type = pa_type.value_type
+        if value_type.equals(pa.string()) or value_type.equals(pa.binary()):
+            return _string_vector_from_dictionary_array(array)
+        if pa.types.is_integer(value_type):
+            return _int64_vector_from_dictionary_array(array)
+        # For other non-string dictionaries, decode to dense
         return vector_from_arrow(array.dictionary_decode())
     if pa.types.is_run_end_encoded(pa_type):
         const_vec = _maybe_constant_from_run_end_array(array)
@@ -264,7 +391,9 @@ cpdef object vector_from_arrow(object array):
         return string_from_arrow(array)
     if pa_type.equals(pa.float64()):
         return float64_from_arrow(array)
-    if pa_type.equals(pa.float32()) or pa_type.equals(pa.float16()):
+    if pa_type.equals(pa.float32()):
+        return float32_from_arrow(array)
+    if pa_type.equals(pa.float16()):
         return float64_from_arrow(array.cast(pa.float64()))
     if pa_type.equals(pa.bool_()):
         return bool_from_arrow(array)
@@ -305,6 +434,8 @@ cpdef object vector_from_arrow(object array):
         return string_from_arrow_struct(array)
     if pa.types.is_decimal(pa_type):
         return decimal_from_arrow(array)
+    if pa.types.is_fixed_size_binary(pa_type):
+        return string_from_arrow(array.cast(pa.binary()))
 
     raise NotImplementedError(
         f"vector_from_arrow: no native Draken handler for Arrow type {pa_type!r}. "

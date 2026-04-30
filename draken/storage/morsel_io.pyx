@@ -77,6 +77,7 @@ from draken.vectors.interval_vector cimport IntervalVector
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.string_vector cimport StringVectorBuilder
 from draken.vectors.string_vector cimport from_dict_buffers as string_from_dict_buffers
+from draken.vectors.string_vector cimport from_packed_dict as string_from_packed_dict
 from draken.vectors.time_vector cimport TimeVector
 from draken.vectors.timestamp_vector cimport TimestampVector
 from draken.vectors.vector cimport Vector
@@ -987,6 +988,36 @@ cdef inline Vector _build_typed_dict_vector(
     )
 
 
+cdef Vector _build_dictionary_encoded_string_vector(
+    Py_ssize_t row_count,
+    const uint8_t* codes,
+    uint8_t code_width,
+    bytes dict_offsets_bytes,
+    bytes dict_values_bytes,
+    bytes null_bytes,
+):
+    """Build a StringVector with dictionary encoding preserved from DRKM segments."""
+    cdef Py_ssize_t dict_size = len(dict_offsets_bytes) // sizeof(int32_t) - 1
+    cdef const int32_t* dict_offsets = <const int32_t*>PyBytes_AS_STRING(dict_offsets_bytes)
+    cdef const uint8_t* dict_data = NULL
+    cdef const uint8_t* row_null_bitmap = NULL
+
+    if len(dict_values_bytes) > 0:
+        dict_data = <const uint8_t*>PyBytes_AS_STRING(dict_values_bytes)
+    if null_bytes is not None and len(null_bytes) > 0:
+        row_null_bitmap = <const uint8_t*>PyBytes_AS_STRING(null_bytes)
+
+    return <Vector>string_from_packed_dict(
+        codes,
+        code_width,
+        row_count,
+        dict_offsets,
+        dict_data,
+        dict_size,
+        row_null_bitmap,
+    )
+
+
 cdef Vector _build_dense_string_dict_vector(
     Py_ssize_t row_count,
     const uint8_t* codes,
@@ -1368,7 +1399,7 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
             flags = _const_flags_from_value_type(<int>const_accessor.value_type)
             if const_accessor.is_null != 0:
                 flags |= FLAG_HAS_NULLS
-        elif dtype == DRAKEN_STRING:
+        elif dtype == DRAKEN_STRING and draken_encoding != DRAKEN_ENCODING_DICTIONARY:
             encoding = ENCODING_VAR
             var_ptr = (<StringVector>(<Vector>morsel.ptr.columns[i])).ptr
             null_len = ((row_count + 7) >> 3) if var_ptr.null_bitmap != NULL else 0
@@ -2090,7 +2121,17 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                                 f"checksum mismatch for row null bitmap in dictionary column {i}"
                             )
 
-                if dtype == DRAKEN_DICTIONARY:
+                if dtype == DRAKEN_STRING:
+                    # String-valued dictionaries: preserve dictionary encoding
+                    vec = _build_dictionary_encoded_string_vector(
+                        row_count,
+                        <const uint8_t*>PyBytes_AS_STRING(codes_bytes),
+                        code_width,
+                        dict_offsets_bytes,
+                        dict_values_bytes,
+                        null_bytes,
+                    )
+                elif dtype == DRAKEN_DICTIONARY:
                     # Prefer typed dictionary vectors when possible (numeric types).
                     # DictionaryVector has been retired; restore into typed dictionary
                     # vectors where available, or dense strings otherwise.
@@ -2125,16 +2166,6 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                             <const void*>PyBytes_AS_STRING(dict_values_bytes),
                             dict_len,
                             bool(col_flags & FLAG_DICT_ORDERED),
-                        )
-                    elif dtype == DRAKEN_STRING:
-                        vec = _build_dense_string_dict_vector(
-                            row_count,
-                            <const uint8_t*>PyBytes_AS_STRING(codes_bytes),
-                            code_width,
-                            dict_offsets_bytes,
-                            dict_values_bytes,
-                            null_bytes,
-                            dict_null_bytes,
                         )
                     else:
                         raise DrakenMorselStorageError(

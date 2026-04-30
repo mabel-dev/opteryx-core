@@ -243,7 +243,9 @@ def _dict_compare(op: str, vec, right):
     if op == "InList":
         if isinstance(right, (list, tuple, set, frozenset)):
             right = frozenset(right)
-        return vector_in_list(vec, right)
+        # vector_in_list_int64_vector reads vec.ptr.data which is NULL for
+        # dict-encoded vectors; use the vector's own in_list which handles encoding.
+        return vec.in_list(right)
 
     value_list = list(right) if isinstance(right, (list, tuple, set, frozenset)) else right
 

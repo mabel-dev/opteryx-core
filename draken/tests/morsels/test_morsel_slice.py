@@ -274,9 +274,9 @@ def test_slice_with_array_type():
     assert list(val2) == [5, 6]
 
 
-@pytest.mark.skip(reason="Struct column access needs special handling in vector API")
 def test_slice_with_struct_type():
     """Test slicing column with struct type."""
+    import json
     tbl = pa.table({
         'structs': pa.array([
             {'a': 1, 'b': 'x'},
@@ -285,13 +285,12 @@ def test_slice_with_struct_type():
         ])
     })
     morsel = Morsel.from_arrow(tbl)
-    
+
     sliced = morsel.slice(1, 1)
     assert sliced.shape == (1, 1)
-    
-    # Verify by converting to Arrow and checking the value
+
     arrow_result = sliced.to_arrow()
-    val = arrow_result.column(0)[0].as_py()
+    val = json.loads(arrow_result.column(0)[0].as_py())
     assert val['a'] == 2
 
 

@@ -81,44 +81,56 @@ def test_timestamp_vector():
 
 def test_time32_vector():
     """Test TimeVector with Arrow time32 arrays."""
+    import datetime
     # Create time32 array (seconds since midnight)
     arrow_array = pa.array([3600, 7200, None, 10800], type=pa.time32('s'))
-    
+
     # Wrap in Draken vector
     vec = Vector.from_arrow(arrow_array)
-    
+
     # Check type and length
     assert vec.length == 4
     assert vec.null_count == 1
-    
+
     # Round trip
     roundtrip = vec.to_arrow()
     assert roundtrip.equals(arrow_array)
-    
-    # Check values
+
+    # Check values (3600s = 1 hour, 7200s = 2 hours, 10800s = 3 hours)
     pylist = vec.to_pylist()
-    assert pylist == [3600, 7200, None, 10800]
+    assert pylist == [
+        datetime.time(1, 0, 0),
+        datetime.time(2, 0, 0),
+        None,
+        datetime.time(3, 0, 0),
+    ]
 
 
 def test_time64_vector():
     """Test TimeVector with Arrow time64 arrays."""
+    import datetime
     # Create time64 array (microseconds since midnight)
     arrow_array = pa.array([3600000000, 7200000000, None, 10800000000], type=pa.time64('us'))
-    
+
     # Wrap in Draken vector
     vec = Vector.from_arrow(arrow_array)
-    
+
     # Check type and length
     assert vec.length == 4
     assert vec.null_count == 1
-    
+
     # Round trip
     roundtrip = vec.to_arrow()
     assert roundtrip.equals(arrow_array)
-    
-    # Check values
+
+    # Check values (3600000000us = 1 hour, 7200000000us = 2 hours, 10800000000us = 3 hours)
     pylist = vec.to_pylist()
-    assert pylist == [3600000000, 7200000000, None, 10800000000]
+    assert pylist == [
+        datetime.time(1, 0, 0),
+        datetime.time(2, 0, 0),
+        None,
+        datetime.time(3, 0, 0),
+    ]
 
 
 def test_array_vector():

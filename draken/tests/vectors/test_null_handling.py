@@ -112,16 +112,16 @@ class TestFloat64NullHandling:
         assert vec.null_count == 2
     
     def test_aggregations_skip_nulls(self):
-        """Test that aggregations handle null values."""
+        """Test that aggregations ignore null values."""
         arr = pa.array([1.0, None, 3.0, None, 5.0], type=pa.float64())
         vec = Vector.from_arrow(arr)
-        
-        # Current implementation: nulls are treated as 0 in aggregations
-        # sum includes nulls as 0: 1 + 0 + 3 + 0 + 5 = 9
+
+        # Nulls are ignored in all aggregations
+        # sum: 1 + 3 + 5 = 9
         assert vec.sum() == pytest.approx(9.0)
-        # min treats nulls as 0
-        assert vec.min() == pytest.approx(0.0)
-        # max ignores nulls properly
+        # min: min(1, 3, 5) = 1 (nulls ignored)
+        assert vec.min() == pytest.approx(1.0)
+        # max: max(1, 3, 5) = 5
         assert vec.max() == pytest.approx(5.0)
     
     def test_all_nulls_aggregations(self):
@@ -131,10 +131,12 @@ class TestFloat64NullHandling:
         
         # Sum of all nulls (treated as zeros)
         assert vec.sum() == pytest.approx(0.0)
-        
-        # Min/max on all nulls should be 0 (current behavior)
-        assert vec.min() == pytest.approx(0.0)
-        assert vec.max() == pytest.approx(0.0)
+
+        # Min/max on all nulls should raise ValueError
+        with pytest.raises(ValueError, match="all-null"):
+            vec.min()
+        with pytest.raises(ValueError, match="all-null"):
+            vec.max()
 
     def test_take_preserves_nulls(self):
         """Test that take operation preserves null values."""

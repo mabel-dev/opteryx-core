@@ -10,10 +10,11 @@
 Float32Vector: Cython implementation of a fixed-width float32 column vector for Draken.
 """
 
+from cpython.bytes cimport PyBytes_AS_STRING, PyBytes_FromStringAndSize
 from cpython.mem cimport PyMem_Malloc
 from libc.string cimport memset, memcpy
 
-from libc.stdint cimport int32_t, int8_t, uint16_t, uint32_t, uint64_t, uint8_t
+from libc.stdint cimport int32_t, int8_t, intptr_t, uint16_t, uint32_t, uint64_t, uint8_t
 from libc.stdlib cimport free, malloc
 from libc.math cimport isinf, isnan, llround
 
@@ -1281,5 +1282,52 @@ cdef Float32Vector from_sequence(float[::1] data):
     vec.ptr.length = <size_t> data.shape[0]
     vec.ptr.data = <void*> &data[0]
     vec.ptr.null_bitmap = NULL
+
+    return vec
+
+
+cdef Float32Vector from_arrow(object array):
+    """Zero-copy wrap of a PyArrow float32 array as Float32Vector."""
+    cdef Float32Vector vec = Float32Vector(0, True)
+    vec.ptr = <DrakenFixedBuffer*> malloc(sizeof(DrakenFixedBuffer))
+    if vec.ptr == NULL:
+        raise MemoryError()
+    vec.owns_data = False
+
+    cdef object bufs = array.buffers()
+    vec._arrow_null_buf = bufs[0]
+    vec._arrow_data_buf = bufs[1]
+
+    cdef intptr_t base_ptr = <intptr_t> bufs[1].address
+    cdef Py_ssize_t offset = array.offset
+    cdef intptr_t nb_addr
+    cdef Py_ssize_t nb_size
+    cdef uint8_t* src_bitmap
+    cdef uint8_t* dst_bitmap
+    cdef object new_bitmap_bytes
+    cdef Py_ssize_t i
+
+    vec.ptr.type = DRAKEN_FLOAT32
+    vec.ptr.itemsize = 4
+    vec.ptr.length = <size_t> len(array)
+    vec.ptr.data = <void*> (base_ptr + offset * 4)
+
+    if bufs[0] is not None:
+        nb_addr = bufs[0].address
+        if offset % 8 == 0:
+            vec.ptr.null_bitmap = (<uint8_t*> nb_addr) + (offset >> 3)
+        else:
+            nb_size = (len(array) + 7) // 8
+            new_bitmap_bytes = PyBytes_FromStringAndSize(NULL, nb_size)
+            dst_bitmap = <uint8_t*> PyBytes_AS_STRING(new_bitmap_bytes)
+            memset(dst_bitmap, 0, nb_size)
+            src_bitmap = <uint8_t*> nb_addr
+            for i in range(len(array)):
+                if (src_bitmap[(offset + i) >> 3] >> ((offset + i) & 7)) & 1:
+                    dst_bitmap[i >> 3] |= (1 << (i & 7))
+            vec.ptr.null_bitmap = dst_bitmap
+            vec._arrow_null_buf = new_bitmap_bytes
+    else:
+        vec.ptr.null_bitmap = NULL
 
     return vec

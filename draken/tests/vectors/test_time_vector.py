@@ -32,22 +32,36 @@ class TestTimeVectorBasics:
     
     def test_to_pylist(self):
         """Test conversion to Python list."""
+        import datetime
         arr = pa.array([10000, 20000, 30000], type=pa.time64('us'))
         vec = Vector.from_arrow(arr)
-        
+
         result = vec.to_pylist()
-        expected = [10000, 20000, 30000]
-        
+        # 10000 microseconds = 0 hours, 0 minutes, 0 seconds, 10000 microseconds
+        # 20000 microseconds = 0 hours, 0 minutes, 0 seconds, 20000 microseconds
+        # 30000 microseconds = 0 hours, 0 minutes, 0 seconds, 30000 microseconds
+        expected = [
+            datetime.time(0, 0, 0, 10000),
+            datetime.time(0, 0, 0, 20000),
+            datetime.time(0, 0, 0, 30000),
+        ]
+
         assert result == expected
     
     def test_to_pylist_with_nulls(self):
         """Test conversion to Python list with nulls."""
+        import datetime
         arr = pa.array([10000, None, 30000, None], type=pa.time64('us'))
         vec = Vector.from_arrow(arr)
-        
+
         result = vec.to_pylist()
-        expected = [10000, None, 30000, None]
-        
+        expected = [
+            datetime.time(0, 0, 0, 10000),
+            None,
+            datetime.time(0, 0, 0, 30000),
+            None,
+        ]
+
         assert result == expected
     
     def test_length(self):
@@ -123,43 +137,59 @@ class TestTimeVectorTake:
     def test_take_basic(self):
         """Test basic take operation."""
         import numpy as np
+        import datetime
         arr = pa.array([10000, 20000, 30000, 40000, 50000], type=pa.time64('us'))
         vec = Vector.from_arrow(arr)
-        
+
         indices = np.array([0, 2, 4], dtype=np.int32)
         result = vec.take(indices)
-        
-        assert result.to_pylist() == [10000, 30000, 50000]
+
+        assert result.to_pylist() == [
+            datetime.time(0, 0, 0, 10000),
+            datetime.time(0, 0, 0, 30000),
+            datetime.time(0, 0, 0, 50000),
+        ]
     
     def test_take_with_nulls(self):
         """Test take operation with nulls."""
         import numpy as np
+        import datetime
         arr = pa.array([10000, None, 30000, None, 50000], type=pa.time64('us'))
         vec = Vector.from_arrow(arr)
-        
+
         indices = np.array([0, 1, 4], dtype=np.int32)
         result = vec.take(indices)
-        
-        # Current implementation: nulls become 0
-        assert result.to_pylist() == [10000, 0, 50000]
+
+        # Nulls are preserved through take
+        assert result.to_pylist() == [
+            datetime.time(0, 0, 0, 10000),
+            None,
+            datetime.time(0, 0, 0, 50000),
+        ]
     
     def test_take_single_index(self):
         """Test take with single index."""
         import numpy as np
+        import datetime
         arr = pa.array([10000, 20000, 30000], type=pa.time64('us'))
         vec = Vector.from_arrow(arr)
-        
+
         result = vec.take(np.array([1], dtype=np.int32))
-        assert result.to_pylist() == [20000]
+        assert result.to_pylist() == [datetime.time(0, 0, 0, 20000)]
     
     def test_take_all_indices(self):
         """Test take with all indices."""
         import numpy as np
+        import datetime
         arr = pa.array([10000, 20000, 30000], type=pa.time64('us'))
         vec = Vector.from_arrow(arr)
-        
+
         result = vec.take(np.array([0, 1, 2], dtype=np.int32))
-        assert result.to_pylist() == [10000, 20000, 30000]
+        assert result.to_pylist() == [
+            datetime.time(0, 0, 0, 10000),
+            datetime.time(0, 0, 0, 20000),
+            datetime.time(0, 0, 0, 30000),
+        ]
 
 
 class TestTimeVectorEdgeCases:
@@ -167,35 +197,45 @@ class TestTimeVectorEdgeCases:
     
     def test_single_value(self):
         """Test vector with single value."""
+        import datetime
         arr = pa.array([10000], type=pa.time64('us'))
         vec = Vector.from_arrow(arr)
-        
+
         assert vec.length == 1
-        assert vec.to_pylist() == [10000]
+        assert vec.to_pylist() == [datetime.time(0, 0, 0, 10000)]
     
     def test_duplicate_values(self):
         """Test vector with duplicate values."""
+        import datetime
         arr = pa.array([10000, 10000, 10000], type=pa.time64('us'))
         vec = Vector.from_arrow(arr)
-        
+
         # TimeVector doesn't have equals - just verify creation
-        assert vec.to_pylist() == [10000, 10000, 10000]
+        assert vec.to_pylist() == [
+            datetime.time(0, 0, 0, 10000),
+            datetime.time(0, 0, 0, 10000),
+            datetime.time(0, 0, 0, 10000),
+        ]
     
     def test_very_large_time_values(self):
         """Test with large time values."""
+        import datetime
         # Max time in microseconds for a day
         max_time = 86400000000  # 24 hours in microseconds
         arr = pa.array([0, max_time // 2, max_time - 1], type=pa.time64('us'))
         vec = Vector.from_arrow(arr)
-        
+
         assert vec.length == 3
-        assert vec.to_pylist()[0] == 0
+        assert vec.to_pylist()[0] == datetime.time(0, 0, 0, 0)
     
     def test_sequential_times(self):
         """Test with sequential time values."""
+        import datetime
         times = list(range(0, 50000, 10000))
         arr = pa.array(times, type=pa.time64('us'))
         vec = Vector.from_arrow(arr)
-        
+
         assert vec.length == len(times)
-        assert vec.to_pylist() == times
+        # Convert microseconds to time objects
+        expected = [datetime.time(0, 0, 0, t) for t in times]
+        assert vec.to_pylist() == expected

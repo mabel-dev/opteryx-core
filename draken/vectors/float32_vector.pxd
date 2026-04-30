@@ -82,6 +82,7 @@ cdef Float32Vector from_packed_dict(
     const uint8_t* dict_entry_null_bitmap=*,
 )
 cdef Float32Vector from_sequence(float[::1] data)
+cdef Float32Vector from_arrow(object array)
 cdef Float32Vector from_rle_builder(
     float* run_values,
     int32_t* run_lengths,

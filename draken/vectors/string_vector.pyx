@@ -2593,7 +2593,7 @@ cdef class _StringVectorView:
     cpdef Py_ssize_t value_len(self, Py_ssize_t i):
         if i < 0 or i >= self._ptr.length:
             raise IndexError("Index out of range")
-        return self._offsets[i + 1] - self._offsets[i]
+        return <Py_ssize_t>(<uint32_t>self._offsets[i + 1] - <uint32_t>self._offsets[i])
 
     cpdef bint is_null(self, Py_ssize_t i):
         if i < 0 or i >= self._ptr.length:

@@ -601,6 +601,8 @@ cdef class Float64Vector(Vector):
         """Return mask: 1 if element is in value_set, else 0. Propagates NULLs."""
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_float64(self).in_list(value_set)
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_float64(self).in_list(value_set)
 
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n

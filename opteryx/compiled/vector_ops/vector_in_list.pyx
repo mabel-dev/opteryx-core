@@ -15,7 +15,7 @@ from draken.vectors.vector cimport Vector
 from draken.vectors.int64_vector cimport Int64Vector
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.bool_vector cimport BoolVector
-from draken.core.buffers cimport DrakenVarBuffer
+from draken.core.buffers cimport DrakenVarBuffer, DRAKEN_ENCODING_DENSE, DRAKEN_ENCODING_CONSTANT, DRAKEN_ENCODING_DICTIONARY
 
 cdef BoolVector vector_in_list_int64_vector(Int64Vector vec, set values):
     cdef Py_ssize_t i, n = vec.ptr.length
@@ -89,6 +89,7 @@ cdef BoolVector _list_in_list_generic(Vector vec, set values):
     cdef BoolVector out
     cdef uint8_t* dst
 
+    print("DEBUG: Using generic fallback for IN operator")
     py_list = vec.to_pylist()
     n = len(py_list)
     nbytes = (n + 7) >> 3
@@ -116,8 +117,9 @@ cpdef BoolVector vector_in_list(object arr, object values):
     if isinstance(values, frozenset):
         values = set(values)
 
+    # Use generic fallback for all Int64Vectors due to segfault with vector_in_list_int64_vector
     if isinstance(arr, Int64Vector):
-        return vector_in_list_int64_vector(arr, values)
+        return _list_in_list_generic(arr, values)
     if isinstance(arr, StringVector):
         return vector_in_list_string_vector(arr, values)
     if isinstance(arr, Vector):

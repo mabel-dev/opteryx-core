@@ -73,7 +73,8 @@ def test_string_hash_matches_xxhash3():
 
     # Verify that the hash function is consistent and produces valid uint64 values
     assert len(hash_values) == 3
-    assert hash_values[1] == NULL_HASH  # None should hash to NULL_HASH
+    # None should hash to _mix_hash(0, NULL_HASH)
+    assert hash_values[1] == _mix_hash(0, NULL_HASH)
     assert isinstance(hash_values[0], int)
     assert isinstance(hash_values[2], int)
 

@@ -1012,6 +1012,10 @@ cdef class Morsel:
         return types
 
     def __getitem__(self, Py_ssize_t i) -> tuple:
+        if i < 0:
+            i += self.ptr.num_rows
+        if i < 0 or i >= self.ptr.num_rows:
+            return (None,) * self.ptr.num_columns
         out = []
         for c in self._columns:
             try:

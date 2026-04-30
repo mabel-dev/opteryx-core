@@ -111,23 +111,27 @@ update: ## Update all dependencies
 # === TESTING ===
 
 test: check-python compile dev-install ## Run full test suite with compiled extensions
-	$(call print_blue,"Running full test suite...")
 	@$(PIP) install --upgrade pytest pytest-xdist
-	@clear
+	@clear || true
 	@MANUAL_TEST=1 $(PYTEST) -n auto --color=yes
 
 test-quick: check-python compile ## Run quick test (alias: t)
-	@clear
+	@clear || true
 	@$(PYTHON) tests/integration/sql_battery/run_shapes_battery.py
 
 q:
-	@clear
+	@clear || true
 	@$(PYTHON) tests/integration/sql_battery/test_shapes_basic.py
 
 dt: ## Run draken unit tests
 	$(call print_blue,"Running draken unit tests...")
 	@clear || true
 	@$(PYTEST) draken/tests/ -v --tb=short
+
+tpch: ## Run TPCH tests
+	$(call print_blue,"Running TPCH tests...")
+	@clear || true
+	@$(PYTHON) tests/integration/sql_battery/test_battery_tpch.py
 
 b: check-python
 	@clear || true
@@ -143,7 +147,7 @@ go:
 	@$(PYTHON) tests/groupby_combo_generator_resilient.py --config tests/groupby_combo_tests_config.json --output /tmp/groupby_results.json
 
 clickbench:
-	@clear
+	@clear || true
 	@$(PYTHON) tests/performance/clickbench/clickbench.py
 
 # Aliases for backward compatibility
