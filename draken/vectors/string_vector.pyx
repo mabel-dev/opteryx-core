@@ -2541,12 +2541,11 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t i
         cdef int32_t start, end
-        cdef int32_t min_start = -1, min_end = -1
+        cdef int32_t best_start = -1, best_end = -1
         cdef char* data = <char*> ptr.data
-        cdef bytes result
-        cdef int32_t cmp
-        cdef int32_t cur_start, cur_end, cur_len, min_len
-        cdef char* min_ptr = NULL
+        cdef int cmp
+        cdef int32_t cur_len, best_len, common_len
+        cdef char* best_ptr = NULL
         cdef char* cur_ptr
         cdef uint8_t byte, bit
 
@@ -2556,7 +2555,6 @@ cdef class StringVector(Vector):
             return PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length)
 
         for i in range(n):
-            # Check if value is null
             if ptr.null_bitmap != NULL:
                 byte = ptr.null_bitmap[i >> 3]
                 bit = (byte >> (i & 7)) & 1
@@ -2566,40 +2564,28 @@ cdef class StringVector(Vector):
             start = ptr.offsets[i]
             end = ptr.offsets[i + 1]
 
-            if min_start == -1:
-                min_start = start
-                min_end = end
-                min_ptr = data + start
-            else:
-                cur_start = start
-                cur_end = end
-                cur_len = cur_end - cur_start
-                min_len = min_end - min_start
-                cur_ptr = data + cur_start
+            if best_start == -1:
+                best_start = start
+                best_end = end
+                best_ptr = data + start
+                continue
 
-                # Compare lexicographically
-                if cur_len < min_len:
-                    cmp = memcmp(cur_ptr, min_ptr, cur_len)
-                    if cmp < 0 or (cmp == 0):  # cur is smaller or equal prefix
-                        min_start = cur_start
-                        min_end = cur_end
-                        min_ptr = cur_ptr
-                elif cur_len > min_len:
-                    cmp = memcmp(cur_ptr, min_ptr, min_len)
-                    if cmp < 0:  # cur is smaller
-                        min_start = cur_start
-                        min_end = cur_end
-                        min_ptr = cur_ptr
-                else:
-                    cmp = memcmp(cur_ptr, min_ptr, cur_len)
-                    if cmp < 0:
-                        min_start = cur_start
-                        min_end = cur_end
-                        min_ptr = cur_ptr
+            cur_ptr = data + start
+            cur_len = end - start
+            best_len = best_end - best_start
+            common_len = cur_len if cur_len < best_len else best_len
+            cmp = memcmp(cur_ptr, best_ptr, common_len)
+            # Tie on the shared prefix: shorter string is lex-smaller.
+            if cmp == 0 and cur_len < best_len:
+                cmp = -1
+            if cmp < 0:
+                best_start = start
+                best_end = end
+                best_ptr = cur_ptr
 
-        if min_start == -1:
+        if best_start == -1:
             return None
-        return PyBytes_FromStringAndSize(min_ptr, min_end - min_start)
+        return PyBytes_FromStringAndSize(best_ptr, best_end - best_start)
 
     cpdef object max(self):
         """Return lexicographically largest non-null string value, or None if all null or empty."""
@@ -2611,12 +2597,11 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t i
         cdef int32_t start, end
-        cdef int32_t max_start = -1, max_end = -1
+        cdef int32_t best_start = -1, best_end = -1
         cdef char* data = <char*> ptr.data
-        cdef bytes result
-        cdef int32_t cmp
-        cdef int32_t cur_start, cur_end, cur_len, max_len
-        cdef char* max_ptr = NULL
+        cdef int cmp
+        cdef int32_t cur_len, best_len, common_len
+        cdef char* best_ptr = NULL
         cdef char* cur_ptr
         cdef uint8_t byte, bit
 
@@ -2626,7 +2611,6 @@ cdef class StringVector(Vector):
             return PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length)
 
         for i in range(n):
-            # Check if value is null
             if ptr.null_bitmap != NULL:
                 byte = ptr.null_bitmap[i >> 3]
                 bit = (byte >> (i & 7)) & 1
@@ -2636,40 +2620,28 @@ cdef class StringVector(Vector):
             start = ptr.offsets[i]
             end = ptr.offsets[i + 1]
 
-            if max_start == -1:
-                max_start = start
-                max_end = end
-                max_ptr = data + start
-            else:
-                cur_start = start
-                cur_end = end
-                cur_len = cur_end - cur_start
-                max_len = max_end - max_start
-                cur_ptr = data + cur_start
+            if best_start == -1:
+                best_start = start
+                best_end = end
+                best_ptr = data + start
+                continue
 
-                # Compare lexicographically
-                if cur_len < max_len:
-                    cmp = memcmp(cur_ptr, max_ptr, cur_len)
-                    if cmp > 0:  # cur is larger
-                        max_start = cur_start
-                        max_end = cur_end
-                        max_ptr = cur_ptr
-                elif cur_len > max_len:
-                    cmp = memcmp(cur_ptr, max_ptr, max_len)
-                    if cmp > 0:  # cur is larger
-                        max_start = cur_start
-                        max_end = cur_end
-                        max_ptr = cur_ptr
-                else:
-                    cmp = memcmp(cur_ptr, max_ptr, cur_len)
-                    if cmp > 0:
-                        max_start = cur_start
-                        max_end = cur_end
-                        max_ptr = cur_ptr
+            cur_ptr = data + start
+            cur_len = end - start
+            best_len = best_end - best_start
+            common_len = cur_len if cur_len < best_len else best_len
+            cmp = memcmp(cur_ptr, best_ptr, common_len)
+            # Tie on the shared prefix: longer string is lex-larger.
+            if cmp == 0 and cur_len > best_len:
+                cmp = 1
+            if cmp > 0:
+                best_start = start
+                best_end = end
+                best_ptr = cur_ptr
 
-        if max_start == -1:
+        if best_start == -1:
             return None
-        return PyBytes_FromStringAndSize(max_ptr, max_end - max_start)
+        return PyBytes_FromStringAndSize(best_ptr, best_end - best_start)
 
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
         """Compare two strings at given indices lexicographically. Returns -1, 0, 1. Assumes non-null."""
@@ -2694,7 +2666,8 @@ cdef class StringVector(Vector):
         left_len = left_end - left_start
         right_len = right_end - right_start
 
-        cmp_result = memcmp(data + left_start, data + right_start, min(left_len, right_len))
+        cdef Py_ssize_t common_len = left_len if left_len < right_len else right_len
+        cmp_result = memcmp(data + left_start, data + right_start, common_len)
 
         if cmp_result != 0:
             return -1 if cmp_result < 0 else 1

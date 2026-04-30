@@ -895,6 +895,7 @@ cdef TimeVector from_arrow(object array):
 
     cdef intptr_t addr = base_ptr + offset * itemsize
     vec.ptr.data = <void*> addr
+    vec._arrow_data_buf = bufs[1]
 
     # Variables for null bitmap handling
     cdef Py_ssize_t n_bytes
@@ -912,6 +913,7 @@ cdef TimeVector from_arrow(object array):
         nb_addr = bufs[0].address
         if offset % 8 == 0:
             vec.ptr.null_bitmap = <uint8_t*> (nb_addr + (offset >> 3))
+            vec._arrow_null_buf = bufs[0]
         else:
             # Unaligned offset: copy and shift
             n_bytes = (vec.ptr.length + 7) // 8
