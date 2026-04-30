@@ -520,6 +520,10 @@ cdef class Float64Vector(Vector):
             return _materialize_rle_float64(self)._compare_vector(other, op)
         if other._encoding == DRAKEN_ENCODING_RLE:
             return self._compare_vector(_materialize_rle_float64(other), op)
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY:
+            return _materialize_dict_float64(self)._compare_vector(other, op)
+        if other._encoding == DRAKEN_ENCODING_DICTIONARY:
+            return self._compare_vector(_materialize_dict_float64(other), op)
         if self._has_const:
             return _materialize_const_float64(self)._compare_vector(other, op)
         if other._has_const:
@@ -1426,6 +1430,9 @@ cdef Float64Vector _materialize_rle_float64(Float64Vector rle_vec):
 
 cdef Float64Vector _materialize_dict_float64(Float64Vector vec):
     """Expand a dict-only Float64Vector to a dense Float64Vector (no src ptr.data needed)."""
+    if vec._dict_values == NULL or vec._dict_codes == NULL:
+        raise ValueError("Dictionary encoding not properly initialized")
+
     cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
     cdef Float64Vector dense = Float64Vector(<size_t>n)
     cdef double* dst = <double*>dense.ptr.data
@@ -1433,7 +1440,7 @@ cdef Float64Vector _materialize_dict_float64(Float64Vector vec):
     cdef uint8_t* codes = vec._dict_codes
     cdef uint8_t code_width = vec._dict_code_width
     cdef uint8_t* null_bitmap = vec.ptr.null_bitmap
-    cdef Py_ssize_t i
+    cdef Py_ssize_t i, dict_size = <Py_ssize_t>vec._dict_values.length
     cdef uint32_t code
     cdef Py_ssize_t nb_bytes
 
@@ -1442,6 +1449,8 @@ cdef Float64Vector _materialize_dict_float64(Float64Vector vec):
             dst[i] = 0.0
         else:
             code = _read_packed_code(codes, code_width, i)
+            if code >= dict_size:
+                raise ValueError(f"dictionary index out of bounds at row {i}: code {code} >= dict_size {dict_size}")
             dst[i] = dict_data[code]
 
     if null_bitmap != NULL:
