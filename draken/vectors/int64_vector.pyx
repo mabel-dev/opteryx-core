@@ -546,10 +546,17 @@ cdef class Int64Vector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        for i in range(n):
-            if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
-                if self._compare_int64_values(data[i], value, op):
-                    dst[i >> 3] |= (1 << (i & 7))
+        cdef uint8_t v
+        cdef uint8_t m
+        if src_null == NULL:
+            for i in range(n):
+                m = 1 if self._compare_int64_values(data[i], value, op) else 0
+                dst[i >> 3] |= <uint8_t>(m << (i & 7))
+        else:
+            for i in range(n):
+                v = (src_null[i >> 3] >> (i & 7)) & 1
+                m = 1 if self._compare_int64_values(data[i], value, op) else 0
+                dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
         return out
 
     cdef BoolVector _compare_vector(self, Int64Vector other, int op):
@@ -577,7 +584,7 @@ cdef class Int64Vector(Vector):
         cdef BoolVector out
         cdef uint8_t* dst
         cdef uint8_t* out_null = NULL
-        cdef bint valid1, valid2, valid
+        cdef uint8_t v1, v2, v, m
 
         if n != ptr2.length:
             raise ValueError("Vectors must have the same length")
@@ -595,15 +602,32 @@ cdef class Int64Vector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        for i in range(n):
-            valid1 = True if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1) != 0
-            valid2 = True if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1) != 0
-            valid = valid1 and valid2
-            if valid:
-                if out_null != NULL:
-                    out_null[i >> 3] |= (1 << (i & 7))
-                if self._compare_int64_values(data1[i], data2[i], op):
-                    dst[i >> 3] |= (1 << (i & 7))
+        # Branchless null evaluation (per docs/null_representation_optimizations.md Change 2).
+        # Specialize on null bitmap presence so the inner loop has no per-row branches.
+        if null1 == NULL and null2 == NULL:
+            for i in range(n):
+                m = 1 if self._compare_int64_values(data1[i], data2[i], op) else 0
+                dst[i >> 3] |= <uint8_t>(m << (i & 7))
+        elif null1 != NULL and null2 == NULL:
+            for i in range(n):
+                v = (null1[i >> 3] >> (i & 7)) & 1
+                m = 1 if self._compare_int64_values(data1[i], data2[i], op) else 0
+                dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
+                out_null[i >> 3] |= <uint8_t>(v << (i & 7))
+        elif null1 == NULL and null2 != NULL:
+            for i in range(n):
+                v = (null2[i >> 3] >> (i & 7)) & 1
+                m = 1 if self._compare_int64_values(data1[i], data2[i], op) else 0
+                dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
+                out_null[i >> 3] |= <uint8_t>(v << (i & 7))
+        else:
+            for i in range(n):
+                v1 = (null1[i >> 3] >> (i & 7)) & 1
+                v2 = (null2[i >> 3] >> (i & 7)) & 1
+                v = v1 & v2
+                m = 1 if self._compare_int64_values(data1[i], data2[i], op) else 0
+                dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
+                out_null[i >> 3] |= <uint8_t>(v << (i & 7))
         return out
 
     cpdef BoolVector equals(self, int64_t value):

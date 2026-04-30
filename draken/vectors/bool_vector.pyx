@@ -639,6 +639,8 @@ cdef class BoolVector(Vector):
     cpdef int8_t any(self):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_bool(self).any()
+        if self._has_const:
+            return 0 if self._const_is_null else <int8_t>(1 if self._const_value else 0)
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t nbytes = (ptr.length + 7) >> 3
         cdef Py_ssize_t i
@@ -650,6 +652,9 @@ cdef class BoolVector(Vector):
     cpdef int8_t all(self):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_bool(self).all()
+        if self._has_const:
+            # all-null: no non-null True values, treat as vacuously true (SQL semantics)
+            return 1 if self._const_is_null else <int8_t>(1 if self._const_value else 0)
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t i
