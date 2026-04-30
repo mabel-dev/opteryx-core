@@ -332,8 +332,16 @@ cpdef object vector_from_sequence(object data, object dtype=None):
                 break
 
         if first_val is None:
-            # All elements are None — return raw list; caller must handle
-            return data
+            # All elements are None — return a typed null-valued constant vector.
+            # Without a dtype hint, default to Int64Vector (consistent with the
+            # empty-list path above). Returning the raw list here is unsafe:
+            # downstream Cython code will treat it as a Vector and segfault.
+            dtype_val = _resolve_dtype_str(dtype)
+            if dtype_val in ('VARCHAR', 'BLOB', 'STRING', 'BINARY', 'LARGE_STRING', 'LARGE_BINARY'):
+                return StringVector.from_constant(b"", n, is_null=True)
+            if dtype_val in ('DOUBLE', 'FLOAT', 'FLOAT32', 'FLOAT64'):
+                return Float64Vector.from_constant(0.0, n, is_null=True)
+            return Int64Vector.from_constant(0, n, is_null=True)
 
         # bool must be checked before int (bool is a subclass of int)
         if isinstance(first_val, bool):
