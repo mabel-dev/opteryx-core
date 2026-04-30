@@ -524,10 +524,25 @@ cdef class DecimalVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        for i in range(n):
-            if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
-                if self._compare_decimal_values(data[i], rhs, op):
-                    dst[i >> 3] |= (1 << (i & 7))
+        cdef uint8_t v
+        cdef uint8_t m
+        cdef size_t valid_count
+        if src_null == NULL:
+            for i in range(n):
+                m = 1 if self._compare_decimal_values(data[i], rhs, op) else 0
+                dst[i >> 3] |= <uint8_t>(m << (i & 7))
+        else:
+            valid_count = simd_popcount(src_null, <size_t>nbytes)
+            if n > 0 and (valid_count * 10) < (<size_t>n * 3):
+                for i in range(n):
+                    if (src_null[i >> 3] >> (i & 7)) & 1:
+                        if self._compare_decimal_values(data[i], rhs, op):
+                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            else:
+                for i in range(n):
+                    v = (src_null[i >> 3] >> (i & 7)) & 1
+                    m = 1 if self._compare_decimal_values(data[i], rhs, op) else 0
+                    dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
         return out
 
     # ------------------------------------------------------------------
@@ -546,8 +561,10 @@ cdef class DecimalVector(Vector):
         cdef BoolVector out
         cdef uint8_t* dst
         cdef uint8_t* out_null
-        cdef bint valid1, valid2, any_nullable
+        cdef uint8_t v1, v2, v, mres, any_nullable
         cdef int64_t lval, rval
+        cdef size_t valid1_cnt, valid2_cnt, min_valid
+        cdef bint use_branching = False
 
         ptr1 = self.ptr
         ptr2 = other.ptr
@@ -589,32 +606,56 @@ cdef class DecimalVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        for i in range(n):
-            # Resolve left value
-            if self._has_const:
-                if self._const_is_null:
-                    continue
-                lval = self._const_value
-                valid1 = True
-            else:
-                valid1 = (null1 == NULL) or (((null1[i >> 3] >> (i & 7)) & 1) != 0)
-                lval = data1[i]
+        # Hoist loop-invariant const handling. If either side is a null constant,
+        # the result is all-null and we are done.
+        if (self._has_const and self._const_is_null) or (other._has_const and other._const_is_null):
+            return out
 
-            # Resolve right value
-            if other._has_const:
-                if other._const_is_null:
-                    continue
-                rval = other._const_value
-                valid2 = True
-            else:
-                valid2 = (null2 == NULL) or (((null2[i >> 3] >> (i & 7)) & 1) != 0)
-                rval = data2[i]
+        # Compute density gate (only meaningful in the dense vec/vec case).
+        if not self._has_const and not other._has_const and n > 0 and (null1 != NULL or null2 != NULL):
+            valid1_cnt = simd_popcount(null1, <size_t>nbytes) if null1 != NULL else <size_t>n
+            valid2_cnt = simd_popcount(null2, <size_t>nbytes) if null2 != NULL else <size_t>n
+            min_valid = valid1_cnt if valid1_cnt < valid2_cnt else valid2_cnt
+            use_branching = (min_valid * 10) < (<size_t>n * 3)
 
-            if valid1 and valid2:
+        if self._has_const:
+            lval = self._const_value
+            for i in range(n):
+                v2 = 1 if (other._has_const or null2 == NULL) else (null2[i >> 3] >> (i & 7)) & 1
+                rval = other._const_value if other._has_const else data2[i]
+                mres = 1 if self._compare_decimal_values(lval, rval, op) else 0
+                dst[i >> 3] |= <uint8_t>((v2 & mres) << (i & 7))
                 if out_null != NULL:
-                    out_null[i >> 3] |= (1 << (i & 7))
-                if self._compare_decimal_values(lval, rval, op):
-                    dst[i >> 3] |= (1 << (i & 7))
+                    out_null[i >> 3] |= <uint8_t>(v2 << (i & 7))
+        elif other._has_const:
+            rval = other._const_value
+            for i in range(n):
+                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
+                lval = data1[i]
+                mres = 1 if self._compare_decimal_values(lval, rval, op) else 0
+                dst[i >> 3] |= <uint8_t>((v1 & mres) << (i & 7))
+                if out_null != NULL:
+                    out_null[i >> 3] |= <uint8_t>(v1 << (i & 7))
+        elif null1 == NULL and null2 == NULL:
+            for i in range(n):
+                mres = 1 if self._compare_decimal_values(data1[i], data2[i], op) else 0
+                dst[i >> 3] |= <uint8_t>(mres << (i & 7))
+        elif use_branching:
+            for i in range(n):
+                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
+                v2 = 1 if null2 == NULL else (null2[i >> 3] >> (i & 7)) & 1
+                if v1 & v2:
+                    out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
+                    if self._compare_decimal_values(data1[i], data2[i], op):
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+        else:
+            for i in range(n):
+                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
+                v2 = 1 if null2 == NULL else (null2[i >> 3] >> (i & 7)) & 1
+                v = v1 & v2
+                mres = 1 if self._compare_decimal_values(data1[i], data2[i], op) else 0
+                dst[i >> 3] |= <uint8_t>((v & mres) << (i & 7))
+                out_null[i >> 3] |= <uint8_t>(v << (i & 7))
 
         return out
 

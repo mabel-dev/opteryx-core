@@ -27,6 +27,7 @@ cdef class Date32Vector(Vector):
     cpdef Date32Vector take(self, int32_t[::1] indices)
     cdef bint _compare_date_values(self, int32_t left, int32_t right, int op) nogil
     cdef BoolVector _compare_scalar(self, int32_t value, int op)
+    cdef BoolVector _compare_vector_op(self, Date32Vector other, int op)
 
     cpdef BoolVector equals(self, int32_t value)
     cpdef BoolVector not_equals(self, int32_t value)

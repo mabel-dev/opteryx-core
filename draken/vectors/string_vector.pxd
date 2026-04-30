@@ -56,6 +56,13 @@ cdef class StringVector(Vector):
     cpdef BoolVector like(self, bytes pattern, bint ignore_case=*)
     cpdef BoolVector rlike(self, bytes pattern)
     cpdef BoolVector contains(self, bytes substr, bint ignore_case=*)
+    cdef inline int _string_compare_pair(
+        self,
+        const uint8_t* d1, int32_t s1, int32_t l1,
+        const uint8_t* d2, int32_t s2, int32_t l2,
+        int op,
+    ) nogil
+    cdef BoolVector _compare_vector_op(self, StringVector other, int op)
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
     cpdef StringVector take(self, int32_t[::1] indices)
     cpdef object min(self)

@@ -289,10 +289,91 @@ cdef class Date32Vector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        for i in range(n):
-            if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
-                if self._compare_date_values(data[i], value, op):
-                    dst[i >> 3] |= (1 << (i & 7))
+        cdef uint8_t v
+        cdef uint8_t m
+        cdef size_t valid_count
+        if src_null == NULL:
+            for i in range(n):
+                m = 1 if self._compare_date_values(data[i], value, op) else 0
+                dst[i >> 3] |= <uint8_t>(m << (i & 7))
+        else:
+            valid_count = simd_popcount(src_null, <size_t>nbytes)
+            if n > 0 and (valid_count * 10) < (<size_t>n * 3):
+                for i in range(n):
+                    if (src_null[i >> 3] >> (i & 7)) & 1:
+                        if self._compare_date_values(data[i], value, op):
+                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            else:
+                for i in range(n):
+                    v = (src_null[i >> 3] >> (i & 7)) & 1
+                    m = 1 if self._compare_date_values(data[i], value, op) else 0
+                    dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
+        return out
+
+    cdef BoolVector _compare_vector_op(self, Date32Vector other, int op):
+        # Consolidates the 6 *_vector comparison ops; branchless null evaluation
+        # with a >70% null density gate (per docs/null_representation_optimizations.md).
+        if self._has_const:
+            return _materialize_const_date32(self)._compare_vector_op(other, op)
+        if other._has_const:
+            return self._compare_vector_op(_materialize_const_date32(other), op)
+        cdef DrakenFixedBuffer* ptr1 = self.ptr
+        cdef DrakenFixedBuffer* ptr2 = other.ptr
+        cdef int32_t* data1 = <int32_t*> ptr1.data
+        cdef int32_t* data2 = <int32_t*> ptr2.data
+        cdef uint8_t* null1 = ptr1.null_bitmap
+        cdef uint8_t* null2 = ptr2.null_bitmap
+        cdef Py_ssize_t i, n = ptr1.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out
+        cdef uint8_t* dst
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t v1, v2, v, m
+
+        if n != ptr2.length:
+            raise ValueError("Vectors must have the same length")
+
+        out = BoolVector(<size_t>n)
+        dst = <uint8_t*> out.ptr.data
+        memset(dst, 0, nbytes)
+
+        if (null1 != NULL or null2 != NULL) and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        cdef size_t valid1_cnt, valid2_cnt, min_valid
+        cdef bint use_branching = False
+        if n > 0 and (null1 != NULL or null2 != NULL):
+            valid1_cnt = simd_popcount(null1, <size_t>nbytes) if null1 != NULL else <size_t>n
+            valid2_cnt = simd_popcount(null2, <size_t>nbytes) if null2 != NULL else <size_t>n
+            min_valid = valid1_cnt if valid1_cnt < valid2_cnt else valid2_cnt
+            use_branching = (min_valid * 10) < (<size_t>n * 3)
+
+        if null1 == NULL and null2 == NULL:
+            for i in range(n):
+                m = 1 if self._compare_date_values(data1[i], data2[i], op) else 0
+                dst[i >> 3] |= <uint8_t>(m << (i & 7))
+        elif use_branching:
+            for i in range(n):
+                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
+                v2 = 1 if null2 == NULL else (null2[i >> 3] >> (i & 7)) & 1
+                if v1 & v2:
+                    out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
+                    if self._compare_date_values(data1[i], data2[i], op):
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+        else:
+            for i in range(n):
+                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
+                v2 = 1 if null2 == NULL else (null2[i >> 3] >> (i & 7)) & 1
+                v = v1 & v2
+                m = 1 if self._compare_date_values(data1[i], data2[i], op) else 0
+                dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
+                out_null[i >> 3] |= <uint8_t>(v << (i & 7))
         return out
 
     cpdef BoolVector equals(self, int32_t value):
@@ -314,274 +395,22 @@ cdef class Date32Vector(Vector):
         return self._compare_scalar(value, 5)
 
     cpdef BoolVector equals_vector(self, Date32Vector other):
-        if self._has_const:
-            return _materialize_const_date32(self).equals_vector(other)
-        if other._has_const:
-            return self.equals_vector(_materialize_const_date32(other))
-        cdef DrakenFixedBuffer* ptr1 = self.ptr
-        cdef DrakenFixedBuffer* ptr2 = other.ptr
-        cdef int32_t* data1 = <int32_t*> ptr1.data
-        cdef int32_t* data2 = <int32_t*> ptr2.data
-        cdef uint8_t* null1 = ptr1.null_bitmap
-        cdef uint8_t* null2 = ptr2.null_bitmap
-        cdef Py_ssize_t i, n = ptr1.length
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out
-        cdef uint8_t* dst
-        cdef uint8_t* out_null = NULL
-        cdef bint valid1, valid2, valid
-
-        if n != ptr2.length:
-            raise ValueError("Vectors must have the same length")
-
-        out = BoolVector(<size_t>n)
-        dst = <uint8_t*> out.ptr.data
-        memset(dst, 0, nbytes)
-
-        if (null1 != NULL or null2 != NULL) and nbytes != 0:
-            out_null = <uint8_t*> malloc(nbytes)
-            if out_null == NULL:
-                raise MemoryError()
-            memset(out_null, 0, nbytes)
-            out.ptr.null_bitmap = out_null
-        else:
-            out.ptr.null_bitmap = NULL
-
-        for i in range(n):
-            valid1 = True if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1) != 0
-            valid2 = True if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1) != 0
-            valid = valid1 and valid2
-            if valid:
-                if out_null != NULL:
-                    out_null[i >> 3] |= (1 << (i & 7))
-                if self._compare_date_values(data1[i], data2[i], 0):
-                    dst[i >> 3] |= (1 << (i & 7))
-        return out
+        return self._compare_vector_op(other, 0)
 
     cpdef BoolVector not_equals_vector(self, Date32Vector other):
-        if self._has_const:
-            return _materialize_const_date32(self).not_equals_vector(other)
-        if other._has_const:
-            return self.not_equals_vector(_materialize_const_date32(other))
-        cdef DrakenFixedBuffer* ptr1 = self.ptr
-        cdef DrakenFixedBuffer* ptr2 = other.ptr
-        cdef int32_t* data1 = <int32_t*> ptr1.data
-        cdef int32_t* data2 = <int32_t*> ptr2.data
-        cdef uint8_t* null1 = ptr1.null_bitmap
-        cdef uint8_t* null2 = ptr2.null_bitmap
-        cdef Py_ssize_t i, n = ptr1.length
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out
-        cdef uint8_t* dst
-        cdef uint8_t* out_null = NULL
-        cdef bint valid1, valid2, valid
-
-        if n != ptr2.length:
-            raise ValueError("Vectors must have the same length")
-
-        out = BoolVector(<size_t>n)
-        dst = <uint8_t*> out.ptr.data
-        memset(dst, 0, nbytes)
-
-        if (null1 != NULL or null2 != NULL) and nbytes != 0:
-            out_null = <uint8_t*> malloc(nbytes)
-            if out_null == NULL:
-                raise MemoryError()
-            memset(out_null, 0, nbytes)
-            out.ptr.null_bitmap = out_null
-        else:
-            out.ptr.null_bitmap = NULL
-
-        for i in range(n):
-            valid1 = True if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1) != 0
-            valid2 = True if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1) != 0
-            valid = valid1 and valid2
-            if valid:
-                if out_null != NULL:
-                    out_null[i >> 3] |= (1 << (i & 7))
-                if self._compare_date_values(data1[i], data2[i], 1):
-                    dst[i >> 3] |= (1 << (i & 7))
-        return out
+        return self._compare_vector_op(other, 1)
 
     cpdef BoolVector greater_than_vector(self, Date32Vector other):
-        if self._has_const:
-            return _materialize_const_date32(self).greater_than_vector(other)
-        if other._has_const:
-            return self.greater_than_vector(_materialize_const_date32(other))
-        cdef DrakenFixedBuffer* ptr1 = self.ptr
-        cdef DrakenFixedBuffer* ptr2 = other.ptr
-        cdef int32_t* data1 = <int32_t*> ptr1.data
-        cdef int32_t* data2 = <int32_t*> ptr2.data
-        cdef uint8_t* null1 = ptr1.null_bitmap
-        cdef uint8_t* null2 = ptr2.null_bitmap
-        cdef Py_ssize_t i, n = ptr1.length
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out
-        cdef uint8_t* dst
-        cdef uint8_t* out_null = NULL
-        cdef bint valid1, valid2, valid
-
-        if n != ptr2.length:
-            raise ValueError("Vectors must have the same length")
-
-        out = BoolVector(<size_t>n)
-        dst = <uint8_t*> out.ptr.data
-        memset(dst, 0, nbytes)
-
-        if (null1 != NULL or null2 != NULL) and nbytes != 0:
-            out_null = <uint8_t*> malloc(nbytes)
-            if out_null == NULL:
-                raise MemoryError()
-            memset(out_null, 0, nbytes)
-            out.ptr.null_bitmap = out_null
-        else:
-            out.ptr.null_bitmap = NULL
-
-        for i in range(n):
-            valid1 = True if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1) != 0
-            valid2 = True if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1) != 0
-            valid = valid1 and valid2
-            if valid:
-                if out_null != NULL:
-                    out_null[i >> 3] |= (1 << (i & 7))
-                if self._compare_date_values(data1[i], data2[i], 2):
-                    dst[i >> 3] |= (1 << (i & 7))
-        return out
+        return self._compare_vector_op(other, 2)
 
     cpdef BoolVector greater_than_or_equals_vector(self, Date32Vector other):
-        if self._has_const:
-            return _materialize_const_date32(self).greater_than_or_equals_vector(other)
-        if other._has_const:
-            return self.greater_than_or_equals_vector(_materialize_const_date32(other))
-        cdef DrakenFixedBuffer* ptr1 = self.ptr
-        cdef DrakenFixedBuffer* ptr2 = other.ptr
-        cdef int32_t* data1 = <int32_t*> ptr1.data
-        cdef int32_t* data2 = <int32_t*> ptr2.data
-        cdef uint8_t* null1 = ptr1.null_bitmap
-        cdef uint8_t* null2 = ptr2.null_bitmap
-        cdef Py_ssize_t i, n = ptr1.length
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out
-        cdef uint8_t* dst
-        cdef uint8_t* out_null = NULL
-        cdef bint valid1, valid2, valid
-
-        if n != ptr2.length:
-            raise ValueError("Vectors must have the same length")
-
-        out = BoolVector(<size_t>n)
-        dst = <uint8_t*> out.ptr.data
-        memset(dst, 0, nbytes)
-
-        if (null1 != NULL or null2 != NULL) and nbytes != 0:
-            out_null = <uint8_t*> malloc(nbytes)
-            if out_null == NULL:
-                raise MemoryError()
-            memset(out_null, 0, nbytes)
-            out.ptr.null_bitmap = out_null
-        else:
-            out.ptr.null_bitmap = NULL
-
-        for i in range(n):
-            valid1 = True if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1) != 0
-            valid2 = True if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1) != 0
-            valid = valid1 and valid2
-            if valid:
-                if out_null != NULL:
-                    out_null[i >> 3] |= (1 << (i & 7))
-                if self._compare_date_values(data1[i], data2[i], 3):
-                    dst[i >> 3] |= (1 << (i & 7))
-        return out
+        return self._compare_vector_op(other, 3)
 
     cpdef BoolVector less_than_vector(self, Date32Vector other):
-        if self._has_const:
-            return _materialize_const_date32(self).less_than_vector(other)
-        if other._has_const:
-            return self.less_than_vector(_materialize_const_date32(other))
-        cdef DrakenFixedBuffer* ptr1 = self.ptr
-        cdef DrakenFixedBuffer* ptr2 = other.ptr
-        cdef int32_t* data1 = <int32_t*> ptr1.data
-        cdef int32_t* data2 = <int32_t*> ptr2.data
-        cdef uint8_t* null1 = ptr1.null_bitmap
-        cdef uint8_t* null2 = ptr2.null_bitmap
-        cdef Py_ssize_t i, n = ptr1.length
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out
-        cdef uint8_t* dst
-        cdef uint8_t* out_null = NULL
-        cdef bint valid1, valid2, valid
-
-        if n != ptr2.length:
-            raise ValueError("Vectors must have the same length")
-
-        out = BoolVector(<size_t>n)
-        dst = <uint8_t*> out.ptr.data
-        memset(dst, 0, nbytes)
-
-        if (null1 != NULL or null2 != NULL) and nbytes != 0:
-            out_null = <uint8_t*> malloc(nbytes)
-            if out_null == NULL:
-                raise MemoryError()
-            memset(out_null, 0, nbytes)
-            out.ptr.null_bitmap = out_null
-        else:
-            out.ptr.null_bitmap = NULL
-
-        for i in range(n):
-            valid1 = True if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1) != 0
-            valid2 = True if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1) != 0
-            valid = valid1 and valid2
-            if valid:
-                if out_null != NULL:
-                    out_null[i >> 3] |= (1 << (i & 7))
-                if self._compare_date_values(data1[i], data2[i], 4):
-                    dst[i >> 3] |= (1 << (i & 7))
-        return out
+        return self._compare_vector_op(other, 4)
 
     cpdef BoolVector less_than_or_equals_vector(self, Date32Vector other):
-        if self._has_const:
-            return _materialize_const_date32(self).less_than_or_equals_vector(other)
-        if other._has_const:
-            return self.less_than_or_equals_vector(_materialize_const_date32(other))
-        cdef DrakenFixedBuffer* ptr1 = self.ptr
-        cdef DrakenFixedBuffer* ptr2 = other.ptr
-        cdef int32_t* data1 = <int32_t*> ptr1.data
-        cdef int32_t* data2 = <int32_t*> ptr2.data
-        cdef uint8_t* null1 = ptr1.null_bitmap
-        cdef uint8_t* null2 = ptr2.null_bitmap
-        cdef Py_ssize_t i, n = ptr1.length
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out
-        cdef uint8_t* dst
-        cdef uint8_t* out_null = NULL
-        cdef bint valid1, valid2, valid
-
-        if n != ptr2.length:
-            raise ValueError("Vectors must have the same length")
-
-        out = BoolVector(<size_t>n)
-        dst = <uint8_t*> out.ptr.data
-        memset(dst, 0, nbytes)
-
-        if (null1 != NULL or null2 != NULL) and nbytes != 0:
-            out_null = <uint8_t*> malloc(nbytes)
-            if out_null == NULL:
-                raise MemoryError()
-            memset(out_null, 0, nbytes)
-            out.ptr.null_bitmap = out_null
-        else:
-            out.ptr.null_bitmap = NULL
-
-        for i in range(n):
-            valid1 = True if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1) != 0
-            valid2 = True if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1) != 0
-            valid = valid1 and valid2
-            if valid:
-                if out_null != NULL:
-                    out_null[i >> 3] |= (1 << (i & 7))
-                if self._compare_date_values(data1[i], data2[i], 5):
-                    dst[i >> 3] |= (1 << (i & 7))
-        return out
+        return self._compare_vector_op(other, 5)
 
     cpdef BoolVector in_list(self, object value_set):
         """Return mask: 1 if element is in value_set, else 0. Propagates NULLs."""

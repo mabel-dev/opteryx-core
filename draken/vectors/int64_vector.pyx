@@ -548,15 +548,27 @@ cdef class Int64Vector(Vector):
 
         cdef uint8_t v
         cdef uint8_t m
+        cdef size_t valid_count
+        # Gate: above ~70% null density, the original branching loop wins by
+        # short-circuiting writes for null rows. Below that, branchless wins
+        # by avoiding mispredicted comparison-result branches.
         if src_null == NULL:
             for i in range(n):
                 m = 1 if self._compare_int64_values(data[i], value, op) else 0
                 dst[i >> 3] |= <uint8_t>(m << (i & 7))
         else:
-            for i in range(n):
-                v = (src_null[i >> 3] >> (i & 7)) & 1
-                m = 1 if self._compare_int64_values(data[i], value, op) else 0
-                dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
+            valid_count = simd_popcount(src_null, <size_t>nbytes)
+            if n > 0 and (valid_count * 10) < (<size_t>n * 3):
+                # > 70% nulls: branching path
+                for i in range(n):
+                    if (src_null[i >> 3] >> (i & 7)) & 1:
+                        if self._compare_int64_values(data[i], value, op):
+                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            else:
+                for i in range(n):
+                    v = (src_null[i >> 3] >> (i & 7)) & 1
+                    m = 1 if self._compare_int64_values(data[i], value, op) else 0
+                    dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
         return out
 
     cdef BoolVector _compare_vector(self, Int64Vector other, int op):
@@ -604,10 +616,29 @@ cdef class Int64Vector(Vector):
 
         # Branchless null evaluation (per docs/null_representation_optimizations.md Change 2).
         # Specialize on null bitmap presence so the inner loop has no per-row branches.
+        # Gate: above ~70% null density, the original branching loop wins by
+        # short-circuiting writes for null rows. We use min(valid1, valid2) as a
+        # cheap upper bound on the combined valid count.
+        cdef size_t valid1_cnt, valid2_cnt, min_valid
+        cdef bint use_branching = False
+        if n > 0 and (null1 != NULL or null2 != NULL):
+            valid1_cnt = simd_popcount(null1, <size_t>nbytes) if null1 != NULL else <size_t>n
+            valid2_cnt = simd_popcount(null2, <size_t>nbytes) if null2 != NULL else <size_t>n
+            min_valid = valid1_cnt if valid1_cnt < valid2_cnt else valid2_cnt
+            use_branching = (min_valid * 10) < (<size_t>n * 3)
+
         if null1 == NULL and null2 == NULL:
             for i in range(n):
                 m = 1 if self._compare_int64_values(data1[i], data2[i], op) else 0
                 dst[i >> 3] |= <uint8_t>(m << (i & 7))
+        elif use_branching:
+            for i in range(n):
+                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
+                v2 = 1 if null2 == NULL else (null2[i >> 3] >> (i & 7)) & 1
+                if v1 & v2:
+                    out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
+                    if self._compare_int64_values(data1[i], data2[i], op):
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
         elif null1 != NULL and null2 == NULL:
             for i in range(n):
                 v = (null1[i >> 3] >> (i & 7)) & 1

@@ -714,30 +714,78 @@ cdef class IntegerVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
+        cdef uint8_t v
+        cdef uint8_t m
+        cdef size_t valid_count
+        cdef bint use_branching = False
+        if src_null != NULL and n > 0:
+            valid_count = simd_popcount(src_null, <size_t>nbytes)
+            use_branching = (valid_count * 10) < (<size_t>n * 3)
+
         if ptr.itemsize == 1:
             d8 = <int8_t*>ptr.data
-            for i in range(n):
-                if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
-                    if self._compare_int_values(<int64_t>d8[i], value, op):
-                        dst[i >> 3] |= (1 << (i & 7))
+            if src_null == NULL:
+                for i in range(n):
+                    m = 1 if self._compare_int_values(<int64_t>d8[i], value, op) else 0
+                    dst[i >> 3] |= <uint8_t>(m << (i & 7))
+            elif use_branching:
+                for i in range(n):
+                    if (src_null[i >> 3] >> (i & 7)) & 1:
+                        if self._compare_int_values(<int64_t>d8[i], value, op):
+                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            else:
+                for i in range(n):
+                    v = (src_null[i >> 3] >> (i & 7)) & 1
+                    m = 1 if self._compare_int_values(<int64_t>d8[i], value, op) else 0
+                    dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
         elif ptr.itemsize == 2:
             d16 = <int16_t*>ptr.data
-            for i in range(n):
-                if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
-                    if self._compare_int_values(<int64_t>d16[i], value, op):
-                        dst[i >> 3] |= (1 << (i & 7))
+            if src_null == NULL:
+                for i in range(n):
+                    m = 1 if self._compare_int_values(<int64_t>d16[i], value, op) else 0
+                    dst[i >> 3] |= <uint8_t>(m << (i & 7))
+            elif use_branching:
+                for i in range(n):
+                    if (src_null[i >> 3] >> (i & 7)) & 1:
+                        if self._compare_int_values(<int64_t>d16[i], value, op):
+                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            else:
+                for i in range(n):
+                    v = (src_null[i >> 3] >> (i & 7)) & 1
+                    m = 1 if self._compare_int_values(<int64_t>d16[i], value, op) else 0
+                    dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
         elif ptr.itemsize == 4:
             d32 = <int32_t*>ptr.data
-            for i in range(n):
-                if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
-                    if self._compare_int_values(<int64_t>d32[i], value, op):
-                        dst[i >> 3] |= (1 << (i & 7))
+            if src_null == NULL:
+                for i in range(n):
+                    m = 1 if self._compare_int_values(<int64_t>d32[i], value, op) else 0
+                    dst[i >> 3] |= <uint8_t>(m << (i & 7))
+            elif use_branching:
+                for i in range(n):
+                    if (src_null[i >> 3] >> (i & 7)) & 1:
+                        if self._compare_int_values(<int64_t>d32[i], value, op):
+                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            else:
+                for i in range(n):
+                    v = (src_null[i >> 3] >> (i & 7)) & 1
+                    m = 1 if self._compare_int_values(<int64_t>d32[i], value, op) else 0
+                    dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
         elif ptr.itemsize == 8:
             d64 = <int64_t*>ptr.data
-            for i in range(n):
-                if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
-                    if self._compare_int_values(d64[i], value, op):
-                        dst[i >> 3] |= (1 << (i & 7))
+            if src_null == NULL:
+                for i in range(n):
+                    m = 1 if self._compare_int_values(d64[i], value, op) else 0
+                    dst[i >> 3] |= <uint8_t>(m << (i & 7))
+            elif use_branching:
+                for i in range(n):
+                    if (src_null[i >> 3] >> (i & 7)) & 1:
+                        if self._compare_int_values(d64[i], value, op):
+                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            else:
+                for i in range(n):
+                    v = (src_null[i >> 3] >> (i & 7)) & 1
+                    m = 1 if self._compare_int_values(d64[i], value, op) else 0
+                    dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
         return out
 
     cdef BoolVector _compare_vector(self, IntegerVector other, int op):
@@ -754,7 +802,7 @@ cdef class IntegerVector(Vector):
         cdef BoolVector out
         cdef uint8_t* dst
         cdef uint8_t* out_null = NULL
-        cdef bint valid1, valid2, valid
+        cdef uint8_t v1, v2, v, m
         cdef int64_t val1, val2
         cdef int8_t* d8_1 = NULL
         cdef int16_t* d16_1 = NULL
@@ -800,15 +848,44 @@ cdef class IntegerVector(Vector):
         else:
             d64_2 = <int64_t*>ptr2.data
 
-        for i in range(n):
-            valid1 = True if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1) != 0
-            valid2 = True if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1) != 0
-            valid = valid1 and valid2
-            if valid:
-                if out_null != NULL:
-                    out_null[i >> 3] |= (1 << (i & 7))
+        cdef size_t valid1_cnt, valid2_cnt, min_valid
+        cdef bint use_branching = False
+        if n > 0 and (null1 != NULL or null2 != NULL):
+            valid1_cnt = simd_popcount(null1, <size_t>nbytes) if null1 != NULL else <size_t>n
+            valid2_cnt = simd_popcount(null2, <size_t>nbytes) if null2 != NULL else <size_t>n
+            min_valid = valid1_cnt if valid1_cnt < valid2_cnt else valid2_cnt
+            use_branching = (min_valid * 10) < (<size_t>n * 3)
 
-                # Get values from first vector
+        # Per-row itemsize dispatch is preserved; only the null branch is transformed.
+        if use_branching:
+            for i in range(n):
+                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
+                v2 = 1 if null2 == NULL else (null2[i >> 3] >> (i & 7)) & 1
+                if v1 & v2:
+                    out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
+                    if ptr1.itemsize == 1:
+                        val1 = <int64_t>d8_1[i]
+                    elif ptr1.itemsize == 2:
+                        val1 = <int64_t>d16_1[i]
+                    elif ptr1.itemsize == 4:
+                        val1 = <int64_t>d32_1[i]
+                    else:
+                        val1 = d64_1[i]
+                    if ptr2.itemsize == 1:
+                        val2 = <int64_t>d8_2[i]
+                    elif ptr2.itemsize == 2:
+                        val2 = <int64_t>d16_2[i]
+                    elif ptr2.itemsize == 4:
+                        val2 = <int64_t>d32_2[i]
+                    else:
+                        val2 = d64_2[i]
+                    if self._compare_int_values(val1, val2, op):
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+        else:
+            for i in range(n):
+                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
+                v2 = 1 if null2 == NULL else (null2[i >> 3] >> (i & 7)) & 1
+                v = v1 & v2
                 if ptr1.itemsize == 1:
                     val1 = <int64_t>d8_1[i]
                 elif ptr1.itemsize == 2:
@@ -817,8 +894,6 @@ cdef class IntegerVector(Vector):
                     val1 = <int64_t>d32_1[i]
                 else:
                     val1 = d64_1[i]
-
-                # Get values from second vector
                 if ptr2.itemsize == 1:
                     val2 = <int64_t>d8_2[i]
                 elif ptr2.itemsize == 2:
@@ -827,9 +902,10 @@ cdef class IntegerVector(Vector):
                     val2 = <int64_t>d32_2[i]
                 else:
                     val2 = d64_2[i]
-
-                if self._compare_int_values(val1, val2, op):
-                    dst[i >> 3] |= (1 << (i & 7))
+                m = 1 if self._compare_int_values(val1, val2, op) else 0
+                dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
+                if out_null != NULL:
+                    out_null[i >> 3] |= <uint8_t>(v << (i & 7))
         return out
 
     cpdef BoolVector equals(self, int64_t value):
