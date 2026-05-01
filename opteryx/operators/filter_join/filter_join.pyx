@@ -26,14 +26,17 @@ from . import JoinNode
 
 cdef CarcharSetWrapper _build_filter_hash_set(Morsel morsel, list columns, CarcharSetWrapper seen_hashes):
     cdef Py_ssize_t num_rows = morsel.num_rows
-    cdef Py_ssize_t row_idx
-    cdef uint64_t[::1] row_hashes = morsel.hash(columns)
+    cdef uint64_t[::1] row_hashes
 
     if seen_hashes is None:
         seen_hashes = CarcharSetWrapper()
 
-    for row_idx in range(num_rows):
-        seen_hashes.insert(row_hashes[row_idx])
+    if num_rows == 0:
+        return seen_hashes
+
+    row_hashes = morsel.hash(columns)
+    with nogil:
+        seen_hashes._insert_many_nogil(&row_hashes[0], <size_t>num_rows)
 
     return seen_hashes
 

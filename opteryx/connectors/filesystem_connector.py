@@ -345,17 +345,12 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         min_values = [None] * num_columns
         max_values = [None] * num_columns
 
+        col_name_to_field_id = {col.name: i for i, col in enumerate(schema.columns)}
+
         # Aggregate statistics across all row groups
         for rg in footer_meta.get("row_groups", []):
             for col_meta in rg.get("columns", []):
-                # Get column name and find its field_id in schema
-                col_name = col_meta.get("name", "")
-                field_id = None
-                for i, col in enumerate(schema.columns):
-                    if col.name == col_name:
-                        field_id = i
-                        break
-
+                field_id = col_name_to_field_id.get(col_meta.get("name", ""))
                 if field_id is None:
                     continue
 
