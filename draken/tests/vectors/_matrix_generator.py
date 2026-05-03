@@ -38,13 +38,13 @@ VECTOR_TYPES = {
         "supports_encodings": [DENSE, RLE, CONSTANT],
     },
     "timestamp": {
-        "supports_encodings": [DENSE, CONSTANT],
+        "supports_encodings": [DENSE, RLE, CONSTANT, DICTIONARY],
     },
     "time": {
-        "supports_encodings": [DENSE, CONSTANT],
+        "supports_encodings": [DENSE, RLE, CONSTANT, DICTIONARY],
     },
     "decimal": {
-        "supports_encodings": [DENSE],
+        "supports_encodings": [DENSE, RLE, CONSTANT, DICTIONARY],
     },
 }
 

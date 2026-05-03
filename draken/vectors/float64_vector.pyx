@@ -651,6 +651,107 @@ cdef class Float64Vector(Vector):
     cpdef BoolVector less_than_or_equals_vector(self, Float64Vector other):
         return self._compare_vector(other, 5)
 
+    cpdef BoolVector between(self, double lower, double upper,
+                              bint lower_inclusive=True, bint upper_inclusive=True):
+        """Single-pass range check: lower OP value OP upper. NULL in → NULL out."""
+        if self._encoding == DRAKEN_ENCODING_RLE:
+            return _materialize_rle_float64(self).between(lower, upper, lower_inclusive, upper_inclusive)
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_float64(self).between(lower, upper, lower_inclusive, upper_inclusive)
+
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
+        cdef double* data = <double*>ptr.data
+        cdef uint8_t* src_null = ptr.null_bitmap
+        cdef uint8_t* out_null = NULL
+        cdef Py_ssize_t i
+        cdef uint8_t mask
+        cdef bint in_range
+
+        memset(dst, 0, nbytes)
+
+        if self._has_const:
+            if self._const_is_null:
+                if nbytes != 0:
+                    out_null = <uint8_t*>malloc(nbytes)
+                    if out_null == NULL:
+                        raise MemoryError()
+                    memset(out_null, 0, nbytes)
+                    out.ptr.null_bitmap = out_null
+                else:
+                    out.ptr.null_bitmap = NULL
+                return out
+            if lower_inclusive:
+                in_range = self._const_value >= lower
+            else:
+                in_range = self._const_value > lower
+            if in_range:
+                if upper_inclusive:
+                    in_range = self._const_value <= upper
+                else:
+                    in_range = self._const_value < upper
+            if in_range and nbytes > 0:
+                memset(dst, 0xFF, nbytes)
+                if (n & 7) != 0:
+                    dst[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
+            out.ptr.null_bitmap = NULL
+            return out
+
+        if src_null != NULL and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, src_null, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        if src_null == NULL:
+            if lower_inclusive and upper_inclusive:
+                for i in range(n):
+                    if lower <= data[i] <= upper:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            elif lower_inclusive:
+                for i in range(n):
+                    if lower <= data[i] < upper:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            elif upper_inclusive:
+                for i in range(n):
+                    if lower < data[i] <= upper:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            else:
+                for i in range(n):
+                    if lower < data[i] < upper:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+        else:
+            if lower_inclusive and upper_inclusive:
+                for i in range(n):
+                    if (src_null[i >> 3] >> (i & 7)) & 1:
+                        if lower <= data[i] <= upper:
+                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            elif lower_inclusive:
+                for i in range(n):
+                    if (src_null[i >> 3] >> (i & 7)) & 1:
+                        if lower <= data[i] < upper:
+                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            elif upper_inclusive:
+                for i in range(n):
+                    if (src_null[i >> 3] >> (i & 7)) & 1:
+                        if lower < data[i] <= upper:
+                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            else:
+                for i in range(n):
+                    if (src_null[i >> 3] >> (i & 7)) & 1:
+                        if lower < data[i] < upper:
+                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+        return out
+
     cpdef BoolVector in_list(self, object value_set):
         """Return mask: 1 if element is in value_set, else 0. Propagates NULLs."""
         if self._encoding == DRAKEN_ENCODING_RLE:

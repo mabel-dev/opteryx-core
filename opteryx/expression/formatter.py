@@ -138,4 +138,14 @@ def format_expression(root, qualify: bool = False):
         return root.current_name
     if node_type == NodeType.DNF:
         return " AND ".join([format_expression(e, qualify) for e in root.parameters])
+    if node_type == NodeType.BETWEEN:
+        col = format_expression(root.left, qualify)
+        lower = format_expression(root.right, qualify)
+        upper = format_expression(root.centre, qualify)
+        lower_inclusive, upper_inclusive = root.value
+        if lower_inclusive and upper_inclusive:
+            return f"{col} BETWEEN {lower} AND {upper}"
+        lower_op = ">=" if lower_inclusive else ">"
+        upper_op = "<=" if upper_inclusive else "<"
+        return f"({col} {lower_op} {lower} AND {col} {upper_op} {upper})"
     return str(root.value)

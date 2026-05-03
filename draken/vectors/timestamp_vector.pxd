@@ -43,6 +43,8 @@ cdef class TimestampVector(Vector):
     cpdef BoolVector greater_than_or_equals(self, int64_t value)
     cpdef BoolVector less_than(self, int64_t value)
     cpdef BoolVector less_than_or_equals(self, int64_t value)
+    cpdef BoolVector between(self, int64_t lower, int64_t upper,
+                              bint lower_inclusive=*, bint upper_inclusive=*)
     cpdef BoolVector equals_vector(self, TimestampVector other)
     cpdef BoolVector not_equals_vector(self, TimestampVector other)
     cpdef BoolVector greater_than_vector(self, TimestampVector other)

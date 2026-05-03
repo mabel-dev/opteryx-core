@@ -8,7 +8,7 @@ there to test new cross-type combinations.
 """
 
 import pytest
-from _matrix import TEST_MATRIX_COMPARISONS, COMPARISON_OPERATIONS, VECTOR_TYPES
+from _matrix import TEST_MATRIX_COMPARISONS_WITH_VARIANTS, COMPARISON_OPERATIONS, VECTOR_TYPES
 from _vector_helpers import create_vector_with_encoding, apply_comparison
 from conftest import ENCODING_NAMES, DENSE, RLE, CONSTANT, DICTIONARY
 
@@ -24,21 +24,27 @@ _OP_ABBREV = {
 
 
 def _comparison_id(entry):
-    lt, le, rt, re, op = entry
+    if len(entry) == 7:  # With variants
+        lt, le, rt, re, op, variant_name, _ = entry
+    else:  # Base
+        lt, le, rt, re, op = entry
+        variant_name = "base"
+
     return (
         f"{_TYPE_ABBREV[lt]}[{_ENC_ABBREV[le]}]"
         f"_{_OP_ABBREV[op]}_"
         f"{_TYPE_ABBREV[rt]}[{_ENC_ABBREV[re]}]"
+        f"_{variant_name}"
     )
 
 
 def pytest_generate_tests(metafunc):
-    """Parametrize test_comparison with all comparison matrix entries."""
+    """Parametrize test_comparison with all comparison matrix entries including variants."""
     if "comparison_entry" in metafunc.fixturenames:
         metafunc.parametrize(
             "comparison_entry",
-            TEST_MATRIX_COMPARISONS,
-            ids=[_comparison_id(e) for e in TEST_MATRIX_COMPARISONS],
+            TEST_MATRIX_COMPARISONS_WITH_VARIANTS,
+            ids=[_comparison_id(e) for e in TEST_MATRIX_COMPARISONS_WITH_VARIANTS],
         )
 
 
@@ -53,48 +59,41 @@ def test_comparison(comparison_entry):
     Args:
         comparison_entry: Tuple of (left_type, left_encoding, right_type, right_encoding, operation_name)
     """
-    left_type, left_encoding, right_type, right_encoding, operation_name = comparison_entry
+    # Parse variant format (7-tuple)
+    left_type, left_encoding, right_type, right_encoding, operation_name, variant_name, variant_config = comparison_entry
 
-    # Get type and operation metadata
+    # Get metadata
     left_type_info = VECTOR_TYPES[left_type]
     right_type_info = VECTOR_TYPES[right_type]
     operation_info = COMPARISON_OPERATIONS[operation_name]
 
-    # Check if operation applies to these types
-    skip_if_not = operation_info.get("skip_if_not")
-    if skip_if_not == "orderable":
-        # Orderable types: numeric, temporal (date/timestamp/time), string, decimal
-        orderable_types = {"int64", "float64", "decimal", "date32", "timestamp", "time", "string"}
-        if left_type not in orderable_types or right_type not in orderable_types:
-            pytest.skip(f"Operation {operation_name} requires orderable types (numeric, temporal, or string)")
+    # All comparisons from operator_map are valid - no filtering.
+    # Test with various data conditions.
 
-    # Determine if we should include nulls
-    nullable = operation_info.get("nullable", False)
+    # Apply variant config
+    size = variant_config.get("size", 100)
+    nullable = variant_config.get("nullable", operation_info.get("nullable", False))
 
     # Create vectors for this test
-    try:
-        left_vec = create_vector_with_encoding(
-            left_type,
-            left_encoding,
-            size=100,
-            nullable=nullable,
-        )
-    except (ValueError, NotImplementedError) as e:
-        pytest.skip(f"Cannot create {left_type}/{ENCODING_NAMES[left_encoding]}: {e}")
+    left_vec = create_vector_with_encoding(
+        left_type,
+        left_encoding,
+        size=size,
+        nullable=nullable,
+        seed=42,
+    )
 
-    try:
-        right_vec = create_vector_with_encoding(
-            right_type,
-            right_encoding,
-            size=100,
-            nullable=nullable,
-        )
-    except (ValueError, NotImplementedError) as e:
-        pytest.skip(f"Cannot create {right_type}/{ENCODING_NAMES[right_encoding]}: {e}")
+    right_vec = create_vector_with_encoding(
+        right_type,
+        right_encoding,
+        size=size,
+        nullable=nullable,
+        seed=43,
+    )
 
     # Special handling for operations that require non-empty vectors
     if operation_info.get("requires_non_empty") and (len(left_vec) == 0 or len(right_vec) == 0):
-        pytest.skip("Operation requires non-empty vectors")
+        raise AssertionError("Operation requires non-empty vectors")
 
     # Apply comparison operation - fail hard if it doesn't work
     try:

@@ -520,6 +520,46 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
     return result.not_vector() if negate else result
 
 
+def draken_between(col, lower, upper, lower_inclusive: bool, upper_inclusive: bool):
+    """Dispatch BETWEEN to the vector type's single-pass between() method."""
+    from opteryx.types import OrsoTypes
+
+    from .type_coercion import _coerce_date32, _coerce_float, _coerce_int64, _coerce_timestamp
+
+    vec_type = get_vector_type(col)
+
+    if vec_type in (VectorType.INT64, VectorType.INTEGER):
+        return col.between(_coerce_int64(lower), _coerce_int64(upper), lower_inclusive, upper_inclusive)
+    if vec_type == VectorType.FLOAT64:
+        return col.between(_coerce_float(lower), _coerce_float(upper), lower_inclusive, upper_inclusive)
+    if vec_type == VectorType.TIMESTAMP:
+        return col.between(_coerce_timestamp(lower), _coerce_timestamp(upper), lower_inclusive, upper_inclusive)
+    if vec_type == VectorType.DATE32:
+        return col.between(_coerce_date32(lower), _coerce_date32(upper), lower_inclusive, upper_inclusive)
+    if vec_type == VectorType.CONSTANT_ENCODED:
+        # Call the vector's own between() which has an O(1) const path — avoids
+        # expanding the constant into an N-element list just to compare one value.
+        from draken.vectors.float64_vector import Float64Vector
+        from draken.vectors.int64_vector import Int64Vector
+        if isinstance(col, Int64Vector):
+            return col.between(_coerce_int64(lower), _coerce_int64(upper),
+                               lower_inclusive, upper_inclusive)
+        if isinstance(col, Float64Vector):
+            return col.between(_coerce_float(lower), _coerce_float(upper),
+                               lower_inclusive, upper_inclusive)
+        raise NotImplementedError(
+            f"draken_between: CONSTANT_ENCODED with unsupported underlying type {type(col).__name__!r}"
+        )
+    if vec_type == VectorType.DICTIONARY_ENCODED:
+        # Dict-encoded vectors don't have a native between(); use two existing
+        # comparison methods rather than recursing (which would loop infinitely because
+        # _dictionary_compare_vector returns a vector still classified as DICTIONARY_ENCODED).
+        lo_op = "GtEq" if lower_inclusive else "Gt"
+        hi_op = "LtEq" if upper_inclusive else "Lt"
+        return draken_compare(lo_op, col, lower).and_vector(draken_compare(hi_op, col, upper))
+    raise NotImplementedError(f"draken_between: unsupported vector type {vec_type!r}")
+
+
 def _bool_compare(op: str, left, right):
     """Comparison operations on BoolVector."""
     if op == "Eq":

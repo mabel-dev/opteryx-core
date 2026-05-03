@@ -6,7 +6,7 @@ from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 
 from .arithmetic import _eval_binary_op_draken
-from .comparisons import draken_compare
+from .comparisons import draken_between, draken_compare
 from .function_execution import apply_bounded_function, is_draken_vector
 from .type_coercion import (
     _coerce_date32,
@@ -269,6 +269,13 @@ def evaluate_draken(node, morsel):
         left = evaluate_draken(node.left, morsel)
         right = evaluate_draken(node.right, morsel)
         return left.xor_vector(right)
+
+    if node_type == NodeType.BETWEEN:
+        col = _eval_value(node.left, morsel)
+        lower_val = node.right.value
+        upper_val = node.centre.value
+        lower_inclusive, upper_inclusive = node.value
+        return draken_between(col, lower_val, upper_val, lower_inclusive, upper_inclusive)
 
     if node_type == NodeType.DNF:
         result = evaluate_draken(node.parameters[0], morsel)

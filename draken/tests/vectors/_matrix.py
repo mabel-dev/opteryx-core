@@ -53,7 +53,7 @@ VECTOR_TYPES = {
     "timestamp": {
         "vector_class": "TimestampVector",
         "arrow_type": pa.timestamp("us"),
-        "supports_encodings": [DENSE, CONSTANT],
+        "supports_encodings": [DENSE, RLE, CONSTANT, DICTIONARY],
         "is_numeric": False,
         "is_temporal": True,
         "sample_values": [0, 1000000, -1000000, None],
@@ -62,7 +62,7 @@ VECTOR_TYPES = {
     "time": {
         "vector_class": "TimeVector",
         "arrow_type": pa.time64("us"),
-        "supports_encodings": [DENSE, CONSTANT],
+        "supports_encodings": [DENSE, RLE, CONSTANT, DICTIONARY],
         "is_numeric": False,
         "is_temporal": True,
         "sample_values": [0, 3600000000, 1800000000, None],
@@ -71,7 +71,7 @@ VECTOR_TYPES = {
     "decimal": {
         "vector_class": "DecimalVector",
         "arrow_type": pa.decimal128(10, 2),
-        "supports_encodings": [DENSE],
+        "supports_encodings": [DENSE, RLE, CONSTANT, DICTIONARY],
         "is_numeric": True,
         "is_temporal": False,
         "sample_values": [0, 100, -50, None],
@@ -129,136 +129,73 @@ OPERATIONS = {
         "skip_if_not": None,
         "requires_non_empty": True,
     },
+    # Additional vector operations
+    "copy": {
+        "skip_if_not": None,
+    },
+    "slice": {
+        "skip_if_not": None,
+    },
+    "count": {  # Non-null count (distinct from null_count)
+        "skip_if_not": None,
+    },
+    "unique": {
+        "skip_if_not": None,
+    },
+    "distinct_count": {
+        "skip_if_not": None,
+    },
+    "any": {  # Any non-null
+        "skip_if_not": None,
+    },
+    "all": {  # All non-null
+        "skip_if_not": None,
+    },
 }
 
 # Primary test matrix: single-type operations
-# Each entry is (type_name, encoding, operation)
+# Generated programmatically from VECTOR_TYPES and OPERATIONS
+# This ensures we test ALL supported type/encoding/operation combinations
 TEST_MATRIX_OPERATIONS = [
-    # Int64 - all encodings
-    ("int64", DENSE, "from_arrow"),
-    ("int64", DENSE, "to_arrow"),
-    ("int64", DENSE, "sum"),
-    ("int64", DENSE, "min"),
-    ("int64", DENSE, "max"),
-    ("int64", DENSE, "take"),
-    ("int64", DENSE, "equals"),
-    ("int64", DENSE, "length"),
-    ("int64", DENSE, "null_count"),
-    ("int64", DENSE, "is_null"),
-    ("int64", DENSE, "subscript"),
-
-    ("int64", RLE, "from_arrow"),
-    ("int64", RLE, "to_arrow"),
-    ("int64", RLE, "sum"),
-    ("int64", RLE, "min"),
-    ("int64", RLE, "max"),
-    ("int64", RLE, "take"),
-
-    ("int64", CONSTANT, "from_arrow"),
-    ("int64", CONSTANT, "to_arrow"),
-    ("int64", CONSTANT, "sum"),
-    ("int64", CONSTANT, "min"),
-
-    ("int64", DICTIONARY, "from_arrow"),
-    ("int64", DICTIONARY, "to_arrow"),
-    ("int64", DICTIONARY, "equals"),
-
-    # Float64 - dense, RLE, constant
-    ("float64", DENSE, "from_arrow"),
-    ("float64", DENSE, "to_arrow"),
-    ("float64", DENSE, "sum"),
-    ("float64", DENSE, "min"),
-    ("float64", DENSE, "max"),
-    ("float64", DENSE, "take"),
-    ("float64", DENSE, "equals"),
-
-    ("float64", RLE, "from_arrow"),
-    ("float64", RLE, "sum"),
-    ("float64", RLE, "min"),
-
-    ("float64", CONSTANT, "from_arrow"),
-    ("float64", CONSTANT, "sum"),
-
-    # String - all encodings
-    ("string", DENSE, "from_arrow"),
-    ("string", DENSE, "to_arrow"),
-    ("string", DENSE, "to_pylist"),
-    ("string", DENSE, "take"),
-    ("string", DENSE, "equals"),
-    ("string", DENSE, "length"),
-    ("string", DENSE, "null_count"),
-
-    ("string", RLE, "from_arrow"),
-    ("string", RLE, "to_arrow"),
-    ("string", RLE, "take"),
-    ("string", RLE, "equals"),
-
-    ("string", CONSTANT, "from_arrow"),
-    ("string", CONSTANT, "to_arrow"),
-    ("string", CONSTANT, "equals"),
-
-    ("string", DICTIONARY, "from_arrow"),
-    ("string", DICTIONARY, "to_arrow"),
-    ("string", DICTIONARY, "equals"),
-
-    # Bool - dense, RLE, constant
-    ("bool", DENSE, "from_arrow"),
-    ("bool", DENSE, "to_arrow"),
-    ("bool", DENSE, "take"),
-    ("bool", DENSE, "equals"),
-
-    ("bool", RLE, "from_arrow"),
-    ("bool", RLE, "take"),
-    ("bool", RLE, "equals"),
-
-    ("bool", CONSTANT, "from_arrow"),
-    ("bool", CONSTANT, "to_arrow"),
-
-    # Date32 - dense, RLE, constant
-    ("date32", DENSE, "from_arrow"),
-    ("date32", DENSE, "to_arrow"),
-    ("date32", DENSE, "min"),
-    ("date32", DENSE, "max"),
-    ("date32", DENSE, "take"),
-    ("date32", DENSE, "to_pylist"),
-
-    ("date32", RLE, "from_arrow"),
-    ("date32", RLE, "min"),
-    ("date32", RLE, "max"),
-
-    ("date32", CONSTANT, "from_arrow"),
-    ("date32", CONSTANT, "min"),
-
-    # Timestamp - dense, constant
-    ("timestamp", DENSE, "from_arrow"),
-    ("timestamp", DENSE, "to_arrow"),
-    ("timestamp", DENSE, "to_pylist"),
-    ("timestamp", DENSE, "min"),
-    ("timestamp", DENSE, "max"),
-
-    ("timestamp", CONSTANT, "from_arrow"),
-    ("timestamp", CONSTANT, "to_arrow"),
-
-    # Time - dense, constant
-    ("time", DENSE, "from_arrow"),
-    ("time", DENSE, "to_arrow"),
-    ("time", DENSE, "to_pylist"),
-    ("time", DENSE, "take"),
-
-    ("time", CONSTANT, "from_arrow"),
-    ("time", CONSTANT, "to_arrow"),
-    ("time", CONSTANT, "to_pylist"),
-
-    # Decimal - dense only
-    ("decimal", DENSE, "from_arrow"),
-    ("decimal", DENSE, "to_arrow"),
+    (type_name, encoding, operation_name)
+    for type_name, type_info in VECTOR_TYPES.items()
+    for encoding in type_info["supports_encodings"]
+    for operation_name, op_info in OPERATIONS.items()
+    # Skip operations that don't apply to this type
+    if not (
+        op_info.get("skip_if_not") == "numeric" and not type_info["is_numeric"]
+        or op_info.get("skip_if_not") == "temporal" and not type_info["is_temporal"]
+    )
 ]
 
 from _matrix_generator import generate_matrix_as_list
 TEST_MATRIX_COMPARISONS = generate_matrix_as_list()
 
+# Edge case variants for operations
+# Each (type, encoding, operation) is tested with different vector conditions
+EDGE_CASE_VARIANTS = {
+    "standard": {"nullable": False, "size": 100, "description": "100-element vector"},
+    "empty": {"nullable": False, "size": 0, "description": "empty vector"},
+    "all_null": {"nullable": True, "size": 100, "all_null": True, "description": "all-null 100-element vector"},
+    "single_element": {"nullable": False, "size": 1, "description": "single-element vector"},
+    "boundary_values": {"nullable": False, "size": 100, "use_boundaries": True, "description": "min/max boundary values"},
+}
 
-
+# Generate edge case test variants
+# For each (type, encoding, operation), create variants with different data conditions
+TEST_MATRIX_OPERATIONS_WITH_VARIANTS = []
+for type_name, encoding, operation_name in TEST_MATRIX_OPERATIONS:
+    # Only test edge cases for operations that are relevant
+    if operation_name in {"from_arrow", "to_arrow", "to_pylist", "min", "max", "sum"}:
+        for variant_name, variant_config in EDGE_CASE_VARIANTS.items():
+            TEST_MATRIX_OPERATIONS_WITH_VARIANTS.append(
+                (type_name, encoding, operation_name, variant_name, variant_config)
+            )
+    else:
+        # For other operations, just test standard
+        TEST_MATRIX_OPERATIONS_WITH_VARIANTS.append(
+            (type_name, encoding, operation_name, "standard", EDGE_CASE_VARIANTS["standard"])
+        )
 
 
 
@@ -290,7 +227,50 @@ COMPARISON_OPERATIONS = {
     },
 }
 
+# Generate comparison variants with edge cases
+COMPARISON_VARIANTS = {
+    "standard": {"nullable": False, "size": 100, "description": "100-element vectors"},
+    "empty": {"nullable": False, "size": 0, "description": "empty vectors"},
+    "all_null": {"nullable": True, "size": 100, "all_null": True, "description": "all-null vectors"},
+    "single_element": {"nullable": False, "size": 1, "description": "single-element vectors"},
+    "mixed_nulls": {"nullable": True, "size": 100, "null_ratio": 0.5, "description": "50% null vectors"},
+}
+
+# Generate comparison test variants
+TEST_MATRIX_COMPARISONS_WITH_VARIANTS = []
+for left_type, left_encoding, right_type, right_encoding, operation_name in TEST_MATRIX_COMPARISONS:
+    # Test comparisons with different vector conditions
+    for variant_name, variant_config in COMPARISON_VARIANTS.items():
+        TEST_MATRIX_COMPARISONS_WITH_VARIANTS.append(
+            (left_type, left_encoding, right_type, right_encoding, operation_name, variant_name, variant_config)
+        )
+
+# Encoding-specific operation tests
+# Test how operations behave with encoding transitions and mixed encodings
+ENCODING_OPERATION_TESTS = []
+for type_name, type_info in VECTOR_TYPES.items():
+    encodings = type_info["supports_encodings"]
+    if len(encodings) >= 2:
+        # For types that support multiple encodings, test encoding conversions/interactions
+        for enc1 in encodings:
+            for enc2 in encodings:
+                if enc1 != enc2:
+                    # Test mixed-encoding operations
+                    for operation_name in ["equals", "length", "null_count"]:
+                        ENCODING_OPERATION_TESTS.append(
+                            (type_name, enc1, type_name, enc2, operation_name, "mixed_encodings")
+                        )
+
 print(f"Loaded test matrix with {len(TEST_MATRIX_OPERATIONS)} operation tests")
+print(f"Loaded {len(TEST_MATRIX_OPERATIONS_WITH_VARIANTS)} operation tests (with variants)")
 print(f"Loaded {len(TEST_MATRIX_COMPARISONS)} cross-type comparison tests")
+print(f"Loaded {len(TEST_MATRIX_COMPARISONS_WITH_VARIANTS)} comparison tests (with variants)")
+print(f"Loaded {len(ENCODING_OPERATION_TESTS)} encoding-specific operation tests")
 print(f"Vector types: {list(VECTOR_TYPES.keys())}")
 print(f"Coverage: {len(set((t, e) for t, e, _ in TEST_MATRIX_OPERATIONS))} type/encoding combinations")
+
+# Total test count estimate
+total_tests = len(TEST_MATRIX_OPERATIONS_WITH_VARIANTS) + len(TEST_MATRIX_COMPARISONS_WITH_VARIANTS) + len(ENCODING_OPERATION_TESTS) + 29
+print(f"\n{'='*60}")
+print(f"TOTAL TESTS: ~{total_tests}")
+print(f"{'='*60}")

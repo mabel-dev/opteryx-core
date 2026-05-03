@@ -35,6 +35,8 @@ cdef class Date32Vector(Vector):
     cpdef BoolVector greater_than_or_equals(self, int32_t value)
     cpdef BoolVector less_than(self, int32_t value)
     cpdef BoolVector less_than_or_equals(self, int32_t value)
+    cpdef BoolVector between(self, int32_t lower, int32_t upper,
+                              bint lower_inclusive=*, bint upper_inclusive=*)
     cpdef BoolVector equals_vector(self, Date32Vector other)
     cpdef BoolVector not_equals_vector(self, Date32Vector other)
     cpdef BoolVector greater_than_vector(self, Date32Vector other)

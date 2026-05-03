@@ -7,7 +7,12 @@ Test coverage is defined in _matrix.py - add entries there to test new combinati
 """
 
 import pytest
-from _matrix import TEST_MATRIX_OPERATIONS, VECTOR_TYPES, OPERATIONS
+from _matrix import (
+    TEST_MATRIX_OPERATIONS_WITH_VARIANTS,
+    ENCODING_OPERATION_TESTS,
+    VECTOR_TYPES,
+    OPERATIONS,
+)
 from _vector_helpers import create_vector_with_encoding, apply_operation
 from conftest import ENCODING_NAMES, DENSE, RLE, CONSTANT, DICTIONARY
 
@@ -19,61 +24,69 @@ _ENC_ABBREV = {DENSE: "den", RLE: "rle", CONSTANT: "con", DICTIONARY: "dic"}
 
 
 def _operation_id(entry):
-    type_name, encoding, op = entry
-    return f"{_TYPE_ABBREV[type_name]}[{_ENC_ABBREV[encoding]}]_{op}"
+    if len(entry) == 5:  # With variants
+        type_name, encoding, op, variant_name, _ = entry
+        return f"{_TYPE_ABBREV[type_name]}[{_ENC_ABBREV[encoding]}]_{op}_{variant_name}"
+    elif len(entry) == 3:  # Base matrix
+        type_name, encoding, op = entry
+        return f"{_TYPE_ABBREV[type_name]}[{_ENC_ABBREV[encoding]}]_{op}"
+    else:  # Encoding operation tests
+        return f"{entry[0]}_{entry[4]}"
 
 
 def pytest_generate_tests(metafunc):
-    """Parametrize test_matrix_operation with all matrix entries."""
+    """Parametrize tests with all matrix entries (including variants and encoding tests)."""
     if "matrix_entry" in metafunc.fixturenames:
+        # Combine variant tests and encoding operation tests
+        all_tests = TEST_MATRIX_OPERATIONS_WITH_VARIANTS + ENCODING_OPERATION_TESTS
         metafunc.parametrize(
             "matrix_entry",
-            TEST_MATRIX_OPERATIONS,
-            ids=[_operation_id(e) for e in TEST_MATRIX_OPERATIONS],
+            all_tests,
+            ids=[_operation_id(e) for e in all_tests],
         )
 
 
 def test_matrix_operation(matrix_entry):
-    """Test that engine has path for (type, encoding, operation) combination.
+    """Test that engine has path for (type, encoding, operation) with variants.
 
-    This verifies that:
-    1. Vector of this type/encoding can be created
-    2. Operation can be applied without NotImplementedError
-    3. Result is meaningful (not None, unless expected)
-
-    Args:
-        matrix_entry: Tuple of (type_name, encoding, operation_name)
+    Verifies operation works across different data conditions:
+    - Standard 100-element vectors
+    - Empty vectors
+    - All-null vectors
+    - Single-element vectors
+    - Boundary values
+    - Mixed-encoding operations
     """
-    type_name, encoding, operation_name = matrix_entry
+    # Parse entry format
+    if len(matrix_entry) == 5:  # Variant format
+        type_name, encoding, operation_name, variant_name, variant_config = matrix_entry
+    elif len(matrix_entry) == 6:  # Encoding operation tests
+        type_name, enc1, type_name2, enc2, operation_name, variant_name = matrix_entry
+        encoding = enc1
+        variant_config = {"size": 100, "nullable": False}
+    else:
+        raise ValueError(f"Unexpected entry format: {matrix_entry}")
 
-    # Get type and operation metadata
+    # Get metadata
     type_info = VECTOR_TYPES[type_name]
     operation_info = OPERATIONS[operation_name]
 
-    # Skip if operation doesn't apply to this type
-    skip_if_not = operation_info.get("skip_if_not")
-    if skip_if_not == "numeric" and not type_info["is_numeric"]:
-        pytest.skip(f"Operation {operation_name} requires numeric type")
-    if skip_if_not == "temporal" and not type_info["is_temporal"]:
-        pytest.skip(f"Operation {operation_name} requires temporal type")
-
-    # Determine if we should include nulls
-    nullable = operation_info.get("nullable", False)
+    # Apply variant config
+    size = variant_config.get("size", 100)
+    nullable = variant_config.get("nullable", operation_info.get("nullable", False))
 
     # Create vector for this test
-    try:
-        vec = create_vector_with_encoding(
-            type_name,
-            encoding,
-            size=100,
-            nullable=nullable,
-        )
-    except (ValueError, NotImplementedError) as e:
-        pytest.skip(f"Cannot create {type_name}/{ENCODING_NAMES[encoding]}: {e}")
+    vec = create_vector_with_encoding(
+        type_name,
+        encoding,
+        size=size,
+        nullable=nullable,
+        seed=42,
+    )
 
     # Special handling for operations that require non-empty vectors
     if operation_info.get("requires_non_empty") and len(vec) == 0:
-        pytest.skip("Operation requires non-empty vector")
+        raise AssertionError("Operation requires non-empty vector")
 
     # Apply operation
     try:
@@ -87,10 +100,10 @@ def test_matrix_operation(matrix_entry):
             )
 
     except NotImplementedError as e:
-        pytest.skip(f"Operation {operation_name} not implemented: {e}")
+        raise AssertionError(f"Operation {operation_name} not implemented: {e}") from e
     except (TypeError, ValueError) as e:
-        if "empty" in str(e).lower() or "all-null" in str(e).lower():
-            pytest.skip(f"Expected error for edge case: {e}")
+        # If it's in the test matrix, it must run and show what happens
+        # No skips on edge cases - let failures expose gaps
         raise
 
 
@@ -104,12 +117,9 @@ def test_matrix_operation(matrix_entry):
 ])
 def test_vector_creation(type_name, encoding):
     """Test that vectors can be created for all supported type/encoding combinations."""
-    try:
-        vec = create_vector_with_encoding(type_name, encoding, size=10, nullable=False)
-        assert vec is not None
-        assert len(vec) == 10
-    except (ValueError, NotImplementedError) as e:
-        pytest.skip(f"Cannot create {type_name}/{ENCODING_NAMES[encoding]}: {e}")
+    vec = create_vector_with_encoding(type_name, encoding, size=10, nullable=False)
+    assert vec is not None
+    assert len(vec) == 10
 
 
 def test_matrix_coverage():

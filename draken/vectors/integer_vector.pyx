@@ -944,6 +944,20 @@ cdef class IntegerVector(Vector):
     cpdef BoolVector less_than_or_equals_vector(self, IntegerVector other):
         return self._compare_vector(other, 5)
 
+    cpdef BoolVector between(self, int64_t lower, int64_t upper,
+                              bint lower_inclusive=True, bint upper_inclusive=True):
+        """Range check delegating to _compare_scalar (handles all integer widths)."""
+        cdef BoolVector lo, hi
+        if lower_inclusive:
+            lo = self._compare_scalar(lower, 3)  # GtEq
+        else:
+            lo = self._compare_scalar(lower, 2)  # Gt
+        if upper_inclusive:
+            hi = self._compare_scalar(upper, 5)  # LtEq
+        else:
+            hi = self._compare_scalar(upper, 4)  # Lt
+        return lo.and_vector(hi)
+
     cdef void hash_into(
         self,
         uint64_t[::1] out_buf,

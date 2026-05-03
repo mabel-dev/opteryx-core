@@ -44,6 +44,8 @@ cdef class IntegerVector(Vector):
     cpdef BoolVector less_than_vector(self, IntegerVector other)
     cpdef BoolVector less_than_or_equals(self, int64_t value)
     cpdef BoolVector less_than_or_equals_vector(self, IntegerVector other)
+    cpdef BoolVector between(self, int64_t lower, int64_t upper,
+                              bint lower_inclusive=*, bint upper_inclusive=*)
 
 cdef IntegerVector from_arrow(object array)
 cdef IntegerVector from_dict(const int32_t[::1] codes, const int64_t[::1] dictionary)

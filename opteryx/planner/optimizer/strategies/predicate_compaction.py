@@ -172,6 +172,7 @@ class ColumnAnalysisResult:
 
     status: str
     required: Optional[List[PredicateOccurrence]] = None
+    between_node: Optional[Node] = None  # Set when both bounds compact to a BETWEEN node
 
 
 class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
@@ -196,8 +197,23 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
 
         state = context.bag.setdefault(
             "predicate_compaction",
-            {"filters": {}, "column_occurrences": {}},
+            {"filters": {}, "column_occurrences": {}, "filter_chain_roots": {}},
         )
+
+        # Determine which chain this filter belongs to.
+        # Traversal is top-down, so the parent node (context.parent_nid) was already
+        # visited. If that parent is itself a filter (its node_id appears in
+        # filter_chain_roots), we inherit its chain root. Otherwise the parent is the
+        # chain boundary and becomes the root.
+        #
+        # This prevents predicates from different plan branches (e.g. the two sides
+        # of an EXCEPT or UNION) being grouped together and incorrectly compacted.
+        filter_chain_roots: Dict[str, str] = state["filter_chain_roots"]
+        if context.parent_nid in filter_chain_roots:
+            chain_root = filter_chain_roots[context.parent_nid]
+        else:
+            chain_root = context.parent_nid
+        filter_chain_roots[context.node_id] = chain_root
 
         predicates = self._extract_and_predicates(node.condition)
         state["filters"][context.node_id] = {"predicates": predicates}
@@ -207,9 +223,9 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
             if not info:
                 continue
             column_id, operator, value = info
-            # Key includes filter node ID to prevent cross-filter compaction
-            # (e.g., don't compact 'id < 3' from filter A with 'id > 7' from filter B)
-            column_key = (context.node_id, column_id)
+            # Group by (chain_root, column_id) — predicates on the same column but
+            # in different plan branches (different chain_root) stay separate.
+            column_key = (chain_root, column_id)
             occurrences: List[PredicateOccurrence] = state["column_occurrences"].setdefault(
                 column_key, []
             )
@@ -242,6 +258,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
 
         drop_keys: Set[Tuple[str, int]] = set()
         filters_to_false: Set[str] = set()
+        between_replacements: Dict[str, List[Node]] = {}
 
         for occurrences in column_occurrences.values():
             analysis = self._analyze_column_predicates(occurrences)
@@ -249,6 +266,16 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
 
             if status == "contradiction":
                 filters_to_false.update(occ.filter_nid for occ in occurrences)
+                self.telemetry.optimization_predicate_compaction += 1
+                self.telemetry.optimization_predicate_compaction_range_simplified += 1
+                continue
+
+            if status == "between" and analysis.between_node:
+                # Drop every predicate for this column — they're all replaced by BETWEEN.
+                filter_nid = occurrences[0].filter_nid
+                for occ in occurrences:
+                    drop_keys.add((occ.filter_nid, id(occ.predicate)))
+                between_replacements.setdefault(filter_nid, []).append(analysis.between_node)
                 self.telemetry.optimization_predicate_compaction += 1
                 self.telemetry.optimization_predicate_compaction_range_simplified += 1
                 continue
@@ -286,6 +313,10 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
                 if key in drop_keys:
                     continue
                 new_predicates.append(predicate.copy())
+
+            # Append BETWEEN nodes that replaced compacted range predicate pairs.
+            for between_node in between_replacements.get(filter_nid, []):
+                new_predicates.append(between_node)
 
             if not new_predicates:
                 optimized_plan.remove_node(filter_nid, heal=True)
@@ -376,6 +407,23 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
             required.append(best_lower.occurrence)
         if best_upper and (not required or best_upper.occurrence not in required):
             required.append(best_upper.occurrence)
+
+        # When both a lower and upper bound exist, compact all predicates for this
+        # column into a single BETWEEN node regardless of whether individual predicates
+        # were already the most restrictive (i.e. even the "unchanged" 2-predicate case).
+        if best_lower and best_upper:
+            column_node = best_lower.occurrence.predicate.left
+            lower_node = best_lower.occurrence.predicate.right
+            upper_node = best_upper.occurrence.predicate.right
+            between = Node(
+                NodeType.BETWEEN,
+                left=column_node.copy(),
+                right=lower_node.copy(),
+                centre=upper_node.copy(),
+                # value encodes bound inclusivity: (lower_inclusive, upper_inclusive)
+                value=(best_lower.inclusive, best_upper.inclusive),
+            )
+            return ColumnAnalysisResult(status="between", required=required, between_node=between)
 
         if not required or len(required) == len(occurrences):
             return ColumnAnalysisResult(status="unchanged", required=required or None)

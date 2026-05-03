@@ -49,6 +49,8 @@ cdef class Float64Vector(Vector):
     cpdef BoolVector less_than_vector(self, Float64Vector other)
     cpdef BoolVector less_than_or_equals(self, double value)
     cpdef BoolVector less_than_or_equals_vector(self, Float64Vector other)
+    cpdef BoolVector between(self, double lower, double upper,
+                              bint lower_inclusive=*, bint upper_inclusive=*)
     cpdef BoolVector in_list(self, object value_set)
 
     cpdef int8_t[::1] is_null(self)

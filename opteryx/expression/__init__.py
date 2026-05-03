@@ -81,6 +81,7 @@ class NodeType(int, Enum):
     EVALUATED = 44  # 0010 1100 - memoize results
     CAST = 45  # 0010 1101 - type casting
     EXTRACTION_OPERATOR = 46  # 0010 1110 - value extraction: ->, ->>, []
+    BETWEEN = 47  # 0010 1111 - range comparison: lower <= col <= upper (optimizer-created)
 
 
 def _typed_constant_vector(value, length: int, schema_column):

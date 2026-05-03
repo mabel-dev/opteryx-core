@@ -40,12 +40,6 @@ def create_vector_with_encoding(type_name, encoding, size=100, nullable=False, s
 
     type_info = VECTOR_TYPES[type_name]
 
-    if encoding not in type_info["supports_encodings"]:
-        raise ValueError(
-            f"Encoding {encoding} not supported for {type_name}. "
-            f"Supported: {type_info['supports_encodings']}"
-        )
-
     sample_values = type_info["sample_values"]
     arrow_type = type_info["arrow_type"]
 

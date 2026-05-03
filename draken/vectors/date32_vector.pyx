@@ -394,6 +394,79 @@ cdef class Date32Vector(Vector):
     cpdef BoolVector less_than_or_equals(self, int32_t value):
         return self._compare_scalar(value, 5)
 
+    cpdef BoolVector between(self, int32_t lower, int32_t upper,
+                              bint lower_inclusive=True, bint upper_inclusive=True):
+        """Single-pass range check: lower OP value OP upper. NULL in → NULL out."""
+        if self._encoding == DRAKEN_ENCODING_RLE:
+            return _materialize_rle_date32(self).between(lower, upper, lower_inclusive, upper_inclusive)
+        if self._has_const:
+            return _materialize_const_date32(self).between(lower, upper, lower_inclusive, upper_inclusive)
+
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef int32_t* data = <int32_t*>ptr.data
+        cdef uint8_t* src_null = ptr.null_bitmap
+        cdef Py_ssize_t i, n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t mask
+        cdef bint in_range
+
+        memset(dst, 0, nbytes)
+
+        if src_null != NULL and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, src_null, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        if src_null == NULL:
+            if lower_inclusive and upper_inclusive:
+                for i in range(n):
+                    if lower <= data[i] <= upper:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            elif lower_inclusive:
+                for i in range(n):
+                    if lower <= data[i] < upper:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            elif upper_inclusive:
+                for i in range(n):
+                    if lower < data[i] <= upper:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            else:
+                for i in range(n):
+                    if lower < data[i] < upper:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+        else:
+            if lower_inclusive and upper_inclusive:
+                for i in range(n):
+                    if (src_null[i >> 3] >> (i & 7)) & 1:
+                        if lower <= data[i] <= upper:
+                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            elif lower_inclusive:
+                for i in range(n):
+                    if (src_null[i >> 3] >> (i & 7)) & 1:
+                        if lower <= data[i] < upper:
+                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            elif upper_inclusive:
+                for i in range(n):
+                    if (src_null[i >> 3] >> (i & 7)) & 1:
+                        if lower < data[i] <= upper:
+                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            else:
+                for i in range(n):
+                    if (src_null[i >> 3] >> (i & 7)) & 1:
+                        if lower < data[i] < upper:
+                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+        return out
+
     cpdef BoolVector equals_vector(self, Date32Vector other):
         return self._compare_vector_op(other, 0)
 

@@ -477,6 +477,64 @@ cdef class TimestampVector(Vector):
     cpdef BoolVector less_than_or_equals(self, int64_t value):
         return self._compare_scalar(value, 5)
 
+    cpdef BoolVector between(self, int64_t lower, int64_t upper,
+                              bint lower_inclusive=True, bint upper_inclusive=True):
+        """Single-pass range check: lower OP value OP upper. NULL in → NULL out."""
+        if self._encoding == DRAKEN_ENCODING_RLE:
+            return _materialize_rle_timestamp(self).between(lower, upper, lower_inclusive, upper_inclusive)
+        if self._has_const:
+            return _materialize_const_timestamp(self).between(lower, upper, lower_inclusive, upper_inclusive)
+
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef int64_t* data = <int64_t*>ptr.data
+        cdef uint8_t* src_null = ptr.null_bitmap
+        cdef Py_ssize_t i, n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
+        cdef uint8_t* out_null = NULL
+
+        memset(dst, 0, nbytes)
+        if src_null != NULL and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        # null_bit_offset support: use _bitmap_is_valid like _compare_scalar does
+        if lower_inclusive and upper_inclusive:
+            for i in range(n):
+                if src_null == NULL or _bitmap_is_valid(src_null, i, self.null_bit_offset):
+                    if out_null != NULL:
+                        out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
+                    if lower <= data[i] <= upper:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+        elif lower_inclusive:
+            for i in range(n):
+                if src_null == NULL or _bitmap_is_valid(src_null, i, self.null_bit_offset):
+                    if out_null != NULL:
+                        out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
+                    if lower <= data[i] < upper:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+        elif upper_inclusive:
+            for i in range(n):
+                if src_null == NULL or _bitmap_is_valid(src_null, i, self.null_bit_offset):
+                    if out_null != NULL:
+                        out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
+                    if lower < data[i] <= upper:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+        else:
+            for i in range(n):
+                if src_null == NULL or _bitmap_is_valid(src_null, i, self.null_bit_offset):
+                    if out_null != NULL:
+                        out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
+                    if lower < data[i] < upper:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+        return out
+
     cpdef BoolVector equals_vector(self, TimestampVector other):
         if self._has_const:
             return _materialize_const_timestamp(self).equals_vector(other)
