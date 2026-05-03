@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import math as _math
 from typing import List
 
 # Local implementation imports (kept as late imports inside function if heavy)
+from opteryx.compiled.vector_ops import vector_case as _vector_case
+from opteryx.compiled.vector_ops import vector_coalesce as _vector_coalesce
 from opteryx.compiled.vector_ops import vector_iif as _vector_iif
 from opteryx.expression.functions import (
     FunctionDefinition,
@@ -31,98 +32,6 @@ from opteryx.expression.functions.registrar import _case_return_type, _coalesce_
 from opteryx.types import OrsoTypes
 
 
-def _coalesce(*arrays):
-    """
-    Element-wise coalesce: return the first non-null value across arrays.
-    Treats Python None and float NaN as null.
-    """
-
-    def _is_null_val(v):
-        if v is None:
-            return True
-        if isinstance(v, float) and _math.isnan(v):
-            return True
-        return False
-
-    def to_pylist(a):
-        if hasattr(a, "to_pylist"):
-            return a.to_pylist()
-        if isinstance(a, list):
-            return a
-        return list(a)
-
-    lists = [to_pylist(a) for a in arrays]
-    n = max(len(lst) for lst in lists)
-    result = [None] * n
-
-    for lst in lists:
-        broadcast = len(lst) == 1
-        for i in range(n):
-            if _is_null_val(result[i]):
-                val = lst[0] if broadcast else lst[i]
-                if not _is_null_val(val):
-                    result[i] = val
-
-    return result
-
-
-def select_values(boolean_arrays, value_arrays):
-    """
-    Build a result array based on CASE conditions and corresponding value arrays.
-    Conditions are evaluated in reverse priority order (last wins → applied first).
-
-    Parameters:
-    - boolean_arrays: list of boolean arrays/vectors representing conditions.
-    - value_arrays:   list of value arrays/vectors corresponding to each condition.
-
-    Returns:
-    - list: result values, None where no condition matched.
-    """
-    if not boolean_arrays or not value_arrays or len(boolean_arrays) != len(value_arrays):
-        raise ValueError("Input lists must be non-empty and of the same length.")
-
-    def _to_bool_list(v, n):
-        if hasattr(v, "to_pylist"):
-            lst = v.to_pylist()
-        elif isinstance(v, list):
-            lst = v
-        else:
-            lst = [bool(v)] * n
-        if len(lst) == 1 and n != 1:
-            lst = lst * n
-        return [bool(b) if b is not None else False for b in lst]
-
-    def _to_val_list(v, n):
-        if hasattr(v, "to_pylist"):
-            lst = v.to_pylist()
-        elif isinstance(v, list):
-            lst = v
-        else:
-            lst = [v] * n
-        if len(lst) == 1 and n != 1:
-            lst = lst * n
-        return lst
-
-    first_condition = boolean_arrays[0]
-    if hasattr(first_condition, "__len__") and not isinstance(first_condition, (str, bytes)):
-        n = len(first_condition)
-    elif hasattr(first_condition, "to_pylist"):
-        n = len(first_condition.to_pylist())
-    else:
-        n = 1
-
-    result = [None] * n
-
-    for condition, values in zip(reversed(boolean_arrays), reversed(value_arrays)):
-        cond = _to_bool_list(condition, n)
-        vals = _to_val_list(values, n)
-        for i in range(n):
-            if cond[i]:
-                result[i] = vals[i]
-
-    return result
-
-
 def get_builtin_logical_functions() -> List[FunctionDefinition]:
     """
     Logical and control-flow function registrar entries.
@@ -145,9 +54,9 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
         humanize = staticmethod(_lf_humanize)
         jsonb_object_keys = staticmethod(_lf_jsonb_object_keys)
 
-    _coalesce_kernel = _coalesce
+    _coalesce_kernel = _vector_coalesce
     _iif_kernel = _vector_iif
-    _case_kernel = select_values
+    _case_kernel = _vector_case
 
     _variadic_any = (
         ParameterSpec(name="arg0", type_family="any"),

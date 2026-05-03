@@ -125,6 +125,12 @@ def build_literal_node(
     if value_type in type_mapping or suggested_type not in (OrsoTypes._MISSING_TYPE, 0, None):
         if suggested_type == OrsoTypes.INTERVAL:
             value = normalize_interval_value(value)
+        if isinstance(value, datetime.datetime):
+            from opteryx.types._datetime_conversion import timestamp_to_int64_us
+            value = timestamp_to_int64_us(value)
+        elif isinstance(value, datetime.date):
+            from opteryx.types._datetime_conversion import date_to_int64_days
+            value = date_to_int64_days(value)
         root.value = value
         root.node_type = NodeType.LITERAL
         root.type = (

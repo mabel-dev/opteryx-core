@@ -474,6 +474,13 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
     if negate:
         op = _NEGATED_OPS[op]
 
+    # InList with a pre-built CarcharSetWrapper: hash-based dispatch for all vector types.
+    if op == "InList":
+        from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
+        if isinstance(right, CarcharSetWrapper):
+            result = vector_in_list(left, right)
+            return result.not_vector() if negate else result
+
     # Scalar left with vector right: flip operands and invert directional ops
     # Example: 5 > [1, 2, 3] becomes [1, 2, 3] < 5
     if is_scalar(left) and is_draken_vector(right):

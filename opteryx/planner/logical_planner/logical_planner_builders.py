@@ -618,6 +618,7 @@ def _normalize_cast_type(data_type: str) -> str:
 def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
     """Cast a literal value at compile time."""
     from opteryx.expression.casts import parse_timestamp_value
+    from opteryx.types._datetime_conversion import date_to_int64_days, timestamp_to_int64_us
 
     # NULL values remain NULL regardless of target type
     if literal_node.type == OrsoTypes.NULL:
@@ -648,7 +649,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
     if base_type == "VARBINARY":
         orso_type = OrsoTypes.BLOB
     elif base_type == "DATE" and literal_node.type in (OrsoTypes.INTEGER, OrsoTypes.DATE):
-        value = _EPOCH_DATE + datetime.timedelta(days=int(literal_node.value))
+        value = date_to_int64_days(_EPOCH_DATE + datetime.timedelta(days=int(literal_node.value)))
         return Node(NodeType.LITERAL, type=OrsoTypes.DATE, value=value, alias=alias)
     # Special case: INTEGER to TIMESTAMP conversion
     elif base_type == "TIMESTAMP" and (
@@ -665,11 +666,13 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
         int_value = int(literal_node.value)
         # If unit was specified, use it; otherwise use default behavior for dates
         if unit:
-            value = parse_timestamp_value(int_value, unit=unit)
+            value = timestamp_to_int64_us(parse_timestamp_value(int_value, unit=unit))
         elif literal_node.type == OrsoTypes.DATE or abs(int_value) < 100_000:
-            value = (_EPOCH_DT + datetime.timedelta(days=int_value)).replace(tzinfo=None)
+            value = timestamp_to_int64_us(
+                (_EPOCH_DT + datetime.timedelta(days=int_value)).replace(tzinfo=None)
+            )
         else:
-            value = parse_timestamp_value(int_value)
+            value = timestamp_to_int64_us(parse_timestamp_value(int_value))
         return Node(NodeType.LITERAL, type=OrsoTypes.TIMESTAMP, value=value, alias=alias)
     else:
         orso_type = OrsoTypes.from_name(base_type)[0]
@@ -677,6 +680,10 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
     # Attempt to parse and cast the literal value
     try:
         parsed_value = orso_type.parse(literal_node.value)
+        if isinstance(parsed_value, datetime.datetime):
+            parsed_value = timestamp_to_int64_us(parsed_value)
+        elif isinstance(parsed_value, datetime.date):
+            parsed_value = date_to_int64_days(parsed_value)
         return Node(NodeType.LITERAL, type=orso_type, value=parsed_value, alias=alias)
     except Exception as e:
         # For TRY_CAST/SAFE_CAST, return NULL on failure
@@ -884,7 +891,6 @@ def identifier(branch, alias: Optional[List[str]] = None, key=None):
 def in_list(branch, alias: Optional[List[str]] = None, key=None):
     left_node = build(branch["expr"])
     value_nodes = [build(v) for v in branch["list"]]
-    value_list = {v.value for v in value_nodes}
     element_type = {v.type for v in value_nodes}
     if len(element_type) > 1:
         raise ArrayWithMixedTypesError("Array in IN condition has values with mixed types.")
@@ -893,7 +899,7 @@ def in_list(branch, alias: Optional[List[str]] = None, key=None):
     right_node = Node(
         node_type=NodeType.LITERAL,
         type=OrsoTypes.ARRAY,
-        value=value_list,
+        value=[v.value for v in value_nodes],
         element_type=element_type,
     )
     return Node(

@@ -383,7 +383,7 @@ cdef BoolVector _dictionary_starts_ends(
 # ----------------------------------------------------------------------
 # Public API (unchanged)
 # ----------------------------------------------------------------------
-cpdef BoolVector vector_starts_with(StringVector vec, StringVector prefix, bint ignore_case=False, bint negated=False):
+cpdef BoolVector vector_starts_with(StringVector vec, StringVector prefix):
     cdef Py_ssize_t needle_len
     cdef const uint8_t* needle
 
@@ -394,13 +394,30 @@ cpdef BoolVector vector_starts_with(StringVector vec, StringVector prefix, bint 
         raise ValueError("vector_starts_with does not support non-constant prefixes")
 
     if vec._has_const:
-        return _constant_starts_ends(vec, needle, needle_len, ignore_case, negated, False)
+        return _constant_starts_ends(vec, needle, needle_len, False, False, False)
     if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec._dict_values != NULL:
-        return _dictionary_starts_ends(vec, needle, needle_len, ignore_case, negated, False)
-    return _dense_starts_ends(vec, needle, needle_len, ignore_case, negated, False)
+        return _dictionary_starts_ends(vec, needle, needle_len, False, False, False)
+    return _dense_starts_ends(vec, needle, needle_len, False, False, False)
 
 
-cpdef BoolVector vector_ends_with(StringVector vec, StringVector suffix, bint ignore_case=False, bint negated=False):
+cpdef BoolVector vector_ci_starts_with(StringVector vec, StringVector prefix):
+    cdef Py_ssize_t needle_len
+    cdef const uint8_t* needle
+
+    if prefix._has_const:
+        needle = <const uint8_t*>prefix._const_value.data
+        needle_len = prefix._const_value.length
+    else:
+        raise ValueError("vector_ci_starts_with does not support non-constant prefixes")
+
+    if vec._has_const:
+        return _constant_starts_ends(vec, needle, needle_len, True, False, False)
+    if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec._dict_values != NULL:
+        return _dictionary_starts_ends(vec, needle, needle_len, True, False, False)
+    return _dense_starts_ends(vec, needle, needle_len, True, False, False)
+
+
+cpdef BoolVector vector_ends_with(StringVector vec, StringVector suffix):
     cdef Py_ssize_t needle_len
     cdef const uint8_t* needle
 
@@ -411,7 +428,24 @@ cpdef BoolVector vector_ends_with(StringVector vec, StringVector suffix, bint ig
         raise ValueError("vector_ends_with does not support non-constant suffixes")
 
     if vec._has_const:
-        return _constant_starts_ends(vec, needle, needle_len, ignore_case, negated, True)
+        return _constant_starts_ends(vec, needle, needle_len, False, False, True)
     if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec._dict_values != NULL:
-        return _dictionary_starts_ends(vec, needle, needle_len, ignore_case, negated, True)
-    return _dense_starts_ends(vec, needle, needle_len, ignore_case, negated, True)
+        return _dictionary_starts_ends(vec, needle, needle_len, False, False, True)
+    return _dense_starts_ends(vec, needle, needle_len, False, False, True)
+
+
+cpdef BoolVector vector_ci_ends_with(StringVector vec, StringVector suffix):
+    cdef Py_ssize_t needle_len
+    cdef const uint8_t* needle
+
+    if suffix._has_const:
+        needle = <const uint8_t*>suffix._const_value.data
+        needle_len = suffix._const_value.length
+    else:
+        raise ValueError("vector_ci_ends_with does not support non-constant suffixes")
+
+    if vec._has_const:
+        return _constant_starts_ends(vec, needle, needle_len, True, False, True)
+    if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec._dict_values != NULL:
+        return _dictionary_starts_ends(vec, needle, needle_len, True, False, True)
+    return _dense_starts_ends(vec, needle, needle_len, True, False, True)

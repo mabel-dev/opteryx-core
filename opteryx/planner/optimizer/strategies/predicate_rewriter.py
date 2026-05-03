@@ -562,17 +562,23 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
             ):
                 telemetry.optimization_predicate_rewriter_replace_like_with_starts_with += 1
                 pattern_bytes = predicate.right.value[:-1].encode()
-                predicate.node_type = NodeType.FUNCTION
-                predicate.parameters = [
-                    predicate.left,
-                    build_literal_node(pattern_bytes),
-                    build_literal_node(predicate.value in {"ILike", "NotILike"}),
-                    build_literal_node(predicate.value in {"NotLike", "NotILike"}),
-                ]
-                predicate.value = "_STARTS_WITH"
-                predicate.left = None
-                predicate.right = None
-                _rebind_function_node(predicate)
+                negated = predicate.value in {"NotLike", "NotILike"}
+                func_name = "_CI_STARTS_WITH" if predicate.value in {"ILike", "NotILike"} else "_STARTS_WITH"
+                fn_node = Node(node_type=NodeType.FUNCTION, value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes)])
+                _rebind_function_node(fn_node)
+                if negated:
+                    predicate.node_type = NodeType.NOT
+                    predicate.centre = fn_node
+                    predicate.value = None
+                    predicate.left = None
+                    predicate.right = None
+                else:
+                    predicate.node_type = NodeType.FUNCTION
+                    predicate.value = func_name
+                    predicate.parameters = fn_node.parameters
+                    predicate.function_ref = fn_node.function_ref
+                    predicate.left = None
+                    predicate.right = None
             elif (
                 predicate.right.value.startswith("%")
                 and "%" not in predicate.right.value[1:]
@@ -580,20 +586,26 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
             ):
                 telemetry.optimization_predicate_rewriter_replace_like_with_ends_with += 1
                 pattern_bytes = predicate.right.value[1:].encode()
-                predicate.node_type = NodeType.FUNCTION
-                predicate.parameters = [
-                    predicate.left,
-                    build_literal_node(pattern_bytes),
-                    build_literal_node(predicate.value in {"ILike", "NotILike"}),
-                    build_literal_node(predicate.value in {"NotLike", "NotILike"}),
-                ]
-                predicate.value = "_ENDS_WITH"
-                predicate.left = None
-                predicate.right = None
-                _rebind_function_node(predicate)
+                negated = predicate.value in {"NotLike", "NotILike"}
+                func_name = "_CI_ENDS_WITH" if predicate.value in {"ILike", "NotILike"} else "_ENDS_WITH"
+                fn_node = Node(node_type=NodeType.FUNCTION, value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes)])
+                _rebind_function_node(fn_node)
+                if negated:
+                    predicate.node_type = NodeType.NOT
+                    predicate.centre = fn_node
+                    predicate.value = None
+                    predicate.left = None
+                    predicate.right = None
+                else:
+                    predicate.node_type = NodeType.FUNCTION
+                    predicate.value = func_name
+                    predicate.parameters = fn_node.parameters
+                    predicate.function_ref = fn_node.function_ref
+                    predicate.left = None
+                    predicate.right = None
 
-    # If the predicate was transformed to a FUNCTION node, return early
-    if predicate.node_type == NodeType.FUNCTION:
+    # If the predicate was transformed to a FUNCTION or NOT node, return early
+    if predicate.node_type in {NodeType.FUNCTION, NodeType.NOT}:
         return predicate
 
     if predicate.right.type == OrsoTypes.BLOB:
@@ -625,17 +637,23 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
             ):
                 telemetry.optimization_predicate_rewriter_replace_like_with_starts_with += 1
                 pattern_bytes = predicate.right.value[:-1]
-                predicate.node_type = NodeType.FUNCTION
-                predicate.parameters = [
-                    predicate.left,
-                    build_literal_node(pattern_bytes),
-                    build_literal_node(predicate.value in {"ILike", "NotILike"}),
-                    build_literal_node(predicate.value in {"NotLike", "NotILike"}),
-                ]
-                predicate.value = "_STARTS_WITH"
-                predicate.left = None
-                predicate.right = None
-                _rebind_function_node(predicate)
+                negated = predicate.value in {"NotLike", "NotILike"}
+                func_name = "_CI_STARTS_WITH" if predicate.value in {"ILike", "NotILike"} else "_STARTS_WITH"
+                fn_node = Node(node_type=NodeType.FUNCTION, value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes)])
+                _rebind_function_node(fn_node)
+                if negated:
+                    predicate.node_type = NodeType.NOT
+                    predicate.centre = fn_node
+                    predicate.value = None
+                    predicate.left = None
+                    predicate.right = None
+                else:
+                    predicate.node_type = NodeType.FUNCTION
+                    predicate.value = func_name
+                    predicate.parameters = fn_node.parameters
+                    predicate.function_ref = fn_node.function_ref
+                    predicate.left = None
+                    predicate.right = None
             elif (
                 predicate.right.value.startswith(b"%")
                 and b"%" not in predicate.right.value[1:]
@@ -643,17 +661,23 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
             ):
                 telemetry.optimization_predicate_rewriter_replace_like_with_ends_with += 1
                 pattern_bytes = predicate.right.value[1:]
-                predicate.node_type = NodeType.FUNCTION
-                predicate.parameters = [
-                    predicate.left,
-                    build_literal_node(pattern_bytes),
-                    build_literal_node(predicate.value in {"ILike", "NotILike"}),
-                    build_literal_node(predicate.value in {"NotLike", "NotILike"}),
-                ]
-                predicate.value = "_ENDS_WITH"
-                predicate.left = None
-                predicate.right = None
-                _rebind_function_node(predicate)
+                negated = predicate.value in {"NotLike", "NotILike"}
+                func_name = "_CI_ENDS_WITH" if predicate.value in {"ILike", "NotILike"} else "_ENDS_WITH"
+                fn_node = Node(node_type=NodeType.FUNCTION, value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes)])
+                _rebind_function_node(fn_node)
+                if negated:
+                    predicate.node_type = NodeType.NOT
+                    predicate.centre = fn_node
+                    predicate.value = None
+                    predicate.left = None
+                    predicate.right = None
+                else:
+                    predicate.node_type = NodeType.FUNCTION
+                    predicate.value = func_name
+                    predicate.parameters = fn_node.parameters
+                    predicate.function_ref = fn_node.function_ref
+                    predicate.left = None
+                    predicate.right = None
 
     if predicate.value == "AnyOpEq":
         if predicate.right.node_type == NodeType.LITERAL:

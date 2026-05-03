@@ -18,6 +18,8 @@ from opteryx.compiled import vector_ops as compiled_vector_ops
 from draken.vectors.string_vector import lowercase as vector_lowercase
 from draken.vectors.string_vector import uppercase as vector_uppercase
 from opteryx.compiled.vector_ops import (
+    vector_ci_ends_with,
+    vector_ci_starts_with,
     vector_ends_with,
     vector_initcap,
     vector_length,
@@ -224,18 +226,21 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
             (
                 ParameterSpec(name="haystack", type_family="string"),
                 ParameterSpec(name="needle", type_family="string", constant_only=True),
-                ParameterSpec(
-                    name="case_insensitive",
-                    type_family="boolean",
-                    constant_only=True,
-                    optional=True,
-                ),
-                ParameterSpec(
-                    name="negated", type_family="boolean", constant_only=True, optional=True
-                ),
             ),
             engine="draken",
-            summary="Internal prefix match.",
+            summary="Internal prefix match (case-sensitive).",
+            cost=64.0,
+        ),
+        _make(
+            "_CI_STARTS_WITH",
+            vector_ci_starts_with,
+            OrsoTypes.BOOLEAN,
+            (
+                ParameterSpec(name="haystack", type_family="string"),
+                ParameterSpec(name="needle", type_family="string", constant_only=True),
+            ),
+            engine="draken",
+            summary="Internal prefix match (case-insensitive).",
             cost=64.0,
         ),
         _make(
@@ -245,18 +250,21 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
             (
                 ParameterSpec(name="haystack", type_family="string"),
                 ParameterSpec(name="needle", type_family="string", constant_only=True),
-                ParameterSpec(
-                    name="case_insensitive",
-                    type_family="boolean",
-                    constant_only=True,
-                    optional=True,
-                ),
-                ParameterSpec(
-                    name="negated", type_family="boolean", constant_only=True, optional=True
-                ),
             ),
             engine="draken",
-            summary="Internal suffix match.",
+            summary="Internal suffix match (case-sensitive).",
+            cost=64.0,
+        ),
+        _make(
+            "_CI_ENDS_WITH",
+            vector_ci_ends_with,
+            OrsoTypes.BOOLEAN,
+            (
+                ParameterSpec(name="haystack", type_family="string"),
+                ParameterSpec(name="needle", type_family="string", constant_only=True),
+            ),
+            engine="draken",
+            summary="Internal suffix match (case-insensitive).",
             cost=64.0,
         ),
     ]

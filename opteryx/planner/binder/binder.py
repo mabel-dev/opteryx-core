@@ -489,6 +489,25 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
             node.schema_column = schema_column
             schemas["$derived"].columns.append(schema_column)
         else:
+            if node.value in ("InList", "NotInList") and isinstance(
+                getattr(node.right, "value", None), list
+            ):
+                from opteryx.compiled.vector_ops import build_in_list_carchar
+                from opteryx.types import OrsoTypes as _OT
+
+                left_type = getattr(getattr(node.left, "schema_column", None), "type", None)
+                _COERCE = {
+                    _OT.DOUBLE: float,
+                    _OT.INTEGER: int,
+                    _OT.BOOLEAN: bool,
+                    _OT.VARCHAR: lambda v: v.encode("utf-8") if isinstance(v, str) else v,
+                    _OT.BLOB: lambda v: v if isinstance(v, bytes) else str(v).encode("utf-8"),
+                }
+                coerce = _COERCE.get(left_type, lambda v: v)
+                node.right.value = build_in_list_carchar(
+                    [None if v is None else coerce(v) for v in node.right.value]
+                )
+
             mismatches = get_mismatched_condition_column_types(node, relaxed=True)
             if mismatches:
                 raise IncompatibleTypesError(**mismatches)

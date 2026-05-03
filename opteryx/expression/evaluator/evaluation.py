@@ -59,17 +59,27 @@ def _eval_value(node, morsel):
     node_type = node.node_type
 
     if node_type == NodeType.LITERAL:
-        # bool must stay as raw Python — bint Cython params coerce any non-None
-        # object to True, so wrapping False in a BoolVector breaks bint params.
-        if not isinstance(node.value, bool):
-            from draken.vectors.scalar_constructors import (
-                from_scalar as _const_scalar,
-            )
+        if isinstance(node.value, bool):
+            from draken.vectors.bool_vector import BoolVector
 
-            vec = _const_scalar(node.value, morsel.num_rows)
-            if vec is not None:
-                return vec
-        return node.value
+            return BoolVector.from_constant(node.value, morsel.num_rows)
+
+        from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
+
+        if isinstance(node.value, CarcharSetWrapper):
+            return node.value
+
+        from draken.vectors.scalar_constructors import (
+            from_scalar as _const_scalar,
+        )
+
+        vec = _const_scalar(node.value, morsel.num_rows)
+        if vec is None:
+            raise TypeError(
+                f"_eval_value: cannot construct Draken vector for literal "
+                f"{node.value!r} (type {type(node.value).__name__})"
+            )
+        return vec
 
     if node_type == NodeType.IDENTIFIER:
         vec = morsel.column(node.schema_column.identity, node.schema_column.name.encode())
@@ -375,12 +385,20 @@ def evaluate_and_append_draken(nodes, morsel):
         if identity in existing:
             continue
         if node.node_type == NodeType.FUNCTION:
-            from opteryx.expression import NodeType as _NT
-            from opteryx.expression import _inner_evaluate
-
             parameters = []
             for param in node.parameters:
-                parameters.append(_eval_value(param, morsel))
+                value = _eval_value(param, morsel)
+                if is_draken_vector(value):
+                    parameters.append(value)
+                    continue
+                if isinstance(value, list) and all(is_draken_vector(v) for v in value):
+                    parameters.append(value)
+                    continue
+                raise TypeError(
+                    f"evaluate_and_append_draken: parameter for {node.value!r} "
+                    f"must be a Draken vector (or list of Draken vectors); "
+                    f"got {type(value).__name__}"
+                )
             if len(parameters) == 0:
                 parameters = [morsel.num_rows]
             result = apply_bounded_function(node, *parameters)

@@ -6,122 +6,65 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-from cpython.bytes cimport PyBytes_FromStringAndSize
-from cython import Py_ssize_t
-from libc.stdint cimport int64_t, uint8_t, int32_t
+from libc.stdint cimport uint8_t, uint64_t
 from libc.string cimport memset
 
 from draken.vectors.vector cimport Vector
-from draken.vectors.int64_vector cimport Int64Vector
-from draken.vectors.string_vector cimport StringVector
 from draken.vectors.bool_vector cimport BoolVector
-from draken.core.buffers cimport DrakenVarBuffer, DRAKEN_ENCODING_DENSE, DRAKEN_ENCODING_CONSTANT, DRAKEN_ENCODING_DICTIONARY
+from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 
-cdef BoolVector vector_in_list_int64_vector(Int64Vector vec, set values):
-    cdef Py_ssize_t i, n = vec.ptr.length
-    cdef Py_ssize_t nbytes = (n + 7) >> 3
-    cdef BoolVector out = BoolVector(<size_t>n)
-    cdef uint8_t* dst = <uint8_t*>out.ptr.data
-    cdef int64_t* data = <int64_t*>vec.ptr.data
-    cdef uint8_t* nulls = vec.ptr.null_bitmap
-    cdef bint null_in_values = None in values
-    cdef bint is_valid
-
-    memset(dst, 0, nbytes)
-
-    if nulls == NULL:
-        for i in range(n):
-            if data[i] in values:
-                dst[i >> 3] |= (1 << (i & 7))
-    else:
-        for i in range(n):
-            is_valid = (nulls[i >> 3] >> (i & 7)) & 1
-            if is_valid:
-                if data[i] in values:
-                    dst[i >> 3] |= (1 << (i & 7))
-            elif null_in_values:
-                dst[i >> 3] |= (1 << (i & 7))
-
-    return out
+# Null hash sentinel — same value as filter_join.pyx and the Draken hash machinery.
+# Computed as mix_hash(0, raw_NULL_HASH) where raw_NULL_HASH = 0x4c3f95a36ab8ecca.
+cdef uint64_t _NULL_HASH = <uint64_t>0x73d59cff8f94d86cULL
 
 
-cdef BoolVector vector_in_list_string_vector(StringVector vec, set values):
-    cdef Py_ssize_t i, n = vec.ptr.length
-    cdef Py_ssize_t nbytes = (n + 7) >> 3
-    cdef BoolVector out = BoolVector(<size_t>n)
-    cdef uint8_t* dst = <uint8_t*>out.ptr.data
-    cdef bint null_in_values
-    cdef StringRow row
-    cdef bytes s
+def build_in_list_carchar(values):
+    """Build a CarcharSetWrapper from a Python list of IN-list literal values.
 
-    # Normalise string values to bytes for comparison
-    cdef set bytes_values = set()
+    Called once at plan time. Each value is hashed via the same Draken hash
+    machinery used by the column vectors, so hashes are directly comparable
+    at evaluation time.
+    """
+    from draken.vectors.scalar_constructors import from_scalar as _build_scalar
+
+    cdef CarcharSetWrapper result = CarcharSetWrapper(len(values) * 2 + 8)
+    cdef uint64_t[::1] hash_buf
+    cdef uint64_t h
+
     for val in values:
         if val is None:
-            bytes_values.add(None)
-        elif isinstance(val, bytes):
-            bytes_values.add(val)
-        elif isinstance(val, str):
-            bytes_values.add(val.encode('utf-8'))
-        else:
-            bytes_values.add(val)
+            result.insert(_NULL_HASH)
+            continue
+        scalar_vec = _build_scalar(val, 1)
+        if scalar_vec is None:
+            raise TypeError(
+                f"build_in_list_carchar: unsupported IN list value type {type(val).__name__!r}"
+            )
+        hash_buf = (<Vector>scalar_vec).hash()
+        result.insert(hash_buf[0])
 
-    null_in_values = None in bytes_values
+    return result
+
+
+cpdef BoolVector vector_in_list(Vector arr, CarcharSetWrapper carchar):
+    """Row-wise IN-list membership test using a pre-built CarcharSetWrapper.
+
+    Hashes each element of arr and probes the set. O(n) with O(1) probe cost.
+    Works for any Draken Vector type — hash consistency is guaranteed because
+    both the set and the column use the same Draken hash_into machinery.
+    """
+    cdef Py_ssize_t i, n = len(arr)
+    cdef Py_ssize_t nbytes = (n + 7) >> 3
+    cdef BoolVector out = BoolVector(<size_t>n)
+    cdef uint8_t* dst = <uint8_t*>out.ptr.data
+    cdef uint64_t[::1] hashes
 
     memset(dst, 0, nbytes)
 
+    hashes = arr.hash()
+
     for i in range(n):
-        row = string_vec_get_at(vec, i)
-        if row.is_null:
-            if null_in_values:
-                dst[i >> 3] |= (1 << (i & 7))
-        else:
-            s = PyBytes_FromStringAndSize(row.data, row.length)
-            if s in bytes_values:
-                dst[i >> 3] |= (1 << (i & 7))
-
-    return out
-
-
-cdef BoolVector _list_in_list_generic(Vector vec, set values):
-    """Generic fallback via to_pylist() for Vector types without a fast path."""
-    cdef Py_ssize_t i, n, nbytes
-    cdef BoolVector out
-    cdef uint8_t* dst
-
-    print("DEBUG: Using generic fallback for IN operator")
-    py_list = vec.to_pylist()
-    n = len(py_list)
-    nbytes = (n + 7) >> 3
-    out = BoolVector(<size_t>n)
-    dst = <uint8_t*>out.ptr.data
-    memset(dst, 0, nbytes)
-    for i in range(n):
-        if py_list[i] in values:
+        if carchar.contains(hashes[i]):
             dst[i >> 3] |= (1 << (i & 7))
+
     return out
-
-
-cpdef BoolVector vector_in_list(object arr, object values):
-    """
-    Fast membership check for "InList".
-
-    Parameters:
-        arr: Draken Vector (Int64Vector, StringVector, or generic Vector).
-        values: Set or frozenset of valid values.
-
-    Returns:
-        BoolVector indicating membership.
-    """
-    # Convert frozenset to set if needed
-    if isinstance(values, frozenset):
-        values = set(values)
-
-    # Use generic fallback for all Int64Vectors due to segfault with vector_in_list_int64_vector
-    if isinstance(arr, Int64Vector):
-        return _list_in_list_generic(arr, values)
-    if isinstance(arr, StringVector):
-        return vector_in_list_string_vector(arr, values)
-    if isinstance(arr, Vector):
-        return _list_in_list_generic(arr, values)
-    raise TypeError(f"vector_in_list requires a Draken Vector, got {type(arr)}")
