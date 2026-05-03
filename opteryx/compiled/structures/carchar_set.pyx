@@ -31,6 +31,7 @@ Design notes
 
 from libc.stdint cimport int32_t, int64_t, uint64_t
 from libc.stddef cimport size_t
+from cpython.mem cimport PyMem_Malloc, PyMem_Free
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +95,24 @@ cdef extern from *:
             s->tighten();
          }
 
+        static inline size_t probe_found_32(
+            const opteryx::carchar::CarcharSet* s,
+            const uint64_t* keys,
+            int32_t* out_indices,
+            size_t length
+        ) noexcept {
+            return s->probe_found_32(keys, out_indices, length);
+        }
+
+        static inline size_t probe_not_found_32(
+            const opteryx::carchar::CarcharSet* s,
+            const uint64_t* keys,
+            int32_t* out_indices,
+            size_t length
+        ) noexcept {
+            return s->probe_not_found_32(keys, out_indices, length);
+        }
+
     }   // namespace opteryx_csw
     """
     bint _csw_insert "opteryx_csw::insert_new"(
@@ -130,6 +149,20 @@ cdef extern from *:
 
     void _csw_tighten "opteryx_csw::tighten"(
         CarcharSet* s,
+    ) noexcept nogil
+
+    size_t _csw_probe_found_32 "opteryx_csw::probe_found_32"(
+        const CarcharSet* s,
+        const uint64_t* keys,
+        int32_t* out_indices,
+        size_t length,
+    ) noexcept nogil
+
+    size_t _csw_probe_not_found_32 "opteryx_csw::probe_not_found_32"(
+        const CarcharSet* s,
+        const uint64_t* keys,
+        int32_t* out_indices,
+        size_t length,
     ) noexcept nogil
 
 
@@ -235,6 +268,36 @@ cdef class CarcharSetWrapper:
             self._ptr, hashes, out_indices, <size_t>length
           )
 
+    cdef Py_ssize_t probe_found_32_nogil(
+        self,
+        uint64_t* hashes,
+        Py_ssize_t length,
+        int32_t* out_indices,
+    ) noexcept nogil:
+        """
+        Read-only batch probe: write row indices of hashes FOUND in the set
+        into out_indices.  Returns the count written.  Never modifies the set.
+        Used by the semi-join (IN subquery) probe phase.
+        """
+        return <Py_ssize_t>_csw_probe_found_32(
+            self._ptr, hashes, out_indices, <size_t>length
+        )
+
+    cdef Py_ssize_t probe_not_found_32_nogil(
+        self,
+        uint64_t* hashes,
+        Py_ssize_t length,
+        int32_t* out_indices,
+    ) noexcept nogil:
+        """
+        Read-only batch probe: write row indices of hashes NOT FOUND in the set
+        into out_indices.  Returns the count written.  Never modifies the set.
+        Used by the anti-join (NOT IN / EXCEPT) probe phase.
+        """
+        return <Py_ssize_t>_csw_probe_not_found_32(
+            self._ptr, hashes, out_indices, <size_t>length
+        )
+
     # -----------------------------------------------------------------------
     # C-level and Python-visible methods
     # -----------------------------------------------------------------------
@@ -275,3 +338,41 @@ cdef class CarcharSetWrapper:
     cpdef void reserve_py(self, size_t capacity):
         """Pre-allocate for at least `capacity` entries (Python-visible)."""
         _csw_reserve(self._ptr, capacity)
+
+    def probe_found(self, keys):
+        """
+        Python-visible read-only probe: return a list of indices into `keys`
+        where keys[i] IS present in the set.  Used for testing.
+        """
+        cdef uint64_t[:] kv = memoryview(keys)
+        cdef Py_ssize_t n = kv.shape[0]
+        if n == 0:
+            return []
+        cdef int32_t* out = <int32_t*>PyMem_Malloc(n * sizeof(int32_t))
+        if out == NULL:
+            raise MemoryError()
+        cdef Py_ssize_t found
+        with nogil:
+            found = self.probe_found_32_nogil(&kv[0], n, out)
+        result = [out[i] for i in range(found)]
+        PyMem_Free(out)
+        return result
+
+    def probe_not_found(self, keys):
+        """
+        Python-visible read-only probe: return a list of indices into `keys`
+        where keys[i] is NOT present in the set.  Used for testing.
+        """
+        cdef uint64_t[:] kv = memoryview(keys)
+        cdef Py_ssize_t n = kv.shape[0]
+        if n == 0:
+            return []
+        cdef int32_t* out = <int32_t*>PyMem_Malloc(n * sizeof(int32_t))
+        if out == NULL:
+            raise MemoryError()
+        cdef Py_ssize_t not_found
+        with nogil:
+            not_found = self.probe_not_found_32_nogil(&kv[0], n, out)
+        result = [out[i] for i in range(not_found)]
+        PyMem_Free(out)
+        return result

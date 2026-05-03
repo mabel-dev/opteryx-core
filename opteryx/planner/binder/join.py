@@ -20,6 +20,47 @@ from opteryx.types.schema import RelationSchema
 from opteryx.utils import random_string
 
 
+def _bind_on_condition_split(
+    on_node: Node, left_context: BindingContext, right_context: BindingContext, right_set: set
+) -> Node:
+    """
+    Bind each side of an AND-tree of Eq conditions using a split context.
+
+    When the ON condition comes from an IN-subquery rewrite, both the outer relation
+    and the inner (subquery) relation may project the same column name. Binding the
+    entire condition with a merged context would raise AmbiguousIdentifierError.
+
+    This function routes each Eq comparison's sides to the appropriate restricted
+    context: right-side identifiers (source in right_set) use the subquery-only
+    context; left-side identifiers use the outer-query context.
+    """
+    if on_node.node_type == NodeType.AND:
+        on_node.left = _bind_on_condition_split(
+            on_node.left, left_context, right_context, right_set
+        )
+        on_node.right = _bind_on_condition_split(
+            on_node.right, left_context, right_context, right_set
+        )
+        return on_node
+
+    if on_node.node_type == NodeType.COMPARISON_OPERATOR and on_node.value == "Eq":
+        right_source = getattr(on_node.right, "source", None)
+        left_source = getattr(on_node.left, "source", None)
+
+        if right_source in right_set:
+            on_node.right, _ = inner_binder(on_node.right, right_context)
+            on_node.left, _ = inner_binder(on_node.left, left_context)
+        elif left_source in right_set:
+            on_node.left, _ = inner_binder(on_node.left, right_context)
+            on_node.right, _ = inner_binder(on_node.right, left_context)
+        else:
+            on_node, _ = inner_binder(on_node, left_context)
+        return on_node
+
+    on_node, _ = inner_binder(on_node, left_context)
+    return on_node
+
+
 def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Visits a JOIN node and handles different types of joins.
@@ -36,13 +77,13 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     """
     node.columns = []
 
-    if not node.left_relation_names and len(node.relation_names) >= 2:
+    if not node.left_relation_names and node.relation_names and len(node.relation_names) >= 2:
         node.left_relation_names = (
             node.relation_names[0]
             if isinstance(node.relation_names[0], list)
             else [node.relation_names[0]]
         )
-    if not node.right_relation_names and len(node.relation_names) >= 2:
+    if not node.right_relation_names and node.relation_names and len(node.relation_names) >= 2:
         node.right_relation_names = (
             node.relation_names[1]
             if isinstance(node.relation_names[1], list)
@@ -105,7 +146,38 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
 
             raise UnsupportedSyntaxError("Only JOINs with equals comparisons supported.")
 
-        node.on, context = inner_binder(node.on, context)
+        if not node.left_relation_names and node.right_relation_names:
+            # IN-subquery rewrites: both outer and inner may share a column name (e.g. "id").
+            # Bind each side of the ON condition in a restricted context to avoid
+            # AmbiguousIdentifierError: left side uses only non-subquery schemas, right side
+            # uses only the subquery schema.
+            right_set = set(node.right_relation_names)
+            left_context = context.copy()
+            left_context.schemas = {k: v for k, v in context.schemas.items() if k not in right_set}
+            right_context = context.copy()
+            right_context.schemas = {
+                k: v for k, v in context.schemas.items() if k in right_set or k == "$derived"
+            }
+            node.on = _bind_on_condition_split(node.on, left_context, right_context, right_set)
+        else:
+            node.on, context = inner_binder(node.on, context)
+
+        # When left_relation_names is not set (e.g. IN-subquery rewrites that don't know
+        # the outer relation at rewrite time), infer it from the bound ON condition: any
+        # identifier source that is not the right-side relation must be on the left.
+        if not node.left_relation_names and node.right_relation_names:
+            right_set = set(node.right_relation_names)
+            left_sources = {
+                n.source
+                for n in get_all_nodes_of_type(node.on, (NodeType.IDENTIFIER,))
+                if n.source
+                and n.source not in right_set
+                and n.source != "$derived"
+                and not n.source.startswith("$shared-")
+            }
+            if left_sources:
+                node.left_relation_names = list(left_sources)
+
         node.left_columns, node.right_columns = extract_join_fields(
             node.on, node.left_relation_names, node.right_relation_names
         )
@@ -161,7 +233,7 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         )
 
     # SEMI and ANTI joins only return columns from one table
-    if node.type in ("left anti", "left semi"):
+    if node.type in ("left anti", "left semi", "left anti null-aware"):
         for schema in node.right_relation_names:
             context.schemas.pop(schema, None)
 

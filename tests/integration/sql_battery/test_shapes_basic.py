@@ -230,6 +230,14 @@ STATEMENTS = [
         ("SELECT * FROM (SELECT name, id FROM $planets AS A WHERE id < 3 EXCEPT SELECT name, id FROM $planets AS B WHERE id > 7) C", 2, 2, None),
         # EXCEPT with same input should return 0 rows
         ("SELECT * FROM (SELECT name, id FROM $planets AS A EXCEPT SELECT name, id FROM $planets AS B) C", 0, 2, None),
+
+        # IN subquery
+        ("SELECT name FROM testdata.satellites WHERE id IN (SELECT id FROM $planets)", 9, 1, None),
+        ("SELECT name FROM testdata.satellites WHERE id NOT IN (SELECT id FROM $planets)", 168, 1, None),
+
+        # EXISTS / NOT EXISTS subquery
+        ("SELECT name FROM $planets WHERE EXISTS (SELECT 1 FROM testdata.satellites WHERE testdata.satellites.planetId = $planets.id)", 7, 1, None),
+        ("SELECT name FROM $planets WHERE NOT EXISTS (SELECT 1 FROM testdata.satellites WHERE testdata.satellites.planetId = $planets.id)", 2, 1, None),
 ]
 
 # fmt:on

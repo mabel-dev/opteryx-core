@@ -122,8 +122,8 @@ def _create_join_node(logical_node, query_properties, registry):
     elif join_type == "cross join":
         # CROSS JOIN, CROSS JOIN UNNEST
         return registry.create("Cross Join", query_properties, **node_config)
-    elif join_type in ("left anti", "left semi"):
-        # LEFT SEMI, LEFT ANTI JOIN
+    elif join_type in ("left anti", "left semi", "left anti null-aware"):
+        # LEFT SEMI, LEFT ANTI, LEFT ANTI NULL-AWARE (NOT IN) JOIN
         return registry.create("Filter Join", query_properties, **node_config)
     else:
         # We don't support other JOIN types, e.g. RIGHT SEMI, RIGHT ANTI

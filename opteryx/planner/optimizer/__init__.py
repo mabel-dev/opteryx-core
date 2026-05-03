@@ -40,11 +40,13 @@ from opteryx.planner.optimizer.strategies import (
     CrossJoinFilterPushdownStrategy,
     DistinctPushdownStrategy,
     HashMapVariantStrategy,
+    JoinEliminationStrategy,
     JoinOrderingStrategy,
     JoinRewriteStrategy,
     LimitFilesPruningStrategy,
     LimitPushdownStrategy,
     ManifestPruningStrategy,
+    NullabilityInferenceStrategy,
     OperatorFusionStrategy,
     PredicateCompactionStrategy,
     PredicateOrderingStrategy,
@@ -74,6 +76,7 @@ class OptimizerVisitor:
             CastSimplificationStrategy(telemetry),  # DISABLED: Causes plan corruption
             SplitConjunctivePredicatesStrategy(telemetry),
             CorrelatedFiltersStrategy(telemetry),
+            NullabilityInferenceStrategy(telemetry),
             PredicateRewriteStrategy(telemetry),
             PredicateCompactionStrategy(telemetry),
             PredicatePushdownStrategy(telemetry),
@@ -82,6 +85,7 @@ class OptimizerVisitor:
             ),  # Convert CROSS JOIN + filters to INNER JOIN
             ManifestPruningStrategy(telemetry),  # Apply after predicate pushdown
             ProjectionPushdownStrategy(telemetry),
+            JoinEliminationStrategy(telemetry),
             JoinRewriteStrategy(telemetry),
             JoinOrderingStrategy(telemetry),
             DistinctPushdownStrategy(telemetry),

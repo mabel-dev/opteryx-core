@@ -718,17 +718,16 @@ def expression_with_alias(branch, alias: Optional[List[str]] = None, key=None):
 def exists(branch, alias: Optional[List[str]] = None, key=None):
     from opteryx.planner.logical_planner.logical_planner import plan_query
 
-    subplan = plan_query(branch["subquery"])
-    not_exists = Node(NodeType.LITERAL, type=OrsoTypes.BOOLEAN, value=branch["negated"])
+    ast = {"Query": branch["subquery"]}
+    subquery_plan = plan_query(ast)
+    exit_node = subquery_plan.get_exit_points()[0]
+    subquery_plan.remove_node(exit_node, heal=True)
 
-    raise UnsupportedSyntaxError("EXISTS is not supported in Opteryx")
-
-    return Node(
-        NodeType.UNARY_OPERATOR,
-        value="EXISTS",
-        parameters=[Node(NodeType.SUBQUERY, plan=subplan), not_exists],
-        alias=alias,
-    )
+    sub_query = Node(NodeType.SUBQUERY, value=subquery_plan)
+    node = Node(NodeType.UNARY_OPERATOR, value="Exists", alias=alias)
+    node.parameters = [sub_query]
+    node.negated = branch["negated"]
+    return node
 
 
 def expressions(branch, alias: Optional[List[str]] = None, key=None):
@@ -906,29 +905,23 @@ def in_list(branch, alias: Optional[List[str]] = None, key=None):
 
 
 def in_subquery(branch, alias: Optional[List[str]] = None, key=None):
-    # if it's a sub-query we create a plan for it
-
-    from opteryx.exceptions import UnsupportedSyntaxError
-
-    raise UnsupportedSyntaxError("IN subqueries are currently not supported in Opteryx")
-
     from opteryx.planner.logical_planner.logical_planner import plan_query
 
     left = build(branch["expr"])
-    ast = {}
-    ast["Query"] = branch["subquery"]
+    ast = {"Query": branch["subquery"]}
     subquery_plan = plan_query(ast)
     exit_node = subquery_plan.get_exit_points()[0]
     subquery_plan.remove_node(exit_node, heal=True)
-    operator = "NotInSubQuery" if branch["negated"] else "InSubQuery"
 
     sub_query = Node(NodeType.SUBQUERY, value=subquery_plan)
-    return Node(
+    node = Node(
         NodeType.COMPARISON_OPERATOR,
-        value=operator,
+        value="InSubQuery",
         left=left,
         right=sub_query,
     )
+    node.negated = branch["negated"]
+    return node
 
 
 def in_unnest(branch, alias: Optional[List[str]] = None, key=None):

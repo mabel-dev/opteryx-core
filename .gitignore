@@ -281,3 +281,6 @@ opteryx/third_party/yyjson/cyyjson.c
 rugo/src/_jsonl/_jsonl_reader.cpp
 rugo/src/jsonl/jsonl_reader.cpp
 rugo/src/parquet/parquet_reader.cpp
+draken/vectors/string_vector.c
+draken/vectors/int64_vector.c
+draken/tests/_rle_test_helpers.cpp

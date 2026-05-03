@@ -13,6 +13,8 @@ cdef extern from "carchar_set.hpp" namespace "opteryx::carchar" nogil:
         bint insert_or_ignore(uint64_t key) except +
         size_t insert_many(const uint64_t* keys, size_t length) except +
         size_t mark_new(const uint64_t* keys, uint8_t* out_is_new, size_t length) noexcept
+        size_t probe_found_32(const uint64_t* keys, int32_t* out_indices, size_t length) noexcept
+        size_t probe_not_found_32(const uint64_t* keys, int32_t* out_indices, size_t length) noexcept
         size_t mark_new_indices_32(const uint64_t* keys, int32_t* out_indices, size_t length) noexcept
         size_t mark_new_indices_64(const uint64_t* keys, int64_t* out_indices, size_t length) noexcept
 
@@ -36,6 +38,21 @@ cdef class CarcharSetWrapper:
         int64_t* out_indices,
     ) noexcept nogil
     cdef Py_ssize_t find_new_indices_out_32(
+        self,
+        uint64_t* hashes,
+        Py_ssize_t length,
+        int32_t* out_indices,
+    ) noexcept nogil
+
+    # Batch read-only probes — semi-join (found) and anti-join (not-found).
+    # const on the C++ side; safe to call NoGIL; never modify the set.
+    cdef Py_ssize_t probe_found_32_nogil(
+        self,
+        uint64_t* hashes,
+        Py_ssize_t length,
+        int32_t* out_indices,
+    ) noexcept nogil
+    cdef Py_ssize_t probe_not_found_32_nogil(
         self,
         uint64_t* hashes,
         Py_ssize_t length,

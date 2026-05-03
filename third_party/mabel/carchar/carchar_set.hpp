@@ -196,6 +196,66 @@ class CarcharSet {
         return inserted;
     }
 
+    // Pure read-only probe for SEMI JOIN (IN subquery): returns indices of keys
+    // that ARE present in the set.  Caller supplies out_indices with at least
+    // `length` int32 slots.  Returns the count written.
+    // const — never modifies the set; safe to call NoGIL with a shared build-side set.
+    std::size_t probe_found_32(
+        const std::uint64_t* keys,
+        std::int32_t*        out_indices,
+        std::size_t          length
+    ) const noexcept {
+        if (keys == nullptr || out_indices == nullptr || length == 0) {
+            return 0;
+        }
+        const auto probe_finder = detail::select_probe_finder();
+        const std::size_t capacity_mask = capacity_ - 1U;
+        std::size_t found = 0;
+        const std::size_t prime = std::min(kPrefetchAhead, length);
+        for (std::size_t p = 0; p < prime; ++p) {
+            prefetch_entry(keys[p] & capacity_mask);
+        }
+        for (std::size_t i = 0; i < length; ++i) {
+            if (i + kPrefetchAhead < length) {
+                prefetch_entry(keys[i + kPrefetchAhead] & capacity_mask);
+            }
+            if (find_slot(keys[i], probe_finder).found) {
+                out_indices[found++] = static_cast<std::int32_t>(i);
+            }
+        }
+        return found;
+    }
+
+    // Pure read-only probe for ANTI JOIN (NOT IN subquery): returns indices of
+    // keys that are NOT present in the set.  Caller supplies out_indices with
+    // at least `length` int32 slots.  Returns the count written.
+    // const — never modifies the set; safe to call NoGIL with a shared build-side set.
+    std::size_t probe_not_found_32(
+        const std::uint64_t* keys,
+        std::int32_t*        out_indices,
+        std::size_t          length
+    ) const noexcept {
+        if (keys == nullptr || out_indices == nullptr || length == 0) {
+            return 0;
+        }
+        const auto probe_finder = detail::select_probe_finder();
+        const std::size_t capacity_mask = capacity_ - 1U;
+        std::size_t not_found = 0;
+        const std::size_t prime = std::min(kPrefetchAhead, length);
+        for (std::size_t p = 0; p < prime; ++p) {
+            prefetch_entry(keys[p] & capacity_mask);
+        }
+        for (std::size_t i = 0; i < length; ++i) {
+            if (i + kPrefetchAhead < length) {
+                prefetch_entry(keys[i + kPrefetchAhead] & capacity_mask);
+            }
+            if (!find_slot(keys[i], probe_finder).found) {
+                out_indices[not_found++] = static_cast<std::int32_t>(i);
+            }
+        }
+        return not_found;
+    }
+
     std::size_t estimated_bytes() const noexcept { return capacity_ * (1U + 8U); }
 
    private:
@@ -226,6 +286,7 @@ class CarcharSet {
         control_.assign(capacity_ + (kGroupWidth - 1U), kEmpty);
         hashes_.assign(capacity_, 0U);
         size_ = 0;
+        probe_finder_ = detail::select_probe_finder();
     }
 
     void ensure_insert_capacity() {
@@ -262,8 +323,8 @@ class CarcharSet {
         return slot;
     }
 
-    FindResult find_slot(std::uint64_t key) const {
-        return find_slot(key, detail::select_probe_finder());
+    FindResult find_slot(std::uint64_t key) const noexcept {
+        return find_slot(key, probe_finder_);
     }
 
     FindResult find_slot(std::uint64_t key, detail::ProbeFn probe_finder) const noexcept {
@@ -295,6 +356,7 @@ class CarcharSet {
     std::vector<std::uint64_t> hashes_;
     std::size_t size_ = 0;
     double load_factor_ = 0.80;
+    detail::ProbeFn probe_finder_ = nullptr;
 };
 
 }  // namespace opteryx::carchar

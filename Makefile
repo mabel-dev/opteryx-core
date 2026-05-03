@@ -162,6 +162,21 @@ coverage: ## Generate test coverage report
 	@$(COVERAGE) html --include=$(SRC_DIR)/**
 	$(call print_green,"Coverage report generated in htmlcov/")
 
+fuzz: check-python dev-install ## Run fuzzing tests (existing + metamorphic)
+	$(call print_blue,"Running fuzzing suite...")
+	@clear || true
+	$(call print_blue,"Phase 1: Fuzzing literals...")
+	@$(PYTHON) tests/fuzzing/fuzz_literals.py --iterations 100
+	$(call print_blue,"Phase 2: Fuzzing joins...")
+	@$(PYTHON) tests/fuzzing/fuzz_joins.py --iterations 50
+	$(call print_blue,"Phase 3: Fuzzing single table select...")
+	@$(PYTHON) tests/fuzzing/fuzz_single_table_select.py --iterations 50
+	$(call print_blue,"Phase 4: Metamorphic fuzzing...")
+	@$(PYTHON) tests/fuzzing/fuzz_metamorphic.py --iterations 500 --verbose
+	$(call print_blue,"Phase 5: Constant Folding fuzzing...")
+	@$(PYTHON) tests/fuzzing/fuzz_constant_folding.py --iterations 500 --verbose
+	$(call print_green,"Fuzzing complete!")
+
 # === TYPE CHECKING ===
 
 mypy: ## Run type checking

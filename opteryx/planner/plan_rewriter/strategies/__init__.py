@@ -9,11 +9,19 @@
 from opteryx.planner.plan_rewriter.strategies.except_to_anti_join import (
     ExceptToAntiJoinStrategy,
 )
+from opteryx.planner.plan_rewriter.strategies.exists_subquery_to_join import (
+    ExistsSubqueryToJoinStrategy,
+)
+from opteryx.planner.plan_rewriter.strategies.in_subquery_to_join import (
+    InSubqueryToJoinStrategy,
+)
 from opteryx.planner.plan_rewriter.strategies.intersect_to_inner_join import (
     IntersectToSemiJoinStrategy,
 )
 
 STRATEGIES: list = [
     ExceptToAntiJoinStrategy,
+    ExistsSubqueryToJoinStrategy,
     IntersectToSemiJoinStrategy,
+    InSubqueryToJoinStrategy,
 ]
