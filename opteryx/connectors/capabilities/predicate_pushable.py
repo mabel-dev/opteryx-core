@@ -35,6 +35,7 @@ class PredicatePushable:
         "LtEq": False,
         "Like": False,
         "NotLike": False,
+        "Between": False,
     }
 
     OPS_XLAT: Dict[str, str] = {
@@ -54,7 +55,13 @@ class PredicatePushable:
         # we can only push simple expressions
         all_nodes = get_all_nodes_of_type(operator.condition, ("*",))
         if any(
-            n.node_type not in (NodeType.IDENTIFIER, NodeType.LITERAL, NodeType.COMPARISON_OPERATOR)
+            n.node_type
+            not in (
+                NodeType.IDENTIFIER,
+                NodeType.LITERAL,
+                NodeType.COMPARISON_OPERATOR,
+                NodeType.BETWEEN,
+            )
             for n in all_nodes
         ):
             return False
@@ -62,7 +69,13 @@ class PredicatePushable:
         if types and not types.issubset(self.PUSHABLE_TYPES):
             return False
         # we can only push certain operators
-        return self.PUSHABLE_OPS.get(operator.condition.value, False)
+        # BETWEEN nodes store inclusivity flags in .value (a tuple), not a string op name
+        op_key = (
+            "Between"
+            if operator.condition.node_type == NodeType.BETWEEN
+            else operator.condition.value
+        )
+        return self.PUSHABLE_OPS.get(op_key, False)
 
     def __init__(self, **kwargs):
         pass

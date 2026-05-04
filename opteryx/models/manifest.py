@@ -154,6 +154,40 @@ class Manifest:
                             skip_file = True
                             break
 
+                elif (
+                    predicate.node_type == NodeType.BETWEEN
+                    and predicate.left.node_type == NodeType.IDENTIFIER
+                    and predicate.right.node_type == NodeType.LITERAL
+                    and predicate.centre.node_type == NodeType.LITERAL
+                ):
+                    column_name = predicate.left.source_column
+                    lower = predicate.right.value
+                    upper = predicate.centre.value
+                    if hasattr(lower, "item"):
+                        lower = lower.item()
+                    if hasattr(upper, "item"):
+                        upper = upper.item()
+
+                    field_id = None
+                    for i, col in enumerate(self.schema.columns):
+                        if col.name == column_name:
+                            field_id = i
+                            break
+
+                    if field_id is None:
+                        continue
+
+                    if not file_entry.lower_bounds or not file_entry.upper_bounds:
+                        continue
+
+                    min_value = file_entry.lower_bounds.get(field_id)
+                    max_value = file_entry.upper_bounds.get(field_id)
+
+                    if min_value is not None and max_value is not None:
+                        if max_value < lower or min_value > upper:
+                            skip_file = True
+                            break
+
             if not skip_file:
                 kept_files.append(file_entry)
 

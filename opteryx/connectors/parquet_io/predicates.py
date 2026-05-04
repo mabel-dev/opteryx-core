@@ -63,10 +63,51 @@ def extract_predicate_stats(conditions) -> List[Tuple[str, str, Any]]:
         return []
     result = []
     for node in conditions:
+        between_stats = _try_extract_between(node)
+        if between_stats:
+            result.extend(between_stats)
+            continue
         stat = _try_extract(node)
         if stat is not None:
             result.append(stat)
     return result
+
+
+def _try_extract_between(node) -> List[Tuple[str, str, Any]]:
+    """Decompose a BETWEEN node into two GtEq/LtEq triples for row-group pruning."""
+    if node is None:
+        return []
+
+    from opteryx.expression import NodeType
+
+    if node.node_type != NodeType.BETWEEN:
+        return []
+    if node.left is None or node.right is None or node.centre is None:
+        return []
+    if node.left.node_type != NodeType.IDENTIFIER:
+        return []
+    if node.right.node_type != NodeType.LITERAL or node.centre.node_type != NodeType.LITERAL:
+        return []
+
+    col_sc = getattr(node.left, "schema_column", None)
+    if col_sc is None:
+        return []
+    col_name = getattr(col_sc, "name", None)
+    if not col_name:
+        return []
+
+    lower_inclusive, upper_inclusive = node.value  # (bool, bool)
+    lower_op = "GtEq" if lower_inclusive else "Gt"
+    upper_op = "LtEq" if upper_inclusive else "Lt"
+
+    lower_val = node.right.value
+    upper_val = node.centre.value
+    if isinstance(lower_val, datetime.date) and not isinstance(lower_val, datetime.datetime):
+        lower_val = datetime.datetime.combine(lower_val, datetime.time.min)
+    if isinstance(upper_val, datetime.date) and not isinstance(upper_val, datetime.datetime):
+        upper_val = datetime.datetime.combine(upper_val, datetime.time.min)
+
+    return [(col_name, lower_op, lower_val), (col_name, upper_op, upper_val)]
 
 
 def _try_extract(node) -> Optional[Tuple[str, str, Any]]:

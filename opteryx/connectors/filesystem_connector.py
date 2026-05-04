@@ -61,6 +61,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         "NotInList": True,
         "RLike": True,
         "NotRLike": True,
+        "Between": True,
     }
 
     PUSHABLE_TYPES = {

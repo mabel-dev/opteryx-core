@@ -87,7 +87,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             # 1. Has aggregators (HAVING clause) - will be pushed into aggregate
             # 2. OR: references relations AND no aggregators AND simple comparison (regular predicate)
             is_simple_comparison = (
-                node.condition.node_type == NodeType.COMPARISON_OPERATOR
+                node.condition.node_type in (NodeType.COMPARISON_OPERATOR, NodeType.BETWEEN)
                 and len(identifiers) >= 1  # At least one column reference
             )
 
