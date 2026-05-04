@@ -29,7 +29,7 @@ With optimization: Reader sees implicit "users.id IS NOT NULL AND orders.user_id
 filters and can skip null rows without materializing them.
 """
 
-from typing import Set, Optional, Tuple
+from typing import Optional, Set, Tuple
 
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
@@ -65,42 +65,33 @@ class NullabilityInferenceStrategy(OptimizationStrategy):
             context.optimized_plan = optimized_plan
 
         # Find INNER JOINs
-        join_nodes = get_nodes_of_type_from_logical_plan(optimized_plan, (LogicalPlanStepType.Join,))
+        join_nodes = get_nodes_of_type_from_logical_plan(
+            optimized_plan, (LogicalPlanStepType.Join,)
+        )
         if not join_nodes:
             return optimized_plan
 
-        print(f"[NULLABILITY_INFERENCE] Found {len(join_nodes)} join node(s)")
-
-        first_join_nid = join_nodes[0]
-        join_node = optimized_plan[first_join_nid]
-        print(f"[NULLABILITY_INFERENCE] Join node type: {type(join_node)}, node_type: {join_node.node_type if hasattr(join_node, 'node_type') else 'N/A'}")
-        print(f"[NULLABILITY_INFERENCE] Join node str: {str(join_node)}")
-        print(f"[NULLABILITY_INFERENCE] Join node.__dict__: {join_node.__dict__ if hasattr(join_node, '__dict__') else 'N/A'}")
+        # join_nodes contains (nid, node) tuples from plan.nodes(True)
+        first_join_nid, join_node = join_nodes[0]
 
         # Only process INNER JOINs
         if not (hasattr(join_node, "type") and join_node.type == "inner"):
-            print(f"[NULLABILITY_INFERENCE] Not an inner join, returning")
             return optimized_plan
 
         if not (hasattr(join_node, "on") and join_node.on is not None):
-            print(f"[NULLABILITY_INFERENCE] No ON clause, returning")
             return optimized_plan
 
         # Collect left and right join key columns
         left_cols, right_cols = self._collect_join_key_columns_by_side(join_node.on)
-        print(f"[NULLABILITY_INFERENCE] Collected left_cols={left_cols}, right_cols={right_cols}")
 
         if not left_cols and not right_cols:
-            print(f"[NULLABILITY_INFERENCE] No join columns found, returning")
             return optimized_plan
 
         # Get existing null filters to avoid duplication
         existing_filters = self._get_existing_null_filters(optimized_plan)
-        print(f"[NULLABILITY_INFERENCE] Existing null filters: {existing_filters}")
 
         # Get incoming edges to the join to identify left vs right inputs
         ingoing = list(optimized_plan.ingoing_edges(first_join_nid))
-        print(f"[NULLABILITY_INFERENCE] Ingoing edges: {ingoing}")
         if len(ingoing) < 2:
             return optimized_plan
 
@@ -118,7 +109,6 @@ class NullabilityInferenceStrategy(OptimizationStrategy):
         # Create left filter if needed
         if left_cols and left_input_source:
             left_cols_to_filter = left_cols - existing_filters
-            print(f"[NULLABILITY_INFERENCE] Left columns to filter: {left_cols_to_filter}")
             if left_cols_to_filter:
                 left_filters = self._synthesize_not_is_null_filters(left_cols_to_filter, set())
                 left_chain = self._build_filter_chain(left_filters)
@@ -128,13 +118,13 @@ class NullabilityInferenceStrategy(OptimizationStrategy):
                         step_type=LogicalPlanStepType.Filter,
                         condition=left_chain,
                     )
-                    print(f"[NULLABILITY_INFERENCE] Inserting left filter {left_filter_nid} before {left_input_source}")
-                    optimized_plan.insert_node_before(left_filter_nid, left_filter_node, left_input_source)
+                    optimized_plan.insert_node_before(
+                        left_filter_nid, left_filter_node, left_input_source
+                    )
 
         # Create right filter if needed
         if right_cols and right_input_source:
             right_cols_to_filter = right_cols - existing_filters
-            print(f"[NULLABILITY_INFERENCE] Right columns to filter: {right_cols_to_filter}")
             if right_cols_to_filter:
                 right_filters = self._synthesize_not_is_null_filters(right_cols_to_filter, set())
                 right_chain = self._build_filter_chain(right_filters)
@@ -144,8 +134,9 @@ class NullabilityInferenceStrategy(OptimizationStrategy):
                         step_type=LogicalPlanStepType.Filter,
                         condition=right_chain,
                     )
-                    print(f"[NULLABILITY_INFERENCE] Inserting right filter {right_filter_nid} before {right_input_source}")
-                    optimized_plan.insert_node_before(right_filter_nid, right_filter_node, right_input_source)
+                    optimized_plan.insert_node_before(
+                        right_filter_nid, right_filter_node, right_input_source
+                    )
 
         if self.telemetry:
             self.telemetry.optimization_nullability_inference += 1
@@ -192,9 +183,7 @@ class NullabilityInferenceStrategy(OptimizationStrategy):
         join_columns = set()
 
         join_nodes = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Join,))
-        for join_nid in join_nodes:
-            join_node = plan[join_nid]
-
+        for join_nid, join_node in join_nodes:
             # Only process INNER JOINs
             if not hasattr(join_node, "type") or join_node.type != "inner":
                 continue
@@ -280,7 +269,7 @@ class NullabilityInferenceStrategy(OptimizationStrategy):
 
             # Create Identifier node (stub - will be filled in by binder if needed)
             identifier = Node(NodeType.IDENTIFIER, value="unknown")
-            identifier.schema_column = type('obj', (object,), {'identity': col_id})()
+            identifier.schema_column = type("obj", (object,), {"identity": col_id})()
 
             # Create IS NOT NULL unary operator
             is_not_null = Node(NodeType.UNARY_OPERATOR, value="IsNotNull", centre=identifier)
@@ -312,4 +301,5 @@ class NullabilityInferenceStrategy(OptimizationStrategy):
     def _generate_node_id() -> str:
         """Generate a unique node ID."""
         import uuid
+
         return str(uuid.uuid4())

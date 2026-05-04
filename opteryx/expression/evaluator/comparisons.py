@@ -192,6 +192,10 @@ def _dict_compare(op: str, vec, right):
     # Unwrap constant vectors to their scalar value
     if _is_constant_vector_like(right):
         right = _constant_scalar_value(right)
+        # An empty or null-valued constant vector unwraps to None; comparisons
+        # against NULL are UNKNOWN → all-false mask (matches SQL semantics).
+        if right is None:
+            return BoolVector(len(vec))
 
     # Column-to-column: right is also a vector with comparison methods
     elif is_draken_vector(right):

@@ -199,12 +199,48 @@ Implement Phase 1 first with explicit failure for Phase 1 misses. Phase 2 follow
 
 ---
 
+## Implementation Status
+
+### Changes 1 & 2 — COMPLETE ✓
+
+Both plan rewriter strategies have been fully implemented (commit `cf66549d`, May 3 2026):
+
+**Change 1: EXISTS/NOT EXISTS → semi/anti joins**
+- **File:** `plan_rewriter/strategies/exists_subquery_to_join.py` (318 lines)
+- **What:** Rewrites `EXISTS(...)` → `LEFT SEMI JOIN`, `NOT EXISTS(...)` → `LEFT ANTI JOIN`
+- **How:** Extracts equi-correlation predicates from subquery WHERE clause → join ON condition; replaces subquery projection with correlation key columns (for hash set)
+- **Constraints:** Requires explicit equi-correlations; raises `UnsupportedSyntaxError` on non-equi or OR-branched correlations
+- **NULL semantics:** Handled by filter_join kernels (semi excludes left nulls when right has nulls; anti is plain)
+
+**Change 2: NOT IN → null-aware anti-join**
+- **File:** `plan_rewriter/strategies/in_subquery_to_join.py` (216 lines, expanded from IN-only)
+- **What:** Extends IN subquery rewrite to support NOT IN via `LEFT ANTI NULL-AWARE` join
+- **How:** Line 193 sets join_type to `"left anti null-aware"` when subquery is negated
+- **NULL semantics:** Correctly handled by `_anti_join_null_aware_filter()` in `filter_join.pyx:168-204`:
+  - If right side contains NULL → return empty (all left rows excluded, per `NOT IN (NULL, ...) = UNKNOWN`)
+  - Otherwise → return left rows not in set, excluding left nulls (`NULL NOT IN (...) = UNKNOWN`)
+- **No IS NOT NULL injection needed** — the filter_join kernel proactively checks for `_NULL_HASH` in the right set (line 180)
+
+**Supporting changes:**
+- **Binder:** `planner/binder/join.py` + `_bind_on_condition_split()` resolves ambiguous identifiers when outer/subquery overlap column names
+- **Logical planner:** `logical_planner_builders.py` removed the `UnsupportedSyntaxError` raise for EXISTS
+- **Execution:** `operators/filter_join/filter_join.pyx` implements three join modes with correct NULL handling
+
+### Change 3 — DEFERRED ⏳
+
+General correlated subquery decorrelation (DependentJoin-based unnesting) not yet started. Remains as designed:
+- Requires logical planner to emit `DependentJoin` node for correlated subqueries
+- Requires Binder to pass `DependentJoin` through with scoped column resolution
+- Requires Optimizer strategy implementing Phase 1 (simple unnesting / predicate pull-up) and Phase 2 (D-based general unnesting)
+
+---
+
 ## Summary
 
-| Change | Location | File | Depends on |
+| Change | Status | Location | Implemented |
 |---|---|---|---|
-| EXISTS/NOT EXISTS → semi/anti join | Plan Rewriter | new `exists_to_join.py` | Remove raise in `logical_planner_builders.py:724` |
-| NOT IN → null-aware anti join | Plan Rewriter | modify `in_subquery_to_join.py` | `filter_join.pyx` null-aware anti-join already updated |
-| General correlated decorrelation | Optimizer | new `decorrelate_subquery.py` + `DependentJoin` node | Logical planner must emit `DependentJoin`; Binder must pass it through; Phase 1 before Phase 2 |
+| **EXISTS/NOT EXISTS → semi/anti** | ✓ Complete | Plan Rewriter | `exists_subquery_to_join.py` |
+| **NOT IN → null-aware anti-join** | ✓ Complete | Plan Rewriter | `in_subquery_to_join.py` (expanded) + filter_join kernels |
+| **General correlated decorrelation** | ⏳ Planned | Optimizer | (Not started) |
 
-Changes 1 and 2 are self-contained rewriter strategies following the existing `in_subquery_to_join.py` pattern. Change 3 requires touching the logical planner (emit `DependentJoin`), the Binder (pass it through with scoped resolution), and adds an Optimizer strategy.
+Changes 1 and 2 are production-ready. Change 3 requires logical planner, binder, and optimizer modifications.

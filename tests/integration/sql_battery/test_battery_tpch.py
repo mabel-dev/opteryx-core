@@ -16,31 +16,6 @@ import pytest
 
 import opteryx
 
-EXPECTED_OUTCOME = {
-    "query01.sql": True,
-    "query02.sql": False,
-    "query03.sql": True,
-    "query04.sql": True,
-    "query05.sql": True,
-    "query06.sql": True,
-    "query07.sql": False,
-    "query08.sql": False,
-    "query09.sql": False,
-    "query10.sql": True,
-    "query11.sql": False,
-    "query12.sql": True,
-    "query13.sql": True,
-    "query14.sql": True,
-    "query15.sql": False,
-    "query16.sql": False,
-    "query17.sql": False,
-    "query18.sql": False,
-    "query19.sql": True,
-    "query20.sql": False,
-    "query21.sql": False,
-    "query22.sql": False,
-}
-
 
 def get_tests():
     tests = sorted(glob.glob(f"**/tpch/**.sql", recursive=True))
@@ -63,7 +38,7 @@ def test_tpch(test_id, statement):
     except Exception as err:
         outcome = False
 
-    assert EXPECTED_OUTCOME[test_id] == outcome
+    assert outcome
 
 
 if __name__ == "__main__":  # pragma: no cover

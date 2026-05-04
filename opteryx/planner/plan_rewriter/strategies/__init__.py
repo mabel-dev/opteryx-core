@@ -6,6 +6,9 @@
 # Rewrite strategies are applied in declaration order.
 # Strategies that must see the output of a prior strategy go after it.
 
+from opteryx.planner.plan_rewriter.strategies.decorrelate_subquery import (
+    DecorrelateSubqueryStrategy,
+)
 from opteryx.planner.plan_rewriter.strategies.except_to_anti_join import (
     ExceptToAntiJoinStrategy,
 )
@@ -24,4 +27,5 @@ STRATEGIES: list = [
     ExistsSubqueryToJoinStrategy,
     IntersectToSemiJoinStrategy,
     InSubqueryToJoinStrategy,
+    DecorrelateSubqueryStrategy,  # runs after EXISTS/IN — handles scalar correlated subqueries
 ]

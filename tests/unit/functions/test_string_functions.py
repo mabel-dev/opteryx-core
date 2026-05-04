@@ -308,6 +308,45 @@ def test_regex_replace_double_backslash_extracts_domains():
     )
 
 
+compile_dfa_program = getattr(compiled_vector_ops, "compile_dfa_program")
+vector_dfa_extract = getattr(compiled_vector_ops, "vector_dfa_extract")
+
+
+def _const_sv(value: bytes) -> StringVector:
+    return StringVector.from_constant(value, 1)
+
+
+def test_dfa_extract_compiles_for_full_consume_pattern():
+    program = compile_dfa_program(rb"^https?://(?:www\.)?([^/]+)/.*$", rb"\1")
+    assert isinstance(program, bytes) and len(program) > 0
+
+
+def test_dfa_extract_executes_full_consume_pattern():
+    program = compile_dfa_program(rb"^https?://(?:www\.)?([^/]+)/.*$", rb"\1")
+    data = _to_sv(["https://www.example.com/path", "http://foo.bar/x", "no-match-here"])
+    result = vector_dfa_extract(data, _const_sv(program)).to_pylist()
+    decoded = [v.decode("utf-8") if isinstance(v, bytes) else v for v in result]
+    assert decoded == ["example.com", "foo.bar", "no-match-here"]
+
+
+def test_dfa_extract_rejects_unanchored_pattern():
+    # Without ^ the executor would silently drop the unmatched prefix.
+    assert compile_dfa_program(rb"https?://([^/]+)/.*$", rb"\1") is None
+
+
+def test_dfa_extract_rejects_non_consuming_pattern():
+    # Anchored at start but not at end and without consume-to-end.
+    assert compile_dfa_program(rb"^https?://([^/]+)", rb"\1") is None
+
+
+def test_dfa_extract_non_match_returns_input():
+    program = compile_dfa_program(rb"^https?://(?:www\.)?([^/]+)/.*$", rb"\1")
+    data = _to_sv(["plain-string"])
+    result = vector_dfa_extract(data, _const_sv(program)).to_pylist()
+    decoded = [v.decode("utf-8") if isinstance(v, bytes) else v for v in result]
+    assert decoded == ["plain-string"]
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 

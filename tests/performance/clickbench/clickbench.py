@@ -22,7 +22,7 @@ class Dataset(enum.Enum):
     FULL_SINGLE = "scratch.hits_single"
 
 
-DATASET = Dataset.MID
+DATASET = Dataset.FULL_SPLIT
 
 # fmt:off
 STATEMENTS = [

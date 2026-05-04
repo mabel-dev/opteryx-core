@@ -67,6 +67,11 @@ class ParquetIOPipeline {
     std::atomic<int> pending_work_{0};
     std::atomic<bool> shutdown_{false};
 
+    // Diagnostic counters for queue-contention investigation.
+    std::atomic<uint64_t> spin_iterations_{0};
+    std::atomic<uint64_t> enqueue_count_{0};
+    std::atomic<size_t>   queue_high_watermark_{0};
+
     /**
      * Convert gs://bucket/path to https://storage.googleapis.com/bucket/path.
      */
@@ -181,9 +186,16 @@ class ParquetIOPipeline {
                 std::lock_guard<std::mutex> lk(queue_mutex_);
                 if (result_queue_.size() < queue_capacity_) {
                     result_queue_.push_back(std::move(result));
+                    size_t sz = result_queue_.size();
+                    enqueue_count_.fetch_add(1, std::memory_order_relaxed);
+                    size_t prev = queue_high_watermark_.load(std::memory_order_relaxed);
+                    while (sz > prev &&
+                           !queue_high_watermark_.compare_exchange_weak(
+                               prev, sz, std::memory_order_relaxed)) {}
                     break;
                 }
             }
+            spin_iterations_.fetch_add(1, std::memory_order_relaxed);
             std::this_thread::yield();
         }
         pending_work_--;
@@ -239,6 +251,16 @@ class ParquetIOPipeline {
 
     int pending_work_count() const {
         return pending_work_.load(std::memory_order_relaxed);
+    }
+
+    uint64_t spin_iterations() const {
+        return spin_iterations_.load(std::memory_order_relaxed);
+    }
+    uint64_t enqueue_count() const {
+        return enqueue_count_.load(std::memory_order_relaxed);
+    }
+    size_t queue_high_watermark() const {
+        return queue_high_watermark_.load(std::memory_order_relaxed);
     }
 };
 

@@ -54,6 +54,7 @@ class LogicalPlanStepType(int, Enum):
     CTE = auto()
     Subquery = auto()
     FunctionDataset = auto()  # Unnest, GenerateSeries, values + Fake
+    DependentJoin = auto()  # Correlated subquery awaiting decorrelation
 
     CreateView = auto()
     AlterView = auto()

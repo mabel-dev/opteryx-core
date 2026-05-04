@@ -7,12 +7,16 @@
 # cython: boundscheck=False
 
 """
-Native DFA-style regex replacement for a narrow, explicitly supported subset.
+Native DFA-style regex extraction for a narrow, explicitly supported subset.
 
-This module executes optimizer-compiled DFA procedures over Draken StringVector
-directly.
+REGEXP_REPLACE(s, pat, '\\1') is a capture-group extraction when `pat` matches
+the entire input — the matched span is the whole string, so the result is just
+the captured group (or the input untouched on no match). This kernel implements
+that specialisation: the optimizer rewrites qualifying REGEXP_REPLACE calls to
+_DFA_EXTRACT, and this module executes the compiled DFA procedure over a
+Draken StringVector directly.
 
-- optimizer compiles supported regex+replacement pairs into a compact blob
+- optimizer compiles supported regex+'\\1' pairs into a compact blob
 - execution decodes the constant program blob once
 - execution interprets the decoded procedure over StringVector data
 - preserve constant and dictionary encodings where possible
@@ -225,19 +229,19 @@ cdef inline void _decode_procedure(
     cdef int i
 
     if program_ptr == NULL or program_len < 2:
-        raise ValueError("vector_dfa_replace: compiled program blob is invalid")
+        raise ValueError("vector_dfa_extract: compiled program blob is invalid")
 
     version = _read_u8(&p)
     if version != 1:
-        raise ValueError("vector_dfa_replace: unsupported compiled program version")
+        raise ValueError("vector_dfa_extract: unsupported compiled program version")
 
     op_count = _read_u8(&p)
     if op_count == 0 or op_count > 8:
-        raise ValueError("vector_dfa_replace: compiled program op count is invalid")
+        raise ValueError("vector_dfa_extract: compiled program op count is invalid")
 
     for i in range(op_count):
         if p >= end:
-            raise ValueError("vector_dfa_replace: compiled program truncated")
+            raise ValueError("vector_dfa_extract: compiled program truncated")
 
         op_type = _read_u8(&p)
         proc.ops[i].op_type = op_type
@@ -247,29 +251,29 @@ cdef inline void _decode_procedure(
 
         if op_type == DFA_OP_CONSUME_LITERAL or op_type == DFA_OP_CONSUME_OPTIONAL_LITERAL:
             if end - p < 4:
-                raise ValueError("vector_dfa_replace: compiled literal header truncated")
+                raise ValueError("vector_dfa_extract: compiled literal header truncated")
             literal_len = _read_u32(&p)
             if literal_len == 0:
-                raise ValueError("vector_dfa_replace: compiled literal length is invalid")
+                raise ValueError("vector_dfa_extract: compiled literal length is invalid")
             if end - p < literal_len:
-                raise ValueError("vector_dfa_replace: compiled literal payload truncated")
+                raise ValueError("vector_dfa_extract: compiled literal payload truncated")
             proc.ops[i].literal = p
             proc.ops[i].literal_len = <Py_ssize_t>literal_len
             p += literal_len
 
         elif op_type == DFA_OP_CAPTURE_UNTIL_CHAR:
             if p >= end:
-                raise ValueError("vector_dfa_replace: compiled capture target missing")
+                raise ValueError("vector_dfa_extract: compiled capture target missing")
             proc.ops[i].target_char = <char>_read_u8(&p)
 
         elif op_type == DFA_OP_CONSUME_TO_END or op_type == DFA_OP_RETURN_CAPTURE:
             pass
 
         else:
-            raise ValueError("vector_dfa_replace: compiled program contains unsupported opcode")
+            raise ValueError("vector_dfa_extract: compiled program contains unsupported opcode")
 
     if p != end:
-        raise ValueError("vector_dfa_replace: compiled program has trailing bytes")
+        raise ValueError("vector_dfa_extract: compiled program has trailing bytes")
 
     proc.op_count = op_count
 
@@ -412,10 +416,12 @@ cdef inline bint _is_capture_until_char(Regexp* re, char* target_char) noexcept:
     cdef CharClass* char_class
     cdef RuneRange* it
     cdef RuneRange* end
-    cdef int slash = 47
-    cdef bint saw_before = False
-    cdef bint saw_after = False
     cdef int range_count = 0
+    cdef int first_lo = -1
+    cdef int first_hi = -1
+    cdef int second_lo = -1
+    cdef int second_hi = -1
+    cdef int excluded
 
     if re == NULL or re.op() != kRegexpCapture or re.nsub() != 1 or re.cap() != 1:
         return False
@@ -438,23 +444,35 @@ cdef inline bint _is_capture_until_char(Regexp* re, char* target_char) noexcept:
     if char_class == NULL:
         return False
 
+    # Accept any [^X]+ where X is a single ASCII byte, recognised as the two
+    # ranges [0, X-1] and [X+1, 1114111]. Multi-byte exclusions and multi-char
+    # exclusions are rejected because the byte-level scanner can only locate
+    # a single concrete byte.
     it = char_class.begin()
     end = char_class.end()
 
     while it != end:
+        if range_count == 0:
+            first_lo = it.lo
+            first_hi = it.hi
+        elif range_count == 1:
+            second_lo = it.lo
+            second_hi = it.hi
         range_count += 1
-        if it.lo <= slash and slash <= it.hi:
-            return False
-        if it.lo == 0 and it.hi == slash - 1:
-            saw_before = True
-        elif it.lo == slash + 1 and it.hi == 1114111:
-            saw_after = True
         it += 1
 
-    if not (saw_before and saw_after):
+    if range_count != 2:
+        return False
+    if first_lo != 0 or second_hi != 1114111:
+        return False
+    if first_hi + 2 != second_lo:
         return False
 
-    target_char[0] = <char>slash
+    excluded = first_hi + 1
+    if excluded < 1 or excluded > 127:
+        return False
+
+    target_char[0] = <char>excluded
     return True
 
 
@@ -572,7 +590,7 @@ cdef inline bytes _encode_builder_program(DfaProgramBuilder* builder):
     cdef char* out_ptr
 
     if builder.op_count <= 0 or builder.op_count > 8:
-        raise ValueError("vector_dfa_replace: compiled program op count is invalid")
+        raise ValueError("vector_dfa_extract: compiled program op count is invalid")
 
     for i in range(builder.op_count):
         total_len += 1
@@ -609,6 +627,14 @@ cpdef object compile_dfa_program(bytes pattern, bytes replacement):
     cdef Regexp* parsed = NULL
     cdef Regexp* simplified = NULL
     cdef DfaProgramBuilder builder
+    cdef bint has_begin_anchor = False
+    cdef bint has_end_anchor = False
+    cdef Regexp* first_child = NULL
+    cdef Regexp* last_child = NULL
+    cdef int last_op_type
+    cdef int op_idx
+    cdef int next_op_type
+    cdef char boundary_char
 
     PyBytes_AsStringAndSize(pattern, &pattern_buf, &pattern_len)
     PyBytes_AsStringAndSize(replacement, &replacement_buf, &replacement_len)
@@ -628,6 +654,26 @@ cpdef object compile_dfa_program(bytes pattern, bytes replacement):
         if simplified == NULL:
             return None
 
+        # The executor returns only the captured group on success. That is
+        # equivalent to REGEXP_REPLACE(s, pattern, '\1') only when the program
+        # consumes the entire input (i.e. anchored ^...$ or terminating in a
+        # consume-to-end). Otherwise bytes outside the match are silently
+        # dropped. Refuse to compile patterns that do not satisfy this so the
+        # optimizer falls back to the full RE2 path.
+        if simplified.op() == kRegexpConcat and simplified.nsub() >= 1:
+            first_child = simplified.sub()[0]
+            last_child = simplified.sub()[simplified.nsub() - 1]
+            if first_child != NULL and first_child.op() == kRegexpBeginText:
+                has_begin_anchor = True
+            if last_child != NULL and last_child.op() == kRegexpEndText:
+                has_end_anchor = True
+        elif simplified.op() == kRegexpBeginText:
+            has_begin_anchor = True
+            has_end_anchor = True
+
+        if not has_begin_anchor:
+            return None
+
         _builder_reset(&builder)
         if not _lower_regexp_to_builder(simplified, &builder):
             return None
@@ -635,7 +681,27 @@ cpdef object compile_dfa_program(bytes pattern, bytes replacement):
         if builder.op_count == 0:
             return None
 
-        if builder.op_types[builder.op_count - 1] != DFA_OP_RETURN_CAPTURE:
+        last_op_type = builder.op_types[builder.op_count - 1]
+        if last_op_type != DFA_OP_CONSUME_TO_END and not has_end_anchor:
+            return None
+
+        # Every CAPTURE_UNTIL_CHAR(X) must be immediately followed by a
+        # CONSUME_LITERAL whose first byte is X. Without this, a regex like
+        # ^M([^s]+).*$ would compile (no 's' required by the pattern) but the
+        # DFA would fail to find 's' in "Mercury" and return the input unchanged
+        # instead of the correct "ercury".
+        for op_idx in range(builder.op_count - 1):
+            if builder.op_types[op_idx] == DFA_OP_CAPTURE_UNTIL_CHAR:
+                next_op_type = builder.op_types[op_idx + 1]
+                if next_op_type != DFA_OP_CONSUME_LITERAL:
+                    return None
+                boundary_char = builder.target_chars[op_idx]
+                if builder.literal_lens[op_idx + 1] < 1:
+                    return None
+                if builder.literals[op_idx + 1][0] != boundary_char:
+                    return None
+
+        if last_op_type != DFA_OP_RETURN_CAPTURE:
             if not _builder_append_simple(&builder, DFA_OP_RETURN_CAPTURE):
                 return None
 
@@ -663,9 +729,9 @@ cdef inline void _extract_const_slice(
     Py_ssize_t* data_len,
 ) except *:
     if not vec._has_const:
-        raise ValueError("vector_dfa_replace: compiled program must be constant encoded")
+        raise ValueError("vector_dfa_extract: compiled program must be constant encoded")
     if vec._const_is_null or vec._const_value == NULL:
-        raise ValueError("vector_dfa_replace: compiled program must be non-null")
+        raise ValueError("vector_dfa_extract: compiled program must be non-null")
 
     data_ptr[0] = <const char*>vec._const_value.data
     data_len[0] = <Py_ssize_t>vec._const_value.length
@@ -686,6 +752,7 @@ cdef inline bint _execute_procedure(
     cdef const char* capture_ptr = NULL
     cdef Py_ssize_t capture_len = 0
     cdef int i
+    cdef int char_pos
     cdef DfaOp* op
     cdef Py_ssize_t remaining
     cdef const char* scan
@@ -715,12 +782,12 @@ cdef inline bint _execute_procedure(
             remaining = <Py_ssize_t>(end - p)
             if remaining <= 0:
                 return False
-            i = simd_find_char(p, <size_t>remaining, op.target_char)
-            if i < 0:
+            char_pos = simd_find_char(p, <size_t>remaining, op.target_char)
+            if char_pos < 0:
                 return False
-            if i == 0:
+            if char_pos == 0:
                 return False
-            scan = p + i
+            scan = p + char_pos
             if scan < p or scan >= end:
                 return False
             capture_ptr = p
@@ -735,6 +802,8 @@ cdef inline bint _execute_procedure(
         elif op.op_type == DFA_OP_RETURN_CAPTURE:
             if capture_ptr == NULL:
                 return False
+            if p != end:
+                return False
             out_ptr[0] = capture_ptr
             out_len[0] = capture_len
             return True
@@ -745,7 +814,7 @@ cdef inline bint _execute_procedure(
     return False
 
 
-cpdef StringVector vector_dfa_replace(
+cpdef StringVector vector_dfa_extract(
     StringVector data,
     StringVector compiled_program,
 ):

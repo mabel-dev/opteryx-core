@@ -295,7 +295,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
         """Concatenate with separator, skipping nulls."""
         return sep.join(str(a) for a in args if a is not None)
 
-    vector_dfa_replace = getattr(compiled_vector_ops, "vector_dfa_replace")
+    vector_dfa_extract = getattr(compiled_vector_ops, "vector_dfa_extract")
     vector_ltrim = getattr(compiled_vector_ops, "vector_ltrim")
     vector_rtrim = getattr(compiled_vector_ops, "vector_rtrim")
     vector_trim = getattr(compiled_vector_ops, "vector_trim")
@@ -438,17 +438,17 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
             ),
         ),
         FunctionDefinition(
-            name="_DFA_REPLACE",
+            name="_DFA_EXTRACT",
             aliases=(),
             category="text",
             volatility="immutable",
             deterministic=True,
             lifecycle=LifecycleSpec(status="active"),
-            summary="Replace using compiled DFA procedure.",
-            documentation="Internal Draken-native regex replacement for optimizer-selected compiled DFA programs.",
+            summary="Extract capture group using compiled DFA procedure.",
+            documentation="Internal Draken-native capture-group extraction for REGEXP_REPLACE(s, pat, '\\1') calls the optimizer compiled to a DFA program.",
             overloads=(
                 FunctionOverload(
-                    id="_DFA_REPLACE_2",
+                    id="_DFA_EXTRACT_2",
                     parameters=(
                         _string,
                         _compiled_program,
@@ -457,7 +457,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=vector_dfa_replace,
+                        callable_ref=vector_dfa_extract,
                         null_policy="passthru",
                         cost_us_per_million=112.0,
                     ),

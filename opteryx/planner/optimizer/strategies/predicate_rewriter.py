@@ -764,7 +764,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
             return None
 
         telemetry.optimization_predicate_rewriter_regex_replace_to_dfa += 1
-        function.value = "_DFA_REPLACE"
+        function.value = "_DFA_EXTRACT"
         function.parameters = [
             function.parameters[0],
             build_literal_node(

@@ -160,6 +160,15 @@ class BinderVisitor:
     ) -> Tuple[Node, BindingContext]:
         return visit_subquery(self, node, context)
 
+    def visit_dependent_join(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        from opteryx.exceptions import UnsupportedSyntaxError
+        raise UnsupportedSyntaxError(
+            "DependentJoin reached the Binder — correlated subquery was not decorrelated. "
+            "This is a bug in the Plan Rewriter."
+        )
+
     def post_bind(self, node: Node) -> Node:
         return post_bind(self, node)
 

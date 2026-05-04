@@ -722,6 +722,24 @@ def expression_with_alias(branch, alias: Optional[List[str]] = None, key=None):
     return build(branch["expr"], alias=branch["alias"]["value"])
 
 
+def scalar_subquery(branch, alias: Optional[List[str]] = None, key=None):
+    """
+    Scalar subquery used as an expression value, e.g.:
+        WHERE col = (SELECT MAX(x) FROM T WHERE T.k = outer.k)
+
+    The inner plan is embedded as a NodeType.SUBQUERY expression node.
+    Correlation detection and decorrelation are handled by DecorrelateSubqueryStrategy
+    in the Plan Rewriter.
+    """
+    from opteryx.planner.logical_planner.logical_planner import plan_query
+
+    subquery_plan = plan_query(branch)
+    exit_node = subquery_plan.get_exit_points()[0]
+    subquery_plan.remove_node(exit_node, heal=True)
+
+    return Node(NodeType.SUBQUERY, value=subquery_plan, alias=alias)
+
+
 def exists(branch, alias: Optional[List[str]] = None, key=None):
     from opteryx.planner.logical_planner.logical_planner import plan_query
 
@@ -1320,6 +1338,7 @@ BUILDERS = {
     "RLike": pattern_match,
     "SingleQuotedString": literal_string,
     "SimilarTo": pattern_match,
+    "Subquery": scalar_subquery,
     "Substring": substring,
     "Tuple": tuple_literal,
     "Trim": trim_string,

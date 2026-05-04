@@ -365,7 +365,12 @@ int32_t DecodeRLEBitPackedIndicesWithConsumption(const uint8_t *data, size_t dat
 int32_t DecodeRLEBitPackedIndicesNoPrefix(const uint8_t *data, size_t data_size,
                                           int32_t num_values, int bit_width,
                                           std::vector<int32_t> &indices) {
-  if (bit_width <= 0 || bit_width > 32) return -1;
+  if (bit_width > 32) return -1;
+  if (bit_width == 0) {
+    // Single-entry dictionary: every present value is index 0, no bits on wire.
+    indices.assign(num_values, 0);
+    return num_values;
+  }
 
   indices.clear();
   indices.reserve(num_values);
@@ -427,7 +432,13 @@ int32_t DecodeRLEBitPackedIndicesToRuns(const uint8_t *data, size_t data_size,
                                         int32_t num_values, int bit_width,
                                         std::vector<int32_t> &run_codes,
                                         std::vector<int32_t> &run_counts) {
-  if (bit_width <= 0 || bit_width > 32) return -1;
+  if (bit_width > 32) return -1;
+  if (bit_width == 0) {
+    // Single-entry dictionary: every present value is index 0, no bits on wire.
+    run_codes.assign(1, 0);
+    run_counts.assign(1, num_values);
+    return num_values;
+  }
 
   run_codes.clear();
   run_counts.clear();

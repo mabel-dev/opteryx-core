@@ -55,6 +55,9 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         bint try_get_result(MorselRef& out) nogil
         void wait_shutdown() nogil
         int pending_work_count() nogil
+        uint64_t spin_iterations() nogil
+        uint64_t enqueue_count() nogil
+        size_t queue_high_watermark() nogil
 
 
 cdef class CppIOPipeline:
@@ -137,10 +140,22 @@ cdef class CppIOPipeline:
         cdef dict ref_ids = {}
         cdef int64_t ref_id
         cdef str col_name
+        cdef const uint8_t* col_ptr
+        cdef Py_ssize_t col_len
+        cdef const uint8_t[::1] col_view
 
         for i in range(result.column_ipc_bytes.size()):
             col_name = result.column_names[i].decode('utf-8')
-            ref_id = self.pool.commit(bytes(result.column_ipc_bytes[i]))
+            # Zero-copy handoff: commit() uses the buffer protocol, so a typed
+            # memoryview over the C++ vector storage is enough. Avoids a Python
+            # bytes() copy of the entire column IPC payload.
+            col_len = result.column_ipc_bytes[i].size()
+            if col_len == 0:
+                ref_id = self.pool.commit(b"")
+            else:
+                col_ptr = result.column_ipc_bytes[i].data()
+                col_view = <const uint8_t[:col_len]>col_ptr
+                ref_id = self.pool.commit(col_view)
             if ref_id == -1:
                 return {
                     'success': False,
@@ -163,6 +178,13 @@ cdef class CppIOPipeline:
     def close(self):
         with nogil:
             self.pipeline.wait_shutdown()
+
+    def diagnostics(self):
+        return {
+            "spin_iterations": self.pipeline.spin_iterations(),
+            "enqueue_count": self.pipeline.enqueue_count(),
+            "queue_high_watermark": self.pipeline.queue_high_watermark(),
+        }
 
 
 def iter_row_groups_ipc(
@@ -203,36 +225,53 @@ def iter_row_groups_ipc(
 
     cdef CppIOPipeline pipeline = CppIOPipeline(
         decode_workers=decode_workers,
-        queue_capacity=256,
+        queue_capacity=1024,
         pool_size=256*1024*1024,
     )
 
+    cdef uint64_t t_phase1_ns = 0
+    cdef uint64_t t_phase2_ns = 0
+    cdef uint64_t t_footer_ns = 0
+    cdef uint64_t t_submit_ns = 0
+    cdef uint64_t t_consume_ns = 0
+    cdef uint64_t t_get_result_ns = 0
+    cdef uint64_t t_sleep_ns = 0
+    cdef uint64_t n_sleep_ticks = 0
+    cdef uint64_t _t0, _t1, _ts
+
     try:
+        _t0 = time.monotonic_ns()
         work_items = []
         for path in paths:
             if prefetched_footers and path in prefetched_footers:
                 meta = prefetched_footers[path]
             else:
+                _ts = time.monotonic_ns()
                 meta = fetch_footer(
                     filesystem, path,
                     connector=connector, footer_bytes_cache=footer_bytes_cache,
                 )
+                t_footer_ns += time.monotonic_ns() - _ts
             for rg_idx, rg_meta in enumerate(meta.get("row_groups", [])):
                 if predicates and not row_group_may_satisfy(rg_meta, predicates):
                     continue
                 work_items.append((path, rg_idx))
+        t_phase1_ns = time.monotonic_ns() - _t0
 
         if not work_items:
             return
 
+        _t0 = time.monotonic_ns()
         for path, rg_idx in work_items:
             if prefetched_footers and path in prefetched_footers:
                 meta = prefetched_footers[path]
             else:
+                _ts = time.monotonic_ns()
                 meta = fetch_footer(
                     filesystem, path,
                     connector=connector, footer_bytes_cache=footer_bytes_cache,
                 )
+                t_footer_ns += time.monotonic_ns() - _ts
             rg_meta = meta["row_groups"][rg_idx]
 
             column_stats_dicts = []
@@ -243,21 +282,46 @@ def iter_row_groups_ipc(
                         break
 
             # Submit the signed URL to C++; Python path stays unchanged.
+            _ts = time.monotonic_ns()
             pipeline.submit_work(
                 orig_to_cpp.get(path, path), rg_idx, column_names, column_stats_dicts
             )
+            t_submit_ns += time.monotonic_ns() - _ts
+        t_phase2_ns = time.monotonic_ns() - _t0
 
+        _t0 = time.monotonic_ns()
         results_received = 0
         while results_received < len(work_items):
+            _ts = time.monotonic_ns()
             result = pipeline.get_result()
+            t_get_result_ns += time.monotonic_ns() - _ts
             if result is None:
+                _ts = time.monotonic_ns()
                 time.sleep(0.0001)
+                t_sleep_ns += time.monotonic_ns() - _ts
+                n_sleep_ticks += 1
                 continue
 
             if not result['success']:
                 raise RuntimeError(f"Parquet pipeline error: {result.get('error', 'unknown')}")
 
             row_group = deserialize_row_group(result['ref_ids'], pipeline.pool)
+
+            # Defensive: all columns from a single row group must have the same length.
+            # A length mismatch means the C++ decoder produced corrupt output for this
+            # row group; propagating it silently would corrupt all downstream operators.
+            col_lengths = {
+                k: len(v)
+                for k, v in row_group.items()
+                if not (isinstance(k, str) and k.startswith('__'))
+                   and hasattr(v, '__len__')
+            }
+            if col_lengths and len(set(col_lengths.values())) > 1:
+                raise RuntimeError(
+                    f"C++ decoder produced inconsistent column lengths for "
+                    f"path={result['path']!r} rg={result['rg_idx']}: {col_lengths}"
+                )
+
             # Translate signed URL back to the original path for Python consumers.
             row_group['__path__'] = cpp_to_orig.get(result['path'], result['path'])
             row_group['__row_group__'] = result['rg_idx']
@@ -265,6 +329,25 @@ def iter_row_groups_ipc(
 
             results_received += 1
             yield row_group
+        t_consume_ns = time.monotonic_ns() - _t0
 
     finally:
+        import os, sys
+        if os.environ.get("OPTERYX_IO_DIAG"):
+            diag = pipeline.diagnostics()
+            sys.stderr.write(
+                "\n[io_diag] paths=%d rgs=%d  phase1=%.1fms phase2=%.1fms consume=%.1fms\n"
+                "         footer_total=%.1fms  submit_total=%.3fms\n"
+                "         get_result_total=%.1fms  sleep_total=%.1fms ticks=%d\n"
+                "         queue: enqueues=%d high_watermark=%d spin_iters=%d\n"
+                % (
+                    len(set(p for p, _ in work_items)) if work_items else 0,
+                    len(work_items),
+                    t_phase1_ns / 1e6, t_phase2_ns / 1e6, t_consume_ns / 1e6,
+                    t_footer_ns / 1e6, t_submit_ns / 1e6,
+                    t_get_result_ns / 1e6, t_sleep_ns / 1e6, n_sleep_ticks,
+                    diag["enqueue_count"], diag["queue_high_watermark"],
+                    diag["spin_iterations"],
+                )
+            )
         pipeline.close()
