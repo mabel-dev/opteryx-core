@@ -307,20 +307,24 @@ def iter_row_groups_ipc(
 
             row_group = deserialize_row_group(result['ref_ids'], pipeline.pool)
 
-            # Defensive: all columns from a single row group must have the same length.
-            # A length mismatch means the C++ decoder produced corrupt output for this
-            # row group; propagating it silently would corrupt all downstream operators.
+            # Defensive: detect columns decoded to 0 rows in a non-empty row group.
+            # List columns (max_repetition_level > 0) have more values than rows and
+            # are intentionally excluded — only a zero-length column in a non-empty
+            # row group indicates a C++ decoder bug (silent data loss).
             col_lengths = {
                 k: len(v)
                 for k, v in row_group.items()
                 if not (isinstance(k, str) and k.startswith('__'))
                    and hasattr(v, '__len__')
             }
-            if col_lengths and len(set(col_lengths.values())) > 1:
-                raise RuntimeError(
-                    f"C++ decoder produced inconsistent column lengths for "
-                    f"path={result['path']!r} rg={result['rg_idx']}: {col_lengths}"
-                )
+            if col_lengths:
+                lengths = list(col_lengths.values())
+                max_len = max(lengths)
+                if max_len > 0 and any(l == 0 for l in lengths):
+                    raise RuntimeError(
+                        f"C++ decoder produced zero-length column(s) in non-empty row group for "
+                        f"path={result['path']!r} rg={result['rg_idx']}: {col_lengths}"
+                    )
 
             # Translate signed URL back to the original path for Python consumers.
             row_group['__path__'] = cpp_to_orig.get(result['path'], result['path'])

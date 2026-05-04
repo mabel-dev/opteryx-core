@@ -238,6 +238,9 @@ STATEMENTS = [
         # EXISTS / NOT EXISTS subquery
         ("SELECT name FROM $planets WHERE EXISTS (SELECT 1 FROM testdata.satellites WHERE testdata.satellites.planetId = $planets.id)", 7, 1, None),
         ("SELECT name FROM $planets WHERE NOT EXISTS (SELECT 1 FROM testdata.satellites WHERE testdata.satellites.planetId = $planets.id)", 2, 1, None),
+
+        # REGEXP_REPLACE
+        ("SELECT COUNT(*), cve FROM (SELECT REGEXP_REPLACE(cve_id, '^CVE-([^-]+)-.*$', r'\\1') AS cve FROM testdata.nvd) GROUP BY cve;", 15, 2, None),
 ]
 
 # fmt:on

@@ -435,7 +435,7 @@ static void serialize_decoded_column(const DecodedColumn& col,
             // RLE path: non-nullable dict-encoded byte_array column.
             serialize_rle_string_as_plain(out, col);
         } else if ((!col.dict_indices.empty() || !col.dict_codes_array.empty()) &&
-            !col.string_dict_arena.empty()) {
+            !col.string_dict_lens.empty()) {
             serialize_string_dict(out, col);
         } else if (!col.dict_indices.empty() && !col.string_values.empty()) {
             // dict_indices present but old-style string_values dict — build arena

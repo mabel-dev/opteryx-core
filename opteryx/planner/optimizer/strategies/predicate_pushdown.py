@@ -44,6 +44,105 @@ def _add_condition(existing_condition, new_condition):
     return _and
 
 
+# Microseconds per unit for each CAST target type name (from cast_node.value).
+# _TIMESTAMP_NS is sub-µs (fractional scale) so is intentionally excluded.
+_LITERAL_SCALE_US: dict = {
+    "DATE":            86_400_000_000,
+    "_TIMESTAMP_DAYS": 86_400_000_000,
+    "_TIMESTAMP_S":    1_000_000,
+    "_TIMESTAMP_MS":   1_000,
+    "_TIMESTAMP_US":   1,
+}
+
+# Microseconds per column-unit for OrsoTypes that can appear as a CAST target.
+_COL_SCALE_US: dict = {
+    OrsoTypes.DATE:      86_400_000_000,  # stores int32 days
+    OrsoTypes.TIMESTAMP: 1,               # stores int64 µs
+}
+
+# When l_scale > c_scale (the CAST truncates via floor division), LtEq and Gt
+# need the literal bumped by one column-unit and the operator flipped so that
+# the pushed predicate has the same row set as the original CAST predicate.
+_FLOOR_CAST_OP_ADJUST: dict = {
+    "LtEq": "Lt",
+    "Gt":   "GtEq",
+}
+
+_INVERT_COMPARISON_OP: dict = {
+    "Gt": "Lt", "GtEq": "LtEq", "Lt": "Gt", "LtEq": "GtEq",
+    "Eq": "Eq", "NotEq": "NotEq",
+}
+
+
+def _try_normalize_cast_predicate(condition: Node):
+    """Strip CAST from CAST(IDENTIFIER) op LITERAL predicates and rescale the literal.
+
+    Converts ``CAST(col, T2) op literal(T2)`` into ``col op rescaled_literal``
+    where the literal value is converted from T2 units to col's native units using
+    the ratio ``l_scale / c_scale`` (both expressed in microseconds).
+
+    Returns a new condition Node, or None if the predicate cannot be normalised.
+    """
+    if condition.node_type != NodeType.COMPARISON_OPERATOR:
+        return None
+
+    op = condition.value
+    left, right = condition.left, condition.right
+
+    if left.node_type == NodeType.CAST and right.node_type == NodeType.LITERAL:
+        cast_node, literal_node = left, right
+    elif right.node_type == NodeType.CAST and left.node_type == NodeType.LITERAL:
+        cast_node, literal_node = right, left
+        op = _INVERT_COMPARISON_OP.get(op, op)
+    else:
+        return None
+
+    identifier = getattr(cast_node, "left", None)
+    if identifier is None or identifier.node_type != NodeType.IDENTIFIER:
+        return None
+
+    col_sc = getattr(identifier, "schema_column", None)
+    cast_sc = getattr(cast_node, "schema_column", None)
+    if col_sc is None or cast_sc is None:
+        return None
+
+    c_scale = _COL_SCALE_US.get(col_sc.type)
+    l_scale = _LITERAL_SCALE_US.get(cast_node.value)
+    if l_scale is None:
+        return None
+    # An INTEGER column being cast to a temporal type is a type assertion — the integer
+    # stores values in the cast target's units already (e.g. EventDate::DATE stores days).
+    if c_scale is None and col_sc.type == OrsoTypes.INTEGER:
+        c_scale = l_scale
+    if c_scale is None or l_scale < c_scale:
+        return None  # unknown column type or literal is finer-grained than column
+
+    literal_value = literal_node.value
+    if not isinstance(literal_value, int):
+        return None
+
+    # Eq/NotEq across different scales can't be expressed as a single comparison.
+    if l_scale != c_scale and op in ("Eq", "NotEq"):
+        return None
+
+    # LtEq / Gt with floor-truncating casts need +1 on the literal and a flipped op.
+    adjusted_op = _FLOOR_CAST_OP_ADJUST.get(op, op) if l_scale != c_scale else op
+    literal_adjust = 1 if op in _FLOOR_CAST_OP_ADJUST and l_scale != c_scale else 0
+
+    rescaled = (literal_value + literal_adjust) * l_scale // c_scale
+
+    new_literal = Node(node_type=NodeType.LITERAL)
+    new_literal.value = rescaled
+    new_literal.schema_column = col_sc
+
+    new_condition = Node(node_type=NodeType.COMPARISON_OPERATOR)
+    new_condition.value = adjusted_op
+    new_condition.left = identifier
+    new_condition.right = new_literal
+    new_condition.schema_column = condition.schema_column
+    return new_condition
+
+
 class PredicatePushdownStrategy(OptimizationStrategy):
     def should_i_run(self, plan):
         from opteryx import config
@@ -409,6 +508,27 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 (node.relation, node.alias)
             ):
                 if node.connector:
+                    # Try to normalise CAST(col, T) op literal predicates before the
+                    # can_push check — CAST nodes are not in can_push's allowlist, but
+                    # a stripped/rescaled form may be pushable and semantically equivalent.
+                    normalized = _try_normalize_cast_predicate(predicate.condition)
+                    if normalized is not None:
+                        norm_types = set()
+                        if normalized.left.schema_column:
+                            norm_types.add(normalized.left.schema_column.type)
+                        if normalized.right.schema_column:
+                            norm_types.add(normalized.right.schema_column.type)
+                        norm_predicate = Node(node_type=predicate.node_type)
+                        norm_predicate.condition = normalized
+                        norm_predicate.relations = predicate.relations
+                        if node.connector.supports_predicate_pushdown and node.connector.can_push(
+                            norm_predicate, norm_types
+                        ):
+                            if not node.predicates:
+                                node.predicates = []
+                            node.predicates.append(normalized)
+                            continue
+
                     types = set()
                     if predicate.condition.left and predicate.condition.left.schema_column:
                         types.add(predicate.condition.left.schema_column.type)

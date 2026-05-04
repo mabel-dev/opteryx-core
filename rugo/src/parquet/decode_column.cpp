@@ -1037,7 +1037,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             int32_t decoded = DecodeRLEBitPackedIndicesNoPrefix(
                 data_ptr, data_size, present_count, bit_width, indices);
             RUGO_TEL_ACCUM(rugo_tel::rle_s, _rle_t0);
-            if (decoded != present_count) return result; }
+            if (decoded != present_count) { return result; } }
 
           // ── Scatter packed codes for nullable dict columns ──
           if (!result.dict_codes_array.empty() && page_uses_dictionary) {

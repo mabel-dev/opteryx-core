@@ -45,6 +45,19 @@ which corresponds to:
     consume("://")
     consume_optional("www.")
     capture_until("/")
+    consume("/
+    consume_to_end()
+    return_capture()
+
+second example:
+
+    ^CVE-([^-]+)-.*$
+
+maps to:
+
+    consume("CVE-")
+    capture_until("-")
+    consume("-")
     consume_to_end()
     return_capture()
 
@@ -56,6 +69,7 @@ This file is designed to be included from `vector_ops.pyx`.
 
 from libc.stddef cimport size_t
 from libc.stdint cimport int32_t, uint8_t
+from libc.stdlib cimport free, malloc
 from libc.string cimport memcmp, memcpy, memset
 
 from cpython.bytes cimport PyBytes_AsStringAndSize
@@ -165,7 +179,7 @@ from draken.core.buffers cimport (
     DrakenVarBuffer,
     DRAKEN_ENCODING_DICTIONARY,
 )
-from draken.vectors.string_vector cimport StringVector
+from draken.vectors.string_vector cimport StringVector, from_packed_dict
 
 
 cdef enum DfaOpType:
@@ -849,6 +863,8 @@ cpdef StringVector vector_dfa_extract(
     cdef const char* row_ptr = NULL
     cdef Py_ssize_t write_offset = 0
     cdef Py_ssize_t null_bytes = 0
+    cdef Py_ssize_t dict_size
+    cdef object new_dict_sv
 
     # Constant encoding: execute once, replicate.
     if data._has_const:
@@ -893,14 +909,53 @@ cpdef StringVector vector_dfa_extract(
             out_ptr_buf.offsets[i + 1] = <int32_t>write_offset
         return out_vec
 
-    # Dictionary encoding currently falls through to the dense row path.
-    # Repacking transformed dictionary values is unsafe here because null-producing
-    # rewrites can invalidate the original dictionary/null-code relationship.
-    # Fail-safe correctness beats unsafe preservation.
+    # Dictionary encoding: apply DFA once per unique entry, repack with same codes.
+    # DFA output is always <= input (capture is a substring, passthrough is the
+    # original), so pre-allocate from the original dict byte total and write in
+    # a single pass — no size-counting pass needed.
+    if data._encoding == DRAKEN_ENCODING_DICTIONARY:
+        dict_size = data._dict_values.length
+        new_dict_sv = StringVector(dict_size, <Py_ssize_t>data._dict_values.offsets[dict_size])
+        out_ptr_buf = (<StringVector>new_dict_sv).ptr
+        write_offset = 0
+        out_ptr_buf.offsets[0] = 0
+        for i in range(dict_size):
+            start = data._dict_values.offsets[i]
+            end = data._dict_values.offsets[i + 1]
+            row_ptr = (<const char*>data._dict_values.data) + start
+            row_len = <Py_ssize_t>(end - start)
+            if _execute_procedure(row_ptr, row_len, &proc, &out_ptr, &out_len):
+                if out_len > 0:
+                    memcpy((<char*>out_ptr_buf.data) + write_offset, out_ptr, <size_t>out_len)
+                write_offset += out_len
+            else:
+                if row_len > 0:
+                    memcpy((<char*>out_ptr_buf.data) + write_offset, row_ptr, <size_t>row_len)
+                write_offset += row_len
+            out_ptr_buf.offsets[i + 1] = <int32_t>write_offset
+        return from_packed_dict(
+            data._dict_codes, data._dict_code_width, n,
+            out_ptr_buf.offsets, <const uint8_t*>out_ptr_buf.data, dict_size,
+            data._dict_accessor.row_nulls,
+        )
+
     ptr = data.ptr
+
+    # Cache (capture_offset_from_data_start, capture_len) per row so the write
+    # pass never calls _execute_procedure again — pure array reads + memcpy.
+    # Negative capture_len signals "no match; emit original row".
+    cdef int32_t* cap_offsets = <int32_t*>malloc(<size_t>n * sizeof(int32_t))
+    cdef int32_t* cap_lens = <int32_t*>malloc(<size_t>n * sizeof(int32_t))
+
+    if cap_offsets == NULL or cap_lens == NULL:
+        free(cap_offsets)
+        free(cap_lens)
+        raise MemoryError("vector_dfa_extract: cache allocation failed")
 
     for i in range(n):
         if ptr.null_bitmap != NULL and not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
+            cap_offsets[i] = 0
+            cap_lens[i] = 0
             continue
 
         start = ptr.offsets[i]
@@ -908,15 +963,13 @@ cpdef StringVector vector_dfa_extract(
         row_ptr = (<const char*>ptr.data) + start
         row_len = <Py_ssize_t>(end - start)
 
-        if _execute_procedure(
-            row_ptr,
-            row_len,
-            &proc,
-            &out_ptr,
-            &out_len,
-        ):
+        if _execute_procedure(row_ptr, row_len, &proc, &out_ptr, &out_len):
+            cap_offsets[i] = <int32_t>(out_ptr - (<const char*>ptr.data))
+            cap_lens[i] = <int32_t>out_len
             total_bytes += out_len
         else:
+            cap_offsets[i] = start
+            cap_lens[i] = <int32_t>(-row_len - 1)  # sentinel: negative means passthrough
             total_bytes += row_len
 
     out_vec = StringVector(n, total_bytes)
@@ -934,31 +987,40 @@ cpdef StringVector vector_dfa_extract(
     write_offset = 0
     out_ptr_buf.offsets[0] = 0
 
+    cdef int32_t cached_off, cached_len, copy_len
+
     for i in range(n):
         if ptr.null_bitmap != NULL and not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
             out_ptr_buf.offsets[i + 1] = <int32_t>write_offset
             continue
 
-        start = ptr.offsets[i]
-        end = ptr.offsets[i + 1]
-        row_ptr = (<const char*>ptr.data) + start
-        row_len = <Py_ssize_t>(end - start)
+        cached_off = cap_offsets[i]
+        cached_len = cap_lens[i]
 
-        if _execute_procedure(
-            row_ptr,
-            row_len,
-            &proc,
-            &out_ptr,
-            &out_len,
-        ):
-            if out_len > 0:
-                memcpy((<char*>out_ptr_buf.data) + write_offset, out_ptr, <size_t>out_len)
-            write_offset += out_len
+        if cached_len >= 0:
+            # DFA matched: emit the cached capture slice
+            copy_len = cached_len
+            if copy_len > 0:
+                memcpy(
+                    (<char*>out_ptr_buf.data) + write_offset,
+                    (<const char*>ptr.data) + cached_off,
+                    <size_t>copy_len,
+                )
+            write_offset += copy_len
         else:
-            if row_len > 0:
-                memcpy((<char*>out_ptr_buf.data) + write_offset, row_ptr, <size_t>row_len)
-            write_offset += row_len
+            # Passthrough: negative sentinel encodes original row length as (-len - 1)
+            copy_len = <int32_t>(-cached_len - 1)
+            if copy_len > 0:
+                memcpy(
+                    (<char*>out_ptr_buf.data) + write_offset,
+                    (<const char*>ptr.data) + cached_off,
+                    <size_t>copy_len,
+                )
+            write_offset += copy_len
 
         out_ptr_buf.offsets[i + 1] = <int32_t>write_offset
+
+    free(cap_offsets)
+    free(cap_lens)
 
     return out_vec
