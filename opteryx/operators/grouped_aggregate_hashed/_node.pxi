@@ -30,13 +30,7 @@ from opteryx import EOS
 from opteryx.operators import BasePlanNode
 
 
-CHUNK_SIZE = 65536
-
-
-def _normalize_column_name(column):
-    if isinstance(column, bytes):
-        return column
-    return str(column).encode("utf-8")
+CHUNK_SIZE = 8192
 
 
 class GroupedAggregateHashedNode(BasePlanNode):
@@ -86,14 +80,13 @@ class GroupedAggregateHashedNode(BasePlanNode):
         else:
             self._implicit_count_added = False
 
-        normalized_group_cols = [_normalize_column_name(c) for c in self.group_by_columns]
         collectors, _key_kinds_placeholder = create_collectors(
-            self._aggregation_specs, normalized_group_cols
+            self._aggregation_specs, self.group_by_columns
         )
 
         variant = parameters.get("group_map_variant", "carchar")
         use_parvi = variant == "parvi"
-        self._engine = GroupHashEngine(normalized_group_cols, collectors, True, use_parvi)
+        self._engine = GroupHashEngine(self.group_by_columns, collectors, True, use_parvi)
 
         # Required columns for morsel.select() before ingestion
         self._required_columns = self._build_required_columns()

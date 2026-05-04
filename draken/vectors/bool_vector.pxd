@@ -27,6 +27,7 @@ cdef class BoolVector(Vector):
     cpdef int8_t all(self)
     cpdef int8_t[::1] is_null(self)
     cpdef list to_pylist(self)
+    cpdef bytes to_byte_array(self)
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False
     cpdef int64_t min(self)

@@ -370,3 +370,93 @@ class TestBoolVectorMiscellaneous:
         result = vec.take(indices)
 
         assert result.to_pylist() == [True, None, True]
+
+
+class TestBoolVectorToByteArray:
+    """Test to_byte_array() method - converts BoolVector to bytes without intermediate list."""
+
+    def test_to_byte_array_all_true(self):
+        """Test converting all True values to byte array."""
+        arrow_array = pa.array([True, True, True, True])
+        vec = Vector.from_arrow(arrow_array)
+
+        result = vec.to_byte_array()
+        assert isinstance(result, bytes)
+        assert result == b'\x01\x01\x01\x01'
+
+    def test_to_byte_array_all_false(self):
+        """Test converting all False values to byte array."""
+        arrow_array = pa.array([False, False, False, False])
+        vec = Vector.from_arrow(arrow_array)
+
+        result = vec.to_byte_array()
+        assert isinstance(result, bytes)
+        assert result == b'\x00\x00\x00\x00'
+
+    def test_to_byte_array_mixed(self):
+        """Test converting mixed True/False values to byte array."""
+        arrow_array = pa.array([True, False, True, False])
+        vec = Vector.from_arrow(arrow_array)
+
+        result = vec.to_byte_array()
+        assert isinstance(result, bytes)
+        assert result == b'\x01\x00\x01\x00'
+
+    def test_to_byte_array_with_nulls(self):
+        """Test converting with nulls - nulls should be 0."""
+        arrow_array = pa.array([True, None, False, None])
+        vec = Vector.from_arrow(arrow_array)
+
+        result = vec.to_byte_array()
+        assert isinstance(result, bytes)
+        assert result == b'\x01\x00\x00\x00'
+
+    def test_to_byte_array_all_nulls(self):
+        """Test converting all-null vector."""
+        arrow_array = pa.array([None, None, None], type=pa.bool_())
+        vec = Vector.from_arrow(arrow_array)
+
+        result = vec.to_byte_array()
+        assert isinstance(result, bytes)
+        assert result == b'\x00\x00\x00'
+
+    def test_to_byte_array_constant_true(self):
+        """Test to_byte_array on constant True vector."""
+        vec = Vector.from_arrow(pa.array([True, True, True]))
+        # Create a constant vector (if possible through the API)
+        result = vec.to_byte_array()
+        assert result == b'\x01\x01\x01'
+
+    def test_to_byte_array_constant_false(self):
+        """Test to_byte_array on constant False vector."""
+        vec = Vector.from_arrow(pa.array([False, False, False]))
+        result = vec.to_byte_array()
+        assert result == b'\x00\x00\x00'
+
+    def test_to_byte_array_empty(self):
+        """Test to_byte_array on empty vector."""
+        arrow_array = pa.array([], type=pa.bool_())
+        vec = Vector.from_arrow(arrow_array)
+
+        result = vec.to_byte_array()
+        assert isinstance(result, bytes)
+        assert result == b''
+
+    def test_to_byte_array_single_element(self):
+        """Test to_byte_array with single element."""
+        arrow_array = pa.array([True])
+        vec = Vector.from_arrow(arrow_array)
+
+        result = vec.to_byte_array()
+        assert result == b'\x01'
+
+    def test_to_byte_array_large_vector(self):
+        """Test to_byte_array with larger vector."""
+        data = [bool(i % 2) for i in range(100)]
+        arrow_array = pa.array(data)
+        vec = Vector.from_arrow(arrow_array)
+
+        result = vec.to_byte_array()
+        expected = bytes([1 if v else 0 for v in data])
+        assert result == expected
+        assert len(result) == 100

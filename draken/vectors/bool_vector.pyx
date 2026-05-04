@@ -774,6 +774,58 @@ cdef class BoolVector(Vector):
             out.append(bool(val))
         return out
 
+    cpdef bytes to_byte_array(self):
+        """Export mask as bytes without intermediate Python list.
+
+        Returns bytearray where each element is 1 (True/valid) or 0 (False/invalid).
+        Nulls are treated as 0.
+        """
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t i, n = ptr.length
+        cdef bytearray out = bytearray(n)
+        cdef uint8_t* data = <uint8_t*>ptr.data
+        cdef uint8_t* null_bitmap = ptr.null_bitmap
+        cdef uint8_t byte, bit, val, fill_val
+        cdef size_t br, rle_runs_b
+        cdef uint8_t* rle_vals_b
+        cdef int32_t* rle_lens_b
+        cdef uint8_t* rle_nulls_b
+        cdef Py_ssize_t bool_pos
+        cdef int32_t bool_run_len
+
+        if self._encoding == DRAKEN_ENCODING_RLE:
+            rle_vals_b = <uint8_t*>self._rle_buffer.run_values
+            rle_lens_b = self._rle_buffer.run_lengths
+            rle_runs_b = self._rle_buffer.num_runs
+            rle_nulls_b = self._rle_buffer.null_bitmap
+            bool_pos = 0
+            for br in range(rle_runs_b):
+                bool_run_len = rle_lens_b[br]
+                for i in range(bool_run_len):
+                    if rle_nulls_b != NULL and not ((rle_nulls_b[(bool_pos + i) >> 3] >> ((bool_pos + i) & 7)) & 1):
+                        out[bool_pos + i] = 0
+                    else:
+                        out[bool_pos + i] = 1 if rle_vals_b[br] else 0
+                bool_pos += bool_run_len
+            return bytes(out)
+
+        if self._has_const:
+            fill_val = 0 if self._const_is_null else (1 if self._const_value else 0)
+            for i in range(n):
+                out[i] = fill_val
+            return bytes(out)
+
+        for i in range(n):
+            if null_bitmap != NULL:
+                byte = null_bitmap[i >> 3]
+                bit = (byte >> (i & 7)) & 1
+                if not bit:
+                    out[i] = 0
+                    continue
+            val = (data[i >> 3] >> (i & 7)) & 1
+            out[i] = 1 if val else 0
+        return bytes(out)
+
     cpdef int64_t min(self):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_bool(self).min()

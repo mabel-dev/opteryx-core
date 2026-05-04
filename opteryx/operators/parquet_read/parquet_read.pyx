@@ -74,8 +74,10 @@ class ParquetReadNode(ReaderNode):
         self._parquet_files_seen: set = set()
         self._predicate_function_nodes_cached = None  # Cache to avoid AST walking per row group
         self._compiled_predicate_dispatcher = None  # Phase 2: Compiled predicate dispatcher
+        self._planner_name_to_identity_cached = None  # Cache name-to-identity mapping
+        self._filter_column_names_cached = None  # Cache filter column names extraction
 
-    def _analyze_predicate_type(self, predicate_root):
+    def _analyze_predicate_type(self, object predicate_root) -> tuple:
         """Analyze predicate structure to determine if it can be compiled.
 
         Returns a descriptor tuple:
@@ -134,7 +136,7 @@ class ParquetReadNode(ReaderNode):
         return ("complex_expression", predicate_root)
 
     @staticmethod
-    def _commute_operator(op: str) -> str:
+    def _commute_operator(str op) -> str:
         """Commute comparison operators (e.g., a < b becomes b > a)."""
         commute_map = {
             "Lt",
@@ -146,7 +148,7 @@ class ParquetReadNode(ReaderNode):
         }
         return commute_map.get(op, op)
 
-    def _compile_predicate_dispatcher(self, predicate_root):
+    def _compile_predicate_dispatcher(self, object predicate_root):
         """Generate a specialized predicate evaluation function.
 
         Returns a callable: morsel -> BoolVector mask
@@ -177,7 +179,7 @@ class ParquetReadNode(ReaderNode):
         return None
 
     @staticmethod
-    def _compile_int64_scalar_dispatcher(column_name: str, operator: str, scalar_value: int):
+    def _compile_int64_scalar_dispatcher(str column_name, str operator, long scalar_value):
         """Generate specialized function for: int64_column <op> constant
 
         Example for Q02 (AdvEngineID <> 0):
@@ -213,7 +215,7 @@ class ParquetReadNode(ReaderNode):
         return specialized_dispatcher
 
     @staticmethod
-    def _compile_float64_scalar_dispatcher(column_name: str, operator: str, scalar_value: float):
+    def _compile_float64_scalar_dispatcher(str column_name, str operator, double scalar_value):
         """Generate specialized function for: float64_column <op> constant"""
         op_map = {
             "Eq",
@@ -379,6 +381,124 @@ class ParquetReadNode(ReaderNode):
             return morsel.slice(0, 0), rows_before_filter, 0
         return filtered, rows_before_filter, filtered.num_rows
 
+    def _extract_row_group_metadata(self, row_group: dict):
+        """Extract and aggregate metadata from row_group dict into self.readings.
+
+        Batches all pop() operations and updates to self.readings to minimize
+        dict lookups. Returns path and rg_idx; all other metadata is consumed.
+        """
+        path = row_group.pop("__path__")
+        rg_idx = row_group.pop("__row_group__")
+
+        # Additive metrics: direct +=
+        self.readings["parquet_row_groups_pruned"] = row_group.pop("__row_groups_pruned__", 0)
+        self.bytes_in += row_group.pop("__bytes_fetched__", 0)
+        self.readings["parquet_footer_bytes"] += row_group.pop("__footer_bytes__", 0)
+        self.readings["parquet_range_request_count"] += row_group.pop("__range_request_count__", 0)
+        self.readings["parquet_range_bytes_requested"] += row_group.pop("__range_bytes_requested__", 0)
+        self.readings["time_parquet_read_ranges_ns"] += row_group.pop("__time_read_ranges_ns__", 0)
+        self.readings["time_parquet_decode_columns_ns"] += row_group.pop("__time_decode_columns_ns__", 0)
+        self.readings["time_parquet_task_queue_wait_ns"] += row_group.pop("__task_queue_wait_ns__", 0)
+        self.readings["time_parquet_task_total_ns"] += row_group.pop("__task_total_ns__", 0)
+        self.readings["time_parquet_footer_fetch_ns"] += row_group.pop("__footer_fetch_ns__", 0)
+        self.readings["time_parquet_scheduler_wait_ns"] += row_group.pop("__scheduler_wait_ns__", 0)
+        self.readings["time_parquet_rowgroup_completion_ns"] += row_group.pop("__rowgroup_completion_latency_ns__", 0)
+        self.readings["time_parquet_emit_wait_ns"] += row_group.pop("__emit_wait_ns__", 0)
+        self.readings["time_parquet_scheduler_empty_wait_ns"] += row_group.pop("__scheduler_empty_wait_ns__", 0)
+        self.readings["parquet_scheduler_empty_wait_events"] += row_group.pop("__scheduler_empty_wait_events__", 0)
+        self.readings["io_ring_producer_full_wait_ns"] += row_group.pop("__io_ring_producer_full_wait_ns__", 0)
+        self.readings["io_ring_producer_full_wait_events"] += row_group.pop("__io_ring_producer_full_wait_events__", 0)
+        self.readings["io_ring_consumer_empty_wait_ns"] += row_group.pop("__io_ring_consumer_empty_wait_ns__", 0)
+        self.readings["io_ring_consumer_empty_wait_events"] += row_group.pop("__io_ring_consumer_empty_wait_events__", 0)
+        self.readings["io_transfer_emit_wait_ns"] += row_group.pop("__io_transfer_emit_wait_ns__", 0)
+        self.readings["io_rowgroup_slice_count"] += row_group.pop("__io_rowgroup_slice_count__", 0)
+        self.readings["io_deserialize_ns"] += row_group.pop("__io_deserialize_ns__", 0)
+        self.readings["io_serialize_ns"] += row_group.pop("__io_serialize_ns__", 0)
+
+        # Peak metrics: max()
+        self.readings["parquet_rowgroup_peak_in_flight_max"] = max(
+            self.readings.get("parquet_rowgroup_peak_in_flight_max", 0),
+            row_group.pop("__rowgroup_peak_in_flight__", 0),
+        )
+        self.readings["parquet_ranges_in_flight_peak"] = max(
+            self.readings.get("parquet_ranges_in_flight_peak", 0),
+            row_group.pop("__ranges_in_flight_peak__", 0),
+        )
+        self.readings["parquet_active_files_peak"] = max(
+            self.readings.get("parquet_active_files_peak", 0),
+            row_group.pop("__active_files_peak__", 0),
+        )
+        self.readings["parquet_active_rowgroups_peak"] = max(
+            self.readings.get("parquet_active_rowgroups_peak", 0),
+            row_group.pop("__active_rowgroups_peak__", 0),
+        )
+        self.readings["parquet_rowgroups_in_flight_cap"] = max(
+            self.readings.get("parquet_rowgroups_in_flight_cap", 0),
+            row_group.pop("__rowgroups_in_flight_cap__", 0),
+        )
+        self.readings["parquet_emit_queue_depth_at_ready_max"] = max(
+            self.readings.get("parquet_emit_queue_depth_at_ready_max", 0),
+            row_group.pop("__emit_queue_depth_at_ready__", 0),
+        )
+        self.readings["io_ring_slot_bytes"] = max(
+            self.readings.get("io_ring_slot_bytes", 0),
+            row_group.pop("__io_ring_slot_bytes__", 0),
+        )
+        self.readings["io_ring_slot_count"] = max(
+            self.readings.get("io_ring_slot_count", 0),
+            row_group.pop("__io_ring_slot_count__", 0),
+        )
+        self.readings["io_ring_total_bytes"] = max(
+            self.readings.get("io_ring_total_bytes", 0),
+            row_group.pop("__io_ring_total_bytes__", 0),
+        )
+        self.readings["io_transfer_ready_backlog_peak"] = max(
+            self.readings.get("io_transfer_ready_backlog_peak", 0),
+            row_group.pop("__io_transfer_ready_backlog_peak__", 0),
+        )
+        self.readings["io_transfer_fragment_count_p50"] = max(
+            self.readings.get("io_transfer_fragment_count_p50", 0),
+            row_group.pop("__io_transfer_fragment_count_p50__", 0),
+        )
+        self.readings["io_transfer_fragment_count_p95"] = max(
+            self.readings.get("io_transfer_fragment_count_p95", 0),
+            row_group.pop("__io_transfer_fragment_count_p95__", 0),
+        )
+        self.readings["io_transfer_fragment_count_max"] = max(
+            self.readings.get("io_transfer_fragment_count_max", 0),
+            row_group.pop("__io_transfer_fragment_count_max__", 0),
+        )
+        self.readings["io_transfer_payload_bytes_p50"] = max(
+            self.readings.get("io_transfer_payload_bytes_p50", 0),
+            row_group.pop("__io_transfer_payload_bytes_p50__", 0),
+        )
+        self.readings["io_transfer_payload_bytes_p95"] = max(
+            self.readings.get("io_transfer_payload_bytes_p95", 0),
+            row_group.pop("__io_transfer_payload_bytes_p95__", 0),
+        )
+        self.readings["io_transfer_payload_bytes_max"] = max(
+            self.readings.get("io_transfer_payload_bytes_max", 0),
+            row_group.pop("__io_transfer_payload_bytes_max__", 0),
+        )
+
+        # Special handling: scan strategy (set once if present)
+        scan_strategy = row_group.pop("__parquet_scan_strategy__", None)
+        if scan_strategy:
+            self.readings["parquet_scan_strategy"] = scan_strategy
+
+        # Special handling: time to first row group (set once, keep minimum)
+        time_to_first_rowgroup_ns = row_group.pop("__time_to_first_rowgroup_ns__", 0)
+        if time_to_first_rowgroup_ns:
+            existing = self.readings.get("time_to_first_rowgroup_ns", 0)
+            if existing == 0 or time_to_first_rowgroup_ns < existing:
+                self.readings["time_to_first_rowgroup_ns"] = time_to_first_rowgroup_ns
+
+        # Clean up remaining __*__ keys without breaking the contract
+        for key in [k for k in row_group if k.startswith("__")]:
+            row_group.pop(key, None)
+
+        return path, rg_idx
+
     def execute(self, morsel):
         if morsel == EOS:
             yield None
@@ -386,15 +506,19 @@ class ParquetReadNode(ReaderNode):
 
         base_schema = self.parameters["schema"]
 
-        # Build name → planner identity map from self.columns.
-        # These are the identities downstream nodes (FILTER, PROJECT, etc.) expect.
-        # base_schema lives in a different identity namespace from the planner.
-        _planner_name_to_identity = {
-            col.schema_column.name: col.schema_column.identity
-            for col in (self.columns or [])
-        }
+        # Build name → planner identity map once and cache. Avoids repeated dict
+        # comprehensions that would recompute this for every execute() call.
+        if self._planner_name_to_identity_cached is None:
+            self._planner_name_to_identity_cached = {
+                col.schema_column.name: col.schema_column.identity
+                for col in (self.columns or [])
+            }
+        _planner_name_to_identity = self._planner_name_to_identity_cached
 
-        filter_column_names = self._extract_filter_column_names(self.predicates)
+        # Cache filter column names extraction (called once, reused at line 559).
+        if self._filter_column_names_cached is None:
+            self._filter_column_names_cached = self._extract_filter_column_names(self.predicates)
+        filter_column_names = self._filter_column_names_cached
         required_names = set(_planner_name_to_identity.keys()) | filter_column_names
 
         # Select physical columns to read by NAME, not by identity.
@@ -436,7 +560,7 @@ class ParquetReadNode(ReaderNode):
         # only columns (e.g. SELECT url WHERE url LIKE …), or the feature is off.
         # Use physical column names throughout to avoid identity-space mismatch
         # between self.columns (planner) and base_schema.columns (schema loader).
-        _filter_names = self._extract_filter_column_names(self.predicates)
+        _filter_names = filter_column_names  # Use cached value instead of extracting again
         _projected_names = {col.schema_column.name for col in (self.columns or [])}
         _pass2_names = _projected_names - _filter_names
         two_pass_eligible = (
@@ -467,54 +591,6 @@ class ParquetReadNode(ReaderNode):
         self.readings["columns_read"] += len(read_schema.columns)
         self.readings["parquet_filter_columns_read"] += len(filter_column_names)
         self.readings["parquet_projection_columns_read"] += len(_planner_name_to_identity)
-        self.readings["parquet_rows_before_filter"] += 0
-        self.readings["parquet_rows_after_filter"] += 0
-        self.readings["parquet_filter_selectivity"] += 0
-        self.readings["parquet_range_request_count"] += 0
-        self.readings["parquet_range_bytes_requested"] += 0
-        self.readings["parquet_footer_bytes"] += 0
-        self.readings["time_parquet_read_ranges_ns"] += 0
-        self.readings["time_parquet_decode_columns_ns"] += 0
-        self.readings["time_parquet_task_queue_wait_ns"] += 0
-        self.readings["time_parquet_task_total_ns"] += 0
-        self.readings["time_parquet_footer_fetch_ns"] += 0
-        self.readings["time_parquet_scheduler_wait_ns"] += 0
-        self.readings["time_parquet_rowgroup_completion_ns"] += 0
-        self.readings["time_parquet_emit_wait_ns"] += 0
-        self.readings["time_parquet_scheduler_empty_wait_ns"] += 0
-        self.readings["parquet_scheduler_empty_wait_events"] += 0
-        self.readings["parquet_rowgroup_peak_in_flight_max"] += 0
-        self.readings["parquet_ranges_in_flight_peak"] += 0
-        self.readings["parquet_active_files_peak"] += 0
-        self.readings["parquet_active_rowgroups_peak"] += 0
-        self.readings["parquet_emit_queue_depth_at_ready_max"] += 0
-        self.readings["time_to_first_rowgroup_ns"] += 0
-        self.readings["parquet_row_groups_pruned"] += 0
-        self.readings["io_ring_slot_bytes"] += 0
-        self.readings["io_ring_slot_count"] += 0
-        self.readings["io_ring_total_bytes"] += 0
-        self.readings["io_ring_producer_full_wait_ns"] += 0
-        self.readings["io_ring_producer_full_wait_events"] += 0
-        self.readings["io_ring_consumer_empty_wait_ns"] += 0
-        self.readings["io_ring_consumer_empty_wait_events"] += 0
-        self.readings["io_transfer_ready_backlog_peak"] += 0
-        self.readings["io_transfer_emit_wait_ns"] += 0
-        self.readings["io_transfer_fragment_count_p50"] += 0
-        self.readings["io_transfer_fragment_count_p95"] += 0
-        self.readings["io_transfer_fragment_count_max"] += 0
-        self.readings["io_transfer_payload_bytes_p50"] += 0
-        self.readings["io_transfer_payload_bytes_p95"] += 0
-        self.readings["io_transfer_payload_bytes_max"] += 0
-        self.readings["io_rowgroup_slice_count"] += 0
-        self.readings["io_deserialize_ns"] += 0
-        self.readings["io_serialize_ns"] += 0
-        self.readings["parquet_latmat_pass1_row_groups"] += 0
-        self.readings["parquet_latmat_pass2_row_groups"] += 0
-        self.readings["parquet_latmat_skipped_row_groups"] += 0
-        self.readings["parquet_latmat_abandoned_files"] += 0
-        self.readings["parquet_latmat_pass2_bytes"] += 0
-        self.readings["parquet_latmat_skipped_pages"] += 0
-        self.readings["parquet_latmat_decoded_pages"] += 0
 
         # Phase 1 predicate pushdown: extract (col, op, value) triples from pushed-down
         # predicates so the reader can prune row groups using footer min/max stats.
@@ -596,144 +672,10 @@ class ParquetReadNode(ReaderNode):
                 prefetched_footers=prefetched_footers,
                 footer_bytes_cache=footer_bytes_cache,
             ):
-                path = row_group.pop("__path__")
-                rg_idx = row_group.pop("__row_group__")
-                self.readings["parquet_row_groups_pruned"] = row_group.pop(
-                    "__row_groups_pruned__", 0
-                )
-                self.bytes_in += row_group.pop("__bytes_fetched__", 0)
-                self.readings["parquet_footer_bytes"] += row_group.pop("__footer_bytes__", 0)
-                self.readings["parquet_range_request_count"] += row_group.pop(
-                    "__range_request_count__", 0
-                )
-                self.readings["parquet_range_bytes_requested"] += row_group.pop(
-                    "__range_bytes_requested__", 0
-                )
-                self.readings["time_parquet_read_ranges_ns"] += row_group.pop(
-                    "__time_read_ranges_ns__", 0
-                )
-                self.readings["time_parquet_decode_columns_ns"] += row_group.pop(
-                    "__time_decode_columns_ns__", 0
-                )
-                self.readings["time_parquet_task_queue_wait_ns"] += row_group.pop(
-                    "__task_queue_wait_ns__", 0
-                )
-                self.readings["time_parquet_task_total_ns"] += row_group.pop("__task_total_ns__", 0)
-                self.readings["time_parquet_footer_fetch_ns"] += row_group.pop(
-                    "__footer_fetch_ns__", 0
-                )
-                self.readings["time_parquet_scheduler_wait_ns"] += row_group.pop(
-                    "__scheduler_wait_ns__", 0
-                )
-                self.readings["time_parquet_rowgroup_completion_ns"] += row_group.pop(
-                    "__rowgroup_completion_latency_ns__", 0
-                )
-                self.readings["parquet_rowgroup_peak_in_flight_max"] = max(
-                    self.readings.get("parquet_rowgroup_peak_in_flight_max", 0),
-                    row_group.pop("__rowgroup_peak_in_flight__", 0),
-                )
-                self.readings["parquet_ranges_in_flight_peak"] = max(
-                    self.readings.get("parquet_ranges_in_flight_peak", 0),
-                    row_group.pop("__ranges_in_flight_peak__", 0),
-                )
-                self.readings["parquet_active_files_peak"] = max(
-                    self.readings.get("parquet_active_files_peak", 0),
-                    row_group.pop("__active_files_peak__", 0),
-                )
-                self.readings["parquet_active_rowgroups_peak"] = max(
-                    self.readings.get("parquet_active_rowgroups_peak", 0),
-                    row_group.pop("__active_rowgroups_peak__", 0),
-                )
-                self.readings["parquet_rowgroups_in_flight_cap"] = max(
-                    self.readings.get("parquet_rowgroups_in_flight_cap", 0),
-                    row_group.pop("__rowgroups_in_flight_cap__", 0),
-                )
-                self.readings["time_parquet_emit_wait_ns"] += row_group.pop("__emit_wait_ns__", 0)
-                self.readings["parquet_emit_queue_depth_at_ready_max"] = max(
-                    self.readings.get("parquet_emit_queue_depth_at_ready_max", 0),
-                    row_group.pop("__emit_queue_depth_at_ready__", 0),
-                )
-                self.readings["time_parquet_scheduler_empty_wait_ns"] += row_group.pop(
-                    "__scheduler_empty_wait_ns__", 0
-                )
-                self.readings["parquet_scheduler_empty_wait_events"] += row_group.pop(
-                    "__scheduler_empty_wait_events__", 0
-                )
-                self.readings["io_ring_slot_bytes"] = max(
-                    self.readings.get("io_ring_slot_bytes", 0),
-                    row_group.pop("__io_ring_slot_bytes__", 0),
-                )
-                self.readings["io_ring_slot_count"] = max(
-                    self.readings.get("io_ring_slot_count", 0),
-                    row_group.pop("__io_ring_slot_count__", 0),
-                )
-                self.readings["io_ring_total_bytes"] = max(
-                    self.readings.get("io_ring_total_bytes", 0),
-                    row_group.pop("__io_ring_total_bytes__", 0),
-                )
-                self.readings["io_ring_producer_full_wait_ns"] += row_group.pop(
-                    "__io_ring_producer_full_wait_ns__", 0
-                )
-                self.readings["io_ring_producer_full_wait_events"] += row_group.pop(
-                    "__io_ring_producer_full_wait_events__", 0
-                )
-                self.readings["io_ring_consumer_empty_wait_ns"] += row_group.pop(
-                    "__io_ring_consumer_empty_wait_ns__", 0
-                )
-                self.readings["io_ring_consumer_empty_wait_events"] += row_group.pop(
-                    "__io_ring_consumer_empty_wait_events__", 0
-                )
-                self.readings["io_transfer_ready_backlog_peak"] = max(
-                    self.readings.get("io_transfer_ready_backlog_peak", 0),
-                    row_group.pop("__io_transfer_ready_backlog_peak__", 0),
-                )
-                self.readings["io_transfer_emit_wait_ns"] += row_group.pop(
-                    "__io_transfer_emit_wait_ns__", 0
-                )
-                self.readings["io_transfer_fragment_count_p50"] = max(
-                    self.readings.get("io_transfer_fragment_count_p50", 0),
-                    row_group.pop("__io_transfer_fragment_count_p50__", 0),
-                )
-                self.readings["io_transfer_fragment_count_p95"] = max(
-                    self.readings.get("io_transfer_fragment_count_p95", 0),
-                    row_group.pop("__io_transfer_fragment_count_p95__", 0),
-                )
-                self.readings["io_transfer_fragment_count_max"] = max(
-                    self.readings.get("io_transfer_fragment_count_max", 0),
-                    row_group.pop("__io_transfer_fragment_count_max__", 0),
-                )
-                self.readings["io_transfer_payload_bytes_p50"] = max(
-                    self.readings.get("io_transfer_payload_bytes_p50", 0),
-                    row_group.pop("__io_transfer_payload_bytes_p50__", 0),
-                )
-                self.readings["io_transfer_payload_bytes_p95"] = max(
-                    self.readings.get("io_transfer_payload_bytes_p95", 0),
-                    row_group.pop("__io_transfer_payload_bytes_p95__", 0),
-                )
-                self.readings["io_transfer_payload_bytes_max"] = max(
-                    self.readings.get("io_transfer_payload_bytes_max", 0),
-                    row_group.pop("__io_transfer_payload_bytes_max__", 0),
-                )
-                self.readings["io_rowgroup_slice_count"] += row_group.pop(
-                    "__io_rowgroup_slice_count__", 0
-                )
-                self.readings["io_deserialize_ns"] += row_group.pop("__io_deserialize_ns__", 0)
-                self.readings["io_serialize_ns"] += row_group.pop("__io_serialize_ns__", 0)
-                scan_strategy = row_group.pop("__parquet_scan_strategy__", None)
-                if scan_strategy:
-                    self.readings["parquet_scan_strategy"] = scan_strategy
-                time_to_first_rowgroup_ns = row_group.pop("__time_to_first_rowgroup_ns__", 0)
-                if time_to_first_rowgroup_ns:
-                    existing = self.readings.get("time_to_first_rowgroup_ns", 0)
-                    if existing == 0 or time_to_first_rowgroup_ns < existing:
-                        self.readings["time_to_first_rowgroup_ns"] = time_to_first_rowgroup_ns
-
-                # Drop any future scheduler metadata keys without breaking
-                # the row payload contract expected below.
-                for key in [k for k in row_group if k.startswith("__")]:
-                    row_group.pop(key, None)
+                path, rg_idx = self._extract_row_group_metadata(row_group)
 
                 # ── Morsel assembly ───────────────────────────────────────────
+                morsel_already_ordered = False  # Track if morsel is already in output order
                 if two_pass_eligible:
                     from opteryx.expression.evaluator import evaluate_and_append_draken
                     from opteryx.expression.evaluator import evaluate_draken
@@ -747,12 +689,9 @@ class ParquetReadNode(ReaderNode):
                     rows_before_filter = p1_morsel.num_rows
 
                     # Evaluate predicate to get the raw BoolVector mask.
-                    # Handle FUNCTION nodes first (mirrors _apply_predicates_to_morsel).
-                    function_nodes = get_all_nodes_of_type(
-                        predicate_root, select_nodes=(NodeType.FUNCTION,)
-                    )
-                    if function_nodes:
-                        p1_morsel = evaluate_and_append_draken(function_nodes, p1_morsel)
+                    # Use cached function nodes (computed once at initialization, not per row group).
+                    if self._predicate_function_nodes_cached:
+                        p1_morsel = evaluate_and_append_draken(self._predicate_function_nodes_cached, p1_morsel)
                     mask = evaluate_draken(predicate_root, p1_morsel)
 
                     self.readings["parquet_latmat_pass1_row_groups"] += 1
@@ -773,7 +712,7 @@ class ParquetReadNode(ReaderNode):
 
                     # Pass 2: fetch projection-only columns for this (path, rg_idx).
                     from array import array as _pyarray
-                    _mask_arr = _pyarray('B', (1 if v else 0 for v in mask.to_pylist()))
+                    _mask_arr = _pyarray('B', mask.to_byte_array())
                     pass2_raw = fetch_columns(
                         filesystem,
                         path,
@@ -791,23 +730,40 @@ class ParquetReadNode(ReaderNode):
                     self.readings["parquet_latmat_decoded_pages"] += pass2_raw.pop(
                         "__pages_decoded__", 0
                     )
-                    for _k in [k for k in list(pass2_raw) if k.startswith("__")]:
+                    # Clean up metadata keys. Snapshot keys to avoid modification during iteration.
+                    for _k in [k for k in pass2_raw if k.startswith("__")]:
                         pass2_raw.pop(_k)
 
                     # Pass 1 filtered morsel (K rows).
                     p1_filtered = p1_morsel.filter_mask(mask)
 
                     # Pass 2 vectors are already K rows (decoder applied the mask).
-                    p2_identity_names = [pass2_name_to_identity[col] for col in pass2_raw]
-                    result_morsel = Morsel.from_vectors(
-                        p1_identity_names + p2_identity_names,
-                        [
-                            p1_filtered.column(n)
-                            for n in p1_identity_names
-                        ]
-                        + list(pass2_raw.values()),
-                    )
+                    # Build identity→source mappings to construct morsel in output order.
+                    p1_vectors_by_identity = {n: p1_filtered.column(n) for n in p1_identity_names}
+                    p2_vectors_by_identity = {
+                        pass2_name_to_identity[col]: vec
+                        for col, vec in pass2_raw.items()
+                    }
+                    # Assemble in output_identity_order if available, else combine [p1 + p2].
+                    if output_identity_order:
+                        combined_identity_names = []
+                        combined_vectors = []
+                        for identity in output_identity_order:
+                            if identity in p1_vectors_by_identity:
+                                combined_identity_names.append(identity)
+                                combined_vectors.append(p1_vectors_by_identity[identity])
+                            elif identity in p2_vectors_by_identity:
+                                combined_identity_names.append(identity)
+                                combined_vectors.append(p2_vectors_by_identity[identity])
+                    else:
+                        # Fallback: combine [p1 + p2] in original order.
+                        combined_identity_names = list(p1_identity_names)
+                        combined_identity_names.extend(p2_vectors_by_identity.keys())
+                        combined_vectors = list(p1_vectors_by_identity.values())
+                        combined_vectors.extend(p2_vectors_by_identity.values())
+                    result_morsel = Morsel.from_vectors(combined_identity_names, combined_vectors)
                     rows_after_filter = result_morsel.num_rows
+                    morsel_already_ordered = bool(output_identity_order)  # Already ordered if built above
 
                     self.readings["parquet_latmat_pass2_row_groups"] += 1
 
@@ -826,7 +782,7 @@ class ParquetReadNode(ReaderNode):
                             consecutive_full_pass = 0
 
                 else:
-                    # Single-pass path: existing behaviour, unchanged.
+                    # Single-pass path: existing behaviour.
                     identity_names = [name_to_identity[col] for col in row_group]
                     vectors = list(row_group.values())
                     if not identity_names:
@@ -847,7 +803,8 @@ class ParquetReadNode(ReaderNode):
                         )
                 total_rows_before_filter += rows_before_filter
                 total_rows_after_filter += rows_after_filter
-                if output_identity_order:
+                # Skip select() if morsel was already built in output order (two-pass path).
+                if output_identity_order and not morsel_already_ordered:
                     result_morsel = result_morsel.select(output_identity_order)
                 elif not two_pass_eligible:
                     # No output columns (e.g. COUNT(*) with a filter-only read).

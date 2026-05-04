@@ -14,41 +14,11 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
+
 from opteryx.connectors import TableType
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.models import QueryTelemetry
 from opteryx.types.schema import RelationSchema
-
-MIN_CHUNK_SIZE: int = 500
-INITIAL_CHUNK_SIZE: int = 500
-DEFAULT_MORSEL_SIZE: int = 16 * 1024 * 1024
-
-
-def _dictset_to_morsel(chunk: list) -> Morsel:
-    """Convert a list of dicts to a Morsel without Arrow intermediate.
-
-    Extracts columns from the dict list and creates vectors directly.
-
-    Args:
-        chunk: List of dictionaries with uniform keys
-
-    Returns:
-        Morsel with columns and data from the dicts
-    """
-    if not chunk:
-        return Morsel()
-
-    # Get all unique column names from the chunk
-    column_names = list(chunk[0].keys()) if chunk else []
-
-    # Extract columns: create a list of lists, one per column
-    columns = []
-    for col_name in column_names:
-        col_data = [record.get(col_name) for record in chunk]
-        vec = vector_from_sequence(col_data)
-        columns.append(vec)
-
-    return Morsel.from_vectors(column_names, columns)
 
 
 class BaseConnector:
@@ -180,7 +150,6 @@ class BaseTable:
         else:
             self.config = config.copy()
         self.dataset = dataset
-        self.chunk_size = INITIAL_CHUNK_SIZE
         self.schema: RelationSchema = None
         self.telemetry = telemetry
         self.pushed_predicates: list = []
@@ -205,66 +174,3 @@ class BaseTable:
             A reader object for iterating over the dataset.
         """
         raise NotImplementedError("Subclasses must implement read_dataset method.")
-
-    def chunk_dictset(
-        self,
-        dictset: Iterable[dict],
-        columns: Optional[list] = None,
-        morsel_size: int = DEFAULT_MORSEL_SIZE,
-        initial_chunk_size: int = INITIAL_CHUNK_SIZE,
-    ) -> Morsel:
-        chunk = []
-        self.chunk_size = initial_chunk_size  # we reset each time
-        morsel = None
-
-        for index, record in enumerate(dictset):
-            _id = record.pop("_id", None)
-            # column selection
-            if columns:
-                record = {k.source_column: record.get(k.source_column) for k in columns}
-            record["id"] = None if _id is None else str(_id)
-
-            chunk.append(record)
-
-            if index == self.chunk_size - 1 or (index > self.chunk_size - 1) and (index - self.chunk_size) % self.chunk_size == 0:
-                morsel = _dictset_to_morsel(chunk)
-                yield morsel
-                chunk = []
-
-        if chunk:
-            morsel = _dictset_to_morsel(chunk)
-            yield morsel
-
-
-class DatasetReader:
-    def __init__(self, dataset_name: str, config: Optional[Dict[str, Any]] = None) -> None:
-        """
-        Initialize the reader with configuration.
-
-        Args:
-            config: Configuration information specific to the reader.
-        """
-        self.dataset_name = dataset_name
-        self.config = config
-
-    def __iter__(self) -> "DatasetReader":
-        """
-        Make the reader object iterable.
-        """
-        return self
-
-    def __next__(self) -> Morsel:  # pragma: no cover
-        """
-        Read the next chunk or morsel from the dataset.
-
-        Returns:
-            A Morsel representing a chunk of the dataset.
-            raises StopIteration if the dataset is exhausted.
-        """
-        raise NotImplementedError("Subclasses must implement __next__ method.")
-
-    def close(self) -> None:  # pragma: no cover
-        """
-        Close the reader and release any resources.
-        """
-        return None
