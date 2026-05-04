@@ -908,7 +908,10 @@ cdef class StringVector(Vector):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_string(self).equals(value)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_string(self).equals(value)
+            _eq_code = _dict_find_code(self, PyBytes_AS_STRING(value), len(value))
+            if _eq_code < 0:
+                return BoolVector(<size_t>self.ptr.length)
+            return _codes_to_boolvector_eq(self, _eq_code)
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -971,7 +974,10 @@ cdef class StringVector(Vector):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_string(self).not_equals(value)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_string(self).not_equals(value)
+            _neq_code = _dict_find_code(self, PyBytes_AS_STRING(value), len(value))
+            if _neq_code < 0:
+                return _codes_to_boolvector_neq(self, <Py_ssize_t>self._dict_values.length)
+            return _codes_to_boolvector_neq(self, _neq_code)
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -1028,7 +1034,7 @@ cdef class StringVector(Vector):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_string(self).less_than(value)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_string(self).less_than(value)
+            return _dict_ordered_scalar(self, value, 0)
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -1087,7 +1093,7 @@ cdef class StringVector(Vector):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_string(self).greater_than(value)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_string(self).greater_than(value)
+            return _dict_ordered_scalar(self, value, 1)
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -1146,7 +1152,7 @@ cdef class StringVector(Vector):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_string(self).less_than_or_equals(value)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_string(self).less_than_or_equals(value)
+            return _dict_ordered_scalar(self, value, 2)
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -1205,7 +1211,7 @@ cdef class StringVector(Vector):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_string(self).greater_than_or_equals(value)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_string(self).greater_than_or_equals(value)
+            return _dict_ordered_scalar(self, value, 3)
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -3448,6 +3454,165 @@ cdef StringVector from_packed_dict(
             free(lengths_buf)
         if row_validity != NULL:
             free(row_validity)
+
+cdef Py_ssize_t _dict_find_code(StringVector vec, const char* val_ptr, Py_ssize_t val_len) noexcept nogil:
+    """Return the code index for val in vec's dictionary, or -1 if absent."""
+    cdef DrakenVarBuffer* dv = vec._dict_values
+    cdef Py_ssize_t d = <Py_ssize_t>dv.length
+    cdef Py_ssize_t i, entry_len
+    cdef int32_t start, end
+    for i in range(d):
+        start = dv.offsets[i]
+        end = dv.offsets[i + 1]
+        entry_len = end - start
+        if entry_len != val_len:
+            continue
+        if val_len == 0 or memcmp(<const char*>dv.data + start, val_ptr, <size_t>val_len) == 0:
+            return i
+    return -1
+
+
+cdef BoolVector _codes_to_boolvector_eq(StringVector vec, Py_ssize_t target_code):
+    """BoolVector: codes[i] == target_code, propagating nulls."""
+    cdef uint8_t* codes = vec._dict_codes
+    cdef uint8_t code_width = vec._dict_code_width
+    cdef uint8_t* nb_ptr = vec.ptr.null_bitmap
+    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
+    cdef Py_ssize_t nbytes = (n + 7) >> 3
+    cdef BoolVector out = BoolVector(<size_t>n)
+    cdef uint8_t* dst = <uint8_t*>out.ptr.data
+    cdef uint8_t* out_null = NULL
+    cdef uint8_t mask
+    cdef Py_ssize_t i
+    cdef uint32_t code
+
+    memset(dst, 0, nbytes)
+    if nb_ptr != NULL and nbytes != 0:
+        out_null = <uint8_t*>malloc(nbytes)
+        if out_null == NULL:
+            raise MemoryError()
+        memcpy(out_null, nb_ptr, nbytes)
+        if (n & 7) != 0:
+            mask = <uint8_t>((1 << (n & 7)) - 1)
+            out_null[nbytes - 1] &= mask
+        out.ptr.null_bitmap = out_null
+    else:
+        out.ptr.null_bitmap = NULL
+
+    for i in range(n):
+        if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+            continue
+        code = _read_packed_code(codes, code_width, i)
+        if <Py_ssize_t>code == target_code:
+            dst[i >> 3] |= (1 << (i & 7))
+    return out
+
+
+cdef BoolVector _codes_to_boolvector_neq(StringVector vec, Py_ssize_t target_code):
+    """BoolVector: codes[i] != target_code, propagating nulls."""
+    cdef uint8_t* codes = vec._dict_codes
+    cdef uint8_t code_width = vec._dict_code_width
+    cdef uint8_t* nb_ptr = vec.ptr.null_bitmap
+    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
+    cdef Py_ssize_t nbytes = (n + 7) >> 3
+    cdef BoolVector out = BoolVector(<size_t>n)
+    cdef uint8_t* dst = <uint8_t*>out.ptr.data
+    cdef uint8_t* out_null = NULL
+    cdef uint8_t mask
+    cdef Py_ssize_t i
+    cdef uint32_t code
+
+    memset(dst, 0, nbytes)
+    if nb_ptr != NULL and nbytes != 0:
+        out_null = <uint8_t*>malloc(nbytes)
+        if out_null == NULL:
+            raise MemoryError()
+        memcpy(out_null, nb_ptr, nbytes)
+        if (n & 7) != 0:
+            mask = <uint8_t>((1 << (n & 7)) - 1)
+            out_null[nbytes - 1] &= mask
+        out.ptr.null_bitmap = out_null
+    else:
+        out.ptr.null_bitmap = NULL
+
+    for i in range(n):
+        if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+            continue
+        code = _read_packed_code(codes, code_width, i)
+        if <Py_ssize_t>code != target_code:
+            dst[i >> 3] |= (1 << (i & 7))
+    return out
+
+
+cdef BoolVector _dict_ordered_scalar(StringVector vec, bytes value, int op):
+    """Dict-level ordered scalar compare without materializing. op: 0=lt,1=gt,2=lte,3=gte."""
+    cdef DrakenVarBuffer* dv = vec._dict_values
+    cdef Py_ssize_t d = <Py_ssize_t>dv.length
+    cdef const char* val_ptr = PyBytes_AS_STRING(value)
+    cdef Py_ssize_t val_len = len(value)
+    cdef uint8_t* pass_array = <uint8_t*>malloc(d)
+    cdef Py_ssize_t i
+    cdef int32_t start, end
+    cdef int cmp_res
+
+    if pass_array == NULL:
+        raise MemoryError()
+    try:
+        for i in range(d):
+            start = dv.offsets[i]
+            end = dv.offsets[i + 1]
+            cmp_res = _compare_bytes_lex(
+                <const uint8_t*>dv.data + start, end - start,
+                <const uint8_t*>val_ptr, val_len,
+            )
+            if op == 0:
+                pass_array[i] = 1 if cmp_res < 0 else 0
+            elif op == 1:
+                pass_array[i] = 1 if cmp_res > 0 else 0
+            elif op == 2:
+                pass_array[i] = 1 if cmp_res <= 0 else 0
+            else:
+                pass_array[i] = 1 if cmp_res >= 0 else 0
+        return _dict_compare_pass_array(vec, pass_array)
+    finally:
+        free(pass_array)
+
+
+cdef BoolVector _dict_compare_pass_array(StringVector vec, uint8_t* pass_array):
+    """BoolVector built from a per-code pass_array[code] lookup, propagating nulls."""
+    cdef uint8_t* codes = vec._dict_codes
+    cdef uint8_t code_width = vec._dict_code_width
+    cdef uint8_t* nb_ptr = vec.ptr.null_bitmap
+    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
+    cdef Py_ssize_t nbytes = (n + 7) >> 3
+    cdef BoolVector out = BoolVector(<size_t>n)
+    cdef uint8_t* dst = <uint8_t*>out.ptr.data
+    cdef uint8_t* out_null = NULL
+    cdef uint8_t mask
+    cdef Py_ssize_t i
+    cdef uint32_t code
+
+    memset(dst, 0, nbytes)
+    if nb_ptr != NULL and nbytes != 0:
+        out_null = <uint8_t*>malloc(nbytes)
+        if out_null == NULL:
+            raise MemoryError()
+        memcpy(out_null, nb_ptr, nbytes)
+        if (n & 7) != 0:
+            mask = <uint8_t>((1 << (n & 7)) - 1)
+            out_null[nbytes - 1] &= mask
+        out.ptr.null_bitmap = out_null
+    else:
+        out.ptr.null_bitmap = NULL
+
+    for i in range(n):
+        if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+            continue
+        code = _read_packed_code(codes, code_width, i)
+        if pass_array[code]:
+            dst[i >> 3] |= (1 << (i & 7))
+    return out
+
 
 cdef StringVector _materialize_dict_string(StringVector vec):
     """Expand a dict-only StringVector to a dense StringVector (no src ptr.data needed)."""
