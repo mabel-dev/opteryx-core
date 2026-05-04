@@ -413,12 +413,10 @@ def fetch_columns(
                     connector=connector,
                 )
 
-            # Convert memoryview to bytes if needed
-            raw_bytes_arg = bytes(raw_bytes) if isinstance(raw_bytes, memoryview) else raw_bytes
             decoded = (
-                decoder(raw_bytes_arg, _col_stats)  # type: ignore[misc]
+                decoder(raw_bytes, _col_stats)  # type: ignore[misc]
                 if row_mask is None
-                else decoder(raw_bytes_arg, _col_stats, row_mask)  # type: ignore[misc]
+                else decoder(raw_bytes, _col_stats, row_mask)  # type: ignore[misc]
             )
             if decoded is None:
                 raise RuntimeError(
