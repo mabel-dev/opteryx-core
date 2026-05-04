@@ -33,7 +33,9 @@ cdef class Float32Vector(Vector):
     cdef uint8_t* null_bitmap_ptr(self) noexcept
 
     cpdef Float32Vector take(self, int32_t[::1] indices)
-    cdef bint _compare_float_values(self, float left, float right, int op) nogil
+    cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
+    cdef BoolVector _compare_scalar_rle(self, float value, int op)
+    cdef BoolVector _compare_scalar_dict(self, float value, int op)
     cdef BoolVector _compare_scalar(self, float value, int op)
     cdef BoolVector _compare_vector(self, Float32Vector other, int op)
 

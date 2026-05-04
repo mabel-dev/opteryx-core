@@ -50,6 +50,21 @@ from draken.vectors.timestamp_vector cimport TimestampVector
 cdef extern from "simd_hash.h":
     void simd_scale_date32(const int32_t* src, int64_t* dest, size_t count) nogil
 
+cdef extern from "simd_bitops.h" nogil:
+    void simd_and_mask(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n)
+
+cdef extern from "draken/vectors/_date32_compare.hpp" namespace "draken::date32_cmp" nogil:
+    void bit_fill_range(uint8_t* dst, size_t start, size_t count)
+    bint dispatch_compare_once(int op, int32_t a, int32_t b)
+    void dispatch_scalar_nonnull(int op, const int32_t* data, int32_t value, uint8_t* dst, size_t n)
+    void dispatch_scalar_branchless(int op, const int32_t* data, int32_t value, const uint8_t* src_null, uint8_t* dst, size_t n)
+    void dispatch_scalar_branching(int op, const int32_t* data, int32_t value, const uint8_t* src_null, uint8_t* dst, size_t n)
+    void dispatch_vector_nonnull(int op, const int32_t* a, const int32_t* b, uint8_t* dst, size_t n)
+    void dispatch_vector_one_null_branchless(int op, const int32_t* a, const int32_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_one_null_branching(int op, const int32_t* a, const int32_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branchless(int op, const int32_t* a, const int32_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branching(int op, const int32_t* a, const int32_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+
 # Constants for temporal arithmetic (Phase 5b)
 cdef int64_t MICROSECONDS_PER_DAY = 86_400_000_000
 cdef const int64_t INT64_MIN_VALUE = <int64_t>0x8000000000000000
@@ -250,31 +265,96 @@ cdef class Date32Vector(Vector):
             dst[i] = src[indices[i]]
         return out
 
-    cdef inline bint _compare_date_values(self, int32_t left, int32_t right, int op) nogil:
-        if op == 0:
-            return left == right
-        if op == 1:
-            return left != right
-        if op == 2:
-            return left > right
-        if op == 3:
-            return left >= right
-        if op == 4:
-            return left < right
-        return left <= right
+    cdef BoolVector _make_all_null_bool(self, Py_ssize_t n):
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
+        cdef uint8_t* null_bm
+        memset(dst, 0, nbytes)
+        if nbytes != 0:
+            null_bm = <uint8_t*>malloc(nbytes)
+            if null_bm == NULL:
+                raise MemoryError()
+            memset(null_bm, 0, nbytes)
+            out.ptr.null_bitmap = null_bm
+        else:
+            out.ptr.null_bitmap = NULL
+        return out
+
+    cdef BoolVector _compare_scalar_rle(self, int32_t value, int op):
+        # Compare RLE vector against a scalar without materialising to dense int32.
+        # Evaluates the predicate once per run, bit-fills the result, then applies
+        # the row-level null bitmap (if any) via a single SIMD AND pass.
+        cdef size_t n = self._rle_buffer.length
+        cdef size_t num_runs = self._rle_buffer.num_runs
+        cdef int32_t* rle_vals = <int32_t*>self._rle_buffer.run_values
+        cdef int32_t* rle_lens = self._rle_buffer.run_lengths
+        cdef uint8_t* rle_nulls = self._rle_buffer.null_bitmap
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
+        memset(dst, 0, nbytes)
+
+        cdef uint8_t* out_null = NULL
+        if rle_nulls != NULL and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, rle_nulls, nbytes)
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        cdef size_t pos = 0
+        cdef size_t r
+        for r in range(num_runs):
+            if dispatch_compare_once(op, rle_vals[r], value):
+                bit_fill_range(dst, pos, <size_t>rle_lens[r])
+            pos += <size_t>rle_lens[r]
+
+        if out_null != NULL:
+            simd_and_mask(dst, dst, out_null, <size_t>nbytes)
+
+        return out
 
     cdef BoolVector _compare_scalar(self, int32_t value, int op):
         if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_date32(self)._compare_scalar(value, op)
+            return self._compare_scalar_rle(value, op)
+
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int32_t* data = <int32_t*> ptr.data
-        cdef uint8_t* src_null = ptr.null_bitmap
-        cdef Py_ssize_t i, n = ptr.length
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t>n)
-        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef Py_ssize_t n
+        cdef Py_ssize_t nbytes
+        cdef BoolVector out
+        cdef uint8_t* dst
         cdef uint8_t* out_null = NULL
         cdef uint8_t mask
+        cdef bint matched
+
+        if self._has_const:
+            n = ptr.length
+            nbytes = (n + 7) >> 3
+            out = BoolVector(<size_t>n)
+            dst = <uint8_t*>out.ptr.data
+            if nbytes > 0:
+                memset(dst, 0, nbytes)
+            if self._const_is_null:
+                return self._make_all_null_bool(n)
+            matched = dispatch_compare_once(op, self._const_value, value)
+            if matched and nbytes > 0:
+                memset(dst, 0xFF, nbytes)
+                if (n & 7) != 0:
+                    mask = <uint8_t>((1 << (n & 7)) - 1)
+                    dst[nbytes - 1] &= mask
+            out.ptr.null_bitmap = NULL
+            return out
+
+        cdef int32_t* data = <int32_t*> ptr.data
+        cdef uint8_t* src_null = ptr.null_bitmap
+        n = ptr.length
+        nbytes = (n + 7) >> 3
+        out = BoolVector(<size_t>n)
+        dst = <uint8_t*> out.ptr.data
 
         memset(dst, 0, nbytes)
         if src_null != NULL and nbytes != 0:
@@ -289,46 +369,60 @@ cdef class Date32Vector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        cdef uint8_t v
-        cdef uint8_t m
         cdef size_t valid_count
         if src_null == NULL:
-            for i in range(n):
-                m = 1 if self._compare_date_values(data[i], value, op) else 0
-                dst[i >> 3] |= <uint8_t>(m << (i & 7))
+            dispatch_scalar_nonnull(op, data, value, dst, <size_t>n)
         else:
             valid_count = simd_popcount(src_null, <size_t>nbytes)
             if n > 0 and (valid_count * 10) < (<size_t>n * 3):
-                for i in range(n):
-                    if (src_null[i >> 3] >> (i & 7)) & 1:
-                        if self._compare_date_values(data[i], value, op):
-                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+                dispatch_scalar_branching(op, data, value, src_null, dst, <size_t>n)
             else:
-                for i in range(n):
-                    v = (src_null[i >> 3] >> (i & 7)) & 1
-                    m = 1 if self._compare_date_values(data[i], value, op) else 0
-                    dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
+                dispatch_scalar_branchless(op, data, value, src_null, dst, <size_t>n)
         return out
 
     cdef BoolVector _compare_vector_op(self, Date32Vector other, int op):
-        # Consolidates the 6 *_vector comparison ops; branchless null evaluation
-        # with a >70% null density gate (per docs/null_representation_optimizations.md).
+        # Consolidates the 6 *_vector comparison ops. Op dispatch and null-pointer
+        # specialisation happen once here; the C++ kernel runs a tight loop with
+        # no per-row branching. Const fast paths avoid O(n) materialisation.
+        if self._encoding == DRAKEN_ENCODING_RLE:
+            return _materialize_rle_date32(self)._compare_vector_op(other, op)
+        if other._encoding == DRAKEN_ENCODING_RLE:
+            return self._compare_vector_op(_materialize_rle_date32(other), op)
+
+        # Const fast paths: avoid O(n) materialisation.
+        cdef Py_ssize_t const_n
+        cdef int reversed_op
         if self._has_const:
-            return _materialize_const_date32(self)._compare_vector_op(other, op)
+            const_n = self.ptr.length
+            if const_n != other.ptr.length:
+                raise ValueError("Vectors must have the same length")
+            if self._const_is_null:
+                return self._make_all_null_bool(const_n)
+            # Reverse directional ops: gt(2)<->lt(4), ge(3)<->le(5)
+            if op == 2:   reversed_op = 4
+            elif op == 3: reversed_op = 5
+            elif op == 4: reversed_op = 2
+            elif op == 5: reversed_op = 3
+            else:         reversed_op = op
+            return other._compare_scalar(self._const_value, reversed_op)
         if other._has_const:
-            return self._compare_vector_op(_materialize_const_date32(other), op)
+            if self.ptr.length != other.ptr.length:
+                raise ValueError("Vectors must have the same length")
+            if other._const_is_null:
+                return self._make_all_null_bool(self.ptr.length)
+            return self._compare_scalar(other._const_value, op)
+
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int32_t* data1 = <int32_t*> ptr1.data
         cdef int32_t* data2 = <int32_t*> ptr2.data
         cdef uint8_t* null1 = ptr1.null_bitmap
         cdef uint8_t* null2 = ptr2.null_bitmap
-        cdef Py_ssize_t i, n = ptr1.length
+        cdef Py_ssize_t n = ptr1.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
         cdef BoolVector out
         cdef uint8_t* dst
         cdef uint8_t* out_null = NULL
-        cdef uint8_t v1, v2, v, m
 
         if n != ptr2.length:
             raise ValueError("Vectors must have the same length")
@@ -355,25 +449,20 @@ cdef class Date32Vector(Vector):
             use_branching = (min_valid * 10) < (<size_t>n * 3)
 
         if null1 == NULL and null2 == NULL:
-            for i in range(n):
-                m = 1 if self._compare_date_values(data1[i], data2[i], op) else 0
-                dst[i >> 3] |= <uint8_t>(m << (i & 7))
+            dispatch_vector_nonnull(op, data1, data2, dst, <size_t>n)
         elif use_branching:
-            for i in range(n):
-                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
-                v2 = 1 if null2 == NULL else (null2[i >> 3] >> (i & 7)) & 1
-                if v1 & v2:
-                    out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
-                    if self._compare_date_values(data1[i], data2[i], op):
-                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            if null1 != NULL and null2 != NULL:
+                dispatch_vector_both_null_branching(op, data1, data2, null1, null2, dst, out_null, <size_t>n)
+            elif null1 != NULL:
+                dispatch_vector_one_null_branching(op, data1, data2, null1, dst, out_null, <size_t>n)
+            else:
+                dispatch_vector_one_null_branching(op, data1, data2, null2, dst, out_null, <size_t>n)
+        elif null1 != NULL and null2 == NULL:
+            dispatch_vector_one_null_branchless(op, data1, data2, null1, dst, out_null, <size_t>n)
+        elif null1 == NULL and null2 != NULL:
+            dispatch_vector_one_null_branchless(op, data1, data2, null2, dst, out_null, <size_t>n)
         else:
-            for i in range(n):
-                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
-                v2 = 1 if null2 == NULL else (null2[i >> 3] >> (i & 7)) & 1
-                v = v1 & v2
-                m = 1 if self._compare_date_values(data1[i], data2[i], op) else 0
-                dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
-                out_null[i >> 3] |= <uint8_t>(v << (i & 7))
+            dispatch_vector_both_null_branchless(op, data1, data2, null1, null2, dst, out_null, <size_t>n)
         return out
 
     cpdef BoolVector equals(self, int32_t value):

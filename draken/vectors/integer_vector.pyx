@@ -36,6 +36,73 @@ from draken.core.fixed_vector cimport (
 from draken.vectors.vector cimport MIX_HASH_CONSTANT, NULL_HASH, Vector, mix_hash, simd_mix_hash, simd_popcount
 from draken.vectors.bool_vector cimport BoolVector
 
+cdef extern from "simd_bitops.h" nogil:
+    void simd_and_mask(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n)
+
+cdef extern from "draken/vectors/_integer_compare.hpp" namespace "draken::integer_cmp" nogil:
+    # Single-value compare (for const / RLE paths)
+    bint dispatch_compare_once(int op, int64_t a, int64_t b)
+    # bit_fill_range: fill count bits in dst starting at bit-offset start
+    void bit_fill_range(uint8_t* dst, size_t start, size_t count)
+    # Scalar dispatchers — per element width
+    void dispatch_scalar_nonnull_i8(int op, const int8_t* data, int64_t value, uint8_t* dst, size_t n)
+    void dispatch_scalar_branchless_i8(int op, const int8_t* data, int64_t value, const uint8_t* src_null, uint8_t* dst, size_t n)
+    void dispatch_scalar_branching_i8(int op, const int8_t* data, int64_t value, const uint8_t* src_null, uint8_t* dst, size_t n)
+    void dispatch_scalar_nonnull_i16(int op, const int16_t* data, int64_t value, uint8_t* dst, size_t n)
+    void dispatch_scalar_branchless_i16(int op, const int16_t* data, int64_t value, const uint8_t* src_null, uint8_t* dst, size_t n)
+    void dispatch_scalar_branching_i16(int op, const int16_t* data, int64_t value, const uint8_t* src_null, uint8_t* dst, size_t n)
+    void dispatch_scalar_nonnull_i32(int op, const int32_t* data, int64_t value, uint8_t* dst, size_t n)
+    void dispatch_scalar_branchless_i32(int op, const int32_t* data, int64_t value, const uint8_t* src_null, uint8_t* dst, size_t n)
+    void dispatch_scalar_branching_i32(int op, const int32_t* data, int64_t value, const uint8_t* src_null, uint8_t* dst, size_t n)
+    # Vector-vector dispatchers — same-type pairs
+    void dispatch_vector_nonnull_i8_i8(int op, const int8_t* a, const int8_t* b, uint8_t* dst, size_t n)
+    void dispatch_vector_one_null_branchless_i8_i8(int op, const int8_t* a, const int8_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_one_null_branching_i8_i8(int op, const int8_t* a, const int8_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branchless_i8_i8(int op, const int8_t* a, const int8_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branching_i8_i8(int op, const int8_t* a, const int8_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_nonnull_i16_i16(int op, const int16_t* a, const int16_t* b, uint8_t* dst, size_t n)
+    void dispatch_vector_one_null_branchless_i16_i16(int op, const int16_t* a, const int16_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_one_null_branching_i16_i16(int op, const int16_t* a, const int16_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branchless_i16_i16(int op, const int16_t* a, const int16_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branching_i16_i16(int op, const int16_t* a, const int16_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_nonnull_i32_i32(int op, const int32_t* a, const int32_t* b, uint8_t* dst, size_t n)
+    void dispatch_vector_one_null_branchless_i32_i32(int op, const int32_t* a, const int32_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_one_null_branching_i32_i32(int op, const int32_t* a, const int32_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branchless_i32_i32(int op, const int32_t* a, const int32_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branching_i32_i32(int op, const int32_t* a, const int32_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    # Mixed-width pairs (self narrower)
+    void dispatch_vector_nonnull_i8_i16(int op, const int8_t* a, const int16_t* b, uint8_t* dst, size_t n)
+    void dispatch_vector_one_null_branchless_i8_i16(int op, const int8_t* a, const int16_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_one_null_branching_i8_i16(int op, const int8_t* a, const int16_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branchless_i8_i16(int op, const int8_t* a, const int16_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branching_i8_i16(int op, const int8_t* a, const int16_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_nonnull_i8_i32(int op, const int8_t* a, const int32_t* b, uint8_t* dst, size_t n)
+    void dispatch_vector_one_null_branchless_i8_i32(int op, const int8_t* a, const int32_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_one_null_branching_i8_i32(int op, const int8_t* a, const int32_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branchless_i8_i32(int op, const int8_t* a, const int32_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branching_i8_i32(int op, const int8_t* a, const int32_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_nonnull_i16_i32(int op, const int16_t* a, const int32_t* b, uint8_t* dst, size_t n)
+    void dispatch_vector_one_null_branchless_i16_i32(int op, const int16_t* a, const int32_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_one_null_branching_i16_i32(int op, const int16_t* a, const int32_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branchless_i16_i32(int op, const int16_t* a, const int32_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branching_i16_i32(int op, const int16_t* a, const int32_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    # Mixed-width pairs (self wider)
+    void dispatch_vector_nonnull_i16_i8(int op, const int16_t* a, const int8_t* b, uint8_t* dst, size_t n)
+    void dispatch_vector_one_null_branchless_i16_i8(int op, const int16_t* a, const int8_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_one_null_branching_i16_i8(int op, const int16_t* a, const int8_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branchless_i16_i8(int op, const int16_t* a, const int8_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branching_i16_i8(int op, const int16_t* a, const int8_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_nonnull_i32_i8(int op, const int32_t* a, const int8_t* b, uint8_t* dst, size_t n)
+    void dispatch_vector_one_null_branchless_i32_i8(int op, const int32_t* a, const int8_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_one_null_branching_i32_i8(int op, const int32_t* a, const int8_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branchless_i32_i8(int op, const int32_t* a, const int8_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branching_i32_i8(int op, const int32_t* a, const int8_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_nonnull_i32_i16(int op, const int32_t* a, const int16_t* b, uint8_t* dst, size_t n)
+    void dispatch_vector_one_null_branchless_i32_i16(int op, const int32_t* a, const int16_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_one_null_branching_i32_i16(int op, const int32_t* a, const int16_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branchless_i32_i16(int op, const int32_t* a, const int16_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branching_i32_i16(int op, const int32_t* a, const int16_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+
 DEF INTEGER_HASH_CHUNK = 1024
 
 
@@ -638,35 +705,71 @@ cdef class IntegerVector(Vector):
                 out.ptr.null_bitmap = out_null
         return out
 
-    cdef inline bint _compare_int_values(self, int64_t left, int64_t right, int op) nogil:
-        if op == 0:
-            return left == right
-        if op == 1:
-            return left != right
-        if op == 2:
-            return left > right
-        if op == 3:
-            return left >= right
-        if op == 4:
-            return left < right
-        return left <= right
+    cdef BoolVector _make_all_null_bool(self, Py_ssize_t n):
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
+        cdef uint8_t* null_bm
+        memset(dst, 0, nbytes)
+        if nbytes != 0:
+            null_bm = <uint8_t*>malloc(nbytes)
+            if null_bm == NULL:
+                raise MemoryError()
+            memset(null_bm, 0, nbytes)
+            out.ptr.null_bitmap = null_bm
+        else:
+            out.ptr.null_bitmap = NULL
+        return out
+
+    cdef BoolVector _compare_scalar_rle(self, int64_t value, int op):
+        # Evaluate predicate once per run, fill the result bitmap using
+        # bit_fill_range, then AND with the row-level null bitmap — no
+        # materialisation of the full dense array.
+        cdef size_t n = self._rle_buffer.length
+        cdef size_t num_runs = self._rle_buffer.num_runs
+        cdef int64_t* rle_vals = <int64_t*>self._rle_buffer.run_values
+        cdef int32_t* rle_lens = self._rle_buffer.run_lengths
+        cdef uint8_t* rle_nulls = self._rle_buffer.null_bitmap
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
+        memset(dst, 0, nbytes)
+
+        cdef uint8_t* out_null = NULL
+        if rle_nulls != NULL and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, rle_nulls, nbytes)
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        cdef size_t pos = 0
+        cdef size_t r
+        for r in range(num_runs):
+            if dispatch_compare_once(op, rle_vals[r], value):
+                bit_fill_range(dst, pos, <size_t>rle_lens[r])
+            pos += <size_t>rle_lens[r]
+
+        if out_null != NULL:
+            simd_and_mask(dst, dst, out_null, <size_t>nbytes)
+
+        return out
 
     cdef BoolVector _compare_scalar(self, int64_t value, int op):
         if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_integer(self)._compare_scalar(value, op)
+            return self._compare_scalar_rle(value, op)
+
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n
         cdef Py_ssize_t nbytes
         cdef BoolVector out
         cdef uint8_t* dst
         cdef uint8_t* out_null = NULL
-        cdef Py_ssize_t i
         cdef uint8_t mask
         cdef bint matched
-        cdef int8_t* d8
-        cdef int16_t* d16
-        cdef int32_t* d32
-        cdef int64_t* d64
 
         if self._has_const:
             n = ptr.length
@@ -676,17 +779,9 @@ cdef class IntegerVector(Vector):
             if nbytes > 0:
                 memset(dst, 0, nbytes)
             if self._const_is_null:
-                if nbytes != 0:
-                    out_null = <uint8_t*>malloc(nbytes)
-                    if out_null == NULL:
-                        raise MemoryError()
-                    memset(out_null, 0, nbytes)
-                    out.ptr.null_bitmap = out_null
-                else:
-                    out.ptr.null_bitmap = NULL
-                return out
+                return self._make_all_null_bool(n)
 
-            matched = self._compare_int_values(self._const_value, value, op)
+            matched = dispatch_compare_once(op, self._const_value, value)
             if matched and nbytes > 0:
                 memset(dst, 0xFF, nbytes)
                 if (n & 7) != 0:
@@ -714,8 +809,10 @@ cdef class IntegerVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        cdef uint8_t v
-        cdef uint8_t m
+        # Gate: >~70% null density → branching kernel (skips work for null rows).
+        # Below that: branchless kernel avoids mispredicted comparison branches.
+        # Op dispatch happens once here; the C++ kernel runs a tight loop with
+        # no per-row branching on op or itemsize.
         cdef size_t valid_count
         cdef bint use_branching = False
         if src_null != NULL and n > 0:
@@ -723,69 +820,26 @@ cdef class IntegerVector(Vector):
             use_branching = (valid_count * 10) < (<size_t>n * 3)
 
         if ptr.itemsize == 1:
-            d8 = <int8_t*>ptr.data
             if src_null == NULL:
-                for i in range(n):
-                    m = 1 if self._compare_int_values(<int64_t>d8[i], value, op) else 0
-                    dst[i >> 3] |= <uint8_t>(m << (i & 7))
+                dispatch_scalar_nonnull_i8(op, <const int8_t*>ptr.data, value, dst, <size_t>n)
             elif use_branching:
-                for i in range(n):
-                    if (src_null[i >> 3] >> (i & 7)) & 1:
-                        if self._compare_int_values(<int64_t>d8[i], value, op):
-                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+                dispatch_scalar_branching_i8(op, <const int8_t*>ptr.data, value, src_null, dst, <size_t>n)
             else:
-                for i in range(n):
-                    v = (src_null[i >> 3] >> (i & 7)) & 1
-                    m = 1 if self._compare_int_values(<int64_t>d8[i], value, op) else 0
-                    dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
+                dispatch_scalar_branchless_i8(op, <const int8_t*>ptr.data, value, src_null, dst, <size_t>n)
         elif ptr.itemsize == 2:
-            d16 = <int16_t*>ptr.data
             if src_null == NULL:
-                for i in range(n):
-                    m = 1 if self._compare_int_values(<int64_t>d16[i], value, op) else 0
-                    dst[i >> 3] |= <uint8_t>(m << (i & 7))
+                dispatch_scalar_nonnull_i16(op, <const int16_t*>ptr.data, value, dst, <size_t>n)
             elif use_branching:
-                for i in range(n):
-                    if (src_null[i >> 3] >> (i & 7)) & 1:
-                        if self._compare_int_values(<int64_t>d16[i], value, op):
-                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+                dispatch_scalar_branching_i16(op, <const int16_t*>ptr.data, value, src_null, dst, <size_t>n)
             else:
-                for i in range(n):
-                    v = (src_null[i >> 3] >> (i & 7)) & 1
-                    m = 1 if self._compare_int_values(<int64_t>d16[i], value, op) else 0
-                    dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
-        elif ptr.itemsize == 4:
-            d32 = <int32_t*>ptr.data
+                dispatch_scalar_branchless_i16(op, <const int16_t*>ptr.data, value, src_null, dst, <size_t>n)
+        else:  # itemsize == 4
             if src_null == NULL:
-                for i in range(n):
-                    m = 1 if self._compare_int_values(<int64_t>d32[i], value, op) else 0
-                    dst[i >> 3] |= <uint8_t>(m << (i & 7))
+                dispatch_scalar_nonnull_i32(op, <const int32_t*>ptr.data, value, dst, <size_t>n)
             elif use_branching:
-                for i in range(n):
-                    if (src_null[i >> 3] >> (i & 7)) & 1:
-                        if self._compare_int_values(<int64_t>d32[i], value, op):
-                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+                dispatch_scalar_branching_i32(op, <const int32_t*>ptr.data, value, src_null, dst, <size_t>n)
             else:
-                for i in range(n):
-                    v = (src_null[i >> 3] >> (i & 7)) & 1
-                    m = 1 if self._compare_int_values(<int64_t>d32[i], value, op) else 0
-                    dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
-        elif ptr.itemsize == 8:
-            d64 = <int64_t*>ptr.data
-            if src_null == NULL:
-                for i in range(n):
-                    m = 1 if self._compare_int_values(d64[i], value, op) else 0
-                    dst[i >> 3] |= <uint8_t>(m << (i & 7))
-            elif use_branching:
-                for i in range(n):
-                    if (src_null[i >> 3] >> (i & 7)) & 1:
-                        if self._compare_int_values(d64[i], value, op):
-                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
-            else:
-                for i in range(n):
-                    v = (src_null[i >> 3] >> (i & 7)) & 1
-                    m = 1 if self._compare_int_values(d64[i], value, op) else 0
-                    dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
+                dispatch_scalar_branchless_i32(op, <const int32_t*>ptr.data, value, src_null, dst, <size_t>n)
         return out
 
     cdef BoolVector _compare_vector(self, IntegerVector other, int op):
@@ -793,25 +847,39 @@ cdef class IntegerVector(Vector):
             return _materialize_rle_integer(self)._compare_vector(other, op)
         if other._encoding == DRAKEN_ENCODING_RLE:
             return self._compare_vector(_materialize_rle_integer(other), op)
+
+        # Const fast paths: avoid O(n) materialisation.
+        cdef Py_ssize_t const_n
+        cdef int reversed_op
+        if self._has_const:
+            const_n = self.ptr.length
+            if const_n != other.ptr.length:
+                raise ValueError("Vectors must have the same length")
+            if self._const_is_null:
+                return self._make_all_null_bool(const_n)
+            # Reverse directional ops: gt(2)↔lt(4), ge(3)↔le(5); eq/ne unchanged.
+            if op == 2:   reversed_op = 4
+            elif op == 3: reversed_op = 5
+            elif op == 4: reversed_op = 2
+            elif op == 5: reversed_op = 3
+            else:         reversed_op = op
+            return other._compare_scalar(self._const_value, reversed_op)
+        if other._has_const:
+            if self.ptr.length != other.ptr.length:
+                raise ValueError("Vectors must have the same length")
+            if other._const_is_null:
+                return self._make_all_null_bool(self.ptr.length)
+            return self._compare_scalar(other._const_value, op)
+
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef uint8_t* null1 = ptr1.null_bitmap
         cdef uint8_t* null2 = ptr2.null_bitmap
-        cdef Py_ssize_t i, n = ptr1.length
+        cdef Py_ssize_t n = ptr1.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
         cdef BoolVector out
         cdef uint8_t* dst
         cdef uint8_t* out_null = NULL
-        cdef uint8_t v1, v2, v, m
-        cdef int64_t val1, val2
-        cdef int8_t* d8_1 = NULL
-        cdef int16_t* d16_1 = NULL
-        cdef int32_t* d32_1 = NULL
-        cdef int64_t* d64_1 = NULL
-        cdef int8_t* d8_2 = NULL
-        cdef int16_t* d16_2 = NULL
-        cdef int32_t* d32_2 = NULL
-        cdef int64_t* d64_2 = NULL
 
         if n != ptr2.length:
             raise ValueError("Vectors must have the same length")
@@ -829,25 +897,9 @@ cdef class IntegerVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        # Get data pointers based on itemsize
-        if ptr1.itemsize == 1:
-            d8_1 = <int8_t*>ptr1.data
-        elif ptr1.itemsize == 2:
-            d16_1 = <int16_t*>ptr1.data
-        elif ptr1.itemsize == 4:
-            d32_1 = <int32_t*>ptr1.data
-        else:
-            d64_1 = <int64_t*>ptr1.data
-
-        if ptr2.itemsize == 1:
-            d8_2 = <int8_t*>ptr2.data
-        elif ptr2.itemsize == 2:
-            d16_2 = <int16_t*>ptr2.data
-        elif ptr2.itemsize == 4:
-            d32_2 = <int32_t*>ptr2.data
-        else:
-            d64_2 = <int64_t*>ptr2.data
-
+        # Gate: >~70% nulls → branching kernel; below → branchless.
+        # Itemsize dispatch and op dispatch are both hoisted outside the hot loop
+        # by the C++ template instantiation.
         cdef size_t valid1_cnt, valid2_cnt, min_valid
         cdef bint use_branching = False
         if n > 0 and (null1 != NULL or null2 != NULL):
@@ -856,56 +908,147 @@ cdef class IntegerVector(Vector):
             min_valid = valid1_cnt if valid1_cnt < valid2_cnt else valid2_cnt
             use_branching = (min_valid * 10) < (<size_t>n * 3)
 
-        # Per-row itemsize dispatch is preserved; only the null branch is transformed.
-        if use_branching:
-            for i in range(n):
-                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
-                v2 = 1 if null2 == NULL else (null2[i >> 3] >> (i & 7)) & 1
-                if v1 & v2:
-                    out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
-                    if ptr1.itemsize == 1:
-                        val1 = <int64_t>d8_1[i]
-                    elif ptr1.itemsize == 2:
-                        val1 = <int64_t>d16_1[i]
-                    elif ptr1.itemsize == 4:
-                        val1 = <int64_t>d32_1[i]
-                    else:
-                        val1 = d64_1[i]
-                    if ptr2.itemsize == 1:
-                        val2 = <int64_t>d8_2[i]
-                    elif ptr2.itemsize == 2:
-                        val2 = <int64_t>d16_2[i]
-                    elif ptr2.itemsize == 4:
-                        val2 = <int64_t>d32_2[i]
-                    else:
-                        val2 = d64_2[i]
-                    if self._compare_int_values(val1, val2, op):
-                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+        # Itemsize pair dispatch — hoisted outside the loop.
+        # For each pair of itemsizes call the matching typed C++ dispatcher.
+        cdef size_t s1 = ptr1.itemsize
+        cdef size_t s2 = ptr2.itemsize
+
+        if null1 == NULL and null2 == NULL:
+            if s1 == 1 and s2 == 1:
+                dispatch_vector_nonnull_i8_i8(op, <const int8_t*>ptr1.data, <const int8_t*>ptr2.data, dst, <size_t>n)
+            elif s1 == 2 and s2 == 2:
+                dispatch_vector_nonnull_i16_i16(op, <const int16_t*>ptr1.data, <const int16_t*>ptr2.data, dst, <size_t>n)
+            elif s1 == 4 and s2 == 4:
+                dispatch_vector_nonnull_i32_i32(op, <const int32_t*>ptr1.data, <const int32_t*>ptr2.data, dst, <size_t>n)
+            elif s1 == 1 and s2 == 2:
+                dispatch_vector_nonnull_i8_i16(op, <const int8_t*>ptr1.data, <const int16_t*>ptr2.data, dst, <size_t>n)
+            elif s1 == 1 and s2 == 4:
+                dispatch_vector_nonnull_i8_i32(op, <const int8_t*>ptr1.data, <const int32_t*>ptr2.data, dst, <size_t>n)
+            elif s1 == 2 and s2 == 4:
+                dispatch_vector_nonnull_i16_i32(op, <const int16_t*>ptr1.data, <const int32_t*>ptr2.data, dst, <size_t>n)
+            elif s1 == 2 and s2 == 1:
+                dispatch_vector_nonnull_i16_i8(op, <const int16_t*>ptr1.data, <const int8_t*>ptr2.data, dst, <size_t>n)
+            elif s1 == 4 and s2 == 1:
+                dispatch_vector_nonnull_i32_i8(op, <const int32_t*>ptr1.data, <const int8_t*>ptr2.data, dst, <size_t>n)
+            else:  # s1 == 4, s2 == 2
+                dispatch_vector_nonnull_i32_i16(op, <const int32_t*>ptr1.data, <const int16_t*>ptr2.data, dst, <size_t>n)
+        elif use_branching:
+            if null1 != NULL and null2 != NULL:
+                if s1 == 1 and s2 == 1:
+                    dispatch_vector_both_null_branching_i8_i8(op, <const int8_t*>ptr1.data, <const int8_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 2:
+                    dispatch_vector_both_null_branching_i16_i16(op, <const int16_t*>ptr1.data, <const int16_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+                elif s1 == 4 and s2 == 4:
+                    dispatch_vector_both_null_branching_i32_i32(op, <const int32_t*>ptr1.data, <const int32_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+                elif s1 == 1 and s2 == 2:
+                    dispatch_vector_both_null_branching_i8_i16(op, <const int8_t*>ptr1.data, <const int16_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+                elif s1 == 1 and s2 == 4:
+                    dispatch_vector_both_null_branching_i8_i32(op, <const int8_t*>ptr1.data, <const int32_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 4:
+                    dispatch_vector_both_null_branching_i16_i32(op, <const int16_t*>ptr1.data, <const int32_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 1:
+                    dispatch_vector_both_null_branching_i16_i8(op, <const int16_t*>ptr1.data, <const int8_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+                elif s1 == 4 and s2 == 1:
+                    dispatch_vector_both_null_branching_i32_i8(op, <const int32_t*>ptr1.data, <const int8_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+                else:
+                    dispatch_vector_both_null_branching_i32_i16(op, <const int32_t*>ptr1.data, <const int16_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+            elif null1 != NULL:
+                if s1 == 1 and s2 == 1:
+                    dispatch_vector_one_null_branching_i8_i8(op, <const int8_t*>ptr1.data, <const int8_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 2:
+                    dispatch_vector_one_null_branching_i16_i16(op, <const int16_t*>ptr1.data, <const int16_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+                elif s1 == 4 and s2 == 4:
+                    dispatch_vector_one_null_branching_i32_i32(op, <const int32_t*>ptr1.data, <const int32_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+                elif s1 == 1 and s2 == 2:
+                    dispatch_vector_one_null_branching_i8_i16(op, <const int8_t*>ptr1.data, <const int16_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+                elif s1 == 1 and s2 == 4:
+                    dispatch_vector_one_null_branching_i8_i32(op, <const int8_t*>ptr1.data, <const int32_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 4:
+                    dispatch_vector_one_null_branching_i16_i32(op, <const int16_t*>ptr1.data, <const int32_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 1:
+                    dispatch_vector_one_null_branching_i16_i8(op, <const int16_t*>ptr1.data, <const int8_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+                elif s1 == 4 and s2 == 1:
+                    dispatch_vector_one_null_branching_i32_i8(op, <const int32_t*>ptr1.data, <const int8_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+                else:
+                    dispatch_vector_one_null_branching_i32_i16(op, <const int32_t*>ptr1.data, <const int16_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+            else:  # null2 != NULL
+                if s1 == 1 and s2 == 1:
+                    dispatch_vector_one_null_branching_i8_i8(op, <const int8_t*>ptr1.data, <const int8_t*>ptr2.data, null2, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 2:
+                    dispatch_vector_one_null_branching_i16_i16(op, <const int16_t*>ptr1.data, <const int16_t*>ptr2.data, null2, dst, out_null, <size_t>n)
+                elif s1 == 4 and s2 == 4:
+                    dispatch_vector_one_null_branching_i32_i32(op, <const int32_t*>ptr1.data, <const int32_t*>ptr2.data, null2, dst, out_null, <size_t>n)
+                elif s1 == 1 and s2 == 2:
+                    dispatch_vector_one_null_branching_i8_i16(op, <const int8_t*>ptr1.data, <const int16_t*>ptr2.data, null2, dst, out_null, <size_t>n)
+                elif s1 == 1 and s2 == 4:
+                    dispatch_vector_one_null_branching_i8_i32(op, <const int8_t*>ptr1.data, <const int32_t*>ptr2.data, null2, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 4:
+                    dispatch_vector_one_null_branching_i16_i32(op, <const int16_t*>ptr1.data, <const int32_t*>ptr2.data, null2, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 1:
+                    dispatch_vector_one_null_branching_i16_i8(op, <const int16_t*>ptr1.data, <const int8_t*>ptr2.data, null2, dst, out_null, <size_t>n)
+                elif s1 == 4 and s2 == 1:
+                    dispatch_vector_one_null_branching_i32_i8(op, <const int32_t*>ptr1.data, <const int8_t*>ptr2.data, null2, dst, out_null, <size_t>n)
+                else:
+                    dispatch_vector_one_null_branching_i32_i16(op, <const int32_t*>ptr1.data, <const int16_t*>ptr2.data, null2, dst, out_null, <size_t>n)
         else:
-            for i in range(n):
-                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
-                v2 = 1 if null2 == NULL else (null2[i >> 3] >> (i & 7)) & 1
-                v = v1 & v2
-                if ptr1.itemsize == 1:
-                    val1 = <int64_t>d8_1[i]
-                elif ptr1.itemsize == 2:
-                    val1 = <int64_t>d16_1[i]
-                elif ptr1.itemsize == 4:
-                    val1 = <int64_t>d32_1[i]
+            # Branchless path
+            if null1 != NULL and null2 != NULL:
+                if s1 == 1 and s2 == 1:
+                    dispatch_vector_both_null_branchless_i8_i8(op, <const int8_t*>ptr1.data, <const int8_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 2:
+                    dispatch_vector_both_null_branchless_i16_i16(op, <const int16_t*>ptr1.data, <const int16_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+                elif s1 == 4 and s2 == 4:
+                    dispatch_vector_both_null_branchless_i32_i32(op, <const int32_t*>ptr1.data, <const int32_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+                elif s1 == 1 and s2 == 2:
+                    dispatch_vector_both_null_branchless_i8_i16(op, <const int8_t*>ptr1.data, <const int16_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+                elif s1 == 1 and s2 == 4:
+                    dispatch_vector_both_null_branchless_i8_i32(op, <const int8_t*>ptr1.data, <const int32_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 4:
+                    dispatch_vector_both_null_branchless_i16_i32(op, <const int16_t*>ptr1.data, <const int32_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 1:
+                    dispatch_vector_both_null_branchless_i16_i8(op, <const int16_t*>ptr1.data, <const int8_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+                elif s1 == 4 and s2 == 1:
+                    dispatch_vector_both_null_branchless_i32_i8(op, <const int32_t*>ptr1.data, <const int8_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
                 else:
-                    val1 = d64_1[i]
-                if ptr2.itemsize == 1:
-                    val2 = <int64_t>d8_2[i]
-                elif ptr2.itemsize == 2:
-                    val2 = <int64_t>d16_2[i]
-                elif ptr2.itemsize == 4:
-                    val2 = <int64_t>d32_2[i]
+                    dispatch_vector_both_null_branchless_i32_i16(op, <const int32_t*>ptr1.data, <const int16_t*>ptr2.data, null1, null2, dst, out_null, <size_t>n)
+            elif null1 != NULL:
+                if s1 == 1 and s2 == 1:
+                    dispatch_vector_one_null_branchless_i8_i8(op, <const int8_t*>ptr1.data, <const int8_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 2:
+                    dispatch_vector_one_null_branchless_i16_i16(op, <const int16_t*>ptr1.data, <const int16_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+                elif s1 == 4 and s2 == 4:
+                    dispatch_vector_one_null_branchless_i32_i32(op, <const int32_t*>ptr1.data, <const int32_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+                elif s1 == 1 and s2 == 2:
+                    dispatch_vector_one_null_branchless_i8_i16(op, <const int8_t*>ptr1.data, <const int16_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+                elif s1 == 1 and s2 == 4:
+                    dispatch_vector_one_null_branchless_i8_i32(op, <const int8_t*>ptr1.data, <const int32_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 4:
+                    dispatch_vector_one_null_branchless_i16_i32(op, <const int16_t*>ptr1.data, <const int32_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 1:
+                    dispatch_vector_one_null_branchless_i16_i8(op, <const int16_t*>ptr1.data, <const int8_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+                elif s1 == 4 and s2 == 1:
+                    dispatch_vector_one_null_branchless_i32_i8(op, <const int32_t*>ptr1.data, <const int8_t*>ptr2.data, null1, dst, out_null, <size_t>n)
                 else:
-                    val2 = d64_2[i]
-                m = 1 if self._compare_int_values(val1, val2, op) else 0
-                dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
-                if out_null != NULL:
-                    out_null[i >> 3] |= <uint8_t>(v << (i & 7))
+                    dispatch_vector_one_null_branchless_i32_i16(op, <const int32_t*>ptr1.data, <const int16_t*>ptr2.data, null1, dst, out_null, <size_t>n)
+            else:  # null2 != NULL
+                if s1 == 1 and s2 == 1:
+                    dispatch_vector_one_null_branchless_i8_i8(op, <const int8_t*>ptr1.data, <const int8_t*>ptr2.data, null2, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 2:
+                    dispatch_vector_one_null_branchless_i16_i16(op, <const int16_t*>ptr1.data, <const int16_t*>ptr2.data, null2, dst, out_null, <size_t>n)
+                elif s1 == 4 and s2 == 4:
+                    dispatch_vector_one_null_branchless_i32_i32(op, <const int32_t*>ptr1.data, <const int32_t*>ptr2.data, null2, dst, out_null, <size_t>n)
+                elif s1 == 1 and s2 == 2:
+                    dispatch_vector_one_null_branchless_i8_i16(op, <const int8_t*>ptr1.data, <const int16_t*>ptr2.data, null2, dst, out_null, <size_t>n)
+                elif s1 == 1 and s2 == 4:
+                    dispatch_vector_one_null_branchless_i8_i32(op, <const int8_t*>ptr1.data, <const int32_t*>ptr2.data, null2, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 4:
+                    dispatch_vector_one_null_branchless_i16_i32(op, <const int16_t*>ptr1.data, <const int32_t*>ptr2.data, null2, dst, out_null, <size_t>n)
+                elif s1 == 2 and s2 == 1:
+                    dispatch_vector_one_null_branchless_i16_i8(op, <const int16_t*>ptr1.data, <const int8_t*>ptr2.data, null2, dst, out_null, <size_t>n)
+                elif s1 == 4 and s2 == 1:
+                    dispatch_vector_one_null_branchless_i32_i8(op, <const int32_t*>ptr1.data, <const int8_t*>ptr2.data, null2, dst, out_null, <size_t>n)
+                else:
+                    dispatch_vector_one_null_branchless_i32_i16(op, <const int32_t*>ptr1.data, <const int16_t*>ptr2.data, null2, dst, out_null, <size_t>n)
         return out
 
     cpdef BoolVector equals(self, int64_t value):

@@ -28,7 +28,8 @@ cdef class IntegerVector(Vector):
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 
-    cdef bint _compare_int_values(self, int64_t left, int64_t right, int op) nogil
+    cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
+    cdef BoolVector _compare_scalar_rle(self, int64_t value, int op)
     cdef BoolVector _compare_scalar(self, int64_t value, int op)
     cdef BoolVector _compare_vector(self, IntegerVector other, int op)
 

@@ -33,7 +33,9 @@ cdef class Int64Vector(Vector):
     cdef uint8_t* null_bitmap_ptr(self) noexcept
 
     cpdef Int64Vector take(self, int32_t[::1] indices)
-    cdef bint _compare_int64_values(self, int64_t left, int64_t right, int op) nogil
+    cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
+    cdef BoolVector _compare_scalar_rle(self, int64_t value, int op)
+    cdef BoolVector _compare_scalar_dict(self, int64_t value, int op)
     cdef BoolVector _compare_scalar(self, int64_t value, int op)
     cdef BoolVector _compare_vector(self, Int64Vector other, int op)
 

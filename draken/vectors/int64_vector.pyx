@@ -60,6 +60,21 @@ from draken.vectors.vector cimport (
 
 from draken.vectors.bool_vector cimport BoolVector
 
+cdef extern from "simd_bitops.h" nogil:
+    void simd_and_mask(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n)
+
+cdef extern from "draken/vectors/_int64_compare.hpp" namespace "draken::int64_cmp" nogil:
+    void bit_fill_range(uint8_t* dst, size_t start, size_t count)
+    bint dispatch_compare_once(int op, int64_t a, int64_t b)
+    void dispatch_scalar_nonnull(int op, const int64_t* data, int64_t value, uint8_t* dst, size_t n)
+    void dispatch_scalar_branchless(int op, const int64_t* data, int64_t value, const uint8_t* src_null, uint8_t* dst, size_t n)
+    void dispatch_scalar_branching(int op, const int64_t* data, int64_t value, const uint8_t* src_null, uint8_t* dst, size_t n)
+    void dispatch_vector_nonnull(int op, const int64_t* a, const int64_t* b, uint8_t* dst, size_t n)
+    void dispatch_vector_one_null_branchless(int op, const int64_t* a, const int64_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_one_null_branching(int op, const int64_t* a, const int64_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branchless(int op, const int64_t* a, const int64_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branching(int op, const int64_t* a, const int64_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+
 
 cdef inline uint8_t _dict_code_width_for_size(Py_ssize_t dict_size) noexcept:
     if dict_size <= 256:
@@ -470,24 +485,128 @@ cdef class Int64Vector(Vector):
                     free(taken_codes)
         return out
 
-    cdef inline bint _compare_int64_values(self, int64_t left, int64_t right, int op) nogil:
-        if op == 0:
-            return left == right
-        if op == 1:
-            return left != right
-        if op == 2:
-            return left > right
-        if op == 3:
-            return left >= right
-        if op == 4:
-            return left < right
-        return left <= right
+    cdef BoolVector _make_all_null_bool(self, Py_ssize_t n):
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
+        cdef uint8_t* null_bm = NULL
+        memset(dst, 0, nbytes)
+        if nbytes != 0:
+            null_bm = <uint8_t*>malloc(nbytes)
+            if null_bm == NULL:
+                raise MemoryError()
+            memset(null_bm, 0, nbytes)
+            out.ptr.null_bitmap = null_bm
+        else:
+            out.ptr.null_bitmap = NULL
+        return out
+
+    cdef BoolVector _compare_scalar_rle(self, int64_t value, int op):
+        # Compare RLE vector against a scalar without materialising to dense int64.
+        # Evaluates the predicate once per run, bit-fills the result, then applies
+        # the row-level null bitmap (if any) via a single SIMD AND pass.
+        cdef size_t n = self._rle_buffer.length
+        cdef size_t num_runs = self._rle_buffer.num_runs
+        cdef int64_t* rle_vals = <int64_t*>self._rle_buffer.run_values
+        cdef int32_t* rle_lens = self._rle_buffer.run_lengths
+        cdef uint8_t* rle_nulls = self._rle_buffer.null_bitmap
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
+        memset(dst, 0, nbytes)
+
+        cdef uint8_t* out_null = NULL
+        if rle_nulls != NULL and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, rle_nulls, nbytes)
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        cdef size_t pos = 0
+        cdef size_t r
+        for r in range(num_runs):
+            if dispatch_compare_once(op, rle_vals[r], value):
+                bit_fill_range(dst, pos, <size_t>rle_lens[r])
+            pos += <size_t>rle_lens[r]
+
+        if out_null != NULL:
+            simd_and_mask(dst, dst, out_null, <size_t>nbytes)
+
+        return out
+
+    cdef BoolVector _compare_scalar_dict(self, int64_t value, int op):
+        # Compare dict-encoded vector against a scalar without materialising to dense int64.
+        # Evaluates the predicate once per dictionary entry into a tiny match_table,
+        # then walks the code array gathering bits. code_width dispatch is hoisted
+        # outside the loop so the inner loop has no per-row branching on width.
+        # Null bitmap applied via a single simd_and_mask pass at the end.
+        cdef Py_ssize_t dict_size = <Py_ssize_t>self._dict_values.length
+        cdef int64_t* dict_data = <int64_t*>self._dict_values.data
+        cdef uint8_t* codes = self._dict_codes
+        cdef uint8_t code_width = self._dict_code_width
+        cdef uint8_t* row_nulls = self.ptr.null_bitmap
+        cdef Py_ssize_t n = <Py_ssize_t>self.ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+
+        cdef uint8_t* match_table = <uint8_t*>malloc(<size_t>dict_size)
+        if match_table == NULL:
+            raise MemoryError()
+
+        cdef Py_ssize_t d
+        for d in range(dict_size):
+            match_table[d] = 1 if dispatch_compare_once(op, dict_data[d], value) else 0
+
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
+        memset(dst, 0, nbytes)
+
+        cdef uint8_t* out_null = NULL
+        if row_nulls != NULL and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
+            if out_null == NULL:
+                free(match_table)
+                raise MemoryError()
+            memcpy(out_null, row_nulls, nbytes)
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        cdef Py_ssize_t i
+        cdef const uint8_t* codes8
+        cdef const uint16_t* codes16
+        cdef const uint32_t* codes32
+        if code_width == 1:
+            codes8 = <const uint8_t*>codes
+            for i in range(n):
+                if match_table[codes8[i]]:
+                    dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+        elif code_width == 2:
+            codes16 = <const uint16_t*>codes
+            for i in range(n):
+                if match_table[codes16[i]]:
+                    dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+        else:
+            codes32 = <const uint32_t*>codes
+            for i in range(n):
+                if match_table[codes32[i]]:
+                    dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+
+        free(match_table)
+
+        if out_null != NULL:
+            simd_and_mask(dst, dst, out_null, <size_t>nbytes)
+
+        return out
 
     cdef BoolVector _compare_scalar(self, int64_t value, int op):
         if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_int64(self)._compare_scalar(value, op)
+            return self._compare_scalar_rle(value, op)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_int64(self)._compare_scalar(value, op)
+            return self._compare_scalar_dict(value, op)
 
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n
@@ -495,7 +614,6 @@ cdef class Int64Vector(Vector):
         cdef BoolVector out
         cdef uint8_t* dst
         cdef uint8_t* out_null = NULL
-        cdef Py_ssize_t i
         cdef uint8_t mask
         cdef bint matched
 
@@ -507,17 +625,9 @@ cdef class Int64Vector(Vector):
             if nbytes > 0:
                 memset(dst, 0, nbytes)
             if self._const_is_null:
-                if nbytes != 0:
-                    out_null = <uint8_t*>malloc(nbytes)
-                    if out_null == NULL:
-                        raise MemoryError()
-                    memset(out_null, 0, nbytes)
-                    out.ptr.null_bitmap = out_null
-                else:
-                    out.ptr.null_bitmap = NULL
-                return out
+                return self._make_all_null_bool(n)
 
-            matched = self._compare_int64_values(self._const_value, value, op)
+            matched = dispatch_compare_once(op, self._const_value, value)
             if matched and nbytes > 0:
                 memset(dst, 0xFF, nbytes)
                 if (n & 7) != 0:
@@ -546,29 +656,20 @@ cdef class Int64Vector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        cdef uint8_t v
-        cdef uint8_t m
         cdef size_t valid_count
-        # Gate: above ~70% null density, the original branching loop wins by
-        # short-circuiting writes for null rows. Below that, branchless wins
-        # by avoiding mispredicted comparison-result branches.
+        # Gate: above ~70% null density, the branching kernel wins by
+        # short-circuiting writes for null rows. Below that, the branchless
+        # kernel wins by avoiding mispredicted comparison-result branches.
+        # op dispatch happens once here; the C++ kernel runs a tight loop
+        # with no per-row branching on op.
         if src_null == NULL:
-            for i in range(n):
-                m = 1 if self._compare_int64_values(data[i], value, op) else 0
-                dst[i >> 3] |= <uint8_t>(m << (i & 7))
+            dispatch_scalar_nonnull(op, data, value, dst, <size_t>n)
         else:
             valid_count = simd_popcount(src_null, <size_t>nbytes)
             if n > 0 and (valid_count * 10) < (<size_t>n * 3):
-                # > 70% nulls: branching path
-                for i in range(n):
-                    if (src_null[i >> 3] >> (i & 7)) & 1:
-                        if self._compare_int64_values(data[i], value, op):
-                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+                dispatch_scalar_branching(op, data, value, src_null, dst, <size_t>n)
             else:
-                for i in range(n):
-                    v = (src_null[i >> 3] >> (i & 7)) & 1
-                    m = 1 if self._compare_int64_values(data[i], value, op) else 0
-                    dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
+                dispatch_scalar_branchless(op, data, value, src_null, dst, <size_t>n)
         return out
 
     cdef BoolVector _compare_vector(self, Int64Vector other, int op):
@@ -580,10 +681,34 @@ cdef class Int64Vector(Vector):
             return _materialize_dict_int64(self)._compare_vector(other, op)
         if other._encoding == DRAKEN_ENCODING_DICTIONARY:
             return self._compare_vector(_materialize_dict_int64(other), op)
+        # Const fast paths: avoid O(n) materialisation.
+        # self[i] OP other[i] where self is const V = V OP other[i]
+        #   = other[i] reversed_op V, so flip directional ops.
+        cdef Py_ssize_t const_n
+        cdef Py_ssize_t const_nbytes
+        cdef BoolVector const_out
+        cdef uint8_t* const_dst
+        cdef uint8_t* const_null
+        cdef int reversed_op
         if self._has_const:
-            return _materialize_const_int64(self)._compare_vector(other, op)
+            const_n = self.ptr.length
+            if const_n != other.ptr.length:
+                raise ValueError("Vectors must have the same length")
+            if self._const_is_null:
+                return self._make_all_null_bool(const_n)
+            # Reverse: gt(2)↔lt(4), ge(3)↔le(5); eq(0) and ne(1) unchanged.
+            if op == 2:   reversed_op = 4
+            elif op == 3: reversed_op = 5
+            elif op == 4: reversed_op = 2
+            elif op == 5: reversed_op = 3
+            else:         reversed_op = op
+            return other._compare_scalar(self._const_value, reversed_op)
         if other._has_const:
-            return self._compare_vector(_materialize_const_int64(other), op)
+            if self.ptr.length != other.ptr.length:
+                raise ValueError("Vectors must have the same length")
+            if other._const_is_null:
+                return self._make_all_null_bool(self.ptr.length)
+            return self._compare_scalar(other._const_value, op)
 
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
@@ -591,13 +716,11 @@ cdef class Int64Vector(Vector):
         cdef int64_t* data2 = <int64_t*> ptr2.data
         cdef uint8_t* null1 = ptr1.null_bitmap
         cdef uint8_t* null2 = ptr2.null_bitmap
-        cdef Py_ssize_t i, n = ptr1.length
+        cdef Py_ssize_t n = ptr1.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
         cdef BoolVector out
         cdef uint8_t* dst
         cdef uint8_t* out_null = NULL
-        cdef uint8_t v1, v2, v, m
-
         if n != ptr2.length:
             raise ValueError("Vectors must have the same length")
 
@@ -614,11 +737,8 @@ cdef class Int64Vector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        # Branchless null evaluation (per docs/null_representation_optimizations.md Change 2).
-        # Specialize on null bitmap presence so the inner loop has no per-row branches.
-        # Gate: above ~70% null density, the original branching loop wins by
-        # short-circuiting writes for null rows. We use min(valid1, valid2) as a
-        # cheap upper bound on the combined valid count.
+        # op dispatch and null-pointer specialisation happen once here.
+        # Gate: >~70% nulls → branching kernel (skips work for null rows).
         cdef size_t valid1_cnt, valid2_cnt, min_valid
         cdef bint use_branching = False
         if n > 0 and (null1 != NULL or null2 != NULL):
@@ -628,37 +748,20 @@ cdef class Int64Vector(Vector):
             use_branching = (min_valid * 10) < (<size_t>n * 3)
 
         if null1 == NULL and null2 == NULL:
-            for i in range(n):
-                m = 1 if self._compare_int64_values(data1[i], data2[i], op) else 0
-                dst[i >> 3] |= <uint8_t>(m << (i & 7))
+            dispatch_vector_nonnull(op, data1, data2, dst, <size_t>n)
         elif use_branching:
-            for i in range(n):
-                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
-                v2 = 1 if null2 == NULL else (null2[i >> 3] >> (i & 7)) & 1
-                if v1 & v2:
-                    out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
-                    if self._compare_int64_values(data1[i], data2[i], op):
-                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            if null1 != NULL and null2 != NULL:
+                dispatch_vector_both_null_branching(op, data1, data2, null1, null2, dst, out_null, <size_t>n)
+            elif null1 != NULL:
+                dispatch_vector_one_null_branching(op, data1, data2, null1, dst, out_null, <size_t>n)
+            else:
+                dispatch_vector_one_null_branching(op, data1, data2, null2, dst, out_null, <size_t>n)
         elif null1 != NULL and null2 == NULL:
-            for i in range(n):
-                v = (null1[i >> 3] >> (i & 7)) & 1
-                m = 1 if self._compare_int64_values(data1[i], data2[i], op) else 0
-                dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
-                out_null[i >> 3] |= <uint8_t>(v << (i & 7))
+            dispatch_vector_one_null_branchless(op, data1, data2, null1, dst, out_null, <size_t>n)
         elif null1 == NULL and null2 != NULL:
-            for i in range(n):
-                v = (null2[i >> 3] >> (i & 7)) & 1
-                m = 1 if self._compare_int64_values(data1[i], data2[i], op) else 0
-                dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
-                out_null[i >> 3] |= <uint8_t>(v << (i & 7))
+            dispatch_vector_one_null_branchless(op, data1, data2, null2, dst, out_null, <size_t>n)
         else:
-            for i in range(n):
-                v1 = (null1[i >> 3] >> (i & 7)) & 1
-                v2 = (null2[i >> 3] >> (i & 7)) & 1
-                v = v1 & v2
-                m = 1 if self._compare_int64_values(data1[i], data2[i], op) else 0
-                dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
-                out_null[i >> 3] |= <uint8_t>(v << (i & 7))
+            dispatch_vector_both_null_branchless(op, data1, data2, null1, null2, dst, out_null, <size_t>n)
         return out
 
     cpdef BoolVector equals(self, int64_t value):
@@ -881,11 +984,13 @@ cdef class Int64Vector(Vector):
         cdef int64_t* data = <int64_t*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
         cdef int64_t total = 0
-        for i in range(n):
-            if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):  # null
-                    continue
-            total += data[i]
+        if ptr.null_bitmap == NULL:
+            for i in range(n):
+                total += data[i]
+        else:
+            for i in range(n):
+                if _bitmap_is_valid(ptr.null_bitmap, i, 0):
+                    total += data[i]
         return total
 
     cpdef int64_t min(self):
@@ -906,25 +1011,23 @@ cdef class Int64Vector(Vector):
         cdef int64_t m
         cdef bint found = False
 
-        # Find first non-null value
-        for i in range(n):
-            if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):  # null
-                    continue
-            m = data[i]
-            found = True
-            break
-
-        if not found:
-            raise ValueError("Cannot compute min of all-null column")
-
-        # Find minimum among remaining values
-        for i in range(i + 1, n):
-            if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):  # null
-                    continue
-            if data[i] < m:
-                m = data[i]
+        if ptr.null_bitmap == NULL:
+            m = data[0]
+            for i in range(1, n):
+                if data[i] < m:
+                    m = data[i]
+        else:
+            for i in range(n):
+                if _bitmap_is_valid(ptr.null_bitmap, i, 0):
+                    m = data[i]
+                    found = True
+                    break
+            if not found:
+                raise ValueError("Cannot compute min of all-null column")
+            for i in range(i + 1, n):
+                if _bitmap_is_valid(ptr.null_bitmap, i, 0):
+                    if data[i] < m:
+                        m = data[i]
         return m
 
     cpdef int64_t max(self):
@@ -945,25 +1048,23 @@ cdef class Int64Vector(Vector):
         cdef int64_t m
         cdef bint found = False
 
-        # Find first non-null value
-        for i in range(n):
-            if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):  # null
-                    continue
-            m = data[i]
-            found = True
-            break
-
-        if not found:
-            raise ValueError("Cannot compute max of all-null column")
-
-        # Find maximum among remaining values
-        for i in range(i + 1, n):
-            if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):  # null
-                    continue
-            if data[i] > m:
-                m = data[i]
+        if ptr.null_bitmap == NULL:
+            m = data[0]
+            for i in range(1, n):
+                if data[i] > m:
+                    m = data[i]
+        else:
+            for i in range(n):
+                if _bitmap_is_valid(ptr.null_bitmap, i, 0):
+                    m = data[i]
+                    found = True
+                    break
+            if not found:
+                raise ValueError("Cannot compute max of all-null column")
+            for i in range(i + 1, n):
+                if _bitmap_is_valid(ptr.null_bitmap, i, 0):
+                    if data[i] > m:
+                        m = data[i]
         return m
 
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
@@ -1474,30 +1575,6 @@ cdef class Int64Vector(Vector):
         for i in range(k):
             vals.append(data[i])
         return f"<Int64Vector len={buf_length(self.ptr)} values={vals}>"
-
-
-cdef Int64Vector _materialize_const_int64(Int64Vector const_vec):
-    """Expand a CONSTANT Int64Vector to a dense Int64Vector."""
-    cdef size_t n = const_vec.ptr.length
-    cdef Int64Vector dense = Int64Vector(n)
-    cdef int64_t* dst = <int64_t*>dense.ptr.data
-    cdef int64_t val = const_vec._const_value
-    cdef bint is_null = const_vec._const_is_null
-    cdef size_t i
-    cdef size_t null_bytes
-    cdef uint8_t* null_bm
-
-    if is_null:
-        null_bytes = (n + 7) >> 3
-        null_bm = <uint8_t*>malloc(null_bytes)
-        if null_bm == NULL:
-            raise MemoryError()
-        memset(null_bm, 0, null_bytes)
-        dense.ptr.null_bitmap = null_bm
-    else:
-        for i in range(n):
-            dst[i] = val
-    return dense
 
 
 cdef Int64Vector _materialize_rle_int64(Int64Vector rle_vec):

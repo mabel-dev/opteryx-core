@@ -740,8 +740,18 @@ extensions = [
     make_draken_extension("interop.vector_sequence", "interop/vector_sequence.pyx"),
     make_draken_extension("vectors.vector", "vectors/vector.pyx"),
     make_draken_extension("vectors.bool_vector", "vectors/bool_vector.pyx"),
-    make_draken_extension("vectors.float64_vector", "vectors/float64_vector.pyx"),
-    make_draken_extension("vectors.float32_vector", "vectors/float32_vector.pyx"),
+    make_draken_extension(
+        "vectors.float64_vector",
+        "vectors/float64_vector.pyx",
+        language="c++",
+        depends=["draken/src/core/buffers.h", "draken/vectors/_float64_compare.hpp"],
+    ),
+    make_draken_extension(
+        "vectors.float32_vector",
+        "vectors/float32_vector.pyx",
+        language="c++",
+        depends=["draken/src/core/buffers.h", "draken/vectors/_float32_compare.hpp"],
+    ),
     make_draken_extension("vectors.array_vector", "vectors/array_vector.pyx"),
     make_draken_extension("vectors.vector_vector", "vectors/vector_vector.pyx"),
     make_draken_extension("vectors.time_vector", "vectors/time_vector.pyx"),
@@ -754,8 +764,18 @@ extensions = [
         language="c",
         extra_compile_args=C_FLAGS,
     ),
-    make_draken_extension("vectors.int64_vector", "vectors/int64_vector.pyx", language="c++"),
-    make_draken_extension("vectors.integer_vector", "vectors/integer_vector.pyx", language="c++"),
+    make_draken_extension(
+        "vectors.int64_vector",
+        "vectors/int64_vector.pyx",
+        language="c++",
+        depends=["draken/src/core/buffers.h", "draken/vectors/_int64_compare.hpp"],
+    ),
+    make_draken_extension(
+        "vectors.integer_vector",
+        "vectors/integer_vector.pyx",
+        language="c++",
+        depends=["draken/src/core/buffers.h", "draken/vectors/_integer_compare.hpp"],
+    ),
     Extension(
         "draken.vectors.string_vector",
         sources=[
@@ -772,9 +792,19 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
         language="c++",
     ),
-    make_draken_extension("vectors.date32_vector", "vectors/date32_vector.pyx"),
+    make_draken_extension(
+        "vectors.date32_vector",
+        "vectors/date32_vector.pyx",
+        language="c++",
+        depends=["draken/src/core/buffers.h", "draken/vectors/_date32_compare.hpp"],
+    ),
     make_draken_extension("vectors._decimal_vector", "vectors/_decimal_vector.pyx"),
-    make_draken_extension("vectors.timestamp_vector", "vectors/timestamp_vector.pyx"),
+    make_draken_extension(
+        "vectors.timestamp_vector",
+        "vectors/timestamp_vector.pyx",
+        depends=["draken/src/core/buffers.h", "draken/vectors/_timestamp_compare.hpp",
+                 "draken/vectors/_int64_compare.hpp"],
+    ),
     make_draken_extension("morsels.morsel", "morsels/morsel.pyx"),
     make_draken_extension("storage.morsel_io", "storage/morsel_io.pyx"),
     # Pre-generated C module for morsels.align (Cython-generated C source)
