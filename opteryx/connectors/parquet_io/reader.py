@@ -1,15 +1,13 @@
 """
-Parquet column-chunk reader: footer parsing and column fetch.
+Parquet column-chunk reader: column fetch.
 
 Public API:
-- fetch_footer(...)
 - fetch_columns(...)
 - ListColumnError
 """
 
 from __future__ import annotations
 
-import struct
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -23,10 +21,6 @@ from opteryx.compiled.structures.footer_cache import ParquetFooterBytesCache
 from opteryx.tracing.event_recorder import record_event as _record_event
 
 from opteryx import config as _cfg
-
-_PARQUET_MAGIC = b"PAR1"
-_PARQUET_FOOTER_SUFFIX = 8
-_FOOTER_PREFETCH = 65536
 
 
 class ListColumnError(ValueError):
@@ -130,7 +124,6 @@ def _resolve_decoder(decoder: Optional[Any]) -> Any:
             "Ensure rugo is compiled and in the Python path."
         )
     return decode_column_from_chunk
-    return decode_column_from_chunk
 
 
 def _column_chunk_range(col_stats: dict) -> Tuple[int, int]:
@@ -201,111 +194,6 @@ def _split_coalesced_buffers(
     return expanded
 
 
-def _read_footer_payload(
-    filesystem: Any,
-    path: str,
-    file_size: Optional[int] = None,
-    connector: Optional[str] = None,
-    footer_cache: Optional[ParquetFooterBytesCache] = None,
-) -> Tuple[bytes, int, int]:
-    if _trace_enabled():
-        _trace_io_started(file_id=path, component="footer", connector=connector)
-
-    start_ns = time.monotonic_ns()
-
-    if file_size is None or file_size <= 0:
-        file_info = filesystem.get_file_info(path)
-        file_size = file_info.size
-    if file_size is None or file_size < _PARQUET_FOOTER_SUFFIX:
-        raise ValueError(f"File {path!r} is too small to be a valid Parquet file ({file_size} B)")
-
-    # Check footer bytes cache before I/O
-    if footer_cache is not None:
-        cached = footer_cache.get(path)
-        if cached is not None:
-            return cached, 0, 0
-
-    prefetch_size = min(_FOOTER_PREFETCH, file_size)
-    prefetch_offset = file_size - prefetch_size
-    (tail_bytes,) = filesystem.read_ranges(path, [(prefetch_offset, prefetch_size)])
-
-    magic = tail_bytes[-4:]
-    if magic != _PARQUET_MAGIC:
-        raise ValueError(
-            f"File {path!r} does not end with Parquet magic bytes "
-            f"(got {magic!r}, expected {_PARQUET_MAGIC!r})"
-        )
-
-    (footer_length,) = struct.unpack_from(
-        "<I", tail_bytes, len(tail_bytes) - _PARQUET_FOOTER_SUFFIX
-    )
-    if footer_length == 0 or footer_length > file_size - _PARQUET_FOOTER_SUFFIX:
-        raise ValueError(
-            f"Invalid footer length {footer_length} in {path!r} (file_size={file_size})"
-        )
-
-    total_footer_payload = footer_length + _PARQUET_FOOTER_SUFFIX
-    if total_footer_payload <= prefetch_size:
-        footer_start = len(tail_bytes) - total_footer_payload
-        footer_bytes_data = tail_bytes[footer_start : footer_start + footer_length]
-        bytes_fetched = prefetch_size
-    else:
-        footer_offset = file_size - _PARQUET_FOOTER_SUFFIX - footer_length
-        (footer_bytes_data,) = filesystem.read_ranges(path, [(footer_offset, footer_length)])
-        bytes_fetched = prefetch_size + footer_length
-
-    if _trace_enabled():
-        _trace_io_completed(
-            file_id=path, component="footer", bytes_received=bytes_fetched, connector=connector
-        )
-
-    envelope = (
-        _PARQUET_MAGIC + footer_bytes_data + struct.pack("<I", footer_length) + _PARQUET_MAGIC
-    )
-
-    # Store in footer bytes cache
-    if footer_cache is not None:
-        footer_cache.put(path, envelope)
-
-    return envelope, bytes_fetched, (time.monotonic_ns() - start_ns)
-
-
-def _parse_footer_envelope(path: str, envelope: bytes, footer_bytes: int) -> dict:
-    try:
-        from rugo.parquet_reader import read_metadata_from_bytes  # type: ignore[import]
-    except ImportError:
-        raise RuntimeError(
-            "rugo.parquet_reader is required but not available. "
-            "Ensure rugo is compiled and in the Python path."
-        )
-
-    try:
-        meta = read_metadata_from_bytes(envelope)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to parse Parquet footer from {path!r}: {exc}") from exc
-
-    meta["__footer_bytes__"] = footer_bytes
-    return meta
-
-
-def fetch_footer(
-    filesystem: Any,
-    path: str,
-    file_size: Optional[int] = None,
-    connector: Optional[str] = None,
-    footer_bytes_cache: Optional[ParquetFooterBytesCache] = None,
-) -> dict:
-    if file_size is None:
-        envelope, footer_bytes, _ = _read_footer_payload(
-            filesystem, path, connector=connector, footer_cache=footer_bytes_cache
-        )
-    else:
-        envelope, footer_bytes, _ = _read_footer_payload(
-            filesystem, path, file_size, connector, footer_cache=footer_bytes_cache
-        )
-    return _parse_footer_envelope(path, envelope, footer_bytes)
-
-
 def fetch_columns(
     filesystem: Any,
     path: str,
@@ -316,6 +204,7 @@ def fetch_columns(
     row_mask=None,
     footer_bytes_cache: Optional[ParquetFooterBytesCache] = None,
 ) -> Dict[str, Any]:
+    from opteryx.connectors.parquet_io.pool_reader import fetch_footer
     decoder = _resolve_decoder(decoder)
     meta = fetch_footer(filesystem, path, footer_bytes_cache=footer_bytes_cache)
 

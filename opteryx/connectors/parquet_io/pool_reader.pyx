@@ -13,10 +13,22 @@ No Python in the hot path. All IO, decode, and IPC-serialize run in C++:
 from libc.stdint cimport uint8_t, int32_t, int64_t, uint32_t, uint64_t
 from libcpp.string cimport string
 from libcpp.vector cimport vector
+from libcpp.unordered_map cimport unordered_map
+import struct as _struct
 import time
 
 from opteryx.compiled.structures.memory_pool cimport MemoryPool
 from opteryx.compiled.structures.column_deserializer cimport deserialize_row_group
+from opteryx.compiled.structures.footer_cache import ParquetFooterBytesCache as _FooterBytesCache
+from opteryx.tracing.event_recorder import record_event as _record_event
+from opteryx import config as _cfg
+from rugo.parquet_reader import read_metadata_from_bytes as _read_metadata_from_bytes
+from rugo.parquet_reader import decode_value as _decode_value_c
+from rugo.parquet_reader cimport ReadParquetMetadataFromBuffer, FileStats, RowGroupStats, ColumnStats
+
+_PARQUET_MAGIC = b"PAR1"
+_PARQUET_FOOTER_SUFFIX = 8
+_FOOTER_PREFETCH = 65536
 
 
 cdef extern from "metadata.hpp":
@@ -119,6 +131,25 @@ cdef class CppIOPipeline:
         with nogil:
             self.pipeline.submit_row_group(path_str, rg_idx, col_names_vec, col_stats_vec)
 
+    cdef submit_work_native(self, str cpp_path, int rg_idx, list column_names, RowGroupStats* rg):
+        """Submit a row group using C++ ColumnStats directly — no Python dict round-trip."""
+        cdef vector[string] col_names_vec
+        cdef vector[ColumnStats] col_stats_vec
+        cdef string path_str = cpp_path.encode('utf-8')
+        cdef string cpp_col_name
+        cdef size_t i
+
+        for col_name in column_names:
+            cpp_col_name = col_name.encode('utf-8')
+            col_names_vec.push_back(cpp_col_name)
+            for i in range(rg.columns.size()):
+                if rg.columns[i].name == cpp_col_name:
+                    col_stats_vec.push_back(rg.columns[i])
+                    break
+
+        with nogil:
+            self.pipeline.submit_row_group(path_str, rg_idx, col_names_vec, col_stats_vec)
+
     def get_result(self):
         cdef MorselRef result
         cdef bint got_result
@@ -187,6 +218,149 @@ cdef class CppIOPipeline:
         }
 
 
+cdef tuple _read_footer_payload(
+    object filesystem,
+    str path,
+    object file_size_in,
+    object connector,
+    object footer_cache,
+):
+    cdef int64_t file_size, prefetch_size, prefetch_offset
+    cdef int64_t footer_length, total_footer_payload, footer_offset, bytes_fetched
+    cdef uint64_t start_ns = time.monotonic_ns()
+    cdef bytes tail_bytes, footer_bytes_data, envelope
+
+    if _cfg.OPTERYX_TRACE:
+        _record_event("download_start", file_id=path, component="footer", connector=connector)
+
+    if file_size_in is None or file_size_in <= 0:
+        file_info = filesystem.get_file_info(path)
+        file_size = file_info.size
+    else:
+        file_size = file_size_in
+
+    if file_size < _PARQUET_FOOTER_SUFFIX:
+        raise ValueError(
+            f"File {path!r} is too small to be a valid Parquet file ({file_size} B)"
+        )
+
+    if footer_cache is not None:
+        cached = footer_cache.get(path)
+        if cached is not None:
+            return cached, 0, 0
+
+    prefetch_size = min(_FOOTER_PREFETCH, file_size)
+    prefetch_offset = file_size - prefetch_size
+    (tail_bytes,) = filesystem.read_ranges(path, [(prefetch_offset, prefetch_size)])
+
+    if tail_bytes[-4:] != _PARQUET_MAGIC:
+        raise ValueError(
+            f"File {path!r} does not end with Parquet magic bytes "
+            f"(got {tail_bytes[-4:]!r}, expected {_PARQUET_MAGIC!r})"
+        )
+
+    (footer_length,) = _struct.unpack_from("<I", tail_bytes, len(tail_bytes) - _PARQUET_FOOTER_SUFFIX)
+    if footer_length == 0 or footer_length > file_size - _PARQUET_FOOTER_SUFFIX:
+        raise ValueError(
+            f"Invalid footer length {footer_length} in {path!r} (file_size={file_size})"
+        )
+
+    total_footer_payload = footer_length + _PARQUET_FOOTER_SUFFIX
+    if total_footer_payload <= prefetch_size:
+        footer_start = len(tail_bytes) - total_footer_payload
+        footer_bytes_data = tail_bytes[footer_start : footer_start + footer_length]
+        bytes_fetched = prefetch_size
+    else:
+        footer_offset = file_size - _PARQUET_FOOTER_SUFFIX - footer_length
+        (footer_bytes_data,) = filesystem.read_ranges(path, [(footer_offset, footer_length)])
+        bytes_fetched = prefetch_size + footer_length
+
+    if _cfg.OPTERYX_TRACE:
+        _record_event(
+            "download_complete",
+            file_id=path, component="footer", bytes_received=bytes_fetched, connector=connector,
+        )
+
+    envelope = _PARQUET_MAGIC + footer_bytes_data + _struct.pack("<I", footer_length) + _PARQUET_MAGIC
+
+    if footer_cache is not None:
+        footer_cache.put(path, envelope)
+
+    return envelope, bytes_fetched, time.monotonic_ns() - start_ns
+
+
+cdef dict _parse_footer_envelope(str path, bytes envelope, int64_t footer_bytes):
+    cdef dict meta
+    try:
+        meta = _read_metadata_from_bytes(envelope)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to parse Parquet footer from {path!r}: {exc}") from exc
+    meta["__footer_bytes__"] = footer_bytes
+    return meta
+
+
+cpdef dict fetch_footer(
+    object filesystem,
+    str path,
+    object file_size = None,
+    object connector = None,
+    object footer_bytes_cache = None,
+):
+    cdef bytes envelope
+    cdef int64_t footer_bytes
+    envelope, footer_bytes, _ = _read_footer_payload(
+        filesystem, path, file_size, connector, footer_bytes_cache
+    )
+    return _parse_footer_envelope(path, envelope, footer_bytes)
+
+
+cdef bint _rg_passes_predicates_native(RowGroupStats& rg, list predicates):
+    """Evaluate AND-combined predicates against RowGroupStats min/max without materialising a Python dict."""
+    cdef size_t i
+    cdef string col_str
+    cdef object min_val, max_val, value, col_name, op
+
+    for pred in predicates:
+        col_name, op, value = pred
+        col_str = col_name.encode('utf-8') if isinstance(col_name, str) else col_name
+        for i in range(rg.columns.size()):
+            if rg.columns[i].name != col_str:
+                continue
+            min_val = _decode_value_c(
+                rg.columns[i].physical_type, rg.columns[i].logical_type,
+                rg.columns[i].min, False,
+            ) if rg.columns[i].has_min else None
+            max_val = _decode_value_c(
+                rg.columns[i].physical_type, rg.columns[i].logical_type,
+                rg.columns[i].max, False,
+            ) if rg.columns[i].has_max else None
+            if min_val is None or max_val is None:
+                break
+            try:
+                if op == "Eq":
+                    if value < min_val or value > max_val:
+                        return False
+                elif op == "NotEq":
+                    if min_val == max_val == value:
+                        return False
+                elif op == "Gt":
+                    if max_val <= value:
+                        return False
+                elif op == "GtEq":
+                    if max_val < value:
+                        return False
+                elif op == "Lt":
+                    if min_val >= value:
+                        return False
+                elif op == "LtEq":
+                    if min_val > value:
+                        return False
+            except TypeError:
+                pass
+            break
+    return True
+
+
 def iter_row_groups_ipc(
     filesystem,
     paths,
@@ -205,7 +379,6 @@ def iter_row_groups_ipc(
     Supports local files (POSIX), HTTP/HTTPS (libcurl), and GCS gs:// (rewritten to
     signed HTTPS URLs at submission time so C++ libcurl needs no auth headers).
     """
-    from opteryx.connectors.parquet_io.reader import fetch_footer
     from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
 
     # Planning-time URL signer: converts gs:// paths to signed HTTPS URLs so the
@@ -238,24 +411,43 @@ def iter_row_groups_ipc(
     cdef uint64_t t_sleep_ns = 0
     cdef uint64_t n_sleep_ticks = 0
     cdef uint64_t _t0, _t1, _ts
+    cdef unordered_map[string, FileStats] local_footers_native
+    cdef string path_bytes_cpp
+    cdef const uint8_t* footer_buf_ptr
+    cdef size_t footer_buf_size
+    cdef RowGroupStats* rg_ptr
+    cdef size_t rg_i
 
     try:
         _t0 = time.monotonic_ns()
         work_items = []
         for path in paths:
             if prefetched_footers and path in prefetched_footers:
+                # Prefetched dict path — predicate check uses Python dict API
                 meta = prefetched_footers[path]
+                for rg_idx, rg_meta in enumerate(meta.get("row_groups", [])):
+                    if predicates and not row_group_may_satisfy(rg_meta, predicates):
+                        continue
+                    work_items.append((path, rg_idx))
             else:
-                _ts = time.monotonic_ns()
-                meta = fetch_footer(
-                    filesystem, path,
-                    connector=connector, footer_bytes_cache=footer_bytes_cache,
-                )
-                t_footer_ns += time.monotonic_ns() - _ts
-            for rg_idx, rg_meta in enumerate(meta.get("row_groups", [])):
-                if predicates and not row_group_may_satisfy(rg_meta, predicates):
-                    continue
-                work_items.append((path, rg_idx))
+                path_bytes_cpp = path.encode('utf-8')
+                if local_footers_native.count(path_bytes_cpp) == 0:
+                    _ts = time.monotonic_ns()
+                    envelope, _, _ = _read_footer_payload(
+                        filesystem, path, None, connector, footer_bytes_cache
+                    )
+                    t_footer_ns += time.monotonic_ns() - _ts
+                    footer_buf_ptr = <const uint8_t*>envelope
+                    footer_buf_size = len(envelope)
+                    local_footers_native[path_bytes_cpp] = ReadParquetMetadataFromBuffer(
+                        footer_buf_ptr, footer_buf_size
+                    )
+                for rg_i in range(local_footers_native[path_bytes_cpp].row_groups.size()):
+                    if predicates and not _rg_passes_predicates_native(
+                        local_footers_native[path_bytes_cpp].row_groups[rg_i], predicates
+                    ):
+                        continue
+                    work_items.append((path, rg_i))
         t_phase1_ns = time.monotonic_ns() - _t0
 
         if not work_items:
@@ -263,29 +455,27 @@ def iter_row_groups_ipc(
 
         _t0 = time.monotonic_ns()
         for path, rg_idx in work_items:
-            if prefetched_footers and path in prefetched_footers:
-                meta = prefetched_footers[path]
-            else:
-                _ts = time.monotonic_ns()
-                meta = fetch_footer(
-                    filesystem, path,
-                    connector=connector, footer_bytes_cache=footer_bytes_cache,
-                )
-                t_footer_ns += time.monotonic_ns() - _ts
-            rg_meta = meta["row_groups"][rg_idx]
-
-            column_stats_dicts = []
-            for col_name in column_names:
-                for col_meta in rg_meta["columns"]:
-                    if col_meta["name"] == col_name:
-                        column_stats_dicts.append(col_meta)
-                        break
-
-            # Submit the signed URL to C++; Python path stays unchanged.
             _ts = time.monotonic_ns()
-            pipeline.submit_work(
-                orig_to_cpp.get(path, path), rg_idx, column_names, column_stats_dicts
-            )
+            if prefetched_footers and path in prefetched_footers:
+                # Prefetched dict path — column stats come from Python dict
+                meta = prefetched_footers[path]
+                rg_meta = meta["row_groups"][rg_idx]
+                column_stats_dicts = []
+                for col_name in column_names:
+                    for col_meta in rg_meta["columns"]:
+                        if col_meta["name"] == col_name:
+                            column_stats_dicts.append(col_meta)
+                            break
+                pipeline.submit_work(
+                    orig_to_cpp.get(path, path), rg_idx, column_names, column_stats_dicts
+                )
+            else:
+                # Native path — column stats come directly from C++ FileStats
+                path_bytes_cpp = path.encode('utf-8')
+                rg_ptr = &local_footers_native[path_bytes_cpp].row_groups[rg_idx]
+                pipeline.submit_work_native(
+                    orig_to_cpp.get(path, path), rg_idx, column_names, rg_ptr
+                )
             t_submit_ns += time.monotonic_ns() - _ts
         t_phase2_ns = time.monotonic_ns() - _t0
 

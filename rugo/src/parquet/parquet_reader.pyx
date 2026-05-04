@@ -158,7 +158,7 @@ cdef inline str _safe_decode_utf8(string raw_bytes):
             return b.decode("latin-1")
 
 
-cdef object decode_value(
+cpdef object decode_value(
         string physical_type,
         string logical_type,
         string raw,

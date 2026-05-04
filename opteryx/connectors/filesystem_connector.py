@@ -301,7 +301,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                 max_values = None
 
                 try:
-                    from opteryx.connectors.parquet_io.reader import fetch_footer
+                    from opteryx.connectors.parquet_io.pool_reader import fetch_footer
 
                     meta = fetch_footer(self.filesystem, blob_name, file_size=file_size or None)
                     record_count = sum(rg.get("num_rows", 0) for rg in meta.get("row_groups", []))
