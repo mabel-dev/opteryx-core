@@ -1,4 +1,4 @@
-/* 
+/*
 Opteryx syntax changes
 - view definitions changed to CTE
 */
@@ -8,9 +8,9 @@ with q11_part_tmp_cached as
     ps_partkey,
     sum(ps_supplycost * ps_availqty) as part_value
 from
-    testdata.tpch_tiny.partsupp,
-    testdata.tpch_tiny.supplier,
-    testdata.tpch_tiny.nation
+    testdata.tpch.partsupp,
+    testdata.tpch.supplier,
+    testdata.tpch.nation
 where
     ps_suppkey = s_suppkey
     and s_nationkey = n_nationkey

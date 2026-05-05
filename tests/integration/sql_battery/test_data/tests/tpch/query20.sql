@@ -1,23 +1,23 @@
 -- explain formatted
 with tmp1 as (
-    select p_partkey from testdata.tpch_tiny.part where p_name like 'forest%'
+    select p_partkey from testdata.tpch.part where p_name like 'forest%'
 ),
 tmp2 as (
     select s_name, s_address, s_suppkey
-    from testdata.tpch_tiny.supplier, testdata.tpch_tiny.nation
+    from testdata.tpch.supplier, testdata.tpch.nation
     where s_nationkey = n_nationkey
     and n_name = 'CANADA'
 ),
 tmp3 as (
     select l_partkey, 0.5 * sum(l_quantity) as sum_quantity, l_suppkey
-    from testdata.tpch_tiny.lineitem, tmp2
+    from testdata.tpch.lineitem, tmp2
     where l_shipdate >= '1994-01-01'::DATE and l_shipdate <= '1995-01-01'::DATE
     and l_suppkey = s_suppkey
     group by l_partkey, l_suppkey
 ),
 tmp4 as (
     select ps_partkey, ps_suppkey, ps_availqty
-    from testdata.tpch_tiny.partsupp
+    from testdata.tpch.partsupp
     where ps_partkey IN (select p_partkey from tmp1)
 ),
 tmp5 as (
@@ -34,7 +34,7 @@ select
     s_name,
     s_address
 from
-    testdata.tpch_tiny.supplier
+    testdata.tpch.supplier
 where
     s_suppkey IN (select ps_suppkey from tmp5)
 order by s_name;

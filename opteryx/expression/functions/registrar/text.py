@@ -35,8 +35,10 @@ from opteryx.compiled.vector_ops import (
     vector_starts_with,
     vector_string_slice_left,
     vector_string_slice_right,
+    vector_string_substring,
     vector_string_length,
 )
+from draken.vectors.null_vector import NullVector
 from opteryx.expression.functions import (
     FunctionDefinition,
     FunctionOverload,
@@ -174,7 +176,9 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=string_functions.substring,
+                        callable_ref=lambda s, f: vector_string_substring(
+                            s, f, NullVector(len(s))
+                        ),
                         cost_us_per_million=378.0,
                     ),
                 ),
@@ -189,7 +193,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=string_functions.substring,
+                        callable_ref=vector_string_substring,
                         cost_us_per_million=429.0,
                     ),
                 ),

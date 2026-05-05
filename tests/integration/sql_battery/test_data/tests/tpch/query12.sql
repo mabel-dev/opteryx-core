@@ -13,8 +13,8 @@ select
         else 0
     end) as low_line_count
 from
-    testdata.tpch_tiny.orders,
-    testdata.tpch_tiny.lineitem
+    testdata.tpch.orders,
+    testdata.tpch.lineitem
 where
     o_orderkey = l_orderkey
     and l_shipmode in ('REG AIR', 'MAIL')

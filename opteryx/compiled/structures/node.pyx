@@ -63,10 +63,10 @@ cdef class Node:
     def __cinit__(self, node_type, **attributes):
         """
         Initialize a new Node with a given node_type and optional attributes.
-        A UUID is automatically generated for the node.
+        A UUID is automatically generated for the node unless one is supplied.
         """
         self.node_type = node_type
-        self.uuid = str(uuid4())
+        self.uuid = <str>attributes.pop('uuid') if 'uuid' in attributes else str(uuid4())
         self._properties = dict(attributes)
 
     def __getattr__(self, str name):

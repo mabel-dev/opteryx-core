@@ -1,8 +1,8 @@
 select
     sum(l_extendedprice* (1 - l_discount)) as revenue
 from
-    testdata.tpch_tiny.lineitem,
-    testdata.tpch_tiny.part
+    testdata.tpch.lineitem,
+    testdata.tpch.part
 where
     (
         p_partkey = l_partkey

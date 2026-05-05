@@ -42,6 +42,19 @@ def call_arithmetic_op(op, left, right):
     if right_type_before in (VectorType.DICTIONARY_ENCODED, VectorType.CONSTANT_ENCODED):
         right = right.materialize()
 
+    # Convert DECIMAL vectors to Float64 for arithmetic.
+    # DECIMAL arithmetic (DECIMAL × DECIMAL, DECIMAL ± integer, etc.) is handled
+    # by converting the unscaled int64 values to their actual float64 representation,
+    # then delegating to the existing float64 kernels.
+    if left_type_before == VectorType.DECIMAL or (
+        is_draken_vector(left) and get_vector_type(left) == VectorType.DECIMAL
+    ):
+        left = left.to_float64_vector()
+    if right_type_before == VectorType.DECIMAL or (
+        is_draken_vector(right) and get_vector_type(right) == VectorType.DECIMAL
+    ):
+        right = right.to_float64_vector()
+
     # Only process if at least one operand is a Draken vector
     left_is_draken = is_draken_vector(left)
     right_is_draken = is_draken_vector(right)

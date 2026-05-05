@@ -492,11 +492,12 @@ class PredicatePushdownStrategy(OptimizationStrategy):
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
         # anything we couldn't push, we need to put back
         for predicate in context.collected_predicates:
-            for nid in predicate.plan_path:
-                if nid in context.optimized_plan:
-                    self.telemetry.optimization_predicate_pushdown_unplaced += 1
-                    context.optimized_plan.insert_node_before(predicate.nid, predicate, nid)
-                    break
+            if predicate.plan_path is not None:
+                for nid in predicate.plan_path:
+                    if nid in context.optimized_plan:
+                        self.telemetry.optimization_predicate_pushdown_unplaced += 1
+                        context.optimized_plan.insert_node_before(predicate.nid, predicate, nid)
+                        break
         return context.optimized_plan
 
     def _handle_predicates(
@@ -504,8 +505,8 @@ class PredicatePushdownStrategy(OptimizationStrategy):
     ) -> OptimizerContext:
         remaining_predicates = []
         for predicate in context.collected_predicates:
-            if len(predicate.relations) >= 1 and predicate.relations.intersection(
-                (node.relation, node.alias)
+            if len(predicate.relations) >= 1 and predicate.relations.issubset(
+                {node.relation, node.alias}
             ):
                 if node.connector:
                     # Try to normalise CAST(col, T) op literal predicates before the

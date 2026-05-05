@@ -2,10 +2,11 @@
 Test fixtures and data conversion for _jsonl reader tests
 """
 
-import pytest
 import json
 import os
 from pathlib import Path
+
+import pytest
 
 
 def pytest_configure(config):
@@ -28,8 +29,8 @@ def convert_testdata_to_jsonl(testdata_dir):
         return
 
     # TPCH tiny
-    tpch_dir = testdata_dir / "tpch_tiny"
-    tpch_jsonl_dir = testdata_dir / "tpch_tiny_jsonl"
+    tpch_dir = testdata_dir / "tpch_1"
+    tpch_jsonl_dir = testdata_dir / "tpch_1_jsonl"
     if tpch_dir.exists() and not tpch_jsonl_dir.exists():
         tpch_jsonl_dir.mkdir(exist_ok=True)
         for parquet_file in tpch_dir.glob("*/*.parquet"):
@@ -80,7 +81,7 @@ def sample_jsonl_bytes():
 def escaped_jsonl_bytes():
     """JSONL with escaped quotes and special characters."""
     data = [
-        {"id": 1, "text": 'Hello "World"', "value": 'A\\B'},
+        {"id": 1, "text": 'Hello "World"', "value": "A\\B"},
         {"id": 2, "text": "Line\nBreak", "value": None},
         {"id": 3, "text": "✓ Unicode", "value": 123.45},
     ]

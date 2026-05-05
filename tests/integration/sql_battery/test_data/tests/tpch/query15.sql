@@ -7,7 +7,7 @@ with revenue_cached as
     l_suppkey as supplier_no,
     sum(l_extendedprice * (1 - l_discount)) as total_revenue
 from
-    testdata.tpch_tiny.lineitem
+    testdata.tpch.lineitem
 where
     l_shipdate >= '1996-01-01'::DATE
     and l_shipdate < '1996-04-01'::DATE
@@ -26,7 +26,7 @@ select
     s_phone,
     total_revenue
 from
-    testdata.tpch_tiny.supplier,
+    testdata.tpch.supplier,
     revenue_cached,
     max_revenue_cached
 where

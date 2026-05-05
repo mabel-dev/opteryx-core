@@ -130,6 +130,7 @@ class FlatColumn:
             precision=self.precision,
             scale=self.scale,
             length=self.length,
+            origin=self.origin,
         )
 
     def __repr__(self) -> str:

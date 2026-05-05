@@ -15,6 +15,7 @@ from draken.vectors.vector cimport Vector
 from draken.vectors.int64_vector cimport Int64Vector
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.string_vector cimport StringVector
+from draken.vectors._decimal_vector cimport DecimalVector
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +134,9 @@ cpdef void resolve_deferred_collectors(
             vec = morsel.column(c.column_name)
             if isinstance(vec, Int64Vector):
                 typed_c = SumInt64Collector()
+            elif isinstance(vec, DecimalVector):
+                typed_c = SumDecimalCollector()
+                (<SumDecimalCollector>typed_c)._factor = 10.0 ** (-(<DecimalVector>vec)._scale)
             else:
                 typed_c = SumFloat64Collector()
             typed_c.column_name = c.column_name
@@ -147,6 +151,10 @@ cpdef void resolve_deferred_collectors(
             elif isinstance(vec, Float64Vector):
                 typed_c = MinMaxFloat64Collector()
                 (<MinMaxFloat64Collector>typed_c)._direction = 1
+            elif isinstance(vec, DecimalVector):
+                typed_c = MinMaxDecimalCollector()
+                (<MinMaxDecimalCollector>typed_c)._direction = 1
+                (<MinMaxDecimalCollector>typed_c)._factor = 10.0 ** (-(<DecimalVector>vec)._scale)
             else:
                 typed_c = MinMaxObjectCollector()
                 (<MinMaxObjectCollector>typed_c)._direction = 1
@@ -162,6 +170,10 @@ cpdef void resolve_deferred_collectors(
             elif isinstance(vec, Float64Vector):
                 typed_c = MinMaxFloat64Collector()
                 (<MinMaxFloat64Collector>typed_c)._direction = -1
+            elif isinstance(vec, DecimalVector):
+                typed_c = MinMaxDecimalCollector()
+                (<MinMaxDecimalCollector>typed_c)._direction = -1
+                (<MinMaxDecimalCollector>typed_c)._factor = 10.0 ** (-(<DecimalVector>vec)._scale)
             else:
                 typed_c = MinMaxObjectCollector()
                 (<MinMaxObjectCollector>typed_c)._direction = -1

@@ -93,7 +93,7 @@ class DrakenInnerJoinNode(JoinNode):
 
             if (
                 left_type != right_type
-                and JoinNode._join_numeric_target_arrow_type(left_type, right_type) is not None
+                and JoinNode._join_numeric_target_type(left_type, right_type) is not None
             ):
                 return False
 

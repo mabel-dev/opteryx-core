@@ -518,6 +518,17 @@ class ParquetReadNode(ReaderNode):
             for col in (self.columns or [])
             if col.schema_column.name in _planner_name_to_identity
         ]
+
+        # Build DECIMAL column map: col_name → (precision, scale) for any DECIMAL column
+        # in the schema.  Used to coerce Int64Vector → DecimalVector after IPC deserialization,
+        # since the C++ pipeline serializes DECIMAL as TAG_INT64 (the physical type) and
+        # the IPC format carries no logical type info.
+        from opteryx.types import OrsoTypes as _OrsoTypes
+        _decimal_col_map = {
+            col.name: (col.precision or 18, col.scale or 0)
+            for col in base_schema.columns
+            if col.type == _OrsoTypes.DECIMAL
+        }
         predicate_root = self._compose_predicates(self.predicates or [])
 
         # >> OPTIMIZATION: Pre-compute function nodes once instead of per row group
@@ -638,6 +649,16 @@ class ParquetReadNode(ReaderNode):
                 footer_bytes_cache=footer_bytes_cache,
             ):
                 path, rg_idx = self._extract_row_group_metadata(row_group)
+
+                # Coerce DECIMAL columns: the C++ IPC pipeline serializes them as
+                # TAG_INT64 (physical type), so they arrive as Int64Vector.  Convert
+                # to DecimalVector here using schema precision/scale from the binder.
+                if _decimal_col_map:
+                    from draken.vectors._decimal_vector import from_int64_vector as _int64_to_decimal
+                    from draken.vectors.int64_vector import Int64Vector as _Int64VectorCls
+                    for _dcol, (_dprec, _dscale) in _decimal_col_map.items():
+                        if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls):
+                            row_group[_dcol] = _int64_to_decimal(row_group[_dcol], _dprec, _dscale)
 
                 # ── Morsel assembly ───────────────────────────────────────────
                 morsel_already_ordered = False  # Track if morsel is already in output order

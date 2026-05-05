@@ -3616,6 +3616,8 @@ cdef BoolVector _dict_compare_pass_array(StringVector vec, uint8_t* pass_array):
 
 cdef StringVector _materialize_dict_string(StringVector vec):
     """Expand a dict-only StringVector to a dense StringVector (no src ptr.data needed)."""
+    if vec._dict_values == NULL or vec._dict_codes == NULL:
+        raise ValueError("Dictionary vector missing required data structures")
     cdef DrakenVarBuffer* dict_values = vec._dict_values
     cdef uint8_t* codes = vec._dict_codes
     cdef uint8_t code_width = vec._dict_code_width
@@ -3627,11 +3629,14 @@ cdef StringVector _materialize_dict_string(StringVector vec):
     cdef int32_t start, end
     cdef const char* arena = <const char*>dict_values.data
     cdef StringVectorBuilder builder
+    cdef Py_ssize_t dict_size = <Py_ssize_t>dict_values.length
 
     for i in range(n):
         if null_bitmap != NULL and not ((null_bitmap[i >> 3] >> (i & 7)) & 1):
             continue
         code = _read_packed_code(codes, code_width, i)
+        if code >= dict_size:
+            raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
         start = dict_values.offsets[code]
         end = dict_values.offsets[code + 1]
         total_bytes += end - start
@@ -3642,6 +3647,8 @@ cdef StringVector _materialize_dict_string(StringVector vec):
             builder.append_null()
         else:
             code = _read_packed_code(codes, code_width, i)
+            if code >= dict_size:
+                raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
             start = dict_values.offsets[code]
             end = dict_values.offsets[code + 1]
             builder.append_bytes(arena + start, end - start)

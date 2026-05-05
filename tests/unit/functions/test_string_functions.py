@@ -21,6 +21,7 @@ vector_ltrim = getattr(compiled_vector_ops, "vector_ltrim")
 vector_rtrim = getattr(compiled_vector_ops, "vector_rtrim")
 vector_string_slice_right = getattr(compiled_vector_ops, "vector_string_slice_right")
 vector_string_slice_left = getattr(compiled_vector_ops, "vector_string_slice_left")
+vector_string_substring = getattr(compiled_vector_ops, "vector_string_substring")
 
 
 def _to_sv(lst):
@@ -62,6 +63,166 @@ def test_slice_right():
     assert slicer(["abc", "abcdefghijklmnopqrstuvwxyz"], 5) == ["abc", "vwxyz"]
     assert slicer([None, "", "abcdef", "a"], 2) == [None, "", "ef", "a"]
     # fmt:on
+
+
+def _null_vec(n=1):
+    """Build a NullVector of length n — used for SUBSTRING_2 (no count arg)."""
+    from draken.vectors.null_vector import NullVector
+
+    return NullVector(n)
+
+
+def _int64_const(value):
+    """Build a const-encoded Int64Vector (mirrors how SQL literal integers arrive)."""
+    from draken.vectors.scalar_constructors import from_scalar
+
+    return from_scalar(int(value), 1)
+
+
+def _int64_varying(values):
+    """Build a varying Int64Vector from a Python list of ints."""
+    return vector_from_arrow(pyarrow.array(values, type=pyarrow.int64()))
+
+
+def test_substring_const_vector_args():
+    """SUBSTRING with const-encoded Int64Vector args — the SQL-literal path."""
+    def sub(arr, p, c):
+        data = _to_sv(arr)
+        return _sv_to_list(vector_string_substring(data, _int64_const(p), _int64_const(c)))
+
+    # 1-based position, position 1 starts at the beginning
+    assert sub(["abcdef"], 1, 3) == ["abc"]
+    # Position 2 skips the first character
+    assert sub(["abcdef"], 2, 3) == ["bcd"]
+    # Position 0 also starts at the beginning (some SQL dialects)
+    assert sub(["abcdef"], 0, 3) == ["abc"]
+    # Multiple rows
+    assert sub(["abcdef", "ghijklm"], 2, 2) == ["bc", "hi"]
+
+
+def test_substring_count_null_vec_slices_to_end():
+    """When count is a NullVector (SUBSTRING_2 path), slice from start to end."""
+    def sub(arr, p):
+        data = _to_sv(arr)
+        return _sv_to_list(vector_string_substring(data, p, _null_vec(len(arr))))
+
+    assert sub(["abcdef"], _int64_const(3)) == ["cdef"]
+    assert sub(["abcdef"], _int64_const(1)) == ["abcdef"]
+    # Position past end → empty
+    assert sub(["abcdef"], _int64_const(10)) == [""]
+
+
+def test_substring_count_truncates_at_end():
+    """count larger than remaining bytes truncates rather than overruns."""
+    def sub(arr, p, c):
+        data = _to_sv(arr)
+        return _sv_to_list(vector_string_substring(data, _int64_const(p), _int64_const(c)))
+
+    assert sub(["abc"], 1, 100) == ["abc"]
+    assert sub(["abcdef"], 4, 100) == ["def"]
+
+
+def test_substring_negative_position():
+    """Negative position counts back from the end."""
+    def sub(arr, p, c):
+        data = _to_sv(arr)
+        return _sv_to_list(vector_string_substring(data, _int64_const(p), _int64_const(c)))
+
+    # -2 means 2 from the end → "ef"
+    assert sub(["abcdef"], -2, 2) == ["ef"]
+    # Negative further back than the string clamps to 0
+    assert sub(["abcdef"], -100, 3) == ["abc"]
+
+
+def test_substring_negative_count_yields_empty():
+    """Negative count produces empty bytes."""
+    data = _to_sv(["abcdef"])
+    assert _sv_to_list(vector_string_substring(data, _int64_const(1), _int64_const(-1))) == [""]
+
+
+def test_substring_null_propagation():
+    """NULL strings stay NULL; valid rows are sliced normally."""
+    data = _to_sv([None, "abcdef", None, "ghi"])
+    result = _sv_to_list(vector_string_substring(data, _int64_const(2), _int64_const(2)))
+    assert result == [None, "bc", None, "hi"]
+
+
+def test_substring_empty_string():
+    """Empty input string yields empty output."""
+    data1 = _to_sv([""])
+    assert _sv_to_list(vector_string_substring(data1, _int64_const(1), _int64_const(3))) == [""]
+    data2 = _to_sv(["", "abc"])
+    assert _sv_to_list(vector_string_substring(data2, _int64_const(1), _int64_const(2))) == ["", "ab"]
+
+
+def test_substring_empty_input_array():
+    """Empty input array yields empty output."""
+    data = _to_sv([])
+    assert _sv_to_list(vector_string_substring(data, _int64_const(1), _int64_const(3))) == []
+
+
+def test_substring_const_encoded_int64_position():
+    """Position passed as a const-encoded Int64Vector — the SQL-literal path."""
+    data = _to_sv(["abcdef", "ghijkl"])
+    pos = _int64_const(2)
+    cnt = _int64_const(3)
+    assert _sv_to_list(vector_string_substring(data, pos, cnt)) == ["bcd", "hij"]
+
+
+def test_substring_const_encoded_count_null_vec():
+    """Const Int64Vector for from_pos with NullVector count (SUBSTRING_2 path)."""
+    data = _to_sv(["abcdef", "ghijkl"])
+    pos = _int64_const(3)
+    assert _sv_to_list(vector_string_substring(data, pos, _null_vec(2))) == ["cdef", "ijkl"]
+
+
+def test_substring_varying_int64_position():
+    """Per-row varying Int64Vector for from_pos and count."""
+    data = _to_sv(["abcdef", "ghijkl", "mnopqr"])
+    pos = _int64_varying([1, 3, 5])
+    cnt = _int64_varying([2, 2, 2])
+    assert _sv_to_list(vector_string_substring(data, pos, cnt)) == ["ab", "ij", "qr"]
+
+
+def test_substring_varying_count_with_const_position():
+    """Mixed: const position, varying count."""
+    data = _to_sv(["abcdef", "abcdef", "abcdef"])
+    pos = _int64_const(1)
+    cnt = _int64_varying([1, 3, 6])
+    assert _sv_to_list(vector_string_substring(data, pos, cnt)) == ["a", "abc", "abcdef"]
+
+
+def test_substring_via_optimizer_rewrite_to_left():
+    """SQL `SUBSTRING(x, 1, n)` is rewritten to `LEFT(x, n)`; verify end-to-end.
+
+    This exercises the rewriter path that was silently broken before
+    `_rebind_function_ref()` was added — the kernel binding for SUBSTRING_3
+    must be replaced when the rewriter shrinks the parameter list.
+    """
+    import opteryx
+
+    session = opteryx.session()
+    rows = []
+    for morsel in session.execute_to_morsels(
+        "SELECT SUBSTRING('abcdef', 1, 3) AS p"
+    ):
+        if hasattr(morsel, "num_rows") and morsel.num_rows:
+            rows.extend(morsel.to_arrow().to_pylist())
+    assert rows == [{"p": b"abc"}] or rows == [{"p": "abc"}]
+
+
+def test_substring_3_arg_via_sql():
+    """SQL `SUBSTRING(x, 2, 3)` keeps the 3-arg form (not rewritten)."""
+    import opteryx
+
+    session = opteryx.session()
+    rows = []
+    for morsel in session.execute_to_morsels(
+        "SELECT SUBSTRING('abcdef', 2, 3) AS p"
+    ):
+        if hasattr(morsel, "num_rows") and morsel.num_rows:
+            rows.extend(morsel.to_arrow().to_pylist())
+    assert rows == [{"p": b"bcd"}] or rows == [{"p": "bcd"}]
 
 
 def test_random_string():

@@ -822,6 +822,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
         telemetry.optimization_predicate_rewriter_substring_to_left += 1
         function.value = "LEFT"
         function.parameters = [function.parameters[0], function.parameters[2]]
+        _rebind_function_ref()
         return function
     # CONCAT(x, y, z) → x || y || z
     if function.value == "CONCAT" and len(function.parameters) > 1:

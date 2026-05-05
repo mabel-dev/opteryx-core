@@ -38,6 +38,7 @@ from opteryx.planner.optimizer.strategies import (
     ConstantFoldingStrategy,
     CorrelatedFiltersStrategy,
     CrossJoinFilterPushdownStrategy,
+    DisjunctionSimplificationStrategy,
     DistinctPushdownStrategy,
     HashMapVariantStrategy,
     JoinEliminationStrategy,
@@ -74,6 +75,7 @@ class OptimizerVisitor:
             StatisticsOnlyResponseStrategy(telemetry),
             BooleanSimplificationStrategy(telemetry),
             CastSimplificationStrategy(telemetry),  # DISABLED: Causes plan corruption
+            DisjunctionSimplificationStrategy(telemetry),
             SplitConjunctivePredicatesStrategy(telemetry),
             CorrelatedFiltersStrategy(telemetry),
             NullabilityInferenceStrategy(telemetry),

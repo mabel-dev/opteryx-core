@@ -147,12 +147,27 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
                 column.value[0] if isinstance(column.value, (list, tuple)) else column.value
             )
 
+            found_match = False
+            shared_schema_names = []
+
             for name, schema in list(context.schemas.items()):
-                if (
-                    name == table_name
-                    or name.startswith("$shared")
+                # Check if this schema matches the qualified wildcard
+                # Match by:
+                # 1. Exact key match (e.g., "supplier" == "supplier")
+                # 2. Ends with .table_name (e.g., "testdata.tpch_001.supplier" ends with ".supplier")
+                # 3. Shared schema pattern (e.g., "$view-ABC" with matching schema.name)
+                is_exact_match = name == table_name
+                is_qualified_match = name.endswith(f".{table_name}") or (
+                    name.startswith("$view") and schema.name.endswith(f"/{table_name}.parquet")
+                )
+                is_shared_match = (
+                    name.startswith("$shared")
                     and f"^{table_name}#" in schema.name
-                ):
+                )
+
+                if is_exact_match or is_qualified_match or is_shared_match:
+                    found_match = True
+                    # Expand all columns from this schema
                     for schema_column in schema.columns:
                         column_reference = LogicalColumn(
                             node_type=NodeType.IDENTIFIER,  # column type
@@ -161,11 +176,19 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
                             schema_column=schema_column,
                         )
                         columns.append(column_reference)
-                if name.startswith("$shared") and f"^{table_name}#" in schema.name:
-                    context.schemas.pop(name)
 
+                    # Track shared schemas for cleanup after loop
+                    if is_shared_match:
+                        shared_schema_names.append(name)
+
+            # Clean up shared schemas after processing
+            for shared_name in shared_schema_names:
+                context.schemas.pop(shared_name)
+
+            # Update the schema mapping if we found a match
+            if found_match and columns:
                 context.schemas[table_name] = RelationSchema(
-                    name=name, columns=[col.schema_column for col in columns]
+                    name=table_name, columns=[col.schema_column for col in columns]
                 )
 
     projected_column_count = len(columns)

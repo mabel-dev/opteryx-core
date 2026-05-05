@@ -3,6 +3,7 @@ from .cast_simplification import CastSimplificationStrategy
 from .constant_folding import ConstantFoldingStrategy
 from .correlated_filters import CorrelatedFiltersStrategy
 from .cross_join_filter_pushdown import CrossJoinFilterPushdownStrategy
+from .disjunction_simplification import DisjunctionSimplificationStrategy
 from .distinct_pushdown import DistinctPushdownStrategy
 from .hash_map_variant import HashMapVariantStrategy
 from .join_elimination import JoinEliminationStrategy
@@ -28,6 +29,7 @@ __all__ = [
     "ConstantFoldingStrategy",
     "CorrelatedFiltersStrategy",
     "CrossJoinFilterPushdownStrategy",
+    "DisjunctionSimplificationStrategy",
     "DistinctPushdownStrategy",
     "HashMapVariantStrategy",
     "JoinEliminationStrategy",

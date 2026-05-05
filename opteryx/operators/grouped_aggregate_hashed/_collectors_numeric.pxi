@@ -26,6 +26,7 @@ from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
 from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
 from draken.vectors.string_vector cimport StringVector, _StringVectorCIterator, StringElement, _materialize_dict_string
 from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
+from draken.vectors._decimal_vector cimport DecimalVector
 
 
 cdef inline bint _num_bitmap_valid(uint8_t* bm, Py_ssize_t i) noexcept nogil:
@@ -971,10 +972,13 @@ cdef class AvgCollector(BaseCollector):
         cdef int64_t si
         cdef Int64Vector iv
         cdef Float64Vector fv
+        cdef DecimalVector dv
         cdef int64_t* i64
+        cdef int64_t* dec_data
         cdef double* f64
         cdef uint8_t* nulls
         cdef double const_f64
+        cdef double dec_factor
         cdef int64_t const_i64
 
         if isinstance(raw, Int64Vector):
@@ -995,6 +999,24 @@ cdef class AvgCollector(BaseCollector):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
                     sums[si] += i64[i]
+                    counts[si] += 1
+        elif isinstance(raw, DecimalVector):
+            dv = <DecimalVector>raw
+            dec_factor = 10.0 ** (-dv._scale)
+            if dv._has_const:
+                if not dv._const_is_null:
+                    const_f64 = <double>dv._const_value * dec_factor
+                    for i in range(n_rows):
+                        si = state_indices[i]
+                        sums[si] += const_f64
+                        counts[si] += 1
+                return
+            dec_data = <int64_t*>dv.ptr.data
+            nulls = dv.null_bitmap_ptr()
+            for i in range(n_rows):
+                if _num_bitmap_valid(nulls, i):
+                    si = state_indices[i]
+                    sums[si] += <double>dec_data[i] * dec_factor
                     counts[si] += 1
         else:
             fv = <Float64Vector>raw
@@ -1054,3 +1076,265 @@ cdef class AvgCollector(BaseCollector):
                 _bitmap_clear(out.null_bitmap, i)
 
         return _slice_float64_buffer(out, start, stop)
+
+
+# ---------------------------------------------------------------------------
+# Decimal collectors — SumDecimalCollector and MinMaxDecimalCollector
+# Accumulate unscaled int64 values, apply scale factor at finalize time.
+# ---------------------------------------------------------------------------
+
+cdef class SumDecimalCollector(BaseCollector):
+    """
+    SUM collector for DecimalVector columns.
+
+    Accumulates unscaled int64 sums in a float64 buffer (to avoid int64 overflow
+    on large datasets). The scale factor (10^-scale) is applied once on first
+    accumulate, converting unscaled int64 to actual decimal value before summing.
+    Finalize returns a Float64Vector.
+    """
+    cdef DrakenFixedBuffer* _sums
+    cdef uint8_t* _seen
+    cdef int64_t _capacity
+    cdef double _factor   # 10 ^ (-scale), set from DecimalVector on first accumulate
+
+    def __cinit__(self):
+        self._sums = alloc_fixed_buffer(DRAKEN_FLOAT64, 0, 8)
+        self._seen = NULL
+        self._capacity = 0
+        self._factor = 1.0
+
+    def __dealloc__(self):
+        if self._sums != NULL:
+            free_fixed_buffer(self._sums, True)
+            self._sums = NULL
+        if self._seen != NULL:
+            free(self._seen)
+            self._seen = NULL
+
+    cdef void grow(self, int64_t new_count):
+        if new_count > self._capacity:
+            _grow_fixed_buffer(self._sums, self._capacity, new_count)
+            _grow_bitmap(&self._seen, self._capacity, new_count, False)
+            self._capacity = new_count
+
+    cdef void accumulate(
+        self,
+        object morsel,
+        const int64_t* state_indices,
+        Py_ssize_t n_rows,
+    ):
+        cdef DecimalVector vec = <DecimalVector>morsel.column(self.column_name)
+        cdef double* sums = <double*>self._sums.data
+        cdef uint8_t* seen = self._seen
+        cdef int64_t* data
+        cdef uint8_t* nulls
+        cdef Py_ssize_t i
+        cdef int64_t si
+        cdef double const_val
+        cdef double factor = self._factor
+
+        if vec._has_const:
+            if not vec._const_is_null:
+                const_val = <double>vec._const_value * factor
+                for i in range(n_rows):
+                    si = state_indices[i]
+                    sums[si] += const_val
+                    _bitmap_set(seen, si)
+            return
+
+        data = <int64_t*>vec.ptr.data
+        nulls = vec.null_bitmap_ptr()
+        for i in range(n_rows):
+            if _num_bitmap_valid(nulls, i):
+                si = state_indices[i]
+                sums[si] += <double>data[i] * factor
+                _bitmap_set(seen, si)
+
+    cpdef Vector finalize(self, int64_t num_groups):
+        cdef DrakenFixedBuffer* out = self._sums
+        cdef uint8_t* seen = self._seen
+        cdef Py_ssize_t i
+
+        out.length = <size_t>num_groups
+        if seen != NULL:
+            for i in range(num_groups):
+                if not _num_bitmap_valid(seen, i):
+                    out.null_bitmap = seen
+                    seen = NULL
+                    break
+
+        self._sums = alloc_fixed_buffer(DRAKEN_FLOAT64, 0, 8)
+        self._seen = NULL
+        self._capacity = 0
+
+        if seen != NULL:
+            free(seen)
+
+        return _wrap_float64_buffer(out)
+
+    cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
+        cdef DrakenFixedBuffer* out = self._sums
+        cdef uint8_t* seen = self._seen
+        cdef Py_ssize_t i
+
+        out.length = <size_t>self._capacity
+        if out.null_bitmap == NULL and seen != NULL:
+            for i in range(self._capacity):
+                if not _num_bitmap_valid(seen, i):
+                    out.null_bitmap = seen
+                    seen = NULL
+                    break
+            if seen != NULL:
+                free(seen)
+                self._seen = NULL
+
+        return _slice_float64_buffer(out, start, stop)
+
+
+cdef class MinMaxDecimalCollector(BaseCollector):
+    """
+    MIN/MAX collector for DecimalVector columns.
+
+    Compares unscaled int64 values directly (valid since all values share the
+    same scale). Applies the scale factor (10^-scale) at finalize time to
+    produce a Float64Vector.
+    """
+    cdef DrakenFixedBuffer* _values  # stores unscaled int64 min/max values
+    cdef uint8_t* _seen
+    cdef int64_t _capacity
+    cdef int8_t _direction    # +1 = MIN, -1 = MAX
+    cdef double _factor       # 10 ^ (-scale), set from DecimalVector on first accumulate
+
+    def __cinit__(self):
+        self._values = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+        self._seen = NULL
+        self._capacity = 0
+        self._factor = 1.0
+
+    def __dealloc__(self):
+        if self._values != NULL:
+            free_fixed_buffer(self._values, True)
+            self._values = NULL
+        if self._seen != NULL:
+            free(self._seen)
+            self._seen = NULL
+
+    cdef void grow(self, int64_t new_count):
+        cdef int64_t sentinel = INT64_MAX if self._direction == 1 else INT64_MIN
+        cdef int64_t old_count = self._capacity
+        cdef int64_t* values
+        cdef int64_t i
+
+        if new_count > old_count:
+            _grow_fixed_buffer(self._values, old_count, new_count)
+            _grow_bitmap(&self._seen, old_count, new_count, False)
+            values = <int64_t*>self._values.data
+            for i in range(old_count, new_count):
+                values[i] = sentinel
+            self._capacity = new_count
+
+    cdef void accumulate(
+        self,
+        object morsel,
+        const int64_t* state_indices,
+        Py_ssize_t n_rows,
+    ):
+        cdef DecimalVector vec = <DecimalVector>morsel.column(self.column_name)
+        cdef int64_t* values = <int64_t*>self._values.data
+        cdef uint8_t* seen = self._seen
+        cdef int64_t* data
+        cdef uint8_t* nulls
+        cdef Py_ssize_t i
+        cdef int64_t si, v
+
+        if vec._has_const:
+            if not vec._const_is_null:
+                v = vec._const_value
+                if self._direction == 1:   # MIN
+                    for i in range(n_rows):
+                        si = state_indices[i]
+                        if not _num_bitmap_valid(seen, si) or v < values[si]:
+                            values[si] = v
+                        _bitmap_set(seen, si)
+                else:                      # MAX
+                    for i in range(n_rows):
+                        si = state_indices[i]
+                        if not _num_bitmap_valid(seen, si) or v > values[si]:
+                            values[si] = v
+                        _bitmap_set(seen, si)
+            return
+
+        data = <int64_t*>vec.ptr.data
+        nulls = vec.null_bitmap_ptr()
+        if self._direction == 1:   # MIN
+            for i in range(n_rows):
+                if _num_bitmap_valid(nulls, i):
+                    si = state_indices[i]
+                    v = data[i]
+                    if not _num_bitmap_valid(seen, si) or v < values[si]:
+                        values[si] = v
+                    _bitmap_set(seen, si)
+        else:                      # MAX
+            for i in range(n_rows):
+                if _num_bitmap_valid(nulls, i):
+                    si = state_indices[i]
+                    v = data[i]
+                    if not _num_bitmap_valid(seen, si) or v > values[si]:
+                        values[si] = v
+                    _bitmap_set(seen, si)
+
+    cpdef Vector finalize(self, int64_t num_groups):
+        """Apply scale factor and return Float64Vector."""
+        cdef DrakenFixedBuffer* src = self._values
+        cdef uint8_t* seen = self._seen
+        cdef DrakenFixedBuffer* out
+        cdef int64_t* src_data
+        cdef double* out_data
+        cdef double factor = self._factor
+        cdef Py_ssize_t i
+
+        out = alloc_fixed_buffer(DRAKEN_FLOAT64, <size_t>num_groups, 8)
+        src_data = <int64_t*>src.data
+        out_data = <double*>out.data
+
+        for i in range(num_groups):
+            out_data[i] = <double>src_data[i] * factor
+
+        if seen != NULL:
+            for i in range(num_groups):
+                if not _num_bitmap_valid(seen, i):
+                    out.null_bitmap = seen
+                    seen = NULL
+                    break
+
+        if seen != NULL:
+            free(seen)
+        self._seen = NULL
+        self._capacity = 0
+
+        return _wrap_float64_buffer(out)
+
+    cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
+        """Apply scale factor and return slice as Float64Vector."""
+        cdef DrakenFixedBuffer* src = self._values
+        cdef Py_ssize_t length = <Py_ssize_t>(stop - start)
+        cdef DrakenFixedBuffer* out
+        cdef int64_t* src_data
+        cdef double* out_data
+        cdef double factor = self._factor
+        cdef Py_ssize_t i
+
+        out = alloc_fixed_buffer(DRAKEN_FLOAT64, <size_t>length, 8)
+        src_data = <int64_t*>src.data
+        out_data = <double*>out.data
+
+        for i in range(length):
+            out_data[i] = <double>src_data[start + i] * factor
+
+        if src.null_bitmap != NULL:
+            out.null_bitmap = _alloc_all_valid_bitmap(length)
+            for i in range(length):
+                if not _num_bitmap_valid(src.null_bitmap, start + i):
+                    _bitmap_clear(out.null_bitmap, i)
+
+        return _wrap_float64_buffer(out)

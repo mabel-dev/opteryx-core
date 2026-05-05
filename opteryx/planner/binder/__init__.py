@@ -41,6 +41,31 @@ from opteryx.planner.logical_planner import (
 )
 
 
+def _copy_cte_plan(plan: LogicalPlan) -> LogicalPlan:
+    """
+    Copy a CTE sub-plan with fresh node IDs so repeated expansions of the
+    same CTE (e.g. once directly and once inside a chained CTE) don't share
+    node IDs and cause dict-update collisions when merged into the main plan.
+    """
+    from opteryx.utils import random_string
+
+    id_map = {old_id: random_string() for old_id in plan.nodes(data=False)}
+
+    base = plan.copy()
+    new_plan = plan.__class__.__new__(plan.__class__)
+    new_plan._nodes = {id_map[old_id]: node for old_id, node in base._nodes.items()}
+
+    new_plan._edges = {}
+    for src, targets in base._edges.items():
+        new_src = id_map.get(src, src)
+        new_plan._edges[new_src] = tuple(
+            (id_map.get(tgt, tgt), rel) for tgt, rel in targets
+        )
+
+    new_plan._cached_edges = None
+    return new_plan
+
+
 def rename_relations(plan: LogicalPlan, prefix: str = "$view-"):
     """
     When we include VIEWs and CTEs in a plan, we randomize the name of the
@@ -52,6 +77,7 @@ def rename_relations(plan: LogicalPlan, prefix: str = "$view-"):
     from opteryx.utils import random_string
 
     relations = {}
+    uuid_remap = {}  # old_uuid -> new_uuid for updating join readers
 
     # first we collection the relations
     for nid, node in [
@@ -62,6 +88,7 @@ def rename_relations(plan: LogicalPlan, prefix: str = "$view-"):
         alias = f"{prefix}{random_string(4)}"
         unique_id = str(uuid.uuid4())
         relations[node.alias] = (node.relation, alias, unique_id)
+        uuid_remap[node.uuid] = unique_id
         node.alias = alias
         node.uuid = unique_id
         plan[nid] = node
@@ -81,6 +108,30 @@ def rename_relations(plan: LogicalPlan, prefix: str = "$view-"):
     for nid, node in plan.nodes(True):
         for property in node.properties:
             node.properties[property] = _prop(node.properties[property])
+
+    # Remap left/right relation name lists and reader UUID lists on join nodes.
+    # _prop only handles LogicalColumn.source; plain string lists need explicit remapping.
+    for nid, node in plan.nodes(True):
+        if node.node_type == LogicalPlanStepType.Join:
+            if node.left_relation_names:
+                node.left_relation_names = [
+                    relations[n][1] if n in relations else n
+                    for n in node.left_relation_names
+                ]
+            if node.right_relation_names:
+                node.right_relation_names = [
+                    relations[n][1] if n in relations else n
+                    for n in node.right_relation_names
+                ]
+            if node.left_readers:
+                node.left_readers = [
+                    uuid_remap.get(u, u) for u in node.left_readers
+                ]
+            if node.right_readers:
+                node.right_readers = [
+                    uuid_remap.get(u, u) for u in node.right_readers
+                ]
+            plan[nid] = node
 
     return plan
 
@@ -137,27 +188,32 @@ def bind_logical_relations(plan: LogicalPlan, ctes: dict, telemetry) -> LogicalP
     if ctes is None:
         ctes = {}
 
-    for nid, node in [
-        (nid, node)
-        for (nid, node) in plan.nodes(True)
-        if node.node_type == LogicalPlanStepType.Scan
-    ]:
-        relation = node.relation
-        sub_plan = get_view_plan(relation, telemetry)
-        if sub_plan is None and relation in ctes:
-            sub_plan = ctes[relation]
-        if sub_plan:
-            sub_plan = rename_relations(sub_plan)
-            sub_plan_head = sub_plan.get_exit_points()[0]
-            consumer = plan.outgoing_edges(nid)[0]
-            node.node_type = LogicalPlanStepType.Subquery
-            node.columns = sub_plan[sub_plan_head].columns or [Node(NodeType.WILDCARD)]
-            plan += sub_plan
-            plan.add_edge(sub_plan_head, nid, consumer[2])
-
-            plan = join_leg_preprocess(plan)
-
-        # DEBUG: print(plan.draw())
+    # Iterative expansion: after merging a CTE sub-plan, newly added Scan nodes
+    # inside it may themselves reference other CTEs (chained CTEs). Re-scan until
+    # no resolvable Scan nodes remain. Use .copy() to avoid mutating the shared
+    # CTE plan objects when rename_relations modifies node aliases in-place.
+    while True:
+        expanded = False
+        for nid, node in list(plan.nodes(True)):
+            if node.node_type != LogicalPlanStepType.Scan:
+                continue
+            relation = node.relation
+            sub_plan = get_view_plan(relation, telemetry)
+            if sub_plan is None and relation in ctes:
+                sub_plan = _copy_cte_plan(ctes[relation])
+            if sub_plan:
+                sub_plan = rename_relations(sub_plan)
+                sub_plan_head = sub_plan.get_exit_points()[0]
+                consumer = plan.outgoing_edges(nid)[0]
+                node.node_type = LogicalPlanStepType.Subquery
+                node.columns = sub_plan[sub_plan_head].columns or [Node(NodeType.WILDCARD)]
+                plan += sub_plan
+                plan.add_edge(sub_plan_head, nid, consumer[2])
+                plan = join_leg_preprocess(plan)
+                expanded = True
+                break  # restart scan; plan topology has changed
+        if not expanded:
+            break
 
     return plan
 

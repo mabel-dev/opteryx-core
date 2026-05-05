@@ -1,4 +1,4 @@
-/* 
+/*
 Opteryx syntax changes
 - view definitions changed to CTE
 */
@@ -7,7 +7,7 @@ with q18_tmp_cached as
     l_orderkey,
     sum(l_quantity) as t_sum_quantity
 from
-    testdata.tpch_tiny.lineitem
+    testdata.tpch.lineitem
 where
     l_orderkey is not null
 group by
@@ -21,10 +21,10 @@ select
     o_totalprice,
     sum(l_quantity)
 from
-    testdata.tpch_tiny.customer,
-    testdata.tpch_tiny.orders,
+    testdata.tpch.customer,
+    testdata.tpch.orders,
     q18_tmp_cached t,
-    testdata.tpch_tiny.lineitem l
+    testdata.tpch.lineitem l
 where
     c_custkey = o_custkey
     and o_orderkey = t.l_orderkey
@@ -40,5 +40,5 @@ group by
     o_totalprice
 order by
     o_totalprice desc,
-    o_orderdate 
+    o_orderdate
 limit 100;

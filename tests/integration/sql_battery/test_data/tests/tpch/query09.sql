@@ -9,12 +9,12 @@ from
             EXTRACT(YEAR FROM o_orderdate) as o_year,
             l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity as amount
         from
-            testdata.tpch_tiny.part,
-            testdata.tpch_tiny.supplier,
-            testdata.tpch_tiny.lineitem,
-            testdata.tpch_tiny.partsupp,
-            testdata.tpch_tiny.orders,
-            testdata.tpch_tiny.nation
+            testdata.tpch.part,
+            testdata.tpch.supplier,
+            testdata.tpch.lineitem,
+            testdata.tpch.partsupp,
+            testdata.tpch.orders,
+            testdata.tpch.nation
         where
             s_suppkey = l_suppkey
             and ps_suppkey = l_suppkey

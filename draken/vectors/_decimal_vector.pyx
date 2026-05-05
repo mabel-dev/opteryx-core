@@ -36,7 +36,9 @@ from libc.stdlib cimport malloc, free
 
 from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
 from draken.core.buffers cimport DRAKEN_INT64
+from draken.core.buffers cimport DRAKEN_NON_NATIVE
 from draken.core.buffers cimport DRAKEN_ENCODING_DENSE
+from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.fixed_vector cimport buf_dtype
@@ -45,6 +47,8 @@ from draken.core.fixed_vector cimport buf_length
 from draken.core.fixed_vector cimport free_fixed_buffer
 from draken.vectors.vector cimport Vector, NULL_HASH, simd_mix_hash, simd_popcount
 from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
+from draken.vectors.float64_vector cimport Float64Vector
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +209,7 @@ cdef class DecimalVector(Vector):
 
     @property
     def dtype(self):
-        return buf_dtype(self.ptr)
+        return DRAKEN_NON_NATIVE
 
     @property
     def ordered(self):
@@ -323,6 +327,52 @@ cdef class DecimalVector(Vector):
             n,
             [null_buf, data_buf],
         )
+
+    cpdef Float64Vector to_float64_vector(self):
+        """Convert to a Float64Vector by dividing unscaled int64 values by 10^scale.
+
+        Returns a Float64Vector with the actual decimal values as double-precision
+        floating point.  Used for arithmetic operations where DECIMAL semantics
+        can be approximated by float64 without unacceptable precision loss.
+        """
+        cdef DrakenFixedBuffer* ptr
+        cdef int64_t* src
+        cdef uint8_t* src_null
+        cdef Py_ssize_t i, n
+        cdef Float64Vector out
+        cdef double* dst
+        cdef uint8_t* out_null
+        cdef size_t nb_bytes
+        cdef double factor
+
+        factor = 10.0 ** (-self._scale)
+        ptr = self.ptr
+        n = ptr.length
+
+        if self._has_const:
+            if self._const_is_null:
+                return Float64Vector.from_constant(None, n, is_null=True)
+            return Float64Vector.from_constant(<double>self._const_value * factor, n)
+
+        out = Float64Vector(<size_t>n)
+        src = <int64_t*>ptr.data
+        dst = <double*>(<void*>out.ptr.data)
+        src_null = ptr.null_bitmap
+
+        for i in range(n):
+            dst[i] = <double>src[i] * factor
+
+        if src_null != NULL and n > 0:
+            nb_bytes = (<size_t>n + 7) >> 3
+            out_null = <uint8_t*>malloc(nb_bytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, src_null, nb_bytes)
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        return out
 
     cpdef list to_pylist(self):
         """Return the vector as a Python list of Decimal values (None for nulls)."""
@@ -1167,3 +1217,91 @@ cdef DecimalVector from_arrow(object array):
     vec._scale = <int8_t>scale
 
     return vec
+
+
+# ---------------------------------------------------------------------------
+# Module-level factory: from_int64_vector
+# ---------------------------------------------------------------------------
+
+cpdef DecimalVector from_int64_vector(Int64Vector source, int precision, int scale):
+    """
+    Build a DecimalVector from an Int64Vector containing unscaled integer values.
+
+    This is the native Draken conversion path for parquet DECIMAL columns, which
+    are stored as INT64 physical type with a decimal logical type annotation.
+
+    The resulting vector owns its buffer (copied, never borrowed).
+    Scale and precision are set from the caller-provided values.
+
+    Args:
+        source:    Int64Vector with unscaled integer values (dense or const)
+        precision: Decimal precision (max 18 for int64 backing)
+        scale:     Decimal scale (number of digits after decimal point)
+
+    Returns:
+        DecimalVector with the same data and null bitmap as source.
+    """
+    cdef Py_ssize_t n
+    cdef DecimalVector out
+    cdef int64_t* src_data
+    cdef int64_t* dst_data
+    cdef uint8_t* src_null
+    cdef uint8_t* out_null
+    cdef size_t nb_bytes
+
+    if precision > 18:
+        raise NotImplementedError(
+            f"DecimalVector supports precision up to 18; got precision={precision}."
+        )
+
+    # Materialise dictionary-encoded Int64Vector before copying
+    if source._encoding == DRAKEN_ENCODING_DICTIONARY and source.ptr.data == NULL:
+        source = _materialize_dict_int64(source)
+
+    n = <Py_ssize_t>source.ptr.length
+
+    # Constant-encoding fast path
+    if source._has_const:
+        if source._const_is_null:
+            out = DecimalVector(0)
+            out.ptr.length = <size_t>n
+            out.ptr.null_bitmap = NULL
+            out._has_const = True
+            out._const_is_null = True
+            out._const_value = 0
+            out._precision = <int8_t>precision
+            out._scale = <int8_t>scale
+            return out
+        out = DecimalVector(0)
+        out.ptr.length = <size_t>n
+        out.ptr.null_bitmap = NULL
+        out._has_const = True
+        out._const_is_null = False
+        out._const_value = source._const_value
+        out._precision = <int8_t>precision
+        out._scale = <int8_t>scale
+        return out
+
+    # Dense path: allocate new buffer and copy data
+    out = DecimalVector(<size_t>n)
+    out._precision = <int8_t>precision
+    out._scale = <int8_t>scale
+
+    if n > 0:
+        src_data = <int64_t*>source.ptr.data
+        dst_data = <int64_t*>out.ptr.data
+        memcpy(dst_data, src_data, <size_t>n * sizeof(int64_t))
+
+    # Copy null bitmap
+    src_null = <uint8_t*>source.ptr.null_bitmap
+    if src_null != NULL and n > 0:
+        nb_bytes = (<size_t>n + 7) >> 3
+        out_null = <uint8_t*>malloc(nb_bytes)
+        if out_null == NULL:
+            raise MemoryError()
+        memcpy(out_null, src_null, nb_bytes)
+        out.ptr.null_bitmap = out_null
+    else:
+        out.ptr.null_bitmap = NULL
+
+    return out

@@ -535,9 +535,9 @@ cdef class Float64Vector(Vector):
             return _materialize_rle_float64(self)._compare_vector(other, op)
         if other._encoding == DRAKEN_ENCODING_RLE:
             return self._compare_vector(_materialize_rle_float64(other), op)
-        if self._encoding == DRAKEN_ENCODING_DICTIONARY:
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _materialize_dict_float64(self)._compare_vector(other, op)
-        if other._encoding == DRAKEN_ENCODING_DICTIONARY:
+        if other._encoding == DRAKEN_ENCODING_DICTIONARY and other.ptr.data == NULL:
             return self._compare_vector(_materialize_dict_float64(other), op)
         if self._has_const:
             return _materialize_const_float64(self)._compare_vector(other, op)

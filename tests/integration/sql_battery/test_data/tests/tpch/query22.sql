@@ -1,4 +1,4 @@
-/* 
+/*
 Opteryx syntax changes
 - view definitions changed to CTE
 */
@@ -9,7 +9,7 @@ with q22_customer_tmp_cached as
     c_custkey,
     substring(c_phone, 1, 2) as cntrycode
 from
-    testdata.tpch_tiny.customer
+    testdata.tpch.customer
 where
     substring(c_phone, 1, 2) = '13' or
     substring(c_phone, 1, 2) = '31' or
@@ -19,7 +19,7 @@ where
     substring(c_phone, 1, 2) = '18' or
     substring(c_phone, 1, 2) = '17'
 ),
- 
+
 q22_customer_tmp1_cached as
 (select
     avg(c_acctbal) as avg_acctbal
@@ -33,7 +33,7 @@ q22_orders_tmp_cached as
 (select
     o_custkey
 from
-    testdata.tpch_tiny.orders
+    testdata.tpch.orders
 group by
     o_custkey)
 

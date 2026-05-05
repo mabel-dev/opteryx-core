@@ -8,10 +8,10 @@ select
     c_phone,
     c_comment
 from
-    testdata.tpch_tiny.customer,
-    testdata.tpch_tiny.orders,
-    testdata.tpch_tiny.lineitem,
-    testdata.tpch_tiny.nation
+    testdata.tpch.customer,
+    testdata.tpch.orders,
+    testdata.tpch.lineitem,
+    testdata.tpch.nation
 where
     c_custkey = o_custkey
     and l_orderkey = o_orderkey

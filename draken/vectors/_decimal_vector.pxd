@@ -15,6 +15,8 @@ from libc.stdint cimport uint8_t
 from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
 from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.float64_vector cimport Float64Vector
 
 
 cdef class DecimalVector(Vector):
@@ -107,6 +109,7 @@ cdef class DecimalVector(Vector):
     # Conversion
     # ------------------------------------------------------------------
 
+    cpdef Float64Vector to_float64_vector(self)
     cpdef list to_pylist(self)
 
     # ------------------------------------------------------------------
@@ -118,5 +121,6 @@ cdef class DecimalVector(Vector):
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=*) except *
 
 
-# Module-level factory exposed for cimport by arrow.pyx and other consumers
+# Module-level factories exposed for cimport by other consumers
 cdef DecimalVector from_arrow(object array)
+cpdef DecimalVector from_int64_vector(Int64Vector source, int precision, int scale)

@@ -7,7 +7,7 @@ select
     o_orderpriority,
     count(*) as order_count
 from
-    testdata.tpch_tiny.orders as o
+    testdata.tpch.orders as o
 where
     o_orderdate >= '1996-05-01'::DATE
     and o_orderdate < '1996-08-01'::DATE
@@ -15,7 +15,7 @@ where
         select
             *
         from
-            testdata.tpch_tiny.lineitem
+            testdata.tpch.lineitem
         where
             l_orderkey = o.o_orderkey
             and l_commitdate < l_receiptdate
@@ -30,12 +30,12 @@ SELECT
   o_orderpriority,
   Count(*) AS order_count
 FROM
-  testdata.tpch_tiny.orders AS o LEFT semi
+  testdata.tpch.orders AS o LEFT semi
   JOIN (
     SELECT
       *
     FROM
-      testdata.tpch_tiny.lineitem AS l
+      testdata.tpch.lineitem AS l
     WHERE
       l_commitdate < l_receiptdate
   ) AS l ON l.l_orderkey = o.o_orderkey

@@ -138,25 +138,30 @@ class CrossJoinNode(JoinNode):
                     self.left_table = Morsel.combine(self.left_morsels)
                     self.left_morsels = []
                 else:
-                    self.left_table = Morsel.empty()
+                    # Left side has no rows — cross product is always empty.
+                    self.left_table = None
                 yield None
             else:
-                if morsel is not None and morsel != EMPTY:
+                if morsel is not None and morsel != EMPTY and len(morsel) > 0:
                     self.left_morsels.append(morsel)
                 yield None
             return
 
         else:
             if morsel == EOS:
+                if self.left_table is None:
+                    yield EOS
+                    return
                 if self.right_morsels:
                     right_table = Morsel.combine(self.right_morsels)
                     self.right_morsels = []
                 else:
-                    right_table = Morsel.empty()
+                    yield EOS
+                    return
 
                 yield from _cross_join(self.left_table, right_table)
                 yield EOS
             else:
-                if morsel is not None and morsel != EMPTY:
+                if morsel is not None and morsel != EMPTY and len(morsel) > 0:
                     self.right_morsels.append(morsel)
                 yield None

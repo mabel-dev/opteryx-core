@@ -65,36 +65,6 @@ cdef int _value_type_from_dtype(object dtype):
             return dtype_int
         return -1
 
-    try:
-        import pyarrow as pa
-
-        if pa.types.is_boolean(dtype):
-            return DRAKEN_BOOL
-        if pa.types.is_int8(dtype):
-            return DRAKEN_INT8
-        if pa.types.is_int16(dtype):
-            return DRAKEN_INT16
-        if pa.types.is_int32(dtype):
-            return DRAKEN_INT32
-        if pa.types.is_int64(dtype) or pa.types.is_uint64(dtype):
-            return DRAKEN_INT64
-        if pa.types.is_integer(dtype):
-            return DRAKEN_INT32
-        if pa.types.is_floating(dtype):
-            return DRAKEN_FLOAT64
-        if pa.types.is_string(dtype) or pa.types.is_large_string(dtype) or pa.types.is_binary(dtype):
-            return DRAKEN_STRING
-        if pa.types.is_date32(dtype):
-            return DRAKEN_DATE32
-        if pa.types.is_time32(dtype):
-            return DRAKEN_TIME32
-        if pa.types.is_time64(dtype):
-            return DRAKEN_TIME64
-        if pa.types.is_timestamp(dtype):
-            return DRAKEN_TIMESTAMP64
-    except Exception:
-        return -1
-
     return -1
 
 
@@ -103,10 +73,6 @@ cdef object _typed_constant_from_scalar(object value, size_t length, object dtyp
     cdef object scalar = value
     cdef object dtype_name_obj = ""
     cdef str dtype_name
-    cdef object pa
-    cdef object cast_type
-    cdef object timestamp_type
-    cdef object time_type
     cdef bint is_time64 = False
 
     if hasattr(scalar, "as_py"):
@@ -164,70 +130,6 @@ cdef object _typed_constant_from_scalar(object value, size_t length, object dtyp
         from draken.vectors.string_vector import StringVector
 
         return StringVector.from_constant(b"" if is_null else scalar, length, is_null=is_null)
-
-    try:
-        import pyarrow as pa
-
-        if dtype is not None and not isinstance(dtype, str):
-            if pa.types.is_boolean(dtype):
-                from draken.vectors.bool_vector import BoolVector
-
-                return BoolVector.from_constant(False if is_null else scalar, length, is_null=is_null)
-            if pa.types.is_integer(dtype):
-                if pa.types.is_int64(dtype) or pa.types.is_uint64(dtype):
-                    from draken.vectors.int64_vector import Int64Vector
-
-                    return Int64Vector.from_constant(0 if is_null else scalar, length, is_null=is_null)
-                from draken.vectors.integer_vector import IntegerVector
-
-                return IntegerVector.from_constant(0 if is_null else scalar, length, is_null=is_null)
-            if pa.types.is_floating(dtype):
-                from draken.vectors.float64_vector import Float64Vector
-
-                return Float64Vector.from_constant(0.0 if is_null else scalar, length, is_null=is_null)
-            if (
-                pa.types.is_string(dtype)
-                or pa.types.is_large_string(dtype)
-                or pa.types.is_binary(dtype)
-                or pa.types.is_large_binary(dtype)
-            ):
-                from draken.vectors.string_vector import StringVector
-
-                return StringVector.from_constant(b"" if is_null else scalar, length, is_null=is_null)
-            if pa.types.is_date32(dtype):
-                from draken.vectors.date32_vector import Date32Vector
-
-                if not is_null:
-                    scalar = pa.array([scalar], type=pa.date32()).cast(pa.int32())[0].as_py()
-                return Date32Vector.from_constant(0 if is_null else scalar, length, is_null=is_null)
-            if pa.types.is_timestamp(dtype):
-                from draken.vectors.timestamp_vector import TimestampVector
-
-                timestamp_type = dtype
-                if not is_null:
-                    scalar = pa.array([scalar], type=timestamp_type).cast(pa.int64())[0].as_py()
-                return TimestampVector.from_constant(
-                    0 if is_null else scalar,
-                    length,
-                    is_null=is_null,
-                    timestamp_unit=timestamp_type.unit,
-                )
-            if pa.types.is_time32(dtype) or pa.types.is_time64(dtype):
-                from draken.vectors.time_vector import TimeVector
-
-                time_type = dtype
-                is_time64 = pa.types.is_time64(time_type)
-                if not is_null:
-                    cast_type = pa.int64() if is_time64 else pa.int32()
-                    scalar = pa.array([scalar], type=time_type).cast(cast_type)[0].as_py()
-                return TimeVector.from_constant(
-                    0 if is_null else scalar,
-                    length,
-                    is_null=is_null,
-                    is_time64=is_time64,
-                )
-    except Exception:
-        pass
 
     if dtype is None:
         if isinstance(scalar, bool):

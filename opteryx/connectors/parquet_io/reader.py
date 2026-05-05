@@ -49,6 +49,44 @@ def _logical_timestamp_unit(logical_type: str) -> str:
     return "us"
 
 
+def _coerce_decimal_vector(decoded: Any, col_stats: dict) -> Any:
+    """
+    Ensure parquet logical DECIMAL columns materialise as DecimalVector.
+
+    The rugo decoder emits Int64Vector for DECIMAL columns (INT64 physical type).
+    This helper converts those to DecimalVector at the parquet → vector boundary,
+    preserving precision and scale from the logical type annotation.
+    """
+    logical_type = str(col_stats.get("logical_type", "") or "").lower()
+    if not logical_type or not logical_type.startswith("decimal"):
+        return decoded
+
+    cls_name = decoded.__class__.__name__
+    if cls_name != "Int64Vector":
+        return decoded
+
+    # Parse "decimal(precision,scale)" from logical type string
+    # e.g. "decimal(15,2)" → precision=15, scale=2
+    precision = 18
+    scale = 0
+    inner_start = logical_type.find("(")
+    inner_end = logical_type.find(")", inner_start + 1) if inner_start >= 0 else -1
+    if inner_start >= 0 and inner_end > inner_start:
+        parts = logical_type[inner_start + 1 : inner_end].split(",")
+        try:
+            precision = int(parts[0].strip())
+        except (ValueError, IndexError):
+            pass
+        try:
+            scale = int(parts[1].strip())
+        except (ValueError, IndexError):
+            pass
+
+    from draken.vectors._decimal_vector import from_int64_vector as _int64_to_decimal
+
+    return _int64_to_decimal(decoded, precision, scale)
+
+
 def _coerce_temporal_vector(decoded: Any, col_stats: dict) -> Any:
     """
     Ensure parquet logical temporal columns materialize as temporal vectors.
@@ -314,6 +352,7 @@ def fetch_columns(
                     f"encodings={_col_stats.get('encodings')})"
                 )
             decoded = _coerce_temporal_vector(decoded, _col_stats)
+            decoded = _coerce_decimal_vector(decoded, _col_stats)
 
             if _trace_enabled():
                 _trace_decode_completed(

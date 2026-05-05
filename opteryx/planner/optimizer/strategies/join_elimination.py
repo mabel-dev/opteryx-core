@@ -48,6 +48,9 @@ def _right_columns_used_above(plan: LogicalPlan, join_nid: str, right_relations:
                 continue
             exprs = expr if isinstance(expr, list) else [expr]
             for e in exprs:
+                # order_by items are (column_node, ascending_bool) tuples
+                if isinstance(e, tuple):
+                    e = e[0]
                 for ident in get_all_nodes_of_type(e, (NodeType.IDENTIFIER,)):
                     if getattr(ident, "source", None) in right_relations:
                         return True

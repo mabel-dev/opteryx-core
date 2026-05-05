@@ -1,4 +1,4 @@
-/* 
+/*
 Opteryx syntax changes
 - view definitions changed to CTE
 */
@@ -7,11 +7,11 @@ with q2_min_ps_supplycost as
     p_partkey as min_p_partkey,
     min(ps_supplycost) as min_ps_supplycost
 from
-    testdata.tpch_tiny.part,
-    testdata.tpch_tiny.partsupp,
-    testdata.tpch_tiny.supplier,
-    testdata.tpch_tiny.nation,
-    testdata.tpch_tiny.region
+    testdata.tpch.part,
+    testdata.tpch.partsupp,
+    testdata.tpch.supplier,
+    testdata.tpch.nation,
+    testdata.tpch.region
 where
     p_partkey = ps_partkey
     and s_suppkey = ps_suppkey
@@ -31,11 +31,11 @@ select
     s_phone,
     s_comment
 from
-    testdata.tpch_tiny.part,
-    testdata.tpch_tiny.supplier,
-    testdata.tpch_tiny.partsupp,
-    testdata.tpch_tiny.nation,
-    testdata.tpch_tiny.region,
+    testdata.tpch.part,
+    testdata.tpch.supplier,
+    testdata.tpch.partsupp,
+    testdata.tpch.nation,
+    testdata.tpch.region,
     q2_min_ps_supplycost
 where
     p_partkey = ps_partkey

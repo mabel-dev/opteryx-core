@@ -25,11 +25,19 @@ def get_tests():
 
 
 TPCH_TESTS = list(get_tests())
+TPCH_SCALE = "001"  # 001 = 0.01
+
+# To create a new TPCH dataset - this example uses scale factor 10
+# - this creates the files in the current directory
+# $ cargo install tpchgen-cli
+# $ tpchgen-cli -s 10 --format=parquet
 
 
 @pytest.mark.parametrize("test_id, statement", TPCH_TESTS)
 def test_tpch(test_id, statement):
     try:
+        statement = statement.replace("testdata.tpch_tiny.", f"testdata.tpch_{TPCH_SCALE}.")
+        statement = statement.replace("testdata.tpch.", f"testdata.tpch_{TPCH_SCALE}.")
         session = opteryx.session()
         morsels = session.execute_to_morsels(statement)
         for _ in morsels:
@@ -58,8 +66,16 @@ if __name__ == "__main__":  # pragma: no cover
 
     width = shutil.get_terminal_size((80, 20))[0]
 
+    print("WARMING UP")
+    test_tpch(0, f"SELECT COUNT(*) FROM testdata.tpch_{TPCH_SCALE}.lineitem")
+
     print(f"RUNNING BATTERY OF {len(TPCH_TESTS)} TPC-H TESTS\n")
+    print(f"SCALE FACTOR: {TPCH_SCALE}")
+    pass_count = 0
+    total_count = 0
+    start_time = time.monotonic_ns()
     for index, (test, statement) in enumerate(TPCH_TESTS):
+        total_count += 1
         detail = f"\033[0;35m{test}\033[0m {format_sql(statement)}"
         detail = trunc_printable(detail, width - 20)
         print(
@@ -72,7 +88,9 @@ if __name__ == "__main__":  # pragma: no cover
             print(
                 f"\033[38;2;26;185;67m{str(int((time.monotonic_ns() - start) / 1e6)).rjust(4)}ms\033[0m ✅",
             )
+            pass_count += 1
         except AssertionError as err:
             print(f"\033[0;31m{str(int((time.monotonic_ns() - start) / 1e6)).rjust(4)}ms ❌\033[0m")
 
-    print("--- ✅ \033[0;32mdone\033[0m")
+    print(f"\n--- ✅ \033[0;32m{pass_count}/{total_count} passed\033[0m")
+    print(f"--- ⏱ \033[0;36m{str(int((time.monotonic_ns() - start_time) / 1e6)).rjust(4)}ms\033[0m")

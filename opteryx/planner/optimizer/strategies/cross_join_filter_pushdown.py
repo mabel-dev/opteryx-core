@@ -17,10 +17,11 @@ This can provide 100,000× speedup for large cartesian products by avoiding
 intermediate materialization of the full cross product.
 """
 
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
-from opteryx.expression import NodeType
+from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
+from opteryx.planner.binder.common import extract_join_fields
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.planner.optimizer.strategies.optimization_strategy import OptimizerContext, OptimizationStrategy
 from opteryx.utils import random_string
@@ -111,6 +112,37 @@ def _get_table_from_identifier(node: Optional[Node]) -> Optional[str]:
     return None
 
 
+def _collect_cross_joins(
+    plan: LogicalPlan,
+    node_id: str,
+    result: List[Tuple[str, LogicalPlanNode]],
+    visited: Optional[Set[str]] = None,
+) -> None:
+    """
+    Descend the input subtree of `node_id` collecting cross-join nodes that are
+    still candidates for conversion (no ON / USING). Subqueries are not
+    descended into — a CTE/subquery is an opaque relation at this scope.
+    """
+    if visited is None:
+        visited = set()
+    if node_id in visited:
+        return
+    visited.add(node_id)
+
+    for child_id, _, _ in plan.ingoing_edges(node_id):
+        child_node = plan[child_id]
+        if child_node.node_type == LogicalPlanStepType.Subquery:
+            continue
+        if (
+            child_node.node_type == LogicalPlanStepType.Join
+            and child_node.type == "cross join"
+            and not getattr(child_node, "on", None)
+            and not getattr(child_node, "using", None)
+        ):
+            result.append((child_id, child_node))
+        _collect_cross_joins(plan, child_id, result, visited)
+
+
 class CrossJoinFilterPushdownStrategy(OptimizationStrategy):
     """
     Optimization Rule - Cross Join Filter Pushdown
@@ -129,85 +161,67 @@ class CrossJoinFilterPushdownStrategy(OptimizationStrategy):
     """
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        """
-        Traverse plan and collect CROSS JOINs and FILTER nodes.
-        """
         if not context.optimized_plan:
             context.optimized_plan = context.pre_optimized_tree.copy()
-
-        # Collect cross joins and filters
-        if (
-            node.node_type == LogicalPlanStepType.Join
-            and node.type == "cross join"
-            and not getattr(node, "on", None)
-            and not getattr(node, "using", None)
-        ):
-            if not hasattr(context, "collected_joins"):
-                context.collected_joins = []
-            context.collected_joins.append(node)
-
-        if node.node_type == LogicalPlanStepType.Filter:
-            if not hasattr(context, "collected_filters"):
-                context.collected_filters = []
-            context.collected_filters.append(node)
-
         return context
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
         """
-        Rewrite CROSS JOINs with extractable predicates to INNER JOINs.
+        For every Filter in the plan, walk down the input subtree to find any
+        unconverted cross joins, and try to extract join predicates from the
+        filter's condition for each one. Cross joins below intermediate inner
+        joins are reachable this way — earlier predicate pushdown can interpose
+        such joins between the filter and the remaining cross joins.
         """
-        if not hasattr(context, "collected_joins") or not hasattr(context, "collected_filters"):
-            return plan
+        filter_ids = [
+            nid
+            for nid, node in plan.nodes(True)
+            if node.node_type == LogicalPlanStepType.Filter
+        ]
 
-        if not context.collected_joins or not context.collected_filters:
-            return plan
+        for filter_id in filter_ids:
+            filter_node = plan[filter_id]
+            if filter_node.condition is None:
+                continue
 
-        # For each cross join, check if the next node is a filter
-        for join_node in context.collected_joins:
-            # Find this node in the plan
-            join_id = None
-            for node_id, node in plan._nodes.items():
-                if node is join_node:
-                    join_id = node_id
+            cross_joins: List[Tuple[str, LogicalPlanNode]] = []
+            _collect_cross_joins(plan, filter_id, cross_joins)
+            if not cross_joins:
+                continue
+
+            remaining_condition = filter_node.condition
+            any_converted = False
+
+            for join_id, join_node in cross_joins:
+                join_preds, remaining_preds = _extract_join_predicates(
+                    remaining_condition,
+                    join_node.left_relation_names or [],
+                    join_node.right_relation_names or [],
+                )
+                if not join_preds:
+                    continue
+
+                on_condition = _build_and_condition_tree(join_preds)
+                join_node.type = "inner"
+                join_node.on = on_condition
+                join_node.left_columns, join_node.right_columns = extract_join_fields(
+                    on_condition,
+                    join_node.left_relation_names or [],
+                    join_node.right_relation_names or [],
+                )
+                join_node.columns = get_all_nodes_of_type(on_condition, (NodeType.IDENTIFIER,))
+                plan[join_id] = join_node
+                remaining_condition = _build_and_condition_tree(remaining_preds)
+                any_converted = True
+                if remaining_condition is None:
                     break
 
-            if join_id is None:
-                continue
-
-            # Get successor nodes
-            successors = plan.successors(join_id)
-            if not successors:
-                continue
-
-            # Check if successor is a filter node
-            successor_id = list(successors)[0]
-            successor_node = plan[successor_id]
-
-            if successor_node.node_type != LogicalPlanStepType.Filter:
-                continue
-
-            # Try to extract join predicates from the filter
-            join_preds, remaining_preds = _extract_join_predicates(
-                successor_node.condition,
-                join_node.left_relation_names or [],
-                join_node.right_relation_names or [],
-            )
-
-            if not join_preds:
-                # No join predicates found, keep as cross join
-                continue
-
-            # Convert to inner join
-            join_node.type = "inner"
-            join_node.on = _build_and_condition_tree(join_preds)
-
-            # Update or remove filter node
-            if remaining_preds:
-                successor_node.condition = _build_and_condition_tree(remaining_preds)
-            else:
-                # No remaining filters, remove the filter node
-                plan.remove_node(successor_id, heal=True)
+            if any_converted:
+                if remaining_condition is None:
+                    plan.remove_node(filter_id, heal=True)
+                else:
+                    filter_node.condition = remaining_condition
+                    plan[filter_id] = filter_node
 
         return plan
 

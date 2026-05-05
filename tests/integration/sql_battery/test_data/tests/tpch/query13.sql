@@ -12,7 +12,7 @@ from
             c_custkey,
             count(o_orderkey) as c_count
         from
-            testdata.tpch_tiny.customer left outer join testdata.tpch_tiny.orders on
+            testdata.tpch.customer left outer join testdata.tpch.orders on
                 c_custkey = o_custkey
                 and o_comment not like '%unusual%accounts%'
         group by
@@ -25,24 +25,24 @@ order by
     c_count desc;
 */
 
-SELECT 
-  c_count, 
-  Count(*) AS custdist 
-FROM 
+SELECT
+  c_count,
+  Count(*) AS custdist
+FROM
   (
-    SELECT 
-      c_custkey, 
-      Count(o_orderkey) AS c_count 
-    FROM 
-      testdata.tpch_tiny.customer 
-      LEFT OUTER JOIN testdata.tpch_tiny.orders ON c_custkey = o_custkey 
-    WHERE 
-      o_comment NOT LIKE '%unusual%accounts%' 
-    GROUP BY 
+    SELECT
+      c_custkey,
+      Count(o_orderkey) AS c_count
+    FROM
+      testdata.tpch.customer
+      LEFT OUTER JOIN testdata.tpch.orders ON c_custkey = o_custkey
+    WHERE
+      o_comment NOT LIKE '%unusual%accounts%'
+    GROUP BY
       c_custkey
-  ) c_orders 
-GROUP BY 
-  c_count 
-ORDER BY 
-  custdist DESC, 
+  ) c_orders
+GROUP BY
+  c_count
+ORDER BY
+  custdist DESC,
   c_count DESC;

@@ -8,15 +8,15 @@ from
         select
             n1.n_name as supp_nation,
             n2.n_name as cust_nation,
-            year(l_shipdate) as l_year,
+            EXTRACT(YEAR FROM l_shipdate) as l_year,
             l_extendedprice * (1 - l_discount) as volume
         from
-            testdata.tpch_tiny.supplier,
-            testdata.tpch_tiny.lineitem,
-            testdata.tpch_tiny.orders,
-            testdata.tpch_tiny.customer,
-            testdata.tpch_tiny.nation n1,
-            testdata.tpch_tiny.nation n2
+            testdata.tpch.supplier,
+            testdata.tpch.lineitem,
+            testdata.tpch.orders,
+            testdata.tpch.customer,
+            testdata.tpch.nation n1,
+            testdata.tpch.nation n2
         where
             s_suppkey = l_suppkey
             and o_orderkey = l_orderkey

@@ -69,7 +69,10 @@ class LogicalPlan(Graph):
 
 class LogicalPlanNode(Node):
     def copy(self) -> "Node":
-        return LogicalPlanNode(**super().copy().properties)
+        parent_copy = super().copy()
+        new_node = LogicalPlanNode(**parent_copy.properties)
+        new_node.uuid = parent_copy.uuid
+        return new_node
 
     def __str__(self):  # pragma: no cover
         try:
@@ -713,6 +716,8 @@ def process_join_tree(join: dict) -> LogicalPlanNode:
         if join_operator == {"Join": "Natural"}:
             return "natural join"
         elif join_operator == "CrossJoin":
+            return "cross join"
+        elif join_operator == {"Join": "None"}:
             return "cross join"
 
         join_operator = next(iter(join["join_operator"]))

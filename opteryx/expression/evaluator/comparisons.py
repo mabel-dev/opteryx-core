@@ -568,6 +568,11 @@ def draken_between(col, lower, upper, lower_inclusive: bool, upper_inclusive: bo
         lo_op = "GtEq" if lower_inclusive else "Gt"
         hi_op = "LtEq" if upper_inclusive else "Lt"
         return draken_compare(lo_op, col, lower).and_vector(draken_compare(hi_op, col, upper))
+    if vec_type == VectorType.DECIMAL:
+        # DecimalVector has no between(); use two scalar comparisons.
+        lo_op = "GtEq" if lower_inclusive else "Gt"
+        hi_op = "LtEq" if upper_inclusive else "Lt"
+        return _decimal_compare(lo_op, col, lower).and_vector(_decimal_compare(hi_op, col, upper))
     raise NotImplementedError(f"draken_between: unsupported vector type {vec_type!r}")
 
 

@@ -528,7 +528,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
         if col.source is not None:
             sources.append(col.source)
         if col.schema_column is not None:
-            sources.extend(col.schema_column.origin)
+            sources.extend(col.schema_column.origin or [])
     node.relations = set(sources)
 
     context.schemas = schemas

@@ -11,14 +11,14 @@ from
             l_extendedprice * (1 - l_discount) as volume,
             n2.n_name as nation
         from
-            testdata.tpch_tiny.part,
-            testdata.tpch_tiny.supplier,
-            testdata.tpch_tiny.lineitem,
-            testdata.tpch_tiny.orders,
-            testdata.tpch_tiny.customer,
-            testdata.tpch_tiny.nation n1,
-            testdata.tpch_tiny.nation n2,
-            testdata.tpch_tiny.region
+            testdata.tpch.part,
+            testdata.tpch.supplier,
+            testdata.tpch.lineitem,
+            testdata.tpch.orders,
+            testdata.tpch.customer,
+            testdata.tpch.nation n1,
+            testdata.tpch.nation n2,
+            testdata.tpch.region
         where
             p_partkey = l_partkey
             and s_suppkey = l_suppkey

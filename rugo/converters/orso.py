@@ -148,6 +148,36 @@ def _columns_from_metadata(metadata: Dict[str, Any]) -> Iterable[Dict[str, Any]]
     return _fallback_schema_columns(metadata)
 
 
+def _parse_decimal_params(logical_type: Optional[str]) -> tuple:
+    """
+    Extract precision and scale from a decimal logical type string.
+
+    Handles formats: 'decimal(15,2)', 'DECIMAL(38,10)', 'decimal'.
+
+    Returns:
+        (precision, scale) as ints, or (None, None) if not parseable.
+    """
+    if not logical_type:
+        return None, None
+    lt = logical_type.lower()
+    if not lt.startswith("decimal"):
+        return None, None
+    lb = lt.find("(")
+    rb = lt.find(")", lb + 1) if lb >= 0 else -1
+    if lb < 0 or rb <= lb:
+        return None, None
+    parts = lt[lb + 1 : rb].split(",")
+    try:
+        precision = int(parts[0].strip())
+    except (ValueError, IndexError):
+        precision = None
+    try:
+        scale = int(parts[1].strip())
+    except (ValueError, IndexError):
+        scale = None
+    return precision, scale
+
+
 def _fallback_schema_columns(metadata: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
     row_groups = metadata.get("row_groups") or []
     if not row_groups:
@@ -177,12 +207,19 @@ def _fallback_schema_columns(metadata: Dict[str, Any]) -> Iterable[Dict[str, Any
             }
             continue
 
-        columns[col_name] = {
+        col_entry: Dict[str, Any] = {
             "name": col_name,
             "physical_type": physical_type,
             "logical_type": logical_type,
             "nullable": bool(col_metadata.get("null_count", 0)),
         }
+        # Propagate precision/scale from decimal logical type (e.g. "decimal(15,2)")
+        _prec, _scale = _parse_decimal_params(logical_type)
+        if _prec is not None:
+            col_entry["precision"] = _prec
+        if _scale is not None:
+            col_entry["scale"] = _scale
+        columns[col_name] = col_entry
 
     return columns.values()
 
@@ -214,20 +251,33 @@ def rugo_to_orso_schema(
         name = entry.get("name")
         if not name:
             continue
+        if name.startswith("arrow_schema."):
+            name = name[len("arrow_schema."):]
 
         physical_type = entry.get("physical_type")
         logical_type = entry.get("logical_type")
         nullable = bool(entry.get("nullable", True))
 
         orso_type = _map_parquet_type_to_orso(physical_type, logical_type)
-        # print(f"DEBUG: creating FlatColumn for {name}, type={orso_type}, element_type={getattr(orso_type, '_element_type', 'MISSING')}")
+
+        # Resolve precision/scale: prefer explicit entry fields, fall back to
+        # parsing from decimal logical type string (e.g. "decimal(15,2)").
+        precision = entry.get("precision")
+        scale = entry.get("scale")
+        if precision is None or scale is None:
+            _prec, _scl = _parse_decimal_params(logical_type)
+            if precision is None:
+                precision = _prec
+            if scale is None:
+                scale = _scl
+
         columns.append(
             FlatColumn(
                 name=name,
                 type=orso_type,
                 nullable=nullable,
-                precision=entry.get("precision"),
-                scale=entry.get("scale"),
+                precision=precision,
+                scale=scale,
                 length=entry.get("length"),
                 element_type=entry.get("element_type"),
             )

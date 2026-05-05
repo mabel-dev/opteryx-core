@@ -284,3 +284,4 @@ rugo/src/parquet/parquet_reader.cpp
 draken/vectors/string_vector.c
 draken/vectors/int64_vector.c
 draken/tests/_rle_test_helpers.cpp
+testdata/tpch_1/**

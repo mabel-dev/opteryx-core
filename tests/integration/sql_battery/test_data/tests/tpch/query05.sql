@@ -2,12 +2,12 @@ select
     n_name,
     sum(l_extendedprice * (1 - l_discount)) as revenue
 from
-    testdata.tpch_tiny.customer,
-    testdata.tpch_tiny.orders,
-    testdata.tpch_tiny.lineitem,
-    testdata.tpch_tiny.supplier,
-    testdata.tpch_tiny.nation,
-    testdata.tpch_tiny.region
+    testdata.tpch.customer,
+    testdata.tpch.orders,
+    testdata.tpch.lineitem,
+    testdata.tpch.supplier,
+    testdata.tpch.nation,
+    testdata.tpch.region
 where
     c_custkey = o_custkey
     and l_orderkey = o_orderkey

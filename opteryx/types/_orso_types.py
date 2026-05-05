@@ -163,6 +163,21 @@ class OrsoTypes(Enum):
         # Normalize to uppercase for simple lookup
         upper = name.strip().upper()
 
+        # Handle parameterized types: DECIMAL(p,s), VARCHAR(n), etc.
+        if "(" in upper:
+            base = upper[:upper.index("(")].strip()
+            params = upper[upper.index("(")+1:upper.rindex(")")].strip()
+            parts = [p.strip() for p in params.split(",")]
+            precision = int(parts[0]) if parts and parts[0].isdigit() else None
+            scale = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+            _aliases_p = {"INT": "INTEGER", "FLOAT": "DOUBLE", "STRING": "VARCHAR",
+                          "TEXT": "VARCHAR", "BOOL": "BOOLEAN", "BYTES": "BLOB"}
+            base = _aliases_p.get(base, base)
+            try:
+                return (cls[base], None, precision, scale, None)
+            except KeyError:
+                raise ValueError(f"Unknown OrsoType: {name}")
+
         # Handle compound types: array<element>, list<element>, struct<...>
         if "<" in upper:
             outer, rest = upper.split("<", 1)

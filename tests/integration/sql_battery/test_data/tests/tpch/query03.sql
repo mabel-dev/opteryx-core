@@ -4,9 +4,9 @@ select
     o_orderdate,
     o_shippriority
 from
-    testdata.tpch_tiny.customer,
-    testdata.tpch_tiny.orders,
-    testdata.tpch_tiny.lineitem
+    testdata.tpch.customer,
+    testdata.tpch.orders,
+    testdata.tpch.lineitem
 where
     c_mktsegment = 'BUILDING'
     and c_custkey = o_custkey
