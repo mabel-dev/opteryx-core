@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <utility>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <thread>
 #include <fcntl.h>
@@ -61,6 +62,7 @@ class ParquetIOPipeline {
     // queue. Lock contention is negligible vs the IO/decode cost per item.
     std::deque<MorselRef> result_queue_;
     std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;
     size_t queue_capacity_;
     HttpClient http_client_;
 
@@ -179,26 +181,25 @@ class ParquetIOPipeline {
 
         result.read_ns = total_read_ns;
         result.decode_ns = total_decode_ns;
-        // Apply soft back-pressure: if the consumer is far behind, yield
-        // until it drains rather than letting the queue grow unbounded.
-        for (;;) {
-            {
-                std::lock_guard<std::mutex> lk(queue_mutex_);
-                if (result_queue_.size() < queue_capacity_) {
-                    result_queue_.push_back(std::move(result));
-                    size_t sz = result_queue_.size();
-                    enqueue_count_.fetch_add(1, std::memory_order_relaxed);
-                    size_t prev = queue_high_watermark_.load(std::memory_order_relaxed);
-                    while (sz > prev &&
-                           !queue_high_watermark_.compare_exchange_weak(
-                               prev, sz, std::memory_order_relaxed)) {}
-                    break;
-                }
+        // Apply soft back-pressure: if the consumer is far behind, block
+        // on the condition variable until it drains rather than spin-yielding.
+        {
+            std::unique_lock<std::mutex> lk(queue_mutex_);
+            queue_cv_.wait(lk, [this]() {
+                return result_queue_.size() < queue_capacity_ || shutdown_.load(std::memory_order_relaxed);
+            });
+            if (!shutdown_.load(std::memory_order_relaxed)) {
+                result_queue_.push_back(std::move(result));
+                size_t sz = result_queue_.size();
+                enqueue_count_.fetch_add(1, std::memory_order_relaxed);
+                size_t prev = queue_high_watermark_.load(std::memory_order_relaxed);
+                while (sz > prev &&
+                       !queue_high_watermark_.compare_exchange_weak(
+                           prev, sz, std::memory_order_relaxed)) {}
             }
-            spin_iterations_.fetch_add(1, std::memory_order_relaxed);
-            std::this_thread::yield();
         }
         pending_work_--;
+        queue_cv_.notify_one();
     }
 
  public:
@@ -239,11 +240,32 @@ class ParquetIOPipeline {
         if (result_queue_.empty()) return false;
         out = std::move(result_queue_.front());
         result_queue_.pop_front();
+        queue_cv_.notify_one();  // wake a blocked producer if queue was full
+        return true;
+    }
+
+    /**
+     * Block until a result is available or the pipeline is fully drained.
+     * Returns true and populates `out` when a result is ready.
+     * Returns false when the pipeline is shut down and the queue is empty.
+     */
+    bool wait_and_get_result(MorselRef& out) {
+        std::unique_lock<std::mutex> lk(queue_mutex_);
+        queue_cv_.wait(lk, [this]() {
+            return !result_queue_.empty() || shutdown_.load(std::memory_order_relaxed);
+        });
+        if (result_queue_.empty()) {
+            return false;  // shutdown and nothing left
+        }
+        out = std::move(result_queue_.front());
+        result_queue_.pop_front();
+        queue_cv_.notify_one();  // wake a blocked producer if queue was full
         return true;
     }
 
     void wait_shutdown() {
         shutdown_ = true;
+        queue_cv_.notify_all();
         if (decode_pool_) {
             decode_pool_->wait();
         }

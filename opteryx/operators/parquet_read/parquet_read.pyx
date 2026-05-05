@@ -25,17 +25,13 @@ between I/O and decode across all files and row groups simultaneously.
 """
 
 import time
-from concurrent.futures import as_completed
 from copy import deepcopy
 from typing import Generator
 
 from opteryx.compiled.structures.footer_cache import ParquetFooterBytesCache
 from opteryx.connectors.parquet_io import fetch_columns
-from opteryx.connectors.parquet_io import fetch_footer
 from opteryx.connectors.parquet_io import iter_row_groups
 from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
-from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
-from opteryx.connectors.parquet_io.thread_pool_manager import get_footer_pool
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
@@ -46,18 +42,6 @@ from opteryx import EOS
 from opteryx import config
 
 
-
-def _get_footer_pool():
-    """Get footer prefetch pool via thread_pool_manager."""
-    return get_footer_pool(max_workers=64)
-
-
-# Module-level pool proxy: lazy wrapper that always defers to thread_pool_manager cache.
-# This ensures that even if pools are shut down (e.g., in tests), the proxy will
-# get the fresh recreated pool from the cache on next access.
-# Footer reads are I/O-bound (two small range reads per file), so threads scale well
-# past cpu_count().
-_FOOTER_POOL = LazyPoolProxy(_get_footer_pool)
 
 
 class ParquetReadNode(ReaderNode):
@@ -634,24 +618,6 @@ class ParquetReadNode(ReaderNode):
 
         footer_bytes_cache = ParquetFooterBytesCache()
 
-        prefetched_footers: dict[str, dict] = {}
-
-        unique_blob_paths = list(dict.fromkeys(blob_paths))
-        if unique_blob_paths:
-            future_to_path = {
-                _FOOTER_POOL.submit(
-                    fetch_footer,
-                    filesystem,
-                    blob_name,
-                    file_size=file_sizes.get(blob_name),
-                    footer_bytes_cache=footer_bytes_cache,
-                ): blob_name
-                for blob_name in unique_blob_paths
-            }
-            for future in as_completed(future_to_path):
-                blob_name = future_to_path[future]
-                prefetched_footers[blob_name] = future.result()
-
         result_morsel = None
         two_pass_active = two_pass_eligible
         consecutive_full_pass = 0
@@ -669,7 +635,6 @@ class ParquetReadNode(ReaderNode):
                 file_sizes=file_sizes or None,
                 connector=connector_type,
                 query_id=getattr(self.properties, "query_id", None),
-                prefetched_footers=prefetched_footers,
                 footer_bytes_cache=footer_bytes_cache,
             ):
                 path, rg_idx = self._extract_row_group_metadata(row_group)

@@ -31,50 +31,8 @@ _PARQUET_FOOTER_SUFFIX = 8
 _FOOTER_PREFETCH = 65536
 
 
-cdef extern from "metadata.hpp":
-    cdef cppclass ColumnStats:
-        string name
-        string physical_type
-        string logical_type
-        int64_t num_values
-        int64_t total_uncompressed_size
-        int64_t total_compressed_size
-        int64_t data_page_offset
-        int64_t dictionary_page_offset
-        int32_t codec
-        int32_t max_definition_level
-        int32_t max_repetition_level
-        vector[int32_t] encodings
-
-
-cdef extern from "io_pipeline.hpp" namespace "rugo":
-    cdef cppclass MorselRef:
-        string path
-        int rg_idx
-        vector[string] column_names
-        vector[vector[uint8_t]] column_ipc_bytes
-        int64_t bytes_fetched
-        uint64_t read_ns
-        uint64_t decode_ns
-        string error
-        bint success
-
-    cdef cppclass ParquetIOPipeline:
-        ParquetIOPipeline(int decode_workers, size_t queue_capacity) except +
-        void submit_row_group(const string& path, int rg_idx,
-                             const vector[string]& column_names,
-                             const vector[ColumnStats]& column_stats) nogil
-        bint try_get_result(MorselRef& out) nogil
-        void wait_shutdown() nogil
-        int pending_work_count() nogil
-        uint64_t spin_iterations() nogil
-        uint64_t enqueue_count() nogil
-        size_t queue_high_watermark() nogil
-
-
 cdef class CppIOPipeline:
-    cdef ParquetIOPipeline* pipeline
-    cdef MemoryPool pool
+    # C attributes declared in pool_reader.pxd; only method bodies here.
 
     def __cinit__(self, int decode_workers=4, size_t queue_capacity=256,
                   int64_t pool_size=256*1024*1024):
@@ -180,6 +138,60 @@ cdef class CppIOPipeline:
             # Zero-copy handoff: commit() uses the buffer protocol, so a typed
             # memoryview over the C++ vector storage is enough. Avoids a Python
             # bytes() copy of the entire column IPC payload.
+            col_len = result.column_ipc_bytes[i].size()
+            if col_len == 0:
+                ref_id = self.pool.commit(b"")
+            else:
+                col_ptr = result.column_ipc_bytes[i].data()
+                col_view = <const uint8_t[:col_len]>col_ptr
+                ref_id = self.pool.commit(col_view)
+            if ref_id == -1:
+                return {
+                    'success': False,
+                    'error': f'MemoryPool exhausted storing column {col_name}',
+                    'path': result.path.decode('utf-8'),
+                    'rg_idx': result.rg_idx,
+                }
+            ref_ids[col_name] = ref_id
+
+        return {
+            'success': True,
+            'path': result.path.decode('utf-8'),
+            'rg_idx': result.rg_idx,
+            'ref_ids': ref_ids,
+            'bytes_fetched': result.bytes_fetched,
+            'read_ns': result.read_ns,
+            'decode_ns': result.decode_ns,
+        }
+
+    def wait_result(self):
+        """Block (GIL released) until a result is available or pipeline is drained."""
+        cdef MorselRef result
+        cdef bint got_result
+
+        with nogil:
+            got_result = self.pipeline.wait_and_get_result(result)
+
+        if not got_result:
+            return None
+
+        if not result.success:
+            return {
+                'success': False,
+                'error': result.error.decode('utf-8'),
+                'path': result.path.decode('utf-8'),
+                'rg_idx': result.rg_idx,
+            }
+
+        cdef dict ref_ids = {}
+        cdef int64_t ref_id
+        cdef str col_name
+        cdef const uint8_t* col_ptr
+        cdef Py_ssize_t col_len
+        cdef const uint8_t[::1] col_view
+
+        for i in range(result.column_ipc_bytes.size()):
+            col_name = result.column_names[i].decode('utf-8')
             col_len = result.column_ipc_bytes[i].size()
             if col_len == 0:
                 ref_id = self.pool.commit(b"")
@@ -408,8 +420,6 @@ def iter_row_groups_ipc(
     cdef uint64_t t_submit_ns = 0
     cdef uint64_t t_consume_ns = 0
     cdef uint64_t t_get_result_ns = 0
-    cdef uint64_t t_sleep_ns = 0
-    cdef uint64_t n_sleep_ticks = 0
     cdef uint64_t _t0, _t1, _ts
     cdef unordered_map[string, FileStats] local_footers_native
     cdef string path_bytes_cpp
@@ -483,14 +493,14 @@ def iter_row_groups_ipc(
         results_received = 0
         while results_received < len(work_items):
             _ts = time.monotonic_ns()
-            result = pipeline.get_result()
+            result = pipeline.wait_result()
             t_get_result_ns += time.monotonic_ns() - _ts
             if result is None:
-                _ts = time.monotonic_ns()
-                time.sleep(0.0001)
-                t_sleep_ns += time.monotonic_ns() - _ts
-                n_sleep_ticks += 1
-                continue
+                # Pipeline drained before all work completed — should not happen.
+                raise RuntimeError(
+                    f"Parquet pipeline drained with {len(work_items) - results_received} "
+                    f"result(s) missing"
+                )
 
             if not result['success']:
                 raise RuntimeError(f"Parquet pipeline error: {result.get('error', 'unknown')}")
@@ -532,14 +542,14 @@ def iter_row_groups_ipc(
             sys.stderr.write(
                 "\n[io_diag] paths=%d rgs=%d  phase1=%.1fms phase2=%.1fms consume=%.1fms\n"
                 "         footer_total=%.1fms  submit_total=%.3fms\n"
-                "         get_result_total=%.1fms  sleep_total=%.1fms ticks=%d\n"
+                "         wait_result_total=%.1fms\n"
                 "         queue: enqueues=%d high_watermark=%d spin_iters=%d\n"
                 % (
                     len(set(p for p, _ in work_items)) if work_items else 0,
                     len(work_items),
                     t_phase1_ns / 1e6, t_phase2_ns / 1e6, t_consume_ns / 1e6,
                     t_footer_ns / 1e6, t_submit_ns / 1e6,
-                    t_get_result_ns / 1e6, t_sleep_ns / 1e6, n_sleep_ticks,
+                    t_get_result_ns / 1e6,
                     diag["enqueue_count"], diag["queue_high_watermark"],
                     diag["spin_iterations"],
                 )
