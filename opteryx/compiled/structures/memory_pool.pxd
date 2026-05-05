@@ -1,7 +1,7 @@
 # Cython declaration file for MemoryPool
 # Allows other .pyx modules to use typed references via cimport
 
-from libc.stdint cimport int64_t
+from libc.stdint cimport int64_t, uint8_t
 from libcpp.vector cimport vector
 from libcpp.unordered_map cimport unordered_map
 
@@ -33,7 +33,7 @@ cdef class MemoryPool:
         int64_t alignment
         bint auto_resize
 
-    cpdef int64_t commit(self, object data)
+    cpdef int64_t commit(self, const uint8_t[::1] data)
     cpdef bytes read(self, int64_t ref_id, bint zero_copy, bint latch)
     cpdef void release(self, int64_t ref_id)
     cpdef void latch(self, int64_t ref_id)

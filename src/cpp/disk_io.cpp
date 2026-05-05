@@ -3,11 +3,16 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <thread>
+#include <vector>
+
+#include "disk_io.h"
 
 size_t get_optimal_chunk_size(size_t file_size) {
     // For very small files, read in one chunk
@@ -561,5 +566,174 @@ int unmap_memory_c(unsigned char* addr, size_t size) {
     return munmap(addr, size) == 0 ? 0 : -errno;
 #else
     return UnmapViewOfFile(addr) ? 0 : -1;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Batched range read.
+//
+// Opens the file once, fans pread() across workers sharing one fd. Caller
+// supplies pre-allocated destination buffers; we never allocate on the hot
+// path. Fail-fast on the first error.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr size_t kMaxRangeWorkers = 8;
+
+#if defined(__linux__) || defined(__APPLE__)
+
+// Run one range against an open fd (clamped against file_size).
+// Returns 0 on success or a negative errno.
+inline int run_one_range(int fd, size_t file_size, read_range_t& r) {
+    if (r.offset >= file_size) {
+        r.out_len = 0;
+        r.rc = 0;
+        return 0;
+    }
+    size_t to_read = (r.offset + r.length > file_size)
+                       ? (file_size - r.offset)
+                       : r.length;
+    size_t done = 0;
+    while (done < to_read) {
+        ssize_t n = pread(fd, r.dst + done, to_read - done,
+                          static_cast<off_t>(r.offset + done));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            r.rc = -errno;
+            r.out_len = done;
+            return r.rc;
+        }
+        if (n == 0) {
+            // Short read: file ended earlier than fstat said. Accept it.
+            break;
+        }
+        done += static_cast<size_t>(n);
+    }
+    r.out_len = done;
+    r.rc = 0;
+    return 0;
+}
+
+int read_ranges_pread_posix(const char* path, read_range_t* ranges, size_t count) {
+    if (count == 0) return 0;
+
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        int e = -errno;
+        for (size_t i = 0; i < count; ++i) { ranges[i].out_len = 0; ranges[i].rc = e; }
+        return e;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        int e = -errno;
+        close(fd);
+        for (size_t i = 0; i < count; ++i) { ranges[i].out_len = 0; ranges[i].rc = e; }
+        return e;
+    }
+    size_t file_size = static_cast<size_t>(st.st_size);
+
+    // Single-range fast path: no thread spawn.
+    if (count == 1) {
+        int rc = run_one_range(fd, file_size, ranges[0]);
+        close(fd);
+        return rc;
+    }
+
+    // Initialise output fields; -ECANCELED for ranges that don't end up running.
+    for (size_t i = 0; i < count; ++i) {
+        ranges[i].out_len = 0;
+        ranges[i].rc = -ECANCELED;
+    }
+
+    std::atomic<size_t> next_idx{0};
+    std::atomic<int> first_err{0};
+
+    size_t worker_count = std::min<size_t>(count, kMaxRangeWorkers);
+
+    auto worker = [&]() {
+        while (true) {
+            if (first_err.load(std::memory_order_relaxed) != 0) return;
+            size_t i = next_idx.fetch_add(1, std::memory_order_relaxed);
+            if (i >= count) return;
+
+            int rc = run_one_range(fd, file_size, ranges[i]);
+            if (rc != 0) {
+                int expected = 0;
+                first_err.compare_exchange_strong(expected, rc,
+                                                  std::memory_order_relaxed,
+                                                  std::memory_order_relaxed);
+                return;
+            }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(worker_count);
+    for (size_t w = 0; w < worker_count; ++w) {
+        threads.emplace_back(worker);
+    }
+    for (auto& t : threads) t.join();
+
+    close(fd);
+    return first_err.load(std::memory_order_relaxed);
+}
+
+#else  // Windows: simple, correct, sequential. Windows is not the perf target.
+
+int read_ranges_pread_win(const char* path, read_range_t* ranges, size_t count) {
+    if (count == 0) return 0;
+
+    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ,
+                               NULL, OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
+                               NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        int e = -1;
+        for (size_t i = 0; i < count; ++i) { ranges[i].out_len = 0; ranges[i].rc = e; }
+        return e;
+    }
+
+    DWORD sizeHigh = 0;
+    DWORD sizeLow = GetFileSize(hFile, &sizeHigh);
+    size_t file_size = (static_cast<size_t>(sizeHigh) << 32) | sizeLow;
+
+    int first_err = 0;
+    for (size_t i = 0; i < count; ++i) {
+        read_range_t& r = ranges[i];
+        if (first_err != 0) { r.out_len = 0; r.rc = -ECANCELED; continue; }
+        if (r.offset >= file_size) { r.out_len = 0; r.rc = 0; continue; }
+        size_t to_read = (r.offset + r.length > file_size)
+                           ? (file_size - r.offset) : r.length;
+        OVERLAPPED ov = {};
+        ov.Offset = static_cast<DWORD>(r.offset & 0xFFFFFFFFu);
+        ov.OffsetHigh = static_cast<DWORD>(r.offset >> 32);
+        DWORD got = 0;
+        BOOL ok = ReadFile(hFile, r.dst, static_cast<DWORD>(to_read), &got, &ov);
+        if (!ok && GetLastError() != ERROR_HANDLE_EOF) {
+            r.rc = -1;
+            r.out_len = got;
+            first_err = -1;
+        } else {
+            r.rc = 0;
+            r.out_len = got;
+        }
+    }
+
+    CloseHandle(hFile);
+    return first_err;
+}
+
+#endif
+
+}  // namespace
+
+// Public symbol — the only definition outside the anonymous namespace.
+int read_ranges_pread(const char* path, read_range_t* ranges, size_t count) {
+#if defined(__linux__) || defined(__APPLE__)
+    return read_ranges_pread_posix(path, ranges, count);
+#else
+    return read_ranges_pread_win(path, ranges, count);
 #endif
 }

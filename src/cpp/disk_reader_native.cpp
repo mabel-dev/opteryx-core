@@ -233,6 +233,65 @@ NB_MODULE(disk_reader, m) {
     );
 
     m.def(
+        "read_file_ranges",
+        [](nb::str path, nb::sequence ranges_seq) -> nb::list {
+            const char* c_path = path.c_str();
+
+            // Materialise the input (offset, length) pairs.
+            std::vector<std::pair<size_t, size_t>> req;
+            for (nb::handle item : ranges_seq) {
+                nb::tuple t = nb::cast<nb::tuple>(item);
+                if (t.size() != 2) {
+                    throw nb::value_error("each range must be a (offset, length) pair");
+                }
+                size_t off = nb::cast<size_t>(t[0]);
+                size_t len = nb::cast<size_t>(t[1]);
+                req.emplace_back(off, len);
+            }
+            const size_t n = req.size();
+
+            // Allocate one bytearray per range up front (Python objects need GIL).
+            // We'll wire the destination pointers into read_range_t and release
+            // the GIL only for the actual I/O.
+            std::vector<nb::bytearray> buffers;
+            buffers.reserve(n);
+            std::vector<read_range_t> rr(n);
+
+            for (size_t i = 0; i < n; ++i) {
+                const size_t len = req[i].second;
+                buffers.emplace_back(nullptr, len);
+                rr[i].offset  = req[i].first;
+                rr[i].length  = len;
+                rr[i].dst     = reinterpret_cast<uint8_t*>(buffers[i].data());
+                rr[i].out_len = 0;
+                rr[i].rc      = 0;
+            }
+
+            int rc = 0;
+            {
+                nb::gil_scoped_release rel;
+                rc = read_ranges_pread(c_path, n ? rr.data() : nullptr, n);
+            }
+
+            if (rc != 0) {
+                raise_path_error(rc, c_path, "read_file_ranges failed");
+            }
+
+            // Resize each buffer to the actual bytes read and wrap as memoryview.
+            nb::list out;
+            for (size_t i = 0; i < n; ++i) {
+                if (rr[i].out_len < rr[i].length) {
+                    buffers[i].resize(rr[i].out_len);
+                }
+                out.append(make_memoryview_from_object(buffers[i].ptr()));
+            }
+            return out;
+        },
+        nb::arg("path"),
+        nb::arg("ranges")
+    );
+
+    m.def(
         "read_file_slice_to_bytes",
         [](nb::str path, size_t offset, size_t length, bool sequential, bool willneed, bool drop_after) {
             nb::object mv = read_slice_impl(path, offset, length, sequential, willneed, drop_after);

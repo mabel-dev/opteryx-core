@@ -5,27 +5,8 @@ Uses memory-mapped files and stream wrappers for high-performance local file acc
 """
 
 import os
-from concurrent.futures import as_completed
 from typing import List
 from typing import Tuple
-
-from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
-from opteryx.connectors.parquet_io.thread_pool_manager import get_filesystem_pool
-
-# Tuned for SSD-only systems: 64 was overkill (contention > benefit)
-# Optimal saturation point for local range reads: 48 workers
-_MAX_PARALLEL_RANGE_READS = 48
-
-
-def _get_local_range_pool():
-    """Get local range-read pool via thread_pool_manager."""
-    return get_filesystem_pool(protocol="local", max_workers=_MAX_PARALLEL_RANGE_READS)
-
-
-# Module-level thread pool proxy: lazy wrapper that always defers to thread_pool_manager cache.
-# This ensures that even if pools are shut down (e.g., in tests), the proxy will
-# get the fresh recreated pool from the cache on next access.
-_LOCAL_RANGE_POOL = LazyPoolProxy(_get_local_range_pool)
 
 
 class MemoryMappedFile:
@@ -200,49 +181,25 @@ class OpteryxLocalFileSystem:
 
         return infos[0] if single_path else infos
 
-    def read_ranges(self, path: str, ranges: List[Tuple[int, int]]) -> List[bytes]:
+    def read_ranges(self, path: str, ranges: List[Tuple[int, int]]) -> List[memoryview]:
         """Read multiple byte ranges from a local file.
+
+        Delegates to the C++ batched reader, which opens the file once, fans
+        pread() across native worker threads, and returns one memoryview per
+        range. The GIL is released for the duration of the I/O.
 
         Args:
             path: Absolute or relative path to the local file.
             ranges: List of (offset, length) tuples specifying byte ranges to read.
 
         Returns:
-            List of byte buffers in the same order as ranges.
+            List of memoryview buffers in the same order as ranges. A buffer
+            shorter than the requested length indicates EOF was reached.
         """
         if not ranges:
             return []
-
-        # Avoid threadpool overhead for trivial calls or environments without pread().
-        if len(ranges) == 1 or not hasattr(os, "pread"):
-            result = []
-            with open(path, "rb") as f:
-                for offset, length in ranges:
-                    f.seek(offset)
-                    result.append(f.read(length))
-            return result
-
-        # Use pread() to read independent ranges from one fd in parallel while
-        # preserving output order.
-        fd = os.open(path, os.O_RDONLY)
-        try:
-            worker_count = min(_MAX_PARALLEL_RANGE_READS, len(ranges))
-            result: List[bytes] = [b""] * len(ranges)
-
-            def _read_one(idx: int, offset: int, length: int) -> Tuple[int, bytes]:
-                return idx, os.pread(fd, length, offset)
-
-            futures = [
-                _LOCAL_RANGE_POOL.submit(_read_one, idx, offset, length)
-                for idx, (offset, length) in enumerate(ranges)
-            ]
-            for fut in as_completed(futures):
-                idx, chunk = fut.result()
-                result[idx] = chunk
-
-            return result
-        finally:
-            os.close(fd)
+        from opteryx.compiled.io.disk_reader import read_file_ranges
+        return read_file_ranges(path, ranges)
 
     def stream_to(self, path: str, sink, chunk_size: int = 1 << 20) -> int:
         """Stream a local file directly into *sink* without an intermediate buffer.

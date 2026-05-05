@@ -11,7 +11,7 @@ Value: raw footer envelope bytes (stored in MemoryPool, accessed via ref_id)
 """
 
 from typing import Optional
-from libc.stdint cimport int64_t
+from libc.stdint cimport int64_t, uint8_t
 
 from opteryx.compiled.structures.lru_k cimport LRU_K
 from opteryx.compiled.structures.memory_pool cimport MemoryPool
@@ -56,7 +56,7 @@ cdef class ParquetFooterBytesCache:
         ref_id = self._path_to_ref[path]
         return self.pool.read(ref_id, False, False)
 
-    cpdef bint put(self, str path, bytes envelope):
+    cpdef bint put(self, str path, const uint8_t[::1] envelope):
         """Store footer envelope in cache with LRU tracking.
 
         On cache miss, commits to pool. If pool fills, evicts LRU entries until
@@ -64,7 +64,9 @@ cdef class ParquetFooterBytesCache:
 
         Args:
             path: File path (cache key)
-            envelope: Raw footer bytes (magic + footer + magic + length)
+            envelope: Raw footer bytes (magic + footer + magic + length).
+                Accepts any contiguous read-only byte buffer (bytes, bytearray,
+                memoryview).
 
         Returns:
             bool: True if stored successfully, False if pool exhausted

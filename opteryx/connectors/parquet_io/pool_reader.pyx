@@ -14,7 +14,6 @@ from libc.stdint cimport uint8_t, int32_t, int64_t, uint32_t, uint64_t
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.unordered_map cimport unordered_map
-import struct as _struct
 import time
 
 from opteryx.compiled.structures.memory_pool cimport MemoryPool
@@ -239,8 +238,13 @@ cdef tuple _read_footer_payload(
 ):
     cdef int64_t file_size, prefetch_size, prefetch_offset
     cdef int64_t footer_length, total_footer_payload, footer_offset, bytes_fetched
+    cdef int64_t footer_start, n, lp, env_size, off
+    cdef uint32_t footer_length_u32
     cdef uint64_t start_ns = time.monotonic_ns()
-    cdef bytes tail_bytes, footer_bytes_data, envelope
+    cdef const uint8_t[::1] tail_view, footer_view
+    cdef uint8_t[::1] env_view
+    cdef bytearray env_buf
+    cdef bytes envelope
 
     if _cfg.OPTERYX_TRACE:
         _record_event("download_start", file_id=path, component="footer", connector=connector)
@@ -263,15 +267,29 @@ cdef tuple _read_footer_payload(
 
     prefetch_size = min(_FOOTER_PREFETCH, file_size)
     prefetch_offset = file_size - prefetch_size
-    (tail_bytes,) = filesystem.read_ranges(path, [(prefetch_offset, prefetch_size)])
+    # Buffer-protocol assignment: works for bytes (HTTP/GCS) and memoryview
+    # (local filesystem zero-copy path) without branching.
+    tail_view = filesystem.read_ranges(path, [(prefetch_offset, prefetch_size)])[0]
 
-    if tail_bytes[-4:] != _PARQUET_MAGIC:
+    n = tail_view.shape[0]
+    if not (tail_view[n - 4] == 0x50   # 'P'
+        and tail_view[n - 3] == 0x41   # 'A'
+        and tail_view[n - 2] == 0x52   # 'R'
+        and tail_view[n - 1] == 0x31): # '1'
         raise ValueError(
             f"File {path!r} does not end with Parquet magic bytes "
-            f"(got {tail_bytes[-4:]!r}, expected {_PARQUET_MAGIC!r})"
+            f"(got {bytes(tail_view[n - 4:n])!r}, expected {_PARQUET_MAGIC!r})"
         )
 
-    (footer_length,) = _struct.unpack_from("<I", tail_bytes, len(tail_bytes) - _PARQUET_FOOTER_SUFFIX)
+    # 4-byte little-endian read of footer length: typed C arithmetic, no struct.
+    lp = n - _PARQUET_FOOTER_SUFFIX
+    footer_length_u32 = (
+        <uint32_t>tail_view[lp]
+        | (<uint32_t>tail_view[lp + 1] << 8)
+        | (<uint32_t>tail_view[lp + 2] << 16)
+        | (<uint32_t>tail_view[lp + 3] << 24)
+    )
+    footer_length = <int64_t>footer_length_u32
     if footer_length == 0 or footer_length > file_size - _PARQUET_FOOTER_SUFFIX:
         raise ValueError(
             f"Invalid footer length {footer_length} in {path!r} (file_size={file_size})"
@@ -279,12 +297,12 @@ cdef tuple _read_footer_payload(
 
     total_footer_payload = footer_length + _PARQUET_FOOTER_SUFFIX
     if total_footer_payload <= prefetch_size:
-        footer_start = len(tail_bytes) - total_footer_payload
-        footer_bytes_data = tail_bytes[footer_start : footer_start + footer_length]
+        footer_start = n - total_footer_payload
+        footer_view = tail_view[footer_start : footer_start + footer_length]
         bytes_fetched = prefetch_size
     else:
         footer_offset = file_size - _PARQUET_FOOTER_SUFFIX - footer_length
-        (footer_bytes_data,) = filesystem.read_ranges(path, [(footer_offset, footer_length)])
+        footer_view = filesystem.read_ranges(path, [(footer_offset, footer_length)])[0]
         bytes_fetched = prefetch_size + footer_length
 
     if _cfg.OPTERYX_TRACE:
@@ -293,7 +311,32 @@ cdef tuple _read_footer_payload(
             file_id=path, component="footer", bytes_received=bytes_fetched, connector=connector,
         )
 
-    envelope = _PARQUET_MAGIC + footer_bytes_data + _struct.pack("<I", footer_length) + _PARQUET_MAGIC
+    # Assemble envelope: MAGIC + footer + length(LE) + MAGIC, in one contiguous
+    # bytearray with a single memcpy of the footer payload. _parse_footer_envelope
+    # and the cache contract take `bytes`, so we materialise once at the end.
+    env_size = 4 + footer_length + 4 + 4
+    env_buf = bytearray(env_size)
+    env_view = env_buf
+
+    env_view[0] = 0x50
+    env_view[1] = 0x41
+    env_view[2] = 0x52
+    env_view[3] = 0x31
+
+    env_view[4 : 4 + footer_length] = footer_view
+
+    off = 4 + footer_length
+    env_view[off]     = <uint8_t>( footer_length_u32        & 0xff)
+    env_view[off + 1] = <uint8_t>((footer_length_u32 >>  8) & 0xff)
+    env_view[off + 2] = <uint8_t>((footer_length_u32 >> 16) & 0xff)
+    env_view[off + 3] = <uint8_t>((footer_length_u32 >> 24) & 0xff)
+
+    env_view[off + 4] = 0x50
+    env_view[off + 5] = 0x41
+    env_view[off + 6] = 0x52
+    env_view[off + 7] = 0x31
+
+    envelope = bytes(env_buf)
 
     if footer_cache is not None:
         footer_cache.put(path, envelope)

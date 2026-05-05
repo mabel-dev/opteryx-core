@@ -26,8 +26,7 @@ Features:
 
 from libc.stdlib cimport malloc, free, realloc
 from libc.string cimport memcpy, memmove
-from cpython.bytes cimport PyBytes_AsString, PyBytes_FromStringAndSize
-from cpython.buffer cimport PyBUF_SIMPLE, PyObject_GetBuffer, PyBuffer_Release, Py_buffer
+from cpython.bytes cimport PyBytes_FromStringAndSize
 from libcpp.vector cimport vector
 from libcpp.unordered_map cimport unordered_map
 from cython.operator cimport dereference, preincrement
@@ -292,29 +291,18 @@ cdef class MemoryPool:
 
             return 100 - (largest_free_block * 100 // total_free)
 
-    cpdef int64_t commit(self, object data):
-        cdef int64_t len_data
+    cpdef int64_t commit(self, const uint8_t[::1] data):
+        cdef int64_t len_data = data.shape[0]
         cdef int64_t segment_index
         cdef MemorySegment segment, new_segment
         cdef int64_t new_size
         cdef MemorySegment additional_space
         cdef int64_t ref_id = self.next_ref_id
-        cdef Py_buffer view
-        cdef char* raw_ptr
+        cdef const char* raw_ptr
         cdef int64_t aligned_size
         cdef SegmentMetadata metadata
 
         self.next_ref_id += 1
-
-        if isinstance(data, bytes):
-            len_data = len(data)
-            raw_ptr = PyBytes_AsString(data)
-        else:
-            if PyObject_GetBuffer(data, &view, PyBUF_SIMPLE) == 0:
-                len_data = view.len
-                raw_ptr = <char*> view.buf
-            else:
-                raise TypeError("Unsupported data type for commit")
 
         if len_data == 0:
             with self.lock:
@@ -326,6 +314,10 @@ cdef class MemoryPool:
                 self.c_metadata[ref_id] = metadata
                 self.commits += 1
             return ref_id
+
+        # Non-zero length: take the buffer pointer. Cython acquired the buffer
+        # protocol at the call boundary; releases it on function exit.
+        raw_ptr = <const char*>&data[0]
 
         aligned_size = _align_size(len_data, self.alignment)
 
@@ -361,8 +353,6 @@ cdef class MemoryPool:
 
             if segment_index == -1:
                 self.failed_commits += 1
-                if not isinstance(data, bytes):
-                    PyBuffer_Release(&view)
                 return -1
 
             segment = self.segments[segment_index]
@@ -396,9 +386,6 @@ cdef class MemoryPool:
             memcpy(self.pool + new_segment.start, raw_ptr, len_data)
             self.used_size += aligned_size
             self.commits += 1
-
-        if not isinstance(data, bytes):
-            PyBuffer_Release(&view)
 
         return ref_id
 
