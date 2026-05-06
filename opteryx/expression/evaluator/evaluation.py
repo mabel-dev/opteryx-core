@@ -265,7 +265,7 @@ def _compute_target_hash(target_names, target_vecs):
 
     target_morsel = Morsel.from_vectors(target_names, target_vecs)
     target_hash_view = target_morsel.hash(target_names)
-    return int(memoryview(target_hash_view).cast("Q")[0])
+    return int(target_hash_view[0])
 
 
 def _try_collect_numeric_eq_predicates(node):
@@ -323,7 +323,7 @@ def _try_collect_numeric_eq_predicates(node):
 
         preds.append((sc.identity, sc.name.encode(), lit_val, col_type))
 
-    if len(preds) < 2:
+    if len(preds) < 3:
         return None
     return preds
 
@@ -340,10 +340,7 @@ def _evaluate_numeric_eq_via_hash(preds, morsel):
     Returns a BoolVector or None if the fast-path could not be constructed
     (caller should fall back to the per-column path).
     """
-    import numpy as np
-
-    from draken.interop.vector_sequence import vector_from_sequence
-    from draken.morsels.morsel import Morsel
+    from draken.interop.vector_sequence import bool_vector_from_uint64_eq
 
     num_rows = morsel.num_rows
     if num_rows == 0:
@@ -388,17 +385,7 @@ def _evaluate_numeric_eq_via_hash(preds, morsel):
         _TARGET_HASH_CACHE[cache_key] = target_hash
 
     row_hashes_view = morsel.hash(hash_keys)
-    arr_u64 = np.asarray(row_hashes_view, dtype=np.uint64)
-    arr_i64 = np.ascontiguousarray(arr_u64.view(np.int64))
-
-    int64_vec = vector_from_sequence(arr_i64)
-    if int64_vec is None:
-        return None
-
-    target_i64 = (
-        target_hash if target_hash < (1 << 63) else target_hash - (1 << 64)
-    )
-    return int64_vec.equals(target_i64)
+    return bool_vector_from_uint64_eq(row_hashes_view, target_hash)
 
 
 def evaluate_draken(node, morsel):

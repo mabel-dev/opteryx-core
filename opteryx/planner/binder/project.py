@@ -18,69 +18,82 @@ def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     # clear the derived schema
     context.schemas.pop("$derived", None)
 
-    def name_column(column):
-        for projection_column in node.columns:
-            if (
-                projection_column.schema_column
-                and projection_column.schema_column.identity == column.identity
-            ):
-                if projection_column.alias:
-                    return projection_column.alias
+    def _output_name_for_projection(proj_col, schema_col):
+        """User-visible name for an explicitly-projected column."""
+        if proj_col.alias:
+            return proj_col.alias
+        if proj_col.query_column:
+            return str(proj_col.query_column)
+        if proj_col.current_name:
+            return proj_col.current_name
+        return schema_col.name
 
-                if projection_column.query_column:
-                    return str(projection_column.query_column)
-                if projection_column.current_name:
-                    return projection_column.current_name
+    output_columns = []
 
-        return column.name
+    for column in node.columns:
+        if column.node_type == NodeType.WILDCARD:
+            # Wildcard expansion — schema-driven. Each underlying column produces
+            # exactly one output column.
+            if column.value is not None:
+                # Qualified wildcard: only columns whose origin matches the qualifier.
+                qualifier = column.value[0]
+                seen_identities = set()
+                for schema in context.schemas.values():
+                    for schema_col in schema.columns:
+                        if schema_col.identity in seen_identities:
+                            continue
+                        origin = schema_col.origin
+                        if isinstance(origin, str):
+                            origin = [origin]
+                            schema_col.origin = origin
+                        if origin and qualifier in origin:
+                            output_columns.append(
+                                LogicalColumn(
+                                    node_type=NodeType.IDENTIFIER,
+                                    source_column=schema_col.name,
+                                    source=None,
+                                    alias=schema_col.name,
+                                    schema_column=schema_col,
+                                )
+                            )
+                            seen_identities.add(schema_col.identity)
+            else:
+                # Bare wildcard: every column from every schema (deduped by identity).
+                seen_identities = set()
+                for schema in context.schemas.values():
+                    for schema_col in schema.columns:
+                        if schema_col.identity in seen_identities:
+                            continue
+                        output_columns.append(
+                            LogicalColumn(
+                                node_type=NodeType.IDENTIFIER,
+                                source_column=schema_col.name,
+                                source=None,
+                                alias=schema_col.name,
+                                schema_column=schema_col,
+                            )
+                        )
+                        seen_identities.add(schema_col.identity)
+            continue
 
-    def keep_column(column, identities):
-        if len(node.columns) == 1 and node.columns[0].node_type == NodeType.WILDCARD:
-            if node.columns[0].value:
-                if isinstance(column.origin, str):
-                    column.origin = [column.origin]
-                if node.columns[0].value[0] in column.origin:
-                    identities.append(column.identity)
-                    return True
-                else:
-                    return False
-            identities.append(column.identity)
-            return True
-        return column.identity in identities
-
-    identities = []
-    for column in (col for col in node.columns if col.node_type != NodeType.WILDCARD):
+        # Explicit projection: emit one output per `node.columns` entry, even when
+        # multiple entries resolve to the same underlying schema_column (identity).
+        # Earlier nodes may have folded same-identity columns into one — EXIT
+        # unfolds them back into the user's distinct output names.
         new_col, _ = inner_binder(column, context)
-        identities.append(new_col.schema_column.identity)
+        schema_col = new_col.schema_column
+        column_name = _output_name_for_projection(new_col, schema_col)
+        output_columns.append(
+            LogicalColumn(
+                node_type=NodeType.IDENTIFIER,
+                source_column=column_name,
+                source=None,
+                alias=column_name,
+                schema_column=schema_col,
+            )
+        )
 
-    for select_column in (
-        col for col in node.columns if col.node_type == NodeType.WILDCARD and col.value is not None
-    ):
-        for column in context.schemas[select_column.value[0]].columns:
-            # new_col, _ = inner_binder(column, context)
-            identities.append(column.identity)
-
-    columns = []
-    seen_identities = set()
-    for _, schema in context.schemas.items():
-        for column in schema.columns:
-            if column.identity in seen_identities:
-                continue
-            if keep_column(column, identities):
-                column_name = name_column(column=column)
-                column_reference = LogicalColumn(
-                    node_type=NodeType.IDENTIFIER,
-                    source_column=column_name,
-                    source=None,
-                    alias=column_name,
-                    schema_column=column,
-                )
-                columns.append(column_reference)
-                seen_identities.add(column.identity)
-
-    # we bound as we came across items in schemas, not the order the user wants them
-    desired_order = {id: index for index, id in enumerate(identities)}
-    node.columns = sorted(columns, key=lambda item: desired_order[item.schema_column.identity])
+    node.columns = output_columns
 
     context.schemas["$derived"] = derived.schema()
 
@@ -206,19 +219,32 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
     node.order_by_columns = list(bound_columns[projected_column_count:])
     context.schemas = merge_schemas(*[ctx.schemas for ctx in group_contexts])
 
-    # Check for duplicates
+    # Check for duplicates.
+    # Two columns sharing the same underlying identity are still distinct
+    # outputs when each has an explicit AS alias and those aliases differ
+    # (e.g. `SELECT a AS x, a AS y` or `n1.n_name AS supp, n2.n_name AS cust`
+    # in self-joins). Without an explicit alias we fall back to identity, so
+    # `SELECT a, a` and case-variant `SELECT id, ID` are still flagged.
+    def _output_key(c):
+        if c.alias:
+            return (c.schema_column.identity, c.alias)
+        return (c.schema_column.identity, None)
+
     all_top_level_identities = [
         c.schema_column.identity for c in list(node.columns) + list(node.order_by_columns)
     ]
-    if len(set(all_top_level_identities)) != len(all_top_level_identities):
+    all_top_level_keys = [
+        _output_key(c) for c in list(node.columns) + list(node.order_by_columns)
+    ]
+    if len(set(all_top_level_keys)) != len(all_top_level_keys):
         from collections import Counter
 
         from opteryx.exceptions import AmbiguousIdentifierError
 
         duplicates = [
-            column for column, count in Counter(all_top_level_identities).items() if count > 1
+            key for key, count in Counter(all_top_level_keys).items() if count > 1
         ]
-        matches = {c.value for c in node.columns if c.schema_column.identity in duplicates}
+        matches = {c.value for c in node.columns if _output_key(c) in duplicates}
         raise AmbiguousIdentifierError(
             message=f"Query result contains multiple instances of the same column(s) - `{'`, `'.join(matches)}`"
         )

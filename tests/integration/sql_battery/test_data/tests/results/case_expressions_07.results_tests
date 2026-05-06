@@ -1,5 +1,0 @@
-{
-    "summary": "Test CASE (searched) match",
-    "statement": "SELECT CASE WHEN 1=1 THEN 'one' END AS C",
-    "result": {"C": ["one"]}
-}

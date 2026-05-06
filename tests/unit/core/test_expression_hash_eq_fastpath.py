@@ -38,7 +38,9 @@ def _with_fast_path_disabled(fn):
         ev._try_collect_numeric_eq_predicates = saved
 
 
-def test_two_predicate_eq_int_bool_matches_baseline():
+def test_two_predicate_below_threshold_matches_baseline():
+    """2-pred is below the >=3 crossover threshold, so it takes the regular
+    per-column path. Verify the result is still correct."""
     sql = (
         "SELECT COUNT(*) FROM testdata.clickbench_tiny "
         "WHERE CounterID = 225510 AND DontCountHits = 0"
@@ -132,14 +134,22 @@ def test_collect_predicates_helper_directly():
     def and_(l, r):
         return FakeNode(NodeType.AND, left=l, right=r)
 
-    # Two-predicate eq on int + bool: eligible
-    tree = and_(eq(ident("a", OrsoTypes.INTEGER), lit(1)),
-                eq(ident("b", OrsoTypes.BOOLEAN), lit(True)))
+    # Three-predicate eq on int + int + bool: eligible
+    tree = and_(
+        and_(eq(ident("a", OrsoTypes.INTEGER), lit(1)),
+             eq(ident("b", OrsoTypes.BOOLEAN), lit(True))),
+        eq(ident("c", OrsoTypes.INTEGER), lit(7)),
+    )
     out = ev._try_collect_numeric_eq_predicates(tree)
     assert out is not None
-    assert len(out) == 2
+    assert len(out) == 3
 
-    # Single eq — needs >= 2 to fire
+    # Two-predicate eq — below crossover threshold, returns None
+    tree = and_(eq(ident("a", OrsoTypes.INTEGER), lit(1)),
+                eq(ident("b", OrsoTypes.BOOLEAN), lit(True)))
+    assert ev._try_collect_numeric_eq_predicates(tree) is None
+
+    # Single eq — also below threshold
     tree = eq(ident("a", OrsoTypes.INTEGER), lit(1))
     assert ev._try_collect_numeric_eq_predicates(tree) is None
 
@@ -165,10 +175,13 @@ def test_collect_predicates_helper_directly():
     assert ev._try_collect_numeric_eq_predicates(tree) is None
 
     # Reversed leaf shape (literal = identifier) is also accepted
-    tree = and_(eq(lit(1), ident("a", OrsoTypes.INTEGER)),
-                eq(lit(0), ident("b", OrsoTypes.BOOLEAN)))
+    tree = and_(
+        and_(eq(lit(1), ident("a", OrsoTypes.INTEGER)),
+             eq(lit(0), ident("b", OrsoTypes.BOOLEAN))),
+        eq(lit(2), ident("c", OrsoTypes.INTEGER)),
+    )
     out = ev._try_collect_numeric_eq_predicates(tree)
-    assert out is not None and len(out) == 2
+    assert out is not None and len(out) == 3
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ The dtype hint (OrsoTypes enum or plain string) is used for dispatch when
 the list contains only None values, or when type sniffing is ambiguous.
 """
 
-from libc.stdint cimport int8_t, int64_t, uint8_t
+from libc.stdint cimport int8_t, int64_t, uint8_t, uint64_t
 from libc.stdlib cimport malloc
 from libc.string cimport memset
 
@@ -428,6 +428,32 @@ cpdef object vector_from_sequence(object data, object dtype=None):
     # 5. Scalar / unsupported — return as-is
     # ------------------------------------------------------------------
     return data
+
+
+cpdef BoolVector bool_vector_from_uint64_eq(uint64_t[::1] hashes, uint64_t target):
+    """
+    Compare a buffer of 64-bit hashes against a single scalar target and
+    return a BoolVector of equality results (no nulls, length == hashes.shape[0]).
+
+    This is the kernel for the multi-equals hash dispatch fast-path in
+    evaluate_draken: row_hashes equals target_hash → row matches.
+    """
+    cdef Py_ssize_t n = hashes.shape[0]
+    cdef BoolVector vec = BoolVector(<size_t> n)
+    cdef uint8_t* dst
+    cdef Py_ssize_t i
+    cdef uint8_t bit
+
+    if n == 0:
+        return vec
+
+    dst = <uint8_t*> vec.ptr.data
+    # BoolVector(n) zero-fills the data buffer, so we only set bits where eq.
+    for i in range(n):
+        if hashes[i] == target:
+            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+
+    return vec
 
 
 cpdef DrakenType sequence_type_to_draken(object dtype):

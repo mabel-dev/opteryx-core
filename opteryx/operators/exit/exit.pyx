@@ -41,22 +41,19 @@ class ExitNode(BasePlanNode):
             final_columns.append(column.schema_column.identity)
             final_names.append(column.alias)
 
-        if len(final_columns) != len(set(final_columns)):  # pragma: no cover
+        # Duplicate identities are legitimate when each output has a distinct
+        # alias (e.g. `SELECT id AS x, id AS y` or `n1.n_name, n2.n_name` in
+        # self-joins). Earlier nodes fold same-identity columns into a single
+        # underlying vector; EXIT unfolds them by selecting the source column
+        # multiple times and renaming each instance to the user's alias.
+        # Duplicate output NAMES, however, are still ambiguous.
+        if len(set(final_names)) != len(final_names):
             from collections import Counter
 
-            duplicates = [column for column, count in Counter(final_columns).items() if count > 1]
-            matches = {a for a, b in zip(final_names, final_columns) if b in duplicates}
+            duplicates = [name for name, count in Counter(final_names).items() if count > 1]
             raise AmbiguousIdentifierError(
-                message=f"Query result contains multiple instances of the same column(s) - `{'`, `'.join(matches)}`"
+                message=f"Query result contains multiple instances of the same column(s) - `{'`, `'.join(duplicates)}`"
             )
-
-        if len(set(final_names)) != len(final_names):  # we have duplicate names
-            final_names = []
-            for column in self.columns:
-                # if column.schema_column.origin:
-                #    final_names.append(f"{column.schema_column.origin[0]}.{column.current_name}")
-                # else:
-                final_names.append(column.alias)
 
         # identity is already bytes; no encode needed
         self.final_columns = list(final_columns)

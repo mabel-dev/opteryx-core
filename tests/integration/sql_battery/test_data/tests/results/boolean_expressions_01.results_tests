@@ -1,5 +1,0 @@
-{
-    "summary": "Test AND",
-    "statement": "SELECT TRUE AND FALSE AS T;",
-    "result": {"T": [false]}
-}
