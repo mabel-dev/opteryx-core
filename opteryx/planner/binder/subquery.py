@@ -62,15 +62,17 @@ def visit_subquery(self, node: Node, context: BindingContext) -> Tuple[Node, Bin
     source_relations: list = []
     for name, schema in context.schemas.items():
         for schema_column in schema.columns:
-            # Find the column in the projection if it exists
-            projection_column = next(
-                (
-                    column
-                    for column in node.columns
-                    if column.schema_column.identity == schema_column.identity
-                ),
-                None,
-            )
+            # Find ALL projection columns matching this schema_column's identity.
+            # When the user aliases the same underlying column with multiple
+            # output names (e.g. `n1.n_name AS supp, n2.n_name AS cust` in a
+            # self-join, or `id AS x, id AS y`), every alias must remain
+            # resolvable from the outer query.
+            projection_matches = [
+                column
+                for column in node.columns
+                if column.schema_column.identity == schema_column.identity
+            ]
+            projection_column = projection_matches[0] if projection_matches else None
             if not schema_column.origin:
                 schema_column.origin = []
             source_relations.extend(schema_column.origin or [])
@@ -86,7 +88,16 @@ def visit_subquery(self, node: Node, context: BindingContext) -> Tuple[Node, Bin
                 # If the column is not in the projection, it should retain its name without any prefix
                 schema_column.name = schema_column.name.split(".")[-1]
 
-            schema_column.aliases = []
+            # Carry every additional alias from sibling projection columns
+            # so the outer query can resolve any of the user's output names.
+            extra_aliases = []
+            for extra in projection_matches[1:]:
+                extra_name = extra.current_name
+                if "." in (extra_name or ""):
+                    extra_name = extra_name.split(".")[-1]
+                if extra_name and extra_name != schema_column.name and extra_name not in extra_aliases:
+                    extra_aliases.append(extra_name)
+            schema_column.aliases = extra_aliases
             columns.append(schema_column)
         if name[0] != "$" and name in context.relations:
             context.relations.pop(name)

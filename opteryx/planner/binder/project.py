@@ -221,14 +221,15 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
 
     # Check for duplicates.
     # Two columns sharing the same underlying identity are still distinct
-    # outputs when each has an explicit AS alias and those aliases differ
-    # (e.g. `SELECT a AS x, a AS y` or `n1.n_name AS supp, n2.n_name AS cust`
-    # in self-joins). Without an explicit alias we fall back to identity, so
-    # `SELECT a, a` and case-variant `SELECT id, ID` are still flagged.
+    # outputs when their user-visible names differ — e.g. `SELECT a AS x, a AS y`,
+    # or `SELECT supp_nation, cust_nation` over a self-join where both resolve
+    # to the same `n_name` identity. We compare on (identity, lower(name)) so
+    # case-variant references like `SELECT id, ID` are still flagged.
     def _output_key(c):
-        if c.alias:
-            return (c.schema_column.identity, c.alias)
-        return (c.schema_column.identity, None)
+        name = c.alias or getattr(c, "value", None)
+        if isinstance(name, str):
+            name = name.lower()
+        return (c.schema_column.identity, name)
 
     all_top_level_identities = [
         c.schema_column.identity for c in list(node.columns) + list(node.order_by_columns)
