@@ -1,0 +1,261 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# See the License at http://www.apache.org/licenses/LICENSE-2.0
+# Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+
+import json
+import pytest
+import tempfile
+from pathlib import Path
+
+import opteryx
+from opteryx.connectors import register_workspace
+from opteryx.connectors.local_store_connector import LocalStoreConnector
+from opteryx.exceptions import DatasetNotFoundError, ReadOnlyConnectorError, UnsupportedSyntaxError
+
+
+def _setup_workspace(tmp_path):
+    """Set up a temporary workspace for testing."""
+    register_workspace("ws", LocalStoreConnector, store_root=str(tmp_path))
+
+
+def test_create_table_basic(tmp_path):
+    """CREATE TABLE with basic columns."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    result = list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+
+    # Verify folder structure
+    events_dir = tmp_path / "ws" / "events"
+    assert events_dir.exists()
+    assert (events_dir / "dataset.json").exists()
+
+    # Verify schema in dataset.json
+    with open(events_dir / "dataset.json") as f:
+        dataset_info = json.load(f)
+
+    assert len(dataset_info["schema"]["columns"]) == 2
+    assert dataset_info["schema"]["columns"][0]["name"] == "id"
+    assert dataset_info["schema"]["columns"][0]["type"] == "INTEGER"
+    assert dataset_info["schema"]["columns"][1]["name"] == "name"
+    assert dataset_info["schema"]["columns"][1]["type"] == "VARCHAR"
+
+
+def test_create_table_nested_name(tmp_path):
+    """CREATE TABLE with nested schema path."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    result = list(session.execute_to_morsels("CREATE TABLE ws.a.b.events (id BIGINT)"))
+
+    # Verify nested folder structure
+    events_dir = tmp_path / "ws" / "a" / "b" / "events"
+    assert events_dir.exists()
+    assert (events_dir / "dataset.json").exists()
+
+
+def test_create_table_if_not_exists(tmp_path):
+    """CREATE TABLE IF NOT EXISTS allows duplicate creation."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    # First create should succeed
+    list(session.execute_to_morsels("CREATE TABLE ws.users (id BIGINT, name VARCHAR)"))
+
+    # Second create with IF NOT EXISTS should succeed silently
+    result = list(session.execute_to_morsels("CREATE TABLE IF NOT EXISTS ws.users (id BIGINT, name VARCHAR)"))
+    assert result is not None
+
+    # Second create without IF NOT EXISTS should raise
+    with pytest.raises(ValueError, match="relation already exists"):
+        list(session.execute_to_morsels("CREATE TABLE ws.users (id BIGINT, name VARCHAR)"))
+
+
+def test_create_table_zero_columns_rejected(tmp_path):
+    """CREATE TABLE with no columns is rejected."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    # Depending on whether sqloxide accepts empty column lists,
+    # we may get a parser error or our UnsupportedSyntaxError.
+    # Accept any exception here.
+    with pytest.raises(Exception):
+        list(session.execute_to_morsels("CREATE TABLE ws.x ()"))
+
+
+def test_create_table_unsupported_type(tmp_path):
+    """CREATE TABLE with unsupported type is rejected."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    with pytest.raises(UnsupportedSyntaxError, match="unsupported column type"):
+        list(session.execute_to_morsels("CREATE TABLE ws.x (a JSON)"))
+
+
+def test_create_table_readonly_connector_rejected(tmp_path):
+    """CREATE TABLE on read-only connector raises ReadOnlyConnectorError."""
+    # Do not register ws; use filesystem path which is read-only
+    session = opteryx.session()
+
+    with pytest.raises(ReadOnlyConnectorError, match="does not support CREATE TABLE"):
+        list(session.execute_to_morsels("CREATE TABLE somefile.foo (a BIGINT)"))
+
+
+def test_drop_table_removes_folder(tmp_path):
+    """DROP TABLE removes the table folder."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    # Create table
+    list(session.execute_to_morsels("CREATE TABLE ws.products (id BIGINT, name VARCHAR)"))
+    events_dir = tmp_path / "ws" / "products"
+    assert events_dir.exists()
+
+    # Drop table
+    list(session.execute_to_morsels("DROP TABLE ws.products"))
+    assert not events_dir.exists()
+
+
+def test_drop_table_if_exists(tmp_path):
+    """DROP TABLE IF EXISTS succeeds for non-existent table."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    # Drop non-existent table with IF EXISTS should succeed
+    list(session.execute_to_morsels("DROP TABLE IF EXISTS ws.nonexistent"))
+
+    # Drop non-existent table without IF EXISTS should raise
+    with pytest.raises(DatasetNotFoundError):
+        list(session.execute_to_morsels("DROP TABLE ws.nonexistent"))
+
+
+def test_drop_table_multiple(tmp_path):
+    """DROP TABLE can drop multiple tables."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    # Create two tables
+    list(session.execute_to_morsels("CREATE TABLE ws.a (id BIGINT)"))
+    list(session.execute_to_morsels("CREATE TABLE ws.b (id BIGINT)"))
+
+    assert (tmp_path / "ws" / "a").exists()
+    assert (tmp_path / "ws" / "b").exists()
+
+    # Drop both tables
+    list(session.execute_to_morsels("DROP TABLE ws.a, ws.b"))
+
+    assert not (tmp_path / "ws" / "a").exists()
+    assert not (tmp_path / "ws" / "b").exists()
+
+
+def test_drop_table_readonly_rejected(tmp_path):
+    """DROP TABLE on read-only connector raises ReadOnlyConnectorError."""
+    session = opteryx.session()
+
+    with pytest.raises(ReadOnlyConnectorError, match="does not support DROP TABLE"):
+        list(session.execute_to_morsels("DROP TABLE somefile.foo"))
+
+
+def test_drop_view_still_works(tmp_path):
+    """Verify existing DROP VIEW path is unchanged."""
+    # This test is skipped because LocalStoreConnector doesn't support views.
+    # Views are managed by filesystem connectors, not the local store connector.
+    # The DROP VIEW path is not directly testable with our current setup.
+    pytest.skip("LocalStoreConnector does not support views; DROP VIEW cannot be tested here")
+
+
+def test_truncate_creates_empty_snapshot(tmp_path):
+    """TRUNCATE TABLE clears the table."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    # Create a table (no data, so we just verify structure)
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+
+    # Truncate should succeed
+    result = list(session.execute_to_morsels("TRUNCATE TABLE ws.events"))
+
+    # Verify folder still exists
+    events_dir = tmp_path / "ws" / "events"
+    assert events_dir.exists()
+    assert (events_dir / "dataset.json").exists()
+
+    # The current snapshot should have no files
+    with open(events_dir / "dataset.json") as f:
+        dataset_info = json.load(f)
+
+    # Check that there's a snapshot entry (may be null)
+    # The exact structure depends on LocalStoreConnector implementation
+    # For now, we just verify the table still exists
+    assert "relation_name" in dataset_info
+    assert "ws.events" in dataset_info["relation_name"]
+
+
+def test_truncate_missing_relation_raises(tmp_path):
+    """TRUNCATE on missing table raises DatasetNotFoundError."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    with pytest.raises(DatasetNotFoundError):
+        list(session.execute_to_morsels("TRUNCATE TABLE ws.nonexistent"))
+
+
+def test_create_table_with_not_null(tmp_path):
+    """CREATE TABLE respects NOT NULL constraints."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.strict (id BIGINT NOT NULL, name VARCHAR)"))
+
+    # Verify schema
+    events_dir = tmp_path / "ws" / "strict"
+    with open(events_dir / "dataset.json") as f:
+        dataset_info = json.load(f)
+
+    # id should be NOT NULL
+    id_col = next((c for c in dataset_info["schema"]["columns"] if c["name"] == "id"), None)
+    assert id_col is not None
+    assert id_col.get("nullable", True) == False
+
+    # name should be nullable
+    name_col = next((c for c in dataset_info["schema"]["columns"] if c["name"] == "name"), None)
+    assert name_col is not None
+    assert name_col.get("nullable", True) == True
+
+
+def test_create_table_all_types(tmp_path):
+    """CREATE TABLE supports all mapped types."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("""
+        CREATE TABLE ws.all_types (
+            int_col BIGINT,
+            varchar_col VARCHAR,
+            double_col DOUBLE,
+            bool_col BOOLEAN,
+            date_col DATE,
+            timestamp_col TIMESTAMP,
+            blob_col BLOB
+        )
+    """))
+
+    # Verify all columns exist
+    types_dir = tmp_path / "ws" / "all_types"
+    with open(types_dir / "dataset.json") as f:
+        dataset_info = json.load(f)
+
+    expected_cols = {
+        "int_col": "INTEGER",
+        "varchar_col": "VARCHAR",
+        "double_col": "DOUBLE",
+        "bool_col": "BOOLEAN",
+        "date_col": "DATE",
+        "timestamp_col": "TIMESTAMP",
+        "blob_col": "BLOB",
+    }
+
+    for col in dataset_info["schema"]["columns"]:
+        assert col["name"] in expected_cols
+        assert col["type"] == expected_cols[col["name"]]

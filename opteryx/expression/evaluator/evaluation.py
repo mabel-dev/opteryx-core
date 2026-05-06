@@ -254,6 +254,127 @@ def _validate_temporal_comparison(left_node, right_node, op):
         )
 
 
+_HASH_DISPATCH_MIN_ROWS = 1024
+
+
+def _try_collect_numeric_eq_predicates(node):
+    """Walk an AND-only subtree and collect IDENTIFIER = LITERAL predicates on
+    fixed-width numeric/temporal columns.
+
+    Returns a list of (identity_bytes, name_bytes, literal_value, orso_type)
+    tuples if the entire subtree consists of such predicates (>= 2 of them) and
+    every leaf is eligible. Returns None otherwise — caller takes the regular
+    recursive path.
+    """
+    from opteryx.expression import NodeType
+    from opteryx.types import OrsoTypes
+
+    eligible_types = (OrsoTypes.INTEGER, OrsoTypes.BOOLEAN)
+
+    preds = []
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        nt = n.node_type
+        if nt == NodeType.NESTED:
+            stack.append(n.centre)
+            continue
+        if nt == NodeType.AND:
+            stack.append(n.left)
+            stack.append(n.right)
+            continue
+        if nt != NodeType.COMPARISON_OPERATOR or n.value != "Eq":
+            return None
+
+        left, right = n.left, n.right
+        if (
+            left.node_type == NodeType.IDENTIFIER
+            and right.node_type == NodeType.LITERAL
+        ):
+            ident_node, lit_node = left, right
+        elif (
+            right.node_type == NodeType.IDENTIFIER
+            and left.node_type == NodeType.LITERAL
+        ):
+            ident_node, lit_node = right, left
+        else:
+            return None
+
+        sc = getattr(ident_node, "schema_column", None)
+        if sc is None:
+            return None
+        col_type = getattr(sc, "type", None)
+        if col_type not in eligible_types:
+            return None
+        lit_val = lit_node.value
+        if lit_val is None:
+            return None
+
+        preds.append((sc.identity, sc.name.encode(), lit_val, col_type))
+
+    if len(preds) < 2:
+        return None
+    return preds
+
+
+def _evaluate_numeric_eq_via_hash(preds, morsel):
+    """Evaluate a chain of IDENTIFIER = LITERAL predicates by hashing all
+    referenced columns once and comparing against a single precomputed
+    target hash.
+
+    Collision safety: 64-bit combined hash. P(false positive per row) = 2^-64.
+    For 100M rows that is ~5e-12 expected — well below noise floor of normal
+    hardware. No verify pass.
+
+    Returns a BoolVector or None if the fast-path could not be constructed
+    (caller should fall back to the per-column path).
+    """
+    import numpy as np
+
+    from draken.interop.vector_sequence import vector_from_sequence
+    from draken.morsels.morsel import Morsel
+
+    num_rows = morsel.num_rows
+    if num_rows == 0:
+        return None
+    if num_rows < _HASH_DISPATCH_MIN_ROWS:
+        return None
+
+    target_names = []
+    target_vecs = []
+    hash_keys = []
+
+    for ident, name, val, _col_type in preds:
+        col_vec = morsel.column(ident, name)
+        if col_vec is None:
+            return None
+        cls = type(col_vec)
+        try:
+            const_vec = cls.from_constant(val, 1)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        target_names.append(name)
+        target_vecs.append(const_vec)
+        hash_keys.append(ident)
+
+    target_morsel = Morsel.from_vectors(target_names, target_vecs)
+    target_hash_view = target_morsel.hash(target_names)
+    target_hash = int(np.asarray(target_hash_view, dtype=np.uint64)[0])
+
+    row_hashes_view = morsel.hash(hash_keys)
+    arr_u64 = np.asarray(row_hashes_view, dtype=np.uint64)
+    arr_i64 = np.ascontiguousarray(arr_u64.view(np.int64))
+
+    int64_vec = vector_from_sequence(arr_i64)
+    if int64_vec is None:
+        return None
+
+    target_i64 = (
+        target_hash if target_hash < (1 << 63) else target_hash - (1 << 64)
+    )
+    return int64_vec.equals(target_i64)
+
+
 def evaluate_draken(node, morsel):
     from opteryx.expression import NodeType
 
@@ -263,6 +384,11 @@ def evaluate_draken(node, morsel):
         return evaluate_draken(node.centre, morsel)
 
     if node_type == NodeType.AND:
+        preds = _try_collect_numeric_eq_predicates(node)
+        if preds is not None:
+            fast = _evaluate_numeric_eq_via_hash(preds, morsel)
+            if fast is not None:
+                return fast
         left = evaluate_draken(node.left, morsel)
         right = evaluate_draken(node.right, morsel)
         return left.and_vector(right)
