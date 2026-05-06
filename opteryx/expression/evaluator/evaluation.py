@@ -256,6 +256,17 @@ def _validate_temporal_comparison(left_node, right_node, op):
 
 _HASH_DISPATCH_MIN_ROWS = 1024
 
+_TARGET_HASH_CACHE = {}
+_TARGET_HASH_CACHE_MAX = 128
+
+
+def _compute_target_hash(target_names, target_vecs):
+    from draken.morsels.morsel import Morsel
+
+    target_morsel = Morsel.from_vectors(target_names, target_vecs)
+    target_hash_view = target_morsel.hash(target_names)
+    return int(memoryview(target_hash_view).cast("Q")[0])
+
 
 def _try_collect_numeric_eq_predicates(node):
     """Walk an AND-only subtree and collect IDENTIFIER = LITERAL predicates on
@@ -341,7 +352,8 @@ def _evaluate_numeric_eq_via_hash(preds, morsel):
         return None
 
     target_names = []
-    target_vecs = []
+    target_classes = []
+    target_values = []
     hash_keys = []
 
     for ident, name, val, _col_type in preds:
@@ -349,17 +361,31 @@ def _evaluate_numeric_eq_via_hash(preds, morsel):
         if col_vec is None:
             return None
         cls = type(col_vec)
-        try:
-            const_vec = cls.from_constant(val, 1)
-        except (TypeError, ValueError, OverflowError):
-            return None
         target_names.append(name)
-        target_vecs.append(const_vec)
+        target_classes.append(cls)
+        target_values.append(val)
         hash_keys.append(ident)
 
-    target_morsel = Morsel.from_vectors(target_names, target_vecs)
-    target_hash_view = target_morsel.hash(target_names)
-    target_hash = int(np.asarray(target_hash_view, dtype=np.uint64)[0])
+    cache_key = (
+        tuple(target_names),
+        tuple(target_classes),
+        tuple(target_values),
+    )
+    target_hash = _TARGET_HASH_CACHE.get(cache_key)
+    if target_hash is None:
+        target_vecs = []
+        for cls, val in zip(target_classes, target_values):
+            try:
+                target_vecs.append(cls.from_constant(val, 1))
+            except (TypeError, ValueError, OverflowError):
+                return None
+        try:
+            target_hash = _compute_target_hash(target_names, target_vecs)
+        except Exception:
+            return None
+        if len(_TARGET_HASH_CACHE) >= _TARGET_HASH_CACHE_MAX:
+            _TARGET_HASH_CACHE.clear()
+        _TARGET_HASH_CACHE[cache_key] = target_hash
 
     row_hashes_view = morsel.hash(hash_keys)
     arr_u64 = np.asarray(row_hashes_view, dtype=np.uint64)

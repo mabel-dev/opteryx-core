@@ -206,29 +206,19 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
     node.order_by_columns = list(bound_columns[projected_column_count:])
     context.schemas = merge_schemas(*[ctx.schemas for ctx in group_contexts])
 
-    # Check for duplicates.
-    # Key on (identity, output_name): two columns sharing the same underlying
-    # identity are legitimate distinct outputs when their AS aliases differ
-    # (e.g. `SELECT a AS x, a AS y` or self-joins like `n1.n_name, n2.n_name`).
-    def _output_key(c):
-        name = c.alias if c.alias else getattr(c, "value", None)
-        return (c.schema_column.identity, name)
-
+    # Check for duplicates
     all_top_level_identities = [
         c.schema_column.identity for c in list(node.columns) + list(node.order_by_columns)
     ]
-    all_top_level_keys = [
-        _output_key(c) for c in list(node.columns) + list(node.order_by_columns)
-    ]
-    if len(set(all_top_level_keys)) != len(all_top_level_keys):
+    if len(set(all_top_level_identities)) != len(all_top_level_identities):
         from collections import Counter
 
         from opteryx.exceptions import AmbiguousIdentifierError
 
         duplicates = [
-            key for key, count in Counter(all_top_level_keys).items() if count > 1
+            column for column, count in Counter(all_top_level_identities).items() if count > 1
         ]
-        matches = {c.value for c in node.columns if _output_key(c) in duplicates}
+        matches = {c.value for c in node.columns if c.schema_column.identity in duplicates}
         raise AmbiguousIdentifierError(
             message=f"Query result contains multiple instances of the same column(s) - `{'`, `'.join(matches)}`"
         )
