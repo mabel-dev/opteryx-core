@@ -54,6 +54,10 @@ def traverse(
     Returns:
         A tuple containing the updated graph and the context.
     """
+    # Expose the graph on the visitor so handlers (e.g. visit_insert) can
+    # reach already-bound upstream nodes by id when needed.
+    self.graph = graph
+
     # Recursively visit children
     children = graph.ingoing_edges(node)
 

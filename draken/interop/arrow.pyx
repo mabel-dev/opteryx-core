@@ -394,7 +394,9 @@ cpdef object vector_from_arrow(object array):
     if pa_type.equals(pa.float32()):
         return float32_from_arrow(array)
     if pa_type.equals(pa.float16()):
-        return float64_from_arrow(array.cast(pa.float64()))
+        # Top-level fp16 has no first-class home in Draken; widen to fp32.
+        # FP16 is reserved for VectorVector (fp16-only embedding columns).
+        return float32_from_arrow(array.cast(pa.float32()))
     if pa_type.equals(pa.bool_()):
         return bool_from_arrow(array)
     if pa.types.is_date32(pa_type):
@@ -407,11 +409,17 @@ cpdef object vector_from_arrow(object array):
     if pa.types.is_time32(pa_type) or pa.types.is_time64(pa_type):
         return time_from_arrow(array)
     if pa.types.is_fixed_size_list(pa_type):
-        if pa.types.is_integer(pa_type.value_type) or pa.types.is_floating(pa_type.value_type):
+        # Only FixedSizeList<float16> becomes a VectorVector (the embedding type).
+        # All other numeric children (int*, float32, float64) cast to a regular
+        # list and go to ArrayVector with a typed numeric child.
+        if pa_type.value_type.equals(pa.float16()):
             return vector_from_arrow_vector(array)
-        return array_from_arrow(array)
+        return array_from_arrow(array.cast(pa.list_(pa_type.value_type)))
     if pa.types.is_list(pa_type) or pa.types.is_large_list(pa_type):
-        if pa.types.is_integer(pa_type.value_type) or pa.types.is_floating(pa_type.value_type):
+        # Auto-promote variable-length list<float16> with uniform row lengths
+        # to FixedSizeList<float16> so it lands in VectorVector. Non-fp16
+        # numeric lists stay as ArrayVector regardless of length uniformity.
+        if pa_type.value_type.equals(pa.float16()):
             raw_lengths = pc.list_value_length(array).to_pylist()
             uniform_lengths = True
             for length_value in raw_lengths:
@@ -425,7 +433,7 @@ cpdef object vector_from_arrow(object array):
                     break
             if uniform_lengths and dimension is not None and dimension > 0:
                 try:
-                    fixed_array = array.cast(pa.list_(pa_type.value_type, dimension))
+                    fixed_array = array.cast(pa.list_(pa.float16(), dimension))
                     return vector_from_arrow_vector(fixed_array)
                 except Exception:
                     pass

@@ -42,7 +42,10 @@ def _right_columns_used_above(plan: LogicalPlan, join_nid: str, right_relations:
         visited.add(consumer_nid)
         node = plan[consumer_nid]
 
-        for attr in ("condition", "order_by", "groups", "having"):
+        # `on` covers Join consumers — projection_pushdown rewrites Join.columns to
+        # only the passthrough projection set, dropping the join keys themselves, so
+        # we must inspect the consumer's join condition explicitly.
+        for attr in ("condition", "order_by", "groups", "having", "on"):
             expr = getattr(node, attr, None)
             if expr is None:
                 continue

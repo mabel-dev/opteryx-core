@@ -1,6 +1,5 @@
 from opteryx.models import PhysicalPlan
-from opteryx.operators.catalog import OperatorCategory
-from opteryx.operators.catalog import get_registry
+from opteryx.operators.catalog import OperatorCategory, get_registry
 
 
 def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
@@ -131,13 +130,31 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
                 # Use node UID (nid) as the key
                 node.telemetry.operations[nid] = stat
 
+    # Build a structured edge list so consumers can reconstruct the plan DAG
+    # without parsing the Mermaid string.  Direction: from = producer, to = consumer.
+    # excluded_nodes is populated in the rendering loop below, so collect edges
+    # after the node loop but store them after the rendering loop.
+    _raw_edges = list(plan.edges())
+
+    # Grab any telemetry instance still reachable (the exit node is always present)
+    _any_telemetry = None
     for nid, node in plan.nodes(True):
         if node.is_not_explained:
             excluded_nodes.append(nid)
             continue
         builder += f"  {node.to_mermaid(nid)}\n"
         node_stats[nid] = node_stats.pop(node.identity, None)
+        if _any_telemetry is None:
+            _any_telemetry = node.telemetry
     builder += "\n"
+
+    # Write the edge list to telemetry now that excluded_nodes is finalised
+    if _any_telemetry is not None:
+        _any_telemetry.edges = [
+            {"from": s, "to": t, **(({"leg": r}) if r else {})}
+            for s, t, r in _raw_edges
+            if s not in excluded_nodes and t not in excluded_nodes
+        ]
     for s, t, r in plan.edges():
         if t in excluded_nodes:
             continue

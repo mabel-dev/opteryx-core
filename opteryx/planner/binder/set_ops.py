@@ -19,9 +19,75 @@ def visit_set(self, node: Node, context: BindingContext) -> Tuple[Node, BindingC
     return node, context
 
 
+def _columns_for_side(
+    self,
+    node: Node,
+    relation_names: List[str],
+    context: BindingContext,
+):
+    """Resolve the schema columns produced by one side of a set operation.
+
+    Normally each side's relation names are registered in `context.schemas`.
+    When a branch has no FROM clause (e.g. `SELECT 1`), the project step pops
+    the synthetic `$no_table` source because none of its columns are projected,
+    and the projected literals end up under a shared `$project` key that gets
+    merged across branches. In that case fall back to walking the plan to find
+    the branch's direct Project child of the set-op node and use its columns.
+    """
+    columns = []
+    missing = False
+    for rel_name in relation_names:
+        schema = context.schemas.get(rel_name)
+        if schema is not None:
+            columns.extend(schema.columns)
+        else:
+            missing = True
+    if not missing:
+        return columns
+
+    graph = getattr(self, "graph", None)
+    if graph is None:
+        raise KeyError(relation_names)
+
+    set_op_nid = None
+    for nid, n in graph.nodes(True):
+        if n is node:
+            set_op_nid = nid
+            break
+    if set_op_nid is None:
+        raise KeyError(relation_names)
+
+    rel_set = set(relation_names)
+    for child_nid, _, _ in graph.ingoing_edges(set_op_nid):
+        stack = [child_nid]
+        seen = set()
+        matched = False
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            cur_node = graph[cur]
+            if getattr(cur_node, "alias", None) in rel_set:
+                matched = True
+                break
+            for upstream_nid, _, _ in graph.ingoing_edges(cur):
+                stack.append(upstream_nid)
+        if matched:
+            child_node = graph[child_nid]
+            branch_columns = []
+            for col in (child_node.columns or []):
+                schema_column = getattr(col, "schema_column", None)
+                if schema_column is not None:
+                    branch_columns.append(schema_column)
+            return branch_columns
+
+    raise KeyError(relation_names)
+
+
 def _validate_set_operation_types(
-    left_relations: List[str],
-    right_relations: List[str],
+    self,
+    node: Node,
     context: BindingContext,
     operation_name: str = "SET OPERATION",
 ) -> List[OrsoTypes]:
@@ -30,14 +96,8 @@ def _validate_set_operation_types(
     For each column position across left and right relations, find a compatible type.
     Returns list of coerced types in column order.
     """
-    # Get all columns from left and right
-    left_columns = []
-    for rel_name in left_relations:
-        left_columns.extend(context.schemas[rel_name].columns)
-
-    right_columns = []
-    for rel_name in right_relations:
-        right_columns.extend(context.schemas[rel_name].columns)
+    left_columns = _columns_for_side(self, node, node.left_relation_names, context)
+    right_columns = _columns_for_side(self, node, node.right_relation_names, context)
 
     if len(left_columns) != len(right_columns):
         raise ValueError(
@@ -54,9 +114,7 @@ def _validate_set_operation_types(
 
 def visit_union(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     # Validate and determine coerced types for UNION/INTERSECT/EXCEPT
-    coerced_types = _validate_set_operation_types(
-        node.left_relation_names, node.right_relation_names, context, "UNION"
-    )
+    coerced_types = _validate_set_operation_types(self, node, context, "UNION")
     node.coerced_types = coerced_types
 
     for relation in node.right_relation_names:
@@ -84,9 +142,7 @@ def visit_union(self, node: Node, context: BindingContext) -> Tuple[Node, Bindin
 
 def visit_intersect(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     # Validate and determine coerced types for INTERSECT
-    coerced_types = _validate_set_operation_types(
-        node.left_relation_names, node.right_relation_names, context, "INTERSECT"
-    )
+    coerced_types = _validate_set_operation_types(self, node, context, "INTERSECT")
     node.coerced_types = coerced_types
 
     for relation in node.right_relation_names:
@@ -114,9 +170,7 @@ def visit_intersect(self, node: Node, context: BindingContext) -> Tuple[Node, Bi
 
 def visit_except(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     # Validate and determine coerced types for EXCEPT
-    coerced_types = _validate_set_operation_types(
-        node.left_relation_names, node.right_relation_names, context, "EXCEPT"
-    )
+    coerced_types = _validate_set_operation_types(self, node, context, "EXCEPT")
     node.coerced_types = coerced_types
 
     for relation in node.right_relation_names:

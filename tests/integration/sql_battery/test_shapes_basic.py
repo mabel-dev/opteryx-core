@@ -212,6 +212,11 @@ STATEMENTS = [
         ("SELECT * FROM (SELECT name, id FROM $planets AS A UNION SELECT name, id FROM $planets AS B) AS C WHERE name = 'Earth'", 1, 2, None),
         # Baseline: UNION ALL keeps duplicates
         ("SELECT * FROM (SELECT name, id FROM $planets AS A UNION ALL SELECT name, id FROM $planets AS B) AS C WHERE name = 'Earth'", 2, 2, None),
+        # FROM-less SELECT branches in set operations (regression: schema must be
+        # registered under the renamed $union- relation even when the inner SELECT
+        # has no FROM clause).
+        ("SELECT 1 UNION ALL SELECT 2", 2, 1, None),
+        ("SELECT 1, 'a' UNION ALL SELECT 2, 'b'", 2, 2, None),
         # TODO: Chained UNION (three relations) - WIP: Schema binding issue with nested Union nodes
         # ("SELECT * FROM (SELECT name, id FROM $planets AS A WHERE id = 1 UNION SELECT name, id FROM $planets AS B WHERE id = 2 UNION SELECT name, id FROM $planets AS C WHERE id = 3) D", 3, 2, None),
 

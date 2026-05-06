@@ -39,12 +39,18 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 
 
 def _manifest_is_all_parquet(manifest) -> bool:
-    """Return True if every file in *manifest* has a .parquet extension."""
-    if not manifest:
+    """Return True if every file in *manifest* has a .parquet extension.
+
+    An empty manifest (no files) is treated as parquet-compatible — it
+    represents an empty relation and the parquet reader yields nothing.
+    """
+    if manifest is None:
         return False
     files = getattr(manifest, "files", None)
-    if not files:
+    if files is None:
         return False
+    if len(files) == 0:
+        return True
     return all(getattr(f, "file_path", "").endswith(".parquet") for f in files)
 
 
@@ -230,6 +236,22 @@ def _create_comment_node(logical_node, query_properties, registry):
     return registry.create("View Management", query_properties, action="comment", **logical_node.properties)
 
 
+def _create_create_relation_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="create_relation", **logical_node.properties)
+
+
+def _create_drop_relation_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="drop_relation", **logical_node.properties)
+
+
+def _create_truncate_relation_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="truncate_relation", **logical_node.properties)
+
+
+def _create_insert_node(logical_node, query_properties, registry):
+    return registry.create("Insert", query_properties, **logical_node.properties)
+
+
 _DISPATCH = {
     LogicalPlanStepType.Aggregate:        _create_aggregate_node,
     LogicalPlanStepType.AggregateAndGroup: _create_aggregate_and_group_node,
@@ -254,6 +276,10 @@ _DISPATCH = {
     LogicalPlanStepType.Unnest:           _create_unnest_node,
     LogicalPlanStepType.Analyze:          _create_analyze_node,
     LogicalPlanStepType.Comment:          _create_comment_node,
+    LogicalPlanStepType.CreateRelation:   _create_create_relation_node,
+    LogicalPlanStepType.DropRelation:     _create_drop_relation_node,
+    LogicalPlanStepType.TruncateRelation: _create_truncate_relation_node,
+    LogicalPlanStepType.Insert:           _create_insert_node,
 }
 
 

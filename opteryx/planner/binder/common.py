@@ -26,6 +26,12 @@ from opteryx.planner.binder.view import (
     visit_drop_view,
     visit_show_columns,
 )
+from opteryx.planner.binder.relation import (
+    visit_create_relation,
+    visit_drop_relation,
+    visit_truncate_relation,
+    visit_insert,
+)
 from opteryx.planner.logical_planner import LogicalPlan
 
 # Re-exported for backward compatibility with external callers (e.g. predicate_pushdown.py)
@@ -149,6 +155,26 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_drop_view(self, node, context)
+
+    def visit_create_relation(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_create_relation(self, node, context)
+
+    def visit_drop_relation(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_drop_relation(self, node, context)
+
+    def visit_truncate_relation(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_truncate_relation(self, node, context)
+
+    def visit_insert(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_insert(self, node, context)
 
     def visit_comment(
         self, node: Node, context: BindingContext

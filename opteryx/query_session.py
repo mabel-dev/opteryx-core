@@ -510,6 +510,17 @@ class Session(DataFrame):
             return
         result_data, self._result_type = results
 
+        # Handle non-tabular results (DDL statements)
+        if self._result_type == ResultType.NON_TABULAR:
+            from opteryx.models import NonTabularResult
+            if isinstance(result_data, NonTabularResult):
+                self._rowcount = result_data.record_count
+                self._query_status = result_data.status
+            self._executed = True
+            elapsed = time.time_ns() - start
+            self._telemetry.time_executing += elapsed - self._telemetry.time_planning
+            return
+
         def _yield_morsel(morsel: Morsel):
             if not getattr(self._schema, "columns", None):
                 self._schema = _schema_from_morsel(morsel)

@@ -272,20 +272,37 @@ cdef inline uint64_t _load_le_u64_partial(const uint8_t* ptr, size_t n) nogil:
     return value
 
 
+cdef inline uint64_t _load_u64(const uint8_t* ptr) noexcept nogil:
+    cdef uint64_t value
+    memcpy(&value, ptr, 8)
+    return value
+
+
 cdef inline uint64_t _short_string_hash(const uint8_t* ptr, size_t n) nogil:
-    cdef uint64_t first
-    cdef uint64_t last
-    cdef uint64_t h
+    cdef uint64_t h, w0, w1, w2, w3
 
     if n <= 8:
-        first = _load_le_u64_partial(ptr, n)
-        return mix_hash(<uint64_t>n, first)
-
-    # 9..16 bytes: combine first 8 and last 8 with length-based seed.
-    first = _load_le_u64_partial(ptr, 8)
-    last = _load_le_u64_partial(ptr + (n - 8), 8)
-    h = mix_hash(<uint64_t>n, first)
-    return mix_hash(h, last)
+        return mix_hash(<uint64_t>n, _load_le_u64_partial(ptr, n))
+    if n <= 16:
+        w0 = _load_u64(ptr)
+        w1 = _load_u64(ptr + n - 8)
+        h = mix_hash(<uint64_t>n, w0)
+        return mix_hash(h, w1)
+    if n <= 24:
+        w0 = _load_u64(ptr)
+        w1 = _load_u64(ptr + 8)
+        w2 = _load_u64(ptr + n - 8)
+        h = mix_hash(<uint64_t>n, w0)
+        h = mix_hash(h, w1)
+        return mix_hash(h, w2)
+    w0 = _load_u64(ptr)
+    w1 = _load_u64(ptr + 8)
+    w2 = _load_u64(ptr + 16)
+    w3 = _load_u64(ptr + n - 8)
+    h = mix_hash(<uint64_t>n, w0)
+    h = mix_hash(h, w1)
+    h = mix_hash(h, w2)
+    return mix_hash(h, w3)
 
 
 # ---------------------------------------------------------------------------
@@ -2050,7 +2067,7 @@ cdef class StringVector(Vector):
             if self._const_is_null:
                 value = NULL_HASH
             else:
-                if self._const_value.length <= 16:
+                if self._const_value.length <= 32:
                     value = _short_string_hash(<const uint8_t*>self._const_value.data, <size_t>self._const_value.length)
                 else:
                     value = XXH3_64bits(<const void*>self._const_value.data, <size_t>self._const_value.length)
@@ -2085,7 +2102,7 @@ cdef class StringVector(Vector):
                     start = dict_values_buf.offsets[dict_idx]
                     end = dict_values_buf.offsets[dict_idx + 1]
                     str_len = <size_t>(end - start)
-                    if str_len <= 16:
+                    if str_len <= 32:
                         dict_hashes_ptr[dict_idx] = _short_string_hash(data + start, str_len)
                     else:
                         dict_hashes_ptr[dict_idx] = XXH3_64bits(<const void*>(data + start), str_len)
@@ -2141,7 +2158,7 @@ cdef class StringVector(Vector):
                         start = offsets[idx]
                         end = offsets[idx + 1]
                         str_len = <size_t>(end - start)
-                        if str_len <= 16:
+                        if str_len <= 32:
                             scratch[j] = _short_string_hash(dense_data + start, str_len)
                         else:
                             scratch[j] = XXH3_64bits(dense_data + start, str_len)
@@ -2150,7 +2167,7 @@ cdef class StringVector(Vector):
                         start = offsets[i + j]
                         end = offsets[i + j + 1]
                         str_len = <size_t>(end - start)
-                        if str_len <= 16:
+                        if str_len <= 32:
                             scratch[j] = _short_string_hash(dense_data + start, str_len)
                         else:
                             scratch[j] = XXH3_64bits(dense_data + start, str_len)
@@ -2187,7 +2204,7 @@ cdef class StringVector(Vector):
             if self._const_is_null:
                 value = NULL_HASH
             else:
-                if self._const_value.length <= 16:
+                if self._const_value.length <= 32:
                     value = _short_string_hash(<const uint8_t*>self._const_value.data, <size_t>self._const_value.length)
                 else:
                     value = XXH3_64bits(<const void*>self._const_value.data, <size_t>self._const_value.length)
@@ -2227,7 +2244,7 @@ cdef class StringVector(Vector):
                 start = dict_values_buf.offsets[dict_idx]
                 end = dict_values_buf.offsets[dict_idx + 1]
                 str_len = <size_t>(end - start)
-                if str_len <= 16:
+                if str_len <= 32:
                     dict_hashes_ptr[dict_idx] = _short_string_hash(data + start, str_len)
                 else:
                     dict_hashes_ptr[dict_idx] = XXH3_64bits(<const void*>(data + start), str_len)
@@ -2283,7 +2300,7 @@ cdef class StringVector(Vector):
                     start = offsets[idx]
                     end = offsets[idx + 1]
                     str_len = <size_t>(end - start)
-                    if str_len <= 16:
+                    if str_len <= 32:
                         scratch[j] = _short_string_hash(data + start, str_len)
                     else:
                         scratch[j] = XXH3_64bits(data + start, str_len)
@@ -2292,7 +2309,7 @@ cdef class StringVector(Vector):
                     start = offsets[i + j]
                     end = offsets[i + j + 1]
                     str_len = <size_t>(end - start)
-                    if str_len <= 16:
+                    if str_len <= 32:
                         scratch[j] = _short_string_hash(data + start, str_len)
                     else:
                         scratch[j] = XXH3_64bits(data + start, str_len)

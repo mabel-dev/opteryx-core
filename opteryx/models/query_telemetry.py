@@ -72,6 +72,7 @@ class _QueryTelemetry:
         # put messages and plan at the end
         readings_dict["version"] = opteryx.__version__
         readings_dict["messages"] = readings_dict.pop("messages", [])
+        readings_dict["edges"] = readings_dict.pop("edges", [])
         readings_dict["plan"] = readings_dict.pop("plan", None)
         return readings_dict
 

@@ -94,6 +94,13 @@ class ProgrammingError(DatabaseError):
     """
 
 
+class ReadOnlyConnectorError(DatabaseError):
+    """
+    Exception raised when attempting a write operation (CREATE, DROP, TRUNCATE) on
+    a read-only connector that does not support the Writable capability.
+    """
+
+
 # ======================== End PEP-0249 Exceptions ==========================
 
 

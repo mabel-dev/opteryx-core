@@ -22,6 +22,13 @@ from libc.string cimport memcpy, memset
 
 from libc.stdint cimport int32_t, int8_t, intptr_t, uint64_t, uint8_t, int64_t
 from libc.stdlib cimport malloc, free
+from libc.stddef cimport size_t
+
+cdef extern from "simd_bitops.h" nogil:
+    void simd_and_mask(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n)
+    void simd_or_mask(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n)
+    void simd_xor_mask(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n)
+    void simd_not_mask(uint8_t* dest, const uint8_t* src, size_t n)
 
 from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenRLEBuffer
 from draken.core.buffers cimport DRAKEN_BOOL
@@ -200,7 +207,22 @@ cdef class BoolVector(Vector):
             raise ValueError("Vectors must have the same length")
 
         cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef BoolVector out
+
+        # Fast path: no nulls on either side -> SIMD bulk AND, no 3VL needed.
+        if ptr1.null_bitmap == NULL and ptr2.null_bitmap == NULL:
+            out = BoolVector(<size_t>n)
+            if nbytes > 0:
+                simd_and_mask(
+                    <uint8_t*> out.ptr.data,
+                    <uint8_t*> ptr1.data,
+                    <uint8_t*> ptr2.data,
+                    <size_t>nbytes,
+                )
+            out.ptr.null_bitmap = NULL
+            return out
+
+        out = BoolVector(<size_t>n)
         cdef uint8_t* a = <uint8_t*> ptr1.data
         cdef uint8_t* b = <uint8_t*> ptr2.data
         cdef uint8_t* d = <uint8_t*> out.ptr.data
@@ -268,7 +290,22 @@ cdef class BoolVector(Vector):
             raise ValueError("Vectors must have the same length")
 
         cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef BoolVector out
+
+        # Fast path: no nulls on either side -> SIMD bulk OR, no 3VL needed.
+        if ptr1.null_bitmap == NULL and ptr2.null_bitmap == NULL:
+            out = BoolVector(<size_t>n)
+            if nbytes > 0:
+                simd_or_mask(
+                    <uint8_t*> out.ptr.data,
+                    <uint8_t*> ptr1.data,
+                    <uint8_t*> ptr2.data,
+                    <size_t>nbytes,
+                )
+            out.ptr.null_bitmap = NULL
+            return out
+
+        out = BoolVector(<size_t>n)
         cdef uint8_t* a = <uint8_t*> ptr1.data
         cdef uint8_t* b = <uint8_t*> ptr2.data
         cdef uint8_t* d = <uint8_t*> out.ptr.data
@@ -332,7 +369,22 @@ cdef class BoolVector(Vector):
             raise ValueError("Vectors must have the same length")
 
         cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef BoolVector out
+
+        # Fast path: no nulls on either side -> SIMD bulk XOR, no 3VL needed.
+        if ptr1.null_bitmap == NULL and ptr2.null_bitmap == NULL:
+            out = BoolVector(<size_t>n)
+            if nbytes > 0:
+                simd_xor_mask(
+                    <uint8_t*> out.ptr.data,
+                    <uint8_t*> ptr1.data,
+                    <uint8_t*> ptr2.data,
+                    <size_t>nbytes,
+                )
+            out.ptr.null_bitmap = NULL
+            return out
+
+        out = BoolVector(<size_t>n)
         cdef uint8_t* a = <uint8_t*> ptr1.data
         cdef uint8_t* b = <uint8_t*> ptr2.data
         cdef uint8_t* d = <uint8_t*> out.ptr.data
@@ -376,7 +428,21 @@ cdef class BoolVector(Vector):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef BoolVector out
+
+        # Fast path: no nulls -> SIMD bulk NOT.
+        if ptr.null_bitmap == NULL:
+            out = BoolVector(<size_t>n)
+            if nbytes > 0:
+                simd_not_mask(<uint8_t*> out.ptr.data, <uint8_t*> ptr.data, <size_t>nbytes)
+                # NOT inverts trailing bits in the last byte from 0->1; mask them back to 0
+                # so consumers like simd_popcount/any() don't see phantom set bits.
+                if (n & 7) != 0:
+                    (<uint8_t*> out.ptr.data)[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
+            out.ptr.null_bitmap = NULL
+            return out
+
+        out = BoolVector(<size_t>n)
         cdef uint8_t* src = <uint8_t*> ptr.data
         cdef uint8_t* src_null = ptr.null_bitmap
         cdef uint8_t* dst = <uint8_t*> out.ptr.data

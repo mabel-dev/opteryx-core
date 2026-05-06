@@ -172,6 +172,8 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.union import UnionNode
     from opteryx.operators.unnest_join import UnnestJoinNode
     from opteryx.operators.view_management import ViewManagementNode
+    from opteryx.operators.relation_management import RelationManagementNode
+    from opteryx.operators.insert import InsertNode
 
     r = OperatorRegistry()
 
@@ -362,6 +364,18 @@ def _build_registry() -> OperatorRegistry:
         ViewManagementNode,
         name="View Management",
         category=OperatorCategory.DDL,
+        is_not_explained=True,
+    )
+    r.register(
+        RelationManagementNode,
+        name="Relation Management",
+        category=OperatorCategory.DDL,
+        is_not_explained=True,
+    )
+    r.register(
+        InsertNode,
+        name="Insert",
+        category=OperatorCategory.IO,
         is_not_explained=True,
     )
 

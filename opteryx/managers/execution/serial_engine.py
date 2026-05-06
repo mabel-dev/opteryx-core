@@ -28,6 +28,8 @@ def execute(
     from opteryx.operators.show_value import ShowValueNode
     from opteryx.operators.table_management import TableManagementNode
     from opteryx.operators.view_management import ViewManagementNode
+    from opteryx.operators.relation_management import RelationManagementNode
+    from opteryx.operators.insert import InsertNode
 
     # Retrieve the tail of the query plan, which should ideally be a single head node
     head_nodes = list(set(plan.get_exit_points()))
@@ -51,9 +53,25 @@ def execute(
     if isinstance(head_node, SetVariableNode):
         # Set the variables and return a non-tabular result
         return head_node(None), ResultType.NON_TABULAR
-    if isinstance(head_node, (ViewManagementNode, TableManagementNode)):
-        # Metadata DDL (CREATE/ALTER/DROP VIEW) - return non-tabular result
+    if isinstance(head_node, (ViewManagementNode, TableManagementNode, RelationManagementNode)):
+        # Metadata DDL (CREATE/ALTER/DROP VIEW/TABLE) - return non-tabular result
         return head_node(None), ResultType.NON_TABULAR
+    if isinstance(head_node, InsertNode):
+        # INSERT ... VALUES: drive the pipeline to completion, then return the result
+        def _drive_insert():
+            pump_nodes = [(nid, node) for nid, node in plan.depth_first_search_flat() if node.is_scan]
+            for pump_nid, pump_instance in pump_nodes:
+                for morsel in pump_instance(None):
+                    if morsel is not None:
+                        for _ in process_node(plan, pump_nid, morsel):
+                            pass
+                for _ in process_node(plan, pump_nid, EOS):
+                    pass
+
+        _drive_insert()
+        if head_node.result is None:
+            raise InvalidInternalStateError("InsertNode did not produce a result")
+        return head_node.result, ResultType.NON_TABULAR
     if isinstance(head_node, (ShowValueNode, ShowCreateNode)):
         # There's no execution plan to execute, just return the result
         return head_node(None), ResultType.TABULAR

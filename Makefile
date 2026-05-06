@@ -148,7 +148,17 @@ go:
 
 clickbench:
 	@clear || true
-	@$(PYTHON) tests/performance/clickbench/clickbench.py
+	@$(PYTHON) tests/performance/clickbench/opteryx/runner.py
+
+clickbench-duckdb: ## Re-run DuckDB ClickBench calibration (regenerates duckdb/results.local.json)
+	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py
+
+tpch-bench: ## Run TPC-H performance benchmark (Opteryx)
+	@clear || true
+	@$(PYTHON) tests/performance/tpch/opteryx/runner.py
+
+tpch-bench-duckdb: ## Re-run DuckDB TPC-H calibration (regenerates duckdb/results.sf*.json)
+	@$(PYTHON) tests/performance/tpch/duckdb/runner.py
 
 # Aliases for backward compatibility
 t: test-quick

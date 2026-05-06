@@ -15,11 +15,13 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import opteryx
-from opteryx.connectors.base.base_connector import BaseConnector
+from opteryx.connectors import TableType
+from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
 from opteryx.connectors.capabilities import Writable
-from opteryx.exceptions import ConcurrentModificationError
+from opteryx.exceptions import ConcurrentModificationError, DatasetNotFoundError
 from opteryx.models.dataset_descriptor import DatasetDescriptor
 from opteryx.models.file_entry import FileEntry
+from opteryx.models.manifest import Manifest
 from opteryx.types.schema import RelationSchema
 
 
@@ -49,6 +51,9 @@ class LocalStoreConnector(BaseConnector, Writable):
     """
 
     __mode__ = "Blob"
+
+    supports_predicate_pushdown = False
+    supports_limit_pushdown = False
 
     def __init__(self, store_root: Optional[str] = None, **kwargs):
         """Initialize LocalStoreConnector.
@@ -212,6 +217,20 @@ class LocalStoreConnector(BaseConnector, Writable):
         relation_dir = self._relation_dir(relation_name)
         return os.path.isfile(os.path.join(relation_dir, "dataset.json"))
 
+    def locate_object(self, name: str):
+        """Determine if a name refers to a table managed by this connector."""
+        if self.relation_exists(name):
+            return (TableType.Table, None)
+        return (None, None)
+
+    def table_engine(self, name: str, telemetry=None, **kwargs):
+        """Create a transient table reader for the named relation."""
+        return LocalStoreTable(
+            dataset=name,
+            store_root=self.store_root,
+            telemetry=telemetry,
+        )
+
     def insert(self, relation_name: str, file_entries: List[FileEntry]) -> None:
         """Commit pre-written data files into a new snapshot.
 
@@ -311,3 +330,58 @@ class LocalStoreConnector(BaseConnector, Writable):
         with open(dataset_tmp, "w") as f:
             json.dump(new_descriptor.to_dict(), f)
         os.replace(dataset_tmp, dataset_path)
+
+
+class LocalStoreTable(BaseTable):
+    """Transient reader for a LocalStoreConnector-managed relation."""
+
+    __mode__ = "Blob"
+    __synchronousity__ = "synchronous"
+
+    supports_predicate_pushdown = False
+    supports_limit_pushdown = False
+    supports_async = False
+
+    def __init__(self, dataset, store_root, telemetry=None, **kwargs):
+        BaseTable.__init__(self, dataset=dataset, telemetry=telemetry, **kwargs)
+        self.store_root = store_root
+        self.__type__ = "LOCAL_STORE"
+        self.schema = None
+        self.manifest = None
+
+    def _relation_dir(self) -> str:
+        parts = self.dataset.split(".")
+        return os.path.join(self.store_root, *parts)
+
+    def get_dataset_schema(self) -> RelationSchema:
+        if self.schema is not None:
+            return self.schema
+        schema, _ = self.get_dataset_metadata()
+        return schema
+
+    def get_dataset_metadata(self):
+        if self.schema is not None and self.manifest is not None:
+            return self.schema, self.manifest
+
+        relation_dir = self._relation_dir()
+        dataset_path = os.path.join(relation_dir, "dataset.json")
+        if not os.path.isfile(dataset_path):
+            raise DatasetNotFoundError(dataset=self.dataset, connector=self.__type__)
+
+        with open(dataset_path, "r") as f:
+            descriptor_dict = json.load(f)
+        descriptor = DatasetDescriptor.from_dict(descriptor_dict)
+        self.schema = descriptor.schema
+
+        file_entries: List[FileEntry] = []
+        if descriptor.current_snapshot is not None:
+            snapshot_path = os.path.join(relation_dir, descriptor.current_snapshot)
+            with open(snapshot_path, "r") as f:
+                snapshot = json.load(f)
+            for fe_dict in snapshot.get("files", []):
+                fe = FileEntry.from_json_dict(fe_dict)
+                fe.file_path = os.path.join(relation_dir, fe.file_path)
+                file_entries.append(fe)
+
+        self.manifest = Manifest(file_entries, self.schema)
+        return self.schema, self.manifest

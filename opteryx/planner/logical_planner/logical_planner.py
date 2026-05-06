@@ -62,6 +62,11 @@ class LogicalPlanStepType(int, Enum):
     Analyze = auto()
     Comment = auto()  # COMMENT ON VIEW/TABLE
 
+    CreateRelation = auto()
+    DropRelation = auto()
+    TruncateRelation = auto()
+    Insert = auto()
+
 
 class LogicalPlan(Graph):
     pass
@@ -1281,45 +1286,331 @@ def plan_alter_view(statement, **kwargs):
     return plan
 
 
-def plan_drop_view(statement, **kwargs):
+def plan_drop(statement, **kwargs):
     """
-    Create a logical plan for DROP VIEW statement.
+    Create a logical plan for DROP statement (VIEW or TABLE).
 
     DROP VIEW [IF EXISTS] view_name
+    DROP TABLE [IF EXISTS] table_name
     """
     root_node = "Drop"
     plan = LogicalPlan()
 
     drop_statement = statement[root_node]
+    object_type = drop_statement.get("object_type")
 
-    # Only handle DROP VIEW statements
-    if drop_statement.get("object_type") != "View":
-        from opteryx.exceptions import UnsupportedSyntaxError
+    if object_type == "View":
+        # DROP VIEW path (unchanged)
+        drop_view_node = LogicalPlanNode(node_type=LogicalPlanStepType.DropView)
 
-        raise UnsupportedSyntaxError(
-            f"DROP {drop_statement.get('object_type')} is not supported in this context"
+        # Extract view names (can drop multiple views)
+        names = drop_statement["names"]
+        view_names = []
+        for name_parts in names:
+            view_name = extract_variable(name_parts)
+            if isinstance(view_name, list):
+                view_name = ".".join(view_name)
+            view_names.append(view_name)
+
+        drop_view_node.view_names = view_names
+
+        # Extract IF EXISTS flag
+        drop_view_node.if_exists = drop_statement.get("if_exists", False)
+
+        # Extract CASCADE/RESTRICT flag
+        drop_view_node.cascade = drop_statement.get("cascade", False)
+
+        plan.add_node(random_string(), drop_view_node)
+        return plan
+
+    elif object_type == "Table":
+        # DROP TABLE path (new)
+        drop_relation_node = LogicalPlanNode(node_type=LogicalPlanStepType.DropRelation)
+
+        # Extract table names (can drop multiple tables)
+        names = drop_statement["names"]
+        relation_names = []
+        for name_parts in names:
+            relation_name = extract_variable(name_parts)
+            if isinstance(relation_name, list):
+                relation_name = ".".join(relation_name)
+            relation_names.append(relation_name)
+
+        drop_relation_node.relation_names = relation_names
+
+        # Extract IF EXISTS flag
+        drop_relation_node.if_exists = drop_statement.get("if_exists", False)
+
+        plan.add_node(random_string(), drop_relation_node)
+        return plan
+
+    else:
+        raise UnsupportedSyntaxError(f"DROP {object_type} is not supported")
+
+
+def _plan_ctas(relation_name, if_not_exists, query_ast):
+    """Plan CREATE TABLE ... AS SELECT.
+
+    Builds: SELECT subtree (Exit-stripped) → InsertNode(create_target=True).
+    Target schema is derived at bind time from the SELECT's exit columns.
+    """
+    plan = LogicalPlan()
+
+    source_plan = plan_query(query_ast)
+    exit_node_id = source_plan.get_exit_points()[0]
+    source_plan.remove_node(exit_node_id, heal=True)
+    plan += source_plan
+    source_tail_id = source_plan.get_exit_points()[0]
+
+    insert_step = LogicalPlanNode(node_type=LogicalPlanStepType.Insert)
+    insert_step.relation_name = relation_name
+    insert_step.values_feeder = None
+    insert_step.source_tail_id = source_tail_id
+    insert_step.explicit_columns = None
+    insert_step.create_target = True
+    insert_step.if_not_exists = if_not_exists
+
+    insert_id = random_string()
+    plan.add_node(insert_id, insert_step)
+    plan.add_edge(source_tail_id, insert_id)
+    return plan
+
+
+def plan_create_table(statement, **kwargs):
+    """
+    Create a logical plan for CREATE TABLE statement.
+
+    CREATE TABLE [IF NOT EXISTS] table_name (
+        column_name column_type [NOT NULL],
+        ...
+    )
+
+    Maps sqloxide column types to OrsoTypes and constructs a RelationSchema.
+    """
+    from opteryx.types.schema import FlatColumn, RelationSchema
+
+    root_node = "CreateTable"
+    plan = LogicalPlan()
+
+    create_table_node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateRelation)
+
+    # Extract table name
+    table_name_parts = statement[root_node]["name"]
+    create_table_node.relation_name = extract_variable(table_name_parts)
+    if isinstance(create_table_node.relation_name, list):
+        create_table_node.relation_name = ".".join(create_table_node.relation_name)
+
+    # Extract IF NOT EXISTS flag
+    create_table_node.if_not_exists = statement[root_node].get("if_not_exists", False)
+
+    # Check for unsupported options
+    for option in ["or_replace", "external", "temporary", "transient", "volatile", "iceberg"]:
+        if statement[root_node].get(option):
+            raise UnsupportedSyntaxError(f"CREATE TABLE option not supported: {option}")
+
+    # CTAS path
+    query_ast = statement[root_node].get("query")
+    if query_ast is not None:
+        column_defs = statement[root_node].get("columns", [])
+        if column_defs:
+            raise UnsupportedSyntaxError(
+                "CREATE TABLE AS SELECT cannot specify column definitions"
+            )
+        return _plan_ctas(
+            relation_name=create_table_node.relation_name,
+            if_not_exists=create_table_node.if_not_exists,
+            query_ast=query_ast,
         )
 
-    drop_view_node = LogicalPlanNode(node_type=LogicalPlanStepType.DropView)
+    # Parse columns
+    columns = []
+    column_defs = statement[root_node].get("columns", [])
+    if not column_defs:
+        raise UnsupportedSyntaxError("CREATE TABLE requires at least one column")
 
-    # Extract view names (can drop multiple views)
-    names = drop_statement["names"]
-    view_names = []
-    for name_parts in names:
-        view_name = extract_variable(name_parts)
-        if isinstance(view_name, list):
-            view_name = ".".join(view_name)
-        view_names.append(view_name)
+    # Type mapping from sqloxide to OrsoTypes
+    type_mapping = {
+        "BigInt": "INTEGER",
+        "Int": "INTEGER",
+        "Integer": "INTEGER",
+        "SmallInt": "INTEGER",
+        "TinyInt": "INTEGER",
+        "Varchar": "VARCHAR",
+        "Text": "VARCHAR",
+        "String": "VARCHAR",
+        "Char": "VARCHAR",
+        "Double": "DOUBLE",
+        "Float": "DOUBLE",
+        "Real": "DOUBLE",
+        "Boolean": "BOOLEAN",
+        "Bool": "BOOLEAN",
+        "Date": "DATE",
+        "Timestamp": "TIMESTAMP",
+        "Blob": "BLOB",
+        "Bytea": "BLOB",
+        "Bytes": "BLOB",
+    }
 
-    drop_view_node.view_names = view_names
+    for col_def in column_defs:
+        col_name = col_def["name"]["value"]
+        col_type_data = col_def["data_type"]
 
-    # Extract IF EXISTS flag
-    drop_view_node.if_exists = drop_statement.get("if_exists", False)
+        # Extract the type key. sqloxide returns either:
+        # - A dict like {"BigInt": None}
+        # - A string like "Boolean" or "Date"
+        if isinstance(col_type_data, str):
+            type_key = col_type_data
+        elif isinstance(col_type_data, dict):
+            type_key = next(iter(col_type_data.keys()))
+        else:
+            raise UnsupportedSyntaxError(
+                f"unsupported column type in CREATE TABLE: {col_type_data}"
+            )
 
-    # Extract CASCADE/RESTRICT flag
-    drop_view_node.cascade = drop_statement.get("cascade", False)
+        if type_key not in type_mapping:
+            raise UnsupportedSyntaxError(
+                f"unsupported column type in CREATE TABLE: {type_key}"
+            )
 
-    plan.add_node(random_string(), drop_view_node)
+        # Map to OrsoTypes
+        orso_type_str = type_mapping[type_key]
+        orso_type = OrsoTypes[orso_type_str]
+
+        # Check for NOT NULL constraint
+        col_nullable = True
+        col_options = col_def.get("options", [])
+        if col_options:
+            for opt in col_options:
+                if isinstance(opt, dict) and opt.get("option") == "NotNull":
+                    col_nullable = False
+                    break
+
+        # Create FlatColumn
+        flat_col = FlatColumn(name=col_name, type=orso_type, nullable=col_nullable)
+        columns.append(flat_col)
+
+    create_table_node.columns = columns
+
+    # Build RelationSchema
+    schema = RelationSchema(name=create_table_node.relation_name, columns=columns)
+    create_table_node.schema = schema
+
+    plan.add_node(random_string(), create_table_node)
+    return plan
+
+
+def plan_truncate(statement, **kwargs):
+    """
+    Create a logical plan for TRUNCATE TABLE statement.
+
+    TRUNCATE [TABLE] table_name [IF EXISTS]
+    """
+    root = "Truncate"
+    truncate_stmt = statement[root]
+
+    if not truncate_stmt.get("table"):
+        raise UnsupportedSyntaxError("TRUNCATE without TABLE keyword is not supported")
+
+    table_names = truncate_stmt.get("table_names", [])
+    if len(table_names) != 1:
+        raise UnsupportedSyntaxError("TRUNCATE supports a single table name")
+
+    # Extract table name
+    name_parts = table_names[0].get("name", [])
+    relation_name = ".".join(p["Identifier"]["value"] for p in name_parts)
+
+    plan = LogicalPlan()
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.TruncateRelation)
+    node.relation_name = relation_name
+    node.if_exists = truncate_stmt.get("if_exists", False)
+
+    plan.add_node(random_string(), node)
+    return plan
+
+
+def plan_insert(statement, **kwargs):
+    """
+    Create a logical plan for INSERT statement.
+
+    Supports:
+      INSERT INTO table_name [(c1, c2, ...)] VALUES (v1, v2), ...
+      INSERT INTO table_name [(c1, c2, ...)] SELECT ...
+    """
+    root = "Insert"
+    insert_stmt = statement[root]
+
+    if insert_stmt.get("overwrite"):
+        raise UnsupportedSyntaxError("INSERT OVERWRITE is not supported")
+
+    body = insert_stmt["source"]["body"]
+
+    # Target relation name
+    table_name_parts = insert_stmt["table"]["TableName"]
+    relation_name = ".".join(
+        logical_planner_builders.build(p).value for p in table_name_parts
+    )
+
+    # Explicit column list (may be empty/None)
+    explicit_columns = []
+    for col in insert_stmt.get("columns") or []:
+        if isinstance(col, dict) and "value" in col:
+            explicit_columns.append(col["value"])
+        else:
+            raise UnsupportedSyntaxError(
+                f"Unsupported column reference in INSERT column list: {col}"
+            )
+    explicit_columns_tuple = tuple(explicit_columns) if explicit_columns else None
+
+    plan = LogicalPlan()
+
+    if "Values" in body:
+        # VALUES source — mirror the existing FromClause VALUES path.
+        values_step = LogicalPlanNode(
+            node_type=LogicalPlanStepType.FunctionDataset, function="VALUES"
+        )
+        values_step.alias = f"$insert_values-{random_string(6)}"
+        values_step.values = [
+            tuple(logical_planner_builders.build(value) for value in row)
+            for row in body["Values"]["rows"]
+        ]
+        # Generate placeholder column names. These will be replaced by visit_insert
+        # with the actual column names from the target relation's schema.
+        if values_step.values:
+            num_cols = len(values_step.values[0])
+            values_step.columns = tuple(f"$col{i}" for i in range(num_cols))
+        else:
+            values_step.columns = ()
+
+        values_id = random_string()
+        plan.add_node(values_id, values_step)
+
+        insert_step = LogicalPlanNode(node_type=LogicalPlanStepType.Insert)
+        insert_step.relation_name = relation_name
+        insert_step.values_feeder = values_step
+        insert_step.source_tail_id = None
+        insert_step.explicit_columns = explicit_columns_tuple
+        insert_id = random_string()
+        plan.add_node(insert_id, insert_step)
+        plan.add_edge(values_id, insert_id)
+    else:
+        # SELECT source — plan the sub-query, strip its Exit node, then attach
+        # the Insert sink in the Exit's place.
+        source_plan = plan_query(insert_stmt["source"])
+        exit_node_id = source_plan.get_exit_points()[0]
+        source_plan.remove_node(exit_node_id, heal=True)
+
+        plan += source_plan
+        source_tail_id = source_plan.get_exit_points()[0]
+
+        insert_step = LogicalPlanNode(node_type=LogicalPlanStepType.Insert)
+        insert_step.relation_name = relation_name
+        insert_step.values_feeder = None
+        insert_step.source_tail_id = source_tail_id
+        insert_step.explicit_columns = explicit_columns_tuple
+        insert_id = random_string()
+        plan.add_node(insert_id, insert_step)
+        plan.add_edge(source_tail_id, insert_id)
+
     return plan
 
 
@@ -1481,7 +1772,10 @@ QUERY_BUILDERS = {
     # "Use": plan_use
     "CreateView": plan_create_view,
     "AlterView": plan_alter_view,
-    "Drop": plan_drop_view,  # handles DROP VIEW (checks object_type internally)
+    "Drop": plan_drop,  # handles DROP VIEW and DROP TABLE
+    "CreateTable": plan_create_table,
+    "Truncate": plan_truncate,
+    "Insert": plan_insert,
 }
 
 
