@@ -154,3 +154,50 @@ class FileEntry:
             "has_k_hashes": self.min_k_hashes is not None,
             "has_histograms": self.histogram_counts is not None,
         }
+
+    def to_json_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization (round-trippable).
+
+        Encodes bytes in lower_bounds/upper_bounds as base64 strings.
+        """
+        import base64
+
+        def encode_bounds(bounds: Optional[Dict[int, bytes]]) -> Optional[Dict[str, str]]:
+            if bounds is None:
+                return None
+            return {str(k): base64.b64encode(v).decode("ascii") for k, v in bounds.items()}
+
+        return {
+            "file_path": self.file_path,
+            "file_format": self.file_format,
+            "record_count": self.record_count,
+            "file_size_in_bytes": self.file_size_in_bytes,
+            "uncompressed_size_in_bytes": self.uncompressed_size_in_bytes,
+            "lower_bounds": encode_bounds(self.lower_bounds),
+            "upper_bounds": encode_bounds(self.upper_bounds),
+            "null_value_counts": self.null_value_counts,
+            "min_k_hashes": self.min_k_hashes,
+            "histogram_counts": self.histogram_counts,
+            "histogram_bins": self.histogram_bins,
+            "min_values": self.min_values,
+            "max_values": self.max_values,
+            "column_uncompressed_sizes_in_bytes": self.column_uncompressed_sizes_in_bytes,
+        }
+
+    @classmethod
+    def from_json_dict(cls, data: dict) -> "FileEntry":
+        """Create from JSON-serialized dictionary.
+
+        Decodes base64 strings in lower_bounds/upper_bounds to bytes.
+        """
+        import base64
+
+        def decode_bounds(bounds: Optional[Dict[str, str]]) -> Optional[Dict[int, bytes]]:
+            if bounds is None:
+                return None
+            return {int(k): base64.b64decode(v) for k, v in bounds.items()}
+
+        data = data.copy()
+        data["lower_bounds"] = decode_bounds(data.get("lower_bounds"))
+        data["upper_bounds"] = decode_bounds(data.get("upper_bounds"))
+        return cls(**data)

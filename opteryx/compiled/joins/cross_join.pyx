@@ -6,170 +6,159 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# See the License at http://www.apache.org/licenses/LICENSE-2.0
+# Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+
+"""Draken-native CROSS JOIN UNNEST kernels and list deduplication."""
+
 from draken.vectors.int64_vector cimport Int64Vector
 from draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
+from draken.vectors.int64_vector cimport from_rle_builder as int64_from_rle_builder
 from draken.vectors.vector cimport Vector
 from draken.interop.vector_sequence cimport vector_from_sequence
 from opteryx.compiled.structures.buffers cimport IntBuffer
-from opteryx.compiled.structures.buffers cimport ObjectBuffer
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
-from opteryx.third_party.fastfloat.fast_float cimport c_parse_fast_float as parse_fast_float
-from libc.stdint cimport int64_t
-
-from libc.stdint cimport int32_t, int64_t, uint64_t, uint8_t, uintptr_t
-from cpython.unicode cimport PyUnicode_DecodeUTF8
+from libc.stdint cimport int32_t, int64_t, uint64_t
+from libc.stdlib cimport malloc, free
 from cpython.object cimport PyObject_Hash
-from cpython.bytes cimport PyBytes_FromStringAndSize
 
-cpdef tuple build_rows_indices_and_column(object column):
-    cdef:
-        object child_elements = column.values
-        list buffers = column.buffers()
-        Py_ssize_t row_count = len(column)
-        Py_ssize_t total_size
-        Py_ssize_t i
-        Py_ssize_t j
-        Py_ssize_t index_pos
-        IntBuffer indices_buf
-        ObjectBuffer flat_data_buf
-        const int64_t[::1] indices
-        Py_ssize_t arr_offset = column.offset
-        const int32_t* offsets32 = <const int32_t*><uintptr_t>(buffers[1].address)
 
-        # Child array variables
-        Py_ssize_t child_offset = child_elements.offset
-        list child_buffers = child_elements.buffers()
-        const int32_t* child_offsets32 = <const int32_t*><uintptr_t>(child_buffers[1].address)
-        const char* child_data = <const char*><uintptr_t>(child_buffers[2].address)
+cpdef tuple build_rows_indices_and_column_draken(object column_vector):
+    """Build row indices and flattened column data from ARRAY column (Draken-native).
 
-        const uint8_t* parent_valid = <const uint8_t*><uintptr_t>(buffers[0].address) if buffers[0] else NULL
-        const uint8_t* child_valid = <const uint8_t*><uintptr_t>(child_buffers[0].address) if child_buffers[0] else NULL
+    Parameters:
+        column_vector: Draken Vector (ArrayVector for ARRAY columns)
 
-        Py_ssize_t start
-        Py_ssize_t end
-        Py_ssize_t str_start
-        Py_ssize_t str_end
+    Returns:
+        tuple of (Int64Vector, Draken vector) — row indices and flattened typed data
+    """
+    cdef int64_t row_count = len(column_vector)
+    cdef int64_t i
+    cdef int64_t total_size = 0
+    cdef list flat_data_list = []
+    cdef IntBuffer indices_buf
+    cdef object element
 
-    if row_count == 0:
-        return int64_from_sequence(None), []
+    for i in range(row_count):
+        element = column_vector[i]
+        if element is not None:
+            if hasattr(element, '__iter__') and not isinstance(element, (str, bytes)):
+                for item in element:
+                    flat_data_list.append(item)
+                    total_size += 1
+            else:
+                flat_data_list.append(element)
+                total_size += 1
 
-    total_size = offsets32[arr_offset + row_count] - offsets32[arr_offset]
     if total_size == 0:
-        return int64_from_sequence(None), []
+        return (int64_from_sequence(None), vector_from_sequence([]))
 
     indices_buf = IntBuffer(total_size)
-    flat_data_buf = ObjectBuffer(total_size)
-
-    index_pos = 0
     for i in range(row_count):
-        if parent_valid and not (parent_valid[i >> 3] & (1 << (i & 7))):
-            continue
-
-        start = offsets32[arr_offset + i]
-        end = offsets32[arr_offset + i + 1]
-
-        if start >= end:
-            continue
-
-        for j in range(start, end):
-            indices_buf.append(i)
-
-            if child_valid and not (child_valid[(child_offset + j) >> 3] & (1 << ((child_offset + j) & 7))):
-                flat_data_buf.append(None)
+        element = column_vector[i]
+        if element is not None:
+            if hasattr(element, '__iter__') and not isinstance(element, (str, bytes)):
+                for item in element:
+                    indices_buf.append(i)
             else:
-                str_start = child_offsets32[child_offset + j]
-                str_end = child_offsets32[child_offset + j + 1]
-
-                if str_end > str_start:
-                    flat_data_buf.append(PyUnicode_DecodeUTF8(
-                        child_data + str_start, str_end - str_start, "replace"
-                    )
-                )
-                else:
-                    flat_data_buf.append("")
-            index_pos += 1
-
-    indices = indices_buf.get_buffer()
-    cdef Int64Vector vec = int64_from_sequence(indices)
-    vec._arrow_data_buf = indices_buf
-    return vec, flat_data_buf.to_list()
-
-
-cpdef tuple build_filtered_rows_indices_and_column(object column, set valid_values):
-    """
-    Arrow-native version of build_filtered_rows_indices_and_column.
-    Filters values from a ListArray column based on membership in `valid_values`.
-    Returns matching row indices and values (as bytes, not str).
-    """
-    cdef:
-        object child_elements = column.values
-        list buffers = column.buffers()
-        Py_ssize_t row_count = len(column)
-        Py_ssize_t arr_offset = column.offset
-        const int32_t* offsets32 = <const int32_t*><uintptr_t>(buffers[1].address)
-        Py_ssize_t i = 0
-        Py_ssize_t j = 0
-        Py_ssize_t k = 0
-        Py_ssize_t start
-        Py_ssize_t end
-        Py_ssize_t str_len
-        Py_ssize_t str_end
-        Py_ssize_t allocated_size = row_count * 4 if row_count > 0 else 4
-
-        list child_buffers = child_elements.buffers()
-        const int32_t* child_offsets32 = <const int32_t*><uintptr_t>(child_buffers[1].address)
-        const char* child_data = <const char*><uintptr_t>(child_buffers[2].address)
-        Py_ssize_t child_offset = child_elements.offset
-        const uint8_t* parent_bitmap = NULL
-        const uint8_t* child_bitmap = NULL
-
-        Py_ssize_t str_start
-
-    if buffers[0]:
-        parent_bitmap = <const uint8_t*><uintptr_t>(buffers[0].address)
-    if child_buffers[0]:
-        child_bitmap = <const uint8_t*><uintptr_t>(child_buffers[0].address)
-
-    # Normalize valid_values to bytes
-    cdef set valid_bytes = set()
-    for v in valid_values:
-        valid_bytes.add(v.encode("utf8") if isinstance(v, str) else v)
-
-    cdef IntBuffer indices_buf = IntBuffer(allocated_size)
-    cdef list flat_list = []
-
-    for i in range(row_count):
-        if parent_bitmap is not NULL and not (parent_bitmap[i >> 3] & (1 << (i & 7))):
-            continue
-
-        start = offsets32[arr_offset + i]
-        end = offsets32[arr_offset + i + 1]
-
-        for j in range(start, end):
-            if child_bitmap is not NULL and not (child_bitmap[(child_offset + j) >> 3] & (1 << ((child_offset + j) & 7))):
-                continue
-
-            str_start = child_offsets32[child_offset + j]
-            str_end = child_offsets32[child_offset + j + 1]
-            str_len = str_end - str_start
-
-            # Materialize only matched values as bytes
-            value_bytes = PyBytes_FromStringAndSize(child_data + str_start, str_len)
-
-            if value_bytes in valid_bytes:
                 indices_buf.append(i)
-                flat_list.append(value_bytes)
 
-    k = indices_buf.size()
-    if k == 0:
-        return int64_from_sequence(None), vector_from_sequence([])
-
-    # Convert IntBuffer to Int64Vector (native path)
-    # We must ensure the IntBuffer stays alive to back the memoryview
     cdef const int64_t[::1] mv = indices_buf.get_buffer()
     cdef Int64Vector vec = int64_from_sequence(mv)
-    vec._arrow_data_buf = indices_buf  # Anchor the buffer object
-    return vec, vector_from_sequence(flat_list)
+    vec._arrow_data_buf = indices_buf
+    return (vec, vector_from_sequence(flat_data_list))
+
+
+cpdef tuple build_filtered_rows_indices_and_column_draken(object column_vector, set valid_values):
+    """Build row indices and flattened column data for filtered ARRAY column (Draken-native).
+
+    Parameters:
+        column_vector: Draken Vector
+        valid_values:  set of values to include in results
+
+    Returns:
+        tuple of (Int64Vector, Draken vector) — row indices and flattened filtered data
+    """
+    cdef int64_t row_count = len(column_vector)
+    cdef int64_t i
+    cdef int64_t total_matched = 0
+    cdef list flat_data_list = []
+    cdef IntBuffer indices_buf = IntBuffer(row_count)
+    cdef object element, item
+
+    for i in range(row_count):
+        element = column_vector[i]
+        if element is not None:
+            if hasattr(element, '__iter__') and not isinstance(element, (str, bytes)):
+                for item in element:
+                    if item in valid_values:
+                        flat_data_list.append(item)
+                        indices_buf.append(i)
+                        total_matched += 1
+            else:
+                if element in valid_values:
+                    flat_data_list.append(element)
+                    indices_buf.append(i)
+                    total_matched += 1
+
+    if total_matched == 0:
+        return (int64_from_sequence(None), vector_from_sequence([]))
+
+    cdef const int64_t[::1] mv = indices_buf.get_buffer()
+    cdef Int64Vector vec = int64_from_sequence(mv)
+    vec._arrow_data_buf = indices_buf
+    return (vec, vector_from_sequence(flat_data_list))
+
+
+cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
+    """
+    Build row indices for a Cartesian product (CROSS JOIN).
+
+    Left index is RLE-encoded (left_rows runs of length right_rows each).
+    Right index is dense ([0..right_rows-1] repeated left_rows times).
+
+    Returns:
+        tuple of (Int64Vector, Int64Vector) — left (RLE) and right (dense) row indices
+    """
+    cdef int64_t total_rows = left_rows * right_rows
+    cdef int64_t i, j
+    cdef int64_t* left_run_vals
+    cdef int32_t* left_run_lens
+    cdef Int64Vector left_vec
+    cdef IntBuffer right_indices_buf
+    cdef const int64_t[::1] right_mv
+    cdef Int64Vector right_vec
+
+    if total_rows == 0:
+        return (Int64Vector(0), Int64Vector(0))
+
+    left_run_vals = <int64_t*>malloc(left_rows * sizeof(int64_t))
+    left_run_lens = <int32_t*>malloc(left_rows * sizeof(int32_t))
+    if left_run_vals == NULL or left_run_lens == NULL:
+        free(left_run_vals)
+        free(left_run_lens)
+        raise MemoryError()
+
+    for i in range(left_rows):
+        left_run_vals[i] = i
+        left_run_lens[i] = <int32_t>right_rows
+
+    left_vec = int64_from_rle_builder(left_run_vals, left_run_lens, <size_t>left_rows)
+    free(left_run_vals)
+    free(left_run_lens)
+
+    right_indices_buf = IntBuffer(total_rows)
+    for i in range(left_rows):
+        for j in range(right_rows):
+            right_indices_buf.append(j)
+
+    right_mv = right_indices_buf.get_buffer()
+    right_vec = int64_from_sequence(right_mv)
+    right_vec._arrow_data_buf = right_indices_buf
+
+    return (left_vec, right_vec)
 
 
 cpdef tuple list_distinct(Vector values, Int64Vector indices, CarcharSetWrapper seen_hashes=None):
@@ -177,20 +166,19 @@ cpdef tuple list_distinct(Vector values, Int64Vector indices, CarcharSetWrapper 
     Filter duplicates from values using hash-based deduplication (Draken-native).
 
     Args:
-        values: Draken Vector of values
-        indices: Int64Vector of row indices
-        seen_hashes: CarcharSetWrapper to track seen hash values
+        values:       Draken Vector of values
+        indices:      Int64Vector of row indices
+        seen_hashes:  CarcharSetWrapper to track seen hash values (shared across calls)
 
     Returns:
         tuple of (deduplicated_values, deduplicated_indices_vector, seen_hashes)
     """
-    cdef:
-        Py_ssize_t i = 0
-        Py_ssize_t n = len(values)
-        uint64_t hash_value
-        object v
-        list new_values_list = []
-        list new_indices_list = []
+    cdef Py_ssize_t i = 0
+    cdef Py_ssize_t n = len(values)
+    cdef uint64_t hash_value
+    cdef object v
+    cdef list new_values_list = []
+    cdef list new_indices_list = []
 
     if seen_hashes is None:
         seen_hashes = CarcharSetWrapper()
@@ -202,5 +190,4 @@ cpdef tuple list_distinct(Vector values, Int64Vector indices, CarcharSetWrapper 
             new_values_list.append(v)
             new_indices_list.append(indices[i])
 
-    # Create Draken vectors from collected data
     return vector_from_sequence(new_values_list), vector_from_sequence(new_indices_list), seen_hashes

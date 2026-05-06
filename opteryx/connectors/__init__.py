@@ -327,6 +327,10 @@ def __getattr__(connector_name: str):
         from opteryx.connectors.filesystem_connector import FileSystemConnector
 
         return FileSystemConnector
+    if connector_name == "LocalStoreConnector":
+        from opteryx.connectors.local_store_connector import LocalStoreConnector
+
+        return LocalStoreConnector
     if connector_name == "GcpCloudStorageConnector":
         # Return FileSystemConnector with GCS filesystem
         return create_gcs_connector

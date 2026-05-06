@@ -393,6 +393,10 @@ class UnnamedColumnError(SqlError):
     """Exception raised for unnamed columns."""
 
 
+class ConcurrentModificationError(DatabaseError):
+    """Raised when a relation is modified concurrently during a commit operation."""
+
+
 # ======================== End Miscellaneous Database Errors ==========================
 
 

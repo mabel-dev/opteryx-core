@@ -286,7 +286,8 @@ IO_POOL_SLOT_BYTES: int = int(get("IO_POOL_SLOT_BYTES", 32 * 1024 * 1024))
 IO_POOL_SLOT_COUNT: int = int(get("IO_POOL_SLOT_COUNT", 64))
 """Initial slot count for the MemoryPool used by the pool reader."""
 
-
+LOCAL_STORE_ROOT: str = get("OPTERYX_LOCAL_STORE", "./.opteryx")
+"""Root directory for LocalStoreConnector storage."""
 
 # FEATURE FLAGS
 class Features:

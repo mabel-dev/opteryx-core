@@ -136,22 +136,30 @@ if __name__ == "__main__":  # pragma: no cover
     parser.add_argument(
         "--duckdb-baseline",
         type=str,
-        default="tests/performance/clickbench/duckdb.c6a.4xlarge.json",
-        help="Path to DuckDB baseline results JSON",
+        default=None,
+        help="Path to DuckDB baseline results JSON (defaults to duckdb.local.json if present, then duckdb.c6a.4xlarge.json)",
     )
     args = parser.parse_args()
 
+    # Resolve DuckDB baseline path: prefer local results if present
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    _local = os.path.join(_script_dir, "duckdb.local.json")
+    _remote = os.path.join(_script_dir, "duckdb.c6a.4xlarge.json")
+    if args.duckdb_baseline is None:
+        if os.path.exists(_local):
+            args.duckdb_baseline = _local
+        else:
+            args.duckdb_baseline = _remote
+
     # Load DuckDB baseline results
     duckdb_results = None
+    duckdb_machine = None
     if os.path.exists(args.duckdb_baseline):
-        try:
-            with open(args.duckdb_baseline, "r") as f:
-                duckdb_data = json.load(f)
-                # Use the warm2 (second warm run) for comparison
-                duckdb_results = [result[2] for result in duckdb_data.get("result", [])]
-        except Exception as e:
-            print(f"Warning: Could not load DuckDB baseline: {e}\n")
-            duckdb_results = None
+        with open(args.duckdb_baseline, "r") as f:
+            duckdb_data = json.load(f)
+            # Use the warm2 (second warm run) for comparison
+            duckdb_results = [result[2] for result in duckdb_data.get("result", [])]
+            duckdb_machine = duckdb_data.get("machine", args.duckdb_baseline)
 
     def format_ratio(opteryx_ms: float, duckdb_ms: float) -> str:
         """Format ratio with color coding based on performance."""
@@ -186,7 +194,7 @@ if __name__ == "__main__":  # pragma: no cover
         print(f"Iterations per query: {args.iterations}")
         print(f"Dataset: {DATASET.name} ({DATASET.value})")
         if duckdb_results:
-            print(f"Baseline: DuckDB (comparing to warm2 times)")
+            print(f"Baseline: DuckDB on {duckdb_machine} (comparing to warm2 times)")
         print()
         print(f"{'=' * 80}\n")
 

@@ -8,6 +8,7 @@ from opteryx.connectors.capabilities.diachronic import Diachronic
 from opteryx.connectors.capabilities.eidetic import Eidetic
 from opteryx.connectors.capabilities.limit_pushable import LimitPushable
 from opteryx.connectors.capabilities.predicate_pushable import PredicatePushable
+from opteryx.connectors.capabilities.writable import Writable
 
 __all__ = (
     "Asynchronous",
@@ -15,4 +16,5 @@ __all__ = (
     "Eidetic",
     "LimitPushable",
     "PredicatePushable",
+    "Writable",
 )

@@ -429,30 +429,20 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                                 node.type = "inner"
                                 node.on = _add_condition(node.on, predicate.condition)
                                 self.telemetry.optimization_predicate_pushdown_cross_join_to_inner_join += 1
-                            elif predicate.condition.value in non_equi_ops:
-                                # Only convert when the predicate can be represented as join fields.
-                                try:
-                                    extract_join_fields(
-                                        predicate.condition,
-                                        node.left_relation_names,
-                                        node.right_relation_names,
-                                    )
-                                except UnsupportedSyntaxError:
-                                    self.telemetry.optimization_predicate_pushdown += 1
-                                    context.optimized_plan.insert_node_after(
-                                        predicate.nid, predicate, context.node_id
-                                    )
-                                    continue
-                                # Convert to non-equi join
-                                node.type = "non equi"
-                                node.on = _add_condition(node.on, predicate.condition)
-                                self.telemetry.optimization_predicate_pushdown_cross_join_to_inner_join += 1
                             else:
                                 # Unsupported comparison - insert predicate above the join
                                 self.telemetry.optimization_predicate_pushdown += 1
                                 context.optimized_plan.insert_node_after(
                                     predicate.nid, predicate, context.node_id
                                 )
+                        elif predicate.relations.intersection(all_join_rels) and not predicate.relations.issubset(all_join_rels):
+                            # Predicate has some relations inside the join AND external
+                            # relations (e.g. an outer subquery alias). Cannot push past
+                            # the join — the external alias dissolves after inlining.
+                            self.telemetry.optimization_predicate_pushdown += 1
+                            context.optimized_plan.insert_node_after(
+                                predicate.nid, predicate, context.node_id
+                            )
                         else:
                             # Single-relation predicates can be pushed past the join
                             remaining_predicates.append(predicate)

@@ -529,6 +529,12 @@ class ParquetReadNode(ReaderNode):
             for col in base_schema.columns
             if col.type == _OrsoTypes.DECIMAL
         }
+        _date_col_set = {
+            col.name for col in base_schema.columns if col.type == _OrsoTypes.DATE
+        }
+        _timestamp_col_set = {
+            col.name for col in base_schema.columns if col.type == _OrsoTypes.TIMESTAMP
+        }
         predicate_root = self._compose_predicates(self.predicates or [])
 
         # >> OPTIMIZATION: Pre-compute function nodes once instead of per row group
@@ -659,6 +665,21 @@ class ParquetReadNode(ReaderNode):
                     for _dcol, (_dprec, _dscale) in _decimal_col_map.items():
                         if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls):
                             row_group[_dcol] = _int64_to_decimal(row_group[_dcol], _dprec, _dscale)
+
+                # Coerce DATE/TIMESTAMP columns: the C++ IPC pipeline serializes them
+                # as TAG_INT64 (physical type), so they arrive as Int64Vector.  Convert
+                # to Date32Vector / TimestampVector here using the schema type from the
+                # binder.  Required for kernels like EXTRACT that reject Int64Vector.
+                if _date_col_set or _timestamp_col_set:
+                    from draken.vectors.date32_vector import from_int64_vector as _int64_to_date32
+                    from draken.vectors.timestamp_vector import from_int64_vector as _int64_to_timestamp
+                    from draken.vectors.int64_vector import Int64Vector as _Int64VectorCls2
+                    for _dcol in _date_col_set:
+                        if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls2):
+                            row_group[_dcol] = _int64_to_date32(row_group[_dcol])
+                    for _tcol in _timestamp_col_set:
+                        if _tcol in row_group and isinstance(row_group[_tcol], _Int64VectorCls2):
+                            row_group[_tcol] = _int64_to_timestamp(row_group[_tcol], "us")
 
                 # ── Morsel assembly ───────────────────────────────────────────
                 morsel_already_ordered = False  # Track if morsel is already in output order
