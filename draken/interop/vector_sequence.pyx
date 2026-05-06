@@ -197,6 +197,65 @@ cdef DecimalVector _decimal_from_pylist(list data):
 
 
 # ---------------------------------------------------------------------------
+# VectorVector (FP16 embeddings) from Python list-of-lists
+# ---------------------------------------------------------------------------
+
+cdef object _vector_vector_from_pylist(list data):
+    """
+    Build a VectorVector from a Python list of [list-of-floats | None].
+
+    All non-null rows must have the same length (the embedding dimension),
+    and must not contain element-level nulls. Empty input or all-None input
+    cannot determine a dimension — raises ValueError. PyArrow handles the
+    fp32/fp64 -> fp16 narrowing on construction; the resulting Arrow array
+    is then routed through the standard FixedSizeList<float16> ingestion
+    path so the same validation and zero-copy rules apply.
+    """
+    import pyarrow as pa
+
+    cdef Py_ssize_t n = len(data)
+    cdef Py_ssize_t i
+    cdef object item, first_present = None
+    cdef Py_ssize_t dim = -1
+    cdef Py_ssize_t row_len
+
+    for i in range(n):
+        item = data[i]
+        if item is None:
+            continue
+        if not isinstance(item, (list, tuple)):
+            raise TypeError(
+                f"VECTOR builder expects list/tuple per row, got "
+                f"{type(item).__name__} at index {i}"
+            )
+        row_len = len(item)
+        if dim < 0:
+            dim = row_len
+            first_present = item
+        elif row_len != dim:
+            raise ValueError(
+                f"VECTOR rows must all have the same length; row {i} has "
+                f"length {row_len}, expected {dim}"
+            )
+        for sub in item:
+            if sub is None:
+                raise ValueError(
+                    "VECTOR rows must not contain null elements; embedding "
+                    "rows are present-or-absent at the row level"
+                )
+
+    if dim < 0:
+        raise ValueError(
+            "Cannot build a VECTOR from an empty or all-None sequence "
+            "without an inferable dimension"
+        )
+
+    arrow_array = pa.array(data, type=pa.list_(pa.float16(), dim))
+    from draken.interop.arrow import vector_from_arrow
+    return vector_from_arrow(arrow_array)
+
+
+# ---------------------------------------------------------------------------
 # dtype hint helpers
 # ---------------------------------------------------------------------------
 
@@ -321,6 +380,9 @@ cpdef object vector_from_sequence(object data, object dtype=None):
 
         if dtype_val == 'DECIMAL':
             return _decimal_from_pylist(data)
+
+        if dtype_val == 'VECTOR':
+            return _vector_vector_from_pylist(data)
 
         # -- Sniff element type from first non-None value --
         import decimal as _decimal

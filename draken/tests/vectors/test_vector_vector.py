@@ -162,6 +162,46 @@ def test_distance_kernels_reject_query_dimension_mismatch():
         vec.dot(_q([1.0, 2.0, 3.0]))
 
 
+# --- vector_from_sequence VECTOR branch (EMBED ingest path) ---------------
+
+
+def test_vector_from_sequence_builds_vectorvector_from_pylist():
+    from draken.interop.vector_sequence import vector_from_sequence
+    from opteryx.types import OrsoTypes
+
+    rows = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], None, [0.7, 0.8, 0.9]]
+    vec = vector_from_sequence(rows, dtype=OrsoTypes.VECTOR)
+
+    assert isinstance(vec, VectorVector)
+    assert vec.dimensions == 3
+    assert len(vec) == 4
+    assert vec.is_null_at(2)
+
+
+def test_vector_from_sequence_rejects_mixed_row_lengths():
+    from draken.interop.vector_sequence import vector_from_sequence
+    from opteryx.types import OrsoTypes
+
+    with pytest.raises(ValueError):
+        vector_from_sequence([[1.0, 2.0], [3.0]], dtype=OrsoTypes.VECTOR)
+
+
+def test_vector_from_sequence_rejects_inner_nulls():
+    from draken.interop.vector_sequence import vector_from_sequence
+    from opteryx.types import OrsoTypes
+
+    with pytest.raises(ValueError):
+        vector_from_sequence([[1.0, None, 2.0]], dtype=OrsoTypes.VECTOR)
+
+
+def test_vector_from_sequence_rejects_undimensionable():
+    from draken.interop.vector_sequence import vector_from_sequence
+    from opteryx.types import OrsoTypes
+
+    with pytest.raises(ValueError):
+        vector_from_sequence([None, None], dtype=OrsoTypes.VECTOR)
+
+
 # --- Morsel round-trip -----------------------------------------------------
 
 
