@@ -163,9 +163,9 @@ class _StaticHashEmbeddingProvider:
                         0.25,
                     )
 
-        norm = numpy.linalg.norm(vector)
+        norm = numpy.norm(vector)
         if norm != 0.0:
-            vector /= norm
+            vector = [value / norm for value in vector]
         return vector
 
     def embed_texts(self, texts: list[str]) -> numpy.ndarray:
@@ -200,7 +200,7 @@ class _StaticHashEmbeddingProvider:
         embedded = self.embed_texts([query_text, *texts])
         query_vector = embedded[0]
         row_vectors = embedded[1:]
-        return numpy.asarray(row_vectors @ query_vector, dtype=numpy.float32)
+        return [numpy.dot(row, query_vector) for row in row_vectors]
 
     def score_string_vector(self, query_text: str, values):
         positions, texts = self._extract_active_texts(values)
@@ -353,45 +353,34 @@ class _HybridEmbeddingProvider:
             max(self._rerank_k, min(len(texts), 8 * int(len(texts) ** 0.5))),
         )
         if shortlist >= len(texts):
-            candidate_indices = numpy.arange(len(texts), dtype=numpy.int64)
+            candidate_indices = list(range(len(texts)))
         else:
-            candidate_indices = numpy.argpartition(lexical_scores, -shortlist)[-shortlist:]
-            candidate_indices = candidate_indices[
-                numpy.argsort(lexical_scores[candidate_indices])[::-1]
-            ]
+            candidate_indices = numpy.argsort(lexical_scores, reverse=True)[:shortlist]
 
-        candidate_texts = [texts[index] for index in candidate_indices.tolist()]
-        rerank_embeddings = numpy.asarray(
-            self._reranker.embed_texts([query_text, *candidate_texts]),
-            dtype=numpy.float32,
-        )
+        candidate_texts = [texts[index] for index in candidate_indices]
+        rerank_embeddings = self._reranker.embed_texts([query_text, *candidate_texts])
         query_vector = rerank_embeddings[0]
         row_vectors = rerank_embeddings[1:]
 
         try:
             from opteryx.compiled.nanobind import vector_search
 
-            rerank_scores = numpy.asarray(
-                vector_search.score_cosine(query_vector, row_vectors),
-                dtype=numpy.float32,
-            )
+            rerank_scores = list(vector_search.score_cosine(query_vector, row_vectors))
         except (ImportError, ValueError):
-            rerank_scores = numpy.zeros(len(candidate_texts), dtype=numpy.float32)
-            query_norm = numpy.linalg.norm(query_vector)
+            rerank_scores = [0.0] * len(candidate_texts)
+            query_norm = numpy.norm(query_vector)
             if query_norm != 0.0:
-                row_norms = numpy.linalg.norm(row_vectors, axis=1)
-                valid_mask = row_norms != 0.0
-                if numpy.any(valid_mask):
-                    rerank_scores[valid_mask] = (row_vectors[valid_mask] @ query_vector) / (
-                        row_norms[valid_mask] * query_norm
-                    )
+                for index, row in enumerate(row_vectors):
+                    row_norm = numpy.norm(row)
+                    if row_norm != 0.0:
+                        rerank_scores[index] = numpy.dot(row, query_vector) / (
+                            row_norm * query_norm
+                        )
 
-        final_scores = lexical_scores * numpy.float32(0.15)
-        final_scores[candidate_indices] = rerank_scores
-        return (
-            numpy.asarray(positions, dtype=numpy.int64),
-            numpy.asarray(final_scores, dtype=numpy.float32),
-        )
+        final_scores = [score * 0.15 for score in lexical_scores]
+        for candidate_index, rerank_score in zip(candidate_indices, rerank_scores):
+            final_scores[candidate_index] = rerank_score
+        return (positions, final_scores)
 
 
 class _MiniLMNativeEmbeddingProvider:
