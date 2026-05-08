@@ -256,11 +256,24 @@ cdef dict _filestats_to_python(parquet_reader.FileStats fs,
     cdef parquet_reader.SchemaField field
     cdef size_t idx
     cdef dict top_level_types = {}
-    for idx in range(fs.schema_columns.size()):
+
+    # --- Schema columns ---
+    # Pre-decode strings once.  Column names/types are identical across every
+    # row group; decoding them here avoids N_rg × N_col redundant decode calls.
+    cdef size_t n_schema = fs.schema_columns.size()
+    # Name-keyed cache: display_name -> (logical_type_str, prefer_text)
+    # Keyed by top-level name so nested schemas (struct/array with multiple
+    # physical leaves per schema entry) look up correctly.
+    # physical_type is NOT cached here — for nested columns the schema entry
+    # has "struct"/"list" but rg.columns has the actual wire type; always use
+    # col.physical_type directly.
+    cdef dict col_cache = {}
+
+    for idx in range(n_schema):
         field = fs.schema_columns[idx]
-        field_name = field.name.decode("utf-8")
+        field_name    = field.name.decode("utf-8")
         field_physical = field.physical_type.decode("utf-8")
-        field_logical = field.logical_type.decode("utf-8")
+        field_logical  = field.logical_type.decode("utf-8")
         schema_columns.append({
             "name": field_name,
             "physical_type": field_physical,
@@ -271,103 +284,100 @@ cdef dict _filestats_to_python(parquet_reader.FileStats fs,
             "logical": field_logical,
             "physical": field_physical,
         }
+        prefer_text = field_logical == "json" or field_logical.startswith("array<")
+        col_cache[field_name] = (field_logical, prefer_text)
+
     result["schema_columns"] = schema_columns
 
-    if include_row_groups and fs.row_groups.size() > 0:
-        row_groups = []
-        for rg in fs.row_groups:
-            rg_dict = {
-                "num_rows": rg.num_rows,
-                "total_byte_size": rg.total_byte_size,
-                "columns": []
-            }
-            for col in rg.columns:
-                physical_type_str = col.physical_type.decode("utf-8")
-                if col.logical_type.size() > 0:
-                    logical_type_str = col.logical_type.decode("utf-8")
-                else:
-                    logical_type_str = ""
-
-                full_name = col.name.decode("utf-8")
-                if "." in full_name:
-                    display_name = full_name.split(".", 1)[0]
-                else:
-                    display_name = full_name
-
-                top_level_info = top_level_types.get(display_name)
-                if top_level_info is not None:
-                    top_level_type = top_level_info.get("logical", "")
-                    prefer_text = top_level_type == "json" or top_level_type.startswith("array<")
-                else:
-                    top_level_type = ""
-                    prefer_text = False
-
-                if full_name != display_name and top_level_info is not None:
-                    logical_type_str = top_level_info.get("logical", logical_type_str)
-
-                null_count = col.null_count if col.null_count >= 0 else None
-                distinct_count = col.distinct_count if col.distinct_count >= 0 else None
-                num_values = col.num_values if col.num_values >= 0 else None
-                total_uncompressed_size = col.total_uncompressed_size if col.total_uncompressed_size >= 0 else None
-                total_compressed_size = col.total_compressed_size if col.total_compressed_size >= 0 else None
-                data_page_offset = col.data_page_offset if col.data_page_offset >= 0 else None
-                index_page_offset = col.index_page_offset if col.index_page_offset >= 0 else None
-                dictionary_page_offset = col.dictionary_page_offset if col.dictionary_page_offset >= 0 else None
-                bloom_offset = col.bloom_offset if col.bloom_offset >= 0 else None
-                bloom_length = col.bloom_length if col.bloom_length >= 0 else None
-
-                min_val = decode_value(
-                    col.physical_type,
-                    col.logical_type,
-                    col.min,
-                    prefer_text) if col.has_min else None
-                max_val = decode_value(
-                    col.physical_type,
-                    col.logical_type,
-                    col.max,
-                    prefer_text) if col.has_max else None
-
-                encodings_list = []
-                for enc in col.encodings:
-                    encodings_list.append(parquet_reader.EncodingToString(enc).decode("utf-8"))
-
-                codec_str = None
-                if col.codec >= 0:
-                    codec_str = parquet_reader.CompressionCodecToString(col.codec).decode("utf-8")
-
-                kv_metadata = {}
-                for item in col.key_value_metadata:
-                    kv_metadata[item.first.decode("utf-8")] = item.second.decode("utf-8")
-
-                rg_dict["columns"].append({
-                    "name": display_name,
-                    "path_in_schema": full_name,
-                    "physical_type": physical_type_str,
-                    "logical_type": logical_type_str,
-                    "max_repetition_level": col.max_repetition_level if col.max_repetition_level >= 0 else None,
-                    "max_definition_level": col.max_definition_level if col.max_definition_level >= 0 else None,
-                    "type_length": col.type_length if col.type_length > 0 else None,
-                    "min": min_val,
-                    "max": max_val,
-                    "null_count": null_count,
-                    "distinct_count": distinct_count,
-                    "num_values": num_values,
-                    "total_uncompressed_size": total_uncompressed_size,
-                    "total_compressed_size": total_compressed_size,
-                    "data_page_offset": data_page_offset,
-                    "index_page_offset": index_page_offset,
-                    "dictionary_page_offset": dictionary_page_offset,
-                    "bloom_offset": bloom_offset,
-                    "bloom_length": bloom_length,
-                    "encodings": encodings_list,
-                    "compression_codec": codec_str,
-                    "key_value_metadata": kv_metadata if kv_metadata else None,
-                })
-            row_groups.append(rg_dict)
-        result["row_groups"] = row_groups
-    else:
+    if not (include_row_groups and fs.row_groups.size() > 0):
         result["row_groups"] = []
+        return result
 
+    # --- Row groups ---
+    # Reuse pre-decoded schema strings; only decode per-RG-per-col scalars.
+    row_groups = []
+    cdef size_t col_i
+
+    for rg in fs.row_groups:
+        rg_col_list = []
+        rg_ncols = rg.columns.size()
+        for col_i in range(rg_ncols):
+            col = rg.columns[col_i]
+
+            # Always decode col.name — needed for both flat and nested schemas.
+            # For nested columns (e.g. addr.street) display_name is the top-level
+            # part; col_cache is keyed by display_name so lookup is always correct.
+            full_name = col.name.decode("utf-8")
+            dot_pos = full_name.find(".")
+            display_name = full_name[:dot_pos] if dot_pos >= 0 else full_name
+
+            # physical_type always comes from the ColumnStats leaf — NOT from
+            # schema_columns, which stores "struct"/"list" for parent nodes.
+            physical_type_str = col.physical_type.decode("utf-8")
+
+            cached = col_cache.get(display_name)
+            if cached is not None:
+                logical_type_str, prefer_text = cached
+                # For nested paths the leaf may have its own logical type; the
+                # top-level override (json / array<…>) takes precedence so the
+                # full column is treated as a single typed value.
+                if dot_pos >= 0:
+                    leaf_logical = col.logical_type.decode("utf-8") if col.logical_type.size() > 0 else ""
+                    if not logical_type_str:
+                        logical_type_str = leaf_logical
+                else:
+                    pass  # flat column: use top-level logical_type as-is
+            else:
+                logical_type_str = col.logical_type.decode("utf-8") if col.logical_type.size() > 0 else ""
+                prefer_text = False
+
+            min_val = decode_value(
+                col.physical_type, col.logical_type, col.min, prefer_text
+            ) if col.has_min else None
+            max_val = decode_value(
+                col.physical_type, col.logical_type, col.max, prefer_text
+            ) if col.has_max else None
+
+            encodings_list = []
+            for enc in col.encodings:
+                encodings_list.append(parquet_reader.EncodingToString(enc).decode("utf-8"))
+
+            codec_str = parquet_reader.CompressionCodecToString(col.codec).decode("utf-8") if col.codec >= 0 else None
+
+            kv_metadata = {}
+            for item in col.key_value_metadata:
+                kv_metadata[item.first.decode("utf-8")] = item.second.decode("utf-8")
+
+            rg_col_list.append({
+                "name": display_name,
+                "path_in_schema": full_name,
+                "physical_type": physical_type_str,
+                "logical_type": logical_type_str,
+                "max_repetition_level": col.max_repetition_level if col.max_repetition_level >= 0 else None,
+                "max_definition_level": col.max_definition_level if col.max_definition_level >= 0 else None,
+                "type_length": col.type_length if col.type_length > 0 else None,
+                "min": min_val,
+                "max": max_val,
+                "null_count": col.null_count if col.null_count >= 0 else None,
+                "distinct_count": col.distinct_count if col.distinct_count >= 0 else None,
+                "num_values": col.num_values if col.num_values >= 0 else None,
+                "total_uncompressed_size": col.total_uncompressed_size if col.total_uncompressed_size >= 0 else None,
+                "total_compressed_size": col.total_compressed_size if col.total_compressed_size >= 0 else None,
+                "data_page_offset": col.data_page_offset if col.data_page_offset >= 0 else None,
+                "index_page_offset": col.index_page_offset if col.index_page_offset >= 0 else None,
+                "dictionary_page_offset": col.dictionary_page_offset if col.dictionary_page_offset >= 0 else None,
+                "bloom_offset": col.bloom_offset if col.bloom_offset >= 0 else None,
+                "bloom_length": col.bloom_length if col.bloom_length >= 0 else None,
+                "encodings": encodings_list,
+                "compression_codec": codec_str,
+                "key_value_metadata": kv_metadata if kv_metadata else None,
+            })
+        row_groups.append({
+            "num_rows": rg.num_rows,
+            "total_byte_size": rg.total_byte_size,
+            "columns": rg_col_list,
+        })
+    result["row_groups"] = row_groups
     return result
 
 

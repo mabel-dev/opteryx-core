@@ -432,7 +432,10 @@ static SchemaElement ParseSchemaElement(TInput &in) {
 // 5: optional binary max_value
 // 6: optional binary min_value
 static void ParseStatistics(TInput &in, ColumnStats &cs) {
-  std::string legacy_min, legacy_max, v2_min, v2_max;
+  // Hold string_views into the (still-live) footer buffer; only the chosen
+  // version is materialized as std::string at the end. Avoids allocating both
+  // legacy and v2 min/max when only one is used downstream.
+  std::string_view legacy_min, legacy_max, v2_min, v2_max;
   bool legacy_min_set = false;
   bool legacy_max_set = false;
   bool v2_min_set = false;
@@ -444,11 +447,11 @@ static void ParseStatistics(TInput &in, ColumnStats &cs) {
       break;
     switch (fh.id) {
     case 1:
-      legacy_max = ReadString(in);
+      legacy_max = ReadStringView(in);
       legacy_max_set = true;
       break;
     case 2:
-      legacy_min = ReadString(in);
+      legacy_min = ReadStringView(in);
       legacy_min_set = true;
       break;
     case 3:
@@ -458,11 +461,11 @@ static void ParseStatistics(TInput &in, ColumnStats &cs) {
       cs.distinct_count = ReadI64(in);
       break;
     case 5:
-      v2_max = ReadString(in);
+      v2_max = ReadStringView(in);
       v2_max_set = true;
       break;
     case 6:
-      v2_min = ReadString(in);
+      v2_min = ReadStringView(in);
       v2_min_set = true;
       break;
     default:
@@ -471,10 +474,10 @@ static void ParseStatistics(TInput &in, ColumnStats &cs) {
     }
   }
   if (v2_min_set) {
-    cs.min = v2_min;
+    cs.min.assign(v2_min.data(), v2_min.size());
     cs.has_min = true;
   } else if (legacy_min_set) {
-    cs.min = legacy_min;
+    cs.min.assign(legacy_min.data(), legacy_min.size());
     cs.has_min = true;
   } else {
     cs.min.clear();
@@ -482,10 +485,10 @@ static void ParseStatistics(TInput &in, ColumnStats &cs) {
   }
 
   if (v2_max_set) {
-    cs.max = v2_max;
+    cs.max.assign(v2_max.data(), v2_max.size());
     cs.has_max = true;
   } else if (legacy_max_set) {
-    cs.max = legacy_max;
+    cs.max.assign(legacy_max.data(), legacy_max.size());
     cs.has_max = true;
   } else {
     cs.max.clear();
@@ -526,6 +529,7 @@ static void ParseColumnMeta(TInput &in, ColumnStats &cs,
     }
     case 2: { // encodings (Thrift i32 enum — ZigZag encoded)
       auto lh = ReadListHeader(in);
+      cs.encodings.reserve(lh.size);
       for (uint32_t i = 0; i < lh.size; i++) {
         int32_t enc = ReadI32(in);
         cs.encodings.push_back(enc);
@@ -534,12 +538,14 @@ static void ParseColumnMeta(TInput &in, ColumnStats &cs,
     }
     case 3: {
       auto lh = ReadListHeader(in);
+      // Build path directly into one std::string instead of allocating a
+      // temporary std::string per path component.
       std::string name;
       for (uint32_t i = 0; i < lh.size; i++) {
-        std::string part = ReadString(in);
+        std::string_view part = ReadStringView(in);
         if (!name.empty())
           name.push_back('.');
-        name += part;
+        name.append(part.data(), part.size());
       }
       cs.name = CanonicalizeColumnName(std::move(name));
       break;
@@ -560,8 +566,21 @@ static void ParseColumnMeta(TInput &in, ColumnStats &cs,
       cs.total_compressed_size = ReadI64(in);
       break;
     }
-    case 8: { // key_value_metadata: list<struct>; skip
+    case 8: { // key_value_metadata: list<struct>
       auto lh = ReadListHeader(in);
+      if (!opts.include_statistics) {
+        // Skip without allocating when caller doesn't want stats-class data.
+        for (uint32_t i = 0; i < lh.size; i++) {
+          int16_t kv_last = 0;
+          while (true) {
+            auto kvfh = ReadFieldHeader(in, kv_last);
+            if (kvfh.type == 0)
+              break;
+            SkipField(in, kvfh.type);
+          }
+        }
+        break;
+      }
       for (uint32_t i = 0; i < lh.size; i++) {
         int16_t kv_last = 0;
         std::string key, value;
@@ -640,13 +659,13 @@ static void ParseColumnChunk(TInput &in, ColumnStats &out,
       break;
     switch (fh.id) {
     case 1: {
-      (void)ReadString(in);
+      SkipBinary(in);
       break;
-    } // file_path
+    } // file_path (always discarded)
     case 2: {
-      out.column_chunk_file_offset = ReadI64(in);
+      (void)ReadI64(in); // file_offset: not used by any consumer, skip
       break;
-    } // file_offset
+    }
     case 3: { // meta_data (ColumnMetaData)
       ParseColumnMeta(in, out, opts);
       break;
@@ -878,113 +897,88 @@ static FileStats ParseFileMeta(TInput &in, const MetadataParseOptions &opts) {
   }
   return fs;
 }
-static void ApplyLogicalTypes(
-    FileStats &fs,
-    const std::unordered_map<std::string, std::string> &logical_type_map) {
-  if (fs.row_groups.empty()) {
+// Per-leaf schema info, in the same order as schema leaves (= row group column order).
+// Built once per file; applied to every row group by index — no hash lookups.
+struct LeafInfo {
+  std::string logical_type;
+  int32_t repetition_type  = -1;
+  int32_t max_def_level    =  0;
+  int32_t max_rep_level    =  0;
+  int32_t type_length      =  0;
+};
+
+// Walk the schema tree once, collecting one LeafInfo per physical leaf in
+// schema order.  acc_def/acc_rep carry the running Dremel level counts.
+static void WalkLeaves(
+    const SchemaElement &elem,
+    int32_t acc_def, int32_t acc_rep,
+    const std::unordered_map<std::string, std::string> &logical_type_map,
+    std::vector<LeafInfo> &out)
+{
+  // Accumulate Dremel levels for this node.
+  if (elem.repetition_type == 2) { acc_def++; acc_rep++; }
+  else if (elem.repetition_type == 1) { acc_def++; }
+
+  if (elem.children.empty()) {
+    // Physical leaf: resolve logical type then emit.
+    const std::string canonical = CanonicalizeColumnName(
+        elem.full_name.empty() ? elem.name : elem.full_name);
+
+    LeafInfo li;
+    li.repetition_type = elem.repetition_type;
+    li.max_def_level   = acc_def;
+    li.max_rep_level   = acc_rep;
+    li.type_length     = elem.type_length;
+
+    auto it = logical_type_map.find(canonical);
+    if (it != logical_type_map.end()) {
+      li.logical_type = it->second;
+    } else {
+      // Fallback: derive from physical type (mirrors ApplyLogicalTypes).
+      if (elem.physical_type == "int96") {
+        li.logical_type = "timestamp[ns]";
+      } else if (!elem.logical_type.empty()) {
+        li.logical_type = elem.logical_type;
+      } else if (elem.type_length > 0 &&
+                 std::strcmp(elem.physical_type.c_str(), "fixed_len_byte_array") == 0) {
+        li.logical_type = "fixed_len_byte_array[" +
+                          std::to_string(elem.type_length) + "]";
+      } else if (elem.physical_type == "byte_array" ||
+                 elem.physical_type == "fixed_len_byte_array") {
+        li.logical_type = "binary";
+      } else if (!elem.physical_type.empty()) {
+        li.logical_type = elem.physical_type;
+      } else {
+        li.logical_type = "unknown";
+      }
+    }
+
+    out.push_back(std::move(li));
     return;
   }
 
-  for (auto &rg : fs.row_groups) {
-    for (auto &col : rg.columns) {
-      auto it = logical_type_map.find(col.name);
-      if (it != logical_type_map.end()) {
-        col.logical_type = it->second;
-        continue;
-      }
-
-      if (col.logical_type.empty()) {
-        if (col.physical_type == "int96") {
-          col.logical_type = "timestamp[ns]";
-        } else if (col.physical_type == "byte_array") {
-          col.logical_type = "binary";
-        } else if (col.physical_type == "fixed_len_byte_array") {
-          col.logical_type = "binary";
-        } else if (!col.physical_type.empty()) {
-          col.logical_type = col.physical_type;
-        } else {
-          col.logical_type = "unknown";
-        }
-      }
-    }
+  for (const auto &child : elem.children) {
+    WalkLeaves(child, acc_def, acc_rep, logical_type_map, out);
   }
 }
 
-// Enrich column stats with schema information for level data.
-//
-// Uses the Dremel encoding rules (Parquet spec, parquet.thrift FieldRepetitionType):
-//   REPEATED (2) on the path from root to leaf: +1 max_rep_level, +1 max_def_level
-//   OPTIONAL (1) on the path from root to leaf: +1 max_def_level only
-//   REQUIRED (0) on the path from root to leaf: no contribution
-//
-// The root message node itself has no repetition_type and is not counted.
-// This correctly handles arbitrary nesting depth (flat columns, 3-level lists, maps, etc.)
-// without any special-casing of specific schema shapes.
-static void EnrichColumnStatsWithSchemaInfo(FileStats &fs) {
-  if (fs.schema.empty()) {
-    return;
-  }
+// Apply per-leaf schema info to every row group's columns by position.
+// Replaces both ApplyLogicalTypes and EnrichColumnStatsWithSchemaInfo.
+static void ApplyLeafInfosByIndex(FileStats &fs,
+                                  const std::vector<LeafInfo> &leaf_infos) {
+  if (leaf_infos.empty()) return;
+  const size_t n = leaf_infos.size();
 
-  // Map from canonical leaf name to the ordered list of repetition_types
-  // of all schema nodes on the path: root's first-level child … leaf (inclusive).
-  std::unordered_map<std::string, std::vector<int32_t>> schema_path_map;
-  // Leaf's own repetition_type, stored separately for ColumnStats.repetition_type.
-  std::unordered_map<std::string, int32_t> schema_leaf_rep;
-  // Leaf's type_length (FIXED_LEN_BYTE_ARRAY width in bytes).
-  std::unordered_map<std::string, int32_t> schema_leaf_type_length;
-
-  std::function<void(const SchemaElement&, std::vector<int32_t>)> walk_schema =
-    [&](const SchemaElement& elem, std::vector<int32_t> path) {
-      path.push_back(elem.repetition_type);
-
-      if (elem.children.empty()) {
-        // Leaf node: record the full ancestor + self repetition-type path.
-        std::string canonical = CanonicalizeColumnName(
-          elem.full_name.empty() ? elem.name : elem.full_name);
-        schema_path_map[canonical] = path;
-        schema_leaf_rep[canonical]  = elem.repetition_type;
-        schema_leaf_type_length[canonical] = elem.type_length;
-      }
-
-      for (const auto& child : elem.children) {
-        walk_schema(child, path);
-      }
-    };
-
-  // Walk from the root's children (the root message node itself is not counted).
-  for (const auto& root : fs.schema) {
-    for (const auto& child : root.children) {
-      walk_schema(child, {});
-    }
-  }
-
-  // Apply Dremel level rules to every column in every row group.
-  for (auto& rg : fs.row_groups) {
-    for (auto& col : rg.columns) {
-      auto it = schema_path_map.find(col.name);
-      if (it != schema_path_map.end()) {
-        const std::vector<int32_t>& path = it->second;
-
-        col.repetition_type = schema_leaf_rep[col.name];
-
-        int32_t max_rep = 0;
-        int32_t max_def = 0;
-        for (int32_t rep_type : path) {
-          if (rep_type == 2) {       // REPEATED: contributes to both levels
-            max_rep += 1;
-            max_def += 1;
-          } else if (rep_type == 1) { // OPTIONAL: contributes to def level only
-            max_def += 1;
-          }
-          // REQUIRED (0) or unset (-1): no contribution to either level
-        }
-        col.max_repetition_level = max_rep;
-        col.max_definition_level = max_def;
-      }
-      auto tl_it = schema_leaf_type_length.find(col.name);
-      if (tl_it != schema_leaf_type_length.end()) {
-        col.type_length = tl_it->second;
-      }
+  for (auto &rg : fs.row_groups) {
+    const size_t cols = std::min(rg.columns.size(), n);
+    for (size_t i = 0; i < cols; ++i) {
+      auto &col       = rg.columns[i];
+      const auto &li  = leaf_infos[i];
+      col.logical_type       = li.logical_type;
+      col.repetition_type    = li.repetition_type;
+      col.max_definition_level = li.max_def_level;
+      col.max_repetition_level = li.max_rep_level;
+      if (li.type_length > 0) col.type_length = li.type_length;
     }
   }
 }
@@ -1013,22 +1007,31 @@ FileStats ReadParquetMetadataFromBuffer(const uint8_t *buf, size_t size,
   TInput in{footer_start, footer_end};
   FileStats fs = ParseFileMeta(in, opts);
 
+  // Build schema_columns + logical_type_map from the schema tree (single pass
+  // over the schema — typically 105 nodes, not 23k row-group columns).
   std::unordered_map<std::string, std::string> logical_type_map;
   if (!fs.schema.empty()) {
     for (const auto &root : fs.schema) {
-      if (root.children.empty()) {
-        continue;
-      }
+      if (root.children.empty()) continue;
       CollectSchemaArtifacts(root, fs.schema_columns, logical_type_map);
       break;
     }
   }
 
-  // Apply map to row group columns
-  ApplyLogicalTypes(fs, logical_type_map);
-
-  // Enrich column stats with schema information (repetition type, max levels)
-  EnrichColumnStatsWithSchemaInfo(fs);
+  // Walk schema leaves once to collect per-leaf info in schema order.
+  // Then apply to all row groups by index — no hash lookups per row group.
+  if (!fs.row_groups.empty() && !fs.schema.empty()) {
+    std::vector<LeafInfo> leaf_infos;
+    leaf_infos.reserve(fs.schema_columns.size() > 0
+                           ? fs.schema_columns.size()
+                           : 64);
+    for (const auto &root : fs.schema) {
+      for (const auto &child : root.children) {
+        WalkLeaves(child, 0, 0, logical_type_map, leaf_infos);
+      }
+    }
+    ApplyLeafInfosByIndex(fs, leaf_infos);
+  }
 
   return fs;
 }
@@ -1083,4 +1086,108 @@ FileStats ReadParquetMetadata(const std::string &path,
 FileStats ReadParquetMetadata(const std::string &path) {
   MetadataParseOptions opts;
   return ReadParquetMetadata(path, opts);
+}
+
+// ------------------- AggregateColumnStats -------------------
+//
+// Compare two raw-bytes statistics values for a given physical type.
+// Returns <0 if a < b, 0 if equal, >0 if a > b.
+// Falls back to lexicographic for unrecognised types.
+static int CompareStatBytes(const std::string &a, const std::string &b,
+                             const std::string &physical_type) {
+  if (physical_type == "int32") {
+    if (a.size() < 4 || b.size() < 4) return 0;
+    int32_t va = 0, vb = 0;
+    std::memcpy(&va, a.data(), 4);
+    std::memcpy(&vb, b.data(), 4);
+    return (va < vb) ? -1 : (va > vb) ? 1 : 0;
+  }
+  if (physical_type == "int64") {
+    if (a.size() < 8 || b.size() < 8) return 0;
+    int64_t va = 0, vb = 0;
+    std::memcpy(&va, a.data(), 8);
+    std::memcpy(&vb, b.data(), 8);
+    return (va < vb) ? -1 : (va > vb) ? 1 : 0;
+  }
+  if (physical_type == "float32") {
+    if (a.size() < 4 || b.size() < 4) return 0;
+    float va = 0.0f, vb = 0.0f;
+    std::memcpy(&va, a.data(), 4);
+    std::memcpy(&vb, b.data(), 4);
+    return (va < vb) ? -1 : (va > vb) ? 1 : 0;
+  }
+  if (physical_type == "float64") {
+    if (a.size() < 8 || b.size() < 8) return 0;
+    double va = 0.0, vb = 0.0;
+    std::memcpy(&va, a.data(), 8);
+    std::memcpy(&vb, b.data(), 8);
+    return (va < vb) ? -1 : (va > vb) ? 1 : 0;
+  }
+  // byte_array, fixed_len_byte_array, boolean, int96: lexicographic
+  return a.compare(b);
+}
+
+std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
+  // Build display-name → index map from schema_columns (top-level only).
+  std::unordered_map<std::string, size_t> col_index;
+  col_index.reserve(fs.schema_columns.size());
+  std::vector<AggColumnStat> result;
+  result.reserve(fs.schema_columns.size());
+
+  for (size_t i = 0; i < fs.schema_columns.size(); ++i) {
+    col_index[fs.schema_columns[i].name] = i;
+    AggColumnStat agg;
+    agg.name = fs.schema_columns[i].name;
+    result.push_back(std::move(agg));
+  }
+
+  for (const auto &rg : fs.row_groups) {
+    for (const auto &col : rg.columns) {
+      // Map leaf path to top-level display name (everything before first dot).
+      const std::string &col_name = col.name;
+      size_t dot = col_name.find('.');
+      std::string display = (dot == std::string::npos)
+                                ? col_name
+                                : col_name.substr(0, dot);
+
+      auto it = col_index.find(display);
+      if (it == col_index.end()) continue;
+      AggColumnStat &agg = result[it->second];
+
+      // Capture physical/logical type from first leaf encountered.
+      if (agg.physical_type.empty() && !col.physical_type.empty()) {
+        agg.physical_type = col.physical_type;
+        agg.logical_type  = col.logical_type;
+      }
+
+      // Aggregate null count.
+      if (agg.null_count_complete) {
+        if (col.null_count >= 0) {
+          agg.null_count += col.null_count;
+        } else {
+          agg.null_count_complete = false;
+        }
+      }
+
+      // Aggregate min: keep the smallest value.
+      if (col.has_min) {
+        if (!agg.has_min ||
+            CompareStatBytes(col.min, agg.min_bytes, agg.physical_type) < 0) {
+          agg.min_bytes = col.min;
+          agg.has_min   = true;
+        }
+      }
+
+      // Aggregate max: keep the largest value.
+      if (col.has_max) {
+        if (!agg.has_max ||
+            CompareStatBytes(col.max, agg.max_bytes, agg.physical_type) > 0) {
+          agg.max_bytes = col.max;
+          agg.has_max   = true;
+        }
+      }
+    }
+  }
+
+  return result;
 }

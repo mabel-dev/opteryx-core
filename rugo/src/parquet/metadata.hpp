@@ -115,3 +115,23 @@ const char *CompressionCodecToString(int32_t codec);
 // New functions for bloom filter testing
 bool TestBloomFilter(const std::string &file_path, int64_t bloom_offset,
                      int64_t bloom_length, const std::string &value);
+
+// Aggregated per-column statistics across all row groups.
+// Used by the planning phase to extract min/max/null_count without building
+// per-row-group Python dicts.
+struct AggColumnStat {
+  std::string name;          // top-level (display) name
+  std::string physical_type; // from ColumnStats leaf
+  std::string logical_type;  // from ColumnStats leaf (enriched by schema)
+  std::string min_bytes;     // raw bytes of the minimum value (global min of mins)
+  std::string max_bytes;     // raw bytes of the maximum value (global max of maxes)
+  int64_t null_count = 0;
+  bool has_min = false;
+  bool has_max = false;
+  bool null_count_complete = true;
+};
+
+// Aggregate column statistics across all row groups in a single C++ pass.
+// Binary comparison avoids decoding intermediate values — only the winner
+// per column is decoded by the caller (Cython).
+std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs);

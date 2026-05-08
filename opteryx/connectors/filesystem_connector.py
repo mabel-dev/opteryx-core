@@ -308,15 +308,16 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                 null_value_counts = None
 
                 try:
-                    from opteryx.connectors.parquet_io.pool_reader import fetch_footer
+                    from opteryx.connectors.parquet_io.pool_reader import fetch_column_stats
 
-                    meta = fetch_footer(self.filesystem, blob_name, file_size=file_size or None)
-                    record_count = sum(rg.get("num_rows", 0) for rg in meta.get("row_groups", []))
+                    record_count, footer_size, col_stats = fetch_column_stats(
+                        self.filesystem, blob_name, file_size=file_size or None
+                    )
                     if file_size == 0:
-                        file_size = meta.get("__footer_bytes__", 0)
+                        file_size = footer_size
 
-                    min_values, max_values, null_value_counts = self._extract_column_stats(
-                        meta, schema
+                    min_values, max_values, null_value_counts = self._extract_column_stats_compact(
+                        col_stats, schema
                     )
                 except Exception:
                     record_count = 0
@@ -345,6 +346,31 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         # Create and return manifest
         manifest = Manifest(file_entries, schema)
         return schema, manifest
+
+    def _extract_column_stats_compact(self, col_stats: dict, schema: RelationSchema) -> tuple:
+        """Extract planning statistics from the compact {name: (min, max, null_count)} dict
+        returned by fetch_column_stats. Already aggregated across row groups by C++."""
+        num_columns = len(schema.columns)
+        min_values = [None] * num_columns
+        max_values = [None] * num_columns
+        null_counts = {}
+
+        for i, col in enumerate(schema.columns):
+            entry = col_stats.get(col.name)
+            if entry is None:
+                continue
+            min_val, max_val, null_count = entry
+            min_values[i] = min_val
+            max_values[i] = max_val
+            if null_count is not None:
+                null_counts[i] = null_count
+
+        null_value_counts = null_counts if null_counts else None
+        return (
+            min_values if any(v is not None for v in min_values) else None,
+            max_values if any(v is not None for v in max_values) else None,
+            null_value_counts,
+        )
 
     def _extract_column_stats(self, footer_meta: dict, schema: RelationSchema) -> tuple:
         """

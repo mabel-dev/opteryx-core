@@ -95,6 +95,19 @@ cdef extern from "metadata.hpp":
     const char* EncodingToString(int32_t enc)
     const char* CompressionCodecToString(int32_t codec)
 
+    cdef cppclass AggColumnStat:
+        string name
+        string physical_type
+        string logical_type
+        string min_bytes
+        string max_bytes
+        int64_t null_count
+        bint has_min
+        bint has_max
+        bint null_count_complete
+
+    vector[AggColumnStat] AggregateColumnStats(const FileStats& fs)
+
 
 cdef extern from "decode.hpp":
     cdef cppclass DecodedColumn:

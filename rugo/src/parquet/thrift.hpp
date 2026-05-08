@@ -2,16 +2,22 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 struct TInput {
   const uint8_t *p;
   const uint8_t *end;
 
+  // Checked read — used at structure boundaries where EOF is meaningful.
   uint8_t readByte() {
-    if (p >= end)
+    if (__builtin_expect(p >= end, 0))
       throw std::runtime_error("EOF");
     return *p++;
   }
+
+  // Unchecked read — for use inside inner loops when the outer caller has
+  // already validated that enough bytes remain.
+  uint8_t readByteUnchecked() { return *p++; }
 };
 
 enum ThriftType {
@@ -29,24 +35,38 @@ enum ThriftType {
   T_MAP = 14,
   T_SET = 15,
   T_LIST = 16,
-  // … whatever else you have
 };
 
 // ------------------- Varint / ZigZag -------------------
 
+// Optimized ReadVarint: fast path for the 1-byte and 2-byte cases (covers
+// ~95% of calls in parquet footers — small field deltas, list sizes, and
+// integers that fit in 7 or 14 bits).  Falls through to a loop for larger
+// values.  Avoids the shift-increment and count-check overhead in the loop.
 inline uint64_t ReadVarint(TInput &in) {
-  uint64_t result = 0;
-  int shift = 0;
+  if (__builtin_expect(in.p >= in.end, 0))
+    throw std::runtime_error("EOF");
+  uint8_t b = *in.p++;
+  if (__builtin_expect(!(b & 0x80), 1))
+    return b;                               // fast path: 1 byte
+
+  if (__builtin_expect(in.p >= in.end, 0))
+    throw std::runtime_error("EOF");
+  uint64_t result = (uint64_t)(b & 0x7F);
+  b = *in.p++;
+  if (__builtin_expect(!(b & 0x80), 1))
+    return result | ((uint64_t)b << 7);     // fast path: 2 bytes
+
+  // 3-10 byte varints (rare for footer data).
+  result |= (uint64_t)(b & 0x7F) << 7;
+  int shift = 14;
   int count = 0;
   while (true) {
-    if (count++ > 10)
+    if (__builtin_expect(count++ > 8, 0))
       throw std::runtime_error("Varint too long");
-    uint8_t byte = in.readByte();
-    result |= (uint64_t)(byte & 0x7F) << shift;
-    if (!(byte & 0x80))
-      break;
-    if (shift >= 63)
-      throw std::runtime_error("Varint overflow");
+    b = in.readByte();
+    result |= (uint64_t)(b & 0x7F) << shift;
+    if (!(b & 0x80)) break;
     shift += 7;
   }
   return result;
@@ -63,11 +83,32 @@ inline int32_t ReadI32(TInput &in) {
 inline std::string ReadString(TInput &in) {
   uint64_t len = ReadVarint(in);
   uint64_t avail = (uint64_t)(in.end - in.p);
-  if (len > avail)
+  if (__builtin_expect(len > avail, 0))
     throw std::runtime_error("Invalid string length");
   std::string s((const char *)in.p, (size_t)len);
   in.p += len;
   return s;
+}
+
+// Read a length-prefixed binary/string and return a view into the input
+// buffer. The view is valid only as long as the underlying buffer outlives it.
+inline std::string_view ReadStringView(TInput &in) {
+  uint64_t len = ReadVarint(in);
+  uint64_t avail = (uint64_t)(in.end - in.p);
+  if (__builtin_expect(len > avail, 0))
+    throw std::runtime_error("Invalid string length");
+  std::string_view sv((const char *)in.p, (size_t)len);
+  in.p += len;
+  return sv;
+}
+
+// Skip a length-prefixed binary/string field without allocating.
+inline void SkipBinary(TInput &in) {
+  uint64_t len = ReadVarint(in);
+  uint64_t avail = (uint64_t)(in.end - in.p);
+  if (__builtin_expect(len > avail, 0))
+    throw std::runtime_error("Invalid string length");
+  in.p += len;
 }
 
 static inline bool ReadBool(TInput &in) { return in.readByte() != 0; }
@@ -79,26 +120,28 @@ struct FieldHeader {
   uint8_t type;
 };
 
-// Decode a field header (Thrift Compact Protocol)
+// Decode a field header (Thrift Compact Protocol).
+// Hot path: delta-encoded header (modifier != 0) is a single byte — no varint.
 inline FieldHeader ReadFieldHeader(TInput &in, int16_t &last_id) {
-  uint8_t header = in.readByte();
-  if (header == 0) {
-    // STOP marker: do not touch last_id, just return
-    return {0, 0};
-  }
+  if (__builtin_expect(in.p >= in.end, 0))
+    throw std::runtime_error("EOF");
+  uint8_t header = *in.p++;
 
-  uint8_t type = header & 0x0F;
+  if (__builtin_expect(header == 0, 0))
+    return {0, 0};   // STOP
+
+  uint8_t type     = header & 0x0F;
   uint8_t modifier = header >> 4;
 
-  int16_t field_id;
-  if (modifier == 0) {
-    field_id = static_cast<int16_t>(ZigZagDecode(ReadVarint(in)));
-  } else {
-    // Delta from previous id
-    field_id = static_cast<int16_t>(last_id + modifier);
+  if (__builtin_expect(modifier != 0, 1)) {
+    // Fast path: delta from previous field id (no extra varint).
+    last_id = static_cast<int16_t>(last_id + modifier);
+    return {last_id, type};
   }
 
-  last_id = field_id; // update only when not STOP
+  // Slow path: absolute field id encoded as a zigzag varint.
+  int16_t field_id = static_cast<int16_t>(ZigZagDecode(ReadVarint(in)));
+  last_id = field_id;
   return {field_id, type};
 }
 
@@ -110,9 +153,9 @@ struct ListHeader {
 
 inline ListHeader ReadListHeader(TInput &in) {
   uint8_t first = in.readByte();
-  uint32_t size = first >> 4;
-  uint8_t elem_type = first & 0x0F;
-  if (size == 15) {
+  uint32_t size  = first >> 4;
+  uint8_t  elem_type = first & 0x0F;
+  if (__builtin_expect(size == 15, 0)) {
     size = (uint32_t)ReadVarint(in);
   }
   return {elem_type, size};
@@ -124,7 +167,7 @@ inline void SkipField(TInput &in, uint8_t type) {
     return; // STOP
   case 1:
   case 2:
-    return; // BOOL
+    return; // BOOL (encoded in the field header type byte, nothing extra)
   case 3:
     in.readByte();
     return; // BYTE
@@ -144,13 +187,13 @@ inline void SkipField(TInput &in, uint8_t type) {
     return;
   }
   case 8:
-    (void)ReadString(in);
-    return; // BINARY/STRING
+    SkipBinary(in);
+    return; // BINARY/STRING — no alloc needed for skip
   case 9: { // LIST
     auto lh = ReadListHeader(in);
     for (uint32_t i = 0; i < lh.size; i++) {
       if (lh.elem_type == 1 || lh.elem_type == 2) {
-        in.readByte(); // consume boolean element byte
+        in.readByte();
       } else {
         SkipField(in, lh.elem_type);
       }
@@ -175,19 +218,15 @@ inline void SkipField(TInput &in, uint8_t type) {
       return;
     if (size == 15)
       size = (uint32_t)ReadVarint(in);
-    uint8_t types = in.readByte();
+    uint8_t types    = in.readByte();
     uint8_t key_type = types >> 4;
     uint8_t val_type = types & 0x0F;
 
     for (uint32_t i = 0; i < size; i++) {
-      if (key_type == 1 || key_type == 2)
-        in.readByte();
-      else
-        SkipField(in, key_type);
-      if (val_type == 1 || val_type == 2)
-        in.readByte();
-      else
-        SkipField(in, val_type);
+      if (key_type == 1 || key_type == 2) in.readByte();
+      else SkipField(in, key_type);
+      if (val_type == 1 || val_type == 2) in.readByte();
+      else SkipField(in, val_type);
     }
     return;
   }
@@ -195,15 +234,13 @@ inline void SkipField(TInput &in, uint8_t type) {
     int16_t last = 0;
     while (true) {
       auto fh = ReadFieldHeader(in, last);
-      if (fh.type == 0)
-        break;
+      if (fh.type == 0) break;
       SkipField(in, fh.type);
     }
     return;
   }
   default:
-    // Be forgiving: consume one byte to move on
-    in.readByte();
+    in.readByte(); // be forgiving: skip one byte
     return;
   }
 }
@@ -212,8 +249,7 @@ static void SkipStruct(TInput &in) {
   int16_t last_id = 0;
   while (true) {
     auto fh = ReadFieldHeader(in, last_id);
-    if (fh.type == 0)
-      break;
+    if (fh.type == 0) break;
     SkipField(in, fh.type);
   }
 }
