@@ -51,6 +51,9 @@ cdef extern from "metadata.hpp":
         int32_t max_definition_level
         int32_t max_repetition_level
 
+        # FIXED_LEN_BYTE_ARRAY width in bytes (0 for other physical types)
+        int32_t type_length
+
     cdef cppclass RowGroupStats:
         long long num_rows
         long long total_byte_size

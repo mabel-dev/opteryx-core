@@ -765,6 +765,34 @@ extensions = [
         language="c",
         extra_compile_args=C_FLAGS,
     ),
+    Extension(
+        "draken.vectors._arithmetic_int64_int64",
+        sources=["draken/vectors/_arithmetic_int64_int64.pyx"],
+        include_dirs=include_dirs,
+        language="c",
+        extra_compile_args=C_FLAGS,
+    ),
+    Extension(
+        "draken.vectors._arithmetic_float64_float64",
+        sources=["draken/vectors/_arithmetic_float64_float64.pyx"],
+        include_dirs=include_dirs,
+        language="c",
+        extra_compile_args=C_FLAGS,
+    ),
+    Extension(
+        "draken.vectors._arithmetic_int64_float64",
+        sources=["draken/vectors/_arithmetic_int64_float64.pyx"],
+        include_dirs=include_dirs,
+        language="c",
+        extra_compile_args=C_FLAGS,
+    ),
+    Extension(
+        "draken.vectors._arithmetic_float64_int64",
+        sources=["draken/vectors/_arithmetic_float64_int64.pyx"],
+        include_dirs=include_dirs,
+        language="c",
+        extra_compile_args=C_FLAGS,
+    ),
     make_draken_extension(
         "vectors.int64_vector",
         "vectors/int64_vector.pyx",
@@ -1154,11 +1182,10 @@ def generate_consolidated_module(module_dir, output_file):
     print(f"Generated {output_file} with {len(pyx_files)} includes")
 
 
-# Generate vector_ops, joins, and aggregation kernels
+# Generate vector_ops kernels
 generate_consolidated_module(
     "opteryx/compiled/vector_ops", "opteryx/compiled/vector_ops/vector_ops.pyx"
 )
-generate_consolidated_module("opteryx/compiled/joins", "opteryx/compiled/joins/joins.pyx")
 
 
 # Add consolidated modules with their dependencies
@@ -1198,17 +1225,6 @@ extensions.extend(
             extra_compile_args=CPP_FLAGS,
             extra_link_args=vector_ops_link_args,
             define_macros=[("VENDORED_DIGESTS", "1")],
-        ),
-        Extension(
-            "opteryx.compiled.joins.joins",
-            sources=[
-                "opteryx/compiled/joins/joins.pyx",
-                "src/cpp/intbuffer.cpp",
-                "src/cpp/cpu_features.cpp",
-            ],
-            include_dirs=include_dirs,
-            language="c++",
-            extra_compile_args=CPP_FLAGS,
         ),
     ]
 )
@@ -1264,6 +1280,17 @@ extensions.append(
 
 extensions.append(
     Extension(
+        "opteryx.vectors.vector_math",
+        sources=["opteryx/vectors/vector_math.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+        language="c++",
+    )
+)
+
+extensions.append(
+    Extension(
         "opteryx.compiled.io.csv_rows",
         sources=[
             "opteryx/compiled/io/csv_rows.pyx",
@@ -1301,11 +1328,11 @@ extensions.append(
     )
 )
 
-# Compiled utils: PCG-backed random string helper
+# PCG-backed random string helper
 extensions.append(
     Extension(
-        "opteryx.compiled.utils.random_helper",
-        sources=["opteryx/compiled/utils/random_helper.pyx"],
+        "opteryx.compiled.functions.random_helper",
+        sources=["opteryx/compiled/functions/random_helper.pyx"],
         include_dirs=include_dirs + ["opteryx/third_party/pcg"],
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA,

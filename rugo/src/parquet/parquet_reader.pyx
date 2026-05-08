@@ -13,7 +13,6 @@ import struct
 import time as _time
 
 import opteryx.config as _opteryx_config
-from array import array as pyarray
 from cpython.bytes cimport PyBytes_FromStringAndSize
 
 # ---------------------------------------------------------------------------
@@ -175,7 +174,7 @@ cpdef object decode_value(
         or logical_str.startswith("array<string")
         or logical_str.startswith("array<varchar")
     )
-    cdef object candidate
+    cdef str candidate
 
     if len(b) == 0:
         if type_str in ("byte_array", "fixed_len_byte_array"):
@@ -249,7 +248,7 @@ cdef parquet_reader.MetadataParseOptions _build_options(
     return opts
 
 
-cdef object _filestats_to_python(parquet_reader.FileStats fs,
+cdef dict _filestats_to_python(parquet_reader.FileStats fs,
                                  bint include_row_groups):
     cdef dict result = {"num_rows": fs.num_rows}
 
@@ -347,6 +346,7 @@ cdef object _filestats_to_python(parquet_reader.FileStats fs,
                     "logical_type": logical_type_str,
                     "max_repetition_level": col.max_repetition_level if col.max_repetition_level >= 0 else None,
                     "max_definition_level": col.max_definition_level if col.max_definition_level >= 0 else None,
+                    "type_length": col.type_length if col.type_length > 0 else None,
                     "min": min_val,
                     "max": max_val,
                     "null_count": null_count,
@@ -819,6 +819,7 @@ cdef StringVector _make_string_vector(
     cdef Py_ssize_t num_dict
     cdef Py_ssize_t estimated_bytes
     cdef int32_t dict_idx
+    cdef int64_t total_bytes64
     cdef int32_t total_bytes
     cdef int32_t offset, slen
     cdef Py_ssize_t nb_bytes
@@ -895,10 +896,19 @@ cdef StringVector _make_string_vector(
             dict_ptrs[d] = <const char*>(arena_data + decoded_col.string_dict_offsets[d])
             dict_lens[d] = decoded_col.string_dict_lens[d]
 
-        # Step 2: count total expanded bytes — tight loop, no Python overhead.
-        total_bytes = 0
-        for i in range(num_indices):
-            total_bytes += dict_lens[decoded_col.dict_indices[i]]
+        # Step 2: count total expanded bytes via SIMD gather of dict_lens[codes].
+        # See _string_materialize.hpp — Pass 1 of the materialization plan.
+        total_bytes64 = parquet_reader.sum_dict_lens(
+            dict_lens,
+            <const int32_t*>decoded_col.dict_indices.data(),
+            <size_t>num_indices,
+        )
+        # StringVector capacity field is int32; guard against overflow.
+        if total_bytes64 > <int64_t>2147483647:
+            free(dict_ptrs)
+            free(dict_lens)
+            raise OverflowError("StringVector materialization exceeds 2 GiB")
+        total_bytes = <int32_t>total_bytes64
         if total_bytes == 0:
             total_bytes = 1
 
@@ -911,14 +921,21 @@ cdef StringVector _make_string_vector(
 
         # Step 4a: non-null path — no null bitmap required, tightest inner loop.
         if decoded_col.valid_bits.size() == 0:
+            # Pass 2: SIMD build of exclusive offsets[0..num_rows].
+            # offsets[num_rows] == total_bytes (already validated to fit int32).
+            parquet_reader.build_offsets(
+                dict_lens,
+                <const int32_t*>decoded_col.dict_indices.data(),
+                <size_t>num_rows,
+                offsets,
+            )
+            # Body memcpy walk uses the precomputed offsets[]; Pass 3 will
+            # unroll this with software prefetch.
             for i in range(num_rows):
-                offsets[i] = offset
                 dict_idx = decoded_col.dict_indices[i]
                 slen = dict_lens[dict_idx]
                 if slen > 0:
-                    memcpy(dst + offset, dict_ptrs[dict_idx], slen)
-                offset += slen
-            offsets[num_rows] = offset
+                    memcpy(dst + offsets[i], dict_ptrs[dict_idx], slen)
 
         else:
             # Step 4b: nullable — allocate and fill validity bitmap.
@@ -1095,22 +1112,31 @@ cdef inline void _record_dictionary_decode(parquet_reader.DecodedColumn& decoded
     _TEL["parquet_dict_code_width_bytes"] += code_width
 
 
-cdef tuple _expanded_dict_codes_and_validity(
+cdef int _fill_dict_codes_and_validity(
         parquet_reader.DecodedColumn& decoded_col,
-        int32_t num_rows):
-    cdef object codes_obj = pyarray('i', [0]) * num_rows
-    cdef int32_t[::1] codes = codes_obj
-    cdef object validity_obj = None
-    cdef uint8_t[::1] validity
+        int32_t num_rows,
+        int32_t* codes,
+        uint8_t** validity_out) except -1:
+    """Fill pre-allocated codes[num_rows]; malloc and fill validity when nullable.
+
+    Returns 1 (nullable — *validity_out is a malloc'd buffer owned by caller),
+            0 (all valid — *validity_out is NULL).
+    Caller must free(*validity_out) if non-NULL.
+    """
     cdef Py_ssize_t i
     cdef Py_ssize_t val_idx = 0
+    cdef uint8_t* validity
+
+    validity_out[0] = NULL
 
     if decoded_col.valid_bits.size() > 0:
-        validity_obj = bytearray(num_rows)
-        validity = validity_obj
+        validity = <uint8_t*>malloc(num_rows)
+        if validity == NULL:
+            raise MemoryError()
         for i in range(num_rows):
             if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
-                if val_idx >= decoded_col.dict_indices.size():
+                if val_idx >= <Py_ssize_t>decoded_col.dict_indices.size():
+                    free(validity)
                     raise ValueError("dictionary index stream shorter than number of valid rows")
                 codes[i] = decoded_col.dict_indices[val_idx]
                 validity[i] = 1
@@ -1118,24 +1144,26 @@ cdef tuple _expanded_dict_codes_and_validity(
             else:
                 codes[i] = 0
                 validity[i] = 0
+        validity_out[0] = validity
+        return 1
     else:
-        if decoded_col.dict_indices.size() != num_rows:
+        if decoded_col.dict_indices.size() != <size_t>num_rows:
             raise ValueError("dictionary index stream length does not match row count")
         for i in range(num_rows):
             codes[i] = decoded_col.dict_indices[i]
-
-    return codes_obj, validity_obj
+        return 0
 
 
 cdef Int64Vector _make_typed_int64_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    cdef object codes_obj
-    cdef object validity_obj
-    cdef int32_t[::1] codes
-    cdef uint8_t[::1] validity
     cdef Py_ssize_t dict_size = decoded_col.dict_int64_values.size()
     cdef const int64_t[::1] dictionary
+    cdef int32_t* codes_buf
+    cdef uint8_t* validity_buf
+    cdef int32_t[::1] codes
+    cdef uint8_t[::1] validity
+    cdef Int64Vector result
 
     if dict_size == 0:
         raise ValueError("typed int64 dictionary vector requires non-empty dictionary")
@@ -1152,67 +1180,92 @@ cdef Int64Vector _make_typed_int64_dictionary_vector(
             decoded_col.valid_bits.data() if not decoded_col.valid_bits.empty() else NULL,
         )
 
-    codes_obj, validity_obj = _expanded_dict_codes_and_validity(decoded_col, num_rows)
-    codes = codes_obj
-    dictionary = <const int64_t[:dict_size]>decoded_col.dict_int64_values.data()
-    _record_dictionary_decode(decoded_col)
-    if validity_obj is None:
-        return int64_from_dict(codes, dictionary)
-    validity = validity_obj
-    return int64_from_dict_nullable(codes, dictionary, validity)
+    codes_buf = <int32_t*>malloc(num_rows * sizeof(int32_t))
+    if codes_buf == NULL:
+        raise MemoryError()
+    validity_buf = NULL
+    try:
+        _fill_dict_codes_and_validity(decoded_col, num_rows, codes_buf, &validity_buf)
+        codes = <int32_t[:num_rows:1]>codes_buf
+        dictionary = <const int64_t[:dict_size:1]>decoded_col.dict_int64_values.data()
+        _record_dictionary_decode(decoded_col)
+        if validity_buf == NULL:
+            result = int64_from_dict(codes, dictionary)
+        else:
+            validity = <uint8_t[:num_rows:1]>validity_buf
+            result = int64_from_dict_nullable(codes, dictionary, validity)
+    finally:
+        free(codes_buf)
+        free(validity_buf)
+    return result
 
 
 cdef Int64Vector _make_typed_int64_from_int32_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    cdef object codes_obj
-    cdef object validity_obj
-    cdef object dictionary_obj
-    cdef int32_t[::1] codes
-    cdef int64_t[::1] dictionary
-    cdef uint8_t[::1] validity
     cdef Py_ssize_t dict_size = decoded_col.dict_int32_values.size()
-    cdef Py_ssize_t i
+    cdef int64_t* dict_buf
+    cdef int32_t* codes_buf
+    cdef uint8_t* validity_buf
+    cdef int64_t[::1] dictionary
+    cdef int32_t[::1] codes
+    cdef uint8_t[::1] validity
+    cdef Int64Vector result
 
     if dict_size == 0:
         raise ValueError("typed int32 dictionary vector requires non-empty dictionary")
 
-    # Widen int32 dict to int64 (always needed regardless of path)
-    dictionary_obj = pyarray('q', [0]) * dict_size
-    dictionary = dictionary_obj
-    for i in range(dict_size):
-        dictionary[i] = <int64_t>decoded_col.dict_int32_values[i]
+    # Widen int32 dict to int64 via SIMD helper (no Python object needed)
+    dict_buf = <int64_t*>malloc(dict_size * sizeof(int64_t))
+    if dict_buf == NULL:
+        raise MemoryError()
+    rugo_widen_int32_to_int64(decoded_col.dict_int32_values.data(), dict_buf, dict_size)
 
-    # Fast path: packed codes array built in C++ (nullable dict column, zero materialization)
-    if not decoded_col.dict_codes_array.empty():
-        _record_dictionary_decode(decoded_col)
-        return make_int64_dict_only(
-            decoded_col.dict_codes_array.data(),
-            decoded_col.code_width,
-            num_rows,
-            &dictionary[0],
-            dict_size,
-            decoded_col.valid_bits.data() if not decoded_col.valid_bits.empty() else NULL,
-        )
+    codes_buf = <int32_t*>malloc(num_rows * sizeof(int32_t))
+    if codes_buf == NULL:
+        free(dict_buf)
+        raise MemoryError()
+    validity_buf = NULL
+    try:
+        dictionary = <int64_t[:dict_size:1]>dict_buf
 
-    codes_obj, validity_obj = _expanded_dict_codes_and_validity(decoded_col, num_rows)
-    codes = codes_obj
-    _record_dictionary_decode(decoded_col)
-    if validity_obj is None:
-        return int64_from_dict(codes, dictionary)
-    validity = validity_obj
-    return int64_from_dict_nullable(codes, dictionary, validity)
+        # Fast path: packed codes array built in C++ (zero materialization)
+        if not decoded_col.dict_codes_array.empty():
+            _record_dictionary_decode(decoded_col)
+            result = make_int64_dict_only(
+                decoded_col.dict_codes_array.data(),
+                decoded_col.code_width,
+                num_rows,
+                dict_buf,
+                dict_size,
+                decoded_col.valid_bits.data() if not decoded_col.valid_bits.empty() else NULL,
+            )
+        else:
+            _fill_dict_codes_and_validity(decoded_col, num_rows, codes_buf, &validity_buf)
+            codes = <int32_t[:num_rows:1]>codes_buf
+            _record_dictionary_decode(decoded_col)
+            if validity_buf == NULL:
+                result = int64_from_dict(codes, dictionary)
+            else:
+                validity = <uint8_t[:num_rows:1]>validity_buf
+                result = int64_from_dict_nullable(codes, dictionary, validity)
+    finally:
+        free(dict_buf)
+        free(codes_buf)
+        free(validity_buf)
+    return result
 
 
 cdef Float64Vector _make_typed_float64_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    cdef object codes_obj
-    cdef object validity_obj
-    cdef int32_t[::1] codes
-    cdef uint8_t[::1] validity
     cdef Py_ssize_t dict_size = decoded_col.dict_float64_values.size()
     cdef const double[::1] dictionary
+    cdef int32_t* codes_buf
+    cdef uint8_t* validity_buf
+    cdef int32_t[::1] codes
+    cdef uint8_t[::1] validity
+    cdef Float64Vector result
 
     if dict_size == 0:
         raise ValueError("typed float64 dictionary vector requires non-empty dictionary")
@@ -1229,73 +1282,98 @@ cdef Float64Vector _make_typed_float64_dictionary_vector(
             decoded_col.valid_bits.data() if not decoded_col.valid_bits.empty() else NULL,
         )
 
-    codes_obj, validity_obj = _expanded_dict_codes_and_validity(decoded_col, num_rows)
-    codes = codes_obj
-    dictionary = <const double[:dict_size]>decoded_col.dict_float64_values.data()
-    _record_dictionary_decode(decoded_col)
-    if validity_obj is None:
-        return float64_from_dict(codes, dictionary)
-    validity = validity_obj
-    return float64_from_dict_nullable(codes, dictionary, validity)
+    codes_buf = <int32_t*>malloc(num_rows * sizeof(int32_t))
+    if codes_buf == NULL:
+        raise MemoryError()
+    validity_buf = NULL
+    try:
+        _fill_dict_codes_and_validity(decoded_col, num_rows, codes_buf, &validity_buf)
+        codes = <int32_t[:num_rows:1]>codes_buf
+        dictionary = <const double[:dict_size:1]>decoded_col.dict_float64_values.data()
+        _record_dictionary_decode(decoded_col)
+        if validity_buf == NULL:
+            result = float64_from_dict(codes, dictionary)
+        else:
+            validity = <uint8_t[:num_rows:1]>validity_buf
+            result = float64_from_dict_nullable(codes, dictionary, validity)
+    finally:
+        free(codes_buf)
+        free(validity_buf)
+    return result
 
 
 cdef Float64Vector _make_typed_float64_from_float32_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    cdef object codes_obj
-    cdef object validity_obj
-    cdef object dictionary_obj
-    cdef int32_t[::1] codes
-    cdef double[::1] dictionary
-    cdef uint8_t[::1] validity
     cdef Py_ssize_t dict_size = decoded_col.dict_float32_values.size()
-    cdef Py_ssize_t i
+    cdef double* dict_buf
+    cdef int32_t* codes_buf
+    cdef uint8_t* validity_buf
+    cdef double[::1] dictionary
+    cdef int32_t[::1] codes
+    cdef uint8_t[::1] validity
+    cdef Float64Vector result
 
     if dict_size == 0:
         raise ValueError("typed float32 dictionary vector requires non-empty dictionary")
 
-    # Widen float32 dict to float64 (always needed regardless of path)
-    dictionary_obj = pyarray('d', [0.0]) * dict_size
-    dictionary = dictionary_obj
-    for i in range(dict_size):
-        dictionary[i] = <double>decoded_col.dict_float32_values[i]
+    # Widen float32 dict to float64 via SIMD helper (no Python object needed)
+    dict_buf = <double*>malloc(dict_size * sizeof(double))
+    if dict_buf == NULL:
+        raise MemoryError()
+    rugo_widen_float32_to_float64(decoded_col.dict_float32_values.data(), dict_buf, dict_size)
 
-    # Fast path: packed codes array built in C++ (nullable dict column, zero materialization)
-    if not decoded_col.dict_codes_array.empty():
-        _record_dictionary_decode(decoded_col)
-        return make_float64_dict_only(
-            decoded_col.dict_codes_array.data(),
-            decoded_col.code_width,
-            num_rows,
-            &dictionary[0],
-            dict_size,
-            decoded_col.valid_bits.data() if not decoded_col.valid_bits.empty() else NULL,
-        )
+    codes_buf = <int32_t*>malloc(num_rows * sizeof(int32_t))
+    if codes_buf == NULL:
+        free(dict_buf)
+        raise MemoryError()
+    validity_buf = NULL
+    try:
+        dictionary = <double[:dict_size:1]>dict_buf
 
-    codes_obj, validity_obj = _expanded_dict_codes_and_validity(decoded_col, num_rows)
-    codes = codes_obj
-    _record_dictionary_decode(decoded_col)
-    if validity_obj is None:
-        return float64_from_dict(codes, dictionary)
-    validity = validity_obj
-    return float64_from_dict_nullable(codes, dictionary, validity)
+        # Fast path: packed codes array built in C++ (zero materialization)
+        if not decoded_col.dict_codes_array.empty():
+            _record_dictionary_decode(decoded_col)
+            result = make_float64_dict_only(
+                decoded_col.dict_codes_array.data(),
+                decoded_col.code_width,
+                num_rows,
+                dict_buf,
+                dict_size,
+                decoded_col.valid_bits.data() if not decoded_col.valid_bits.empty() else NULL,
+            )
+        else:
+            _fill_dict_codes_and_validity(decoded_col, num_rows, codes_buf, &validity_buf)
+            codes = <int32_t[:num_rows:1]>codes_buf
+            _record_dictionary_decode(decoded_col)
+            if validity_buf == NULL:
+                result = float64_from_dict(codes, dictionary)
+            else:
+                validity = <uint8_t[:num_rows:1]>validity_buf
+                result = float64_from_dict_nullable(codes, dictionary, validity)
+    finally:
+        free(dict_buf)
+        free(codes_buf)
+        free(validity_buf)
+    return result
 
 
 cdef StringVector _make_typed_string_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    cdef object codes_obj
-    cdef object validity_obj
-    cdef object offsets_obj
-    cdef object lengths_obj
-    cdef object arena_obj
-    cdef int32_t[::1] codes
+    cdef Py_ssize_t dict_size = decoded_col.string_dict_lens.size()
+    cdef Py_ssize_t arena_size = decoded_col.string_dict_arena.size()
+    cdef int32_t* offsets_buf
+    cdef int32_t* lengths_buf
+    cdef uint8_t* arena_buf
+    cdef int32_t* codes_buf
+    cdef uint8_t* validity_buf
     cdef int32_t[::1] dict_offsets
     cdef int32_t[::1] dict_lengths
     cdef uint8_t[::1] arena_bytes
+    cdef int32_t[::1] codes
     cdef uint8_t[::1] validity
-    cdef Py_ssize_t dict_size = decoded_col.string_dict_lens.size()
-    cdef Py_ssize_t arena_size = decoded_col.string_dict_arena.size()
+    cdef StringVector result
     cdef Py_ssize_t i
 
     if dict_size == 0:
@@ -1315,28 +1393,53 @@ cdef StringVector _make_typed_string_dictionary_vector(
             decoded_col.valid_bits.data() if not decoded_col.valid_bits.empty() else NULL,
         )
 
-    codes_obj, validity_obj = _expanded_dict_codes_and_validity(decoded_col, num_rows)
-    offsets_obj = pyarray('i', [0]) * dict_size
-    lengths_obj = pyarray('i', [0]) * dict_size
-    arena_obj = bytearray(arena_size)
+    offsets_buf = <int32_t*>malloc(dict_size * sizeof(int32_t))
+    if offsets_buf == NULL:
+        raise MemoryError()
+    lengths_buf = <int32_t*>malloc(dict_size * sizeof(int32_t))
+    if lengths_buf == NULL:
+        free(offsets_buf)
+        raise MemoryError()
+    # malloc(0) is implementation-defined; use at least 1 byte for zero-length arena.
+    arena_buf = <uint8_t*>malloc(arena_size if arena_size > 0 else 1)
+    if arena_buf == NULL:
+        free(offsets_buf)
+        free(lengths_buf)
+        raise MemoryError()
+    codes_buf = <int32_t*>malloc(num_rows * sizeof(int32_t))
+    if codes_buf == NULL:
+        free(offsets_buf)
+        free(lengths_buf)
+        free(arena_buf)
+        raise MemoryError()
+    validity_buf = NULL
+    try:
+        for i in range(dict_size):
+            offsets_buf[i] = decoded_col.string_dict_offsets[i]
+            lengths_buf[i] = decoded_col.string_dict_lens[i]
+        if arena_size > 0:
+            memcpy(arena_buf, decoded_col.string_dict_arena.data(), <size_t>arena_size)
 
-    dict_offsets = offsets_obj
-    dict_lengths = lengths_obj
-    arena_bytes = arena_obj
+        _fill_dict_codes_and_validity(decoded_col, num_rows, codes_buf, &validity_buf)
 
-    for i in range(dict_size):
-        dict_offsets[i] = decoded_col.string_dict_offsets[i]
-        dict_lengths[i] = decoded_col.string_dict_lens[i]
+        dict_offsets = <int32_t[:dict_size:1]>offsets_buf
+        dict_lengths = <int32_t[:dict_size:1]>lengths_buf
+        arena_bytes  = <uint8_t[:arena_size:1]>arena_buf if arena_size > 0 else <uint8_t[:1:1]>arena_buf
+        codes        = <int32_t[:num_rows:1]>codes_buf
 
-    if arena_size > 0:
-        memcpy(&arena_bytes[0], decoded_col.string_dict_arena.data(), <size_t>arena_size)
-
-    codes = codes_obj
-    _record_dictionary_decode(decoded_col)
-    if validity_obj is None:
-        return string_from_dict_buffers(codes, dict_offsets, dict_lengths, arena_bytes)
-    validity = validity_obj
-    return string_from_dict_buffers(codes, dict_offsets, dict_lengths, arena_bytes, validity)
+        _record_dictionary_decode(decoded_col)
+        if validity_buf == NULL:
+            result = string_from_dict_buffers(codes, dict_offsets, dict_lengths, arena_bytes)
+        else:
+            validity = <uint8_t[:num_rows:1]>validity_buf
+            result = string_from_dict_buffers(codes, dict_offsets, dict_lengths, arena_bytes, validity)
+    finally:
+        free(offsets_buf)
+        free(lengths_buf)
+        free(arena_buf)
+        free(codes_buf)
+        free(validity_buf)
+    return result
 
 
 cdef Vector _make_dictionary_vector(
@@ -1371,7 +1474,7 @@ cdef Vector _make_typed_constant_vector(
     cdef bint all_null = _decoded_all_null(decoded_col, num_rows)
     cdef uint32_t offset
     cdef int32_t length
-    cdef object value
+    cdef bytes value
 
     _record_dictionary_decode(decoded_col)
 
@@ -1837,6 +1940,8 @@ def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
     cpp_col.max_definition_level = _tmp if _tmp is not None else 0
     _tmp = col_stats.get('max_repetition_level')
     cpp_col.max_repetition_level = _tmp if _tmp is not None else 0
+    _tmp = col_stats.get('type_length')
+    cpp_col.type_length = _tmp if _tmp is not None else 0
 
     # Convert codec string → int (e.g. 'SNAPPY' → 1)
     codec_str = col_stats.get('compression_codec') or 'UNCOMPRESSED'
@@ -2004,6 +2109,8 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
     cpp_col.max_definition_level = _tmp if _tmp is not None else 0
     _tmp = col_stats.get('max_repetition_level')
     cpp_col.max_repetition_level = _tmp if _tmp is not None else 0
+    _tmp = col_stats.get('type_length')
+    cpp_col.type_length = _tmp if _tmp is not None else 0
 
     # Convert codec string → int (e.g. 'SNAPPY' → 1)
     codec_str = col_stats.get('compression_codec') or 'UNCOMPRESSED'
@@ -2179,6 +2286,7 @@ def decode_column_from_memory(data, str column_name, row_group_stats, int row_gr
         cpp_col.bloom_length = col.bloom_length if col.bloom_length is not None else -1
         cpp_col.encodings = col.encodings if col.encodings is not None else []
         cpp_col.codec = col.codec if col.codec is not None else -1
+        cpp_col.type_length = col.type_length if getattr(col, 'type_length', None) is not None else 0
         cpp_row_group.columns.push_back(cpp_col)
 
     cdef parquet_reader.DecodedColumn result

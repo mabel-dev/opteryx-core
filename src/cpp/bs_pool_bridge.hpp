@@ -3,6 +3,20 @@
  *
  * Provides utilities to submit tasks to BS::thread_pool and extract results
  * into Python concurrent.futures.Future objects with minimal GIL overhead.
+ *
+ * GIL contract (all rules are strict):
+ *   - Python C API (including Py_INCREF/DECREF) requires the GIL.
+ *   - BS::thread_pool workers are NOT Python threads; they use
+ *     PyGILState_Ensure/Release to borrow the GIL for Python work.
+ *   - All destructors that touch PyObject* must acquire the GIL themselves,
+ *     because they may fire from worker threads after GIL has been released.
+ *   - notify_python_future() nulls its PyObject* members after use so that
+ *     the destructor is a safe no-op.
+ *
+ * Exception handling (Python >= 3.12):
+ *   - PyErr_GetRaisedException() returns the exception *instance* (new ref)
+ *     and clears the indicator atomically.  This preserves the message and
+ *     traceback on the Python Future, unlike the old PyErr_Occurred() (type only).
  */
 
 #ifndef BS_POOL_BRIDGE_HPP
@@ -14,15 +28,16 @@
 #include <functional>
 #include <mutex>
 #include <condition_variable>
-#include "../../../third_party/bshoshany/BS_thread_pool.hpp"
+#include "BS_thread_pool.hpp"
+
 
 /**
- * Thread-safe result container for storing task results.
+ * Thread-safe result container: holds the result or exception until the Python
+ * Future is notified.  All Python object references are managed with GIL held.
  */
 class ResultContainer {
 private:
     mutable std::mutex mutex_;
-    std::condition_variable cv_;
     PyObject* py_future_;
     PyObject* result_;
     PyObject* exception_;
@@ -31,75 +46,80 @@ private:
 public:
     ResultContainer(PyObject* py_future)
         : py_future_(py_future), result_(nullptr), exception_(nullptr), ready_(false) {
+        // Called with GIL held (from BSThreadPoolBridge::submit).
         Py_INCREF(py_future_);
     }
 
     ~ResultContainer() {
-        Py_XDECREF(py_future_);
-        Py_XDECREF(result_);
-        Py_XDECREF(exception_);
+        // May be called from a BS worker thread after PyGILState_Release.
+        // Acquire GIL to safely decrement any remaining Python references.
+        if (py_future_ || result_ || exception_) {
+            PyGILState_STATE gstate = PyGILState_Ensure();
+            Py_XDECREF(py_future_);
+            Py_XDECREF(result_);
+            Py_XDECREF(exception_);
+            PyGILState_Release(gstate);
+        }
     }
 
     /**
-     * Set the result (call from worker thread, no GIL needed).
+     * Store the task result.  Called with GIL held.
      */
     void set_result(PyObject* result) {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!ready_) {
-                result_ = result;
-                Py_XINCREF(result_);
-                ready_ = true;
-            } else {
-                Py_XDECREF(result);
-            }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!ready_) {
+            result_ = result;
+            Py_XINCREF(result_);
+            ready_ = true;
         }
-        cv_.notify_one();
     }
 
     /**
-     * Set exception (call from worker thread, no GIL needed).
+     * Store the task exception.  Called with GIL held.
+     * Expects an exception *instance* (new reference — caller must Py_DECREF after).
      */
     void set_exception(PyObject* exc) {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!ready_) {
-                exception_ = exc;
-                Py_XINCREF(exc);
-                ready_ = true;
-            } else {
-                Py_XDECREF(exc);
-            }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!ready_) {
+            exception_ = exc;
+            Py_XINCREF(exception_);
+            ready_ = true;
         }
-        cv_.notify_one();
     }
 
     /**
-     * Wait for result to be ready (blocking).
-     */
-    void wait() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait(lock, [this] { return ready_; });
-    }
-
-    /**
-     * Notify the Python future with the result (call with GIL held).
+     * Resolve the Python Future.  Must be called with GIL held.
+     * Nulls all PyObject* members so the destructor is a no-op.
      */
     void notify_python_future() {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (ready_ && py_future_) {
-            if (exception_) {
-                PyObject_CallMethod(py_future_, "set_exception", "O", exception_);
-            } else if (result_) {
-                PyObject_CallMethod(py_future_, "set_result", "O", result_);
-            }
-            PyErr_Clear();  // Clear any errors from the method call
+        if (!ready_ || !py_future_) {
+            return;
         }
+        if (exception_) {
+            PyObject_CallMethod(py_future_, "set_exception", "O", exception_);
+        } else if (result_) {
+            PyObject_CallMethod(py_future_, "set_result", "O", result_);
+        }
+        PyErr_Clear();  // Swallow any error from the set_* call itself.
+
+        // Null out after use so ~ResultContainer is a no-op for these refs.
+        Py_XDECREF(py_future_);   py_future_  = nullptr;
+        Py_XDECREF(result_);      result_     = nullptr;
+        Py_XDECREF(exception_);   exception_  = nullptr;
     }
 };
 
+
 /**
- * Wrapper for task execution that bridges to Python futures.
+ * Wraps a single Python callable + arguments for deferred execution on a
+ * BS::thread_pool worker.
+ *
+ * Ownership: constructor increments all PyObject* refs (called with GIL held).
+ * Cleanup:   operator() nulls refs while still holding the GIL so that the
+ *            destructor (which fires without GIL on the worker thread) is safe.
+ *            If operator() was never called (e.g., pool shut down before task
+ *            ran), the destructor re-acquires the GIL to clean up.
  */
 class TaskWrapper {
 private:
@@ -112,66 +132,76 @@ public:
     TaskWrapper(std::shared_ptr<ResultContainer> container, PyObject* callable,
                 PyObject* args, PyObject* kwargs)
         : container_(container), callable_(callable), args_(args), kwargs_(kwargs) {
+        // Called with GIL held from BSThreadPoolBridge::submit.
         Py_INCREF(callable_);
         Py_INCREF(args_);
         Py_XINCREF(kwargs_);
     }
 
     ~TaskWrapper() {
-        Py_DECREF(callable_);
-        Py_DECREF(args_);
-        Py_XDECREF(kwargs_);
+        // operator() nulls the pointers after use, making this a no-op in the
+        // common case.  If they are still set (pool shutdown before task ran),
+        // we must acquire the GIL to safely decrement.
+        if (callable_) {
+            PyGILState_STATE gstate = PyGILState_Ensure();
+            Py_DECREF(callable_);
+            Py_DECREF(args_);
+            Py_XDECREF(kwargs_);
+            PyGILState_Release(gstate);
+        }
     }
 
     /**
-     * Execute the task and store result (called in worker thread).
-     * This method MUST NOT hold the GIL during execution.
+     * Execute the task.  Called by a BS::thread_pool worker thread.
+     *
+     * Acquires the GIL for all Python work, then releases it.  Python object
+     * refs are nulled before the GIL is released so the destructor (which runs
+     * without the GIL) touches no Python state.
      */
     void operator()() {
-        // Call the Python function (requires GIL)
         PyGILState_STATE gstate = PyGILState_Ensure();
-        try {
-            PyObject* result = nullptr;
-            if (kwargs_) {
-                result = PyObject_Call(callable_, args_, kwargs_);
-            } else {
-                result = PyObject_CallObject(callable_, args_);
-            }
 
-            if (result) {
-                container_->set_result(result);
-                Py_DECREF(result);
-            } else {
-                PyObject* exc = PyErr_Occurred();
-                if (exc) {
-                    container_->set_exception(exc);
-                    PyErr_Clear();
-                }
-            }
-        } catch (const std::exception& e) {
-            PyObject* exc_type = PyExc_RuntimeError;
-            PyErr_SetString(exc_type, e.what());
-            PyObject* exc = PyErr_Occurred();
-            if (exc) {
-                container_->set_exception(exc);
-            }
-            PyErr_Clear();
-        } catch (...) {
-            PyErr_SetString(PyExc_RuntimeError, "Unknown exception in task wrapper");
-            PyObject* exc = PyErr_Occurred();
-            if (exc) {
-                container_->set_exception(exc);
-            }
-            PyErr_Clear();
+        // --- Run the callable --------------------------------------------------
+        PyObject* result = nullptr;
+        if (kwargs_) {
+            result = PyObject_Call(callable_, args_, kwargs_);
+        } else {
+            result = PyObject_CallObject(callable_, args_);
         }
+
+        // --- Record result or exception ----------------------------------------
+        if (result) {
+            container_->set_result(result);
+            Py_DECREF(result);
+            container_->notify_python_future();
+        } else {
+            // PyErr_GetRaisedException: Python >= 3.12.
+            // Returns exception *instance* (new ref) and clears indicator.
+            PyObject* exc = PyErr_GetRaisedException();
+            if (exc) {
+                container_->set_exception(exc);
+                Py_DECREF(exc);   // balance the new ref we own
+                container_->notify_python_future();
+            }
+        }
+
+        // --- Release Python refs while GIL is still held -----------------------
+        // Nulling prevents ~TaskWrapper() from calling Py_DECREF without GIL.
+        Py_DECREF(callable_);   callable_ = nullptr;
+        Py_DECREF(args_);       args_     = nullptr;
+        Py_XDECREF(kwargs_);    kwargs_   = nullptr;
 
         PyGILState_Release(gstate);
     }
 };
 
+
 /**
- * Wrapper for BS::thread_pool that provides Python-friendly interface.
- * Uses BS::light_thread_pool (BS::thread_pool<BS::tp::none>) for simplicity.
+ * Wrapper for BS::thread_pool that provides Python-compatible task submission.
+ *
+ * Each call to submit() creates a concurrent.futures.Future, dispatches the
+ * task to BS::thread_pool, and returns the Future to the caller.  The worker
+ * resolves the Future via notify_python_future() once the callable completes.
  */
 class BSThreadPoolBridge {
 private:
@@ -186,42 +216,32 @@ public:
           max_workers_(max_workers) {}
 
     /**
-     * Submit a task to the thread pool and return a Python future.
-     *
-     * This method creates a Python concurrent.futures.Future, submits the task
-     * to BS::thread_pool, and returns the future to the caller. The task will
-     * update the future with its result when complete.
+     * Submit a Python callable to the thread pool.
      *
      * Must be called with GIL held.
+     * Returns a new reference to a concurrent.futures.Future.
+     * Returns NULL and sets a Python exception on failure.
      */
     PyObject* submit(PyObject* callable, PyObject* args, PyObject* kwargs) {
-        // Import concurrent.futures.Future
+        // Import is cached by Python's import system after the first call.
         PyObject* futures_module = PyImport_ImportModule("concurrent.futures");
         if (!futures_module) {
             return nullptr;
         }
-
         PyObject* Future = PyObject_GetAttrString(futures_module, "Future");
         Py_DECREF(futures_module);
         if (!Future) {
             return nullptr;
         }
-
-        // Create a Python Future
         PyObject* py_future = PyObject_CallObject(Future, nullptr);
         Py_DECREF(Future);
         if (!py_future) {
             return nullptr;
         }
 
-        // Create result container
         auto container = std::make_shared<ResultContainer>(py_future);
+        auto task_ptr  = std::make_shared<TaskWrapper>(container, callable, args, kwargs);
 
-        // Wrap in shared_ptr so the lambda can be moved into the pool's queue
-        // without invalidating PyObject* references (TaskWrapper owns them).
-        auto task_ptr = std::make_shared<TaskWrapper>(container, callable, args, kwargs);
-
-        // Submit to thread pool (detach — result tracked via ResultContainer/Future)
         try {
             pool_->detach_task([task_ptr]() { (*task_ptr)(); });
         } catch (const std::exception& e) {
@@ -230,12 +250,13 @@ public:
             return nullptr;
         }
 
-        // Return the Python future to caller
+        // Return new reference (the one we got from PyObject_CallObject).
         return py_future;
     }
 
     /**
-     * Shutdown the thread pool.
+     * Wait for all queued tasks to complete, then destroy the pool.
+     * Release the GIL while waiting so worker threads can finish.
      */
     void shutdown(bool wait = true) {
         if (pool_) {
@@ -246,38 +267,12 @@ public:
         }
     }
 
-    /**
-     * Get pool name.
-     */
-    const std::string& name() const {
-        return name_;
-    }
-
-    /**
-     * Get max workers.
-     */
     int max_workers() const {
         return max_workers_;
     }
 
-    /**
-     * Get number of queued tasks.
-     */
-    size_t get_queued_tasks_count() const {
-        if (pool_) {
-            return pool_->get_tasks_queued();
-        }
-        return 0;
-    }
-
-    /**
-     * Get number of running tasks.
-     */
-    size_t get_running_tasks_count() const {
-        if (pool_) {
-            return pool_->get_tasks_running();
-        }
-        return 0;
+    const std::string& name() const {
+        return name_;
     }
 };
 

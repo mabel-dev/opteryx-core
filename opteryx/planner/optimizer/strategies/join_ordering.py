@@ -117,6 +117,8 @@ def _col_value(col):
 
 
 class JoinOrderingStrategy(OptimizationStrategy):
+    optimization_technique = "cost"
+
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if not context.optimized_plan:
             context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore

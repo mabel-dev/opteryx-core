@@ -1,0 +1,27 @@
+{
+  "system": "DuckDB (H2O / Parquet views)",
+  "date": "2026-05-07",
+  "machine": "Justins-MacBook-Pro.local",
+  "size": "small",
+  "iterations": 2,
+  "data_path": "testdata/h2o",
+  "result": [
+    {
+      "name": "gro/g1",
+      "min_ms": 8.151250003720634,
+      "max_ms": 8.162457990692928,
+      "avg_ms": 8.156853997206781,
+      "iterations": 2,
+      "times": [
+        8.162457990692928,
+        8.151250003720634
+      ],
+      "shape": [
+        100,
+        2
+      ],
+      "workload": "groupby",
+      "status": "ok"
+    }
+  ]
+}

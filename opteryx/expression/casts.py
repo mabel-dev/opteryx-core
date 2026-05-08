@@ -285,14 +285,40 @@ def cast(arr: any, _type: str, args: tuple = (), unit: str = None) -> any:
         _resolved_type = "VARBINARY" if _type == "VARBINARY" else _type
         caster = OrsoTypes[_resolved_type].parse
 
+        decimal_quantizer = None
         if _type == "DECIMAL":
-            # DECIMAL requires special handling for precision and scale
-            if len(args) == 2:
-                kwargs["precision"] = args[0]
-                kwargs["scale"] = args[1]
+            # DECIMAL parse() takes only the value; precision/scale aren't kwargs
+            # the parser accepts. We capture the requested scale here and quantize
+            # the parsed Decimal afterwards so `CAST(x AS DECIMAL(p,s))` actually
+            # rounds to the requested scale rather than silently no-op'ing.
+            import decimal as _decimal_mod
+
+            def _to_int_arg(a):
+                # Args from the evaluator may be vectors (length-1) wrapping the literal.
+                if hasattr(a, "to_pylist"):
+                    pl = a.to_pylist()
+                    return int(pl[0]) if pl else 0
+                return int(a)
+
+            if len(args) >= 2:
+                _scale = _to_int_arg(args[1])
             elif len(args) == 1:
-                kwargs["precision"] = args[0]
-                kwargs["scale"] = 0
+                _scale = 0
+            else:
+                _scale = None
+            if _scale is not None:
+                _quant_exp = _decimal_mod.Decimal(1).scaleb(-_scale)
+
+                def decimal_quantizer(d):  # noqa: E306
+                    if d is None:
+                        return None
+                    if not isinstance(d, _decimal_mod.Decimal):
+                        return d
+                    try:
+                        return d.quantize(_quant_exp)
+                    except _decimal_mod.InvalidOperation:
+                        return d
+
         elif _type in ("VARCHAR", "BLOB", "VARBINARY") and len(args) == 1:
             # VARCHAR and BLOB can take a single argument for length
             kwargs["length"] = args[0]
@@ -343,6 +369,8 @@ def cast(arr: any, _type: str, args: tuple = (), unit: str = None) -> any:
             result = [caster(_unwrap_vector_value(i), **kwargs) for i in arr]
             return vector_from_sequence(result, dtype=OrsoTypes.VECTOR)
         result = [_cast_value(i) for i in arr]
+        if decimal_quantizer is not None:
+            result = [decimal_quantizer(d) for d in result]
         resolved = "BLOB" if _type == "VARBINARY" else _type
         return vector_from_sequence(result, dtype=OrsoTypes[resolved])
 

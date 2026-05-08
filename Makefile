@@ -128,10 +128,10 @@ dt: ## Run draken unit tests
 	@clear || true
 	@$(PYTEST) draken/tests/ -v --tb=short
 
-tpch: ## Run TPCH tests
-	$(call print_blue,"Running TPCH tests...")
+tpch: ## Run TPC-H benchmark vs DuckDB (defaults to SF=1)
+	$(call print_blue,"Running TPC-H benchmark vs DuckDB...")
 	@clear || true
-	@$(PYTHON) tests/integration/sql_battery/test_battery_tpch.py
+	@$(PYTHON) tests/performance/tpch/runner.py
 
 b: check-python
 	@clear || true
@@ -159,6 +159,20 @@ tpch-bench: ## Run TPC-H performance benchmark (Opteryx)
 
 tpch-bench-duckdb: ## Re-run DuckDB TPC-H calibration (regenerates duckdb/results.sf*.json)
 	@$(PYTHON) tests/performance/tpch/duckdb/runner.py
+
+job: ## Run Join Order Benchmark (JOB) vs DuckDB
+	@clear || true
+	@$(PYTHON) tests/performance/job/runner.py
+
+job-duckdb: ## Re-run DuckDB JOB calibration (regenerates duckdb/results.json)
+	@$(PYTHON) tests/performance/job/duckdb/runner.py
+
+h2o: ## Run H2O db-benchmark vs DuckDB (groupby + join, size=small)
+	@clear || true
+	@$(PYTHON) tests/performance/h2o/runner.py --size small --workload both
+
+h2o-duckdb: ## Re-run DuckDB H2O calibration (regenerates duckdb/results.<size>.json)
+	@$(PYTHON) tests/performance/h2o/duckdb/runner.py --size small --workload both
 
 # Aliases for backward compatibility
 t: test-quick

@@ -446,9 +446,17 @@ cdef ArrayVector from_arrow(object array):
     if bufs[1] is None:
         raise ValueError("List arrays require an offsets buffer")
 
+    # Detect LargeList (64-bit offsets) and fail fast. We only support ListType (32-bit).
+    array_type = array.type
+    type_name = str(array_type)
+    if type_name.startswith("large_list"):
+        raise NotImplementedError(
+            f"LargeList arrays (64-bit offsets) are not supported. "
+            f"Got type: {type_name}. Use list_ (32-bit offsets) instead."
+        )
+
     # Handle offsets with array.offset
-    # Assuming ListType (int32 offsets). If LargeList, this will be wrong.
-    # TODO: Check for LargeList and handle or error.
+    # This assumes ListType (int32 offsets) - LargeList check above prevents silent data corruption.
     cdef Py_ssize_t offset = array.offset
     offsets_addr = <intptr_t> bufs[1].address + offset * 4
     vec.ptr.offsets = <int32_t*> offsets_addr

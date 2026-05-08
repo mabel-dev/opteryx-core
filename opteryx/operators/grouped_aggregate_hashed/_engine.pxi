@@ -184,6 +184,241 @@ cdef class GroupHashEngine:
         if self._telemetry_enabled:
             self._time_resolve_ns += _now_ns() - start_ns
 
+    cdef void _ingest_rle_single_string_fast(
+        self, object morsel, StringVector svec, Py_ssize_t n_rows
+    ) except *:
+        """Fast ingest path for a single RLE-encoded string GROUP BY key.
+
+        Walks the K runs once, mapping each run-value hash to a state via
+        the index.  Then fills si_buf in O(N) but with no per-row hashing.
+        Adjacent runs that share a value still collapse to the same state
+        because the hash matches.  Caller has already verified that the
+        row-level null bitmap is NULL.
+        """
+        cdef Py_ssize_t n_runs = svec.c_rle_run_count()
+        cdef int64_t* si_buf = self._state_indices_buf.data()
+        cdef int64_t num_groups = self._num_groups
+        cdef int64_t state_idx
+        cdef uint64_t h
+        cdef Py_ssize_t r, k, vlen
+        cdef int32_t run_len
+        cdef Py_ssize_t row_offset = 0
+        cdef bint state_is_new
+
+        for r in range(n_runs):
+            run_len = svec.c_rle_run_length(r)
+            if run_len <= 0:
+                continue
+            h = svec.c_rle_run_value_hash(r)
+            state_is_new = False
+            if not self._index.lookup_fast(h, state_idx):
+                state_idx = num_groups
+                self._index.insert_new(h, state_idx)
+                num_groups += 1
+                state_is_new = True
+            for k in range(run_len):
+                si_buf[row_offset + k] = state_idx
+            if state_is_new:
+                # First row of the run is the canonical "new row" for key
+                # storage.  KeyStore.store_new_rows reads the morsel's
+                # column at this index — for RLE-encoded source it
+                # currently materializes; same trade-off as the dict path.
+                self._new_row_scratch.push_back(row_offset)
+            row_offset += run_len
+
+        # Sanity check: row_offset must cover every row in the morsel.
+        if row_offset != n_rows:
+            raise ValueError(
+                f"rle-fast-path row count mismatch: covered {row_offset} of {n_rows}"
+            )
+
+        self._num_groups = num_groups
+
+        cdef Py_ssize_t n_new = <Py_ssize_t>self._new_row_scratch.size()
+        cdef long long phase_start
+        if n_new > 0:
+            if self._telemetry_enabled:
+                phase_start = _now_ns()
+            self._key_store.store_new_rows(
+                morsel,
+                self._new_row_scratch.data(),
+                n_new,
+            )
+            if self._telemetry_enabled:
+                self._time_store_keys_ns += _now_ns() - phase_start
+
+            if self._telemetry_enabled:
+                phase_start = _now_ns()
+            for collector in self._collectors:
+                (<BaseCollector>collector).grow(num_groups)
+            if self._telemetry_enabled:
+                self._time_grow_ns += _now_ns() - phase_start
+
+        if self._telemetry_enabled:
+            phase_start = _now_ns()
+        for collector in self._collectors:
+            (<BaseCollector>collector).accumulate(morsel, si_buf, n_rows)
+        if self._telemetry_enabled:
+            self._time_accumulate_ns += _now_ns() - phase_start
+
+    cdef void _ingest_dict_single_string_fast(
+        self, object morsel, StringVector svec, Py_ssize_t n_rows
+    ) except *:
+        """Fast ingest path for a single dict-encoded string GROUP BY key.
+
+        Computes the K dict-value hashes once, looks them up in the index to
+        build a code→state mapping, then walks the N codes filling the
+        state-indices buffer.  Avoids the per-row hash-and-probe loop
+        entirely.  Assumes carchar (non-parvi) mode and a non-NULL index.
+        """
+        cdef Py_ssize_t dict_size = svec.c_dict_size()
+        cdef const uint8_t* codes = svec.c_dict_codes_ptr()
+        cdef uint8_t code_width = svec.c_dict_code_width()
+        cdef const uint8_t* row_nulls = svec.c_row_null_bitmap()
+        cdef const int64_t* counts = svec.c_dict_code_counts_ptr()
+        cdef int64_t* si_buf = self._state_indices_buf.data()
+        cdef int64_t num_groups = self._num_groups
+        cdef int64_t state_idx
+        cdef uint64_t h
+        cdef Py_ssize_t i, di
+        cdef uint32_t code
+        cdef int64_t null_state_idx = -1
+        cdef Py_ssize_t first_null_row = -1
+        cdef uint64_t null_marker = mix_hash(0, NULL_HASH)
+        cdef int64_t* code_to_state = NULL
+        cdef uint8_t* dict_is_new = NULL
+        cdef Py_ssize_t* first_row_per_dict = NULL
+        cdef Py_ssize_t alloc_k = dict_size if dict_size > 0 else 1
+
+        code_to_state = <int64_t*>malloc(<size_t>alloc_k * sizeof(int64_t))
+        dict_is_new = <uint8_t*>malloc(<size_t>alloc_k * sizeof(uint8_t))
+        first_row_per_dict = <Py_ssize_t*>malloc(<size_t>alloc_k * sizeof(Py_ssize_t))
+        if code_to_state == NULL or dict_is_new == NULL or first_row_per_dict == NULL:
+            if code_to_state != NULL: free(code_to_state)
+            if dict_is_new != NULL: free(dict_is_new)
+            if first_row_per_dict != NULL: free(first_row_per_dict)
+            raise MemoryError()
+
+        try:
+            # Phase 1: per dict entry — compute hash, insert/lookup, build map.
+            # Skip entries that are unreferenced (count == 0) to avoid
+            # allocating empty groups.  Sentinel state_idx = -2 means
+            # "this dict entry is itself null; rows pointing here go to
+            # the global null group".  Sentinel state_idx = -3 means
+            # "this dict entry has zero references; should never be looked
+            # up via si_buf".
+            for di in range(dict_size):
+                first_row_per_dict[di] = -1
+                dict_is_new[di] = 0
+                if counts[di] <= 0:
+                    code_to_state[di] = -3
+                    continue
+                if svec.c_dict_value_is_null(di):
+                    code_to_state[di] = -2
+                    continue
+                h = svec.c_dict_value_hash(di)
+                if not self._index.lookup_fast(h, state_idx):
+                    state_idx = num_groups
+                    self._index.insert_new(h, state_idx)
+                    num_groups += 1
+                    dict_is_new[di] = 1
+                code_to_state[di] = state_idx
+
+            # Phase 2: walk N rows, fill si_buf, lazily allocate the null group.
+            for i in range(n_rows):
+                if row_nulls != NULL and not (
+                    (row_nulls[i >> 3] >> (i & 7)) & 1
+                ):
+                    if null_state_idx < 0:
+                        if not self._index.lookup_fast(null_marker, state_idx):
+                            null_state_idx = num_groups
+                            self._index.insert_new(null_marker, null_state_idx)
+                            num_groups += 1
+                            first_null_row = i
+                        else:
+                            null_state_idx = state_idx
+                    si_buf[i] = null_state_idx
+                    continue
+
+                if code_width == 1:
+                    code = (<const uint8_t*>codes)[i]
+                elif code_width == 2:
+                    code = (<const uint16_t*>codes)[i]
+                else:
+                    code = (<const uint32_t*>codes)[i]
+
+                if <Py_ssize_t>code >= dict_size:
+                    raise ValueError(
+                        f"dictionary index out of bounds at row {i}: {code}"
+                    )
+
+                state_idx = code_to_state[<Py_ssize_t>code]
+                if state_idx == -3:
+                    # Should be unreachable: a valid row referencing a code
+                    # implies count[code] > 0.  Fail fast if violated.
+                    raise ValueError(
+                        f"dict-fast-path invariant violated at row {i}: "
+                        f"code {code} was unreferenced but a valid row uses it"
+                    )
+                if state_idx == -2:
+                    # Dict entry is null → goes to the global null group.
+                    if null_state_idx < 0:
+                        if not self._index.lookup_fast(null_marker, state_idx):
+                            null_state_idx = num_groups
+                            self._index.insert_new(null_marker, null_state_idx)
+                            num_groups += 1
+                            first_null_row = i
+                        else:
+                            null_state_idx = state_idx
+                    si_buf[i] = null_state_idx
+                    continue
+
+                si_buf[i] = state_idx
+                if dict_is_new[<Py_ssize_t>code] and first_row_per_dict[<Py_ssize_t>code] < 0:
+                    first_row_per_dict[<Py_ssize_t>code] = i
+
+            # Phase 3: collect first-row indices for newly-allocated states so
+            # KeyStore.store_new_rows can read each new group's key value.
+            for di in range(dict_size):
+                if dict_is_new[di] and first_row_per_dict[di] >= 0:
+                    self._new_row_scratch.push_back(first_row_per_dict[di])
+            if first_null_row >= 0:
+                self._new_row_scratch.push_back(first_null_row)
+        finally:
+            free(code_to_state)
+            free(dict_is_new)
+            free(first_row_per_dict)
+
+        self._num_groups = num_groups
+
+        # Mirror the post-loop work the regular ingest path does.
+        cdef Py_ssize_t n_new = <Py_ssize_t>self._new_row_scratch.size()
+        cdef long long phase_start
+        if n_new > 0:
+            if self._telemetry_enabled:
+                phase_start = _now_ns()
+            self._key_store.store_new_rows(
+                morsel,
+                self._new_row_scratch.data(),
+                n_new,
+            )
+            if self._telemetry_enabled:
+                self._time_store_keys_ns += _now_ns() - phase_start
+
+            if self._telemetry_enabled:
+                phase_start = _now_ns()
+            for collector in self._collectors:
+                (<BaseCollector>collector).grow(num_groups)
+            if self._telemetry_enabled:
+                self._time_grow_ns += _now_ns() - phase_start
+
+        if self._telemetry_enabled:
+            phase_start = _now_ns()
+        for collector in self._collectors:
+            (<BaseCollector>collector).accumulate(morsel, si_buf, n_rows)
+        if self._telemetry_enabled:
+            self._time_accumulate_ns += _now_ns() - phase_start
+
     cpdef void ingest(self, object morsel):
         """
         Process one input Morsel. No Python in the inner loop.
@@ -200,18 +435,64 @@ cdef class GroupHashEngine:
         if not self._resolved:
             self._resolve_on_first_morsel(morsel)
 
+        # Ensure scratch buffers are large enough.
+        if <Py_ssize_t>self._state_indices_buf.size() < n_rows:
+            self._state_indices_buf.resize(n_rows)
+        self._new_row_scratch.clear()
+
+        # Single dict-encoded string-key fast path: skip morsel.hash entirely
+        # and use the dict codes as group ids.  K hash-table lookups instead
+        # of N.  Only viable in carchar mode (parvi has its own small-map
+        # invariants we don't replicate here).
+        cdef Vector raw_vec
+        cdef StringVector svec_key
+        if (
+            not self._use_parvi
+            and self._index != NULL
+            and len(self._group_columns) == 1
+            and self._key_kinds[0] == KEY_MULTI_ENCODED_STRING
+        ):
+            raw_vec = <Vector>morsel.column(self._group_columns[0])
+            if isinstance(raw_vec, StringVector):
+                svec_key = <StringVector>raw_vec
+                # Cardinality gate: at K ~ N the existing path's batched
+                # hash + cached lookups beat our K-independent path.  Only
+                # take the fast path when K is meaningfully smaller than N.
+                if (
+                    svec_key._encoding == DRAKEN_ENCODING_DICTIONARY
+                    and svec_key._dict_codes != NULL
+                    and svec_key._dict_values != NULL
+                    and svec_key.c_dict_size() <= (n_rows >> 2)
+                ):
+                    if self._telemetry_enabled:
+                        phase_start = _now_ns()
+                    self._ingest_dict_single_string_fast(morsel, svec_key, n_rows)
+                    if self._telemetry_enabled:
+                        self._time_lookup_ns += _now_ns() - phase_start
+                        self._time_resolve_ns += _now_ns() - start_ns
+                    return
+                # RLE single-key fast path: avoids the morsel.hash()
+                # materialization (KeyStore still materializes once).  Net
+                # win in production where data arrives as RLE; the
+                # alternative path materializes twice (hash + keystore).
+                if (
+                    svec_key._encoding == DRAKEN_ENCODING_RLE
+                    and svec_key.c_rle_null_bitmap() == NULL
+                ):
+                    if self._telemetry_enabled:
+                        phase_start = _now_ns()
+                    self._ingest_rle_single_string_fast(morsel, svec_key, n_rows)
+                    if self._telemetry_enabled:
+                        self._time_lookup_ns += _now_ns() - phase_start
+                        self._time_resolve_ns += _now_ns() - start_ns
+                    return
+
         if self._telemetry_enabled:
             phase_start = _now_ns()
         # Compute group hashes for the group-by columns
         cdef uint64_t[::1] hashes = morsel.hash(self._group_columns)
         if self._telemetry_enabled:
             self._time_hash_ns += _now_ns() - phase_start
-
-        # Ensure scratch buffers are large enough
-        if <Py_ssize_t>self._state_indices_buf.size() < n_rows:
-            self._state_indices_buf.resize(n_rows)
-
-        self._new_row_scratch.clear()
 
         cdef int64_t* si_buf = self._state_indices_buf.data()
         cdef int64_t state_idx

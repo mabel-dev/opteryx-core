@@ -228,24 +228,6 @@ def query_planner(
     optimized_plan = do_optimizer(bound_plan, telemetry)
     telemetry.time_planning_optimizer += time.monotonic_ns() - start
 
-    # Choose output format
-    if output_format == "substrait":
-        # Build Substrait representation directly from optimized logical plan
-        try:
-            from opteryx.planner.substrait_builder import build_substrait_plan
-
-            start = time.monotonic_ns()
-            query_properties = QueryProperties(
-                query_id=query_id, variables=execution_context.variables
-            )
-            substrait_plan = build_substrait_plan(optimized_plan, query_properties)
-            telemetry.time_planning_physical_planner += time.monotonic_ns() - start
-
-            return substrait_plan
-        except ImportError:
-            # Fallback to physical planner if substrait builder not available
-            pass
-
     # Default: build traditional physical plan
     # before we write the new optimizer and execution engine, convert to a V1 plan
     start = time.monotonic_ns()
@@ -310,21 +292,6 @@ def execute_logical_plan(
     start = time.monotonic_ns()
     optimized_plan = do_optimizer(bound_plan, telemetry)
     telemetry.time_planning_optimizer += time.monotonic_ns() - start
-
-    # Choose output format
-    if output_format == "substrait":
-        try:
-            from opteryx.planner.substrait_builder import build_substrait_plan
-
-            start = time.monotonic_ns()
-            query_properties = QueryProperties(query_id=query_id, variables=conn_context.variables)
-            substrait_plan = build_substrait_plan(optimized_plan, query_properties)
-            telemetry.time_planning_physical_planner += time.monotonic_ns() - start
-
-            return substrait_plan
-        except ImportError:
-            # fallback to traditional physical planner
-            pass
 
     # Default: build physical plan
     start = time.monotonic_ns()

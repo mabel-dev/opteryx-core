@@ -24,6 +24,8 @@ from opteryx.types.schema import RelationSchema
 
 OS_SEP = os.sep
 PARQUET_SUFFIX = ".parquet"
+STATS_SIDECAR_SUFFIX = ".stats.json"
+STATS_SCHEMA_VERSION = 1
 
 
 class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
@@ -62,6 +64,10 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         "RLike": True,
         "NotRLike": True,
         "Between": True,
+        "IsNull": True,
+        "IsNotNull": True,
+        "IsEmpty": True,
+        "IsNotEmpty": True,
     }
 
     PUSHABLE_TYPES = {
@@ -299,6 +305,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
 
                 min_values = None
                 max_values = None
+                null_value_counts = None
 
                 try:
                     from opteryx.connectors.parquet_io.pool_reader import fetch_footer
@@ -308,10 +315,16 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     if file_size == 0:
                         file_size = meta.get("__footer_bytes__", 0)
 
-                    # Extract min/max statistics from row groups
-                    min_values, max_values = self._extract_column_stats(meta, schema)
+                    min_values, max_values, null_value_counts = self._extract_column_stats(
+                        meta, schema
+                    )
                 except Exception:
                     record_count = 0
+
+                # Sidecar KMV sketches (offline-populated). Missing/malformed
+                # sidecars are silently ignored; production data has no sidecars
+                # yet and the planner already handles min_k_hashes=None.
+                min_k_hashes = self._load_sidecar_min_k_hashes(blob_name, schema)
 
                 entry = FileEntry(
                     file_path=blob_name,
@@ -320,6 +333,8 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     file_size_in_bytes=file_size,
                     min_values=min_values,
                     max_values=max_values,
+                    null_value_counts=null_value_counts,
+                    min_k_hashes=min_k_hashes,
                 )
                 file_entries.append(entry)
 
@@ -333,29 +348,33 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
 
     def _extract_column_stats(self, footer_meta: dict, schema: RelationSchema) -> tuple:
         """
-        Extract min/max column statistics from parquet footer metadata.
+        Extract min/max column statistics and null counts from parquet footer metadata.
 
-        Returns tuple of (min_values, max_values) lists indexed by field position,
-        with values aggregated across all row groups.
+        Returns tuple of (min_values, max_values, null_value_counts):
+        - min_values, max_values: lists indexed by field position
+        - null_value_counts: dict mapping field_id -> total null count, or None
+          if any row group is missing null_count for any column (partial data
+          would silently corrupt aggregate answers).
         """
         if not footer_meta or not footer_meta.get("row_groups"):
-            return None, None
+            return None, None, None
 
-        # Initialize min/max lists by column count
         num_columns = len(schema.columns)
         min_values = [None] * num_columns
         max_values = [None] * num_columns
+        null_counts = {i: 0 for i in range(num_columns)}
+        null_counts_complete = {i: True for i in range(num_columns)}
 
         col_name_to_field_id = {col.name: i for i, col in enumerate(schema.columns)}
 
-        # Aggregate statistics across all row groups
         for rg in footer_meta.get("row_groups", []):
+            seen_fields = set()
             for col_meta in rg.get("columns", []):
                 field_id = col_name_to_field_id.get(col_meta.get("name", ""))
                 if field_id is None:
                     continue
+                seen_fields.add(field_id)
 
-                # Extract min/max from column metadata
                 min_val = col_meta.get("min")
                 max_val = col_meta.get("max")
 
@@ -367,7 +386,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                             if min_val < min_values[field_id]:
                                 min_values[field_id] = min_val
                         except TypeError:
-                            # Skip comparison if types don't match
                             pass
 
                 if max_val is not None:
@@ -378,12 +396,102 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                             if max_val > max_values[field_id]:
                                 max_values[field_id] = max_val
                         except TypeError:
-                            # Skip comparison if types don't match
                             pass
 
-        # Return None if no stats were found
+                nc = col_meta.get("null_count")
+                if nc is None:
+                    null_counts_complete[field_id] = False
+                else:
+                    null_counts[field_id] += nc
+
+            # Any column missing from this row group is incomplete
+            for fid in range(num_columns):
+                if fid not in seen_fields:
+                    null_counts_complete[fid] = False
+
+        null_value_counts = {
+            fid: null_counts[fid] for fid in range(num_columns) if null_counts_complete[fid]
+        }
+        if not null_value_counts:
+            null_value_counts = None
+
         return (min_values if any(v is not None for v in min_values) else None,
-                max_values if any(v is not None for v in max_values) else None)
+                max_values if any(v is not None for v in max_values) else None,
+                null_value_counts)
+
+    def _load_sidecar_min_k_hashes(self, blob_name: str, schema: RelationSchema):
+        """Load the optional ``<blob_name>.stats.json`` sidecar.
+
+        Returns a positional list aligned with ``schema.columns`` of K-min hash
+        lists, or None if the sidecar is missing, malformed, or its embedded
+        field-id mapping disagrees with the schema (stale stats).
+        """
+        sidecar_path = blob_name + STATS_SIDECAR_SUFFIX
+
+        # Slurp the sidecar via the same filesystem the connector uses.
+        try:
+            stream = self.filesystem.open_input_stream(sidecar_path)
+        except Exception:
+            return None
+        try:
+            try:
+                payload = bytes(stream.memoryview)
+            except AttributeError:
+                payload = stream.read()
+        except Exception:
+            return None
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+        import json
+
+        try:
+            data = json.loads(payload)
+        except (ValueError, TypeError):
+            return None
+
+        if not isinstance(data, dict):
+            return None
+        if data.get("schema_version") != STATS_SCHEMA_VERSION:
+            return None
+
+        sidecar_field_ids = data.get("field_ids")
+        sidecar_hashes = data.get("min_k_hashes")
+        if not isinstance(sidecar_field_ids, dict) or not isinstance(sidecar_hashes, dict):
+            return None
+
+        expected_field_ids = {col.name: i for i, col in enumerate(schema.columns)}
+        # Sidecar must agree with the schema's positional field ids exactly.
+        if sidecar_field_ids != expected_field_ids:
+            import sys
+
+            print(
+                f"[opteryx] discarding stale stats sidecar: {sidecar_path} "
+                f"(field_id mapping disagrees with current schema)",
+                file=sys.stderr,
+            )
+            return None
+
+        num_columns = len(schema.columns)
+        positional: list = [None] * num_columns
+        for fid_str, hashes in sidecar_hashes.items():
+            try:
+                fid = int(fid_str)
+            except (TypeError, ValueError):
+                return None
+            if fid < 0 or fid >= num_columns:
+                return None
+            if not isinstance(hashes, list):
+                return None
+            positional[fid] = [int(h) for h in hashes]
+
+        if not any(h is not None for h in positional):
+            return None
+
+        return positional
 
 
 class FileSystemConnector(BaseConnector):

@@ -19,7 +19,7 @@ Architectural contract (strict, no exceptions):
 - Any contract violation raises TypeError or ValueError immediately.
 
 Shared bitmap / type-classification / vector-construction helpers live in
-_select_helpers.pyx and are prefixed with `_sel_`.
+_helper_select.pyx and are prefixed with `_sel_`.
 """
 
 from cpython.bytes cimport PyBytes_FromStringAndSize

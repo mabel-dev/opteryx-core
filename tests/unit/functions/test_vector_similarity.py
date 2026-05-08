@@ -18,7 +18,7 @@ from draken.vectors.string_vector import StringVector
 import opteryx
 from draken import Morsel
 from opteryx.connectors import DiskConnector
-from opteryx.embeddings import (
+from opteryx.vectors.embeddings import (
     create_hybrid_embedding_provider,
     create_static_embedding_provider,
     embed_text_matrix,

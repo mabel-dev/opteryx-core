@@ -40,6 +40,20 @@ def _bitwise_not(values):
     return vector_bitwise_not(values)
 
 
+def _is_empty(values):
+    """Check for empty strings. Input must be StringVector."""
+    from opteryx.compiled.vector_ops import vector_string_is_empty
+
+    return vector_string_is_empty(values)
+
+
+def _is_not_empty(values):
+    """Check for non-empty strings. Input must be StringVector."""
+    from opteryx.compiled.vector_ops import vector_string_is_not_empty
+
+    return vector_string_is_not_empty(values)
+
+
 UNARY_OPERATIONS = {
     "IsNull": _is_null,
     "IsNotFalse": _is_not_false,
@@ -47,5 +61,7 @@ UNARY_OPERATIONS = {
     "IsNotTrue": _is_not_true,
     "IsTrue": _is_true,
     "IsFalse": _is_false,
+    "IsEmpty": _is_empty,
+    "IsNotEmpty": _is_not_empty,
     "BitwiseNot": _bitwise_not,
 }

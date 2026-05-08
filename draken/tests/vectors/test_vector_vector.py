@@ -202,6 +202,84 @@ def test_vector_from_sequence_rejects_undimensionable():
         vector_from_sequence([None, None], dtype=OrsoTypes.VECTOR)
 
 
+# --- SQL fast paths --------------------------------------------------------
+
+
+def test_cosine_similarity_sql_fast_path_on_vectorvector():
+    from opteryx.expression.functions.implementations.utility import cosine_similarity
+
+    arr = pa.array(
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], None, [0.7071, 0.7071, 0.0]],
+        type=pa.list_(pa.float16(), 3),
+    )
+    vv = Vector.from_arrow(arr)
+
+    scores = cosine_similarity(vv, [[1.0, 0.0, 0.0]])
+
+    # Numeric path now returns a Float32Vector with null propagation.
+    assert isinstance(scores, Float32Vector)
+    values = scores.to_pylist()
+    assert values[0] == pytest.approx(1.0, abs=1e-3)
+    assert values[1] == pytest.approx(0.0, abs=1e-3)
+    assert values[2] is None
+    assert values[3] == pytest.approx(0.7071, abs=1e-3)
+
+
+def test_cosine_similarity_legacy_list_input_returns_float32_vector():
+    from opteryx.expression.functions.implementations.utility import cosine_similarity
+
+    scores = cosine_similarity(
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], [[1.0, 0.0, 0.0]]
+    )
+
+    assert isinstance(scores, Float32Vector)
+    assert scores.to_pylist() == [1.0, 0.0]
+
+
+def test_match_against_fast_path_on_vectorvector(monkeypatch):
+    from opteryx.compiled.vector_ops import vector_match_against
+    import opteryx.vectors.embeddings as emb
+
+    # Stub the embed function so this test doesn't depend on the configured
+    # embedding provider (which has unrelated shim issues).
+    monkeypatch.setattr(
+        emb, "embed_text_matrix", lambda texts: [[1.0, 0.0, 0.0]] * len(texts)
+    )
+
+    arr = pa.array(
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], None, [0.7071, 0.7071, 0.0]],
+        type=pa.list_(pa.float16(), 3),
+    )
+    vv = Vector.from_arrow(arr)
+
+    mask = vector_match_against(vv, None, "any text", 0.5)
+    assert list(mask.to_pylist()) == [True, False, False, True]
+
+
+def test_match_against_empty_query_returns_no_matches(monkeypatch):
+    from opteryx.compiled.vector_ops import vector_match_against
+
+    arr = pa.array([[1.0, 0.0, 0.0]], type=pa.list_(pa.float16(), 3))
+    vv = Vector.from_arrow(arr)
+
+    mask = vector_match_against(vv, None, "", 0.5)
+    assert list(mask.to_pylist()) == [False]
+
+
+def test_match_against_dimension_mismatch_returns_no_matches(monkeypatch):
+    from opteryx.compiled.vector_ops import vector_match_against
+    import opteryx.vectors.embeddings as emb
+
+    # Embedding provider returns wrong dimension — function should return all False
+    monkeypatch.setattr(emb, "embed_text_matrix", lambda texts: [[1.0, 0.0]])
+
+    arr = pa.array([[1.0, 0.0, 0.0]], type=pa.list_(pa.float16(), 3))
+    vv = Vector.from_arrow(arr)
+
+    mask = vector_match_against(vv, None, "query", 0.5)
+    assert list(mask.to_pylist()) == [False]
+
+
 # --- Morsel round-trip -----------------------------------------------------
 
 

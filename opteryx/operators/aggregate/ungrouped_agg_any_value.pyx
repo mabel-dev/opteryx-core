@@ -49,7 +49,7 @@ cdef class AnyValueAggregate(UngroupedAggregate):
             idata = <const int64_t*>vec_i.dense_ptr()
             nulls = vec_i.null_bitmap_ptr()
             for i in range(nrows):
-                if _bitmap_is_valid(nulls, i):
+                if nulls == NULL or _bitmap_is_valid(nulls, i):
                     self._value = idata[i]; self._seen = True; return
             return
 
@@ -62,7 +62,7 @@ cdef class AnyValueAggregate(UngroupedAggregate):
             fdata = <const double*>vec_f.dense_ptr()
             nulls = vec_f.null_bitmap_ptr()
             for i in range(nrows):
-                if _bitmap_is_valid(nulls, i):
+                if nulls == NULL or _bitmap_is_valid(nulls, i):
                     self._value = fdata[i]; self._seen = True; return
             return
 
@@ -74,10 +74,24 @@ cdef class AnyValueAggregate(UngroupedAggregate):
                     length_c = <Py_ssize_t>svec._const_value.length
                     self._value = ptr_c[:length_c]; self._seen = True
                 return
+            # Dict-encoded fast path: find the first dict entry that has a
+            # referenced, non-null row, and return its value.
+            if (
+                svec._encoding == DRAKEN_ENCODING_DICTIONARY
+                and svec._dict_codes != NULL
+                and svec._dict_values != NULL
+            ):
+                if self._take_first_dict(svec):
+                    self._seen = True
+                return
+            if svec._encoding == DRAKEN_ENCODING_RLE:
+                if self._take_first_rle(svec):
+                    self._seen = True
+                return
             buf = svec.ptr
             nulls = buf.null_bitmap
             for i in range(nrows):
-                if _bitmap_is_valid(nulls, i):
+                if nulls == NULL or _bitmap_is_valid(nulls, i):
                     ptr_c    = <const char*>(buf.data + buf.offsets[i])
                     length_c = <Py_ssize_t>(buf.offsets[i + 1] - buf.offsets[i])
                     self._value = ptr_c[:length_c]; self._seen = True; return
@@ -99,6 +113,69 @@ cdef class AnyValueAggregate(UngroupedAggregate):
         for val_py in raw.to_pylist():
             if val_py is not None:
                 self._value = val_py; self._seen = True; return
+
+    cdef bint _take_first_rle(self, StringVector svec) except *:
+        """Return the first run value covering a valid (non-null) row."""
+        cdef Py_ssize_t n_runs = svec.c_rle_run_count()
+        cdef const uint8_t* row_nulls = svec.c_rle_null_bitmap()
+        cdef Py_ssize_t r, vlen
+        cdef int32_t run_len
+        cdef Py_ssize_t row_offset = 0
+        cdef Py_ssize_t k
+        cdef const uint8_t* vptr
+        for r in range(n_runs):
+            run_len = svec.c_rle_run_length(r)
+            if run_len <= 0:
+                continue
+            if row_nulls == NULL:
+                # No nulls anywhere — first run wins.
+                vptr = svec.c_rle_value_ptr(r, &vlen)
+                if vptr != NULL:
+                    self._value = (<const char*>vptr)[:vlen]
+                    return True
+                row_offset += run_len
+                continue
+            # Find the first valid row covered by this run.
+            for k in range(run_len):
+                if _bitmap_is_valid(row_nulls, row_offset + k):
+                    vptr = svec.c_rle_value_ptr(r, &vlen)
+                    if vptr != NULL:
+                        self._value = (<const char*>vptr)[:vlen]
+                        return True
+                    break
+            row_offset += run_len
+        return False
+
+    cdef bint _take_first_dict(self, StringVector svec) except *:
+        """Walk the dict codes once; on the first valid (non-null) row whose
+        dict entry is itself not null, capture its value and return True."""
+        cdef Py_ssize_t n = svec.c_length()
+        cdef const uint8_t* codes = svec.c_dict_codes_ptr()
+        cdef uint8_t code_width = svec.c_dict_code_width()
+        cdef const uint8_t* row_nulls = svec.c_row_null_bitmap()
+        cdef Py_ssize_t dict_size = svec.c_dict_size()
+        cdef Py_ssize_t i, vlen
+        cdef uint32_t code
+        cdef const uint8_t* vptr
+        for i in range(n):
+            if row_nulls != NULL and not _bitmap_is_valid(row_nulls, i):
+                continue
+            if code_width == 1:
+                code = (<const uint8_t*>codes)[i]
+            elif code_width == 2:
+                code = (<const uint16_t*>codes)[i]
+            else:
+                code = (<const uint32_t*>codes)[i]
+            if <Py_ssize_t>code >= dict_size:
+                raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+            if svec.c_dict_value_is_null(<Py_ssize_t>code):
+                continue
+            vptr = svec.c_dict_value_ptr(<Py_ssize_t>code, &vlen)
+            if vptr == NULL:
+                continue
+            self._value = (<const char*>vptr)[:vlen]
+            return True
+        return False
 
     cdef int64_t get_result_i64(self) noexcept:
         return 0

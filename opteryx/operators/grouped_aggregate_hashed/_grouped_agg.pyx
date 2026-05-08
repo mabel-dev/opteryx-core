@@ -29,12 +29,13 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 
 from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenType
-from draken.vectors.vector cimport Vector
+from draken.vectors.vector cimport Vector, NULL_HASH, mix_hash
 include "_key_store.pxi"
 include "_collectors_base.pxi"
 include "_collectors_numeric.pxi"
 include "_collectors_distinct.pxi"
 include "_collectors_approx.pxi"
+include "_collectors_buffered.pxi"
 include "_engine.pxi"
 include "_factory.pxi"
 include "_node.pxi"

@@ -66,6 +66,10 @@ class OpteryxTable(Diachronic, PredicatePushable):
         "NotInList": True,
         "RLike": True,
         "NotRLike": True,
+        "IsNull": True,
+        "IsNotNull": True,
+        "IsEmpty": True,
+        "IsNotEmpty": True,
     }
 
     def __init__(self, dataset: str, catalog, workspace: str, **kwargs):
@@ -296,6 +300,10 @@ class OpteryxConnector(Eidetic, PredicatePushable):
         "NotInList": True,
         "RLike": True,
         "NotRLike": True,
+        "IsNull": True,
+        "IsNotNull": True,
+        "IsEmpty": True,
+        "IsNotEmpty": True,
     }
 
     def __init__(self, *args, catalog=None, telemetry=None, **kwargs):

@@ -37,12 +37,15 @@ from opteryx.planner.optimizer.strategies import (
     CastSimplificationStrategy,
     ConstantFoldingStrategy,
     CorrelatedFiltersStrategy,
+    CrossJoinChainReorderStrategy,
     CrossJoinFilterPushdownStrategy,
     DisjunctionSimplificationStrategy,
     DistinctPushdownStrategy,
+    FunctionRewriteStrategy,
     HashMapVariantStrategy,
     JoinEliminationStrategy,
     JoinOrderingStrategy,
+    JoinPlanningStrategy,
     JoinRewriteStrategy,
     LimitFilesPruningStrategy,
     LimitPushdownStrategy,
@@ -59,6 +62,7 @@ from opteryx.planner.optimizer.strategies import (
     StatisticsOnlyResponseStrategy,
 )
 
+from .statistics_refresh import refresh_statistics
 from .strategies.optimization_strategy import OptimizerContext
 
 __all__ = ["do_optimizer"]
@@ -80,7 +84,9 @@ class OptimizerVisitor:
             CorrelatedFiltersStrategy(telemetry),
             NullabilityInferenceStrategy(telemetry),
             PredicateRewriteStrategy(telemetry),
+            FunctionRewriteStrategy(telemetry),
             PredicateCompactionStrategy(telemetry),
+            JoinPlanningStrategy(telemetry),  # Cost-based DPccp; no-op when flag off
             PredicatePushdownStrategy(telemetry),
             CrossJoinFilterPushdownStrategy(
                 telemetry
@@ -148,9 +154,21 @@ class OptimizerVisitor:
             LogicalPlan: The fully optimized logical plan.
         """
         current_plan = plan
+        # Plans enter the optimizer with no propagated statistics, so treat them
+        # as stale until refresh_statistics has populated per-node estimates.
+        current_plan.statistics_are_stale = True
         for strategy in self.strategies:
             if strategy.should_i_run(current_plan):
+                if (
+                    strategy.optimization_technique == "cost"
+                    and getattr(current_plan, "statistics_are_stale", True)
+                ):
+                    current_plan = refresh_statistics(current_plan)
                 current_plan = self.traverse(current_plan, strategy)
+                if strategy.optimization_technique != "cost":
+                    # Heuristic strategies that ran may have rewritten the plan;
+                    # invalidate stats so the next cost-based strategy refreshes.
+                    current_plan.statistics_are_stale = True
                 ## DEBUG: print(f"AFTER {strategy.__class__.__name__}")
                 ## DEBUG: print(current_plan.draw())
         # DEBUG: print("AFTER OPTIMIZATION")

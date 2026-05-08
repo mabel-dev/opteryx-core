@@ -302,6 +302,7 @@ class Features:
     parquet_pool_reader = str(get("FEATURE_PARQUET_POOL_READER", "1")).lower() in ("1", "true", "yes")
     parquet_thread_scheduler = str(get("FEATURE_PARQUET_THREAD_SCHEDULER", "0")).lower() in ("1", "true", "yes")
     parquet_late_materialization = str(get("FEATURE_PARQUET_LATE_MATERIALIZATION", "1")).lower() in ("1", "true", "yes")
+    enable_dpccp_join_planning = bool(get("FEATURE_ENABLE_DPCCP_JOIN_PLANNING", False))
 
 
 features = Features()

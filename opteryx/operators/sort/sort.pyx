@@ -8,9 +8,10 @@ Sort Node
 
 This is a SQL Query Execution Plan Node.
 
-This node orders a dataset using a permutation-based LSD radix sort over Draken
-morsels.  Dictionary-encoded columns are ORDER BY-correct (codes are remapped to
-value rank before sorting, with AVX2/NEON SIMD acceleration for uint8 codes).
+This node orders a dataset using a permutation-based sort (C++ std::sort /
+std::stable_sort with memcmp tiebreak) over Draken morsels. Dictionary-encoded
+columns are ORDER BY-correct (codes are remapped to value rank before sorting,
+with AVX2/NEON SIMD acceleration for uint8 codes).
 """
 
 from typing import Generator, Optional
@@ -76,6 +77,6 @@ class SortNode(BasePlanNode):
             combined = evaluate_and_append(evaluations, combined)
 
         perm = morsel_sort(combined, column_names, ascending_flags)
-        combined.take(list(perm))
+        combined.take(perm)
 
         yield combined

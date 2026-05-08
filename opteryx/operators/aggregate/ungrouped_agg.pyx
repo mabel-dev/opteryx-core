@@ -11,11 +11,11 @@ from libc.float cimport DBL_MAX
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
-from draken.vectors.vector cimport Vector
+from draken.vectors.vector cimport Vector, NULL_HASH, mix_hash
 from draken.vectors.integer_vector cimport IntegerVector
 from draken.core.buffers cimport (
     ConstAccessor, DictAccessor, DrakenFixedBuffer, DrakenVarBuffer,
-    DrakenConstantStringPayload, DRAKEN_ENCODING_RLE,
+    DrakenConstantStringPayload, DRAKEN_ENCODING_DICTIONARY, DRAKEN_ENCODING_RLE,
 )
 cdef extern from "_agg_kernels.hpp" namespace "opteryx::ungrouped":
     int compare_bytes(const char* a, size_t la, const char* b, size_t lb) noexcept
@@ -137,6 +137,10 @@ cdef class UngroupedAggregate:
     cpdef object get_result(self):
         return None
 
+    def _test_apply(self, morsel):
+        """Test-only driver: invoke ``apply`` from Python."""
+        self.apply(<Morsel>morsel)
+
 
 # ---------------------------------------------------------------------------
 # Concrete aggregate implementations (textual includes — single .so)
@@ -146,4 +150,5 @@ include "ungrouped_agg_sum.pyx"
 include "ungrouped_agg_min_max.pyx"
 include "ungrouped_agg_any_value.pyx"
 include "ungrouped_agg_count_distinct.pyx"
+include "ungrouped_agg_median.pyx"
 include "ungrouped_agg_engine.pyx"

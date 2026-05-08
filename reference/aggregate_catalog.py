@@ -7,7 +7,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from opteryx.operators.aggregate_helpers import AGGREGATORS
+from opteryx.operators.aggregate.helpers import AGGREGATORS
 
 _GLOBAL_SUPPORTED = frozenset(
     {
@@ -16,6 +16,7 @@ _GLOBAL_SUPPORTED = frozenset(
         "MIN",
         "MAX",
         "AVG",
+        "MEDIAN",
         "COUNT_DISTINCT",
         "APPROX_COUNT_DISTINCT",
         "APPROX_PERCENTILE",
@@ -32,6 +33,7 @@ _STRICT_GROUPED_SUPPORTED = frozenset(
         "MIN",
         "MAX",
         "AVG",
+        "MEDIAN",
         "COUNT_DISTINCT",
         "APPROX_COUNT_DISTINCT",
         "APPROX_PERCENTILE",
@@ -49,6 +51,7 @@ _FRIENDLY_NAMES = {
     "COUNT": "Count",
     "COUNT_DISTINCT": "Count Distinct",
     "MAX": "Maximum",
+    "MEDIAN": "Median",
     "MIN": "Minimum",
     "SUM": "Sum",
 }
@@ -62,6 +65,7 @@ _CATEGORIES = {
     "COUNT": "counting",
     "COUNT_DISTINCT": "counting",
     "MAX": "extrema",
+    "MEDIAN": "numeric",
     "MIN": "extrema",
     "SUM": "numeric",
 }
@@ -75,6 +79,7 @@ _SUMMARIES = {
     "COUNT": "Counts rows or non-null input values.",
     "COUNT_DISTINCT": "Counts distinct non-null input values.",
     "MAX": "Returns the largest non-null input value.",
+    "MEDIAN": "Computes the exact median (middle value) of the input values.",
     "MIN": "Returns the smallest non-null input value.",
     "SUM": "Sums the input values.",
 }
@@ -88,6 +93,7 @@ _DOCUMENTATION = {
     "COUNT": "COUNT(*) counts rows, while COUNT(expr) counts non-null values.",
     "COUNT_DISTINCT": "Exact distinct count over the non-null input values.",
     "MAX": "Returns the greatest comparable non-null value encountered.",
+    "MEDIAN": "Buffers all non-null values per group and selects the middle. Even-count inputs interpolate; result type is FLOAT. Per-group buffer is capped (default 1000) — exceeding it raises an error. Decimal inputs must be CAST to FLOAT.",
     "MIN": "Returns the smallest comparable non-null value encountered.",
     "SUM": "Nulls are ignored; non-null values are accumulated.",
 }
@@ -106,6 +112,7 @@ _SQL_FORMS = {
     "COUNT": ["COUNT(*)", "COUNT(expr)", "COUNT(DISTINCT expr)"],
     "COUNT_DISTINCT": ["COUNT_DISTINCT(expr)", "COUNT(DISTINCT expr)"],
     "MAX": ["MAX(expr)"],
+    "MEDIAN": ["MEDIAN(expr)"],
     "MIN": ["MIN(expr)"],
     "SUM": ["SUM(expr)"],
 }

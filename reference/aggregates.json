@@ -149,6 +149,24 @@
             "strict_grouped": true
         }
     },
+    "MEDIAN": {
+        "ast_symbol": "MEDIAN",
+        "friendly_name": "Median",
+        "kernel_name": "median",
+        "category": "numeric",
+        "status": "active",
+        "summary": "Computes the exact median (middle value) of the input values.",
+        "description": "Computes the exact median (middle value) of the input values.",
+        "documentation": "Buffers all non-null values per group and selects the middle. Even-count inputs interpolate; result type is FLOAT. Per-group buffer is capped (default 1000) \u2014 exceeding it raises an error. Decimal inputs must be CAST to FLOAT.",
+        "sql_forms": [
+            "MEDIAN(expr)"
+        ],
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
     "MIN": {
         "ast_symbol": "MIN",
         "friendly_name": "Minimum",

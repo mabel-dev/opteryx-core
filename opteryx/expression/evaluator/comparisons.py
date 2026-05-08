@@ -118,9 +118,16 @@ def _int64_compare(op: str, vec, right):
         else:
             return _call_vector_vector_op(op, vec, right)
 
-    # Int64 vs Float64 — compare directly against the coerced float scalar/vector path
+    # Int64 vs Float64 — promote the int side to float so vector-vector ops have
+    # matching types. Constant float right operands are unwrapped to scalars by
+    # _float64_compare's existing path.
     if get_vector_type(right) == VectorType.FLOAT64:
-        return _float64_compare(op, vec, right)
+        if _is_constant_vector_like(right):
+            return _float64_compare(op, vec, right)
+        from draken.interop.vector_sequence import vector_from_sequence
+
+        vec_float = vector_from_sequence([float(x) if x is not None else None for x in vec.to_pylist()])
+        return _float64_compare(op, vec_float, right)
 
     value = _coerce_int64(right)
 
@@ -244,14 +251,23 @@ def _dict_compare(op: str, vec, right):
             f"dictionary-encoded vector temporal compare: unsupported op {op!r}"
         )
 
+    # String-keyed dict vectors require bytes, not str, on the Cython boundary.
+    def _enc(v):
+        return v.encode() if isinstance(v, str) else v
+
     if op == "InList":
         if isinstance(right, (list, tuple, set, frozenset)):
-            right = frozenset(right)
+            right = frozenset(_enc(v) for v in right)
+        else:
+            right = _enc(right)
         # vector_in_list_int64_vector reads vec.ptr.data which is NULL for
         # dict-encoded vectors; use the vector's own in_list which handles encoding.
         return vec.in_list(right)
 
-    value_list = list(right) if isinstance(right, (list, tuple, set, frozenset)) else right
+    if isinstance(right, (list, tuple, set, frozenset)):
+        value_list = [_enc(v) for v in right]
+    else:
+        value_list = _enc(right)
 
     if op == "Eq":
         return vec.equals(value_list)
@@ -366,6 +382,17 @@ def _decimal_compare(op: str, vec, right):
         if op == "GtEq":
             return vec.greater_than_or_equals_vector(right)
         raise NotImplementedError(f"DecimalVector vector-vector: unsupported op {op!r}")
+
+    # Decimal vs Float64 — promote the decimal side to float so vector-vector
+    # ops have matching types. Mirrors `_int64_compare`'s Float64 path. Constant
+    # float right operands fall through to the scalar path below.
+    if get_vector_type(right) == VectorType.FLOAT64 and not _is_constant_vector_like(right):
+        from draken.interop.vector_sequence import vector_from_sequence
+
+        vec_float = vector_from_sequence(
+            [float(x) if x is not None else None for x in vec.to_pylist()]
+        )
+        return _float64_compare(op, vec_float, right)
 
     # Unwrap constant-encoded right-hand vectors to their scalar value
     if _is_constant_vector_like(right):

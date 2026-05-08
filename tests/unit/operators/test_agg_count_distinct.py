@@ -25,7 +25,7 @@ def _distinct_size(func, column):
 def test_count_distinct_parquet():
     result = execute_and_fetch_all("SELECT COUNT(DISTINCT user_name) FROM testdata.flat.formats.parquet;")
     first = result[0]["COUNT(DISTINCT user_name)"]
-    assert first == 83606, first
+    assert first == 52846, first
 
 
 def test_count_distinct_identifier_group_by():

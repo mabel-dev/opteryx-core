@@ -19,16 +19,10 @@ from draken.core.buffers cimport DRAKEN_ENCODING_RLE, DRAKEN_ENCODING_DICTIONARY
 
 # ---------------------------------------------------------------------------
 # Local helpers
+#
+# Note: _decode_dict_code lives in _helper_string.pyx and is available at
+# the consolidated-module level via the `include` directive in vector_ops.pyx.
 # ---------------------------------------------------------------------------
-
-cdef inline uint32_t _decode_dict_code(const uint8_t* codes, uint8_t code_width, Py_ssize_t row_idx) noexcept:
-    """Decode a packed dict code for row_idx (code_width: 1, 2, or 4 bytes)."""
-    if code_width == 1:
-        return codes[row_idx]
-    if code_width == 2:
-        return (<const uint16_t*>codes)[row_idx]
-    return (<const uint32_t*>codes)[row_idx]
-
 
 cdef inline Int64Vector _prepare_int_arg(object arg):
     """Materialise any Int64Vector encoding to const-or-dense for fast per-row reads.
@@ -68,43 +62,6 @@ cdef inline int64_t _read_int_arg(Int64Vector iv, Py_ssize_t row, bint* is_null)
         is_null[0] = True
         return 0
     return data[row]
-
-
-# ---------------------------------------------------------------------------
-# vector_string_length
-# ---------------------------------------------------------------------------
-
-cpdef Int64Vector vector_string_length(StringVector vec):
-    """Return byte-length of each string in a StringVector."""
-    cdef DrakenVarBuffer* ptr = vec.ptr
-    cdef Py_ssize_t n = ptr.length
-    cdef uint8_t* null_bm
-    cdef int64_t[::1] rview
-    cdef Py_ssize_t i
-    cdef DrakenConstantStringPayload* const_val
-
-    cdef array template = array('q')  # 'q' = signed long long (int64)
-    cdef array result_array = clone(template, n, False)
-    rview = result_array
-
-    if vec._has_const:
-        if not vec._const_is_null and vec._const_value != NULL:
-            const_val = vec._const_value
-            for i in range(n):
-                rview[i] = const_val.length
-        else:
-            for i in range(n):
-                rview[i] = 0
-        return int64_from_sequence(rview)
-
-    null_bm = ptr.null_bitmap
-    for i in range(n):
-        if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
-            rview[i] = 0
-        else:
-            rview[i] = ptr.offsets[i + 1] - ptr.offsets[i]
-
-    return int64_from_sequence(rview)
 
 
 # ---------------------------------------------------------------------------

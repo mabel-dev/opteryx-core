@@ -80,6 +80,7 @@ cdef class CppIOPipeline:
             stats.codec = codec_map.get(codec_name, 0)
             stats.max_definition_level = s_dict.get('max_definition_level', 0)
             stats.max_repetition_level = s_dict.get('max_repetition_level', 0)
+            stats.type_length = s_dict.get('type_length') or 0
             stats.encodings.clear()
             for enc_code in encoding_codes:
                 stats.encodings.push_back(enc_code)

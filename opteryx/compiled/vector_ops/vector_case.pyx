@@ -38,7 +38,7 @@ into C arrays. The inner kernels are pure C: typed Vector returns, no
 Python lists, no Python scalar intermediates.
 
 Shared bitmap / type-classification / vector-construction helpers live in
-_select_helpers.pyx and are prefixed with `_sel_`.
+_helper_select.pyx and are prefixed with `_sel_`.
 """
 
 from libc.stdint cimport int8_t, int32_t, uint8_t

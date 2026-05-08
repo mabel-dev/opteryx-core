@@ -194,6 +194,10 @@ cdef void _release_dict_storage(StringVector vec) noexcept:
     if vec._dict_values != NULL:
         free_var_buffer(vec._dict_values, True)
         vec._dict_values = NULL
+    if vec._dict_code_counts != NULL:
+        free(vec._dict_code_counts)
+        vec._dict_code_counts = NULL
+    vec._dict_code_counts_valid = False
     vec._dict_code_width = 0
     vec._dict_ordered = 0
     vec._dict_accessor.codes = NULL
@@ -524,6 +528,8 @@ cdef class StringVector(Vector):
         self._has_const = False
         self._const_is_null = False
         self._rle_buffer = NULL
+        self._dict_code_counts = NULL
+        self._dict_code_counts_valid = False
 
     def __dealloc__(self):
         if self._rle_buffer != NULL:
@@ -586,6 +592,243 @@ cdef class StringVector(Vector):
         if self.ptr == NULL or self._has_const or self._encoding == DRAKEN_ENCODING_RLE:
             return NULL
         return self.ptr.null_bitmap
+
+    # ------------------------------------------------------------------
+    # Encoded-form accessors (dict and RLE) for aggregation kernels.
+    # The caller must check `self._encoding` before calling these; they
+    # do not validate the encoding.
+    # ------------------------------------------------------------------
+    cdef Py_ssize_t c_length(self) noexcept nogil:
+        if self._encoding == DRAKEN_ENCODING_RLE:
+            return <Py_ssize_t>self._rle_buffer.length
+        if self.ptr == NULL:
+            return 0
+        return <Py_ssize_t>self.ptr.length
+
+    cdef Py_ssize_t c_dict_size(self) noexcept nogil:
+        if self._dict_values == NULL:
+            return 0
+        return <Py_ssize_t>self._dict_values.length
+
+    cdef uint8_t c_dict_code_width(self) noexcept nogil:
+        return self._dict_code_width
+
+    cdef const uint8_t* c_dict_codes_ptr(self) noexcept nogil:
+        return <const uint8_t*>self._dict_codes
+
+    cdef const uint8_t* c_dict_value_ptr(
+        self, Py_ssize_t i, Py_ssize_t* out_len
+    ) noexcept nogil:
+        cdef DrakenVarBuffer* dv = self._dict_values
+        cdef int32_t start, end
+        if dv == NULL or i < 0 or <size_t>i >= dv.length:
+            out_len[0] = 0
+            return NULL
+        start = dv.offsets[i]
+        end = dv.offsets[i + 1]
+        out_len[0] = <Py_ssize_t>(end - start)
+        return (<const uint8_t*>dv.data) + start
+
+    cdef bint c_dict_value_is_null(self, Py_ssize_t i) noexcept nogil:
+        cdef DrakenVarBuffer* dv = self._dict_values
+        if dv == NULL or dv.null_bitmap == NULL:
+            return False
+        return not ((dv.null_bitmap[i >> 3] >> (i & 7)) & 1)
+
+    cdef const uint8_t* c_row_null_bitmap(self) noexcept nogil:
+        if self.ptr == NULL:
+            return NULL
+        return self.ptr.null_bitmap
+
+    cdef const int64_t* c_dict_code_counts_ptr(self) except NULL:
+        """Return a pointer to a length-`dict_size` int64 array of per-code
+        occurrence counts.  Computed once on first access and cached on the
+        vector.  Counts only include rows that are *valid* (non-null in the
+        row null bitmap)."""
+        cdef DrakenVarBuffer* dv = self._dict_values
+        cdef Py_ssize_t dict_size
+        cdef Py_ssize_t n
+        cdef Py_ssize_t i
+        cdef uint32_t code
+        cdef const uint8_t* codes
+        cdef const uint8_t* row_nulls
+        cdef int64_t* counts
+        cdef uint8_t code_width
+
+        if self._encoding != DRAKEN_ENCODING_DICTIONARY:
+            raise ValueError("c_dict_code_counts_ptr: vector is not dict-encoded")
+        if dv == NULL:
+            raise ValueError("c_dict_code_counts_ptr: missing dictionary values")
+
+        if self._dict_code_counts_valid and self._dict_code_counts != NULL:
+            return self._dict_code_counts
+
+        dict_size = <Py_ssize_t>dv.length
+        # Allocate (calloc) and zero-fill; even for dict_size==0 we keep a
+        # 1-byte allocation so the returned pointer is never NULL.
+        if self._dict_code_counts != NULL:
+            free(self._dict_code_counts)
+            self._dict_code_counts = NULL
+
+        counts = <int64_t*>malloc(<size_t>(dict_size if dict_size > 0 else 1) * sizeof(int64_t))
+        if counts == NULL:
+            raise MemoryError()
+        memset(counts, 0, <size_t>(dict_size if dict_size > 0 else 1) * sizeof(int64_t))
+
+        if dict_size > 0 and self._dict_codes != NULL and self.ptr != NULL:
+            n = <Py_ssize_t>self.ptr.length
+            codes = <const uint8_t*>self._dict_codes
+            code_width = self._dict_code_width
+            row_nulls = self.ptr.null_bitmap
+            with nogil:
+                for i in range(n):
+                    if row_nulls != NULL and not ((row_nulls[i >> 3] >> (i & 7)) & 1):
+                        continue
+                    code = _read_packed_code(codes, code_width, i)
+                    if <Py_ssize_t>code >= dict_size:
+                        # Fail fast — this indicates a corrupted dict vector.
+                        with gil:
+                            free(counts)
+                            raise ValueError(
+                                f"dictionary index out of bounds at row {i}: {code}"
+                            )
+                    counts[<Py_ssize_t>code] += 1
+
+        self._dict_code_counts = counts
+        self._dict_code_counts_valid = True
+        return self._dict_code_counts
+
+    cdef Py_ssize_t c_rle_run_count(self) noexcept nogil:
+        if self._rle_buffer == NULL:
+            return 0
+        return <Py_ssize_t>self._rle_buffer.num_runs
+
+    cdef const uint8_t* c_rle_value_ptr(
+        self, Py_ssize_t i, Py_ssize_t* out_len
+    ) noexcept nogil:
+        cdef DrakenRLEBuffer* rb = self._rle_buffer
+        if rb == NULL or i < 0 or <size_t>i >= rb.num_runs:
+            out_len[0] = 0
+            return NULL
+        out_len[0] = <Py_ssize_t>rb.run_str_lens[i]
+        return (<const uint8_t*>rb.run_values) + rb.run_str_offsets[i]
+
+    cdef int32_t c_rle_run_length(self, Py_ssize_t i) noexcept nogil:
+        cdef DrakenRLEBuffer* rb = self._rle_buffer
+        if rb == NULL or i < 0 or <size_t>i >= rb.num_runs:
+            return 0
+        return rb.run_lengths[i]
+
+    cdef const int32_t* c_rle_run_lengths_ptr(self) noexcept nogil:
+        if self._rle_buffer == NULL:
+            return NULL
+        return self._rle_buffer.run_lengths
+
+    cdef const uint8_t* c_rle_null_bitmap(self) noexcept nogil:
+        if self._rle_buffer == NULL:
+            return NULL
+        return self._rle_buffer.null_bitmap
+
+    cdef uint64_t c_dict_value_hash(self, Py_ssize_t i) noexcept nogil:
+        """Final mixed hash for dict entry i, matching the value c_hash_into
+        writes for a row pointing to entry i when the destination is zeroed."""
+        cdef DrakenVarBuffer* dv = self._dict_values
+        cdef int32_t start, end
+        cdef size_t str_len
+        cdef uint64_t per_string_hash
+        cdef uint64_t scratch
+        if dv == NULL or i < 0 or <size_t>i >= dv.length:
+            return NULL_HASH
+        if dv.null_bitmap != NULL and not ((dv.null_bitmap[i >> 3] >> (i & 7)) & 1):
+            return NULL_HASH
+        start = dv.offsets[i]
+        end = dv.offsets[i + 1]
+        str_len = <size_t>(end - start)
+        if str_len <= 32:
+            per_string_hash = _short_string_hash(<const uint8_t*>dv.data + start, str_len)
+        else:
+            per_string_hash = XXH3_64bits(<const void*>(<const uint8_t*>dv.data + start), str_len)
+        # simd_mix_hash with dst=0: dst[0] = mix(0, per_string_hash).
+        scratch = 0
+        simd_mix_hash(&scratch, &per_string_hash, 1)
+        return scratch
+
+    cdef uint64_t c_rle_run_value_hash(self, Py_ssize_t i) noexcept nogil:
+        """Final mixed hash for RLE run value i."""
+        cdef DrakenRLEBuffer* rb = self._rle_buffer
+        cdef size_t str_len
+        cdef uint64_t per_string_hash
+        cdef uint64_t scratch
+        cdef const uint8_t* base
+        if rb == NULL or i < 0 or <size_t>i >= rb.num_runs:
+            return NULL_HASH
+        str_len = <size_t>rb.run_str_lens[i]
+        base = (<const uint8_t*>rb.run_values) + rb.run_str_offsets[i]
+        if str_len <= 32:
+            per_string_hash = _short_string_hash(base, str_len)
+        else:
+            per_string_hash = XXH3_64bits(<const void*>base, str_len)
+        scratch = 0
+        simd_mix_hash(&scratch, &per_string_hash, 1)
+        return scratch
+
+    # Python-callable wrappers around the encoded-form accessors.  Used by
+    # tests and any non-hot-path consumers; the cdef methods above remain
+    # the supported entry point for nogil kernels.
+    def dict_value_at(self, Py_ssize_t i):
+        cdef Py_ssize_t length
+        cdef const uint8_t* p
+        if self._encoding != DRAKEN_ENCODING_DICTIONARY:
+            raise ValueError("dict_value_at: vector is not dict-encoded")
+        if i < 0 or i >= self.c_dict_size():
+            raise IndexError("dict index out of range")
+        if self.c_dict_value_is_null(i):
+            return None
+        p = self.c_dict_value_ptr(i, &length)
+        return PyBytes_FromStringAndSize(<const char*>p, length)
+
+    def dict_code_at(self, Py_ssize_t i):
+        if self._encoding != DRAKEN_ENCODING_DICTIONARY:
+            raise ValueError("dict_code_at: vector is not dict-encoded")
+        if self._dict_codes == NULL:
+            raise ValueError("dict_code_at: missing codes")
+        if i < 0 or i >= <Py_ssize_t>self.ptr.length:
+            raise IndexError("row index out of range")
+        return <Py_ssize_t>_read_packed_code(
+            <const uint8_t*>self._dict_codes, self._dict_code_width, i
+        )
+
+    def dict_code_counts(self):
+        cdef const int64_t* counts
+        cdef Py_ssize_t dict_size
+        cdef Py_ssize_t i
+        if self._encoding != DRAKEN_ENCODING_DICTIONARY:
+            raise ValueError("dict_code_counts: vector is not dict-encoded")
+        counts = self.c_dict_code_counts_ptr()
+        dict_size = self.c_dict_size()
+        return [<int>counts[i] for i in range(dict_size)]
+
+    def rle_run_count_value(self):
+        if self._encoding != DRAKEN_ENCODING_RLE:
+            raise ValueError("rle_run_count_value: vector is not RLE-encoded")
+        return self.c_rle_run_count()
+
+    def rle_value_at(self, Py_ssize_t i):
+        cdef Py_ssize_t length
+        cdef const uint8_t* p
+        if self._encoding != DRAKEN_ENCODING_RLE:
+            raise ValueError("rle_value_at: vector is not RLE-encoded")
+        if i < 0 or i >= self.c_rle_run_count():
+            raise IndexError("run index out of range")
+        p = self.c_rle_value_ptr(i, &length)
+        return PyBytes_FromStringAndSize(<const char*>p, length)
+
+    def rle_run_length_at(self, Py_ssize_t i):
+        if self._encoding != DRAKEN_ENCODING_RLE:
+            raise ValueError("rle_run_length_at: vector is not RLE-encoded")
+        if i < 0 or i >= self.c_rle_run_count():
+            raise IndexError("run index out of range")
+        return <int>self.c_rle_run_length(i)
 
     @property
     def length(self):
@@ -3988,6 +4231,112 @@ cdef StringVector from_rle_builder(
 
     vec._rle_buffer = buf
     vec._encoding   = DRAKEN_ENCODING_RLE
+
+    return vec
+
+
+cpdef StringVector _test_make_rle_string(list values, list run_lengths, object null_bitmap=None):
+    """Construct an RLE-encoded StringVector for tests.
+
+    Each entry in ``values`` is a ``bytes``/``str`` run value, paired with the
+    matching ``run_lengths`` repetition count.  Optional ``null_bitmap`` is a
+    bytes-like row-level validity bitmap (1 = valid).
+    """
+    if len(values) != len(run_lengths):
+        raise ValueError("values and run_lengths must have the same length")
+
+    cdef Py_ssize_t num_runs = len(values)
+    cdef Py_ssize_t total = 0
+    cdef Py_ssize_t arena_size = 0
+    cdef Py_ssize_t i
+    cdef Py_ssize_t bitmap_bytes
+    cdef bytes b
+    cdef list encoded = []
+
+    for i in range(num_runs):
+        v = values[i]
+        if isinstance(v, str):
+            b = v.encode("utf8")
+        elif isinstance(v, (bytes, bytearray, memoryview)):
+            b = bytes(v)
+        else:
+            raise TypeError("RLE run value must be str/bytes")
+        encoded.append(b)
+        arena_size += len(b)
+        if run_lengths[i] < 0:
+            raise ValueError("run length must be non-negative")
+        total += <Py_ssize_t>run_lengths[i]
+
+    cdef StringVector vec = StringVector(0, 0, True)
+    cdef DrakenRLEBuffer* buf = <DrakenRLEBuffer*>malloc(sizeof(DrakenRLEBuffer))
+    if buf == NULL:
+        raise MemoryError()
+
+    cdef uint8_t* arena = NULL
+    cdef int32_t* run_lens_arr = NULL
+    cdef uint32_t* run_offs_arr = NULL
+    cdef int32_t* run_str_lens_arr = NULL
+    cdef uint32_t off = 0
+    cdef uint8_t* nb = NULL
+
+    try:
+        if arena_size > 0:
+            arena = <uint8_t*>malloc(<size_t>arena_size)
+            if arena == NULL:
+                raise MemoryError()
+        if num_runs > 0:
+            run_lens_arr = <int32_t*>malloc(<size_t>num_runs * sizeof(int32_t))
+            run_offs_arr = <uint32_t*>malloc(<size_t>num_runs * sizeof(uint32_t))
+            run_str_lens_arr = <int32_t*>malloc(<size_t>num_runs * sizeof(int32_t))
+            if run_lens_arr == NULL or run_offs_arr == NULL or run_str_lens_arr == NULL:
+                raise MemoryError()
+            for i in range(num_runs):
+                b = encoded[i]
+                run_offs_arr[i] = off
+                run_str_lens_arr[i] = <int32_t>len(b)
+                if len(b) > 0:
+                    memcpy(arena + off, <const char*>PyBytes_AS_STRING(b), <size_t>len(b))
+                off += <uint32_t>len(b)
+                run_lens_arr[i] = <int32_t>run_lengths[i]
+
+        if null_bitmap is not None:
+            bm = bytes(null_bitmap)
+            bitmap_bytes = (total + 7) >> 3
+            if len(bm) < bitmap_bytes:
+                raise ValueError("null_bitmap is shorter than required")
+            nb = <uint8_t*>malloc(<size_t>bitmap_bytes)
+            if nb == NULL:
+                raise MemoryError()
+            memcpy(nb, <const char*>PyBytes_AS_STRING(bm), <size_t>bitmap_bytes)
+
+        buf.run_values       = <void*>arena
+        buf.run_lengths      = run_lens_arr
+        buf.run_str_offsets  = run_offs_arr
+        buf.run_str_lens     = run_str_lens_arr
+        buf.null_bitmap      = nb
+        buf.num_runs         = <size_t>num_runs
+        buf.length           = <size_t>total
+        buf.type             = DRAKEN_STRING
+
+        vec.ptr = <DrakenVarBuffer*>malloc(sizeof(DrakenVarBuffer))
+        if vec.ptr == NULL:
+            raise MemoryError()
+        vec.ptr.data        = NULL
+        vec.ptr.offsets     = NULL
+        vec.ptr.null_bitmap = NULL
+        vec.ptr.length      = <size_t>total
+        vec.ptr.type        = DRAKEN_STRING
+        vec.owns_data       = False
+        vec._rle_buffer     = buf
+        vec._encoding       = DRAKEN_ENCODING_RLE
+    except:
+        if arena != NULL: free(arena)
+        if run_lens_arr != NULL: free(run_lens_arr)
+        if run_offs_arr != NULL: free(run_offs_arr)
+        if run_str_lens_arr != NULL: free(run_str_lens_arr)
+        if nb != NULL: free(nb)
+        free(buf)
+        raise
 
     return vec
 

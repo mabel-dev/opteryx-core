@@ -930,6 +930,8 @@ static void EnrichColumnStatsWithSchemaInfo(FileStats &fs) {
   std::unordered_map<std::string, std::vector<int32_t>> schema_path_map;
   // Leaf's own repetition_type, stored separately for ColumnStats.repetition_type.
   std::unordered_map<std::string, int32_t> schema_leaf_rep;
+  // Leaf's type_length (FIXED_LEN_BYTE_ARRAY width in bytes).
+  std::unordered_map<std::string, int32_t> schema_leaf_type_length;
 
   std::function<void(const SchemaElement&, std::vector<int32_t>)> walk_schema =
     [&](const SchemaElement& elem, std::vector<int32_t> path) {
@@ -941,6 +943,7 @@ static void EnrichColumnStatsWithSchemaInfo(FileStats &fs) {
           elem.full_name.empty() ? elem.name : elem.full_name);
         schema_path_map[canonical] = path;
         schema_leaf_rep[canonical]  = elem.repetition_type;
+        schema_leaf_type_length[canonical] = elem.type_length;
       }
 
       for (const auto& child : elem.children) {
@@ -977,6 +980,10 @@ static void EnrichColumnStatsWithSchemaInfo(FileStats &fs) {
         }
         col.max_repetition_level = max_rep;
         col.max_definition_level = max_def;
+      }
+      auto tl_it = schema_leaf_type_length.find(col.name);
+      if (tl_it != schema_leaf_type_length.end()) {
+        col.type_length = tl_it->second;
       }
     }
   }

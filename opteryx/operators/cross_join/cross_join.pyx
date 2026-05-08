@@ -18,12 +18,67 @@ REFACTORED (Session 46): Draken-native Cartesian product
 """
 
 from typing import Generator, Optional
-from opteryx.compiled.joins import build_cartesian_indices
+
+from libc.stdint cimport int32_t, int64_t
+from libc.stdlib cimport malloc, free
+
+from draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
+from draken.vectors.int64_vector cimport from_rle_builder as int64_from_rle_builder
+
 from opteryx.models import QueryProperties
 
 from opteryx import EOS, EMPTY
 
 from . import JoinNode
+
+
+cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
+    """
+    Build row indices for a Cartesian product (CROSS JOIN).
+
+    Left index is RLE-encoded (left_rows runs of length right_rows each).
+    Right index is dense ([0..right_rows-1] repeated left_rows times).
+
+    Returns:
+        tuple of (Int64Vector, Int64Vector) — left (RLE) and right (dense) row indices
+    """
+    cdef int64_t total_rows = left_rows * right_rows
+    cdef int64_t i, j
+    cdef int64_t* left_run_vals
+    cdef int32_t* left_run_lens
+    cdef Int64Vector left_vec
+    cdef IntBuffer right_indices_buf
+    cdef const int64_t[::1] right_mv
+    cdef Int64Vector right_vec
+
+    if total_rows == 0:
+        return (Int64Vector(0), Int64Vector(0))
+
+    left_run_vals = <int64_t*>malloc(left_rows * sizeof(int64_t))
+    left_run_lens = <int32_t*>malloc(left_rows * sizeof(int32_t))
+    if left_run_vals == NULL or left_run_lens == NULL:
+        free(left_run_vals)
+        free(left_run_lens)
+        raise MemoryError()
+
+    for i in range(left_rows):
+        left_run_vals[i] = i
+        left_run_lens[i] = <int32_t>right_rows
+
+    left_vec = int64_from_rle_builder(left_run_vals, left_run_lens, <size_t>left_rows)
+    free(left_run_vals)
+    free(left_run_lens)
+
+    right_indices_buf = IntBuffer(total_rows)
+    for i in range(left_rows):
+        for j in range(right_rows):
+            right_indices_buf.append(j)
+
+    right_mv = right_indices_buf.get_buffer()
+    right_vec = int64_from_sequence(right_mv)
+    right_vec._arrow_data_buf = right_indices_buf
+
+    return (left_vec, right_vec)
 
 INTERNAL_BATCH_SIZE: int = 10000  # config
 MAX_JOIN_SIZE: int = 1_000_000  # config

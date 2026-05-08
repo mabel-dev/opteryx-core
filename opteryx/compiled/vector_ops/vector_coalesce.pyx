@@ -31,7 +31,7 @@ directly from each argument's `ConstAccessor.value_ptr` and copied into
 the output via `memcpy` — no boxing through Python `int`/`float`/`bytes`.
 
 Shared bitmap / type-classification / vector-construction helpers live in
-_select_helpers.pyx and are prefixed with `_sel_`.
+_helper_select.pyx and are prefixed with `_sel_`.
 """
 
 from libc.stdint cimport int32_t, uint8_t

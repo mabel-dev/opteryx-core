@@ -44,6 +44,10 @@ cdef class _DeferredAnyValueCollector(BaseCollector):
     pass
 
 
+# _DeferredMedianCollector is declared in _collectors_buffered.pxi (it needs
+# the MedianFloat64Collector type to resolve to).
+
+
 # ---------------------------------------------------------------------------
 # Factory function
 # ---------------------------------------------------------------------------
@@ -98,6 +102,8 @@ cpdef tuple create_collectors(list aggregation_specs, list group_columns):
             c = ApproxPercentileCollector(percentile)
         elif fn in ("array_agg", "hash_list"):
             c = ArrayAggCollector(spec.options)
+        elif fn == "median":
+            c = _DeferredMedianCollector()
         else:
             raise ValueError(f"unsupported aggregation function: {fn!r}")
 
@@ -189,6 +195,22 @@ cpdef void resolve_deferred_collectors(
                 typed_c = AnyValueFloat64Collector()
             else:
                 typed_c = AnyValueObjectCollector()
+            typed_c.column_name = c.column_name
+            typed_c.result_name = c.result_name
+            collectors[i] = typed_c
+
+        elif isinstance(c, _DeferredMedianCollector):
+            vec = morsel.column(c.column_name)
+            if isinstance(vec, DecimalVector):
+                raise NotImplementedError(
+                    "MEDIAN does not support DECIMAL inputs; CAST the column "
+                    "to DOUBLE first (e.g. MEDIAN(CAST(col AS DOUBLE)))."
+                )
+            if not isinstance(vec, (Int64Vector, Float64Vector)):
+                # Allow integer-narrow vectors through — MedianFloat64Collector
+                # has a to_pylist fallback for them. Reject obvious non-numerics.
+                pass
+            typed_c = MedianFloat64Collector()
             typed_c.column_name = c.column_name
             typed_c.result_name = c.result_name
             collectors[i] = typed_c

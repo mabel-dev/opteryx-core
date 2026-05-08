@@ -6,8 +6,10 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -265,6 +267,78 @@ struct CountState {
 
     inline void apply_star(size_t n) noexcept {
         count += static_cast<int64_t>(n);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// MedianState — buffers non-null doubles, computes exact median via
+// std::nth_element on finalize. `max_size` is a hard cap; once reached,
+// `overflowed` is set and further appends are dropped — the engine
+// must check overflowed() and raise.
+// ---------------------------------------------------------------------------
+struct MedianState {
+    double* buf = nullptr;
+    size_t  size = 0;
+    size_t  cap = 0;
+    size_t  max_size = 1000;
+    bool    overflowed = false;
+
+    MedianState() noexcept = default;
+    MedianState(const MedianState&) = delete;
+    MedianState& operator=(const MedianState&) = delete;
+
+    MedianState(MedianState&& o) noexcept
+        : buf(o.buf), size(o.size), cap(o.cap),
+          max_size(o.max_size), overflowed(o.overflowed) {
+        o.buf = nullptr; o.size = 0; o.cap = 0;
+    }
+
+    MedianState& operator=(MedianState&& o) noexcept {
+        if (this != &o) {
+            if (buf) std::free(buf);
+            buf = o.buf; size = o.size; cap = o.cap;
+            max_size = o.max_size; overflowed = o.overflowed;
+            o.buf = nullptr; o.size = 0; o.cap = 0;
+        }
+        return *this;
+    }
+
+    ~MedianState() noexcept {
+        if (buf) { std::free(buf); buf = nullptr; }
+    }
+
+    inline bool _grow(size_t need) noexcept {
+        size_t new_cap = cap == 0 ? 64 : cap * 2;
+        while (new_cap < need) new_cap *= 2;
+        if (new_cap > max_size) new_cap = max_size;
+        double* nb = (double*)std::realloc(buf, new_cap * sizeof(double));
+        if (!nb) return false;
+        buf = nb;
+        cap = new_cap;
+        return true;
+    }
+
+    inline bool append(double v) noexcept {
+        if (size >= max_size) { overflowed = true; return false; }
+        if (size >= cap && !_grow(size + 1)) return false;
+        buf[size++] = v;
+        return true;
+    }
+
+    // Compute median in place. Mutates buf via std::nth_element.
+    // Returns 0.0 if size==0; caller must check size first.
+    inline double finalize_median() noexcept {
+        if (size == 0) return 0.0;
+        size_t mid = size / 2;
+        std::nth_element(buf, buf + mid, buf + size);
+        double upper = buf[mid];
+        if (size % 2 == 1) return upper;
+        // Even count: lower middle is the max of the lower partition.
+        // Partition [0, mid) was left after the first nth_element; the
+        // largest element in it is the (mid-1)-th order statistic.
+        std::nth_element(buf, buf + mid - 1, buf + mid);
+        double lower = buf[mid - 1];
+        return (lower + upper) * 0.5;
     }
 };
 

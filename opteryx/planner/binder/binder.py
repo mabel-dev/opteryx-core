@@ -26,6 +26,44 @@ from opteryx.types import OrsoTypes
 from opteryx.types.schema import ConstantColumn, FlatColumn, FunctionColumn, RelationSchema
 
 
+# Aggregate return-type inference for the binder. Aggregates are dispatched by
+# the physical aggregate operators (not the function catalog), but the binder
+# still needs to know the result type so expressions like `0.2 * AVG(col)` and
+# downstream comparisons type-check correctly.
+_AGGREGATE_RESULT_INTEGER = frozenset(
+    {"COUNT", "COUNT_DISTINCT", "DISTINCT", "APPROX_COUNT_DISTINCT"}
+)
+_AGGREGATE_RESULT_PASSTHROUGH = frozenset({"SUM", "MIN", "MAX", "ANY_VALUE"})
+_AGGREGATE_RESULT_DOUBLE = frozenset({"APPROX_PERCENTILE"})
+
+
+def _aggregate_return_type(node: Node) -> Optional[OrsoTypes]:
+    """Best-effort result-type inference for aggregate functions."""
+    name = node.value
+    if name in _AGGREGATE_RESULT_INTEGER:
+        return OrsoTypes.INTEGER
+    if name in _AGGREGATE_RESULT_DOUBLE:
+        return OrsoTypes.DOUBLE
+    if name == "ARRAY_AGG":
+        return OrsoTypes.ARRAY
+    if name in _AGGREGATE_RESULT_PASSTHROUGH or name == "AVG":
+        # Pass through the input column's type. AVG of a DECIMAL stays DECIMAL;
+        # AVG of an INTEGER becomes DOUBLE (standard SQL behaviour).
+        if node.parameters:
+            param = node.parameters[0]
+            param_type = None
+            if param.node_type == NodeType.LITERAL:
+                param_type = getattr(param, "type", None)
+            elif getattr(param, "schema_column", None) is not None:
+                param_type = param.schema_column.type
+            if param_type in (None, 0, OrsoTypes._MISSING_TYPE, OrsoTypes.NULL):
+                return None
+            if name == "AVG" and param_type == OrsoTypes.INTEGER:
+                return OrsoTypes.DOUBLE
+            return param_type
+    return None
+
+
 def merge_schemas(*schemas: Dict[str, RelationSchema]) -> Dict[str, RelationSchema]:
     """
     Handles the merging of relations, requiring a custom merge function.
@@ -118,10 +156,17 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
 
     # get the list of candidate schemas
     if node.source:
+        # A reference like `partsupp.ps_suppkey` from `FROM testdata.tpch.partsupp`
+        # carries `node.source = "partsupp"` while the schema is keyed by the
+        # full path `testdata.tpch.partsupp`. Match the bare qualifier against
+        # both the exact key and the trailing dotted segment.
+        suffix = f".{node.source}"
         candidate_schemas = {
             name: schema
             for name, schema in context.schemas.items()
-            if name.startswith("$shared") or name == node.source
+            if name.startswith("$shared")
+            or name == node.source
+            or name.endswith(suffix)
         }
     else:
         candidate_schemas = context.schemas
@@ -314,6 +359,14 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                     result_type = _resolved.inferred_return_type
                     element_type = _resolved.inferred_element_type
                     node.function_ref = _resolved
+                elif node_type == NodeType.AGGREGATOR:
+                    # Aggregates are not in the function catalog (dispatched at
+                    # runtime by the aggregate operators). The binder still needs
+                    # a result type so expressions like `0.2 * AVG(col)` and
+                    # downstream comparisons type-check correctly.
+                    result_type = _aggregate_return_type(node)
+                    if result_type is None:
+                        result_type = OrsoTypes.NULL
                 else:
                     result_type = OrsoTypes.NULL  # unknown function; type resolved at runtime
 

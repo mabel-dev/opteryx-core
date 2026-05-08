@@ -215,65 +215,93 @@ def _cosine_similarity_text(arr, val):
     if not active_texts:
         return result
 
+    from array import array
+
+    from opteryx.vectors import vector_math
+
     embedded = embed_text_matrix([query_text, *active_texts])
-    query_vector = embedded[0]
-    row_vectors = embedded[1:]
-
-    try:
-        from opteryx.compiled.nanobind import vector_search
-
-        scores = vector_search.score_cosine(query_vector, row_vectors)
-    except (ImportError, ValueError, TypeError):
-        # Fallback: compute in Python
-        scores = []
-        query_norm = _vec_norm(query_vector)
-        if query_norm == 0.0:
-            scores = [0.0] * len(row_vectors)
-        else:
-            for row_vec in row_vectors:
-                row_norm = _vec_norm(row_vec)
-                if row_norm == 0.0:
-                    scores.append(0.0)
-                else:
-                    dot = _dot_product(row_vec, query_vector)
-                    similarity = dot / (row_norm * query_norm)
-                    scores.append(similarity if _is_finite(similarity) else 0.0)
+    n_active = len(active_texts)
+    docs = embedded.take(array("i", range(1, n_active + 1)))
+    query_fp32 = vector_math.row_as_fp32_array(embedded, 0)
+    score_vec = docs.cosine_similarity(memoryview(query_fp32))
+    scores = score_vec.to_pylist()
 
     for index, score in zip(active_positions, scores, strict=True):
-        result[index] = float(score)
+        if score is None:
+            continue
+        score = float(score)
+        if _is_finite(score):
+            result[index] = score
     return result
 
 
-def cosine_similarity(arr, val):
-    """Cosine similarity over numeric vectors or semantic text embeddings."""
-    if len(arr) == 0:
-        return []
+def _is_text_input(arr, val):
+    """True when both arguments look like text columns (string or bytes rows).
 
+    The numeric/text overload of COSINE_SIMILARITY/COSINE_DISTANCE share a
+    single Python entry point. This sniffs which path applies.
+    """
     sample_left = next((row for row in arr if row is not None), None)
+    if sample_left is None:
+        return False
+    if not isinstance(sample_left, (str, bytes)):
+        return False
     sample_right = next((row for row in val if row is not None), None)
-    if sample_left is not None and sample_right is not None:
-        return _score_numeric_vectors(arr, val)
+    if sample_right is None:
+        return False
+    return isinstance(sample_right, (str, bytes))
 
-    return _cosine_similarity_text(arr, val)
+
+def cosine_similarity(arr, val):
+    """Cosine similarity over numeric vectors or semantic text embeddings.
+
+    Numeric path is delegated to the Cython vector_ops kernel and returns a
+    Float32Vector with row-level null propagation. Text path stays here
+    because it is fundamentally Python-bound (calls the embedding provider).
+    """
+    if len(arr) == 0:
+        from opteryx.compiled.vector_ops import vector_cosine_similarity
+        return vector_cosine_similarity(arr, val)
+
+    if _is_text_input(arr, val):
+        return _cosine_similarity_text(arr, val)
+
+    from opteryx.compiled.vector_ops import vector_cosine_similarity
+    return vector_cosine_similarity(arr, val)
 
 
 def cosine_distance(arr, val):
-    """Cosine distance for numeric vectors, returned as 1 - cosine_similarity."""
-    scores = cosine_similarity(arr, val)
-    if not scores:
-        return []
-    # Clip each score to [-1, 1] and compute 1 - similarity
-    return [1.0 - max(-1.0, min(float(s), 1.0)) for s in scores]
+    """Cosine distance = 1 - clip(similarity, -1, 1).
+
+    Numeric path returns a Float32Vector via the Cython kernel. Text path
+    falls back to scoring then clipping in Python.
+    """
+    if len(arr) == 0:
+        from opteryx.compiled.vector_ops import vector_cosine_distance
+        return vector_cosine_distance(arr, val)
+
+    if _is_text_input(arr, val):
+        scores = _cosine_similarity_text(arr, val)
+        return [1.0 - max(-1.0, min(float(s), 1.0)) for s in scores]
+
+    from opteryx.compiled.vector_ops import vector_cosine_distance
+    return vector_cosine_distance(arr, val)
 
 
 def embed(arr):
-    """Convert text values into numeric vectors using the configured embedding provider."""
-    if len(arr) == 0:
-        return []
+    """Convert text values into a fp16 VectorVector using the configured embedding provider."""
+    from opteryx.vectors import vector_math
+    from opteryx.vectors.embeddings import (
+        _provider_dimensions,
+        get_embedding_provider,
+    )
+
+    n = len(arr)
+    provider = get_embedding_provider()
+    dims = _provider_dimensions(provider) if provider is not None else 0
 
     texts = []
     row_positions = []
-    results = [None] * len(arr)
     for index, value in enumerate(arr):
         text_value = _coerce_text_scalar(value)
         if text_value is None:
@@ -282,12 +310,14 @@ def embed(arr):
         row_positions.append(index)
 
     if not texts:
-        return results
+        return vector_math.new_matrix_with_nulls(n, dims or 0)
 
-    embedded = embed_text_values(texts)
-    for index, vector in zip(row_positions, embedded, strict=True):
-        results[index] = vector
-    return results
+    embedded = embed_text_matrix(texts)
+    out = vector_math.new_matrix_with_nulls(n, embedded.dimensions)
+    for new_idx, output_idx in enumerate(row_positions):
+        vector_math.write_row_bytes(out, output_idx, vector_math.row_bytes(embedded, new_idx))
+        vector_math.mark_present(out, output_idx)
+    return out
 
 
 def jsonb_object_keys(arr):

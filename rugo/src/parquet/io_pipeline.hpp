@@ -26,6 +26,8 @@
 #include <thread>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <map>
 
 #include "BS_thread_pool.hpp"
@@ -137,6 +139,45 @@ class ParquetIOPipeline {
         uint64_t total_read_ns = 0;
         uint64_t total_decode_ns = 0;
 
+        // For local files, mmap the full column-chunk extent of the row group
+        // once rather than open/pread/close per column.  Eliminates per-column
+        // heap allocation and gives the kernel a sequential-prefetch hint via
+        // MADV_SEQUENTIAL.  Falls back to read_range() for HTTP/GCS.
+        bool is_local = item.path.rfind("gs://",   0) != 0 &&
+                        item.path.rfind("http://",  0) != 0 &&
+                        item.path.rfind("https://", 0) != 0;
+
+        void*   mmap_base   = MAP_FAILED;
+        size_t  mmap_len    = 0;
+        int64_t mmap_offset = 0;  // page-aligned file offset of the mapping
+
+        if (is_local && !item.column_stats.empty()) {
+            int64_t span_min = INT64_MAX, span_max = 0;
+            for (const auto& cs : item.column_stats) {
+                int64_t base = cs.data_page_offset;
+                if (cs.dictionary_page_offset >= 0 && cs.dictionary_page_offset < base)
+                    base = cs.dictionary_page_offset;
+                int64_t end = base + cs.total_compressed_size;
+                if (base < span_min) span_min = base;
+                if (end   > span_max) span_max = end;
+            }
+            long page_size  = sysconf(_SC_PAGESIZE);
+            mmap_offset     = (span_min / page_size) * page_size;
+            mmap_len        = static_cast<size_t>(span_max - mmap_offset);
+
+            auto t_map = std::chrono::steady_clock::now();
+            int fd = open(item.path.c_str(), O_RDONLY | O_CLOEXEC);
+            if (fd >= 0) {
+                mmap_base = mmap(nullptr, mmap_len, PROT_READ, MAP_PRIVATE, fd, mmap_offset);
+                close(fd);
+                // No madvise: let the OS manage readahead.
+                if (mmap_base == MAP_FAILED)
+                    mmap_base = MAP_FAILED;
+            }
+            total_read_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - t_map).count();
+        }
+
         try {
             for (size_t i = 0; i < item.column_stats.size(); ++i) {
                 const auto& col_stats = item.column_stats[i];
@@ -148,21 +189,33 @@ class ParquetIOPipeline {
                 }
                 int64_t chunk_size = col_stats.total_compressed_size;
 
-                auto [raw_bytes, read_ns] = read_range(item.path, base_offset, chunk_size);
-                result.bytes_fetched += chunk_size;
-                total_read_ns += read_ns;
-
                 ColumnStats adjusted = col_stats;
                 adjusted.data_page_offset -= base_offset;
-                if (adjusted.dictionary_page_offset >= 0) {
+                if (adjusted.dictionary_page_offset >= 0)
                     adjusted.dictionary_page_offset -= base_offset;
-                }
 
-                auto t_dec = std::chrono::steady_clock::now();
-                DecodedColumn decoded = DecodeColumnFromChunk(
-                    raw_bytes.data(), raw_bytes.size(), &adjusted);
-                total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - t_dec).count();
+                DecodedColumn decoded;
+                if (mmap_base != MAP_FAILED) {
+                    // Zero-copy: slice directly into the mmap — no heap allocation.
+                    const uint8_t* chunk_ptr =
+                        static_cast<const uint8_t*>(mmap_base) + (base_offset - mmap_offset);
+                    auto t_dec = std::chrono::steady_clock::now();
+                    decoded = DecodeColumnFromChunk(
+                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted);
+                    total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t_dec).count();
+                    result.bytes_fetched += chunk_size;
+                } else {
+                    // Fallback: pread for HTTP/GCS or if mmap failed.
+                    auto [raw_bytes, read_ns] = read_range(item.path, base_offset, chunk_size);
+                    result.bytes_fetched += chunk_size;
+                    total_read_ns += read_ns;
+                    auto t_dec = std::chrono::steady_clock::now();
+                    decoded = DecodeColumnFromChunk(
+                        raw_bytes.data(), raw_bytes.size(), &adjusted);
+                    total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t_dec).count();
+                }
 
                 if (!decoded.success) {
                     result.success = false;
@@ -178,6 +231,9 @@ class ParquetIOPipeline {
             result.success = false;
             result.error = e.what();
         }
+
+        if (mmap_base != MAP_FAILED)
+            munmap(mmap_base, mmap_len);
 
         result.read_ns = total_read_ns;
         result.decode_ns = total_decode_ns;

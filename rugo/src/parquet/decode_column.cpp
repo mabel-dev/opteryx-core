@@ -32,6 +32,17 @@ inline uint8_t CodeWidthForDictSize(size_t dict_size) {
   return 4;
 }
 
+// Read a big-endian, two's-complement signed integer of `width` bytes
+// (1..8) into int64_t. Used to widen FIXED_LEN_BYTE_ARRAY DECIMAL values
+// to int64. The first byte is sign-extended.
+inline int64_t ReadBESignExt(const uint8_t* p, int width) {
+  int64_t v = static_cast<int64_t>(static_cast<int8_t>(p[0]));
+  for (int i = 1; i < width; ++i) {
+    v = (v << 8) | static_cast<int64_t>(p[i]);
+  }
+  return v;
+}
+
 inline void WritePackedCode(uint8_t* codes_array, size_t row_index,
                             int32_t code, uint8_t code_width) {
   switch (code_width) {
@@ -47,38 +58,128 @@ inline void WritePackedCode(uint8_t* codes_array, size_t row_index,
   }
 }
 
+// ─── Open-addressed string intern table ──────────────────────────────────────
+// Replaces std::unordered_map<std::string, int32_t> for the per-column-chunk
+// unified dictionary on byte_array columns.  Designed for the parquet decode
+// hot path: PLAIN-encoded data pages call intern() per row, millions of times
+// for URL-shaped columns.  The std::unordered_map version dominates decode
+// CPU because each call does a heap-alloc'd std::string key + node lookup.
+//
+// Wins:
+//   - No per-call heap allocation: arena bytes are the canonical key storage;
+//     slots reference into the arena by (offset, length).
+//   - Open addressing with linear probing → one cache line per probe.
+//   - 8-byte-chunked FNV-style hash → ~3-5 ns per short URL-sized value.
+struct StringInternSlot {
+  uint64_t hash;
+  uint32_t arena_off;
+  int32_t  len;        // -1 = empty slot
+  int32_t  code;
+};
+
+struct StringInternTable {
+  std::vector<StringInternSlot> slots;
+  size_t mask = 0;     // capacity - 1; capacity is always a power of two
+  size_t used = 0;
+
+  inline bool empty() const { return used == 0; }
+
+  inline void clear() {
+    slots.clear();
+    mask = 0;
+    used = 0;
+  }
+
+  inline void resize_to(size_t new_capacity) {
+    std::vector<StringInternSlot> old = std::move(slots);
+    slots.assign(new_capacity, StringInternSlot{0, 0, -1, 0});
+    mask = new_capacity - 1;
+    for (const auto& s : old) {
+      if (s.len < 0) continue;
+      size_t b = s.hash & mask;
+      while (slots[b].len >= 0) b = (b + 1) & mask;
+      slots[b] = s;
+    }
+  }
+
+  // 8-byte-chunked FNV-1a–style hash; cheap and adequate for short keys.
+  static inline uint64_t hash_bytes(const char* data, size_t len) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    size_t i = 0;
+    while (i + 8 <= len) {
+      uint64_t chunk;
+      std::memcpy(&chunk, data + i, 8);
+      h ^= chunk;
+      h *= 0x100000001b3ULL;
+      i += 8;
+    }
+    while (i < len) {
+      h ^= static_cast<uint8_t>(data[i]);
+      h *= 0x100000001b3ULL;
+      ++i;
+    }
+    h ^= h >> 32;
+    return h;
+  }
+};
+
 inline int32_t InternByteArrayToDictionary(
     const char* value_ptr,
     int32_t value_len,
-    std::unordered_map<std::string, int32_t>& dict_map,
+    StringInternTable& table,
     std::vector<uint8_t>& arena,
     std::vector<uint32_t>& offsets,
     std::vector<int32_t>& lens) {
-  std::string key(value_ptr, static_cast<size_t>(value_len));
-  auto it = dict_map.find(key);
-  if (it != dict_map.end()) {
-    return it->second;
+  if (table.slots.empty()) table.resize_to(64);
+  // Grow at 75% load factor.
+  if ((table.used + 1) * 4 > (table.mask + 1) * 3) {
+    table.resize_to((table.mask + 1) * 2);
   }
-
-  int32_t code = static_cast<int32_t>(lens.size());
-  uint32_t off = static_cast<uint32_t>(arena.size());
-  arena.insert(arena.end(), key.begin(), key.end());
-  offsets.push_back(off);
-  lens.push_back(value_len);
-  dict_map.emplace(std::move(key), code);
-  return code;
+  const uint64_t h = StringInternTable::hash_bytes(value_ptr, (size_t)value_len);
+  size_t b = h & table.mask;
+  while (true) {
+    auto& s = table.slots[b];
+    if (s.len < 0) {
+      // Empty: append to arena, register slot.
+      const uint32_t off = static_cast<uint32_t>(arena.size());
+      arena.insert(arena.end(),
+                   reinterpret_cast<const uint8_t*>(value_ptr),
+                   reinterpret_cast<const uint8_t*>(value_ptr) + value_len);
+      const int32_t code = static_cast<int32_t>(lens.size());
+      offsets.push_back(off);
+      lens.push_back(value_len);
+      s.hash = h;
+      s.arena_off = off;
+      s.len = value_len;
+      s.code = code;
+      ++table.used;
+      return code;
+    }
+    if (s.hash == h && s.len == value_len &&
+        std::memcmp(arena.data() + s.arena_off, value_ptr, (size_t)value_len) == 0) {
+      return s.code;
+    }
+    b = (b + 1) & table.mask;
+  }
 }
 
 inline void SeedDictionaryMapFromArena(
-    std::unordered_map<std::string, int32_t>& dict_map,
+    StringInternTable& table,
     const std::vector<uint8_t>& arena,
     const std::vector<uint32_t>& offsets,
     const std::vector<int32_t>& lens) {
-  dict_map.reserve(lens.size() * 2 + 1);
+  if (lens.empty()) return;
+  size_t cap = 64;
+  while (cap < lens.size() * 2) cap *= 2;
+  table.resize_to(cap);
   for (size_t i = 0; i < lens.size(); ++i) {
     const char* ptr = reinterpret_cast<const char*>(arena.data() + offsets[i]);
-    dict_map.emplace(std::string(ptr, static_cast<size_t>(lens[i])),
-                     static_cast<int32_t>(i));
+    const int32_t l = lens[i];
+    const uint64_t h = StringInternTable::hash_bytes(ptr, (size_t)l);
+    size_t b = h & table.mask;
+    while (table.slots[b].len >= 0) b = (b + 1) & table.mask;
+    table.slots[b] = {h, offsets[i], l, static_cast<int32_t>(i)};
+    ++table.used;
   }
 }
 
@@ -285,6 +386,20 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     result.max_rep_level = target_col->max_repetition_level;
     result.max_def_level = target_col->max_definition_level;
 
+    // FIXED_LEN_BYTE_ARRAY DECIMAL with width <= 8 bytes is decoded as int64
+    // (sign-extended big-endian). For all downstream branches we present this
+    // as int64; flba_byte_width > 0 selects the BE-stride read path.
+    int flba_byte_width = 0;
+    if (target_col->physical_type == "fixed_len_byte_array") {
+      if (target_col->type_length <= 0 || target_col->type_length > 8 ||
+          target_col->logical_type.rfind("decimal", 0) != 0) {
+        // Caller should have been gated by CanDecode; defensive bail.
+        return result;
+      }
+      flba_byte_width = target_col->type_length;
+      result.type = "int64";
+    }
+
     // -----------------------------------------------------------------
     // Step 1: Load dictionary page (if present)
     // -----------------------------------------------------------------
@@ -359,6 +474,19 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           }
 #endif
         } else if (result.type == "int64") {
+          if (flba_byte_width > 0) {
+            // FIXED_LEN_BYTE_ARRAY DECIMAL dict: each value is `flba_byte_width`
+            // bytes, big-endian, signed. Sign-extend to int64.
+            int32_t safe_count = std::min(
+                dict_size,
+                (int32_t)((dict_end - dict_data_ptr) / flba_byte_width));
+            result.dict_int64_values.reserve(safe_count);
+            for (int32_t i = 0; i < safe_count; i++) {
+              result.dict_int64_values.push_back(
+                  ReadBESignExt(dict_data_ptr, flba_byte_width));
+              dict_data_ptr += flba_byte_width;
+            }
+          } else {
           int32_t safe_count = std::min(dict_size, (int32_t)((dict_end - dict_data_ptr) / 8));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
           result.dict_int64_values.resize(safe_count);
@@ -371,6 +499,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             dict_data_ptr += 8;
           }
 #endif
+          }
         } else if (result.type == "byte_array") {
           // Build a flat arena: one allocation for all dict string bytes,
           // plus offset/length arrays — no per-entry std::string heap alloc.
@@ -469,7 +598,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     bool int64_dict_mode = (result.type == "int64" && dict_size > 0);
     bool float32_dict_mode = (result.type == "float32" && dict_size > 0);
     bool float64_dict_mode = (result.type == "float64" && dict_size > 0);
-    std::unordered_map<std::string, int32_t> unified_dict_map;
+    StringInternTable unified_dict_map;
     std::unordered_map<int32_t, int32_t> int32_dict_map;
     std::unordered_map<int64_t, int32_t> int64_dict_map;
     std::unordered_map<uint32_t, int32_t> float32_dict_map;
@@ -566,6 +695,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           target_col->max_definition_level == 0 &&
           target_col->max_repetition_level == 0 &&
           row_mask == nullptr &&
+          flba_byte_width == 0 &&
           (result.type == "int32" || result.type == "int64" ||
            result.type == "float32" || result.type == "float64")
       );
@@ -1457,6 +1587,16 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                 int32_t code = InternPrimitiveToDictionary(value, int64_dict_map, result.dict_int64_values);
                 result.dict_indices.push_back(code);
               }
+            } else if (flba_byte_width > 0) {
+              result.dict_indices.reserve(result.dict_indices.size() + present_count);
+              for (int32_t i = 0;
+                   i < present_count && data_ptr + flba_byte_width <= data_end;
+                   i++) {
+                int64_t value = ReadBESignExt(data_ptr, flba_byte_width);
+                data_ptr += flba_byte_width;
+                int32_t code = InternPrimitiveToDictionary(value, int64_dict_map, result.dict_int64_values);
+                result.dict_indices.push_back(code);
+              }
             } else {
               result.dict_indices.reserve(result.dict_indices.size() + present_count);
               for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
@@ -1473,6 +1613,17 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               if (decoded != present_count) return result;
               std::copy(page_ints.begin(), page_ints.end(), result.ext_int64 + result.ext_written);
               result.ext_written += (int32_t)page_ints.size();
+            } else if (flba_byte_width > 0) {
+              int32_t safe_count = std::min(
+                  present_count,
+                  (int32_t)((data_end - data_ptr) / flba_byte_width));
+              int64_t* edst = result.ext_int64 + result.ext_written;
+              for (int32_t i = 0; i < safe_count; i++) {
+                edst[i] = ReadBESignExt(data_ptr + i * flba_byte_width,
+                                        flba_byte_width);
+              }
+              data_ptr += safe_count * flba_byte_width;
+              result.ext_written += safe_count;
             } else {
               int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 8));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -1494,6 +1645,18 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               if (decoded != present_count) return result;
               result.int64_values.insert(result.int64_values.end(),
                                           page_ints.begin(), page_ints.end());
+            } else if (flba_byte_width > 0) {
+              int32_t safe_count = std::min(
+                  present_count,
+                  (int32_t)((data_end - data_ptr) / flba_byte_width));
+              size_t old_sz = result.int64_values.size();
+              result.int64_values.resize(old_sz + safe_count);
+              int64_t* dst = result.int64_values.data() + old_sz;
+              for (int32_t i = 0; i < safe_count; i++) {
+                dst[i] = ReadBESignExt(data_ptr + i * flba_byte_width,
+                                       flba_byte_width);
+              }
+              data_ptr += safe_count * flba_byte_width;
             } else {
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
               int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 8));

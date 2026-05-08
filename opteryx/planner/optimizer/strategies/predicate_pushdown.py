@@ -186,7 +186,12 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             # 1. Has aggregators (HAVING clause) - will be pushed into aggregate
             # 2. OR: references relations AND no aggregators AND simple comparison (regular predicate)
             is_simple_comparison = (
-                node.condition.node_type in (NodeType.COMPARISON_OPERATOR, NodeType.BETWEEN)
+                node.condition.node_type
+                in (
+                    NodeType.COMPARISON_OPERATOR,
+                    NodeType.BETWEEN,
+                    NodeType.UNARY_OPERATOR,  # IsNull, IsNotNull, IsEmpty, IsNotEmpty
+                )
                 and len(identifiers) >= 1  # At least one column reference
             )
 
@@ -330,26 +335,80 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 context.optimized_plan.add_edge(context.node_id, context.last_nid)
 
         elif node.node_type == LogicalPlanStepType.Join:
+            join_left_rels = set(node.left_relation_names or [])
+            join_right_rels = set(node.right_relation_names or [])
 
-            def _inner(node):
-                # if we're an AND, check each leg
+            def _predicate_sides(predicate):
+                """(touches_left, touches_right) for a predicate's identifiers."""
+                touches_left = False
+                touches_right = False
+                for ident in get_all_nodes_of_type(predicate, (NodeType.IDENTIFIER,)):
+                    src = getattr(ident, "source", None)
+                    if src in join_left_rels:
+                        touches_left = True
+                    if src in join_right_rels:
+                        touches_right = True
+                return touches_left, touches_right
+
+            def _flatten_and(node):
+                """Flatten an AND tree into a list of leaf predicates."""
+                if node is None:
+                    return []
                 if node.node_type == NodeType.AND:
-                    # if one of the sides of an AND is a collectable condition,
-                    # collect it and replace the AND with the other side only.
-                    collected_left, _ = _inner(node.left)
-                    collected_right, _ = _inner(node.right)
-                    if collected_left:
-                        return collected_left, node.right
-                    if collected_right:
-                        return collected_right, node.left
-                    return [], node
-                # if we're a predicate, check it, left first
-                if len(get_all_nodes_of_type(node.left, (NodeType.IDENTIFIER,))) == 0:
-                    return [node], None
-                if len(get_all_nodes_of_type(node.right, (NodeType.IDENTIFIER,))) == 0:
-                    return [node], None
+                    return _flatten_and(node.left) + _flatten_and(node.right)
+                return [node]
 
-                return [], node
+            def _and_chain(leaves):
+                """Rebuild a left-leaning AND tree from leaves; None if empty."""
+                # Local import: a function-scoped `from opteryx.models import Node`
+                # elsewhere in `visit` makes Node a local variable for the whole
+                # method, so the module-level import isn't visible to closures.
+                from opteryx.models import Node as _Node
+
+                if not leaves:
+                    return None
+                result = leaves[0]
+                for leaf in leaves[1:]:
+                    and_node = _Node(node_type=NodeType.AND)
+                    and_node.left = result
+                    and_node.right = leaf
+                    result = and_node
+                return result
+
+            def _is_collectable(predicate):
+                """True if this predicate should be pulled out of the ON clause."""
+                # Literal-on-one-side predicates: collectable as filters.
+                if len(get_all_nodes_of_type(predicate.left, (NodeType.IDENTIFIER,))) == 0:
+                    return True
+                if len(get_all_nodes_of_type(predicate.right, (NodeType.IDENTIFIER,))) == 0:
+                    return True
+                # Single-side predicates in the ON clause (e.g.
+                # `JOIN ... ON a.x = b.x AND a.y > a.z`) belong to that side
+                # and are filters, not join keys. Pull them out so the join
+                # stays a pure equi-join — DrakenInnerJoinNode only supports
+                # Eq, and even when other comparators are supported the input
+                # filter is cheaper.
+                if join_left_rels or join_right_rels:
+                    touches_left, touches_right = _predicate_sides(predicate)
+                    if touches_left ^ touches_right:
+                        return True
+                return False
+
+            def _inner(on_node):
+                """Split the ON clause into (extracted_predicates, remaining_on)."""
+                leaves = _flatten_and(on_node)
+                extracted = []
+                kept = []
+                for leaf in leaves:
+                    if leaf.node_type == NodeType.AND:
+                        # nested AND that survived flattening — keep as-is
+                        kept.append(leaf)
+                        continue
+                    if _is_collectable(leaf):
+                        extracted.append(leaf)
+                    else:
+                        kept.append(leaf)
+                return extracted, _and_chain(kept)
 
             if node.on:
                 new_predicates, node.on = _inner(node.on)
@@ -493,55 +552,97 @@ class PredicatePushdownStrategy(OptimizationStrategy):
     def _handle_predicates(
         self, node: LogicalPlanNode, context: OptimizerContext
     ) -> OptimizerContext:
+        # Two-pass: classify pushable predicates as selective (comparison-style) vs.
+        # metadata-only (UNARY_OPERATOR), then commit. Metadata-only predicates ride
+        # along on a scan only when at least one selective predicate is also being
+        # pushed — otherwise a non-selective unary predicate (e.g. `col <> ''`) would
+        # be the sole driver of two-pass / late-materialization, which is a net loss
+        # when the predicate doesn't narrow the mask enough to pay back the overhead.
         remaining_predicates = []
-        for predicate in context.collected_predicates:
-            if len(predicate.relations) >= 1 and predicate.relations.issubset(
-                {node.relation, node.alias}
-            ):
-                if node.connector:
-                    # Try to normalise CAST(col, T) op literal predicates before the
-                    # can_push check — CAST nodes are not in can_push's allowlist, but
-                    # a stripped/rescaled form may be pushable and semantically equivalent.
-                    normalized = _try_normalize_cast_predicate(predicate.condition)
-                    if normalized is not None:
-                        norm_types = set()
-                        if normalized.left.schema_column:
-                            norm_types.add(normalized.left.schema_column.type)
-                        if normalized.right.schema_column:
-                            norm_types.add(normalized.right.schema_column.type)
-                        norm_predicate = Node(node_type=predicate.node_type)
-                        norm_predicate.condition = normalized
-                        norm_predicate.relations = predicate.relations
-                        if node.connector.supports_predicate_pushdown and node.connector.can_push(
-                            norm_predicate, norm_types
-                        ):
-                            if not node.predicates:
-                                node.predicates = []
-                            node.predicates.append(normalized)
-                            continue
+        selective_to_push = []  # (predicate, condition_to_push)
+        metadata_to_push = []   # (predicate, condition_to_push)
+        not_pushable = []       # predicate
 
-                    types = set()
-                    if predicate.condition.left and predicate.condition.left.schema_column:
-                        types.add(predicate.condition.left.schema_column.type)
-                    # For InList/NotInList the right side is always an ARRAY literal; its type
-                    # is an implementation detail of the IN operator, not a column type the
-                    # connector needs to handle. Including it causes can_push to spuriously
-                    # return False (ARRAY not in PUSHABLE_TYPES), leaving the column out of
-                    # pass-1 and breaking two-pass late-materialization for downstream filters.
-                    if predicate.condition.right and predicate.condition.right.schema_column:
-                        if predicate.condition.value not in ("InList", "NotInList"):
-                            types.add(predicate.condition.right.schema_column.type)
-                    if node.connector.supports_predicate_pushdown and node.connector.can_push(
-                        predicate, types
-                    ):
-                        if not node.predicates:
-                            node.predicates = []
-                        node.predicates.append(predicate.condition)
-                        continue
-                self.telemetry.optimization_predicate_pushdown += 1
-                context.optimized_plan.insert_node_after(predicate.nid, predicate, context.node_id)
+        for predicate in context.collected_predicates:
+            if not (
+                len(predicate.relations) >= 1
+                and predicate.relations.issubset({node.relation, node.alias})
+            ):
+                remaining_predicates.append(predicate)
                 continue
-            remaining_predicates.append(predicate)
+
+            if not node.connector:
+                not_pushable.append(predicate)
+                continue
+
+            # Try to normalise CAST(col, T) op literal predicates before the
+            # can_push check — CAST nodes are not in can_push's allowlist, but
+            # a stripped/rescaled form may be pushable and semantically equivalent.
+            # Normalisation only fires for COMPARISON_OPERATOR, so a hit is selective.
+            normalized = _try_normalize_cast_predicate(predicate.condition)
+            if normalized is not None:
+                norm_types = set()
+                if normalized.left.schema_column:
+                    norm_types.add(normalized.left.schema_column.type)
+                if normalized.right.schema_column:
+                    norm_types.add(normalized.right.schema_column.type)
+                norm_predicate = Node(node_type=predicate.node_type)
+                norm_predicate.condition = normalized
+                norm_predicate.relations = predicate.relations
+                if node.connector.supports_predicate_pushdown and node.connector.can_push(
+                    norm_predicate, norm_types
+                ):
+                    selective_to_push.append((predicate, normalized))
+                    continue
+
+            types = set()
+            if predicate.condition.node_type == NodeType.UNARY_OPERATOR:
+                if predicate.condition.centre and predicate.condition.centre.schema_column:
+                    types.add(predicate.condition.centre.schema_column.type)
+            else:
+                if predicate.condition.left and predicate.condition.left.schema_column:
+                    types.add(predicate.condition.left.schema_column.type)
+                # For InList/NotInList the right side is always an ARRAY literal; its type
+                # is an implementation detail of the IN operator, not a column type the
+                # connector needs to handle. Including it causes can_push to spuriously
+                # return False (ARRAY not in PUSHABLE_TYPES), leaving the column out of
+                # pass-1 and breaking two-pass late-materialization for downstream filters.
+                if predicate.condition.right and predicate.condition.right.schema_column:
+                    if predicate.condition.value not in ("InList", "NotInList"):
+                        types.add(predicate.condition.right.schema_column.type)
+            if node.connector.supports_predicate_pushdown and node.connector.can_push(
+                predicate, types
+            ):
+                if predicate.condition.node_type == NodeType.UNARY_OPERATOR:
+                    metadata_to_push.append((predicate, predicate.condition))
+                else:
+                    selective_to_push.append((predicate, predicate.condition))
+            else:
+                not_pushable.append(predicate)
+
+        # Commit selective predicates unconditionally.
+        for _predicate, condition in selective_to_push:
+            if not node.predicates:
+                node.predicates = []
+            node.predicates.append(condition)
+
+        # Metadata predicates only push when a selective companion is also pushing.
+        if selective_to_push:
+            for _predicate, condition in metadata_to_push:
+                if not node.predicates:
+                    node.predicates = []
+                node.predicates.append(condition)
+        else:
+            for predicate, _condition in metadata_to_push:
+                self.telemetry.optimization_predicate_pushdown_metadata_orphaned += 1
+                context.optimized_plan.insert_node_after(
+                    predicate.nid, predicate, context.node_id
+                )
+
+        for predicate in not_pushable:
+            self.telemetry.optimization_predicate_pushdown += 1
+            context.optimized_plan.insert_node_after(predicate.nid, predicate, context.node_id)
+
         context.collected_predicates = remaining_predicates
         return context
 

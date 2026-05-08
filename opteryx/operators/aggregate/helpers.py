@@ -16,6 +16,7 @@ AGGREGATORS: dict = {
     "COUNT_DISTINCT": "count_distinct",
     "MAX": "max",
     "AVG": "mean",
+    "MEDIAN": "median",
     "MIN": "min",
     "ANY_VALUE": "any_value",
     "SUM": "sum",

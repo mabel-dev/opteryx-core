@@ -81,6 +81,7 @@ def is_simple_aggregate(aggregate_node) -> bool:
 
     Supported:
     - COUNT(*)
+    - COUNT(column) — answered as total_rows - null_count when manifest has nulls
     - MIN(column) where column is INTEGER or TIMESTAMP
     - MAX(column) where column is INTEGER or TIMESTAMP
 
@@ -107,7 +108,10 @@ def is_simple_aggregate(aggregate_node) -> bool:
 
         agg_func = getattr(aggregate, "value", "").upper()
 
-        # COUNT(*) only - must not be DISTINCT/FILTER and must target wildcard
+        # COUNT(*) or COUNT(col) - must not be DISTINCT/FILTER.
+        # COUNT(*) reads from manifest record count.
+        # COUNT(col) reads from manifest record count minus null_count;
+        # the null_count availability check happens in `complete()`.
         if agg_func == "COUNT":
             if aggregate.duplicate_treatment == "Distinct":
                 return False
@@ -119,7 +123,14 @@ def is_simple_aggregate(aggregate_node) -> bool:
             if not parameters or len(parameters) != 1:
                 return False
 
-            if getattr(parameters[0], "node_type", None) != NodeType.WILDCARD:
+            param = parameters[0]
+            param_kind = getattr(param, "node_type", None)
+            if param_kind == NodeType.WILDCARD:
+                continue
+            # Column reference: must carry a resolvable schema column with a name
+            if getattr(param, "schema_column", None) is None:
+                return False
+            if not getattr(param, "source_column", None):
                 return False
             continue
 
@@ -151,6 +162,7 @@ def is_statistics_only_query(logical_plan) -> bool:
 
     Supported patterns:
     - SELECT COUNT(*) FROM table
+    - SELECT COUNT(column) FROM table
     - SELECT MIN(column) FROM table (INTEGER/TIMESTAMP only)
     - SELECT MAX(column) FROM table (INTEGER/TIMESTAMP only)
 
@@ -349,7 +361,11 @@ def get_all_aggregate_metadata(aggregate_node) -> list:
         agg_func = getattr(agg, "value", "").upper()
 
         if agg_func == "COUNT":
-            column_name = ""
+            param = agg.parameters[0] if hasattr(agg, "parameters") and agg.parameters else None
+            if param is not None and getattr(param, "node_type", None) != NodeType.WILDCARD:
+                column_name = getattr(param, "source_column", "") or ""
+            else:
+                column_name = ""
         elif agg_func in ("MIN", "MAX"):
             param = agg.parameters[0] if hasattr(agg, "parameters") and agg.parameters else None
             column_name = getattr(param, "source_column", "") if param else ""
@@ -504,7 +520,16 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         for idx, (agg_func, column_name, agg_node) in enumerate(agg_metadata):
             # Get the aggregate value based on type
             if agg_func == "COUNT":
-                result_value = get_count_from_manifest(manifest)
+                total_rows = get_count_from_manifest(manifest)
+                if column_name:
+                    # COUNT(col) = total_rows - nulls(col); requires every file
+                    # in the manifest to carry null counts for the column.
+                    null_count = manifest.get_total_null_count(column_name)
+                    if null_count is None:
+                        return plan
+                    result_value = total_rows - null_count
+                else:
+                    result_value = total_rows
                 result_type = OrsoTypes.INTEGER
             elif agg_func in ("MIN", "MAX"):
                 if not column_name:

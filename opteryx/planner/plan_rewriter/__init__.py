@@ -39,6 +39,10 @@ def do_plan_rewrite(
     """
     Apply structural rewrites to the unbound logical plan.
 
+    CTE bodies are rewritten in-place too — strategies like InSubqueryToJoin must
+    see filters inside CTE definitions, otherwise IN-subqueries that live inside
+    a CTE's WHERE clause survive to runtime as opaque SUBQUERY nodes.
+
     Parameters:
         plan: The logical plan produced by the Logical Planner.
         common_table_expressions: CTE definitions from the query, keyed by name.
@@ -48,4 +52,9 @@ def do_plan_rewrite(
         The rewritten logical plan, ready for the Binder.
     """
     rewriter = PlanRewriterVisitor(telemetry)
+    if common_table_expressions:
+        for cte_name, cte_plan in list(common_table_expressions.items()):
+            common_table_expressions[cte_name] = rewriter.rewrite(
+                cte_plan, common_table_expressions
+            )
     return rewriter.rewrite(plan, common_table_expressions)

@@ -307,6 +307,138 @@ def rewrite_ored_eq_to_inlist(predicate, telemetry):
     return predicate
 
 
+_LENGTH_FN_NAMES = frozenset({"LENGTH", "CHAR_LENGTH", "CHARACTER_LENGTH"})
+
+# Map (operator, integer-literal-value) → unary-operator name.
+# Each entry holds, for the form `LENGTH(c) <op> <lit>`, the rewrite that is
+# logically equivalent given LENGTH never returns a negative value and NULLs
+# propagate (NULL <op> N → NULL in both forms).
+_LENGTH_COMPARE_REWRITES = {
+    ("Eq", 0): "IsEmpty",
+    ("NotEq", 0): "IsNotEmpty",
+    ("Lt", 1): "IsEmpty",       # LENGTH(c) < 1  → empty (LENGTH >= 0 always)
+    ("LtEq", 0): "IsEmpty",     # LENGTH(c) <= 0 → empty
+    ("Gt", 0): "IsNotEmpty",    # LENGTH(c) > 0  → non-empty
+    ("GtEq", 1): "IsNotEmpty",  # LENGTH(c) >= 1 → non-empty
+}
+
+# Operator flips for when the literal is on the left.
+_FLIP_OP = {
+    "Eq": "Eq",
+    "NotEq": "NotEq",
+    "Lt": "Gt",
+    "LtEq": "GtEq",
+    "Gt": "Lt",
+    "GtEq": "LtEq",
+}
+
+
+def _build_emptiness_node(ident, op_name):
+    new_node = Node(
+        node_type=NodeType.UNARY_OPERATOR,
+        value=op_name,
+        centre=ident,
+    )
+    new_node.schema_column = ExpressionColumn(
+        name=format_expression(new_node, True),
+        type=OrsoTypes.BOOLEAN,
+    )
+    return new_node
+
+
+def rewrite_string_empty_compare(predicate, telemetry):
+    """
+    Rewrite empty-string comparisons to `IsEmpty` / `IsNotEmpty` UNARY_OPERATOR
+    nodes. Modelling these as unary operators (same shape as `IsNull`) lets
+    later optimisations (e.g. metadata-only push-down to the IO layer) treat
+    all metadata-answerable predicates uniformly.
+
+    Forms recognised (sides may appear in either order):
+      col = ''                         → IsEmpty(col)
+      col != ''                        → IsNotEmpty(col)
+      LENGTH(col) = 0                  → IsEmpty(col)
+      LENGTH(col) <> 0                 → IsNotEmpty(col)
+      LENGTH(col) < 1 / <= 0           → IsEmpty(col)
+      LENGTH(col) > 0 / >= 1           → IsNotEmpty(col)
+
+    Also matches the CHAR_LENGTH and CHARACTER_LENGTH aliases of LENGTH.
+    LENGTH never returns a negative value and NULL-propagates, so the rewrites
+    preserve SQL 3VL semantics.
+    """
+    if predicate.node_type != NodeType.COMPARISON_OPERATOR:
+        return predicate
+
+    # ------------------------------------------------------------------
+    # Form 1: col {=, !=} ''
+    # ------------------------------------------------------------------
+    if predicate.value in {"Eq", "NotEq"}:
+        if (
+            predicate.left.node_type == NodeType.IDENTIFIER
+            and predicate.right.node_type == NodeType.LITERAL
+        ):
+            ident, literal = predicate.left, predicate.right
+        elif (
+            predicate.right.node_type == NodeType.IDENTIFIER
+            and predicate.left.node_type == NodeType.LITERAL
+        ):
+            ident, literal = predicate.right, predicate.left
+        else:
+            ident = literal = None
+
+        if ident is not None:
+            col_type = getattr(getattr(ident, "schema_column", None), "type", None)
+            val = literal.value
+            if (
+                col_type in {OrsoTypes.VARCHAR, OrsoTypes.BLOB}
+                and val is not None
+                and val in ("", b"")
+            ):
+                op_name = "IsEmpty" if predicate.value == "Eq" else "IsNotEmpty"
+                telemetry.optimization_predicate_rewriter_string_empty_compare += 1
+                return _build_emptiness_node(ident, op_name)
+
+    # ------------------------------------------------------------------
+    # Form 2: LENGTH(col) <op> <int_literal>
+    # ------------------------------------------------------------------
+    if (
+        predicate.left.node_type == NodeType.FUNCTION
+        and predicate.left.value in _LENGTH_FN_NAMES
+        and predicate.right.node_type == NodeType.LITERAL
+    ):
+        func_node, literal, operator = predicate.left, predicate.right, predicate.value
+    elif (
+        predicate.right.node_type == NodeType.FUNCTION
+        and predicate.right.value in _LENGTH_FN_NAMES
+        and predicate.left.node_type == NodeType.LITERAL
+    ):
+        func_node, literal = predicate.right, predicate.left
+        operator = _FLIP_OP.get(predicate.value)
+        if operator is None:
+            return predicate
+    else:
+        return predicate
+
+    if not func_node.parameters or len(func_node.parameters) != 1:
+        return predicate
+    inner = func_node.parameters[0]
+    if inner.node_type != NodeType.IDENTIFIER:
+        return predicate
+    col_type = getattr(getattr(inner, "schema_column", None), "type", None)
+    if col_type not in {OrsoTypes.VARCHAR, OrsoTypes.BLOB}:
+        return predicate
+
+    val = literal.value
+    if val is None or not isinstance(val, int) or isinstance(val, bool):
+        return predicate
+
+    op_name = _LENGTH_COMPARE_REWRITES.get((operator, val))
+    if op_name is None:
+        return predicate
+
+    telemetry.optimization_predicate_rewriter_string_empty_compare += 1
+    return _build_emptiness_node(inner, op_name)
+
+
 def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
     """
     Rewrite temporal TRUNC comparisons to range comparisons for better pushdown eligibility.
@@ -532,6 +664,12 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
             if predicate.node_type != NodeType.COMPARISON_OPERATOR:
                 return predicate
 
+    # Rewrite `col = ''` / `col != ''` to `IsEmpty(col)` / `IsNotEmpty(col)`.
+    if predicate.node_type == NodeType.COMPARISON_OPERATOR:
+        rewritten = rewrite_string_empty_compare(predicate, telemetry)
+        if rewritten is not predicate:
+            return rewritten
+
     if predicate.right.type == OrsoTypes.VARCHAR:
         if predicate.value in {"Like", "ILike", "NotLike", "NotILike"}:
             if "%%" in predicate.right.value:
@@ -690,7 +828,14 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
             predicate.value = "NotInList"
 
     if predicate.value in IN_REWRITES:
-        if predicate.right.node_type == NodeType.LITERAL and len(predicate.right.value) == 1:
+        # The binder may have pre-baked the IN-list into a CarcharSetWrapper
+        # (hash-only, not iterable, original values discarded). Skip the
+        # IN→Eq rewrite in that case — the evaluator hash-set path handles it.
+        if (
+            predicate.right.node_type == NodeType.LITERAL
+            and isinstance(predicate.right.value, (list, tuple, set, frozenset))
+            and len(predicate.right.value) == 1
+        ):
             telemetry.optimization_predicate_rewriter_in_to_equals += 1
             return dispatcher["rewrite_in_to_eq"](predicate)
 
@@ -867,34 +1012,12 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
 
 
 class PredicateRewriteStrategy(OptimizationStrategy):
-    def _rewrite_expression_list(self, expressions, telemetry):
-        if not expressions:
-            return expressions
-
-        rewritten = []
-        for expr in expressions:
-            rewritten.append(_rewrite_predicate(expr, telemetry))
-        return rewritten
-
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if not context.optimized_plan:
             context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
 
         if node.node_type == LogicalPlanStepType.Filter:
             node.condition = _rewrite_predicate(node.condition, self.telemetry)
-            context.optimized_plan[context.node_id] = node
-
-        if node.node_type == LogicalPlanStepType.Project:
-            node.columns = self._rewrite_expression_list(node.columns, self.telemetry)
-            context.optimized_plan[context.node_id] = node
-
-        if node.node_type in {LogicalPlanStepType.Aggregate, LogicalPlanStepType.AggregateAndGroup}:
-            if getattr(node, "groups", None):
-                node.groups = self._rewrite_expression_list(node.groups, self.telemetry)
-            if getattr(node, "aggregates", None):
-                node.aggregates = self._rewrite_expression_list(node.aggregates, self.telemetry)
-            if getattr(node, "projection", None):
-                node.projection = self._rewrite_expression_list(node.projection, self.telemetry)
             context.optimized_plan[context.node_id] = node
 
         return context

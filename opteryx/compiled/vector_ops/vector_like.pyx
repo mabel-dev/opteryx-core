@@ -2,6 +2,7 @@
 
 from draken.vectors.string_vector cimport StringVector, DrakenVarBuffer
 from draken.vectors.bool_vector cimport BoolVector
+from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 from cpython.bytes cimport PyBytes_AS_STRING
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
@@ -118,7 +119,7 @@ cpdef BoolVector vector_like(StringVector vec, bytes pattern, bint ignore_case=F
 
     try:
         # Dictionary-encoded path: check each unique value once
-        if vec._encoding == 2:  # DRAKEN_ENCODING_DICTIONARY
+        if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
             dict_values_buf = vec._dict_values
             if dict_values_buf == NULL or dict_values_buf.data == NULL:
                 return out  # Fallback to empty result

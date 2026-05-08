@@ -251,10 +251,7 @@ cdef class MinBytesAggregate(UngroupedAggregate):
         if self._col_type == _VTYPE_STRING:
             svec = <StringVector>raw
             if svec._encoding == DRAKEN_ENCODING_RLE:
-                morsel_min = svec.min()
-                if morsel_min is not None:
-                    if self._result is None or morsel_min < self._result:
-                        self._result = morsel_min
+                self._scan_rle_min(svec)
                 return
             if svec._has_const:
                 if not svec._const_is_null:
@@ -266,6 +263,17 @@ cdef class MinBytesAggregate(UngroupedAggregate):
                         ptr_a = self._result; len_a = len(self._result)
                         if compare_bytes(ptr_b, len_b, ptr_a, len_a) < 0:
                             self._result = ptr_b[:len_b]
+                return
+            # Dict-encoded fast path: scan referenced, non-null dict entries
+            # only.  Only worthwhile when K << N — at K ~ N this loses to
+            # the dense path's tighter inner loop.
+            if (
+                svec._encoding == DRAKEN_ENCODING_DICTIONARY
+                and svec._dict_codes != NULL
+                and svec._dict_values != NULL
+                and svec.c_dict_size() <= (nrows >> 2)
+            ):
+                self._scan_dict_min(svec)
                 return
             buf   = svec.ptr
             nulls = buf.null_bitmap
@@ -286,6 +294,54 @@ cdef class MinBytesAggregate(UngroupedAggregate):
                 b = val_py if isinstance(val_py, bytes) else str(val_py).encode()
                 if self._result is None or b < self._result:
                     self._result = b
+
+    cdef void _scan_rle_min(self, StringVector svec) except *:
+        # RLE scan: compare run values only (K instead of N).  When a
+        # row-level null bitmap is present we can't know which runs are
+        # referenced solely by null rows, so fall back to materialization.
+        if svec.c_rle_null_bitmap() != NULL:
+            morsel_min = svec.min()
+            if morsel_min is not None:
+                if self._result is None or morsel_min < self._result:
+                    self._result = morsel_min
+            return
+        cdef Py_ssize_t n_runs = svec.c_rle_run_count()
+        cdef Py_ssize_t r, vlen, best_len
+        cdef const uint8_t* vptr
+        cdef const char* best_ptr
+        for r in range(n_runs):
+            vptr = svec.c_rle_value_ptr(r, &vlen)
+            if vptr == NULL or svec.c_rle_run_length(r) <= 0:
+                continue
+            if self._result is None:
+                self._result = (<const char*>vptr)[:vlen]
+            else:
+                best_ptr = self._result
+                best_len = len(self._result)
+                if compare_bytes(<const char*>vptr, <size_t>vlen, best_ptr, <size_t>best_len) < 0:
+                    self._result = (<const char*>vptr)[:vlen]
+
+    cdef void _scan_dict_min(self, StringVector svec) except *:
+        cdef const int64_t* counts = svec.c_dict_code_counts_ptr()
+        cdef Py_ssize_t dict_size = svec.c_dict_size()
+        cdef Py_ssize_t di, vlen, best_len
+        cdef const uint8_t* vptr
+        cdef const char* best_ptr
+        for di in range(dict_size):
+            if counts[di] <= 0:
+                continue
+            if svec.c_dict_value_is_null(di):
+                continue
+            vptr = svec.c_dict_value_ptr(di, &vlen)
+            if vptr == NULL:
+                continue
+            if self._result is None:
+                self._result = (<const char*>vptr)[:vlen]
+            else:
+                best_ptr = self._result
+                best_len = len(self._result)
+                if compare_bytes(<const char*>vptr, <size_t>vlen, best_ptr, <size_t>best_len) < 0:
+                    self._result = (<const char*>vptr)[:vlen]
 
     cdef int64_t get_result_i64(self) noexcept:
         return 0
@@ -336,10 +392,7 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
         if self._col_type == _VTYPE_STRING:
             svec = <StringVector>raw
             if svec._encoding == DRAKEN_ENCODING_RLE:
-                morsel_max = svec.max()
-                if morsel_max is not None:
-                    if self._result is None or morsel_max > self._result:
-                        self._result = morsel_max
+                self._scan_rle_max(svec)
                 return
             if svec._has_const:
                 if not svec._const_is_null:
@@ -351,6 +404,14 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
                         ptr_a = self._result; len_a = len(self._result)
                         if compare_bytes(ptr_b, len_b, ptr_a, len_a) > 0:
                             self._result = ptr_b[:len_b]
+                return
+            if (
+                svec._encoding == DRAKEN_ENCODING_DICTIONARY
+                and svec._dict_codes != NULL
+                and svec._dict_values != NULL
+                and svec.c_dict_size() <= (nrows >> 2)
+            ):
+                self._scan_dict_max(svec)
                 return
             buf   = svec.ptr
             nulls = buf.null_bitmap
@@ -371,6 +432,51 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
                 b = val_py if isinstance(val_py, bytes) else str(val_py).encode()
                 if self._result is None or b > self._result:
                     self._result = b
+
+    cdef void _scan_rle_max(self, StringVector svec) except *:
+        if svec.c_rle_null_bitmap() != NULL:
+            morsel_max = svec.max()
+            if morsel_max is not None:
+                if self._result is None or morsel_max > self._result:
+                    self._result = morsel_max
+            return
+        cdef Py_ssize_t n_runs = svec.c_rle_run_count()
+        cdef Py_ssize_t r, vlen, best_len
+        cdef const uint8_t* vptr
+        cdef const char* best_ptr
+        for r in range(n_runs):
+            vptr = svec.c_rle_value_ptr(r, &vlen)
+            if vptr == NULL or svec.c_rle_run_length(r) <= 0:
+                continue
+            if self._result is None:
+                self._result = (<const char*>vptr)[:vlen]
+            else:
+                best_ptr = self._result
+                best_len = len(self._result)
+                if compare_bytes(<const char*>vptr, <size_t>vlen, best_ptr, <size_t>best_len) > 0:
+                    self._result = (<const char*>vptr)[:vlen]
+
+    cdef void _scan_dict_max(self, StringVector svec) except *:
+        cdef const int64_t* counts = svec.c_dict_code_counts_ptr()
+        cdef Py_ssize_t dict_size = svec.c_dict_size()
+        cdef Py_ssize_t di, vlen, best_len
+        cdef const uint8_t* vptr
+        cdef const char* best_ptr
+        for di in range(dict_size):
+            if counts[di] <= 0:
+                continue
+            if svec.c_dict_value_is_null(di):
+                continue
+            vptr = svec.c_dict_value_ptr(di, &vlen)
+            if vptr == NULL:
+                continue
+            if self._result is None:
+                self._result = (<const char*>vptr)[:vlen]
+            else:
+                best_ptr = self._result
+                best_len = len(self._result)
+                if compare_bytes(<const char*>vptr, <size_t>vlen, best_ptr, <size_t>best_len) > 0:
+                    self._result = (<const char*>vptr)[:vlen]
 
     cdef int64_t get_result_i64(self) noexcept:
         return 0

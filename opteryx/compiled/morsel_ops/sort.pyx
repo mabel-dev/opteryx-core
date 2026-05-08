@@ -77,42 +77,13 @@ cdef inline uint32_t _dict_read_code(const DictAccessor* acc, Py_ssize_t i) noex
     return (<uint32_t*>acc.codes)[i]
 
 
-# ── SIMD remap ────────────────────────────────────────────────────────────────
-# These functions remap codes in-place (uint8→uint8, uint16→uint16).
-# They are declared here for external callers that mutate the codes buffer
-# across many morsels.  morsel_sort itself uses scalar scatter-to-uint64.
-
-cdef extern from "simd_remap.h" nogil:
-    void simd_remap_u8(uint8_t* codes, size_t n, const uint8_t* remap_table)
-    void simd_remap_u16(uint16_t* codes, size_t n, const uint16_t* remap_table)
-    void simd_remap_u32(uint32_t* codes, size_t n, const uint32_t* remap_table)
-
-
-# ── Inline C++: memcmp tiebreak + std::sort helpers ──────────────────────────
+# ── Inline C++: std::sort helpers ────────────────────────────────────────────
 
 cdef extern from * nogil:
     """
     #include <algorithm>
     #include <cstdint>
     #include <cstring>
-
-    static void _do_tiebreak_sort(
-        uint32_t* begin,
-        uint32_t* end,
-        const char* data,
-        const int32_t* offsets,
-        bool ascending
-    ) {
-        std::stable_sort(begin, end,
-            [data, offsets, ascending](uint32_t a, uint32_t b) {
-                int32_t sa = offsets[a], la = offsets[a + 1] - sa;
-                int32_t sb = offsets[b], lb = offsets[b + 1] - sb;
-                int32_t cm = (la < lb) ? la : lb;
-                int r = cm ? std::memcmp(data + sa, data + sb, (size_t)cm) : 0;
-                if (r == 0) r = la - lb;
-                return ascending ? (r < 0) : (r > 0);
-            });
-    }
 
     static void _sort_strings(
         uint32_t* perm,
@@ -164,14 +135,6 @@ cdef extern from * nogil:
             });
     }
     """
-    void _do_tiebreak_sort(
-        uint32_t* begin,
-        uint32_t* end,
-        const char* data,
-        const int32_t* offsets,
-        bint ascending,
-    ) nogil
-
     void _sort_strings(
         uint32_t* perm,
         uint32_t n,
@@ -244,47 +207,6 @@ cdef void _radix_sort(
     # If an odd number of passes ran, the result ended up in tmp; copy back.
     if src != perm:
         memcpy(perm, src, <size_t>n * sizeof(uint32_t))
-
-
-# ── String prefix tiebreak ────────────────────────────────────────────────────
-
-cdef void _tiebreak_strings(
-    uint32_t* perm,
-    Py_ssize_t n,
-    const uint64_t* prefix_keys,
-    const char* str_data,
-    const int32_t* str_offsets,
-    bint ascending,
-) noexcept nogil:
-    """
-    After a prefix radix sort, stable-sort any sub-run whose strings share
-    the same 7-byte prefix AND contains at least one string longer than 7
-    bytes (shorter strings are fully resolved by the prefix key).
-    """
-    cdef Py_ssize_t lo = 0, hi, i
-    cdef uint64_t cur_key
-    cdef bint needs_tiebreak
-    cdef uint32_t row_idx
-
-    while lo < n:
-        cur_key = prefix_keys[perm[lo]]
-        hi = lo + 1
-        while hi < n and prefix_keys[perm[hi]] == cur_key:
-            hi += 1
-
-        if hi > lo + 1:
-            needs_tiebreak = False
-            for i in range(lo, hi):
-                row_idx = perm[i]
-                if str_offsets[row_idx + 1] - str_offsets[row_idx] > 7:
-                    needs_tiebreak = True
-                    break
-            if needs_tiebreak:
-                _do_tiebreak_sort(
-                    perm + lo, perm + hi, str_data, str_offsets, ascending
-                )
-
-        lo = hi
 
 
 # ── Key transform helpers ─────────────────────────────────────────────────────
@@ -462,8 +384,8 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
 
     Returns
     -------
-    array('I')
-        uint32 permutation: result[i] is the original row index for sorted
+    array('i')
+        int32 permutation: result[i] is the original row index for sorted
         position i.  Apply with ``morsel.take(perm)``.
     """
     if len(column_names) != len(ascending):
@@ -473,7 +395,7 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
 
     cdef Py_ssize_t n = len(morsel)
     if n == 0:
-        return array("I")
+        return array("i")
 
     # Allocate all three C buffers once; reuse keys across every column.
     # perm and tmp swap roles each radix pass; keys is overwritten per column.
@@ -499,7 +421,7 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
     cdef int n_passes
     cdef uint32_t* remap = NULL
     cdef uint64_t flip
-    cdef unsigned int[::1] rv
+    cdef int[::1] rv
 
     try:
         # LSD: iterate columns from least-significant to most-significant.
@@ -596,8 +518,7 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
                         keys[i] = <uint64_t>signed_mv[i] ^ key_xor
                     _radix_sort(perm_buf, tmp_buf, keys, n, 8)
 
-        # Copy perm into a Python array and return.
-        result = array("I", bytes(n * sizeof(uint32_t)))
+        result = array("i", b"\x00" * (n * sizeof(uint32_t)))
         rv = result
         memcpy(&rv[0], perm_buf, n * sizeof(uint32_t))
         return result

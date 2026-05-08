@@ -59,6 +59,11 @@ class OptimizerContext:
 
 
 class OptimizationStrategy:
+    optimization_technique: str = "heuristic"
+    """Strategies that consult plan statistics to make decisions set this to "cost".
+    The optimizer refreshes statistics before running a "cost" strategy when the
+    plan's ``statistics_are_stale`` flag is set."""
+
     def __init__(self, telemetry):
         self.telemetry = telemetry
 

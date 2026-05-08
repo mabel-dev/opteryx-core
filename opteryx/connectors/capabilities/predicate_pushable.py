@@ -36,6 +36,10 @@ class PredicatePushable:
         "Like": False,
         "NotLike": False,
         "Between": False,
+        "IsNull": False,
+        "IsNotNull": False,
+        "IsEmpty": False,
+        "IsNotEmpty": False,
     }
 
     OPS_XLAT: Dict[str, str] = {
@@ -61,6 +65,7 @@ class PredicatePushable:
                 NodeType.LITERAL,
                 NodeType.COMPARISON_OPERATOR,
                 NodeType.BETWEEN,
+                NodeType.UNARY_OPERATOR,
             )
             for n in all_nodes
         ):

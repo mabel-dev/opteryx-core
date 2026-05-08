@@ -18,7 +18,12 @@ Draken-native implementation (no PyArrow).
 
 from typing import Generator, Set, Tuple
 
+from libc.stdint cimport int32_t, int64_t, uint64_t
+from cpython.object cimport PyObject_Hash
+
 from draken.vectors.vector cimport Vector
+from draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
+
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, QueryProperties
 from opteryx.types.schema import FlatColumn
@@ -28,6 +33,125 @@ from opteryx import EOS
 from . import BasePlanNode
 
 INTERNAL_BATCH_SIZE: int = 10000
+
+
+cpdef tuple build_rows_indices_and_column_draken(object column_vector):
+    """Build row indices and flattened column data from ARRAY column (Draken-native).
+
+    Parameters:
+        column_vector: Draken Vector (ArrayVector for ARRAY columns)
+
+    Returns:
+        tuple of (Int64Vector, Draken vector) — row indices and flattened typed data
+    """
+    cdef int64_t row_count = len(column_vector)
+    cdef int64_t i
+    cdef int64_t total_size = 0
+    cdef list flat_data_list = []
+    cdef IntBuffer indices_buf
+    cdef object element
+
+    for i in range(row_count):
+        element = column_vector[i]
+        if element is not None:
+            if hasattr(element, '__iter__') and not isinstance(element, (str, bytes)):
+                for item in element:
+                    flat_data_list.append(item)
+                    total_size += 1
+            else:
+                flat_data_list.append(element)
+                total_size += 1
+
+    if total_size == 0:
+        return (int64_from_sequence(None), vector_from_sequence([]))
+
+    indices_buf = IntBuffer(total_size)
+    for i in range(row_count):
+        element = column_vector[i]
+        if element is not None:
+            if hasattr(element, '__iter__') and not isinstance(element, (str, bytes)):
+                for item in element:
+                    indices_buf.append(i)
+            else:
+                indices_buf.append(i)
+
+    cdef const int64_t[::1] mv = indices_buf.get_buffer()
+    cdef Int64Vector vec = int64_from_sequence(mv)
+    vec._arrow_data_buf = indices_buf
+    return (vec, vector_from_sequence(flat_data_list))
+
+
+cpdef tuple build_filtered_rows_indices_and_column_draken(object column_vector, set valid_values):
+    """Build row indices and flattened column data for filtered ARRAY column (Draken-native).
+
+    Parameters:
+        column_vector: Draken Vector
+        valid_values:  set of values to include in results
+
+    Returns:
+        tuple of (Int64Vector, Draken vector) — row indices and flattened filtered data
+    """
+    cdef int64_t row_count = len(column_vector)
+    cdef int64_t i
+    cdef int64_t total_matched = 0
+    cdef list flat_data_list = []
+    cdef IntBuffer indices_buf = IntBuffer(row_count)
+    cdef object element, item
+
+    for i in range(row_count):
+        element = column_vector[i]
+        if element is not None:
+            if hasattr(element, '__iter__') and not isinstance(element, (str, bytes)):
+                for item in element:
+                    if item in valid_values:
+                        flat_data_list.append(item)
+                        indices_buf.append(i)
+                        total_matched += 1
+            else:
+                if element in valid_values:
+                    flat_data_list.append(element)
+                    indices_buf.append(i)
+                    total_matched += 1
+
+    if total_matched == 0:
+        return (int64_from_sequence(None), vector_from_sequence([]))
+
+    cdef const int64_t[::1] mv = indices_buf.get_buffer()
+    cdef Int64Vector vec = int64_from_sequence(mv)
+    vec._arrow_data_buf = indices_buf
+    return (vec, vector_from_sequence(flat_data_list))
+
+
+cpdef tuple list_distinct(Vector values, Int64Vector indices, CarcharSetWrapper seen_hashes=None):
+    """
+    Filter duplicates from values using hash-based deduplication (Draken-native).
+
+    Args:
+        values:       Draken Vector of values
+        indices:      Int64Vector of row indices
+        seen_hashes:  CarcharSetWrapper to track seen hash values (shared across calls)
+
+    Returns:
+        tuple of (deduplicated_values, deduplicated_indices_vector, seen_hashes)
+    """
+    cdef Py_ssize_t i = 0
+    cdef Py_ssize_t n = len(values)
+    cdef uint64_t hash_value
+    cdef object v
+    cdef list new_values_list = []
+    cdef list new_indices_list = []
+
+    if seen_hashes is None:
+        seen_hashes = CarcharSetWrapper()
+
+    for i in range(n):
+        v = values[i]
+        hash_value = <uint64_t>(PyObject_Hash(v) & 0xFFFFFFFFFFFFFFFF)
+        if seen_hashes.insert(hash_value):
+            new_values_list.append(v)
+            new_indices_list.append(indices[i])
+
+    return vector_from_sequence(new_values_list), vector_from_sequence(new_indices_list), seen_hashes
 
 
 def _cross_join_unnest_column(
@@ -55,10 +179,6 @@ def _cross_join_unnest_column(
     Yields:
         Morsel objects with unnested rows.
     """
-    from opteryx.compiled.joins import build_rows_indices_and_column_draken
-    from opteryx.compiled.joins import build_filtered_rows_indices_and_column_draken
-    from opteryx.compiled.joins import list_distinct
-
     if morsel.num_rows == 0:
         return
 

@@ -1,6 +1,6 @@
 # cython: language_level=3
 
-from libc.stdint cimport int32_t, int8_t, intptr_t, uint32_t, uint64_t, uint8_t
+from libc.stdint cimport int32_t, int8_t, int64_t, intptr_t, uint32_t, uint64_t, uint8_t
 from draken.core.buffers cimport ConstAccessor
 from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.core.buffers cimport DictAccessor
@@ -34,11 +34,37 @@ cdef class StringVector(Vector):
     cdef bint _has_const
     cdef bint _const_is_null
     cdef DrakenRLEBuffer* _rle_buffer
+    cdef int64_t* _dict_code_counts
+    cdef bint _dict_code_counts_valid
 
     cdef DictAccessor* dict_accessor(self) noexcept
     cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
+
+    # Encoded-form accessors for dict/RLE-aware operators.
+    # Each method assumes the caller has already verified the encoding.
+    cdef Py_ssize_t c_length(self) noexcept nogil
+    cdef Py_ssize_t c_dict_size(self) noexcept nogil
+    cdef uint8_t c_dict_code_width(self) noexcept nogil
+    cdef const uint8_t* c_dict_codes_ptr(self) noexcept nogil
+    cdef const uint8_t* c_dict_value_ptr(self, Py_ssize_t i, Py_ssize_t* out_len) noexcept nogil
+    cdef bint c_dict_value_is_null(self, Py_ssize_t i) noexcept nogil
+    cdef const uint8_t* c_row_null_bitmap(self) noexcept nogil
+    cdef const int64_t* c_dict_code_counts_ptr(self) except NULL
+
+    cdef Py_ssize_t c_rle_run_count(self) noexcept nogil
+    cdef const uint8_t* c_rle_value_ptr(self, Py_ssize_t i, Py_ssize_t* out_len) noexcept nogil
+    cdef int32_t c_rle_run_length(self, Py_ssize_t i) noexcept nogil
+    cdef const int32_t* c_rle_run_lengths_ptr(self) noexcept nogil
+    cdef const uint8_t* c_rle_null_bitmap(self) noexcept nogil
+
+    # Returns the final mixed hash for the i-th dict entry, matching the
+    # value c_hash_into writes for a row pointing to that dict entry when
+    # the destination buffer is zeroed.
+    cdef uint64_t c_dict_value_hash(self, Py_ssize_t i) noexcept nogil
+    # Same shape, for the i-th RLE run value.
+    cdef uint64_t c_rle_run_value_hash(self, Py_ssize_t i) noexcept nogil
 
     cpdef BoolVector equals(self, bytes value)
     cpdef BoolVector not_equals(self, bytes value)
@@ -194,3 +220,5 @@ cdef StringVector from_arrow_struct(object array)
 
 cpdef StringVector uppercase(StringVector input)
 cpdef StringVector lowercase(StringVector input)
+
+cpdef StringVector _test_make_rle_string(list values, list run_lengths, object null_bitmap=*)

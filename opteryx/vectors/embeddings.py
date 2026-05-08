@@ -1,75 +1,43 @@
 from __future__ import annotations
 
+import math
 import os
 import re
+from array import array
 from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
 
+from draken.vectors.vector_vector import VectorVector
+
 from opteryx.exceptions import InvalidConfigurationError
 from opteryx.third_party.cyan4973.xxhash import hash_bytes
-from opteryx.vectors import _embedding_math as numpy
+from opteryx.vectors import vector_math
 
 _embedding_provider = None
 _default_embedding_provider = None
-_embedding_cache = OrderedDict()
+# Cache stores raw fp16 row bytes (dimensions * 2 bytes) keyed by source text.
+_embedding_cache: "OrderedDict[str, tuple[int, bytes]]" = OrderedDict()
 _EMBEDDING_CACHE_MAX_ENTRIES = 4096
 _STATIC_FEATURE_CACHE_MAX_ENTRIES = 65536
 _STATIC_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+(?:['_-][A-Za-z0-9]+)*|[^\w\s]", re.UNICODE)
 _STATIC_STOPWORDS = frozenset(
     {
-        "a",
-        "an",
-        "and",
-        "are",
-        "as",
-        "at",
-        "be",
-        "but",
-        "by",
-        "for",
-        "from",
-        "has",
-        "have",
-        "i",
-        "if",
-        "in",
-        "is",
-        "it",
-        "its",
-        "me",
-        "my",
-        "of",
-        "on",
-        "or",
-        "our",
-        "so",
-        "that",
-        "the",
-        "their",
-        "them",
-        "there",
-        "they",
-        "this",
-        "to",
-        "was",
-        "we",
-        "were",
-        "with",
-        "would",
-        "you",
+        "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
+        "has", "have", "i", "if", "in", "is", "it", "its", "me", "my", "of",
+        "on", "or", "our", "so", "that", "the", "their", "them", "there",
+        "they", "this", "to", "was", "we", "were", "with", "would", "you",
         "your",
     }
 )
 
 
 class _StaticHashEmbeddingProvider:
-    """
-    Fast static embedding provider.
+    """Fast static embedding provider (model2vec-style hashed projection).
 
-    This is a model2vec-style compromise: tokenize, map features into a fixed embedding
-    space with deterministic hashing, then pool and normalize. It is dramatically cheaper
-    than transformer inference, but quality is lower and more lexical.
+    Tokenize, map features into a fixed embedding space with deterministic
+    hashing, then pool, L2-normalize, and pack to fp16 inside a single Cython
+    kernel call per text.
     """
 
     def __init__(
@@ -87,7 +55,7 @@ class _StaticHashEmbeddingProvider:
         self._char_ngram_min = char_ngram_min
         self._char_ngram_max = max(char_ngram_min, char_ngram_max)
         self._feature_cache = OrderedDict()
-        self._projection_scale = numpy.float32(2**-0.5)
+        self._projection_scale = float(2 ** -0.5)
 
     @property
     def dimensions(self) -> int:
@@ -116,15 +84,10 @@ class _StaticHashEmbeddingProvider:
 
         first = hash_bytes(feature)
         second = hash_bytes(b"\x01" + feature)
+        scale = self._projection_scale
         projections = (
-            (
-                first % self._dimensions,
-                self._projection_scale if ((first >> 63) & 1) == 0 else -self._projection_scale,
-            ),
-            (
-                second % self._dimensions,
-                self._projection_scale if ((second >> 63) & 1) == 0 else -self._projection_scale,
-            ),
+            (first % self._dimensions, scale if ((first >> 63) & 1) == 0 else -scale),
+            (second % self._dimensions, scale if ((second >> 63) & 1) == 0 else -scale),
         )
         self._feature_cache[feature] = projections
         self._feature_cache.move_to_end(feature)
@@ -132,48 +95,52 @@ class _StaticHashEmbeddingProvider:
             self._feature_cache.popitem(last=False)
         return projections
 
-    def _add_feature(self, vector: numpy.ndarray, feature: bytes, weight: float) -> None:
-        for index, sign in self._feature_projections(feature):
-            vector[index] += sign * weight
-
-    def embed_text(self, text: str) -> numpy.ndarray:
-        vector = numpy.zeros(self._dimensions, dtype=numpy.float32)
+    def _gather_contributions(self, text: str) -> tuple[array, array]:
+        """Return (indices, contributions) typed arrays for a single text."""
+        indices = array("i")
+        contributions = array("f")
         tokens = self._tokenize(text)
         if not tokens:
-            return vector
+            return indices, contributions
 
         for position, token in enumerate(tokens):
             encoded = token.encode("utf8", errors="ignore")
             if not encoded:
                 continue
-            self._add_feature(vector, b"u:" + encoded, 1.0)
+            for idx, sign in self._feature_projections(b"u:" + encoded):
+                indices.append(idx)
+                contributions.append(sign)
 
             if self._include_bigrams and position + 1 < len(tokens):
                 next_token = tokens[position + 1].encode("utf8", errors="ignore")
                 if next_token:
-                    self._add_feature(vector, b"b:" + encoded + b" " + next_token, 0.5)
+                    for idx, sign in self._feature_projections(b"b:" + encoded + b" " + next_token):
+                        indices.append(idx)
+                        contributions.append(sign * 0.5)
 
             wrapped = f"<{token}>"
             max_ngram = min(self._char_ngram_max, len(wrapped))
             for ngram_size in range(self._char_ngram_min, max_ngram + 1):
                 for start in range(len(wrapped) - ngram_size + 1):
-                    self._add_feature(
-                        vector,
-                        b"g:" + wrapped[start : start + ngram_size].encode("utf8", errors="ignore"),
-                        0.25,
-                    )
+                    feature = b"g:" + wrapped[start : start + ngram_size].encode("utf8", errors="ignore")
+                    for idx, sign in self._feature_projections(feature):
+                        indices.append(idx)
+                        contributions.append(sign * 0.25)
+        return indices, contributions
 
-        norm = numpy.norm(vector)
-        if norm != 0.0:
-            vector = [value / norm for value in vector]
-        return vector
+    def embed_text(self, text: str) -> VectorVector:
+        vv = vector_math.new_matrix(1, self._dimensions)
+        indices, contributions = self._gather_contributions(text)
+        vector_math.pack_static_hash_row(vv, 0, indices, contributions)
+        return vv
 
-    def embed_texts(self, texts: list[str]) -> numpy.ndarray:
-        if not texts:
-            return numpy.empty((0, self._dimensions), dtype=numpy.float32)
-        return numpy.vstack([self.embed_text(text) for text in texts]).astype(
-            numpy.float32, copy=False
-        )
+    def embed_texts(self, texts: list[str]) -> VectorVector:
+        n = len(texts)
+        vv = vector_math.new_matrix(n, self._dimensions)
+        for i, text in enumerate(texts):
+            indices, contributions = self._gather_contributions(text)
+            vector_math.pack_static_hash_row(vv, i, indices, contributions)
+        return vv
 
     def _extract_active_texts(self, values):
         if hasattr(values, "to_arrow"):
@@ -194,20 +161,16 @@ class _StaticHashEmbeddingProvider:
             texts.append(value)
         return positions, texts
 
-    def score_texts(self, query_text: str, texts: list[str]) -> numpy.ndarray:
+    def score_texts(self, query_text: str, texts: list[str]) -> list[float]:
         if not texts:
-            return numpy.empty(0, dtype=numpy.float32)
+            return []
         embedded = self.embed_texts([query_text, *texts])
-        query_vector = embedded[0]
-        row_vectors = embedded[1:]
-        return [numpy.dot(row, query_vector) for row in row_vectors]
+        # Dot product of fp16 query against each fp16 row, accumulated in fp32.
+        return [vector_math.dot_fp16(embedded, 0, i + 1) for i in range(len(texts))]
 
     def score_string_vector(self, query_text: str, values):
         positions, texts = self._extract_active_texts(values)
-        return (
-            numpy.asarray(positions, dtype=numpy.int64),
-            self.score_texts(query_text, texts),
-        )
+        return (positions, self.score_texts(query_text, texts))
 
 
 class _HybridEmbeddingProvider:
@@ -231,19 +194,19 @@ class _HybridEmbeddingProvider:
         self._reranker = _MiniLMNativeEmbeddingProvider()
         self._rerank_k = max(1, rerank_k)
 
-    def embed_text(self, text: str) -> list[float]:
+    def embed_text(self, text: str) -> VectorVector:
         return self._reranker.embed_text(text)
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    def embed_texts(self, texts: list[str]) -> VectorVector:
         return self._reranker.embed_texts(texts)
 
     def _tokenize(self, text: str) -> list[str]:
         return self._static._tokenize(text)
 
-    def _lexical_scores(self, query_text: str, texts: list[str]) -> numpy.ndarray:
+    def _lexical_scores(self, query_text: str, texts: list[str]) -> list[float]:
         query_tokens = self._tokenize(query_text)
         if not query_tokens or not texts:
-            return numpy.zeros(len(texts), dtype=numpy.float32)
+            return [0.0] * len(texts)
 
         query_term_counts = {}
         for token in query_tokens:
@@ -278,25 +241,25 @@ class _HybridEmbeddingProvider:
 
         doc_count = max(1, len(texts))
         average_doc_length = max(1.0, total_doc_length / doc_count)
-        k1 = numpy.float32(1.5)
-        b = numpy.float32(0.75)
+        k1 = 1.5
+        b = 0.75
         term_idf = {
-            term: numpy.float32(max(0.05, numpy.log1p((doc_count - df + 0.5) / (df + 0.5))))
+            term: max(0.05, math.log1p((doc_count - df + 0.5) / (df + 0.5)))
             for term, df in document_frequency.items()
         }
         bigram_idf = {
-            bigram: numpy.float32(max(0.05, numpy.log1p((doc_count - df + 0.5) / (df + 0.5))))
+            bigram: max(0.05, math.log1p((doc_count - df + 0.5) / (df + 0.5)))
             for bigram, df in bigram_frequency.items()
         }
 
-        scores = numpy.zeros(len(texts), dtype=numpy.float32)
+        scores = [0.0] * len(texts)
         query_len = len(query_tokens)
 
         for index, (tokens, token_counts, token_positions, doc_bigrams) in enumerate(docs):
             if not tokens:
                 continue
 
-            score = numpy.float32(0.0)
+            score = 0.0
             matched_terms = 0
             doc_length = len(tokens)
             length_norm = k1 * (1.0 - b + b * (doc_length / average_doc_length))
@@ -305,14 +268,14 @@ class _HybridEmbeddingProvider:
                 if tf == 0:
                     continue
                 matched_terms += 1
-                query_weight = numpy.float32(1.0 + 0.25 * min(query_term_counts[term] - 1, 2))
+                query_weight = 1.0 + 0.25 * min(query_term_counts[term] - 1, 2)
                 tf_component = ((k1 + 1.0) * tf) / (length_norm + tf)
-                score += term_idf[term] * query_weight * numpy.float32(tf_component)
+                score += term_idf[term] * query_weight * tf_component
 
             if query_bigrams:
                 for bigram in query_bigrams:
                     if bigram in doc_bigrams:
-                        score += numpy.float32(2.5) * bigram_idf[bigram]
+                        score += 2.5 * bigram_idf[bigram]
 
             if query_len > 1 and len(tokens) >= query_len:
                 contiguous = False
@@ -321,7 +284,7 @@ class _HybridEmbeddingProvider:
                         contiguous = True
                         break
                 if contiguous:
-                    score += numpy.float32(3.0)
+                    score += 3.0
 
             if matched_terms >= 2:
                 covered_positions = []
@@ -331,10 +294,10 @@ class _HybridEmbeddingProvider:
                         covered_positions.append(positions[0])
                 if len(covered_positions) >= 2:
                     span_width = max(1, max(covered_positions) - min(covered_positions) + 1)
-                    score += numpy.float32((matched_terms * matched_terms) / span_width)
+                    score += (matched_terms * matched_terms) / span_width
 
             coverage = matched_terms / max(1, len(query_term_set))
-            score *= numpy.float32(0.25 + 0.75 * coverage)
+            score *= 0.25 + 0.75 * coverage
             scores[index] = score
 
         return scores
@@ -342,10 +305,7 @@ class _HybridEmbeddingProvider:
     def score_string_vector(self, query_text: str, values):
         positions, texts = self._static._extract_active_texts(values)
         if not texts:
-            return (
-                numpy.empty(0, dtype=numpy.int64),
-                numpy.empty(0, dtype=numpy.float32),
-            )
+            return ([], [])
 
         lexical_scores = self._lexical_scores(query_text, texts)
         shortlist = min(
@@ -355,27 +315,22 @@ class _HybridEmbeddingProvider:
         if shortlist >= len(texts):
             candidate_indices = list(range(len(texts)))
         else:
-            candidate_indices = numpy.argsort(lexical_scores, reverse=True)[:shortlist]
+            candidate_indices = vector_math.argsort(lexical_scores, reverse=True)[:shortlist]
 
         candidate_texts = [texts[index] for index in candidate_indices]
-        rerank_embeddings = self._reranker.embed_texts([query_text, *candidate_texts])
-        query_vector = rerank_embeddings[0]
-        row_vectors = rerank_embeddings[1:]
-
-        try:
-            from opteryx.compiled.nanobind import vector_search
-
-            rerank_scores = list(vector_search.score_cosine(query_vector, row_vectors))
-        except (ImportError, ValueError):
-            rerank_scores = [0.0] * len(candidate_texts)
-            query_norm = numpy.norm(query_vector)
-            if query_norm != 0.0:
-                for index, row in enumerate(row_vectors):
-                    row_norm = numpy.norm(row)
-                    if row_norm != 0.0:
-                        rerank_scores[index] = numpy.dot(row, query_vector) / (
-                            row_norm * query_norm
-                        )
+        rerank_vv = self._reranker.embed_texts([query_text, *candidate_texts])
+        # Cosine of fp16 query against fp16 rerank rows, accumulated in fp32.
+        query_norm_sq = vector_math.dot_fp16(rerank_vv, 0, 0)
+        rerank_scores = [0.0] * len(candidate_texts)
+        if query_norm_sq > 0.0:
+            query_norm = math.sqrt(query_norm_sq)
+            for index in range(len(candidate_texts)):
+                row_idx = index + 1
+                row_norm_sq = vector_math.dot_fp16(rerank_vv, row_idx, row_idx)
+                if row_norm_sq > 0.0:
+                    rerank_scores[index] = vector_math.dot_fp16(rerank_vv, 0, row_idx) / (
+                        math.sqrt(row_norm_sq) * query_norm
+                    )
 
         final_scores = [score * 0.15 for score in lexical_scores]
         for candidate_index, rerank_score in zip(candidate_indices, rerank_scores):
@@ -393,12 +348,32 @@ class _MiniLMNativeEmbeddingProvider:
         model_path = model_dir / "model.onnx"
         vocab_path = model_dir / "vocab.txt"
         self._embedder = minilm_native.MiniLMEmbedder(str(model_path), str(vocab_path), 256)
+        self._dimensions = int(self._embedder.dimensions)
 
-    def embed_text(self, text: str) -> list[float]:
-        return self._embedder.embed_text(text)
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        return self._embedder.embed_texts(texts)
+    def embed_text(self, text: str) -> VectorVector:
+        fp32_row = array("f", self._embedder.embed_text(text))
+        if len(fp32_row) != self._dimensions:
+            raise InvalidConfigurationError(
+                config_item="embedding_provider",
+                provided_value=f"width {len(fp32_row)}",
+                valid_value_description=f"a vector of width {self._dimensions}.",
+            )
+        vv = vector_math.new_matrix(1, self._dimensions)
+        vector_math.pack_fp32_row(vv, 0, fp32_row)
+        return vv
+
+    def embed_texts(self, texts: list[str]) -> VectorVector:
+        rows = self._embedder.embed_texts(texts)
+        n = len(rows)
+        vv = vector_math.new_matrix(n, self._dimensions)
+        for i, row in enumerate(rows):
+            fp32_row = array("f", row)
+            vector_math.pack_fp32_row(vv, i, fp32_row)
+        return vv
 
     def score_string_vector(self, query_text: str, values):
         scorer = getattr(self._embedder, "score_string_vector", None)
@@ -415,10 +390,7 @@ class _MiniLMNativeEmbeddingProvider:
             null_buffer,
             len(values),
         )
-        return (
-            numpy.asarray(positions, dtype=numpy.int64),
-            numpy.asarray(scores, dtype=numpy.float32),
-        )
+        return (list(positions), list(scores))
 
 
 def _load_default_embedding_provider():
@@ -477,7 +449,6 @@ def create_static_embedding_provider(
     char_ngram_min: int = 3,
     char_ngram_max: int = 4,
 ):
-    """Create a fast static embedding provider for search/ranking workloads."""
     return _StaticHashEmbeddingProvider(
         dimensions=dimensions,
         include_bigrams=include_bigrams,
@@ -494,7 +465,6 @@ def create_hybrid_embedding_provider(
     char_ngram_min: int = 3,
     char_ngram_max: int = 4,
 ):
-    """Create a fast-recall, MiniLM-reranked embedding provider."""
     return _HybridEmbeddingProvider(
         static_dimensions=static_dimensions,
         rerank_k=rerank_k,
@@ -511,7 +481,6 @@ def use_static_embedding_provider(
     char_ngram_min: int = 3,
     char_ngram_max: int = 4,
 ) -> None:
-    """Register the built-in static embedding provider."""
     register_embedding_provider(
         create_static_embedding_provider(
             dimensions=dimensions,
@@ -530,7 +499,6 @@ def use_hybrid_embedding_provider(
     char_ngram_min: int = 3,
     char_ngram_max: int = 4,
 ) -> None:
-    """Register the built-in hybrid embedding provider."""
     register_embedding_provider(
         create_hybrid_embedding_provider(
             static_dimensions=static_dimensions,
@@ -550,127 +518,172 @@ def _raise_invalid_provider(provider, detail: str) -> None:
     )
 
 
-def _coerce_embedding_vector_array(vector) -> numpy.ndarray:
-    if isinstance(vector, numpy.ndarray):
-        if vector.ndim != 1:
-            _raise_invalid_provider(
-                _embedding_provider,
-                "a provider returning one 1-dimensional numeric vector per input value.",
-            )
-        coerced = numpy.asarray(vector, dtype=numpy.float32)
-        if coerced.ndim != 1:
-            _raise_invalid_provider(
-                _embedding_provider,
-                "a provider returning one 1-dimensional numeric vector per input value.",
-            )
-        return coerced
-    elif not isinstance(vector, (list, tuple)):
+def _coerce_to_fp32_array(value, expected_width: int) -> array:
+    """Coerce a provider's per-text result into a typed fp32 array of `expected_width`."""
+    if isinstance(value, (str, bytes, bytearray)):
         _raise_invalid_provider(
             _embedding_provider,
             "a provider returning one numeric vector per input value.",
         )
-
     try:
-        return numpy.asarray(vector, dtype=numpy.float32)
+        out = array("f", value)
     except (TypeError, ValueError) as err:
         raise InvalidConfigurationError(
             config_item="embedding_provider",
-            provided_value=type(vector).__name__,
+            provided_value=type(value).__name__,
             valid_value_description="a numeric vector result.",
         ) from err
-
-
-def _stack_embedding_rows(rows, expected_count: int) -> numpy.ndarray | None:
-    if len(rows) != expected_count:
-        return None
-    if expected_count == 0:
-        return numpy.empty((0, 0), dtype=numpy.float32)
-
-    width = rows[0].shape[0]
-    if width == 0:
-        return numpy.empty((expected_count, 0), dtype=numpy.float32)
-    if any(row.ndim != 1 or row.shape[0] != width for row in rows):
+    if len(out) != expected_width:
         _raise_invalid_provider(
             _embedding_provider,
-            "a provider returning one fixed-width numeric vector per input value.",
+            f"a provider returning fixed-width numeric vectors of width {expected_width}.",
         )
-    return numpy.vstack(rows).astype(numpy.float32, copy=False)
+    return out
 
 
-def _coerce_embedding_batch_array(value, expected_count: int) -> numpy.ndarray | None:
-    if isinstance(value, numpy.ndarray):
-        if value.ndim == 2 and value.shape[0] == expected_count:
-            return numpy.asarray(value, dtype=numpy.float32)
-        return None
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+def _provider_dimensions(provider) -> int | None:
+    dims = getattr(provider, "dimensions", None)
+    if dims is None:
         return None
     try:
-        rows = [_coerce_embedding_vector_array(row) for row in value]
-    except InvalidConfigurationError:
+        return int(dims)
+    except (TypeError, ValueError):
         return None
-    return _stack_embedding_rows(rows, expected_count)
 
 
-def _provider_batch(provider, texts: list[str]) -> numpy.ndarray | None:
-    if hasattr(provider, "embed_texts"):
+def _provider_batch_rows(provider, texts: list[str]):
+    """Return whatever the provider gives us for a batch (or None if it can't)."""
+    for attr in ("embed_texts", "embed_many", "embed"):
+        method = getattr(provider, attr, None)
+        if method is None:
+            continue
         try:
-            return _coerce_embedding_batch_array(provider.embed_texts(texts), len(texts))
+            return method(texts)
         except TypeError:
-            return None
-    if hasattr(provider, "embed_many"):
-        try:
-            return _coerce_embedding_batch_array(provider.embed_many(texts), len(texts))
-        except TypeError:
-            return None
-    if hasattr(provider, "embed"):
-        try:
-            return _coerce_embedding_batch_array(provider.embed(texts), len(texts))
-        except TypeError:
-            return None
+            continue
     if callable(provider):
         try:
-            return _coerce_embedding_batch_array(provider(texts), len(texts))
+            return provider(texts)
         except TypeError:
             return None
     return None
 
 
-def _provider_single(provider, text: str) -> numpy.ndarray:
-    if hasattr(provider, "embed_text"):
-        return _coerce_embedding_vector_array(provider.embed_text(text))
-    if hasattr(provider, "embed"):
-        return _coerce_embedding_vector_array(provider.embed(text))
+def _provider_single_row(provider, text: str):
+    for attr in ("embed_text", "embed"):
+        method = getattr(provider, attr, None)
+        if method is not None:
+            return method(text)
     if callable(provider):
-        return _coerce_embedding_vector_array(provider(text))
+        return provider(text)
     _raise_invalid_provider(
         provider,
         "configured via opteryx.register_embedding_provider(...) with a callable or embed_text(s) method.",
     )
 
 
+def _embed_via_provider(provider, texts: list[str]) -> VectorVector:
+    """Run `texts` through the provider and return the result as a fp16 VectorVector.
+
+    Built-in providers may return a VectorVector directly; user-defined providers
+    typically return a sequence of numeric rows that we coerce via fp32 → fp16.
+    """
+    rows = _provider_batch_rows(provider, texts)
+
+    if isinstance(rows, VectorVector):
+        if len(rows) != len(texts):
+            _raise_invalid_provider(
+                provider,
+                "a provider returning one numeric vector per input value.",
+            )
+        return rows
+
+    if rows is None:
+        # Per-text fallback.
+        first = _provider_single_row(provider, texts[0])
+        if isinstance(first, VectorVector):
+            single_rows = [first] + [
+                _provider_single_row(provider, t) for t in texts[1:]
+            ]
+            for r in single_rows:
+                if not isinstance(r, VectorVector) or len(r) != 1:
+                    _raise_invalid_provider(provider, "a consistent provider return type.")
+            dims = single_rows[0].dimensions
+            vv = vector_math.new_matrix(len(texts), dims)
+            for i, single in enumerate(single_rows):
+                vector_math.write_row_bytes(vv, i, vector_math.row_bytes(single, 0))
+            return vv
+        rows = [first] + [_provider_single_row(provider, t) for t in texts[1:]]
+
+    if isinstance(rows, VectorVector):
+        return rows
+
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes, bytearray)):
+        _raise_invalid_provider(
+            provider,
+            "a provider returning a sequence of numeric vectors for a batch.",
+        )
+    if len(rows) != len(texts):
+        _raise_invalid_provider(
+            provider,
+            "a provider returning one numeric vector per input value.",
+        )
+
+    dims = _provider_dimensions(provider)
+    if dims is None:
+        first = _coerce_to_fp32_array_unbounded(rows[0])
+        dims = len(first)
+        vv = vector_math.new_matrix(len(rows), dims)
+        vector_math.pack_fp32_row(vv, 0, first)
+        for i in range(1, len(rows)):
+            fp32 = _coerce_to_fp32_array(rows[i], dims)
+            vector_math.pack_fp32_row(vv, i, fp32)
+        return vv
+
+    vv = vector_math.new_matrix(len(rows), dims)
+    for i, row in enumerate(rows):
+        fp32 = _coerce_to_fp32_array(row, dims)
+        vector_math.pack_fp32_row(vv, i, fp32)
+    return vv
+
+
+def _coerce_to_fp32_array_unbounded(value) -> array:
+    if isinstance(value, (str, bytes, bytearray)):
+        _raise_invalid_provider(
+            _embedding_provider,
+            "a provider returning one numeric vector per input value.",
+        )
+    try:
+        return array("f", value)
+    except (TypeError, ValueError) as err:
+        raise InvalidConfigurationError(
+            config_item="embedding_provider",
+            provided_value=type(value).__name__,
+            valid_value_description="a numeric vector result.",
+        ) from err
+
+
 def _clear_embedding_cache() -> None:
     _embedding_cache.clear()
 
 
-def _embedding_cache_get(text: str) -> numpy.ndarray | None:
-    vector = _embedding_cache.get(text)
-    if vector is None:
+def _embedding_cache_get(text: str) -> tuple[int, bytes] | None:
+    entry = _embedding_cache.get(text)
+    if entry is None:
         return None
     _embedding_cache.move_to_end(text)
-    return vector
+    return entry
 
 
-def _embedding_cache_put(text: str, vector) -> None:
-    cached = numpy.asarray(vector, dtype=numpy.float32)
-    cached.setflags(write=False)
-    _embedding_cache[text] = cached
+def _embedding_cache_put(text: str, dimensions: int, row_data: bytes) -> None:
+    _embedding_cache[text] = (dimensions, row_data)
     _embedding_cache.move_to_end(text)
     if len(_embedding_cache) > _EMBEDDING_CACHE_MAX_ENTRIES:
         _embedding_cache.popitem(last=False)
 
 
-def embed_text_matrix(texts: list[str]) -> numpy.ndarray:
-    """Embed a batch of text values into a contiguous float32 matrix."""
+def embed_text_matrix(texts: list[str]) -> VectorVector:
+    """Embed `texts` into a fp16 VectorVector of length len(texts) × dimensions."""
     provider = get_embedding_provider()
     if provider is None:
         raise InvalidConfigurationError(
@@ -679,45 +692,70 @@ def embed_text_matrix(texts: list[str]) -> numpy.ndarray:
             valid_value_description="configured via opteryx.register_embedding_provider(...).",
         )
 
-    results = [None] * len(texts)
-    missing_positions = []
-    missing_unique = []
-    seen_missing = set()
+    if not texts:
+        dims = _provider_dimensions(provider) or 0
+        return vector_math.new_matrix(0, dims)
+
+    cached_rows: dict[int, tuple[int, bytes]] = {}
+    missing_positions: list[int] = []
+    missing_unique: list[str] = []
+    seen_missing: set[str] = set()
 
     for index, text in enumerate(texts):
-        cached = _embedding_cache_get(text)
-        if cached is not None:
-            results[index] = cached
+        entry = _embedding_cache_get(text)
+        if entry is not None:
+            cached_rows[index] = entry
             continue
-
         missing_positions.append(index)
         if text not in seen_missing:
             missing_unique.append(text)
             seen_missing.add(text)
 
+    new_rows: VectorVector | None = None
     if missing_unique:
-        batch = _provider_batch(provider, missing_unique)
-        if batch is None:
-            batch = _stack_embedding_rows(
-                [_provider_single(provider, text) for text in missing_unique],
-                len(missing_unique),
-            )
+        new_rows = _embed_via_provider(provider, missing_unique)
 
-        unique_vectors = {}
-        for text, vector in zip(missing_unique, batch, strict=True):
-            _embedding_cache_put(text, vector)
-            unique_vectors[text] = _embedding_cache_get(text)
+    # Determine dimensions from whichever source actually produced rows.
+    if new_rows is not None:
+        dimensions = new_rows.dimensions
+    else:
+        dimensions = next(iter(cached_rows.values()))[0]
 
-        for index in missing_positions:
-            results[index] = unique_vectors[texts[index]]
+    # Validate cached rows are dimensionally compatible (provider may have changed).
+    for index, (cached_dims, _) in list(cached_rows.items()):
+        if cached_dims != dimensions:
+            del cached_rows[index]
+            missing_positions.append(index)
+            text = texts[index]
+            if text not in seen_missing:
+                missing_unique.append(text)
+                seen_missing.add(text)
 
-    if not results:
-        return numpy.empty((0, 0), dtype=numpy.float32)
+    if missing_positions and (new_rows is None or new_rows.dimensions != dimensions):
+        # Re-embed any rows we just invalidated.
+        new_rows = _embed_via_provider(provider, missing_unique)
+        dimensions = new_rows.dimensions
 
-    return numpy.vstack(results).astype(numpy.float32, copy=False)
+    out = vector_math.new_matrix(len(texts), dimensions)
+
+    # Copy cached rows into place.
+    for index, (_, row_data) in cached_rows.items():
+        vector_math.write_row_bytes(out, index, row_data)
+
+    # Map missing texts to their row index in `new_rows` and copy across.
+    if new_rows is not None:
+        unique_to_new_idx = {text: i for i, text in enumerate(missing_unique)}
+        for output_index in missing_positions:
+            text = texts[output_index]
+            new_idx = unique_to_new_idx[text]
+            row_data = vector_math.row_bytes(new_rows, new_idx)
+            vector_math.write_row_bytes(out, output_index, row_data)
+            _embedding_cache_put(text, dimensions, row_data)
+
+    return out
 
 
 def embed_text_values(texts: list[str]) -> list[list[float]]:
-    """Embed a batch of text values using the configured provider."""
+    """Embed `texts` and return them as fp32 Python lists (lossy widen for compatibility)."""
     matrix = embed_text_matrix(texts)
-    return [row.tolist() for row in matrix]
+    return matrix.to_pylist()

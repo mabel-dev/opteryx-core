@@ -8,15 +8,10 @@ import sys
 import time
 from pathlib import Path
 
-# Define test files in order
+# Define test files in order. The other shape batteries have been migrated
+# to sqllogictest in the sibling sqllogictest repo (examples/opteryx/tests/shapes/).
 test_files = [
     'test_shapes_basic.py',
-    'test_shapes_data_sources.py',
-    'test_shapes_operators_expressions.py',
-    'test_shapes_aliases_distinct.py',
-    'test_shapes_functions_aggregates.py',
-    'test_shapes_joins_subqueries.py',
-    'test_shapes_edge_cases.py',
 ]
 
 test_dir = Path(__file__).parent

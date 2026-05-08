@@ -51,10 +51,29 @@ class RedundantOperationsStrategy(OptimizationStrategy):
                 provider_nid = providers[0][0]
                 provider_node = context.pre_optimized_tree[provider_nid]
                 if provider_node.node_type != LogicalPlanStepType.Subquery:
-                    provider_columns = {c.schema_column.identity for c in provider_node.columns}
-                    # if the columns in the project are the same as the operator before it
-                    # we don't need to project
-                    my_columns = {c.schema_column.identity for c in node.columns}
+                    # Aggregate logical nodes' `.columns` conflates outputs with
+                    # input identifiers referenced by the aggregates (binder uses
+                    # it for upstream schema pruning — see binder/aggregate.py).
+                    # For the redundancy check we want only the actual outputs.
+                    if provider_node.node_type in (
+                        LogicalPlanStepType.Aggregate,
+                        LogicalPlanStepType.AggregateAndGroup,
+                    ):
+                        provider_columns = {
+                            c.schema_column.identity
+                            for c in (provider_node.aggregates or [])
+                            + (provider_node.groups or [])
+                        }
+                    else:
+                        provider_columns = {c.schema_column.identity for c in provider_node.columns}
+                    # A Project at runtime emits `columns ∪ order_by_columns` (see
+                    # projection.pyx). Both must be considered when deciding whether the
+                    # upstream operator already produces the same set of columns.
+                    my_columns = {
+                        c.schema_column.identity
+                        for c in list(node.columns)
+                        + list(getattr(node, "order_by_columns", None) or [])
+                    }
                     if provider_columns == my_columns:
                         # we need to ensure we keep some of the context if not the step
                         source_node_alias = context.optimized_plan[context.node_id].alias

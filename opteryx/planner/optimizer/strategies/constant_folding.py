@@ -67,6 +67,11 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         # we currently don't fold CASE expressions
         return root
 
+    if root.node_type == NodeType.SUBQUERY:
+        # subqueries are opaque to constant folding; they have no schema_column
+        # and any inner identifiers are not visible at this scope.
+        return root
+
     if root.node_type == NodeType.DNF:
         # if we have a DNF, we can fold each part
         root.parameters = [fold_constants(p, telemetry) for p in root.parameters]

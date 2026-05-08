@@ -13,10 +13,12 @@ from cpython.array cimport array, clone
 
 from draken.core.buffers cimport DictAccessor
 from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.float32_vector cimport Float32Vector
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.string_vector cimport _StringVectorCIterator
 from draken.vectors.string_vector cimport StringElement
 from draken.vectors.vector cimport Vector
+from draken.vectors.vector_vector cimport VectorVector
 
 from cpython.unicode cimport PyUnicode_DecodeUTF8
 
@@ -49,11 +51,15 @@ cdef BoolVector _vector_match_against_string_vector(
     str query_text,
     float min_score=0.6,
 ):
-    cdef object embedded
+    cdef VectorVector embedded
+    cdef VectorVector docs
     cdef array positions_arr = array('q')  # 'q' = signed long long (int64)
     cdef array scores_arr = array('f')   # 'f' = float32
+    cdef array take_idx = array('i')     # row indices for VectorVector.take
     cdef int64_t[::1] positions
     cdef float[::1] scores
+    cdef int32_t[::1] take_view
+    cdef float[::1] query_view
     cdef Py_ssize_t i
     cdef Py_ssize_t n = values.ptr.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -68,12 +74,10 @@ cdef BoolVector _vector_match_against_string_vector(
     cdef list active_positions
     cdef list active_texts
     cdef object decoded
-    cdef object vector_search
     cdef object query_vector
     cdef object row_vectors
-    cdef list valid_mask
     cdef Py_ssize_t current_index
-    from opteryx.embeddings import embed_text_matrix
+    from opteryx.vectors.embeddings import embed_text_matrix
 
     memset(dst, 0, nbytes)
 
@@ -116,38 +120,11 @@ cdef BoolVector _vector_match_against_string_vector(
     query_vector = embedded[0]
     row_vectors = embedded[1:]
 
-    # Convert scores to Cython array
-    try:
-        from opteryx.compiled.nanobind import vector_search
-        import math
+    from opteryx.compiled.nanobind import vector_search
 
-        scores_list = vector_search.score_cosine(query_vector, row_vectors)
-        for score in scores_list:
-            scores_arr.append(float(score))
-    except (ImportError, ValueError):
-        import math
-
-        # Fallback: compute cosine similarity using pure Python
-        def norm_2d(vectors):
-            """Compute norm for each vector in a 2D list."""
-            return [math.sqrt(sum(x*x for x in vec)) for vec in vectors]
-
-        def dot_product(a, b):
-            """Compute dot product of two vectors."""
-            return sum(x*y for x, y in zip(a, b))
-
-        query_norm = math.sqrt(sum(x*x for x in query_vector))
-        if query_norm != 0.0:
-            row_norms = norm_2d(row_vectors)
-            for j, (row, row_norm) in enumerate(zip(row_vectors, row_norms)):
-                if row_norm != 0.0:
-                    score = dot_product(row, query_vector) / (row_norm * query_norm)
-                    scores_arr.append(score)
-                else:
-                    scores_arr.append(0.0)
-        else:
-            for _ in row_vectors:
-                scores_arr.append(0.0)
+    scores_list = vector_search.score_cosine(query_vector, row_vectors)
+    for score in scores_list:
+        scores_arr.append(float(score))
 
     # Convert positions to Cython array
     for pos in active_positions:
@@ -208,6 +185,53 @@ cdef BoolVector _vector_match_against_dictionary_accessor(
     return out
 
 
+cdef BoolVector _vector_match_against_vector_vector(
+    VectorVector values,
+    str query_text,
+    float min_score,
+):
+    """Fast path for pre-embedded VectorVector columns.
+
+    Skips the per-row text embedding step (which dominates cost in the
+    StringVector path). Embeds only the query, then uses VectorVector's
+    cosine kernel to score every row in one C call, and thresholds in-place.
+    """
+    from opteryx.vectors.embeddings import embed_text_matrix
+    from opteryx.vectors import vector_math
+
+    cdef Py_ssize_t n = len(values)
+    cdef Py_ssize_t nbytes = (n + 7) >> 3
+    cdef BoolVector out = BoolVector(<size_t>n)
+    cdef uint8_t* dst = <uint8_t*>out.ptr.data
+    memset(dst, 0, nbytes)
+
+    cdef str text = (query_text or "").strip()
+    if not text:
+        return out
+
+    cdef VectorVector embedded = embed_text_matrix([text])
+    if len(embedded) == 0 or embedded.dimensions != values.dimensions:
+        return out
+
+    cdef object query_fp32 = vector_math.row_as_fp32_array(embedded, 0)
+    cdef float[::1] query_view = query_fp32
+    cdef Float32Vector scores = values.cosine_similarity(query_view)
+    cdef float* score_ptr = <float*> scores.ptr.data
+    cdef uint8_t* score_nulls = scores.ptr.null_bitmap
+    cdef Py_ssize_t i
+    cdef bint row_valid
+
+    for i in range(n):
+        if score_nulls != NULL:
+            row_valid = (score_nulls[i >> 3] >> (i & 7)) & 1
+            if not row_valid:
+                continue
+        if score_ptr[i] >= min_score:
+            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+
+    return out
+
+
 cpdef BoolVector vector_match_against(
     object values,
     object provider,
@@ -216,6 +240,9 @@ cpdef BoolVector vector_match_against(
 ):
     cdef DictAccessor* dict_accessor = NULL
 
+    if isinstance(values, VectorVector):
+        return _vector_match_against_vector_vector(values, query_text, min_score)
+
     if isinstance(values, Vector):
         dict_accessor = (<Vector>values).dict_accessor()
 
@@ -223,4 +250,4 @@ cpdef BoolVector vector_match_against(
         return _vector_match_against_dictionary_accessor(values, dict_accessor, provider, query_text, min_score)
     if isinstance(values, StringVector):
         return _vector_match_against_string_vector(values, provider, query_text, min_score)
-    raise TypeError(f"vector_match_against requires StringVector or dictionary-encoded Vector, got {type(values)}")
+    raise TypeError(f"vector_match_against requires StringVector, dictionary-encoded Vector, or VectorVector, got {type(values)}")

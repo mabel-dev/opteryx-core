@@ -26,7 +26,8 @@ from draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
 from draken.vectors.vector cimport Vector
 from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
 from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
-from draken.vectors.string_vector cimport StringVector, _materialize_dict_string
+from draken.vectors.string_vector cimport StringVector, _materialize_dict_string, _materialize_rle_string
+from draken.core.buffers cimport DRAKEN_ENCODING_RLE
 from draken.vectors.bool_vector cimport BoolVector
 
 
@@ -190,15 +191,20 @@ cdef inline void _ks_ensure_bitmap_capacity(
     cdef Py_ssize_t new_bytes_cap
     cdef uint8_t* grown_bitmap
 
+    # Cold first-allocation: we may have skipped allocating a bitmap while
+    # every prior row was valid.  As soon as we need one — even at a row
+    # count that fits in the same byte — allocate with prior rows marked
+    # valid.  Without this the caller would dereference a NULL bitmap.
+    if bitmap_ref[0] == NULL:
+        new_rows_cap = _ks_growth_target(current_rows, required_rows, 8)
+        bitmap_ref[0] = _ks_alloc_all_valid_bitmap(new_rows_cap)
+        return
+
     if required_bytes <= current_bytes:
         return
 
     new_rows_cap = _ks_growth_target(current_rows, required_rows, 8)
     new_bytes_cap = _ks_bitmap_nbytes(new_rows_cap)
-
-    if bitmap_ref[0] == NULL:
-        bitmap_ref[0] = _ks_alloc_all_valid_bitmap(new_rows_cap)
-        return
 
     grown_bitmap = <uint8_t*>realloc(bitmap_ref[0], new_bytes_cap)
     if grown_bitmap == NULL:
@@ -711,6 +717,10 @@ cdef class KeyStore:
                 sv = <StringVector>vec
                 if sv._encoding == DRAKEN_ENCODING_DICTIONARY and sv.ptr.data == NULL:
                     sv = _materialize_dict_string(sv)
+                    nulls = sv.null_bitmap_ptr()
+                elif sv._encoding == DRAKEN_ENCODING_RLE:
+                    sv = _materialize_rle_string(sv)
+                    nulls = sv.null_bitmap_ptr()
                 vbuf = sv.ptr
                 if self._single_string_direct:
                     for ri in range(n_new):

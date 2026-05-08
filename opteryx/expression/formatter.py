@@ -116,6 +116,8 @@ def format_expression(root, qualify: bool = False):
         _map = {
             "IsNull": "%s IS NULL",
             "IsNotNull": "%s IS NOT NULL",
+            "IsEmpty": "%s IS EMPTY",
+            "IsNotEmpty": "%s IS NOT EMPTY",
             "BitwiseNot": "~%s",
         }
         return _map.get(root.value, root.value + "(%s)").replace(

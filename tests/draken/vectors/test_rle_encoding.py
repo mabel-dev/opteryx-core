@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 import pytest
 
-from opteryx.compiled.joins import build_cartesian_indices
+from opteryx.operators._operators import build_cartesian_indices
 
 # Stable encoding constants
 DRAKEN_ENCODING_DENSE = 0

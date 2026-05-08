@@ -89,15 +89,13 @@ cdef class CountAggregate(UngroupedAggregate):
                 if not vec_s._const_is_null:
                     self._count += nrows
                 return
-            if vec_s._dict_codes != NULL:
-                dacc  = vec_s.dict_accessor()
-                nulls = dacc.row_nulls
-                if nulls == NULL:
-                    self._count += nrows
-                    return
-                for i in range(nrows):
-                    if _bitmap_is_valid(nulls, i):
-                        self._count += 1
+            # Dict-encoded and RLE fast paths: COUNT(col) = length - null_count.
+            # The vector's null_count is computed via simd_popcount.
+            if vec_s._encoding == DRAKEN_ENCODING_DICTIONARY:
+                self._count += <int64_t>nrows - <int64_t>vec_s.null_count
+                return
+            if vec_s._encoding == DRAKEN_ENCODING_RLE:
+                self._count += <int64_t>nrows - <int64_t>vec_s.null_count
                 return
             nulls = vec_s.null_bitmap_ptr()
             if nulls == NULL:

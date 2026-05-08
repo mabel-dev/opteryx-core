@@ -52,6 +52,9 @@ struct ColumnStats {
   int32_t max_definition_level = -1;
   int32_t max_repetition_level = -1;
 
+  // Width of FIXED_LEN_BYTE_ARRAY values (bytes). 0 for other physical types.
+  int32_t type_length = 0;
+
   // Raw key/value metadata (flattened for now)
   std::unordered_map<std::string, std::string> key_value_metadata;
 };

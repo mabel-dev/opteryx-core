@@ -237,6 +237,11 @@ def _update_literal_spec(spec, row_count: int):
         spec["seen"] = True
         return
 
+    if aggregate_type == "MEDIAN":
+        spec["value"] = literal
+        spec["seen"] = True
+        return
+
 
 def _finalize_literal_spec(spec):
     aggregate_type = spec["aggregate_type"]
@@ -261,6 +266,11 @@ def _finalize_literal_spec(spec):
 
     if aggregate_type in ("MIN", "MAX", "ANY_VALUE"):
         return spec["value"] if spec["seen"] else None
+
+    if aggregate_type == "MEDIAN":
+        if not spec["seen"] or spec["value"] is None:
+            return None
+        return float(spec["value"])
 
     raise ValueError(f"Unsupported literal aggregate type: {aggregate_type}")
 
@@ -343,6 +353,22 @@ def _build_engine_aggregate(aggregate):
         raise NotImplementedError(
             f"Approximate aggregate `{aggregate_type}` is no longer supported."
         )
+
+    if aggregate_type == "MEDIAN":
+        if parameter_name is None:
+            return [], None, _make_literal_spec(aggregate)
+        type_value = getattr(parameter_type, "value", parameter_type)
+        if type_value == "DECIMAL":
+            raise NotImplementedError(
+                "MEDIAN does not support DECIMAL inputs; CAST the column "
+                "to DOUBLE first (e.g. MEDIAN(CAST(col AS DOUBLE)))."
+            )
+        if type_value in ("VARCHAR", "BLOB", "BOOLEAN", "DATE", "TIMESTAMP", "TIME", "INTERVAL"):
+            raise NotImplementedError(
+                f"MEDIAN over {type_value} is not supported; only numeric "
+                "inputs are accepted."
+            )
+        return [MedianFloat64Aggregate(parameter_name, output_name)], None, None
 
     raise ValueError(f"Unsupported aggregate type for Draken global aggregate: {aggregate_type}")
 

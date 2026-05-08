@@ -284,4 +284,11 @@ rugo/src/parquet/parquet_reader.cpp
 draken/vectors/string_vector.c
 draken/vectors/int64_vector.c
 draken/tests/_rle_test_helpers.cpp
-testdata/tpch_1/**
+tests/performance/**/*.csv
+opteryx/vectors/vector_math.cpp
+draken/vectors/**.c
+opteryx/operators/_operators.h
+
+# Downloaded JOB source data
+/testdata/_downloads/job/csv/
+/testdata/_downloads/job/imdb.tgz

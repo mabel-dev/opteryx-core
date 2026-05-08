@@ -27,8 +27,17 @@ static bool CheckColumnCompatibility(const ColumnStats &col) {
 
   if (col.physical_type != "int32"     && col.physical_type != "int64" &&
       col.physical_type != "byte_array" && col.physical_type != "boolean" &&
-      col.physical_type != "float32"   && col.physical_type != "float64") {
+      col.physical_type != "float32"   && col.physical_type != "float64" &&
+      col.physical_type != "fixed_len_byte_array") {
     return false;
+  }
+
+  // FIXED_LEN_BYTE_ARRAY is only supported for DECIMAL with width <= 8 bytes
+  // (sign-extended big-endian -> int64). Anything wider — or non-DECIMAL FLBA
+  // (UUID, fixed-width hashes) — is a clean bail.
+  if (col.physical_type == "fixed_len_byte_array") {
+    if (col.type_length <= 0 || col.type_length > 8) return false;
+    if (col.logical_type.rfind("decimal", 0) != 0) return false;
   }
 
   for (int32_t enc : col.encodings) {

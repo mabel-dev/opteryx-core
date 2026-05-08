@@ -5,7 +5,7 @@
 # cython: cdivision=True
 # cython: infer_types=True
 
-import heapq
+from array import array
 from collections.abc import Iterable
 
 from opteryx.vectors.vector_ranking import vector_exact_search_top_k
@@ -27,6 +27,7 @@ from . import BasePlanNode
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from libc.stdint cimport int32_t, int64_t, uint64_t
 from libc.stdlib cimport malloc, free
+from libc.string cimport memcpy
 
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -146,7 +147,7 @@ cdef bint _mh_sift_up(
     return True
 
 
-cdef list _compressed_top_k(
+cdef object _compressed_top_k(
     int64_t[::1] compressed,
     Py_ssize_t k,
     bint descending,
@@ -162,10 +163,10 @@ cdef list _compressed_top_k(
     After the scan the heap is insertion-sorted to produce a fully ordered
     result.  Up to (k - valid_selected) null row indices are appended last.
 
-    Returns a Python list of int row indices.
+    Returns an array('i') of row indices.
     """
     cdef Py_ssize_t n = compressed.shape[0]
-    cdef Py_ssize_t i, heap_size = 0, null_count = 0, ni = 0
+    cdef Py_ssize_t i, heap_size = 0, null_count = 0, ni = 0, count
     cdef Py_ssize_t pos, parent_pos, left, right, worst
     cdef Py_ssize_t valid_count, take_count, needed
     cdef int64_t val, parent_val, worst_val, tmp_val
@@ -173,6 +174,7 @@ cdef list _compressed_top_k(
     cdef int64_t* heap_vals = NULL
     cdef int32_t* heap_idxs = NULL
     cdef int32_t* null_buf = NULL
+    cdef int[::1] rv
 
     with nogil:
         for i in range(n):
@@ -182,7 +184,7 @@ cdef list _compressed_top_k(
     valid_count = n - null_count
     take_count = k if k < valid_count else valid_count
     if take_count == 0:
-        return []
+        return array("i")
 
     heap_vals = <int64_t*>PyMem_Malloc(take_count * sizeof(int64_t))
     heap_idxs = <int32_t*>PyMem_Malloc(take_count * sizeof(int32_t))
@@ -272,12 +274,17 @@ cdef list _compressed_top_k(
                 heap_vals[pos] = tmp_val
                 heap_idxs[pos] = tmp_idx
 
-        result = [<int>heap_idxs[i] for i in range(heap_size)]
+        result = array("i", b"\x00" * (k * 4))
+        rv = result
+        memcpy(&rv[0], heap_idxs, heap_size * sizeof(int32_t))
+        count = heap_size
         needed = k - heap_size
         if needed > 0 and null_count > 0:
-            for i in range(needed if needed < null_count else null_count):
-                result.append(<int>null_buf[i])
-        return result
+            needed = needed if needed < null_count else null_count
+            for i in range(needed):
+                rv[count] = null_buf[i]
+                count += 1
+        return result[:count] if count < k else result
 
     finally:
         PyMem_Free(heap_vals)
@@ -371,32 +378,18 @@ cdef _sift_down_single_vector(
 
 # ── Node ──────────────────────────────────────────────────────────────────────
 
+_EXACT_COMPRESS_VECTOR_TYPES = frozenset({
+    "BoolVector", "Date32Vector", "Float64Vector",
+    "Int8Vector", "Int16Vector", "Int32Vector", "Int64Vector",
+    "StringVector", "TimeVector", "TimestampVector",
+    "UInt8Vector", "UInt16Vector", "UInt32Vector", "UInt64Vector",
+})
+
+
 class HeapSortNode(BasePlanNode):
     _NULL_COMPRESSED = -(1 << 63)  # INT64_MIN — same sentinel used by compress_into
     _USEARCH_ENABLED = False
     _USEARCH_MIN_ROWS = 2048
-    _EXACT_COMPRESS_VECTOR_TYPES = frozenset(
-        {
-            "BoolVector",
-            "Date32Vector",
-            "Float64Vector",
-            "Int8Vector",
-            "Int16Vector",
-            "Int32Vector",
-            "Int64Vector",
-            "StringVector",
-            "TimeVector",
-            "TimestampVector",
-            "UInt8Vector",
-            "UInt16Vector",
-            "UInt32Vector",
-            "UInt64Vector",
-        }
-    )
-
-    @classmethod
-    def _is_exact_compressible_vector(cls, vector) -> bool:
-        return vector.__class__.__name__ in cls._EXACT_COMPRESS_VECTOR_TYPES
 
     def __init__(self, properties: QueryProperties, **parameters):
         super().__init__(properties=properties, **parameters)
@@ -412,8 +405,28 @@ class HeapSortNode(BasePlanNode):
                 raise ColumnNotFoundError(
                     f"`ORDER BY` must reference columns from `SELECT`. {cnfe}"
                 ) from cnfe
-        self.table = None
+
+        # Precompute uniform sort direction: True=all-DESC, False=all-ASC, None=mixed.
+        any_desc = False
+        all_desc = True
+        for _, ascending in self.mapped_order:
+            if not ascending:
+                any_desc = True
+            else:
+                all_desc = False
+        self._uniform_direction = True if all_desc else (False if not any_desc else None)
+
+        # Cache vector-class compressibility: populated on first morsel, reused thereafter.
+        self._compress_cache = {}
         self._chunk_buffer = []
+
+    def _is_exact_compressible_vector(self, vector) -> bool:
+        name = vector.__class__.__name__
+        result = self._compress_cache.get(name)
+        if result is None:
+            result = name in _EXACT_COMPRESS_VECTOR_TYPES
+            self._compress_cache[name] = result
+        return result
 
     @property
     def config(self):  # pragma: no cover
@@ -430,19 +443,13 @@ class HeapSortNode(BasePlanNode):
     def execute(self, Morsel morsel):
 
         if morsel is EOS:
-            if self.table is None and not self._chunk_buffer:
+            if not self._chunk_buffer:
                 return
 
-            if self.limit and self.limit > 0 and self.mapped_order:
-                if self._chunk_buffer:
-                    self.table = Morsel.combine(self._chunk_buffer)
-                    self.table = self._top_n(self.table)
-                elif self.table is not None:
-                    self.table = self._top_n(self.table)
-            elif (self.limit is None or self.limit <= 0) and self.mapped_order:
-                self.table = self._sort_morsel(self.table)
-
-            yield self.table
+            table = Morsel.combine(self._chunk_buffer)
+            if self.mapped_order:
+                table = self._top_n(table)
+            yield table
             return
 
         if isinstance(morsel, Morsel):
@@ -456,10 +463,8 @@ class HeapSortNode(BasePlanNode):
                 operator_id=self.identity,
                 duration_ns=0,
                 rows_in=getattr(morsel, "num_rows", 0) if morsel is not EOS else 0,
-                rows_out=getattr(self.table, "num_rows", 0) if self.table is not None else 0,
-                produced_rows=bool(
-                    self.table is not None and getattr(self.table, "num_rows", 0) > 0
-                ),
+                rows_out=0,
+                produced_rows=False,
             )
             yield None
             return
@@ -470,40 +475,16 @@ class HeapSortNode(BasePlanNode):
             if chunk is EOS or chunk_rows == 0:
                 continue
 
-            if self.limit and self.limit > 0:
-                chunk = self._top_n(chunk)
-                if chunk.num_rows > 0:
-                    self._chunk_buffer.append(chunk)
-            else:
-                if self.table is None:
-                    self.table = chunk
-                else:
-                    self.table.append(chunk)
+            chunk = self._top_n(chunk)
+            if chunk.num_rows > 0:
+                self._chunk_buffer.append(chunk)
 
         yield None
 
-    def _sorted_indices(self, morsel):
-        if not self.mapped_order:
-            return list(range(morsel.num_rows))
-
-        vectors = [morsel.column(col) for col, _ in self.mapped_order]
-        directions = [_is_descending(direction) for _, direction in self.mapped_order]
-
-        indices = list(range(morsel.num_rows))
-
-        from functools import cmp_to_key
-        indices.sort(key=cmp_to_key(
-            lambda i, j: _compare_rows_vectors(i, j, vectors, directions)
-        ))
-        return indices
-
-    def _materialize_rows(self, morsel, list row_indices):
+    def _materialize_rows(self, morsel, row_indices):
         if not row_indices:
             return morsel.empty()
         return morsel.take(row_indices)
-
-    def _sort_morsel(self, morsel):
-        return self._materialize_rows(morsel, self._sorted_indices(morsel))
 
     def _ensure_order_expressions_evaluated(self, morsel):
         # column_names returns bytes; identity is bytes — compare directly
@@ -526,9 +507,7 @@ class HeapSortNode(BasePlanNode):
         cdef Py_ssize_t k, row_idx, i, j, heap_size = 0
         cdef int32_t* heap_buf = NULL
         cdef int32_t pivot_idx, tmp
-
-        if self.limit is None or self.limit <= 0:
-            return morsel
+        cdef int[::1] rv
 
         vector_ranked = self._vector_top_n(morsel)
         if vector_ranked is not None:
@@ -540,15 +519,11 @@ class HeapSortNode(BasePlanNode):
         if k == 0:
             return morsel.empty()
 
-        if not self.mapped_order:
-            return self._materialize_rows(morsel, list(range(k)))
-
         if len(self.mapped_order) == 1:
             return self._top_n_single_key(morsel, k)
 
-        uniform_direction = self._uniform_direction()
-        if uniform_direction is not None:
-            return self._top_n_multi_key_uniform(morsel, k, descending=<bint>uniform_direction)
+        if self._uniform_direction is not None:
+            return self._top_n_multi_key_uniform(morsel, k, descending=<bint>self._uniform_direction)
 
         key_vectors = [morsel.column(column) for column, _ in self.mapped_order]
         directions  = [_is_descending(direction) for _, direction in self.mapped_order]
@@ -575,25 +550,12 @@ class HeapSortNode(BasePlanNode):
                     j -= 1
                 heap_buf[j] = pivot_idx
 
-            top_indices = [<int>heap_buf[i] for i in range(heap_size)]
+            top_indices = array("i", b"\x00" * (heap_size * 4))
+            rv = top_indices
+            memcpy(&rv[0], heap_buf, heap_size * sizeof(int32_t))
         finally:
             PyMem_Free(heap_buf)
         return self._materialize_rows(morsel, top_indices)
-
-    def _uniform_direction(self):
-        cdef bint any_desc = False, all_desc = True
-        cdef bint d
-        for _, direction in self.mapped_order:
-            d = _is_descending(direction)
-            if d:
-                any_desc = True
-            else:
-                all_desc = False
-        if all_desc:
-            return True
-        if not any_desc:
-            return False
-        return None
 
     def _top_n_single_key(self, morsel, Py_ssize_t k):
         cdef bint descending
@@ -612,8 +574,9 @@ class HeapSortNode(BasePlanNode):
     def _top_n_single_key_vector(self, morsel, vector, bint descending, Py_ssize_t k):
         """Top-k on single column using native vector comparators only. No Python fallback."""
         cdef Py_ssize_t n = morsel.num_rows
-        cdef Py_ssize_t i, heap_size = 0, pivot_idx, j
+        cdef Py_ssize_t i, heap_size = 0, pivot_idx, j, count
         cdef int32_t* heap_buf = <int32_t*>PyMem_Malloc(k * sizeof(int32_t))
+        cdef int[::1] rv
 
         if heap_buf == NULL:
             raise MemoryError()
@@ -640,17 +603,19 @@ class HeapSortNode(BasePlanNode):
                     j -= 1
                 heap_buf[j] = pivot_idx
 
-            result = [<int>heap_buf[i] for i in range(heap_size)]
-
-            # Append nulls if needed
-            needed = k - heap_size
-            if needed > 0:
-                for i in range(morsel.num_rows):
+            result = array("i", b"\x00" * (k * 4))
+            rv = result
+            memcpy(&rv[0], heap_buf, heap_size * sizeof(int32_t))
+            count = heap_size
+            if count < k:
+                for i in range(n):
+                    if count >= k:
+                        break
                     if vector.is_null_at(i):
-                        if len(result) < k:
-                            result.append(<int>i)
+                        rv[count] = <int32_t>i
+                        count += 1
 
-            return self._materialize_rows(morsel, result)
+            return self._materialize_rows(morsel, result[:count] if count < k else result)
         finally:
             PyMem_Free(heap_buf)
 
@@ -670,6 +635,7 @@ class HeapSortNode(BasePlanNode):
         cdef Py_ssize_t heap_size = 0, idx, i, j
         cdef int32_t* heap_buf = <int32_t*>PyMem_Malloc(k * sizeof(int32_t))
         cdef int32_t pivot_idx
+        cdef int[::1] rv
 
         if heap_buf == NULL:
             raise MemoryError()
@@ -693,7 +659,9 @@ class HeapSortNode(BasePlanNode):
                     j -= 1
                 heap_buf[j] = pivot_idx
 
-            result = [<int>heap_buf[i] for i in range(heap_size)]
+            result = array("i", b"\x00" * (heap_size * 4))
+            rv = result
+            memcpy(&rv[0], heap_buf, heap_size * sizeof(int32_t))
             return self._materialize_rows(morsel, result)
         finally:
             PyMem_Free(heap_buf)
@@ -729,7 +697,7 @@ class HeapSortNode(BasePlanNode):
         cdef Py_ssize_t take_count, row_index, i, j, dims
         cdef bint nearest_neighbor_order, descending
 
-        if self.limit is None or self.limit <= 0 or len(self.order_by) != 1:
+        if len(self.order_by) != 1:
             return None
 
         order_expression, direction = self.order_by[0]
@@ -791,7 +759,7 @@ class HeapSortNode(BasePlanNode):
             if source_vector.is_null_at(row_index):
                 continue
             # Get row vector value (materializes one row, not all)
-            row_vector = self._coerce_numeric_vector(source_vector[row_index])
+            row_vector = self._validate_numeric_sequence(source_vector[row_index])
             if row_vector is None:
                 continue
             if len(row_vector) != dims:
@@ -951,19 +919,9 @@ class HeapSortNode(BasePlanNode):
 
         return result
 
-    @staticmethod
-    def _coerce_numeric_vector(value):
-        """
-        Validate a numeric vector sequence.
-
-        Returns tuple of floats or None if invalid.
-        Used for checking row vector validity before materialization.
-        """
-        return HeapSortNode._validate_numeric_sequence(value)
-
     def _resolve_query_vector(self, query_node):
         if query_node.node_type == NodeType.LITERAL:
-            return self._coerce_numeric_vector(query_node.value)
+            return self._validate_numeric_sequence(query_node.value)
         if (
             query_node.node_type == NodeType.FUNCTION
             and query_node.value == "EMBED"
@@ -973,7 +931,7 @@ class HeapSortNode(BasePlanNode):
             from opteryx.vectors.embeddings import embed_text_matrix
 
             embedded = embed_text_matrix([query_node.parameters[0].value])
-            if embedded.size == 0:
+            if not embedded or not embedded[0]:
                 return None
-            return self._coerce_numeric_vector(embedded[0])
+            return self._validate_numeric_sequence(embedded[0])
         return None

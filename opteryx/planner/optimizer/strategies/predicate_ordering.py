@@ -21,10 +21,9 @@ been run if this strategy didn't run.
 - How to handle complex sub conditions or ORed conditions
 """
 
-from itertools import permutations
-
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
+from opteryx.planner.cost_estimation import PredicateStats, order_predicates as _order_predicates
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.types import OrsoTypes
 from opteryx.types.schema import ConstantColumn
@@ -149,49 +148,34 @@ def _order_complex_predicates(predicates, telemetry):
     return ordered
 
 
+def _resolve_predicate_stats(condition) -> PredicateStats:
+    """Build pre-resolved selectivity/cost for a single simple predicate.
+
+    Selectivity comes from ``DEFAULT_SELECTIVITY`` keyed on the comparison
+    operator; cost comes from ``OPERATION_COSTS`` (op-specific override) or
+    ``BASIC_COMPARISON_COSTS`` keyed on the column type. Manifest-driven
+    selectivity is a planned follow-up and not wired here.
+    """
+    return PredicateStats(
+        selectivity=_estimate_selectivity(condition),
+        cost=_base_cost(condition),
+    )
+
+
 def _order_simple_predicates(predicates, telemetry):
-    """Order simple (non-function) predicates by brute-force cost if small, else by cost heuristic."""
+    """Order simple (non-function) predicates via the cost-estimation module."""
 
     if len(predicates) <= 1:
         return predicates
 
-    selectivities = [_estimate_selectivity(p.condition) for p in predicates]
-    execution = [_base_cost(p.condition) for p in predicates]
+    indexed = [(i, _resolve_predicate_stats(p.condition)) for i, p in enumerate(predicates)]
+    order = _order_predicates(indexed)
+    ordered = [predicates[i] for i in order]
 
-    if len(predicates) <= 6:
-        best_order = _brute_force_order(selectivities, execution)
-        ordered = [predicates[i] for i in best_order]
-    else:
-        # Greedy: lowest execution cost first
-        order = sorted(range(len(predicates)), key=lambda i: execution[i])
-        ordered = [predicates[i] for i in order]
-
-    # Telemetry if order changed
-    if any(predicates[i] is not ordered[i] for i in range(len(ordered)) if i < len(predicates)):
+    if any(predicates[i] is not ordered[i] for i in range(len(ordered))):
         telemetry.optimization_cost_based_predicate_ordering += 1
 
     return ordered
-
-
-def _brute_force_order(predicate_selectivity, predicate_execution_time):
-    """Return the permutation with the lowest estimated cost using simple selectivity/cost model."""
-
-    best_order = tuple(range(len(predicate_selectivity)))
-    best_cost = float("inf")
-
-    for arrangement in permutations(range(len(predicate_selectivity))):
-        cumulative_size = 1.0
-        execution_cost = 0.0
-
-        for idx in arrangement:
-            execution_cost += predicate_execution_time[idx] * cumulative_size
-            cumulative_size *= predicate_selectivity[idx]
-
-        if execution_cost < best_cost:
-            best_cost = execution_cost
-            best_order = arrangement
-
-    return best_order
 
 
 def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
@@ -301,6 +285,8 @@ def order_predicates(predicates: list, telemetry) -> list:
 
 
 class PredicateOrderingStrategy(OptimizationStrategy):
+    optimization_technique = "cost"
+
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if not context.optimized_plan:
             context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
