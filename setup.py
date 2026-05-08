@@ -1532,7 +1532,10 @@ setup(
     description="Python SQL Query Engine",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    packages=find_packages(include=[LIBRARY, f"{LIBRARY}.*"]),
+    packages=find_packages(
+        include=[LIBRARY, f"{LIBRARY}.*", "draken", "draken.*", "rugo", "rugo.*"],
+        exclude=["draken.tests", "draken.tests.*", "rugo.tests", "rugo.tests.*"],
+    ),
     python_requires=">=3.13",
     url="https://github.com/mabel-dev/opteryx/",
     ext_modules=cythonize(

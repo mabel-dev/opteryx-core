@@ -244,7 +244,6 @@ third_party/mabel/draken/vectors/scalar_constructors.cpp
 opteryx/operators/*.c*
 opteryx/third_party/mbleven.c
 opteryx/third_party/maki_nage/distogram.c
-testdata/github/**.parquet
 opteryx/operators/aggregate/ungrouped_agg.cpp
 opteryx/operators/aggregate/aggregate_node.c
 opteryx/third_party/mabel/base16/base16.c
@@ -289,6 +288,7 @@ opteryx/vectors/vector_math.cpp
 draken/vectors/**.c
 opteryx/operators/_operators.h
 
-# Downloaded JOB source data
-/testdata/_downloads/job/csv/
-/testdata/_downloads/job/imdb.tgz
+**.parquet
+**.csv
+**.tgz
+**.stats.json
