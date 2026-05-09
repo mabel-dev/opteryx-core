@@ -242,15 +242,12 @@ def fetch_columns(
     row_mask=None,
     footer_bytes_cache: Optional[ParquetFooterBytesCache] = None,
 ) -> Dict[str, Any]:
-    from opteryx.connectors.parquet_io.pool_reader import fetch_footer
+    from opteryx.connectors.parquet_io.pool_reader import fetch_column_chunk_info
     decoder = _resolve_decoder(decoder)
-    meta = fetch_footer(filesystem, path, footer_bytes_cache=footer_bytes_cache)
-
-    if rg_idx < 0 or rg_idx >= len(meta["row_groups"]):
-        raise IndexError(f"Row group {rg_idx} out of range [0, {len(meta['row_groups'])})")
-
-    rg_meta = meta["row_groups"][rg_idx]
-    name_to_stats: Dict[str, dict] = {col["name"]: col for col in rg_meta["columns"]}
+    # IndexError raised by fetch_column_chunk_info if rg_idx out of range.
+    name_to_stats: Dict[str, dict] = fetch_column_chunk_info(
+        path, rg_idx, column_names, footer_bytes_cache=footer_bytes_cache
+    )
 
     results: Dict[str, Any] = {}
     misses: List[str] = []

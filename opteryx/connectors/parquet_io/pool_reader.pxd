@@ -13,6 +13,7 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 
 from opteryx.compiled.structures.memory_pool cimport MemoryPool
+from opteryx.compiled.structures.footer_cache cimport ParquetFooterBytesCache
 from rugo.parquet_reader cimport ColumnStats, RowGroupStats
 
 
@@ -51,11 +52,9 @@ cdef class CppIOPipeline:
 
 
 cdef tuple _read_footer_payload(
-    object filesystem,
     str path,
-    object file_size_in,
-    object connector,
-    object footer_cache,
+    int64_t file_size,
+    ParquetFooterBytesCache footer_cache,
 )
 
 cdef bint _rg_passes_predicates_native(RowGroupStats& rg, list predicates)

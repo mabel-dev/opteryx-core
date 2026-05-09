@@ -18,7 +18,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-import rugo.parquet as rp
+import rugo.parquet_reader as rp
 
 PARQUET_DIR = REPO_ROOT / "testdata" / "parquet_tests"
 

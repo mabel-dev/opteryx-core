@@ -292,3 +292,4 @@ opteryx/operators/_operators.h
 **.csv
 **.tgz
 **.stats.json
+**.jsonl

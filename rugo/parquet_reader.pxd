@@ -173,6 +173,15 @@ cdef extern from "decode.hpp":
     DecodedTable ReadParquet(const uint8_t* data, size_t size, const vector[string]& column_names) nogil
     DecodedTable ReadParquet(const uint8_t* data, size_t size) nogil
 
+cdef extern from "filesystem.hpp" namespace "rugo":
+    cdef cppclass ParquetFooterResult:
+        vector[uint8_t] envelope
+        int64_t bytes_fetched
+
+    ParquetFooterResult FetchParquetFooter(const string& path, int64_t file_size) except +
+    ParquetFooterResult FetchParquetFooter(const string& path) except +
+
+
 cdef extern from "type_widening.hpp" namespace "parquet_simd":
     # SIMD-accelerated type widening functions
     void widen_int32_to_int64(const int32_t* src, int64_t* dst, size_t count) nogil

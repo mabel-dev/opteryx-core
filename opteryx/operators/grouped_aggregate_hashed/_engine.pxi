@@ -33,6 +33,9 @@ cdef extern from "carchar_index.hpp" namespace "opteryx::carchar":
         size_t size() const
         bint lookup_fast(uint64_t key, int64_t& payload_ref_out) const
         size_t insert_new(uint64_t key, int64_t payload_ref) except +
+        # Single-probe combined find/insert.  Returns True if new_id was newly
+        # inserted; False if an existing payload was returned in payload_out.
+        bint find_or_insert_id(uint64_t key, int64_t new_id, int64_t& payload_out) except +
 
 
 cdef extern from "parvi.hpp" namespace "opteryx::parvi":
@@ -210,12 +213,9 @@ cdef class GroupHashEngine:
             if run_len <= 0:
                 continue
             h = svec.c_rle_run_value_hash(r)
-            state_is_new = False
-            if not self._index.lookup_fast(h, state_idx):
-                state_idx = num_groups
-                self._index.insert_new(h, state_idx)
+            state_is_new = self._index.find_or_insert_id(h, num_groups, state_idx)
+            if state_is_new:
                 num_groups += 1
-                state_is_new = True
             for k in range(run_len):
                 si_buf[row_offset + k] = state_idx
             if state_is_new:
@@ -289,6 +289,7 @@ cdef class GroupHashEngine:
         cdef uint8_t* dict_is_new = NULL
         cdef Py_ssize_t* first_row_per_dict = NULL
         cdef Py_ssize_t alloc_k = dict_size if dict_size > 0 else 1
+        cdef bint _is_new
 
         code_to_state = <int64_t*>malloc(<size_t>alloc_k * sizeof(int64_t))
         dict_is_new = <uint8_t*>malloc(<size_t>alloc_k * sizeof(uint8_t))
@@ -317,9 +318,8 @@ cdef class GroupHashEngine:
                     code_to_state[di] = -2
                     continue
                 h = svec.c_dict_value_hash(di)
-                if not self._index.lookup_fast(h, state_idx):
-                    state_idx = num_groups
-                    self._index.insert_new(h, state_idx)
+                _is_new = self._index.find_or_insert_id(h, num_groups, state_idx)
+                if _is_new:
                     num_groups += 1
                     dict_is_new[di] = 1
                 code_to_state[di] = state_idx
@@ -330,13 +330,10 @@ cdef class GroupHashEngine:
                     (row_nulls[i >> 3] >> (i & 7)) & 1
                 ):
                     if null_state_idx < 0:
-                        if not self._index.lookup_fast(null_marker, state_idx):
-                            null_state_idx = num_groups
-                            self._index.insert_new(null_marker, null_state_idx)
+                        _is_new = self._index.find_or_insert_id(null_marker, num_groups, null_state_idx)
+                        if _is_new:
                             num_groups += 1
                             first_null_row = i
-                        else:
-                            null_state_idx = state_idx
                     si_buf[i] = null_state_idx
                     continue
 
@@ -363,13 +360,10 @@ cdef class GroupHashEngine:
                 if state_idx == -2:
                     # Dict entry is null → goes to the global null group.
                     if null_state_idx < 0:
-                        if not self._index.lookup_fast(null_marker, state_idx):
-                            null_state_idx = num_groups
-                            self._index.insert_new(null_marker, null_state_idx)
+                        _is_new = self._index.find_or_insert_id(null_marker, num_groups, null_state_idx)
+                        if _is_new:
                             num_groups += 1
                             first_null_row = i
-                        else:
-                            null_state_idx = state_idx
                     si_buf[i] = null_state_idx
                     continue
 
@@ -549,11 +543,11 @@ cdef class GroupHashEngine:
                 i += 1
                 if not self._use_parvi:
                     break  # promoted — finish the morsel on the carchar path
+        cdef bint _hot_is_new
         if not self._use_parvi:
             while i < n_rows:
-                if not self._index.lookup_fast(hashes[i], state_idx):
-                    state_idx = num_groups
-                    self._index.insert_new(hashes[i], state_idx)
+                _hot_is_new = self._index.find_or_insert_id(hashes[i], num_groups, state_idx)
+                if _hot_is_new:
                     self._new_row_scratch.push_back(i)
                     num_groups += 1
                 si_buf[i] = state_idx

@@ -26,9 +26,7 @@ cdef class ParquetFooterBytesCache:
     Thread-safe: both MemoryPool and LRU_K use RLock internally.
     """
 
-    cdef MemoryPool pool
-    cdef LRU_K lru
-    cdef dict _path_to_ref  # path -> ref_id mapping
+    # cdef attributes declared in footer_cache.pxd
 
     def __cinit__(self, int64_t pool_size_bytes=16*1024*1024):
         """Initialize footer cache with fixed memory pool.
@@ -40,7 +38,7 @@ cdef class ParquetFooterBytesCache:
         self.lru = LRU_K(k=1, max_memory=0, max_size=0)
         self._path_to_ref = {}
 
-    cpdef Optional[bytes] get(self, str path):
+    cpdef object get(self, str path):
         """Retrieve cached footer envelope bytes for a path.
 
         Returns:

@@ -106,6 +106,33 @@ class CarcharIndex {
         return {payload_ref, true};
     }
 
+    // Non-template variant for callers that already have the new payload value
+    // (e.g. a monotonically-assigned slot id from num_groups++).  One probe for
+    // both hit and miss.
+    //
+    // Returns true  → new_id was inserted (caller should treat row as a new group).
+    // Returns false → existing payload was placed in payload_out (no new group).
+    //
+    // Hit-path is hot: no floating-point capacity check, no insert-stat update.
+    // Miss path runs the capacity check and re-probes if a resize fired.
+    bool find_or_insert_id(std::uint64_t key, std::int64_t new_id, std::int64_t& payload_out) {
+        auto result = find_slot(key);
+        if (result.found) {
+            payload_out = payload_refs_[result.slot];
+            return false;
+        }
+        // Miss: ensure capacity (may resize, invalidating the slot), then re-probe.
+        if (size_ + 1 > static_cast<std::size_t>(static_cast<double>(capacity_) * load_factor_)) {
+            resize(capacity_ * 2U);
+            result = find_slot(key);
+        }
+        ++insert_count_;
+        record_insert_probe_length(result.probes);
+        insert_at(result.slot, key, new_id);
+        payload_out = new_id;
+        return true;
+    }
+
     std::vector<std::pair<std::uint64_t, std::int64_t>> items() const {
         std::vector<std::pair<std::uint64_t, std::int64_t>> out;
         out.reserve(size_);

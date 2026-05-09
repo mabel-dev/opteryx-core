@@ -248,186 +248,62 @@ cdef parquet_reader.MetadataParseOptions _build_options(
     return opts
 
 
-cdef dict _filestats_to_python(parquet_reader.FileStats fs,
-                                 bint include_row_groups):
-    cdef dict result = {"num_rows": fs.num_rows}
-
-    cdef list schema_columns = []
+cdef list _schema_columns(parquet_reader.FileStats& fs):
+    """Build schema_columns list from C++ FileStats. Schema only — no row groups."""
+    cdef list out = []
     cdef parquet_reader.SchemaField field
-    cdef size_t idx
-    cdef dict top_level_types = {}
-
-    # --- Schema columns ---
-    # Pre-decode strings once.  Column names/types are identical across every
-    # row group; decoding them here avoids N_rg × N_col redundant decode calls.
-    cdef size_t n_schema = fs.schema_columns.size()
-    # Name-keyed cache: display_name -> (logical_type_str, prefer_text)
-    # Keyed by top-level name so nested schemas (struct/array with multiple
-    # physical leaves per schema entry) look up correctly.
-    # physical_type is NOT cached here — for nested columns the schema entry
-    # has "struct"/"list" but rg.columns has the actual wire type; always use
-    # col.physical_type directly.
-    cdef dict col_cache = {}
-
-    for idx in range(n_schema):
-        field = fs.schema_columns[idx]
-        field_name    = field.name.decode("utf-8")
-        field_physical = field.physical_type.decode("utf-8")
-        field_logical  = field.logical_type.decode("utf-8")
-        schema_columns.append({
-            "name": field_name,
-            "physical_type": field_physical,
-            "logical_type": field_logical,
-            "nullable": bool(field.nullable),
+    cdef size_t i
+    for i in range(fs.schema_columns.size()):
+        field = fs.schema_columns[i]
+        out.append({
+            "name":          field.name.decode("utf-8"),
+            "physical_type": field.physical_type.decode("utf-8"),
+            "logical_type":  field.logical_type.decode("utf-8"),
+            "nullable":      bool(field.nullable),
         })
-        top_level_types[field_name] = {
-            "logical": field_logical,
-            "physical": field_physical,
-        }
-        prefer_text = field_logical == "json" or field_logical.startswith("array<")
-        col_cache[field_name] = (field_logical, prefer_text)
-
-    result["schema_columns"] = schema_columns
-
-    if not (include_row_groups and fs.row_groups.size() > 0):
-        result["row_groups"] = []
-        return result
-
-    # --- Row groups ---
-    # Reuse pre-decoded schema strings; only decode per-RG-per-col scalars.
-    row_groups = []
-    cdef size_t col_i
-
-    for rg in fs.row_groups:
-        rg_col_list = []
-        rg_ncols = rg.columns.size()
-        for col_i in range(rg_ncols):
-            col = rg.columns[col_i]
-
-            # Always decode col.name — needed for both flat and nested schemas.
-            # For nested columns (e.g. addr.street) display_name is the top-level
-            # part; col_cache is keyed by display_name so lookup is always correct.
-            full_name = col.name.decode("utf-8")
-            dot_pos = full_name.find(".")
-            display_name = full_name[:dot_pos] if dot_pos >= 0 else full_name
-
-            # physical_type always comes from the ColumnStats leaf — NOT from
-            # schema_columns, which stores "struct"/"list" for parent nodes.
-            physical_type_str = col.physical_type.decode("utf-8")
-
-            cached = col_cache.get(display_name)
-            if cached is not None:
-                logical_type_str, prefer_text = cached
-                # For nested paths the leaf may have its own logical type; the
-                # top-level override (json / array<…>) takes precedence so the
-                # full column is treated as a single typed value.
-                if dot_pos >= 0:
-                    leaf_logical = col.logical_type.decode("utf-8") if col.logical_type.size() > 0 else ""
-                    if not logical_type_str:
-                        logical_type_str = leaf_logical
-                else:
-                    pass  # flat column: use top-level logical_type as-is
-            else:
-                logical_type_str = col.logical_type.decode("utf-8") if col.logical_type.size() > 0 else ""
-                prefer_text = False
-
-            min_val = decode_value(
-                col.physical_type, col.logical_type, col.min, prefer_text
-            ) if col.has_min else None
-            max_val = decode_value(
-                col.physical_type, col.logical_type, col.max, prefer_text
-            ) if col.has_max else None
-
-            encodings_list = []
-            for enc in col.encodings:
-                encodings_list.append(parquet_reader.EncodingToString(enc).decode("utf-8"))
-
-            codec_str = parquet_reader.CompressionCodecToString(col.codec).decode("utf-8") if col.codec >= 0 else None
-
-            kv_metadata = {}
-            for item in col.key_value_metadata:
-                kv_metadata[item.first.decode("utf-8")] = item.second.decode("utf-8")
-
-            rg_col_list.append({
-                "name": display_name,
-                "path_in_schema": full_name,
-                "physical_type": physical_type_str,
-                "logical_type": logical_type_str,
-                "max_repetition_level": col.max_repetition_level if col.max_repetition_level >= 0 else None,
-                "max_definition_level": col.max_definition_level if col.max_definition_level >= 0 else None,
-                "type_length": col.type_length if col.type_length > 0 else None,
-                "min": min_val,
-                "max": max_val,
-                "null_count": col.null_count if col.null_count >= 0 else None,
-                "distinct_count": col.distinct_count if col.distinct_count >= 0 else None,
-                "num_values": col.num_values if col.num_values >= 0 else None,
-                "total_uncompressed_size": col.total_uncompressed_size if col.total_uncompressed_size >= 0 else None,
-                "total_compressed_size": col.total_compressed_size if col.total_compressed_size >= 0 else None,
-                "data_page_offset": col.data_page_offset if col.data_page_offset >= 0 else None,
-                "index_page_offset": col.index_page_offset if col.index_page_offset >= 0 else None,
-                "dictionary_page_offset": col.dictionary_page_offset if col.dictionary_page_offset >= 0 else None,
-                "bloom_offset": col.bloom_offset if col.bloom_offset >= 0 else None,
-                "bloom_length": col.bloom_length if col.bloom_length >= 0 else None,
-                "encodings": encodings_list,
-                "compression_codec": codec_str,
-                "key_value_metadata": kv_metadata if kv_metadata else None,
-            })
-        row_groups.append({
-            "num_rows": rg.num_rows,
-            "total_byte_size": rg.total_byte_size,
-            "columns": rg_col_list,
-        })
-    result["row_groups"] = row_groups
-    return result
+    return out
 
 
-def read_metadata(str path, *, bint schema_only=False,
-                  bint include_statistics=True, Py_ssize_t max_row_groups=-1):
-    """Read parquet metadata from a file path."""
-    cdef parquet_reader.MetadataParseOptions opts = _build_options(
-        schema_only, include_statistics, max_row_groups
-    )
+def read_metadata(str path):
+    """Return schema metadata for a parquet file: {num_rows, schema_columns}.
+
+    For column statistics use fetch_column_stats().
+    For data use iter_row_groups_ipc().
+    """
     cdef bytes path_bytes = path.encode("utf-8")
-    cdef const char* c_path = path_bytes
+    cdef parquet_reader.MetadataParseOptions opts
+    opts.schema_only = True
     cdef parquet_reader.FileStats fs = parquet_reader.ReadParquetMetadataC(
-        c_path, opts
+        path_bytes, opts
     )
-    return _filestats_to_python(fs, not schema_only)
+    return {"num_rows": fs.num_rows, "schema_columns": _schema_columns(fs)}
 
 
-def read_metadata_from_bytes(bytes data, *, bint schema_only=False,
-                             bint include_statistics=True,
-                             Py_ssize_t max_row_groups=-1):
-    """Read parquet metadata from an in-memory bytes object."""
-    cdef parquet_reader.MetadataParseOptions opts = _build_options(
-        schema_only, include_statistics, max_row_groups
-    )
+def read_metadata_from_bytes(bytes data):
+    """Return schema metadata from an in-memory bytes buffer."""
+    cdef parquet_reader.MetadataParseOptions opts
+    opts.schema_only = True
     cdef const uint8_t* buf = <const uint8_t*> data
     cdef size_t size = len(data)
     cdef parquet_reader.FileStats fs = parquet_reader.ReadParquetMetadataFromBuffer(
         buf, size, opts
     )
-    return _filestats_to_python(fs, not schema_only)
+    return {"num_rows": fs.num_rows, "schema_columns": _schema_columns(fs)}
 
 
-def read_metadata_from_memoryview(memoryview mv, *, bint schema_only=False,
-                                  bint include_statistics=True,
-                                  Py_ssize_t max_row_groups=-1):
-    """Read parquet metadata from a Python memoryview (zero-copy)."""
+def read_metadata_from_memoryview(memoryview mv):
+    """Return schema metadata from a contiguous memoryview (zero-copy)."""
     if not mv.contiguous:
         raise ValueError("Memoryview must be contiguous")
-
-    cdef parquet_reader.MetadataParseOptions opts = _build_options(
-        schema_only, include_statistics, max_row_groups
-    )
-    cdef memoryview[uint8_t] mv_bytes = mv.cast('B')  # keep reference alive
+    cdef parquet_reader.MetadataParseOptions opts
+    opts.schema_only = True
+    cdef memoryview[uint8_t] mv_bytes = mv.cast('B')
     cdef const uint8_t* buf = &mv_bytes[0]
     cdef size_t size = mv_bytes.nbytes
-
     cdef parquet_reader.FileStats fs = parquet_reader.ReadParquetMetadataFromBuffer(
         buf, size, opts
     )
-    return _filestats_to_python(fs, not schema_only)
+    return {"num_rows": fs.num_rows, "schema_columns": _schema_columns(fs)}
 
 
 def can_decode(str path):

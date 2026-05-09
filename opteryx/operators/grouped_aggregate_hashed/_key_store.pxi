@@ -12,7 +12,7 @@
 #                           No legacy codec storage or decode path remains.
 
 from libc.string cimport memset, memcpy
-from libc.stdint cimport int32_t, int64_t, uint8_t
+from libc.stdint cimport int32_t, int64_t, uint8_t, uint16_t, uint32_t
 from libc.stdlib cimport realloc, free
 
 from libcpp.vector cimport vector
@@ -44,12 +44,27 @@ cdef int KEY_MULTI_ENCODED_STRING = 6
 # ---------------------------------------------------------------------------
 # Dispatch codes for multi-column store_new_rows (replaces isinstance in loop)
 # ---------------------------------------------------------------------------
-cdef int _DISPATCH_INT64   = 0
-cdef int _DISPATCH_BOOL    = 1
-cdef int _DISPATCH_FLOAT64 = 2
-cdef int _DISPATCH_STRING  = 3
+cdef int _DISPATCH_INT64        = 0
+cdef int _DISPATCH_BOOL         = 1
+cdef int _DISPATCH_FLOAT64      = 2
+cdef int _DISPATCH_STRING       = 3
+cdef int _DISPATCH_DICT_STRING  = 4
+cdef int _DISPATCH_DICT_INT64   = 5
+cdef int _DISPATCH_DICT_FLOAT64 = 6
 
 
+
+
+# ---------------------------------------------------------------------------
+# Packed-code reader (re-declared here for .pxi locality; identical to the
+# one in int64_vector.pyx / string_vector.pyx, which are not exported via .pxd)
+# ---------------------------------------------------------------------------
+cdef inline uint32_t _ks_read_packed_code(const uint8_t* codes, uint8_t code_width, Py_ssize_t row_idx) noexcept nogil:
+    if code_width == 1:
+        return (<const uint8_t*>codes)[row_idx]
+    if code_width == 2:
+        return (<const uint16_t*>codes)[row_idx]
+    return (<const uint32_t*>codes)[row_idx]
 
 
 # ---------------------------------------------------------------------------
@@ -534,6 +549,133 @@ cdef inline void _ks_store_multi_string_bulk(
 
 
 # ---------------------------------------------------------------------------
+# Dict-encoded bulk helpers — read from the K-entry dict buffer via code index
+# instead of expanding to an N-row dense buffer first.
+# ---------------------------------------------------------------------------
+
+cdef inline void _ks_store_fixed_bulk_dict(
+    DrakenFixedBuffer* buf,
+    uint8_t** null_bitmap_ref,
+    Py_ssize_t* row_count_ref,
+    const int64_t* row_indices,
+    Py_ssize_t n_new,
+    uint8_t* row_nulls,
+    const int64_t* dict_data,
+    const uint8_t* codes,
+    uint8_t code_width,
+) except *:
+    """Store int64/float64 dict-encoded keys without materializing the full column.
+
+    dict_data must point to the raw int64_t values of the dictionary buffer
+    (cast from DrakenFixedBuffer.data).  For float64, caller passes the float
+    bits as int64 — matching the dense path that does <int64_t*>fv.dense_ptr().
+    """
+    cdef Py_ssize_t start_row = row_count_ref[0]
+    cdef Py_ssize_t ri
+    cdef Py_ssize_t row_idx
+    cdef Py_ssize_t out_row
+    cdef uint32_t code
+    cdef int64_t* dst
+    cdef bint needs_null_bitmap = False
+
+    for ri in range(n_new):
+        row_idx = row_indices[ri]
+        if row_nulls != NULL and not ((row_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
+            needs_null_bitmap = True
+            break
+
+    _ks_reserve_fixed_direct(buf, null_bitmap_ref, start_row, n_new, needs_null_bitmap)
+
+    dst = <int64_t*>buf.data
+    for ri in range(n_new):
+        row_idx = row_indices[ri]
+        out_row = start_row + ri
+        if row_nulls != NULL and not ((row_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
+            dst[out_row] = 0
+            if null_bitmap_ref[0] != NULL:
+                _ks_bitmap_clear(null_bitmap_ref[0], out_row)
+        else:
+            code = _ks_read_packed_code(codes, code_width, row_idx)
+            dst[out_row] = dict_data[code]
+            if null_bitmap_ref[0] != NULL:
+                _ks_bitmap_set(null_bitmap_ref[0], out_row)
+
+    row_count_ref[0] = start_row + n_new
+    buf.null_bitmap = null_bitmap_ref[0]
+
+
+cdef inline void _ks_store_string_bulk_dict(
+    DrakenVarBuffer* buf,
+    uint8_t** null_bitmap_ref,
+    Py_ssize_t* row_count_ref,
+    Py_ssize_t* bytes_used_ref,
+    const int64_t* row_indices,
+    Py_ssize_t n_new,
+    uint8_t* row_nulls,
+    DrakenVarBuffer* dict_vbuf,
+    const uint8_t* codes,
+    uint8_t code_width,
+) except *:
+    """Store string dict-encoded keys without materializing the full column."""
+    cdef Py_ssize_t start_row = row_count_ref[0]
+    cdef Py_ssize_t bytes_used = bytes_used_ref[0]
+    cdef Py_ssize_t ri
+    cdef Py_ssize_t row_idx
+    cdef Py_ssize_t out_row
+    cdef Py_ssize_t str_len
+    cdef Py_ssize_t required_rows = start_row + n_new
+    cdef Py_ssize_t current_row_capacity = <Py_ssize_t>buf.length
+    cdef Py_ssize_t current_byte_capacity = bytes_used if bytes_used > 0 else 0
+    cdef uint32_t code
+
+    _ks_ensure_string_capacity(
+        buf,
+        current_row_capacity,
+        current_byte_capacity,
+        required_rows,
+        bytes_used + max(n_new * 16, 64),
+        &current_byte_capacity,
+    )
+    current_row_capacity = <Py_ssize_t>buf.length
+
+    if start_row == 0:
+        buf.offsets[0] = 0
+
+    for ri in range(n_new):
+        row_idx = row_indices[ri]
+        out_row = start_row + ri
+
+        if row_nulls != NULL and not ((row_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
+            if null_bitmap_ref[0] == NULL:
+                _ks_ensure_bitmap_capacity(null_bitmap_ref, start_row, required_rows)
+            _ks_bitmap_clear(null_bitmap_ref[0], out_row)
+        else:
+            code = _ks_read_packed_code(codes, code_width, row_idx)
+            str_len = dict_vbuf.offsets[code + 1] - dict_vbuf.offsets[code]
+            if str_len > 0:
+                if bytes_used + str_len > current_byte_capacity:
+                    _ks_ensure_string_capacity(
+                        buf,
+                        current_row_capacity,
+                        current_byte_capacity,
+                        required_rows,
+                        bytes_used + str_len,
+                        &current_byte_capacity,
+                    )
+                    current_row_capacity = <Py_ssize_t>buf.length
+                memcpy(buf.data + bytes_used, dict_vbuf.data + dict_vbuf.offsets[code], str_len)
+            bytes_used += str_len
+            if null_bitmap_ref[0] != NULL:
+                _ks_bitmap_set(null_bitmap_ref[0], out_row)
+
+        buf.offsets[out_row + 1] = <int32_t>bytes_used
+
+    row_count_ref[0] = required_rows
+    bytes_used_ref[0] = bytes_used
+    buf.null_bitmap = null_bitmap_ref[0]
+
+
+# ---------------------------------------------------------------------------
 # KeyStore
 # ---------------------------------------------------------------------------
 
@@ -691,6 +833,21 @@ cdef class KeyStore:
         cdef uint8_t const_bool
         cdef uint8_t* bool_nulls
 
+        # Single-column dict paths (avoids N-row materialization)
+        cdef DrakenVarBuffer* sv_dv
+        cdef const uint8_t* sv_dc
+        cdef uint8_t sv_dcw
+        cdef uint8_t* sv_rnulls
+        cdef uint32_t sv_code
+        cdef int64_t* iv_dict_data
+        cdef const uint8_t* iv_dc
+        cdef uint8_t iv_dcw
+        cdef uint8_t* iv_rnulls
+        cdef int64_t* fv_dict_data
+        cdef const uint8_t* fv_dc
+        cdef uint8_t fv_dcw
+        cdef uint8_t* fv_rnulls
+
         # Multi-column pre-computed dispatch
         cdef vector[int]    col_dispatch
         cdef vector[size_t] col_null_ptrs
@@ -698,6 +855,8 @@ cdef class KeyStore:
         cdef vector[size_t] col_varbuf_ptrs
         cdef vector[bint]   col_has_const
         cdef vector[int64_t] col_const_vals
+        cdef vector[size_t] col_dict_code_ptrs
+        cdef vector[uint8_t] col_dict_code_widths
         cdef int disp
         cdef int storage_slot
         cdef DrakenFixedBuffer* fixed_buf
@@ -716,42 +875,78 @@ cdef class KeyStore:
             if key_kind == KEY_MULTI_ENCODED_STRING:
                 sv = <StringVector>vec
                 if sv._encoding == DRAKEN_ENCODING_DICTIONARY and sv.ptr.data == NULL:
-                    sv = _materialize_dict_string(sv)
-                    nulls = sv.null_bitmap_ptr()
-                elif sv._encoding == DRAKEN_ENCODING_RLE:
-                    sv = _materialize_rle_string(sv)
-                    nulls = sv.null_bitmap_ptr()
-                vbuf = sv.ptr
-                if self._single_string_direct:
-                    for ri in range(n_new):
-                        row_idx = row_indices[ri]
-                        valid_flag = 1 if _ks_bitmap_is_valid(nulls, row_idx) else 0
-                        if valid_flag and vbuf != NULL:
-                            str_ptr = <const char*>(vbuf.data + vbuf.offsets[row_idx])
-                            str_len  = vbuf.offsets[row_idx + 1] - vbuf.offsets[row_idx]
-                        else:
-                            str_ptr = NULL
-                            str_len  = 0
-                        _ks_append_single_string_direct(
+                    # Dict path: read directly from dict values — no N-row materialization.
+                    sv_dv     = sv._dict_values
+                    sv_dc     = sv._dict_codes
+                    sv_dcw    = sv._dict_code_width
+                    sv_rnulls = sv.ptr.null_bitmap
+                    if self._single_string_direct:
+                        _ks_store_string_bulk_dict(
                             self._single_string_buf,
                             &self._single_string_nulls,
                             &self._single_string_rows,
                             &self._single_string_bytes,
-                            str_ptr,
-                            str_len,
-                            valid_flag,
+                            row_indices,
+                            n_new,
+                            sv_rnulls,
+                            sv_dv,
+                            sv_dc,
+                            sv_dcw,
                         )
+                    else:
+                        raise RuntimeError("single string codec path removed")
                 else:
-                    raise RuntimeError("single string codec path removed")
+                    if sv._encoding == DRAKEN_ENCODING_RLE:
+                        sv = _materialize_rle_string(sv)
+                    vbuf  = sv.ptr
+                    nulls = sv.null_bitmap_ptr()
+                    if self._single_string_direct:
+                        for ri in range(n_new):
+                            row_idx = row_indices[ri]
+                            valid_flag = 1 if _ks_bitmap_is_valid(nulls, row_idx) else 0
+                            if valid_flag and vbuf != NULL:
+                                str_ptr = <const char*>(vbuf.data + vbuf.offsets[row_idx])
+                                str_len  = vbuf.offsets[row_idx + 1] - vbuf.offsets[row_idx]
+                            else:
+                                str_ptr = NULL
+                                str_len  = 0
+                            _ks_append_single_string_direct(
+                                self._single_string_buf,
+                                &self._single_string_nulls,
+                                &self._single_string_rows,
+                                &self._single_string_bytes,
+                                str_ptr,
+                                str_len,
+                                valid_flag,
+                            )
+                    else:
+                        raise RuntimeError("single string codec path removed")
 
             elif isinstance(vec, Int64Vector):
                 iv = <Int64Vector>vec
                 if iv._encoding == DRAKEN_ENCODING_DICTIONARY and iv.ptr.data == NULL:
-                    iv = _materialize_dict_int64(iv)
-                    nulls = iv.null_bitmap_ptr()
-                if self._single_fixed_direct:
-                    if iv._has_const:
-                        const_i64 = iv._const_value
+                    # Dict path: read directly from dict values — no N-row materialization.
+                    iv_dict_data = <int64_t*>iv._dict_values.data
+                    iv_dc        = iv._dict_codes
+                    iv_dcw       = iv._dict_code_width
+                    iv_rnulls    = iv.ptr.null_bitmap
+                    if self._single_fixed_direct:
+                        _ks_store_fixed_bulk_dict(
+                            self._single_fixed_buf,
+                            &self._single_fixed_nulls,
+                            &self._single_fixed_rows,
+                            row_indices,
+                            n_new,
+                            iv_rnulls,
+                            iv_dict_data,
+                            iv_dc,
+                            iv_dcw,
+                        )
+                    else:
+                        raise RuntimeError("single fixed key codec path removed")
+                elif iv._has_const:
+                    const_i64 = iv._const_value
+                    if self._single_fixed_direct:
                         _ks_store_single_fixed_bulk_int64(
                             self._single_fixed_buf,
                             &self._single_fixed_nulls,
@@ -764,6 +959,9 @@ cdef class KeyStore:
                             const_i64,
                         )
                     else:
+                        raise RuntimeError("single fixed key codec path removed")
+                else:
+                    if self._single_fixed_direct:
                         i64_data = <int64_t*>iv.dense_ptr()
                         _ks_store_single_fixed_bulk_int64(
                             self._single_fixed_buf,
@@ -776,8 +974,8 @@ cdef class KeyStore:
                             False,
                             0,
                         )
-                else:
-                    raise RuntimeError("single fixed key codec path removed")
+                    else:
+                        raise RuntimeError("single fixed key codec path removed")
 
             elif isinstance(vec, BoolVector):
                 bv = <BoolVector>vec
@@ -817,23 +1015,43 @@ cdef class KeyStore:
                 # Float64Vector and other fixed-width types — store as raw int64 bits
                 fv = <Float64Vector>vec
                 if fv._encoding == DRAKEN_ENCODING_DICTIONARY and fv.ptr.data == NULL:
-                    fv = _materialize_dict_float64(fv)
-                    nulls = fv.null_bitmap_ptr()
-                i64_data = <int64_t*>fv.dense_ptr()
-                if self._single_fixed_direct:
-                    _ks_store_single_fixed_bulk_int64(
-                        self._single_fixed_buf,
-                        &self._single_fixed_nulls,
-                        &self._single_fixed_rows,
-                        row_indices,
-                        n_new,
-                        nulls,
-                        i64_data,
-                        False,
-                        0,
-                    )
+                    # Dict path: read directly from dict values — no N-row materialization.
+                    # Float bits are stored as int64 in the dict buffer, matching the
+                    # dense path cast <int64_t*>fv.dense_ptr().
+                    fv_dict_data = <int64_t*>fv._dict_values.data
+                    fv_dc        = fv._dict_codes
+                    fv_dcw       = fv._dict_code_width
+                    fv_rnulls    = fv.ptr.null_bitmap
+                    if self._single_fixed_direct:
+                        _ks_store_fixed_bulk_dict(
+                            self._single_fixed_buf,
+                            &self._single_fixed_nulls,
+                            &self._single_fixed_rows,
+                            row_indices,
+                            n_new,
+                            fv_rnulls,
+                            fv_dict_data,
+                            fv_dc,
+                            fv_dcw,
+                        )
+                    else:
+                        raise RuntimeError("single fixed key codec path removed")
                 else:
-                    raise RuntimeError("single fixed key codec path removed")
+                    i64_data = <int64_t*>fv.dense_ptr()
+                    if self._single_fixed_direct:
+                        _ks_store_single_fixed_bulk_int64(
+                            self._single_fixed_buf,
+                            &self._single_fixed_nulls,
+                            &self._single_fixed_rows,
+                            row_indices,
+                            n_new,
+                            nulls,
+                            i64_data,
+                            False,
+                            0,
+                        )
+                    else:
+                        raise RuntimeError("single fixed key codec path removed")
 
         else:
             # ----------------------------------------------------------------
@@ -851,32 +1069,47 @@ cdef class KeyStore:
             col_varbuf_ptrs.resize(self._n_cols, 0)
             col_has_const.resize(self._n_cols, False)
             col_const_vals.resize(self._n_cols, 0)
+            col_dict_code_ptrs.resize(self._n_cols, 0)
+            col_dict_code_widths.resize(self._n_cols, 0)
 
             for col_idx in range(self._n_cols):
                 key_kind = self._key_kinds[col_idx]
                 vec = vecs[col_idx]
 
                 if key_kind == KEY_MULTI_ENCODED_STRING:
-                    col_dispatch[col_idx]   = _DISPATCH_STRING
                     sv = <StringVector>vec
                     if sv._encoding == DRAKEN_ENCODING_DICTIONARY and sv.ptr.data == NULL:
-                        sv = _materialize_dict_string(sv)
-                        vecs[col_idx] = sv
-                    col_null_ptrs[col_idx]  = <size_t>sv.null_bitmap_ptr()
-                    col_varbuf_ptrs[col_idx] = <size_t>sv.ptr
+                        # Dict path: capture dict pointers; no N-row materialization.
+                        col_dispatch[col_idx]        = _DISPATCH_DICT_STRING
+                        col_null_ptrs[col_idx]       = <size_t>sv.ptr.null_bitmap
+                        col_varbuf_ptrs[col_idx]     = <size_t>sv._dict_values
+                        col_dict_code_ptrs[col_idx]  = <size_t>sv._dict_codes
+                        col_dict_code_widths[col_idx] = sv._dict_code_width
+                    else:
+                        if sv._encoding == DRAKEN_ENCODING_RLE:
+                            sv = _materialize_rle_string(sv)
+                            vecs[col_idx] = sv
+                        col_dispatch[col_idx]    = _DISPATCH_STRING
+                        col_null_ptrs[col_idx]   = <size_t>sv.null_bitmap_ptr()
+                        col_varbuf_ptrs[col_idx] = <size_t>sv.ptr
 
                 elif isinstance(vec, Int64Vector):
-                    col_dispatch[col_idx] = _DISPATCH_INT64
                     iv = <Int64Vector>vec
                     if iv._encoding == DRAKEN_ENCODING_DICTIONARY and iv.ptr.data == NULL:
-                        iv = _materialize_dict_int64(iv)
-                        vecs[col_idx] = iv
-                    col_null_ptrs[col_idx] = <size_t>iv.null_bitmap_ptr()
-                    if iv._has_const:
-                        col_has_const[col_idx] = True
-                        col_const_vals[col_idx] = iv._const_value
+                        # Dict path: capture dict pointers; no N-row materialization.
+                        col_dispatch[col_idx]        = _DISPATCH_DICT_INT64
+                        col_null_ptrs[col_idx]       = <size_t>iv.ptr.null_bitmap
+                        col_dense_ptrs[col_idx]      = <size_t>iv._dict_values.data
+                        col_dict_code_ptrs[col_idx]  = <size_t>iv._dict_codes
+                        col_dict_code_widths[col_idx] = iv._dict_code_width
                     else:
-                        col_dense_ptrs[col_idx] = <size_t>iv.dense_ptr()
+                        col_dispatch[col_idx]  = _DISPATCH_INT64
+                        col_null_ptrs[col_idx] = <size_t>iv.null_bitmap_ptr()
+                        if iv._has_const:
+                            col_has_const[col_idx]  = True
+                            col_const_vals[col_idx] = iv._const_value
+                        else:
+                            col_dense_ptrs[col_idx] = <size_t>iv.dense_ptr()
 
                 elif isinstance(vec, BoolVector):
                     col_dispatch[col_idx] = _DISPATCH_BOOL
@@ -891,13 +1124,18 @@ cdef class KeyStore:
 
                 else:
                     # Float64Vector and other fixed-width types
-                    col_dispatch[col_idx] = _DISPATCH_FLOAT64
                     fv = <Float64Vector>vec
                     if fv._encoding == DRAKEN_ENCODING_DICTIONARY and fv.ptr.data == NULL:
-                        fv = _materialize_dict_float64(fv)
-                        vecs[col_idx] = fv
-                    col_null_ptrs[col_idx] = <size_t>fv.null_bitmap_ptr()
-                    col_dense_ptrs[col_idx] = <size_t>fv.dense_ptr()
+                        # Dict path: float bits stored as int64 — matches dense cast.
+                        col_dispatch[col_idx]        = _DISPATCH_DICT_FLOAT64
+                        col_null_ptrs[col_idx]       = <size_t>fv.ptr.null_bitmap
+                        col_dense_ptrs[col_idx]      = <size_t>fv._dict_values.data
+                        col_dict_code_ptrs[col_idx]  = <size_t>fv._dict_codes
+                        col_dict_code_widths[col_idx] = fv._dict_code_width
+                    else:
+                        col_dispatch[col_idx]    = _DISPATCH_FLOAT64
+                        col_null_ptrs[col_idx]   = <size_t>fv.null_bitmap_ptr()
+                        col_dense_ptrs[col_idx]  = <size_t>fv.dense_ptr()
 
             if self._multi_direct:
                 for col_idx in range(self._n_cols):
@@ -914,6 +1152,31 @@ cdef class KeyStore:
                             n_new,
                             <uint8_t*>col_null_ptrs[col_idx],
                             <DrakenVarBuffer*>col_varbuf_ptrs[col_idx],
+                        )
+                    elif disp == _DISPATCH_DICT_STRING:
+                        _ks_store_string_bulk_dict(
+                            self._multi_string_bufs[storage_slot],
+                            &self._multi_string_nulls[storage_slot],
+                            &self._multi_string_rows[storage_slot],
+                            &self._multi_string_bytes[storage_slot],
+                            row_indices,
+                            n_new,
+                            <uint8_t*>col_null_ptrs[col_idx],
+                            <DrakenVarBuffer*>col_varbuf_ptrs[col_idx],
+                            <const uint8_t*>col_dict_code_ptrs[col_idx],
+                            col_dict_code_widths[col_idx],
+                        )
+                    elif disp == _DISPATCH_DICT_INT64 or disp == _DISPATCH_DICT_FLOAT64:
+                        _ks_store_fixed_bulk_dict(
+                            self._multi_fixed_bufs[storage_slot],
+                            &self._multi_fixed_nulls[storage_slot],
+                            &self._multi_fixed_rows[storage_slot],
+                            row_indices,
+                            n_new,
+                            <uint8_t*>col_null_ptrs[col_idx],
+                            <const int64_t*>col_dense_ptrs[col_idx],
+                            <const uint8_t*>col_dict_code_ptrs[col_idx],
+                            col_dict_code_widths[col_idx],
                         )
                     else:
                         _ks_store_multi_fixed_bulk(

@@ -11,6 +11,7 @@ No Python in the hot path. All IO, decode, and IPC-serialize run in C++:
 """
 
 from libc.stdint cimport uint8_t, int32_t, int64_t, uint32_t, uint64_t
+from libc.stddef cimport size_t
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.unordered_map cimport unordered_map
@@ -18,12 +19,11 @@ import time
 
 from opteryx.compiled.structures.memory_pool cimport MemoryPool
 from opteryx.compiled.structures.column_deserializer cimport deserialize_row_group
-from opteryx.compiled.structures.footer_cache import ParquetFooterBytesCache as _FooterBytesCache
-from opteryx.tracing.event_recorder import record_event as _record_event
-from opteryx import config as _cfg
-from rugo.parquet_reader import read_metadata_from_bytes as _read_metadata_from_bytes
+from opteryx.compiled.structures.footer_cache cimport ParquetFooterBytesCache
 from rugo.parquet_reader import decode_value as _decode_value_c
 from rugo.parquet_reader cimport ReadParquetMetadataFromBuffer, FileStats, RowGroupStats, ColumnStats, AggColumnStat, AggregateColumnStats
+from rugo.parquet_reader cimport EncodingToString, CompressionCodecToString
+from rugo.parquet_reader cimport ParquetFooterResult, FetchParquetFooter
 
 _PARQUET_MAGIC = b"PAR1"
 _PARQUET_FOOTER_SUFFIX = 8
@@ -231,161 +231,115 @@ cdef class CppIOPipeline:
 
 
 cdef tuple _read_footer_payload(
-    object filesystem,
     str path,
-    object file_size_in,
-    object connector,
-    object footer_cache,
+    int64_t file_size,
+    ParquetFooterBytesCache footer_cache,
 ):
-    cdef int64_t file_size, prefetch_size, prefetch_offset
-    cdef int64_t footer_length, total_footer_payload, footer_offset, bytes_fetched
-    cdef int64_t footer_start, n, lp, env_size, off
-    cdef uint32_t footer_length_u32
-    cdef uint64_t start_ns = time.monotonic_ns()
-    cdef const uint8_t[::1] tail_view, footer_view
-    cdef uint8_t[::1] env_view
-    cdef bytearray env_buf
+    """Fetch the Parquet footer envelope. Pure C++ IO, typed cache.
+
+    Returns (envelope_bytes, bytes_fetched). Pass file_size=-1 to auto-detect
+    via stat() (local) or HEAD (http/gcs). Pass footer_cache=None to bypass
+    the cache.
+    """
+    cdef ParquetFooterResult result
+    cdef size_t env_sz
+    cdef const uint8_t* env_ptr
     cdef bytes envelope
-
-    if _cfg.OPTERYX_TRACE:
-        _record_event("download_start", file_id=path, component="footer", connector=connector)
-
-    if file_size_in is None or file_size_in <= 0:
-        file_info = filesystem.get_file_info(path)
-        file_size = file_info.size
-    else:
-        file_size = file_size_in
-
-    if file_size < _PARQUET_FOOTER_SUFFIX:
-        raise ValueError(
-            f"File {path!r} is too small to be a valid Parquet file ({file_size} B)"
-        )
 
     if footer_cache is not None:
         cached = footer_cache.get(path)
         if cached is not None:
-            return cached, 0, 0
+            return cached, 0
 
-    prefetch_size = min(_FOOTER_PREFETCH, file_size)
-    prefetch_offset = file_size - prefetch_size
-    # Buffer-protocol assignment: works for bytes (HTTP/GCS) and memoryview
-    # (local filesystem zero-copy path) without branching.
-    tail_view = filesystem.read_ranges(path, [(prefetch_offset, prefetch_size)])[0]
+    result = FetchParquetFooter(path.encode("utf-8"), file_size)
 
-    n = tail_view.shape[0]
-    if not (tail_view[n - 4] == 0x50   # 'P'
-        and tail_view[n - 3] == 0x41   # 'A'
-        and tail_view[n - 2] == 0x52   # 'R'
-        and tail_view[n - 1] == 0x31): # '1'
-        raise ValueError(
-            f"File {path!r} does not end with Parquet magic bytes "
-            f"(got {bytes(tail_view[n - 4:n])!r}, expected {_PARQUET_MAGIC!r})"
-        )
-
-    # 4-byte little-endian read of footer length: typed C arithmetic, no struct.
-    lp = n - _PARQUET_FOOTER_SUFFIX
-    footer_length_u32 = (
-        <uint32_t>tail_view[lp]
-        | (<uint32_t>tail_view[lp + 1] << 8)
-        | (<uint32_t>tail_view[lp + 2] << 16)
-        | (<uint32_t>tail_view[lp + 3] << 24)
-    )
-    footer_length = <int64_t>footer_length_u32
-    if footer_length == 0 or footer_length > file_size - _PARQUET_FOOTER_SUFFIX:
-        raise ValueError(
-            f"Invalid footer length {footer_length} in {path!r} (file_size={file_size})"
-        )
-
-    total_footer_payload = footer_length + _PARQUET_FOOTER_SUFFIX
-    if total_footer_payload <= prefetch_size:
-        footer_start = n - total_footer_payload
-        footer_view = tail_view[footer_start : footer_start + footer_length]
-        bytes_fetched = prefetch_size
-    else:
-        footer_offset = file_size - _PARQUET_FOOTER_SUFFIX - footer_length
-        footer_view = filesystem.read_ranges(path, [(footer_offset, footer_length)])[0]
-        bytes_fetched = prefetch_size + footer_length
-
-    if _cfg.OPTERYX_TRACE:
-        _record_event(
-            "download_complete",
-            file_id=path, component="footer", bytes_received=bytes_fetched, connector=connector,
-        )
-
-    # Assemble envelope: MAGIC + footer + length(LE) + MAGIC, in one contiguous
-    # bytearray with a single memcpy of the footer payload. _parse_footer_envelope
-    # and the cache contract take `bytes`, so we materialise once at the end.
-    env_size = 4 + footer_length + 4 + 4
-    env_buf = bytearray(env_size)
-    env_view = env_buf
-
-    env_view[0] = 0x50
-    env_view[1] = 0x41
-    env_view[2] = 0x52
-    env_view[3] = 0x31
-
-    env_view[4 : 4 + footer_length] = footer_view
-
-    off = 4 + footer_length
-    env_view[off]     = <uint8_t>( footer_length_u32        & 0xff)
-    env_view[off + 1] = <uint8_t>((footer_length_u32 >>  8) & 0xff)
-    env_view[off + 2] = <uint8_t>((footer_length_u32 >> 16) & 0xff)
-    env_view[off + 3] = <uint8_t>((footer_length_u32 >> 24) & 0xff)
-
-    env_view[off + 4] = 0x50
-    env_view[off + 5] = 0x41
-    env_view[off + 6] = 0x52
-    env_view[off + 7] = 0x31
-
-    envelope = bytes(env_buf)
+    env_sz = result.envelope.size()
+    env_ptr = result.envelope.data()
+    envelope = env_ptr[:env_sz]
 
     if footer_cache is not None:
         footer_cache.put(path, envelope)
 
-    return envelope, bytes_fetched, time.monotonic_ns() - start_ns
+    return envelope, result.bytes_fetched
 
 
-cdef dict _parse_footer_envelope(str path, bytes envelope, int64_t footer_bytes):
-    cdef dict meta
-    try:
-        meta = _read_metadata_from_bytes(envelope)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to parse Parquet footer from {path!r}: {exc}") from exc
-    meta["__footer_bytes__"] = footer_bytes
-    return meta
-
-
-cpdef dict fetch_footer(
-    object filesystem,
+cpdef dict fetch_column_chunk_info(
     str path,
-    object file_size = None,
-    object connector = None,
-    object footer_bytes_cache = None,
+    int rg_idx,
+    list column_names,
+    ParquetFooterBytesCache footer_bytes_cache = None,
 ):
+    """Return decode metadata for the requested columns in one row group.
+
+    Returns {col_name: col_info_dict} containing only the fields needed to
+    read and decode column chunks (offsets, sizes, codec, encodings, levels,
+    type info).  Only requested columns are decoded — no Python objects created
+    for the rest of the schema.
+    """
     cdef bytes envelope
-    cdef int64_t footer_bytes
-    envelope, footer_bytes, _ = _read_footer_payload(
-        filesystem, path, file_size, connector, footer_bytes_cache
-    )
-    return _parse_footer_envelope(path, envelope, footer_bytes)
+    cdef const uint8_t* buf_ptr
+    cdef size_t buf_size
+    cdef FileStats fs
+    cdef size_t rg_count, col_count, col_i
+    cdef str col_name
+
+    envelope, _ = _read_footer_payload(path, -1, footer_bytes_cache)
+    buf_ptr = <const uint8_t*>envelope
+    buf_size = <size_t>len(envelope)
+    fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
+
+    rg_count = fs.row_groups.size()
+    if rg_idx < 0 or <size_t>rg_idx >= rg_count:
+        raise IndexError(
+            f"Row group {rg_idx} out of range [0, {rg_count})"
+        )
+
+    requested = set(column_names)
+    cdef dict result = {}
+    col_count = fs.row_groups[rg_idx].columns.size()
+    for col_i in range(col_count):
+        col = fs.row_groups[rg_idx].columns[col_i]
+        col_name = col.name.decode("utf-8")
+        # Use display name (top-level) for lookup — matches schema_columns naming.
+        dot = col_name.find(".")
+        display = col_name[:dot] if dot >= 0 else col_name
+        if display not in requested:
+            continue
+        encodings_list = [
+            EncodingToString(enc).decode("utf-8")
+            for enc in col.encodings
+        ]
+        codec_str = CompressionCodecToString(col.codec).decode("utf-8") if col.codec >= 0 else None
+        result[display] = {
+            "name":                  display,
+            "physical_type":         col.physical_type.decode("utf-8"),
+            "logical_type":          col.logical_type.decode("utf-8") if col.logical_type.size() > 0 else "",
+            "data_page_offset":      col.data_page_offset      if col.data_page_offset >= 0      else None,
+            "dictionary_page_offset":col.dictionary_page_offset if col.dictionary_page_offset >= 0 else None,
+            "total_compressed_size": col.total_compressed_size  if col.total_compressed_size >= 0  else None,
+            "compression_codec":     codec_str,
+            "encodings":             encodings_list,
+            "max_definition_level":  col.max_definition_level  if col.max_definition_level >= 0  else None,
+            "max_repetition_level":  col.max_repetition_level  if col.max_repetition_level >= 0  else None,
+            "type_length":           col.type_length            if col.type_length > 0             else None,
+            "num_values":            col.num_values             if col.num_values >= 0             else None,
+        }
+
+    return result
 
 
 cpdef tuple fetch_column_stats(
-    object filesystem,
     str path,
-    object file_size = None,
-    object connector = None,
-    object footer_bytes_cache = None,
+    int64_t file_size = -1,
+    ParquetFooterBytesCache footer_bytes_cache = None,
 ):
     """Fast planning-phase stats: aggregate column min/max/null_count in C++.
 
     Returns (num_rows, footer_bytes, col_stats_dict) where:
       col_stats_dict = {name: (min_val, max_val, null_count_or_None)}
 
-    ~25× faster than fetch_footer() for the planning use case because:
-    - No per-row-group Python dict creation (23,730 dicts avoided for hits.parquet)
-    - Binary comparison in C++ keeps only the global min/max per column
-    - decode_value called once per column (not once per column per row group)
+    Pass file_size=-1 to auto-detect via stat()/HEAD. Binary min/max
+    aggregation runs in C++; decode_value is called once per column.
     """
     cdef bytes envelope
     cdef int64_t footer_bytes
@@ -396,9 +350,7 @@ cpdef tuple fetch_column_stats(
     cdef str col_name, log_type
     cdef bint prefer_text
 
-    envelope, footer_bytes, _ = _read_footer_payload(
-        filesystem, path, file_size, connector, footer_bytes_cache
-    )
+    envelope, footer_bytes = _read_footer_payload(path, file_size, footer_bytes_cache)
 
     buf_ptr = <const uint8_t*>envelope
     buf_size = <size_t>len(envelope)
@@ -535,9 +487,7 @@ def iter_row_groups_ipc(
                 path_bytes_cpp = path.encode('utf-8')
                 if local_footers_native.count(path_bytes_cpp) == 0:
                     _ts = time.monotonic_ns()
-                    envelope, _, _ = _read_footer_payload(
-                        filesystem, path, None, connector, footer_bytes_cache
-                    )
+                    envelope, _ = _read_footer_payload(path, -1, footer_bytes_cache)
                     t_footer_ns += time.monotonic_ns() - _ts
                     footer_buf_ptr = <const uint8_t*>envelope
                     footer_buf_size = len(envelope)

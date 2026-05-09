@@ -3,11 +3,13 @@ from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
 from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
 from opteryx.connectors.parquet_io.reader import ListColumnError
 from opteryx.connectors.parquet_io.reader import fetch_columns
-from opteryx.connectors.parquet_io.pool_reader import fetch_footer
+from opteryx.connectors.parquet_io.pool_reader import fetch_column_chunk_info
+from opteryx.connectors.parquet_io.pool_reader import fetch_column_stats
 from opteryx.connectors.parquet_io.pool_reader import iter_row_groups_ipc as iter_row_groups
 
 __all__ = [
-    "fetch_footer",
+    "fetch_column_chunk_info",
+    "fetch_column_stats",
     "fetch_columns",
     "iter_row_groups",
     "ListColumnError",

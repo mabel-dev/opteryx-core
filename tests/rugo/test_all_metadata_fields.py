@@ -11,7 +11,7 @@ import glob
 
 import pytest
 
-from rugo import parquet
+import rugo.parquet_reader as parquet
 
 
 def test_all_metadata_fields_exposed():
@@ -173,36 +173,35 @@ def test_metadata_field_values():
 
 
 def test_multiple_columns():
-    """Test that all columns have the complete metadata."""
-    metadata = parquet.read_metadata("testdata/planets/planets.parquet")
+    """Test that all columns have the complete chunk metadata via fetch_column_chunk_info."""
+    from opteryx.connectors.parquet_io.pool_reader import fetch_column_chunk_info
+
+    path = "testdata/planets/planets.parquet"
+    schema = parquet.read_metadata(path)
+    column_names = [c["name"] for c in schema["schema_columns"]]
+
+    col_info = fetch_column_chunk_info(path, 0, column_names)
 
     expected_fields = {
         "name",
         "physical_type",
         "logical_type",
         "num_values",
-        "total_uncompressed_size",
         "total_compressed_size",
         "data_page_offset",
-        "index_page_offset",
         "dictionary_page_offset",
-        "min",
-        "max",
-        "null_count",
-        "distinct_count",
-        "bloom_offset",
-        "bloom_length",
         "encodings",
         "compression_codec",
-        "key_value_metadata",
+        "max_definition_level",
+        "max_repetition_level",
     }
 
-    for col in metadata["row_groups"][0]["columns"]:
+    for col_name, col in col_info.items():
         actual_fields = set(col.keys())
         missing_fields = expected_fields - actual_fields
-        assert not missing_fields, f"Column '{col['name']}' missing fields: {missing_fields}"
+        assert not missing_fields, f"Column '{col_name}' missing fields: {missing_fields}"
 
-    print(f"✅ All {len(metadata['row_groups'][0]['columns'])} columns have complete metadata")
+    print(f"✅ All {len(col_info)} columns have complete metadata")
 
 
 if __name__ == "__main__":

@@ -166,7 +166,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             stream = self.filesystem.open_input_stream(blob_name)
             try:
                 mv = stream.memoryview
-                rugo_metadata = read_metadata_from_memoryview(mv, schema_only=True)
+                rugo_metadata = read_metadata_from_memoryview(mv)
                 schema = rugo_to_orso_schema(rugo_metadata, schema_name=blob_name)
                 return schema
             finally:
@@ -311,7 +311,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     from opteryx.connectors.parquet_io.pool_reader import fetch_column_stats
 
                     record_count, footer_size, col_stats = fetch_column_stats(
-                        self.filesystem, blob_name, file_size=file_size or None
+                        blob_name, file_size=file_size or -1
                     )
                     if file_size == 0:
                         file_size = footer_size
