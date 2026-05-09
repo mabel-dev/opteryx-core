@@ -206,216 +206,45 @@ class Manifest:
     # ================================================================
 
     def estimate_selectivity(self, predicate) -> float:
+        """Estimate fraction of rows matching predicate.
+
+        Delegates to cost_estimation.selectivity.estimate_selectivity, which
+        operates over a RelationStatistics view of this manifest.
         """
-        Estimate fraction of rows matching predicate.
+        from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
+        return estimate_selectivity(predicate, self._as_relation_statistics())
 
-        Uses histograms if available, otherwise falls back to NDV/null counts
-        or textbook constants. Never raises on missing stats; degrades to the
-        next tier and finally to a constant.
+    def _as_relation_statistics(self):
+        """Build a fresh RelationStatistics snapshot of this manifest.
 
-        Args:
-            predicate: Predicate expression Node.
-
-        Returns:
-            Estimated selectivity in [0.0, 1.0].
+        No caching: selectivity walks rebuild this on each call. Cheap because
+        the underlying manifest accessors (estimate_cardinality, get_distogram,
+        estimate_null_fraction) already memoise as needed.
         """
-        return _clamp01(self._selectivity(predicate))
-
-    def _selectivity(self, node) -> float:
-        from opteryx.expression import NodeType
-
-        if node is None:
-            return 1.0
-
-        node_type = getattr(node, "node_type", None)
-
-        if node_type == NodeType.AND:
-            return self._selectivity(node.left) * self._selectivity(node.right)
-
-        if node_type == NodeType.OR:
-            s1 = self._selectivity(node.left)
-            s2 = self._selectivity(node.right)
-            return 1.0 - (1.0 - s1) * (1.0 - s2)
-
-        if node_type == NodeType.NOT:
-            return 1.0 - self._selectivity(node.centre)
-
-        if node_type == NodeType.UNARY_OPERATOR:
-            op = node.value
-            col_name = _identifier_name(node.centre)
-            if col_name is None:
-                return 1.0
-            if op == "IsNull":
-                return self._selectivity_is_null(col_name)
-            if op == "IsNotNull":
-                return 1.0 - self._selectivity_is_null(col_name)
-            return 1.0
-
-        if node_type == NodeType.BETWEEN:
-            return self._selectivity_between(node)
-
-        if node_type == NodeType.COMPARISON_OPERATOR:
-            return self._selectivity_comparison(node)
-
-        return 1.0
-
-    def _selectivity_comparison(self, node) -> float:
-        from opteryx.expression import NodeType
-
-        op = node.value
-        left, right = node.left, node.right
-
-        # Normalise to (identifier, literal) and possibly invert op for swapped operands.
-        col_name = _identifier_name(left)
-        literal_node = right
-        if col_name is None:
-            col_name = _identifier_name(right)
-            literal_node = left
-            op = _SWAPPED_OP.get(op, op)
-        if col_name is None:
-            return 1.0
-
-        if literal_node is None or literal_node.node_type != NodeType.LITERAL:
-            return 1.0
-
-        literal_value = _literal_scalar(literal_node)
-
-        if op == "Eq":
-            return self._selectivity_eq(col_name, literal_value)
-        if op == "NotEq":
-            return 1.0 - self._selectivity_eq(col_name, literal_value)
-        if op in ("Lt", "LtEq", "Gt", "GtEq"):
-            return self._selectivity_range(col_name, op, literal_value)
-        if op == "InList":
-            return self._selectivity_in(col_name, literal_value)
-        if op == "NotInList":
-            return 1.0 - self._selectivity_in(col_name, literal_value)
-        if op in ("Like", "ILike", "RLike"):
-            return _selectivity_like(literal_value)
-        if op in ("NotLike", "NotILike", "NotRLike"):
-            return 1.0 - _selectivity_like(literal_value)
-        return 1.0
-
-    # ---- predicate-kind helpers ----
-
-    def _selectivity_eq(self, col_name: str, literal_value) -> float:
-        # Histogram-based: bin density at literal.
-        dgram = self.get_distogram(col_name)
-        lit_f = _to_float(literal_value)
-        if dgram is not None and lit_f is not None:
-            total = float(dgram.count())
-            if total > 0:
-                bins_len = dgram.bin_count
-                if bins_len > 0:
-                    span = dgram.max - dgram.min
-                    if span > 0 and bins_len > 1:
-                        bin_width = span / bins_len
-                        below = _count_up_to(dgram, lit_f - bin_width / 2.0)
-                        above = _count_up_to(dgram, lit_f + bin_width / 2.0)
-                        density = (above - below) / total
-                        # Tighten the equality estimate using NDV when known.
-                        ndv = self.estimate_cardinality(col_name)
-                        if ndv and ndv > 0:
-                            density = min(density, max(1.0 / ndv, density / max(ndv, 1)))
-                        return _clamp01(density)
-                    # Single-bin or zero-width histogram: literal lands inside iff it equals min.
-                    if span == 0:
-                        return 1.0 if lit_f == dgram.min else 0.0
-
-        ndv = self.estimate_cardinality(col_name)
-        if ndv and ndv > 0:
-            return 1.0 / ndv
-
-        return 0.1
-
-    def _selectivity_range(self, col_name: str, op: str, literal_value) -> float:
-        dgram = self.get_distogram(col_name)
-        lit_f = _to_float(literal_value)
-        if dgram is not None and lit_f is not None:
-            total = float(dgram.count())
-            if total > 0:
-                below = _count_up_to(dgram, lit_f)
-                fraction_below = below / total
-                if op in ("Lt", "LtEq"):
-                    return _clamp01(fraction_below)
-                # Gt / GtEq
-                return _clamp01(1.0 - fraction_below)
-
-        return 0.25
-
-    def _selectivity_in(self, col_name: str, literal_value) -> float:
-        if not isinstance(literal_value, (list, tuple, set, frozenset)):
-            return 0.1
-        values = list(literal_value)
-        n = len(values)
-        if n == 0:
-            return 0.0
-
-        dgram = self.get_distogram(col_name)
-        if dgram is not None:
-            total = float(dgram.count())
-            if total > 0 and dgram.bin_count > 0:
-                span = dgram.max - dgram.min
-                if span > 0:
-                    bin_width = span / dgram.bin_count
-                    accumulated = 0.0
-                    coerced_any = False
-                    for v in values:
-                        f = _to_float(v)
-                        if f is None:
-                            continue
-                        coerced_any = True
-                        below = _count_up_to(dgram, f - bin_width / 2.0)
-                        above = _count_up_to(dgram, f + bin_width / 2.0)
-                        accumulated += (above - below) / total
-                    if coerced_any:
-                        return _clamp01(accumulated)
-
-        ndv = self.estimate_cardinality(col_name)
-        if ndv and ndv > 0:
-            return min(1.0, n / ndv)
-
-        return min(1.0, n * 0.1)
-
-    def _selectivity_between(self, node) -> float:
-        from opteryx.expression import NodeType
-
-        col_name = _identifier_name(node.left)
-        if col_name is None:
-            return 1.0
-
-        # Mirror prune_files: right is one bound, centre is the other. The
-        # ordering is sometimes (lower=right, upper=centre); be tolerant and
-        # sort the two bounds rather than assume a fixed pairing.
-        right = node.right
-        centre = node.centre
-        if right is None or centre is None:
-            return 1.0
-        if right.node_type != NodeType.LITERAL or centre.node_type != NodeType.LITERAL:
-            return 1.0
-
-        a = _to_float(_literal_scalar(right))
-        b = _to_float(_literal_scalar(centre))
-
-        dgram = self.get_distogram(col_name)
-        if dgram is not None and a is not None and b is not None:
-            total = float(dgram.count())
-            if total > 0:
-                lo, hi = (a, b) if a <= b else (b, a)
-                fraction = (_count_up_to(dgram, hi) - _count_up_to(dgram, lo)) / total
-                return _clamp01(fraction)
-
-        return 0.25
-
-    def _selectivity_is_null(self, col_name: str) -> float:
-        # estimate_null_fraction reports 0.0 even when no file carries null
-        # counts at all; treat "no file knows" as missing stats and fall back.
-        if not any(f.null_value_counts for f in self.files):
-            return 0.05
-        nf = self.estimate_null_fraction(col_name)
-        if nf is None:
-            return 0.05
-        return _clamp01(nf)
+        from opteryx.planner.optimizer.statistics import (
+            ColumnRange,
+            ColumnStatistics,
+            RelationStatistics,
+        )
+        total_rows = self.get_record_count()
+        has_null_counts = any(f.null_value_counts for f in self.files)
+        columns: dict = {}
+        for col in self.schema.columns:
+            col_name = getattr(col, "name", None)
+            if not col_name:
+                continue
+            null_fraction = None
+            if has_null_counts:
+                null_fraction = self.estimate_null_fraction(col_name)
+            columns[col_name] = ColumnStatistics(
+                column_name=col_name,
+                data_type=str(getattr(col, "type", "")),
+                distinct_count=self.estimate_cardinality(col_name),
+                value_range=ColumnRange(),
+                histogram=self.get_distogram(col_name),
+                null_fraction=null_fraction,
+            )
+        return RelationStatistics(row_count=total_rows, columns=columns)
 
     # ================================================================
     # Histograms / Distograms
@@ -683,93 +512,3 @@ class Manifest:
             "files_with_histograms": sum(1 for f in self.files if f.histogram_counts),
         }
 
-
-# ================================================================
-# Selectivity helpers (module-level; pure)
-# ================================================================
-
-
-_SWAPPED_OP = {
-    "Lt": "Gt",
-    "LtEq": "GtEq",
-    "Gt": "Lt",
-    "GtEq": "LtEq",
-    "Eq": "Eq",
-    "NotEq": "NotEq",
-}
-
-
-def _clamp01(value: float) -> float:
-    if value < 0.0:
-        return 0.0
-    if value > 1.0:
-        return 1.0
-    return float(value)
-
-
-def _identifier_name(node) -> Optional[str]:
-    from opteryx.expression import NodeType
-
-    if node is None or getattr(node, "node_type", None) != NodeType.IDENTIFIER:
-        return None
-    name = getattr(node, "source_column", None)
-    if name is None:
-        name = getattr(node, "value", None)
-    if isinstance(name, bytes):
-        try:
-            name = name.decode("utf-8")
-        except UnicodeDecodeError:
-            return None
-    return name if isinstance(name, str) else None
-
-
-def _literal_scalar(node):
-    value = getattr(node, "value", None)
-    if hasattr(value, "item") and not isinstance(value, (list, tuple, set, frozenset)):
-        try:
-            return value.item()
-        except (ValueError, TypeError):
-            return value
-    return value
-
-
-def _to_float(value) -> Optional[float]:
-    """Coerce a literal to float for histogram-domain comparisons.
-
-    Returns None if the value is not numerically meaningful — caller should
-    fall back to the next stats tier rather than guess.
-    """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return float(value)
-    if isinstance(value, (int, float)):
-        return float(value)
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _count_up_to(dgram, value: float) -> float:
-    from opteryx.third_party.maki_nage.distogram import count_up_to
-
-    return count_up_to(dgram, value)
-
-
-def _selectivity_like(literal_value) -> float:
-    """LIKE selectivity heuristic: prefix patterns are tighter than substring."""
-    if isinstance(literal_value, bytes):
-        try:
-            literal_value = literal_value.decode("utf-8")
-        except UnicodeDecodeError:
-            return 0.1
-    if not isinstance(literal_value, str):
-        return 0.1
-    if (
-        literal_value.endswith("%")
-        and "%" not in literal_value[:-1]
-        and "_" not in literal_value
-    ):
-        return 0.25
-    return 0.1

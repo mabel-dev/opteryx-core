@@ -52,7 +52,10 @@ from typing import Tuple
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
-from opteryx.planner.optimizer.statistics import CardinalityEstimator
+from opteryx.planner.cost_estimation import KeyStats
+from opteryx.planner.cost_estimation import estimate_after_filter
+from opteryx.planner.cost_estimation import estimate_group_by_cardinality
+from opteryx.planner.cost_estimation import estimate_join_cardinality
 from opteryx.planner.optimizer.statistics import ColumnRange
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
@@ -77,6 +80,118 @@ _PASS_THROUGH_TYPES = {
     LogicalPlanStepType.Analyze,
 }
 
+# Map the local estimator vocabulary to cost_estimation.estimate_join_cardinality's
+# vocabulary. The local names ("left", "right", "outer") were a System A
+# convention; cost_estimation uses the planner's own join-type strings.
+_JOIN_TYPE_FOR_CARDINALITY = {
+    "inner": "inner",
+    "left": "left outer",
+    "right": "right outer",
+    "outer": "full outer",
+}
+
+
+def _split_and_conjuncts(node):
+    """Split an AND-tree into a flat list of conjuncts. Returns [node] for non-AND."""
+    from opteryx.expression import NodeType  # lazy: avoid touching module-level imports
+
+    if node is None:
+        return []
+    if getattr(node, "node_type", None) != NodeType.AND:
+        return [node]
+    return _split_and_conjuncts(node.left) + _split_and_conjuncts(node.right)
+
+
+def _identifier_sources(node):
+    """Collect every identifier ``source`` referenced anywhere in the subtree.
+
+    Used to determine whether a predicate touches only one relation.
+    """
+    from opteryx.expression import NodeType
+
+    if node is None:
+        return set()
+    if node.node_type == NodeType.IDENTIFIER:
+        src = getattr(node, "source", None)
+        return {src} if src is not None else set()
+    out = set()
+    for attr in ("left", "right", "centre"):
+        child = getattr(node, attr, None)
+        if child is not None:
+            out |= _identifier_sources(child)
+    parameters = getattr(node, "parameters", None)
+    if parameters:
+        for p in parameters:
+            out |= _identifier_sources(p)
+    return out
+
+
+def _scan_relation_names(scan_node):
+    """Names by which identifiers can refer to this scan: relation + alias."""
+    names = set()
+    rel = getattr(scan_node, "relation", None)
+    if rel:
+        names.add(rel)
+    alias = getattr(scan_node, "alias", None)
+    if alias:
+        names.add(alias)
+    return names
+
+
+# Node types that the upward walk passes through transparently when looking
+# for Filter conjuncts that constrain a particular Scan. Cross joins are
+# transparent for this purpose because they don't change which conjuncts
+# apply to which leaf — only relation membership does. Anything not in this
+# set (Aggregate, Distinct, Subquery, post-pushdown Inner Join, etc.) stops
+# the walk because the relationship between this Scan's rows and conjuncts
+# above that node is no longer simple selectivity.
+_UPWARD_TRANSPARENT_TYPES = frozenset({
+    LogicalPlanStepType.Filter,
+    LogicalPlanStepType.Project,
+    LogicalPlanStepType.Order,
+    LogicalPlanStepType.HeapSort,
+})
+
+
+def _is_upward_transparent(node) -> bool:
+    nt = node.node_type
+    if nt in _UPWARD_TRANSPARENT_TYPES:
+        return True
+    # Unconverted cross joins are transparent for filter-binding purposes.
+    if nt == LogicalPlanStepType.Join and getattr(node, "type", None) == "cross join":
+        return True
+    return False
+
+
+def _collect_leaf_local_conjuncts(plan, scan_id, scan_names):
+    """Walk upward from the Scan; return conjuncts whose identifiers all bind
+    to ``scan_names``.
+
+    Stops at any non-transparent ancestor (Aggregate, Subquery, post-pushdown
+    Inner Join, Union, etc.). See _is_upward_transparent for the whitelist.
+    """
+    out = []
+    visited = set()
+    frontier = [scan_id]
+    while frontier:
+        nid = frontier.pop()
+        for _, parent_id, _ in plan.outgoing_edges(nid):
+            if parent_id in visited:
+                continue
+            visited.add(parent_id)
+            parent = plan[parent_id]
+            if not _is_upward_transparent(parent):
+                continue  # do not recurse past this branch
+            if parent.node_type == LogicalPlanStepType.Filter:
+                cond = getattr(parent, "condition", None)
+                if cond is not None:
+                    for conj in _split_and_conjuncts(cond):
+                        sources = _identifier_sources(conj)
+                        if sources and sources <= scan_names:
+                            out.append(conj)
+            frontier.append(parent_id)
+    return out
+
 
 def _empty_stats(row_count: int = 0) -> RelationStatistics:
     return RelationStatistics(row_count=max(0, int(row_count)), columns={})
@@ -92,7 +207,11 @@ def _column_name(col) -> Optional[str]:
     return getattr(col, "name", None)
 
 
-def _scan_stats(node: LogicalPlanNode) -> RelationStatistics:
+def _scan_stats(
+    node: LogicalPlanNode,
+    plan: Optional["LogicalPlan"] = None,
+    nid: Optional[str] = None,
+) -> RelationStatistics:
     schema = getattr(node, "schema", None)
     manifest = getattr(node, "manifest", None)
 
@@ -109,6 +228,10 @@ def _scan_stats(node: LogicalPlanNode) -> RelationStatistics:
         row_count = _UNKNOWN_ROW_COUNT
 
     columns: dict = {}
+    has_null_counts = (
+        manifest is not None
+        and any(f.null_value_counts for f in (getattr(manifest, "files", None) or []))
+    )
     if schema is not None:
         for col in schema.columns:
             col_name = getattr(col, "name", None)
@@ -117,6 +240,7 @@ def _scan_stats(node: LogicalPlanNode) -> RelationStatistics:
             distinct_count = None
             value_range = ColumnRange()
             histogram = None
+            null_fraction = None
             if manifest is not None:
                 try:
                     distinct_count = manifest.estimate_cardinality(col_name)
@@ -126,25 +250,52 @@ def _scan_stats(node: LogicalPlanNode) -> RelationStatistics:
                     histogram = manifest.get_distogram(col_name)
                 except Exception:
                     histogram = None
+                if has_null_counts:
+                    try:
+                        null_fraction = manifest.estimate_null_fraction(col_name)
+                    except Exception:
+                        null_fraction = None
             columns[col_name] = ColumnStatistics(
                 column_name=col_name,
                 data_type=str(getattr(col, "type", "")),
                 distinct_count=distinct_count,
                 value_range=value_range,
                 histogram=histogram,
-                _total_rows=row_count,
+                null_fraction=null_fraction,
             )
 
-    return RelationStatistics(row_count=int(row_count), columns=columns)
+    base = RelationStatistics(row_count=int(row_count), columns=columns)
+
+    # Apply leaf-local filter selectivity from upward Filter ancestors.
+    if plan is not None and nid is not None:
+        scan_names = _scan_relation_names(node)
+        if scan_names:
+            conjuncts = _collect_leaf_local_conjuncts(plan, nid, scan_names)
+            if conjuncts:
+                from opteryx.planner.cost_estimation.selectivity import (
+                    estimate_selectivity,
+                )
+                selectivity = 1.0
+                for conj in conjuncts:
+                    try:
+                        s = float(estimate_selectivity(conj, base))
+                    except Exception:
+                        s = 1.0
+                    selectivity *= s
+                if selectivity != 1.0:
+                    new_rows = max(1, int(base.row_count * selectivity))
+                    base = base.with_row_count(new_rows)
+
+    return base
 
 
-def _find_underlying_manifest(plan: LogicalPlan, nid: str) -> Optional[object]:
-    """Walk the ingoing chain looking for a single underlying Scan with a manifest.
+def _find_underlying_scan(plan: LogicalPlan, nid: str):
+    """Walk the ingoing chain looking for a single underlying Scan node.
 
-    Returns the manifest if exactly one Scan is reachable through pass-through
-    edges; returns None if a Join, Union, Aggregate, Set op, or branching is
-    encountered (selectivity from a single-table manifest doesn't apply cleanly
-    in those cases).
+    Returns the Scan LogicalPlanNode when exactly one Scan is reachable
+    through pass-through edges; returns None if a Join, Union, Aggregate,
+    Set op, or branching is encountered (selectivity from a single-table
+    fold doesn't apply cleanly in those cases).
     """
     current = nid
     seen: set = set()
@@ -154,7 +305,7 @@ def _find_underlying_manifest(plan: LogicalPlan, nid: str) -> Optional[object]:
         seen.add(current)
         node = plan[current]
         if node.node_type == LogicalPlanStepType.Scan:
-            return getattr(node, "manifest", None)
+            return node
         if node.node_type in (
             LogicalPlanStepType.Join,
             LogicalPlanStepType.DependentJoin,
@@ -177,19 +328,45 @@ def _filter_stats(
     plan: LogicalPlan,
     nid: str,
 ) -> RelationStatistics:
+    """Apply selectivity for conjuncts that haven't already been folded into
+    the underlying Scan stats by ``_scan_stats``.
+
+    A conjunct is considered already-folded when both:
+      * the Filter has a single underlying Scan reachable through
+        pass-through nodes (``_find_underlying_scan`` returns it), and
+      * every identifier in the conjunct binds to that Scan's relation.
+
+    Conjuncts not satisfying both conditions still have an effect on row
+    count and need their selectivity applied here.
+    """
     base = _first_child_stats(child_stats) or _empty_stats()
-    selectivity = 1.0
-    manifest = _find_underlying_manifest(plan, nid)
     condition = getattr(node, "condition", None)
-    if manifest is not None and condition is not None:
+    if condition is None:
+        return base
+
+    underlying_scan = _find_underlying_scan(plan, nid)
+    folded_names = (
+        _scan_relation_names(underlying_scan) if underlying_scan is not None else set()
+    )
+
+    from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
+
+    selectivity = 1.0
+    for conj in _split_and_conjuncts(condition):
+        sources = _identifier_sources(conj)
+        if folded_names and sources and sources <= folded_names:
+            # Already folded into Scan.statistics.row_count by _scan_stats.
+            continue
         try:
-            selectivity = float(manifest.estimate_selectivity(condition))
+            s = float(estimate_selectivity(conj, base))
         except Exception:
-            selectivity = 1.0
-    new_rows = CardinalityEstimator().estimate_after_filter(base, selectivity)
-    narrowed = _narrow_filter_columns(base.columns, condition)
-    capped = _cap_ndvs(narrowed, new_rows)
-    return RelationStatistics(row_count=new_rows, columns=capped)
+            s = 1.0
+        selectivity *= s
+
+    if selectivity == 1.0:
+        return base
+    new_rows = estimate_after_filter(base.row_count, selectivity)
+    return base.with_row_count(new_rows)
 
 
 def _join_stats(
@@ -206,8 +383,6 @@ def _join_stats(
         out_rows = max(1, left.row_count * right.row_count)
         merged = _drop_histograms(_merge_columns(left, right))
         return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(merged, out_rows))
-
-    estimator = CardinalityEstimator()
 
     # Map planner join names to the estimator's vocabulary.
     estimator_type = "inner"
@@ -236,12 +411,22 @@ def _join_stats(
         merged = _drop_histograms(_merge_columns(left, right))
         return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(merged, out_rows))
 
-    out_rows = estimator.estimate_join_cardinality(
-        left_stats=left,
-        right_stats=right,
-        left_key=left_key,
-        right_key=right_key,
-        join_type=estimator_type,
+    left_col = left.get_column(left_key)
+    right_col = right.get_column(right_key)
+    left_key_stats = KeyStats(
+        ndv=left_col.distinct_count if left_col else None,
+        null_fraction=None,
+    )
+    right_key_stats = KeyStats(
+        ndv=right_col.distinct_count if right_col else None,
+        null_fraction=None,
+    )
+    out_rows = estimate_join_cardinality(
+        left_rows=left.row_count,
+        right_rows=right.row_count,
+        join_type=_JOIN_TYPE_FOR_CARDINALITY[estimator_type],
+        equi_keys=[(left_key_stats, right_key_stats)],
+        extra_predicates_selectivity=1.0,
     )
     merged = _drop_histograms(_merge_columns(left, right))
     # Equi-join: matching join keys see their range intersected and NDV reduced
@@ -287,7 +472,11 @@ def _aggregate_stats(
     group_names = [n for n in (_column_name(g) for g in groups) if n]
     if not group_names:
         return _empty_stats(row_count=1)
-    out_rows = CardinalityEstimator().estimate_group_by_cardinality(base, group_names)
+    ndvs = [
+        base.columns[name].distinct_count if name in base.columns else None
+        for name in group_names
+    ]
+    out_rows = estimate_group_by_cardinality(base.row_count, ndvs)
     # Output columns are the group keys; each row is now a unique combination,
     # so a single key's distinct_count is bounded above by the output row count.
     # Histograms drop because the group-by output's value distribution differs
@@ -297,7 +486,7 @@ def _aggregate_stats(
         col = base.columns.get(name)
         if col is None:
             continue
-        out_cols[name] = replace(col, histogram=None, _total_rows=out_rows)
+        out_cols[name] = replace(col, histogram=None)
     return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(out_cols, out_rows))
 
 
@@ -326,9 +515,8 @@ def _distinct_stats(
     base = _first_child_stats(child_stats) or _empty_stats()
     if not base.columns:
         return base
-    out_rows = CardinalityEstimator().estimate_group_by_cardinality(
-        base, list(base.columns.keys())
-    )
+    ndvs = [col.distinct_count for col in base.columns.values()]
+    out_rows = estimate_group_by_cardinality(base.row_count, ndvs)
     # Distinct collapses duplicates — distribution shape changes (histograms
     # invalid); each column's NDV is bounded by the output row count.
     out_cols = _drop_histograms(base.columns)
@@ -353,7 +541,7 @@ def _union_stats(
         for k, v in cs.columns.items():
             existing = columns.get(k)
             if existing is None:
-                columns[k] = replace(v, histogram=None, _total_rows=rows)
+                columns[k] = replace(v, histogram=None)
                 continue
             # Widen range, sum NDVs.
             new_lower = _min_or_none(existing.value_range.lower_bound, v.value_range.lower_bound)
@@ -450,9 +638,9 @@ def _cap_ndvs(columns: Dict[str, ColumnStatistics], row_count: int) -> Dict[str,
     out: Dict[str, ColumnStatistics] = {}
     for k, c in columns.items():
         if c.distinct_count is not None and c.distinct_count > row_count:
-            out[k] = replace(c, distinct_count=max(1, int(row_count)), _total_rows=row_count)
+            out[k] = replace(c, distinct_count=max(1, int(row_count)))
         else:
-            out[k] = replace(c, _total_rows=row_count)
+            out[k] = c
     return out
 
 
@@ -690,7 +878,7 @@ class StatisticsRefreshVisitor:
         nt = node.node_type
 
         if nt == LogicalPlanStepType.Scan:
-            return _scan_stats(node)
+            return _scan_stats(node, self.plan, nid)
         if nt == LogicalPlanStepType.Filter:
             return _filter_stats(node, child_stats, self.plan, nid)
         if nt in (LogicalPlanStepType.Join, LogicalPlanStepType.DependentJoin):

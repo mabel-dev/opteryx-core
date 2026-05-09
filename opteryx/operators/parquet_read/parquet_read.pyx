@@ -41,7 +41,7 @@ from opteryx.utils import random_string
 from opteryx import EOS
 from opteryx import config
 
-
+_FOOTER_CACHE = ParquetFooterBytesCache()
 
 
 class ParquetReadNode(ReaderNode):
@@ -633,8 +633,6 @@ class ParquetReadNode(ReaderNode):
             for col in read_schema.columns
         }
 
-        footer_bytes_cache = ParquetFooterBytesCache()
-
         result_morsel = None
         two_pass_active = two_pass_eligible
         consecutive_full_pass = 0
@@ -652,7 +650,7 @@ class ParquetReadNode(ReaderNode):
                 file_sizes=file_sizes or None,
                 connector=connector_type,
                 query_id=getattr(self.properties, "query_id", None),
-                footer_bytes_cache=footer_bytes_cache,
+                footer_bytes_cache=_FOOTER_CACHE,
             ):
                 path, rg_idx = self._extract_row_group_metadata(row_group)
 

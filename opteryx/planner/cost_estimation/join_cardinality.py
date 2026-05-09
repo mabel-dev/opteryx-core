@@ -139,3 +139,48 @@ def estimate_join_cardinality(
         raise ValueError(f"unhandled join_type: {join_type!r}")
 
     return max(1, int(result))
+
+
+def estimate_after_filter(input_rows: int, selectivity: float) -> int:
+    """Row count after applying a filter with given selectivity.
+
+    Floored at 1 so a zero estimate cannot propagate as a multiplicative
+    zero through downstream cost arithmetic.
+    """
+    if input_rows < 0:
+        raise ValueError(f"input_rows must be non-negative (got {input_rows})")
+    if selectivity < 0.0:
+        raise ValueError(f"selectivity must be non-negative (got {selectivity})")
+    return max(1, int(input_rows * selectivity))
+
+
+def estimate_group_by_cardinality(
+    input_rows: int,
+    group_key_ndvs: List[Optional[int]],
+) -> int:
+    """Cardinality after GROUP BY.
+
+    Output is the product of group-key NDVs (independence assumption),
+    capped at the input row count. Unknown NDVs (None entries) contribute
+    a fallback of input_rows / 2 each — same heuristic as the previous
+    implementation.
+
+    Args:
+        input_rows: rows entering the group-by.
+        group_key_ndvs: distinct-value count per group key. Use None for
+            keys whose NDV is unknown.
+
+    Returns:
+        Estimated output row count, >= 1.
+    """
+    if input_rows <= 0:
+        return 1
+    if not group_key_ndvs:
+        return 1
+    cardinality = 1
+    for ndv in group_key_ndvs:
+        if ndv is not None and ndv > 0:
+            cardinality *= ndv
+        else:
+            cardinality *= max(1, input_rows // 2)
+    return max(1, min(cardinality, input_rows))

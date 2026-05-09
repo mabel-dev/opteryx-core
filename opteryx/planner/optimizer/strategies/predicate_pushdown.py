@@ -193,6 +193,11 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     NodeType.UNARY_OPERATOR,  # IsNull, IsNotNull, IsEmpty, IsNotEmpty
                 )
                 and len(identifiers) >= 1  # At least one column reference
+            ) or (
+                node.condition.node_type == NodeType.FUNCTION
+                and len(identifiers) >= 1
+                and getattr(getattr(node.condition, "schema_column", None), "type", None)
+                == OrsoTypes.BOOLEAN
             )
 
             is_having_predicate = bool(has_agg)

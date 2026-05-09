@@ -12,6 +12,8 @@ from opteryx.planner.cost_estimation.dpccp import JoinTreeNode
 from opteryx.planner.cost_estimation.dpccp import dpccp
 from opteryx.planner.cost_estimation.greedy_join_order import greedy_join_order
 from opteryx.planner.cost_estimation.join_cardinality import KeyStats
+from opteryx.planner.cost_estimation.join_cardinality import estimate_after_filter
+from opteryx.planner.cost_estimation.join_cardinality import estimate_group_by_cardinality
 from opteryx.planner.cost_estimation.join_cardinality import estimate_join_cardinality
 from opteryx.planner.cost_estimation.join_graph import JoinEdge
 from opteryx.planner.cost_estimation.join_graph import JoinGraph
@@ -36,6 +38,8 @@ def enumerate_join_tree(graph: JoinGraph, *, dp_threshold: int = 12) -> JoinTree
 
 __all__ = [
     "KeyStats",
+    "estimate_after_filter",
+    "estimate_group_by_cardinality",
     "estimate_join_cardinality",
     "JoinVertex",
     "JoinEdge",

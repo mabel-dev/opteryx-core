@@ -56,6 +56,13 @@ class PredicatePushable:
     PUSHABLE_TYPES: set = {t for t in OrsoTypes}
 
     def can_push(self, operator: Node, types: set = None) -> bool:
+        # Boolean-returning functions are their own predicate — push without further analysis
+        if (
+            operator.condition.node_type == NodeType.FUNCTION
+            and getattr(getattr(operator.condition, "schema_column", None), "type", None)
+            == OrsoTypes.BOOLEAN
+        ):
+            return True
         # we can only push simple expressions
         all_nodes = get_all_nodes_of_type(operator.condition, ("*",))
         if any(

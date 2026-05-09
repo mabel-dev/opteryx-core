@@ -78,33 +78,17 @@ def _find_scan_for_relation(
     return None
 
 
-def _leaf_local_filter_conditions(plan: LogicalPlan, subplan_id: str) -> List[Node]:
-    """Filter conditions that sit inside a leaf's subplan (already pushed down)."""
-    out: List[Node] = []
-    for _, node in _walk_subplan(plan, subplan_id):
-        if node.node_type == LogicalPlanStepType.Filter and node.condition is not None:
-            out.append(node.condition)
-    return out
-
-
-def _split_and(node: Optional[Node]) -> List[Node]:
-    if node is None:
-        return []
-    if node.node_type != NodeType.AND:
-        return [node]
-    return _split_and(node.left) + _split_and(node.right)
-
-
 def _key_stats(scan_node, column_name: Optional[str]) -> KeyStats:
-    """Resolve KeyStats for a column on a scan node, with safe fallbacks."""
+    """Resolve KeyStats for a column by reading the refreshed Scan stats."""
     if scan_node is None or column_name is None:
         return KeyStats(ndv=None, null_fraction=None)
-    manifest = getattr(scan_node, "manifest", None)
-    if manifest is None:
+    stats = getattr(scan_node, "statistics", None)
+    if stats is None:
         return KeyStats(ndv=None, null_fraction=None)
-    ndv = manifest.estimate_cardinality(column_name)
-    null_fraction = manifest.estimate_null_fraction(column_name)
-    return KeyStats(ndv=ndv, null_fraction=null_fraction)
+    col = stats.columns.get(column_name)
+    if col is None:
+        return KeyStats(ndv=None, null_fraction=None)
+    return KeyStats(ndv=col.distinct_count, null_fraction=col.null_fraction)
 
 
 def _leaf_relation_to_scan(
@@ -123,76 +107,27 @@ def _leaf_row_count(
     plan: LogicalPlan,
     leaf_subplan_id: str,
     leaf_rel_to_scan: Dict[str, Any],
-    leaf_local_above: List[Node],
+    leaf_local_above: List[Node],  # kept for signature stability; unused
 ) -> Optional[int]:
-    """Estimate row count for a leaf.
+    """Estimate row count for a leaf by reading the refreshed Scan stats.
 
-    Sum of record counts from each scan in the leaf, multiplied by the
-    selectivity of every leaf-local filter (above-chain or in-subplan).
-    Returns None if no scan in the leaf carries a manifest — without a row
-    count DPccp can't cost the plan and the caller bails.
+    Returns None if any scan in the leaf is missing statistics (refresh
+    couldn't build them — typically because the scan has no manifest).
+
+    The ``plan``, ``leaf_subplan_id``, and ``leaf_local_above`` parameters
+    are preserved for signature stability with existing callers but are no
+    longer used: filter selectivity is folded into Scan.statistics by
+    statistics_refresh before any cost-based strategy runs.
     """
     if not leaf_rel_to_scan:
         return None
-    base_rows = 0
+    total = 0
     for _rel, scan in leaf_rel_to_scan.items():
-        manifest = getattr(scan, "manifest", None)
-        if manifest is None:
+        stats = getattr(scan, "statistics", None)
+        if stats is None:
             return None
-        base_rows += manifest.get_record_count()
-    if base_rows <= 0:
-        return 1
-
-    # Apply selectivity from filters embedded in the leaf subplan.
-    selectivity = 1.0
-    for cond in _leaf_local_filter_conditions(plan, leaf_subplan_id):
-        for pred in _split_and(cond):
-            for _rel, scan in leaf_rel_to_scan.items():
-                manifest = getattr(scan, "manifest", None)
-                if manifest is None:
-                    continue
-                sel = manifest.estimate_selectivity(pred)
-                if sel is not None:
-                    selectivity *= sel
-                break
-
-    # Apply selectivity from leaf-local predicates that live in a Filter
-    # *above* the chain (still apply to this leaf only).
-    for pred in leaf_local_above:
-        for _rel, scan in leaf_rel_to_scan.items():
-            manifest = getattr(scan, "manifest", None)
-            if manifest is None:
-                continue
-            sel = manifest.estimate_selectivity(pred)
-            if sel is not None:
-                selectivity *= sel
-            break
-
-    return max(1, int(base_rows * selectivity))
-
-
-def _identifier_sources_in_subtree(node: Optional[Node]) -> Set[str]:
-    """Collect every identifier ``source`` referenced anywhere in the subtree.
-
-    A predicate that touches only one relation source is leaf-local. Used for
-    routing single-table filters (``col op literal``, multi-conjunct OR-of-LIKE
-    on one column, etc.) to the right leaf for cost-side selectivity scaling.
-    """
-    if node is None:
-        return set()
-    if node.node_type == NodeType.IDENTIFIER:
-        src = getattr(node, "source", None)
-        return {src} if src is not None else set()
-    out: Set[str] = set()
-    for attr in ("left", "right", "centre"):
-        child = getattr(node, attr, None)
-        if child is not None:
-            out |= _identifier_sources_in_subtree(child)
-    parameters = getattr(node, "parameters", None)
-    if parameters:
-        for p in parameters:
-            out |= _identifier_sources_in_subtree(p)
-    return out
+        total += stats.row_count
+    return max(1, total)
 
 
 def _classify_predicate(
@@ -201,29 +136,19 @@ def _classify_predicate(
     """Return ``(left_leaf, right_leaf, is_equality)`` for a predicate.
 
     ``left_leaf`` / ``right_leaf`` are leaf indices, or None if either side
-    isn't a simple identifier bound to a tracked relation. For single-leaf
-    predicates the two indices are equal.
-
-    Falls back to subtree-wide identifier scanning when the predicate isn't a
-    pure ``identifier op identifier`` comparison: any predicate whose
-    identifier references all bind to a single leaf (``col op literal``,
-    ``f(col) op literal``, OR-chains over one column, etc.) is leaf-local on
-    that leaf.
+    isn't a simple identifier bound to a tracked relation. Single-relation
+    predicates (column op literal) return (None, None, False) — their
+    selectivity is already folded into Scan.statistics by the refresh pass.
     """
-    if pred.node_type == NodeType.COMPARISON_OPERATOR:
-        left_src = _identifier_source(pred.left)
-        right_src = _identifier_source(pred.right)
-        if left_src is not None and right_src is not None:
-            left_leaf = rel_to_leaf.get(left_src)
-            right_leaf = rel_to_leaf.get(right_src)
-            return left_leaf, right_leaf, pred.value == "Eq"
-
-    sources = _identifier_sources_in_subtree(pred)
-    leaves = {rel_to_leaf[s] for s in sources if s in rel_to_leaf}
-    if len(leaves) == 1:
-        leaf = next(iter(leaves))
-        return leaf, leaf, False
-    return None, None, False
+    if pred.node_type != NodeType.COMPARISON_OPERATOR:
+        return None, None, False
+    left_src = _identifier_source(pred.left)
+    right_src = _identifier_source(pred.right)
+    if left_src is None or right_src is None:
+        return None, None, False
+    left_leaf = rel_to_leaf.get(left_src)
+    right_leaf = rel_to_leaf.get(right_src)
+    return left_leaf, right_leaf, pred.value == "Eq"
 
 
 def build_join_graph(
@@ -252,18 +177,19 @@ def build_join_graph(
         for rel in leaf.rel_names:
             rel_to_leaf[rel] = i
 
-    # Partition predicates: leaf-local vs cross-leaf-equi vs other.
-    leaf_local_per_leaf: List[List[Node]] = [[] for _ in leaves]
+    # Partition predicates: cross-leaf-equi only. Single-relation predicates
+    # are no longer routed here — refresh has already folded their
+    # selectivity into Scan.statistics.row_count.
     cross_equi: List[Tuple[int, int, Node]] = []
     for pred in predicates:
         l, r, is_eq = _classify_predicate(pred, rel_to_leaf)
         if l is None or r is None:
             continue
-        if l == r:
-            leaf_local_per_leaf[l].append(pred)
-        elif is_eq:
+        if l != r and is_eq:
             cross_equi.append((l, r, pred))
-        # cross-leaf non-equi: ignored for graph building (stays in upper Filter)
+        # Same-leaf predicates and cross-leaf non-equi predicates are
+        # ignored for graph building (the original Filter still enforces
+        # them after the rewrite).
 
     # Resolve scan nodes per leaf (relation -> scan).
     per_leaf_scans: List[Dict[str, Any]] = [
@@ -273,9 +199,7 @@ def build_join_graph(
     # Build vertices.
     vertices: List[JoinVertex] = []
     for i, leaf in enumerate(leaves):
-        rows = _leaf_row_count(
-            plan, leaf.subplan_id, per_leaf_scans[i], leaf_local_per_leaf[i]
-        )
+        rows = _leaf_row_count(plan, leaf.subplan_id, per_leaf_scans[i], [])
         if rows is None:
             return None
         name = leaf.rel_names[0] if leaf.rel_names else f"leaf_{i}"

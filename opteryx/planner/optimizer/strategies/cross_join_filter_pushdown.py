@@ -17,8 +17,9 @@ This can provide 100,000× speedup for large cartesian products by avoiding
 intermediate materialization of the full cross product.
 """
 
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
+from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.binder.common import extract_join_fields
@@ -110,6 +111,192 @@ def _get_table_from_identifier(node: Optional[Node]) -> Optional[str]:
         # Return the source (table name) if explicitly qualified
         return node.source
     return None
+
+
+def _subplan_relation_names(
+    plan: LogicalPlan, root_id: str, visited: Optional[Set[str]] = None
+) -> Set[str]:
+    if visited is None:
+        visited = set()
+    if root_id in visited:
+        return set()
+    visited.add(root_id)
+    node = plan[root_id]
+    names: Set[str] = set()
+    alias = getattr(node, "alias", None)
+    if alias:
+        names.add(alias)
+    if node.node_type == LogicalPlanStepType.Subquery:
+        return names
+    for child_id, _, _ in plan.ingoing_edges(root_id):
+        names |= _subplan_relation_names(plan, child_id, visited)
+    return names
+
+
+def _try_dissolve_cross_join_in_inner_join(
+    plan: LogicalPlan, inner_join_id: str, inner_join_node: LogicalPlanNode
+) -> bool:
+    """
+    Handles the pattern that arises after predicate pushdown converts an outer
+    cross join while leaving a nested cross join intact:
+
+        INNER JOIN (P_A_C AND P_B_C)
+        ├─ CROSS JOIN (A, B)
+        └─ C
+
+    Where P_A_C only references tables in A and C, and P_B_C only references
+    tables in B and C.  Restructures to:
+
+        INNER JOIN (P_B_AC)
+        ├─ INNER JOIN (P_A_C)
+        │   ├─ A
+        │   └─ C
+        └─ B
+
+    Returns True if restructuring occurred.
+    """
+    if inner_join_node.type != "inner" or not inner_join_node.on:
+        return False
+
+    children = list(plan.ingoing_edges(inner_join_id))
+    if len(children) != 2:
+        return False
+
+    cross_join_id: Optional[str] = None
+    cross_join_node: Optional[LogicalPlanNode] = None
+    other_child_id: Optional[str] = None
+    other_child_rel: Optional[object] = None
+
+    for child_id, _, edge_rel in children:
+        child = plan[child_id]
+        if _is_unconverted_cross_join(child):
+            cross_join_id = child_id
+            cross_join_node = child
+        else:
+            other_child_id = child_id
+            other_child_rel = edge_rel
+
+    if cross_join_id is None or cross_join_node is None or other_child_id is None:
+        return False
+
+    cross_left_rels: Set[str] = set(cross_join_node.left_relation_names or [])
+    cross_right_rels: Set[str] = set(cross_join_node.right_relation_names or [])
+    all_inner_rels: Set[str] = (
+        set(inner_join_node.left_relation_names or [])
+        | set(inner_join_node.right_relation_names or [])
+    )
+    other_rels: Set[str] = all_inner_rels - cross_left_rels - cross_right_rels
+
+    if not other_rels:
+        return False
+
+    # Classify each ON condition: does it span cross-left+other or cross-right+other?
+    on_conditions = _split_and_conditions(inner_join_node.on)
+    if len(on_conditions) < 2:
+        return False
+
+    left_preds: List[Node] = []
+    right_preds: List[Node] = []
+
+    for cond in on_conditions:
+        if cond.node_type != NodeType.COMPARISON_OPERATOR or cond.value != "Eq":
+            return False
+        idents = get_all_nodes_of_type(cond, (NodeType.IDENTIFIER,))
+        sources = {n.source for n in idents if n.source}
+        refs_cross_left = bool(sources & cross_left_rels)
+        refs_cross_right = bool(sources & cross_right_rels)
+        if refs_cross_left and not refs_cross_right:
+            left_preds.append(cond)
+        elif refs_cross_right and not refs_cross_left:
+            right_preds.append(cond)
+        else:
+            return False  # Spans both sides or is unclassifiable
+
+    if not left_preds or not right_preds:
+        return False
+
+    # Locate the two children of the cross join
+    cross_children = list(plan.ingoing_edges(cross_join_id))
+    if len(cross_children) != 2:
+        return False
+
+    cross_left_id: Optional[str] = None
+    cross_right_id: Optional[str] = None
+    cross_right_rel: Optional[object] = None
+
+    for child_id, _, edge_rel in cross_children:
+        child_rels = _subplan_relation_names(plan, child_id)
+        if child_rels == cross_left_rels:
+            cross_left_id = child_id
+        elif child_rels == cross_right_rels:
+            cross_right_id = child_id
+            cross_right_rel = edge_rel
+
+    if cross_left_id is None or cross_right_id is None:
+        return False
+
+    # Pre-validate join field extraction before touching the graph
+    left_on = _build_and_condition_tree(left_preds)
+    right_on = _build_and_condition_tree(right_preds)
+    new_left_rels = list(cross_left_rels | other_rels)
+    new_right_rels = list(cross_right_rels)
+
+    try:
+        new_cross_l_cols, new_cross_r_cols = extract_join_fields(
+            left_on, list(cross_left_rels), list(other_rels)
+        )
+        new_outer_l_cols, new_outer_r_cols = extract_join_fields(
+            right_on, new_left_rels, new_right_rels
+        )
+    except UnsupportedSyntaxError:
+        return False
+
+    # All checks passed — rewire the graph.
+    # Remove: C (other_child) -> inner_join
+    for child_id, target, rel in list(plan.ingoing_edges(inner_join_id)):
+        if child_id == other_child_id:
+            plan.remove_edge(child_id, target, rel)
+            break
+    # Remove: B (cross_right) -> cross_join
+    for child_id, target, rel in list(plan.ingoing_edges(cross_join_id)):
+        if child_id == cross_right_id:
+            plan.remove_edge(child_id, target, rel)
+            break
+    # Add: C -> cross_join (C is now right child of the new inner join)
+    plan.add_edge(other_child_id, cross_join_id, None)
+    # Add: B -> inner_join (B is now right child of the outer inner join)
+    plan.add_edge(cross_right_id, inner_join_id, None)
+
+    # Update formerly-cross-join node: now INNER JOIN (A ⋈ C)
+    master_schemas: Dict = dict(getattr(inner_join_node, "schemas", None) or {})
+    cross_join_node.type = "inner"
+    cross_join_node.on = left_on
+    cross_join_node.right_relation_names = list(other_rels)
+    cross_join_node.relation_names = [list(cross_left_rels), list(other_rels)]
+    cross_join_node.left_columns = new_cross_l_cols
+    cross_join_node.right_columns = new_cross_r_cols
+    cross_join_node.columns = get_all_nodes_of_type(left_on, (NodeType.IDENTIFIER,))
+    if master_schemas:
+        cross_join_node.schemas = {
+            k: v
+            for k, v in master_schemas.items()
+            if k in (cross_left_rels | other_rels) or (k and k.startswith("$"))
+        }
+    plan[cross_join_id] = cross_join_node
+
+    # Update outer inner-join node: now INNER JOIN ((A+C) ⋈ B)
+    inner_join_node.on = right_on
+    inner_join_node.left_relation_names = new_left_rels
+    inner_join_node.right_relation_names = new_right_rels
+    inner_join_node.relation_names = [new_left_rels, new_right_rels]
+    inner_join_node.left_columns = new_outer_l_cols
+    inner_join_node.right_columns = new_outer_r_cols
+    inner_join_node.columns = get_all_nodes_of_type(right_on, (NodeType.IDENTIFIER,))
+    if master_schemas:
+        inner_join_node.schemas = master_schemas
+    plan[inner_join_id] = inner_join_node
+
+    return True
 
 
 def _collect_cross_joins(
@@ -222,6 +409,18 @@ class CrossJoinFilterPushdownStrategy(OptimizationStrategy):
                 else:
                     filter_node.condition = remaining_condition
                     plan[filter_id] = filter_node
+
+        # Handle the pattern left by predicate_pushdown:
+        #   INNER JOIN(P_A_C AND P_B_C) [CROSS JOIN(A, B), C]
+        # predicate_pushdown converts the outer cross join but consumes both predicates,
+        # leaving the inner cross join unconverted. Restructure to eliminate it.
+        for nid, node in list(plan.nodes(True)):
+            if (
+                node.node_type == LogicalPlanStepType.Join
+                and node.type == "inner"
+                and node.on is not None
+            ):
+                _try_dissolve_cross_join_in_inner_join(plan, nid, node)
 
         return plan
 
