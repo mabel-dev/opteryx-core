@@ -66,6 +66,88 @@ def _write_filters(left_column, right_column):
     return new_filters
 
 
+def _get_equi_join_pairs(on_node):
+    """
+    Extract (left_col, right_col) identifier pairs from a (possibly AND-nested) equi-join
+    ON condition.  Returns an empty list for anything that isn't a col = col comparison.
+    """
+    if on_node is None:
+        return []
+    if on_node.node_type == NodeType.AND:
+        return _get_equi_join_pairs(on_node.left) + _get_equi_join_pairs(on_node.right)
+    if (
+        on_node.node_type == NodeType.COMPARISON_OPERATOR
+        and on_node.value == "Eq"
+        and getattr(on_node, "left", None) is not None
+        and getattr(on_node, "right", None) is not None
+        and on_node.left.node_type == NodeType.IDENTIFIER
+        and on_node.right.node_type == NodeType.IDENTIFIER
+    ):
+        return [(on_node.left, on_node.right)]
+    return []
+
+
+def _collect_col_filters_walking_up(plan, start_nid, column):
+    """
+    Walk from start_nid toward the plan root collecting Filter conditions of the
+    form ``col OP literal`` where col matches *column*.  Stops at the first Join
+    boundary so we never cross into the other leg.
+
+    Returns a list of condition Nodes (deduplicated by op + literal value).
+    """
+    conditions = []
+    seen = set()
+    current = start_nid
+    while current:
+        edges = plan.outgoing_edges(current)
+        if not edges:
+            break
+        parent_nid = edges[0][1]
+        parent_node = plan[parent_nid]
+        if parent_node is None:
+            break
+        if parent_node.node_type == LogicalPlanStepType.Join:
+            break
+        if parent_node.node_type == LogicalPlanStepType.Filter:
+            cond = parent_node.condition
+            if (
+                cond is not None
+                and cond.node_type == NodeType.COMPARISON_OPERATOR
+                and getattr(cond, "left", None) is not None
+                and getattr(cond, "right", None) is not None
+                and cond.left.node_type == NodeType.IDENTIFIER
+                and cond.right.node_type == NodeType.LITERAL
+                and cond.left.source == column.source
+                and cond.left.value == column.value
+            ):
+                dedup_key = (cond.value, str(cond.right.value))
+                if dedup_key not in seen:
+                    seen.add(dedup_key)
+                    conditions.append(cond)
+        current = parent_nid
+    return conditions
+
+
+def _make_propagated_filter(condition, target_col):
+    """
+    Build a new Filter LogicalPlanNode that mirrors *condition* onto *target_col*.
+    The literal operand is shared (not mutated) and the operator is preserved.
+    """
+    new_cond = Node(
+        NodeType.COMPARISON_OPERATOR,
+        value=condition.value,
+        left=target_col,
+        right=condition.right,
+    )
+    return LogicalPlanNode(
+        node_type=LogicalPlanStepType.Filter,
+        condition=new_cond,
+        columns=[target_col],
+        relations={target_col.source},
+        all_relations={target_col.source},
+    )
+
+
 def _literal_node_from_statistics(stat_value, column_type):
     if stat_value is None:
         return None
@@ -118,6 +200,38 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
                 new_filters.extend(
                     _write_filters(left_column=right_column, right_column=left_column)
                 )
+            # Predicate propagation: for each equi-join pair, collect simple
+            # col OP literal filters already present on one leg and mirror them
+            # to the other leg.  This is cheap — if the statistics-based filters
+            # above were vacuous (full-range), a real predicate is far better.
+            _uuid_to_nid = {}
+            for _nid in list(context.optimized_plan.nodes()):
+                _pn = context.optimized_plan[_nid]
+                if _pn is not None:
+                    _uuid = getattr(_pn, "uuid", None)
+                    if _uuid:
+                        _uuid_to_nid[_uuid] = _nid
+
+            for _left_col, _right_col in _get_equi_join_pairs(node.on):
+                # Filters on left key → mirror to right leg
+                for _uuid in node.left_readers or []:
+                    _start = _uuid_to_nid.get(_uuid)
+                    if _start is None:
+                        continue
+                    for _cond in _collect_col_filters_walking_up(
+                        context.optimized_plan, _start, _left_col
+                    ):
+                        new_filters.append(_make_propagated_filter(_cond, _right_col))
+                # Filters on right key → mirror to left leg
+                for _uuid in node.right_readers or []:
+                    _start = _uuid_to_nid.get(_uuid)
+                    if _start is None:
+                        continue
+                    for _cond in _collect_col_filters_walking_up(
+                        context.optimized_plan, _start, _right_col
+                    ):
+                        new_filters.append(_make_propagated_filter(_cond, _left_col))
+
             # If we generated any filter candidates, record that the optimization
             # was considered. We count filter candidates here so tests that assert
             # the optimization was invoked can observe it even if insertion is

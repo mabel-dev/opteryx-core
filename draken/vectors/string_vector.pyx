@@ -2612,10 +2612,140 @@ cdef class StringVector(Vector):
             out_buf[offset + i] = <int64_t>acc
 
     cpdef StringVector take(self, int32_t[::1] indices):
+        cdef Py_ssize_t out_n
+        cdef Py_ssize_t out_i
+        cdef int32_t out_src_idx
+        cdef uint32_t gathered_code
+        cdef uint8_t code_width_local
+        cdef Py_ssize_t code_bytes
+        cdef uint8_t* src_codes
+        cdef uint8_t* dst_codes
+        cdef DrakenVarBuffer* src_dict_values
+        cdef DrakenVarBuffer* dst_dict_values
+        cdef Py_ssize_t take_dict_size
+        cdef Py_ssize_t dict_arena_size
+        cdef Py_ssize_t nb_bytes_dict
+        cdef bint src_has_row_nulls
+        cdef uint8_t* src_row_nulls
+        cdef uint8_t* dst_row_nulls
+        cdef uint8_t src_bit_local
+        cdef Py_ssize_t src_len_check
+        cdef StringVector dict_result
+
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_string(self).take(indices)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_string(self).take(indices)
+            # Dict-in → dict-out: gather codes for the requested rows, share the
+            # dictionary verbatim. Avoids materializing ~N decoded strings just
+            # to throw most away. The dictionary is typically tiny relative to
+            # the row count, so the per-row work drops to a packed-code copy.
+            out_n = indices.shape[0]
+            code_width_local = self._dict_code_width
+            src_codes = self._dict_codes
+            src_dict_values = self._dict_values
+            src_row_nulls = self.ptr.null_bitmap
+            src_has_row_nulls = src_row_nulls != NULL
+            src_len_check = <Py_ssize_t>self.ptr.length
+
+            if src_dict_values == NULL:
+                raise ValueError("dict-encoded vector has no dictionary values")
+
+            take_dict_size = <Py_ssize_t>src_dict_values.length
+            dict_arena_size = <Py_ssize_t>src_dict_values.offsets[take_dict_size]
+
+            # Bounds-check indices up front (matches the dense path's behavior).
+            for out_i in range(out_n):
+                out_src_idx = indices[out_i]
+                if out_src_idx < 0 or out_src_idx >= src_len_check:
+                    raise IndexError(
+                        f"Index {out_src_idx} out of bounds for length {src_len_check}"
+                    )
+
+            dict_result = StringVector(0, 0, True)
+            dict_result.ptr = <DrakenVarBuffer*>malloc(sizeof(DrakenVarBuffer))
+            if dict_result.ptr == NULL:
+                raise MemoryError()
+            dict_result.owns_data = False
+            dict_result.ptr.data = NULL
+            dict_result.ptr.offsets = NULL
+            dict_result.ptr.null_bitmap = NULL
+            dict_result.ptr.length = <size_t>out_n
+            dict_result.ptr.type = DRAKEN_STRING
+
+            # Gather packed codes.
+            code_bytes = out_n * <Py_ssize_t>code_width_local
+            if code_bytes > 0:
+                dst_codes = <uint8_t*>malloc(<size_t>code_bytes)
+                if dst_codes == NULL:
+                    raise MemoryError()
+                if code_width_local == 1:
+                    for out_i in range(out_n):
+                        gathered_code = (<const uint8_t*>src_codes)[indices[out_i]]
+                        (<uint8_t*>dst_codes)[out_i] = <uint8_t>gathered_code
+                elif code_width_local == 2:
+                    for out_i in range(out_n):
+                        gathered_code = (<const uint16_t*>src_codes)[indices[out_i]]
+                        (<uint16_t*>dst_codes)[out_i] = <uint16_t>gathered_code
+                else:
+                    for out_i in range(out_n):
+                        gathered_code = (<const uint32_t*>src_codes)[indices[out_i]]
+                        (<uint32_t*>dst_codes)[out_i] = <uint32_t>gathered_code
+                dict_result._dict_codes = dst_codes
+
+            # Gather row null bitmap if present.
+            if src_has_row_nulls and out_n > 0:
+                nb_bytes_dict = (out_n + 7) >> 3
+                dst_row_nulls = <uint8_t*>malloc(<size_t>nb_bytes_dict)
+                if dst_row_nulls == NULL:
+                    raise MemoryError()
+                memset(dst_row_nulls, 0, <size_t>nb_bytes_dict)
+                for out_i in range(out_n):
+                    out_src_idx = indices[out_i]
+                    src_bit_local = (
+                        (src_row_nulls[out_src_idx >> 3] >> (out_src_idx & 7)) & 1
+                    )
+                    if src_bit_local:
+                        dst_row_nulls[out_i >> 3] |= (1 << (out_i & 7))
+                dict_result.ptr.null_bitmap = dst_row_nulls
+
+            # Copy the dictionary verbatim. The dictionary is typically small
+            # relative to N, and copying keeps ownership simple (each vector
+            # owns its dict storage; freeing one doesn't dangle the other).
+            dst_dict_values = alloc_var_buffer(
+                DRAKEN_STRING, <size_t>take_dict_size, <size_t>dict_arena_size
+            )
+            for out_i in range(take_dict_size + 1):
+                dst_dict_values.offsets[out_i] = src_dict_values.offsets[out_i]
+            if dict_arena_size > 0:
+                memcpy(
+                    dst_dict_values.data,
+                    <const void*>src_dict_values.data,
+                    <size_t>dict_arena_size,
+                )
+            # Copy dict-entry null bitmap if any.
+            if src_dict_values.null_bitmap != NULL and take_dict_size > 0:
+                nb_bytes_dict = (take_dict_size + 7) >> 3
+                dst_dict_values.null_bitmap = <uint8_t*>malloc(<size_t>nb_bytes_dict)
+                if dst_dict_values.null_bitmap == NULL:
+                    raise MemoryError()
+                memcpy(
+                    dst_dict_values.null_bitmap,
+                    <const void*>src_dict_values.null_bitmap,
+                    <size_t>nb_bytes_dict,
+                )
+            dict_result._dict_values = dst_dict_values
+
+            dict_result._dict_code_width = code_width_local
+            dict_result._dict_ordered = self._dict_ordered
+            dict_result._encoding = DRAKEN_ENCODING_DICTIONARY
+
+            dict_result._dict_accessor.codes = dict_result._dict_codes
+            dict_result._dict_accessor.code_width = code_width_local
+            dict_result._dict_accessor.row_nulls = dict_result.ptr.null_bitmap
+            dict_result._dict_accessor.length = <size_t>out_n
+            dict_result._dict_accessor.dict_values = dict_result._dict_values
+
+            return dict_result
         cdef DrakenVarBuffer* src_ptr = self.ptr
         cdef Py_ssize_t n = indices.shape[0]
         cdef size_t total_bytes = 0
@@ -2806,15 +2936,43 @@ cdef class StringVector(Vector):
 
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
         """Compare two strings at given indices lexicographically. Returns -1, 0, 1. Assumes non-null."""
+        cdef DrakenVarBuffer* ptr
+        cdef char* data
+        cdef int32_t left_start, left_end, right_start, right_end
+        cdef Py_ssize_t left_len, right_len, common_len
+        cdef int cmp_result
+        cdef uint32_t lc, rc
+        cdef const uint8_t* lp
+        cdef const uint8_t* rp
+
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_string(self).compare_at(left_idx, right_idx)
+
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_string(self).compare_at(left_idx, right_idx)
-        cdef DrakenVarBuffer* ptr = self.ptr
-        cdef char* data = <char*> ptr.data
-        cdef int32_t left_start, left_end, right_start, right_end
-        cdef Py_ssize_t left_len, right_len
-        cdef int cmp_result
+            # Dict-aware path: compare via packed codes without materializing the
+            # dictionary. For an ordered dict, code order matches value order, so
+            # a single integer compare suffices. Otherwise dereference into the
+            # dict's varbuffer and memcmp the underlying bytes.
+            lc = _read_packed_code(self._dict_codes, self._dict_code_width, left_idx)
+            rc = _read_packed_code(self._dict_codes, self._dict_code_width, right_idx)
+            if lc == rc:
+                return 0
+            if self._dict_ordered:
+                return -1 if lc < rc else 1
+            lp = self.c_dict_value_ptr(<Py_ssize_t>lc, &left_len)
+            rp = self.c_dict_value_ptr(<Py_ssize_t>rc, &right_len)
+            common_len = left_len if left_len < right_len else right_len
+            cmp_result = memcmp(lp, rp, common_len)
+            if cmp_result != 0:
+                return -1 if cmp_result < 0 else 1
+            if left_len < right_len:
+                return -1
+            elif left_len > right_len:
+                return 1
+            return 0
+
+        ptr = self.ptr
+        data = <char*> ptr.data
 
         if self._has_const:
             return 0
@@ -2827,7 +2985,7 @@ cdef class StringVector(Vector):
         left_len = left_end - left_start
         right_len = right_end - right_start
 
-        cdef Py_ssize_t common_len = left_len if left_len < right_len else right_len
+        common_len = left_len if left_len < right_len else right_len
         cmp_result = memcmp(data + left_start, data + right_start, common_len)
 
         if cmp_result != 0:

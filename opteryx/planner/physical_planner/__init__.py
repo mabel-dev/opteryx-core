@@ -95,7 +95,7 @@ def _create_filter_node(logical_node, query_properties, registry):
         "Filter",
         query_properties,
         filter=node_config["condition"],
-        **{k: v for k, v in node_config.items() if k in ("all_relations",)},
+        **{k: v for k, v in node_config.items() if k in ("all_relations", "pre_update_columns")},
     )
 
 

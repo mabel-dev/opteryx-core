@@ -8,11 +8,10 @@
 
 from libc.stdint cimport int32_t, int64_t, uint8_t
 
-from draken.core.buffers cimport DrakenConstantStringPayload, DrakenVarBuffer
+from draken.core.buffers cimport DrakenConstantStringPayload, DrakenVarBuffer, DRAKEN_ENCODING_DICTIONARY
 from draken.vectors.array_vector cimport ArrayVector
 from draken.vectors.int64_vector cimport Int64Vector
-from draken.vectors.string_vector cimport StringVector
-from draken.vectors.string_vector cimport StringVectorBuilder
+from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
 from opteryx.third_party import yyjson
 
 
@@ -128,6 +127,29 @@ cpdef StringVector vector_map_access_string(StringVector vec, Int64Vector key):
     return builder.finish()
 
 
+cdef object _json_extract_text_value(bytes doc_bytes, bytes key):
+    """Extract a key from a JSON document and return bytes or None."""
+    from opteryx.exceptions import IncorrectTypeError
+    cdef object parser = yyjson.Parser()
+    cdef object value
+    cdef object mini
+    cdef bytes out_bytes
+    try:
+        value = parser.parse(doc_bytes).get(key)
+    except ValueError as err:
+        raise IncorrectTypeError("The `->>` operator can only be used on JSON documents.") from err
+    if value is None:
+        return None
+    if hasattr(value, "mini"):
+        mini = value.mini
+        if mini is None:
+            return None
+        return mini if isinstance(mini, bytes) else str(mini).encode("utf8")
+    if isinstance(value, bytes):
+        return <bytes>value
+    return str(value).encode("utf8")
+
+
 cpdef StringVector vector_json_extract_text(StringVector docs, bytes key):
     """
     JSON extraction for ->> over StringVector documents.
@@ -135,17 +157,40 @@ cpdef StringVector vector_json_extract_text(StringVector docs, bytes key):
     Returns:
         StringVector containing UTF-8 bytes (NULL for null/missing).
     """
-    from opteryx.exceptions import IncorrectTypeError
-
     cdef Py_ssize_t n = docs.ptr.length
     cdef Py_ssize_t i
     cdef object doc
-    cdef object value
-    cdef object mini
-    cdef object parser
     cdef bytes doc_bytes
     cdef bytes out_bytes
     cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(n, 16)
+    cdef DrakenVarBuffer* dict_ptr
+    cdef Py_ssize_t dict_size
+    cdef int32_t start, end
+    cdef uint8_t* null_bm
+    cdef uint32_t code
+
+    if docs._encoding == DRAKEN_ENCODING_DICTIONARY:
+        dict_ptr = docs._dict_values
+        dict_size = dict_ptr.length
+        dict_results = [None] * dict_size
+        for i in range(dict_size):
+            start = dict_ptr.offsets[i]
+            end = dict_ptr.offsets[i + 1]
+            doc_bytes = bytes(dict_ptr.data[start:end])
+            dict_results[i] = _json_extract_text_value(doc_bytes, key)
+
+        null_bm = docs._dict_accessor.row_nulls
+        for i in range(n):
+            if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
+                builder.append_null()
+                continue
+            code = _read_packed_code(docs._dict_codes, docs._dict_code_width, i)
+            out_bytes = dict_results[code]
+            if out_bytes is None:
+                builder.append_null()
+            else:
+                builder.append_bytes(<const char*>out_bytes, len(out_bytes))
+        return builder.finish()
 
     for i in range(n):
         doc = docs[i]
@@ -158,30 +203,29 @@ cpdef StringVector vector_json_extract_text(StringVector docs, bytes key):
         else:
             doc_bytes = <bytes>doc
 
-        parser = yyjson.Parser()
-        try:
-            value = parser.parse(doc_bytes).get(key)  # type: ignore
-        except ValueError as err:
-            raise IncorrectTypeError("The `->>` operator can only be used on JSON documents.") from err
-
-        if value is None:
+        out_bytes = _json_extract_text_value(doc_bytes, key)
+        if out_bytes is None:
             builder.append_null()
-            continue
-
-        if hasattr(value, "mini"):
-            mini = value.mini
-            if mini is None:
-                builder.append_null()
-                continue
-            out_bytes = mini if isinstance(mini, bytes) else str(mini).encode("utf8")
-        elif isinstance(value, bytes):
-            out_bytes = <bytes>value
         else:
-            out_bytes = str(value).encode("utf8")
-
-        builder.append_bytes(<const char*>out_bytes, len(out_bytes))
+            builder.append_bytes(<const char*>out_bytes, len(out_bytes))
 
     return builder.finish()
+
+
+cdef object _json_extract_variant_value(bytes doc_bytes, bytes key):
+    """Extract a key from a JSON document and return a Python object or None."""
+    from opteryx.exceptions import IncorrectTypeError
+    cdef object parser = yyjson.Parser()
+    cdef object value
+    try:
+        value = parser.parse(doc_bytes).get(key)
+    except ValueError as err:
+        raise IncorrectTypeError("The `->` operator can only be used on JSON documents.") from err
+    if hasattr(value, "as_list"):
+        return value.as_list()
+    if hasattr(value, "as_dict"):
+        return value.as_dict()
+    return value
 
 
 cpdef list vector_json_extract_variant(StringVector docs, bytes key):
@@ -191,15 +235,34 @@ cpdef list vector_json_extract_variant(StringVector docs, bytes key):
     Returns:
         Python list of extracted values (scalar/list/dict/None).
     """
-    from opteryx.exceptions import IncorrectTypeError
-
     cdef Py_ssize_t n = docs.ptr.length
     cdef Py_ssize_t i
     cdef object doc
-    cdef object value
-    cdef object parser
     cdef bytes doc_bytes
     cdef list result = [None] * n
+    cdef DrakenVarBuffer* dict_ptr
+    cdef Py_ssize_t dict_size
+    cdef int32_t start, end
+    cdef uint8_t* null_bm
+    cdef uint32_t code
+
+    if docs._encoding == DRAKEN_ENCODING_DICTIONARY:
+        dict_ptr = docs._dict_values
+        dict_size = dict_ptr.length
+        dict_results = [None] * dict_size
+        for i in range(dict_size):
+            start = dict_ptr.offsets[i]
+            end = dict_ptr.offsets[i + 1]
+            doc_bytes = bytes(dict_ptr.data[start:end])
+            dict_results[i] = _json_extract_variant_value(doc_bytes, key)
+
+        null_bm = docs._dict_accessor.row_nulls
+        for i in range(n):
+            if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
+                continue
+            code = _read_packed_code(docs._dict_codes, docs._dict_code_width, i)
+            result[i] = dict_results[code]
+        return result
 
     for i in range(n):
         doc = docs[i]
@@ -211,17 +274,6 @@ cpdef list vector_json_extract_variant(StringVector docs, bytes key):
         else:
             doc_bytes = <bytes>doc
 
-        parser = yyjson.Parser()
-        try:
-            value = parser.parse(doc_bytes).get(key)  # type: ignore
-        except ValueError as err:
-            raise IncorrectTypeError("The `->` operator can only be used on JSON documents.") from err
-
-        if hasattr(value, "as_list"):
-            result[i] = value.as_list()  # type: ignore[attr-defined]
-        elif hasattr(value, "as_dict"):
-            result[i] = value.as_dict()  # type: ignore[attr-defined]
-        else:
-            result[i] = value
+        result[i] = _json_extract_variant_value(doc_bytes, key)
 
     return result

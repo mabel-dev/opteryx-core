@@ -26,6 +26,7 @@ class FilterNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.filter = parameters.get("filter")
+        self.post_filter_columns = parameters.get("pre_update_columns")
 
         self.function_evaluations = get_all_nodes_of_type(
             self.filter,
@@ -49,6 +50,11 @@ class FilterNode(BasePlanNode):
 
         mask = evaluate_draken(self.filter, morsel)
         filtered = morsel.filter_mask(mask)
+
+        if self.post_filter_columns:
+            keep = [c for c in filtered.column_names if c in self.post_filter_columns]
+            if len(keep) < filtered.num_columns:
+                filtered = filtered.select(keep)
 
         if filtered.num_rows > 0:
             yield filtered

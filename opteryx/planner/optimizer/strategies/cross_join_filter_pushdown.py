@@ -113,6 +113,34 @@ def _get_table_from_identifier(node: Optional[Node]) -> Optional[str]:
     return None
 
 
+def _collect_scan_uuids(plan: LogicalPlan, root_id: str) -> List[str]:
+    """Walk the subplan rooted at root_id and collect all Scan node UUIDs."""
+    uuids: List[str] = []
+    visited: Set[str] = set()
+    frontier = [root_id]
+    while frontier:
+        nid = frontier.pop()
+        if nid in visited:
+            continue
+        visited.add(nid)
+        node = plan[nid]
+        uuid = getattr(node, "uuid", None)
+        if node.node_type == LogicalPlanStepType.Scan and uuid is not None:
+            uuids.append(uuid)
+        for child_id, _, _ in plan.ingoing_edges(nid):
+            frontier.append(child_id)
+    return uuids
+
+
+def _is_unconverted_cross_join(node: LogicalPlanNode) -> bool:
+    return (
+        node.node_type == LogicalPlanStepType.Join
+        and node.type == "cross join"
+        and not getattr(node, "on", None)
+        and not getattr(node, "using", None)
+    )
+
+
 def _subplan_relation_names(
     plan: LogicalPlan, root_id: str, visited: Optional[Set[str]] = None
 ) -> Set[str]:
@@ -266,6 +294,14 @@ def _try_dissolve_cross_join_in_inner_join(
     plan.add_edge(other_child_id, cross_join_id, None)
     # Add: B -> inner_join (B is now right child of the outer inner join)
     plan.add_edge(cross_right_id, inner_join_id, None)
+
+    # Rebuild readers from the actual scan nodes now under each side.
+    # left_readers/right_readers contain scan UUIDs used by label_join_legs in the
+    # physical plan to assign LEFT/RIGHT leg labels — they must reflect the new structure.
+    cross_join_node.left_readers = _collect_scan_uuids(plan, cross_left_id)
+    cross_join_node.right_readers = _collect_scan_uuids(plan, other_child_id)
+    inner_join_node.left_readers = _collect_scan_uuids(plan, cross_join_id)
+    inner_join_node.right_readers = _collect_scan_uuids(plan, cross_right_id)
 
     # Update formerly-cross-join node: now INNER JOIN (A ⋈ C)
     master_schemas: Dict = dict(getattr(inner_join_node, "schemas", None) or {})

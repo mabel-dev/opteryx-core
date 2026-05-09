@@ -11,7 +11,7 @@ from libc.stdlib cimport malloc, free
 
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
-from draken.core.buffers cimport DrakenVarBuffer
+from draken.core.buffers cimport DrakenVarBuffer, DRAKEN_ENCODING_DICTIONARY
 
 
 cdef inline int64_t parse_int64(const char* data, int32_t length) except -1:
@@ -42,8 +42,12 @@ cpdef Int64Vector vector_cast_bytes_to_int(StringVector vec):
     cdef int64_t* result_ptr
     cdef int64_t[::1] result_view
     cdef Int64Vector result_vector
+    cdef DrakenVarBuffer* dv
+    cdef Py_ssize_t dict_size
+    cdef int64_t* dict_ints
+    cdef uint8_t* null_bm
+    cdef uint32_t code
 
-    # Allocate result buffer with malloc
     result_ptr = <int64_t*>malloc(n * sizeof(int64_t))
     if result_ptr == NULL:
         raise MemoryError("Failed to allocate memory for result array")
@@ -51,14 +55,35 @@ cpdef Int64Vector vector_cast_bytes_to_int(StringVector vec):
     try:
         result_view = <int64_t[:n]>result_ptr
 
-        for i in range(n):
-            row = string_vec_get_at(vec, i)
-            if row.is_null:
-                result_view[i] = 0
-            else:
-                result_view[i] = parse_int64(row.data, <int32_t>row.length)
+        if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
+            dv = vec._dict_values
+            dict_size = <Py_ssize_t>dv.length
+            dict_ints = <int64_t*>malloc(<size_t>dict_size * sizeof(int64_t))
+            if dict_ints == NULL:
+                raise MemoryError()
+            try:
+                for i in range(dict_size):
+                    dict_ints[i] = parse_int64(
+                        <const char*>dv.data + dv.offsets[i],
+                        dv.offsets[i + 1] - dv.offsets[i],
+                    )
+                null_bm = vec._dict_accessor.row_nulls
+                for i in range(n):
+                    if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
+                        result_view[i] = 0
+                    else:
+                        code = _read_packed_code(vec._dict_codes, vec._dict_code_width, i)
+                        result_view[i] = dict_ints[code]
+            finally:
+                free(dict_ints)
+        else:
+            for i in range(n):
+                row = string_vec_get_at(vec, i)
+                if row.is_null:
+                    result_view[i] = 0
+                else:
+                    result_view[i] = parse_int64(row.data, <int32_t>row.length)
 
-        # Convert memoryview to Int64Vector (which copies the data)
         result_vector = int64_from_sequence(result_view)
         return result_vector
     finally:

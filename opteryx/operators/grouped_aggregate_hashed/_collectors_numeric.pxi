@@ -91,6 +91,13 @@ cdef inline void _grow_fixed_buffer(DrakenFixedBuffer* buf, int64_t old_count, i
     buf.length = <size_t>new_count
 
 
+cdef inline int64_t _grow_target(int64_t capacity, int64_t new_count) noexcept nogil:
+    cdef int64_t target = capacity * 2 if capacity > 0 else new_count
+    if target < new_count:
+        target = new_count
+    return target
+
+
 cdef inline void _grow_bitmap(uint8_t** bitmap_ref, int64_t old_count, int64_t new_count, bint fill_valid) except *:
     cdef Py_ssize_t old_bytes = _bitmap_nbytes(old_count)
     cdef Py_ssize_t new_bytes = _bitmap_nbytes(new_count)
@@ -232,9 +239,11 @@ cdef class CountStarCollector(BaseCollector):
             self._counts = NULL
 
     cdef void grow(self, int64_t new_count):
+        cdef int64_t target
         if new_count > self._capacity:
-            _grow_fixed_buffer(self._counts, self._capacity, new_count)
-            self._capacity = new_count
+            target = _grow_target(self._capacity, new_count)
+            _grow_fixed_buffer(self._counts, self._capacity, target)
+            self._capacity = target
 
     cdef void accumulate(
         self,
@@ -276,9 +285,11 @@ cdef class CountValueCollector(BaseCollector):
             self._counts = NULL
 
     cdef void grow(self, int64_t new_count):
+        cdef int64_t target
         if new_count > self._capacity:
-            _grow_fixed_buffer(self._counts, self._capacity, new_count)
-            self._capacity = new_count
+            target = _grow_target(self._capacity, new_count)
+            _grow_fixed_buffer(self._counts, self._capacity, target)
+            self._capacity = target
 
     cdef void accumulate(
         self,
@@ -348,10 +359,12 @@ cdef class SumInt64Collector(BaseCollector):
             self._seen = NULL
 
     cdef void grow(self, int64_t new_count):
+        cdef int64_t target
         if new_count > self._capacity:
-            _grow_fixed_buffer(self._sums, self._capacity, new_count)
-            _grow_bitmap(&self._seen, self._capacity, new_count, False)
-            self._capacity = new_count
+            target = _grow_target(self._capacity, new_count)
+            _grow_fixed_buffer(self._sums, self._capacity, target)
+            _grow_bitmap(&self._seen, self._capacity, target, False)
+            self._capacity = target
 
     cdef void accumulate(
         self,
@@ -455,10 +468,12 @@ cdef class SumFloat64Collector(BaseCollector):
             self._seen = NULL
 
     cdef void grow(self, int64_t new_count):
+        cdef int64_t target
         if new_count > self._capacity:
-            _grow_fixed_buffer(self._sums, self._capacity, new_count)
-            _grow_bitmap(&self._seen, self._capacity, new_count, False)
-            self._capacity = new_count
+            target = _grow_target(self._capacity, new_count)
+            _grow_fixed_buffer(self._sums, self._capacity, target)
+            _grow_bitmap(&self._seen, self._capacity, target, False)
+            self._capacity = target
 
     cdef void accumulate(
         self,
@@ -561,16 +576,18 @@ cdef class MinMaxInt64Collector(BaseCollector):
     cdef void grow(self, int64_t new_count):
         cdef int64_t sentinel = INT64_MAX if self._direction == 1 else INT64_MIN
         cdef int64_t old_count = self._capacity
+        cdef int64_t target
         cdef int64_t* values
         cdef int64_t i
 
         if new_count > old_count:
-            _grow_fixed_buffer(self._values, old_count, new_count)
-            _grow_bitmap(&self._seen, old_count, new_count, False)
+            target = _grow_target(old_count, new_count)
+            _grow_fixed_buffer(self._values, old_count, target)
+            _grow_bitmap(&self._seen, old_count, target, False)
             values = <int64_t*>self._values.data
-            for i in range(old_count, new_count):
+            for i in range(old_count, target):
                 values[i] = sentinel
-            self._capacity = new_count
+            self._capacity = target
 
     cdef void accumulate(
         self,
@@ -691,16 +708,18 @@ cdef class MinMaxFloat64Collector(BaseCollector):
     cdef void grow(self, int64_t new_count):
         cdef double sentinel = HUGE_VAL if self._direction == 1 else -HUGE_VAL
         cdef int64_t old_count = self._capacity
+        cdef int64_t target
         cdef double* values
         cdef int64_t i
 
         if new_count > old_count:
-            _grow_fixed_buffer(self._values, old_count, new_count)
-            _grow_bitmap(&self._seen, old_count, new_count, False)
+            target = _grow_target(old_count, new_count)
+            _grow_fixed_buffer(self._values, old_count, target)
+            _grow_bitmap(&self._seen, old_count, target, False)
             values = <double*>self._values.data
-            for i in range(old_count, new_count):
+            for i in range(old_count, target):
                 values[i] = sentinel
-            self._capacity = new_count
+            self._capacity = target
 
     cdef void accumulate(
         self,
@@ -954,10 +973,12 @@ cdef class AvgCollector(BaseCollector):
             self._counts = NULL
 
     cdef void grow(self, int64_t new_count):
+        cdef int64_t target
         if new_count > self._capacity:
-            _grow_fixed_buffer(self._sums, self._capacity, new_count)
-            _grow_fixed_buffer(self._counts, self._capacity, new_count)
-            self._capacity = new_count
+            target = _grow_target(self._capacity, new_count)
+            _grow_fixed_buffer(self._sums, self._capacity, target)
+            _grow_fixed_buffer(self._counts, self._capacity, target)
+            self._capacity = target
 
     cdef void accumulate(
         self,
@@ -1112,10 +1133,12 @@ cdef class SumDecimalCollector(BaseCollector):
             self._seen = NULL
 
     cdef void grow(self, int64_t new_count):
+        cdef int64_t target
         if new_count > self._capacity:
-            _grow_fixed_buffer(self._sums, self._capacity, new_count)
-            _grow_bitmap(&self._seen, self._capacity, new_count, False)
-            self._capacity = new_count
+            target = _grow_target(self._capacity, new_count)
+            _grow_fixed_buffer(self._sums, self._capacity, target)
+            _grow_bitmap(&self._seen, self._capacity, target, False)
+            self._capacity = target
 
     cdef void accumulate(
         self,
@@ -1222,16 +1245,18 @@ cdef class MinMaxDecimalCollector(BaseCollector):
     cdef void grow(self, int64_t new_count):
         cdef int64_t sentinel = INT64_MAX if self._direction == 1 else INT64_MIN
         cdef int64_t old_count = self._capacity
+        cdef int64_t target
         cdef int64_t* values
         cdef int64_t i
 
         if new_count > old_count:
-            _grow_fixed_buffer(self._values, old_count, new_count)
-            _grow_bitmap(&self._seen, old_count, new_count, False)
+            target = _grow_target(old_count, new_count)
+            _grow_fixed_buffer(self._values, old_count, target)
+            _grow_bitmap(&self._seen, old_count, target, False)
             values = <int64_t*>self._values.data
-            for i in range(old_count, new_count):
+            for i in range(old_count, target):
                 values[i] = sentinel
-            self._capacity = new_count
+            self._capacity = target
 
     cdef void accumulate(
         self,
