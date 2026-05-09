@@ -487,7 +487,7 @@ def iter_row_groups_ipc(
                 path_bytes_cpp = path.encode('utf-8')
                 if local_footers_native.count(path_bytes_cpp) == 0:
                     _ts = time.monotonic_ns()
-                    envelope, _ = _read_footer_payload(path, -1, footer_bytes_cache)
+                    envelope, _ = _read_footer_payload(orig_to_cpp.get(path, path), -1, footer_bytes_cache)
                     t_footer_ns += time.monotonic_ns() - _ts
                     footer_buf_ptr = <const uint8_t*>envelope
                     footer_buf_size = len(envelope)
