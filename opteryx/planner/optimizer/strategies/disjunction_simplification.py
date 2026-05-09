@@ -189,6 +189,15 @@ class DisjunctionSimplificationStrategy(OptimizationStrategy):
 
             if condition is not None and condition.node_type == NodeType.OR:
                 simplified = _simplify_disjunction(condition)
+                if simplified is None:
+                    # No logical simplification, but flatten nested binary OR to CNF
+                    # when there are 3+ branches for efficient n-ary evaluation.
+                    branches = _split_or(condition)
+                    if len(branches) >= 3:
+                        cnf = Node(node_type=NodeType.CNF)
+                        cnf.parameters = branches
+                        simplified = cnf
+
                 if simplified is not None:
                     new_node = context.optimized_plan[context.node_id]
                     new_node.condition = simplified

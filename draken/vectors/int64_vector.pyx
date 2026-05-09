@@ -1214,8 +1214,8 @@ cdef class Int64Vector(Vector):
     def nbytes(self):
         """Return the approximate memory footprint of this vector in bytes."""
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t n = ptr.length
-        cdef Py_ssize_t dict_bytes, code_bytes, null_bytes, data_bytes, bm_bytes
+        cdef uint64_t n = ptr.length
+        cdef uint64_t dict_bytes, code_bytes, null_bytes, data_bytes, bm_bytes
         if self._has_const:
             return 8  # sizeof(int64_t)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and ptr.data == NULL:
@@ -1223,7 +1223,7 @@ cdef class Int64Vector(Vector):
             code_bytes = n * self._dict_code_width
             null_bytes = (n + 7) >> 3 if ptr.null_bitmap != NULL else 0
             return dict_bytes + code_bytes + null_bytes
-        data_bytes = <Py_ssize_t>(buf_length(ptr) * buf_itemsize(ptr))
+        data_bytes = <uint64_t>(buf_length(ptr) * buf_itemsize(ptr))
         bm_bytes = (n + 7) >> 3 if ptr.null_bitmap != NULL else 0
         return data_bytes + bm_bytes
 

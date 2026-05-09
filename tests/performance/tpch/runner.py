@@ -50,15 +50,7 @@ from opteryx.connectors import DiskConnector  # noqa: E402
 opteryx.register_workspace("testdata", DiskConnector)
 
 
-_QUERY_DIR = os.path.join(
-    _REPO_ROOT,
-    "tests",
-    "integration",
-    "sql_battery",
-    "test_data",
-    "tests",
-    "tpch",
-)
+_QUERY_DIR = os.path.join(os.path.dirname(__file__), "opteryx", "queries")
 _DUCKDB_DIR = os.path.join(os.path.dirname(__file__), "duckdb")
 _RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 
@@ -129,6 +121,24 @@ def main() -> int:
     duckdb_min, duckdb_machine = load_duckdb_baseline(
         os.path.join(_DUCKDB_DIR, f"results.sf{args.scale}.json")
     )
+
+    # Cold start
+    print("Warming up (cold start)...")
+    start = time.monotonic_ns()
+    warm_session = None
+    try:
+        warm_session = opteryx.session()
+        for _ in warm_session.execute_to_morsels(
+            f"SELECT COUNT(*) FROM testdata.tpch_{args.scale};"
+        ):
+            pass
+        cold_time_ms = (time.monotonic_ns() - start) / 1e6
+        print(f"Cold start: {cold_time_ms:.2f}ms\n")
+    except Exception as e:
+        print(f"Cold start failed: {e}\n")
+    finally:
+        if warm_session is not None:
+            warm_session.close()
 
     print_banner(
         title="TPC-H BENCHMARK",
@@ -224,9 +234,7 @@ def main() -> int:
 
     print("─" * 100)
     if compared_queries:
-        print_total_row(
-            opteryx_total_min, duckdb_total_min, compared_queries, args.iterations
-        )
+        print_total_row(opteryx_total_min, duckdb_total_min, compared_queries, args.iterations)
     print()
 
     elapsed_s = (time.monotonic_ns() - suite_start) / 1e9

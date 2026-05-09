@@ -63,7 +63,8 @@ class NodeType(int, Enum):
     OR = 18  # 0001 0010
     XOR = 19  # 0001 0011
     NOT = 20  # 0001 0100
-    DNF = 21  # 0001 0101
+    DNF = 21  # 0001 0101 - n-ary AND (parameters list)
+    CNF = 22  # 0001 0110 - n-ary OR  (parameters list)
 
     # INTERAL IDENTIFIERS
     # 0010 nnnn
@@ -214,6 +215,25 @@ def evaluate_dnf(expressions: List[Node], table) -> list:
     for idx in true_indices:
         final_result[idx] = True
     return final_result
+
+
+def evaluate_cnf(expressions: List[Node], table) -> list:
+    num_rows = table.num_rows
+    result = [False] * num_rows
+
+    for predicate in expressions:
+        branch = evaluate(predicate, table)
+        if hasattr(branch, "to_pylist"):
+            branch = branch.to_pylist()
+        else:
+            branch = list(branch)
+        for i, v in enumerate(branch):
+            if v:
+                result[i] = True
+        if all(result):
+            return result
+
+    return result
 
 
 def _filter_indices_by_mask(indices, mask):
@@ -394,6 +414,9 @@ def _inner_evaluate(root: Node, table):
 
     if node_type == NodeType.DNF:
         return evaluate_dnf(root.parameters, table)
+
+    if node_type == NodeType.CNF:
+        return evaluate_cnf(root.parameters, table)
 
     if node_type == NodeType.SUBQUERY:
         raise UnsupportedSyntaxError("IN (<subquery>) temporarily not supported.")

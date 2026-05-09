@@ -31,6 +31,7 @@ CASE WHEN x THEN y ELSE z END               → IIF(x, y, z)
 COALESCE(x, y)                              → IFNULL(x, y) (when only two parameters)
 SUBSTRING(x, 1, n)                          → LEFT(x, n) (when starting at position 1)
 x LIKE 'pattern1%' OR x LIKE '%pattern2'    → x REGEX '^pattern1.*|.*pattern2$' (for ORed LIKE conditions)
+expr = v1 OR expr = v2 OR ... OR expr = vN  → expr IN (v1, ..., vN) (CNF branches with same LHS)
 CONCAT(x, y, z)                             → x || y || z (CONCAT to operators)
 CONCAT_WS(x, y, z)                          → y || x || z (CONCAT_WS to operators)
 x = 'a' OR x = 'b' OR x = 'c'               → x IN ('a', 'b', 'c') (for ORed Equals conditions)
@@ -305,6 +306,85 @@ def rewrite_ored_eq_to_inlist(predicate, telemetry):
                 node.type = OrsoTypes.BOOLEAN
 
     return predicate
+
+
+def rewrite_cnf_eq_to_inlist(condition, telemetry):
+    """
+    For a CNF (n-ary OR) node, group Eq branches that share the same left-hand
+    expression and collect their literal values into a single InList node.
+
+    expr = v1 OR expr = v2 OR ... OR expr = vN  →  expr IN (v1, v2, ..., vN)
+
+    Unlike rewrite_ored_eq_to_inlist this works on any left-hand expression
+    (identifiers, function calls, etc.) using the canonical string as the key.
+    """
+    if condition.node_type != NodeType.CNF:
+        return condition
+
+    groups: Dict[str, dict] = {}
+    non_eq = []
+
+    for branch in condition.parameters:
+        if (
+            branch.node_type == NodeType.COMPARISON_OPERATOR
+            and branch.value == "Eq"
+            and branch.right.node_type == NodeType.LITERAL
+        ):
+            key = format_expression(branch.left)
+            if key not in groups:
+                groups[key] = {"values": [], "node": branch}
+            groups[key]["values"].append(branch.right.value)
+        else:
+            non_eq.append(branch)
+
+    new_params = list(non_eq)
+    rewrote = False
+
+    for data in groups.values():
+        if len(data["values"]) > 1:
+            from opteryx.compiled.vector_ops import build_in_list_carchar
+
+            node = data["node"]
+            left_type = getattr(getattr(node.left, "schema_column", None), "type", None)
+            _COERCE = {
+                OrsoTypes.DOUBLE: float,
+                OrsoTypes.INTEGER: int,
+                OrsoTypes.BOOLEAN: bool,
+                OrsoTypes.VARCHAR: lambda v: v.encode("utf-8") if isinstance(v, str) else v,
+                OrsoTypes.BLOB: lambda v: v if isinstance(v, bytes) else str(v).encode("utf-8"),
+            }
+            coerce = _COERCE.get(left_type, lambda v: v)
+            values = sorted(str(v) for v in set(data["values"]))
+            node.value = "InList"
+            node.right.display_values = values
+            node.right.value = build_in_list_carchar(
+                [None if v is None else coerce(v) for v in values]
+            )
+            node.right.element_type = node.right.type
+            node.right.type = OrsoTypes.ARRAY
+            node.right.schema_column = ConstantColumn(
+                name=node.right.name,
+                type=OrsoTypes.ARRAY,
+                element_type=node.right.element_type,
+                value=node.right.value,
+            )
+            new_params.append(node)
+            telemetry.optimization_predicate_rewriter_eqs_to_list = (
+                getattr(telemetry, "optimization_predicate_rewriter_eqs_to_list", 0) + 1
+            )
+            rewrote = True
+        else:
+            new_params.append(data["node"])
+
+    if not rewrote:
+        return condition
+
+    if len(new_params) == 1:
+        return new_params[0]
+
+    result = Node(node_type=NodeType.CNF)
+    result.parameters = new_params
+    return result
 
 
 _LENGTH_FN_NAMES = frozenset({"LENGTH", "CHAR_LENGTH", "CHARACTER_LENGTH"})
@@ -641,6 +721,9 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
         rewritten = rewrite_ored_any_eq_to_contains(rewritten, telemetry)
         if rewritten != predicate:
             return rewritten
+
+    if predicate.node_type == NodeType.CNF:
+        predicate = rewrite_cnf_eq_to_inlist(predicate, telemetry)
 
     # if predicate.node_type in {NodeType.AND, NodeType.OR, NodeType.XOR}:
     if predicate.left:

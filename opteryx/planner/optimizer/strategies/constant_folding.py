@@ -72,8 +72,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         # and any inner identifiers are not visible at this scope.
         return root
 
-    if root.node_type == NodeType.DNF:
-        # if we have a DNF, we can fold each part
+    if root.node_type in (NodeType.DNF, NodeType.CNF):
         root.parameters = [fold_constants(p, telemetry) for p in root.parameters]
         return root
 

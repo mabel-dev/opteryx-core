@@ -1106,23 +1106,23 @@ cdef class StringVector(Vector):
     def nbytes(self):
         """Return the approximate memory footprint of this vector in bytes."""
         cdef DrakenVarBuffer* ptr = self.ptr
-        cdef Py_ssize_t n = ptr.length
-        cdef Py_ssize_t data_bytes, offset_bytes, null_bytes
-        cdef Py_ssize_t dict_data_bytes, dict_offset_bytes, code_bytes
+        cdef uint64_t n = ptr.length
+        cdef uint64_t data_bytes, offset_bytes, null_bytes
+        cdef uint64_t dict_data_bytes, dict_offset_bytes, code_bytes
         if self._has_const:
-            return <Py_ssize_t>self._const_value.length if self._const_value != NULL else 0
+            return <uint64_t>self._const_value.length if self._const_value != NULL else 0
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and ptr.data == NULL:
             code_bytes = n * self._dict_code_width
             if self._dict_values != NULL and self._dict_values.offsets != NULL:
-                dict_data_bytes = <Py_ssize_t>self._dict_values.offsets[self._dict_values.length]
-                dict_offset_bytes = (<Py_ssize_t>self._dict_values.length + 1) * sizeof(int32_t)
+                dict_data_bytes = <uint64_t><uint32_t>self._dict_values.offsets[self._dict_values.length]
+                dict_offset_bytes = (<uint64_t>self._dict_values.length + 1) * sizeof(int32_t)
             else:
                 dict_data_bytes = 0
                 dict_offset_bytes = 0
             null_bytes = (n + 7) >> 3 if ptr.null_bitmap != NULL else 0
             return code_bytes + dict_data_bytes + dict_offset_bytes + null_bytes
         # Dense
-        data_bytes = <Py_ssize_t>ptr.offsets[n] if ptr.offsets != NULL else 0
+        data_bytes = <uint64_t><uint32_t>ptr.offsets[n] if ptr.offsets != NULL else 0
         offset_bytes = (n + 1) * sizeof(int32_t)
         null_bytes = (n + 7) >> 3 if ptr.null_bitmap != NULL else 0
         return data_bytes + offset_bytes + null_bytes

@@ -869,9 +869,9 @@ cdef class IntervalVector(Vector):
     def nbytes(self):
         """Return the approximate memory footprint of this vector in bytes."""
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t n = ptr.length
-        cdef Py_ssize_t data_bytes, bm_bytes
-        data_bytes = <Py_ssize_t>(buf_length(ptr) * buf_itemsize(ptr))
+        cdef uint64_t n = ptr.length
+        cdef uint64_t data_bytes, bm_bytes
+        data_bytes = <uint64_t>(buf_length(ptr) * buf_itemsize(ptr))
         bm_bytes = (n + 7) >> 3 if ptr.null_bitmap != NULL else 0
         return data_bytes + bm_bytes
 

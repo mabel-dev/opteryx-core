@@ -10,10 +10,10 @@ from libc.stdint cimport int32_t, int64_t, uint8_t, uint16_t, uint32_t
 from libc.stddef cimport size_t
 from cpython.array cimport array, clone
 
-from draken.vectors.string_vector cimport StringVector, from_packed_dict, _materialize_rle_string, _materialize_dict_string
+from draken.vectors.vector cimport Vector
+from draken.vectors.string_vector cimport StringVector, StringVectorBuilder, from_packed_dict, _materialize_rle_string, _materialize_dict_string
 from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence, _materialize_rle_int64, _materialize_dict_int64
 from draken.vectors.null_vector cimport NullVector
-from draken.vectors import string_vector as string_vector_module
 from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenRLEBuffer
 from draken.core.buffers cimport DRAKEN_ENCODING_RLE, DRAKEN_ENCODING_DICTIONARY
 
@@ -24,7 +24,7 @@ from draken.core.buffers cimport DRAKEN_ENCODING_RLE, DRAKEN_ENCODING_DICTIONARY
 # the consolidated-module level via the `include` directive in vector_ops.pyx.
 # ---------------------------------------------------------------------------
 
-cdef inline Int64Vector _prepare_int_arg(object arg):
+cdef inline Int64Vector _prepare_int_arg(Vector arg):
     """Materialise any Int64Vector encoding to const-or-dense for fast per-row reads.
 
     All arguments must be vectors — NullVector or Int64Vector. Scalars are not accepted.
@@ -68,7 +68,7 @@ cdef inline int64_t _read_int_arg(Int64Vector iv, Py_ssize_t row, bint* is_null)
 # vector_string_slice_left
 # ---------------------------------------------------------------------------
 
-cpdef StringVector vector_string_slice_left(StringVector vec, object length):
+cpdef StringVector vector_string_slice_left(StringVector vec, Vector length):
     """
     Slice each string from the left (beginning) up to 'length' bytes.
 
@@ -89,8 +89,7 @@ cpdef StringVector vector_string_slice_left(StringVector vec, object length):
     cdef bint length_null
     cdef DrakenConstantStringPayload* const_val
     cdef int32_t const_len
-
-    builder = string_vector_module.StringVectorBuilder.with_estimate(n, 8)
+    cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(n, 8)
 
     if length_is_null_vec:
         for i in range(n):
@@ -158,11 +157,13 @@ cdef StringVector _slice_left_dict(StringVector vec, Int64Vector length_iv, Py_s
     cdef uint32_t code
     cdef Py_ssize_t i
     cdef StringVector new_dict_sv
+    cdef StringVectorBuilder dict_builder
+    cdef StringVectorBuilder builder
 
     # When int arg is const we can operate on dict values only — O(dict_size)
     if length_iv._has_const and not length_iv._const_is_null:
         length_val = length_iv._const_value
-        dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 8)
+        dict_builder = StringVectorBuilder.with_estimate(dict_size, 8)
         for j in range(dict_size):
             dict_start = dict_ptr.offsets[j]
             dict_end = dict_ptr.offsets[j + 1]
@@ -186,12 +187,12 @@ cdef StringVector _slice_left_dict(StringVector vec, Int64Vector length_iv, Py_s
     # Varying int arg — per-row dict code lookup (no full materialisation)
     if length_iv._has_const and length_iv._const_is_null:
         # const-null length → all rows null
-        builder = string_vector_module.StringVectorBuilder.with_estimate(n, 0)
+        builder = StringVectorBuilder.with_estimate(n, 0)
         for i in range(n):
             builder.append_null()
         return builder.finish()
 
-    builder = string_vector_module.StringVectorBuilder.with_estimate(n, 8)
+    builder = StringVectorBuilder.with_estimate(n, 8)
     for i in range(n):
         if row_nulls != NULL and not ((row_nulls[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
@@ -225,8 +226,8 @@ cdef StringVector _slice_left_dense(StringVector vec, Int64Vector length_iv, Py_
     cdef int64_t length_val
     cdef Py_ssize_t take
     cdef bint length_null
+    cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(n, 8)
 
-    builder = string_vector_module.StringVectorBuilder.with_estimate(n, 8)
     for i in range(n):
         if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
@@ -254,7 +255,7 @@ cdef StringVector _slice_left_dense(StringVector vec, Int64Vector length_iv, Py_
 # vector_string_slice_right
 # ---------------------------------------------------------------------------
 
-cpdef StringVector vector_string_slice_right(StringVector vec, object length):
+cpdef StringVector vector_string_slice_right(StringVector vec, Vector length):
     """
     Slice each string from the right (end) keeping 'length' bytes.
 
@@ -275,8 +276,7 @@ cpdef StringVector vector_string_slice_right(StringVector vec, object length):
     cdef bint length_null
     cdef DrakenConstantStringPayload* const_val
     cdef int32_t const_len
-
-    builder = string_vector_module.StringVectorBuilder.with_estimate(n, 8)
+    cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(n, 8)
 
     if length_is_null_vec:
         for i in range(n):
@@ -343,10 +343,12 @@ cdef StringVector _slice_right_dict(StringVector vec, Int64Vector length_iv, Py_
     cdef uint32_t code
     cdef Py_ssize_t i
     cdef StringVector new_dict_sv
+    cdef StringVectorBuilder dict_builder
+    cdef StringVectorBuilder builder
 
     if length_iv._has_const and not length_iv._const_is_null:
         length_val = length_iv._const_value
-        dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 8)
+        dict_builder = StringVectorBuilder.with_estimate(dict_size, 8)
         for j in range(dict_size):
             dict_start = dict_ptr.offsets[j]
             dict_end = dict_ptr.offsets[j + 1]
@@ -367,12 +369,12 @@ cdef StringVector _slice_right_dict(StringVector vec, Int64Vector length_iv, Py_
         )
 
     if length_iv._has_const and length_iv._const_is_null:
-        builder = string_vector_module.StringVectorBuilder.with_estimate(n, 0)
+        builder = StringVectorBuilder.with_estimate(n, 0)
         for i in range(n):
             builder.append_null()
         return builder.finish()
 
-    builder = string_vector_module.StringVectorBuilder.with_estimate(n, 8)
+    builder = StringVectorBuilder.with_estimate(n, 8)
     for i in range(n):
         if row_nulls != NULL and not ((row_nulls[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
@@ -405,8 +407,7 @@ cdef StringVector _slice_right_dense(StringVector vec, Int64Vector length_iv, Py
     cdef int64_t length_val
     cdef Py_ssize_t take, actual_start
     cdef bint length_null
-
-    builder = string_vector_module.StringVectorBuilder.with_estimate(n, 8)
+    cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(n, 8)
     for i in range(n):
         if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
@@ -460,8 +461,7 @@ cpdef StringVector vector_string_substring(StringVector vec, object from_pos, ob
     cdef DrakenConstantStringPayload* const_val
     cdef int32_t const_len
     cdef const char* row_data
-
-    builder = string_vector_module.StringVectorBuilder.with_estimate(n, 8)
+    cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(n, 8)
 
     # All rows null if from_pos is a NullVector
     if pos_is_null_vec:
@@ -556,12 +556,14 @@ cdef StringVector _substring_dict(
     cdef uint32_t code
     cdef Py_ssize_t i
     cdef StringVector new_dict_sv
+    cdef StringVectorBuilder dict_builder
+    cdef StringVectorBuilder builder
 
     # Const pos + const (or null) count → operate on dict values only — O(dict_size)
     if pos_iv._has_const and not pos_iv._const_is_null:
         if cnt_is_null_vec or (cnt_iv._has_const and not cnt_iv._const_is_null):
             start_val = pos_iv._const_value
-            dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 8)
+            dict_builder = StringVectorBuilder.with_estimate(dict_size, 8)
             for j in range(dict_size):
                 dict_start = dict_ptr.offsets[j]
                 dict_end = dict_ptr.offsets[j + 1]
@@ -602,20 +604,20 @@ cdef StringVector _substring_dict(
 
     # Const-null pos → all rows null
     if pos_iv._has_const and pos_iv._const_is_null:
-        builder = string_vector_module.StringVectorBuilder.with_estimate(n, 0)
+        builder = StringVectorBuilder.with_estimate(n, 0)
         for i in range(n):
             builder.append_null()
         return builder.finish()
 
     # Const-null count → all rows null (count=NULL propagates)
     if not cnt_is_null_vec and cnt_iv is not None and cnt_iv._has_const and cnt_iv._const_is_null:
-        builder = string_vector_module.StringVectorBuilder.with_estimate(n, 0)
+        builder = StringVectorBuilder.with_estimate(n, 0)
         for i in range(n):
             builder.append_null()
         return builder.finish()
 
     # Varying args — per-row dict code lookup (no full materialisation)
-    builder = string_vector_module.StringVectorBuilder.with_estimate(n, 8)
+    builder = StringVectorBuilder.with_estimate(n, 8)
     for i in range(n):
         if row_nulls != NULL and not ((row_nulls[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
@@ -679,8 +681,7 @@ cdef StringVector _substring_dense(
     cdef Py_ssize_t s_idx, take
     cdef bint pos_null, cnt_null
     cdef const char* row_data
-
-    builder = string_vector_module.StringVectorBuilder.with_estimate(n, 8)
+    cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(n, 8)
     for i in range(n):
         if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
             builder.append_null()

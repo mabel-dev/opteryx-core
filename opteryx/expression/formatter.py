@@ -67,6 +67,13 @@ def format_expression(root, qualify: bool = False):
             return _format_interval(root.value)
         if literal_type == OrsoTypes.NULL:
             return "null"
+        if literal_type == OrsoTypes.ARRAY:
+            display = getattr(root, "display_values", None)
+            if display is not None:
+                shown = display[:3]
+                rest = len(display) - len(shown)
+                items = ", ".join(shown)
+                return "{" + items + (f", ...{rest} more" if rest else "") + "}"
         return str(root.value)
     # INTERAL IDENTIFIERS
     if node_type & INTERNAL_TYPE == INTERNAL_TYPE:
@@ -140,6 +147,8 @@ def format_expression(root, qualify: bool = False):
         return root.current_name
     if node_type == NodeType.DNF:
         return " AND ".join([format_expression(e, qualify) for e in root.parameters])
+    if node_type == NodeType.CNF:
+        return " OR ".join([format_expression(e, qualify) for e in root.parameters])
     if node_type == NodeType.BETWEEN:
         col = format_expression(root.left, qualify)
         lower = format_expression(root.right, qualify)

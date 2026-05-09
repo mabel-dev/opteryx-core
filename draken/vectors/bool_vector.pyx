@@ -785,8 +785,8 @@ cdef class BoolVector(Vector):
     def nbytes(self):
         """Return the approximate memory footprint of this vector in bytes."""
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t n = ptr.length
-        cdef Py_ssize_t data_bytes, bm_bytes
+        cdef uint64_t n = ptr.length
+        cdef uint64_t data_bytes, bm_bytes
         if self._has_const:
             return 1  # single bool value
         # Bit-packed: 1 bit per element

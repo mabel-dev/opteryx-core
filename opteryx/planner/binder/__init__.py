@@ -198,9 +198,10 @@ def bind_logical_relations(plan: LogicalPlan, ctes: dict, telemetry) -> LogicalP
             if node.node_type != LogicalPlanStepType.Scan:
                 continue
             relation = node.relation
-            sub_plan = get_view_plan(relation, telemetry)
-            if sub_plan is None and relation in ctes:
+            if relation in ctes:
                 sub_plan = _copy_cte_plan(ctes[relation])
+            else:
+                sub_plan = get_view_plan(relation, telemetry)
             if sub_plan:
                 sub_plan = rename_relations(sub_plan)
                 sub_plan_head = sub_plan.get_exit_points()[0]

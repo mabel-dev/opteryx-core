@@ -167,9 +167,9 @@ cdef class VectorVector(Vector):
 
     @property
     def nbytes(self):
-        cdef Py_ssize_t total = self._length * self._dimensions * sizeof(uint16_t)
+        cdef uint64_t total = <uint64_t>self._length * self._dimensions * sizeof(uint16_t)
         if self._null_bitmap != NULL:
-            total += (self._length + 7) >> 3
+            total += (<uint64_t>self._length + 7) >> 3
         return total
 
     cpdef object null_bitmap(self):

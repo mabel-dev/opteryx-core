@@ -442,6 +442,14 @@ def evaluate_draken(node, morsel):
             result = result.and_vector(evaluate_draken(sub, morsel))
         return result
 
+    if node_type == NodeType.CNF:
+        result = evaluate_draken(node.parameters[0], morsel)
+        for sub in node.parameters[1:]:
+            if result.all():
+                return result
+            result = result.or_vector(evaluate_draken(sub, morsel))
+        return result
+
     if node_type == NodeType.LITERAL:
         from draken.vectors.bool_vector import BoolVector
 
