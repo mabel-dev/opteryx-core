@@ -250,6 +250,20 @@ def traversive_recursive_bind(node: Node, context: Any) -> Tuple[Node, Any]:
         )
         merged_schemas = merge_schemas(*[ctx.schemas for ctx in new_contexts])
         context.schemas = merged_schemas
+    if node.node_type == NodeType.CASE:
+        # NodeType.CASE uses conditions/results/else_result instead of parameters
+        if node.conditions:
+            bound, new_contexts = zip(*(inner_binder(c, context) for c in node.conditions))
+            node.conditions = list(bound)
+            merged_schemas = merge_schemas(*[ctx.schemas for ctx in new_contexts])
+            context.schemas = merged_schemas
+        if node.results:
+            bound, new_contexts = zip(*(inner_binder(r, context) for r in node.results))
+            node.results = list(bound)
+            merged_schemas = merge_schemas(*[ctx.schemas for ctx in new_contexts])
+            context.schemas = merged_schemas
+        if node.else_result is not None:
+            node.else_result, context = inner_binder(node.else_result, context)
     return node, context
 
 
@@ -373,17 +387,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                 # Literal coercion: binder's job — mutate AST nodes to match the resolved type.
                 # This is NOT type inference; it's making literals consistent with the
                 # surrounding expression's type after the catalog has declared the return type.
-                if node.value == "_CASE" and result_type not in (
-                    OrsoTypes._MISSING_TYPE,
-                    OrsoTypes.NULL,
-                    0,
-                ):
-                    for param in node.parameters[1].parameters:
-                        if param.node_type == NodeType.LITERAL and param.value is not None:
-                            param.value = result_type.parse(param.value)
-                            param.type = result_type
-                            param.schema_column.type = result_type
-                elif node.value in ("COALESCE", "IFNULL", "IFNOTNULL") and result_type not in (
+                if node.value in ("COALESCE", "IFNULL", "IFNOTNULL") and result_type not in (
                     OrsoTypes._MISSING_TYPE,
                     OrsoTypes.NULL,
                     0,
@@ -409,6 +413,36 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                     precision=precision,
                     scale=scale,
                 )
+            schemas["$derived"].columns.append(schema_column)
+            node.derived_from = []
+            node.schema_column = schema_column
+            node.query_column = node.alias or column_name
+
+        elif node_type == NodeType.CASE:
+            aliases = [node.alias] if node.alias else []
+            # Resolve result type: first non-NULL type from results + else_result
+            result_type = OrsoTypes.NULL
+            branch_nodes = list(node.results or [])
+            if node.else_result is not None:
+                branch_nodes.append(node.else_result)
+            for branch in branch_nodes:
+                sc = getattr(branch, "schema_column", None)
+                if sc is not None and sc.type not in (OrsoTypes.NULL, 0, OrsoTypes._MISSING_TYPE):
+                    result_type = sc.type
+                    break
+            # Coerce LITERAL branches to the resolved result type
+            if result_type not in (OrsoTypes._MISSING_TYPE, OrsoTypes.NULL, 0):
+                for branch in branch_nodes:
+                    if branch.node_type == NodeType.LITERAL and branch.value is not None:
+                        branch.value = result_type.parse(branch.value)
+                        branch.type = result_type
+                        if branch.schema_column is not None:
+                            branch.schema_column.type = result_type
+            schema_column = FunctionColumn(
+                name=column_name,
+                type=result_type,
+                aliases=aliases,
+            )
             schemas["$derived"].columns.append(schema_column)
             node.derived_from = []
             node.schema_column = schema_column

@@ -108,6 +108,30 @@ cdef class CppIOPipeline:
         with nogil:
             self.pipeline.submit_row_group(path_str, rg_idx, col_names_vec, col_stats_vec)
 
+    cdef submit_work_native_masked(self, str cpp_path, int rg_idx, list column_names, RowGroupStats* rg, bytes row_mask):
+        """Submit a row group with a per-row mask using C++ ColumnStats directly."""
+        cdef vector[string] col_names_vec
+        cdef vector[ColumnStats] col_stats_vec
+        cdef vector[uint8_t] mask_vec
+        cdef string path_str = cpp_path.encode('utf-8')
+        cdef string cpp_col_name
+        cdef size_t i
+        cdef size_t mask_len = len(row_mask)
+        cdef const uint8_t* mask_ptr = <const uint8_t*>row_mask
+
+        for col_name in column_names:
+            cpp_col_name = col_name.encode('utf-8')
+            col_names_vec.push_back(cpp_col_name)
+            for i in range(rg.columns.size()):
+                if rg.columns[i].name == cpp_col_name:
+                    col_stats_vec.push_back(rg.columns[i])
+                    break
+
+        mask_vec.assign(mask_ptr, mask_ptr + mask_len)
+
+        with nogil:
+            self.pipeline.submit_row_group(path_str, rg_idx, col_names_vec, col_stats_vec, mask_vec)
+
     def get_result(self):
         cdef MorselRef result
         cdef bint got_result
@@ -596,4 +620,102 @@ def iter_row_groups_ipc(
                     diag["spin_iterations"],
                 )
             )
+        pipeline.close()
+
+
+def iter_pass2_row_groups_ipc(
+    filesystem,
+    work_items,
+    column_names,
+    decode_workers=4,
+    file_sizes=None,
+    connector=None,
+    query_id=None,
+    prefetched_footers=None,
+    footer_bytes_cache=None,
+):
+    """
+    C++ Parquet IO pipeline for pass-2 late materialization.
+
+    Decodes pass-2 columns in parallel, applying a per-row-group mask so only
+    surviving rows (from pass-1 predicate evaluation) are decoded and serialized.
+
+    work_items: list of (path, rg_idx, mask_bytes) triples.
+    column_names: pass-2 (projection-only) column names.
+
+    Yields row_group dicts with __path__, __row_group__, __parquet_scan_strategy__,
+    and __bytes_fetched__ in completion order.
+    """
+    if not work_items:
+        return
+
+    # Planning-time URL signer: converts gs:// paths to signed HTTPS URLs.
+    sign_url = getattr(filesystem, "rewrite_to_signed_url", None)
+    cdef dict orig_to_cpp = {}
+    cdef dict cpp_to_orig = {}
+    if sign_url:
+        for path, _rg, _mask in work_items:
+            if path not in orig_to_cpp:
+                cpp_path = sign_url(path)
+                orig_to_cpp[path] = cpp_path
+                cpp_to_orig[cpp_path] = path
+
+    cdef CppIOPipeline pipeline = CppIOPipeline(
+        decode_workers=decode_workers,
+        queue_capacity=1024,
+        pool_size=256*1024*1024,
+    )
+
+    cdef unordered_map[string, FileStats] local_footers_native
+    cdef string path_bytes_cpp
+    cdef const uint8_t* footer_buf_ptr
+    cdef size_t footer_buf_size
+    cdef RowGroupStats* rg_ptr
+
+    try:
+        # Load footers for all paths needed (footer cache hits expected — pass 1 already fetched them).
+        # TODO: factor out footer-loading logic shared with iter_row_groups_ipc.
+        for path, rg_idx, mask_bytes in work_items:
+            path_bytes_cpp = path.encode('utf-8')
+            if local_footers_native.count(path_bytes_cpp) == 0:
+                envelope, _ = _read_footer_payload(orig_to_cpp.get(path, path), -1, footer_bytes_cache)
+                footer_buf_ptr = <const uint8_t*>envelope
+                footer_buf_size = len(envelope)
+                local_footers_native[path_bytes_cpp] = ReadParquetMetadataFromBuffer(
+                    footer_buf_ptr, footer_buf_size
+                )
+
+        # Submit all pass-2 work items with their masks.
+        for path, rg_idx, mask_bytes in work_items:
+            path_bytes_cpp = path.encode('utf-8')
+            rg_ptr = &local_footers_native[path_bytes_cpp].row_groups[rg_idx]
+            pipeline.submit_work_native_masked(
+                orig_to_cpp.get(path, path), rg_idx, column_names, rg_ptr, bytes(mask_bytes)
+            )
+
+        # Consume results in completion order.
+        results_received = 0
+        while results_received < len(work_items):
+            result = pipeline.wait_result()
+            if result is None:
+                raise RuntimeError(
+                    f"Parquet pass-2 pipeline drained with {len(work_items) - results_received} "
+                    f"result(s) missing"
+                )
+
+            if not result['success']:
+                raise RuntimeError(f"Parquet pass-2 pipeline error: {result.get('error', 'unknown')}")
+
+            row_group = deserialize_row_group(result['ref_ids'], pipeline.pool)
+
+            # Translate signed URL back to original path for Python consumers.
+            row_group['__path__'] = cpp_to_orig.get(result['path'], result['path'])
+            row_group['__row_group__'] = result['rg_idx']
+            row_group['__parquet_scan_strategy__'] = 'cpp-pipeline-pass2'
+            row_group['__bytes_fetched__'] = result['bytes_fetched']
+
+            results_received += 1
+            yield row_group
+
+    finally:
         pipeline.close()

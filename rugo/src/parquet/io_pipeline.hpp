@@ -57,6 +57,7 @@ class ParquetIOPipeline {
         int rg_idx;
         std::vector<std::string> column_names;
         std::vector<ColumnStats> column_stats;  // absolute file offsets
+        std::vector<uint8_t> row_mask;           // empty = no mask (decode all rows)
     };
 
     std::shared_ptr<BS::light_thread_pool> decode_pool_;
@@ -178,6 +179,9 @@ class ParquetIOPipeline {
                 std::chrono::steady_clock::now() - t_map).count();
         }
 
+        // Precompute mask pointer once — shared across all columns in this row group.
+        const uint8_t* mask_ptr = item.row_mask.empty() ? nullptr : item.row_mask.data();
+
         try {
             for (size_t i = 0; i < item.column_stats.size(); ++i) {
                 const auto& col_stats = item.column_stats[i];
@@ -201,7 +205,7 @@ class ParquetIOPipeline {
                         static_cast<const uint8_t*>(mmap_base) + (base_offset - mmap_offset);
                     auto t_dec = std::chrono::steady_clock::now();
                     decoded = DecodeColumnFromChunk(
-                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted);
+                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, mask_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                     result.bytes_fetched += chunk_size;
@@ -212,7 +216,7 @@ class ParquetIOPipeline {
                     total_read_ns += read_ns;
                     auto t_dec = std::chrono::steady_clock::now();
                     decoded = DecodeColumnFromChunk(
-                        raw_bytes.data(), raw_bytes.size(), &adjusted);
+                        raw_bytes.data(), raw_bytes.size(), &adjusted, mask_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 }
@@ -285,6 +289,31 @@ class ParquetIOPipeline {
         item.rg_idx = rg_idx;
         item.column_names = column_names;
         item.column_stats = column_stats;
+
+        decode_pool_->detach_task([this, item = std::move(item)]() {
+            decode_row_group(item);
+        });
+    }
+
+    /**
+     * Submit a row group with a per-row mask (1=keep, 0=skip).
+     * Workers apply the mask during decode so only surviving rows are serialized.
+     * Default-empty mask in the base overload means existing callers are unaffected.
+     */
+    void submit_row_group(const std::string& path, int rg_idx,
+                          const std::vector<std::string>& column_names,
+                          const std::vector<ColumnStats>& column_stats,
+                          std::vector<uint8_t> row_mask) {
+        if (shutdown_) return;
+
+        pending_work_++;
+
+        WorkItem item;
+        item.path = path;
+        item.rg_idx = rg_idx;
+        item.column_names = column_names;
+        item.column_stats = column_stats;
+        item.row_mask = std::move(row_mask);
 
         decode_pool_->detach_task([this, item = std::move(item)]() {
             decode_row_group(item);

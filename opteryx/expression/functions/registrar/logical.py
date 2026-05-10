@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import List
 
 # Local implementation imports (kept as late imports inside function if heavy)
-from opteryx.compiled.vector_ops import vector_case as _vector_case
 from opteryx.compiled.vector_ops import vector_coalesce as _vector_coalesce
 from opteryx.compiled.vector_ops import vector_iif as _vector_iif
 from opteryx.expression.functions import (
@@ -28,7 +27,7 @@ from opteryx.expression.functions.implementations.utility import (
 )
 
 # Local helpers provided by registrar package
-from opteryx.expression.functions.registrar import _case_return_type, _coalesce_return_type
+from opteryx.expression.functions.registrar import _coalesce_return_type
 from opteryx.types import OrsoTypes
 
 
@@ -42,7 +41,6 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
       - NULLIF
       - IIF (vectorized conditional)
       - _PASSTHRU (utility, for tests/compat)
-      - _CASE (variadic CASE expression)
     """
 
     # Small adapter object bundling kernels implemented elsewhere
@@ -56,7 +54,6 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
 
     _coalesce_kernel = _vector_coalesce
     _iif_kernel = _vector_iif
-    _case_kernel = _vector_case
 
     _variadic_any = (
         ParameterSpec(name="arg0", type_family="any"),
@@ -215,30 +212,6 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                         id="default",
                         callable_ref=lambda x: x,
                         cost_us_per_million=0.28,
-                    ),
-                ),
-            ),
-        ),
-        FunctionDefinition(
-            name="_CASE",
-            aliases=(),
-            category="logical",
-            volatility="immutable",
-            deterministic=True,
-            lifecycle=LifecycleSpec(status="active"),
-            summary="Conditional value selection.",
-            documentation="Returns a value based on conditional expressions.",
-            overloads=(
-                FunctionOverload(
-                    id="_CASE_variadic",
-                    parameters=_variadic_any,
-                    return_spec=ReturnSpec(mode="resolver", resolver=_case_return_type),
-                    kernel=KernelSpec(
-                        engine="draken",
-                        id="default",
-                        callable_ref=_case_kernel,
-                        null_policy="passthru",
-                        cost_us_per_million=1.04,
                     ),
                 ),
             ),

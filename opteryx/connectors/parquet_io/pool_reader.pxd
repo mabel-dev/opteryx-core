@@ -36,6 +36,12 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
             const vector[string]& column_names,
             const vector[ColumnStats]& column_stats,
         ) nogil
+        void submit_row_group(
+            const string& path, int rg_idx,
+            const vector[string]& column_names,
+            const vector[ColumnStats]& column_stats,
+            const vector[uint8_t]& row_mask,
+        ) nogil
         bint try_get_result(MorselRef& out) nogil
         bint wait_and_get_result(MorselRef& out) nogil
         void wait_shutdown() nogil
@@ -49,6 +55,7 @@ cdef class CppIOPipeline:
     cdef ParquetIOPipeline* pipeline
     cdef public MemoryPool pool        # `public` → accessible as Python attribute
     cdef submit_work_native(self, str cpp_path, int rg_idx, list column_names, RowGroupStats* rg)
+    cdef submit_work_native_masked(self, str cpp_path, int rg_idx, list column_names, RowGroupStats* rg, bytes row_mask)
 
 
 cdef tuple _read_footer_payload(

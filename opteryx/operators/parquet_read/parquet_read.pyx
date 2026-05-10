@@ -31,6 +31,7 @@ from typing import Generator
 from opteryx.compiled.structures.footer_cache import ParquetFooterBytesCache
 from opteryx.connectors.parquet_io import fetch_columns
 from opteryx.connectors.parquet_io import iter_row_groups
+from opteryx.connectors.parquet_io.pool_reader import iter_pass2_row_groups_ipc
 from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
@@ -634,58 +635,49 @@ class ParquetReadNode(ReaderNode):
         }
 
         result_morsel = None
-        two_pass_active = two_pass_eligible
-        consecutive_full_pass = 0
-        scan_column_names = pass1_column_names if two_pass_eligible else column_names
 
         decode_start = time.monotonic_ns()
         total_rows_before_filter = 0
         total_rows_after_filter = 0
         try:
-            for row_group in iter_row_groups(
-                filesystem,
-                blob_paths,
-                scan_column_names,
-                predicates=predicate_stats,
-                file_sizes=file_sizes or None,
-                connector=connector_type,
-                query_id=getattr(self.properties, "query_id", None),
-                footer_bytes_cache=_FOOTER_CACHE,
-            ):
-                path, rg_idx = self._extract_row_group_metadata(row_group)
+            if two_pass_eligible:
+                from opteryx.expression.evaluator import evaluate_and_append_draken
+                from opteryx.expression.evaluator import evaluate_draken
 
-                # Coerce DECIMAL columns: the C++ IPC pipeline serializes them as
-                # TAG_INT64 (physical type), so they arrive as Int64Vector.  Convert
-                # to DecimalVector here using schema precision/scale from the binder.
-                if _decimal_col_map:
-                    from draken.vectors._decimal_vector import from_int64_vector as _int64_to_decimal
-                    from draken.vectors.int64_vector import Int64Vector as _Int64VectorCls
-                    for _dcol, (_dprec, _dscale) in _decimal_col_map.items():
-                        if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls):
-                            row_group[_dcol] = _int64_to_decimal(row_group[_dcol], _dprec, _dscale)
+                # ── Phase 1: stream pass-1 row groups, evaluate predicate, collect survivors ──
+                pass2_work = []   # list of (path, rg_idx, mask_bytes)
+                p1_cache = {}     # (path, rg_idx) -> p1_filtered Morsel
 
-                # Coerce DATE/TIMESTAMP columns: the C++ IPC pipeline serializes them
-                # as TAG_INT64 (physical type), so they arrive as Int64Vector.  Convert
-                # to Date32Vector / TimestampVector here using the schema type from the
-                # binder.  Required for kernels like EXTRACT that reject Int64Vector.
-                if _date_col_set or _timestamp_col_set:
-                    from draken.vectors.date32_vector import from_int64_vector as _int64_to_date32
-                    from draken.vectors.timestamp_vector import from_int64_vector as _int64_to_timestamp
-                    from draken.vectors.int64_vector import Int64Vector as _Int64VectorCls2
-                    for _dcol in _date_col_set:
-                        if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls2):
-                            row_group[_dcol] = _int64_to_date32(row_group[_dcol])
-                    for _tcol in _timestamp_col_set:
-                        if _tcol in row_group and isinstance(row_group[_tcol], _Int64VectorCls2):
-                            row_group[_tcol] = _int64_to_timestamp(row_group[_tcol], "us")
+                for row_group in iter_row_groups(
+                    filesystem,
+                    blob_paths,
+                    pass1_column_names,
+                    predicates=predicate_stats,
+                    file_sizes=file_sizes or None,
+                    connector=connector_type,
+                    query_id=getattr(self.properties, "query_id", None),
+                    footer_bytes_cache=_FOOTER_CACHE,
+                ):
+                    path, rg_idx = self._extract_row_group_metadata(row_group)
 
-                # ── Morsel assembly ───────────────────────────────────────────
-                morsel_already_ordered = False  # Track if morsel is already in output order
-                if two_pass_eligible:
-                    from opteryx.expression.evaluator import evaluate_and_append_draken
-                    from opteryx.expression.evaluator import evaluate_draken
+                    # Coerce DATE/TIMESTAMP/DECIMAL in pass-1 filter columns.
+                    if _decimal_col_map:
+                        from draken.vectors._decimal_vector import from_int64_vector as _int64_to_decimal
+                        from draken.vectors.int64_vector import Int64Vector as _Int64VectorCls
+                        for _dcol, (_dprec, _dscale) in _decimal_col_map.items():
+                            if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls):
+                                row_group[_dcol] = _int64_to_decimal(row_group[_dcol], _dprec, _dscale)
+                    if _date_col_set or _timestamp_col_set:
+                        from draken.vectors.date32_vector import from_int64_vector as _int64_to_date32
+                        from draken.vectors.timestamp_vector import from_int64_vector as _int64_to_timestamp
+                        from draken.vectors.int64_vector import Int64Vector as _Int64VectorCls2
+                        for _dcol in _date_col_set:
+                            if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls2):
+                                row_group[_dcol] = _int64_to_date32(row_group[_dcol])
+                        for _tcol in _timestamp_col_set:
+                            if _tcol in row_group and isinstance(row_group[_tcol], _Int64VectorCls2):
+                                row_group[_tcol] = _int64_to_timestamp(row_group[_tcol], "us")
 
-                    # Build Pass 1 morsel from filter columns only.
                     p1_identity_names = [pass1_name_to_identity[col] for col in row_group]
                     p1_vectors = list(row_group.values())
                     if not p1_identity_names:
@@ -693,18 +685,14 @@ class ParquetReadNode(ReaderNode):
                     p1_morsel = Morsel.from_vectors(p1_identity_names, p1_vectors)
                     rows_before_filter = p1_morsel.num_rows
 
-                    # Evaluate predicate to get the raw BoolVector mask.
-                    # Use cached function nodes (computed once at initialization, not per row group).
                     if self._predicate_function_nodes_cached:
                         p1_morsel = evaluate_and_append_draken(self._predicate_function_nodes_cached, p1_morsel)
                     mask = evaluate_draken(predicate_root, p1_morsel)
 
                     self.readings["parquet_latmat_pass1_row_groups"] += 1
+                    total_rows_before_filter += rows_before_filter
 
-                    # Zero-hit fast path: skip Pass 2 entirely for this row group.
-                    # Only applies when the abandonment heuristic has not fired.
-                    if two_pass_active and not mask.any():
-                        total_rows_before_filter += rows_before_filter
+                    if not mask.any():
                         self.readings["parquet_latmat_skipped_row_groups"] += 1
                         self.readings["row_groups_read"] = (
                             self.readings.get("row_groups_read", 0) + 1
@@ -715,41 +703,55 @@ class ParquetReadNode(ReaderNode):
                             self.readings["blobs_seen"] += 1
                         continue
 
-                    # Pass 2: fetch projection-only columns for this (path, rg_idx).
-                    from array import array as _pyarray
-                    _mask_arr = _pyarray('B', mask.to_byte_array())
-                    pass2_raw = fetch_columns(
-                        filesystem,
-                        path,
-                        rg_idx,
-                        pass2_column_names,
-                        connector=connector_type,
-                        row_mask=_mask_arr,
-                    )
-                    p2_bytes = pass2_raw.pop("__bytes_fetched__", 0)
+                    p1_cache[(path, rg_idx)] = (p1_morsel.filter_mask(mask), p1_identity_names)
+                    pass2_work.append((path, rg_idx, bytes(mask.to_byte_array())))
+
+                # ── Phase 2: parallel pass-2 decode via C++ pipeline ──────────────────────
+                for row_group in iter_pass2_row_groups_ipc(
+                    filesystem,
+                    pass2_work,
+                    pass2_column_names,
+                    file_sizes=file_sizes or None,
+                    connector=connector_type,
+                    query_id=getattr(self.properties, "query_id", None),
+                    footer_bytes_cache=_FOOTER_CACHE,
+                ):
+                    path = row_group.get('__path__')
+                    rg_idx = row_group.get('__row_group__')
+
+                    p2_bytes = row_group.pop('__bytes_fetched__', 0)
                     self.readings["parquet_latmat_pass2_bytes"] += p2_bytes
                     self.bytes_in += p2_bytes
-                    self.readings["parquet_latmat_skipped_pages"] += pass2_raw.pop(
-                        "__pages_skipped__", 0
-                    )
-                    self.readings["parquet_latmat_decoded_pages"] += pass2_raw.pop(
-                        "__pages_decoded__", 0
-                    )
-                    # Clean up metadata keys. Snapshot keys to avoid modification during iteration.
-                    for _k in [k for k in pass2_raw if k.startswith("__")]:
-                        pass2_raw.pop(_k)
+                    # Clean up metadata keys.
+                    for _k in [k for k in row_group if k.startswith("__")]:
+                        row_group.pop(_k)
 
-                    # Pass 1 filtered morsel (K rows).
-                    p1_filtered = p1_morsel.filter_mask(mask)
+                    # Coerce DATE/TIMESTAMP/DECIMAL in pass-2 projection columns.
+                    if _decimal_col_map:
+                        from draken.vectors._decimal_vector import from_int64_vector as _int64_to_decimal
+                        from draken.vectors.int64_vector import Int64Vector as _Int64VectorCls
+                        for _dcol, (_dprec, _dscale) in _decimal_col_map.items():
+                            if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls):
+                                row_group[_dcol] = _int64_to_decimal(row_group[_dcol], _dprec, _dscale)
+                    if _date_col_set or _timestamp_col_set:
+                        from draken.vectors.date32_vector import from_int64_vector as _int64_to_date32
+                        from draken.vectors.timestamp_vector import from_int64_vector as _int64_to_timestamp
+                        from draken.vectors.int64_vector import Int64Vector as _Int64VectorCls2
+                        for _dcol in _date_col_set:
+                            if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls2):
+                                row_group[_dcol] = _int64_to_date32(row_group[_dcol])
+                        for _tcol in _timestamp_col_set:
+                            if _tcol in row_group and isinstance(row_group[_tcol], _Int64VectorCls2):
+                                row_group[_tcol] = _int64_to_timestamp(row_group[_tcol], "us")
 
-                    # Pass 2 vectors are already K rows (decoder applied the mask).
-                    # Build identity→source mappings to construct morsel in output order.
+                    p1_filtered, p1_identity_names = p1_cache.pop((path, rg_idx))
+
                     p1_vectors_by_identity = {n: p1_filtered.column(n) for n in p1_identity_names}
                     p2_vectors_by_identity = {
                         pass2_name_to_identity[col]: vec
-                        for col, vec in pass2_raw.items()
+                        for col, vec in row_group.items()
                     }
-                    # Assemble in output_identity_order if available, else combine [p1 + p2].
+
                     if output_identity_order:
                         combined_identity_names = []
                         combined_vectors = []
@@ -761,40 +763,78 @@ class ParquetReadNode(ReaderNode):
                                 combined_identity_names.append(identity)
                                 combined_vectors.append(p2_vectors_by_identity[identity])
                     else:
-                        # Fallback: combine [p1 + p2] in original order.
                         combined_identity_names = list(p1_identity_names)
                         combined_identity_names.extend(p2_vectors_by_identity.keys())
                         combined_vectors = list(p1_vectors_by_identity.values())
                         combined_vectors.extend(p2_vectors_by_identity.values())
+
                     result_morsel = Morsel.from_vectors(combined_identity_names, combined_vectors)
                     rows_after_filter = result_morsel.num_rows
-                    morsel_already_ordered = bool(output_identity_order)  # Already ordered if built above
+                    total_rows_after_filter += rows_after_filter
 
                     self.readings["parquet_latmat_pass2_row_groups"] += 1
+                    self.readings["rows_seen"] += rows_after_filter
+                    self.readings["row_groups_read"] = self.readings.get("row_groups_read", 0) + 1
 
-                    # Abandonment heuristic: when the predicate is consistently
-                    # non-selective, stop skipping Pass 2 for zero-survivor row groups.
-                    if two_pass_active:
-                        if rows_after_filter == rows_before_filter:
-                            consecutive_full_pass += 1
-                            if (
-                                consecutive_full_pass
-                                >= config.PARQUET_LATE_MATERIALIZATION_ABANDON_AFTER
-                            ):
-                                two_pass_active = False
-                                self.readings["parquet_latmat_abandoned_files"] += 1
-                        else:
-                            consecutive_full_pass = 0
+                    if path not in self._parquet_files_seen:
+                        self._parquet_files_seen.add(path)
+                        self.readings["files_read"] = len(self._parquet_files_seen)
+                        self.readings["blobs_seen"] += 1
 
-                else:
-                    # Single-pass path: existing behaviour.
+                    # Already assembled in output_identity_order — no select() needed.
+                    num_rows = result_morsel.num_rows
+                    if records_to_read < num_rows:
+                        result_morsel = result_morsel.slice(0, int(records_to_read))
+                        records_to_read = 0
+                    else:
+                        records_to_read -= num_rows
+
+                    self.readings["blobs_read"] = len(self._parquet_files_seen)
+                    self.telemetry.blobs_read = len(self._parquet_files_seen)
+                    self.readings["rows_read"] += result_morsel.num_rows
+                    self.telemetry.rows_read += result_morsel.num_rows
+                    self.readings["bytes_processed"] += result_morsel.nbytes
+                    self.telemetry.bytes_processed += result_morsel.nbytes
+
+                    yield result_morsel
+
+                    if records_to_read <= 0:
+                        break
+
+            else:
+                # ── Single-pass path: existing behaviour ─────────────────────────────────
+                for row_group in iter_row_groups(
+                    filesystem,
+                    blob_paths,
+                    column_names,
+                    predicates=predicate_stats,
+                    file_sizes=file_sizes or None,
+                    connector=connector_type,
+                    query_id=getattr(self.properties, "query_id", None),
+                    footer_bytes_cache=_FOOTER_CACHE,
+                ):
+                    path, rg_idx = self._extract_row_group_metadata(row_group)
+
+                    if _decimal_col_map:
+                        from draken.vectors._decimal_vector import from_int64_vector as _int64_to_decimal
+                        from draken.vectors.int64_vector import Int64Vector as _Int64VectorCls
+                        for _dcol, (_dprec, _dscale) in _decimal_col_map.items():
+                            if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls):
+                                row_group[_dcol] = _int64_to_decimal(row_group[_dcol], _dprec, _dscale)
+                    if _date_col_set or _timestamp_col_set:
+                        from draken.vectors.date32_vector import from_int64_vector as _int64_to_date32
+                        from draken.vectors.timestamp_vector import from_int64_vector as _int64_to_timestamp
+                        from draken.vectors.int64_vector import Int64Vector as _Int64VectorCls2
+                        for _dcol in _date_col_set:
+                            if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls2):
+                                row_group[_dcol] = _int64_to_date32(row_group[_dcol])
+                        for _tcol in _timestamp_col_set:
+                            if _tcol in row_group and isinstance(row_group[_tcol], _Int64VectorCls2):
+                                row_group[_tcol] = _int64_to_timestamp(row_group[_tcol], "us")
+
                     identity_names = [name_to_identity[col] for col in row_group]
                     vectors = list(row_group.values())
                     if not identity_names:
-                        # Zero-projection query (e.g. COUNT(*) with a pushed-down WHERE
-                        # predicate that stripped all columns).  The reader cannot build a
-                        # Morsel with no columns; row-level filtering for this case is an
-                        # architectural concern for the planner, not the reader.
                         continue
                     result_morsel = Morsel.from_vectors(identity_names, vectors)
                     rows_before_filter = result_morsel.num_rows
@@ -806,53 +846,47 @@ class ParquetReadNode(ReaderNode):
                                 predicate_root,
                             )
                         )
-                total_rows_before_filter += rows_before_filter
-                total_rows_after_filter += rows_after_filter
-                # Skip select() if morsel was already built in output order (two-pass path).
-                if output_identity_order and not morsel_already_ordered:
-                    result_morsel = result_morsel.select(output_identity_order)
-                elif not two_pass_eligible:
-                    # No output columns (e.g. COUNT(*) with a filter-only read).
-                    # Replace the post-filter morsel with the smallest valid morsel:
-                    # a single constant BoolVector column named b'*'.  The aggregator
-                    # only reads .num_rows; shipping the full filter column (e.g. all
-                    # URL strings) across the operator boundary is pure waste.
-                    surviving_rows = result_morsel.num_rows
-                    if surviving_rows == 0:
-                        continue
-                    result_morsel = Morsel.from_vectors(
-                        [b'*'],
-                        [BoolVector.from_constant(True, surviving_rows)],
-                    )
+                    total_rows_before_filter += rows_before_filter
+                    total_rows_after_filter += rows_after_filter
 
-                num_rows = result_morsel.num_rows
-                self.readings["rows_seen"] += num_rows
-                self.readings["row_groups_read"] = self.readings.get("row_groups_read", 0) + 1
+                    if output_identity_order:
+                        result_morsel = result_morsel.select(output_identity_order)
+                    else:
+                        # No output columns (e.g. COUNT(*) with a filter-only read).
+                        surviving_rows = result_morsel.num_rows
+                        if surviving_rows == 0:
+                            continue
+                        result_morsel = Morsel.from_vectors(
+                            [b'*'],
+                            [BoolVector.from_constant(True, surviving_rows)],
+                        )
 
-                # Track distinct files (rg_idx==0 is the first row group of each file)
-                if path not in self._parquet_files_seen:
-                    self._parquet_files_seen.add(path)
-                    self.readings["files_read"] = len(self._parquet_files_seen)
-                    self.readings["blobs_seen"] += 1
+                    num_rows = result_morsel.num_rows
+                    self.readings["rows_seen"] += num_rows
+                    self.readings["row_groups_read"] = self.readings.get("row_groups_read", 0) + 1
 
-                # ── LIMIT enforcement ─────────────────────────────────────────
-                if records_to_read < num_rows:
-                    result_morsel = result_morsel.slice(0, int(records_to_read))
-                    records_to_read = 0
-                else:
-                    records_to_read -= num_rows
+                    if path not in self._parquet_files_seen:
+                        self._parquet_files_seen.add(path)
+                        self.readings["files_read"] = len(self._parquet_files_seen)
+                        self.readings["blobs_seen"] += 1
 
-                self.readings["blobs_read"] = len(self._parquet_files_seen)
-                self.telemetry.blobs_read = len(self._parquet_files_seen)
-                self.readings["rows_read"] += result_morsel.num_rows
-                self.telemetry.rows_read += result_morsel.num_rows
-                self.readings["bytes_processed"] += result_morsel.nbytes
-                self.telemetry.bytes_processed += result_morsel.nbytes
+                    if records_to_read < num_rows:
+                        result_morsel = result_morsel.slice(0, int(records_to_read))
+                        records_to_read = 0
+                    else:
+                        records_to_read -= num_rows
 
-                yield result_morsel
+                    self.readings["blobs_read"] = len(self._parquet_files_seen)
+                    self.telemetry.blobs_read = len(self._parquet_files_seen)
+                    self.readings["rows_read"] += result_morsel.num_rows
+                    self.telemetry.rows_read += result_morsel.num_rows
+                    self.readings["bytes_processed"] += result_morsel.nbytes
+                    self.telemetry.bytes_processed += result_morsel.nbytes
 
-                if records_to_read <= 0:
-                    break
+                    yield result_morsel
+
+                    if records_to_read <= 0:
+                        break
 
         finally:
             decode_ns = time.monotonic_ns() - decode_start

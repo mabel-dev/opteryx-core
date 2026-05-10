@@ -710,7 +710,71 @@ def _rebind_function_node(function_node):
     function_node.function_ref = resolved
 
 
+def _is_safe(node) -> bool:
+    """Return True iff node is safe to evaluate eagerly (no exceptions, no side effects)."""
+    if node is None:
+        return True
+    nt = node.node_type
+    if nt in (NodeType.LITERAL, NodeType.IDENTIFIER):
+        return True
+    if nt == NodeType.CAST:
+        return False
+    if nt == NodeType.BINARY_OPERATOR:
+        if node.value in {"Divide", "Modulo"}:
+            return False
+        return _is_safe(node.left) and _is_safe(node.right)
+    if nt == NodeType.FUNCTION:
+        return all(_is_safe(p) for p in (node.parameters or []))
+    return False
+
+
+def _rewrite_case_node(node, telemetry: QueryTelemetry):
+    """Rewrite a NodeType.CASE node to IFNULL or IIF when safe."""
+    if len(node.conditions) != 1 or node.else_result is None:
+        return node
+    cond = node.conditions[0]
+    then_ = node.results[0]
+    else_ = node.else_result
+
+    # CASE WHEN x IS NULL THEN y ELSE x END → IFNULL(x, y)
+    if (
+        cond.node_type == NodeType.UNARY_OPERATOR
+        and cond.value == "IsNull"
+        and _is_safe(then_)
+    ):
+        cond_identity = getattr(getattr(cond.centre, "schema_column", None), "identity", None)
+        else_identity = getattr(getattr(else_, "schema_column", None), "identity", None)
+        if cond_identity is not None and cond_identity == else_identity:
+            telemetry.optimization_predicate_rewriter_case_to_ifnull += 1
+            new_node = Node(
+                NodeType.FUNCTION,
+                value="IFNULL",
+                parameters=[else_, then_],
+                alias=node.alias,
+                schema_column=node.schema_column,
+            )
+            _rebind_function_node(new_node)
+            return new_node
+
+    # CASE WHEN c THEN y ELSE z END → IIF(c, y, z) when condition and both branches are safe
+    if _is_safe(cond) and _is_safe(then_) and _is_safe(else_):
+        telemetry.optimization_predicate_rewriter_case_to_iif += 1
+        new_node = Node(
+            NodeType.FUNCTION,
+            value="IIF",
+            parameters=[cond, then_, else_],
+            alias=node.alias,
+            schema_column=node.schema_column,
+        )
+        _rebind_function_node(new_node)
+        return new_node
+
+    return node
+
+
 def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
+    if predicate.node_type == NodeType.CASE:
+        return _rewrite_case_node(predicate, telemetry)
     if predicate.node_type == NodeType.FUNCTION:
         return _rewrite_function(predicate, telemetry)
 
@@ -1008,36 +1072,6 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
     if rewritten is not None:
         return rewritten
 
-    if function.value == "_CASE":
-        # CASE WHEN x IS NULL THEN y ELSE x END → IFNULL(x, y)
-        if len(function.parameters) == 2 and function.parameters[0].parameters[0].value == "IsNull":
-            compare_column = function.parameters[0].parameters[0].centre
-            target_column = function.parameters[1].parameters[1]
-            value_if_null = function.parameters[1].parameters[0]
-
-            if compare_column.schema_column.identity == target_column.schema_column.identity:
-                telemetry.optimization_predicate_rewriter_case_to_ifnull += 1
-                function.value = "IFNULL"
-                function.parameters = [compare_column, value_if_null]
-                _rebind_function_ref()
-                return function
-        # CASE WHEN x THEN y ELSE z END → IIF(x, y, z)
-        if (
-            len(function.parameters) == 2
-            and len(function.parameters[0].parameters) == 2
-            and function.parameters[0].parameters[1].value is True
-            and len(function.parameters[1].parameters) == 2
-        ):
-            telemetry.optimization_predicate_rewriter_case_to_iif += 1
-
-            compare_column = function.parameters[0].parameters[0]
-            value_if_true = function.parameters[1].parameters[0]
-            value_if_false = function.parameters[1].parameters[1]
-
-            function.value = "IIF"
-            function.parameters = [compare_column, value_if_true, value_if_false]
-            _rebind_function_ref()
-            return function
     # COALESCE(x, y) → IFNULL(x, y)
     if function.value == "COALESCE":
         if len(function.parameters) == 2:

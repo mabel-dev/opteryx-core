@@ -68,6 +68,7 @@ class NodeType(int, Enum):
 
     # INTERAL IDENTIFIERS
     # 0010 nnnn
+    CASE = 32  # 0010 0000 — control-flow CASE statement (lazy evaluator)
     WILDCARD = 33  # 0010 0001
     COMPARISON_OPERATOR = 34  # 0010 0010
     BINARY_OPERATOR = 35  # 0010 0011
@@ -532,6 +533,14 @@ def _inner_evaluate(root: Node, table):
             raise TypeError(f"Boolean NOT requires BoolVector input; got {type(centre).__name__}")
 
     # INTERAL IDENTIFIERS
+    if node_type == NodeType.CASE:
+        from opteryx.expression.evaluator.case_eval import evaluate_case
+        from draken.morsels.morsel import Morsel as _Morsel
+        if not isinstance(table, _Morsel):
+            raise TypeError(
+                f"_inner_evaluate: NodeType.CASE requires a Draken Morsel; got {type(table).__name__}"
+            )
+        return evaluate_case(root, table)
     if node_type & INTERNAL_TYPE == INTERNAL_TYPE:  # type: ignore
         if node_type == NodeType.FUNCTION:
             if root.value == "_PASSTHRU":
@@ -775,6 +784,15 @@ def get_all_nodes_of_type(root, select_nodes: tuple) -> list:
                 [param for param in node.parameters if isinstance(param, (Node, LogicalColumn))]
             )
 
+        # NodeType.CASE uses conditions/results/else_result instead of parameters
+        if node.node_type == NodeType.CASE:
+            if node.conditions:
+                stack.extend(c for c in node.conditions if isinstance(c, (Node, LogicalColumn)))
+            if node.results:
+                stack.extend(r for r in node.results if isinstance(r, (Node, LogicalColumn)))
+            if node.else_result is not None and isinstance(node.else_result, (Node, LogicalColumn)):
+                appender(node.else_result)
+
         # Append child nodes
         child = node.right
         if child:
@@ -853,6 +871,7 @@ def evaluate_and_append(expressions, table):
 def should_evaluate(statement):
     """Determine if the given statement should be evaluated."""
     valid_node_types = {
+        NodeType.CASE,
         NodeType.FUNCTION,
         NodeType.CAST,
         NodeType.BINARY_OPERATOR,

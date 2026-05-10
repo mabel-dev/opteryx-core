@@ -162,20 +162,6 @@ def _coalesce_return_type(arg_nodes) -> OrsoTypes:
     return find_compatible_type(types) or OrsoTypes.NULL
 
 
-def _case_return_type(arg_nodes) -> OrsoTypes:
-    """Return the type of the first non-null THEN/ELSE branch.
-
-    CASE node structure: parameters[0] is the scrutinee, parameters[1] is a
-    node whose .parameters list holds the WHEN/THEN/ELSE expressions.
-    """
-    branches = getattr(arg_nodes[1], "parameters", []) if len(arg_nodes) > 1 else []
-    for param in branches:
-        sc = getattr(param, "schema_column", None)
-        if sc is not None and sc.type not in (OrsoTypes.NULL, 0, OrsoTypes._MISSING_TYPE):
-            return sc.type
-    return OrsoTypes.NULL
-
-
 def _datepart_return_type(arg_nodes) -> OrsoTypes:
     """EXTRACT/DATEPART return type depends on the part name literal."""
     part_val = getattr(arg_nodes[0], "value", None) if arg_nodes else None
@@ -251,7 +237,6 @@ def get_builtin_functions() -> list[FunctionDefinition]:
 
 # Re-export helpers for domain modules to use
 __all__ = [
-    "_case_return_type",
     "_coalesce_return_type",
     "_datepart_return_type",
     "_iterate_double_parameter",

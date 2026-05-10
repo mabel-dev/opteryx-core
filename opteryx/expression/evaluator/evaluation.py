@@ -97,6 +97,10 @@ def _eval_value(node, morsel):
     if node_type == NodeType.NESTED:
         return _eval_value(node.centre, morsel)
 
+    if node_type == NodeType.CASE:
+        from opteryx.expression.evaluator.case_eval import evaluate_case
+        return evaluate_case(node, morsel)
+
     if node_type == NodeType.EXPRESSION_LIST:
         return [_eval_value(parameter, morsel) for parameter in node.parameters]
 
@@ -538,6 +542,18 @@ def evaluate_and_append_draken(nodes, morsel):
             continue
         identity = node.schema_column.identity
         if identity in existing:
+            continue
+        if node.node_type == NodeType.CASE:
+            from opteryx.expression.evaluator.case_eval import evaluate_case
+            result = evaluate_case(node, morsel)
+            if not is_draken_vector(result):
+                raise TypeError(
+                    "evaluate_and_append_draken: CASE expression must return a Draken vector; "
+                    f"got {type(result).__name__}."
+                )
+            col_names.append(identity)
+            col_vecs.append(result)
+            existing.add(identity)
             continue
         if node.node_type == NodeType.FUNCTION:
             parameters = []

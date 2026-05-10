@@ -76,12 +76,17 @@ def format_expression(root, qualify: bool = False):
                 return "{" + items + (f", ...{rest} more" if rest else "") + "}"
         return str(root.value)
     # INTERAL IDENTIFIERS
+    if node_type == NodeType.CASE:
+        parts = "".join(
+            f"WHEN {format_expression(c, qualify)} THEN {format_expression(v, qualify)} "
+            for c, v in zip(root.conditions or [], root.results or [])
+        )
+        else_part = (
+            f"ELSE {format_expression(root.else_result, qualify)} " if root.else_result is not None else ""
+        )
+        return f"CASE {parts}{else_part}END"
     if node_type & INTERNAL_TYPE == INTERNAL_TYPE:
         if node_type in (NodeType.FUNCTION, NodeType.AGGREGATOR):
-            if root.value in ("CASE", "_CASE"):
-                con = [format_expression(a, qualify) for a in root.parameters[0].parameters]
-                vals = [format_expression(a, qualify) for a in root.parameters[1].parameters]
-                return "CASE " + "".join([f"WHEN {c} THEN {v} " for c, v in zip(con, vals)]) + "END"
             distinct = "DISTINCT " if root.duplicate_treatment else ""
             order = ""
             if root.order:

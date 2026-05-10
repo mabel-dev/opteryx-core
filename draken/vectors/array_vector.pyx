@@ -16,13 +16,8 @@ and a flattened child Vector stores nested values.
 
 from cpython.buffer cimport PyBUF_READ
 from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AS_STRING
-from cpython.exc cimport PyErr_Occurred
-from cpython.long cimport PyLong_AsSsize_t
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from cpython.memoryview cimport PyMemoryView_FromMemory
-from cpython.ref cimport Py_DECREF
-from cpython.sequence cimport PySequence_Fast
-from cpython.sequence cimport PySequence_Fast_GET_ITEM, PySequence_Fast_GET_SIZE
 
 from libc.stddef cimport size_t
 from libc.stdint cimport int32_t, int8_t, intptr_t, uint8_t, uint64_t
@@ -177,17 +172,13 @@ cdef class ArrayVector(Vector):
             children=[child_arrow],
         )
 
-    def take(self, indices):
+    cpdef ArrayVector take(self, int32_t[::1] indices):
         if self.ptr == NULL:
             raise ValueError("ArrayVector is not initialized")
         if self._child is None:
             raise ValueError("ArrayVector child vector is not initialized")
 
-        cdef object seq = PySequence_Fast(indices, "indices must be a finite sequence")
-        if seq is None:
-            raise TypeError("indices must be a sequence of integers")
-
-        cdef Py_ssize_t n = PySequence_Fast_GET_SIZE(seq)
+        cdef Py_ssize_t n = indices.shape[0]
         cdef Py_ssize_t* normalized = NULL
         cdef int32_t* new_offsets = NULL
         cdef uint8_t* new_null = NULL
@@ -200,7 +191,8 @@ cdef class ArrayVector(Vector):
         cdef Py_ssize_t pos = 0
         cdef Py_ssize_t nb_size = 0
         cdef Py_ssize_t child_cap = 0
-        cdef int32_t[:] idx_view
+        cdef int32_t[::1] idx_view
+        cdef int32_t _sentinel = 0
         cdef Vector child_vec
         cdef object child_result
         cdef ArrayVector result
@@ -217,9 +209,7 @@ cdef class ArrayVector(Vector):
             new_offsets[0] = 0
 
             for i in range(n):
-                idx = PyLong_AsSsize_t(<object> PySequence_Fast_GET_ITEM(seq, i))
-                if idx == -1 and PyErr_Occurred():
-                    raise TypeError("indices must be integers")
+                idx = indices[i]
                 if idx < 0:
                     idx += self.length
                 if idx < 0 or idx >= self.length:
@@ -257,14 +247,14 @@ cdef class ArrayVector(Vector):
                     pos += 1
                     start += 1
 
+            child_vec = <Vector> self._child
             if total == 0:
-                # avoid creating a zero-length memoryview
-                import array as pyarray
-                child_result = (<Vector>self._child).take(pyarray.array('i'))
+                # Cython cannot create a zero-length typed memoryview from a raw
+                # pointer; slice a 1-element stack variable to length 0 instead.
+                idx_view = (<int32_t[:1:1]>&_sentinel)[:0]
             else:
                 idx_view = <int32_t[:total]> child_idx
-                child_vec = <Vector> self._child
-                child_result = child_vec.take(idx_view)
+            child_result = child_vec.take(idx_view)
 
             result = ArrayVector()
             result.ptr = _alloc_array_buffer()
@@ -284,8 +274,6 @@ cdef class ArrayVector(Vector):
                 PyMem_Free(child_idx)
             if normalized != NULL:
                 PyMem_Free(normalized)
-            if seq is not None:
-                Py_DECREF(seq)
             if new_offsets != NULL:
                 free(new_offsets)
             if new_null != NULL:

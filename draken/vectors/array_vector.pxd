@@ -23,6 +23,7 @@ cdef class ArrayVector(Vector):
         uint64_t[::1] out_buf,
         Py_ssize_t offset=*
     ) except *
+    cpdef ArrayVector take(self, int32_t[::1] indices)
     cpdef object min(self)
     cpdef object max(self)
     cpdef object sum(self)

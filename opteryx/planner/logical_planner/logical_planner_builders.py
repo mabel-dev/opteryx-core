@@ -467,16 +467,11 @@ def case_when(value, alias: Optional[List[str]] = None, key=None):
         result = build(condition["result"])
         results.append(result)
 
-    if else_result is not None:
-        conditions.append(Node(NodeType.LITERAL, type=OrsoTypes.BOOLEAN, value=True))
-        results.append(else_result)
-    conditions_node = Node(NodeType.EXPRESSION_LIST, parameters=conditions)
-    results_node = Node(NodeType.EXPRESSION_LIST, parameters=results)
-
     return Node(
-        NodeType.FUNCTION,
-        value="_CASE",
-        parameters=[conditions_node, results_node],
+        NodeType.CASE,
+        conditions=conditions,
+        results=results,
+        else_result=else_result,
         alias=alias,
     )
 

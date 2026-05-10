@@ -14,7 +14,7 @@ Used to represent "argument not supplied" in function kernels while
 preserving the contract that all arguments arrive as vectors.
 """
 
-from libc.stdint cimport int64_t, uint64_t, uint8_t
+from libc.stdint cimport int32_t, int64_t, uint64_t, uint8_t
 from cpython.array cimport array, clone
 
 from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
@@ -83,6 +83,9 @@ cdef class NullVector(Vector):
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
         return NULL
+
+    cpdef NullVector take(self, int32_t[::1] indices):
+        return NullVector(indices.shape[0])
 
     cpdef Vector materialize(self):
         return self
