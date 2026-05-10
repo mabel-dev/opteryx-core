@@ -125,12 +125,6 @@ class OpteryxGcsFileSystem:
             request = Request()
             self.client_credentials.refresh(request)
 
-        # Create HTTP client. max_connections caps per-host concurrent connections
-        # inside each get_many() call's local CURLM event loop, and sets the
-        # connection cache size (CURLMOPT_MAXCONNECTS). With PARQUET_ROWGROUPS_IN_FLIGHT=24
-        # row groups simultaneously in flight, each with its own CURLM instance,
-        # total peak GCS connections = 24 × n_projected_columns. 128 ensures
-        # no column is queued behind another even for very wide projections.
         self.http_client = HttpClient(max_connections=128, timeout_ms=60000)
 
     @property

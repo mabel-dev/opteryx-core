@@ -148,118 +148,17 @@ ENABLE_ZERO_COPY: bool = bool(get("ENABLE_ZERO_COPY", True))
 # GCP project ID - for Google Cloud Data
 GCP_PROJECT_ID: str = get("GCP_PROJECT_ID")
 
+PARQUET_IO_WORKERS: int = int(get("PARQUET_IO_WORKERS", 64))
+"""Worker threads for the C++ Parquet IO pipeline (read + decode + serialize per row group).
+
+Threads are IO-bound on GCS/HTTP: increasing this raises concurrency without CPU cost.
+Default 64 gives ~16x throughput vs the previous hardcoded 4.
+"""
+
 # size of morsels to push between steps
 # MORSEL_SIZE remains a plain constant
 MORSEL_SIZE: int = int(get("MORSEL_SIZE", 64 * 1024 * 1024))
 
-# Parquet row-group scheduler configuration (v2)
-PARQUET_FILES_IN_FLIGHT: int = int(get("PARQUET_FILES_IN_FLIGHT", 2))
-"""Maximum active parquet files admitted concurrently by the v2 scheduler."""
-
-PARQUET_ROWGROUPS_PER_FILE_IN_FLIGHT: int = int(get("PARQUET_ROWGROUPS_PER_FILE_IN_FLIGHT", 10))
-"""Maximum active row groups per active file for the v2 scheduler."""
-
-PARQUET_ROWGROUPS_IN_FLIGHT: int = int(
-    get(
-        "PARQUET_ROWGROUPS_IN_FLIGHT",
-        24
-    )
-)
-"""Maximum active row groups across the full parquet scan for the v2 scheduler.
-
-Defaults to ``PARQUET_FILES_IN_FLIGHT * PARQUET_ROWGROUPS_PER_FILE_IN_FLIGHT`` so
-introducing this cap does not silently reduce prior effective concurrency.
-"""
-
-PARQUET_GLOBAL_RANGE_READERS: int = int(get("PARQUET_GLOBAL_RANGE_READERS", 64))
-"""Hard cap for in-flight column range reads across the full parquet scan."""
-
-PARQUET_RANGE_READERS_PER_ROWGROUP: int = int(get("PARQUET_RANGE_READERS_PER_ROWGROUP", 10))
-"""Cap for in-flight column range reads per row group."""
-
-PARQUET_PREFETCH_FOOTER_WORKERS: int = int(get("PARQUET_PREFETCH_FOOTER_WORKERS", 64))
-"""Concurrency for parquet footer prefetch in ParquetReadNode preflight."""
-
-PARQUET_ACTIVE_ROWGROUPS_TARGET: int = int(get("PARQUET_ACTIVE_ROWGROUPS_TARGET", 16))
-"""Target active row groups for continuous-feed scheduling."""
-
-PARQUET_WARM_START_OPS: int = int(get("PARQUET_WARM_START_OPS", 10))
-"""Number of initial dispatch ops reserved for the first admitted row group."""
-
-PARQUET_LOW_COLUMN_THRESHOLD: int = int(get("PARQUET_LOW_COLUMN_THRESHOLD", 3))
-"""Enable low-column scheduling strategy when projected columns are below this count."""
-
-PARQUET_LOW_COLUMN_ACTIVE_ROWGROUPS_TARGET: int = int(
-    get("PARQUET_LOW_COLUMN_ACTIVE_ROWGROUPS_TARGET", 10)
-)
-"""Active row-group target for low-column strategy."""
-
-PARQUET_LOW_COLUMN_PER_ROWGROUP_SLOTS: int = int(
-    get("PARQUET_LOW_COLUMN_PER_ROWGROUP_SLOTS", 3)
-)
-"""Per-rowgroup in-flight read cap for low-column strategy."""
-
-PARQUET_READY_ROWGROUP_QUEUE_CAP: int = int(get("PARQUET_READY_ROWGROUP_QUEUE_CAP", 6))
-"""Bound on row groups waiting to emit into the ring transport."""
-
-PARQUET_COMPLETED_ROWGROUP_BACKLOG_CAP: int = int(
-    get("PARQUET_COMPLETED_ROWGROUP_BACKLOG_CAP", PARQUET_READY_ROWGROUP_QUEUE_CAP * 4)
-)
-"""Bound on completed row groups retained by scheduler before emitter handoff."""
-
-PARQUET_DECODE_WORKERS: int = int(
-    get("PARQUET_DECODE_WORKERS", max(4, PARQUET_GLOBAL_RANGE_READERS // 2))
-)
-"""Decode worker count for IO-process scheduler's decode stage."""
-
-PARQUET_READ_DECODE_BUFFER_CAP: int = int(
-    get("PARQUET_READ_DECODE_BUFFER_CAP", PARQUET_GLOBAL_RANGE_READERS * 4)
-)
-"""Max pending read-complete items awaiting decode handoff.
-
-Deprecated: use PARQUET_RAW_RING_CAP instead.
-"""
-
-PARQUET_RAW_RING_CAP: int = int(
-    get("PARQUET_RAW_RING_CAP", PARQUET_GLOBAL_RANGE_READERS * 2)
-)
-"""Hard cap on raw (decoded) row-group buffers sitting in the ring between
-read completion and decode submission.  Replaces PARQUET_READ_DECODE_BUFFER_CAP.
-Default = PARQUET_GLOBAL_RANGE_READERS * 2 so downloads run two full waves
-ahead of the decode pool without unbounded memory accumulation."""
-
-PARQUET_READ_QUEUE_CAP: int = int(get("OPTERYX_PARQUET_READ_QUEUE_CAP", 64))
-"""Maximum in-flight column range reads for the pool reader read dispatch queue."""
-
-PARQUET_DECODE_QUEUE_CAP: int = int(get("OPTERYX_PARQUET_DECODE_QUEUE_CAP", 128))
-"""Maximum pending/in-flight decode tasks for the pool reader decode dispatch queue."""
-
-OPTERYX_TRACK_CODEC_METRICS: bool = str(get("OPTERYX_TRACK_CODEC_METRICS", "1")) != "0"
-"""Enable codec performance tracking for cost-aware dispatch.
-
-When enabled, records actual decode times per compression codec and uses
-those measurements to order column dispatch. This improves queue depth
-distribution and reduces p99 latency.
-
-Disable with: OPTERYX_TRACK_CODEC_METRICS=0
-"""
-
-PARQUET_SMALL_FILE_THRESHOLD: int = int(get("PARQUET_SMALL_FILE_THRESHOLD", 4 * 1024 * 1024))
-"""Files whose known size does not exceed this value (bytes) are fetched in a
-single whole-file read rather than per-column range requests (§3)."""
-
-PARQUET_SPECULATIVE_RG_BYTES: int = int(get("PARQUET_SPECULATIVE_RG_BYTES", 0))
-"""Minimum estimated column-batch size (bytes) for speculative row-group
-prefetch (§4).  Set 0 to disable speculative reads entirely."""
-
-# Deprecation check: warn if caller set the old key without setting the new one.
-if environ.get("PARQUET_READ_DECODE_BUFFER_CAP") and not environ.get("PARQUET_RAW_RING_CAP"):
-    import warnings
-    warnings.warn(
-        "PARQUET_READ_DECODE_BUFFER_CAP is deprecated; set PARQUET_RAW_RING_CAP instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
 
 if environ.get("FEATURE_DRAKEN_DICT_EXPR_STRICT") is not None:
     import warnings
