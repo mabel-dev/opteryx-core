@@ -21,6 +21,7 @@ from opteryx.exceptions import MissingDependencyError
 # 16 was too conservative. Testing shows optimal around 96 for GCS bandwidth saturation.
 # This balances concurrency with connection overhead (libcurl internal pooling uses 128 max).
 _MAX_PARALLEL_HEAD_REQUESTS = 96
+_GCP_AUTH_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
 
 
 def _get_gcs_head_pool():
@@ -37,6 +38,7 @@ _GCS_HEAD_POOL = LazyPoolProxy(_get_gcs_head_pool)
 def get_storage_credentials():
     """Get GCS credentials - copied from gcp_cloudstorage_connector."""
     try:
+        import google.auth
         from google.cloud import storage
     except (ImportError, AttributeError) as err:  # pragma: no cover
         name = getattr(err, "name", None) or str(err)
@@ -46,9 +48,10 @@ def get_storage_credentials():
         from google.auth.credentials import AnonymousCredentials
 
         storage_client = storage.Client(credentials=AnonymousCredentials())
-    else:  # pragma: no cover
-        storage_client = storage.Client()
-    return storage_client._credentials
+        return storage_client._credentials
+
+    credentials, _ = google.auth.default(scopes=_GCP_AUTH_SCOPES)
+    return credentials
 
 
 class GcsFile:
@@ -144,6 +147,32 @@ class OpteryxGcsFileSystem:
                 if not self.client_credentials.valid:
                     self.client_credentials.refresh(self._Request())
         return f"Bearer {self.client_credentials.token}"
+
+    def _resolve_signing_service_account_email(self) -> str:
+        """Return the concrete service account email used for IAM-backed signing.
+
+        Workload-identity credentials on Cloud Run / GCE may initially expose the
+        placeholder value ``default`` until they have refreshed against metadata.
+        Signed URLs cannot be generated with that placeholder because IAM signBlob
+        requires the actual service account email.
+        """
+        for attribute_name in ("service_account_email", "signer_email"):
+            email = getattr(self.client_credentials, attribute_name, None)
+            if email and email != "default":
+                return email
+
+        cred_info_getter = getattr(self.client_credentials, "get_cred_info", None)
+        if callable(cred_info_getter):
+            cred_info = cred_info_getter() or {}
+            principal = cred_info.get("principal")
+            if principal and principal != "default":
+                return principal
+
+        raise RuntimeError(
+            "Unable to determine the service account email for GCS signed URL generation. "
+            "Cloud Run / workload-identity credentials must expose a concrete service account "
+            "identity after refresh."
+        )
 
     def get_file_info(self, paths: Union[str, List[str]]):
         """Get info about GCS objects."""
@@ -321,11 +350,12 @@ class OpteryxGcsFileSystem:
         # Compute Engine / Cloud Run: sign via IAM using the service account email
         # and a fresh access token so we never need the private key.
         _ = self._bearer  # ensure token is fresh
+        signer_email = self._resolve_signing_service_account_email()
         return blob.generate_signed_url(
             expiration=expiration,
             method="GET",
             version="v4",
-            service_account_email=creds.service_account_email,
+            service_account_email=signer_email,
             access_token=creds.token,
         )
 

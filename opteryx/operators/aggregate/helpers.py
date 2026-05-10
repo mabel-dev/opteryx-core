@@ -37,6 +37,7 @@ def extract_evaluations(aggregates):
     all_evaluatable_nodes = get_all_nodes_of_type(
         aggregates,
         select_nodes=(
+            NodeType.CASE,
             NodeType.FUNCTION,
             NodeType.BINARY_OPERATOR,
             NodeType.EXTRACTION_OPERATOR,
