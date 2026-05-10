@@ -67,7 +67,14 @@ class ParquetIOPipeline {
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     size_t queue_capacity_;
-    HttpClient http_client_;
+
+    // Thread-local HTTP client: each BS worker thread owns its own HttpClient
+    // and thus its own CURLSH connection cache. Eliminates CURL_LOCK_DATA_CONNECT
+    // mutex contention when N threads simultaneously issue GCS range reads.
+    static HttpClient& tl_http_client() {
+        thread_local HttpClient client;
+        return client;
+    }
 
     std::atomic<int> pending_work_{0};
     std::atomic<bool> shutdown_{false};
@@ -99,12 +106,12 @@ class ParquetIOPipeline {
             std::string url = gcs_to_https(path);
             std::string range_hdr = "bytes=" + std::to_string(offset) +
                                     "-" + std::to_string(offset + size - 1);
-            bytes = http_client_.get(url, {{"Range", range_hdr}});
+            bytes = tl_http_client().get(url, {{"Range", range_hdr}});
 
         } else if (path.substr(0, 7) == "http://" || path.substr(0, 8) == "https://") {
             std::string range_hdr = "bytes=" + std::to_string(offset) +
                                     "-" + std::to_string(offset + size - 1);
-            bytes = http_client_.get(path, {{"Range", range_hdr}});
+            bytes = tl_http_client().get(path, {{"Range", range_hdr}});
 
         } else {
             // Local file: POSIX pread
@@ -266,8 +273,7 @@ class ParquetIOPipeline {
     ParquetIOPipeline(int decode_workers = 4,
                       size_t result_queue_capacity = 256)
         : decode_pool_(std::make_shared<BS::light_thread_pool>(decode_workers)),
-          queue_capacity_(result_queue_capacity),
-          http_client_() {}
+          queue_capacity_(result_queue_capacity) {}
 
     ~ParquetIOPipeline() {
         wait_shutdown();
