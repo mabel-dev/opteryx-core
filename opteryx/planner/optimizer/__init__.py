@@ -41,7 +41,9 @@ from opteryx.planner.optimizer.strategies import (
     CrossJoinFilterPushdownStrategy,
     DisjunctionSimplificationStrategy,
     DistinctPushdownStrategy,
+    FilterImpliedGroupKeyReductionStrategy,
     FunctionRewriteStrategy,
+    GroupKeyReductionStrategy,
     HashMapVariantStrategy,
     JoinEliminationStrategy,
     JoinOrderingStrategy,
@@ -85,6 +87,7 @@ class OptimizerVisitor:
             NullabilityInferenceStrategy(telemetry),
             PredicateRewriteStrategy(telemetry),
             FunctionRewriteStrategy(telemetry),
+            GroupKeyReductionStrategy(telemetry),
             PredicateCompactionStrategy(telemetry),
             JoinPlanningStrategy(telemetry),  # Cost-based DPccp; no-op when flag off
             PredicatePushdownStrategy(telemetry),
@@ -92,6 +95,7 @@ class OptimizerVisitor:
                 telemetry
             ),  # Convert CROSS JOIN + filters to INNER JOIN
             ManifestPruningStrategy(telemetry),  # Apply after predicate pushdown
+            FilterImpliedGroupKeyReductionStrategy(telemetry),
             ProjectionPushdownStrategy(telemetry),
             JoinEliminationStrategy(telemetry),
             JoinRewriteStrategy(telemetry),

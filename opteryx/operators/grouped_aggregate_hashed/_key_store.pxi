@@ -28,6 +28,8 @@ from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
 from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
 from draken.vectors.string_vector cimport StringVector, _materialize_dict_string, _materialize_rle_string
 from draken.core.buffers cimport DRAKEN_ENCODING_RLE
+from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
+from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.vectors.bool_vector cimport BoolVector
 
 
@@ -51,6 +53,7 @@ cdef int _DISPATCH_STRING       = 3
 cdef int _DISPATCH_DICT_STRING  = 4
 cdef int _DISPATCH_DICT_INT64   = 5
 cdef int _DISPATCH_DICT_FLOAT64 = 6
+cdef int _DISPATCH_CONST_STRING = 7
 
 
 
@@ -548,6 +551,59 @@ cdef inline void _ks_store_multi_string_bulk(
     buf.null_bitmap = null_bitmap_ref[0]
 
 
+cdef inline void _ks_store_multi_const_string_bulk(
+    DrakenVarBuffer* buf,
+    uint8_t** null_bitmap_ref,
+    Py_ssize_t* row_count_ref,
+    Py_ssize_t* bytes_used_ref,
+    Py_ssize_t n_new,
+    bint is_null,
+    const uint8_t* const_data,
+    int32_t const_len,
+) except *:
+    """Store n_new copies of a constant string (or null) into the key buffer."""
+    cdef Py_ssize_t start_row = row_count_ref[0]
+    cdef Py_ssize_t bytes_used = bytes_used_ref[0]
+    cdef Py_ssize_t ri
+    cdef Py_ssize_t out_row
+    cdef Py_ssize_t required_rows = start_row + n_new
+    cdef Py_ssize_t current_row_capacity = <Py_ssize_t>buf.length
+    cdef Py_ssize_t current_byte_capacity = bytes_used if bytes_used > 0 else 0
+    cdef Py_ssize_t total_bytes = bytes_used + (0 if is_null else <Py_ssize_t>const_len * n_new)
+
+    _ks_ensure_string_capacity(
+        buf,
+        current_row_capacity,
+        current_byte_capacity,
+        required_rows,
+        total_bytes + 64,
+        &current_byte_capacity,
+    )
+
+    if start_row == 0:
+        buf.offsets[0] = 0
+
+    if is_null:
+        _ks_ensure_bitmap_capacity(null_bitmap_ref, start_row, required_rows)
+        for ri in range(n_new):
+            out_row = start_row + ri
+            _ks_bitmap_clear(null_bitmap_ref[0], out_row)
+            buf.offsets[out_row + 1] = <int32_t>bytes_used
+    else:
+        for ri in range(n_new):
+            out_row = start_row + ri
+            if const_len > 0 and const_data != NULL:
+                memcpy(buf.data + bytes_used, const_data, <size_t>const_len)
+                bytes_used += const_len
+            buf.offsets[out_row + 1] = <int32_t>bytes_used
+            if null_bitmap_ref[0] != NULL:
+                _ks_bitmap_set(null_bitmap_ref[0], out_row)
+
+    row_count_ref[0] = required_rows
+    bytes_used_ref[0] = bytes_used
+    buf.null_bitmap = null_bitmap_ref[0]
+
+
 # ---------------------------------------------------------------------------
 # Dict-encoded bulk helpers — read from the K-entry dict buffer via code index
 # instead of expanding to an N-row dense buffer first.
@@ -832,6 +888,8 @@ cdef class KeyStore:
         cdef int64_t const_i64
         cdef uint8_t const_bool
         cdef uint8_t* bool_nulls
+        cdef const char* const_str_ptr
+        cdef int32_t const_str_len
 
         # Single-column dict paths (avoids N-row materialization)
         cdef DrakenVarBuffer* sv_dv
@@ -861,6 +919,7 @@ cdef class KeyStore:
         cdef int storage_slot
         cdef DrakenFixedBuffer* fixed_buf
         cdef DrakenVarBuffer* string_buf
+        cdef DrakenConstantStringPayload* cpl
         cdef Py_ssize_t additional_bytes
         cdef bint needs_null_bitmap
 
@@ -893,6 +952,27 @@ cdef class KeyStore:
                             sv_dc,
                             sv_dcw,
                         )
+                    else:
+                        raise RuntimeError("single string codec path removed")
+                elif sv._has_const:
+                    # Constant-encoded: same value for every row, no per-row pointer.
+                    if self._single_string_direct:
+                        if sv._const_is_null or sv._const_value == NULL:
+                            const_str_ptr = NULL
+                            const_str_len = 0
+                        else:
+                            const_str_ptr = <const char*>sv._const_value.data
+                            const_str_len = sv._const_value.length
+                        for ri in range(n_new):
+                            _ks_append_single_string_direct(
+                                self._single_string_buf,
+                                &self._single_string_nulls,
+                                &self._single_string_rows,
+                                &self._single_string_bytes,
+                                const_str_ptr if not sv._const_is_null else NULL,
+                                const_str_len if not sv._const_is_null else 0,
+                                0 if sv._const_is_null else 1,
+                            )
                     else:
                         raise RuntimeError("single string codec path removed")
                 else:
@@ -1036,6 +1116,24 @@ cdef class KeyStore:
                         )
                     else:
                         raise RuntimeError("single fixed key codec path removed")
+                elif fv._has_const:
+                    # Reinterpret double bits as int64 — fixed buffer slot is int64_t,
+                    # matches the dense path cast <int64_t*>fv.dense_ptr().
+                    const_i64 = (<int64_t*>&fv._const_value)[0]
+                    if self._single_fixed_direct:
+                        _ks_store_single_fixed_bulk_int64(
+                            self._single_fixed_buf,
+                            &self._single_fixed_nulls,
+                            &self._single_fixed_rows,
+                            row_indices,
+                            n_new,
+                            nulls,
+                            NULL,
+                            True,
+                            const_i64,
+                        )
+                    else:
+                        raise RuntimeError("single fixed key codec path removed")
                 else:
                     i64_data = <int64_t*>fv.dense_ptr()
                     if self._single_fixed_direct:
@@ -1085,6 +1183,11 @@ cdef class KeyStore:
                         col_varbuf_ptrs[col_idx]     = <size_t>sv._dict_values
                         col_dict_code_ptrs[col_idx]  = <size_t>sv._dict_codes
                         col_dict_code_widths[col_idx] = sv._dict_code_width
+                    elif sv._has_const:
+                        # Constant-encoded: same string value for every row.
+                        col_dispatch[col_idx]    = _DISPATCH_CONST_STRING
+                        col_has_const[col_idx]   = not sv._const_is_null
+                        col_varbuf_ptrs[col_idx] = <size_t>sv._const_value
                     else:
                         if sv._encoding == DRAKEN_ENCODING_RLE:
                             sv = _materialize_rle_string(sv)
@@ -1135,7 +1238,12 @@ cdef class KeyStore:
                     else:
                         col_dispatch[col_idx]    = _DISPATCH_FLOAT64
                         col_null_ptrs[col_idx]   = <size_t>fv.null_bitmap_ptr()
-                        col_dense_ptrs[col_idx]  = <size_t>fv.dense_ptr()
+                        if fv._has_const:
+                            # Reinterpret double bits as int64 — fixed buffer slot is int64_t.
+                            col_has_const[col_idx]  = True
+                            col_const_vals[col_idx] = (<int64_t*>&fv._const_value)[0]
+                        else:
+                            col_dense_ptrs[col_idx]  = <size_t>fv.dense_ptr()
 
             if self._multi_direct:
                 for col_idx in range(self._n_cols):
@@ -1165,6 +1273,18 @@ cdef class KeyStore:
                             <DrakenVarBuffer*>col_varbuf_ptrs[col_idx],
                             <const uint8_t*>col_dict_code_ptrs[col_idx],
                             col_dict_code_widths[col_idx],
+                        )
+                    elif disp == _DISPATCH_CONST_STRING:
+                        cpl = <DrakenConstantStringPayload*>col_varbuf_ptrs[col_idx]
+                        _ks_store_multi_const_string_bulk(
+                            self._multi_string_bufs[storage_slot],
+                            &self._multi_string_nulls[storage_slot],
+                            &self._multi_string_rows[storage_slot],
+                            &self._multi_string_bytes[storage_slot],
+                            n_new,
+                            not col_has_const[col_idx],
+                            cpl.data if cpl != NULL else NULL,
+                            cpl.length if cpl != NULL else 0,
                         )
                     elif disp == _DISPATCH_DICT_INT64 or disp == _DISPATCH_DICT_FLOAT64:
                         _ks_store_fixed_bulk_dict(

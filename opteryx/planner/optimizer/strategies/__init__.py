@@ -20,6 +20,8 @@ from .predicate_compaction import PredicateCompactionStrategy
 from .predicate_ordering import PredicateOrderingStrategy
 from .predicate_pushdown import PredicatePushdownStrategy
 from .function_rewriter import FunctionRewriteStrategy
+from .filter_implied_group_key_reduction import FilterImpliedGroupKeyReductionStrategy
+from .group_key_reduction import GroupKeyReductionStrategy
 from .predicate_rewriter import PredicateRewriteStrategy
 from .projection_pushdown import ProjectionPushdownStrategy
 from .redundant_operators import RedundantOperationsStrategy
@@ -49,6 +51,8 @@ __all__ = [
     "PredicateOrderingStrategy",
     "PredicatePushdownStrategy",
     "FunctionRewriteStrategy",
+    "FilterImpliedGroupKeyReductionStrategy",
+    "GroupKeyReductionStrategy",
     "PredicateRewriteStrategy",
     "ProjectionPushdownStrategy",
     "RedundantOperationsStrategy",
