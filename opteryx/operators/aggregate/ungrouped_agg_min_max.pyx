@@ -17,27 +17,42 @@ cdef class MinInt64Aggregate(UngroupedAggregate):
         self._seen       = False
 
     cdef void apply(self, Morsel morsel) except *:
-        cdef Morsel typed    = <Morsel>morsel
-        cdef Py_ssize_t nrows = <Py_ssize_t>typed.ptr.num_rows
+        # Delegates to Vector.min() which dispatches by encoding (dense via
+        # C++ kernel, dict / RLE / const via dedicated helpers).
+        cdef Morsel typed = <Morsel>morsel
+        if typed.ptr is NULL or typed.ptr.num_rows == 0:
+            return
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-
         if self._col_idx < 0 or self._col_idx >= len(typed._columns):
             return
 
         cdef Vector raw = <Vector>typed._columns[self._col_idx]
-
         if raw is None:
             return
 
-        # Skip native fast paths due to segfault - use fallback instead
+        if self._col_type == _VTYPE_UNKNOWN:
+            self._col_type = _classify_vector(raw)
+
         cdef int64_t val
-        for val_py in raw.to_pylist():
-            if val_py is not None:
-                val = <int64_t>val_py
-                if not self._seen or val < self._result:
-                    self._result = val; self._seen = True
+        try:
+            if self._col_type == _VTYPE_INT64:
+                val = (<Int64Vector>raw).min()
+            elif self._col_type == _VTYPE_INTEGER:
+                val = (<IntegerVector>raw).min()
+            else:
+                raise TypeError(
+                    f"MinInt64Aggregate cannot scan column {self.column_name!r}: "
+                    f"unsupported vector type {type(raw).__name__}"
+                )
+        except ValueError:
+            # all-null morsel — skip
+            return
+
+        if not self._seen or val < self._result:
+            self._result = val
+            self._seen = True
 
     cdef int64_t get_result_i64(self) noexcept:
         return self._result
@@ -71,27 +86,39 @@ cdef class MaxInt64Aggregate(UngroupedAggregate):
         self._seen       = False
 
     cdef void apply(self, Morsel morsel) except *:
-        cdef Morsel typed    = <Morsel>morsel
-        cdef Py_ssize_t nrows = <Py_ssize_t>typed.ptr.num_rows
+        cdef Morsel typed = <Morsel>morsel
+        if typed.ptr is NULL or typed.ptr.num_rows == 0:
+            return
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-
         if self._col_idx < 0 or self._col_idx >= len(typed._columns):
             return
 
         cdef Vector raw = <Vector>typed._columns[self._col_idx]
-
         if raw is None:
             return
 
-        # Skip native fast paths due to segfault - use fallback instead
+        if self._col_type == _VTYPE_UNKNOWN:
+            self._col_type = _classify_vector(raw)
+
         cdef int64_t val
-        for val_py in raw.to_pylist():
-            if val_py is not None:
-                val = <int64_t>val_py
-                if not self._seen or val > self._result:
-                    self._result = val; self._seen = True
+        try:
+            if self._col_type == _VTYPE_INT64:
+                val = (<Int64Vector>raw).max()
+            elif self._col_type == _VTYPE_INTEGER:
+                val = (<IntegerVector>raw).max()
+            else:
+                raise TypeError(
+                    f"MaxInt64Aggregate cannot scan column {self.column_name!r}: "
+                    f"unsupported vector type {type(raw).__name__}"
+                )
+        except ValueError:
+            return
+
+        if not self._seen or val > self._result:
+            self._result = val
+            self._seen = True
 
     cdef int64_t get_result_i64(self) noexcept:
         return self._result
@@ -125,27 +152,37 @@ cdef class MinFloat64Aggregate(UngroupedAggregate):
         self._seen       = False
 
     cdef void apply(self, Morsel morsel) except *:
-        cdef Morsel typed    = <Morsel>morsel
-        cdef Py_ssize_t nrows = <Py_ssize_t>typed.ptr.num_rows
+        cdef Morsel typed = <Morsel>morsel
+        if typed.ptr is NULL or typed.ptr.num_rows == 0:
+            return
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-
         if self._col_idx < 0 or self._col_idx >= len(typed._columns):
             return
 
         cdef Vector raw = <Vector>typed._columns[self._col_idx]
-
         if raw is None:
             return
 
-        # Skip native fast paths due to segfault - use fallback instead
+        if self._col_type == _VTYPE_UNKNOWN:
+            self._col_type = _classify_vector(raw)
+
         cdef double val
-        for val_py in raw.to_pylist():
-            if val_py is not None:
-                val = <double>val_py
-                if not self._seen or val < self._result:
-                    self._result = val; self._seen = True
+        try:
+            if self._col_type == _VTYPE_FLOAT64:
+                val = (<Float64Vector>raw).min()
+            else:
+                raise TypeError(
+                    f"MinFloat64Aggregate cannot scan column {self.column_name!r}: "
+                    f"unsupported vector type {type(raw).__name__}"
+                )
+        except ValueError:
+            return
+
+        if not self._seen or val < self._result:
+            self._result = val
+            self._seen = True
 
     cdef int64_t get_result_i64(self) noexcept:
         return <int64_t>self._result
@@ -179,27 +216,37 @@ cdef class MaxFloat64Aggregate(UngroupedAggregate):
         self._seen       = False
 
     cdef void apply(self, Morsel morsel) except *:
-        cdef Morsel typed    = <Morsel>morsel
-        cdef Py_ssize_t nrows = <Py_ssize_t>typed.ptr.num_rows
+        cdef Morsel typed = <Morsel>morsel
+        if typed.ptr is NULL or typed.ptr.num_rows == 0:
+            return
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-
         if self._col_idx < 0 or self._col_idx >= len(typed._columns):
             return
 
         cdef Vector raw = <Vector>typed._columns[self._col_idx]
-
         if raw is None:
             return
 
-        # Skip native fast paths due to segfault - use fallback instead
+        if self._col_type == _VTYPE_UNKNOWN:
+            self._col_type = _classify_vector(raw)
+
         cdef double val
-        for val_py in raw.to_pylist():
-            if val_py is not None:
-                val = <double>val_py
-                if not self._seen or val > self._result:
-                    self._result = val; self._seen = True
+        try:
+            if self._col_type == _VTYPE_FLOAT64:
+                val = (<Float64Vector>raw).max()
+            else:
+                raise TypeError(
+                    f"MaxFloat64Aggregate cannot scan column {self.column_name!r}: "
+                    f"unsupported vector type {type(raw).__name__}"
+                )
+        except ValueError:
+            return
+
+        if not self._seen or val > self._result:
+            self._result = val
+            self._seen = True
 
     cdef int64_t get_result_i64(self) noexcept:
         return <int64_t>self._result

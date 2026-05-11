@@ -9,15 +9,14 @@
 """
 Draken-native global aggregation node.
 
-This operator stays on Draken morsels end-to-end. The actual accumulation work
-is delegated to the lower-level ungrouped aggregate engine; this module only
-bridges planner-bound aggregate nodes to that engine and handles a few literal
-edge cases.
+This operator stays on Draken morsels end-to-end. The accumulation work is
+delegated to the lower-level ungrouped aggregate engine; the per-morsel hot
+path here is deliberately Python-free — typed cdef classes for result specs
+and literal accumulators, early-out when no per-row evaluation is needed,
+and no instrumentation syscalls.
 """
 
-import time
-
-from libc.stdint cimport uint8_t
+from libc.stdint cimport uint8_t, int64_t
 
 from draken.vectors.vector cimport Vector
 from opteryx.expression import NodeType
@@ -31,6 +30,15 @@ from opteryx import EOS
 from opteryx.operators import BasePlanNode
 
 _DRAKEN_ENCODING_CONSTANT = 3
+
+# Literal-aggregate-kind tags (typed, no string comparisons on hot path)
+cdef int _LITERAL_NONE          = 0
+cdef int _LITERAL_COUNT         = 1
+cdef int _LITERAL_COUNT_DISTINCT = 2
+cdef int _LITERAL_SUM           = 3
+cdef int _LITERAL_AVG           = 4
+cdef int _LITERAL_MIN_MAX_ANY   = 5
+cdef int _LITERAL_MEDIAN        = 6
 
 
 def _column_bytes(identity):
@@ -181,98 +189,147 @@ def _is_string_type(type_value) -> bool:
     return value in ("VARCHAR", "BLOB")
 
 
-def _make_literal_spec(aggregate):
-    parameter = aggregate.parameters[0] if aggregate.parameters else None
-    return {
-        "kind": "literal",
-        "aggregate_type": aggregate.value,
-        "duplicate_treatment": getattr(aggregate, "duplicate_treatment", None),
-        "output_name": _column_bytes(aggregate.schema_column.identity),
-        "literal": None if parameter is None else parameter.value,
-        "count": 0,
-        "sum": None,
-        "value": None,
-        "seen": False,
-    }
+cdef class _LiteralAggState:
+    """Typed accumulator for an aggregate whose input is a literal.
 
+    Replaces the dict-based literal spec — fields are looked up directly,
+    and `update()`/`finalize()` are cdef so the per-morsel call has no
+    Python attribute / dict lookups.
+    """
+    cdef int      kind
+    cdef bint     distinct
+    cdef object   literal      # Python scalar (may be None)
+    cdef int64_t  count
+    cdef object   sum_         # None until first non-zero contribution
+    cdef object   value
+    cdef bint     seen
 
-def _update_literal_spec(spec, row_count: int):
-    if row_count == 0:
-        return
+    def __cinit__(self, int kind, bint distinct, object literal):
+        self.kind = kind
+        self.distinct = distinct
+        self.literal = literal
+        self.count = 0
+        self.sum_ = None
+        self.value = None
+        self.seen = False
 
-    aggregate_type = spec["aggregate_type"]
-    duplicate_treatment = spec["duplicate_treatment"]
-    literal = spec["literal"]
-
-    if aggregate_type == "COUNT":
-        if duplicate_treatment == "Distinct":
-            if literal is not None:
-                spec["seen"] = True
+    cdef void update(self, Py_ssize_t row_count):
+        if row_count == 0:
             return
-        if literal is not None:
-            spec["count"] += row_count
-        return
 
-    if aggregate_type in ("COUNT_DISTINCT", "DISTINCT"):
-        if literal is not None:
-            spec["seen"] = True
-        return
+        cdef int kind = self.kind
+        cdef object literal = self.literal
 
-    if literal is None:
-        return
+        if kind == _LITERAL_COUNT:
+            if self.distinct:
+                if literal is not None:
+                    self.seen = True
+                return
+            if literal is not None:
+                self.count += row_count
+            return
 
-    if aggregate_type == "SUM":
-        contribution = literal * row_count
-        spec["sum"] = contribution if spec["sum"] is None else spec["sum"] + contribution
-        return
+        if kind == _LITERAL_COUNT_DISTINCT:
+            if literal is not None:
+                self.seen = True
+            return
 
-    if aggregate_type == "AVG":
-        contribution = literal * row_count
-        spec["sum"] = contribution if spec["sum"] is None else spec["sum"] + contribution
-        spec["count"] += row_count
-        return
+        if literal is None:
+            return
 
-    if aggregate_type in ("MIN", "MAX", "ANY_VALUE"):
-        spec["value"] = literal
-        spec["seen"] = True
-        return
+        if kind == _LITERAL_SUM:
+            contribution = literal * row_count
+            self.sum_ = contribution if self.sum_ is None else self.sum_ + contribution
+            return
 
-    if aggregate_type == "MEDIAN":
-        spec["value"] = literal
-        spec["seen"] = True
-        return
+        if kind == _LITERAL_AVG:
+            contribution = literal * row_count
+            self.sum_ = contribution if self.sum_ is None else self.sum_ + contribution
+            self.count += row_count
+            return
 
+        if kind == _LITERAL_MIN_MAX_ANY:
+            self.value = literal
+            self.seen = True
+            return
 
-def _finalize_literal_spec(spec):
-    aggregate_type = spec["aggregate_type"]
-    duplicate_treatment = spec["duplicate_treatment"]
-    literal = spec["literal"]
+        if kind == _LITERAL_MEDIAN:
+            self.value = literal
+            self.seen = True
+            return
 
-    if aggregate_type == "COUNT":
-        if duplicate_treatment == "Distinct":
+    cdef object finalize(self):
+        cdef int kind = self.kind
+        cdef object literal = self.literal
+
+        if kind == _LITERAL_COUNT:
+            if self.distinct:
+                return 1 if literal is not None else 0
+            return self.count
+
+        if kind == _LITERAL_COUNT_DISTINCT:
             return 1 if literal is not None else 0
-        return spec["count"]
 
-    if aggregate_type in ("COUNT_DISTINCT", "DISTINCT"):
-        return 1 if literal is not None else 0
+        if kind == _LITERAL_SUM:
+            return self.sum_
 
+        if kind == _LITERAL_AVG:
+            if self.count == 0 or self.sum_ is None:
+                return None
+            return self.sum_ / self.count
+
+        if kind == _LITERAL_MIN_MAX_ANY:
+            return self.value if self.seen else None
+
+        if kind == _LITERAL_MEDIAN:
+            if not self.seen or self.value is None:
+                return None
+            return float(self.value)
+
+        raise ValueError(f"Unsupported literal aggregate kind: {kind}")
+
+
+cdef int _literal_kind_for(aggregate_type: str) except -1:
+    if aggregate_type == "COUNT":
+        return _LITERAL_COUNT
+    if aggregate_type == "COUNT_DISTINCT" or aggregate_type == "DISTINCT":
+        return _LITERAL_COUNT_DISTINCT
     if aggregate_type == "SUM":
-        return spec["sum"]
-
+        return _LITERAL_SUM
     if aggregate_type == "AVG":
-        if spec["count"] == 0 or spec["sum"] is None:
-            return None
-        return spec["sum"] / spec["count"]
-
-    if aggregate_type in ("MIN", "MAX", "ANY_VALUE"):
-        return spec["value"] if spec["seen"] else None
-
+        return _LITERAL_AVG
+    if aggregate_type == "MIN" or aggregate_type == "MAX" or aggregate_type == "ANY_VALUE":
+        return _LITERAL_MIN_MAX_ANY
     if aggregate_type == "MEDIAN":
-        if not spec["seen"] or spec["value"] is None:
-            return None
-        return float(spec["value"])
-
+        return _LITERAL_MEDIAN
     raise ValueError(f"Unsupported literal aggregate type: {aggregate_type}")
+
+
+def _make_literal_state(aggregate):
+    parameter = aggregate.parameters[0] if aggregate.parameters else None
+    literal = None if parameter is None else parameter.value
+    aggregate_type = aggregate.value
+    distinct = getattr(aggregate, "duplicate_treatment", None) == "Distinct"
+    return _LiteralAggState(_literal_kind_for(aggregate_type), distinct, literal)
+
+
+cdef class _ResultSpec:
+    """Typed result-emit slot.
+
+    For engine-kind specs we hold the alias bytes that addresses the column
+    in the engine's finalize() output. For literal-kind specs we hold the
+    typed `_LiteralAggState` accumulator updated per morsel.
+
+    `kind`: 0 = engine column, 1 = literal accumulator.
+    """
+    cdef int                kind
+    cdef bytes              output_name
+    cdef _LiteralAggState   state
+
+    def __cinit__(self, int kind, bytes output_name, _LiteralAggState state):
+        self.kind = kind
+        self.output_name = output_name
+        self.state = state
 
 
 def _build_engine_aggregate(aggregate):
@@ -290,33 +347,33 @@ def _build_engine_aggregate(aggregate):
         if parameter is not None and parameter.node_type == NodeType.LITERAL:
             if parameter.value == "*":
                 return [CountStarAggregate(output_name)], None, None
-            return [], None, _make_literal_spec(aggregate)
+            return [], None, _make_literal_state(aggregate)
 
         if duplicate_treatment == "Distinct":
             if parameter_name is None:
-                return [], None, _make_literal_spec(aggregate)
+                return [], None, _make_literal_state(aggregate)
             return [CountDistinctAggregate(parameter_name, output_name)], None, None
 
         if parameter_name is None:
-            return [], None, _make_literal_spec(aggregate)
+            return [], None, _make_literal_state(aggregate)
 
         return [CountAggregate(parameter_name, output_name)], None, None
 
     if aggregate_type in ("COUNT_DISTINCT", "DISTINCT"):
          if parameter_name is None:
-             return [], None, _make_literal_spec(aggregate)
+             return [], None, _make_literal_state(aggregate)
          return [CountDistinctAggregate(parameter_name, output_name)], None, None
 
     if aggregate_type == "SUM":
         if parameter_name is None:
-            return [], None, _make_literal_spec(aggregate)
+            return [], None, _make_literal_state(aggregate)
         if _is_float_type(parameter_type):
             return [SumFloat64Aggregate(parameter_name, output_name)], None, None
         return [SumInt64Aggregate(parameter_name, output_name)], None, None
 
     if aggregate_type == "AVG":
         if parameter_name is None:
-            return [], None, _make_literal_spec(aggregate)
+            return [], None, _make_literal_state(aggregate)
         sum_alias = _column_bytes(f"__avg_sum_{output_name.decode('utf-8', 'ignore')}")
         count_alias = _column_bytes(f"__avg_count_{output_name.decode('utf-8', 'ignore')}")
         if _is_float_type(parameter_type):
@@ -328,7 +385,7 @@ def _build_engine_aggregate(aggregate):
 
     if aggregate_type == "MIN":
         if parameter_name is None:
-            return [], None, _make_literal_spec(aggregate)
+            return [], None, _make_literal_state(aggregate)
         if _is_string_type(parameter_type):
             return [MinBytesAggregate(parameter_name, output_name)], None, None
         if _is_float_type(parameter_type):
@@ -337,7 +394,7 @@ def _build_engine_aggregate(aggregate):
 
     if aggregate_type == "MAX":
         if parameter_name is None:
-            return [], None, _make_literal_spec(aggregate)
+            return [], None, _make_literal_state(aggregate)
         if _is_string_type(parameter_type):
             return [MaxBytesAggregate(parameter_name, output_name)], None, None
         if _is_float_type(parameter_type):
@@ -346,7 +403,7 @@ def _build_engine_aggregate(aggregate):
 
     if aggregate_type == "ANY_VALUE":
         if parameter_name is None:
-            return [], None, _make_literal_spec(aggregate)
+            return [], None, _make_literal_state(aggregate)
         return [AnyValueAggregate(parameter_name, output_name)], None, None
 
     if aggregate_type in ("APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"):
@@ -356,7 +413,7 @@ def _build_engine_aggregate(aggregate):
 
     if aggregate_type == "MEDIAN":
         if parameter_name is None:
-            return [], None, _make_literal_spec(aggregate)
+            return [], None, _make_literal_state(aggregate)
         type_value = getattr(parameter_type, "value", parameter_type)
         if type_value == "DECIMAL":
             raise NotImplementedError(
@@ -390,38 +447,50 @@ class UngroupedAggregateNode(BasePlanNode):
         ]
         self.all_identifiers = list(dict.fromkeys(all_identifiers))
         self._engine = UngroupedAggregateEngine()
-        self._result_specs = []
+        # Typed parallel arrays for the per-morsel hot path
+        self._result_specs = []          # list[_ResultSpec], registration order
+        self._literal_specs = []         # list[_ResultSpec] of kind=1 only
         self._engine_aggregate_count = 0
         self._finalized = False
 
+        # Hot-path early-out flags
+        self._no_eval = (len(self.evaluatable_nodes) == 0)
+        self._all_identifiers_bytes = [
+            _column_bytes(i) for i in self.all_identifiers
+        ]
+        # Whether `chunk.select(...)` is required. Resolved on first ingest by
+        # comparing the morsel's column set against `self.all_identifiers`; if
+        # all required columns are already present and there are no extra ones
+        # we don't need to make a fresh morsel. Until then we conservatively
+        # do the select.
+        self._select_state = 0  # 0 = unknown, 1 = needed, 2 = unneeded
+
+        cdef bytes ident_bytes
+        cdef _LiteralAggState lit_state
+        cdef _ResultSpec rspec
+
         for aggregate in self.aggregates:
+            ident_bytes = _column_bytes(aggregate.schema_column.identity)
+
             engine_aggs, avg_spec, literal_spec = _build_engine_aggregate(aggregate)
             for engine_agg in engine_aggs:
                 self._engine.add_aggregate(engine_agg)
                 self._engine_aggregate_count += 1
+
             if avg_spec is not None:
                 self._engine.add_avg_finalizer(avg_spec[1], avg_spec[2], avg_spec[3])
-                self._result_specs.append(
-                    {
-                        "kind": "engine",
-                        "output_name": _column_bytes(aggregate.schema_column.identity),
-                    }
-                )
+                rspec = _ResultSpec(0, ident_bytes, None)
+                self._result_specs.append(rspec)
             elif literal_spec is not None:
-                self._result_specs.append(
-                    {
-                        "kind": "literal",
-                        "output_name": literal_spec["output_name"],
-                        "state": literal_spec,
-                    }
-                )
+                lit_state = literal_spec
+                rspec = _ResultSpec(1, ident_bytes, lit_state)
+                self._result_specs.append(rspec)
+                self._literal_specs.append(rspec)
             else:
-                self._result_specs.append(
-                    {
-                        "kind": "engine",
-                        "output_name": _column_bytes(aggregate.schema_column.identity),
-                    }
-                )
+                rspec = _ResultSpec(0, ident_bytes, None)
+                self._result_specs.append(rspec)
+
+        self._has_literals = len(self._literal_specs) > 0
 
     @property
     def config(self):  # pragma: no cover
@@ -433,16 +502,34 @@ class UngroupedAggregateNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Ungrouped Aggregate"
 
-    def _prepare_chunk(self, chunk: Morsel) -> Morsel:
-        if self.all_identifiers:
-            chunk = chunk.select(self.all_identifiers)
+    def _resolve_select_state(self, Morsel chunk):
+        """Decide once whether `chunk.select(...)` is needed for this stream.
 
-        if self.evaluatable_nodes:
-            eval_start = time.monotonic_ns()
-            chunk = evaluate_and_append_draken(self.evaluatable_nodes, chunk)
-            self.readings["time_aggregate_evaluations"] += time.monotonic_ns() - eval_start
+        Returns the resolved state (1=needed, 2=unneeded). Sets and returns
+        `self._select_state`. Called at most once per query.
+        """
+        cdef dict name_map
+        cdef bytes ident
 
-        return chunk
+        if not self._all_identifiers_bytes:
+            self._select_state = 2
+            return 2
+
+        name_map = chunk._ensure_name_map()
+        for ident in self._all_identifiers_bytes:
+            if ident not in name_map:
+                self._select_state = 1
+                return 1
+
+        if len(name_map) == len(self._all_identifiers_bytes):
+            self._select_state = 2
+        elif self._no_eval:
+            # Extra columns are harmless when no per-row evaluation runs —
+            # the aggregate kernels read by name. Skip the trim.
+            self._select_state = 2
+        else:
+            self._select_state = 1
+        return self._select_state
 
     def _finalize_morsel(self):
         names = []
@@ -452,16 +539,20 @@ class UngroupedAggregateNode(BasePlanNode):
         if self._engine_aggregate_count:
             engine_result = self._engine.finalize()
 
+        cdef _ResultSpec spec
         for spec in self._result_specs:
-            names.append(spec["output_name"])
-            if spec["kind"] == "engine":
-                vectors.append(engine_result.column(spec["output_name"]))
+            names.append(spec.output_name)
+            if spec.kind == 0:
+                vectors.append(engine_result.column(spec.output_name))
             else:
-                vectors.append(vector_from_sequence([_finalize_literal_spec(spec["state"])]))
+                vectors.append(vector_from_sequence([spec.state.finalize()]))
 
         return Morsel.from_vectors(names, vectors)
 
     def execute(self, Morsel morsel):
+        cdef int select_state
+        cdef Py_ssize_t num_rows
+        cdef _ResultSpec lit_spec
 
         if morsel == EOS:
             if self._finalized:
@@ -470,14 +561,20 @@ class UngroupedAggregateNode(BasePlanNode):
             yield self._finalize_morsel()
             return
 
-        ingest_start = time.monotonic_ns()
+        num_rows = morsel.num_rows
+        if num_rows > 0:
+            select_state = self._select_state
+            if select_state == 0:
+                select_state = self._resolve_select_state(morsel)
+            if select_state == 1:
+                morsel = morsel.select(self.all_identifiers)
+            if not self._no_eval:
+                morsel = evaluate_and_append_draken(self.evaluatable_nodes, morsel)
 
-        if morsel.num_rows > 0:
-            morsel = self._prepare_chunk(morsel)
             self._engine.ingest(morsel)
-            for spec in self._result_specs:
-                if spec["kind"] == "literal":
-                    _update_literal_spec(spec["state"], morsel.num_rows)
-        self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start
+
+            if self._has_literals:
+                for lit_spec in self._literal_specs:
+                    lit_spec.state.update(num_rows)
         yield None
         return

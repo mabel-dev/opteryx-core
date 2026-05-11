@@ -41,6 +41,25 @@ from draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
 from draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash, simd_popcount
 from draken.vectors.bool_vector cimport BoolVector
 
+cdef extern from "draken/vectors/_float64_reductions.hpp" namespace "draken::float64_red" nogil:
+    double sum_nonnull(const double* data, size_t n)
+    double sum_nullable_branchless(const double* data, const uint8_t* nulls, size_t n)
+    double min_nonnull(const double* data, size_t n)
+    double max_nonnull(const double* data, size_t n)
+    size_t min_nullable_branchless(const double* data, const uint8_t* nulls, size_t n, double* out_min)
+    size_t max_nullable_branchless(const double* data, const uint8_t* nulls, size_t n, double* out_max)
+
+cdef extern from "draken/vectors/_float64_compare.hpp" namespace "draken::float64_cmp" nogil:
+    bint dispatch_compare_once(int op, double a, double b)
+    void dispatch_scalar_nonnull(int op, const double* data, double value, uint8_t* dst, size_t n)
+    void dispatch_scalar_branchless(int op, const double* data, double value, const uint8_t* src_null, uint8_t* dst, size_t n)
+    void dispatch_scalar_branching(int op, const double* data, double value, const uint8_t* src_null, uint8_t* dst, size_t n)
+    void dispatch_vector_nonnull(int op, const double* a, const double* b, uint8_t* dst, size_t n)
+    void dispatch_vector_one_null_branchless(int op, const double* a, const double* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_one_null_branching(int op, const double* a, const double* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branchless(int op, const double* a, const double* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+    void dispatch_vector_both_null_branching(int op, const double* a, const double* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+
 DEF FLOAT64_HASH_CHUNK = 1024
 
 cdef const int64_t INT64_MIN_VALUE = <int64_t>0x8000000000000000
@@ -454,7 +473,7 @@ cdef class Float64Vector(Vector):
             return _materialize_dict_float64(self)._compare_scalar(value, op)
 
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t i, n
+        cdef Py_ssize_t n
         cdef Py_ssize_t nbytes
         cdef BoolVector out
         cdef uint8_t* dst
@@ -480,7 +499,7 @@ cdef class Float64Vector(Vector):
                     out.ptr.null_bitmap = NULL
                 return out
 
-            matched = self._compare_float_values(self._const_value, value, op)
+            matched = dispatch_compare_once(op, self._const_value, value)
             if matched and nbytes > 0:
                 memset(dst, 0xFF, nbytes)
                 if (n & 7) != 0:
@@ -509,25 +528,19 @@ cdef class Float64Vector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        cdef uint8_t v
-        cdef uint8_t m
+        # Gate as in int64_vector: > ~70% null density → branching kernel
+        # wins by short-circuiting null rows; otherwise the branchless kernel
+        # avoids mispredicted comparison-result branches. The op is dispatched
+        # once here and the inner C++ loop has no per-row branch on op.
         cdef size_t valid_count
         if src_null == NULL:
-            for i in range(n):
-                m = 1 if self._compare_float_values(data[i], value, op) else 0
-                dst[i >> 3] |= <uint8_t>(m << (i & 7))
+            dispatch_scalar_nonnull(op, data, value, dst, <size_t>n)
         else:
             valid_count = simd_popcount(src_null, <size_t>nbytes)
             if n > 0 and (valid_count * 10) < (<size_t>n * 3):
-                for i in range(n):
-                    if (src_null[i >> 3] >> (i & 7)) & 1:
-                        if self._compare_float_values(data[i], value, op):
-                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+                dispatch_scalar_branching(op, data, value, src_null, dst, <size_t>n)
             else:
-                for i in range(n):
-                    v = (src_null[i >> 3] >> (i & 7)) & 1
-                    m = 1 if self._compare_float_values(data[i], value, op) else 0
-                    dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
+                dispatch_scalar_branchless(op, data, value, src_null, dst, <size_t>n)
         return out
 
     cdef BoolVector _compare_vector(self, Float64Vector other, int op):
@@ -550,12 +563,11 @@ cdef class Float64Vector(Vector):
         cdef double* data2 = <double*> ptr2.data
         cdef uint8_t* null1 = ptr1.null_bitmap
         cdef uint8_t* null2 = ptr2.null_bitmap
-        cdef Py_ssize_t i, n = ptr1.length
+        cdef Py_ssize_t n = ptr1.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
         cdef BoolVector out
         cdef uint8_t* dst
         cdef uint8_t* out_null = NULL
-        cdef uint8_t v1, v2, v, m
 
         if n != ptr2.length:
             raise ValueError("Vectors must have the same length")
@@ -581,38 +593,25 @@ cdef class Float64Vector(Vector):
             min_valid = valid1_cnt if valid1_cnt < valid2_cnt else valid2_cnt
             use_branching = (min_valid * 10) < (<size_t>n * 3)
 
+        # Op dispatched once at the C++ boundary; the inner kernel is templated
+        # so the compiler sees a single compile-time comparison per row.
         if null1 == NULL and null2 == NULL:
-            for i in range(n):
-                m = 1 if self._compare_float_values(data1[i], data2[i], op) else 0
-                dst[i >> 3] |= <uint8_t>(m << (i & 7))
-        elif use_branching:
-            for i in range(n):
-                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
-                v2 = 1 if null2 == NULL else (null2[i >> 3] >> (i & 7)) & 1
-                if v1 & v2:
-                    out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
-                    if self._compare_float_values(data1[i], data2[i], op):
-                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            dispatch_vector_nonnull(op, data1, data2, dst, <size_t>n)
         elif null1 != NULL and null2 == NULL:
-            for i in range(n):
-                v = (null1[i >> 3] >> (i & 7)) & 1
-                m = 1 if self._compare_float_values(data1[i], data2[i], op) else 0
-                dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
-                out_null[i >> 3] |= <uint8_t>(v << (i & 7))
+            if use_branching:
+                dispatch_vector_one_null_branching(op, data1, data2, null1, dst, out_null, <size_t>n)
+            else:
+                dispatch_vector_one_null_branchless(op, data1, data2, null1, dst, out_null, <size_t>n)
         elif null1 == NULL and null2 != NULL:
-            for i in range(n):
-                v = (null2[i >> 3] >> (i & 7)) & 1
-                m = 1 if self._compare_float_values(data1[i], data2[i], op) else 0
-                dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
-                out_null[i >> 3] |= <uint8_t>(v << (i & 7))
+            if use_branching:
+                dispatch_vector_one_null_branching(op, data1, data2, null2, dst, out_null, <size_t>n)
+            else:
+                dispatch_vector_one_null_branchless(op, data1, data2, null2, dst, out_null, <size_t>n)
         else:
-            for i in range(n):
-                v1 = (null1[i >> 3] >> (i & 7)) & 1
-                v2 = (null2[i >> 3] >> (i & 7)) & 1
-                v = v1 & v2
-                m = 1 if self._compare_float_values(data1[i], data2[i], op) else 0
-                dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
-                out_null[i >> 3] |= <uint8_t>(v << (i & 7))
+            if use_branching:
+                dispatch_vector_both_null_branching(op, data1, data2, null1, null2, dst, out_null, <size_t>n)
+            else:
+                dispatch_vector_both_null_branchless(op, data1, data2, null1, null2, dst, out_null, <size_t>n)
         return out
 
     cpdef BoolVector equals(self, double value):
@@ -822,100 +821,88 @@ cdef class Float64Vector(Vector):
         return out
 
     cpdef double sum(self):
+        cdef DrakenFixedBuffer* ptr
+        cdef double* data
+        cdef Py_ssize_t n
+
         if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_float64(self).sum()
+            return _sum_rle_float64(self._rle_buffer)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_float64(self).sum()
+            return _sum_dict_float64(self)
         if self._has_const:
             if self._const_is_null:
                 return 0.0
             return self.ptr.length * self._const_value
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef double* data = <double*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
-        cdef double total = 0.0
-        for i in range(n):
-            if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i):  # null
-                    continue
-            total += data[i]
-        return total
+        ptr = self.ptr
+        data = <double*> ptr.data
+        n = ptr.length
+        if n == 0:
+            return 0.0
+        if ptr.null_bitmap == NULL:
+            return sum_nonnull(data, <size_t>n)
+        return sum_nullable_branchless(data, ptr.null_bitmap, <size_t>n)
 
     cpdef double min(self):
+        cdef DrakenFixedBuffer* ptr
+        cdef double* data
+        cdef Py_ssize_t n
+        cdef double out
+        cdef size_t valid_count
+
         if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_float64(self).min()
+            return _min_rle_float64(self._rle_buffer)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_float64(self).min()
+            return _min_dict_float64(self)
         if self._has_const:
             if self.ptr.length == 0:
                 raise ValueError("Cannot compute min of empty column")
             if self._const_is_null:
                 raise ValueError("Cannot compute min of all-null column")
             return self._const_value
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef double* data = <double*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
-        cdef bint found = False
+        ptr = self.ptr
+        data = <double*> ptr.data
+        n = ptr.length
         if n == 0:
             raise ValueError("Cannot compute min of empty column")
 
-        cdef double m = 0.0
-        for i in range(n):
-            if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i):  # null
-                    continue
-            m = data[i]
-            found = True
-            break
+        if ptr.null_bitmap == NULL:
+            return min_nonnull(data, <size_t>n)
 
-        if not found:
+        valid_count = min_nullable_branchless(data, ptr.null_bitmap, <size_t>n, &out)
+        if valid_count == 0:
             raise ValueError("Cannot compute min of all-null column")
-
-        for i in range(i + 1, n):
-            if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i):  # null
-                    continue
-            if data[i] < m:
-                m = data[i]
-        return m
+        return out
 
     cpdef double max(self):
+        cdef DrakenFixedBuffer* ptr
+        cdef double* data
+        cdef Py_ssize_t n
+        cdef double out
+        cdef size_t valid_count
+
         if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_float64(self).max()
+            return _max_rle_float64(self._rle_buffer)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_float64(self).max()
+            return _max_dict_float64(self)
         if self._has_const:
             if self.ptr.length == 0:
                 raise ValueError("Cannot compute max of empty column")
             if self._const_is_null:
                 raise ValueError("Cannot compute max of all-null column")
             return self._const_value
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef double* data = <double*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
-        cdef bint found = False
+        ptr = self.ptr
+        data = <double*> ptr.data
+        n = ptr.length
         if n == 0:
             raise ValueError("Cannot compute max of empty column")
 
-        cdef double m = 0.0
-        for i in range(n):
-            if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i):  # null
-                    continue
-            m = data[i]
-            found = True
-            break
+        if ptr.null_bitmap == NULL:
+            return max_nonnull(data, <size_t>n)
 
-        if not found:
+        valid_count = max_nullable_branchless(data, ptr.null_bitmap, <size_t>n, &out)
+        if valid_count == 0:
             raise ValueError("Cannot compute max of all-null column")
-
-        for i in range(i + 1, n):
-            if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i):  # null
-                    continue
-            if data[i] > m:
-                m = data[i]
-        return m
+        return out
 
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
         """Compare two values at given indices. Returns -1, 0, 1. Assumes non-null."""
@@ -1951,3 +1938,251 @@ cdef Float64Vector from_sequence(double[::1] data):
     vec.ptr.null_bitmap = NULL
 
     return vec
+
+
+# ---------------------------------------------------------------------------
+# Encoding-aware reductions — sum/min/max without materialization.
+# ---------------------------------------------------------------------------
+
+cdef double _sum_dict_float64(Float64Vector vec) noexcept:
+    cdef double* dict_data = <double*>vec._dict_values.data
+    cdef Py_ssize_t dict_size = <Py_ssize_t>vec._dict_values.length
+    cdef uint8_t* codes = vec._dict_codes
+    cdef uint8_t code_width = vec._dict_code_width
+    cdef uint8_t* nulls = vec.ptr.null_bitmap
+    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
+    cdef Py_ssize_t i
+    cdef uint32_t code
+    cdef double total = 0.0
+
+    if nulls == NULL:
+        with nogil:
+            for i in range(n):
+                code = _read_packed_code(codes, code_width, i)
+                if <Py_ssize_t>code < dict_size:
+                    total += dict_data[code]
+    else:
+        with nogil:
+            for i in range(n):
+                if _bitmap_is_valid(nulls, i):
+                    code = _read_packed_code(codes, code_width, i)
+                    if <Py_ssize_t>code < dict_size:
+                        total += dict_data[code]
+    return total
+
+
+cdef double _min_dict_float64(Float64Vector vec):
+    cdef double* dict_data = <double*>vec._dict_values.data
+    cdef Py_ssize_t dict_size = <Py_ssize_t>vec._dict_values.length
+    cdef uint8_t* codes = vec._dict_codes
+    cdef uint8_t code_width = vec._dict_code_width
+    cdef uint8_t* nulls = vec.ptr.null_bitmap
+    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
+    cdef Py_ssize_t i, start
+    cdef uint32_t code
+    cdef double m = 0.0
+    cdef bint seen = False
+
+    if n == 0:
+        raise ValueError("Cannot compute min of empty column")
+
+    if nulls == NULL:
+        code = _read_packed_code(codes, code_width, 0)
+        if <Py_ssize_t>code >= dict_size:
+            raise ValueError("dictionary index out of bounds at row 0")
+        m = dict_data[code]
+        seen = True
+        start = 1
+    else:
+        start = -1
+        for i in range(n):
+            if _bitmap_is_valid(nulls, i):
+                code = _read_packed_code(codes, code_width, i)
+                if <Py_ssize_t>code >= dict_size:
+                    raise ValueError(f"dictionary index out of bounds at row {i}")
+                m = dict_data[code]
+                seen = True
+                start = i + 1
+                break
+        if not seen:
+            raise ValueError("Cannot compute min of all-null column")
+
+    if nulls == NULL:
+        with nogil:
+            for i in range(start, n):
+                code = _read_packed_code(codes, code_width, i)
+                if <Py_ssize_t>code < dict_size:
+                    if dict_data[code] < m:
+                        m = dict_data[code]
+    else:
+        with nogil:
+            for i in range(start, n):
+                if _bitmap_is_valid(nulls, i):
+                    code = _read_packed_code(codes, code_width, i)
+                    if <Py_ssize_t>code < dict_size:
+                        if dict_data[code] < m:
+                            m = dict_data[code]
+    return m
+
+
+cdef double _max_dict_float64(Float64Vector vec):
+    cdef double* dict_data = <double*>vec._dict_values.data
+    cdef Py_ssize_t dict_size = <Py_ssize_t>vec._dict_values.length
+    cdef uint8_t* codes = vec._dict_codes
+    cdef uint8_t code_width = vec._dict_code_width
+    cdef uint8_t* nulls = vec.ptr.null_bitmap
+    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
+    cdef Py_ssize_t i, start
+    cdef uint32_t code
+    cdef double m = 0.0
+    cdef bint seen = False
+
+    if n == 0:
+        raise ValueError("Cannot compute max of empty column")
+
+    if nulls == NULL:
+        code = _read_packed_code(codes, code_width, 0)
+        if <Py_ssize_t>code >= dict_size:
+            raise ValueError("dictionary index out of bounds at row 0")
+        m = dict_data[code]
+        seen = True
+        start = 1
+    else:
+        start = -1
+        for i in range(n):
+            if _bitmap_is_valid(nulls, i):
+                code = _read_packed_code(codes, code_width, i)
+                if <Py_ssize_t>code >= dict_size:
+                    raise ValueError(f"dictionary index out of bounds at row {i}")
+                m = dict_data[code]
+                seen = True
+                start = i + 1
+                break
+        if not seen:
+            raise ValueError("Cannot compute max of all-null column")
+
+    if nulls == NULL:
+        with nogil:
+            for i in range(start, n):
+                code = _read_packed_code(codes, code_width, i)
+                if <Py_ssize_t>code < dict_size:
+                    if dict_data[code] > m:
+                        m = dict_data[code]
+    else:
+        with nogil:
+            for i in range(start, n):
+                if _bitmap_is_valid(nulls, i):
+                    code = _read_packed_code(codes, code_width, i)
+                    if <Py_ssize_t>code < dict_size:
+                        if dict_data[code] > m:
+                            m = dict_data[code]
+    return m
+
+
+cdef double _sum_rle_float64(DrakenRLEBuffer* rle) noexcept:
+    if rle == NULL or rle.num_runs == 0:
+        return 0.0
+
+    cdef double* values = <double*>rle.run_values
+    cdef int32_t* lengths = rle.run_lengths
+    cdef size_t num_runs = rle.num_runs
+    cdef uint8_t* nulls = rle.null_bitmap
+    cdef Py_ssize_t r, n, row, k
+    cdef double total = 0.0
+
+    if nulls == NULL:
+        with nogil:
+            for r in range(num_runs):
+                total += values[r] * <double>lengths[r]
+        return total
+
+    row = 0
+    for r in range(num_runs):
+        n = <Py_ssize_t>lengths[r]
+        for k in range(n):
+            if _bitmap_is_valid(nulls, row + k):
+                total += values[r]
+        row += n
+    return total
+
+
+cdef double _min_rle_float64(DrakenRLEBuffer* rle):
+    if rle == NULL or rle.num_runs == 0:
+        raise ValueError("Cannot compute min of empty column")
+
+    cdef double* values = <double*>rle.run_values
+    cdef int32_t* lengths = rle.run_lengths
+    cdef size_t num_runs = rle.num_runs
+    cdef uint8_t* nulls = rle.null_bitmap
+    cdef Py_ssize_t r, n, row, k
+    cdef double m = 0.0
+    cdef bint seen = False
+
+    if nulls == NULL:
+        for r in range(num_runs):
+            if lengths[r] > 0:
+                if not seen:
+                    m = values[r]
+                    seen = True
+                elif values[r] < m:
+                    m = values[r]
+        if not seen:
+            raise ValueError("Cannot compute min of empty column")
+        return m
+
+    row = 0
+    for r in range(num_runs):
+        n = <Py_ssize_t>lengths[r]
+        for k in range(n):
+            if _bitmap_is_valid(nulls, row + k):
+                if not seen:
+                    m = values[r]
+                    seen = True
+                elif values[r] < m:
+                    m = values[r]
+                break
+        row += n
+    if not seen:
+        raise ValueError("Cannot compute min of all-null column")
+    return m
+
+
+cdef double _max_rle_float64(DrakenRLEBuffer* rle):
+    if rle == NULL or rle.num_runs == 0:
+        raise ValueError("Cannot compute max of empty column")
+
+    cdef double* values = <double*>rle.run_values
+    cdef int32_t* lengths = rle.run_lengths
+    cdef size_t num_runs = rle.num_runs
+    cdef uint8_t* nulls = rle.null_bitmap
+    cdef Py_ssize_t r, n, row, k
+    cdef double m = 0.0
+    cdef bint seen = False
+
+    if nulls == NULL:
+        for r in range(num_runs):
+            if lengths[r] > 0:
+                if not seen:
+                    m = values[r]
+                    seen = True
+                elif values[r] > m:
+                    m = values[r]
+        if not seen:
+            raise ValueError("Cannot compute max of empty column")
+        return m
+
+    row = 0
+    for r in range(num_runs):
+        n = <Py_ssize_t>lengths[r]
+        for k in range(n):
+            if _bitmap_is_valid(nulls, row + k):
+                if not seen:
+                    m = values[r]
+                    seen = True
+                elif values[r] > m:
+                    m = values[r]
+                break
+        row += n
+    if not seen:
+        raise ValueError("Cannot compute max of all-null column")
+    return m

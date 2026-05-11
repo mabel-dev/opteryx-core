@@ -56,19 +56,94 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
         if raw is None:
             return
 
+        if self._col_type == _VTYPE_UNKNOWN:
+            self._col_type = _classify_vector(raw)
+
+        cdef const double*      fdata
+        cdef const int64_t*     idata
+        cdef const uint8_t*     nulls
+        cdef DrakenFixedBuffer* ibuf
+        cdef Py_ssize_t i
         cdef double v
-        for val_py in raw.to_pylist():
-            if val_py is None:
-                continue
-            v = <double>val_py
-            if not self._state.append(v):
-                if self._state.overflowed:
-                    raise ValueError(
-                        f"MEDIAN exceeded the per-group cap of "
-                        f"{self._state.max_size} non-null values. "
-                        "Use APPROX_PERCENTILE for larger inputs."
-                    )
-                raise MemoryError("MEDIAN buffer allocation failed")
+
+        if self._col_type == _VTYPE_FLOAT64:
+            vec_f = <Float64Vector>raw
+            if vec_f._has_const:
+                if not vec_f._const_is_null:
+                    for i in range(nrows):
+                        if not self._state.append(vec_f._const_value):
+                            self._raise_append_failure()
+                return
+            fdata = <const double*>vec_f.dense_ptr()
+            nulls = vec_f.null_bitmap_ptr()
+            if nulls == NULL:
+                for i in range(nrows):
+                    if not self._state.append(fdata[i]):
+                        self._raise_append_failure()
+                return
+            for i in range(nrows):
+                if _bitmap_is_valid(nulls, i):
+                    if not self._state.append(fdata[i]):
+                        self._raise_append_failure()
+            return
+
+        if self._col_type == _VTYPE_INT64:
+            vec_i = <Int64Vector>raw
+            if vec_i._has_const:
+                if not vec_i._const_is_null:
+                    v = <double>vec_i._const_value
+                    for i in range(nrows):
+                        if not self._state.append(v):
+                            self._raise_append_failure()
+                return
+            idata = <const int64_t*>vec_i.dense_ptr()
+            nulls = vec_i.null_bitmap_ptr()
+            if nulls == NULL:
+                for i in range(nrows):
+                    if not self._state.append(<double>idata[i]):
+                        self._raise_append_failure()
+                return
+            for i in range(nrows):
+                if _bitmap_is_valid(nulls, i):
+                    if not self._state.append(<double>idata[i]):
+                        self._raise_append_failure()
+            return
+
+        if self._col_type == _VTYPE_INTEGER:
+            vec_n = <IntegerVector>raw
+            if vec_n._has_const:
+                if not vec_n._const_is_null:
+                    v = <double>vec_n._const_value
+                    for i in range(nrows):
+                        if not self._state.append(v):
+                            self._raise_append_failure()
+                return
+            ibuf  = vec_n.ptr
+            nulls = <const uint8_t*>ibuf.null_bitmap
+            if nulls == NULL:
+                for i in range(nrows):
+                    if not self._state.append(<double>_read_integer_value(ibuf, i)):
+                        self._raise_append_failure()
+                return
+            for i in range(nrows):
+                if _bitmap_is_valid(nulls, i):
+                    if not self._state.append(<double>_read_integer_value(ibuf, i)):
+                        self._raise_append_failure()
+            return
+
+        raise TypeError(
+            f"MedianFloat64Aggregate cannot scan column {self.column_name!r}: "
+            f"unsupported vector type {type(raw).__name__}"
+        )
+
+    cdef void _raise_append_failure(self) except *:
+        if self._state.overflowed:
+            raise ValueError(
+                f"MEDIAN exceeded the per-group cap of "
+                f"{self._state.max_size} non-null values. "
+                "Use APPROX_PERCENTILE for larger inputs."
+            )
+        raise MemoryError("MEDIAN buffer allocation failed")
 
     cdef int64_t get_result_i64(self) noexcept:
         return <int64_t>self._state.finalize_median()

@@ -1,9 +1,40 @@
 # included by ungrouped_agg.pyx — do not compile standalone
 
 
+cdef class AvgFinalizer:
+    """Typed record of an AVG(sum_alias, count_alias) → output_alias plan.
+
+    Stored as cdef-class so the hot path can read fields without dict lookups.
+    """
+    cdef bytes sum_alias
+    cdef bytes count_alias
+    cdef bytes output_alias
+
+    def __cinit__(self, bytes sum_alias, bytes count_alias, bytes output_alias):
+        self.sum_alias = sum_alias
+        self.count_alias = count_alias
+        self.output_alias = output_alias
+
+
 cdef class UngroupedAggregateEngine:
+    cdef list                 _aggregates_pyrefs
+    cdef void**               _agg_ptrs
+    cdef Py_ssize_t           _n_aggregates
+    cdef Py_ssize_t           _agg_capacity
+
+    cdef list                 _avg_finalizers_pyrefs
+    cdef void**               _avg_ptrs
+    cdef Py_ssize_t           _n_avgs
+    cdef Py_ssize_t           _avg_capacity
+
+    cdef set                  _internal_aliases
+
     """
     Drives ungrouped (global) aggregation over a stream of Draken morsels.
+
+    Hot path is Python-free:
+      - aggregates iterate over a C array of borrowed PyObject* pointers
+      - finalize() builds the result morsel without dict/Python-list churn
 
     Usage:
         engine = UngroupedAggregateEngine()
@@ -14,17 +45,61 @@ cdef class UngroupedAggregateEngine:
             engine.ingest(morsel)
         result_morsel = engine.finalize()
     """
-    cdef list _aggregates
-    cdef list _avg_finalizers
-    cdef set  _internal_aliases
 
     def __cinit__(self):
-        self._aggregates = []
-        self._avg_finalizers = []
+        self._aggregates_pyrefs = []
+        self._agg_ptrs = NULL
+        self._n_aggregates = 0
+        self._agg_capacity = 0
+
+        self._avg_finalizers_pyrefs = []
+        self._avg_ptrs = NULL
+        self._n_avgs = 0
+        self._avg_capacity = 0
+
         self._internal_aliases = set()
 
+    def __dealloc__(self):
+        if self._agg_ptrs is not NULL:
+            free(self._agg_ptrs)
+            self._agg_ptrs = NULL
+        if self._avg_ptrs is not NULL:
+            free(self._avg_ptrs)
+            self._avg_ptrs = NULL
+
+    cdef void _grow_agg_array(self) except *:
+        cdef Py_ssize_t new_capacity = self._agg_capacity * 2 if self._agg_capacity else 4
+        cdef void** new_ptrs = <void**>malloc(<size_t>new_capacity * sizeof(void*))
+        if new_ptrs is NULL:
+            raise MemoryError("UngroupedAggregateEngine: out of memory")
+        cdef Py_ssize_t i
+        for i in range(self._n_aggregates):
+            new_ptrs[i] = self._agg_ptrs[i]
+        if self._agg_ptrs is not NULL:
+            free(self._agg_ptrs)
+        self._agg_ptrs = new_ptrs
+        self._agg_capacity = new_capacity
+
+    cdef void _grow_avg_array(self) except *:
+        cdef Py_ssize_t new_capacity = self._avg_capacity * 2 if self._avg_capacity else 4
+        cdef void** new_ptrs = <void**>malloc(<size_t>new_capacity * sizeof(void*))
+        if new_ptrs is NULL:
+            raise MemoryError("UngroupedAggregateEngine: out of memory")
+        cdef Py_ssize_t i
+        for i in range(self._n_avgs):
+            new_ptrs[i] = self._avg_ptrs[i]
+        if self._avg_ptrs is not NULL:
+            free(self._avg_ptrs)
+        self._avg_ptrs = new_ptrs
+        self._avg_capacity = new_capacity
+
     cpdef void add_aggregate(self, UngroupedAggregate agg):
-        self._aggregates.append(agg)
+        if self._n_aggregates >= self._agg_capacity:
+            self._grow_agg_array()
+        # Hold strong reference in the Python list, borrow into the C array.
+        self._aggregates_pyrefs.append(agg)
+        self._agg_ptrs[self._n_aggregates] = <void*>agg
+        self._n_aggregates += 1
 
     cpdef void add_avg_finalizer(self, bytes sum_alias, bytes count_alias, object output_alias):
         """
@@ -35,14 +110,28 @@ cdef class UngroupedAggregateEngine:
         sum / count and emits it as output_alias, suppressing the internal
         sum and count columns.
         """
-        self._avg_finalizers.append((sum_alias, count_alias, output_alias))
+        cdef bytes out_alias
+        if isinstance(output_alias, bytes):
+            out_alias = <bytes>output_alias
+        else:
+            out_alias = (<str>output_alias).encode("utf-8")
+
+        cdef AvgFinalizer fin = AvgFinalizer(sum_alias, count_alias, out_alias)
+
+        if self._n_avgs >= self._avg_capacity:
+            self._grow_avg_array()
+        self._avg_finalizers_pyrefs.append(fin)
+        self._avg_ptrs[self._n_avgs] = <void*>fin
+        self._n_avgs += 1
         self._internal_aliases.add(sum_alias)
         self._internal_aliases.add(count_alias)
 
     cpdef void ingest(self, Morsel morsel) except *:
-        """Apply all aggregates to one morsel."""
+        """Apply all aggregates to one morsel — Python-free dispatch."""
+        cdef Py_ssize_t i
         cdef UngroupedAggregate agg
-        for agg in self._aggregates:
+        for i in range(self._n_aggregates):
+            agg = <UngroupedAggregate>self._agg_ptrs[i]
             agg.apply(morsel)
 
     cpdef Morsel finalize(self):
@@ -52,33 +141,41 @@ cdef class UngroupedAggregateEngine:
         AVG finalizers are computed here; their internal sum/count columns
         are excluded from the output.
         """
-        # Build alias → result dict
-        cdef dict results = {}
+        cdef Py_ssize_t i
         cdef UngroupedAggregate agg
+        cdef AvgFinalizer afin
+        cdef set internal = self._internal_aliases
+        cdef list names = []
+        cdef list vectors = []
+        cdef object value, s, c
 
-        for agg in self._aggregates:
-            results[agg.alias] = agg.get_result()
+        # Engine-aggregate columns (skip internal sum/count of any AVG)
+        for i in range(self._n_aggregates):
+            agg = <UngroupedAggregate>self._agg_ptrs[i]
+            if agg.alias in internal:
+                continue
+            names.append(agg.alias)
+            vectors.append(vector_from_sequence([agg.get_result()]))
 
-        # Compute AVG finalizers
-        for (sum_alias, count_alias, output_alias) in self._avg_finalizers:
-            s = results.get(sum_alias)
-            c = results.get(count_alias)
+        # AVG output columns, in registration order
+        for i in range(self._n_avgs):
+            afin = <AvgFinalizer>self._avg_ptrs[i]
+            s = self._result_for_alias(afin.sum_alias)
+            c = self._result_for_alias(afin.count_alias)
             if s is None or c is None or c == 0:
-                results[output_alias] = None
+                value = None
             else:
-                results[output_alias] = s / c
-
-        # Build output lists, skipping internal aliases
-        names = []
-        vectors = []
-        for agg in self._aggregates:
-            if agg.alias not in self._internal_aliases:
-                names.append(agg.alias)
-                vectors.append(vector_from_sequence([results[agg.alias]]))
-
-        # Append AVG output columns (in the order finalizers were added)
-        for (sum_alias, count_alias, output_alias) in self._avg_finalizers:
-            names.append(output_alias if isinstance(output_alias, (bytes, str)) else output_alias)
-            vectors.append(vector_from_sequence([results[output_alias]]))
+                value = s / c
+            names.append(afin.output_alias)
+            vectors.append(vector_from_sequence([value]))
 
         return Morsel.from_vectors(names, vectors)
+
+    cdef object _result_for_alias(self, bytes alias):
+        cdef Py_ssize_t i
+        cdef UngroupedAggregate agg
+        for i in range(self._n_aggregates):
+            agg = <UngroupedAggregate>self._agg_ptrs[i]
+            if agg.alias == alias:
+                return agg.get_result()
+        return None

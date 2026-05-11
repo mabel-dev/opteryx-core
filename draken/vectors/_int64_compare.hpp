@@ -23,6 +23,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "draken/vectors/_compare_bitpack.hpp"
+
 namespace draken { namespace int64_cmp {
 
 // Fill `count` bits in `dst` starting at bit offset `start` (LSB-first within each byte).
@@ -55,6 +57,12 @@ struct Le { static inline bool apply(int64_t a, int64_t b) { return a <= b; } };
 
 // ---------------------------------------------------------------------------
 // Scalar compare: data[i] OP value
+//
+// Output is bit-packed; previously the loop did `dst[i>>3] |= m<<(i&7)` which
+// created an inter-iteration RAW dependency on `dst` that defeated SIMD
+// auto-vectorisation. The byte-batched form below builds each output byte
+// from 8 independent compares in registers, then writes the byte once. The
+// caller pre-zeroes `dst`, so the byte-batched section uses `=` (not `|=`).
 // ---------------------------------------------------------------------------
 
 template <typename Op>
@@ -64,14 +72,21 @@ static inline void cmp_scalar_nonnull(
     uint8_t* __restrict__ dst,
     size_t n)
 {
-    for (size_t i = 0; i < n; ++i) {
-        const uint8_t m = Op::apply(data[i], value) ? 1u : 0u;
-        dst[i >> 3] |= static_cast<uint8_t>(m << (i & 7));
+    const size_t whole_bytes = n >> 3;
+    for (size_t b = 0; b < whole_bytes; ++b) {
+        dst[b] = DRAKEN_PACK8_SCALAR(data + (b << 3), value);
+    }
+    // Tail (< 8 rows). Caller already zeroed dst, so OR'ing is safe.
+    for (size_t i = whole_bytes << 3; i < n; ++i) {
+        if (Op::apply(data[i], value)) {
+            dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
     }
 }
 
-// Low null density: branchless. Reads the validity bit and ANDs it with the
-// comparison result so mispredicted branches don't dominate.
+// Low null density: branchless. Combines comparison result with validity at
+// byte granularity — load the validity byte once, AND with the byte-packed
+// comparison result, store. No per-row branching on either side.
 template <typename Op>
 static inline void cmp_scalar_branchless(
     const int64_t* __restrict__ data,
@@ -80,7 +95,12 @@ static inline void cmp_scalar_branchless(
     uint8_t* __restrict__ dst,
     size_t n)
 {
-    for (size_t i = 0; i < n; ++i) {
+    const size_t whole_bytes = n >> 3;
+    for (size_t b = 0; b < whole_bytes; ++b) {
+        const uint8_t m = DRAKEN_PACK8_SCALAR(data + (b << 3), value);
+        dst[b] = static_cast<uint8_t>(m & src_null[b]);
+    }
+    for (size_t i = whole_bytes << 3; i < n; ++i) {
         const uint8_t v = (src_null[i >> 3] >> (i & 7)) & 1u;
         const uint8_t m = Op::apply(data[i], value) ? 1u : 0u;
         dst[i >> 3] |= static_cast<uint8_t>((v & m) << (i & 7));
@@ -117,15 +137,21 @@ static inline void cmp_vector_nonnull(
     uint8_t* __restrict__ dst,
     size_t n)
 {
-    for (size_t i = 0; i < n; ++i) {
-        const uint8_t m = Op::apply(a[i], b[i]) ? 1u : 0u;
-        dst[i >> 3] |= static_cast<uint8_t>(m << (i & 7));
+    const size_t whole_bytes = n >> 3;
+    for (size_t bi = 0; bi < whole_bytes; ++bi) {
+        const size_t base = bi << 3;
+        dst[bi] = DRAKEN_PACK8_VECTOR(a + base, b + base);
+    }
+    for (size_t i = whole_bytes << 3; i < n; ++i) {
+        if (Op::apply(a[i], b[i])) {
+            dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
     }
 }
 
 // One side has a null bitmap, the other does not. `null_side` points at the
 // validity bitmap of whichever input owns one. The output null bitmap mirrors
-// that input's validity directly.
+// that input's validity directly. Byte-batched.
 template <typename Op>
 static inline void cmp_vector_one_null(
     const int64_t* __restrict__ a,
@@ -135,18 +161,26 @@ static inline void cmp_vector_one_null(
     uint8_t* __restrict__ out_null,
     size_t n)
 {
-    for (size_t i = 0; i < n; ++i) {
+    const size_t whole_bytes = n >> 3;
+    for (size_t bi = 0; bi < whole_bytes; ++bi) {
+        const size_t base = bi << 3;
+        const uint8_t v = null_side[bi];
+        const uint8_t m = DRAKEN_PACK8_VECTOR(a + base, b + base);
+        dst[bi]      = static_cast<uint8_t>(m & v);
+        out_null[bi] = v;
+    }
+    for (size_t i = whole_bytes << 3; i < n; ++i) {
         const uint8_t v = (null_side[i >> 3] >> (i & 7)) & 1u;
         const uint8_t m = Op::apply(a[i], b[i]) ? 1u : 0u;
         const size_t  byte = i >> 3;
         const uint8_t bit  = static_cast<uint8_t>(i & 7);
-        dst[byte]       |= static_cast<uint8_t>((v & m) << bit);
-        out_null[byte]  |= static_cast<uint8_t>(v        << bit);
+        dst[byte]      |= static_cast<uint8_t>((v & m) << bit);
+        out_null[byte] |= static_cast<uint8_t>(v        << bit);
     }
 }
 
 // Both sides have null bitmaps. Branchless variant — combined validity is
-// AND of the two bits.
+// AND of the two bits. Byte-batched.
 template <typename Op>
 static inline void cmp_vector_both_null_branchless(
     const int64_t* __restrict__ a,
@@ -157,7 +191,15 @@ static inline void cmp_vector_both_null_branchless(
     uint8_t* __restrict__ out_null,
     size_t n)
 {
-    for (size_t i = 0; i < n; ++i) {
+    const size_t whole_bytes = n >> 3;
+    for (size_t bi = 0; bi < whole_bytes; ++bi) {
+        const size_t base = bi << 3;
+        const uint8_t v = static_cast<uint8_t>(null_a[bi] & null_b[bi]);
+        const uint8_t m = DRAKEN_PACK8_VECTOR(a + base, b + base);
+        dst[bi]      = static_cast<uint8_t>(m & v);
+        out_null[bi] = v;
+    }
+    for (size_t i = whole_bytes << 3; i < n; ++i) {
         const uint8_t va = (null_a[i >> 3] >> (i & 7)) & 1u;
         const uint8_t vb = (null_b[i >> 3] >> (i & 7)) & 1u;
         const uint8_t v  = static_cast<uint8_t>(va & vb);

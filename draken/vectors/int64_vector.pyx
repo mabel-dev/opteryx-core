@@ -75,6 +75,14 @@ cdef extern from "draken/vectors/_int64_compare.hpp" namespace "draken::int64_cm
     void dispatch_vector_both_null_branchless(int op, const int64_t* a, const int64_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
     void dispatch_vector_both_null_branching(int op, const int64_t* a, const int64_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
 
+cdef extern from "draken/vectors/_int64_reductions.hpp" namespace "draken::int64_red" nogil:
+    int64_t sum_nonnull(const int64_t* data, size_t n)
+    int64_t sum_nullable_branchless(const int64_t* data, const uint8_t* nulls, size_t n)
+    int64_t min_nonnull(const int64_t* data, size_t n)
+    int64_t max_nonnull(const int64_t* data, size_t n)
+    size_t  min_nullable_branchless(const int64_t* data, const uint8_t* nulls, size_t n, int64_t* out_min)
+    size_t  max_nullable_branchless(const int64_t* data, const uint8_t* nulls, size_t n, int64_t* out_max)
+
 
 cdef inline uint8_t _dict_code_width_for_size(Py_ssize_t dict_size) noexcept:
     if dict_size <= 256:
@@ -972,100 +980,88 @@ cdef class Int64Vector(Vector):
         return out
 
     cpdef int64_t sum(self):
+        # Encoding-specific reductions handle their own structure; the dense
+        # path delegates to the C++ kernel for SIMD-friendly throughput.
+        cdef DrakenFixedBuffer* ptr
+        cdef int64_t* data
+        cdef Py_ssize_t n
+
         if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_int64(self).sum()
+            if self._rle_buffer == NULL:
+                return 0
+            return _sum_rle_int64(self._rle_buffer)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_int64(self).sum()
+            return _sum_dict_int64(self)
         if self._has_const:
             if self._const_is_null:
                 return 0
             return <int64_t>(self.ptr.length * self._const_value)
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int64_t* data = <int64_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
-        cdef int64_t total = 0
+        ptr = self.ptr
+        data = <int64_t*> ptr.data
+        n = ptr.length
+        if n == 0:
+            return 0
         if ptr.null_bitmap == NULL:
-            for i in range(n):
-                total += data[i]
-        else:
-            for i in range(n):
-                if _bitmap_is_valid(ptr.null_bitmap, i, 0):
-                    total += data[i]
-        return total
+            return sum_nonnull(data, <size_t>n)
+        return sum_nullable_branchless(data, ptr.null_bitmap, <size_t>n)
 
     cpdef int64_t min(self):
+        cdef DrakenFixedBuffer* ptr
+        cdef int64_t* data
+        cdef Py_ssize_t n
+        cdef int64_t out
+        cdef size_t valid_count
+
         if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_int64(self).min()
+            return _min_rle_int64(self._rle_buffer)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_int64(self).min()
+            return _min_dict_int64(self)
         if self._has_const:
             if self.ptr.length == 0 or self._const_is_null:
                 raise ValueError("Cannot compute min of empty column")
             return self._const_value
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int64_t* data = <int64_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
+        ptr = self.ptr
+        data = <int64_t*> ptr.data
+        n = ptr.length
         if n == 0:
             raise ValueError("Cannot compute min of empty column")
 
-        cdef int64_t m
-        cdef bint found = False
-
         if ptr.null_bitmap == NULL:
-            m = data[0]
-            for i in range(1, n):
-                if data[i] < m:
-                    m = data[i]
-        else:
-            for i in range(n):
-                if _bitmap_is_valid(ptr.null_bitmap, i, 0):
-                    m = data[i]
-                    found = True
-                    break
-            if not found:
-                raise ValueError("Cannot compute min of all-null column")
-            for i in range(i + 1, n):
-                if _bitmap_is_valid(ptr.null_bitmap, i, 0):
-                    if data[i] < m:
-                        m = data[i]
-        return m
+            return min_nonnull(data, <size_t>n)
+
+        valid_count = min_nullable_branchless(data, ptr.null_bitmap, <size_t>n, &out)
+        if valid_count == 0:
+            raise ValueError("Cannot compute min of all-null column")
+        return out
 
     cpdef int64_t max(self):
+        cdef DrakenFixedBuffer* ptr
+        cdef int64_t* data
+        cdef Py_ssize_t n
+        cdef int64_t out
+        cdef size_t valid_count
+
         if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_int64(self).max()
+            return _max_rle_int64(self._rle_buffer)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_int64(self).max()
+            return _max_dict_int64(self)
         if self._has_const:
             if self.ptr.length == 0 or self._const_is_null:
                 raise ValueError("Cannot compute max of empty column")
             return self._const_value
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int64_t* data = <int64_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
+        ptr = self.ptr
+        data = <int64_t*> ptr.data
+        n = ptr.length
         if n == 0:
             raise ValueError("Cannot compute max of empty column")
 
-        cdef int64_t m
-        cdef bint found = False
-
         if ptr.null_bitmap == NULL:
-            m = data[0]
-            for i in range(1, n):
-                if data[i] > m:
-                    m = data[i]
-        else:
-            for i in range(n):
-                if _bitmap_is_valid(ptr.null_bitmap, i, 0):
-                    m = data[i]
-                    found = True
-                    break
-            if not found:
-                raise ValueError("Cannot compute max of all-null column")
-            for i in range(i + 1, n):
-                if _bitmap_is_valid(ptr.null_bitmap, i, 0):
-                    if data[i] > m:
-                        m = data[i]
-        return m
+            return max_nonnull(data, <size_t>n)
+
+        valid_count = max_nullable_branchless(data, ptr.null_bitmap, <size_t>n, &out)
+        if valid_count == 0:
+            raise ValueError("Cannot compute max of all-null column")
+        return out
 
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
         """Compare two values at given indices. Returns -1, 0, 1. Assumes non-null."""
@@ -2034,3 +2030,262 @@ cdef Int64Vector from_sequence(const int64_t[::1] data):
         vec.ptr.data = NULL
 
     return vec
+
+
+# ---------------------------------------------------------------------------
+# Encoding-aware reductions — sum/min/max without materialization.
+#
+# These avoid allocating a dense buffer and a second pass: dict-encoded
+# vectors walk codes once and look up dict values directly; RLE walks runs
+# (O(K) where K = run count) when no row-level null bitmap is present.
+# ---------------------------------------------------------------------------
+
+cdef int64_t _sum_dict_int64(Int64Vector vec) noexcept:
+    cdef int64_t* dict_data = <int64_t*>vec._dict_values.data
+    cdef Py_ssize_t dict_size = <Py_ssize_t>vec._dict_values.length
+    cdef uint8_t* codes = vec._dict_codes
+    cdef uint8_t code_width = vec._dict_code_width
+    cdef uint8_t* nulls = vec.ptr.null_bitmap
+    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
+    cdef Py_ssize_t i
+    cdef uint32_t code
+    cdef int64_t total = 0
+
+    if nulls == NULL:
+        with nogil:
+            for i in range(n):
+                code = _read_packed_code(codes, code_width, i)
+                if <Py_ssize_t>code < dict_size:
+                    total += dict_data[code]
+    else:
+        with nogil:
+            for i in range(n):
+                if _bitmap_is_valid(nulls, i, 0):
+                    code = _read_packed_code(codes, code_width, i)
+                    if <Py_ssize_t>code < dict_size:
+                        total += dict_data[code]
+    return total
+
+
+cdef int64_t _min_dict_int64(Int64Vector vec):
+    cdef int64_t* dict_data = <int64_t*>vec._dict_values.data
+    cdef Py_ssize_t dict_size = <Py_ssize_t>vec._dict_values.length
+    cdef uint8_t* codes = vec._dict_codes
+    cdef uint8_t code_width = vec._dict_code_width
+    cdef uint8_t* nulls = vec.ptr.null_bitmap
+    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
+    cdef Py_ssize_t i, start
+    cdef uint32_t code
+    cdef int64_t m
+    cdef bint seen = False
+
+    if n == 0:
+        raise ValueError("Cannot compute min of empty column")
+
+    # Find the first valid row to seed
+    if nulls == NULL:
+        code = _read_packed_code(codes, code_width, 0)
+        if <Py_ssize_t>code >= dict_size:
+            raise ValueError("dictionary index out of bounds at row 0")
+        m = dict_data[code]
+        seen = True
+        start = 1
+    else:
+        start = -1
+        for i in range(n):
+            if _bitmap_is_valid(nulls, i, 0):
+                code = _read_packed_code(codes, code_width, i)
+                if <Py_ssize_t>code >= dict_size:
+                    raise ValueError(f"dictionary index out of bounds at row {i}")
+                m = dict_data[code]
+                seen = True
+                start = i + 1
+                break
+        if not seen:
+            raise ValueError("Cannot compute min of all-null column")
+
+    if nulls == NULL:
+        with nogil:
+            for i in range(start, n):
+                code = _read_packed_code(codes, code_width, i)
+                if <Py_ssize_t>code < dict_size:
+                    if dict_data[code] < m:
+                        m = dict_data[code]
+    else:
+        with nogil:
+            for i in range(start, n):
+                if _bitmap_is_valid(nulls, i, 0):
+                    code = _read_packed_code(codes, code_width, i)
+                    if <Py_ssize_t>code < dict_size:
+                        if dict_data[code] < m:
+                            m = dict_data[code]
+    return m
+
+
+cdef int64_t _max_dict_int64(Int64Vector vec):
+    cdef int64_t* dict_data = <int64_t*>vec._dict_values.data
+    cdef Py_ssize_t dict_size = <Py_ssize_t>vec._dict_values.length
+    cdef uint8_t* codes = vec._dict_codes
+    cdef uint8_t code_width = vec._dict_code_width
+    cdef uint8_t* nulls = vec.ptr.null_bitmap
+    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
+    cdef Py_ssize_t i, start
+    cdef uint32_t code
+    cdef int64_t m
+    cdef bint seen = False
+
+    if n == 0:
+        raise ValueError("Cannot compute max of empty column")
+
+    if nulls == NULL:
+        code = _read_packed_code(codes, code_width, 0)
+        if <Py_ssize_t>code >= dict_size:
+            raise ValueError("dictionary index out of bounds at row 0")
+        m = dict_data[code]
+        seen = True
+        start = 1
+    else:
+        start = -1
+        for i in range(n):
+            if _bitmap_is_valid(nulls, i, 0):
+                code = _read_packed_code(codes, code_width, i)
+                if <Py_ssize_t>code >= dict_size:
+                    raise ValueError(f"dictionary index out of bounds at row {i}")
+                m = dict_data[code]
+                seen = True
+                start = i + 1
+                break
+        if not seen:
+            raise ValueError("Cannot compute max of all-null column")
+
+    if nulls == NULL:
+        with nogil:
+            for i in range(start, n):
+                code = _read_packed_code(codes, code_width, i)
+                if <Py_ssize_t>code < dict_size:
+                    if dict_data[code] > m:
+                        m = dict_data[code]
+    else:
+        with nogil:
+            for i in range(start, n):
+                if _bitmap_is_valid(nulls, i, 0):
+                    code = _read_packed_code(codes, code_width, i)
+                    if <Py_ssize_t>code < dict_size:
+                        if dict_data[code] > m:
+                            m = dict_data[code]
+    return m
+
+
+cdef int64_t _sum_rle_int64(DrakenRLEBuffer* rle) noexcept:
+    """Sum an RLE int64 column. Walks runs (O(K)) when no row-level null
+    bitmap is present; otherwise falls back to per-row checks."""
+    if rle == NULL or rle.num_runs == 0:
+        return 0
+
+    cdef int64_t* values = <int64_t*>rle.run_values
+    cdef int32_t* lengths = rle.run_lengths
+    cdef size_t num_runs = rle.num_runs
+    cdef uint8_t* nulls = rle.null_bitmap
+    cdef Py_ssize_t r, n, row, k
+    cdef int64_t total = 0
+
+    if nulls == NULL:
+        # Pure run-level sum
+        with nogil:
+            for r in range(num_runs):
+                total += values[r] * <int64_t>lengths[r]
+        return total
+
+    # Row-level null bitmap → walk rows by expanding runs
+    row = 0
+    for r in range(num_runs):
+        n = <Py_ssize_t>lengths[r]
+        for k in range(n):
+            if _bitmap_is_valid(nulls, row + k, 0):
+                total += values[r]
+        row += n
+    return total
+
+
+cdef int64_t _min_rle_int64(DrakenRLEBuffer* rle):
+    if rle == NULL or rle.num_runs == 0:
+        raise ValueError("Cannot compute min of empty column")
+
+    cdef int64_t* values = <int64_t*>rle.run_values
+    cdef int32_t* lengths = rle.run_lengths
+    cdef size_t num_runs = rle.num_runs
+    cdef uint8_t* nulls = rle.null_bitmap
+    cdef Py_ssize_t r, n, row, k
+    cdef int64_t m
+    cdef bint seen = False
+
+    if nulls == NULL:
+        # Find first non-empty run, then walk rest
+        for r in range(num_runs):
+            if lengths[r] > 0:
+                if not seen:
+                    m = values[r]
+                    seen = True
+                elif values[r] < m:
+                    m = values[r]
+        if not seen:
+            raise ValueError("Cannot compute min of empty column")
+        return m
+
+    row = 0
+    for r in range(num_runs):
+        n = <Py_ssize_t>lengths[r]
+        for k in range(n):
+            if _bitmap_is_valid(nulls, row + k, 0):
+                if not seen:
+                    m = values[r]
+                    seen = True
+                elif values[r] < m:
+                    m = values[r]
+                # All other rows in this run share the same value — skip ahead
+                break
+        row += n
+    if not seen:
+        raise ValueError("Cannot compute min of all-null column")
+    return m
+
+
+cdef int64_t _max_rle_int64(DrakenRLEBuffer* rle):
+    if rle == NULL or rle.num_runs == 0:
+        raise ValueError("Cannot compute max of empty column")
+
+    cdef int64_t* values = <int64_t*>rle.run_values
+    cdef int32_t* lengths = rle.run_lengths
+    cdef size_t num_runs = rle.num_runs
+    cdef uint8_t* nulls = rle.null_bitmap
+    cdef Py_ssize_t r, n, row, k
+    cdef int64_t m
+    cdef bint seen = False
+
+    if nulls == NULL:
+        for r in range(num_runs):
+            if lengths[r] > 0:
+                if not seen:
+                    m = values[r]
+                    seen = True
+                elif values[r] > m:
+                    m = values[r]
+        if not seen:
+            raise ValueError("Cannot compute max of empty column")
+        return m
+
+    row = 0
+    for r in range(num_runs):
+        n = <Py_ssize_t>lengths[r]
+        for k in range(n):
+            if _bitmap_is_valid(nulls, row + k, 0):
+                if not seen:
+                    m = values[r]
+                    seen = True
+                elif values[r] > m:
+                    m = values[r]
+                break
+        row += n
+    if not seen:
+        raise ValueError("Cannot compute max of all-null column")
+    return m

@@ -32,10 +32,11 @@ cdef class AnyValueAggregate(UngroupedAggregate):
         if self._col_type == _VTYPE_UNKNOWN:
             self._col_type = _classify_vector(raw)
 
-        cdef const int64_t*   idata
-        cdef const double*    fdata
-        cdef const uint8_t*   nulls
-        cdef DrakenVarBuffer* buf
+        cdef const int64_t*     idata
+        cdef const double*      fdata
+        cdef const uint8_t*     nulls
+        cdef DrakenVarBuffer*   buf
+        cdef DrakenFixedBuffer* ibuf
         cdef Py_ssize_t i
         cdef const char* ptr_c
         cdef Py_ssize_t  length_c
@@ -103,16 +104,21 @@ cdef class AnyValueAggregate(UngroupedAggregate):
                 if not vec_n._const_is_null:
                     self._value = vec_n._const_value; self._seen = True
                 return
-            nulls = vec_n.null_bitmap_ptr()
+            ibuf  = vec_n.ptr
+            nulls = <const uint8_t*>ibuf.null_bitmap
+            if nulls == NULL:
+                if nrows > 0:
+                    self._value = _read_integer_value(ibuf, 0); self._seen = True
+                return
             for i in range(nrows):
                 if _bitmap_is_valid(nulls, i):
-                    self._value = vec_n.to_pylist()[i]; self._seen = True; return
+                    self._value = _read_integer_value(ibuf, i); self._seen = True; return
             return
 
-        # Generic fallback
-        for val_py in raw.to_pylist():
-            if val_py is not None:
-                self._value = val_py; self._seen = True; return
+        raise TypeError(
+            f"AnyValueAggregate cannot scan column {self.column_name!r}: "
+            f"unsupported vector type {type(raw).__name__}"
+        )
 
     cdef bint _take_first_rle(self, StringVector svec) except *:
         """Return the first run value covering a valid (non-null) row."""

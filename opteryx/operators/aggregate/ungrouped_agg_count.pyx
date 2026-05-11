@@ -69,18 +69,17 @@ cdef class CountAggregate(UngroupedAggregate):
                 if nulls == NULL:
                     self._count += nrows   # no row-level nulls — O(1)
                     return
-                for i in range(nrows):
-                    if _bitmap_is_valid(nulls, i):
-                        self._count += 1
+                # Bitmap present — use precomputed null_count (simd_popcount).
+                # The per-row walk used to dominate for nullable columns even
+                # when there were zero nulls (parquet always allocates the
+                # bitmap), eating ~90ms on a 100M-row Q04.
+                self._count += <int64_t>nrows - <int64_t>vec_i.null_count
                 return
             nulls = vec_i.null_bitmap_ptr()
             if nulls == NULL:
                 self._count += nrows
                 return
-            with nogil:
-                for i in range(nrows):
-                    if _bitmap_is_valid(nulls, i):
-                        self._count += 1
+            self._count += <int64_t>nrows - <int64_t>vec_i.null_count
             return
 
         if self._col_type == _VTYPE_STRING:
@@ -117,10 +116,7 @@ cdef class CountAggregate(UngroupedAggregate):
             if nulls == NULL:
                 self._count += nrows
                 return
-            with nogil:
-                for i in range(nrows):
-                    if _bitmap_is_valid(nulls, i):
-                        self._count += 1
+            self._count += <int64_t>nrows - <int64_t>vec_f.null_count
             return
 
         if self._col_type == _VTYPE_INTEGER:
@@ -133,20 +129,15 @@ cdef class CountAggregate(UngroupedAggregate):
             if nulls == NULL:
                 self._count += nrows
                 return
-            with nogil:
-                for i in range(nrows):
-                    if _bitmap_is_valid(nulls, i):
-                        self._count += 1
+            self._count += <int64_t>nrows - <int64_t>vec_n.null_count
             return
 
-        # Generic fallback
+        # Generic fallback — pay per-row only for unknown vector types
         nulls = raw.null_bitmap_ptr()
         if nulls == NULL:
             self._count += nrows
             return
-        for i in range(nrows):
-            if _bitmap_is_valid(nulls, i):
-                self._count += 1
+        self._count += <int64_t>nrows - <int64_t>raw.null_count
 
     cdef int64_t get_result_i64(self) noexcept:
         return self._count

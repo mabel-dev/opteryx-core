@@ -13,41 +13,39 @@ cdef class SumInt64Aggregate(UngroupedAggregate):
         self._seen       = False
 
     cdef void apply(self, Morsel morsel) except *:
-        if not isinstance(morsel, Morsel):
-            return
-
-        cdef Morsel typed    = <Morsel>morsel
-
+        # Per-morsel work: classify the vector once, then delegate to the
+        # Vector's cpdef sum(), which routes through the C++ reduction
+        # kernel for dense paths and encoding-specific helpers for
+        # dict/RLE/const. No encoding handling duplicated here.
+        cdef Morsel typed = <Morsel>morsel
         if typed.ptr is NULL or typed.ptr.num_rows == 0:
             return
 
-        cdef Py_ssize_t nrows = <Py_ssize_t>typed.ptr.num_rows
-
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-
         if self._col_idx < 0 or self._col_idx >= len(typed._columns):
             return
 
         cdef Vector raw = <Vector>typed._columns[self._col_idx]
-
         if raw is None:
             return
 
-        if hasattr(raw, 'sum'):
-            try:
-                val = raw.sum()
-                if val is not None:
-                    self._total += <int64_t>val
-                    self._seen   = True
-                return
-            except (ValueError, NotImplementedError):
-                pass
+        if self._col_type == _VTYPE_UNKNOWN:
+            self._col_type = _classify_vector(raw)
 
-        for val_py in raw.to_pylist():
-            if val_py is not None:
-                self._total += <int64_t>val_py
-                self._seen   = True
+        if self._col_type == _VTYPE_INT64:
+            self._total += (<Int64Vector>raw).sum()
+            self._seen = True
+            return
+        if self._col_type == _VTYPE_INTEGER:
+            self._total += (<IntegerVector>raw).sum()
+            self._seen = True
+            return
+
+        raise TypeError(
+            f"SumInt64Aggregate cannot sum column {self.column_name!r}: "
+            f"unsupported vector type {type(raw).__name__}"
+        )
 
     cdef int64_t get_result_i64(self) noexcept:
         return self._total
@@ -77,41 +75,39 @@ cdef class SumFloat64Aggregate(UngroupedAggregate):
         self._seen       = False
 
     cdef void apply(self, Morsel morsel) except *:
-        if not isinstance(morsel, Morsel):
-            return
-
-        cdef Morsel typed    = <Morsel>morsel
-
+        cdef Morsel typed = <Morsel>morsel
         if typed.ptr is NULL or typed.ptr.num_rows == 0:
             return
 
-        cdef Py_ssize_t nrows = <Py_ssize_t>typed.ptr.num_rows
-
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-
         if self._col_idx < 0 or self._col_idx >= len(typed._columns):
             return
 
         cdef Vector raw = <Vector>typed._columns[self._col_idx]
-
         if raw is None:
             return
 
-        if hasattr(raw, 'sum'):
-            try:
-                val = raw.sum()
-                if val is not None:
-                    self._total += <double>val
-                    self._seen   = True
-                return
-            except (ValueError, NotImplementedError):
-                pass
+        if self._col_type == _VTYPE_UNKNOWN:
+            self._col_type = _classify_vector(raw)
 
-        for val_py in raw.to_pylist():
-            if val_py is not None:
-                self._total += <double>val_py
-                self._seen   = True
+        if self._col_type == _VTYPE_FLOAT64:
+            self._total += (<Float64Vector>raw).sum()
+            self._seen = True
+            return
+        if self._col_type == _VTYPE_INT64:
+            self._total += <double>((<Int64Vector>raw).sum())
+            self._seen = True
+            return
+        if self._col_type == _VTYPE_INTEGER:
+            self._total += <double>((<IntegerVector>raw).sum())
+            self._seen = True
+            return
+
+        raise TypeError(
+            f"SumFloat64Aggregate cannot sum column {self.column_name!r}: "
+            f"unsupported vector type {type(raw).__name__}"
+        )
 
     cdef int64_t get_result_i64(self) noexcept:
         return <int64_t>self._total

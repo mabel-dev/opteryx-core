@@ -78,12 +78,34 @@ cdef class CountDistinctAggregate(UngroupedAggregate):
     cdef uint64_t* _scratch_buf
     cdef Py_ssize_t _scratch_capacity
 
+cdef class AvgFinalizer:
+    cdef bytes  sum_alias
+    cdef bytes  count_alias
+    cdef bytes  output_alias
+
+
 cdef class UngroupedAggregateEngine:
-    cdef list _aggregates
-    cdef list _avg_finalizers
-    cdef set  _internal_aliases
+    # Refcount-holding list of UngroupedAggregate instances. The C array
+    # below holds borrowed pointers into the same objects for Python-free
+    # iteration on the hot path.
+    cdef list                 _aggregates_pyrefs
+    cdef void**               _agg_ptrs
+    cdef Py_ssize_t           _n_aggregates
+    cdef Py_ssize_t           _agg_capacity
+
+    # AVG finalizer storage — typed, no dicts/tuples on the hot path
+    cdef list                 _avg_finalizers_pyrefs
+    cdef void**               _avg_ptrs  # borrowed AvgFinalizer*
+    cdef Py_ssize_t           _n_avgs
+    cdef Py_ssize_t           _avg_capacity
+
+    # Set of aliases that should be hidden from finalize() output
+    cdef set                  _internal_aliases
 
     cpdef void add_aggregate(self, UngroupedAggregate agg)
     cpdef void add_avg_finalizer(self, bytes sum_alias, bytes count_alias, object output_alias)
     cpdef void ingest(self, Morsel morsel) except *
     cpdef Morsel finalize(self)
+    cdef void _grow_agg_array(self) except *
+    cdef void _grow_avg_array(self) except *
+    cdef object _result_for_alias(self, bytes alias)
