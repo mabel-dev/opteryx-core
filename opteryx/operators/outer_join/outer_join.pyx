@@ -1,3 +1,11 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -11,34 +19,81 @@ This is a SQL Query Execution Plan Node.
 PyArrow has LEFT/RIGHT/FULL OUTER JOIN implementations, but they error when the
 relations being joined contain STRUCT or ARRAY columns so we've written our own
 OUTER JOIN implementations.
-
-REFACTORED (Session 51): Draken-native Morsel-based join functions
-- Join functions accept Morsels instead of Arrow tables
-- Morsel.combine() and align_tables_pyarray() for result alignment
-- No Arrow conversions within join logic; Arrow only remains at execution boundaries
 """
 
 import time
-from typing import List
 
-# Draken BoolVector helpers for converting bit-packed bloom results
-from libc.stdint cimport uint8_t, uint64_t, int64_t
+from libc.stdint cimport uint8_t, uint64_t, int64_t, int32_t
+from libc.string cimport memset
+from libcpp.vector cimport vector
+from cpython.mem cimport PyMem_Malloc, PyMem_Free
+
 from draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
-
-# Telemetry: number of times the outer-join bloom-filter Draken fast-path was applied.
-# Incremented when a probe morsel is filtered via the Draken bit-packed result path.
-BLOOM_FASTPATH_COUNTER = 0
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.morsels.morsel cimport Morsel
+from draken.morsels.align cimport align_tables
 
 from opteryx.compiled.structures.bloom_filter import create_bloom_filter_morsel
 from opteryx.compiled.structures.bloom_filter import bloom_filter_check_morsel
 from opteryx.compiled.structures.carchar_index cimport CarcharJoinIndexWrapper
-from draken.morsels.align import align_tables_pyarray
 from opteryx.compiled.morsel_ops.null_filter cimport non_null_row_indices
 from opteryx.models import QueryProperties
 
 from opteryx import EOS, EMPTY
 
 from . import JoinNode
+
+
+# Telemetry: number of times the outer-join bloom-filter Draken fast-path was applied.
+BLOOM_FASTPATH_COUNTER = 0
+
+CHUNK_SIZE: int = 50_000
+
+
+cdef class _JoinChunkBuffers:
+    """
+    RAII wrapper for the two fixed-size int32 index buffers used during join
+    materialisation. Cython generators do not support yield inside try/finally,
+    so buffer ownership is managed here via __dealloc__ instead.
+    """
+    cdef int32_t* left_buf
+    cdef int32_t* right_buf
+
+    def __cinit__(self):
+        self.left_buf = <int32_t*>PyMem_Malloc(CHUNK_SIZE * sizeof(int32_t))
+        self.right_buf = <int32_t*>PyMem_Malloc(CHUNK_SIZE * sizeof(int32_t))
+        if self.left_buf == NULL or self.right_buf == NULL:
+            raise MemoryError()
+
+    def __dealloc__(self):
+        if self.left_buf != NULL:
+            PyMem_Free(self.left_buf)
+            self.left_buf = NULL
+        if self.right_buf != NULL:
+            PyMem_Free(self.right_buf)
+            self.right_buf = NULL
+
+
+cdef class _JoinFlags:
+    """
+    RAII wrapper for a byte-per-row flag array used to track matched rows.
+    Freed via __dealloc__ for the same reason as _JoinChunkBuffers.
+    """
+    cdef uint8_t* flags
+    cdef Py_ssize_t n
+
+    def __cinit__(self, Py_ssize_t n):
+        cdef Py_ssize_t alloc = n if n > 0 else 1
+        self.n = n
+        self.flags = <uint8_t*>PyMem_Malloc(alloc)
+        if self.flags == NULL:
+            raise MemoryError()
+        memset(self.flags, 0, alloc)
+
+    def __dealloc__(self):
+        if self.flags != NULL:
+            PyMem_Free(self.flags)
+            self.flags = NULL
 
 
 cpdef CarcharJoinIndexWrapper _build_probe_hash_map(Morsel morsel, list join_columns):
@@ -70,220 +125,328 @@ cpdef CarcharJoinIndexWrapper _build_side_hash_map(Morsel morsel, list join_colu
     return ht
 
 
-CHUNK_SIZE: int = 50_000
-
-
 def left_join(
-    left_morsel,
-    right_morsel,
-    left_columns: List[str],
-    right_columns: List[str],
-    filter_index,
-    left_hash,
-    columns=None,
+    Morsel left_morsel,
+    Morsel right_morsel,
+    list left_columns,
+    list right_columns,
+    object filter_index,
+    CarcharJoinIndexWrapper left_hash,
+    object columns=None,
 ):
     """
-    Perform a LEFT OUTER JOIN using prebuilt hash map and optional filter.
+    Perform a LEFT OUTER JOIN using a prebuilt left-side hash map.
 
-    Accepts Morsels, returns Morsels.
+    Probes left_hash with each right row's hash to find matching left rows.
+    Unmatched left rows are emitted with null right side (-1 index).
 
-    Yields:
-        Morsel chunks of the joined result.
+    Yields Morsel chunks of the joined result.
     """
+    cdef _JoinChunkBuffers bufs = _JoinChunkBuffers()
+    cdef _JoinFlags seen = _JoinFlags(0)  # replaced below after n_left is known
+    cdef uint64_t[::1] right_hashes
+    cdef uint8_t[::1] bit_results
+    cdef vector[int64_t] left_rows
+    cdef Py_ssize_t n_left, n_right, i, j, buf_pos
+    cdef int32_t l
+    cdef BoolVector mask
 
-    left_indexes = []
-    right_indexes = []
-    seen_flags = array("b", [0]) * len(left_morsel)
+    n_left = len(left_morsel)
+    n_right = len(right_morsel)
 
+    # Bloom filter pre-filter on right side
     if filter_index is not None:
         bit_results = bloom_filter_check_morsel(filter_index, right_morsel, right_columns)
         if bit_results is not None:
-            mask = _bits_to_bool_vector(bit_results, len(right_morsel))
+            mask = bool_vector_from_bits(&bit_results[0], NULL, n_right)
             right_morsel = right_morsel.filter_mask(mask)
+            n_right = len(right_morsel)
 
-        if len(right_morsel) == 0:
-            for i in range(0, len(left_morsel), CHUNK_SIZE):
-                chunk_end = min(i + CHUNK_SIZE, len(left_morsel))
-                chunk_indices = list(range(i, chunk_end))
-                null_indices = [-1] * len(chunk_indices)
-                yield align_tables_pyarray(
-                    left_morsel,
-                    right_morsel,
-                    chunk_indices,
-                    null_indices,
+        if n_right == 0:
+            # Right side empty: all left rows unmatched, yield with null right
+            buf_pos = 0
+            for i in range(n_left):
+                bufs.left_buf[buf_pos] = <int32_t>i
+                bufs.right_buf[buf_pos] = -1
+                buf_pos += 1
+                if buf_pos == CHUNK_SIZE:
+                    yield align_tables(
+                        left_morsel, right_morsel,
+                        <int32_t[:CHUNK_SIZE]>bufs.left_buf,
+                        <int32_t[:CHUNK_SIZE]>bufs.right_buf,
+                    )
+                    buf_pos = 0
+            if buf_pos > 0:
+                yield align_tables(
+                    left_morsel, right_morsel,
+                    <int32_t[:buf_pos]>bufs.left_buf,
+                    <int32_t[:buf_pos]>bufs.right_buf,
                 )
             return
 
-    right_hash = _build_probe_hash_map(right_morsel, right_columns)
+    # Track which left rows were matched
+    seen = _JoinFlags(n_left)
 
-    for h, right_rows in right_hash.items_py():
-        left_rows = left_hash.rows_for(h)
-        if not left_rows:
-            continue
-        for l in left_rows:
-            seen_flags[l] = 1
-            left_indexes.extend([l] * len(right_rows))
-            right_indexes.extend(right_rows)
+    right_hashes = right_morsel.hash(right_columns)
+    buf_pos = 0
 
-    if left_indexes:
-        yield align_tables_pyarray(
-            left_morsel,
-            right_morsel,
-            left_indexes,
-            right_indexes,
+    # Match phase: for each right row, find all matching left rows
+    for i in range(n_right):
+        left_rows = left_hash.rows_for(right_hashes[i])
+        for j in range(left_rows.size()):
+            l = <int32_t>left_rows[j]
+            seen.flags[l] = 1
+            bufs.left_buf[buf_pos] = l
+            bufs.right_buf[buf_pos] = <int32_t>i
+            buf_pos += 1
+            if buf_pos == CHUNK_SIZE:
+                yield align_tables(
+                    left_morsel, right_morsel,
+                    <int32_t[:CHUNK_SIZE]>bufs.left_buf,
+                    <int32_t[:CHUNK_SIZE]>bufs.right_buf,
+                )
+                buf_pos = 0
+
+    if buf_pos > 0:
+        yield align_tables(
+            left_morsel, right_morsel,
+            <int32_t[:buf_pos]>bufs.left_buf,
+            <int32_t[:buf_pos]>bufs.right_buf,
         )
 
-    unmatched = [i for i, seen in enumerate(seen_flags) if not seen]
+    # Unmatched left rows: emit with null right side
+    buf_pos = 0
+    for i in range(n_left):
+        if not seen.flags[i]:
+            bufs.left_buf[buf_pos] = <int32_t>i
+            bufs.right_buf[buf_pos] = -1
+            buf_pos += 1
+            if buf_pos == CHUNK_SIZE:
+                yield align_tables(
+                    left_morsel, right_morsel,
+                    <int32_t[:CHUNK_SIZE]>bufs.left_buf,
+                    <int32_t[:CHUNK_SIZE]>bufs.right_buf,
+                )
+                buf_pos = 0
 
-    if unmatched:
-        for i in range(0, len(unmatched), CHUNK_SIZE):
-            chunk_end = min(i + CHUNK_SIZE, len(unmatched))
-            chunk_indices = unmatched[i:chunk_end]
-            null_indices = [-1] * len(chunk_indices)
-
-            yield align_tables_pyarray(
-                left_morsel,
-                right_morsel,
-                chunk_indices,
-                null_indices,
-            )
-
-    return
+    if buf_pos > 0:
+        yield align_tables(
+            left_morsel, right_morsel,
+            <int32_t[:buf_pos]>bufs.left_buf,
+            <int32_t[:buf_pos]>bufs.right_buf,
+        )
 
 
 def right_join(
-    left_morsel,
-    right_morsel,
-    left_columns: List[str],
-    right_columns: List[str],
-    filter_index,
-    left_hash,
-    columns=None,
+    Morsel left_morsel,
+    Morsel right_morsel,
+    list left_columns,
+    list right_columns,
+    object filter_index,
+    object left_hash,
+    object columns=None,
 ):
     """
-    Perform a RIGHT OUTER JOIN using prebuilt hash map and optional filter.
+    Perform a RIGHT OUTER JOIN.
 
-    Accepts Morsels, returns Morsels.
+    Builds a local hash map from the left morsel, then probes it with each right
+    row's hash. Unmatched right rows are emitted with null left side (-1 index).
 
-    Yields:
-        Morsel chunks of the joined result.
+    left_hash is accepted for interface compatibility but unused (right join builds
+    its own local left hash map since self.left_hash is only populated for left outer).
+
+    Yields Morsel chunks of the joined result.
     """
+    cdef _JoinChunkBuffers bufs = _JoinChunkBuffers()
+    cdef _JoinFlags seen = _JoinFlags(0)  # replaced below after n_right is known
+    cdef uint64_t[::1] right_hashes
+    cdef uint8_t[::1] bit_results
+    cdef vector[int64_t] left_rows
+    cdef Py_ssize_t n_left, n_right, i, j, buf_pos
+    cdef int32_t l
+    cdef CarcharJoinIndexWrapper left_hash_table
+    cdef BoolVector mask
 
-    left_hash_table = _build_probe_hash_map(left_morsel, left_columns)
+    n_left = len(left_morsel)
+    n_right = len(right_morsel)
 
-    left_indexes = []
-    right_indexes = []
-    seen_flags = array("b", [0]) * len(right_morsel)
-
+    # Bloom filter pre-filter on left side
     if filter_index is not None:
         bit_results = bloom_filter_check_morsel(filter_index, left_morsel, left_columns)
         if bit_results is not None:
-            mask = _bits_to_bool_vector(bit_results, len(left_morsel))
+            mask = bool_vector_from_bits(&bit_results[0], NULL, n_left)
             left_morsel = left_morsel.filter_mask(mask)
+            n_left = len(left_morsel)
 
-        if len(left_morsel) == 0:
-            for i in range(0, len(right_morsel), CHUNK_SIZE):
-                chunk_end = min(i + CHUNK_SIZE, len(right_morsel))
-                chunk_indices = list(range(i, chunk_end))
-                null_indices = [-1] * len(chunk_indices)
-                yield align_tables_pyarray(
-                    left_morsel,
-                    right_morsel,
-                    null_indices,
-                    chunk_indices,
+        if n_left == 0:
+            # Left side empty: all right rows unmatched, yield with null left
+            buf_pos = 0
+            for i in range(n_right):
+                bufs.left_buf[buf_pos] = -1
+                bufs.right_buf[buf_pos] = <int32_t>i
+                buf_pos += 1
+                if buf_pos == CHUNK_SIZE:
+                    yield align_tables(
+                        left_morsel, right_morsel,
+                        <int32_t[:CHUNK_SIZE]>bufs.left_buf,
+                        <int32_t[:CHUNK_SIZE]>bufs.right_buf,
+                    )
+                    buf_pos = 0
+            if buf_pos > 0:
+                yield align_tables(
+                    left_morsel, right_morsel,
+                    <int32_t[:buf_pos]>bufs.left_buf,
+                    <int32_t[:buf_pos]>bufs.right_buf,
                 )
             return
 
-    right_hashes = right_morsel.hash(right_columns)
-    for i in range(len(right_morsel)):
-        left_rows = left_hash_table.rows_for(right_hashes[i])
-        if left_rows.size() > 0:
-            seen_flags[i] = 1
-            for left_idx in left_rows:
-                left_indexes.append(left_idx)
-                right_indexes.append(i)
+    # Track which right rows were matched
+    seen = _JoinFlags(n_right)
 
-    if left_indexes:
-        yield align_tables_pyarray(
-            left_morsel,
-            right_morsel,
-            left_indexes,
-            right_indexes,
+    left_hash_table = _build_probe_hash_map(left_morsel, left_columns)
+    right_hashes = right_morsel.hash(right_columns)
+    buf_pos = 0
+
+    # Match phase: for each right row, find all matching left rows
+    for i in range(n_right):
+        left_rows = left_hash_table.rows_for(right_hashes[i])
+        for j in range(left_rows.size()):
+            l = <int32_t>left_rows[j]
+            seen.flags[i] = 1
+            bufs.left_buf[buf_pos] = l
+            bufs.right_buf[buf_pos] = <int32_t>i
+            buf_pos += 1
+            if buf_pos == CHUNK_SIZE:
+                yield align_tables(
+                    left_morsel, right_morsel,
+                    <int32_t[:CHUNK_SIZE]>bufs.left_buf,
+                    <int32_t[:CHUNK_SIZE]>bufs.right_buf,
+                )
+                buf_pos = 0
+
+    if buf_pos > 0:
+        yield align_tables(
+            left_morsel, right_morsel,
+            <int32_t[:buf_pos]>bufs.left_buf,
+            <int32_t[:buf_pos]>bufs.right_buf,
         )
 
-    unmatched = [i for i, seen in enumerate(seen_flags) if not seen]
+    # Unmatched right rows: emit with null left side
+    buf_pos = 0
+    for i in range(n_right):
+        if not seen.flags[i]:
+            bufs.left_buf[buf_pos] = -1
+            bufs.right_buf[buf_pos] = <int32_t>i
+            buf_pos += 1
+            if buf_pos == CHUNK_SIZE:
+                yield align_tables(
+                    left_morsel, right_morsel,
+                    <int32_t[:CHUNK_SIZE]>bufs.left_buf,
+                    <int32_t[:CHUNK_SIZE]>bufs.right_buf,
+                )
+                buf_pos = 0
 
-    if unmatched:
-        for i in range(0, len(unmatched), CHUNK_SIZE):
-            chunk_end = min(i + CHUNK_SIZE, len(unmatched))
-            chunk_indices = unmatched[i:chunk_end]
-            null_indices = [-1] * len(chunk_indices)
-
-            yield align_tables_pyarray(
-                left_morsel,
-                right_morsel,
-                null_indices,
-                chunk_indices,
-            )
-
-    return
+    if buf_pos > 0:
+        yield align_tables(
+            left_morsel, right_morsel,
+            <int32_t[:buf_pos]>bufs.left_buf,
+            <int32_t[:buf_pos]>bufs.right_buf,
+        )
 
 
 def full_join(
-    left_morsel,
-    right_morsel,
-    left_columns: List[str],
-    right_columns: List[str],
-    columns=None,
-    **kwargs,
+    Morsel left_morsel,
+    Morsel right_morsel,
+    list left_columns,
+    list right_columns,
+    object filter_index=None,
+    object left_hash=None,
+    object columns=None,
 ):
     """
     Perform a FULL OUTER JOIN.
 
-    Accepts Morsels, returns Morsels.
+    Builds a hash map from the right morsel, probes it with each left row.
+    All left rows are emitted (matched with right rows, or with null right side).
+    Unmatched right rows are then emitted with null left side.
 
-    Yields:
-        Morsel chunks of the joined result.
+    filter_index and left_hash are accepted for interface compatibility but unused.
+
+    Yields Morsel chunks of the joined result.
     """
+    cdef _JoinChunkBuffers bufs = _JoinChunkBuffers()
+    cdef _JoinFlags matched_right = _JoinFlags(0)  # replaced below
+    cdef uint64_t[::1] left_hashes
+    cdef vector[int64_t] right_rows
+    cdef Py_ssize_t n_left, n_right, i, j, buf_pos
+    cdef int32_t r
+    cdef CarcharJoinIndexWrapper right_hash_table
+
+    n_left = len(left_morsel)
+    n_right = len(right_morsel)
+
+    matched_right = _JoinFlags(n_right)
     right_hash_table = _build_probe_hash_map(right_morsel, right_columns)
-
-    left_indexes = []
-    right_indexes = []
-    matched_right = set()
-
     left_hashes = left_morsel.hash(left_columns)
-    for i in range(len(left_morsel)):
+    buf_pos = 0
+
+    # Left pass: emit all left rows, matched or with null right
+    for i in range(n_left):
         right_rows = right_hash_table.rows_for(left_hashes[i])
         if right_rows.size() > 0:
-            for right_idx in right_rows:
-                left_indexes.append(i)
-                right_indexes.append(right_idx)
-                matched_right.add(right_idx)
+            for j in range(right_rows.size()):
+                r = <int32_t>right_rows[j]
+                matched_right.flags[r] = 1
+                bufs.left_buf[buf_pos] = <int32_t>i
+                bufs.right_buf[buf_pos] = r
+                buf_pos += 1
+                if buf_pos == CHUNK_SIZE:
+                    yield align_tables(
+                        left_morsel, right_morsel,
+                        <int32_t[:CHUNK_SIZE]>bufs.left_buf,
+                        <int32_t[:CHUNK_SIZE]>bufs.right_buf,
+                    )
+                    buf_pos = 0
         else:
-            left_indexes.append(i)
-            right_indexes.append(-1)
+            bufs.left_buf[buf_pos] = <int32_t>i
+            bufs.right_buf[buf_pos] = -1
+            buf_pos += 1
+            if buf_pos == CHUNK_SIZE:
+                yield align_tables(
+                    left_morsel, right_morsel,
+                    <int32_t[:CHUNK_SIZE]>bufs.left_buf,
+                    <int32_t[:CHUNK_SIZE]>bufs.right_buf,
+                )
+                buf_pos = 0
 
-    for i in range(len(right_morsel)):
-        if i not in matched_right:
-            left_indexes.append(-1)
-            right_indexes.append(i)
-
-    total_rows = len(left_indexes)
-    chunk_start = 0
-
-    while chunk_start < total_rows:
-        chunk_end = min(chunk_start + CHUNK_SIZE, total_rows)
-        chunk_left = left_indexes[chunk_start : chunk_end]
-        chunk_right = right_indexes[chunk_start : chunk_end]
-
-        yield align_tables_pyarray(
-            left_morsel,
-            right_morsel,
-            chunk_left,
-            chunk_right,
+    if buf_pos > 0:
+        yield align_tables(
+            left_morsel, right_morsel,
+            <int32_t[:buf_pos]>bufs.left_buf,
+            <int32_t[:buf_pos]>bufs.right_buf,
         )
 
-        chunk_start = chunk_end
+    # Right pass: emit unmatched right rows with null left side
+    buf_pos = 0
+    for i in range(n_right):
+        if not matched_right.flags[i]:
+            bufs.left_buf[buf_pos] = -1
+            bufs.right_buf[buf_pos] = <int32_t>i
+            buf_pos += 1
+            if buf_pos == CHUNK_SIZE:
+                yield align_tables(
+                    left_morsel, right_morsel,
+                    <int32_t[:CHUNK_SIZE]>bufs.left_buf,
+                    <int32_t[:CHUNK_SIZE]>bufs.right_buf,
+                )
+                buf_pos = 0
+
+    if buf_pos > 0:
+        yield align_tables(
+            left_morsel, right_morsel,
+            <int32_t[:buf_pos]>bufs.left_buf,
+            <int32_t[:buf_pos]>bufs.right_buf,
+        )
 
 
 class OuterJoinNode(JoinNode):
@@ -305,7 +468,6 @@ class OuterJoinNode(JoinNode):
 
         self.columns = parameters.get("columns")
 
-        # REFACTORED (Session 42): Morsel buffering instead of Arrow table buffering
         self.left_morsels = []
         self.right_morsels = []
         self.left_relation = None
@@ -328,9 +490,7 @@ class OuterJoinNode(JoinNode):
             return f"{self.join_type.upper()} JOIN (USING {','.join(map(format_expression, self.using))})"
         return f"{self.join_type.upper()}"
 
-    def execute(self, Morsel morsel):
-        # Cython-typed locals used for Draken-native bloom-filter checks.
-        # Declared here at the top of the function so cdef is valid (not inside a nested block).
+    def execute(self, morsel):
         cdef Py_ssize_t orig_rows
         cdef uint8_t[::1] bit_results
         cdef object pass_filter_index = self.filter_index
@@ -371,7 +531,7 @@ class OuterJoinNode(JoinNode):
                     orig_rows = len(right_morsel)
                     bit_results = bloom_filter_check_morsel(self.filter_index, right_morsel, self.right_columns)
                     if bit_results is not None:
-                        mask = _bits_to_bool_vector(bit_results, orig_rows)
+                        mask = bool_vector_from_bits(&bit_results[0], NULL, orig_rows)
                         right_morsel = right_morsel.filter_mask(mask)
                         eliminated_rows = orig_rows - len(right_morsel)
                         self.readings["rows_eliminated_by_bloom_filter"] += eliminated_rows

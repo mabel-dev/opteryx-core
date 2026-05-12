@@ -10,10 +10,3 @@ cpdef Morsel align_tables(
     int32_t[::1] source_indices,
     int32_t[::1] append_indices
 )
-
-cpdef Morsel align_tables_pyarray(
-    Morsel source_morsel,
-    Morsel append_morsel,
-    object source_indices,
-    object append_indices
-)

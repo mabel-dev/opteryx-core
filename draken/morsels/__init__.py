@@ -5,6 +5,5 @@ Morsel (batch) data structures for columnar processing.
 """
 
 from draken.morsels.align import align_tables
-from draken.morsels.align import align_tables_pyarray
 
-__all__ = ["align_tables", "align_tables_pyarray"]
+__all__ = ["align_tables"]

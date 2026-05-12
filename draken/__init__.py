@@ -12,8 +12,7 @@ Main exports:
 """
 
 from draken.morsels.align import align_tables
-from draken.morsels.align import align_tables_pyarray
 from draken.morsels.morsel import Morsel
 from draken.vectors.vector import Vector
 
-__all__ = ("Vector", "Morsel", "align_tables", "align_tables_pyarray")
+__all__ = ("Vector", "Morsel", "align_tables")
