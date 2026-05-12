@@ -1715,6 +1715,29 @@ cdef Float64Vector from_rle_builder(
     return vec
 
 
+cdef Float64Vector from_decoded(
+    void* data,
+    uint8_t* null_bitmap,
+    size_t length,
+):
+    """Wrap externally-malloc'd data + null_bitmap into a Float64Vector.
+
+    Ownership transfers to the Vector — both pointers must come from `malloc`
+    (or be NULL). See `Int64Vector.from_decoded` for the design rationale.
+    """
+    cdef Float64Vector vec = Float64Vector(0, True)
+    vec.ptr = <DrakenFixedBuffer*> malloc(sizeof(DrakenFixedBuffer))
+    if vec.ptr == NULL:
+        raise MemoryError()
+    vec.ptr.type = DRAKEN_FLOAT64
+    vec.ptr.itemsize = 8
+    vec.ptr.length = length
+    vec.ptr.data = data
+    vec.ptr.null_bitmap = null_bitmap
+    vec.owns_data = True
+    return vec
+
+
 cdef Float64Vector from_arrow(object array):
     import pyarrow as pa
 

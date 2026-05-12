@@ -155,20 +155,20 @@ cdef class CppIOPipeline:
         cdef str col_name
         cdef const uint8_t* col_ptr
         cdef Py_ssize_t col_len
-        cdef const uint8_t[::1] col_view
 
         for i in range(result.column_ipc_bytes.size()):
             col_name = result.column_names[i].decode('utf-8')
-            # Zero-copy handoff: commit() uses the buffer protocol, so a typed
-            # memoryview over the C++ vector storage is enough. Avoids a Python
-            # bytes() copy of the entire column IPC payload.
+            # Zero-copy handoff: commit raw pointer + length directly to the
+            # pool. Skips the typed-memoryview / buffer-protocol overhead and
+            # runs the actual commit under nogil.
             col_len = result.column_ipc_bytes[i].size()
             if col_len == 0:
-                ref_id = self.pool.commit(b"")
+                with nogil:
+                    ref_id = self.pool.commit(NULL, 0)
             else:
                 col_ptr = result.column_ipc_bytes[i].data()
-                col_view = <const uint8_t[:col_len]>col_ptr
-                ref_id = self.pool.commit(col_view)
+                with nogil:
+                    ref_id = self.pool.commit(<const void*>col_ptr, col_len)
             if ref_id == -1:
                 return {
                     'success': False,
@@ -212,17 +212,17 @@ cdef class CppIOPipeline:
         cdef str col_name
         cdef const uint8_t* col_ptr
         cdef Py_ssize_t col_len
-        cdef const uint8_t[::1] col_view
 
         for i in range(result.column_ipc_bytes.size()):
             col_name = result.column_names[i].decode('utf-8')
             col_len = result.column_ipc_bytes[i].size()
             if col_len == 0:
-                ref_id = self.pool.commit(b"")
+                with nogil:
+                    ref_id = self.pool.commit(NULL, 0)
             else:
                 col_ptr = result.column_ipc_bytes[i].data()
-                col_view = <const uint8_t[:col_len]>col_ptr
-                ref_id = self.pool.commit(col_view)
+                with nogil:
+                    ref_id = self.pool.commit(<const void*>col_ptr, col_len)
             if ref_id == -1:
                 return {
                     'success': False,

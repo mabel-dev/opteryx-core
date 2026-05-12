@@ -1187,6 +1187,30 @@ cdef class BoolVector(Vector):
         return f"<BoolVector len={buf_length(self.ptr)} values={vals}>"
 
 
+cdef BoolVector from_decoded(
+    void* data,
+    uint8_t* null_bitmap,
+    size_t length,
+):
+    """Wrap externally-malloc'd bit-packed data + null_bitmap into a BoolVector.
+
+    `data` is a bit-packed payload of ceil(length/8) bytes; `length` is the
+    logical row count. Ownership transfers to the Vector — both pointers must
+    come from `malloc` (or be NULL).
+    """
+    cdef BoolVector vec = BoolVector(0, True)
+    vec.ptr = <DrakenFixedBuffer*> malloc(sizeof(DrakenFixedBuffer))
+    if vec.ptr == NULL:
+        raise MemoryError()
+    vec.ptr.type = DRAKEN_BOOL
+    vec.ptr.itemsize = 1   # logical itemsize; storage is bit-packed
+    vec.ptr.length = length
+    vec.ptr.data = data
+    vec.ptr.null_bitmap = null_bitmap
+    vec.owns_data = True
+    return vec
+
+
 cdef BoolVector from_arrow(object array):
     cdef BoolVector vec = BoolVector(0, True)
     vec.ptr = <DrakenFixedBuffer*> malloc(sizeof(DrakenFixedBuffer))

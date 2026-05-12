@@ -50,9 +50,10 @@ cdef class ParquetFooterBytesCache:
         # Update LRU access history
         self.lru.get(path.encode())
 
-        # Read from pool and return as bytes (one copy for safety)
+        # Read from pool and return as bytes (one copy for safety).
+        # Consumer is a Python parquet metadata parser, so we use the py_ surface.
         ref_id = self._path_to_ref[path]
-        return self.pool.read(ref_id, False, False)
+        return self.pool.py_read(ref_id, False, False)
 
     cpdef bint put(self, str path, const uint8_t[::1] envelope):
         """Store footer envelope in cache with LRU tracking.
@@ -69,8 +70,17 @@ cdef class ParquetFooterBytesCache:
         Returns:
             bool: True if stored successfully, False if pool exhausted
         """
+        cdef int64_t env_len = envelope.shape[0]
+        cdef const void* env_ptr = NULL
+        cdef int64_t ref_id
+        cdef int64_t old_ref
+
+        if env_len > 0:
+            env_ptr = <const void*>&envelope[0]
+
         while True:
-            ref_id = self.pool.commit(envelope)
+            with nogil:
+                ref_id = self.pool.commit(env_ptr, env_len)
             if ref_id != -1:  # Success
                 self._path_to_ref[path] = ref_id
                 self.lru.set(path.encode(), b'', True)  # Dummy value, evict=True
@@ -84,13 +94,16 @@ cdef class ParquetFooterBytesCache:
 
             evict_path = evict_key.decode()
             old_ref = self._path_to_ref.pop(evict_path)
-            self.pool.release(old_ref)
+            with nogil:
+                self.pool.release(old_ref)
 
     cpdef void clear(self):
         """Clear all cached footers and reset pool."""
+        cdef int64_t ref_id
         # Release all refs from pool
         for ref_id in self._path_to_ref.values():
-            self.pool.release(ref_id)
+            with nogil:
+                self.pool.release(ref_id)
 
         self._path_to_ref.clear()
         self.lru.clear(False)
@@ -107,7 +120,8 @@ cdef class ParquetFooterBytesCache:
                 - lru_hits: LRU hits
                 - lru_misses: LRU misses
         """
-        pool_stats = self.pool.get_stats()
+        # Python-surface getter — consumer is a Python dict
+        pool_stats = self.pool.py_get_stats()
         lru_stats = self.lru.stats
 
         return {

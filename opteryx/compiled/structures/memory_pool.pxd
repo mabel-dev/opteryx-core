@@ -1,53 +1,96 @@
-# Cython declaration file for MemoryPool
-# Allows other .pyx modules to use typed references via cimport
-
-from libc.stdint cimport int64_t, uint8_t
+# distutils: language = c++
+# cython: language_level=3
+from libc.stdint cimport int64_t, uint8_t, uintptr_t
 from libcpp.vector cimport vector
-from libcpp.unordered_map cimport unordered_map
+from libcpp.string cimport string
 
-cdef struct MemorySegment:
-    int64_t start
-    int64_t length
-    int64_t latches
-    int64_t ref_id
-    bint is_free
+cdef extern from "memory_pool.hpp" namespace "opteryx":
+    cdef struct PoolStats:
+        int64_t total_size
+        int64_t used_size
+        int64_t free_size
+        int64_t used_blocks
+        int64_t free_blocks
+        int64_t largest_free_block
+        int64_t fragmentation
+        int64_t commits
+        int64_t failed_commits
+        int64_t reads
+        int64_t releases
+        int64_t l1_compactions
+        int64_t l2_compactions
+        int64_t resizes
 
-cdef struct SegmentMetadata:
-    int64_t start
-    int64_t length
-    int64_t latches
-    int64_t orig_length
+    cdef struct ReadResult:
+        const void* ptr
+        int64_t length
+
+    cdef struct ReserveResult:
+        int64_t ref_id
+        void* ptr
+        int64_t capacity
+
+    cdef struct MetadataSnapshot:
+        int64_t ref_id
+        int64_t start
+        int64_t length
+        int64_t latches
+        int64_t orig_length
+
+    cdef struct FreeSegmentSnapshot:
+        int64_t start
+        int64_t length
+
+    cdef cppclass CppMemoryPool "opteryx::MemoryPool":
+        CppMemoryPool(int64_t size, string name, bint auto_resize, int64_t alignment) except +
+        int64_t commit(const void* data, int64_t length) except + nogil
+        ReadResult read(int64_t ref_id, bint latch) except + nogil
+        void release(int64_t ref_id) except + nogil
+        void latch(int64_t ref_id) except + nogil
+        void unlatch(int64_t ref_id) except + nogil
+        ReserveResult reserve_for_write(int64_t size) except + nogil
+        void finalize_commit(int64_t ref_id, int64_t actual_length) except + nogil
+        void clear() except + nogil
+        int64_t available_space() except + nogil
+        int64_t get_fragmentation() except + nogil
+        PoolStats get_stats() except + nogil
+        void level1_compaction() except + nogil
+        void level2_compaction() except + nogil
+        vector[MetadataSnapshot] snapshot_metadata() except + nogil
+        vector[FreeSegmentSnapshot] snapshot_free_segments() except + nogil
+
 
 cdef class MemoryPool:
-    cdef:
-        unsigned char* pool
-        public int64_t size
-        public int64_t used_size
-        public vector[MemorySegment] segments
-        unordered_map[int64_t, SegmentMetadata] c_metadata
-        public str name
-        public int64_t commits, failed_commits, reads, read_locks
-        public int64_t l1_compaction, l2_compaction, releases, resizes
-        object lock
-        int64_t next_ref_id
-        int64_t alignment
-        bint auto_resize
+    cdef CppMemoryPool* _pool
 
-    cpdef int64_t commit(self, const uint8_t[::1] data)
-    cpdef bytes read(self, int64_t ref_id, bint zero_copy, bint latch)
-    cpdef void release(self, int64_t ref_id)
-    cpdef void latch(self, int64_t ref_id)
-    cpdef void unlatch(self, int64_t ref_id)
-    cpdef void clear(self)
-    cpdef dict get_stats(self)
-    cpdef list get_free_segments(self)
-    cpdef int64_t get_fragmentation(self)
-    cpdef tuple reserve_for_write_ptr(self, int64_t size)
-    cpdef void finalize_commit(self, int64_t ref_id, int64_t actual_length)
-    cpdef void _level1_compaction(self)
-    cpdef void _level2_compaction(self)
-    cdef void _print_stats(self)
-    cdef bint _resize_pool(self, int64_t new_size)
-    cdef inline int64_t _find_best_fit_segment(self, int64_t size)
-    cdef inline void _merge_adjacent_free_segments(self)
-    cdef void _defragment_memory(self)
+    # ─── Cython-native surface (no Python objects, nogil-safe) ──────────────
+    cdef int64_t        commit(self, const void* data, int64_t length)               except + nogil
+    cdef ReadResult     read(self, int64_t ref_id, bint latch)                       except + nogil
+    cdef ReserveResult  reserve_for_write(self, int64_t size)                        except + nogil
+    cdef void           finalize_commit(self, int64_t ref_id, int64_t actual_length) except + nogil
+    cdef void           release(self, int64_t ref_id)                                except + nogil
+    cdef void           latch(self, int64_t ref_id)                                  except + nogil
+    cdef void           unlatch(self, int64_t ref_id)                                except + nogil
+    cdef void           clear(self)                                                  except + nogil
+    cdef int64_t        available_space(self)                                        except + nogil
+    cdef int64_t        get_fragmentation(self)                                      except + nogil
+    cdef void           level1_compaction(self)                                      except + nogil
+    cdef void           level2_compaction(self)                                      except + nogil
+    cdef vector[MetadataSnapshot]    snapshot_metadata(self)                         except + nogil
+    cdef vector[FreeSegmentSnapshot] snapshot_free_segments(self)                    except + nogil
+
+    # ─── Python surface (py_* prefix; for tests and rare Python callers) ────
+    cpdef int64_t  py_commit(self, const uint8_t[::1] data)
+    cpdef object   py_read(self, int64_t ref_id, bint zero_copy=*, bint latch=*)
+    cpdef tuple    py_reserve_for_write_ptr(self, int64_t size)
+    cpdef void     py_finalize_commit(self, int64_t ref_id, int64_t actual_length)
+    cpdef void     py_release(self, int64_t ref_id)
+    cpdef void     py_latch(self, int64_t ref_id)
+    cpdef void     py_unlatch(self, int64_t ref_id)
+    cpdef void     py_clear(self)
+    cpdef int64_t  py_available_space(self)
+    cpdef int64_t  py_get_fragmentation(self)
+    cpdef dict     py_get_stats(self)
+    cpdef list     py_get_free_segments(self)
+    cpdef void     _py_level1_compaction(self)
+    cpdef void     _py_level2_compaction(self)

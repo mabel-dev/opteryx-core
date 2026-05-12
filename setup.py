@@ -990,8 +990,13 @@ extensions = [
     ),
     Extension(
         "opteryx.compiled.structures.column_deserializer",
-        sources=["opteryx/compiled/structures/column_deserializer.pyx"],
-        include_dirs=include_dirs,
+        sources=[
+            "opteryx/compiled/structures/column_deserializer.pyx",
+            "src/cpp/ipc_deserialize.cpp",
+        ],
+        # column_deserializer.pyx does `cdef extern from "ipc_deserialize.hpp"`;
+        # add src/cpp to the include path so Cython can resolve the header.
+        include_dirs=include_dirs + ["src/cpp"],
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
@@ -1005,8 +1010,11 @@ extensions = [
     ),
     Extension(
         "opteryx.compiled.structures.memory_pool",
-        sources=["opteryx/compiled/structures/memory_pool.pyx"],
-        include_dirs=include_dirs,
+        sources=[
+            "opteryx/compiled/structures/memory_pool.pyx",
+            "src/cpp/memory_pool.cpp",
+        ],
+        include_dirs=include_dirs + ["src/cpp"],
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),

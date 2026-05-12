@@ -1801,6 +1801,35 @@ cdef Int64Vector from_rle_builder(
     return vec
 
 
+cdef Int64Vector from_decoded(
+    void* data,
+    uint8_t* null_bitmap,
+    size_t length,
+):
+    """Wrap externally-malloc'd data + null_bitmap into an Int64Vector.
+
+    Ownership of `data` and `null_bitmap` transfers to the Vector — both must
+    have been allocated with the C standard library `malloc` (or be NULL),
+    because `free_fixed_buffer` releases them with `free()` on dealloc.
+
+    Used by the C++ IPC deserialiser (`src/cpp/ipc_deserialize.cpp`) to
+    transfer ownership of nogil-allocated buffers without a second copy.
+    """
+    cdef Int64Vector vec = Int64Vector(0, True)   # wrap=True: no alloc
+    vec.ptr = <DrakenFixedBuffer*> malloc(sizeof(DrakenFixedBuffer))
+    if vec.ptr == NULL:
+        # We have not yet taken ownership of data/null_bitmap; the caller
+        # frees them on a MemoryError raised from here.
+        raise MemoryError()
+    vec.ptr.type = DRAKEN_INT64
+    vec.ptr.itemsize = 8
+    vec.ptr.length = length
+    vec.ptr.data = data
+    vec.ptr.null_bitmap = null_bitmap
+    vec.owns_data = True
+    return vec
+
+
 cdef Int64Vector from_arrow(object array):
     import pyarrow as pa
 

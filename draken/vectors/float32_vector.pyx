@@ -1483,6 +1483,29 @@ cdef Float32Vector from_sequence(float[::1] data):
     return vec
 
 
+cdef Float32Vector from_decoded(
+    void* data,
+    uint8_t* null_bitmap,
+    size_t length,
+):
+    """Wrap externally-malloc'd data + null_bitmap into a Float32Vector.
+
+    Ownership transfers to the Vector — both pointers must come from `malloc`
+    (or be NULL). See `Int64Vector.from_decoded` for the design rationale.
+    """
+    cdef Float32Vector vec = Float32Vector(0, True)
+    vec.ptr = <DrakenFixedBuffer*> malloc(sizeof(DrakenFixedBuffer))
+    if vec.ptr == NULL:
+        raise MemoryError()
+    vec.ptr.type = DRAKEN_FLOAT32
+    vec.ptr.itemsize = 4
+    vec.ptr.length = length
+    vec.ptr.data = data
+    vec.ptr.null_bitmap = null_bitmap
+    vec.owns_data = True
+    return vec
+
+
 cdef Float32Vector from_arrow(object array):
     """Zero-copy wrap of a PyArrow float32 array as Float32Vector."""
     cdef Float32Vector vec = Float32Vector(0, True)

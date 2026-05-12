@@ -68,6 +68,11 @@ cdef class Float64Vector(Vector):
 
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 
+cdef Float64Vector from_decoded(
+    void* data,
+    uint8_t* null_bitmap,
+    size_t length,
+)
 cdef Float64Vector from_arrow(object array)
 cdef Float64Vector from_dict(const int32_t[::1] codes, const double[::1] dictionary)
 cdef Float64Vector from_dict_nullable(

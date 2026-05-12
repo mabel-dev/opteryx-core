@@ -9,26 +9,73 @@ Deserialize IPC blobs from MemoryPool into Draken vectors.
 Reads the binary format produced by ipc_serialize.hpp using typed pointer
 arithmetic — no struct module, no json, no Python objects in the hot path.
 
-All vectors are constructed with owned memory (alloc + memcpy) so there are
-no lifetime dependencies on the MemoryPool read buffer.
+Fixed-width tags (1..5) are dispatched into the C++ deserialiser in
+``src/cpp/ipc_deserialize.cpp`` so the malloc + memcpy of the destination
+buffer happens with the GIL released. Dict/string tags (6..10) stay on the
+existing Cython path because their Vector internals (codes, packed-dict
+DrakenVarBuffer, string arena) need bespoke ownership-transfer factories
+to move off the GIL safely; that's deliberately scoped out of this change.
+
+All vectors end up with owned memory (Cython or C++ allocated, freed by the
+Vector's dealloc) so there are no lifetime dependencies on the MemoryPool
+read buffer after this function returns.
 """
 
 from libc.stdint cimport uint8_t, int32_t, int64_t, uint32_t, uint64_t
+from libc.stddef cimport size_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy
+from libcpp.vector cimport vector
 
-from opteryx.compiled.structures.memory_pool cimport MemoryPool
+from opteryx.compiled.structures.memory_pool cimport MemoryPool, ReadResult, CppMemoryPool
 
 from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.int64_vector cimport from_decoded as int64_from_decoded
 from draken.vectors.int64_vector cimport from_packed_dict as int64_from_packed_dict
 from draken.vectors.int64_vector cimport make_int64_dict_only
 from draken.vectors.float64_vector cimport Float64Vector
+from draken.vectors.float64_vector cimport from_decoded as float64_from_decoded
 from draken.vectors.float64_vector cimport from_packed_dict as float64_from_packed_dict
 from draken.vectors.float64_vector cimport make_float64_dict_only
 from draken.vectors.float32_vector cimport Float32Vector
+from draken.vectors.float32_vector cimport from_decoded as float32_from_decoded
 from draken.vectors.float32_vector cimport from_packed_dict as float32_from_packed_dict
 from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.bool_vector cimport from_decoded as bool_from_decoded
 from draken.vectors.string_vector cimport StringVector, from_packed_dict, from_dict_buffers, make_string_dict_only
+
+
+cdef extern from "ipc_deserialize.hpp" namespace "opteryx":
+    cdef enum IpcKind:
+        IpcKind_Int64   "opteryx::IpcKind::Int64"
+        IpcKind_Float32 "opteryx::IpcKind::Float32"
+        IpcKind_Float64 "opteryx::IpcKind::Float64"
+        IpcKind_Bool    "opteryx::IpcKind::Bool"
+
+    cdef struct DecodedFixedColumn:
+        IpcKind  kind
+        uint32_t num_rows
+        void*    data
+        uint8_t* null_bitmap
+        int      status
+        uint8_t  tag
+
+    void deserialize_fixed_column(const uint8_t* data, int64_t length,
+                                  DecodedFixedColumn& out) nogil
+
+    void deserialize_row_group_fixed(CppMemoryPool& pool,
+                                     const int64_t* ref_ids,
+                                     size_t n_cols,
+                                     DecodedFixedColumn* out) nogil
+
+# Status codes mirror DeserializeStatus in ipc_deserialize.hpp. Anything
+# non-zero except kStatusNotHandled is a hard error; kStatusNotHandled means
+# the C++ side identified a dict/string tag and we fall back to Cython.
+DEF STATUS_OK           = 0
+DEF STATUS_TRUNCATED    = 1
+DEF STATUS_OOM          = 2
+DEF STATUS_UNKNOWN_TAG  = 3
+DEF STATUS_NOT_HANDLED  = 4
 
 # Type tags — must match ipc_serialize.hpp
 DEF TAG_INT64       = 1
@@ -62,87 +109,11 @@ cdef inline uint8_t* _copy_null_bitmap(const uint8_t* src, uint32_t nbytes) exce
     return dst
 
 
-cdef object _build_int64(const uint8_t* p, uint32_t num_rows,
-                          const uint8_t* null_bitmap, uint32_t null_bitmap_len):
-    cdef uint32_t data_len
-    p = _read_u32(p, &data_len)
-    cdef uint32_t n = data_len >> 3  # / sizeof(int64_t)
-
-    cdef Int64Vector vec = Int64Vector(<size_t>n)
-    if data_len > 0:
-        memcpy(vec.ptr.data, p, data_len)
-    if null_bitmap_len > 0:
-        vec.ptr.null_bitmap = _copy_null_bitmap(null_bitmap, null_bitmap_len)
-    else:
-        vec.ptr.null_bitmap = NULL
-    return vec
-
-
-cdef object _build_int32(const uint8_t* p, uint32_t num_rows,
-                          const uint8_t* null_bitmap, uint32_t null_bitmap_len):
-    """Widen int32 → int64 at IPC decode time."""
-    cdef uint32_t data_len
-    p = _read_u32(p, &data_len)
-    cdef uint32_t n = data_len >> 2  # / sizeof(int32_t)
-
-    cdef Int64Vector vec = Int64Vector(<size_t>n)
-    cdef int64_t* dst = <int64_t*>vec.ptr.data
-    cdef const int32_t* src = <const int32_t*>p
-    cdef uint32_t i
-    for i in range(n):
-        dst[i] = <int64_t>src[i]
-    if null_bitmap_len > 0:
-        vec.ptr.null_bitmap = _copy_null_bitmap(null_bitmap, null_bitmap_len)
-    else:
-        vec.ptr.null_bitmap = NULL
-    return vec
-
-
-cdef object _build_float32(const uint8_t* p, uint32_t num_rows,
-                            const uint8_t* null_bitmap, uint32_t null_bitmap_len):
-    cdef uint32_t data_len
-    p = _read_u32(p, &data_len)
-    cdef uint32_t n = data_len >> 2  # / sizeof(float)
-
-    cdef Float32Vector vec = Float32Vector(<size_t>n)
-    if data_len > 0:
-        memcpy(vec.ptr.data, p, data_len)
-    if null_bitmap_len > 0:
-        vec.ptr.null_bitmap = _copy_null_bitmap(null_bitmap, null_bitmap_len)
-    else:
-        vec.ptr.null_bitmap = NULL
-    return vec
-
-
-cdef object _build_float64(const uint8_t* p, uint32_t num_rows,
-                            const uint8_t* null_bitmap, uint32_t null_bitmap_len):
-    cdef uint32_t data_len
-    p = _read_u32(p, &data_len)
-    cdef uint32_t n = data_len >> 3  # / sizeof(double)
-
-    cdef Float64Vector vec = Float64Vector(<size_t>n)
-    if data_len > 0:
-        memcpy(vec.ptr.data, p, data_len)
-    if null_bitmap_len > 0:
-        vec.ptr.null_bitmap = _copy_null_bitmap(null_bitmap, null_bitmap_len)
-    else:
-        vec.ptr.null_bitmap = NULL
-    return vec
-
-
-cdef object _build_bool(const uint8_t* p, uint32_t num_rows,
-                         const uint8_t* null_bitmap, uint32_t null_bitmap_len):
-    cdef uint32_t data_len
-    p = _read_u32(p, &data_len)
-
-    cdef BoolVector vec = BoolVector(<size_t>data_len)
-    if data_len > 0:
-        memcpy(vec.ptr.data, p, data_len)
-    if null_bitmap_len > 0:
-        vec.ptr.null_bitmap = _copy_null_bitmap(null_bitmap, null_bitmap_len)
-    else:
-        vec.ptr.null_bitmap = NULL
-    return vec
+# Fixed-width column builders (_build_int64, _build_int32, _build_float32,
+# _build_float64, _build_bool) used to live here. They have been replaced by
+# the C++ implementation in src/cpp/ipc_deserialize.cpp, which performs the
+# same malloc + memcpy with the GIL released. The dispatch happens in
+# deserialize_column below.
 
 
 cdef object _build_numeric_dict_int64(const uint8_t* p, uint32_t num_rows,
@@ -304,54 +275,193 @@ cdef object _build_string_plain(const uint8_t* p, uint32_t num_rows,
     return vec
 
 
+cdef inline object _wrap_decoded_fixed(DecodedFixedColumn& dc):
+    """Transfer ownership of the malloc'd buffers in `dc` into a Draken Vector.
+
+    Called with the GIL held, after the nogil C++ deserialiser has populated
+    `dc`. On any failure between buffer transfer and Vector construction the
+    caller's responsibility is to free dc.data/dc.null_bitmap — but
+    `from_decoded` only raises on the small `malloc(sizeof(DrakenFixedBuffer))`
+    inside, and in that case the Vector has not yet taken ownership, so we
+    must release the buffers ourselves.
+    """
+    cdef object vec
+    try:
+        if dc.kind == IpcKind_Int64:
+            vec = int64_from_decoded(dc.data, dc.null_bitmap, <size_t>dc.num_rows)
+        elif dc.kind == IpcKind_Float64:
+            vec = float64_from_decoded(dc.data, dc.null_bitmap, <size_t>dc.num_rows)
+        elif dc.kind == IpcKind_Float32:
+            vec = float32_from_decoded(dc.data, dc.null_bitmap, <size_t>dc.num_rows)
+        elif dc.kind == IpcKind_Bool:
+            vec = bool_from_decoded(dc.data, dc.null_bitmap, <size_t>dc.num_rows)
+        else:
+            # Unreachable under normal flow — the C++ side only sets these four kinds.
+            free(dc.data)
+            free(dc.null_bitmap)
+            raise ValueError(f"Unexpected IpcKind from C++ deserialiser: {<int>dc.kind}")
+    except:
+        # from_decoded raised before taking ownership; release the malloc'd buffers.
+        free(dc.data)
+        free(dc.null_bitmap)
+        raise
+    return vec
+
+
 cpdef object deserialize_column(int64_t ref_id, MemoryPool pool):
-    """Deserialize one IPC blob from MemoryPool into a Draken vector."""
-    cdef bytes raw = pool.read(ref_id, False, False)
-    if not raw:
+    """Deserialize one IPC blob from MemoryPool into a Draken vector.
+
+    Uses the Cython-native pool surface: reads the raw pointer under a latch
+    (preventing concurrent compaction from moving the segment), parses
+    directly from pool memory with no intermediate ``bytes`` copy, then
+    unlatches in a finally block.
+
+    Fixed-width tags (int64, int32→int64, float32, float64, bool) are
+    dispatched into the C++ deserialiser, which performs the destination
+    malloc + memcpy with the GIL released and returns owned buffers that
+    `_wrap_decoded_fixed` slots into a Draken Vector.
+
+    Dict/string tags (6..10) still parse in this Cython function — porting
+    them requires ownership-transfer factories for codes/dict_values/arena,
+    which is the natural follow-on to this change.
+    """
+    cdef ReadResult r
+    cdef const uint8_t* p
+    cdef uint8_t tag
+    cdef uint32_t num_rows
+    cdef uint32_t null_bitmap_len
+    cdef const uint8_t* null_bitmap
+    cdef object result
+    cdef DecodedFixedColumn dc
+
+    with nogil:
+        r = pool.read(ref_id, True)  # latch=True pins the segment
+
+    if r.length == 0:
+        with nogil:
+            pool.unlatch(ref_id)
         raise ValueError(f"Failed to read ref_id {ref_id} from MemoryPool")
 
-    cdef const uint8_t* p = <const uint8_t*><char*>raw
+    try:
+        p = <const uint8_t*>r.ptr
 
-    cdef uint8_t tag = p[0]
-    p += 1
+        # Peek the tag (one byte) so we know whether to dispatch to C++ or
+        # take the Cython dict/string path. Reading one byte from latched pool
+        # memory is essentially free.
+        tag = p[0]
 
-    cdef uint32_t num_rows
-    p = _read_u32(p, &num_rows)
+        if (tag == TAG_INT64 or tag == TAG_INT32 or tag == TAG_FLOAT32
+                or tag == TAG_FLOAT64 or tag == TAG_BOOL):
+            # Fixed-width: full IPC parse + malloc + memcpy happens in C++
+            # with the GIL released. The destination buffers come back already
+            # owned-by-malloc; we transfer them into a Vector under the GIL.
+            with nogil:
+                deserialize_fixed_column(<const uint8_t*>r.ptr, r.length, dc)
 
-    cdef uint32_t null_bitmap_len
-    p = _read_u32(p, &null_bitmap_len)
-    cdef const uint8_t* null_bitmap = p
-    p += null_bitmap_len
+            if dc.status != STATUS_OK:
+                # All non-OK statuses on a fixed-width tag are hard errors —
+                # the kStatusNotHandled path is unreachable here because we
+                # only call C++ for tags in the fixed-width range.
+                free(dc.data)
+                free(dc.null_bitmap)
+                if dc.status == STATUS_OOM:
+                    raise MemoryError()
+                raise ValueError(
+                    f"C++ IPC deserialise failed: tag={tag} status={dc.status}"
+                )
+            result = _wrap_decoded_fixed(dc)
+        else:
+            # Dict / string tags — parse in Cython as before. Advance past the
+            # IPC header to the type-specific body.
+            p += 1
+            p = _read_u32(p, &num_rows)
+            p = _read_u32(p, &null_bitmap_len)
+            null_bitmap = p
+            p += null_bitmap_len
 
-    if tag == TAG_INT64:
-        return _build_int64(p, num_rows, null_bitmap, null_bitmap_len)
-    elif tag == TAG_INT32:
-        return _build_int32(p, num_rows, null_bitmap, null_bitmap_len)
-    elif tag == TAG_FLOAT32:
-        return _build_float32(p, num_rows, null_bitmap, null_bitmap_len)
-    elif tag == TAG_FLOAT64:
-        return _build_float64(p, num_rows, null_bitmap, null_bitmap_len)
-    elif tag == TAG_BOOL:
-        return _build_bool(p, num_rows, null_bitmap, null_bitmap_len)
-    elif tag == TAG_STR_DICT:
-        return _build_string_dict(p, num_rows, null_bitmap, null_bitmap_len)
-    elif tag == TAG_STR_PLAIN:
-        return _build_string_plain(p, num_rows, null_bitmap, null_bitmap_len)
-    elif tag == TAG_INT64_DICT:
-        return _build_numeric_dict_int64(p, num_rows, null_bitmap, null_bitmap_len)
-    elif tag == TAG_FLOAT32_DICT:
-        return _build_numeric_dict_float32(p, num_rows, null_bitmap, null_bitmap_len)
-    elif tag == TAG_FLOAT64_DICT:
-        return _build_numeric_dict_float64(p, num_rows, null_bitmap, null_bitmap_len)
-    else:
-        raise ValueError(f"Unknown IPC type tag: {tag}")
+            if tag == TAG_STR_DICT:
+                result = _build_string_dict(p, num_rows, null_bitmap, null_bitmap_len)
+            elif tag == TAG_STR_PLAIN:
+                result = _build_string_plain(p, num_rows, null_bitmap, null_bitmap_len)
+            elif tag == TAG_INT64_DICT:
+                result = _build_numeric_dict_int64(p, num_rows, null_bitmap, null_bitmap_len)
+            elif tag == TAG_FLOAT32_DICT:
+                result = _build_numeric_dict_float32(p, num_rows, null_bitmap, null_bitmap_len)
+            elif tag == TAG_FLOAT64_DICT:
+                result = _build_numeric_dict_float64(p, num_rows, null_bitmap, null_bitmap_len)
+            else:
+                raise ValueError(f"Unknown IPC type tag: {tag}")
+    finally:
+        with nogil:
+            pool.unlatch(ref_id)
+
+    return result
 
 
 cpdef dict deserialize_row_group(dict ref_ids, MemoryPool pool):
-    """Deserialize all columns for a row group from MemoryPool into Draken vectors."""
+    """Deserialize all columns for a row group from MemoryPool into Draken vectors.
+
+    Fixed-width columns (tags 1..5) are deserialised in a single batched C++
+    call that performs pool.read/parse/malloc/memcpy/unlatch for every column
+    in one nogil window — collapsing per-column GIL transitions from O(n) to
+    O(1) per row group.
+
+    Dict/string columns (tags 6..10) come back as ``kStatusNotHandled`` from
+    the batched driver (which unlatches them) and are then routed through the
+    existing single-column ``deserialize_column`` path, which re-latches under
+    the pool's internal mutex and parses in Cython.
+    """
+    cdef Py_ssize_t n = len(ref_ids)
     cdef dict row_group = {}
+    if n == 0:
+        return row_group
+
+    cdef list names = list(ref_ids.keys())
+    cdef vector[int64_t] refs
+    cdef DecodedFixedColumn* outs
+    cdef Py_ssize_t i
+    cdef str col_name
     cdef int64_t ref_id
-    for col_name, ref_id in ref_ids.items():
-        row_group[col_name] = deserialize_column(ref_id, pool)
-        pool.release(ref_id)
+    cdef int status
+    cdef object vec
+
+    refs.reserve(n)
+    for r in ref_ids.values():
+        refs.push_back(<int64_t>r)
+
+    outs = <DecodedFixedColumn*>malloc(<size_t>n * sizeof(DecodedFixedColumn))
+    if outs == NULL:
+        raise MemoryError()
+
+    try:
+        with nogil:
+            deserialize_row_group_fixed(
+                pool._pool[0], refs.data(), <size_t>n, outs
+            )
+
+        for i in range(n):
+            col_name = names[i]
+            ref_id = refs[i]
+            status = outs[i].status
+
+            if status == STATUS_OK:
+                vec = _wrap_decoded_fixed(outs[i])
+            elif status == STATUS_NOT_HANDLED:
+                # Dict / string tag — fall back to the Cython per-column path
+                # which re-latches the (still-pinned-by-its-own-ref) segment.
+                vec = deserialize_column(ref_id, pool)
+            elif status == STATUS_OOM:
+                raise MemoryError()
+            else:
+                raise ValueError(
+                    f"C++ batched IPC deserialise failed: "
+                    f"ref={ref_id} status={status} tag={outs[i].tag}"
+                )
+
+            row_group[col_name] = vec
+            with nogil:
+                pool.release(ref_id)
+    finally:
+        free(outs)
+
     return row_group
