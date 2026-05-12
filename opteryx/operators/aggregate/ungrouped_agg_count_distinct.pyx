@@ -32,14 +32,10 @@ cdef class CountDistinctAggregate(UngroupedAggregate):
         cdef const int64_t* counts
         cdef uint64_t h
 
-        # Dict / RLE encoded fast paths: only worthwhile when the unique
-        # value count is meaningfully smaller than the row count.  At K ~ N
-        # the per-entry hash cost (one at a time) loses to the dense path's
-        # SIMD-batched hashing.  Threshold K <= N/4 — empirically chosen to
-        # preserve the big wins on low-cardinality data without regressing
-        # high-cardinality URL-style columns.
+        # For COUNT DISTINCT, hashing dict entries is always cheaper than
+        # hashing all rows: dict_size <= nrows always for dict-encoded columns,
+        # and we only insert dict_size unique hashes vs. nrows duplicate ones.
         cdef Py_ssize_t run_count
-        cdef Py_ssize_t card_threshold = nrows >> 2
         if isinstance(raw, StringVector):
             svec = <StringVector>raw
             if (
@@ -48,23 +44,20 @@ cdef class CountDistinctAggregate(UngroupedAggregate):
                 and svec._dict_values != NULL
             ):
                 dict_size = svec.c_dict_size()
-                if dict_size <= card_threshold:
-                    counts = svec.c_dict_code_counts_ptr()
-                    with nogil:
-                        for di in range(dict_size):
-                            if counts[di] <= 0:
-                                continue
-                            if svec.c_dict_value_is_null(di):
-                                continue
-                            h = svec.c_dict_value_hash(di)
-                            the_set._insert_many_nogil(&h, 1)
-                    return
+                counts = svec.c_dict_code_counts_ptr()
+                with nogil:
+                    for di in range(dict_size):
+                        if counts[di] <= 0:
+                            continue
+                        if svec.c_dict_value_is_null(di):
+                            continue
+                        h = svec.c_dict_value_hash(di)
+                        the_set._insert_many_nogil(&h, 1)
+                return
             elif (
                 svec._encoding == DRAKEN_ENCODING_RLE
                 and svec.c_rle_null_bitmap() == NULL
             ):
-                # No cardinality gate here: c_hash_into has no RLE branch,
-                # so the dense fallback would silently produce wrong results.
                 run_count = svec.c_rle_run_count()
                 with nogil:
                     for di in range(run_count):

@@ -55,7 +55,7 @@ from draken.core.buffers cimport (
     DRAKEN_TIME64,
     DRAKEN_TIMESTAMP64,
 )
-from draken.vectors.vector cimport Vector
+from draken.vectors.vector cimport Vector, _Uint64Buffer, _EMPTY_UINT64_SENTINEL
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.date32_vector cimport Date32Vector
 from draken.vectors.float64_vector cimport Float64Vector
@@ -2171,9 +2171,14 @@ cdef class Morsel:
         cdef Py_ssize_t idx
         cdef list column_indices
         cdef Py_ssize_t n_selected
-        cdef Py_ssize_t alloc_rows
         cdef uint64_t* out_buf
         cdef Vector vec
+        cdef int32_t* col_idx_c
+        cdef int32_t n_cols_c
+        cdef bint had_fallback
+        cdef Py_ssize_t i
+        cdef _Uint64Buffer backing
+        cdef uint64_t[::1] out_view
 
         if columns is None:
             column_indices = list(range(self.ptr.num_columns))
@@ -2188,33 +2193,39 @@ cdef class Morsel:
         n_selected = len(column_indices)
 
         if row_count == 0:
-            from array import array
-
-            return array("Q")
+            return <uint64_t[:0:1]>&_EMPTY_UINT64_SENTINEL
 
         if n_selected == 0:
-            alloc_rows = row_count if row_count > 0 else 1
-            out_buf = <uint64_t*> PyMem_Calloc(alloc_rows, sizeof(uint64_t))
-            if out_buf == NULL:
-                raise MemoryError()
-            return <uint64_t[:row_count]> out_buf
+            # No columns selected — all hashes are zero.
+            backing = _Uint64Buffer.create(row_count)
+            out_view = backing
+            return out_view
 
-        if n_selected == 1:
-            vec = <Vector>self.ptr.columns[column_indices[0]]
-            return vec.hash()
+        backing = _Uint64Buffer.create(row_count)
+        out_buf = backing.data
+        out_view = backing   # typed memoryview holds backing alive via its base
 
-        alloc_rows = row_count if row_count > 0 else 1
-        out_buf = <uint64_t*> PyMem_Calloc(alloc_rows, sizeof(uint64_t))
-        if out_buf == NULL:
+        # Build a C array of column indices so we can hash without holding the GIL.
+        n_cols_c = <int32_t>n_selected
+        col_idx_c = <int32_t*>malloc(<size_t>n_cols_c * sizeof(int32_t))
+        if col_idx_c == NULL:
             raise MemoryError()
+        for i in range(n_selected):
+            col_idx_c[i] = <int32_t>column_indices[i]
 
-        cdef uint64_t[::1] out_view = <uint64_t[:row_count]> out_buf
+        with nogil:
+            had_fallback = self.c_hash(out_buf, col_idx_c, n_cols_c, row_count)
+        free(col_idx_c)
 
-        for idx in column_indices:
-            vec = <Vector> self.ptr.columns[idx]
-            vec.hash_into(out_view, 0)
+        if had_fallback:
+            # Unknown vector type encountered — re-zero and fall back to the
+            # Python-level hash_into() path which handles custom vector types.
+            memset(out_buf, 0, <size_t>row_count * sizeof(uint64_t))
+            for idx in column_indices:
+                vec = <Vector>self.ptr.columns[idx]
+                vec.hash_into(out_view, 0)
 
-        return <uint64_t[:row_count]> out_buf
+        return out_view
 
     cdef int32_t* _resolve_columns_to_indices(
         self, object columns, int32_t* out_n_cols

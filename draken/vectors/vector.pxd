@@ -17,6 +17,16 @@ from draken.interop.vector_sequence import vector_from_sequence
 cdef const uint64_t MIX_HASH_CONSTANT
 cdef const uint64_t NULL_HASH
 
+cdef uint64_t _EMPTY_UINT64_SENTINEL
+
+cdef class _Uint64Buffer:
+    cdef uint64_t* data
+    cdef Py_ssize_t n
+    cdef Py_ssize_t _shape[1]
+    cdef Py_ssize_t _strides[1]
+    @staticmethod
+    cdef _Uint64Buffer create(Py_ssize_t n)
+
 cdef extern from "simd_hash.h":
     void simd_mix_hash(uint64_t* dest, const uint64_t* values, size_t count) nogil
 

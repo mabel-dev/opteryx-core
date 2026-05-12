@@ -20,7 +20,7 @@ types (Int64Vector, StringVector, etc.) implement.
 """
 
 from libc.stdint cimport uint64_t, int64_t, uint8_t
-from cpython.mem cimport PyMem_Calloc
+from cpython.mem cimport PyMem_Calloc, PyMem_Free
 
 from draken.core.buffers cimport ConstAccessor, DictAccessor, DrakenEncoding, DRAKEN_ENCODING_DENSE
 from draken.interop.arrow cimport vector_from_arrow
@@ -28,6 +28,68 @@ from opteryx.compiled.structures.relation_statistics cimport to_int
 
 cdef const uint64_t MIX_HASH_CONSTANT = <uint64_t>0x9e3779b97f4a7c15ULL
 cdef const uint64_t NULL_HASH = <uint64_t>0x4c3f95a36ab8eccaULL
+
+# Sentinel for zero-length hash returns — valid memory, never accessed.
+cdef uint64_t _EMPTY_UINT64_SENTINEL = 0
+
+# Platform-correct buffer-protocol format string for uint64_t.
+# 'Q' on macOS/ARM (uint64_t = unsigned long long);
+# 'L' on Linux x86-64 (uint64_t = unsigned long).
+# Probed once at module init so __getbuffer__ is always right.
+cdef bytes _uint64_format_bytes
+
+def _probe_uint64_fmt():
+    cdef uint64_t[1] probe
+    probe[0] = 0
+    cdef uint64_t[::1] view = probe
+    return memoryview(view).format.encode("ascii") + b"\x00"
+
+_uint64_format_bytes = _probe_uint64_fmt()
+
+
+cdef class _Uint64Buffer:
+    """Heap-allocated uint64_t array with proper Python lifetime management.
+
+    Exposes the buffer protocol so a ``uint64_t[::1]`` typed memoryview can be
+    created from it.  The buffer is freed in ``__dealloc__``, so as long as at
+    least one typed memoryview (or Python memoryview) holds a reference to this
+    object, the memory is alive.
+    """
+
+    def __cinit__(self):
+        self.data = NULL
+        self.n = 0
+
+    @staticmethod
+    cdef _Uint64Buffer create(Py_ssize_t n):
+        cdef _Uint64Buffer self = _Uint64Buffer.__new__(_Uint64Buffer)
+        self.n = n
+        self.data = <uint64_t*>PyMem_Calloc(n, sizeof(uint64_t))
+        if self.data == NULL:
+            raise MemoryError()
+        self._shape[0] = n
+        self._strides[0] = <Py_ssize_t>sizeof(uint64_t)
+        return self
+
+    def __dealloc__(self):
+        if self.data != NULL:
+            PyMem_Free(self.data)
+            self.data = NULL
+
+    def __getbuffer__(self, Py_buffer* view, int flags):
+        view.buf = self.data
+        view.obj = self          # INCREF self; PyBuffer_Release will DECREF it
+        view.len = self.n * sizeof(uint64_t)
+        view.readonly = 0
+        view.itemsize = sizeof(uint64_t)
+        view.ndim = 1
+        view.shape = self._shape
+        view.strides = self._strides
+        view.suboffsets = NULL
+        view.format = <char*>_uint64_format_bytes
+
+    def __releasebuffer__(self, Py_buffer* view):
+        pass  # reference released via view.obj by PyBuffer_Release
 
 cdef class Vector:
 
@@ -110,16 +172,10 @@ cdef class Vector:
         """
         cdef Py_ssize_t n = len(self)
         if n == 0:
-            # Return an empty Python array so `memoryview()` sees format 'Q'.
-            from array import array
-            return array("Q")
+            return <uint64_t[:0:1]>&_EMPTY_UINT64_SENTINEL
 
-        cdef uint64_t* out_buf = <uint64_t*> PyMem_Calloc(n, sizeof(uint64_t))
-        if out_buf == NULL:
-            raise MemoryError()
-
-        cdef uint64_t[::1] out_view = <uint64_t[:n]> out_buf
-        # Delegate to the low-level implementation
+        cdef _Uint64Buffer backing = _Uint64Buffer.create(n)
+        cdef uint64_t[::1] out_view = backing
         self.hash_into(out_view, 0)
         return out_view
 
