@@ -28,6 +28,8 @@ This implements non-equi joins (comparisons other than equality) using:
 """
 
 from libc.stdint cimport int32_t, uint8_t
+from libc.string cimport memcpy
+from libcpp.vector cimport vector as cppvector
 from array import array
 
 from draken.morsels.morsel cimport Morsel
@@ -36,6 +38,17 @@ from draken.vectors.bool_vector cimport BoolVector
 from draken.core.buffers cimport DrakenFixedBuffer
 
 from opteryx.models import QueryProperties
+
+
+cdef extern from "operators/loop_join_kernels.hpp" namespace "opteryx::operators" nogil:
+    void non_equi_emit_indices(
+        int32_t left_index,
+        const uint8_t* data_bits,
+        const uint8_t* null_bits,
+        size_t right_rows,
+        cppvector[int32_t]& out_left,
+        cppvector[int32_t]& out_right,
+    )
 
 # EOS sentinel available as _EOS_SENTINEL via the umbrella unit.
 
@@ -46,13 +59,18 @@ from opteryx.models import QueryProperties
 # Helpers
 # ---------------------------------------------------------------------------
 
-cdef Morsel _align_morsels(Morsel left_morsel, Morsel right_morsel,
-                            object left_list, object right_list):
-    """Align two morsels using index lists, converting to typed array for zero-copy view."""
-    cdef object left_arr  = array('i', left_list)
-    cdef object right_arr = array('i', right_list)
+cdef Morsel _align_morsels_from_vec(Morsel left_morsel, Morsel right_morsel,
+                                     const cppvector[int32_t]& left_vec,
+                                     const cppvector[int32_t]& right_vec):
+    """Align two morsels using C++ vector indices via a typed int32 array view."""
+    cdef Py_ssize_t n = <Py_ssize_t>left_vec.size()
+    cdef object left_arr  = array('i', [0]) * n
+    cdef object right_arr = array('i', [0]) * n
     cdef int32_t[::1] left_view  = left_arr
     cdef int32_t[::1] right_view = right_arr
+    if n > 0:
+        memcpy(&left_view[0],  left_vec.data(),  n * sizeof(int32_t))
+        memcpy(&right_view[0], right_vec.data(), n * sizeof(int32_t))
     return align_tables(left_morsel, right_morsel, left_view, right_view)
 
 
@@ -94,7 +112,7 @@ cdef BoolVector _compare_right_vec_with_scalar(object right_vec, object left_val
 # Core kernel
 # ---------------------------------------------------------------------------
 
-cdef tuple _non_equi_nested_loop_join_kernel(
+cdef Morsel _non_equi_nested_loop_join_kernel(
     Morsel left_morsel,
     Morsel right_morsel,
     object left_column,
@@ -119,20 +137,22 @@ cdef tuple _non_equi_nested_loop_join_kernel(
     cdef Py_ssize_t right_rows = right_morsel.num_rows
 
     if left_rows == 0 or right_rows == 0:
-        return None, None
+        return None
 
     cdef object left_vec  = left_morsel.column(left_column)
     cdef object right_vec = right_morsel.column(right_column)
 
-    cdef list left_list  = []
-    cdef list right_list = []
+    cdef cppvector[int32_t] left_idx_vec
+    cdef cppvector[int32_t] right_idx_vec
 
-    cdef Py_ssize_t i, j
+    cdef Py_ssize_t i
+    cdef int32_t i32
     cdef object left_val
     cdef BoolVector mask
     cdef DrakenFixedBuffer* mask_ptr
     cdef uint8_t* data_bits
     cdef uint8_t* null_bits
+    cdef size_t right_rows_sz = <size_t>right_rows
 
     for i in range(left_rows):
         left_val = left_vec[i]
@@ -144,26 +164,19 @@ cdef tuple _non_equi_nested_loop_join_kernel(
         mask_ptr  = mask.ptr
         data_bits = <uint8_t*> mask_ptr.data
         null_bits = mask_ptr.null_bitmap  # NULL means all rows are valid
+        i32 = <int32_t>i
 
-        # Inner loop: only bit extraction — no Python object access.
-        if null_bits == NULL:
-            # Fast path: no nulls in the comparison result.
-            for j in range(right_rows):
-                if (data_bits[j >> 3] >> (j & 7)) & 1:
-                    left_list.append(i)
-                    right_list.append(j)
-        else:
-            # Null-aware path: skip positions where the validity bit is 0.
-            for j in range(right_rows):
-                if ((null_bits[j >> 3] >> (j & 7)) & 1) and \
-                   ((data_bits[j >> 3] >> (j & 7)) & 1):
-                    left_list.append(i)
-                    right_list.append(j)
+        # Inner loop: bit-extraction in C++ (popcount-driven scan, nogil).
+        with nogil:
+            non_equi_emit_indices(
+                i32, data_bits, null_bits, right_rows_sz,
+                left_idx_vec, right_idx_vec,
+            )
 
-    if not left_list:
-        return None, None
+    if left_idx_vec.size() == 0:
+        return None
 
-    return left_list, right_list
+    return _align_morsels_from_vec(left_morsel, right_morsel, left_idx_vec, right_idx_vec)
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +249,7 @@ cdef class NonEquiJoinNode(JoinNode):
             left_column, right_column = right_column, left_column
             swapped = True
 
-        left_list, right_list = _non_equi_nested_loop_join_kernel(
+        cdef Morsel aligned = _non_equi_nested_loop_join_kernel(
             self.left_morsel,
             morsel,
             left_column,
@@ -245,5 +258,5 @@ cdef class NonEquiJoinNode(JoinNode):
             swapped,
         )
 
-        if left_list is not None:
-            self.emit(_align_morsels(self.left_morsel, morsel, left_list, right_list))
+        if aligned is not None:
+            self.emit(aligned)

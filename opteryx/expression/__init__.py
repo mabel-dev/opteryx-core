@@ -807,69 +807,13 @@ def get_all_nodes_of_type(root, select_nodes: tuple) -> list:
     return identifiers
 
 
-def _evaluate_and_append_morsel(expressions, morsel):
-    """
-    Evaluate expressions against a Draken Morsel.
-
-    Typed literal expressions are appended natively as typed constant-encoded vectors.
-    Non-literal expressions are evaluated directly against the Draken morsel.
-    """
-    from draken.morsels.morsel import Morsel
-    from draken.vectors.scalar_constructors import (
-        from_scalar as constant_from_scalar,
-    )
-
-    prioritized_expressions = prioritize_evaluation(expressions)
-
-    # Keep column names as bytes (Morsel format) and retrieve vectors
-    names = list(morsel.column_names)
-    vectors = [morsel.column(name) for name in morsel.column_names]
-
-    # Track existing columns as bytes for identity checking; identity is bytes
-    existing_cols = set(names)
-
-    for statement in prioritized_expressions:
-        identity = statement.schema_column.identity
-        if identity in existing_cols:
-            continue
-
-        if not should_evaluate(statement):
-            continue
-
-        if statement.node_type == NodeType.LITERAL:
-            literal_vec = _typed_constant_vector(
-                statement.value, morsel.num_rows, statement.schema_column
-            )
-            if literal_vec is None:
-                literal_vec = constant_from_scalar(statement.value, morsel.num_rows)
-            if literal_vec is not None:
-                names.append(identity)
-                vectors.append(literal_vec)
-                existing_cols.add(identity)
-                continue
-
-        # Non-literal expressions evaluate directly using Draken vectors
-        working_morsel = Morsel.from_vectors(names, vectors)
-        result = evaluate_statement(statement, working_morsel)
-        names.append(identity)
-        vectors.append(result)
-        existing_cols.add(identity)
-        continue
-
-    return Morsel.from_vectors(names, vectors)
-
-
-def evaluate_and_append(expressions, table):
-    """
-    Evaluate expressions and append result columns to a Draken Morsel.
-
-    The table must be a Draken Morsel; PyArrow tables must be converted first.
-    """
-    return _evaluate_and_append_morsel(expressions, table)
-
-
 def should_evaluate(statement):
-    """Determine if the given statement should be evaluated."""
+    """Determine if the given statement should be evaluated.
+
+    Used by the Cython evaluate_and_append_draken to skip nodes that are
+    already-resolved column references (IDENTIFIER, AGGREGATOR, EVALUATED)
+    or structural placeholders (WILDCARD, SUBQUERY).
+    """
     valid_node_types = {
         NodeType.CASE,
         NodeType.FUNCTION,
@@ -888,26 +832,19 @@ def should_evaluate(statement):
     return statement.node_type in valid_node_types
 
 
-def evaluate_statement(statement, table):
-    """Evaluate a statement and return the corresponding column."""
-    new_column = evaluate(statement, table)
-    if is_mask(new_column, statement, table):
-        new_column = create_mask(new_column, table.num_rows)
-    return new_column
+# evaluate_and_append is now a thin wrapper over the Cython evaluator. The
+# legacy _evaluate_and_append_morsel / evaluate_statement / is_mask / create_mask
+# chain was retired when projection, sort, heap_sort moved to evaluate_and_append_draken;
+# only this top-level name is kept for backwards-compatibility with test fixtures
+# and any external embedders.
+def evaluate_and_append(expressions, table):
+    from opteryx.expression.evaluator import evaluate_and_append_draken
+    return evaluate_and_append_draken(expressions, table)
 
 
-def is_mask(new_column, statement, table):
-    """Determine if the given column represents a mask."""
-    if len(new_column) < table.num_rows:
-        return True
-    if statement.node_type == NodeType.UNARY_OPERATOR:
-        # BitwiseNot returns an integer vector, not a boolean mask
-        return statement.value != "BitwiseNot"
-    return False
-
-
-def create_mask(column, num_rows):
-    """Create a boolean mask based on the given column."""
-    bool_list = [False] * num_rows
-    bool_list[column] = True
-    return bool_list
+# Fail-fast: keep the Cython DEF constants in evaluation.pyx in sync with the
+# NodeType enum values above. Runs at module import; if it ever fires, fix the
+# DEFs at the top of opteryx/expression/evaluator/evaluation.pyx and rebuild.
+from opteryx.expression.evaluator import _verify_node_type_constants
+_verify_node_type_constants()
+del _verify_node_type_constants

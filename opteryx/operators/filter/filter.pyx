@@ -183,6 +183,9 @@ cdef class FilterNode(BasePlanNode):
         return "Filter"
 
     cdef void _dispatch_push(self, Morsel morsel) except *:
+        cdef BoolVector mask
+        cdef Morsel filtered
+        cdef list keep
         if morsel is _EOS_SENTINEL:
             self._emit_cdef(morsel)
             return

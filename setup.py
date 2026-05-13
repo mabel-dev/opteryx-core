@@ -982,6 +982,25 @@ extensions = [
         include_dirs=include_dirs,
         extra_compile_args=C_FLAGS,
     ),
+    # Expression evaluator orchestration (Cython tree walk + dispatch).
+    Extension(
+        "opteryx.expression.evaluator.evaluation",
+        sources=["opteryx/expression/evaluator/evaluation.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=C_FLAGS,
+    ),
+    # Compiled (C++) representation of an expression tree; lowered from Node
+    # at bind time and walked by the evaluator. See src/cpp/expression/.
+    Extension(
+        "opteryx.compiled.expression.compiled_expression",
+        sources=[
+            "opteryx/compiled/expression/compiled_expression.pyx",
+            "src/cpp/expression/compiled_expression.cpp",
+        ],
+        include_dirs=include_dirs + ["src/cpp"],
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
     Extension(
         "opteryx.compiled.structures.bloom_filter",
         sources=["opteryx/compiled/structures/bloom_filter.pyx"],
@@ -1071,6 +1090,7 @@ extensions = [
             "third_party/mabel/carchar/carchar_index.hpp",
             "third_party/mabel/carchar/carchar_common.hpp",
             "third_party/mabel/carchar/carchar_simd.hpp",
+            "src/cpp/operators/loop_join_kernels.hpp",
         ],
     ),
     Extension(

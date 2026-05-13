@@ -1,13 +1,30 @@
-"""Main expression evaluation engine."""
+# cython: language_level=3
+# cython: boundscheck=False
+# cython: wraparound=False
+# cython: initializedcheck=False
+
+"""Main expression evaluation engine (Cython orchestration layer).
+
+Layering (CLAUDE.md):
+- Python   : user-facing API + planner/binder only.
+- Cython   : execution orchestration (this file: tree walk + dispatch).
+- C++      : execution kernels (Draken vector ops, called from here).
+
+NodeType integer constants are inlined as compile-time DEFs to turn the
+dispatch chain into a series of C-level integer compares. They MUST match
+the values declared on the NodeType IntEnum in opteryx/expression/__init__.py;
+a runtime check in opteryx/expression/evaluator/__init__.py verifies this.
+"""
 
 import datetime
+import sys as _sys
 
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 
 from .arithmetic import _eval_binary_op_draken
 from .comparisons import draken_between, draken_compare
-from .function_execution import apply_bounded_function, is_draken_vector
+from .function_execution import apply_bounded_function
 from .type_coercion import (
     _coerce_date32,
     _coerce_date32_set,
@@ -30,6 +47,44 @@ from .type_coercion import (
     _is_typed_constant_encoded_vector,
 )
 
+# Imports from draken are safe at module level — draken does not import opteryx.expression.
+from draken.vectors.bool_vector import BoolVector as _BoolVector
+from draken.vectors.int64_vector import Int64Vector as _Int64Vector
+from draken.vectors.string_vector import StringVector as _StringVector
+from draken.vectors.scalar_constructors import from_scalar as _const_scalar
+from draken.morsels.morsel import Morsel as _Morsel
+from draken.interop.vector_sequence import (
+    bool_vector_from_uint64_eq as _bool_vector_from_uint64_eq,
+    vector_from_sequence as _vector_from_sequence,
+)
+
+
+# NodeType integer values — keep in sync with NodeType in opteryx/expression/__init__.py.
+DEF NT_UNKNOWN = 0
+DEF NT_AND = 17
+DEF NT_OR = 18
+DEF NT_XOR = 19
+DEF NT_NOT = 20
+DEF NT_DNF = 21
+DEF NT_CNF = 22
+DEF NT_CASE = 32
+DEF NT_WILDCARD = 33
+DEF NT_COMPARISON_OPERATOR = 34
+DEF NT_BINARY_OPERATOR = 35
+DEF NT_UNARY_OPERATOR = 36
+DEF NT_FUNCTION = 37
+DEF NT_IDENTIFIER = 38
+DEF NT_SUBQUERY = 39
+DEF NT_NESTED = 40
+DEF NT_AGGREGATOR = 41
+DEF NT_LITERAL = 42
+DEF NT_EXPRESSION_LIST = 43
+DEF NT_EVALUATED = 44
+DEF NT_CAST = 45
+DEF NT_EXTRACTION_OPERATOR = 46
+DEF NT_BETWEEN = 47
+
+
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DATETIME = datetime.datetime(1970, 1, 1)
 
@@ -45,33 +100,20 @@ _NEGATED_OPS = {
 
 
 def _is_scalar_value(obj):
-    """Deprecated: use is_scalar() from opteryx.utils.vector_types instead.
-
-    This function is kept for backward compatibility but new code should
-    use is_scalar() which is centralized and consistent.
-    """
+    """Deprecated: use is_scalar() from opteryx.utils.vector_types instead."""
     return is_scalar(obj)
 
 
 def _eval_value(node, morsel):
-    from opteryx.expression import NodeType
+    cdef int node_type = <int>node.node_type
 
-    node_type = node.node_type
-
-    if node_type == NodeType.LITERAL:
+    if node_type == NT_LITERAL:
         if isinstance(node.value, bool):
-            from draken.vectors.bool_vector import BoolVector
-
-            return BoolVector.from_constant(node.value, morsel.num_rows)
+            return _BoolVector.from_constant(node.value, morsel.num_rows)
 
         from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
-
         if isinstance(node.value, CarcharSetWrapper):
             return node.value
-
-        from draken.vectors.scalar_constructors import (
-            from_scalar as _const_scalar,
-        )
 
         vec = _const_scalar(node.value, morsel.num_rows)
         if vec is None:
@@ -81,41 +123,37 @@ def _eval_value(node, morsel):
             )
         return vec
 
-    if node_type == NodeType.IDENTIFIER:
-        vec = morsel.column(node.schema_column.identity, node.schema_column.name.encode())
-        return vec
+    if node_type == NT_IDENTIFIER:
+        return morsel.column(node.schema_column.identity, node.schema_column.name.encode())
 
-    if node_type in (NodeType.EVALUATED, NodeType.AGGREGATOR):
+    if node_type == NT_EVALUATED or node_type == NT_AGGREGATOR:
         try:
-            vec = morsel.column(
+            return morsel.column(
                 node.schema_column.identity, node.schema_column.name.encode()
             )
         except KeyError:
             raise ColumnReferencedBeforeEvaluationError(column=node.schema_column.name)
-        return vec
 
-    if node_type == NodeType.NESTED:
+    if node_type == NT_NESTED:
         return _eval_value(node.centre, morsel)
 
-    if node_type == NodeType.CASE:
+    if node_type == NT_CASE:
         from opteryx.expression.evaluator.case_eval import evaluate_case
         return evaluate_case(node, morsel)
 
-    if node_type == NodeType.EXPRESSION_LIST:
+    if node_type == NT_EXPRESSION_LIST:
         return [_eval_value(parameter, morsel) for parameter in node.parameters]
 
-    if node_type == NodeType.EXTRACTION_OPERATOR:
+    if node_type == NT_EXTRACTION_OPERATOR:
         left_vec = _eval_value(node.left, morsel)
         right_val = node.right.value
         op = node.value
 
         if op == "MapAccess":
-            from draken.vectors.int64_vector import Int64Vector
             from opteryx.expression.binary_operators import MapAccessOp
-
             # Keep MapAccess in native vector space where possible to avoid
             # costly Arrow <-> Draken round-trips.
-            key_vec = Int64Vector.from_constant(int(right_val), 1)
+            key_vec = _Int64Vector.from_constant(int(right_val), 1)
             result = MapAccessOp(left_vec, key_vec)
             if is_draken_vector(result):
                 return result
@@ -123,26 +161,23 @@ def _eval_value(node, morsel):
                 f"MapAccessOp expected Draken vector result; got {type(result).__name__}."
             )
 
-        if op in ("Arrow", "LongArrow"):
-            from draken.vectors.string_vector import StringVector
+        if op == "Arrow" or op == "LongArrow":
             from opteryx.expression.binary_operators import ArrowOp, LongArrowOp
-
-            key_vec = StringVector.from_constant(right_val, 1)
+            key_vec = _StringVector.from_constant(right_val, 1)
             return ArrowOp(left_vec, key_vec) if op == "Arrow" else LongArrowOp(left_vec, key_vec)
 
         raise NotImplementedError(
             f"_eval_value: EXTRACTION_OPERATOR {op!r} not supported in Draken path"
         )
 
-    from opteryx.expression import NodeType as _NT
-
-    if node.node_type == _NT.BINARY_OPERATOR:
+    if node_type == NT_BINARY_OPERATOR:
         result = _eval_binary_op_draken(node, morsel)
         if result is not None:
             return result
 
-    if node.node_type in (_NT.BINARY_OPERATOR, _NT.CAST, _NT.FUNCTION):
-        identity = getattr(getattr(node, "schema_column", None), "identity", None)
+    if node_type == NT_BINARY_OPERATOR or node_type == NT_CAST or node_type == NT_FUNCTION:
+        sc = getattr(node, "schema_column", None)
+        identity = getattr(sc, "identity", None) if sc is not None else None
         if identity is not None:
             try:
                 vec = morsel.column(identity)
@@ -152,7 +187,6 @@ def _eval_value(node, morsel):
                 return vec
 
         from opteryx.expression import _inner_evaluate
-
         result = _inner_evaluate(node, morsel)
         if result is not None and is_draken_vector(result):
             return result
@@ -164,7 +198,7 @@ def _eval_value(node, morsel):
     return evaluate_draken(node, morsel)
 
 
-def _unary_draken(op: str, centre_node, morsel):
+cdef _unary_draken(str op, centre_node, morsel):
     vec = _eval_value(centre_node, morsel)
 
     if op == "IsNull":
@@ -173,17 +207,14 @@ def _unary_draken(op: str, centre_node, morsel):
         return _is_null_as_boolvector(vec).not_vector()
     if op == "IsEmpty":
         from opteryx.compiled.vector_ops import vector_string_is_empty
-
         return vector_string_is_empty(vec)
     if op == "IsNotEmpty":
         from opteryx.compiled.vector_ops import vector_string_is_not_empty
-
         return vector_string_is_not_empty(vec)
     if op == "BitwiseNot":
         from opteryx.compiled.vector_ops import vector_bitwise_not
-
         return vector_bitwise_not(vec)
-    if op in ("IsTrue", "IsNotFalse", "IsFalse", "IsNotTrue"):
+    if op == "IsTrue" or op == "IsNotFalse" or op == "IsFalse" or op == "IsNotTrue":
         bv = vec if get_vector_type(vec) == VectorType.BOOL else None
         if bv is None:
             raise TypeError(
@@ -200,61 +231,40 @@ def _unary_draken(op: str, centre_node, morsel):
     raise NotImplementedError(f"evaluate_draken: unsupported unary op {op!r}")
 
 
-def _is_temporal_type(orso_type):
+cdef bint _is_temporal_type(orso_type):
     """Check if an OrsoType is DATE or TIMESTAMP."""
     from opteryx.types import OrsoTypes
-
     if orso_type is None:
         return False
-    return orso_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
+    return orso_type == OrsoTypes.DATE or orso_type == OrsoTypes.TIMESTAMP
 
 
-def _validate_temporal_comparison(left_node, right_node, op):
+cdef _validate_temporal_comparison(left_node, right_node, op):
     """
     Validate that temporal comparisons have literals explicitly cast.
 
     When comparing temporal and non-temporal operands, literals must be explicitly cast.
     Temporal columns do not require casting. Both operands must have temporal types.
-
-    Rules:
-    - Temporal columns (IDENTIFIER with temporal schema_column type) are implicitly valid
-    - Literals and other operands must be explicitly cast to temporal types
-    - Both operands must have temporal types in their schema_column
-
-    Args:
-        left_node: AST node for left operand
-        right_node: AST node for right operand
-        op: Comparison operator (Eq, Lt, Gt, etc.)
-
-    Raises:
-        IncompatibleTypesError: If a temporal comparison has an uncast literal operand
     """
-    from opteryx.expression import NodeType
+    left_sc = getattr(left_node, "schema_column", None)
+    right_sc = getattr(right_node, "schema_column", None)
+    left_type = getattr(left_sc, "type", None) if left_sc is not None else None
+    right_type = getattr(right_sc, "type", None) if right_sc is not None else None
 
-    left_type = getattr(getattr(left_node, "schema_column", None), "type", None)
-    right_type = getattr(getattr(right_node, "schema_column", None), "type", None)
+    cdef bint left_is_temporal = _is_temporal_type(left_type)
+    cdef bint right_is_temporal = _is_temporal_type(right_type)
 
-    left_is_temporal = _is_temporal_type(left_type)
-    right_is_temporal = _is_temporal_type(right_type)
-
-    # If neither side is temporal, no validation needed
     if not (left_is_temporal or right_is_temporal):
         return
-
-    # If both sides are temporal, validation passes
     if left_is_temporal and right_is_temporal:
         return
 
-    # At least one side is temporal but the other is not
-    # Check if the non-temporal side is an uncast literal
     from opteryx.exceptions import IncompatibleTypesError
 
     non_temporal_node = right_node if left_is_temporal else left_node
     non_temporal_side = "right" if left_is_temporal else "left"
 
-    # IDENTIFIER nodes with temporal columns are allowed without casting
-    # All other non-temporal nodes (especially literals) must be cast
-    if non_temporal_node.node_type != NodeType.IDENTIFIER:
+    if <int>non_temporal_node.node_type != NT_IDENTIFIER:
         raise IncompatibleTypesError(
             message=f"Temporal comparison requires literals to be explicitly cast to temporal types.\n"
             f"The {non_temporal_side} side is missing an explicit CAST or :: operator.\n\n"
@@ -266,59 +276,66 @@ def _validate_temporal_comparison(left_node, right_node, op):
         )
 
 
-_HASH_DISPATCH_MIN_ROWS = 1024
+DEF _HASH_DISPATCH_MIN_ROWS = 1024
 
 _TARGET_HASH_CACHE = {}
 _TARGET_HASH_CACHE_MAX = 128
 
 
-def _compute_target_hash(target_names, target_vecs):
-    from draken.morsels.morsel import Morsel
+# Helpers shared with the legacy evaluate_and_append path in
+# opteryx/expression/__init__.py. They live in the parent package because they
+# straddle planning concerns; we import them lazily to avoid the import cycle.
+# Cached on first use; the parent package is always fully loaded by the time
+# evaluate_and_append_draken runs.
+_legacy_helpers = None
 
-    target_morsel = Morsel.from_vectors(target_names, target_vecs)
+
+cdef _get_legacy_helpers():
+    global _legacy_helpers
+    if _legacy_helpers is None:
+        from opteryx.expression import (
+            prioritize_evaluation,
+            should_evaluate,
+            _typed_constant_vector,
+        )
+        _legacy_helpers = (prioritize_evaluation, should_evaluate, _typed_constant_vector)
+    return _legacy_helpers
+
+
+cdef _compute_target_hash(target_names, target_vecs):
+    target_morsel = _Morsel.from_vectors(target_names, target_vecs)
     target_hash_view = target_morsel.hash(target_names)
     return int(target_hash_view[0])
 
 
 def _try_collect_numeric_eq_predicates(node):
     """Walk an AND-only subtree and collect IDENTIFIER = LITERAL predicates on
-    fixed-width numeric/temporal columns.
-
-    Returns a list of (identity_bytes, name_bytes, literal_value, orso_type)
-    tuples if the entire subtree consists of such predicates (>= 2 of them) and
-    every leaf is eligible. Returns None otherwise — caller takes the regular
-    recursive path.
+    fixed-width numeric/temporal columns. See module docstring of original.
     """
-    from opteryx.expression import NodeType
     from opteryx.types import OrsoTypes
 
     eligible_types = (OrsoTypes.INTEGER, OrsoTypes.BOOLEAN)
 
     preds = []
     stack = [node]
+    cdef int nt
     while stack:
         n = stack.pop()
-        nt = n.node_type
-        if nt == NodeType.NESTED:
+        nt = <int>n.node_type
+        if nt == NT_NESTED:
             stack.append(n.centre)
             continue
-        if nt == NodeType.AND:
+        if nt == NT_AND:
             stack.append(n.left)
             stack.append(n.right)
             continue
-        if nt != NodeType.COMPARISON_OPERATOR or n.value != "Eq":
+        if nt != NT_COMPARISON_OPERATOR or n.value != "Eq":
             return None
 
         left, right = n.left, n.right
-        if (
-            left.node_type == NodeType.IDENTIFIER
-            and right.node_type == NodeType.LITERAL
-        ):
+        if <int>left.node_type == NT_IDENTIFIER and <int>right.node_type == NT_LITERAL:
             ident_node, lit_node = left, right
-        elif (
-            right.node_type == NodeType.IDENTIFIER
-            and left.node_type == NodeType.LITERAL
-        ):
+        elif <int>right.node_type == NT_IDENTIFIER and <int>left.node_type == NT_LITERAL:
             ident_node, lit_node = right, left
         else:
             return None
@@ -340,21 +357,9 @@ def _try_collect_numeric_eq_predicates(node):
     return preds
 
 
-def _evaluate_numeric_eq_via_hash(preds, morsel):
-    """Evaluate a chain of IDENTIFIER = LITERAL predicates by hashing all
-    referenced columns once and comparing against a single precomputed
-    target hash.
-
-    Collision safety: 64-bit combined hash. P(false positive per row) = 2^-64.
-    For 100M rows that is ~5e-12 expected — well below noise floor of normal
-    hardware. No verify pass.
-
-    Returns a BoolVector or None if the fast-path could not be constructed
-    (caller should fall back to the per-column path).
-    """
-    from draken.interop.vector_sequence import bool_vector_from_uint64_eq
-
-    num_rows = morsel.num_rows
+cdef _evaluate_numeric_eq_via_hash(preds, morsel):
+    """Evaluate a chain of IDENTIFIER = LITERAL predicates via a single hash."""
+    cdef Py_ssize_t num_rows = morsel.num_rows
     if num_rows == 0:
         return None
     if num_rows < _HASH_DISPATCH_MIN_ROWS:
@@ -397,19 +402,19 @@ def _evaluate_numeric_eq_via_hash(preds, morsel):
         _TARGET_HASH_CACHE[cache_key] = target_hash
 
     row_hashes_view = morsel.hash(hash_keys)
-    return bool_vector_from_uint64_eq(row_hashes_view, target_hash)
+    return _bool_vector_from_uint64_eq(row_hashes_view, target_hash)
 
 
 def evaluate_draken(node, morsel):
-    from opteryx.expression import NodeType
+    cdef int node_type = <int>node.node_type
 
-    node_type = node.node_type
-
-    if node_type == NodeType.NESTED:
+    if node_type == NT_NESTED:
         return evaluate_draken(node.centre, morsel)
 
-    if node_type == NodeType.AND:
-        preds = _try_collect_numeric_eq_predicates(node)
+    if node_type == NT_AND:
+        # Look up via sys.modules so tests can monkey-patch the helper to
+        # disable the fast path (see tests/unit/core/test_expression_hash_eq_fastpath.py).
+        preds = _sys.modules[__name__]._try_collect_numeric_eq_predicates(node)
         if preds is not None:
             fast = _evaluate_numeric_eq_via_hash(preds, morsel)
             if fast is not None:
@@ -418,27 +423,27 @@ def evaluate_draken(node, morsel):
         right = evaluate_draken(node.right, morsel)
         return left.and_vector(right)
 
-    if node_type == NodeType.OR:
+    if node_type == NT_OR:
         left = evaluate_draken(node.left, morsel)
         right = evaluate_draken(node.right, morsel)
         return left.or_vector(right)
 
-    if node_type == NodeType.NOT:
+    if node_type == NT_NOT:
         return evaluate_draken(node.centre, morsel).not_vector()
 
-    if node_type == NodeType.XOR:
+    if node_type == NT_XOR:
         left = evaluate_draken(node.left, morsel)
         right = evaluate_draken(node.right, morsel)
         return left.xor_vector(right)
 
-    if node_type == NodeType.BETWEEN:
+    if node_type == NT_BETWEEN:
         col = _eval_value(node.left, morsel)
         lower_val = node.right.value
         upper_val = node.centre.value
         lower_inclusive, upper_inclusive = node.value
         return draken_between(col, lower_val, upper_val, lower_inclusive, upper_inclusive)
 
-    if node_type == NodeType.DNF:
+    if node_type == NT_DNF:
         result = evaluate_draken(node.parameters[0], morsel)
         for sub in node.parameters[1:]:
             if not result.any():
@@ -446,7 +451,7 @@ def evaluate_draken(node, morsel):
             result = result.and_vector(evaluate_draken(sub, morsel))
         return result
 
-    if node_type == NodeType.CNF:
+    if node_type == NT_CNF:
         result = evaluate_draken(node.parameters[0], morsel)
         for sub in node.parameters[1:]:
             if result.all():
@@ -454,14 +459,12 @@ def evaluate_draken(node, morsel):
             result = result.or_vector(evaluate_draken(sub, morsel))
         return result
 
-    if node_type == NodeType.LITERAL:
-        from draken.vectors.bool_vector import BoolVector
-
+    if node_type == NT_LITERAL:
         val = node.value
         scalar = bool(val) if val is not None else False
-        return BoolVector.from_constant(scalar, morsel.num_rows)
+        return _BoolVector.from_constant(scalar, morsel.num_rows)
 
-    if node_type == NodeType.COMPARISON_OPERATOR:
+    if node_type == NT_COMPARISON_OPERATOR:
         # Validate that temporal comparisons have both sides explicitly typed
         _validate_temporal_comparison(node.left, node.right, node.value)
 
@@ -469,18 +472,26 @@ def evaluate_draken(node, morsel):
         right = _eval_value(node.right, morsel)
         from opteryx.types import OrsoTypes
 
-        temporal_types = {OrsoTypes.DATE, OrsoTypes.TIMESTAMP}
-        left_schema_type = getattr(getattr(node.left, "schema_column", None), "type", None)
-        right_schema_type = getattr(getattr(node.right, "schema_column", None), "type", None)
-        if left_schema_type in temporal_types or right_schema_type in temporal_types:
-            if _is_scalar_value(left) and left_schema_type in temporal_types:
+        left_sc = getattr(node.left, "schema_column", None)
+        right_sc = getattr(node.right, "schema_column", None)
+        left_schema_type = getattr(left_sc, "type", None) if left_sc is not None else None
+        right_schema_type = getattr(right_sc, "type", None) if right_sc is not None else None
+        if (
+            left_schema_type == OrsoTypes.DATE
+            or left_schema_type == OrsoTypes.TIMESTAMP
+            or right_schema_type == OrsoTypes.DATE
+            or right_schema_type == OrsoTypes.TIMESTAMP
+        ):
+            if _is_scalar_value(left) and (
+                left_schema_type == OrsoTypes.DATE or left_schema_type == OrsoTypes.TIMESTAMP
+            ):
                 left = _coerce_temporal_scalar_for_arrow(left, left_schema_type)
-            if _is_scalar_value(right) and right_schema_type in temporal_types:
+            if _is_scalar_value(right) and (
+                right_schema_type == OrsoTypes.DATE or right_schema_type == OrsoTypes.TIMESTAMP
+            ):
                 right = _coerce_temporal_scalar_for_arrow(right, right_schema_type)
 
         if is_scalar(left) and is_scalar(right):
-            from draken.vectors.bool_vector import BoolVector
-
             scalar_result = draken_compare(
                 node.value,
                 left,
@@ -496,10 +507,10 @@ def evaluate_draken(node, morsel):
             return scalar_result
         return draken_compare(node.value, left, right, left_schema_type, right_schema_type)
 
-    if node_type == NodeType.UNARY_OPERATOR:
+    if node_type == NT_UNARY_OPERATOR:
         return _unary_draken(node.value, node.centre, morsel)
 
-    if node_type == NodeType.FUNCTION:
+    if node_type == NT_FUNCTION:
         if node.value == "_PASSTHRU":
             return evaluate_draken(node.parameters[0], morsel)
         parameters = [_eval_value(param, morsel) for param in node.parameters]
@@ -507,16 +518,14 @@ def evaluate_draken(node, morsel):
             parameters = [morsel.num_rows]
         result = apply_bounded_function(node, *parameters)
         if isinstance(result, list):
-            from draken.interop.vector_sequence import vector_from_sequence
-
-            result = vector_from_sequence(result)
+            result = _vector_from_sequence(result)
         if get_vector_type(result) != VectorType.BOOL:
             raise TypeError(
                 f"evaluate_draken: FUNCTION node returned {result.__class__.__name__!r}, expected BoolVector"
             )
         return result
 
-    if node_type == NodeType.BINARY_OPERATOR:
+    if node_type == NT_BINARY_OPERATOR:
         result = _eval_value(node, morsel)
         if get_vector_type(result) == VectorType.BOOL:
             return result
@@ -525,25 +534,60 @@ def evaluate_draken(node, morsel):
         )
 
     raise NotImplementedError(
-        f"evaluate_draken: unsupported node type {node_type!r} (value={node.value!r})"
+        f"evaluate_draken: unsupported node type {node.node_type!r} (value={node.value!r})"
     )
 
 
 def evaluate_and_append_draken(nodes, morsel):
-    from draken.morsels.morsel import Morsel
-    from opteryx.expression import NodeType
+    """Evaluate `nodes` against `morsel` and append the resulting columns.
+
+    Parity contract with opteryx.expression._evaluate_and_append_morsel:
+      - Expressions are processed in dependency order (`prioritize_evaluation`):
+        non-EVALUATED-dependent first, dependent second. Safe no-op when
+        callers (aggregate, hashed_inner_join) pass independent expressions.
+      - LITERAL nodes use schema-typed constant encoding (`_typed_constant_vector`)
+        when the schema type is supported, falling back to from_scalar for
+        types not yet covered by the typed path.
+      - Nodes that do not satisfy `should_evaluate` are skipped (matches the
+        legacy filter).
+      - The legacy path's `is_mask`/`create_mask` wrapping is NOT ported:
+        any short result raises rather than being silently one-hot-padded.
+        Per CLAUDE.md §1/9, we surface this rather than mask it.
+    """
+    prioritize_evaluation, should_evaluate, typed_constant_vector = _get_legacy_helpers()
 
     col_names = list(morsel.column_names)
     col_vecs = [morsel.column(n if isinstance(n, bytes) else n.encode()) for n in col_names]
     existing = {n.decode() if isinstance(n, bytes) else n for n in col_names}
 
-    for node in nodes:
+    cdef int node_type
+    for node in prioritize_evaluation(nodes):
         if node.value == "_PASSTHRU":
+            continue
+        if not should_evaluate(node):
             continue
         identity = node.schema_column.identity
         if identity in existing:
             continue
-        if node.node_type == NodeType.CASE:
+        node_type = <int>node.node_type
+
+        if node_type == NT_LITERAL:
+            literal_vec = typed_constant_vector(node.value, morsel.num_rows, node.schema_column)
+            if literal_vec is None:
+                # Schema type not covered by the typed constant path; fall back to
+                # the generic from_scalar that drives shape from the Python value.
+                literal_vec = _const_scalar(node.value, morsel.num_rows)
+            if literal_vec is None:
+                raise TypeError(
+                    f"evaluate_and_append_draken: cannot construct constant vector for "
+                    f"LITERAL value {node.value!r} (type {type(node.value).__name__})."
+                )
+            col_names.append(identity)
+            col_vecs.append(literal_vec)
+            existing.add(identity)
+            continue
+
+        if node_type == NT_CASE:
             from opteryx.expression.evaluator.case_eval import evaluate_case
             result = evaluate_case(node, morsel)
             if not is_draken_vector(result):
@@ -555,7 +599,7 @@ def evaluate_and_append_draken(nodes, morsel):
             col_vecs.append(result)
             existing.add(identity)
             continue
-        if node.node_type == NodeType.FUNCTION:
+        if node_type == NT_FUNCTION:
             parameters = []
             for param in node.parameters:
                 value = _eval_value(param, morsel)
@@ -584,7 +628,7 @@ def evaluate_and_append_draken(nodes, morsel):
         col_vecs.append(result)
         existing.add(identity)
 
-    return Morsel.from_vectors(col_names, col_vecs)
+    return _Morsel.from_vectors(col_names, col_vecs)
 
 
 __all__ = ["draken_compare", "evaluate_and_append_draken", "evaluate_draken"]

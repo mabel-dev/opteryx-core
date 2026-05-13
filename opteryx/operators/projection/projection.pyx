@@ -27,7 +27,7 @@ from collections.abc import Iterable
 
 from draken.encoding import DRAKEN_ENCODING_CONSTANT
 from opteryx.expression import NodeType
-from opteryx.expression import evaluate_and_append
+from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 
 # BasePlanNode in scope via textual include from _operators.pyx.
@@ -65,8 +65,8 @@ cdef class ProjectionNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Projection"
 
-    def _count_emitted_constant_literals(self, morsel):
-        emitted = 0
+    cdef Py_ssize_t _count_emitted_constant_literals(self, Morsel morsel) except -1:
+        cdef Py_ssize_t emitted = 0
         for statement in self.evaluations:
             if statement.node_type != NodeType.LITERAL:
                 continue
@@ -79,8 +79,9 @@ cdef class ProjectionNode(BasePlanNode):
                 emitted += 1
         return emitted
 
-    def _execute_morsel_projection(self, morsel):
-        morsel = evaluate_and_append(self.evaluations, morsel)
+    cdef Morsel _execute_morsel_projection(self, Morsel morsel):
+        cdef Py_ssize_t emitted
+        morsel = evaluate_and_append_draken(self.evaluations, morsel)
         emitted = self._count_emitted_constant_literals(morsel)
         if emitted:
             self.readings["draken_constant_columns_emitted"] = \

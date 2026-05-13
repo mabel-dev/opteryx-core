@@ -14,7 +14,7 @@ from collections.abc import Iterable
 from opteryx.vectors.vector_ranking import vector_exact_search_top_k
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
-from opteryx.expression import evaluate_and_append
+from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -337,16 +337,16 @@ cdef object _compressed_threshold_candidates(
 
 
 cdef inline int _compare_single_vector(
-    Py_ssize_t left, Py_ssize_t right, vector, bint descending
-) except *:
+    Py_ssize_t left, Py_ssize_t right, Vector vector, bint descending
+) except? -2:
     """Compare two values at given indices in a vector. Returns -1, 0, 1."""
     cdef int cmp = vector.compare_at(left, right)
     return -cmp if descending else cmp
 
 
-cdef _sift_up_single_vector(
-    int32_t* buf, Py_ssize_t pos, vector, bint descending
-):
+cdef void _sift_up_single_vector(
+    int32_t* buf, Py_ssize_t pos, Vector vector, bint descending
+) except *:
     """Sift up in a worst-first heap of row indices."""
     cdef Py_ssize_t parent
     cdef int32_t tmp
@@ -359,9 +359,9 @@ cdef _sift_up_single_vector(
             break
 
 
-cdef _sift_down_single_vector(
-    int32_t* buf, Py_ssize_t pos, Py_ssize_t size, vector, bint descending
-):
+cdef void _sift_down_single_vector(
+    int32_t* buf, Py_ssize_t pos, Py_ssize_t size, Vector vector, bint descending
+) except *:
     """Sift down in a worst-first heap of row indices."""
     cdef Py_ssize_t left, right, worst
     cdef int32_t tmp
@@ -471,12 +471,12 @@ cdef class HeapSortNode(BasePlanNode):
         if chunk.num_rows > 0:
             self._chunk_buffer.append(chunk)
 
-    def _materialize_rows(self, morsel, row_indices):
+    cdef Morsel _materialize_rows(self, Morsel morsel, row_indices):
         if not row_indices:
             return morsel.empty()
         return morsel.take(row_indices)
 
-    def _ensure_order_expressions_evaluated(self, morsel):
+    cdef Morsel _ensure_order_expressions_evaluated(self, Morsel morsel):
         # column_names returns bytes; identity is bytes — compare directly
         existing_columns = set(morsel.column_names)
         evaluations = []
@@ -491,7 +491,7 @@ cdef class HeapSortNode(BasePlanNode):
         if not evaluations:
             return morsel
 
-        return evaluate_and_append(evaluations, morsel)
+        return evaluate_and_append_draken(evaluations, morsel)
 
     def _top_n(self, morsel):
         cdef Py_ssize_t k, row_idx, i, j, heap_size = 0
@@ -547,7 +547,7 @@ cdef class HeapSortNode(BasePlanNode):
             PyMem_Free(heap_buf)
         return self._materialize_rows(morsel, top_indices)
 
-    def _top_n_single_key(self, morsel, Py_ssize_t k):
+    cdef Morsel _top_n_single_key(self, Morsel morsel, Py_ssize_t k):
         cdef bint descending
         cdef Py_ssize_t take_count
 
@@ -561,7 +561,7 @@ cdef class HeapSortNode(BasePlanNode):
 
         return self._top_n_single_key_vector(morsel, vector, descending, k)
 
-    def _top_n_single_key_vector(self, morsel, vector, bint descending, Py_ssize_t k):
+    cdef Morsel _top_n_single_key_vector(self, Morsel morsel, Vector vector, bint descending, Py_ssize_t k):
         """Top-k on single column using native vector comparators only. No Python fallback."""
         cdef Py_ssize_t n = morsel.num_rows
         cdef Py_ssize_t i, heap_size = 0, pivot_idx, j, count
@@ -609,7 +609,7 @@ cdef class HeapSortNode(BasePlanNode):
         finally:
             PyMem_Free(heap_buf)
 
-    def _top_n_multi_key_uniform(self, morsel, Py_ssize_t k, bint descending):
+    cdef Morsel _top_n_multi_key_uniform(self, Morsel morsel, Py_ssize_t k, bint descending):
         vectors = [morsel.column(col) for col, _ in self.mapped_order]
         directions = [_is_descending(direction) for _, direction in self.mapped_order]
 
@@ -620,7 +620,7 @@ cdef class HeapSortNode(BasePlanNode):
 
         return self._heap_top_k_multi_vector(morsel, vectors, directions, k, search_space)
 
-    def _heap_top_k_multi_vector(self, morsel, list vectors, list directions, Py_ssize_t k, search_space):
+    cdef Morsel _heap_top_k_multi_vector(self, Morsel morsel, list vectors, list directions, Py_ssize_t k, search_space):
         """Top-k multi-column using vector comparator, no Python materialization."""
         cdef Py_ssize_t heap_size = 0, idx, i, j
         cdef int32_t* heap_buf = <int32_t*>PyMem_Malloc(k * sizeof(int32_t))
@@ -656,7 +656,7 @@ cdef class HeapSortNode(BasePlanNode):
         finally:
             PyMem_Free(heap_buf)
 
-    def _candidate_indices_from_first_key(self, morsel, Py_ssize_t k, bint descending):
+    cdef _candidate_indices_from_first_key(self, Morsel morsel, Py_ssize_t k, bint descending):
         cdef int64_t[::1] compressed
 
         first_column = self.mapped_order[0][0]
@@ -669,7 +669,7 @@ cdef class HeapSortNode(BasePlanNode):
             return None
         return _compressed_threshold_candidates(compressed, k, descending, -(1 << 63))
 
-    def _top_n_single_key_compressed(self, morsel, vector, bint descending, Py_ssize_t k):
+    cdef _top_n_single_key_compressed(self, Morsel morsel, Vector vector, bint descending, Py_ssize_t k):
         cdef int64_t[::1] compressed
 
         if not self._is_exact_compressible_vector(vector):

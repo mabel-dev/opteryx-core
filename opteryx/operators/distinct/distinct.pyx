@@ -58,6 +58,7 @@ cdef class DistinctNode(BasePlanNode):
         return "Distinction"
 
     cdef void _dispatch_push(self, Morsel morsel) except *:
+        cdef bint is_active_parvi
         if self._hash_set is None:
             if self._set_variant == "parvi" and not self._promoted:
                 self._hash_set = _ParviSetWrapper()
@@ -69,7 +70,8 @@ cdef class DistinctNode(BasePlanNode):
             return
 
         chunk = morsel
-        is_active_parvi = isinstance(self._hash_set, _ParviSetWrapper) and not self._promoted
+        # Variant is fixed at init; `_promoted` flips parvi → carchar.
+        is_active_parvi = (self._set_variant == "parvi") and not self._promoted
         promotion_seed = None
         if is_active_parvi and not self._hash_set.full():
             promotion_seed = _CarcharSetWrapper()

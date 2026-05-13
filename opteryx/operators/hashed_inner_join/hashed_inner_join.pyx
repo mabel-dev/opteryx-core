@@ -140,16 +140,6 @@ cdef class DrakenInnerJoinNode(JoinNode):
         return "draken+carchar"
 
     @staticmethod
-    def _iter_morsels(morsel_or_iterable):
-        if isinstance(morsel_or_iterable, Morsel):
-            yield morsel_or_iterable
-            return
-        for morsel in morsel_or_iterable:
-            if morsel is None:
-                continue
-            yield morsel
-
-    @staticmethod
     def _encode_columns(columns):
         encoded = []
         for column in columns:
@@ -159,7 +149,7 @@ cdef class DrakenInnerJoinNode(JoinNode):
                 encoded.append(str(column).encode("utf8"))
         return encoded
 
-    def _collect_expression_nodes_for_side(self, relation_names):
+    cdef list _collect_expression_nodes_for_side(self, list relation_names):
         """Collect ON-clause expressions that should be evaluated on one side."""
         if not self.on:
             return []
@@ -187,7 +177,7 @@ cdef class DrakenInnerJoinNode(JoinNode):
 
         return exprs
 
-    def _project_morsel(self, morsel: Morsel, keep_names) -> Morsel:
+    cdef Morsel _project_morsel(self, Morsel morsel, list keep_names):
         encoded_keep = [name if isinstance(name, bytes) else name.encode("utf8") for name in keep_names]
         available = set(morsel.column_names)
         selected = [name for name in encoded_keep if name in available]
@@ -195,9 +185,6 @@ cdef class DrakenInnerJoinNode(JoinNode):
             return morsel
         self.readings["feature_eliminate_join_columns_draken"] += 1
         return morsel.select(selected)
-
-    def _append_left_morsel(self, morsel: Morsel) -> None:
-        self.left_morsels.append(morsel)
 
     cpdef void push_left(self, Morsel morsel) except *:
         with self.lock:
@@ -274,12 +261,11 @@ cdef class DrakenInnerJoinNode(JoinNode):
                 return
 
             # Build-side data morsel — accumulate.
-            for chunk in self._iter_morsels(morsel):
-                if chunk.num_rows == 0:
-                    continue
-                start = time.monotonic_ns()
-                self._append_left_morsel(chunk)
-                self.readings["time_inner_join_left_accumulate"] += time.monotonic_ns() - start
+            if morsel is None or morsel.num_rows == 0:
+                return
+            start = time.monotonic_ns()
+            self.left_morsels.append(morsel)
+            self.readings["time_inner_join_left_accumulate"] += time.monotonic_ns() - start
 
     cpdef void push_right(self, Morsel morsel) except *:
         with self.lock:
@@ -292,74 +278,73 @@ cdef class DrakenInnerJoinNode(JoinNode):
                 # Inner join with empty build side produces nothing.
                 return
 
-            for chunk in self._iter_morsels(morsel):
-                if chunk.num_rows == 0:
-                    continue
+            if morsel is None or morsel.num_rows == 0:
+                return
 
-                right_chunk = chunk
-                right_exprs = self._collect_expression_nodes_for_side(self.right_relation_names)
-                if right_exprs and right_chunk.num_rows > 0:
-                    old_cols = set(right_chunk.column_names)
-                    try:
-                        right_chunk = evaluate_and_append_draken(right_exprs, right_chunk)
-                    except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
-                        raise UnsupportedSyntaxError(
-                            f"Draken inner join expression evaluation does not support this query shape: {err}"
-                        ) from err
-                    new_cols = set(right_chunk.column_names) - old_cols
-                    if new_cols:
-                        for col in new_cols:
-                            if col not in self.right_columns:
-                                self.right_columns.append(col)
-                if self.columns is not None:
-                    candidate_names = [c.schema_column.identity for c in self.columns]
-                    available_cols = set(right_chunk.column_names)
-                    right_keep = [name for name in candidate_names if name in available_cols]
-                    for join_col in self.right_columns:
-                        join_bytes = join_col if isinstance(join_col, bytes) else str(join_col).encode("utf8")
-                        if join_bytes not in right_keep:
-                            right_keep.append(join_bytes)
-                    if right_keep:
-                        right_chunk = self._project_morsel(right_chunk, right_keep)
+            right_chunk = morsel
+            right_exprs = self._collect_expression_nodes_for_side(self.right_relation_names)
+            if right_exprs and right_chunk.num_rows > 0:
+                old_cols = set(right_chunk.column_names)
+                try:
+                    right_chunk = evaluate_and_append_draken(right_exprs, right_chunk)
+                except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
+                    raise UnsupportedSyntaxError(
+                        f"Draken inner join expression evaluation does not support this query shape: {err}"
+                    ) from err
+                new_cols = set(right_chunk.column_names) - old_cols
+                if new_cols:
+                    for col in new_cols:
+                        if col not in self.right_columns:
+                            self.right_columns.append(col)
+            if self.columns is not None:
+                candidate_names = [c.schema_column.identity for c in self.columns]
+                available_cols = set(right_chunk.column_names)
+                right_keep = [name for name in candidate_names if name in available_cols]
+                for join_col in self.right_columns:
+                    join_bytes = join_col if isinstance(join_col, bytes) else str(join_col).encode("utf8")
+                    if join_bytes not in right_keep:
+                        right_keep.append(join_bytes)
+                if right_keep:
+                    right_chunk = self._project_morsel(right_chunk, right_keep)
 
-                start = time.monotonic_ns()
-                aligned = inner_join_carchar_morsel_aligned(
-                    self.left_morsel,
-                    right_chunk,
-                    self.right_columns,
-                    self.left_hash,
-                )
-                total_join_ns = time.monotonic_ns() - start
+            start = time.monotonic_ns()
+            aligned = inner_join_carchar_morsel_aligned(
+                self.left_morsel,
+                right_chunk,
+                self.right_columns,
+                self.left_hash,
+            )
+            total_join_ns = time.monotonic_ns() - start
 
-                (
-                    hash_time,
-                    probe_time,
-                    bloom_time,
-                    rows_hashed,
-                    candidate_rows,
-                    matched_rows,
-                    materialize_time,
-                    align_time,
-                    rows_eliminated_by_bloom_filter,
-                    _bloom_build_time,
-                    _build_unique_keys,
-                    _build_total_rows,
-                    _build_avg_chain_length,
-                ) = get_last_draken_inner_join_metrics()
-                self.readings["time_inner_join_hash"] += hash_time
-                self.readings["time_inner_join_probe"] += probe_time
-                self.readings["time_inner_join_indices"] += materialize_time
-                self.readings["time_bloom_filtering"] += bloom_time
-                self.readings["rows_inner_join_hashed"] += rows_hashed
-                self.readings["rows_inner_join_candidates"] += candidate_rows
-                self.readings["rows_inner_join_matched"] += matched_rows
-                self.readings["rows_eliminated_by_bloom_filter"] += (
-                    rows_eliminated_by_bloom_filter
-                )
-                self.readings["time_inner_join_total_kernel"] += total_join_ns
-                self.readings["time_inner_join_align"] += align_time
-                if aligned is not None:
-                    self.emit(aligned)
+            (
+                hash_time,
+                probe_time,
+                bloom_time,
+                rows_hashed,
+                candidate_rows,
+                matched_rows,
+                materialize_time,
+                align_time,
+                rows_eliminated_by_bloom_filter,
+                _bloom_build_time,
+                _build_unique_keys,
+                _build_total_rows,
+                _build_avg_chain_length,
+            ) = get_last_draken_inner_join_metrics()
+            self.readings["time_inner_join_hash"] += hash_time
+            self.readings["time_inner_join_probe"] += probe_time
+            self.readings["time_inner_join_indices"] += materialize_time
+            self.readings["time_bloom_filtering"] += bloom_time
+            self.readings["rows_inner_join_hashed"] += rows_hashed
+            self.readings["rows_inner_join_candidates"] += candidate_rows
+            self.readings["rows_inner_join_matched"] += matched_rows
+            self.readings["rows_eliminated_by_bloom_filter"] += (
+                rows_eliminated_by_bloom_filter
+            )
+            self.readings["time_inner_join_total_kernel"] += total_join_ns
+            self.readings["time_inner_join_align"] += align_time
+            if aligned is not None:
+                self.emit(aligned)
 
 
 # ---------------------------------------------------------------------------
@@ -437,15 +422,21 @@ cdef inline void _append_valid_rows_and_hashes(
     cdef Py_ssize_t num_rows = row_hashes.shape[0]
     cdef Py_ssize_t i
     cdef uint64_t h
+    cdef const uint64_t* hashes_ptr
+
+    if num_rows == 0:
+        return
 
     valid_hashes.reserve(num_rows)
     valid_rows.reserve(num_rows)
+    hashes_ptr = &row_hashes[0]
 
-    for i in range(num_rows):
-        h = row_hashes[i]
-        if h != NULL_HASH:
-            valid_rows.push_back(i)
-            valid_hashes.push_back(h)
+    with nogil:
+        for i in range(num_rows):
+            h = hashes_ptr[i]
+            if h != NULL_HASH:
+                valid_rows.push_back(i)
+                valid_hashes.push_back(h)
 
 
 cdef inline void _append_bloom_filtered_rows_and_hashes(
@@ -457,15 +448,21 @@ cdef inline void _append_bloom_filtered_rows_and_hashes(
     cdef Py_ssize_t num_rows = row_hashes.shape[0]
     cdef Py_ssize_t i
     cdef uint64_t h
+    cdef const uint64_t* hashes_ptr
+
+    if num_rows == 0:
+        return
 
     candidate_hashes.reserve(num_rows)
     candidate_rows.reserve(num_rows)
+    hashes_ptr = &row_hashes[0]
 
-    for i in range(num_rows):
-        h = row_hashes[i]
-        if h != NULL_HASH and bloom_filter._possibly_contains_fast(h):
-            candidate_rows.push_back(i)
-            candidate_hashes.push_back(h)
+    with nogil:
+        for i in range(num_rows):
+            h = hashes_ptr[i]
+            if h != NULL_HASH and bloom_filter._possibly_contains_fast(h):
+                candidate_rows.push_back(i)
+                candidate_hashes.push_back(h)
 
 
 cdef object _int32_array_from_vector(const vector[int64_t]& values):

@@ -204,11 +204,16 @@ class JoinOrderingStrategy(OptimizationStrategy):
             if comparator in ("NotEq", "Lt", "Gt", "LtEq", "GtEq"):
                 node.type = "non equi"
                 context.optimized_plan[context.node_id] = node
-            # Small datasets benefit from nested loop joins (avoids building a hash table)
+            # Nested-loop join wins when the smaller side is tiny enough that
+            # building a hash table doesn't amortize, AND the larger side is
+            # big enough that the bloom prefilter pays off. The upper bound
+            # is a safety bound against extrapolation outside the calibrated
+            # range; see scratch/_sweep_join_crossover.py for the empirical
+            # crossover sweep that produced these thresholds.
             elif (
                 not DISABLE_NESTED_LOOP_JOIN
-                and min(node.left_size, node.right_size) < 1_000
-                and max(node.left_size, node.right_size) < 100_000
+                and min(node.left_size, node.right_size) <= 500
+                and 1_000 <= max(node.left_size, node.right_size) <= 1_000_000
             ) or FORCE_NESTED_LOOP_JOIN:
                 node.type = "nested loop"
                 context.optimized_plan[context.node_id] = node

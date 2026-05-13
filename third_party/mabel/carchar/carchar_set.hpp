@@ -69,16 +69,8 @@ class CarcharSet {
         }
         reserve(size_ + length);
         const auto probe_finder = detail::select_probe_finder();
-        const std::size_t capacity_mask = capacity_ - 1U;
         std::size_t inserted = 0;
-        const std::size_t prime = std::min(kPrefetchAhead, length);
-        for (std::size_t p = 0; p < prime; ++p) {
-            prefetch_entry(keys[p] & capacity_mask);
-        }
         for (std::size_t i = 0; i < length; ++i) {
-            if (i + kPrefetchAhead < length) {
-                prefetch_entry(keys[i + kPrefetchAhead] & capacity_mask);
-            }
             if (insert_or_ignore_no_reserve(keys[i], probe_finder)) {
                 ++inserted;
             }
@@ -104,13 +96,6 @@ class CarcharSet {
     // Bulk insert for DISTINCT-style filtering; writes row indices of newly inserted keys
     // directly into out_indices (int32).  Caller must supply a buffer of at least `length`
     // int32 slots.  Returns the number of newly inserted keys written.
-    //
-    // Note: software prefetch (__builtin_prefetch) was evaluated here and showed neutral to
-    // slightly negative results on Apple M-series (large L2 cache, strong hardware prefetcher).
-    // The working sets tested (100k–500k rows, ~1–5 MB) fit within M-series L2, so the hardware
-    // prefetcher handles the random access pattern without assistance.  The prefetch adds
-    // instruction overhead without hiding latency on that platform.  Re-evaluate if this code
-    // runs on x86 server hardware where tables routinely exceed L3 cache.
     std::size_t mark_new_indices_32(
         const std::uint64_t* keys,
         std::int32_t*        out_indices,
@@ -121,16 +106,8 @@ class CarcharSet {
         }
         reserve(size_ + length);
         const auto probe_finder = detail::select_probe_finder();
-        const std::size_t capacity_mask = capacity_ - 1U;
         std::size_t inserted = 0;
-        const std::size_t prime = std::min(kPrefetchAhead, length);
-        for (std::size_t p = 0; p < prime; ++p) {
-            prefetch_entry(keys[p] & capacity_mask);
-        }
         for (std::size_t i = 0; i < length; ++i) {
-            if (i + kPrefetchAhead < length) {
-                prefetch_entry(keys[i + kPrefetchAhead] & capacity_mask);
-            }
             if (insert_or_ignore_no_reserve(keys[i], probe_finder)) {
                 out_indices[inserted++] = static_cast<std::int32_t>(i);
             }
@@ -150,16 +127,8 @@ class CarcharSet {
         }
         reserve(size_ + length);
         const auto probe_finder = detail::select_probe_finder();
-        const std::size_t capacity_mask = capacity_ - 1U;
         std::size_t inserted = 0;
-        const std::size_t prime = std::min(kPrefetchAhead, length);
-        for (std::size_t p = 0; p < prime; ++p) {
-            prefetch_entry(keys[p] & capacity_mask);
-        }
         for (std::size_t i = 0; i < length; ++i) {
-            if (i + kPrefetchAhead < length) {
-                prefetch_entry(keys[i + kPrefetchAhead] & capacity_mask);
-            }
             if (insert_or_ignore_no_reserve(keys[i], probe_finder)) {
                 out_indices[inserted++] = static_cast<std::int64_t>(i);
             }
@@ -176,16 +145,8 @@ class CarcharSet {
         }
         reserve(size_ + length);
         const auto probe_finder = detail::select_probe_finder();
-        const std::size_t capacity_mask = capacity_ - 1U;
         std::size_t inserted = 0;
-        const std::size_t prime = std::min(kPrefetchAhead, length);
-        for (std::size_t p = 0; p < prime; ++p) {
-            prefetch_entry(keys[p] & capacity_mask);
-        }
         for (std::size_t i = 0; i < length; ++i) {
-            if (i + kPrefetchAhead < length) {
-                prefetch_entry(keys[i + kPrefetchAhead] & capacity_mask);
-            }
             if (insert_or_ignore_no_reserve(keys[i], probe_finder)) {
                 out_is_new[i] = 1U;
                 ++inserted;
@@ -209,16 +170,8 @@ class CarcharSet {
             return 0;
         }
         const auto probe_finder = detail::select_probe_finder();
-        const std::size_t capacity_mask = capacity_ - 1U;
         std::size_t found = 0;
-        const std::size_t prime = std::min(kPrefetchAhead, length);
-        for (std::size_t p = 0; p < prime; ++p) {
-            prefetch_entry(keys[p] & capacity_mask);
-        }
         for (std::size_t i = 0; i < length; ++i) {
-            if (i + kPrefetchAhead < length) {
-                prefetch_entry(keys[i + kPrefetchAhead] & capacity_mask);
-            }
             if (find_slot(keys[i], probe_finder).found) {
                 out_indices[found++] = static_cast<std::int32_t>(i);
             }
@@ -239,16 +192,8 @@ class CarcharSet {
             return 0;
         }
         const auto probe_finder = detail::select_probe_finder();
-        const std::size_t capacity_mask = capacity_ - 1U;
         std::size_t not_found = 0;
-        const std::size_t prime = std::min(kPrefetchAhead, length);
-        for (std::size_t p = 0; p < prime; ++p) {
-            prefetch_entry(keys[p] & capacity_mask);
-        }
         for (std::size_t i = 0; i < length; ++i) {
-            if (i + kPrefetchAhead < length) {
-                prefetch_entry(keys[i + kPrefetchAhead] & capacity_mask);
-            }
             if (!find_slot(keys[i], probe_finder).found) {
                 out_indices[not_found++] = static_cast<std::int32_t>(i);
             }
@@ -259,22 +204,6 @@ class CarcharSet {
     std::size_t estimated_bytes() const noexcept { return capacity_ * (1U + 8U); }
 
    private:
-    // Number of entries to prefetch ahead of the current insert position.
-    // Sized to cover ~1 µs of DRAM latency at typical x86 insert throughput.
-    static constexpr std::size_t kPrefetchAhead = 16;
-
-    // Prefetch the control byte and hash slot for a given table slot into L2.
-    // On x86-64 this emits PREFETCHT1 for both arrays, hiding DRAM latency on
-    // large tables.  On all other architectures (ARM/Apple Silicon) the body is
-    // empty; the compiler dead-code-eliminates all call sites and the surrounding
-    // priming/rolling loops at -O2, leaving zero runtime overhead.
-    inline void prefetch_entry([[maybe_unused]] std::size_t slot) const noexcept {
-#if defined(__x86_64__) || defined(_M_X64)
-        __builtin_prefetch(control_.data() + slot, 0, 1);
-        __builtin_prefetch(hashes_.data()  + slot, 0, 1);
-#endif
-    }
-
     struct FindResult {
         std::size_t slot = 0;
         bool found = false;

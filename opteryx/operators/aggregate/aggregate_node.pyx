@@ -525,7 +525,7 @@ cdef class UngroupedAggregateNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Ungrouped Aggregate"
 
-    def _resolve_select_state(self, Morsel chunk):
+    cdef int _resolve_select_state(self, Morsel chunk) except -2:
         """Decide once whether `chunk.select(...)` is needed for this stream.
 
         Returns the resolved state (1=needed, 2=unneeded). Sets and returns
@@ -554,7 +554,7 @@ cdef class UngroupedAggregateNode(BasePlanNode):
             self._select_state = 1
         return self._select_state
 
-    def _finalize_morsel(self):
+    cdef Morsel _finalize_morsel(self):
         names = []
         vectors = []
         engine_result = None

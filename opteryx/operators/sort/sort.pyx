@@ -28,7 +28,7 @@ from typing import Generator, Optional
 from opteryx.compiled.morsel_ops.sort import morsel_sort
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
-from opteryx.expression import evaluate_and_append
+from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 
 # BasePlanNode in scope via textual include from _operators.pyx.
@@ -84,7 +84,7 @@ cdef class SortNode(BasePlanNode):
             ascending_flags.append(bool(ascending))
 
         if evaluations:
-            combined = evaluate_and_append(evaluations, combined)
+            combined = evaluate_and_append_draken(evaluations, combined)
 
         perm = morsel_sort(combined, column_names, ascending_flags)
         combined.take(perm)

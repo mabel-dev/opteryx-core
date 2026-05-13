@@ -30,6 +30,17 @@ from draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
 from draken.morsels.align cimport align_tables
 from opteryx.models import QueryProperties
 
+
+cdef extern from "operators/loop_join_kernels.hpp" namespace "opteryx::operators" nogil:
+    void nested_loop_match(
+        const uint64_t* left_hashes,
+        size_t nl,
+        const uint64_t* right_hashes,
+        size_t nr,
+        vector[int32_t]& out_left,
+        vector[int32_t]& out_right,
+    )
+
 # EOS sentinel available as _EOS_SENTINEL via the umbrella unit.
 
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
@@ -69,25 +80,15 @@ cdef Morsel _nested_loop_join_morsel(Morsel left_morsel, Morsel right_morsel, li
 
     cdef vector[int32_t] left_idx_vec
     cdef vector[int32_t] right_idx_vec
-    cdef Py_ssize_t i, j
-    cdef uint64_t left_hash, right_hash
 
-    # Nested loop join: smaller side outer for better cache locality.
+    # Nested-loop hash equality. C++ kernel picks smaller side as outer and
+    # uses SIMD (NEON / AVX2) for the inner sweep where available.
     with nogil:
-        if nl <= nr:
-            for i in range(nl):
-                left_hash = left_hashes[i]
-                for j in range(nr):
-                    if left_hash == right_hashes[j]:
-                        left_idx_vec.push_back(<int32_t>i)
-                        right_idx_vec.push_back(<int32_t>j)
-        else:
-            for j in range(nr):
-                right_hash = right_hashes[j]
-                for i in range(nl):
-                    if right_hash == left_hashes[i]:
-                        left_idx_vec.push_back(<int32_t>i)
-                        right_idx_vec.push_back(<int32_t>j)
+        nested_loop_match(
+            &left_hashes[0], <size_t>nl,
+            &right_hashes[0], <size_t>nr,
+            left_idx_vec, right_idx_vec,
+        )
 
     cdef Py_ssize_t nmatch = <Py_ssize_t>left_idx_vec.size()
     if nmatch == 0:

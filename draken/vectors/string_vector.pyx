@@ -72,12 +72,6 @@ cdef extern from "volnitsky.h":
 
 cdef extern from *:
     """
-    #ifdef __GNUC__
-    #define PREFETCH(addr) __builtin_prefetch(addr, 0, 3)
-    #else
-    #define PREFETCH(addr)
-    #endif
-
     #if defined(__GNUC__) || defined(__clang__)
     #define BSWAP64(x) __builtin_bswap64(x)
     #elif defined(_MSC_VER)
@@ -91,7 +85,6 @@ cdef extern from *:
     }
     #endif
     """
-    void PREFETCH(const void* addr) nogil
     uint64_t BSWAP64(uint64_t x) nogil
 
 from draken.vectors.vector cimport (
