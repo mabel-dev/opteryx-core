@@ -1,3 +1,13 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -29,38 +39,54 @@ from opteryx.models import QueryProperties
 from opteryx.types.schema import RelationSchema
 from opteryx.types import OrsoTypes
 
-from opteryx import EOS
+# EOS sentinel in scope as _EOS_SENTINEL via the umbrella unit.
 
-from . import BasePlanNode
+# BasePlanNode/JoinNode in scope via _operators.pyx include.
+
+# Static dispatch table for null-vector construction. Built once at module import
+# instead of an if/elif chain per call. Unmapped types fall through to StringVector.
+# Names that do not exist on OrsoTypes are skipped (legacy dead-code branches).
+cdef dict _NULL_CONSTRUCTORS = {}
+
+def _build_null_constructors():
+    table = [
+        ("INTEGER", Int64Vector),
+        ("INT8", Int64Vector),
+        ("INT16", Int64Vector),
+        ("INT32", Int64Vector),
+        ("INT64", Int64Vector),
+        ("DOUBLE", Float64Vector),
+        ("FLOAT32", Float64Vector),
+        ("FLOAT64", Float64Vector),
+        ("VARCHAR", StringVector),
+        ("TEXT", StringVector),
+        ("BLOB", StringVector),
+        ("BOOLEAN", BoolVector),
+        ("DATE", Date32Vector),
+        ("TIMESTAMP", TimestampVector),
+        ("TIME", TimeVector),
+        ("INTERVAL", IntervalVector),
+    ]
+    out = {}
+    for name, cls in table:
+        member = getattr(OrsoTypes, name, None)
+        ctor = getattr(cls, "from_constant", None)
+        if member is not None and ctor is not None:
+            out[member] = ctor
+    return out
+
+_NULL_CONSTRUCTORS = _build_null_constructors()
 
 
-def _create_null_vector(column, num_rows):
+cdef inline object _create_null_vector(object column, Py_ssize_t num_rows):
     """Create a null vector of the correct type for a schema column."""
-    col_type = column.type
-
-    if col_type == OrsoTypes.INT8 or col_type == OrsoTypes.INT16 or col_type == OrsoTypes.INT32:
-        return Int64Vector.from_constant(None, num_rows)
-    elif col_type == OrsoTypes.INT64:
-        return Int64Vector.from_constant(None, num_rows)
-    elif col_type == OrsoTypes.FLOAT32 or col_type == OrsoTypes.FLOAT64:
-        return Float64Vector.from_constant(None, num_rows)
-    elif col_type == OrsoTypes.VARCHAR or col_type == OrsoTypes.TEXT or col_type == OrsoTypes.BLOB:
+    ctor = _NULL_CONSTRUCTORS.get(column.type)
+    if ctor is None:
         return StringVector.from_constant(None, num_rows)
-    elif col_type == OrsoTypes.BOOLEAN:
-        return BoolVector.from_constant(None, num_rows)
-    elif col_type == OrsoTypes.DATE:
-        return Date32Vector.from_constant(None, num_rows)
-    elif col_type == OrsoTypes.TIMESTAMP:
-        return TimestampVector.from_constant(None, num_rows)
-    elif col_type == OrsoTypes.TIME:
-        return TimeVector.from_constant(None, num_rows)
-    elif col_type == OrsoTypes.INTERVAL:
-        return IntervalVector.from_constant(None, num_rows)
-    else:
-        return StringVector.from_constant(None, num_rows)
+    return ctor(None, num_rows)
 
 
-def normalize_morsel(schema: RelationSchema, morsel: Morsel) -> Morsel:
+cdef Morsel normalize_morsel(object schema, Morsel morsel):
     """Normalize a Morsel to match the expected schema.
 
     Handles:
@@ -71,36 +97,51 @@ def normalize_morsel(schema: RelationSchema, morsel: Morsel) -> Morsel:
     if morsel.column_names == [b"$COUNT(*)"]:
         return morsel
 
+    cdef Py_ssize_t num_rows = morsel.num_rows
+
     if len(schema.columns) == 0:
         if morsel.column_names != [b"*"]:
-            all_true = BoolVector.from_constant(True, morsel.num_rows)
+            all_true = BoolVector.from_constant(True, num_rows)
             morsel.append_vector(b"*", all_true)
         return morsel.select([b"*"])
 
     # Build lists of vectors and names in schema order
-    names = []
-    vectors = []
+    cdef list names = []
+    cdef list vectors = []
+    cdef object col_identity
+    cdef object col_name
+    cdef bytes col_name_bytes
 
     for column in schema.columns:
         col_identity = column.identity
-        col_name_bytes = column.name.encode() if isinstance(column.name, str) else column.name
+        col_name = column.name
+        if isinstance(col_name, str):
+            col_name_bytes = col_name.encode()
+        else:
+            col_name_bytes = col_name
 
         try:
             vector = morsel.column(col_identity, col_name_bytes)
             names.append(col_identity)
             vectors.append(vector)
         except (KeyError, ValueError):
-            null_vector = _create_null_vector(column, morsel.num_rows)
             names.append(col_identity)
-            vectors.append(null_vector)
+            vectors.append(_create_null_vector(column, num_rows))
 
     return Morsel.from_vectors(names, vectors)
 
 
-class ReaderNode(BasePlanNode):
+cdef class ReaderNode(BasePlanNode):
     """
     The Reader Node is responsible for reading the relevant datasets.
     """
+
+    cdef public object alias
+    cdef public object dataset
+    cdef public object connector
+    cdef public object predicates
+    cdef public object limit
+    cdef public object schema
 
     def __init__(self, properties: QueryProperties, **parameters):
         """Initialize ReaderNode."""
@@ -194,12 +235,11 @@ class ReaderNode(BasePlanNode):
                 if limit.limit:
                     self.limit = limit.limit
 
-    def execute(self, morsel) -> Generator:
-        """Execute the ReaderNode."""
-        if morsel == EOS:
-            yield EOS
-            return
+    def read_morsels(self):
+        """Source-side morsel iterator used by the push pipeline engine.
 
+        Yields raw morsels; the engine pushes each one into the chain and
+        sends a terminal EOS after the iterator exhausts."""
         if not self.connector:
             raise UnsupportedSyntaxError(
                 "ReaderNode is restricted to internal virtual datasets. "
@@ -208,12 +248,9 @@ class ReaderNode(BasePlanNode):
 
         orso_schema = self.schema
         orso_schema_cols = []
-
-        # Filter columns based on projection
         for col in orso_schema.columns:
             if col.identity in [c.schema_column.identity for c in self.columns]:
                 orso_schema_cols.append(col)
-
         orso_schema.columns = orso_schema_cols
         start_clock = time.monotonic_ns()
         reader = self.connector.read_dataset(

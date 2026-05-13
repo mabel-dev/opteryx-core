@@ -10,6 +10,7 @@ from draken.core.buffers cimport DrakenRLEBuffer
 from draken.core.buffers cimport DrakenVarBuffer
 from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.float64_vector cimport Float64Vector
 
 cdef class Int64Vector(Vector):
     cdef object _arrow_data_buf
@@ -38,6 +39,7 @@ cdef class Int64Vector(Vector):
     cdef BoolVector _compare_scalar_dict(self, int64_t value, int op)
     cdef BoolVector _compare_scalar(self, int64_t value, int op)
     cdef BoolVector _compare_vector(self, Int64Vector other, int op)
+    cdef BoolVector _compare_float64_vector(self, object other, int op)
 
     cpdef BoolVector equals(self, int64_t value)
     cpdef BoolVector equals_vector(self, Int64Vector other)
@@ -51,6 +53,12 @@ cdef class Int64Vector(Vector):
     cpdef BoolVector less_than_vector(self, Int64Vector other)
     cpdef BoolVector less_than_or_equals(self, int64_t value)
     cpdef BoolVector less_than_or_equals_vector(self, Int64Vector other)
+    cpdef BoolVector equals_float64_vector(self, object other)
+    cpdef BoolVector not_equals_float64_vector(self, object other)
+    cpdef BoolVector greater_than_float64_vector(self, object other)
+    cpdef BoolVector greater_than_or_equals_float64_vector(self, object other)
+    cpdef BoolVector less_than_float64_vector(self, object other)
+    cpdef BoolVector less_than_or_equals_float64_vector(self, object other)
     cpdef BoolVector between(self, int64_t lower, int64_t upper,
                               bint lower_inclusive=*, bint upper_inclusive=*)
     cpdef BoolVector in_list(self, object value_set)
@@ -61,6 +69,7 @@ cdef class Int64Vector(Vector):
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False
 
     cpdef list to_pylist(self)
+    cpdef Float64Vector to_float64_vector(self)
     #cpdef int64_t __getitem__(self, Py_ssize_t i)
 
     cpdef int64_t sum(self)

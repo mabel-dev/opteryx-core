@@ -3,9 +3,10 @@
 # cython: cdivision=True
 # cython: initializedcheck=False
 # cython: infer_types=True
-# distutils: sources = src/cpp/simd_search.cpp src/cpp/simd_string_ops.cpp src/cpp/cpu_features.cpp
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 import platform
 from libcpp.vector cimport vector

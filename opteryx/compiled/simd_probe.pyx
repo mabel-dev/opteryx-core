@@ -3,9 +3,10 @@
 # cython: cdivision=True
 # cython: initializedcheck=False
 # cython: infer_types=True
-# distutils: sources = src/cpp/simd_env.cpp src/cpp/simd_hash.cpp src/cpp/simd_bitops.cpp src/cpp/cpu_features.cpp
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 cdef extern from "simd_env.h":
     void opteryx_check_simd_env_or_abort()

@@ -5,6 +5,8 @@
 # cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 # Internal kernels backing the predicate-rewrite of `col = ''` / `col != ''`
 # (and the equivalent `LENGTH(col) <op> N` forms) to `_IS_EMPTY(col)` /

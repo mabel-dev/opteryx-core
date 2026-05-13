@@ -5,6 +5,8 @@
 # cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 from libc.stddef cimport size_t
 from libc.stdint cimport int32_t

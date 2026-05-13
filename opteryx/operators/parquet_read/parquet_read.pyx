@@ -1,3 +1,13 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -38,14 +48,57 @@ from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.models import QueryProperties
 from opteryx.utils import random_string
+from opteryx.types import OrsoTypes
 
-from opteryx import EOS
+# Hoisted out of the per-row-group hot path. Previously these imports happened
+# 3× per row group via `from ... import ...` inside the loop body.
+from draken.vectors._decimal_vector import from_int64_vector as _int64_to_decimal
+from draken.vectors.date32_vector import from_int64_vector as _int64_to_date32
+from draken.vectors.timestamp_vector import from_int64_vector as _int64_to_timestamp
+# Int64Vector is already cimported by the umbrella unit (_operators.pyx).
+
+# EOS sentinel in scope as _EOS_SENTINEL via the umbrella unit.
 from opteryx import config
 
 _FOOTER_CACHE = ParquetFooterBytesCache()
 
 
-class ParquetReadNode(ReaderNode):
+cdef inline void _coerce_logical_types(
+    dict row_group,
+    dict decimal_col_map,
+    set date_col_set,
+    set timestamp_col_set,
+):
+    """Coerce Int64Vector physical columns to their logical types (DATE/TIMESTAMP/DECIMAL).
+
+    The C++ parquet pipeline serialises DATE/TIMESTAMP/DECIMAL as TAG_INT64 (the
+    physical type) and the IPC format carries no logical type info, so we apply
+    the schema-driven coercion here. Hot-path helper: called once per row group.
+    """
+    cdef str col_name
+    cdef int precision
+    cdef int scale
+
+    if decimal_col_map:
+        for col_name, dec in decimal_col_map.items():
+            v = row_group.get(col_name)
+            if v is not None and isinstance(v, Int64Vector):
+                precision = dec[0]
+                scale = dec[1]
+                row_group[col_name] = _int64_to_decimal(v, precision, scale)
+    if date_col_set:
+        for col_name in date_col_set:
+            v = row_group.get(col_name)
+            if v is not None and isinstance(v, Int64Vector):
+                row_group[col_name] = _int64_to_date32(v)
+    if timestamp_col_set:
+        for col_name in timestamp_col_set:
+            v = row_group.get(col_name)
+            if v is not None and isinstance(v, Int64Vector):
+                row_group[col_name] = _int64_to_timestamp(v, "us")
+
+
+cdef class ParquetReadNode(ReaderNode):
     """Read node backed by column-chunk range reads via ``parquet_io``.
 
     Activated for filesystem-backed connectors (GCS, S3, local) when the
@@ -53,10 +106,16 @@ class ParquetReadNode(ReaderNode):
     rejected by the planner.
     """
 
+    cdef public set _parquet_files_seen
+    cdef public object _predicate_function_nodes_cached
+    cdef public object _compiled_predicate_dispatcher
+    cdef public object _planner_name_to_identity_cached
+    cdef public object _filter_column_names_cached
+
     def __init__(self, properties: QueryProperties, **parameters) -> None:
         ReaderNode.__init__(self, properties=properties, **parameters)
         self.predicates = parameters.get("predicates")
-        self._parquet_files_seen: set = set()
+        self._parquet_files_seen = set()
         self._predicate_function_nodes_cached = None  # Cache to avoid AST walking per row group
         self._compiled_predicate_dispatcher = None  # Phase 2: Compiled predicate dispatcher
         self._planner_name_to_identity_cached = None  # Cache name-to-identity mapping
@@ -66,70 +125,81 @@ class ParquetReadNode(ReaderNode):
         """Analyze predicate structure to determine if it can be compiled.
 
         Returns a descriptor tuple:
-        - ("int64_scalar", column_name, operator, scalar_value) for simple int64 comparisons
-        - ("float64_scalar", column_name, operator, scalar_value) for float comparisons
+        - ("int64_scalar", identity_bytes, operator, scalar_value) for simple int64 comparisons
+        - ("float64_scalar", identity_bytes, operator, scalar_value) for float comparisons
         - ("complex_expression", predicate_root) for complex/unsupported predicates
         - None if unable to analyze
+
+        Predicate trees are built from Node instances (there is no separate
+        Identifier class); discriminate via `node_type`, not `__class__.__name__`
+        or `hasattr`. The column reference returned is `schema_column.identity`
+        — the bytes key used by Morsel.column — not the surface SQL name.
         """
         if predicate_root is None:
             return None
 
-        # Check if it's a simple binary comparison
-        if (
-            not hasattr(predicate_root, "node_type")
-            or predicate_root.node_type != NodeType.COMPARISON_OPERATOR
-        ):
+        if predicate_root.node_type != NodeType.COMPARISON_OPERATOR:
             return ("complex_expression", predicate_root)
 
-        left = getattr(predicate_root, "left", None)
-        right = getattr(predicate_root, "right", None)
-        operator = getattr(predicate_root, "operator", None)
-
+        left = predicate_root.left
+        right = predicate_root.right
+        operator = predicate_root.operator
         if left is None or right is None or operator is None:
             return ("complex_expression", predicate_root)
 
-        # Pattern: Column <op> Scalar
-        if (
-            hasattr(left, "__class__")
-            and left.__class__.__name__ == "Identifier"
-            and hasattr(right, "value")
-            and not hasattr(right, "name")
-        ):
-            right_value = right.value
-            if isinstance(right_value, int):
-                return ("int64_scalar", left.name, operator, right_value)
-            elif isinstance(right_value, float):
-                return ("float64_scalar", left.name, operator, right_value)
+        left_type = left.node_type
+        right_type = right.node_type
 
-        # Pattern: Scalar <op> Column (commute operator)
-        if (
-            hasattr(right, "__class__")
-            and right.__class__.__name__ == "Identifier"
-            and hasattr(left, "value")
-            and not hasattr(left, "name")
-        ):
-            left_value = left.value
-            if isinstance(left_value, int):
-                # Commute the operator for reverse comparison
-                commuted_op = self._commute_operator(operator)
-                return ("int64_scalar", right.name, commuted_op, left_value)
-            elif isinstance(left_value, float):
-                commuted_op = self._commute_operator(operator)
-                return ("float64_scalar", right.name, commuted_op, left_value)
+        # Pattern: Column <op> Literal
+        if left_type == NodeType.IDENTIFIER and right_type == NodeType.LITERAL:
+            return self._classify_scalar_compare(left, operator, right.value)
 
-        # Fall back to complex expression
+        # Pattern: Literal <op> Column → commute operator and classify
+        if right_type == NodeType.IDENTIFIER and left_type == NodeType.LITERAL:
+            commuted_op = self._commute_operator(operator)
+            return self._classify_scalar_compare(right, commuted_op, left.value)
+
         return ("complex_expression", predicate_root)
+
+    @staticmethod
+    def _classify_scalar_compare(identifier, operator, value):
+        """Classify a (column, op, literal) triple for the typed dispatcher.
+
+        Only fires for INTEGER / DOUBLE columns paired with a numeric literal.
+        Excludes Python `bool` (which is a subclass of `int`) since boolean
+        comparisons against an integer column would silently coerce.
+        """
+        schema_column = identifier.schema_column
+        if schema_column is None:
+            return ("complex_expression", None)
+
+        identity = schema_column.identity
+        if isinstance(identity, str):
+            identity = identity.encode("utf-8")
+        if not isinstance(identity, (bytes, bytearray)):
+            return ("complex_expression", None)
+
+        col_type = schema_column.type
+        if isinstance(value, bool):
+            return ("complex_expression", None)
+        if col_type == OrsoTypes.INTEGER and isinstance(value, int):
+            return ("int64_scalar", bytes(identity), operator, value)
+        if col_type == OrsoTypes.DOUBLE and isinstance(value, (int, float)):
+            return ("float64_scalar", bytes(identity), operator, float(value))
+        return ("complex_expression", None)
 
     @staticmethod
     def _commute_operator(str op) -> str:
         """Commute comparison operators (e.g., a < b becomes b > a)."""
+        # Previously a set literal accessed as a dict; that bug made the
+        # whole compiled-dispatcher path unreachable.
         commute_map = {
-            "Lt",
-            "Gt",
-            "LtEq",
-            "GtEq",
-            "Eq",
-            "NotEq",
+            "Lt": "Gt",
+            "Gt": "Lt",
+            "LtEq": "GtEq",
+            "GtEq": "LtEq",
+            "Eq": "Eq",
+            "NotEq": "NotEq",
         }
         return commute_map.get(op, op)
 
@@ -153,75 +223,65 @@ class ParquetReadNode(ReaderNode):
 
         if pred_type[0] == "int64_scalar":
             # Compile specialized dispatcher for int64 <op> scalar
-            column_name, operator, scalar_value = pred_type[1:4]
-            return self._compile_int64_scalar_dispatcher(column_name, operator, scalar_value)
+            column_identity, operator, scalar_value = pred_type[1:4]
+            return self._compile_int64_scalar_dispatcher(column_identity, operator, scalar_value)
         elif pred_type[0] == "float64_scalar":
             # Compile specialized dispatcher for float64 <op> scalar
-            column_name, operator, scalar_value = pred_type[1:4]
-            return self._compile_float64_scalar_dispatcher(column_name, operator, scalar_value)
+            column_identity, operator, scalar_value = pred_type[1:4]
+            return self._compile_float64_scalar_dispatcher(column_identity, operator, scalar_value)
 
         # Fall back to None for generic path
         return None
 
     @staticmethod
-    def _compile_int64_scalar_dispatcher(str column_name, str operator, long scalar_value):
+    def _compile_int64_scalar_dispatcher(bytes column_identity, str operator, long scalar_value):
         """Generate specialized function for: int64_column <op> constant
 
         Example for Q02 (AdvEngineID <> 0):
           Generated function calls vec.not_equals(0) directly, no dispatch.
+
+        The closure captures the planner identity (bytes) — the same key
+        Morsel.column uses internally — so the per-row-group lookup is a
+        single hash-table probe with no name fallback scan.
         """
-        # Map SQL operators to Draken vector methods
         op_map = {
-            "Eq",
-            "NotEq",
-            "Lt",
-            "Gt",
-            "LtEq",
-            "GtEq",
+            "Eq": "equals",
+            "NotEq": "not_equals",
+            "Lt": "less_than",
+            "Gt": "greater_than",
+            "LtEq": "less_than_or_equals",
+            "GtEq": "greater_than_or_equals",
         }
 
-        if operator not in op_map:
-            # Can't compile this operator, will use generic fallback
+        method_name = op_map.get(operator)
+        if method_name is None:
             return None
 
-        method_name = op_map[operator]
-
-        # Generate the specialized function
         def specialized_dispatcher(morsel):
-            try:
-                vec = morsel.column(column_name)
-                # Direct call to Draken method - NO dispatch, NO branches!
-                return getattr(vec, method_name)(scalar_value)
-            except (KeyError, AttributeError, TypeError):
-                # Column not available or type mismatch, this shouldn't happen
-                # but we handle it gracefully by returning None (no mask)
-                return None
+            vec = morsel.column(column_identity)
+            return getattr(vec, method_name)(scalar_value)
 
         return specialized_dispatcher
 
     @staticmethod
-    def _compile_float64_scalar_dispatcher(str column_name, str operator, double scalar_value):
+    def _compile_float64_scalar_dispatcher(bytes column_identity, str operator, double scalar_value):
         """Generate specialized function for: float64_column <op> constant"""
         op_map = {
-            "Eq",
-            "NotEq",
-            "Lt",
-            "Gt",
-            "LtEq",
-            "GtEq",
+            "Eq": "equals",
+            "NotEq": "not_equals",
+            "Lt": "less_than",
+            "Gt": "greater_than",
+            "LtEq": "less_than_or_equals",
+            "GtEq": "greater_than_or_equals",
         }
 
-        if operator not in op_map:
+        method_name = op_map.get(operator)
+        if method_name is None:
             return None
 
-        method_name = op_map[operator]
-
         def specialized_dispatcher(morsel):
-            try:
-                vec = morsel.column(column_name)
-                return getattr(vec, method_name)(scalar_value)
-            except (KeyError, AttributeError, TypeError):
-                return None
+            vec = morsel.column(column_identity)
+            return getattr(vec, method_name)(scalar_value)
 
         return specialized_dispatcher
 
@@ -366,129 +426,135 @@ class ParquetReadNode(ReaderNode):
             return morsel.slice(0, 0), rows_before_filter, 0
         return filtered, rows_before_filter, filtered.num_rows
 
-    def _extract_row_group_metadata(self, row_group: dict):
+    cdef tuple _extract_row_group_metadata(self, dict row_group):
         """Extract and aggregate metadata from row_group dict into self.readings.
 
         Batches all pop() operations and updates to self.readings to minimize
         dict lookups. Returns path and rg_idx; all other metadata is consumed.
         """
-        path = row_group.pop("__path__")
-        rg_idx = row_group.pop("__row_group__")
+        # self.readings is a defaultdict; bind as `object` since `cdef dict`
+        # rejects dict subclasses at runtime.
+        cdef object readings = self.readings
+        cdef object path = row_group.pop("__path__")
+        cdef object rg_idx = row_group.pop("__row_group__")
+        cdef object existing
+        cdef object scan_strategy
+        cdef object time_to_first_rowgroup_ns
+        cdef str key
 
         # Additive metrics: direct +=
-        self.readings["parquet_row_groups_pruned"] = row_group.pop("__row_groups_pruned__", 0)
+        readings["parquet_row_groups_pruned"] = row_group.pop("__row_groups_pruned__", 0)
         self.bytes_in += row_group.pop("__bytes_fetched__", 0)
-        self.readings["parquet_footer_bytes"] += row_group.pop("__footer_bytes__", 0)
-        self.readings["parquet_range_request_count"] += row_group.pop("__range_request_count__", 0)
-        self.readings["parquet_range_bytes_requested"] += row_group.pop("__range_bytes_requested__", 0)
-        self.readings["time_parquet_read_ranges_ns"] += row_group.pop("__time_read_ranges_ns__", 0)
-        self.readings["time_parquet_decode_columns_ns"] += row_group.pop("__time_decode_columns_ns__", 0)
-        self.readings["time_parquet_task_queue_wait_ns"] += row_group.pop("__task_queue_wait_ns__", 0)
-        self.readings["time_parquet_task_total_ns"] += row_group.pop("__task_total_ns__", 0)
-        self.readings["time_parquet_footer_fetch_ns"] += row_group.pop("__footer_fetch_ns__", 0)
-        self.readings["time_parquet_scheduler_wait_ns"] += row_group.pop("__scheduler_wait_ns__", 0)
-        self.readings["time_parquet_rowgroup_completion_ns"] += row_group.pop("__rowgroup_completion_latency_ns__", 0)
-        self.readings["time_parquet_emit_wait_ns"] += row_group.pop("__emit_wait_ns__", 0)
-        self.readings["time_parquet_scheduler_empty_wait_ns"] += row_group.pop("__scheduler_empty_wait_ns__", 0)
-        self.readings["parquet_scheduler_empty_wait_events"] += row_group.pop("__scheduler_empty_wait_events__", 0)
-        self.readings["io_ring_producer_full_wait_ns"] += row_group.pop("__io_ring_producer_full_wait_ns__", 0)
-        self.readings["io_ring_producer_full_wait_events"] += row_group.pop("__io_ring_producer_full_wait_events__", 0)
-        self.readings["io_ring_consumer_empty_wait_ns"] += row_group.pop("__io_ring_consumer_empty_wait_ns__", 0)
-        self.readings["io_ring_consumer_empty_wait_events"] += row_group.pop("__io_ring_consumer_empty_wait_events__", 0)
-        self.readings["io_transfer_emit_wait_ns"] += row_group.pop("__io_transfer_emit_wait_ns__", 0)
-        self.readings["io_rowgroup_slice_count"] += row_group.pop("__io_rowgroup_slice_count__", 0)
-        self.readings["io_deserialize_ns"] += row_group.pop("__io_deserialize_ns__", 0)
-        self.readings["io_serialize_ns"] += row_group.pop("__io_serialize_ns__", 0)
+        readings["parquet_footer_bytes"] += row_group.pop("__footer_bytes__", 0)
+        readings["parquet_range_request_count"] += row_group.pop("__range_request_count__", 0)
+        readings["parquet_range_bytes_requested"] += row_group.pop("__range_bytes_requested__", 0)
+        readings["time_parquet_read_ranges_ns"] += row_group.pop("__time_read_ranges_ns__", 0)
+        readings["time_parquet_decode_columns_ns"] += row_group.pop("__time_decode_columns_ns__", 0)
+        readings["time_parquet_task_queue_wait_ns"] += row_group.pop("__task_queue_wait_ns__", 0)
+        readings["time_parquet_task_total_ns"] += row_group.pop("__task_total_ns__", 0)
+        readings["time_parquet_footer_fetch_ns"] += row_group.pop("__footer_fetch_ns__", 0)
+        readings["time_parquet_scheduler_wait_ns"] += row_group.pop("__scheduler_wait_ns__", 0)
+        readings["time_parquet_rowgroup_completion_ns"] += row_group.pop("__rowgroup_completion_latency_ns__", 0)
+        readings["time_parquet_emit_wait_ns"] += row_group.pop("__emit_wait_ns__", 0)
+        readings["time_parquet_scheduler_empty_wait_ns"] += row_group.pop("__scheduler_empty_wait_ns__", 0)
+        readings["parquet_scheduler_empty_wait_events"] += row_group.pop("__scheduler_empty_wait_events__", 0)
+        readings["io_ring_producer_full_wait_ns"] += row_group.pop("__io_ring_producer_full_wait_ns__", 0)
+        readings["io_ring_producer_full_wait_events"] += row_group.pop("__io_ring_producer_full_wait_events__", 0)
+        readings["io_ring_consumer_empty_wait_ns"] += row_group.pop("__io_ring_consumer_empty_wait_ns__", 0)
+        readings["io_ring_consumer_empty_wait_events"] += row_group.pop("__io_ring_consumer_empty_wait_events__", 0)
+        readings["io_transfer_emit_wait_ns"] += row_group.pop("__io_transfer_emit_wait_ns__", 0)
+        readings["io_rowgroup_slice_count"] += row_group.pop("__io_rowgroup_slice_count__", 0)
+        readings["io_deserialize_ns"] += row_group.pop("__io_deserialize_ns__", 0)
+        readings["io_serialize_ns"] += row_group.pop("__io_serialize_ns__", 0)
 
         # Peak metrics: max()
-        self.readings["parquet_rowgroup_peak_in_flight_max"] = max(
-            self.readings.get("parquet_rowgroup_peak_in_flight_max", 0),
+        readings["parquet_rowgroup_peak_in_flight_max"] = max(
+            readings.get("parquet_rowgroup_peak_in_flight_max", 0),
             row_group.pop("__rowgroup_peak_in_flight__", 0),
         )
-        self.readings["parquet_ranges_in_flight_peak"] = max(
-            self.readings.get("parquet_ranges_in_flight_peak", 0),
+        readings["parquet_ranges_in_flight_peak"] = max(
+            readings.get("parquet_ranges_in_flight_peak", 0),
             row_group.pop("__ranges_in_flight_peak__", 0),
         )
-        self.readings["parquet_active_files_peak"] = max(
-            self.readings.get("parquet_active_files_peak", 0),
+        readings["parquet_active_files_peak"] = max(
+            readings.get("parquet_active_files_peak", 0),
             row_group.pop("__active_files_peak__", 0),
         )
-        self.readings["parquet_active_rowgroups_peak"] = max(
-            self.readings.get("parquet_active_rowgroups_peak", 0),
+        readings["parquet_active_rowgroups_peak"] = max(
+            readings.get("parquet_active_rowgroups_peak", 0),
             row_group.pop("__active_rowgroups_peak__", 0),
         )
-        self.readings["parquet_rowgroups_in_flight_cap"] = max(
-            self.readings.get("parquet_rowgroups_in_flight_cap", 0),
+        readings["parquet_rowgroups_in_flight_cap"] = max(
+            readings.get("parquet_rowgroups_in_flight_cap", 0),
             row_group.pop("__rowgroups_in_flight_cap__", 0),
         )
-        self.readings["parquet_emit_queue_depth_at_ready_max"] = max(
-            self.readings.get("parquet_emit_queue_depth_at_ready_max", 0),
+        readings["parquet_emit_queue_depth_at_ready_max"] = max(
+            readings.get("parquet_emit_queue_depth_at_ready_max", 0),
             row_group.pop("__emit_queue_depth_at_ready__", 0),
         )
-        self.readings["io_ring_slot_bytes"] = max(
-            self.readings.get("io_ring_slot_bytes", 0),
+        readings["io_ring_slot_bytes"] = max(
+            readings.get("io_ring_slot_bytes", 0),
             row_group.pop("__io_ring_slot_bytes__", 0),
         )
-        self.readings["io_ring_slot_count"] = max(
-            self.readings.get("io_ring_slot_count", 0),
+        readings["io_ring_slot_count"] = max(
+            readings.get("io_ring_slot_count", 0),
             row_group.pop("__io_ring_slot_count__", 0),
         )
-        self.readings["io_ring_total_bytes"] = max(
-            self.readings.get("io_ring_total_bytes", 0),
+        readings["io_ring_total_bytes"] = max(
+            readings.get("io_ring_total_bytes", 0),
             row_group.pop("__io_ring_total_bytes__", 0),
         )
-        self.readings["io_transfer_ready_backlog_peak"] = max(
-            self.readings.get("io_transfer_ready_backlog_peak", 0),
+        readings["io_transfer_ready_backlog_peak"] = max(
+            readings.get("io_transfer_ready_backlog_peak", 0),
             row_group.pop("__io_transfer_ready_backlog_peak__", 0),
         )
-        self.readings["io_transfer_fragment_count_p50"] = max(
-            self.readings.get("io_transfer_fragment_count_p50", 0),
+        readings["io_transfer_fragment_count_p50"] = max(
+            readings.get("io_transfer_fragment_count_p50", 0),
             row_group.pop("__io_transfer_fragment_count_p50__", 0),
         )
-        self.readings["io_transfer_fragment_count_p95"] = max(
-            self.readings.get("io_transfer_fragment_count_p95", 0),
+        readings["io_transfer_fragment_count_p95"] = max(
+            readings.get("io_transfer_fragment_count_p95", 0),
             row_group.pop("__io_transfer_fragment_count_p95__", 0),
         )
-        self.readings["io_transfer_fragment_count_max"] = max(
-            self.readings.get("io_transfer_fragment_count_max", 0),
+        readings["io_transfer_fragment_count_max"] = max(
+            readings.get("io_transfer_fragment_count_max", 0),
             row_group.pop("__io_transfer_fragment_count_max__", 0),
         )
-        self.readings["io_transfer_payload_bytes_p50"] = max(
-            self.readings.get("io_transfer_payload_bytes_p50", 0),
+        readings["io_transfer_payload_bytes_p50"] = max(
+            readings.get("io_transfer_payload_bytes_p50", 0),
             row_group.pop("__io_transfer_payload_bytes_p50__", 0),
         )
-        self.readings["io_transfer_payload_bytes_p95"] = max(
-            self.readings.get("io_transfer_payload_bytes_p95", 0),
+        readings["io_transfer_payload_bytes_p95"] = max(
+            readings.get("io_transfer_payload_bytes_p95", 0),
             row_group.pop("__io_transfer_payload_bytes_p95__", 0),
         )
-        self.readings["io_transfer_payload_bytes_max"] = max(
-            self.readings.get("io_transfer_payload_bytes_max", 0),
+        readings["io_transfer_payload_bytes_max"] = max(
+            readings.get("io_transfer_payload_bytes_max", 0),
             row_group.pop("__io_transfer_payload_bytes_max__", 0),
         )
 
         # Special handling: scan strategy (set once if present)
         scan_strategy = row_group.pop("__parquet_scan_strategy__", None)
         if scan_strategy:
-            self.readings["parquet_scan_strategy"] = scan_strategy
+            readings["parquet_scan_strategy"] = scan_strategy
 
         # Special handling: time to first row group (set once, keep minimum)
         time_to_first_rowgroup_ns = row_group.pop("__time_to_first_rowgroup_ns__", 0)
         if time_to_first_rowgroup_ns:
-            existing = self.readings.get("time_to_first_rowgroup_ns", 0)
+            existing = readings.get("time_to_first_rowgroup_ns", 0)
             if existing == 0 or time_to_first_rowgroup_ns < existing:
-                self.readings["time_to_first_rowgroup_ns"] = time_to_first_rowgroup_ns
+                readings["time_to_first_rowgroup_ns"] = time_to_first_rowgroup_ns
 
-        # Clean up remaining __*__ keys without breaking the contract
-        for key in [k for k in row_group if k.startswith("__")]:
-            row_group.pop(key, None)
+        # Clean up remaining __*__ keys without breaking the contract.
+        # Snapshot keys first via list() since we mutate during iteration.
+        for key in list(row_group):
+            if key.startswith("__"):
+                row_group.pop(key, None)
 
         return path, rg_idx
 
-    def execute(self, morsel):
-        if morsel == EOS:
-            yield None
-            return
-
+    def read_morsels(self):
+        """Source-side morsel iterator driven by the push pipeline engine."""
         base_schema = self.parameters["schema"]
 
         # Build name → planner identity map once and cache. Avoids repeated dict
@@ -613,8 +679,8 @@ class ParquetReadNode(ReaderNode):
         # (FileSystemConnector subclasses) expose it directly.  For connectors that
         # don't (e.g. OpteryxConnector), derive it from the
         # storage protocol embedded in the file paths.
-        if hasattr(self.connector, "filesystem"):
-            filesystem = self.connector.filesystem
+        filesystem = getattr(self.connector, "filesystem", None)
+        if filesystem is not None:
             connector_type = (
                 getattr(self.connector, "storage_type", None) or self.connector.__type__
             )
@@ -636,6 +702,10 @@ class ParquetReadNode(ReaderNode):
 
         result_morsel = None
 
+        # Hoist properties.query_id out of the per-row-group loop; was previously
+        # called via getattr() three times per iteration in iter_row_groups kwargs.
+        query_id = getattr(self.properties, "query_id", None)
+
         decode_start = time.monotonic_ns()
         total_rows_before_filter = 0
         total_rows_after_filter = 0
@@ -656,28 +726,13 @@ class ParquetReadNode(ReaderNode):
                     predicates=predicate_stats,
                     file_sizes=file_sizes or None,
                     connector=connector_type,
-                    query_id=getattr(self.properties, "query_id", None),
+                    query_id=query_id,
                     footer_bytes_cache=_FOOTER_CACHE,
                 ):
                     path, rg_idx = self._extract_row_group_metadata(row_group)
 
                     # Coerce DATE/TIMESTAMP/DECIMAL in pass-1 filter columns.
-                    if _decimal_col_map:
-                        from draken.vectors._decimal_vector import from_int64_vector as _int64_to_decimal
-                        from draken.vectors.int64_vector import Int64Vector as _Int64VectorCls
-                        for _dcol, (_dprec, _dscale) in _decimal_col_map.items():
-                            if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls):
-                                row_group[_dcol] = _int64_to_decimal(row_group[_dcol], _dprec, _dscale)
-                    if _date_col_set or _timestamp_col_set:
-                        from draken.vectors.date32_vector import from_int64_vector as _int64_to_date32
-                        from draken.vectors.timestamp_vector import from_int64_vector as _int64_to_timestamp
-                        from draken.vectors.int64_vector import Int64Vector as _Int64VectorCls2
-                        for _dcol in _date_col_set:
-                            if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls2):
-                                row_group[_dcol] = _int64_to_date32(row_group[_dcol])
-                        for _tcol in _timestamp_col_set:
-                            if _tcol in row_group and isinstance(row_group[_tcol], _Int64VectorCls2):
-                                row_group[_tcol] = _int64_to_timestamp(row_group[_tcol], "us")
+                    _coerce_logical_types(row_group, _decimal_col_map, _date_col_set, _timestamp_col_set)
 
                     p1_identity_names = [pass1_name_to_identity[col] for col in row_group]
                     p1_vectors = list(row_group.values())
@@ -714,7 +769,7 @@ class ParquetReadNode(ReaderNode):
                     pass2_column_names,
                     file_sizes=file_sizes or None,
                     connector=connector_type,
-                    query_id=getattr(self.properties, "query_id", None),
+                    query_id=query_id,
                     footer_bytes_cache=_FOOTER_CACHE,
                 ):
                     path = row_group.get('__path__')
@@ -728,22 +783,7 @@ class ParquetReadNode(ReaderNode):
                         row_group.pop(_k)
 
                     # Coerce DATE/TIMESTAMP/DECIMAL in pass-2 projection columns.
-                    if _decimal_col_map:
-                        from draken.vectors._decimal_vector import from_int64_vector as _int64_to_decimal
-                        from draken.vectors.int64_vector import Int64Vector as _Int64VectorCls
-                        for _dcol, (_dprec, _dscale) in _decimal_col_map.items():
-                            if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls):
-                                row_group[_dcol] = _int64_to_decimal(row_group[_dcol], _dprec, _dscale)
-                    if _date_col_set or _timestamp_col_set:
-                        from draken.vectors.date32_vector import from_int64_vector as _int64_to_date32
-                        from draken.vectors.timestamp_vector import from_int64_vector as _int64_to_timestamp
-                        from draken.vectors.int64_vector import Int64Vector as _Int64VectorCls2
-                        for _dcol in _date_col_set:
-                            if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls2):
-                                row_group[_dcol] = _int64_to_date32(row_group[_dcol])
-                        for _tcol in _timestamp_col_set:
-                            if _tcol in row_group and isinstance(row_group[_tcol], _Int64VectorCls2):
-                                row_group[_tcol] = _int64_to_timestamp(row_group[_tcol], "us")
+                    _coerce_logical_types(row_group, _decimal_col_map, _date_col_set, _timestamp_col_set)
 
                     p1_filtered, p1_identity_names = p1_cache.pop((path, rg_idx))
 
@@ -812,27 +852,12 @@ class ParquetReadNode(ReaderNode):
                     predicates=predicate_stats,
                     file_sizes=file_sizes or None,
                     connector=connector_type,
-                    query_id=getattr(self.properties, "query_id", None),
+                    query_id=query_id,
                     footer_bytes_cache=_FOOTER_CACHE,
                 ):
                     path, rg_idx = self._extract_row_group_metadata(row_group)
 
-                    if _decimal_col_map:
-                        from draken.vectors._decimal_vector import from_int64_vector as _int64_to_decimal
-                        from draken.vectors.int64_vector import Int64Vector as _Int64VectorCls
-                        for _dcol, (_dprec, _dscale) in _decimal_col_map.items():
-                            if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls):
-                                row_group[_dcol] = _int64_to_decimal(row_group[_dcol], _dprec, _dscale)
-                    if _date_col_set or _timestamp_col_set:
-                        from draken.vectors.date32_vector import from_int64_vector as _int64_to_date32
-                        from draken.vectors.timestamp_vector import from_int64_vector as _int64_to_timestamp
-                        from draken.vectors.int64_vector import Int64Vector as _Int64VectorCls2
-                        for _dcol in _date_col_set:
-                            if _dcol in row_group and isinstance(row_group[_dcol], _Int64VectorCls2):
-                                row_group[_dcol] = _int64_to_date32(row_group[_dcol])
-                        for _tcol in _timestamp_col_set:
-                            if _tcol in row_group and isinstance(row_group[_tcol], _Int64VectorCls2):
-                                row_group[_tcol] = _int64_to_timestamp(row_group[_tcol], "us")
+                    _coerce_logical_types(row_group, _decimal_col_map, _date_col_set, _timestamp_col_set)
 
                     identity_names = [name_to_identity[col] for col in row_group]
                     vectors = list(row_group.values())

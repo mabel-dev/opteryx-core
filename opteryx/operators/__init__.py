@@ -6,13 +6,22 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 
-from .base_plan_node import BasePlanNode, JoinNode  # isort: skip
 from .catalog import OperatorCategory, ParallelStrategy, get_registry
+from ._operators import (
+    BasePlanNode,
+    JoinNode,
+    JoinLeftAdapter,
+    JoinRightAdapter,
+    PipelineContext,
+)
 from .read import ReaderNode
 
 __all__ = [
     "BasePlanNode",
     "JoinNode",
+    "JoinLeftAdapter",
+    "JoinRightAdapter",
+    "PipelineContext",
     "OperatorCategory",
     "ParallelStrategy",
     "get_registry",

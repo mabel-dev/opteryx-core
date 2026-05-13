@@ -1,3 +1,13 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -39,9 +49,9 @@ from libc.stdint cimport int32_t, int64_t, uint64_t
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 
 from opteryx.models import QueryProperties
-from opteryx import EOS
+# EOS sentinel available as _EOS_SENTINEL via the umbrella unit.
 
-from . import JoinNode
+# BasePlanNode/JoinNode in scope via _operators.pyx include.
 
 # Actual hash produced for a null key: mix(0, raw_NULL_HASH) where raw_NULL_HASH = 0x4c3f95a36ab8ecca.
 # hash_into initialises dest to 0 (calloc), so: mixed = (0 ^ raw) * MIX_CONST + 1, then ^ >> 32.
@@ -208,8 +218,16 @@ cdef Morsel _anti_join_null_aware_filter(
 # FilterJoinNode
 # ---------------------------------------------------------------------------
 
-class FilterJoinNode(JoinNode):
-    def __init__(self, properties: QueryProperties, **parameters):
+cdef class FilterJoinNode(JoinNode):
+    cdef public str join_type
+    cdef public object using
+    cdef public list left_columns
+    cdef public list right_columns
+    cdef public CarcharSetWrapper right_hash_set
+    cdef public bint _right_has_null
+    cdef public bint _build_phase
+
+    def __init__(self, properties=None, **parameters):
         self.join_type = parameters["type"]
         JoinNode.__init__(self, properties=properties, **parameters)
         self.on = parameters.get("on")
@@ -239,37 +257,35 @@ class FilterJoinNode(JoinNode):
             return f"{self.join_type.upper()} JOIN (USING {','.join(map(format_expression, self.using))})"
         return f"{self.join_type.upper()}"
 
-    def execute(self, Morsel morsel):
+    cpdef void push_right(self, Morsel morsel) except *:
+        cdef long long start
+        # Build side for filter joins — right side feeds the hash set.
+        if morsel is _EOS_SENTINEL:
+            self._right_has_null = self.right_hash_set.has(_NULL_HASH)
+            return
+        morsel = self._apply_join_key_casts(morsel, is_left=False)
+        start = time.monotonic_ns()
+        self.right_hash_set = _build_filter_hash_set(
+            morsel, self.right_columns, self.right_hash_set
+        )
+        self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
 
-        if self._build_phase:
-            if morsel == EOS:
-                self._build_phase = False
-                # Check once whether the right side contains any null.
-                # probe_found_32 / probe_not_found_32 need this for correct null semantics.
-                self._right_has_null = self.right_hash_set.has(_NULL_HASH)
-                yield None
-            else:
-                morsel = self._apply_join_key_casts(morsel, is_left=False)
-                start = time.monotonic_ns()
-                self.right_hash_set = _build_filter_hash_set(
-                    morsel, self.right_columns, self.right_hash_set
-                )
-                self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
-                yield None
-        else:
-            if morsel == EOS:
-                yield EOS
-                return
-            morsel = self._apply_join_key_casts(morsel, is_left=True)
-            if morsel.num_rows == 0:
-                yield morsel
-            elif self.join_type == "left semi":
-                yield _semi_join_filter(
-                    morsel, self.left_columns, self.right_hash_set, self._right_has_null
-                )
-            elif self.join_type == "left anti":
-                yield _anti_join_filter(morsel, self.left_columns, self.right_hash_set)
-            elif self.join_type == "left anti null-aware":
-                yield _anti_join_null_aware_filter(
-                    morsel, self.left_columns, self.right_hash_set
-                )
+    cpdef void push_left(self, Morsel morsel) except *:
+        # Probe side for filter joins — filters left through the right-side hash set.
+        if morsel is _EOS_SENTINEL:
+            self.emit(_EOS_SENTINEL)
+            return
+        morsel = self._apply_join_key_casts(morsel, is_left=True)
+        if morsel.num_rows == 0:
+            self.emit(morsel)
+            return
+        if self.join_type == "left semi":
+            self.emit(_semi_join_filter(
+                morsel, self.left_columns, self.right_hash_set, self._right_has_null
+            ))
+        elif self.join_type == "left anti":
+            self.emit(_anti_join_filter(morsel, self.left_columns, self.right_hash_set))
+        elif self.join_type == "left anti null-aware":
+            self.emit(_anti_join_null_aware_filter(
+                morsel, self.left_columns, self.right_hash_set
+            ))

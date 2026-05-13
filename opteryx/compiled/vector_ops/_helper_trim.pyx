@@ -5,6 +5,8 @@
 # cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 from draken.vectors.string_vector cimport StringVector, from_packed_dict
 from draken.vectors import string_vector as string_vector_module

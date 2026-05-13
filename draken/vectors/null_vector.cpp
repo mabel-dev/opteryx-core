@@ -1218,7 +1218,7 @@ static int __Pyx_init_co_variables(void) {
 #define __Pyx_FREETHREADING_COMPATIBLE Py_MOD_GIL_USED
 #endif
 #else
-#define __Pyx_FREETHREADING_COMPATIBLE Py_MOD_GIL_USED
+#define __Pyx_FREETHREADING_COMPATIBLE Py_MOD_GIL_NOT_USED
 #endif
 #define __PYX_DEFAULT_STRING_ENCODING_IS_ASCII 0
 #define __PYX_DEFAULT_STRING_ENCODING_IS_UTF8 0
@@ -1725,7 +1725,7 @@ struct __pyx_t_6draken_4core_7buffers_ConstAccessor {
 struct __pyx_opt_args_6draken_7vectors_6vector_6Vector_hash_into;
 struct __pyx_opt_args_6draken_7vectors_6vector_6Vector_compress_into;
 
-/* "draken/vectors/vector.pxd":49
+/* "draken/vectors/vector.pxd":64
  *     cdef void* dense_ptr(self) noexcept
  *     cdef uint8_t* null_bitmap_ptr(self) noexcept
  *     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
@@ -1737,7 +1737,7 @@ struct __pyx_opt_args_6draken_7vectors_6vector_6Vector_hash_into {
   Py_ssize_t offset;
 };
 
-/* "draken/vectors/vector.pxd":56
+/* "draken/vectors/vector.pxd":71
  *     # same semantics as `to_int` in relation_statistics. Implementations
  *     # should write into an int64 buffer provided by the caller.
  *     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
@@ -1761,7 +1761,7 @@ struct __pyx_opt_args_6draken_7vectors_11null_vector_10NullVector_hash_into {
   Py_ssize_t offset;
 };
 
-/* "draken/vectors/null_vector.pyx":109
+/* "draken/vectors/null_vector.pyx":112
  *         return buf
  * 
  *     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:             # <<<<<<<<<<<<<<
@@ -1790,7 +1790,7 @@ struct __pyx_obj_6draken_7vectors_6vector__Uint64Buffer {
 };
 
 
-/* "draken/vectors/vector.pxd":41
+/* "draken/vectors/vector.pxd":56
  *     return mixed ^ (mixed >> 32)
  * 
  * cdef class Vector:             # <<<<<<<<<<<<<<
@@ -1818,7 +1818,7 @@ struct __pyx_obj_6draken_7vectors_11null_vector_NullVector {
 };
 
 
-/* "draken/vectors/null_vector.pyx":46
+/* "draken/vectors/null_vector.pyx":49
  *         return None
  * 
  *     def __iter__(self):             # <<<<<<<<<<<<<<
@@ -1926,7 +1926,7 @@ struct __pyx_vtabstruct_6draken_7vectors_6vector__Uint64Buffer {
 static struct __pyx_vtabstruct_6draken_7vectors_6vector__Uint64Buffer *__pyx_vtabptr_6draken_7vectors_6vector__Uint64Buffer;
 
 
-/* "draken/vectors/vector.pxd":41
+/* "draken/vectors/vector.pxd":56
  *     return mixed ^ (mixed >> 32)
  * 
  * cdef class Vector:             # <<<<<<<<<<<<<<
@@ -1952,7 +1952,7 @@ struct __pyx_vtabstruct_6draken_7vectors_6vector_Vector {
 static struct __pyx_vtabstruct_6draken_7vectors_6vector_Vector *__pyx_vtabptr_6draken_7vectors_6vector_Vector;
 
 
-/* "draken/vectors/null_vector.pyx":24
+/* "draken/vectors/null_vector.pyx":27
  * 
  * 
  * cdef class NullVector(Vector):             # <<<<<<<<<<<<<<
@@ -17252,7 +17252,7 @@ static PyObject *__pyx_unpickle_Enum__set_state(struct __pyx_MemviewEnum_obj *__
   return __pyx_r;
 }
 
-/* "draken/vectors/vector.pxd":36
+/* "draken/vectors/vector.pxd":51
  *     size_t simd_popcount(const uint8_t* data, size_t n) nogil
  * 
  * cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:             # <<<<<<<<<<<<<<
@@ -17264,7 +17264,7 @@ static CYTHON_INLINE uint64_t __pyx_f_6draken_7vectors_6vector_mix_hash(uint64_t
   uint64_t __pyx_v_mixed;
   uint64_t __pyx_r;
 
-  /* "draken/vectors/vector.pxd":37
+  /* "draken/vectors/vector.pxd":52
  * 
  * cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:
  *     cdef uint64_t mixed = current ^ value             # <<<<<<<<<<<<<<
@@ -17273,7 +17273,7 @@ static CYTHON_INLINE uint64_t __pyx_f_6draken_7vectors_6vector_mix_hash(uint64_t
 */
   __pyx_v_mixed = (__pyx_v_current ^ __pyx_v_value);
 
-  /* "draken/vectors/vector.pxd":38
+  /* "draken/vectors/vector.pxd":53
  * cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:
  *     cdef uint64_t mixed = current ^ value
  *     mixed = mixed * MIX_HASH_CONSTANT + 1             # <<<<<<<<<<<<<<
@@ -17282,7 +17282,7 @@ static CYTHON_INLINE uint64_t __pyx_f_6draken_7vectors_6vector_mix_hash(uint64_t
 */
   __pyx_v_mixed = ((__pyx_v_mixed * __pyx_v_6draken_7vectors_6vector_MIX_HASH_CONSTANT) + 1);
 
-  /* "draken/vectors/vector.pxd":39
+  /* "draken/vectors/vector.pxd":54
  *     cdef uint64_t mixed = current ^ value
  *     mixed = mixed * MIX_HASH_CONSTANT + 1
  *     return mixed ^ (mixed >> 32)             # <<<<<<<<<<<<<<
@@ -17292,7 +17292,7 @@ static CYTHON_INLINE uint64_t __pyx_f_6draken_7vectors_6vector_mix_hash(uint64_t
   __pyx_r = (__pyx_v_mixed ^ (__pyx_v_mixed >> 32));
   goto __pyx_L0;
 
-  /* "draken/vectors/vector.pxd":36
+  /* "draken/vectors/vector.pxd":51
  *     size_t simd_popcount(const uint8_t* data, size_t n) nogil
  * 
  * cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:             # <<<<<<<<<<<<<<
@@ -17980,7 +17980,7 @@ static CYTHON_INLINE void __pyx_f_7cpython_5array_zero(arrayobject *__pyx_v_self
   /* function exit code */
 }
 
-/* "draken/vectors/null_vector.pyx":26
+/* "draken/vectors/null_vector.pyx":29
  * cdef class NullVector(Vector):
  * 
  *     def __cinit__(self, Py_ssize_t length):             # <<<<<<<<<<<<<<
@@ -18010,32 +18010,32 @@ static int __pyx_pw_6draken_7vectors_11null_vector_10NullVector_1__cinit__(PyObj
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_length,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_VARARGS(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 26, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 29, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_VARARGS(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 26, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 29, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "__cinit__", 0) < (0)) __PYX_ERR(0, 26, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "__cinit__", 0) < (0)) __PYX_ERR(0, 29, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("__cinit__", 1, 1, 1, i); __PYX_ERR(0, 26, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("__cinit__", 1, 1, 1, i); __PYX_ERR(0, 29, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_VARARGS(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 26, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 29, __pyx_L3_error)
     }
-    __pyx_v_length = __Pyx_PyIndex_AsSsize_t(values[0]); if (unlikely((__pyx_v_length == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 26, __pyx_L3_error)
+    __pyx_v_length = __Pyx_PyIndex_AsSsize_t(values[0]); if (unlikely((__pyx_v_length == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 29, __pyx_L3_error)
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("__cinit__", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 26, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("__cinit__", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 29, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -18059,7 +18059,7 @@ static int __pyx_pw_6draken_7vectors_11null_vector_10NullVector_1__cinit__(PyObj
 static int __pyx_pf_6draken_7vectors_11null_vector_10NullVector___cinit__(struct __pyx_obj_6draken_7vectors_11null_vector_NullVector *__pyx_v_self, Py_ssize_t __pyx_v_length) {
   int __pyx_r;
 
-  /* "draken/vectors/null_vector.pyx":27
+  /* "draken/vectors/null_vector.pyx":30
  * 
  *     def __cinit__(self, Py_ssize_t length):
  *         self._encoding = DRAKEN_ENCODING_CONSTANT             # <<<<<<<<<<<<<<
@@ -18068,7 +18068,7 @@ static int __pyx_pf_6draken_7vectors_11null_vector_10NullVector___cinit__(struct
 */
   __pyx_v_self->__pyx_base._encoding = DRAKEN_ENCODING_CONSTANT;
 
-  /* "draken/vectors/null_vector.pyx":28
+  /* "draken/vectors/null_vector.pyx":31
  *     def __cinit__(self, Py_ssize_t length):
  *         self._encoding = DRAKEN_ENCODING_CONSTANT
  *         self._length = length             # <<<<<<<<<<<<<<
@@ -18077,7 +18077,7 @@ static int __pyx_pf_6draken_7vectors_11null_vector_10NullVector___cinit__(struct
 */
   __pyx_v_self->_length = __pyx_v_length;
 
-  /* "draken/vectors/null_vector.pyx":26
+  /* "draken/vectors/null_vector.pyx":29
  * cdef class NullVector(Vector):
  * 
  *     def __cinit__(self, Py_ssize_t length):             # <<<<<<<<<<<<<<
@@ -18090,7 +18090,7 @@ static int __pyx_pf_6draken_7vectors_11null_vector_10NullVector___cinit__(struct
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":30
+/* "draken/vectors/null_vector.pyx":33
  *         self._length = length
  * 
  *     def __len__(self):             # <<<<<<<<<<<<<<
@@ -18116,7 +18116,7 @@ static Py_ssize_t __pyx_pw_6draken_7vectors_11null_vector_10NullVector_3__len__(
 static Py_ssize_t __pyx_pf_6draken_7vectors_11null_vector_10NullVector_2__len__(struct __pyx_obj_6draken_7vectors_11null_vector_NullVector *__pyx_v_self) {
   Py_ssize_t __pyx_r;
 
-  /* "draken/vectors/null_vector.pyx":31
+  /* "draken/vectors/null_vector.pyx":34
  * 
  *     def __len__(self):
  *         return self._length             # <<<<<<<<<<<<<<
@@ -18126,7 +18126,7 @@ static Py_ssize_t __pyx_pf_6draken_7vectors_11null_vector_10NullVector_2__len__(
   __pyx_r = __pyx_v_self->_length;
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":30
+  /* "draken/vectors/null_vector.pyx":33
  *         self._length = length
  * 
  *     def __len__(self):             # <<<<<<<<<<<<<<
@@ -18139,7 +18139,7 @@ static Py_ssize_t __pyx_pf_6draken_7vectors_11null_vector_10NullVector_2__len__(
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":33
+/* "draken/vectors/null_vector.pyx":36
  *         return self._length
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -18171,7 +18171,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_6length___
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__get__", 0);
 
-  /* "draken/vectors/null_vector.pyx":35
+  /* "draken/vectors/null_vector.pyx":38
  *     @property
  *     def length(self):
  *         return self._length             # <<<<<<<<<<<<<<
@@ -18179,13 +18179,13 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_6length___
  *     @property
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = PyLong_FromSsize_t(__pyx_v_self->_length); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 35, __pyx_L1_error)
+  __pyx_t_1 = PyLong_FromSsize_t(__pyx_v_self->_length); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 38, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":33
+  /* "draken/vectors/null_vector.pyx":36
  *         return self._length
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -18204,7 +18204,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_6length___
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":37
+/* "draken/vectors/null_vector.pyx":40
  *         return self._length
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -18236,7 +18236,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_8num_rows_
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__get__", 0);
 
-  /* "draken/vectors/null_vector.pyx":39
+  /* "draken/vectors/null_vector.pyx":42
  *     @property
  *     def num_rows(self):
  *         return self._length             # <<<<<<<<<<<<<<
@@ -18244,13 +18244,13 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_8num_rows_
  *     def __getitem__(self, Py_ssize_t i):
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = PyLong_FromSsize_t(__pyx_v_self->_length); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 39, __pyx_L1_error)
+  __pyx_t_1 = PyLong_FromSsize_t(__pyx_v_self->_length); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 42, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":37
+  /* "draken/vectors/null_vector.pyx":40
  *         return self._length
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -18269,7 +18269,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_8num_rows_
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":41
+/* "draken/vectors/null_vector.pyx":44
  *         return self._length
  * 
  *     def __getitem__(self, Py_ssize_t i):             # <<<<<<<<<<<<<<
@@ -18290,7 +18290,7 @@ static PyObject *__pyx_pw_6draken_7vectors_11null_vector_10NullVector_5__getitem
   __Pyx_RefNannySetupContext("__getitem__ (wrapper)", 0);
   __pyx_kwvalues = __Pyx_KwValues_VARARGS(__pyx_args, __pyx_nargs);
   assert(__pyx_arg_i); {
-    __pyx_v_i = __Pyx_PyIndex_AsSsize_t(__pyx_arg_i); if (unlikely((__pyx_v_i == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 41, __pyx_L3_error)
+    __pyx_v_i = __Pyx_PyIndex_AsSsize_t(__pyx_arg_i); if (unlikely((__pyx_v_i == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 44, __pyx_L3_error)
   }
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -18318,7 +18318,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_4__getitem
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__getitem__", 0);
 
-  /* "draken/vectors/null_vector.pyx":42
+  /* "draken/vectors/null_vector.pyx":45
  * 
  *     def __getitem__(self, Py_ssize_t i):
  *         if i < 0 or i >= self._length:             # <<<<<<<<<<<<<<
@@ -18336,7 +18336,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_4__getitem
   __pyx_L4_bool_binop_done:;
   if (unlikely(__pyx_t_1)) {
 
-    /* "draken/vectors/null_vector.pyx":43
+    /* "draken/vectors/null_vector.pyx":46
  *     def __getitem__(self, Py_ssize_t i):
  *         if i < 0 or i >= self._length:
  *             raise IndexError("index out of range")             # <<<<<<<<<<<<<<
@@ -18349,14 +18349,14 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_4__getitem
       PyObject *__pyx_callargs[2] = {__pyx_t_4, __pyx_mstate_global->__pyx_kp_u_index_out_of_range};
       __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)(((PyTypeObject*)PyExc_IndexError)), __pyx_callargs+__pyx_t_5, (2-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
-      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 43, __pyx_L1_error)
+      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 46, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
     }
     __Pyx_Raise(__pyx_t_3, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    __PYX_ERR(0, 43, __pyx_L1_error)
+    __PYX_ERR(0, 46, __pyx_L1_error)
 
-    /* "draken/vectors/null_vector.pyx":42
+    /* "draken/vectors/null_vector.pyx":45
  * 
  *     def __getitem__(self, Py_ssize_t i):
  *         if i < 0 or i >= self._length:             # <<<<<<<<<<<<<<
@@ -18365,7 +18365,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_4__getitem
 */
   }
 
-  /* "draken/vectors/null_vector.pyx":44
+  /* "draken/vectors/null_vector.pyx":47
  *         if i < 0 or i >= self._length:
  *             raise IndexError("index out of range")
  *         return None             # <<<<<<<<<<<<<<
@@ -18376,7 +18376,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_4__getitem
   __pyx_r = Py_None; __Pyx_INCREF(Py_None);
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":41
+  /* "draken/vectors/null_vector.pyx":44
  *         return self._length
  * 
  *     def __getitem__(self, Py_ssize_t i):             # <<<<<<<<<<<<<<
@@ -18397,7 +18397,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_4__getitem
 }
 static PyObject *__pyx_gb_6draken_7vectors_11null_vector_10NullVector_8generator(__pyx_CoroutineObject *__pyx_generator, CYTHON_UNUSED PyThreadState *__pyx_tstate, PyObject *__pyx_sent_value); /* proto */
 
-/* "draken/vectors/null_vector.pyx":46
+/* "draken/vectors/null_vector.pyx":49
  *         return None
  * 
  *     def __iter__(self):             # <<<<<<<<<<<<<<
@@ -18432,7 +18432,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_6__iter__(
   if (unlikely(!__pyx_cur_scope)) {
     __pyx_cur_scope = ((struct __pyx_obj_6draken_7vectors_11null_vector___pyx_scope_struct____iter__ *)Py_None);
     __Pyx_INCREF(Py_None);
-    __PYX_ERR(0, 46, __pyx_L1_error)
+    __PYX_ERR(0, 49, __pyx_L1_error)
   } else {
     __Pyx_GOTREF((PyObject *)__pyx_cur_scope);
   }
@@ -18440,7 +18440,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_6__iter__(
   __Pyx_INCREF((PyObject *)__pyx_cur_scope->__pyx_v_self);
   __Pyx_GIVEREF((PyObject *)__pyx_cur_scope->__pyx_v_self);
   {
-    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_6draken_7vectors_11null_vector_10NullVector_8generator, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[0]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_iter, __pyx_mstate_global->__pyx_n_u_NullVector___iter, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector); if (unlikely(!gen)) __PYX_ERR(0, 46, __pyx_L1_error)
+    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_6draken_7vectors_11null_vector_10NullVector_8generator, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[0]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_iter, __pyx_mstate_global->__pyx_n_u_NullVector___iter, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector); if (unlikely(!gen)) __PYX_ERR(0, 49, __pyx_L1_error)
     __Pyx_DECREF(__pyx_cur_scope);
     __Pyx_RefNannyFinishContext();
     return (PyObject *) gen;
@@ -18478,10 +18478,10 @@ static PyObject *__pyx_gb_6draken_7vectors_11null_vector_10NullVector_8generator
   __pyx_L3_first_run:;
   if (unlikely(__pyx_sent_value != Py_None)) {
     if (unlikely(__pyx_sent_value)) PyErr_SetString(PyExc_TypeError, "can't send non-None value to a just-started generator");
-    __PYX_ERR(0, 46, __pyx_L1_error)
+    __PYX_ERR(0, 49, __pyx_L1_error)
   }
 
-  /* "draken/vectors/null_vector.pyx":48
+  /* "draken/vectors/null_vector.pyx":51
  *     def __iter__(self):
  *         cdef Py_ssize_t i
  *         for i in range(self._length):             # <<<<<<<<<<<<<<
@@ -18493,7 +18493,7 @@ static PyObject *__pyx_gb_6draken_7vectors_11null_vector_10NullVector_8generator
   for (__pyx_t_3 = 0; __pyx_t_3 < __pyx_t_2; __pyx_t_3+=1) {
     __pyx_cur_scope->__pyx_v_i = __pyx_t_3;
 
-    /* "draken/vectors/null_vector.pyx":49
+    /* "draken/vectors/null_vector.pyx":52
  *         cdef Py_ssize_t i
  *         for i in range(self._length):
  *             yield None             # <<<<<<<<<<<<<<
@@ -18515,11 +18515,11 @@ static PyObject *__pyx_gb_6draken_7vectors_11null_vector_10NullVector_8generator
     __pyx_t_1 = __pyx_cur_scope->__pyx_t_0;
     __pyx_t_2 = __pyx_cur_scope->__pyx_t_1;
     __pyx_t_3 = __pyx_cur_scope->__pyx_t_2;
-    if (unlikely(!__pyx_sent_value)) __PYX_ERR(0, 49, __pyx_L1_error)
+    if (unlikely(!__pyx_sent_value)) __PYX_ERR(0, 52, __pyx_L1_error)
   }
   CYTHON_MAYBE_UNUSED_VAR(__pyx_cur_scope);
 
-  /* "draken/vectors/null_vector.pyx":46
+  /* "draken/vectors/null_vector.pyx":49
  *         return None
  * 
  *     def __iter__(self):             # <<<<<<<<<<<<<<
@@ -18546,7 +18546,7 @@ static PyObject *__pyx_gb_6draken_7vectors_11null_vector_10NullVector_8generator
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":51
+/* "draken/vectors/null_vector.pyx":54
  *             yield None
  * 
  *     cpdef bint is_null_at(self, Py_ssize_t idx) except? False:             # <<<<<<<<<<<<<<
@@ -18591,13 +18591,13 @@ static int __pyx_f_6draken_7vectors_11null_vector_10NullVector_is_null_at(CYTHON
     if (unlikely(!__Pyx_object_dict_version_matches(((PyObject *)__pyx_v_self), __pyx_tp_dict_version, __pyx_obj_dict_version))) {
       PY_UINT64_T __pyx_typedict_guard = __Pyx_get_tp_dict_version(((PyObject *)__pyx_v_self));
       #endif
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_is_null_at); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 51, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_is_null_at); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 54, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
       if (!__Pyx_IsSameCFunction(__pyx_t_1, (void(*)(void)) __pyx_pw_6draken_7vectors_11null_vector_10NullVector_10is_null_at)) {
         __pyx_t_3 = NULL;
         __Pyx_INCREF(__pyx_t_1);
         __pyx_t_4 = __pyx_t_1; 
-        __pyx_t_5 = PyLong_FromSsize_t(__pyx_v_idx); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 51, __pyx_L1_error)
+        __pyx_t_5 = PyLong_FromSsize_t(__pyx_v_idx); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 54, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_5);
         __pyx_t_6 = 1;
         #if CYTHON_UNPACK_METHODS
@@ -18617,10 +18617,10 @@ static int __pyx_f_6draken_7vectors_11null_vector_10NullVector_is_null_at(CYTHON
           __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
           __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
           __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 51, __pyx_L1_error)
+          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 54, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_2);
         }
-        __pyx_t_7 = __Pyx_PyObject_IsTrue(__pyx_t_2); if (unlikely((__pyx_t_7 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 51, __pyx_L1_error)
+        __pyx_t_7 = __Pyx_PyObject_IsTrue(__pyx_t_2); if (unlikely((__pyx_t_7 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 54, __pyx_L1_error)
         __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
         __pyx_r = __pyx_t_7;
         __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
@@ -18639,7 +18639,7 @@ static int __pyx_f_6draken_7vectors_11null_vector_10NullVector_is_null_at(CYTHON
     #endif
   }
 
-  /* "draken/vectors/null_vector.pyx":52
+  /* "draken/vectors/null_vector.pyx":55
  * 
  *     cpdef bint is_null_at(self, Py_ssize_t idx) except? False:
  *         return True             # <<<<<<<<<<<<<<
@@ -18649,7 +18649,7 @@ static int __pyx_f_6draken_7vectors_11null_vector_10NullVector_is_null_at(CYTHON
   __pyx_r = 1;
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":51
+  /* "draken/vectors/null_vector.pyx":54
  *             yield None
  * 
  *     cpdef bint is_null_at(self, Py_ssize_t idx) except? False:             # <<<<<<<<<<<<<<
@@ -18710,32 +18710,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_idx,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 51, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 54, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 51, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 54, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "is_null_at", 0) < (0)) __PYX_ERR(0, 51, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "is_null_at", 0) < (0)) __PYX_ERR(0, 54, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("is_null_at", 1, 1, 1, i); __PYX_ERR(0, 51, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("is_null_at", 1, 1, 1, i); __PYX_ERR(0, 54, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 51, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 54, __pyx_L3_error)
     }
-    __pyx_v_idx = __Pyx_PyIndex_AsSsize_t(values[0]); if (unlikely((__pyx_v_idx == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 51, __pyx_L3_error)
+    __pyx_v_idx = __Pyx_PyIndex_AsSsize_t(values[0]); if (unlikely((__pyx_v_idx == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 54, __pyx_L3_error)
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("is_null_at", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 51, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("is_null_at", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 54, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -18766,8 +18766,8 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_9is_null_a
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("is_null_at", 0);
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __pyx_f_6draken_7vectors_11null_vector_10NullVector_is_null_at(__pyx_v_self, __pyx_v_idx, 1); if (unlikely(__pyx_t_1 == ((int)0) && PyErr_Occurred())) __PYX_ERR(0, 51, __pyx_L1_error)
-  __pyx_t_2 = __Pyx_PyBool_FromLong(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 51, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_6draken_7vectors_11null_vector_10NullVector_is_null_at(__pyx_v_self, __pyx_v_idx, 1); if (unlikely(__pyx_t_1 == ((int)0) && PyErr_Occurred())) __PYX_ERR(0, 54, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyBool_FromLong(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 54, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __pyx_r = __pyx_t_2;
   __pyx_t_2 = 0;
@@ -18784,7 +18784,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_9is_null_a
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":54
+/* "draken/vectors/null_vector.pyx":57
  *         return True
  * 
  *     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:             # <<<<<<<<<<<<<<
@@ -18830,15 +18830,15 @@ static int __pyx_f_6draken_7vectors_11null_vector_10NullVector_compare_at(CYTHON
     if (unlikely(!__Pyx_object_dict_version_matches(((PyObject *)__pyx_v_self), __pyx_tp_dict_version, __pyx_obj_dict_version))) {
       PY_UINT64_T __pyx_typedict_guard = __Pyx_get_tp_dict_version(((PyObject *)__pyx_v_self));
       #endif
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_compare_at); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 54, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_compare_at); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 57, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
       if (!__Pyx_IsSameCFunction(__pyx_t_1, (void(*)(void)) __pyx_pw_6draken_7vectors_11null_vector_10NullVector_12compare_at)) {
         __pyx_t_3 = NULL;
         __Pyx_INCREF(__pyx_t_1);
         __pyx_t_4 = __pyx_t_1; 
-        __pyx_t_5 = PyLong_FromSsize_t(__pyx_v_left_idx); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 54, __pyx_L1_error)
+        __pyx_t_5 = PyLong_FromSsize_t(__pyx_v_left_idx); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 57, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_5);
-        __pyx_t_6 = PyLong_FromSsize_t(__pyx_v_right_idx); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 54, __pyx_L1_error)
+        __pyx_t_6 = PyLong_FromSsize_t(__pyx_v_right_idx); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 57, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_6);
         __pyx_t_7 = 1;
         #if CYTHON_UNPACK_METHODS
@@ -18859,10 +18859,10 @@ static int __pyx_f_6draken_7vectors_11null_vector_10NullVector_compare_at(CYTHON
           __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
           __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
           __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 54, __pyx_L1_error)
+          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 57, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_2);
         }
-        __pyx_t_8 = __Pyx_PyLong_As_int(__pyx_t_2); if (unlikely((__pyx_t_8 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 54, __pyx_L1_error)
+        __pyx_t_8 = __Pyx_PyLong_As_int(__pyx_t_2); if (unlikely((__pyx_t_8 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 57, __pyx_L1_error)
         __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
         __pyx_r = __pyx_t_8;
         __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
@@ -18881,7 +18881,7 @@ static int __pyx_f_6draken_7vectors_11null_vector_10NullVector_compare_at(CYTHON
     #endif
   }
 
-  /* "draken/vectors/null_vector.pyx":56
+  /* "draken/vectors/null_vector.pyx":59
  *     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
  *         # NULL == NULL for ordering purposes
  *         return 0             # <<<<<<<<<<<<<<
@@ -18891,7 +18891,7 @@ static int __pyx_f_6draken_7vectors_11null_vector_10NullVector_compare_at(CYTHON
   __pyx_r = 0;
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":54
+  /* "draken/vectors/null_vector.pyx":57
  *         return True
  * 
  *     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:             # <<<<<<<<<<<<<<
@@ -18954,39 +18954,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_left_idx,&__pyx_mstate_global->__pyx_n_u_right_idx,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 54, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 57, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 54, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 57, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 54, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 57, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "compare_at", 0) < (0)) __PYX_ERR(0, 54, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "compare_at", 0) < (0)) __PYX_ERR(0, 57, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("compare_at", 1, 2, 2, i); __PYX_ERR(0, 54, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("compare_at", 1, 2, 2, i); __PYX_ERR(0, 57, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 54, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 57, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 54, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 57, __pyx_L3_error)
     }
-    __pyx_v_left_idx = __Pyx_PyIndex_AsSsize_t(values[0]); if (unlikely((__pyx_v_left_idx == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 54, __pyx_L3_error)
-    __pyx_v_right_idx = __Pyx_PyIndex_AsSsize_t(values[1]); if (unlikely((__pyx_v_right_idx == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 54, __pyx_L3_error)
+    __pyx_v_left_idx = __Pyx_PyIndex_AsSsize_t(values[0]); if (unlikely((__pyx_v_left_idx == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 57, __pyx_L3_error)
+    __pyx_v_right_idx = __Pyx_PyIndex_AsSsize_t(values[1]); if (unlikely((__pyx_v_right_idx == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 57, __pyx_L3_error)
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("compare_at", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 54, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("compare_at", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 57, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -19017,8 +19017,8 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_11compare_
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("compare_at", 0);
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __pyx_f_6draken_7vectors_11null_vector_10NullVector_compare_at(__pyx_v_self, __pyx_v_left_idx, __pyx_v_right_idx, 1); if (unlikely(__pyx_t_1 == ((int)0) && PyErr_Occurred())) __PYX_ERR(0, 54, __pyx_L1_error)
-  __pyx_t_2 = __Pyx_PyLong_From_int(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 54, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_6draken_7vectors_11null_vector_10NullVector_compare_at(__pyx_v_self, __pyx_v_left_idx, __pyx_v_right_idx, 1); if (unlikely(__pyx_t_1 == ((int)0) && PyErr_Occurred())) __PYX_ERR(0, 57, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_int(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 57, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __pyx_r = __pyx_t_2;
   __pyx_t_2 = 0;
@@ -19035,7 +19035,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_11compare_
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":58
+/* "draken/vectors/null_vector.pyx":61
  *         return 0
  * 
  *     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=0) except *:             # <<<<<<<<<<<<<<
@@ -19056,7 +19056,7 @@ static void __pyx_f_6draken_7vectors_11null_vector_10NullVector_hash_into(struct
     }
   }
 
-  /* "draken/vectors/null_vector.pyx":60
+  /* "draken/vectors/null_vector.pyx":63
  *     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=0) except *:
  *         cdef Py_ssize_t i
  *         for i in range(self._length):             # <<<<<<<<<<<<<<
@@ -19068,7 +19068,7 @@ static void __pyx_f_6draken_7vectors_11null_vector_10NullVector_hash_into(struct
   for (__pyx_t_3 = 0; __pyx_t_3 < __pyx_t_2; __pyx_t_3+=1) {
     __pyx_v_i = __pyx_t_3;
 
-    /* "draken/vectors/null_vector.pyx":61
+    /* "draken/vectors/null_vector.pyx":64
  *         cdef Py_ssize_t i
  *         for i in range(self._length):
  *             out_buf[offset + i] = NULL_HASH             # <<<<<<<<<<<<<<
@@ -19079,7 +19079,7 @@ static void __pyx_f_6draken_7vectors_11null_vector_10NullVector_hash_into(struct
     *((uint64_t *) ( /* dim=0 */ ((char *) (((uint64_t *) __pyx_v_out_buf.data) + __pyx_t_4)) )) = __pyx_v_6draken_7vectors_6vector_NULL_HASH;
   }
 
-  /* "draken/vectors/null_vector.pyx":58
+  /* "draken/vectors/null_vector.pyx":61
  *         return 0
  * 
  *     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=0) except *:             # <<<<<<<<<<<<<<
@@ -19090,7 +19090,7 @@ static void __pyx_f_6draken_7vectors_11null_vector_10NullVector_hash_into(struct
   /* function exit code */
 }
 
-/* "draken/vectors/null_vector.pyx":63
+/* "draken/vectors/null_vector.pyx":66
  *             out_buf[offset + i] = NULL_HASH
  * 
  *     cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:             # <<<<<<<<<<<<<<
@@ -19105,7 +19105,7 @@ static int __pyx_f_6draken_7vectors_11null_vector_10NullVector_c_hash_into(CYTHO
   Py_ssize_t __pyx_t_2;
   Py_ssize_t __pyx_t_3;
 
-  /* "draken/vectors/null_vector.pyx":65
+  /* "draken/vectors/null_vector.pyx":68
  *     cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
  *         cdef Py_ssize_t i
  *         for i in range(n):             # <<<<<<<<<<<<<<
@@ -19117,7 +19117,7 @@ static int __pyx_f_6draken_7vectors_11null_vector_10NullVector_c_hash_into(CYTHO
   for (__pyx_t_3 = 0; __pyx_t_3 < __pyx_t_2; __pyx_t_3+=1) {
     __pyx_v_i = __pyx_t_3;
 
-    /* "draken/vectors/null_vector.pyx":66
+    /* "draken/vectors/null_vector.pyx":69
  *         cdef Py_ssize_t i
  *         for i in range(n):
  *             out[i] = NULL_HASH             # <<<<<<<<<<<<<<
@@ -19127,7 +19127,7 @@ static int __pyx_f_6draken_7vectors_11null_vector_10NullVector_c_hash_into(CYTHO
     (__pyx_v_out[__pyx_v_i]) = __pyx_v_6draken_7vectors_6vector_NULL_HASH;
   }
 
-  /* "draken/vectors/null_vector.pyx":67
+  /* "draken/vectors/null_vector.pyx":70
  *         for i in range(n):
  *             out[i] = NULL_HASH
  *         return True             # <<<<<<<<<<<<<<
@@ -19137,7 +19137,7 @@ static int __pyx_f_6draken_7vectors_11null_vector_10NullVector_c_hash_into(CYTHO
   __pyx_r = 1;
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":63
+  /* "draken/vectors/null_vector.pyx":66
  *             out_buf[offset + i] = NULL_HASH
  * 
  *     cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:             # <<<<<<<<<<<<<<
@@ -19150,7 +19150,7 @@ static int __pyx_f_6draken_7vectors_11null_vector_10NullVector_c_hash_into(CYTHO
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":69
+/* "draken/vectors/null_vector.pyx":72
  *         return True
  * 
  *     cpdef uint64_t[::1] hash(self):             # <<<<<<<<<<<<<<
@@ -19202,7 +19202,7 @@ static __Pyx_memviewslice __pyx_f_6draken_7vectors_11null_vector_10NullVector_ha
     if (unlikely(!__Pyx_object_dict_version_matches(((PyObject *)__pyx_v_self), __pyx_tp_dict_version, __pyx_obj_dict_version))) {
       PY_UINT64_T __pyx_typedict_guard = __Pyx_get_tp_dict_version(((PyObject *)__pyx_v_self));
       #endif
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_hash); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 69, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_hash); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 72, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
       if (!__Pyx_IsSameCFunction(__pyx_t_1, (void(*)(void)) __pyx_pw_6draken_7vectors_11null_vector_10NullVector_14hash)) {
         __pyx_t_3 = NULL;
@@ -19225,10 +19225,10 @@ static __Pyx_memviewslice __pyx_f_6draken_7vectors_11null_vector_10NullVector_ha
           __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_4, __pyx_callargs+__pyx_t_5, (1-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
           __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
           __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 69, __pyx_L1_error)
+          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 72, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_2);
         }
-        __pyx_t_6 = __Pyx_PyObject_to_MemoryviewSlice_dc_nn_uint64_t(__pyx_t_2, PyBUF_WRITABLE); if (unlikely(!__pyx_t_6.memview)) __PYX_ERR(0, 69, __pyx_L1_error)
+        __pyx_t_6 = __Pyx_PyObject_to_MemoryviewSlice_dc_nn_uint64_t(__pyx_t_2, PyBUF_WRITABLE); if (unlikely(!__pyx_t_6.memview)) __PYX_ERR(0, 72, __pyx_L1_error)
         __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
         __pyx_r = __pyx_t_6;
         __pyx_t_6.memview = NULL;
@@ -19249,7 +19249,7 @@ static __Pyx_memviewslice __pyx_f_6draken_7vectors_11null_vector_10NullVector_ha
     #endif
   }
 
-  /* "draken/vectors/null_vector.pyx":70
+  /* "draken/vectors/null_vector.pyx":73
  * 
  *     cpdef uint64_t[::1] hash(self):
  *         cdef array template = array('Q')             # <<<<<<<<<<<<<<
@@ -19262,37 +19262,37 @@ static __Pyx_memviewslice __pyx_f_6draken_7vectors_11null_vector_10NullVector_ha
     PyObject *__pyx_callargs[2] = {__pyx_t_2, __pyx_mstate_global->__pyx_n_u_Q};
     __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_mstate_global->__pyx_ptype_7cpython_5array_array, __pyx_callargs+__pyx_t_5, (2-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 70, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 73, __pyx_L1_error)
     __Pyx_GOTREF((PyObject *)__pyx_t_1);
   }
   __pyx_v_template = ((arrayobject *)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "draken/vectors/null_vector.pyx":71
+  /* "draken/vectors/null_vector.pyx":74
  *     cpdef uint64_t[::1] hash(self):
  *         cdef array template = array('Q')
  *         cdef array result = clone(template, self._length, False)             # <<<<<<<<<<<<<<
  *         cdef uint64_t[::1] buf = result
  *         cdef Py_ssize_t i
 */
-  __pyx_t_1 = ((PyObject *)__pyx_f_7cpython_5array_clone(__pyx_v_template, __pyx_v_self->_length, 0)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 71, __pyx_L1_error)
+  __pyx_t_1 = ((PyObject *)__pyx_f_7cpython_5array_clone(__pyx_v_template, __pyx_v_self->_length, 0)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 74, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_result = ((arrayobject *)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "draken/vectors/null_vector.pyx":72
+  /* "draken/vectors/null_vector.pyx":75
  *         cdef array template = array('Q')
  *         cdef array result = clone(template, self._length, False)
  *         cdef uint64_t[::1] buf = result             # <<<<<<<<<<<<<<
  *         cdef Py_ssize_t i
  *         for i in range(self._length):
 */
-  __pyx_t_6 = __Pyx_PyObject_to_MemoryviewSlice_dc_nn_uint64_t(((PyObject *)__pyx_v_result), PyBUF_WRITABLE); if (unlikely(!__pyx_t_6.memview)) __PYX_ERR(0, 72, __pyx_L1_error)
+  __pyx_t_6 = __Pyx_PyObject_to_MemoryviewSlice_dc_nn_uint64_t(((PyObject *)__pyx_v_result), PyBUF_WRITABLE); if (unlikely(!__pyx_t_6.memview)) __PYX_ERR(0, 75, __pyx_L1_error)
   __pyx_v_buf = __pyx_t_6;
   __pyx_t_6.memview = NULL;
   __pyx_t_6.data = NULL;
 
-  /* "draken/vectors/null_vector.pyx":74
+  /* "draken/vectors/null_vector.pyx":77
  *         cdef uint64_t[::1] buf = result
  *         cdef Py_ssize_t i
  *         for i in range(self._length):             # <<<<<<<<<<<<<<
@@ -19304,7 +19304,7 @@ static __Pyx_memviewslice __pyx_f_6draken_7vectors_11null_vector_10NullVector_ha
   for (__pyx_t_9 = 0; __pyx_t_9 < __pyx_t_8; __pyx_t_9+=1) {
     __pyx_v_i = __pyx_t_9;
 
-    /* "draken/vectors/null_vector.pyx":75
+    /* "draken/vectors/null_vector.pyx":78
  *         cdef Py_ssize_t i
  *         for i in range(self._length):
  *             buf[i] = NULL_HASH             # <<<<<<<<<<<<<<
@@ -19315,7 +19315,7 @@ static __Pyx_memviewslice __pyx_f_6draken_7vectors_11null_vector_10NullVector_ha
     *((uint64_t *) ( /* dim=0 */ ((char *) (((uint64_t *) __pyx_v_buf.data) + __pyx_t_10)) )) = __pyx_v_6draken_7vectors_6vector_NULL_HASH;
   }
 
-  /* "draken/vectors/null_vector.pyx":76
+  /* "draken/vectors/null_vector.pyx":79
  *         for i in range(self._length):
  *             buf[i] = NULL_HASH
  *         return buf             # <<<<<<<<<<<<<<
@@ -19326,7 +19326,7 @@ static __Pyx_memviewslice __pyx_f_6draken_7vectors_11null_vector_10NullVector_ha
   __pyx_r = __pyx_v_buf;
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":69
+  /* "draken/vectors/null_vector.pyx":72
  *         return True
  * 
  *     cpdef uint64_t[::1] hash(self):             # <<<<<<<<<<<<<<
@@ -19409,8 +19409,8 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_13hash(str
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("hash", 0);
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __pyx_f_6draken_7vectors_11null_vector_10NullVector_hash(__pyx_v_self, 1); if (unlikely(!__pyx_t_1.memview)) __PYX_ERR(0, 69, __pyx_L1_error)
-  __pyx_t_2 = __pyx_memoryview_fromslice(__pyx_t_1, 1, (PyObject *(*)(char *)) __pyx_memview_get_nn_uint64_t, (int (*)(char *, PyObject *)) __pyx_memview_set_nn_uint64_t, 0);; if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 69, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_6draken_7vectors_11null_vector_10NullVector_hash(__pyx_v_self, 1); if (unlikely(!__pyx_t_1.memview)) __PYX_ERR(0, 72, __pyx_L1_error)
+  __pyx_t_2 = __pyx_memoryview_fromslice(__pyx_t_1, 1, (PyObject *(*)(char *)) __pyx_memview_get_nn_uint64_t, (int (*)(char *, PyObject *)) __pyx_memview_set_nn_uint64_t, 0);; if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 72, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __PYX_XCLEAR_MEMVIEW(&__pyx_t_1, 1);
   __pyx_t_1.memview = NULL; __pyx_t_1.data = NULL;
@@ -19430,7 +19430,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_13hash(str
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":78
+/* "draken/vectors/null_vector.pyx":81
  *         return buf
  * 
  *     cpdef object null_bitmap(self):             # <<<<<<<<<<<<<<
@@ -19473,7 +19473,7 @@ static PyObject *__pyx_f_6draken_7vectors_11null_vector_10NullVector_null_bitmap
     if (unlikely(!__Pyx_object_dict_version_matches(((PyObject *)__pyx_v_self), __pyx_tp_dict_version, __pyx_obj_dict_version))) {
       PY_UINT64_T __pyx_typedict_guard = __Pyx_get_tp_dict_version(((PyObject *)__pyx_v_self));
       #endif
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_null_bitmap); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 78, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_null_bitmap); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 81, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
       if (!__Pyx_IsSameCFunction(__pyx_t_1, (void(*)(void)) __pyx_pw_6draken_7vectors_11null_vector_10NullVector_16null_bitmap)) {
         __Pyx_XDECREF(__pyx_r);
@@ -19497,7 +19497,7 @@ static PyObject *__pyx_f_6draken_7vectors_11null_vector_10NullVector_null_bitmap
           __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_4, __pyx_callargs+__pyx_t_5, (1-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
           __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
           __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 78, __pyx_L1_error)
+          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 81, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_2);
         }
         __pyx_r = __pyx_t_2;
@@ -19518,7 +19518,7 @@ static PyObject *__pyx_f_6draken_7vectors_11null_vector_10NullVector_null_bitmap
     #endif
   }
 
-  /* "draken/vectors/null_vector.pyx":79
+  /* "draken/vectors/null_vector.pyx":82
  * 
  *     cpdef object null_bitmap(self):
  *         return None             # <<<<<<<<<<<<<<
@@ -19529,7 +19529,7 @@ static PyObject *__pyx_f_6draken_7vectors_11null_vector_10NullVector_null_bitmap
   __pyx_r = Py_None; __Pyx_INCREF(Py_None);
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":78
+  /* "draken/vectors/null_vector.pyx":81
  *         return buf
  * 
  *     cpdef object null_bitmap(self):             # <<<<<<<<<<<<<<
@@ -19602,7 +19602,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_15null_bit
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("null_bitmap", 0);
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __pyx_f_6draken_7vectors_11null_vector_10NullVector_null_bitmap(__pyx_v_self, 1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 78, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_6draken_7vectors_11null_vector_10NullVector_null_bitmap(__pyx_v_self, 1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 81, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
@@ -19619,7 +19619,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_15null_bit
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":81
+/* "draken/vectors/null_vector.pyx":84
  *         return None
  * 
  *     cdef void* dense_ptr(self) noexcept:             # <<<<<<<<<<<<<<
@@ -19630,7 +19630,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_15null_bit
 static void *__pyx_f_6draken_7vectors_11null_vector_10NullVector_dense_ptr(CYTHON_UNUSED struct __pyx_obj_6draken_7vectors_11null_vector_NullVector *__pyx_v_self) {
   void *__pyx_r;
 
-  /* "draken/vectors/null_vector.pyx":82
+  /* "draken/vectors/null_vector.pyx":85
  * 
  *     cdef void* dense_ptr(self) noexcept:
  *         return NULL             # <<<<<<<<<<<<<<
@@ -19640,7 +19640,7 @@ static void *__pyx_f_6draken_7vectors_11null_vector_10NullVector_dense_ptr(CYTHO
   __pyx_r = NULL;
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":81
+  /* "draken/vectors/null_vector.pyx":84
  *         return None
  * 
  *     cdef void* dense_ptr(self) noexcept:             # <<<<<<<<<<<<<<
@@ -19653,7 +19653,7 @@ static void *__pyx_f_6draken_7vectors_11null_vector_10NullVector_dense_ptr(CYTHO
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":84
+/* "draken/vectors/null_vector.pyx":87
  *         return NULL
  * 
  *     cdef uint8_t* null_bitmap_ptr(self) noexcept:             # <<<<<<<<<<<<<<
@@ -19664,7 +19664,7 @@ static void *__pyx_f_6draken_7vectors_11null_vector_10NullVector_dense_ptr(CYTHO
 static uint8_t *__pyx_f_6draken_7vectors_11null_vector_10NullVector_null_bitmap_ptr(CYTHON_UNUSED struct __pyx_obj_6draken_7vectors_11null_vector_NullVector *__pyx_v_self) {
   uint8_t *__pyx_r;
 
-  /* "draken/vectors/null_vector.pyx":85
+  /* "draken/vectors/null_vector.pyx":88
  * 
  *     cdef uint8_t* null_bitmap_ptr(self) noexcept:
  *         return NULL             # <<<<<<<<<<<<<<
@@ -19674,7 +19674,7 @@ static uint8_t *__pyx_f_6draken_7vectors_11null_vector_10NullVector_null_bitmap_
   __pyx_r = NULL;
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":84
+  /* "draken/vectors/null_vector.pyx":87
  *         return NULL
  * 
  *     cdef uint8_t* null_bitmap_ptr(self) noexcept:             # <<<<<<<<<<<<<<
@@ -19687,7 +19687,7 @@ static uint8_t *__pyx_f_6draken_7vectors_11null_vector_10NullVector_null_bitmap_
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":87
+/* "draken/vectors/null_vector.pyx":90
  *         return NULL
  * 
  *     cpdef NullVector take(self, int32_t[::1] indices):             # <<<<<<<<<<<<<<
@@ -19731,14 +19731,14 @@ static struct __pyx_obj_6draken_7vectors_11null_vector_NullVector *__pyx_f_6drak
     if (unlikely(!__Pyx_object_dict_version_matches(((PyObject *)__pyx_v_self), __pyx_tp_dict_version, __pyx_obj_dict_version))) {
       PY_UINT64_T __pyx_typedict_guard = __Pyx_get_tp_dict_version(((PyObject *)__pyx_v_self));
       #endif
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_take); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 87, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_take); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 90, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
       if (!__Pyx_IsSameCFunction(__pyx_t_1, (void(*)(void)) __pyx_pw_6draken_7vectors_11null_vector_10NullVector_18take)) {
         __Pyx_XDECREF((PyObject *)__pyx_r);
         __pyx_t_3 = NULL;
         __Pyx_INCREF(__pyx_t_1);
         __pyx_t_4 = __pyx_t_1; 
-        __pyx_t_5 = __pyx_memoryview_fromslice(__pyx_v_indices, 1, (PyObject *(*)(char *)) __pyx_memview_get_nn_int32_t, (int (*)(char *, PyObject *)) __pyx_memview_set_nn_int32_t, 0);; if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 87, __pyx_L1_error)
+        __pyx_t_5 = __pyx_memoryview_fromslice(__pyx_v_indices, 1, (PyObject *(*)(char *)) __pyx_memview_get_nn_int32_t, (int (*)(char *, PyObject *)) __pyx_memview_set_nn_int32_t, 0);; if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 90, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_5);
         __pyx_t_6 = 1;
         #if CYTHON_UNPACK_METHODS
@@ -19758,10 +19758,10 @@ static struct __pyx_obj_6draken_7vectors_11null_vector_NullVector *__pyx_f_6drak
           __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
           __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
           __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 87, __pyx_L1_error)
+          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 90, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_2);
         }
-        if (!(likely(((__pyx_t_2) == Py_None) || likely(__Pyx_TypeTest(__pyx_t_2, __pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector))))) __PYX_ERR(0, 87, __pyx_L1_error)
+        if (!(likely(((__pyx_t_2) == Py_None) || likely(__Pyx_TypeTest(__pyx_t_2, __pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector))))) __PYX_ERR(0, 90, __pyx_L1_error)
         __pyx_r = ((struct __pyx_obj_6draken_7vectors_11null_vector_NullVector *)__pyx_t_2);
         __pyx_t_2 = 0;
         __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
@@ -19780,7 +19780,7 @@ static struct __pyx_obj_6draken_7vectors_11null_vector_NullVector *__pyx_f_6drak
     #endif
   }
 
-  /* "draken/vectors/null_vector.pyx":88
+  /* "draken/vectors/null_vector.pyx":91
  * 
  *     cpdef NullVector take(self, int32_t[::1] indices):
  *         return NullVector(indices.shape[0])             # <<<<<<<<<<<<<<
@@ -19789,7 +19789,7 @@ static struct __pyx_obj_6draken_7vectors_11null_vector_NullVector *__pyx_f_6drak
 */
   __Pyx_XDECREF((PyObject *)__pyx_r);
   __pyx_t_2 = NULL;
-  __pyx_t_4 = PyLong_FromSsize_t((__pyx_v_indices.shape[0])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 88, __pyx_L1_error)
+  __pyx_t_4 = PyLong_FromSsize_t((__pyx_v_indices.shape[0])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 91, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_6 = 1;
   {
@@ -19797,14 +19797,14 @@ static struct __pyx_obj_6draken_7vectors_11null_vector_NullVector *__pyx_f_6drak
     __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 88, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 91, __pyx_L1_error)
     __Pyx_GOTREF((PyObject *)__pyx_t_1);
   }
   __pyx_r = ((struct __pyx_obj_6draken_7vectors_11null_vector_NullVector *)__pyx_t_1);
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":87
+  /* "draken/vectors/null_vector.pyx":90
  *         return NULL
  * 
  *     cpdef NullVector take(self, int32_t[::1] indices):             # <<<<<<<<<<<<<<
@@ -19866,32 +19866,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_indices,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 87, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 90, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 87, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 90, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "take", 0) < (0)) __PYX_ERR(0, 87, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "take", 0) < (0)) __PYX_ERR(0, 90, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("take", 1, 1, 1, i); __PYX_ERR(0, 87, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("take", 1, 1, 1, i); __PYX_ERR(0, 90, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 87, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 90, __pyx_L3_error)
     }
-    __pyx_v_indices = __Pyx_PyObject_to_MemoryviewSlice_dc_nn_int32_t(values[0], PyBUF_WRITABLE); if (unlikely(!__pyx_v_indices.memview)) __PYX_ERR(0, 87, __pyx_L3_error)
+    __pyx_v_indices = __Pyx_PyObject_to_MemoryviewSlice_dc_nn_int32_t(values[0], PyBUF_WRITABLE); if (unlikely(!__pyx_v_indices.memview)) __PYX_ERR(0, 90, __pyx_L3_error)
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("take", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 87, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("take", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 90, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -19923,7 +19923,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_17take(str
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("take", 0);
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = ((PyObject *)__pyx_f_6draken_7vectors_11null_vector_10NullVector_take(__pyx_v_self, __pyx_v_indices, 1)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 87, __pyx_L1_error)
+  __pyx_t_1 = ((PyObject *)__pyx_f_6draken_7vectors_11null_vector_10NullVector_take(__pyx_v_self, __pyx_v_indices, 1)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 90, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
@@ -19940,7 +19940,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_17take(str
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":90
+/* "draken/vectors/null_vector.pyx":93
  *         return NullVector(indices.shape[0])
  * 
  *     cpdef Vector materialize(self):             # <<<<<<<<<<<<<<
@@ -19983,7 +19983,7 @@ static struct __pyx_obj_6draken_7vectors_6vector_Vector *__pyx_f_6draken_7vector
     if (unlikely(!__Pyx_object_dict_version_matches(((PyObject *)__pyx_v_self), __pyx_tp_dict_version, __pyx_obj_dict_version))) {
       PY_UINT64_T __pyx_typedict_guard = __Pyx_get_tp_dict_version(((PyObject *)__pyx_v_self));
       #endif
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_materialize); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 90, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_materialize); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 93, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
       if (!__Pyx_IsSameCFunction(__pyx_t_1, (void(*)(void)) __pyx_pw_6draken_7vectors_11null_vector_10NullVector_20materialize)) {
         __Pyx_XDECREF((PyObject *)__pyx_r);
@@ -20007,10 +20007,10 @@ static struct __pyx_obj_6draken_7vectors_6vector_Vector *__pyx_f_6draken_7vector
           __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_4, __pyx_callargs+__pyx_t_5, (1-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
           __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
           __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 90, __pyx_L1_error)
+          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 93, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_2);
         }
-        if (!(likely(((__pyx_t_2) == Py_None) || likely(__Pyx_TypeTest(__pyx_t_2, __pyx_mstate_global->__pyx_ptype_6draken_7vectors_6vector_Vector))))) __PYX_ERR(0, 90, __pyx_L1_error)
+        if (!(likely(((__pyx_t_2) == Py_None) || likely(__Pyx_TypeTest(__pyx_t_2, __pyx_mstate_global->__pyx_ptype_6draken_7vectors_6vector_Vector))))) __PYX_ERR(0, 93, __pyx_L1_error)
         __pyx_r = ((struct __pyx_obj_6draken_7vectors_6vector_Vector *)__pyx_t_2);
         __pyx_t_2 = 0;
         __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
@@ -20029,7 +20029,7 @@ static struct __pyx_obj_6draken_7vectors_6vector_Vector *__pyx_f_6draken_7vector
     #endif
   }
 
-  /* "draken/vectors/null_vector.pyx":91
+  /* "draken/vectors/null_vector.pyx":94
  * 
  *     cpdef Vector materialize(self):
  *         return self             # <<<<<<<<<<<<<<
@@ -20041,7 +20041,7 @@ static struct __pyx_obj_6draken_7vectors_6vector_Vector *__pyx_f_6draken_7vector
   __pyx_r = ((struct __pyx_obj_6draken_7vectors_6vector_Vector *)__pyx_v_self);
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":90
+  /* "draken/vectors/null_vector.pyx":93
  *         return NullVector(indices.shape[0])
  * 
  *     cpdef Vector materialize(self):             # <<<<<<<<<<<<<<
@@ -20114,7 +20114,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_19material
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("materialize", 0);
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = ((PyObject *)__pyx_f_6draken_7vectors_11null_vector_10NullVector_materialize(__pyx_v_self, 1)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 90, __pyx_L1_error)
+  __pyx_t_1 = ((PyObject *)__pyx_f_6draken_7vectors_11null_vector_10NullVector_materialize(__pyx_v_self, 1)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 93, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
@@ -20131,7 +20131,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_19material
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":93
+/* "draken/vectors/null_vector.pyx":96
  *         return self
  * 
  *     def to_pylist(self):             # <<<<<<<<<<<<<<
@@ -20190,7 +20190,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_21to_pylis
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("to_pylist", 0);
 
-  /* "draken/vectors/null_vector.pyx":94
+  /* "draken/vectors/null_vector.pyx":97
  * 
  *     def to_pylist(self):
  *         return [None] * self._length             # <<<<<<<<<<<<<<
@@ -20198,20 +20198,20 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_21to_pylis
  *     def to_arrow(self):
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = PyList_New(1 * ((__pyx_v_self->_length<0) ? 0:__pyx_v_self->_length)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 94, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(1 * ((__pyx_v_self->_length<0) ? 0:__pyx_v_self->_length)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 97, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   { Py_ssize_t __pyx_temp;
     for (__pyx_temp=0; __pyx_temp < __pyx_v_self->_length; __pyx_temp++) {
       __Pyx_INCREF(Py_None);
       __Pyx_GIVEREF(Py_None);
-      if (__Pyx_PyList_SET_ITEM(__pyx_t_1, __pyx_temp, Py_None) != (0)) __PYX_ERR(0, 94, __pyx_L1_error);
+      if (__Pyx_PyList_SET_ITEM(__pyx_t_1, __pyx_temp, Py_None) != (0)) __PYX_ERR(0, 97, __pyx_L1_error);
     }
   }
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":93
+  /* "draken/vectors/null_vector.pyx":96
  *         return self
  * 
  *     def to_pylist(self):             # <<<<<<<<<<<<<<
@@ -20230,7 +20230,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_21to_pylis
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":96
+/* "draken/vectors/null_vector.pyx":99
  *         return [None] * self._length
  * 
  *     def to_arrow(self):             # <<<<<<<<<<<<<<
@@ -20294,20 +20294,20 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_23to_arrow
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("to_arrow", 0);
 
-  /* "draken/vectors/null_vector.pyx":97
+  /* "draken/vectors/null_vector.pyx":100
  * 
  *     def to_arrow(self):
  *         import pyarrow as pa             # <<<<<<<<<<<<<<
  *         return pa.nulls(self._length)
  * 
 */
-  __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_pyarrow, 0, 0, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 97, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_pyarrow, 0, 0, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 100, __pyx_L1_error)
   __pyx_t_1 = __pyx_t_2;
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_pa = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "draken/vectors/null_vector.pyx":98
+  /* "draken/vectors/null_vector.pyx":101
  *     def to_arrow(self):
  *         import pyarrow as pa
  *         return pa.nulls(self._length)             # <<<<<<<<<<<<<<
@@ -20317,7 +20317,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_23to_arrow
   __Pyx_XDECREF(__pyx_r);
   __pyx_t_3 = __pyx_v_pa;
   __Pyx_INCREF(__pyx_t_3);
-  __pyx_t_4 = PyLong_FromSsize_t(__pyx_v_self->_length); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 98, __pyx_L1_error)
+  __pyx_t_4 = PyLong_FromSsize_t(__pyx_v_self->_length); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 101, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_5 = 0;
   {
@@ -20325,14 +20325,14 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_23to_arrow
     __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_nulls, __pyx_callargs+__pyx_t_5, (2-__pyx_t_5) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 98, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 101, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":96
+  /* "draken/vectors/null_vector.pyx":99
  *         return [None] * self._length
  * 
  *     def to_arrow(self):             # <<<<<<<<<<<<<<
@@ -20354,7 +20354,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_23to_arrow
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":100
+/* "draken/vectors/null_vector.pyx":103
  *         return pa.nulls(self._length)
  * 
  *     cpdef int64_t[::1] compress(self):             # <<<<<<<<<<<<<<
@@ -20406,7 +20406,7 @@ static __Pyx_memviewslice __pyx_f_6draken_7vectors_11null_vector_10NullVector_co
     if (unlikely(!__Pyx_object_dict_version_matches(((PyObject *)__pyx_v_self), __pyx_tp_dict_version, __pyx_obj_dict_version))) {
       PY_UINT64_T __pyx_typedict_guard = __Pyx_get_tp_dict_version(((PyObject *)__pyx_v_self));
       #endif
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_compress); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 100, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_compress); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 103, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
       if (!__Pyx_IsSameCFunction(__pyx_t_1, (void(*)(void)) __pyx_pw_6draken_7vectors_11null_vector_10NullVector_26compress)) {
         __pyx_t_3 = NULL;
@@ -20429,10 +20429,10 @@ static __Pyx_memviewslice __pyx_f_6draken_7vectors_11null_vector_10NullVector_co
           __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_4, __pyx_callargs+__pyx_t_5, (1-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
           __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
           __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 100, __pyx_L1_error)
+          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 103, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_2);
         }
-        __pyx_t_6 = __Pyx_PyObject_to_MemoryviewSlice_dc_nn_int64_t(__pyx_t_2, PyBUF_WRITABLE); if (unlikely(!__pyx_t_6.memview)) __PYX_ERR(0, 100, __pyx_L1_error)
+        __pyx_t_6 = __Pyx_PyObject_to_MemoryviewSlice_dc_nn_int64_t(__pyx_t_2, PyBUF_WRITABLE); if (unlikely(!__pyx_t_6.memview)) __PYX_ERR(0, 103, __pyx_L1_error)
         __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
         __pyx_r = __pyx_t_6;
         __pyx_t_6.memview = NULL;
@@ -20453,7 +20453,7 @@ static __Pyx_memviewslice __pyx_f_6draken_7vectors_11null_vector_10NullVector_co
     #endif
   }
 
-  /* "draken/vectors/null_vector.pyx":101
+  /* "draken/vectors/null_vector.pyx":104
  * 
  *     cpdef int64_t[::1] compress(self):
  *         cdef array template = array('q')             # <<<<<<<<<<<<<<
@@ -20466,37 +20466,37 @@ static __Pyx_memviewslice __pyx_f_6draken_7vectors_11null_vector_10NullVector_co
     PyObject *__pyx_callargs[2] = {__pyx_t_2, __pyx_mstate_global->__pyx_n_u_q};
     __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_mstate_global->__pyx_ptype_7cpython_5array_array, __pyx_callargs+__pyx_t_5, (2-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 101, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 104, __pyx_L1_error)
     __Pyx_GOTREF((PyObject *)__pyx_t_1);
   }
   __pyx_v_template = ((arrayobject *)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "draken/vectors/null_vector.pyx":102
+  /* "draken/vectors/null_vector.pyx":105
  *     cpdef int64_t[::1] compress(self):
  *         cdef array template = array('q')
  *         cdef array result = clone(template, self._length, False)             # <<<<<<<<<<<<<<
  *         cdef int64_t[::1] buf = result
  *         cdef Py_ssize_t i
 */
-  __pyx_t_1 = ((PyObject *)__pyx_f_7cpython_5array_clone(__pyx_v_template, __pyx_v_self->_length, 0)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 102, __pyx_L1_error)
+  __pyx_t_1 = ((PyObject *)__pyx_f_7cpython_5array_clone(__pyx_v_template, __pyx_v_self->_length, 0)); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 105, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_result = ((arrayobject *)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "draken/vectors/null_vector.pyx":103
+  /* "draken/vectors/null_vector.pyx":106
  *         cdef array template = array('q')
  *         cdef array result = clone(template, self._length, False)
  *         cdef int64_t[::1] buf = result             # <<<<<<<<<<<<<<
  *         cdef Py_ssize_t i
  *         for i in range(self._length):
 */
-  __pyx_t_6 = __Pyx_PyObject_to_MemoryviewSlice_dc_nn_int64_t(((PyObject *)__pyx_v_result), PyBUF_WRITABLE); if (unlikely(!__pyx_t_6.memview)) __PYX_ERR(0, 103, __pyx_L1_error)
+  __pyx_t_6 = __Pyx_PyObject_to_MemoryviewSlice_dc_nn_int64_t(((PyObject *)__pyx_v_result), PyBUF_WRITABLE); if (unlikely(!__pyx_t_6.memview)) __PYX_ERR(0, 106, __pyx_L1_error)
   __pyx_v_buf = __pyx_t_6;
   __pyx_t_6.memview = NULL;
   __pyx_t_6.data = NULL;
 
-  /* "draken/vectors/null_vector.pyx":105
+  /* "draken/vectors/null_vector.pyx":108
  *         cdef int64_t[::1] buf = result
  *         cdef Py_ssize_t i
  *         for i in range(self._length):             # <<<<<<<<<<<<<<
@@ -20508,7 +20508,7 @@ static __Pyx_memviewslice __pyx_f_6draken_7vectors_11null_vector_10NullVector_co
   for (__pyx_t_9 = 0; __pyx_t_9 < __pyx_t_8; __pyx_t_9+=1) {
     __pyx_v_i = __pyx_t_9;
 
-    /* "draken/vectors/null_vector.pyx":106
+    /* "draken/vectors/null_vector.pyx":109
  *         cdef Py_ssize_t i
  *         for i in range(self._length):
  *             buf[i] = <int64_t>0x8000000000000000ULL             # <<<<<<<<<<<<<<
@@ -20519,7 +20519,7 @@ static __Pyx_memviewslice __pyx_f_6draken_7vectors_11null_vector_10NullVector_co
     *((int64_t *) ( /* dim=0 */ ((char *) (((int64_t *) __pyx_v_buf.data) + __pyx_t_10)) )) = ((int64_t)0x8000000000000000ULL);
   }
 
-  /* "draken/vectors/null_vector.pyx":107
+  /* "draken/vectors/null_vector.pyx":110
  *         for i in range(self._length):
  *             buf[i] = <int64_t>0x8000000000000000ULL
  *         return buf             # <<<<<<<<<<<<<<
@@ -20530,7 +20530,7 @@ static __Pyx_memviewslice __pyx_f_6draken_7vectors_11null_vector_10NullVector_co
   __pyx_r = __pyx_v_buf;
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":100
+  /* "draken/vectors/null_vector.pyx":103
  *         return pa.nulls(self._length)
  * 
  *     cpdef int64_t[::1] compress(self):             # <<<<<<<<<<<<<<
@@ -20613,8 +20613,8 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_25compress
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("compress", 0);
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __pyx_f_6draken_7vectors_11null_vector_10NullVector_compress(__pyx_v_self, 1); if (unlikely(!__pyx_t_1.memview)) __PYX_ERR(0, 100, __pyx_L1_error)
-  __pyx_t_2 = __pyx_memoryview_fromslice(__pyx_t_1, 1, (PyObject *(*)(char *)) __pyx_memview_get_nn_int64_t, (int (*)(char *, PyObject *)) __pyx_memview_set_nn_int64_t, 0);; if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 100, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_6draken_7vectors_11null_vector_10NullVector_compress(__pyx_v_self, 1); if (unlikely(!__pyx_t_1.memview)) __PYX_ERR(0, 103, __pyx_L1_error)
+  __pyx_t_2 = __pyx_memoryview_fromslice(__pyx_t_1, 1, (PyObject *(*)(char *)) __pyx_memview_get_nn_int64_t, (int (*)(char *, PyObject *)) __pyx_memview_set_nn_int64_t, 0);; if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 103, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __PYX_XCLEAR_MEMVIEW(&__pyx_t_1, 1);
   __pyx_t_1.memview = NULL; __pyx_t_1.data = NULL;
@@ -20634,7 +20634,7 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_25compress
   return __pyx_r;
 }
 
-/* "draken/vectors/null_vector.pyx":109
+/* "draken/vectors/null_vector.pyx":112
  *         return buf
  * 
  *     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:             # <<<<<<<<<<<<<<
@@ -20655,7 +20655,7 @@ static void __pyx_f_6draken_7vectors_11null_vector_10NullVector_compress_into(st
     }
   }
 
-  /* "draken/vectors/null_vector.pyx":111
+  /* "draken/vectors/null_vector.pyx":114
  *     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
  *         cdef Py_ssize_t i
  *         for i in range(self._length):             # <<<<<<<<<<<<<<
@@ -20667,7 +20667,7 @@ static void __pyx_f_6draken_7vectors_11null_vector_10NullVector_compress_into(st
   for (__pyx_t_3 = 0; __pyx_t_3 < __pyx_t_2; __pyx_t_3+=1) {
     __pyx_v_i = __pyx_t_3;
 
-    /* "draken/vectors/null_vector.pyx":112
+    /* "draken/vectors/null_vector.pyx":115
  *         cdef Py_ssize_t i
  *         for i in range(self._length):
  *             out_buf[offset + i] = <int64_t>0x8000000000000000ULL             # <<<<<<<<<<<<<<
@@ -20678,7 +20678,7 @@ static void __pyx_f_6draken_7vectors_11null_vector_10NullVector_compress_into(st
     *((int64_t *) ( /* dim=0 */ ((char *) (((int64_t *) __pyx_v_out_buf.data) + __pyx_t_4)) )) = ((int64_t)0x8000000000000000ULL);
   }
 
-  /* "draken/vectors/null_vector.pyx":109
+  /* "draken/vectors/null_vector.pyx":112
  *         return buf
  * 
  *     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:             # <<<<<<<<<<<<<<
@@ -20689,7 +20689,7 @@ static void __pyx_f_6draken_7vectors_11null_vector_10NullVector_compress_into(st
   /* function exit code */
 }
 
-/* "draken/vectors/null_vector.pyx":114
+/* "draken/vectors/null_vector.pyx":117
  *             out_buf[offset + i] = <int64_t>0x8000000000000000ULL
  * 
  *     def __repr__(self):             # <<<<<<<<<<<<<<
@@ -20722,26 +20722,26 @@ static PyObject *__pyx_pf_6draken_7vectors_11null_vector_10NullVector_27__repr__
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__repr__", 0);
 
-  /* "draken/vectors/null_vector.pyx":115
+  /* "draken/vectors/null_vector.pyx":118
  * 
  *     def __repr__(self):
  *         return f"NullVector(length={self._length})"             # <<<<<<<<<<<<<<
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __Pyx_PyUnicode_From_Py_ssize_t(__pyx_v_self->_length, 0, ' ', 'd'); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 115, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyUnicode_From_Py_ssize_t(__pyx_v_self->_length, 0, ' ', 'd'); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 118, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_t_2[0] = __pyx_mstate_global->__pyx_kp_u_NullVector_length;
   __pyx_t_2[1] = __pyx_t_1;
   __pyx_t_2[2] = __pyx_mstate_global->__pyx_kp_u__5;
   __pyx_t_3 = __Pyx_PyUnicode_Join(__pyx_t_2, 3, 18 + __Pyx_PyUnicode_GET_LENGTH(__pyx_t_1) + 1, 127);
-  if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 115, __pyx_L1_error)
+  if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 118, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_r = __pyx_t_3;
   __pyx_t_3 = 0;
   goto __pyx_L0;
 
-  /* "draken/vectors/null_vector.pyx":114
+  /* "draken/vectors/null_vector.pyx":117
  *             out_buf[offset + i] = <int64_t>0x8000000000000000ULL
  * 
  *     def __repr__(self):             # <<<<<<<<<<<<<<
@@ -22237,12 +22237,12 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   __pyx_vtable_6draken_7vectors_11null_vector_NullVector.__pyx_base.materialize = (struct __pyx_obj_6draken_7vectors_6vector_Vector *(*)(struct __pyx_obj_6draken_7vectors_6vector_Vector *, int __pyx_skip_dispatch))__pyx_f_6draken_7vectors_11null_vector_10NullVector_materialize;
   __pyx_vtable_6draken_7vectors_11null_vector_NullVector.take = (struct __pyx_obj_6draken_7vectors_11null_vector_NullVector *(*)(struct __pyx_obj_6draken_7vectors_11null_vector_NullVector *, __Pyx_memviewslice, int __pyx_skip_dispatch))__pyx_f_6draken_7vectors_11null_vector_10NullVector_take;
   #if CYTHON_USE_TYPE_SPECS
-  __pyx_t_2 = PyTuple_Pack(1, (PyObject *)__pyx_mstate_global->__pyx_ptype_6draken_7vectors_6vector_Vector); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 24, __pyx_L1_error)
+  __pyx_t_2 = PyTuple_Pack(1, (PyObject *)__pyx_mstate_global->__pyx_ptype_6draken_7vectors_6vector_Vector); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 27, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_6draken_7vectors_11null_vector_NullVector_spec, __pyx_t_2);
   __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-  if (unlikely(!__pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector)) __PYX_ERR(0, 24, __pyx_L1_error)
-  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_6draken_7vectors_11null_vector_NullVector_spec, __pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector) < (0)) __PYX_ERR(0, 24, __pyx_L1_error)
+  if (unlikely(!__pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector)) __PYX_ERR(0, 27, __pyx_L1_error)
+  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_6draken_7vectors_11null_vector_NullVector_spec, __pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector) < (0)) __PYX_ERR(0, 27, __pyx_L1_error)
   #else
   __pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector = &__pyx_type_6draken_7vectors_11null_vector_NullVector;
   #endif
@@ -22250,7 +22250,7 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   __pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector->tp_base = __pyx_mstate_global->__pyx_ptype_6draken_7vectors_6vector_Vector;
   #endif
   #if !CYTHON_USE_TYPE_SPECS
-  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector) < (0)) __PYX_ERR(0, 24, __pyx_L1_error)
+  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector) < (0)) __PYX_ERR(0, 27, __pyx_L1_error)
   #endif
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount((PyObject*)__pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector);
@@ -22260,20 +22260,20 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
     __pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector->tp_getattro = PyObject_GenericGetAttr;
   }
   #endif
-  if (__Pyx_SetVtable(__pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_vtabptr_6draken_7vectors_11null_vector_NullVector) < (0)) __PYX_ERR(0, 24, __pyx_L1_error)
-  if (__Pyx_MergeVtables(__pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector) < (0)) __PYX_ERR(0, 24, __pyx_L1_error)
-  if (PyObject_SetAttr(__pyx_m, __pyx_mstate_global->__pyx_n_u_NullVector, (PyObject *) __pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector) < (0)) __PYX_ERR(0, 24, __pyx_L1_error)
-  if (__Pyx_setup_reduce((PyObject *) __pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector) < (0)) __PYX_ERR(0, 24, __pyx_L1_error)
+  if (__Pyx_SetVtable(__pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_vtabptr_6draken_7vectors_11null_vector_NullVector) < (0)) __PYX_ERR(0, 27, __pyx_L1_error)
+  if (__Pyx_MergeVtables(__pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector) < (0)) __PYX_ERR(0, 27, __pyx_L1_error)
+  if (PyObject_SetAttr(__pyx_m, __pyx_mstate_global->__pyx_n_u_NullVector, (PyObject *) __pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector) < (0)) __PYX_ERR(0, 27, __pyx_L1_error)
+  if (__Pyx_setup_reduce((PyObject *) __pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector_NullVector) < (0)) __PYX_ERR(0, 27, __pyx_L1_error)
   #if CYTHON_USE_TYPE_SPECS
-  __pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector___pyx_scope_struct____iter__ = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_6draken_7vectors_11null_vector___pyx_scope_struct____iter___spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector___pyx_scope_struct____iter__)) __PYX_ERR(0, 46, __pyx_L1_error)
-  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_6draken_7vectors_11null_vector___pyx_scope_struct____iter___spec, __pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector___pyx_scope_struct____iter__) < (0)) __PYX_ERR(0, 46, __pyx_L1_error)
+  __pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector___pyx_scope_struct____iter__ = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_6draken_7vectors_11null_vector___pyx_scope_struct____iter___spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector___pyx_scope_struct____iter__)) __PYX_ERR(0, 49, __pyx_L1_error)
+  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_6draken_7vectors_11null_vector___pyx_scope_struct____iter___spec, __pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector___pyx_scope_struct____iter__) < (0)) __PYX_ERR(0, 49, __pyx_L1_error)
   #else
   __pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector___pyx_scope_struct____iter__ = &__pyx_type_6draken_7vectors_11null_vector___pyx_scope_struct____iter__;
   #endif
   #if !CYTHON_COMPILING_IN_LIMITED_API
   #endif
   #if !CYTHON_USE_TYPE_SPECS
-  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector___pyx_scope_struct____iter__) < (0)) __PYX_ERR(0, 46, __pyx_L1_error)
+  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector___pyx_scope_struct____iter__) < (0)) __PYX_ERR(0, 49, __pyx_L1_error)
   #endif
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount((PyObject*)__pyx_mstate->__pyx_ptype_6draken_7vectors_11null_vector___pyx_scope_struct____iter__);
@@ -22736,7 +22736,7 @@ static CYTHON_SMALL_CODE int __pyx_pymod_exec_null_vector(PyObject *__pyx_pyinit
   __pyx_m = __pyx_t_1;
   #endif
   #if CYTHON_COMPILING_IN_CPYTHON_FREETHREADING
-  PyUnstable_Module_SetGIL(__pyx_m, Py_MOD_GIL_USED);
+  PyUnstable_Module_SetGIL(__pyx_m, Py_MOD_GIL_NOT_USED);
   #endif
   __pyx_mstate = __pyx_mstate_global;
   CYTHON_UNUSED_VAR(__pyx_t_1);
@@ -23282,139 +23282,139 @@ __Pyx_RefNannySetupContext("PyInit_null_vector", 0);
   if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_pyx_unpickle_Enum, __pyx_t_4) < (0)) __PYX_ERR(1, 4, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "draken/vectors/null_vector.pyx":51
+  /* "draken/vectors/null_vector.pyx":54
  *             yield None
  * 
  *     cpdef bint is_null_at(self, Py_ssize_t idx) except? False:             # <<<<<<<<<<<<<<
  *         return True
  * 
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_10is_null_at, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_is_null_at, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[1])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 51, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_10is_null_at, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_is_null_at, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[1])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 54, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_is_null_at, __pyx_t_4) < (0)) __PYX_ERR(0, 51, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_is_null_at, __pyx_t_4) < (0)) __PYX_ERR(0, 54, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "draken/vectors/null_vector.pyx":54
+  /* "draken/vectors/null_vector.pyx":57
  *         return True
  * 
  *     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:             # <<<<<<<<<<<<<<
  *         # NULL == NULL for ordering purposes
  *         return 0
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_12compare_at, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_compare_at, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[2])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 54, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_12compare_at, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_compare_at, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[2])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 57, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_compare_at, __pyx_t_4) < (0)) __PYX_ERR(0, 54, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_compare_at, __pyx_t_4) < (0)) __PYX_ERR(0, 57, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "draken/vectors/null_vector.pyx":69
+  /* "draken/vectors/null_vector.pyx":72
  *         return True
  * 
  *     cpdef uint64_t[::1] hash(self):             # <<<<<<<<<<<<<<
  *         cdef array template = array('Q')
  *         cdef array result = clone(template, self._length, False)
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_14hash, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_hash, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[3])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 69, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_14hash, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_hash, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[3])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 72, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_hash, __pyx_t_4) < (0)) __PYX_ERR(0, 69, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_hash, __pyx_t_4) < (0)) __PYX_ERR(0, 72, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "draken/vectors/null_vector.pyx":78
+  /* "draken/vectors/null_vector.pyx":81
  *         return buf
  * 
  *     cpdef object null_bitmap(self):             # <<<<<<<<<<<<<<
  *         return None
  * 
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_16null_bitmap, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_null_bitmap, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[4])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 78, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_16null_bitmap, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_null_bitmap, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[4])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 81, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_null_bitmap, __pyx_t_4) < (0)) __PYX_ERR(0, 78, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_null_bitmap, __pyx_t_4) < (0)) __PYX_ERR(0, 81, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "draken/vectors/null_vector.pyx":87
+  /* "draken/vectors/null_vector.pyx":90
  *         return NULL
  * 
  *     cpdef NullVector take(self, int32_t[::1] indices):             # <<<<<<<<<<<<<<
  *         return NullVector(indices.shape[0])
  * 
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_18take, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_take, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[5])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 87, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_18take, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_take, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[5])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 90, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_take, __pyx_t_4) < (0)) __PYX_ERR(0, 87, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_take, __pyx_t_4) < (0)) __PYX_ERR(0, 90, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "draken/vectors/null_vector.pyx":90
+  /* "draken/vectors/null_vector.pyx":93
  *         return NullVector(indices.shape[0])
  * 
  *     cpdef Vector materialize(self):             # <<<<<<<<<<<<<<
  *         return self
  * 
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_20materialize, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_materialize, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[6])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 90, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_20materialize, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_materialize, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[6])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 93, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_materialize, __pyx_t_4) < (0)) __PYX_ERR(0, 90, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_materialize, __pyx_t_4) < (0)) __PYX_ERR(0, 93, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "draken/vectors/null_vector.pyx":93
+  /* "draken/vectors/null_vector.pyx":96
  *         return self
  * 
  *     def to_pylist(self):             # <<<<<<<<<<<<<<
  *         return [None] * self._length
  * 
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_22to_pylist, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_to_pylist, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[7])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 93, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_22to_pylist, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_to_pylist, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[7])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 96, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_to_pylist, __pyx_t_4) < (0)) __PYX_ERR(0, 93, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_to_pylist, __pyx_t_4) < (0)) __PYX_ERR(0, 96, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "draken/vectors/null_vector.pyx":96
+  /* "draken/vectors/null_vector.pyx":99
  *         return [None] * self._length
  * 
  *     def to_arrow(self):             # <<<<<<<<<<<<<<
  *         import pyarrow as pa
  *         return pa.nulls(self._length)
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_24to_arrow, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_to_arrow, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[8])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 96, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_24to_arrow, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_to_arrow, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[8])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 99, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_to_arrow, __pyx_t_4) < (0)) __PYX_ERR(0, 96, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_to_arrow, __pyx_t_4) < (0)) __PYX_ERR(0, 99, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "draken/vectors/null_vector.pyx":100
+  /* "draken/vectors/null_vector.pyx":103
  *         return pa.nulls(self._length)
  * 
  *     cpdef int64_t[::1] compress(self):             # <<<<<<<<<<<<<<
  *         cdef array template = array('q')
  *         cdef array result = clone(template, self._length, False)
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_26compress, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_compress, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[9])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 100, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_6draken_7vectors_11null_vector_10NullVector_26compress, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_NullVector_compress, NULL, __pyx_mstate_global->__pyx_n_u_draken_vectors_null_vector, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[9])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 103, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_compress, __pyx_t_4) < (0)) __PYX_ERR(0, 100, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_6draken_7vectors_11null_vector_NullVector, __pyx_mstate_global->__pyx_n_u_compress, __pyx_t_4) < (0)) __PYX_ERR(0, 103, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
   /* "(tree fragment)":1
@@ -23714,52 +23714,52 @@ static int __Pyx_CreateCodeObjects(__pyx_mstatetype *__pyx_mstate) {
   PyObject* tuple_dedup_map = PyDict_New();
   if (unlikely(!tuple_dedup_map)) return -1;
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 46};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 49};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_i};
     __pyx_mstate_global->__pyx_codeobj_tab[0] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_draken_vectors_null_vector_pyx, __pyx_mstate->__pyx_n_u_iter, __pyx_mstate->__pyx_kp_b_iso88591_A, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[0])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 51};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 54};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_idx};
     __pyx_mstate_global->__pyx_codeobj_tab[1] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_draken_vectors_null_vector_pyx, __pyx_mstate->__pyx_n_u_is_null_at, __pyx_mstate->__pyx_kp_b_iso88591_8_q, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[1])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {3, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 54};
+    const __Pyx_PyCode_New_function_description descr = {3, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 57};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_left_idx, __pyx_mstate->__pyx_n_u_right_idx};
     __pyx_mstate_global->__pyx_codeobj_tab[2] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_draken_vectors_null_vector_pyx, __pyx_mstate->__pyx_n_u_compare_at, __pyx_mstate->__pyx_kp_b_iso88591_RRS_q, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[2])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 69};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 72};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self};
     __pyx_mstate_global->__pyx_codeobj_tab[3] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_draken_vectors_null_vector_pyx, __pyx_mstate->__pyx_n_u_hash, __pyx_mstate->__pyx_kp_b_iso88591_A_e1A_E_D_E_at1_q_Q_q, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[3])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 78};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 81};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self};
     __pyx_mstate_global->__pyx_codeobj_tab[4] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_draken_vectors_null_vector_pyx, __pyx_mstate->__pyx_n_u_null_bitmap, __pyx_mstate->__pyx_kp_b_iso88591_A_q, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[4])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 87};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 90};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_indices};
     __pyx_mstate_global->__pyx_codeobj_tab[5] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_draken_vectors_null_vector_pyx, __pyx_mstate->__pyx_n_u_take, __pyx_mstate->__pyx_kp_b_iso88591_A_z_q, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[5])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 90};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 93};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self};
     __pyx_mstate_global->__pyx_codeobj_tab[6] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_draken_vectors_null_vector_pyx, __pyx_mstate->__pyx_n_u_materialize, __pyx_mstate->__pyx_kp_b_iso88591_A_q, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[6])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 93};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 96};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self};
     __pyx_mstate_global->__pyx_codeobj_tab[7] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_draken_vectors_null_vector_pyx, __pyx_mstate->__pyx_n_u_to_pylist, __pyx_mstate->__pyx_kp_b_iso88591_A_q_A, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[7])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 96};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 99};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_pa};
     __pyx_mstate_global->__pyx_codeobj_tab[8] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_draken_vectors_null_vector_pyx, __pyx_mstate->__pyx_n_u_to_arrow, __pyx_mstate->__pyx_kp_b_iso88591_A_r_q_A, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[8])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 100};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 103};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self};
     __pyx_mstate_global->__pyx_codeobj_tab[9] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_draken_vectors_null_vector_pyx, __pyx_mstate->__pyx_n_u_compress, __pyx_mstate->__pyx_kp_b_iso88591_A_e1A_E_D_E_at1_q_Ya_q, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[9])) goto bad;
   }

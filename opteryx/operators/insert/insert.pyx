@@ -1,3 +1,13 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -13,12 +23,12 @@ snapshot when EOS is received.
 
 from typing import Generator, Optional
 
-from opteryx import EOS
+# EOS sentinel in scope as _EOS_SENTINEL via the umbrella unit.
 from opteryx.constants import QueryStatus
 from opteryx.models import NonTabularResult
 from opteryx.models import QueryProperties
 
-from . import BasePlanNode
+# BasePlanNode in scope via _operators.pyx include.
 
 
 class InsertNode(BasePlanNode):
@@ -46,31 +56,28 @@ class InsertNode(BasePlanNode):
     def config(self):
         return f"insert into {self.relation_name}"
 
-    def execute(self, morsel) -> Generator:
+    def _push_impl(self, morsel):
         from opteryx.connectors.parquet_io.parquet_writer import write_morsel
 
         if self.is_noop:
-            if morsel == EOS:
+            if morsel is _EOS_SENTINEL:
                 self.result = NonTabularResult(
                     record_count=0,
                     status=QueryStatus.SQL_SUCCESS,
                 )
             return
-            yield  # pragma: no cover
 
         if self.create_target and not self._created:
             self.connector.create_relation(self.relation_name, self.target_schema)
             self._created = True
 
-        if morsel == EOS:
-            # Commit snapshot.
+        if morsel is _EOS_SENTINEL:
             self.connector.insert(self.relation_name, self._file_entries)
             self.result = NonTabularResult(
                 record_count=self._total_rows,
                 status=QueryStatus.SQL_SUCCESS,
             )
             return
-            yield  # pragma: no cover — make this a generator
 
         if self.column_mapping is not None and self.target_column_names is not None:
             morsel = self._align_morsel(morsel)
@@ -79,8 +86,6 @@ class InsertNode(BasePlanNode):
         file_entry = write_morsel(morsel, relation_dir)
         self._file_entries.append(file_entry)
         self._total_rows += len(morsel)
-        return
-        yield  # pragma: no cover — make this a generator
 
     def _align_morsel(self, morsel):
         """Reorder columns to target-schema order and rename to target names.

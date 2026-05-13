@@ -158,6 +158,265 @@ void simd_mix_hash(uint64_t* dest, const uint64_t* values, std::size_t count) {
 }
 
 // ---------------------------------------------------------------------------
+// simd_mix_hash_from_dict_*: fused gather + mix for dict-encoded columns.
+//
+// The scatter+mix pattern used elsewhere first writes K-indexed lookups into a
+// per-chunk scratch buffer and then calls simd_mix_hash on that buffer; this
+// fused form replaces that two-pass loop with a single pass that reads codes,
+// gathers from dict_lookup, and folds directly into dest[]. SIMD-specialized
+// per code width (1/2/4 bytes) and per null/non-null. Code-width and null-flag
+// are template parameters so the compiler emits straight-line code with no
+// per-iteration branches.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// One step of the scalar mixer. Kept inline so the compiler can fuse it into
+// each specialized loop body.
+inline uint64_t mix_step(uint64_t acc, uint64_t value) {
+    uint64_t mixed = acc ^ value;
+    mixed = mixed * MIX_HASH_CONSTANT + 1;
+    mixed ^= mixed >> 32;
+    return mixed;
+}
+
+inline bool bitmap_is_set(const uint8_t* bitmap, std::size_t bit_index) {
+    return (bitmap[bit_index >> 3] >> (bit_index & 7)) & 1;
+}
+
+// Scalar implementation, parameterized by code-pointer type and null flag.
+template <typename CodeT, bool Nullable>
+void simd_mix_hash_from_dict_scalar_tpl(
+        uint64_t* dest, const uint64_t* dict_lookup,
+        const CodeT* codes, const uint8_t* null_bitmap,
+        std::size_t start_row, std::size_t count) {
+    for (std::size_t j = 0; j < count; ++j) {
+        uint64_t h;
+        if (Nullable) {
+            h = bitmap_is_set(null_bitmap, start_row + j)
+                    ? dict_lookup[codes[j]]
+                    : NULL_HASH;
+        } else {
+            h = dict_lookup[codes[j]];
+        }
+        dest[j] = mix_step(dest[j], h);
+    }
+}
+
+#if defined(__AVX2__)
+// Widen 4 packed codes (cw1/cw2/cw4) into 4×64-bit indices for SIMD gather.
+template <typename CodeT> inline __m256i load_indices_avx2(const CodeT* codes);
+
+template <> inline __m256i load_indices_avx2<uint8_t>(const uint8_t* codes) {
+    // Load 4 bytes into the low 32 bits, then zero-extend each byte to 64 bits.
+    __m128i raw = _mm_cvtsi32_si128(
+        *reinterpret_cast<const int32_t*>(codes));
+    return _mm256_cvtepu8_epi64(raw);
+}
+template <> inline __m256i load_indices_avx2<uint16_t>(const uint16_t* codes) {
+    // Load 4×uint16 (8 bytes), zero-extend each to 64 bits.
+    __m128i raw = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(codes));
+    return _mm256_cvtepu16_epi64(raw);
+}
+template <> inline __m256i load_indices_avx2<uint32_t>(const uint32_t* codes) {
+    // Load 4×uint32 (16 bytes), zero-extend each to 64 bits.
+    __m128i raw = _mm_loadu_si128(reinterpret_cast<const __m128i*>(codes));
+    return _mm256_cvtepu32_epi64(raw);
+}
+
+template <typename CodeT, bool Nullable>
+void simd_mix_hash_from_dict_avx2_tpl(
+        uint64_t* dest, const uint64_t* dict_lookup,
+        const CodeT* codes, const uint8_t* null_bitmap,
+        std::size_t start_row, std::size_t count) {
+    const __m256i const_vec = _mm256_set1_epi64x(static_cast<long long>(MIX_HASH_CONSTANT));
+    const __m256i one_vec = _mm256_set1_epi64x(1);
+    const std::size_t stride = 4;
+    std::size_t i = 0;
+
+    for (; i + stride <= count; i += stride) {
+        __m256i indices = load_indices_avx2<CodeT>(codes + i);
+        // SIMD gather 4 dict hashes (scale = 8 bytes per uint64).
+        __m256i val_vec = _mm256_i64gather_epi64(
+            reinterpret_cast<const long long*>(dict_lookup), indices, 8);
+
+        if (Nullable) {
+            // Patch up null lanes with NULL_HASH. Branch-free: read 4 lanes
+            // out, fix any nulls in scalar, reload.
+            alignas(32) uint64_t lanes[4];
+            _mm256_store_si256(reinterpret_cast<__m256i*>(lanes), val_vec);
+            const std::size_t base = start_row + i;
+            if (!bitmap_is_set(null_bitmap, base + 0)) lanes[0] = NULL_HASH;
+            if (!bitmap_is_set(null_bitmap, base + 1)) lanes[1] = NULL_HASH;
+            if (!bitmap_is_set(null_bitmap, base + 2)) lanes[2] = NULL_HASH;
+            if (!bitmap_is_set(null_bitmap, base + 3)) lanes[3] = NULL_HASH;
+            val_vec = _mm256_load_si256(reinterpret_cast<const __m256i*>(lanes));
+        }
+
+        __m256i dst_vec = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(dest + i));
+        __m256i mixed = _mm256_xor_si256(dst_vec, val_vec);
+        __m256i product = mullo_u64(mixed, const_vec);
+        product = _mm256_add_epi64(product, one_vec);
+        __m256i shifted = _mm256_srli_epi64(product, 32);
+        __m256i combined = _mm256_xor_si256(product, shifted);
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dest + i), combined);
+    }
+
+    // Scalar tail (0..3 elements).
+    if (i < count) {
+        simd_mix_hash_from_dict_scalar_tpl<CodeT, Nullable>(
+            dest + i, dict_lookup, codes + i, null_bitmap, start_row + i,
+            count - i);
+    }
+}
+#endif  // __AVX2__
+
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+template <typename CodeT, bool Nullable>
+void simd_mix_hash_from_dict_neon_tpl(
+        uint64_t* dest, const uint64_t* dict_lookup,
+        const CodeT* codes, const uint8_t* null_bitmap,
+        std::size_t start_row, std::size_t count) {
+    const uint64x2_t const_vec = vdupq_n_u64(MIX_HASH_CONSTANT);
+    const uint64x2_t one_vec = vdupq_n_u64(1);
+    std::size_t i = 0;
+
+    // 4 elements (2 NEON pairs) per iteration, matching simd_mix_hash_neon.
+    // NEON has no gather, so the gather is scalar; the win vs the old code is
+    // the eliminated scratch buffer pass on dest[].
+    for (; i + 4 <= count; i += 4) {
+        uint64_t v[4];
+        if (Nullable) {
+            const std::size_t base = start_row + i;
+            v[0] = bitmap_is_set(null_bitmap, base + 0) ? dict_lookup[codes[i + 0]] : NULL_HASH;
+            v[1] = bitmap_is_set(null_bitmap, base + 1) ? dict_lookup[codes[i + 1]] : NULL_HASH;
+            v[2] = bitmap_is_set(null_bitmap, base + 2) ? dict_lookup[codes[i + 2]] : NULL_HASH;
+            v[3] = bitmap_is_set(null_bitmap, base + 3) ? dict_lookup[codes[i + 3]] : NULL_HASH;
+        } else {
+            v[0] = dict_lookup[codes[i + 0]];
+            v[1] = dict_lookup[codes[i + 1]];
+            v[2] = dict_lookup[codes[i + 2]];
+            v[3] = dict_lookup[codes[i + 3]];
+        }
+        uint64x2_t v0 = vld1q_u64(v);
+        uint64x2_t v1 = vld1q_u64(v + 2);
+        uint64x2_t d0 = vld1q_u64(dest + i);
+        uint64x2_t d1 = vld1q_u64(dest + i + 2);
+        uint64x2_t m0 = veorq_u64(d0, v0);
+        uint64x2_t m1 = veorq_u64(d1, v1);
+        m0 = vaddq_u64(mullo_u64(m0, const_vec), one_vec);
+        m1 = vaddq_u64(mullo_u64(m1, const_vec), one_vec);
+        m0 = veorq_u64(m0, vshrq_n_u64(m0, 32));
+        m1 = veorq_u64(m1, vshrq_n_u64(m1, 32));
+        vst1q_u64(dest + i, m0);
+        vst1q_u64(dest + i + 2, m1);
+    }
+
+    // Scalar tail.
+    if (i < count) {
+        simd_mix_hash_from_dict_scalar_tpl<CodeT, Nullable>(
+            dest + i, dict_lookup, codes + i, null_bitmap, start_row + i,
+            count - i);
+    }
+}
+#endif  // __ARM_NEON
+
+// Dispatcher per (CodeT, Nullable) pair. Each template instantiation owns its
+// own atomic cache, so the CPU probe runs once per kernel variant.
+template <typename CodeT, bool Nullable>
+void simd_mix_hash_from_dict_dispatch(
+        uint64_t* dest, const uint64_t* dict_lookup,
+        const CodeT* codes, const uint8_t* null_bitmap,
+        std::size_t start_row, std::size_t count) {
+    using fn_t = void (*)(uint64_t*, const uint64_t*, const CodeT*,
+                          const uint8_t*, std::size_t, std::size_t);
+    static std::atomic<fn_t> cache{nullptr};
+
+    fn_t fn = simd::select_dispatch<fn_t>(cache, {
+#if defined(__AVX2__)
+        { &cpu_supports_avx2, simd_mix_hash_from_dict_avx2_tpl<CodeT, Nullable> },
+#endif
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        { &cpu_supports_neon, simd_mix_hash_from_dict_neon_tpl<CodeT, Nullable> },
+#endif
+    }, simd_mix_hash_from_dict_scalar_tpl<CodeT, Nullable>);
+
+    fn(dest, dict_lookup, codes, null_bitmap, start_row, count);
+}
+
+}  // namespace
+
+void simd_mix_hash_from_dict_cw1(uint64_t* dest, const uint64_t* dict_lookup,
+                                  const uint8_t* codes, std::size_t count) {
+    if (dest == nullptr || dict_lookup == nullptr || codes == nullptr || count == 0) {
+        return;
+    }
+    simd_mix_hash_from_dict_dispatch<uint8_t, false>(
+        dest, dict_lookup, codes, nullptr, 0, count);
+}
+
+void simd_mix_hash_from_dict_cw2(uint64_t* dest, const uint64_t* dict_lookup,
+                                  const uint16_t* codes, std::size_t count) {
+    if (dest == nullptr || dict_lookup == nullptr || codes == nullptr || count == 0) {
+        return;
+    }
+    simd_mix_hash_from_dict_dispatch<uint16_t, false>(
+        dest, dict_lookup, codes, nullptr, 0, count);
+}
+
+void simd_mix_hash_from_dict_cw4(uint64_t* dest, const uint64_t* dict_lookup,
+                                  const uint32_t* codes, std::size_t count) {
+    if (dest == nullptr || dict_lookup == nullptr || codes == nullptr || count == 0) {
+        return;
+    }
+    simd_mix_hash_from_dict_dispatch<uint32_t, false>(
+        dest, dict_lookup, codes, nullptr, 0, count);
+}
+
+void simd_mix_hash_from_dict_nullable_cw1(uint64_t* dest, const uint64_t* dict_lookup,
+                                           const uint8_t* codes, const uint8_t* null_bitmap,
+                                           std::size_t start_row, std::size_t count) {
+    if (dest == nullptr || dict_lookup == nullptr || codes == nullptr || count == 0) {
+        return;
+    }
+    if (null_bitmap == nullptr) {
+        simd_mix_hash_from_dict_cw1(dest, dict_lookup, codes, count);
+        return;
+    }
+    simd_mix_hash_from_dict_dispatch<uint8_t, true>(
+        dest, dict_lookup, codes, null_bitmap, start_row, count);
+}
+
+void simd_mix_hash_from_dict_nullable_cw2(uint64_t* dest, const uint64_t* dict_lookup,
+                                           const uint16_t* codes, const uint8_t* null_bitmap,
+                                           std::size_t start_row, std::size_t count) {
+    if (dest == nullptr || dict_lookup == nullptr || codes == nullptr || count == 0) {
+        return;
+    }
+    if (null_bitmap == nullptr) {
+        simd_mix_hash_from_dict_cw2(dest, dict_lookup, codes, count);
+        return;
+    }
+    simd_mix_hash_from_dict_dispatch<uint16_t, true>(
+        dest, dict_lookup, codes, null_bitmap, start_row, count);
+}
+
+void simd_mix_hash_from_dict_nullable_cw4(uint64_t* dest, const uint64_t* dict_lookup,
+                                           const uint32_t* codes, const uint8_t* null_bitmap,
+                                           std::size_t start_row, std::size_t count) {
+    if (dest == nullptr || dict_lookup == nullptr || codes == nullptr || count == 0) {
+        return;
+    }
+    if (null_bitmap == nullptr) {
+        simd_mix_hash_from_dict_cw4(dest, dict_lookup, codes, count);
+        return;
+    }
+    simd_mix_hash_from_dict_dispatch<uint32_t, true>(
+        dest, dict_lookup, codes, null_bitmap, start_row, count);
+}
+
+// ---------------------------------------------------------------------------
 // simd_scale_date32: multiply int32 day values by 86400000000 -> int64 µs
 // ---------------------------------------------------------------------------
 

@@ -5,6 +5,9 @@
 # cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+# cython: freethreading_compatible=True
 
 """
 StringVector: Cython implementation of a variable-width byte column for Draken.
@@ -91,7 +94,20 @@ cdef extern from *:
     void PREFETCH(const void* addr) nogil
     uint64_t BSWAP64(uint64_t x) nogil
 
-from draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash, simd_popcount
+from draken.vectors.vector cimport (
+    MIX_HASH_CONSTANT,
+    NULL_HASH,
+    Vector,
+    mix_hash,
+    simd_mix_hash,
+    simd_mix_hash_from_dict_cw1,
+    simd_mix_hash_from_dict_cw2,
+    simd_mix_hash_from_dict_cw4,
+    simd_mix_hash_from_dict_nullable_cw1,
+    simd_mix_hash_from_dict_nullable_cw2,
+    simd_mix_hash_from_dict_nullable_cw4,
+    simd_popcount,
+)
 from draken.vectors.bool_vector cimport BoolVector
 
 DEF STRING_HASH_CHUNK = 256
@@ -2492,29 +2508,30 @@ cdef class StringVector(Vector):
                 else:
                     dict_hashes_ptr[dict_idx] = XXH3_64bits(<const void*>(data + start), str_len)
 
-            # Scatter hashes by code index
-            i = 0
-            while i < n:
-                block = n - i
-                if block > STRING_HASH_CHUNK:
-                    block = STRING_HASH_CHUNK
-
-                if dict_row_nulls != NULL:
-                    for j in range(block):
-                        idx = i + j
-                        byte = dict_row_nulls[idx >> 3]
-                        if ((byte >> (idx & 7)) & 1) == 0:
-                            scratch[j] = NULL_HASH
-                        else:
-                            code = _read_packed_code(dict_codes, dict_code_width, idx)
-                            scratch[j] = dict_hashes_ptr[code]
+            # Fused gather-and-mix: index dict_hashes_ptr by code and fold
+            # directly into out[] without the per-chunk scratch buffer.
+            # Specialized per code width (1/2/4 bytes) and per null/non-null
+            # to keep the inner loop branch-free.
+            if dict_row_nulls != NULL:
+                if dict_code_width == 1:
+                    simd_mix_hash_from_dict_nullable_cw1(
+                        out, dict_hashes_ptr, dict_codes, dict_row_nulls, 0, <size_t>n)
+                elif dict_code_width == 2:
+                    simd_mix_hash_from_dict_nullable_cw2(
+                        out, dict_hashes_ptr, <uint16_t*>dict_codes, dict_row_nulls, 0, <size_t>n)
                 else:
-                    for j in range(block):
-                        code = _read_packed_code(dict_codes, dict_code_width, i + j)
-                        scratch[j] = dict_hashes_ptr[code]
-
-                simd_mix_hash(out + i, scratch_ptr, <size_t>block)
-                i += block
+                    simd_mix_hash_from_dict_nullable_cw4(
+                        out, dict_hashes_ptr, <uint32_t*>dict_codes, dict_row_nulls, 0, <size_t>n)
+            else:
+                if dict_code_width == 1:
+                    simd_mix_hash_from_dict_cw1(
+                        out, dict_hashes_ptr, dict_codes, <size_t>n)
+                elif dict_code_width == 2:
+                    simd_mix_hash_from_dict_cw2(
+                        out, dict_hashes_ptr, <uint16_t*>dict_codes, <size_t>n)
+                else:
+                    simd_mix_hash_from_dict_cw4(
+                        out, dict_hashes_ptr, <uint32_t*>dict_codes, <size_t>n)
             free(dict_hashes_ptr)
             return 0
 

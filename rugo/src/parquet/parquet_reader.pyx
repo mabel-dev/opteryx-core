@@ -1,12 +1,15 @@
-# distutils: language = c++
-# distutils: extra_compile_args = -Wno-unreachable-code-fallthrough
 # cython: language_level=3
 # cython: nonecheck=False
 # cython: cdivision=True
-# cython: boundscheck=False
-# cython: wraparound=False
+# cython: initializedcheck=False
 # cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
+# distutils: language = c++
+# distutils: extra_compile_args = -Wno-unreachable-code-fallthrough
 import datetime
 import os
 import struct

@@ -63,19 +63,44 @@ def _compare_nullable_temporal(op: str, left, right):
     raise NotImplementedError(f"Temporal compare: unsupported op {op!r}")
 
 
-def _compare_timestamp_date32_vectors(op: str, ts_vec, d_vec):
-    from draken.vectors.bool_vector import BoolVector
+def _convert_date32_to_timestamp_vector(d_vec):
+    """Convert Date32Vector to TimestampVector for cross-type comparison.
 
-    ts_values = ts_vec.to_pylist()
+    Date32 values (days since epoch) are converted to Timestamp values (microseconds since epoch)
+    by multiplying by 86,400,000,000 (microseconds per day).
+
+    This materializes the Date32 vector once, rather than materializing both vectors separately
+    during comparison.
+    """
+    from draken.interop.vector_sequence import vector_from_sequence
+
+    # Convert each Date32 value (days) to Timestamp value (microseconds)
     d_values = d_vec.to_pylist()
-    if len(ts_values) != len(d_values):
-        raise ValueError("Timestamp/Date32 comparison requires equal-length vectors.")
+    ts_values = [None if d is None else int(d) * 86_400_000_000 for d in d_values]
+    return vector_from_sequence(ts_values)
 
-    out = [
-        _compare_nullable_temporal(op, ts, None if d is None else int(d) * 86_400_000_000)
-        for ts, d in zip(ts_values, d_values)
-    ]
-    return BoolVector.from_list(out)
+
+def _compare_timestamp_date32_vectors(op: str, ts_vec, d_vec):
+    """Compare TimestampVector with Date32Vector using native vector comparison.
+
+    Converts Date32Vector to TimestampVector, then uses native equals_vector/less_than_vector/etc.
+    """
+    d_as_ts = _convert_date32_to_timestamp_vector(d_vec)
+
+    # Use native vector comparison operators
+    if op == "Eq":
+        return ts_vec.equals_vector(d_as_ts)
+    if op == "NotEq":
+        return ts_vec.not_equals_vector(d_as_ts)
+    if op == "Lt":
+        return ts_vec.less_than_vector(d_as_ts)
+    if op == "Gt":
+        return ts_vec.greater_than_vector(d_as_ts)
+    if op == "LtEq":
+        return ts_vec.less_than_or_equals_vector(d_as_ts)
+    if op == "GtEq":
+        return ts_vec.greater_than_or_equals_vector(d_as_ts)
+    raise NotImplementedError(f"Timestamp/Date32 comparison: unsupported op {op!r}")
 
 
 def _int64_temporal_compare(op: str, vec, right, temporal_type):

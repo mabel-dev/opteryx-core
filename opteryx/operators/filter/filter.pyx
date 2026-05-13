@@ -1,3 +1,13 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -15,13 +25,14 @@ from typing import Generator, Optional
 from opteryx.expression import NodeType
 from opteryx.expression import format_expression
 from opteryx.expression import get_all_nodes_of_type
+from opteryx.expression.evaluator import evaluate_draken as _evaluate_draken
 from opteryx.models import QueryProperties
-from opteryx import EOS
 
 from draken.vectors.vector cimport Vector
 from draken.encoding import DRAKEN_ENCODING_CONSTANT as _CONSTANT_ENCODING
 
-from . import BasePlanNode
+# BasePlanNode is defined at the top of _operators.pyx (the umbrella unit) and
+# is in scope here via textual include.
 
 
 def _extract_constant_replacements(filter_expr):
@@ -114,7 +125,7 @@ cdef Vector _build_constant_vector(Vector cur, object value, Py_ssize_t length):
     return None
 
 
-cdef void _apply_constant_replacements(Morsel morsel, list replacements):
+cdef void _apply_constant_replacements(Morsel morsel, list replacements) except *:
     cdef Py_ssize_t length = morsel.ptr.num_rows
     cdef Py_ssize_t idx
     cdef Vector cur
@@ -145,9 +156,13 @@ cdef void _apply_constant_replacements(Morsel morsel, list replacements):
         morsel.ptr.column_types[idx] = new_vec.dtype
 
 
-class FilterNode(BasePlanNode):
+cdef class FilterNode(BasePlanNode):
+    cdef public object filter
+    cdef public object post_filter_columns
+    cdef public list function_evaluations
+    cdef public list _const_replacements
 
-    def __init__(self, properties: QueryProperties, **parameters):
+    def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.filter = parameters.get("filter")
         self.post_filter_columns = parameters.get("pre_update_columns")
@@ -167,13 +182,12 @@ class FilterNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Filter"
 
-    def execute(self, Morsel morsel):
-        from opteryx.expression.evaluator import evaluate_draken
-
-        if morsel is EOS:
+    cdef void _dispatch_push(self, Morsel morsel) except *:
+        if morsel is _EOS_SENTINEL:
+            self._emit_cdef(morsel)
             return
 
-        mask = evaluate_draken(self.filter, morsel)
+        mask = _evaluate_draken(self.filter, morsel)
         filtered = morsel.filter_mask(mask)
 
         if self._const_replacements:
@@ -185,6 +199,7 @@ class FilterNode(BasePlanNode):
                 filtered = filtered.select(keep)
 
         if filtered.num_rows > 0:
-            yield filtered
-        else:
-            yield morsel.slice(0, 0)
+            self._emit_cdef(filtered)
+        # Empty-output filters: do nothing (drop the morsel). Previous code
+        # emitted morsel.slice(0,0); under push semantics EMPTY-like outputs
+        # are suppressed and the downstream sees fewer morsels.

@@ -1,5 +1,12 @@
-# cython: language_level=3, boundscheck=False, wraparound=False
-# distutils: sources = src/cpp/http_client.cpp src/cpp/cpu_features.cpp
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 """Cython bindings for the C++ HTTP client.
 

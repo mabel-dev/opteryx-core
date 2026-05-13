@@ -7,7 +7,7 @@
 # cython: boundscheck=False
 
 from libc.stddef cimport size_t
-from libc.stdint cimport uint64_t, int64_t, uint8_t
+from libc.stdint cimport uint64_t, int64_t, uint8_t, uint16_t, uint32_t
 
 from draken.core.buffers cimport ConstAccessor, DictAccessor, DrakenEncoding
 
@@ -29,6 +29,21 @@ cdef class _Uint64Buffer:
 
 cdef extern from "simd_hash.h":
     void simd_mix_hash(uint64_t* dest, const uint64_t* values, size_t count) nogil
+    void simd_mix_hash_from_dict_cw1(uint64_t* dest, const uint64_t* dict_lookup,
+                                      const uint8_t* codes, size_t count) nogil
+    void simd_mix_hash_from_dict_cw2(uint64_t* dest, const uint64_t* dict_lookup,
+                                      const uint16_t* codes, size_t count) nogil
+    void simd_mix_hash_from_dict_cw4(uint64_t* dest, const uint64_t* dict_lookup,
+                                      const uint32_t* codes, size_t count) nogil
+    void simd_mix_hash_from_dict_nullable_cw1(uint64_t* dest, const uint64_t* dict_lookup,
+                                               const uint8_t* codes, const uint8_t* null_bitmap,
+                                               size_t start_row, size_t count) nogil
+    void simd_mix_hash_from_dict_nullable_cw2(uint64_t* dest, const uint64_t* dict_lookup,
+                                               const uint16_t* codes, const uint8_t* null_bitmap,
+                                               size_t start_row, size_t count) nogil
+    void simd_mix_hash_from_dict_nullable_cw4(uint64_t* dest, const uint64_t* dict_lookup,
+                                               const uint32_t* codes, const uint8_t* null_bitmap,
+                                               size_t start_row, size_t count) nogil
 
 cdef extern from "simd_bitops.h":
     size_t simd_popcount(const uint8_t* data, size_t n) nogil

@@ -1,10 +1,12 @@
-# cython: language_level=3, c_string_type=unicode, c_string_encoding=ascii
+# cython: language_level=3
 # cython: nonecheck=False
 # cython: cdivision=True
 # cython: initializedcheck=False
 # cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 # This implementation has evolved from this version:
 # https://github.com/yougov/fuzzy/blob/master/src/fuzzy.pyx

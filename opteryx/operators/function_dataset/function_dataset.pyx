@@ -1,3 +1,13 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -160,7 +170,8 @@ class FunctionDatasetNode(ReaderNode):
     def can_push_selection(self):
         return False
 
-    def execute(self, morsel) -> Generator:
+    def read_morsels(self):
+        """Source-side morsel iterator driven by the push pipeline engine."""
         try:
             start_time = time.time_ns()
             result_morsel = DATASET_FUNCTIONS[self.function](**self.parameters)  # type: ignore

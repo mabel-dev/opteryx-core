@@ -5,6 +5,8 @@
 # cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,9 +41,9 @@ from opteryx.compiled.structures.carchar_index cimport CarcharJoinIndexWrapper
 from opteryx.compiled.morsel_ops.null_filter cimport non_null_row_indices
 from opteryx.models import QueryProperties
 
-from opteryx import EOS, EMPTY
+# EOS sentinel available as _EOS_SENTINEL via the umbrella unit.
 
-from . import JoinNode
+# BasePlanNode/JoinNode in scope via _operators.pyx include.
 
 
 # Telemetry: number of times the outer-join bloom-filter Draken fast-path was applied.
@@ -449,8 +451,20 @@ def full_join(
         )
 
 
-class OuterJoinNode(JoinNode):
-    def __init__(self, properties: QueryProperties, **parameters):
+cdef class OuterJoinNode(JoinNode):
+    cdef public str join_type
+    cdef public object using
+    cdef public list left_columns
+    cdef public list right_columns
+    cdef public list left_morsels
+    cdef public list right_morsels
+    cdef public object left_relation
+    cdef public Morsel _left_morsel
+    cdef public object left_hash
+    cdef public object filter_index
+    cdef public bint _build_phase
+
+    def __init__(self, properties=None, **parameters):
         # Ensure `join_type` exists before the base initializer accesses `self.name`
         self.join_type = parameters["type"]
         JoinNode.__init__(self, properties=properties, **parameters)
@@ -490,43 +504,39 @@ class OuterJoinNode(JoinNode):
             return f"{self.join_type.upper()} JOIN (USING {','.join(map(format_expression, self.using))})"
         return f"{self.join_type.upper()}"
 
-    def execute(self, morsel):
+    cpdef void push_left(self, Morsel morsel) except *:
+        cdef long long start
+        if morsel is _EOS_SENTINEL:
+            if self.left_morsels:
+                self._left_morsel = Morsel.combine(self.left_morsels)
+                self.left_morsels = []
+            else:
+                self._left_morsel = Morsel.from_vectors({})
+            self._left_morsel = self._apply_join_key_casts(self._left_morsel, is_left=True)
+            if self.join_type == "left outer":
+                start = time.monotonic_ns()
+                self.left_hash = _build_side_hash_map(self._left_morsel, self.left_columns)
+                if len(self._left_morsel) < 16_000_001:
+                    start = time.monotonic_ns()
+                    self.filter_index = create_bloom_filter_morsel(self._left_morsel, self.left_columns)
+                    self.readings["time_build_bloom_filter"] += time.monotonic_ns() - start
+                    self.readings["feature_bloom_filter"] += 1
+            return
+        if morsel is not None:
+            self.left_morsels.append(morsel)
+
+    cpdef void push_right(self, Morsel morsel) except *:
         cdef Py_ssize_t orig_rows
         cdef uint8_t[::1] bit_results
-        cdef object pass_filter_index = self.filter_index
+        cdef object pass_filter_index
+        cdef Morsel right_morsel
+        cdef Py_ssize_t eliminated_rows
 
-        if self._build_phase:
-            if morsel == EOS:
-                self._build_phase = False
-                if self.left_morsels:
-                    left_morsel = Morsel.combine(self.left_morsels)
-                    self.left_morsels = []
-                    self._left_morsel = left_morsel
-                else:
-                    self._left_morsel = Morsel.from_vectors({})
-
-                self._left_morsel = self._apply_join_key_casts(self._left_morsel, is_left=True)
-
-                if self.join_type == "left outer":
-                    start = time.monotonic_ns()
-                    self.left_hash = _build_side_hash_map(self._left_morsel, self.left_columns)
-
-                    if len(self._left_morsel) < 16_000_001:
-                        start = time.monotonic_ns()
-                        self.filter_index = create_bloom_filter_morsel(self._left_morsel, self.left_columns)
-                        self.readings["time_build_bloom_filter"] += time.monotonic_ns() - start
-                        self.readings["feature_bloom_filter"] += 1
-            else:
-                if morsel is not None and morsel != EMPTY:
-                    self.left_morsels.append(morsel)
-            yield None
-            return
-
-        if morsel == EOS:
+        if morsel is _EOS_SENTINEL:
+            pass_filter_index = self.filter_index
             if self.right_morsels:
                 right_morsel = Morsel.combine(self.right_morsels)
                 self.right_morsels = []
-
                 if pass_filter_index is not None:
                     orig_rows = len(right_morsel)
                     bit_results = bloom_filter_check_morsel(self.filter_index, right_morsel, self.right_columns)
@@ -543,7 +553,6 @@ class OuterJoinNode(JoinNode):
 
             right_morsel = self._apply_join_key_casts(right_morsel, is_left=False)
             left_morsel_for_join = self._left_morsel
-
             join_provider = providers.get(self.join_type)
 
             for result_morsel in join_provider(
@@ -559,12 +568,12 @@ class OuterJoinNode(JoinNode):
                     candidates = [c.schema_column.identity for c in self.columns]
                     keep_columns = [c for c in candidates if c in result_morsel.column_names]
                     result_morsel = result_morsel.select(keep_columns)
-                yield result_morsel
-            yield EOS
-        else:
-            if morsel is not None and morsel != EMPTY:
-                self.right_morsels.append(morsel)
-            yield None
+                self.emit(result_morsel)
+            self.emit(_EOS_SENTINEL)
+            return
+
+        if morsel is not None:
+            self.right_morsels.append(morsel)
 
 
 providers = {"left outer": left_join, "full outer": full_join, "right outer": right_join}

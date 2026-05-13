@@ -1,5 +1,3 @@
-# distutils: language = c++
-# distutils: sources = src/cpp/intbuffer.cpp
 # cython: language_level=3
 # cython: nonecheck=False
 # cython: cdivision=True
@@ -7,7 +5,11 @@
 # cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
+# distutils: language = c++
+# distutils: sources = src/cpp/intbuffer.cpp
 from libc.stddef cimport size_t
 from libc.stdint cimport int64_t, int32_t
 from libcpp.vector cimport vector

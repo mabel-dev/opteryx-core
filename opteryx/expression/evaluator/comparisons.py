@@ -118,16 +118,23 @@ def _int64_compare(op: str, vec, right):
         else:
             return _call_vector_vector_op(op, vec, right)
 
-    # Int64 vs Float64 — promote the int side to float so vector-vector ops have
-    # matching types. Constant float right operands are unwrapped to scalars by
-    # _float64_compare's existing path.
+    # Int64 vs Float64 — use native cross-type comparison
     if get_vector_type(right) == VectorType.FLOAT64:
         if _is_constant_vector_like(right):
             return _float64_compare(op, vec, right)
-        from draken.interop.vector_sequence import vector_from_sequence
-
-        vec_float = vector_from_sequence([float(x) if x is not None else None for x in vec.to_pylist()])
-        return _float64_compare(op, vec_float, right)
+        # Use native Int64Vector comparison method for Float64Vector
+        ops = {
+            "Eq": vec.equals_float64_vector,
+            "NotEq": vec.not_equals_float64_vector,
+            "Lt": vec.less_than_float64_vector,
+            "Gt": vec.greater_than_float64_vector,
+            "LtEq": vec.less_than_or_equals_float64_vector,
+            "GtEq": vec.greater_than_or_equals_float64_vector,
+        }
+        fn = ops.get(op)
+        if fn is None:
+            raise NotImplementedError(f"Int64 vs Float64: unsupported op {op!r}")
+        return fn(right)
 
     value = _coerce_int64(right)
 
@@ -158,14 +165,25 @@ def _float64_compare(op: str, vec, right):
 
     right_type = get_vector_type(right)
 
-    # Float64 vs Int64 vector — extract scalar if constant-encoded, otherwise convert to float
+    # Float64 vs Int64 vector — extract scalar if constant-encoded, otherwise use native comparison
     if right_type in (VectorType.INT64, VectorType.CONSTANT_ENCODED):
         if _is_constant_vector_like(right):
             right = _constant_scalar_value(right)
         else:
-            # Convert Int64Vector to Float64Vector for element-wise comparison
-            right_float = vector_from_sequence([float(x) for x in right.to_pylist()])
-            return _call_vector_vector_op(op, vec, right_float)
+            # Use native Int64Vector comparison with Float64Vector (reversed operand order)
+            # We need to reverse the operators: Gt ↔ Lt, GtEq ↔ LtEq
+            ops_reversed = {
+                "Eq": right.equals_float64_vector,
+                "NotEq": right.not_equals_float64_vector,
+                "Lt": right.greater_than_float64_vector,  # reversed: float < int64 = int64 > float
+                "Gt": right.less_than_float64_vector,     # reversed: float > int64 = int64 < float
+                "LtEq": right.greater_than_or_equals_float64_vector,  # reversed
+                "GtEq": right.less_than_or_equals_float64_vector,     # reversed
+            }
+            fn = ops_reversed.get(op)
+            if fn is None:
+                raise NotImplementedError(f"Float64 vs Int64: unsupported op {op!r}")
+            return fn(vec)
     elif right_type == VectorType.FLOAT64:
         if _is_constant_vector_like(right):
             right = _constant_scalar_value(right)
@@ -387,11 +405,7 @@ def _decimal_compare(op: str, vec, right):
     # ops have matching types. Mirrors `_int64_compare`'s Float64 path. Constant
     # float right operands fall through to the scalar path below.
     if get_vector_type(right) == VectorType.FLOAT64 and not _is_constant_vector_like(right):
-        from draken.interop.vector_sequence import vector_from_sequence
-
-        vec_float = vector_from_sequence(
-            [float(x) if x is not None else None for x in vec.to_pylist()]
-        )
+        vec_float = vec.to_float64_vector()
         return _float64_compare(op, vec_float, right)
 
     # Unwrap constant-encoded right-hand vectors to their scalar value

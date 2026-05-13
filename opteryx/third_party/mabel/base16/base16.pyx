@@ -5,6 +5,8 @@
 # cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 from libc.stdlib cimport malloc, free
 from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AsString

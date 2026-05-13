@@ -1,12 +1,12 @@
 # cython: language_level=3
-# Public domain – same as original
-#
-# I hereby place my work 'mbleven' into the public domain.
-# All my copyrights, including all related and neighbouring
-# rights, are abandoned.
-#
-# 2018 Fujimoto Seiji <fujimoto@ceptord.net>
-# https://github.com/fujimotos/mbleven/blob/master/LICENSE
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 """Optimized Cython implementation of mbleven algorithm"""
 

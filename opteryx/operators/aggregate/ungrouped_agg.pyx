@@ -1,9 +1,12 @@
 # cython: language_level=3
-# cython: boundscheck=False
-# cython: wraparound=False
 # cython: nonecheck=False
 # cython: cdivision=True
+# cython: initializedcheck=False
 # cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t, INT64_MAX, INT64_MIN
 from libc.stddef cimport size_t

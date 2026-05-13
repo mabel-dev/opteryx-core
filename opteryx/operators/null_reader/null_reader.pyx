@@ -1,3 +1,13 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -21,9 +31,8 @@ from typing import Generator
 from draken.vectors.scalar_constructors import from_scalar
 from opteryx.types.schema import RelationSchema
 
-from opteryx import EOS
-
-from . import BasePlanNode
+# EOS sentinel in scope as _EOS_SENTINEL via the umbrella unit.
+# BasePlanNode in scope via _operators.pyx include.
 
 
 logger = logging.getLogger(__name__)
@@ -43,12 +52,8 @@ class NullReaderNode(BasePlanNode):  # pragma: no cover
         self.relations = parameters.get("relations", [])
         self.schema = parameters.get("schema")
 
-    def execute(self, morsel):
-        """Return empty table with correct schema."""
-        if morsel == EOS:
-            yield None
-            return
-
+    def read_morsels(self):
+        """Source-side iterator: yields a single empty morsel with the correct schema."""
         # Try to build empty Morsel with correct schema
         # First try: use schema property if available
         if self.schema:

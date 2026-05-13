@@ -5,6 +5,9 @@
 # cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+# cython: freethreading_compatible=True
 
 """
 BoolVector: Cython implementation of a zero-copy, bit-packed boolean column vector for Draken.

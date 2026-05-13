@@ -1,14 +1,15 @@
-# distutils: language = c++
 # cython: language_level=3
 # cython: nonecheck=False
 # cython: cdivision=True
 # cython: initializedcheck=False
 # cython: infer_types=True
-# cython: wraparound=True
+# cython: wraparound=False
 # cython: boundscheck=False
-"""
-memory_pool.pyx — thin Cython wrapper over opteryx::MemoryPool (C++).
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+# distutils: language = c++
 
+"""
 Two surfaces:
 
   * Cython-native (unprefixed, `cdef`, nogil-safe) — for production callers

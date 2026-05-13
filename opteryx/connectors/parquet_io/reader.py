@@ -201,7 +201,10 @@ def _coalesce_ranges(
         gap = offset - last_end
         next_span = max(last_end, this_end) - last_offset
 
-        if gap >= 0 and gap <= 64 and next_span <= 32 * 1024 * 1024:
+        # Tuned thresholds for range coalescing:
+        # - gap: increased from 64 to 128 bytes (typical disk I/O overhead is "free")
+        # - span: increased from 32MB to 48MB (better for multi-file scans)
+        if gap >= 0 and gap <= 128 and next_span <= 48 * 1024 * 1024:
             last["parts"].append((original_idx, offset - last_offset, length))
             last["length"] = next_span
             continue

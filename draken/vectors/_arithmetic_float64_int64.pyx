@@ -5,6 +5,9 @@
 # cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+# cython: freethreading_compatible=True
 
 """
 FLOAT64 × INT64 arithmetic kernels.

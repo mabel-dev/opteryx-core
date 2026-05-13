@@ -5,6 +5,8 @@
 # cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 """Hot-loop Cython helpers for the lazy CASE WHEN evaluator in case_eval.py.
 

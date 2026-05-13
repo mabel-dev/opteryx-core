@@ -1,3 +1,13 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -24,16 +34,22 @@ from opteryx.exceptions import AmbiguousIdentifierError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import QueryProperties
 
-from opteryx import EOS
-
-from . import BasePlanNode
+# BasePlanNode in scope via textual include from _operators.pyx.
 
 
-class ExitNode(BasePlanNode):
+cdef class ExitNode(BasePlanNode):
+    """Terminal operator of the push pipeline. Buffers formatted result
+    morsels in `_pending`; the engine drains and yields them to the caller
+    one at a time (streaming, not materialised)."""
+    cdef public bint at_least_one
+    cdef public list final_columns
+    cdef public list final_names
+    cdef public list _pending
 
-    def __init__(self, properties: QueryProperties, **parameters):
+    def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.at_least_one = False
+        self._pending = []
 
         final_columns = []
         final_names = []
@@ -41,12 +57,6 @@ class ExitNode(BasePlanNode):
             final_columns.append(column.schema_column.identity)
             final_names.append(column.alias)
 
-        # Duplicate identities are legitimate when each output has a distinct
-        # alias (e.g. `SELECT id AS x, id AS y` or `n1.n_name, n2.n_name` in
-        # self-joins). Earlier nodes fold same-identity columns into a single
-        # underlying vector; EXIT unfolds them by selecting the source column
-        # multiple times and renaming each instance to the user's alias.
-        # Duplicate output NAMES, however, are still ambiguous.
         if len(set(final_names)) != len(final_names):
             from collections import Counter
 
@@ -55,7 +65,6 @@ class ExitNode(BasePlanNode):
                 message=f"Query result contains multiple instances of the same column(s) - `{'`, `'.join(duplicates)}`"
             )
 
-        # identity is already bytes; no encode needed
         self.final_columns = list(final_columns)
         self.final_names = final_names
 
@@ -67,64 +76,39 @@ class ExitNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Exit"
 
-    def execute(self, Morsel morsel):
-        """Execute exit node: Draken-native column projection.
+    cpdef bint has_pending(self):
+        return len(self._pending) > 0
 
-        The query engine (motor) is Draken-native throughout. Exit node formats results
-        for the cursor layer, which is responsible for converting to the user's desired
-        output format (Arrow, JSON, CSV, MessagePack, etc).
-        """
+    cpdef object pop_pending(self):
+        return self._pending.pop(0)
 
-        # Exit doesn't return EOS
-        if morsel == EOS:
+    cdef void _dispatch_push(self, Morsel morsel) except *:
+        if morsel is _EOS_SENTINEL:
             if not self.at_least_one:
-                # Return empty Draken morsel with correct schema
                 from draken.interop.vector_sequence import vector_from_sequence
-
-                # Create empty vectors with correct types
-                vectors = []
-                for _ in self.columns:
-                    # Empty vector with correct type info
-                    vectors.append(vector_from_sequence([]))
-
-                morsel = Morsel.from_vectors(self.final_names, vectors)
-                yield morsel
-
+                vectors = [vector_from_sequence([]) for _ in self.columns]
+                empty = Morsel.from_vectors(self.final_names, vectors)
+                self._pending.append(empty)
             return
 
-        # Handle both single Morsel and Iterable of Morsels (from streaming)
-        if isinstance(morsel, Morsel):
-            morsels = (morsel,)
-        elif isinstance(morsel, Iterable):
-            morsels = morsel
-        else:  # pragma: no cover
-            yield None
+        if morsel.num_rows == 0:
             return
 
-        for chunk in morsels:
-            if chunk is EOS or chunk.num_rows == 0:
-                continue
+        self.at_least_one = True
 
-            self.at_least_one = True
+        morsel_column_names = morsel.column_names
+        if not set(self.final_columns).issubset(morsel_column_names):  # pragma: no cover
+            mapping = {
+                name: int_name for name, int_name in zip(self.final_columns, self.final_names)
+            }
+            missing_references = {
+                mapping.get(ref): ref
+                for ref in self.final_columns
+                if ref not in morsel_column_names
+            }
+            raise InvalidInternalStateError(
+                f"The following fields were not in the resultset - {', '.join(missing_references.keys())}"
+            )
 
-            # Column validation on morsel
-            morsel_column_names = chunk.column_names
-            if not set(self.final_columns).issubset(morsel_column_names):  # pragma: no cover
-                mapping = {
-                    name: int_name for name, int_name in zip(self.final_columns, self.final_names)
-                }
-                missing_references = {
-                    mapping.get(ref): ref
-                    for ref in self.final_columns
-                    if ref not in morsel_column_names
-                }
-
-                raise InvalidInternalStateError(
-                    f"The following fields were not in the resultset - {', '.join(missing_references.keys())}"
-                )
-
-            # column selection and renaming
-            chunk = chunk.select(self.final_columns)
-            chunk = chunk.rename(self.final_names)
-
-            yield chunk
+        out = morsel.select(self.final_columns).rename(self.final_names)
+        self._pending.append(out)

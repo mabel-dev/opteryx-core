@@ -1,9 +1,12 @@
 # cython: language_level=3
-# cython: boundscheck=False
-# cython: wraparound=False
 # cython: nonecheck=False
 # cython: cdivision=True
+# cython: initializedcheck=False
 # cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 from array import array
 from collections.abc import Iterable
@@ -20,14 +23,14 @@ from opteryx.vectors.vector_types import get_vector_source_identifier
 from opteryx.vectors.vector_types import node_is_numeric_vector
 from opteryx.vectors.vector_types import node_is_vector_query_expression
 
-from opteryx import EOS
-
-from . import BasePlanNode
+# BasePlanNode in scope via textual include from _operators.pyx.
 
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from libc.stdint cimport int32_t, int64_t, uint64_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy
+
+from draken.vectors.vector cimport Vector
 
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -76,7 +79,7 @@ cdef int _compare_rows_vectors(
     """
     cdef Py_ssize_t i, ncols = len(vectors)
     cdef bint descending, left_null, right_null
-    cdef object vector
+    cdef Vector vector
     cdef int cmp_result
 
     for i in range(ncols):
@@ -386,16 +389,24 @@ _EXACT_COMPRESS_VECTOR_TYPES = frozenset({
 })
 
 
-class HeapSortNode(BasePlanNode):
+cdef class HeapSortNode(BasePlanNode):
+    cdef public list order_by
+    cdef public object limit
+    cdef public bint vector_topk_candidate
+    cdef public list mapped_order
+    cdef public object _uniform_direction
+    cdef public dict _compress_cache
+    cdef public list _chunk_buffer
+
     _NULL_COMPRESSED = -(1 << 63)  # INT64_MIN — same sentinel used by compress_into
     _USEARCH_ENABLED = False
     _USEARCH_MIN_ROWS = 2048
 
-    def __init__(self, properties: QueryProperties, **parameters):
-        super().__init__(properties=properties, **parameters)
+    def __init__(self, properties=None, **parameters):
+        BasePlanNode.__init__(self, properties=properties, **parameters)
         self.order_by = parameters.get("order_by", [])
         self.limit = parameters.get("limit", -1)
-        self.vector_topk_candidate = parameters.get("vector_topk_candidate", False)
+        self.vector_topk_candidate = bool(parameters.get("vector_topk_candidate", False))
 
         self.mapped_order = []
         for column, direction in self.order_by:
@@ -406,7 +417,6 @@ class HeapSortNode(BasePlanNode):
                     f"`ORDER BY` must reference columns from `SELECT`. {cnfe}"
                 ) from cnfe
 
-        # Precompute uniform sort direction: True=all-DESC, False=all-ASC, None=mixed.
         any_desc = False
         all_desc = True
         for _, ascending in self.mapped_order:
@@ -416,7 +426,6 @@ class HeapSortNode(BasePlanNode):
                 all_desc = False
         self._uniform_direction = True if all_desc else (False if not any_desc else None)
 
-        # Cache vector-class compressibility: populated on first morsel, reused thereafter.
         self._compress_cache = {}
         self._chunk_buffer = []
 
@@ -440,46 +449,27 @@ class HeapSortNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Heap Sort"
 
-    def execute(self, Morsel morsel):
+    cdef void _dispatch_push(self, Morsel morsel) except *:
+        cdef Py_ssize_t chunk_rows
 
-        if morsel is EOS:
+        if morsel is _EOS_SENTINEL:
             if not self._chunk_buffer:
+                self._emit_cdef(_EOS_SENTINEL)
                 return
-
             table = Morsel.combine(self._chunk_buffer)
             if self.mapped_order:
                 table = self._top_n(table)
-            yield table
+            self._emit_cdef(table)
+            self._emit_cdef(_EOS_SENTINEL)
             return
 
-        if isinstance(morsel, Morsel):
-            morsels = (morsel,)
-        elif isinstance(morsel, Iterable):
-            morsels = morsel
-        else:  # pragma: no cover
-            _trace_record(
-                "operator_execute",
-                operator_name=self.name,
-                operator_id=self.identity,
-                duration_ns=0,
-                rows_in=getattr(morsel, "num_rows", 0) if morsel is not EOS else 0,
-                rows_out=0,
-                produced_rows=False,
-            )
-            yield None
+        chunk_rows = morsel.num_rows
+        if chunk_rows == 0:
             return
 
-        cdef Py_ssize_t chunk_rows
-        for chunk in morsels:
-            chunk_rows = chunk.num_rows if chunk is not EOS else 0
-            if chunk is EOS or chunk_rows == 0:
-                continue
-
-            chunk = self._top_n(chunk)
-            if chunk.num_rows > 0:
-                self._chunk_buffer.append(chunk)
-
-        yield None
+        chunk = self._top_n(morsel)
+        if chunk.num_rows > 0:
+            self._chunk_buffer.append(chunk)
 
     def _materialize_rows(self, morsel, row_indices):
         if not row_indices:

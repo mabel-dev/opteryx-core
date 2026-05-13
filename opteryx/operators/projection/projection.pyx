@@ -1,3 +1,13 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -20,14 +30,14 @@ from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
 
-from opteryx import EOS
-
-from . import BasePlanNode
+# BasePlanNode in scope via textual include from _operators.pyx.
 
 
-class ProjectionNode(BasePlanNode):
+cdef class ProjectionNode(BasePlanNode):
+    cdef public list projection
+    cdef public list evaluations
 
-    def __init__(self, properties: QueryProperties, **parameters):
+    def __init__(self, properties=None, **parameters):
         """
         Attribute Projection, remove unwanted columns and performs column renames.
         """
@@ -55,7 +65,7 @@ class ProjectionNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Projection"
 
-    def _count_emitted_constant_literals(self, morsel: Morsel) -> int:
+    def _count_emitted_constant_literals(self, morsel):
         emitted = 0
         for statement in self.evaluations:
             if statement.node_type != NodeType.LITERAL:
@@ -69,27 +79,22 @@ class ProjectionNode(BasePlanNode):
                 emitted += 1
         return emitted
 
-    def _execute_morsel_projection(self, morsel: Morsel):
+    def _execute_morsel_projection(self, morsel):
         morsel = evaluate_and_append(self.evaluations, morsel)
         emitted = self._count_emitted_constant_literals(morsel)
         if emitted:
-            self.readings["draken_constant_columns_emitted"] += emitted
+            self.readings["draken_constant_columns_emitted"] = \
+                self.readings.get("draken_constant_columns_emitted", 0) + emitted
         return morsel.select(self.projection)
 
-    def execute(self, Morsel morsel):
-        if morsel == EOS:
+    cdef void _dispatch_push(self, Morsel morsel) except *:
+        if morsel is _EOS_SENTINEL:
+            self._emit_cdef(morsel)
             return
 
-        # Handle both single Morsel and Iterable of Morsels (from streaming)
-        if isinstance(morsel, Morsel):
-            morsels = (morsel,)
-        elif isinstance(morsel, Iterable):
-            morsels = morsel
-        else:  # pragma: no cover
-            yield None
+        # Single-morsel case is the only path the push pipeline uses; the
+        # legacy iterable-of-morsels handling came from streaming from old
+        # scan APIs and is no longer reachable here.
+        if morsel.num_rows == 0:
             return
-
-        for chunk in morsels:
-            if chunk is EOS or chunk.num_rows == 0:
-                continue
-            yield self._execute_morsel_projection(chunk)
+        self._emit_cdef(self._execute_morsel_projection(morsel))

@@ -1,3 +1,13 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # See the License for the specific language governing permissions and
 # limitations under the License.
@@ -39,18 +49,28 @@ from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 
-from opteryx import EMPTY
-from opteryx import EOS
+# EOS sentinel available as _EOS_SENTINEL via the umbrella unit.
 from opteryx import config
 
-from . import JoinNode
+# BasePlanNode/JoinNode in scope via _operators.pyx include.
 
 
-class DrakenInnerJoinNode(JoinNode):
+cdef class DrakenInnerJoinNode(JoinNode):
+    cdef public list left_columns
+    cdef public list right_columns
+    cdef public object columns
+    cdef public Morsel left_morsel
+    cdef public list left_morsels
+    cdef public object left_hash
+    cdef public bint left_is_empty
+    cdef public object lock
+    cdef public bint _build_phase
+    cdef public double carchar_probe_load_factor
+
     join_type = "inner"
 
-    def __init__(self, properties: QueryProperties, **parameters):
-        super().__init__(properties=properties, **parameters)
+    def __init__(self, properties=None, **parameters):
+        JoinNode.__init__(self, properties=properties, **parameters)
         self.left_columns = list(parameters.get("left_columns") or [])
         self.right_columns = list(parameters.get("right_columns") or [])
         self.on = parameters.get("on")
@@ -125,7 +145,7 @@ class DrakenInnerJoinNode(JoinNode):
             yield morsel_or_iterable
             return
         for morsel in morsel_or_iterable:
-            if morsel is None or morsel is EMPTY:
+            if morsel is None:
                 continue
             yield morsel
 
@@ -179,179 +199,167 @@ class DrakenInnerJoinNode(JoinNode):
     def _append_left_morsel(self, morsel: Morsel) -> None:
         self.left_morsels.append(morsel)
 
-    def execute(self, Morsel morsel):
+    cpdef void push_left(self, Morsel morsel) except *:
         with self.lock:
-            if self._build_phase:
-                if morsel == EOS:
-                    self._build_phase = False
-                    if not self.left_morsels:
-                        self.left_is_empty = True
-                        yield None
-                        return
-
-                    start = time.monotonic_ns()
-                    self.left_morsel = Morsel.combine(self.left_morsels)
-                    self.readings["time_inner_join_left_combine"] += time.monotonic_ns() - start
-                    self.left_morsels = []
-
-                    left_exprs = self._collect_expression_nodes_for_side(self.left_relation_names)
-                    if left_exprs and self.left_morsel.num_rows > 0:
-                        old_cols = set(self.left_morsel.column_names)
-                        try:
-                            self.left_morsel = evaluate_and_append_draken(
-                                left_exprs, self.left_morsel
-                            )
-                        except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
-                            raise UnsupportedSyntaxError(
-                                f"Draken inner join expression evaluation does not support this query shape: {err}"
-                            ) from err
-                        new_cols = set(self.left_morsel.column_names) - old_cols
-                        if new_cols:
-                            for col in new_cols:
-                                if col not in self.left_columns:
-                                    self.left_columns.append(col)
-
-                    if self.columns is not None and self.left_morsel.num_rows > 0:
-                        candidate_names = [c.schema_column.identity for c in self.columns]
-                        available_cols = set(self.left_morsel.column_names)
-                        left_keep = [name for name in candidate_names if name in available_cols]
-                        for join_col in self.left_columns:
-                            join_bytes = join_col if isinstance(join_col, bytes) else str(join_col).encode("utf8")
-                            if join_bytes not in left_keep:
-                                left_keep.append(join_bytes)
-                        if left_keep:
-                            self.left_morsel = self._project_morsel(self.left_morsel, left_keep)
-
-                    start = time.monotonic_ns()
-                    self.left_hash = build_side_carchar_morsel_map(
-                        self.left_morsel,
-                        self.left_columns,
-                        self.carchar_probe_load_factor,
-                    )
-                    self.readings["time_inner_join_build_side_hash_map"] += (
-                        time.monotonic_ns() - start
-                    )
-                    self.readings["feature_inner_join_backend_carchar"] += 1
-                    self.readings["feature_inner_join_draken"] += 1
-                    (
-                        _hash_time,
-                        _probe_time,
-                        _bloom_time,
-                        _rows_hashed,
-                        _candidate_rows,
-                        _matched_rows,
-                        _materialize_time,
-                        _align_time,
-                        _rows_eliminated,
-                        bloom_build_time,
-                        build_unique_keys,
-                        build_total_rows,
-                        build_avg_chain_length,
-                    ) = get_last_draken_inner_join_metrics()
-                    if self.left_hash.has_bloom_filter():
-                        self.readings["feature_bloom_filter"] += 1
-                        self.readings["time_build_bloom_filter"] += bloom_build_time
-                    # Adaptive join statistics (Phase 1, per docs/adaptive_join_statistics.md):
-                    # surface chain-length distribution from the build side.
-                    self.readings["build_unique_keys"] += build_unique_keys
-                    self.readings["build_total_rows"] += build_total_rows
-                    # avg chain length is per-build; we report the latest build's value
-                    # rather than summing across multiple builds in a join chain.
-                    self.readings["build_avg_chain_length"] = build_avg_chain_length
-                    yield None
+            if morsel is _EOS_SENTINEL:
+                # Build-side EOS — finalise hash table. Do NOT emit downstream.
+                if not self.left_morsels:
+                    self.left_is_empty = True
                     return
+                start = time.monotonic_ns()
+                self.left_morsel = Morsel.combine(self.left_morsels)
+                self.readings["time_inner_join_left_combine"] += time.monotonic_ns() - start
+                self.left_morsels = []
 
-                for chunk in self._iter_morsels(morsel):
-                    if chunk.num_rows == 0:
-                        continue
-                    start = time.monotonic_ns()
-                    self._append_left_morsel(chunk)
-                    self.readings["time_inner_join_left_accumulate"] += time.monotonic_ns() - start
-                yield None
+                left_exprs = self._collect_expression_nodes_for_side(self.left_relation_names)
+                if left_exprs and self.left_morsel.num_rows > 0:
+                    old_cols = set(self.left_morsel.column_names)
+                    try:
+                        self.left_morsel = evaluate_and_append_draken(
+                            left_exprs, self.left_morsel
+                        )
+                    except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
+                        raise UnsupportedSyntaxError(
+                            f"Draken inner join expression evaluation does not support this query shape: {err}"
+                        ) from err
+                    new_cols = set(self.left_morsel.column_names) - old_cols
+                    if new_cols:
+                        for col in new_cols:
+                            if col not in self.left_columns:
+                                self.left_columns.append(col)
+
+                if self.columns is not None and self.left_morsel.num_rows > 0:
+                    candidate_names = [c.schema_column.identity for c in self.columns]
+                    available_cols = set(self.left_morsel.column_names)
+                    left_keep = [name for name in candidate_names if name in available_cols]
+                    for join_col in self.left_columns:
+                        join_bytes = join_col if isinstance(join_col, bytes) else str(join_col).encode("utf8")
+                        if join_bytes not in left_keep:
+                            left_keep.append(join_bytes)
+                    if left_keep:
+                        self.left_morsel = self._project_morsel(self.left_morsel, left_keep)
+
+                start = time.monotonic_ns()
+                self.left_hash = build_side_carchar_morsel_map(
+                    self.left_morsel,
+                    self.left_columns,
+                    self.carchar_probe_load_factor,
+                )
+                self.readings["time_inner_join_build_side_hash_map"] += (
+                    time.monotonic_ns() - start
+                )
+                self.readings["feature_inner_join_backend_carchar"] += 1
+                self.readings["feature_inner_join_draken"] += 1
+                (
+                    _hash_time,
+                    _probe_time,
+                    _bloom_time,
+                    _rows_hashed,
+                    _candidate_rows,
+                    _matched_rows,
+                    _materialize_time,
+                    _align_time,
+                    _rows_eliminated,
+                    bloom_build_time,
+                    build_unique_keys,
+                    build_total_rows,
+                    build_avg_chain_length,
+                ) = get_last_draken_inner_join_metrics()
+                if self.left_hash.has_bloom_filter():
+                    self.readings["feature_bloom_filter"] += 1
+                    self.readings["time_build_bloom_filter"] += bloom_build_time
+                self.readings["build_unique_keys"] += build_unique_keys
+                self.readings["build_total_rows"] += build_total_rows
+                self.readings["build_avg_chain_length"] = build_avg_chain_length
                 return
 
-            else:
-                if morsel == EOS:
-                    yield EOS
-                    return
+            # Build-side data morsel — accumulate.
+            for chunk in self._iter_morsels(morsel):
+                if chunk.num_rows == 0:
+                    continue
+                start = time.monotonic_ns()
+                self._append_left_morsel(chunk)
+                self.readings["time_inner_join_left_accumulate"] += time.monotonic_ns() - start
 
-                if self.left_is_empty:
-                    yield EMPTY
-                    return
+    cpdef void push_right(self, Morsel morsel) except *:
+        with self.lock:
+            if morsel is _EOS_SENTINEL:
+                # Probe-side EOS — terminate downstream chain.
+                self.emit(_EOS_SENTINEL)
+                return
 
-                produced = False
-                for chunk in self._iter_morsels(morsel):
-                    if chunk.num_rows == 0:
-                        continue
+            if self.left_is_empty:
+                # Inner join with empty build side produces nothing.
+                return
 
-                    right_chunk = chunk
-                    right_exprs = self._collect_expression_nodes_for_side(self.right_relation_names)
-                    if right_exprs and right_chunk.num_rows > 0:
-                        old_cols = set(right_chunk.column_names)
-                        try:
-                            right_chunk = evaluate_and_append_draken(right_exprs, right_chunk)
-                        except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
-                            raise UnsupportedSyntaxError(
-                                f"Draken inner join expression evaluation does not support this query shape: {err}"
-                            ) from err
-                        new_cols = set(right_chunk.column_names) - old_cols
-                        if new_cols:
-                            for col in new_cols:
-                                if col not in self.right_columns:
-                                    self.right_columns.append(col)
-                    if self.columns is not None:
-                        candidate_names = [c.schema_column.identity for c in self.columns]
-                        available_cols = set(right_chunk.column_names)
-                        right_keep = [name for name in candidate_names if name in available_cols]
-                        for join_col in self.right_columns:
-                            join_bytes = join_col if isinstance(join_col, bytes) else str(join_col).encode("utf8")
-                            if join_bytes not in right_keep:
-                                right_keep.append(join_bytes)
-                        if right_keep:
-                            right_chunk = self._project_morsel(right_chunk, right_keep)
+            for chunk in self._iter_morsels(morsel):
+                if chunk.num_rows == 0:
+                    continue
 
-                    start = time.monotonic_ns()
-                    aligned = inner_join_carchar_morsel_aligned(
-                        self.left_morsel,
-                        right_chunk,
-                        self.right_columns,
-                        self.left_hash,
-                    )
-                    total_join_ns = time.monotonic_ns() - start
+                right_chunk = chunk
+                right_exprs = self._collect_expression_nodes_for_side(self.right_relation_names)
+                if right_exprs and right_chunk.num_rows > 0:
+                    old_cols = set(right_chunk.column_names)
+                    try:
+                        right_chunk = evaluate_and_append_draken(right_exprs, right_chunk)
+                    except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
+                        raise UnsupportedSyntaxError(
+                            f"Draken inner join expression evaluation does not support this query shape: {err}"
+                        ) from err
+                    new_cols = set(right_chunk.column_names) - old_cols
+                    if new_cols:
+                        for col in new_cols:
+                            if col not in self.right_columns:
+                                self.right_columns.append(col)
+                if self.columns is not None:
+                    candidate_names = [c.schema_column.identity for c in self.columns]
+                    available_cols = set(right_chunk.column_names)
+                    right_keep = [name for name in candidate_names if name in available_cols]
+                    for join_col in self.right_columns:
+                        join_bytes = join_col if isinstance(join_col, bytes) else str(join_col).encode("utf8")
+                        if join_bytes not in right_keep:
+                            right_keep.append(join_bytes)
+                    if right_keep:
+                        right_chunk = self._project_morsel(right_chunk, right_keep)
 
-                    (
-                        hash_time,
-                        probe_time,
-                        bloom_time,
-                        rows_hashed,
-                        candidate_rows,
-                        matched_rows,
-                        materialize_time,
-                        align_time,
-                        rows_eliminated_by_bloom_filter,
-                        _bloom_build_time,
-                        _build_unique_keys,
-                        _build_total_rows,
-                        _build_avg_chain_length,
-                    ) = get_last_draken_inner_join_metrics()
-                    self.readings["time_inner_join_hash"] += hash_time
-                    self.readings["time_inner_join_probe"] += probe_time
-                    self.readings["time_inner_join_indices"] += materialize_time
-                    self.readings["time_bloom_filtering"] += bloom_time
-                    self.readings["rows_inner_join_hashed"] += rows_hashed
-                    self.readings["rows_inner_join_candidates"] += candidate_rows
-                    self.readings["rows_inner_join_matched"] += matched_rows
-                    self.readings["rows_eliminated_by_bloom_filter"] += (
-                        rows_eliminated_by_bloom_filter
-                    )
-                    self.readings["time_inner_join_total_kernel"] += total_join_ns
-                    self.readings["time_inner_join_align"] += align_time
-                    if aligned is not None:
-                        produced = True
-                        yield aligned
+                start = time.monotonic_ns()
+                aligned = inner_join_carchar_morsel_aligned(
+                    self.left_morsel,
+                    right_chunk,
+                    self.right_columns,
+                    self.left_hash,
+                )
+                total_join_ns = time.monotonic_ns() - start
 
-                if not produced:
-                    yield EMPTY
+                (
+                    hash_time,
+                    probe_time,
+                    bloom_time,
+                    rows_hashed,
+                    candidate_rows,
+                    matched_rows,
+                    materialize_time,
+                    align_time,
+                    rows_eliminated_by_bloom_filter,
+                    _bloom_build_time,
+                    _build_unique_keys,
+                    _build_total_rows,
+                    _build_avg_chain_length,
+                ) = get_last_draken_inner_join_metrics()
+                self.readings["time_inner_join_hash"] += hash_time
+                self.readings["time_inner_join_probe"] += probe_time
+                self.readings["time_inner_join_indices"] += materialize_time
+                self.readings["time_bloom_filtering"] += bloom_time
+                self.readings["rows_inner_join_hashed"] += rows_hashed
+                self.readings["rows_inner_join_candidates"] += candidate_rows
+                self.readings["rows_inner_join_matched"] += matched_rows
+                self.readings["rows_eliminated_by_bloom_filter"] += (
+                    rows_eliminated_by_bloom_filter
+                )
+                self.readings["time_inner_join_total_kernel"] += total_join_ns
+                self.readings["time_inner_join_align"] += align_time
+                if aligned is not None:
+                    self.emit(aligned)
 
 
 # ---------------------------------------------------------------------------

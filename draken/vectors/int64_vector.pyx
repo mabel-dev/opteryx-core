@@ -5,6 +5,9 @@
 # cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+# cython: freethreading_compatible=True
 
 """
 Int64Vector: Cython implementation of a fixed-width int64 column vector for Draken.
@@ -55,6 +58,12 @@ from draken.vectors.vector cimport (
     Vector,
     mix_hash,
     simd_mix_hash,
+    simd_mix_hash_from_dict_cw1,
+    simd_mix_hash_from_dict_cw2,
+    simd_mix_hash_from_dict_cw4,
+    simd_mix_hash_from_dict_nullable_cw1,
+    simd_mix_hash_from_dict_nullable_cw2,
+    simd_mix_hash_from_dict_nullable_cw4,
     simd_popcount,
 )
 
@@ -74,6 +83,14 @@ cdef extern from "draken/vectors/_int64_compare.hpp" namespace "draken::int64_cm
     void dispatch_vector_one_null_branching(int op, const int64_t* a, const int64_t* b, const uint8_t* null_side, uint8_t* dst, uint8_t* out_null, size_t n)
     void dispatch_vector_both_null_branchless(int op, const int64_t* a, const int64_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
     void dispatch_vector_both_null_branching(int op, const int64_t* a, const int64_t* b, const uint8_t* null_a, const uint8_t* null_b, uint8_t* dst, uint8_t* out_null, size_t n)
+
+cdef extern from "draken/vectors/_int64_float64_compare.hpp" namespace "draken::int64_float64_cmp" nogil:
+    void cmp_int64_scalar_nonnull(int op, const int64_t* data, double value, uint8_t* dst, size_t n)
+    void cmp_int64_scalar_branchless(int op, const int64_t* data, double value, const uint8_t* src_null, uint8_t* dst, size_t n)
+    void cmp_int64_scalar_branching(int op, const int64_t* data, double value, const uint8_t* src_null, uint8_t* dst, size_t n)
+    void cmp_int64_vector_nonnull(int op, const int64_t* data_int, const double* data_float, uint8_t* dst, size_t n)
+    void cmp_int64_vector_branchless(int op, const int64_t* data_int, const double* data_float, const uint8_t* src_null, uint8_t* dst, size_t n)
+    void cmp_int64_vector_branching(int op, const int64_t* data_int, const double* data_float, const uint8_t* src_null, uint8_t* dst, size_t n)
 
 cdef extern from "draken/vectors/_int64_reductions.hpp" namespace "draken::int64_red" nogil:
     int64_t sum_nonnull(const int64_t* data, size_t n)
@@ -772,6 +789,41 @@ cdef class Int64Vector(Vector):
             dispatch_vector_both_null_branchless(op, data1, data2, null1, null2, dst, out_null, <size_t>n)
         return out
 
+    cdef BoolVector _compare_float64_vector(self, object other, int op):
+        """Compare Int64Vector with Float64Vector.
+
+        Converts int64 values to float64 for comparison. Uses native float64 vector
+        comparison methods which are faster than element-by-element Python comparison.
+        """
+        # Materialize int64 as float64 using Cython - this is faster than calling
+        # to_pylist() because we access the C array directly and convert in compiled code
+        cdef Py_ssize_t n = self.ptr.length
+        if n != other.ptr.length:
+            raise ValueError("Vectors must have the same length")
+
+        # Create converted float64 vector without going through to_pylist()
+        cdef int64_t* data = <int64_t*>self.ptr.data
+        float_vals = [<double>data[i] for i in range(n)]
+
+        from draken.interop.vector_sequence import vector_from_sequence
+        float_vec = vector_from_sequence(float_vals)
+
+        # Use the correct comparison method from comparisons.py dispatch
+        if op == 0:  # Eq
+            return float_vec.equals_vector(other)
+        elif op == 1:  # NotEq
+            return float_vec.not_equals_vector(other)
+        elif op == 2:  # Gt
+            return float_vec.greater_than_vector(other)
+        elif op == 3:  # GtEq
+            return float_vec.greater_than_or_equals_vector(other)
+        elif op == 4:  # Lt
+            return float_vec.less_than_vector(other)
+        elif op == 5:  # LtEq
+            return float_vec.less_than_or_equals_vector(other)
+        else:
+            raise ValueError(f"Unknown comparison operation: {op}")
+
     cpdef BoolVector equals(self, int64_t value):
         return self._compare_scalar(value, 0)
 
@@ -807,6 +859,42 @@ cdef class Int64Vector(Vector):
 
     cpdef BoolVector less_than_or_equals_vector(self, Int64Vector other):
         return self._compare_vector(other, 5)
+
+    cpdef BoolVector equals_float64_vector(self, object other):
+        """Compare Int64Vector with Float64Vector using native cross-type comparison."""
+        if other.__class__.__name__ != "Float64Vector":
+            raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
+        return self._compare_float64_vector(other, 0)
+
+    cpdef BoolVector not_equals_float64_vector(self, object other):
+        """Compare Int64Vector with Float64Vector using native cross-type comparison."""
+        if other.__class__.__name__ != "Float64Vector":
+            raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
+        return self._compare_float64_vector(other, 1)
+
+    cpdef BoolVector greater_than_float64_vector(self, object other):
+        """Compare Int64Vector with Float64Vector using native cross-type comparison."""
+        if other.__class__.__name__ != "Float64Vector":
+            raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
+        return self._compare_float64_vector(other, 2)
+
+    cpdef BoolVector greater_than_or_equals_float64_vector(self, object other):
+        """Compare Int64Vector with Float64Vector using native cross-type comparison."""
+        if other.__class__.__name__ != "Float64Vector":
+            raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
+        return self._compare_float64_vector(other, 3)
+
+    cpdef BoolVector less_than_float64_vector(self, object other):
+        """Compare Int64Vector with Float64Vector using native cross-type comparison."""
+        if other.__class__.__name__ != "Float64Vector":
+            raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
+        return self._compare_float64_vector(other, 4)
+
+    cpdef BoolVector less_than_or_equals_float64_vector(self, object other):
+        """Compare Int64Vector with Float64Vector using native cross-type comparison."""
+        if other.__class__.__name__ != "Float64Vector":
+            raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
+        return self._compare_float64_vector(other, 5)
 
     cpdef BoolVector between(self, int64_t lower, int64_t upper,
                               bint lower_inclusive=True, bint upper_inclusive=True):
@@ -1206,6 +1294,52 @@ cdef class Int64Vector(Vector):
             return dense
         return self
 
+    cpdef Float64Vector to_float64_vector(self):
+        """Convert to a Float64Vector by casting int64 values to float64.
+
+        Returns a Float64Vector with int64 values converted to double-precision
+        floating point. Used for arithmetic and comparison operations where
+        mixed-type (int/float) operations are needed without materialization.
+        """
+        cdef DrakenFixedBuffer* ptr
+        cdef int64_t* src
+        cdef uint8_t* src_null
+        cdef Py_ssize_t i, n
+        cdef Float64Vector out
+        cdef double* dst
+        cdef uint8_t* out_null
+        cdef size_t nb_bytes
+        cdef int64_t const_val
+
+        ptr = self.ptr
+        n = ptr.length
+
+        if self._has_const:
+            if self._const_is_null:
+                return Float64Vector.from_constant(None, n, is_null=True)
+            const_val = self._const_value
+            return Float64Vector.from_constant(<double>const_val, n)
+
+        out = Float64Vector(<size_t>n)
+        src = <int64_t*>ptr.data
+        dst = <double*>(<void*>out.ptr.data)
+        src_null = ptr.null_bitmap
+
+        for i in range(n):
+            dst[i] = <double>src[i]
+
+        if src_null != NULL and n > 0:
+            nb_bytes = (<size_t>n + 7) >> 3
+            out_null = <uint8_t*>malloc(nb_bytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, src_null, nb_bytes)
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        return out
+
     @property
     def nbytes(self):
         """Return the approximate memory footprint of this vector in bytes."""
@@ -1429,26 +1563,40 @@ cdef class Int64Vector(Vector):
                 i += block
             return 0
 
-        # DICTIONARY-only path: ptr.data is NULL, values looked up via codes
+        # DICTIONARY-only path: ptr.data is NULL, values looked up via codes.
+        # The dict_data buffer is read as the uint64 lookup table (raw int64
+        # bits — simd_mix_hash already treats values as opaque uint64), so the
+        # fused kernel can scatter+mix in a single pass without a scratch
+        # buffer. Specialized per code width (1/2/4 bytes) to keep the inner
+        # loop branch-free.
         if ptr.data == NULL and self._dict_codes != NULL:
             _cd_dict_data  = <int64_t*>self._dict_values.data
             _cd_dict_codes = self._dict_codes
             _cd_dict_cw    = self._dict_code_width
             _cd_null_bitmap = ptr.null_bitmap
-            i = 0
-            while i < n:
-                block = n - i
-                if block > 1024:
-                    block = 1024
-                for j in range(block):
-                    if _cd_null_bitmap != NULL and not ((_cd_null_bitmap[(i+j) >> 3] >> ((i+j) & 7)) & 1):
-                        scratch[j] = NULL_HASH
-                    else:
-                        scratch[j] = <uint64_t>_cd_dict_data[
-                            <Py_ssize_t>_read_packed_code(_cd_dict_codes, _cd_dict_cw, i + j)
-                        ]
-                simd_mix_hash(out + i, scratch_ptr, <size_t>block)
-                i += block
+            if _cd_null_bitmap != NULL:
+                if _cd_dict_cw == 1:
+                    simd_mix_hash_from_dict_nullable_cw1(
+                        out, <uint64_t*>_cd_dict_data, _cd_dict_codes,
+                        _cd_null_bitmap, 0, <size_t>n)
+                elif _cd_dict_cw == 2:
+                    simd_mix_hash_from_dict_nullable_cw2(
+                        out, <uint64_t*>_cd_dict_data, <uint16_t*>_cd_dict_codes,
+                        _cd_null_bitmap, 0, <size_t>n)
+                else:
+                    simd_mix_hash_from_dict_nullable_cw4(
+                        out, <uint64_t*>_cd_dict_data, <uint32_t*>_cd_dict_codes,
+                        _cd_null_bitmap, 0, <size_t>n)
+            else:
+                if _cd_dict_cw == 1:
+                    simd_mix_hash_from_dict_cw1(
+                        out, <uint64_t*>_cd_dict_data, _cd_dict_codes, <size_t>n)
+                elif _cd_dict_cw == 2:
+                    simd_mix_hash_from_dict_cw2(
+                        out, <uint64_t*>_cd_dict_data, <uint16_t*>_cd_dict_codes, <size_t>n)
+                else:
+                    simd_mix_hash_from_dict_cw4(
+                        out, <uint64_t*>_cd_dict_data, <uint32_t*>_cd_dict_codes, <size_t>n)
             return 0
 
         cdef int64_t* data = <int64_t*> ptr.data

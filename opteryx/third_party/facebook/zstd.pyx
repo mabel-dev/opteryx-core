@@ -5,6 +5,8 @@
 # cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 from cpython.buffer cimport PyBUF_CONTIG_RO, PyBUF_WRITABLE, PyBuffer_Release, PyObject_GetBuffer
 from cpython.bytes cimport PyBytes_FromStringAndSize

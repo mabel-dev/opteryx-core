@@ -226,6 +226,16 @@ cdef extern from "decode.hpp":
 
 def get_jsonl_schema(data, sample_size=25):
     """
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+
     Infer the schema of a JSONL dataset from a sample of the data.
 
     Parameters

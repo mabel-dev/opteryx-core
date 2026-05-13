@@ -1,3 +1,13 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -15,7 +25,7 @@ from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import NonTabularResult
 from opteryx.models import QueryProperties
 
-from . import BasePlanNode
+# BasePlanNode/JoinNode in scope via _operators.pyx include.
 
 class TableManagementNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):

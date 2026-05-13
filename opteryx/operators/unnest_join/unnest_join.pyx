@@ -1,9 +1,12 @@
 # cython: language_level=3
 # cython: nonecheck=False
 # cython: cdivision=True
-# cython: boundscheck=False
-# cython: wraparound=False
+# cython: initializedcheck=False
 # cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 """
 Unnest Join Node
@@ -28,9 +31,9 @@ from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, QueryProperties
 from opteryx.types.schema import FlatColumn
 
-from opteryx import EOS
+# EOS sentinel available as _EOS_SENTINEL via the umbrella unit.
 
-from . import BasePlanNode
+# BasePlanNode/JoinNode in scope via _operators.pyx include.
 
 INTERNAL_BATCH_SIZE: int = 10000
 
@@ -259,12 +262,22 @@ def _cross_join_unnest_literal(
     yield expanded_morsel
 
 
-class UnnestJoinNode(BasePlanNode):
+cdef class UnnestJoinNode(BasePlanNode):
     """
     Implements CROSS JOIN UNNEST (Draken-native, no PyArrow)
     """
 
-    def __init__(self, properties: QueryProperties, **parameters):
+    cdef public object left_readers
+    cdef public object right_readers
+    cdef public str join_type
+    cdef public object _unnest_column
+    cdef public object _unnest_target
+    cdef public object _filters
+    cdef public bint _distinct
+    cdef public bint _single_column
+    cdef public CarcharSetWrapper hash_set
+
+    def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
 
         # Initialize join interface (UnnestJoinNode is registered as a join node in catalog)
@@ -305,21 +318,21 @@ class UnnestJoinNode(BasePlanNode):
             filters = f"({self._unnest_target.name} IN ({', '.join(self._filters)}))"
         return f"CROSS JOIN {filters}"
 
-    def execute(self, Morsel morsel):
-
-        if morsel == EOS:
-            yield EOS
+    cpdef void _push_impl(self, Morsel morsel) except *:
+        if morsel is _EOS_SENTINEL:
+            self.emit(_EOS_SENTINEL)
             return
 
         if isinstance(self._unnest_column.value, tuple):
-            yield from _cross_join_unnest_literal(
+            for chunk in _cross_join_unnest_literal(
                 morsel=morsel,
                 source=self._unnest_column.value,
                 target_column=self._unnest_target,
-            )
+            ):
+                self.emit(chunk)
             return
 
-        yield from _cross_join_unnest_column(
+        for chunk in _cross_join_unnest_column(
             morsel=morsel,
             source=self._unnest_column,
             target_column=self._unnest_target,
@@ -327,4 +340,5 @@ class UnnestJoinNode(BasePlanNode):
             hash_set=self.hash_set,
             distinct=self._distinct,
             single_column=self._single_column,
-        )
+        ):
+            self.emit(chunk)

@@ -2,9 +2,11 @@
 # cython: nonecheck=False
 # cython: cdivision=True
 # cython: initializedcheck=False
-# cython: infer_types=False
+# cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 from libc.stdint cimport uint32_t
 from libc.math cimport isnan, isinf, isfinite

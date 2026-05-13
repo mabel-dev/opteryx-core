@@ -1,3 +1,13 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -21,13 +31,14 @@ from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
 
-from opteryx import EOS
-
-from . import BasePlanNode
+# BasePlanNode in scope via textual include from _operators.pyx.
 
 
-class SortNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, **parameters):
+cdef class SortNode(BasePlanNode):
+    cdef public list order_by
+    cdef public list _morsels
+
+    def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.order_by = parameters.get("order_by", [])
         self._morsels = []
@@ -43,15 +54,14 @@ class SortNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Sort"
 
-    def execute(self, Morsel morsel):
-
-        if morsel is not EOS:
+    cdef void _dispatch_push(self, Morsel morsel) except *:
+        if morsel is not _EOS_SENTINEL:
             if morsel.num_rows > 0:
                 self._morsels.append(morsel)
-            yield None
             return
 
         if not self._morsels:
+            self._emit_cdef(_EOS_SENTINEL)
             return
 
         combined = Morsel.combine(self._morsels)
@@ -79,4 +89,5 @@ class SortNode(BasePlanNode):
         perm = morsel_sort(combined, column_names, ascending_flags)
         combined.take(perm)
 
-        yield combined
+        self._emit_cdef(combined)
+        self._emit_cdef(_EOS_SENTINEL)

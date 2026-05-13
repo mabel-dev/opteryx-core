@@ -1,4 +1,12 @@
-# cython: language_level=3, nonecheck=False, cdivision=True, boundscheck=False, wraparound=False, initializedcheck=False, infer_types=True, overflowcheck=False
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 """
 ULTRA-FAST STRING SPLITTER - NOW ACTUALLY COMPILES

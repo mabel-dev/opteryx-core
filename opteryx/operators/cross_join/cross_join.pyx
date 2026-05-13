@@ -1,3 +1,13 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -18,18 +28,19 @@ REFACTORED (Session 46): Draken-native Cartesian product
 """
 
 from typing import Generator, Optional
+from array import array
 
 from libc.stdint cimport int32_t, int64_t
-from libc.stdlib cimport malloc, free
+from libcpp.vector cimport vector as cppvector
 
 from draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
 from draken.vectors.int64_vector cimport from_rle_builder as int64_from_rle_builder
 
 from opteryx.models import QueryProperties
 
-from opteryx import EOS, EMPTY
+# EOS sentinel available as _EOS_SENTINEL via the umbrella unit.
 
-from . import JoinNode
+# BasePlanNode/JoinNode in scope via _operators.pyx include.
 
 
 cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
@@ -44,39 +55,41 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
     """
     cdef int64_t total_rows = left_rows * right_rows
     cdef int64_t i, j
-    cdef int64_t* left_run_vals
-    cdef int32_t* left_run_lens
     cdef Int64Vector left_vec
-    cdef IntBuffer right_indices_buf
-    cdef const int64_t[::1] right_mv
     cdef Int64Vector right_vec
+    cdef cppvector[int64_t] left_run_vals
+    cdef cppvector[int32_t] left_run_lens
+    cdef int64_t* lvals
+    cdef int32_t* llens
+    cdef int64_t* rvals
+    cdef int64_t[::1] right_mv
 
     if total_rows == 0:
         return (Int64Vector(0), Int64Vector(0))
 
-    left_run_vals = <int64_t*>malloc(left_rows * sizeof(int64_t))
-    left_run_lens = <int32_t*>malloc(left_rows * sizeof(int32_t))
-    if left_run_vals == NULL or left_run_lens == NULL:
-        free(left_run_vals)
-        free(left_run_lens)
-        raise MemoryError()
+    # Left side: RLE — int64_from_rle_builder copies, so cppvector storage is fine.
+    left_run_vals.resize(<size_t>left_rows)
+    left_run_lens.resize(<size_t>left_rows)
+    lvals = left_run_vals.data()
+    llens = left_run_lens.data()
 
-    for i in range(left_rows):
-        left_run_vals[i] = i
-        left_run_lens[i] = <int32_t>right_rows
+    # Right side: int64_from_sequence is zero-copy, so the backing array must
+    # outlive the Int64Vector — we pin it via right_vec._arrow_data_buf below.
+    right_arr = array('q', [0]) * total_rows
+    right_mv = right_arr
+    rvals = &right_mv[0]
 
-    left_vec = int64_from_rle_builder(left_run_vals, left_run_lens, <size_t>left_rows)
-    free(left_run_vals)
-    free(left_run_lens)
+    with nogil:
+        for i in range(left_rows):
+            lvals[i] = i
+            llens[i] = <int32_t>right_rows
+        for i in range(left_rows):
+            for j in range(right_rows):
+                rvals[i * right_rows + j] = j
 
-    right_indices_buf = IntBuffer(total_rows)
-    for i in range(left_rows):
-        for j in range(right_rows):
-            right_indices_buf.append(j)
-
-    right_mv = right_indices_buf.get_buffer()
+    left_vec = int64_from_rle_builder(lvals, llens, <size_t>left_rows)
     right_vec = int64_from_sequence(right_mv)
-    right_vec._arrow_data_buf = right_indices_buf
+    right_vec._arrow_data_buf = right_arr
 
     return (left_vec, right_vec)
 
@@ -116,8 +129,8 @@ def _cross_join(left_morsel: Morsel, right_morsel: Morsel) -> Generator[Morsel, 
             yield left_morsel.copy()
         return
 
-    cdef int left_rows = left_morsel.num_rows
-    cdef int right_rows = right_morsel.num_rows
+    cdef Py_ssize_t left_rows = left_morsel.num_rows
+    cdef Py_ssize_t right_rows = right_morsel.num_rows
 
     if left_rows == 0 or right_rows == 0:
         # Return empty morsel with combined schema
@@ -146,14 +159,22 @@ def _cross_join(left_morsel: Morsel, right_morsel: Morsel) -> Generator[Morsel, 
 
     yield res_morsel
 
-class CrossJoinNode(JoinNode):
+cdef class CrossJoinNode(JoinNode):
     """
     Implements a SQL CROSS JOIN (Draken-native)
     """
 
+    cdef public object source
+    cdef public list left_morsels
+    cdef public list right_morsels
+    cdef public Morsel left_table
+    cdef public CarcharSetWrapper hash_set
+    cdef public bint continue_executing
+    cdef public bint _build_phase
+
     join_type = "cross"
 
-    def __init__(self, properties: QueryProperties, **parameters):
+    def __init__(self, properties=None, **parameters):
         JoinNode.__init__(self, properties=properties, **parameters)
 
         self.source = parameters.get("column")
@@ -180,43 +201,36 @@ class CrossJoinNode(JoinNode):
     def config(self):  # pragma: no cover
         return f"CROSS JOIN"
 
-    def execute(self, Morsel morsel):
-
+    cpdef void push_left(self, Morsel morsel) except *:
         if not self.continue_executing:
-            yield None
             return
-
-        if self._build_phase:
-            if morsel == EOS:
-                self._build_phase = False
-                if self.left_morsels:
-                    self.left_table = Morsel.combine(self.left_morsels)
-                    self.left_morsels = []
-                else:
-                    # Left side has no rows — cross product is always empty.
-                    self.left_table = None
-                yield None
+        if morsel is _EOS_SENTINEL:
+            if self.left_morsels:
+                self.left_table = Morsel.combine(self.left_morsels)
+                self.left_morsels = []
             else:
-                if morsel is not None and morsel != EMPTY and len(morsel) > 0:
-                    self.left_morsels.append(morsel)
-                yield None
+                self.left_table = None
             return
+        if morsel is not None and len(morsel) > 0:
+            self.left_morsels.append(morsel)
 
-        else:
-            if morsel == EOS:
-                if self.left_table is None:
-                    yield EOS
-                    return
-                if self.right_morsels:
-                    right_table = Morsel.combine(self.right_morsels)
-                    self.right_morsels = []
-                else:
-                    yield EOS
-                    return
-
-                yield from _cross_join(self.left_table, right_table)
-                yield EOS
+    cpdef void push_right(self, Morsel morsel) except *:
+        cdef Morsel right_table
+        if not self.continue_executing:
+            return
+        if morsel is _EOS_SENTINEL:
+            if self.left_table is None:
+                self.emit(_EOS_SENTINEL)
+                return
+            if self.right_morsels:
+                right_table = Morsel.combine(self.right_morsels)
+                self.right_morsels = []
             else:
-                if morsel is not None and morsel != EMPTY and len(morsel) > 0:
-                    self.right_morsels.append(morsel)
-                yield None
+                self.emit(_EOS_SENTINEL)
+                return
+            for chunk in _cross_join(self.left_table, right_table):
+                self.emit(chunk)
+            self.emit(_EOS_SENTINEL)
+            return
+        if morsel is not None and len(morsel) > 0:
+            self.right_morsels.append(morsel)

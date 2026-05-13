@@ -1,3 +1,13 @@
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -26,8 +36,8 @@ from opteryx.models import QueryProperties
 from opteryx.operators.aggregate.helpers import extract_evaluations
 from opteryx.types import OrsoTypes
 
-from opteryx import EOS
-from opteryx.operators import BasePlanNode
+# BasePlanNode in scope via textual include from _operators.pyx (umbrella unit).
+# EOS sentinel available as _EOS_SENTINEL in the same scope.
 
 _DRAKEN_ENCODING_CONSTANT = 3
 
@@ -430,9 +440,22 @@ def _build_engine_aggregate(aggregate):
     raise ValueError(f"Unsupported aggregate type for Draken global aggregate: {aggregate_type}")
 
 
-class UngroupedAggregateNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, **parameters):
-        super().__init__(properties=properties, **parameters)
+cdef class UngroupedAggregateNode(BasePlanNode):
+    cdef public list aggregates
+    cdef public list evaluatable_nodes
+    cdef public list all_identifiers
+    cdef public UngroupedAggregateEngine _engine
+    cdef public list _result_specs
+    cdef public list _literal_specs
+    cdef public Py_ssize_t _engine_aggregate_count
+    cdef public bint _finalized
+    cdef public bint _no_eval
+    cdef public list _all_identifiers_bytes
+    cdef public int _select_state
+    cdef public bint _has_literals
+
+    def __init__(self, properties=None, **parameters):
+        BasePlanNode.__init__(self, properties=properties, **parameters)
 
         self.aggregates = list(parameters.get("aggregates", []))
         self.evaluatable_nodes = [
@@ -549,16 +572,18 @@ class UngroupedAggregateNode(BasePlanNode):
 
         return Morsel.from_vectors(names, vectors)
 
-    def execute(self, Morsel morsel):
+    cpdef void _push_impl(self, Morsel morsel) except *:
         cdef int select_state
         cdef Py_ssize_t num_rows
         cdef _ResultSpec lit_spec
 
-        if morsel == EOS:
+        if morsel is _EOS_SENTINEL:
             if self._finalized:
+                self.emit(_EOS_SENTINEL)
                 return
             self._finalized = True
-            yield self._finalize_morsel()
+            self.emit(self._finalize_morsel())
+            self.emit(_EOS_SENTINEL)
             return
 
         num_rows = morsel.num_rows
@@ -576,5 +601,3 @@ class UngroupedAggregateNode(BasePlanNode):
             if self._has_literals:
                 for lit_spec in self._literal_specs:
                     lit_spec.state.update(num_rows)
-        yield None
-        return

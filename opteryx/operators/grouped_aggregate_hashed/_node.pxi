@@ -24,10 +24,8 @@ class AggregationSpec:
     column: str | bytes | None = None
     options: object | None = None
 
-from opteryx import EMPTY
-from opteryx import EOS
-
-from opteryx.operators import BasePlanNode
+# BasePlanNode in scope via textual include from _operators.pyx (umbrella unit).
+# EOS sentinel available as _EOS_SENTINEL in the same scope.
 
 
 CHUNK_SIZE = 8192
@@ -229,13 +227,14 @@ class GroupedAggregateHashedNode(BasePlanNode):
         mask = evaluate_draken(self._having_condition, morsel)
         return morsel.filter_mask(mask)
 
-    def execute(self, Morsel morsel):
-        if morsel is EOS:
-            yield from self._finalize()
+    def _push_impl(self, morsel):
+        if morsel is _EOS_SENTINEL:
+            for chunk in self._finalize():
+                self.emit(chunk)
+            self.emit(_EOS_SENTINEL)
             return
 
         if morsel.num_rows == 0:
-            yield EMPTY
             return
 
         if self._needs_expression_eval:
@@ -246,7 +245,6 @@ class GroupedAggregateHashedNode(BasePlanNode):
         ingest_start = time.monotonic_ns()
         self._engine.ingest(morsel)
         self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start
-        yield EMPTY
 
     def _finalize(self):
         finalize_start = time.monotonic_ns()

@@ -1,4 +1,3 @@
-# distutils: language = c++
 # cython: language_level=3
 # cython: nonecheck=False
 # cython: cdivision=True
@@ -6,7 +5,10 @@
 # cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
+# distutils: language = c++
 from cpython.bytes cimport PyBytes_AS_STRING, PyBytes_GET_SIZE
 from cpython.unicode cimport PyUnicode_AsUTF8String
 from cpython.mem cimport PyMem_Malloc, PyMem_Free

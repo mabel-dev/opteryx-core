@@ -8,6 +8,10 @@ import os
 from typing import List
 from typing import Tuple
 
+# Compiled disk_reader is required — fail fast if unavailable
+from opteryx.compiled.io.disk_reader import list_directory
+from opteryx.compiled.io.disk_reader import list_files_info
+
 
 class MemoryMappedFile:
     """
@@ -111,38 +115,21 @@ class OpteryxLocalFileSystem:
 
     def list_files(self, base_dir: str, recursive: bool = True) -> list:
         """
-        Return a list of file paths under base_dir.
+        Return a list of file paths under base_dir using compiled disk_reader.
         """
-        try:
-            from opteryx.compiled.io.disk_reader import list_directory
-            from opteryx.compiled.io.disk_reader import list_files_info
-
-            compiled_available = True
-        except ImportError:
-            compiled_available = False
-
         paths = []
         if not os.path.isdir(base_dir):
             return paths
 
-        if recursive and compiled_available:
+        if recursive:
             for entry in list_files_info(base_dir, ()):
                 path, is_dir, is_file, size, mtime = entry
                 if is_file:
                     paths.append(path)
-        elif recursive:
-            for root, dirs, files in os.walk(base_dir):
-                for filename in files:
-                    paths.append(os.path.join(root, filename))
-        elif compiled_available:
+        else:
             for name, is_dir, is_file, size, mtime in list_directory(base_dir):
                 if is_file:
                     paths.append(os.path.join(base_dir, name))
-        else:
-            for item in os.listdir(base_dir):
-                filepath = os.path.join(base_dir, item)
-                if os.path.isfile(filepath):
-                    paths.append(filepath)
         return paths
 
     def get_file_info(self, paths):

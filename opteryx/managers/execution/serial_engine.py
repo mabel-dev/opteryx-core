@@ -1,11 +1,24 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
-# You may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-This module provides the execution engine for processing physical plans in a serial manner.
+Serial execution engine — streaming push pipeline.
+
+Drives the compiled pipeline by iterating each scan, pushing morsels into
+the chain head, and draining the terminal ExitNode's `_pending` queue to
+the caller as a single generator. The per-morsel hot path is a typed
+Cython vtable call (`chain_head.push(morsel)`) — no generator protocol, no
+graph traversal, no Python wrapper.
+
+LIMIT short-circuit: the LIMIT operator sets `ctx.terminated = True` when
+its quota is reached; the scan loop checks this between morsels and breaks
+promptly, dropping the scan iterator (which closes the underlying I/O).
+
+Special operators (Explain, SetVariable, ShowValue, ShowCreate, Insert,
+ViewManagement, TableManagement, RelationManagement) do not enter the push
+pipeline — they're invoked directly via their `__call__` interface.
 """
 
 from typing import Any, Generator, Tuple
@@ -15,7 +28,9 @@ from draken import Morsel
 from draken.interop.vector_sequence import vector_from_sequence
 from opteryx.constants import ResultType
 from opteryx.exceptions import InvalidInternalStateError
+from opteryx.managers.execution.pipeline_compiler import compile_pipeline
 from opteryx.models import PhysicalPlan, QueryTelemetry
+from opteryx.operators._operators import drive_scan
 from opteryx.types import OrsoTypes
 
 
@@ -31,9 +46,7 @@ def execute(
     from opteryx.operators.relation_management import RelationManagementNode
     from opteryx.operators.insert import InsertNode
 
-    # Retrieve the tail of the query plan, which should ideally be a single head node
     head_nodes = list(set(plan.get_exit_points()))
-
     if len(head_nodes) != 1:
         raise InvalidInternalStateError(
             f"Query plan has {len(head_nodes)} heads, expected exactly 1."
@@ -42,53 +55,66 @@ def execute(
     if head_node is None:
         head_node = plan[head_nodes[0]]
 
-    # Special case handling for 'Explain' queries
+    # ── Non-pipeline special cases ───────────────────────────────────────────
     if isinstance(head_node, ExplainNode):
         return (
             explain(plan, analyze=head_node.analyze, _format=head_node.format),
             ResultType.TABULAR,
         )
-
-    # Special case handling
     if isinstance(head_node, SetVariableNode):
-        # Set the variables and return a non-tabular result
         return head_node(None), ResultType.NON_TABULAR
     if isinstance(head_node, (ViewManagementNode, TableManagementNode, RelationManagementNode)):
-        # Metadata DDL (CREATE/ALTER/DROP VIEW/TABLE) - return non-tabular result
         return head_node(None), ResultType.NON_TABULAR
     if isinstance(head_node, InsertNode):
-        # INSERT ... VALUES: drive the pipeline to completion, then return the result
-        def _drive_insert():
-            pump_nodes = [(nid, node) for nid, node in plan.depth_first_search_flat() if node.is_scan]
-            for pump_nid, pump_instance in pump_nodes:
-                for morsel in pump_instance(None):
-                    if morsel is not None:
-                        for _ in process_node(plan, pump_nid, morsel):
-                            pass
-                for _ in process_node(plan, pump_nid, EOS):
-                    pass
-
-        _drive_insert()
+        # Insert IS on the push pipeline (as a sink), but produces a
+        # non-tabular result via its `result` attribute. Drive the pipeline
+        # to completion, then return the result.
+        _drain_pipeline(plan, collect=False)
         if head_node.result is None:
             raise InvalidInternalStateError("InsertNode did not produce a result")
         return head_node.result, ResultType.NON_TABULAR
     if isinstance(head_node, (ShowValueNode, ShowCreateNode)):
-        # There's no execution plan to execute, just return the result
         return head_node(None), ResultType.TABULAR
 
-    def inner_execute(plan: PhysicalPlan) -> Generator:
-        pump_nodes = [(nid, node) for nid, node in plan.depth_first_search_flat() if node.is_scan]
-        for pump_nid, pump_instance in pump_nodes:
-            for morsel in pump_instance(None):
-                if morsel is not None:
-                    yield from process_node(plan, pump_nid, morsel)
-            yield from process_node(plan, pump_nid, EOS)
+    # ── Push pipeline: streaming generator ───────────────────────────────────
+    chains, exit_node, ctx = compile_pipeline(plan)
 
-    return inner_execute(plan), ResultType.TABULAR
+    def stream():
+        if exit_node is None:
+            return
+        # drive_scan runs the per-morsel hot path inside Cython — typed
+        # chain_head.push / exit_node.has_pending / exit_node.pop_pending
+        # calls, no Python -> cpdef boundary per morsel. We only re-yield
+        # the morsels it produces (one yield per emitted result).
+        for scan, chain_head in chains:
+            yield from drive_scan(scan, chain_head, exit_node, ctx)
+            if ctx.terminated:
+                return
+
+    return stream(), ResultType.TABULAR
+
+
+def _drain_pipeline(plan: PhysicalPlan, enable_tracing: bool = False):
+    """Drive the pipeline to completion without yielding to the caller.
+    Used for INSERT (side effects) and EXPLAIN ANALYZE (telemetry) where
+    we discard the result rows."""
+    chains, exit_node, ctx = compile_pipeline(plan)
+    if enable_tracing:
+        # EXPLAIN ANALYZE wants per-operator wall-time. Flip the trace flag
+        # on every node so push() emits clock_gettime + execution_time.
+        for nid, node in plan.depth_first_search_flat():
+            if hasattr(node, "enable_tracing"):
+                node.enable_tracing(True)
+    for scan, chain_head in chains:
+        # Consume drive_scan but discard all yielded morsels.
+        for _ in drive_scan(scan, chain_head, exit_node, ctx):
+            pass
+        if ctx.terminated:
+            break
 
 
 def explain(plan: PhysicalPlan, analyze: bool, _format: str) -> Generator[Morsel, None, None]:
-    from opteryx.operators.base_plan_node import BasePlanNode
+    from opteryx.operators import BasePlanNode
     from opteryx.operators.exit import ExitNode
     from opteryx.operators.explain import ExplainNode
 
@@ -96,7 +122,7 @@ def explain(plan: PhysicalPlan, analyze: bool, _format: str) -> Generator[Morsel
         incoming_operators = plan.ingoing_edges(node)
         for operator_name in incoming_operators:
             operator = plan[operator_name[0]]
-            if isinstance(operator, (ExitNode, ExplainNode)):  # Skip ExitNode
+            if isinstance(operator, (ExitNode, ExplainNode)):
                 yield from _inner_explain(operator_name[0], depth)
                 continue
             elif isinstance(operator, BasePlanNode):
@@ -117,21 +143,15 @@ def explain(plan: PhysicalPlan, analyze: bool, _format: str) -> Generator[Morsel
                 yield from _inner_explain(operator_name[0], depth + 1)
 
     head = list(dict.fromkeys(plan.get_exit_points()))
-    if len(head) != 1:  # pragma: no cover
+    if len(head) != 1:
         raise InvalidInternalStateError(f"Problem with the plan - it has {len(head)} heads.")
 
-    # for EXPLAIN ANALYZE, we execute the query and report telemetry
     if analyze:
-        # we don't want the results, just the details from the plan
-        temp = None
+        # Drive the underlying query for telemetry but discard the result rows.
         head_node = plan.get_exit_points()[0]
-        query_head, _, _ = plan.ingoing_edges(head_node)[0]
-        results, result_type = execute(plan, query_head)
-        if results is not None:
-            results_generator, _ = next(results, ([], None))
-            for temp in results_generator:
-                pass
-        del temp
+        query_head_edges = plan.ingoing_edges(head_node)
+        if query_head_edges:
+            _drain_pipeline(plan, enable_tracing=True)
 
     explained = list(_inner_explain(head[0], 1))
 
@@ -143,10 +163,10 @@ def explain(plan: PhysicalPlan, analyze: bool, _format: str) -> Generator[Morsel
                     [row["identity"] for row in explained], dtype=OrsoTypes.VARCHAR
                 ),
                 vector_from_sequence(
-                    [row["bytes_in"] for row in explained], dtype=OrsoTypes.INTEGER
+                    [row.get("bytes_in", 0) for row in explained], dtype=OrsoTypes.INTEGER
                 ),
                 vector_from_sequence(
-                    [row["bytes_out"] for row in explained], dtype=OrsoTypes.INTEGER
+                    [row.get("bytes_out", 0) for row in explained], dtype=OrsoTypes.INTEGER
                 ),
             ],
         )
@@ -154,41 +174,8 @@ def explain(plan: PhysicalPlan, analyze: bool, _format: str) -> Generator[Morsel
         from opteryx.utils import mermaid
 
         mermaid_plan = mermaid.plan_to_mermaid(plan, explained)
-        # DEBUG: print(mermaid_plan)
         table = Morsel.from_vectors(
             ["plan"], [vector_from_sequence([mermaid_plan], dtype=OrsoTypes.VARCHAR)]
         )
 
     yield table
-
-
-def process_node(plan: PhysicalPlan, nid: str, morsel: Morsel) -> Generator:
-    node = plan[nid]
-
-    if node.is_scan:
-        for _, child, _ in plan.outgoing_edges(nid):
-            results = process_node(plan, child, morsel)
-            yield from (result for result in results if result is not None)
-    else:
-        results = node(morsel)
-
-        if results is None:
-            yield None
-            # If input was EOS, propagate it downstream even if node produced nothing
-            if morsel is EOS and not node.is_join:
-                for _, child, _ in plan.outgoing_edges(nid):
-                    yield from process_node(plan, child, EOS)
-            return
-
-        for result in (result for result in results if result is not None):
-            children = plan.outgoing_edges(nid)
-            if len(children) == 0 and result != EOS:
-                yield result
-            for _, child, _ in children:
-                yield from process_node(plan, child, result)
-
-        # After all results processed, if input was EOS, propagate EOS downstream
-        # Join nodes suppress this: they yield EOS explicitly when the probe side exhausts.
-        if morsel is EOS and not node.is_join:
-            for _, child, _ in plan.outgoing_edges(nid):
-                yield from process_node(plan, child, EOS)

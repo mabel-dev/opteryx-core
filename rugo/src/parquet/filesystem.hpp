@@ -28,7 +28,19 @@
 namespace rugo {
 
 static constexpr int64_t  kParquetFooterSuffix  = 8;       // 4-byte len + 4-byte magic
-static constexpr int64_t  kFooterPrefetch        = 65536;   // bytes to read from EOF
+
+// Adaptive footer prefetch size based on file size.
+// Smaller files have smaller footers; larger files benefit from larger prefetch.
+// - <10MB: 32KB (small files, footers usually <8KB)
+// - 10MB-1GB: 64KB (typical case, ClickBench)
+// - >1GB: 128KB (large files with many row groups)
+inline int64_t adaptive_footer_prefetch_size(int64_t file_size) {
+    if (file_size < 10 * 1024 * 1024)
+        return 32 * 1024;
+    if (file_size < 1024 * 1024 * 1024)
+        return 64 * 1024;
+    return 128 * 1024;
+}
 
 static const uint8_t kParquetMagic[4] = {0x50, 0x41, 0x52, 0x31};  // "PAR1"
 
@@ -114,7 +126,7 @@ inline ParquetFooterResult FetchParquetFooter(const std::string& path,
     if (file_size < kParquetFooterSuffix)
         throw std::runtime_error("File too small to be valid Parquet: " + path);
 
-    int64_t prefetch_size   = std::min(kFooterPrefetch, file_size);
+    int64_t prefetch_size   = std::min(adaptive_footer_prefetch_size(file_size), file_size);
     int64_t prefetch_offset = file_size - prefetch_size;
 
     std::vector<uint8_t> tail = read_range(path, prefetch_offset, prefetch_size);

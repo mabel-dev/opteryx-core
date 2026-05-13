@@ -1,5 +1,12 @@
-# cython: language_level=3, c_string_type=unicode, c_string_encoding=utf8
-# distutils: language=c
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 from cpython.bytes cimport PyBytes_AsStringAndSize, PyBytes_FromStringAndSize
 from cpython.unicode cimport PyUnicode_DecodeUTF8

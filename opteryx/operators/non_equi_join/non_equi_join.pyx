@@ -5,6 +5,8 @@
 # cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,9 +37,9 @@ from draken.core.buffers cimport DrakenFixedBuffer
 
 from opteryx.models import QueryProperties
 
-from opteryx import EOS, EMPTY
+# EOS sentinel available as _EOS_SENTINEL via the umbrella unit.
 
-from . import JoinNode
+# BasePlanNode/JoinNode in scope via _operators.pyx include.
 
 
 # ---------------------------------------------------------------------------
@@ -168,10 +170,17 @@ cdef tuple _non_equi_nested_loop_join_kernel(
 # Node
 # ---------------------------------------------------------------------------
 
-class NonEquiJoinNode(JoinNode):
+cdef class NonEquiJoinNode(JoinNode):
+    cdef public object left_column
+    cdef public object right_column
+    cdef public str comparison_op
+    cdef public Morsel left_morsel
+    cdef public list left_morsels
+    cdef public bint _build_phase
+
     join_type = "non equi"
 
-    def __init__(self, properties: QueryProperties, **parameters):
+    def __init__(self, properties=None, **parameters):
         JoinNode.__init__(self, properties=properties, **parameters)
 
         self.left_column  = parameters.get("on").get("left").schema_column.identity
@@ -202,26 +211,21 @@ class NonEquiJoinNode(JoinNode):
         op_symbol = op_symbols.get(self.comparison_op, self.comparison_op)
         return f"{self.left_column} {op_symbol} {self.right_column}"
 
-    def execute(self, Morsel morsel):
-
-        if self._build_phase:
-            if morsel == EOS:
-                self._build_phase = False
-                if self.left_morsels:
-                    self.left_morsel = Morsel.combine(self.left_morsels)
-                    self.left_morsels = []
-            else:
-                if morsel is not None and morsel != EMPTY:
-                    self.left_morsels.append(morsel)
-            yield None
+    cpdef void push_left(self, Morsel morsel) except *:
+        if morsel is _EOS_SENTINEL:
+            if self.left_morsels:
+                self.left_morsel = Morsel.combine(self.left_morsels)
+                self.left_morsels = []
             return
+        if morsel is not None:
+            self.left_morsels.append(morsel)
 
-        if morsel == EOS:
-            yield EOS
+    cpdef void push_right(self, Morsel morsel) except *:
+        if morsel is _EOS_SENTINEL:
+            self.emit(_EOS_SENTINEL)
             return
 
         if self.left_morsel is None or self.left_morsel.num_rows == 0 or morsel.num_rows == 0:
-            yield None
             return
 
         left_column  = self.left_column
@@ -242,6 +246,4 @@ class NonEquiJoinNode(JoinNode):
         )
 
         if left_list is not None:
-            yield _align_morsels(self.left_morsel, morsel, left_list, right_list)
-        else:
-            yield None
+            self.emit(_align_morsels(self.left_morsel, morsel, left_list, right_list))

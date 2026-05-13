@@ -1,10 +1,13 @@
 # cython: language_level=3
-# cython: boundscheck=False
-# cython: wraparound=False
 # cython: nonecheck=False
 # cython: cdivision=True
-# distutils: sources = src/cpp/simd_remap.cpp src/cpp/cpu_features.cpp
+# cython: initializedcheck=False
 # cython: infer_types=True
+# cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+# cython: freethreading_compatible=True
 
 """opteryx.compiled.morsel_ops.sort
 

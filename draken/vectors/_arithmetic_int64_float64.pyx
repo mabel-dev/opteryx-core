@@ -5,6 +5,9 @@
 # cython: infer_types=True
 # cython: wraparound=False
 # cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
+# cython: freethreading_compatible=True
 
 """
 INT64 × FLOAT64 arithmetic kernels.
@@ -410,4 +413,3 @@ cdef Float64Vector _int64_float64_scalar_add_dense(
             result_data[i] = <double>left_data[i] + scalar
 
     return result
-

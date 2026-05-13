@@ -1,6 +1,12 @@
 # cython: language_level=3
-# cython: boundscheck=False
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: initializedcheck=False
+# cython: infer_types=True
 # cython: wraparound=False
+# cython: boundscheck=False
+# cython: optimize.use_switch=True
+# cython: optimize.unpack_method_calls=True
 
 """
 Column descriptor serialization for zero-copy IPC via MemoryPool.

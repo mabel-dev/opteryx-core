@@ -168,8 +168,7 @@ def _normalize_constants_for_dict_path(parts, else_part):
         if sv.encoding != 3:        # not constant — already dict
             return sv
         n = len(sv)
-        values = sv.to_pylist()
-        val = values[0] if values else None
+        val = sv[0] if n > 0 else None
         # Materialize constants that can't form a valid dict entry
         if val is None or val == b'' or val == '':
             return sv.materialize()
