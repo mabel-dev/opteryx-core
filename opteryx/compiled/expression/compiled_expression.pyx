@@ -6,24 +6,13 @@ Bind-time lowering pass: walks an opteryx Node tree and produces a flat C++
 representation that the (forthcoming) nogil evaluator will consume. See
 src/cpp/expression/compiled_expression.h for the on-disk contract.
 
-This module currently exposes only what's needed for the Wedge C round-trip
-test (CompiledExpressionHandle.node_type_walk). Wedge D will add the eval
-entry point on top of the same arena.
+Wedge C exposed only the round-trip walk; Wedge D1 adds a cdef `root()`
+accessor used by opteryx.expression.evaluator.evaluation.evaluate_compiled
+to walk the arena via raw pointers instead of the source Node tree.
 """
 
-from libcpp.deque cimport deque
-from libcpp.vector cimport vector
-
-
-cdef extern from "expression/compiled_expression.h" namespace "opteryx_expr":
-    cdef cppclass CompiledExpression:
-        int node_type
-
-    cdef cppclass CompiledExpressionArena:
-        CompiledExpressionArena() except +
-        CompiledExpression* lower(object py_node) except NULL
-        object node_type_walk(CompiledExpression* root)
-        size_t node_count() const
+# CompiledExpressionHandle declaration lives in the matching .pxd so sibling
+# Cython modules can cimport it.
 
 
 cdef class CompiledExpressionHandle:
@@ -32,8 +21,6 @@ cdef class CompiledExpressionHandle:
     The arena outlives the handle and is deleted in __dealloc__. Children
     pointed at by the root remain valid for the handle's lifetime.
     """
-    cdef CompiledExpressionArena* _arena
-    cdef CompiledExpression* _root
 
     def __cinit__(self):
         self._arena = new CompiledExpressionArena()
@@ -57,6 +44,9 @@ cdef class CompiledExpressionHandle:
         if self._root == NULL:
             return []
         return self._arena.node_type_walk(self._root)
+
+    cdef CompiledExpression* root(self) noexcept:
+        return self._root
 
 
 def lower(node):

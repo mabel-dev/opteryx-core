@@ -1,17 +1,25 @@
+# cython: language_level=3
+# cython: boundscheck=False
+# cython: wraparound=False
+# cython: initializedcheck=False
+
 """Lazy CASE WHEN evaluator.
 
-PR 1 — pure addition.  Not yet dispatched in production (no NodeType.CASE,
-no entry point from _eval_value).  Validated via direct unit tests.
+Three-phase model:
 
-Node contract (matches the forthcoming NodeType.CASE shape):
-    node.conditions   : list[Node]     # length k >= 1
-    node.results      : list[Node]     # length k, parallel to conditions
-    node.else_result  : Node | None    # explicit; no LITERAL(True) injection
+    Decide   — walk conditions in order, assigning each row to the first
+               branch whose predicate is true (or -1 for unmatched).
+    Compute  — evaluate each branch's result expression on only the rows
+               that landed in that branch (and ELSE on the rest).
+    Assemble — scatter the branch outputs into the final vector via the
+               native Cython kernels in opteryx/compiled/vector_ops/case_helpers.
 
-Phase 1 (Decide):   evaluate conditions lazily, assign branch_id per row.
-Phase 2 (Compute):  evaluate result expressions only on rows that matched.
-Phase 3 (Assemble): scatter/build the output vector.
+Wired into production via NT_CASE dispatch in
+opteryx.expression.evaluator.evaluation (_eval_value and
+evaluate_and_append_draken).
 """
+
+from array import array
 
 from opteryx.compiled.vector_ops import (
     assemble_bool,
@@ -22,25 +30,41 @@ from opteryx.compiled.vector_ops import (
     group_indices_and_perm,
 )
 from opteryx.compiled.vector_ops.vector_ops import _make_const_int16, _make_range_int32
+from opteryx.expression import NodeType
+
+from draken.morsels.morsel import Morsel
+from draken.vectors.bool_vector import BoolVector
+from draken.vectors.null_vector import NullVector
+from draken.vectors.string_vector import StringVector
+
+
+# Draken encoding ids — duplicated as compile-time DEFs so the comparisons
+# below fold to integer literals. Mirrors draken.encoding constants.
+DEF _ENC_FLAT = 0
+DEF _ENC_DICT = 1
+DEF _ENC_CONSTANT = 3
+
+# Compile-time NodeType.LITERAL value — kept in sync with the runtime enum by
+# the verification check in opteryx.expression.evaluator.__init__.
+DEF NT_LITERAL = 42
 
 
 # ---------------------------------------------------------------------------
 # Sub-morsel construction
 # ---------------------------------------------------------------------------
 
-def _sub_morsel(morsel, indices):
+
+cdef _sub_morsel(morsel, indices):
     """Return a new Morsel containing only the rows at `indices`.
 
     Uses per-vector .take() so no full morsel copy is made.
     `indices` must be an int32_t-typed buffer (e.g. array('i')).
     """
-    from draken.morsels.morsel import Morsel
-
-    names = list(morsel.column_names)
-    vecs = [
-        morsel.column(n if isinstance(n, bytes) else n.encode()).take(indices)
-        for n in names
-    ]
+    cdef list names = list(morsel.column_names)
+    cdef list vecs = []
+    for n in names:
+        key = n if isinstance(n, bytes) else n.encode()
+        vecs.append(morsel.column(key).take(indices))
     return Morsel.from_vectors(names, vecs)
 
 
@@ -48,32 +72,40 @@ def _sub_morsel(morsel, indices):
 # Phase 1 — Decide
 # ---------------------------------------------------------------------------
 
-def _decide(node, morsel):
+
+cdef _decide(node, morsel):
     """Evaluate conditions lazily; assign branch_id[r] for each row.
 
     Returns (branch_id, rows_per_branch, unmatched, pos_in_branch).
     """
-    from opteryx.expression import NodeType
+    # Lazy because evaluation.pyx imports this module's evaluate_case; the
+    # import cycle is broken by deferring to first call. By the time _decide
+    # is reached the evaluation module has finished initialising.
     from opteryx.expression.evaluator.evaluation import evaluate_draken
-    from draken.vectors.bool_vector import BoolVector
 
-    n = morsel.num_rows
+    cdef Py_ssize_t n = morsel.num_rows
+    cdef Py_ssize_t i
+    cdef Py_ssize_t num_conditions = len(node.conditions)
+    cdef int cond_node_type
+
     branch_id = _make_const_int16(n, -1)   # int16 array, all -1
-    live = _make_range_int32(n)             # int32 array [0..n-1]
+    live = _make_range_int32(n)            # int32 array [0..n-1]
 
-    for i, cond_node in enumerate(node.conditions):
+    for i in range(num_conditions):
         if len(live) == 0:
             break
 
-        # Constant-condition shortcuts — mirror _case_collect_conditions behaviour
-        if cond_node.node_type == NodeType.LITERAL:
+        cond_node = node.conditions[i]
+        cond_node_type = <int>cond_node.node_type
+
+        # Constant-condition shortcuts — mirror _case_collect_conditions.
+        if cond_node_type == NT_LITERAL:
             if cond_node.value is True:
-                # All live rows go to branch i; remaining branches unreachable
+                # All live rows go to branch i; later branches are unreachable.
                 const_true = BoolVector.from_constant(True, len(live))
                 live = decide_one_branch(const_true, live, branch_id, i)
-                # live is now empty
                 break
-            # False or None: branch is dead — skip
+            # False or None: branch is dead — skip.
             continue
 
         sub = _sub_morsel(morsel, live)
@@ -81,7 +113,7 @@ def _decide(node, morsel):
         live = decide_one_branch(c, live, branch_id, i)
 
     rows_per_branch, unmatched, pos_in_branch = group_indices_and_perm(
-        branch_id, len(node.conditions)
+        branch_id, num_conditions
     )
     return branch_id, rows_per_branch, unmatched, pos_in_branch
 
@@ -90,7 +122,8 @@ def _decide(node, morsel):
 # Phase 2 — Compute
 # ---------------------------------------------------------------------------
 
-def _compute(node, morsel, rows_per_branch, unmatched):
+
+cdef _compute(node, morsel, rows_per_branch, unmatched):
     """Evaluate result expressions only on rows that matched each branch.
 
     Returns (parts, else_part):
@@ -101,14 +134,17 @@ def _compute(node, morsel, rows_per_branch, unmatched):
     """
     from opteryx.expression.evaluator.evaluation import _eval_value
 
-    parts = []
-    for i, result_node in enumerate(node.results):
+    cdef list parts = []
+    cdef Py_ssize_t i
+    cdef Py_ssize_t num_results = len(node.results)
+
+    for i in range(num_results):
         rows_i = rows_per_branch[i]
         if len(rows_i) == 0:
             parts.append(None)
             continue
         sub = _sub_morsel(morsel, rows_i)
-        parts.append(_eval_value(result_node, sub))
+        parts.append(_eval_value(node.results[i], sub))
 
     else_part = None
     if node.else_result is not None and len(unmatched) > 0:
@@ -122,92 +158,108 @@ def _compute(node, morsel, rows_per_branch, unmatched):
 # Phase 3 — Assemble dispatch
 # ---------------------------------------------------------------------------
 
-def _is_dict_path(parts, else_part):
+
+cdef bint _is_dict_path(list parts, else_part):
     """True iff every non-None part (and else_part) is a StringVector in either
     dict or constant encoding, AND at least one is dict-encoded.
 
     Constants are admissible because they collapse to a single dict entry in
-    the unified output.  Pure constants alone don't justify the unified-dict
+    the unified output. Pure constants alone don't justify the unified-dict
     overhead — the flat path is simpler.
     """
-    from draken.vectors.string_vector import StringVector
-
-    all_parts = [p for p in parts if p is not None]
+    cdef list all_parts = [p for p in parts if p is not None]
     if else_part is not None:
         all_parts.append(else_part)
     if not all_parts:
         return False
-    has_dict = False
+    cdef bint has_dict = False
+    cdef int enc
     for p in all_parts:
         if not isinstance(p, StringVector):
             return False
-        enc = p.encoding
-        if enc == 1:           # DRAKEN_ENCODING_DICTIONARY
+        enc = <int>p.encoding
+        if enc == _ENC_DICT:
             has_dict = True
-        elif enc == 3:         # DRAKEN_ENCODING_CONSTANT
+        elif enc == _ENC_CONSTANT:
             pass
         else:
             return False
     return has_dict
 
 
-def _normalize_constants_for_dict_path(parts, else_part):
+cdef _to_dict_or_none(sv):
+    """Convert a constant-encoded StringVector to a 1-entry dict-encoded vector.
+
+    None passthrough. Already-dict vectors passthrough. Null/empty constants
+    are materialised because a dict with no entries can't represent them.
+    """
+    if sv is None:
+        return None
+    if <int>sv.encoding != _ENC_CONSTANT:
+        return sv
+    cdef Py_ssize_t n = len(sv)
+    val = sv[0] if n > 0 else None
+    if val is None or val == b"" or val == "":
+        return sv.materialize()
+    codes = array("i", [0] * n)
+    return StringVector.from_dict(codes, [val])
+
+
+cdef _normalize_constants_for_dict_path(list parts, else_part):
     """Convert constant-encoded StringVector parts to single-entry dict-encoded
     vectors so assemble_dict_string can process them uniformly.
 
     Null constants are materialized — the dict kernel reads the per-row null
-    bitmap from the dict accessor, and a synthesized 1-entry dict with all-null
+    bitmap from the dict accessor, and a synthesised 1-entry dict with all-null
     codes is the simplest representation.
     """
-    from array import array
-    from draken.vectors.string_vector import StringVector
-
-    def _to_dict(sv):
-        if sv is None:
-            return None
-        if sv.encoding != 3:        # not constant — already dict
-            return sv
-        n = len(sv)
-        val = sv[0] if n > 0 else None
-        # Materialize constants that can't form a valid dict entry
-        if val is None or val == b'' or val == '':
-            return sv.materialize()
-        codes = array("i", [0] * n)
-        return StringVector.from_dict(codes, [val])
-
-    new_parts = [_to_dict(p) for p in parts]
-    new_else = _to_dict(else_part)
+    cdef list new_parts = [_to_dict_or_none(p) for p in parts]
+    new_else = _to_dict_or_none(else_part)
     return new_parts, new_else
 
 
-def _assemble(node, parts, else_part, branch_id, rows_per_branch, unmatched, pos_in_branch, n):
+cdef _assemble(
+    node,
+    list parts,
+    else_part,
+    branch_id,
+    rows_per_branch,
+    unmatched,
+    pos_in_branch,
+    Py_ssize_t n,
+):
     """Dispatch to the appropriate assembly helper based on output type."""
-    from draken.vectors.bool_vector import BoolVector
-    from draken.vectors.string_vector import StringVector
 
-    # Find the first non-None part to determine the output family.
-    # Use isinstance rather than get_vector_type: constant-encoded vectors are
-    # still BoolVector/StringVector/Int64Vector instances even when encoding==3.
-    first = next((p for p in parts if p is not None), None)
+    # First non-None part determines the output family. Use isinstance rather
+    # than get_vector_type: constant-encoded vectors are still concrete vector
+    # instances (BoolVector / StringVector / Int64Vector / …) even when
+    # encoding == _ENC_CONSTANT.
+    first = None
+    for p in parts:
+        if p is not None:
+            first = p
+            break
     if first is None:
         first = else_part
     if first is None:
-        from draken.vectors.null_vector import NullVector
         return NullVector(n)
 
     if isinstance(first, BoolVector):
         return assemble_bool(parts, else_part, branch_id, rows_per_branch, unmatched)
 
+    cdef bint all_dict
     if isinstance(first, StringVector):
         if _is_dict_path(parts, else_part):
             d_parts, d_else = _normalize_constants_for_dict_path(parts, else_part)
-            # Normalization may have materialized some parts (e.g. empty string
-            # constants) to flat encoding (enc=0).  assemble_dict_string requires
-            # all inputs to be dict-encoded (enc=1); fall back to flat if not.
-            all_dict = all(
-                p is None or p.encoding == 1 for p in d_parts
-            ) and (d_else is None or d_else.encoding == 1)
-            if all_dict:
+            # Normalisation may have materialised some parts (e.g. empty string
+            # constants) to flat encoding. assemble_dict_string requires all
+            # inputs to be dict-encoded; otherwise fall back to flat.
+            all_dict = True
+            for p in d_parts:
+                if p is not None and <int>p.encoding != _ENC_DICT:
+                    all_dict = False
+                    break
+            if all_dict and (d_else is None or <int>d_else.encoding == _ENC_DICT):
                 return assemble_dict_string(
                     d_parts, d_else, branch_id, pos_in_branch, n
                 )
@@ -223,6 +275,7 @@ def _assemble(node, parts, else_part, branch_id, rows_per_branch, unmatched, pos
 # Public entry point
 # ---------------------------------------------------------------------------
 
+
 def evaluate_case(node, morsel):
     """Evaluate a CASE WHEN node lazily against `morsel`.
 
@@ -234,7 +287,7 @@ def evaluate_case(node, morsel):
     if not node.conditions:
         raise ValueError("evaluate_case: node.conditions must be non-empty")
 
-    n = morsel.num_rows
+    cdef Py_ssize_t n = morsel.num_rows
 
     branch_id, rows_per_branch, unmatched, pos_in_branch = _decide(node, morsel)
     parts, else_part = _compute(node, morsel, rows_per_branch, unmatched)

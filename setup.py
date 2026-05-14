@@ -983,9 +983,77 @@ extensions = [
         extra_compile_args=C_FLAGS,
     ),
     # Expression evaluator orchestration (Cython tree walk + dispatch).
+    # Built as C++ because Wedge D1 cimports the CompiledExpression cdef extern
+    # declarations from opteryx/compiled/expression/compiled_expression.pxd,
+    # which references the C++ arena header.
     Extension(
         "opteryx.expression.evaluator.evaluation",
         sources=["opteryx/expression/evaluator/evaluation.pyx"],
+        include_dirs=include_dirs + ["src/cpp"],
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    # Comparison dispatch — all WHERE predicate evaluation routes through here.
+    Extension(
+        "opteryx.expression.evaluator.comparisons",
+        sources=["opteryx/expression/evaluator/comparisons.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=C_FLAGS,
+    ),
+    # Binary arithmetic dispatch.
+    Extension(
+        "opteryx.expression.evaluator.arithmetic",
+        sources=["opteryx/expression/evaluator/arithmetic.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=C_FLAGS,
+    ),
+    # Temporal (date/timestamp/interval) comparison + arithmetic dispatch.
+    Extension(
+        "opteryx.expression.evaluator.temporal_ops",
+        sources=["opteryx/expression/evaluator/temporal_ops.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=C_FLAGS,
+    ),
+    # VectorType → kernel routing called from arithmetic.pyx per binary op.
+    Extension(
+        "opteryx.expression.evaluator.arithmetic_dispatch",
+        sources=["opteryx/expression/evaluator/arithmetic_dispatch.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=C_FLAGS,
+    ),
+    # StringVector comparison dispatch (LIKE / RLIKE / IN / etc.).
+    Extension(
+        "opteryx.expression.evaluator.string_ops",
+        sources=["opteryx/expression/evaluator/string_ops.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=C_FLAGS,
+    ),
+    # JSON/array vector operations (@>, @?, contains-all).
+    Extension(
+        "opteryx.expression.evaluator.json_ops",
+        sources=["opteryx/expression/evaluator/json_ops.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=C_FLAGS,
+    ),
+    # FUNCTION-node application helper.
+    Extension(
+        "opteryx.expression.evaluator.function_execution",
+        sources=["opteryx/expression/evaluator/function_execution.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=C_FLAGS,
+    ),
+    # Type-coercion utilities cimported by every kernel.
+    Extension(
+        "opteryx.expression.evaluator.type_coercion",
+        sources=["opteryx/expression/evaluator/type_coercion.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=C_FLAGS,
+    ),
+    # CASE WHEN lazy evaluator (Decide / Compute / Assemble orchestration on
+    # top of the native kernels in compiled/vector_ops/case_helpers).
+    Extension(
+        "opteryx.expression.evaluator.case_eval",
+        sources=["opteryx/expression/evaluator/case_eval.pyx"],
         include_dirs=include_dirs,
         extra_compile_args=C_FLAGS,
     ),

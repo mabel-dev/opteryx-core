@@ -44,6 +44,12 @@ struct CompiledExpression {
     PyObject* value;
     PyObject* schema_column;
 
+    // Reference to the source opteryx Node. Held for the arena's lifetime so
+    // the Cython walker can hand it to existing Python-facing kernels without
+    // rebuilding it. Wedge D2 will replace this with resolved fields and the
+    // source_node ref can then be dropped.
+    PyObject* source_node;
+
     // Child pointers into the same arena. NULL if absent. Children remain valid
     // for the arena's lifetime — std::deque does not invalidate pointers on
     // push_back, which is why the arena uses one.

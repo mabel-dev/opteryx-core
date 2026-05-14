@@ -4,6 +4,7 @@ from .comparisons import draken_compare
 
 # Main evaluation API
 from .evaluation import evaluate_and_append_draken
+from .evaluation import evaluate_compiled
 from .evaluation import evaluate_draken
 
 # Function execution
@@ -39,6 +40,7 @@ def _verify_node_type_constants():
 __all__ = [
     "evaluate_draken",
     "evaluate_and_append_draken",
+    "evaluate_compiled",
     "draken_compare",
     "apply_bounded_function",
 ]

@@ -67,9 +67,16 @@ CompiledExpression* CompiledExpressionArena::lower_one(PyObject* py_node) {
     slot->node_type = NT_UNKNOWN;
     slot->value = nullptr;
     slot->schema_column = nullptr;
+    slot->source_node = nullptr;
     slot->left = nullptr;
     slot->right = nullptr;
     slot->centre = nullptr;
+
+    // Hold the source Node for the arena's lifetime so consumers can hand it
+    // back to Python-facing kernels without reconstructing it.
+    Py_INCREF(py_node);
+    slot->source_node = py_node;
+    held_refs_.push_back(py_node);
 
     // node_type — Node.node_type is an IntEnum, int(...) gives us the value.
     PyObject* nt_obj = PyObject_GetAttrString(py_node, "node_type");

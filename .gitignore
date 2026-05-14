@@ -294,3 +294,13 @@ opteryx/operators/_operators.h
 **.stats.json
 **.jsonl
 opteryx/expression/evaluator/evaluation.c
+opteryx/expression/evaluator/comparisons.c
+opteryx/expression/evaluator/arithmetic.c
+opteryx/expression/evaluator/arithmetic_dispatch.c
+opteryx/expression/evaluator/case_eval.c
+opteryx/expression/evaluator/evaluation.cpp
+opteryx/expression/evaluator/function_execution.c
+opteryx/expression/evaluator/json_ops.c
+opteryx/expression/evaluator/string_ops.c
+opteryx/expression/evaluator/temporal_ops.c
+opteryx/expression/evaluator/type_coercion.c

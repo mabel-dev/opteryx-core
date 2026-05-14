@@ -19,6 +19,10 @@ a runtime check in opteryx/expression/evaluator/__init__.py verifies this.
 import datetime
 import sys as _sys
 
+from opteryx.compiled.expression.compiled_expression cimport (
+    CompiledExpression,
+    CompiledExpressionHandle,
+)
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 
@@ -631,4 +635,111 @@ def evaluate_and_append_draken(nodes, morsel):
     return _Morsel.from_vectors(col_names, col_vecs)
 
 
-__all__ = ["draken_compare", "evaluate_and_append_draken", "evaluate_draken"]
+# ---------------------------------------------------------------------------
+# Wedge D1: arena-driven evaluation.
+#
+# evaluate_compiled walks a CompiledExpressionHandle's flat C++ tree instead
+# of a Python Node tree. Boolean combinator layers (AND/OR/NOT/XOR/NESTED/
+# BETWEEN/DNF/CNF) dispatch via pointer chase; leaf nodes hand the source
+# Node back to evaluate_draken so the existing kernels are reused unchanged.
+#
+# This is the minimal step that proves the arena → eval contract end-to-end.
+# Wedge D2 will progressively resolve operands at lower-time and migrate
+# leaf dispatch onto the arena as well.
+# ---------------------------------------------------------------------------
+
+
+cdef _eval_compiled(CompiledExpression* cur, morsel):
+    if cur == NULL:
+        raise ValueError("evaluate_compiled: unexpected NULL child pointer")
+
+    cdef int nt = cur.node_type
+    cdef Py_ssize_t n
+    cdef Py_ssize_t i
+
+    if nt == NT_NESTED:
+        return _eval_compiled(cur.centre, morsel)
+
+    if nt == NT_AND:
+        # The numeric-eq hash fast path is implemented in terms of the source
+        # Node tree; look up via sys.modules so tests can monkey-patch it
+        # exactly as they do for evaluate_draken.
+        src = <object>cur.source_node
+        preds = _sys.modules[__name__]._try_collect_numeric_eq_predicates(src)
+        if preds is not None:
+            fast = _evaluate_numeric_eq_via_hash(preds, morsel)
+            if fast is not None:
+                return fast
+        left = _eval_compiled(cur.left, morsel)
+        right = _eval_compiled(cur.right, morsel)
+        return left.and_vector(right)
+
+    if nt == NT_OR:
+        left = _eval_compiled(cur.left, morsel)
+        right = _eval_compiled(cur.right, morsel)
+        return left.or_vector(right)
+
+    if nt == NT_NOT:
+        return _eval_compiled(cur.centre, morsel).not_vector()
+
+    if nt == NT_XOR:
+        left = _eval_compiled(cur.left, morsel)
+        right = _eval_compiled(cur.right, morsel)
+        return left.xor_vector(right)
+
+    if nt == NT_BETWEEN:
+        col = _eval_value(<object>cur.left.source_node, morsel)
+        lower_val = <object>cur.right.value
+        upper_val = <object>cur.centre.value
+        bounds = <object>cur.value
+        lower_inclusive, upper_inclusive = bounds
+        return draken_between(col, lower_val, upper_val, lower_inclusive, upper_inclusive)
+
+    if nt == NT_DNF:
+        n = <Py_ssize_t>cur.parameters.size()
+        if n == 0:
+            raise ValueError("evaluate_compiled: DNF node has no parameters")
+        result = _eval_compiled(cur.parameters[0], morsel)
+        for i in range(1, n):
+            if not result.any():
+                return result
+            result = result.and_vector(_eval_compiled(cur.parameters[i], morsel))
+        return result
+
+    if nt == NT_CNF:
+        n = <Py_ssize_t>cur.parameters.size()
+        if n == 0:
+            raise ValueError("evaluate_compiled: CNF node has no parameters")
+        result = _eval_compiled(cur.parameters[0], morsel)
+        for i in range(1, n):
+            if result.all():
+                return result
+            result = result.or_vector(_eval_compiled(cur.parameters[i], morsel))
+        return result
+
+    # All other node types (COMPARISON_OPERATOR, BINARY_OPERATOR, FUNCTION,
+    # UNARY_OPERATOR, LITERAL, IDENTIFIER, CASE, ...): the existing kernels
+    # consume the source Node directly, so hand it back. Wedge D2 will fold
+    # these onto the arena.
+    return evaluate_draken(<object>cur.source_node, morsel)
+
+
+def evaluate_compiled(CompiledExpressionHandle handle, morsel):
+    """Arena-driven counterpart to evaluate_draken.
+
+    Walks the lowered CompiledExpression tree owned by `handle` instead of
+    the source Python Node tree. Returns a Draken vector with identical
+    semantics to evaluate_draken(handle's source node, morsel).
+    """
+    cdef CompiledExpression* root = handle.root()
+    if root == NULL:
+        raise ValueError("evaluate_compiled: handle has no lowered root")
+    return _eval_compiled(root, morsel)
+
+
+__all__ = [
+    "draken_compare",
+    "evaluate_and_append_draken",
+    "evaluate_compiled",
+    "evaluate_draken",
+]
