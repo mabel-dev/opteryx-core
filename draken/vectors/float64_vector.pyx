@@ -311,8 +311,7 @@ cdef class Float64Vector(Vector):
     def ordered(self):
         return bool(self._dict_ordered) if self._dict_values != NULL else False
 
-    def __getitem__(self, Py_ssize_t i):
-        """Return the value at index i, or None if null."""
+    cdef object item_at(self, Py_ssize_t i):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef double* data
         cdef uint8_t byte
@@ -350,6 +349,10 @@ cdef class Float64Vector(Vector):
             if not bit:
                 return None
         return data[i]
+
+    def __getitem__(self, Py_ssize_t i):
+        """Return the value at index i, or None if null."""
+        return self.item_at(i)
 
     # -------- Interop (owned -> Arrow) --------
     def to_arrow(self):

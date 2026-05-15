@@ -55,6 +55,64 @@ from opteryx import config
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
 
 
+cdef class JoinReadings:
+    """Zero-overhead telemetry accumulator for the inner join hot path.
+
+    Replaces per-morsel Python dict writes (self.readings) with direct
+    C-level field assignments. flush_into() transfers everything to the Python
+    dict once at probe-side EOS.
+    """
+    # ── Build phase (left EOS, called once) ──────────────────────────────────
+    cdef public int64_t time_inner_join_left_combine
+    cdef public int64_t time_inner_join_left_accumulate
+    cdef public int64_t time_inner_join_build_side_hash_map
+    cdef public int64_t feature_inner_join_backend_carchar
+    cdef public int64_t feature_inner_join_draken
+    cdef public int64_t feature_bloom_filter
+    cdef public int64_t time_build_bloom_filter
+    cdef public int64_t build_unique_keys
+    cdef public int64_t build_total_rows
+    cdef public double  build_avg_chain_length
+
+    # ── Per-projection (called per morsel projection) ─────────────────────────
+    cdef public int64_t feature_eliminate_join_columns_draken
+
+    # ── Probe phase (per right-side morsel) ───────────────────────────────────
+    cdef public int64_t time_inner_join_hash
+    cdef public int64_t time_inner_join_probe
+    cdef public int64_t time_inner_join_indices
+    cdef public int64_t time_bloom_filtering
+    cdef public int64_t rows_inner_join_hashed
+    cdef public int64_t rows_inner_join_candidates
+    cdef public int64_t rows_inner_join_matched
+    cdef public int64_t rows_eliminated_by_bloom_filter
+    cdef public int64_t time_inner_join_total_kernel
+    cdef public int64_t time_inner_join_align
+
+    cpdef void flush_into(self, object readings):
+        readings["time_inner_join_left_combine"]          = self.time_inner_join_left_combine
+        readings["time_inner_join_left_accumulate"]       = self.time_inner_join_left_accumulate
+        readings["time_inner_join_build_side_hash_map"]   = self.time_inner_join_build_side_hash_map
+        readings["feature_inner_join_backend_carchar"]    = self.feature_inner_join_backend_carchar
+        readings["feature_inner_join_draken"]             = self.feature_inner_join_draken
+        readings["feature_bloom_filter"]                  = self.feature_bloom_filter
+        readings["time_build_bloom_filter"]               = self.time_build_bloom_filter
+        readings["build_unique_keys"]                     = self.build_unique_keys
+        readings["build_total_rows"]                      = self.build_total_rows
+        readings["build_avg_chain_length"]                = self.build_avg_chain_length
+        readings["feature_eliminate_join_columns_draken"] = self.feature_eliminate_join_columns_draken
+        readings["time_inner_join_hash"]                  = self.time_inner_join_hash
+        readings["time_inner_join_probe"]                 = self.time_inner_join_probe
+        readings["time_inner_join_indices"]               = self.time_inner_join_indices
+        readings["time_bloom_filtering"]                  = self.time_bloom_filtering
+        readings["rows_inner_join_hashed"]                = self.rows_inner_join_hashed
+        readings["rows_inner_join_candidates"]            = self.rows_inner_join_candidates
+        readings["rows_inner_join_matched"]               = self.rows_inner_join_matched
+        readings["rows_eliminated_by_bloom_filter"]       = self.rows_eliminated_by_bloom_filter
+        readings["time_inner_join_total_kernel"]          = self.time_inner_join_total_kernel
+        readings["time_inner_join_align"]                 = self.time_inner_join_align
+
+
 cdef class DrakenInnerJoinNode(JoinNode):
     cdef public list left_columns
     cdef public list right_columns
@@ -66,6 +124,7 @@ cdef class DrakenInnerJoinNode(JoinNode):
     cdef public object lock
     cdef public bint _build_phase
     cdef public double carchar_probe_load_factor
+    cdef public JoinReadings join_readings
 
     join_type = "inner"
 
@@ -87,6 +146,7 @@ cdef class DrakenInnerJoinNode(JoinNode):
         self.carchar_probe_load_factor = float(
             config.get("FEATURE_CARCHAR_PROBE_LOAD_FACTOR", 0.35)
         )
+        self.join_readings = JoinReadings()
 
     @staticmethod
     def supports(**parameters) -> bool:
@@ -183,7 +243,7 @@ cdef class DrakenInnerJoinNode(JoinNode):
         selected = [name for name in encoded_keep if name in available]
         if not selected or len(selected) == len(morsel.column_names):
             return morsel
-        self.readings["feature_eliminate_join_columns_draken"] += 1
+        self.join_readings.feature_eliminate_join_columns_draken += 1
         return morsel.select(selected)
 
     cpdef void push_left(self, Morsel morsel) except *:
@@ -195,7 +255,7 @@ cdef class DrakenInnerJoinNode(JoinNode):
                     return
                 start = time.monotonic_ns()
                 self.left_morsel = Morsel.combine(self.left_morsels)
-                self.readings["time_inner_join_left_combine"] += time.monotonic_ns() - start
+                self.join_readings.time_inner_join_left_combine += time.monotonic_ns() - start
                 self.left_morsels = []
 
                 left_exprs = self._collect_expression_nodes_for_side(self.left_relation_names)
@@ -232,11 +292,11 @@ cdef class DrakenInnerJoinNode(JoinNode):
                     self.left_columns,
                     self.carchar_probe_load_factor,
                 )
-                self.readings["time_inner_join_build_side_hash_map"] += (
+                self.join_readings.time_inner_join_build_side_hash_map += (
                     time.monotonic_ns() - start
                 )
-                self.readings["feature_inner_join_backend_carchar"] += 1
-                self.readings["feature_inner_join_draken"] += 1
+                self.join_readings.feature_inner_join_backend_carchar += 1
+                self.join_readings.feature_inner_join_draken += 1
                 (
                     _hash_time,
                     _probe_time,
@@ -253,11 +313,11 @@ cdef class DrakenInnerJoinNode(JoinNode):
                     build_avg_chain_length,
                 ) = get_last_draken_inner_join_metrics()
                 if self.left_hash.has_bloom_filter():
-                    self.readings["feature_bloom_filter"] += 1
-                    self.readings["time_build_bloom_filter"] += bloom_build_time
-                self.readings["build_unique_keys"] += build_unique_keys
-                self.readings["build_total_rows"] += build_total_rows
-                self.readings["build_avg_chain_length"] = build_avg_chain_length
+                    self.join_readings.feature_bloom_filter += 1
+                    self.join_readings.time_build_bloom_filter += bloom_build_time
+                self.join_readings.build_unique_keys += build_unique_keys
+                self.join_readings.build_total_rows += build_total_rows
+                self.join_readings.build_avg_chain_length = build_avg_chain_length
                 return
 
             # Build-side data morsel — accumulate.
@@ -265,12 +325,13 @@ cdef class DrakenInnerJoinNode(JoinNode):
                 return
             start = time.monotonic_ns()
             self.left_morsels.append(morsel)
-            self.readings["time_inner_join_left_accumulate"] += time.monotonic_ns() - start
+            self.join_readings.time_inner_join_left_accumulate += time.monotonic_ns() - start
 
     cpdef void push_right(self, Morsel morsel) except *:
         with self.lock:
             if morsel is _EOS_SENTINEL:
-                # Probe-side EOS — terminate downstream chain.
+                # Probe-side EOS — flush telemetry then terminate downstream chain.
+                self.join_readings.flush_into(self.readings)
                 self.emit(_EOS_SENTINEL)
                 return
 
@@ -331,18 +392,16 @@ cdef class DrakenInnerJoinNode(JoinNode):
                 _build_total_rows,
                 _build_avg_chain_length,
             ) = get_last_draken_inner_join_metrics()
-            self.readings["time_inner_join_hash"] += hash_time
-            self.readings["time_inner_join_probe"] += probe_time
-            self.readings["time_inner_join_indices"] += materialize_time
-            self.readings["time_bloom_filtering"] += bloom_time
-            self.readings["rows_inner_join_hashed"] += rows_hashed
-            self.readings["rows_inner_join_candidates"] += candidate_rows
-            self.readings["rows_inner_join_matched"] += matched_rows
-            self.readings["rows_eliminated_by_bloom_filter"] += (
-                rows_eliminated_by_bloom_filter
-            )
-            self.readings["time_inner_join_total_kernel"] += total_join_ns
-            self.readings["time_inner_join_align"] += align_time
+            self.join_readings.time_inner_join_hash            += hash_time
+            self.join_readings.time_inner_join_probe           += probe_time
+            self.join_readings.time_inner_join_indices         += materialize_time
+            self.join_readings.time_bloom_filtering            += bloom_time
+            self.join_readings.rows_inner_join_hashed          += rows_hashed
+            self.join_readings.rows_inner_join_candidates      += candidate_rows
+            self.join_readings.rows_inner_join_matched         += matched_rows
+            self.join_readings.rows_eliminated_by_bloom_filter += rows_eliminated_by_bloom_filter
+            self.join_readings.time_inner_join_total_kernel    += total_join_ns
+            self.join_readings.time_inner_join_align           += align_time
             if aligned is not None:
                 self.emit(aligned)
 

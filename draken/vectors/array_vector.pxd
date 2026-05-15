@@ -7,7 +7,7 @@ from draken.vectors.string_vector cimport StringVector
 
 cdef class ArrayVector(Vector):
     cdef DrakenArrayBuffer* ptr
-    cdef object _child
+    cdef Vector _child
     cdef bint owns_offsets
     cdef bint owns_null_bitmap
     cdef object _arrow_parent

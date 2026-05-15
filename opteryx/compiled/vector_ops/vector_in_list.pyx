@@ -8,8 +8,6 @@
 # cython: optimize.use_switch=True
 # cython: optimize.unpack_method_calls=True
 
-import os
-
 # This file is `include`d into vector_ops.pyx. malloc / free / int32_t /
 # memset etc. are already in scope via earlier-included leaves; we re-state
 # them here only to make the file self-documenting. malloc /
@@ -39,15 +37,15 @@ cdef int64_t _PERFECT_HASH_CAP = 262_144
 def build_in_list_carchar(values):
     """Build a membership set from a Python list of IN-list literal values.
 
-    Returns a PerfectHashSet when OPTERYX_PERFECT_HASH=1, all values are
-    non-null integers, and the value range fits within 256K slots.
-    Otherwise returns a CarcharSetWrapper (hashed path).
+    Returns a PerfectHashSet when all values are non-null integers and the
+    value range fits within 256K slots. Otherwise returns a CarcharSetWrapper
+    (hashed path).
     """
     from draken.vectors.scalar_constructors import from_scalar as _build_scalar
 
-    if os.environ.get("OPTERYX_PERFECT_HASH") == "1" and values:
+    if values:
         try:
-            if not any(v is None for v in values):
+            if not any(v is None or isinstance(v, float) for v in values):
                 import datetime as _dt
                 _EPOCH = _dt.date(1970, 1, 1)
                 def _physical(v):

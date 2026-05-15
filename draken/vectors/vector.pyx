@@ -254,6 +254,9 @@ cdef class Vector:
         """
         return self
 
+    cdef object item_at(self, Py_ssize_t i):
+        return self.__getitem__(i)
+
     @property
     def nbytes(self):
         """Approximate memory footprint in bytes.

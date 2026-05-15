@@ -20,6 +20,7 @@ from .predicate_compaction import PredicateCompactionStrategy
 from .predicate_ordering import PredicateOrderingStrategy
 from .predicate_pushdown import PredicatePushdownStrategy
 from .function_rewriter import FunctionRewriteStrategy
+from .sum_rewriter import SumRewriteStrategy
 from .filter_implied_group_key_reduction import FilterImpliedGroupKeyReductionStrategy
 from .group_key_reduction import GroupKeyReductionStrategy
 from .predicate_rewriter import PredicateRewriteStrategy
@@ -58,4 +59,5 @@ __all__ = [
     "RedundantOperationsStrategy",
     "SplitConjunctivePredicatesStrategy",
     "StatisticsOnlyResponseStrategy",
+    "SumRewriteStrategy",
 ]

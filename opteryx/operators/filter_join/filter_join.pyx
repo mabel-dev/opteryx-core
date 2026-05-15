@@ -24,8 +24,8 @@ call into C++ CarcharSet::probe_found_32 / probe_not_found_32 — const methods
 with software prefetch on x86, fully NoGIL.
 
 PerfectHashSet fast path: when the right-side join key is a non-null Int8 or
-Int16 narrow integer column and OPTERYX_PERFECT_HASH=1, direct-address probing
-replaces hash-table probing. Build detects eligibility at first right morsel.
+Int16 narrow integer column, direct-address probing replaces hash-table probing.
+Build detects eligibility at first right morsel.
 
 NULL semantics
 --------------
@@ -46,7 +46,6 @@ possible join modes:
                        null are also excluded (NULL NOT IN (...) = UNKNOWN).
 """
 
-import os
 from typing import Generator, Optional
 import time
 
@@ -423,7 +422,7 @@ cdef class FilterJoinNode(JoinNode):
         start = time.monotonic_ns()
 
         # On first right morsel: decide hash vs perfect-hash path
-        if self.right_hash_set is None and os.environ.get("OPTERYX_PERFECT_HASH") == "1":
+        if self.right_hash_set is None:
             phash = _try_build_phash(morsel, self.right_columns, None)
             if phash is not None:
                 self.right_hash_set = phash

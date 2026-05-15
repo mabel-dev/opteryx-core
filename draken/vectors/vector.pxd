@@ -84,3 +84,7 @@ cdef class Vector:
     # Return a dense (non-encoded) version of this vector.
     # Default: return self (already dense). Subclasses override for dict/const/RLE.
     cpdef Vector materialize(self)
+
+    # Return the value at index i as a Python object, or None if null.
+    # Base delegates to __getitem__; hot subtypes override with a direct cdef.
+    cdef object item_at(self, Py_ssize_t i)

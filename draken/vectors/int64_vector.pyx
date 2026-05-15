@@ -353,8 +353,7 @@ cdef class Int64Vector(Vector):
     def ordered(self):
         return bool(self._dict_ordered) if self._dict_values != NULL else False
 
-    def __getitem__(self, Py_ssize_t i):
-        """Return the value at index i, or None if null."""
+    cdef object item_at(self, Py_ssize_t i):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef uint8_t byte
         cdef uint8_t bit
@@ -368,7 +367,6 @@ cdef class Int64Vector(Vector):
                 return None
             return self._const_value
         if self._encoding == DRAKEN_ENCODING_RLE:
-            # Linear scan through runs to find value at logical index i
             rle_vals = <int64_t*>self._rle_buffer.run_values
             for run_idx in range(self._rle_buffer.num_runs):
                 cumulative += <size_t>self._rle_buffer.run_lengths[run_idx]
@@ -392,6 +390,10 @@ cdef class Int64Vector(Vector):
             if not bit:
                 return None
         return data[i]
+
+    def __getitem__(self, Py_ssize_t i):
+        """Return the value at index i, or None if null."""
+        return self.item_at(i)
 
     # -------- Interop (owned -> Arrow) --------
     def to_arrow(self):

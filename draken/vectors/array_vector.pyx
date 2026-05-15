@@ -130,7 +130,7 @@ cdef class ArrayVector(Vector):
 
         import pyarrow as pa
 
-        child_arrow = (<Vector> self._child).to_arrow()
+        child_arrow = self._child.to_arrow()
 
         # When a native decoder signals UTF-8 children, cast binary -> utf8.
         if self._child_decode_utf8 and child_arrow.type == pa.binary():
@@ -250,7 +250,7 @@ cdef class ArrayVector(Vector):
                     pos += 1
                     start += 1
 
-            child_vec = <Vector> self._child
+            child_vec = self._child
             if total == 0:
                 # Cython cannot create a zero-length typed memoryview from a raw
                 # pointer; slice a 1-element stack variable to length 0 instead.
@@ -328,12 +328,11 @@ cdef class ArrayVector(Vector):
         cdef Py_ssize_t count = end - start
         if count <= 0:
             return []
-        cdef object child = self._child
-        cdef object getitem = child.__getitem__
+        cdef Vector child = self._child
         cdef list values = [None] * count
         cdef Py_ssize_t j
         for j in range(count):
-            values[j] = getitem(start + j)
+            values[j] = child.item_at(start + j)
         return values
 
     cdef void hash_into(
@@ -363,7 +362,7 @@ cdef class ArrayVector(Vector):
 
         cdef DrakenArrayBuffer* ptr = self.ptr
         cdef Py_ssize_t total_children = ptr.offsets[n] if n > 0 else 0
-        cdef object child = self._child
+        cdef Vector child = self._child
         cdef uint64_t[::1] child_hashes
         cdef Py_ssize_t i, j
         cdef int32_t start, end

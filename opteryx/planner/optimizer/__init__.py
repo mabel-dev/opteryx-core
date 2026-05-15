@@ -62,6 +62,7 @@ from opteryx.planner.optimizer.strategies import (
     RedundantOperationsStrategy,
     SplitConjunctivePredicatesStrategy,
     StatisticsOnlyResponseStrategy,
+    SumRewriteStrategy,
 )
 
 from .statistics_refresh import refresh_statistics
@@ -87,6 +88,7 @@ class OptimizerVisitor:
             NullabilityInferenceStrategy(telemetry),
             PredicateRewriteStrategy(telemetry),
             FunctionRewriteStrategy(telemetry),
+            SumRewriteStrategy(telemetry),
             GroupKeyReductionStrategy(telemetry),
             PredicateCompactionStrategy(telemetry),
             JoinPlanningStrategy(telemetry),  # Cost-based DPccp; no-op when flag off

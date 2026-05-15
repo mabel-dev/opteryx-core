@@ -21,7 +21,6 @@ This is a SQL Query Execution Plan Node.
 This Node eliminates duplicate records.
 """
 
-import os
 from typing import Generator, Optional
 from opteryx.compiled.morsel_ops.distinct import distinct as _distinct
 from opteryx.compiled.structures.carchar_set import CarcharSetWrapper as _CarcharSetWrapper
@@ -65,8 +64,6 @@ cdef class DistinctNode(BasePlanNode):
 
     cdef object _try_init_perfect_hash(self, Morsel morsel):
         """Return a PerfectHashSet if the single DISTINCT key is a non-null Int8/Int16 column."""
-        if os.environ.get("OPTERYX_PERFECT_HASH") != "1":
-            return None
         cols = self._distinct_on
         if cols is None or len(cols) != 1:
             return None

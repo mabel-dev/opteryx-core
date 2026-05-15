@@ -63,6 +63,139 @@ from opteryx import config
 _FOOTER_CACHE = ParquetFooterBytesCache()
 
 
+cdef class ScanReadings:
+    """Zero-overhead telemetry accumulator for the Parquet scan hot path.
+
+    Replaces per-row-group Python dict writes (self.readings) with direct
+    C-level field assignments. flush_into() transfers everything to the Python
+    dict once at scan completion so external consumers see the same interface.
+    """
+    # ── Additive: from _extract_row_group_metadata ───────────────────────────
+    cdef public int64_t parquet_row_groups_pruned
+    cdef public int64_t parquet_footer_bytes
+    cdef public int64_t parquet_range_request_count
+    cdef public int64_t parquet_range_bytes_requested
+    cdef public int64_t time_parquet_read_ranges_ns
+    cdef public int64_t time_parquet_decode_columns_ns
+    cdef public int64_t time_parquet_task_queue_wait_ns
+    cdef public int64_t time_parquet_task_total_ns
+    cdef public int64_t time_parquet_footer_fetch_ns
+    cdef public int64_t time_parquet_scheduler_wait_ns
+    cdef public int64_t time_parquet_rowgroup_completion_ns
+    cdef public int64_t time_parquet_emit_wait_ns
+    cdef public int64_t time_parquet_scheduler_empty_wait_ns
+    cdef public int64_t parquet_scheduler_empty_wait_events
+    cdef public int64_t io_ring_producer_full_wait_ns
+    cdef public int64_t io_ring_producer_full_wait_events
+    cdef public int64_t io_ring_consumer_empty_wait_ns
+    cdef public int64_t io_ring_consumer_empty_wait_events
+    cdef public int64_t io_transfer_emit_wait_ns
+    cdef public int64_t io_rowgroup_slice_count
+    cdef public int64_t io_deserialize_ns
+    cdef public int64_t io_serialize_ns
+
+    # ── Peak/max: from _extract_row_group_metadata ───────────────────────────
+    cdef public int64_t parquet_rowgroup_peak_in_flight_max
+    cdef public int64_t parquet_ranges_in_flight_peak
+    cdef public int64_t parquet_active_files_peak
+    cdef public int64_t parquet_active_rowgroups_peak
+    cdef public int64_t parquet_rowgroups_in_flight_cap
+    cdef public int64_t parquet_emit_queue_depth_at_ready_max
+    cdef public int64_t io_ring_slot_bytes
+    cdef public int64_t io_ring_slot_count
+    cdef public int64_t io_ring_total_bytes
+    cdef public int64_t io_transfer_ready_backlog_peak
+    cdef public int64_t io_transfer_fragment_count_p50
+    cdef public int64_t io_transfer_fragment_count_p95
+    cdef public int64_t io_transfer_fragment_count_max
+    cdef public int64_t io_transfer_payload_bytes_p50
+    cdef public int64_t io_transfer_payload_bytes_p95
+    cdef public int64_t io_transfer_payload_bytes_max
+
+    # ── Special: set-once fields ─────────────────────────────────────────────
+    cdef public object parquet_scan_strategy       # str, set once
+    cdef public int64_t time_to_first_rowgroup_ns  # int64, keep minimum
+
+    # ── Additive: from the scan loop ─────────────────────────────────────────
+    cdef public int64_t parquet_latmat_pass1_row_groups
+    cdef public int64_t parquet_latmat_skipped_row_groups
+    cdef public int64_t parquet_latmat_pass2_bytes
+    cdef public int64_t parquet_latmat_pass2_row_groups
+    cdef public int64_t rows_seen
+    cdef public int64_t row_groups_read
+    cdef public int64_t files_read
+    cdef public int64_t blobs_seen
+    cdef public int64_t blobs_read
+    cdef public int64_t rows_read
+    cdef public int64_t bytes_processed
+    cdef public int64_t time_decoding_blobs
+    cdef public int64_t parquet_rows_before_filter
+    cdef public int64_t parquet_rows_after_filter
+    cdef public double  parquet_filter_selectivity
+    cdef public int64_t empty_datasets
+
+    cpdef void flush_into(self, object readings):
+        readings["parquet_row_groups_pruned"]          = self.parquet_row_groups_pruned
+        readings["parquet_footer_bytes"]               = self.parquet_footer_bytes
+        readings["parquet_range_request_count"]        = self.parquet_range_request_count
+        readings["parquet_range_bytes_requested"]      = self.parquet_range_bytes_requested
+        readings["time_parquet_read_ranges_ns"]        = self.time_parquet_read_ranges_ns
+        readings["time_parquet_decode_columns_ns"]     = self.time_parquet_decode_columns_ns
+        readings["time_parquet_task_queue_wait_ns"]    = self.time_parquet_task_queue_wait_ns
+        readings["time_parquet_task_total_ns"]         = self.time_parquet_task_total_ns
+        readings["time_parquet_footer_fetch_ns"]       = self.time_parquet_footer_fetch_ns
+        readings["time_parquet_scheduler_wait_ns"]     = self.time_parquet_scheduler_wait_ns
+        readings["time_parquet_rowgroup_completion_ns"]= self.time_parquet_rowgroup_completion_ns
+        readings["time_parquet_emit_wait_ns"]          = self.time_parquet_emit_wait_ns
+        readings["time_parquet_scheduler_empty_wait_ns"] = self.time_parquet_scheduler_empty_wait_ns
+        readings["parquet_scheduler_empty_wait_events"]= self.parquet_scheduler_empty_wait_events
+        readings["io_ring_producer_full_wait_ns"]      = self.io_ring_producer_full_wait_ns
+        readings["io_ring_producer_full_wait_events"]  = self.io_ring_producer_full_wait_events
+        readings["io_ring_consumer_empty_wait_ns"]     = self.io_ring_consumer_empty_wait_ns
+        readings["io_ring_consumer_empty_wait_events"] = self.io_ring_consumer_empty_wait_events
+        readings["io_transfer_emit_wait_ns"]           = self.io_transfer_emit_wait_ns
+        readings["io_rowgroup_slice_count"]            = self.io_rowgroup_slice_count
+        readings["io_deserialize_ns"]                  = self.io_deserialize_ns
+        readings["io_serialize_ns"]                    = self.io_serialize_ns
+        readings["parquet_rowgroup_peak_in_flight_max"]= self.parquet_rowgroup_peak_in_flight_max
+        readings["parquet_ranges_in_flight_peak"]      = self.parquet_ranges_in_flight_peak
+        readings["parquet_active_files_peak"]          = self.parquet_active_files_peak
+        readings["parquet_active_rowgroups_peak"]      = self.parquet_active_rowgroups_peak
+        readings["parquet_rowgroups_in_flight_cap"]    = self.parquet_rowgroups_in_flight_cap
+        readings["parquet_emit_queue_depth_at_ready_max"] = self.parquet_emit_queue_depth_at_ready_max
+        readings["io_ring_slot_bytes"]                 = self.io_ring_slot_bytes
+        readings["io_ring_slot_count"]                 = self.io_ring_slot_count
+        readings["io_ring_total_bytes"]                = self.io_ring_total_bytes
+        readings["io_transfer_ready_backlog_peak"]     = self.io_transfer_ready_backlog_peak
+        readings["io_transfer_fragment_count_p50"]     = self.io_transfer_fragment_count_p50
+        readings["io_transfer_fragment_count_p95"]     = self.io_transfer_fragment_count_p95
+        readings["io_transfer_fragment_count_max"]     = self.io_transfer_fragment_count_max
+        readings["io_transfer_payload_bytes_p50"]      = self.io_transfer_payload_bytes_p50
+        readings["io_transfer_payload_bytes_p95"]      = self.io_transfer_payload_bytes_p95
+        readings["io_transfer_payload_bytes_max"]      = self.io_transfer_payload_bytes_max
+        if self.parquet_scan_strategy is not None:
+            readings["parquet_scan_strategy"]          = self.parquet_scan_strategy
+        if self.time_to_first_rowgroup_ns:
+            readings["time_to_first_rowgroup_ns"]      = self.time_to_first_rowgroup_ns
+        readings["parquet_latmat_pass1_row_groups"]    = self.parquet_latmat_pass1_row_groups
+        readings["parquet_latmat_skipped_row_groups"]  = self.parquet_latmat_skipped_row_groups
+        readings["parquet_latmat_pass2_bytes"]         = self.parquet_latmat_pass2_bytes
+        readings["parquet_latmat_pass2_row_groups"]    = self.parquet_latmat_pass2_row_groups
+        readings["rows_seen"]                          = self.rows_seen
+        readings["row_groups_read"]                    = self.row_groups_read
+        readings["files_read"]                         = self.files_read
+        readings["blobs_seen"]                         = self.blobs_seen
+        readings["blobs_read"]                         = self.blobs_read
+        readings["rows_read"]                          = self.rows_read
+        readings["bytes_processed"]                    = self.bytes_processed
+        readings["time_decoding_blobs"]                = self.time_decoding_blobs
+        readings["parquet_rows_before_filter"]         = self.parquet_rows_before_filter
+        readings["parquet_rows_after_filter"]          = self.parquet_rows_after_filter
+        if self.parquet_rows_before_filter > 0:
+            readings["parquet_filter_selectivity"]     = self.parquet_filter_selectivity
+        readings["empty_datasets"]                     = self.empty_datasets
+
+
 cdef inline void _coerce_logical_types(
     dict row_group,
     dict decimal_col_map,
@@ -111,6 +244,7 @@ cdef class ParquetReadNode(ReaderNode):
     cdef public object _compiled_predicate_dispatcher
     cdef public object _planner_name_to_identity_cached
     cdef public object _filter_column_names_cached
+    cdef public ScanReadings scan_readings
 
     def __init__(self, properties: QueryProperties, **parameters) -> None:
         ReaderNode.__init__(self, properties=properties, **parameters)
@@ -120,6 +254,7 @@ cdef class ParquetReadNode(ReaderNode):
         self._compiled_predicate_dispatcher = None  # Phase 2: Compiled predicate dispatcher
         self._planner_name_to_identity_cached = None  # Cache name-to-identity mapping
         self._filter_column_names_cached = None  # Cache filter column names extraction
+        self.scan_readings = ScanReadings()
 
     def _analyze_predicate_type(self, object predicate_root) -> tuple:
         """Analyze predicate structure to determine if it can be compiled.
@@ -427,123 +562,102 @@ cdef class ParquetReadNode(ReaderNode):
         return filtered, rows_before_filter, filtered.num_rows
 
     cdef tuple _extract_row_group_metadata(self, dict row_group):
-        """Extract and aggregate metadata from row_group dict into self.readings.
+        """Extract and accumulate per-row-group pipeline metadata into scan_readings.
 
-        Batches all pop() operations and updates to self.readings to minimize
-        dict lookups. Returns path and rg_idx; all other metadata is consumed.
+        All accumulation uses direct C-level field writes on ScanReadings —
+        no Python dict operations until flush_into() at scan completion.
+        Returns (path, rg_idx); all __*__ metadata keys are consumed from row_group.
         """
-        # self.readings is a defaultdict; bind as `object` since `cdef dict`
-        # rejects dict subclasses at runtime.
-        cdef object readings = self.readings
+        cdef ScanReadings sr = self.scan_readings
         cdef object path = row_group.pop("__path__")
         cdef object rg_idx = row_group.pop("__row_group__")
-        cdef object existing
         cdef object scan_strategy
-        cdef object time_to_first_rowgroup_ns
-        cdef str key
+        cdef int64_t val
 
-        # Additive metrics: direct +=
-        readings["parquet_row_groups_pruned"] = row_group.pop("__row_groups_pruned__", 0)
-        self.bytes_in += row_group.pop("__bytes_fetched__", 0)
-        readings["parquet_footer_bytes"] += row_group.pop("__footer_bytes__", 0)
-        readings["parquet_range_request_count"] += row_group.pop("__range_request_count__", 0)
-        readings["parquet_range_bytes_requested"] += row_group.pop("__range_bytes_requested__", 0)
-        readings["time_parquet_read_ranges_ns"] += row_group.pop("__time_read_ranges_ns__", 0)
-        readings["time_parquet_decode_columns_ns"] += row_group.pop("__time_decode_columns_ns__", 0)
-        readings["time_parquet_task_queue_wait_ns"] += row_group.pop("__task_queue_wait_ns__", 0)
-        readings["time_parquet_task_total_ns"] += row_group.pop("__task_total_ns__", 0)
-        readings["time_parquet_footer_fetch_ns"] += row_group.pop("__footer_fetch_ns__", 0)
-        readings["time_parquet_scheduler_wait_ns"] += row_group.pop("__scheduler_wait_ns__", 0)
-        readings["time_parquet_rowgroup_completion_ns"] += row_group.pop("__rowgroup_completion_latency_ns__", 0)
-        readings["time_parquet_emit_wait_ns"] += row_group.pop("__emit_wait_ns__", 0)
-        readings["time_parquet_scheduler_empty_wait_ns"] += row_group.pop("__scheduler_empty_wait_ns__", 0)
-        readings["parquet_scheduler_empty_wait_events"] += row_group.pop("__scheduler_empty_wait_events__", 0)
-        readings["io_ring_producer_full_wait_ns"] += row_group.pop("__io_ring_producer_full_wait_ns__", 0)
-        readings["io_ring_producer_full_wait_events"] += row_group.pop("__io_ring_producer_full_wait_events__", 0)
-        readings["io_ring_consumer_empty_wait_ns"] += row_group.pop("__io_ring_consumer_empty_wait_ns__", 0)
-        readings["io_ring_consumer_empty_wait_events"] += row_group.pop("__io_ring_consumer_empty_wait_events__", 0)
-        readings["io_transfer_emit_wait_ns"] += row_group.pop("__io_transfer_emit_wait_ns__", 0)
-        readings["io_rowgroup_slice_count"] += row_group.pop("__io_rowgroup_slice_count__", 0)
-        readings["io_deserialize_ns"] += row_group.pop("__io_deserialize_ns__", 0)
-        readings["io_serialize_ns"] += row_group.pop("__io_serialize_ns__", 0)
+        # Additive metrics
+        sr.parquet_row_groups_pruned        = row_group.pop("__row_groups_pruned__", 0)
+        self.bytes_in                      += row_group.pop("__bytes_fetched__", 0)
+        sr.parquet_footer_bytes            += row_group.pop("__footer_bytes__", 0)
+        sr.parquet_range_request_count     += row_group.pop("__range_request_count__", 0)
+        sr.parquet_range_bytes_requested   += row_group.pop("__range_bytes_requested__", 0)
+        sr.time_parquet_read_ranges_ns     += row_group.pop("__time_read_ranges_ns__", 0)
+        sr.time_parquet_decode_columns_ns  += row_group.pop("__time_decode_columns_ns__", 0)
+        sr.time_parquet_task_queue_wait_ns += row_group.pop("__task_queue_wait_ns__", 0)
+        sr.time_parquet_task_total_ns      += row_group.pop("__task_total_ns__", 0)
+        sr.time_parquet_footer_fetch_ns    += row_group.pop("__footer_fetch_ns__", 0)
+        sr.time_parquet_scheduler_wait_ns  += row_group.pop("__scheduler_wait_ns__", 0)
+        sr.time_parquet_rowgroup_completion_ns += row_group.pop("__rowgroup_completion_latency_ns__", 0)
+        sr.time_parquet_emit_wait_ns       += row_group.pop("__emit_wait_ns__", 0)
+        sr.time_parquet_scheduler_empty_wait_ns += row_group.pop("__scheduler_empty_wait_ns__", 0)
+        sr.parquet_scheduler_empty_wait_events  += row_group.pop("__scheduler_empty_wait_events__", 0)
+        sr.io_ring_producer_full_wait_ns   += row_group.pop("__io_ring_producer_full_wait_ns__", 0)
+        sr.io_ring_producer_full_wait_events += row_group.pop("__io_ring_producer_full_wait_events__", 0)
+        sr.io_ring_consumer_empty_wait_ns  += row_group.pop("__io_ring_consumer_empty_wait_ns__", 0)
+        sr.io_ring_consumer_empty_wait_events += row_group.pop("__io_ring_consumer_empty_wait_events__", 0)
+        sr.io_transfer_emit_wait_ns        += row_group.pop("__io_transfer_emit_wait_ns__", 0)
+        sr.io_rowgroup_slice_count         += row_group.pop("__io_rowgroup_slice_count__", 0)
+        sr.io_deserialize_ns               += row_group.pop("__io_deserialize_ns__", 0)
+        sr.io_serialize_ns                 += row_group.pop("__io_serialize_ns__", 0)
 
-        # Peak metrics: max()
-        readings["parquet_rowgroup_peak_in_flight_max"] = max(
-            readings.get("parquet_rowgroup_peak_in_flight_max", 0),
-            row_group.pop("__rowgroup_peak_in_flight__", 0),
-        )
-        readings["parquet_ranges_in_flight_peak"] = max(
-            readings.get("parquet_ranges_in_flight_peak", 0),
-            row_group.pop("__ranges_in_flight_peak__", 0),
-        )
-        readings["parquet_active_files_peak"] = max(
-            readings.get("parquet_active_files_peak", 0),
-            row_group.pop("__active_files_peak__", 0),
-        )
-        readings["parquet_active_rowgroups_peak"] = max(
-            readings.get("parquet_active_rowgroups_peak", 0),
-            row_group.pop("__active_rowgroups_peak__", 0),
-        )
-        readings["parquet_rowgroups_in_flight_cap"] = max(
-            readings.get("parquet_rowgroups_in_flight_cap", 0),
-            row_group.pop("__rowgroups_in_flight_cap__", 0),
-        )
-        readings["parquet_emit_queue_depth_at_ready_max"] = max(
-            readings.get("parquet_emit_queue_depth_at_ready_max", 0),
-            row_group.pop("__emit_queue_depth_at_ready__", 0),
-        )
-        readings["io_ring_slot_bytes"] = max(
-            readings.get("io_ring_slot_bytes", 0),
-            row_group.pop("__io_ring_slot_bytes__", 0),
-        )
-        readings["io_ring_slot_count"] = max(
-            readings.get("io_ring_slot_count", 0),
-            row_group.pop("__io_ring_slot_count__", 0),
-        )
-        readings["io_ring_total_bytes"] = max(
-            readings.get("io_ring_total_bytes", 0),
-            row_group.pop("__io_ring_total_bytes__", 0),
-        )
-        readings["io_transfer_ready_backlog_peak"] = max(
-            readings.get("io_transfer_ready_backlog_peak", 0),
-            row_group.pop("__io_transfer_ready_backlog_peak__", 0),
-        )
-        readings["io_transfer_fragment_count_p50"] = max(
-            readings.get("io_transfer_fragment_count_p50", 0),
-            row_group.pop("__io_transfer_fragment_count_p50__", 0),
-        )
-        readings["io_transfer_fragment_count_p95"] = max(
-            readings.get("io_transfer_fragment_count_p95", 0),
-            row_group.pop("__io_transfer_fragment_count_p95__", 0),
-        )
-        readings["io_transfer_fragment_count_max"] = max(
-            readings.get("io_transfer_fragment_count_max", 0),
-            row_group.pop("__io_transfer_fragment_count_max__", 0),
-        )
-        readings["io_transfer_payload_bytes_p50"] = max(
-            readings.get("io_transfer_payload_bytes_p50", 0),
-            row_group.pop("__io_transfer_payload_bytes_p50__", 0),
-        )
-        readings["io_transfer_payload_bytes_p95"] = max(
-            readings.get("io_transfer_payload_bytes_p95", 0),
-            row_group.pop("__io_transfer_payload_bytes_p95__", 0),
-        )
-        readings["io_transfer_payload_bytes_max"] = max(
-            readings.get("io_transfer_payload_bytes_max", 0),
-            row_group.pop("__io_transfer_payload_bytes_max__", 0),
-        )
+        # Peak/max metrics
+        val = row_group.pop("__rowgroup_peak_in_flight__", 0)
+        if val > sr.parquet_rowgroup_peak_in_flight_max:
+            sr.parquet_rowgroup_peak_in_flight_max = val
+        val = row_group.pop("__ranges_in_flight_peak__", 0)
+        if val > sr.parquet_ranges_in_flight_peak:
+            sr.parquet_ranges_in_flight_peak = val
+        val = row_group.pop("__active_files_peak__", 0)
+        if val > sr.parquet_active_files_peak:
+            sr.parquet_active_files_peak = val
+        val = row_group.pop("__active_rowgroups_peak__", 0)
+        if val > sr.parquet_active_rowgroups_peak:
+            sr.parquet_active_rowgroups_peak = val
+        val = row_group.pop("__rowgroups_in_flight_cap__", 0)
+        if val > sr.parquet_rowgroups_in_flight_cap:
+            sr.parquet_rowgroups_in_flight_cap = val
+        val = row_group.pop("__emit_queue_depth_at_ready__", 0)
+        if val > sr.parquet_emit_queue_depth_at_ready_max:
+            sr.parquet_emit_queue_depth_at_ready_max = val
+        val = row_group.pop("__io_ring_slot_bytes__", 0)
+        if val > sr.io_ring_slot_bytes:
+            sr.io_ring_slot_bytes = val
+        val = row_group.pop("__io_ring_slot_count__", 0)
+        if val > sr.io_ring_slot_count:
+            sr.io_ring_slot_count = val
+        val = row_group.pop("__io_ring_total_bytes__", 0)
+        if val > sr.io_ring_total_bytes:
+            sr.io_ring_total_bytes = val
+        val = row_group.pop("__io_transfer_ready_backlog_peak__", 0)
+        if val > sr.io_transfer_ready_backlog_peak:
+            sr.io_transfer_ready_backlog_peak = val
+        val = row_group.pop("__io_transfer_fragment_count_p50__", 0)
+        if val > sr.io_transfer_fragment_count_p50:
+            sr.io_transfer_fragment_count_p50 = val
+        val = row_group.pop("__io_transfer_fragment_count_p95__", 0)
+        if val > sr.io_transfer_fragment_count_p95:
+            sr.io_transfer_fragment_count_p95 = val
+        val = row_group.pop("__io_transfer_fragment_count_max__", 0)
+        if val > sr.io_transfer_fragment_count_max:
+            sr.io_transfer_fragment_count_max = val
+        val = row_group.pop("__io_transfer_payload_bytes_p50__", 0)
+        if val > sr.io_transfer_payload_bytes_p50:
+            sr.io_transfer_payload_bytes_p50 = val
+        val = row_group.pop("__io_transfer_payload_bytes_p95__", 0)
+        if val > sr.io_transfer_payload_bytes_p95:
+            sr.io_transfer_payload_bytes_p95 = val
+        val = row_group.pop("__io_transfer_payload_bytes_max__", 0)
+        if val > sr.io_transfer_payload_bytes_max:
+            sr.io_transfer_payload_bytes_max = val
 
-        # Special handling: scan strategy (set once if present)
+        # Scan strategy: set once
         scan_strategy = row_group.pop("__parquet_scan_strategy__", None)
-        if scan_strategy:
-            readings["parquet_scan_strategy"] = scan_strategy
+        if scan_strategy and sr.parquet_scan_strategy is None:
+            sr.parquet_scan_strategy = scan_strategy
 
-        # Special handling: time to first row group (set once, keep minimum)
-        time_to_first_rowgroup_ns = row_group.pop("__time_to_first_rowgroup_ns__", 0)
-        if time_to_first_rowgroup_ns:
-            existing = readings.get("time_to_first_rowgroup_ns", 0)
-            if existing == 0 or time_to_first_rowgroup_ns < existing:
-                readings["time_to_first_rowgroup_ns"] = time_to_first_rowgroup_ns
+        # Time to first row group: keep minimum
+        val = row_group.pop("__time_to_first_rowgroup_ns__", 0)
+        if val and (sr.time_to_first_rowgroup_ns == 0 or val < sr.time_to_first_rowgroup_ns):
+            sr.time_to_first_rowgroup_ns = val
 
         # Clean up remaining __*__ keys without breaking the contract.
         # Snapshot keys first via list() since we mutate during iteration.
@@ -745,18 +859,16 @@ cdef class ParquetReadNode(ReaderNode):
                         p1_morsel = evaluate_and_append_draken(self._predicate_function_nodes_cached, p1_morsel)
                     mask = evaluate_draken(predicate_root, p1_morsel)
 
-                    self.readings["parquet_latmat_pass1_row_groups"] += 1
+                    self.scan_readings.parquet_latmat_pass1_row_groups += 1
                     total_rows_before_filter += rows_before_filter
 
                     if not mask.any():
-                        self.readings["parquet_latmat_skipped_row_groups"] += 1
-                        self.readings["row_groups_read"] = (
-                            self.readings.get("row_groups_read", 0) + 1
-                        )
+                        self.scan_readings.parquet_latmat_skipped_row_groups += 1
+                        self.scan_readings.row_groups_read += 1
                         if path not in self._parquet_files_seen:
                             self._parquet_files_seen.add(path)
-                            self.readings["files_read"] = len(self._parquet_files_seen)
-                            self.readings["blobs_seen"] += 1
+                            self.scan_readings.files_read = len(self._parquet_files_seen)
+                            self.scan_readings.blobs_seen += 1
                         continue
 
                     p1_cache[(path, rg_idx)] = (p1_morsel.filter_mask(mask), p1_identity_names)
@@ -776,7 +888,7 @@ cdef class ParquetReadNode(ReaderNode):
                     rg_idx = row_group.get('__row_group__')
 
                     p2_bytes = row_group.pop('__bytes_fetched__', 0)
-                    self.readings["parquet_latmat_pass2_bytes"] += p2_bytes
+                    self.scan_readings.parquet_latmat_pass2_bytes += p2_bytes
                     self.bytes_in += p2_bytes
                     # Clean up metadata keys.
                     for _k in [k for k in row_group if k.startswith("__")]:
@@ -813,14 +925,14 @@ cdef class ParquetReadNode(ReaderNode):
                     rows_after_filter = result_morsel.num_rows
                     total_rows_after_filter += rows_after_filter
 
-                    self.readings["parquet_latmat_pass2_row_groups"] += 1
-                    self.readings["rows_seen"] += rows_after_filter
-                    self.readings["row_groups_read"] = self.readings.get("row_groups_read", 0) + 1
+                    self.scan_readings.parquet_latmat_pass2_row_groups += 1
+                    self.scan_readings.rows_seen += rows_after_filter
+                    self.scan_readings.row_groups_read += 1
 
                     if path not in self._parquet_files_seen:
                         self._parquet_files_seen.add(path)
-                        self.readings["files_read"] = len(self._parquet_files_seen)
-                        self.readings["blobs_seen"] += 1
+                        self.scan_readings.files_read = len(self._parquet_files_seen)
+                        self.scan_readings.blobs_seen += 1
 
                     # Already assembled in output_identity_order — no select() needed.
                     num_rows = result_morsel.num_rows
@@ -830,11 +942,11 @@ cdef class ParquetReadNode(ReaderNode):
                     else:
                         records_to_read -= num_rows
 
-                    self.readings["blobs_read"] = len(self._parquet_files_seen)
+                    self.scan_readings.blobs_read = len(self._parquet_files_seen)
                     self.telemetry.blobs_read = len(self._parquet_files_seen)
-                    self.readings["rows_read"] += result_morsel.num_rows
+                    self.scan_readings.rows_read += result_morsel.num_rows
                     self.telemetry.rows_read += result_morsel.num_rows
-                    self.readings["bytes_processed"] += result_morsel.nbytes
+                    self.scan_readings.bytes_processed += result_morsel.nbytes
                     self.telemetry.bytes_processed += result_morsel.nbytes
 
                     yield result_morsel
@@ -889,13 +1001,13 @@ cdef class ParquetReadNode(ReaderNode):
                         )
 
                     num_rows = result_morsel.num_rows
-                    self.readings["rows_seen"] += num_rows
-                    self.readings["row_groups_read"] = self.readings.get("row_groups_read", 0) + 1
+                    self.scan_readings.rows_seen += num_rows
+                    self.scan_readings.row_groups_read += 1
 
                     if path not in self._parquet_files_seen:
                         self._parquet_files_seen.add(path)
-                        self.readings["files_read"] = len(self._parquet_files_seen)
-                        self.readings["blobs_seen"] += 1
+                        self.scan_readings.files_read = len(self._parquet_files_seen)
+                        self.scan_readings.blobs_seen += 1
 
                     if records_to_read < num_rows:
                         result_morsel = result_morsel.slice(0, int(records_to_read))
@@ -903,11 +1015,11 @@ cdef class ParquetReadNode(ReaderNode):
                     else:
                         records_to_read -= num_rows
 
-                    self.readings["blobs_read"] = len(self._parquet_files_seen)
+                    self.scan_readings.blobs_read = len(self._parquet_files_seen)
                     self.telemetry.blobs_read = len(self._parquet_files_seen)
-                    self.readings["rows_read"] += result_morsel.num_rows
+                    self.scan_readings.rows_read += result_morsel.num_rows
                     self.telemetry.rows_read += result_morsel.num_rows
-                    self.readings["bytes_processed"] += result_morsel.nbytes
+                    self.scan_readings.bytes_processed += result_morsel.nbytes
                     self.telemetry.bytes_processed += result_morsel.nbytes
 
                     yield result_morsel
@@ -917,16 +1029,15 @@ cdef class ParquetReadNode(ReaderNode):
 
         finally:
             decode_ns = time.monotonic_ns() - decode_start
-            self.readings["time_decoding_blobs"] = (
-                self.readings.get("time_decoding_blobs", 0) + decode_ns
-            )
+            self.scan_readings.time_decoding_blobs += decode_ns
             self.telemetry.time_decoding_blobs += decode_ns
-            self.readings["parquet_rows_before_filter"] += total_rows_before_filter
-            self.readings["parquet_rows_after_filter"] += total_rows_after_filter
+            self.scan_readings.parquet_rows_before_filter += total_rows_before_filter
+            self.scan_readings.parquet_rows_after_filter += total_rows_after_filter
             if total_rows_before_filter > 0:
-                self.readings["parquet_filter_selectivity"] = (
-                    total_rows_after_filter / total_rows_before_filter
+                self.scan_readings.parquet_filter_selectivity = (
+                    total_rows_after_filter / <double>total_rows_before_filter
                 )
+            self.scan_readings.flush_into(self.readings)
 
         # ── Empty result guard ────────────────────────────────────────────────
         if result_morsel is None:

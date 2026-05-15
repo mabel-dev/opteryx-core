@@ -916,10 +916,7 @@ cdef class StringVector(Vector):
 
         return pa.Array.from_buffers(pa.binary(), n, [null_buf, offs_buf, data_buf])
 
-    def __getitem__(self, Py_ssize_t i):
-        """
-        Return entry i as raw bytes, or None if null.
-        """
+    cdef object item_at(self, Py_ssize_t i):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_string(self)[i]
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
@@ -938,7 +935,6 @@ cdef class StringVector(Vector):
                 return None
             return PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length)
 
-        # Check for null value
         if ptr.null_bitmap != NULL:
             byte = ptr.null_bitmap[i >> 3]
             bit = (byte >> (i & 7)) & 1
@@ -950,6 +946,10 @@ cdef class StringVector(Vector):
         nbytes = end - start
         base = <char*>ptr.data
         return PyBytes_FromStringAndSize(base + start, nbytes)
+
+    def __getitem__(self, Py_ssize_t i):
+        """Return entry i as raw bytes, or None if null."""
+        return self.item_at(i)
 
     def __iter__(self):
         if self._has_const:

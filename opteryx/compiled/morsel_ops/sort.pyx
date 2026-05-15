@@ -160,6 +160,31 @@ cdef extern from * nogil:
     ) nogil
 
 
+# ── Vergesort run-detection pre-pass ─────────────────────────────────────────
+
+cdef extern from "vergesort.h" nogil:
+    bint vergesort_u64(
+        uint32_t* perm,
+        uint32_t* tmp,
+        const uint64_t* keys,
+        size_t n,
+    ) nogil
+    void vergesort_reset_stats() nogil
+    void vergesort_get_stats(uint64_t* hits, uint64_t* misses) nogil
+
+
+def vergesort_stats():
+    """Return (hits, misses) counters. hits = sorted by vergesort, misses = fell through to radix."""
+    cdef uint64_t hits, misses
+    vergesort_get_stats(&hits, &misses)
+    return int(hits), int(misses)
+
+
+def vergesort_reset():
+    """Reset hit/miss counters to zero."""
+    vergesort_reset_stats()
+
+
 # ── LSD radix sort ────────────────────────────────────────────────────────────
 
 cdef void _radix_sort(
@@ -519,7 +544,8 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
                 with nogil:
                     for i in range(n):
                         keys[i] = <uint64_t>signed_mv[i] ^ key_xor
-                    _radix_sort(perm_buf, tmp_buf, keys, n, 8)
+                    if not vergesort_u64(perm_buf, tmp_buf, keys, n):
+                        _radix_sort(perm_buf, tmp_buf, keys, n, 8)
 
         result = array("i", b"\x00" * (n * sizeof(uint32_t)))
         rv = result

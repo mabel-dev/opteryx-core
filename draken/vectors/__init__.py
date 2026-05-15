@@ -5,9 +5,6 @@ from array import array
 # callers can use this to get the compressed int64 representation.
 from opteryx.compiled.structures.relation_statistics import to_int
 
-from .bool_mask import BoolMask
-
-
 def _compress_vector(vec):
     """Return an array('q') with the compressed int64 values for `vec`.
 
@@ -30,4 +27,4 @@ def _compress_vector(vec):
     return array("q", [to_int(v) for v in vals])
 
 
-__all__ = ["BoolMask", "_compress_vector"]
+__all__ = ["_compress_vector"]
