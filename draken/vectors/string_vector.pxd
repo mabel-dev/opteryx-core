@@ -66,6 +66,7 @@ cdef class StringVector(Vector):
     # Same shape, for the i-th RLE run value.
     cdef uint64_t c_rle_run_value_hash(self, Py_ssize_t i) noexcept nogil
 
+    cpdef BoolVector _compare_scalar(self, bytes value, int op)
     cpdef BoolVector equals(self, bytes value)
     cpdef BoolVector not_equals(self, bytes value)
     cpdef BoolVector less_than(self, bytes value)
@@ -199,6 +200,13 @@ cdef StringVector from_dict_nullable(
     const uint8_t[::1] row_validity,
 )
 cdef StringVector from_dict_buffers(
+    const int32_t[::1] codes,
+    const int32_t[::1] dict_offsets,
+    const int32_t[::1] dict_lengths,
+    const uint8_t[::1] arena_bytes,
+    object row_validity=*,
+)
+cdef StringVector from_dict_buffers_dict_only(
     const int32_t[::1] codes,
     const int32_t[::1] dict_offsets,
     const int32_t[::1] dict_lengths,

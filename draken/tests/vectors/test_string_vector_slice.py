@@ -11,7 +11,18 @@ import pytest
 import pyarrow as pa
 from array import array
 from draken.vectors import string_vector as string_vector_module
+from draken.vectors import int64_vector as int64_vector_module
 from opteryx.compiled import vector_ops
+
+
+def _ic(value, n):
+    """Build an Int64Vector const of length n."""
+    return int64_vector_module.Int64Vector.from_constant(value, n)
+
+
+def _iv(values):
+    """Build an Int64Vector from a Python sequence."""
+    return int64_vector_module.Int64Vector.from_arrow(pa.array(values, type=pa.int64()))
 
 
 class TestStringSliceLeft:
@@ -22,7 +33,7 @@ class TestStringSliceLeft:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([b"hello", b"world", b"test", None])
         )
-        result = vector_ops.vector_string_slice_left(vec, 2)
+        result = vector_ops.vector_string_slice_left(vec, _ic(2, 4))
         assert result.to_pylist() == [b"he", b"wo", b"te", None]
 
     def test_slice_left_dense_zero_length(self):
@@ -30,7 +41,7 @@ class TestStringSliceLeft:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([b"hello", b"world"])
         )
-        result = vector_ops.vector_string_slice_left(vec, 0)
+        result = vector_ops.vector_string_slice_left(vec, _ic(0, 2))
         assert result.to_pylist() == [b"", b""]
 
     def test_slice_left_dense_larger_than_string(self):
@@ -38,7 +49,7 @@ class TestStringSliceLeft:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([b"hi", b"world"])
         )
-        result = vector_ops.vector_string_slice_left(vec, 10)
+        result = vector_ops.vector_string_slice_left(vec, _ic(10, 2))
         assert result.to_pylist() == [b"hi", b"world"]
 
     def test_slice_left_dense_negative_index(self):
@@ -47,7 +58,7 @@ class TestStringSliceLeft:
             pa.array([b"hello"])
         )
         # -2 from end of 5-byte string = slice 3 bytes
-        result = vector_ops.vector_string_slice_left(vec, -2)
+        result = vector_ops.vector_string_slice_left(vec, _ic(-2, 1))
         assert result.to_pylist() == [b"hel"]
 
     def test_slice_left_dict_only_basic(self):
@@ -59,7 +70,7 @@ class TestStringSliceLeft:
             bytearray(b"alphabeta"),  # dict data
             bytearray([1, 1, 1, 0]),  # null bitmap
         )
-        result = vector_ops.vector_string_slice_left(vec, 3)
+        result = vector_ops.vector_string_slice_left(vec, _ic(3, 4))
         assert result.to_pylist() == [b"alp", b"bet", b"alp", None]
 
     def test_slice_left_dict_only_zero(self):
@@ -71,7 +82,7 @@ class TestStringSliceLeft:
             bytearray(b"alphabeta"),
             bytearray([1, 1]),
         )
-        result = vector_ops.vector_string_slice_left(vec, 0)
+        result = vector_ops.vector_string_slice_left(vec, _ic(0, 2))
         assert result.to_pylist() == [b"", b""]
 
     def test_slice_left_dict_only_variable_length(self):
@@ -83,21 +94,19 @@ class TestStringSliceLeft:
             bytearray(b"alphabetagamma"),
             bytearray([1, 1, 1, 1]),
         )
-        # Test with a list of lengths
-        lengths = [2, 3, 1, 5]
-        result = vector_ops.vector_string_slice_left(vec, lengths)
+        result = vector_ops.vector_string_slice_left(vec, _iv([2, 3, 1, 5]))
         assert result.to_pylist() == [b"al", b"bet", b"a", b"gamma"]
 
     def test_slice_left_constant_string(self):
         """Test left slice on constant string vector."""
         vec = string_vector_module.StringVector.from_constant(b"hello", 3)
-        result = vector_ops.vector_string_slice_left(vec, 2)
+        result = vector_ops.vector_string_slice_left(vec, _ic(2, 3))
         assert result.to_pylist() == [b"he", b"he", b"he"]
 
     def test_slice_left_constant_null(self):
         """Test left slice on constant null vector."""
         vec = string_vector_module.StringVector.from_constant(None, 2, is_null=True)
-        result = vector_ops.vector_string_slice_left(vec, 5)
+        result = vector_ops.vector_string_slice_left(vec, _ic(5, 2))
         assert result.to_pylist() == [None, None]
 
     def test_slice_left_empty_string(self):
@@ -105,7 +114,7 @@ class TestStringSliceLeft:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([b"", b"hello", b""])
         )
-        result = vector_ops.vector_string_slice_left(vec, 3)
+        result = vector_ops.vector_string_slice_left(vec, _ic(3, 3))
         assert result.to_pylist() == [b"", b"hel", b""]
 
 
@@ -117,7 +126,7 @@ class TestStringSliceRight:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([b"hello", b"world", b"test", None])
         )
-        result = vector_ops.vector_string_slice_right(vec, 2)
+        result = vector_ops.vector_string_slice_right(vec, _ic(2, 4))
         assert result.to_pylist() == [b"lo", b"ld", b"st", None]
 
     def test_slice_right_dense_zero_length(self):
@@ -125,7 +134,7 @@ class TestStringSliceRight:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([b"hello", b"world"])
         )
-        result = vector_ops.vector_string_slice_right(vec, 0)
+        result = vector_ops.vector_string_slice_right(vec, _ic(0, 2))
         assert result.to_pylist() == [b"", b""]
 
     def test_slice_right_dense_larger_than_string(self):
@@ -133,7 +142,7 @@ class TestStringSliceRight:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([b"hi", b"world"])
         )
-        result = vector_ops.vector_string_slice_right(vec, 10)
+        result = vector_ops.vector_string_slice_right(vec, _ic(10, 2))
         assert result.to_pylist() == [b"hi", b"world"]
 
     def test_slice_right_dense_negative_index(self):
@@ -141,7 +150,7 @@ class TestStringSliceRight:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([b"hello"])
         )
-        result = vector_ops.vector_string_slice_right(vec, -5)
+        result = vector_ops.vector_string_slice_right(vec, _ic(-5, 1))
         assert result.to_pylist() == [b""]
 
     def test_slice_right_dict_only_basic(self):
@@ -153,7 +162,7 @@ class TestStringSliceRight:
             bytearray(b"alphabeta"),
             bytearray([1, 1, 1, 0]),
         )
-        result = vector_ops.vector_string_slice_right(vec, 2)
+        result = vector_ops.vector_string_slice_right(vec, _ic(2, 4))
         assert result.to_pylist() == [b"ha", b"ta", b"ha", None]
 
     def test_slice_right_dict_only_zero(self):
@@ -165,7 +174,7 @@ class TestStringSliceRight:
             bytearray(b"alphabeta"),
             bytearray([1, 1]),
         )
-        result = vector_ops.vector_string_slice_right(vec, 0)
+        result = vector_ops.vector_string_slice_right(vec, _ic(0, 2))
         assert result.to_pylist() == [b"", b""]
 
     def test_slice_right_dict_only_variable_length(self):
@@ -177,20 +186,19 @@ class TestStringSliceRight:
             bytearray(b"alphabetagamma"),
             bytearray([1, 1, 1, 1]),
         )
-        lengths = [2, 3, 1, 5]
-        result = vector_ops.vector_string_slice_right(vec, lengths)
+        result = vector_ops.vector_string_slice_right(vec, _iv([2, 3, 1, 5]))
         assert result.to_pylist() == [b"ha", b"eta", b"a", b"gamma"]
 
     def test_slice_right_constant_string(self):
         """Test right slice on constant string vector."""
         vec = string_vector_module.StringVector.from_constant(b"hello", 3)
-        result = vector_ops.vector_string_slice_right(vec, 2)
+        result = vector_ops.vector_string_slice_right(vec, _ic(2, 3))
         assert result.to_pylist() == [b"lo", b"lo", b"lo"]
 
     def test_slice_right_constant_null(self):
         """Test right slice on constant null vector."""
         vec = string_vector_module.StringVector.from_constant(None, 2, is_null=True)
-        result = vector_ops.vector_string_slice_right(vec, 5)
+        result = vector_ops.vector_string_slice_right(vec, _ic(5, 2))
         assert result.to_pylist() == [None, None]
 
     def test_slice_right_empty_string(self):
@@ -198,7 +206,7 @@ class TestStringSliceRight:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([b"", b"hello", b""])
         )
-        result = vector_ops.vector_string_slice_right(vec, 3)
+        result = vector_ops.vector_string_slice_right(vec, _ic(3, 3))
         assert result.to_pylist() == [b"", b"llo", b""]
 
     def test_slice_right_unicode_string(self):
@@ -206,7 +214,7 @@ class TestStringSliceRight:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([b"hello", b"world"])
         )
-        result = vector_ops.vector_string_slice_right(vec, 2)
+        result = vector_ops.vector_string_slice_right(vec, _ic(2, 2))
         assert result.to_pylist() == [b"lo", b"ld"]
 
 
@@ -218,7 +226,7 @@ class TestStringSliceEdgeCases:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([None, None, None], type=pa.string())
         )
-        result = vector_ops.vector_string_slice_left(vec, 5)
+        result = vector_ops.vector_string_slice_left(vec, _ic(5, 3))
         assert result.to_pylist() == [None, None, None]
 
     def test_slice_right_all_nulls(self):
@@ -226,7 +234,7 @@ class TestStringSliceEdgeCases:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([None, None, None], type=pa.string())
         )
-        result = vector_ops.vector_string_slice_right(vec, 5)
+        result = vector_ops.vector_string_slice_right(vec, _ic(5, 3))
         assert result.to_pylist() == [None, None, None]
 
     def test_slice_left_very_long_string(self):
@@ -235,7 +243,7 @@ class TestStringSliceEdgeCases:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([long_string])
         )
-        result = vector_ops.vector_string_slice_left(vec, 100)
+        result = vector_ops.vector_string_slice_left(vec, _ic(100, 1))
         assert result.to_pylist() == [b"x" * 100]
 
     def test_slice_right_very_long_string(self):
@@ -244,7 +252,7 @@ class TestStringSliceEdgeCases:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([long_string])
         )
-        result = vector_ops.vector_string_slice_right(vec, 100)
+        result = vector_ops.vector_string_slice_right(vec, _ic(100, 1))
         assert result.to_pylist() == [b"x" * 100]
 
     def test_slice_left_single_char(self):
@@ -252,7 +260,7 @@ class TestStringSliceEdgeCases:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([b"a", b"b", b"c"])
         )
-        result = vector_ops.vector_string_slice_left(vec, 1)
+        result = vector_ops.vector_string_slice_left(vec, _ic(1, 3))
         assert result.to_pylist() == [b"a", b"b", b"c"]
 
     def test_slice_right_single_char(self):
@@ -260,7 +268,7 @@ class TestStringSliceEdgeCases:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([b"a", b"b", b"c"])
         )
-        result = vector_ops.vector_string_slice_right(vec, 1)
+        result = vector_ops.vector_string_slice_right(vec, _ic(1, 3))
         assert result.to_pylist() == [b"a", b"b", b"c"]
 
     def test_slice_left_mixed_null_and_data(self):
@@ -268,7 +276,7 @@ class TestStringSliceEdgeCases:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([b"hello", None, b"world", None, b"test"])
         )
-        result = vector_ops.vector_string_slice_left(vec, 3)
+        result = vector_ops.vector_string_slice_left(vec, _ic(3, 5))
         assert result.to_pylist() == [b"hel", None, b"wor", None, b"tes"]
 
     def test_slice_right_mixed_null_and_data(self):
@@ -276,7 +284,7 @@ class TestStringSliceEdgeCases:
         vec = string_vector_module.StringVector.from_arrow(
             pa.array([b"hello", None, b"world", None, b"test"])
         )
-        result = vector_ops.vector_string_slice_right(vec, 3)
+        result = vector_ops.vector_string_slice_right(vec, _ic(3, 5))
         assert result.to_pylist() == [b"llo", None, b"rld", None, b"est"]
 
 

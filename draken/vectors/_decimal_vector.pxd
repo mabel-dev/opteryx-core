@@ -60,8 +60,8 @@ cdef class DecimalVector(Vector):
 
     cdef int64_t _coerce_scalar(self, object scalar)
     cdef bint _compare_decimal_values(self, int64_t left, int64_t right, int op) nogil
-    cdef BoolVector _compare_scalar(self, int op, int64_t rhs)
-    cdef BoolVector _compare_vector(self, DecimalVector other, int op)
+    cpdef BoolVector _compare_scalar(self, int op, int64_t rhs)
+    cpdef BoolVector _compare_vector(self, DecimalVector other, int op)
 
     # ------------------------------------------------------------------
     # Public comparison API — scalar

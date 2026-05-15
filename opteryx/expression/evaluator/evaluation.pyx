@@ -1,8 +1,3 @@
-# cython: language_level=3
-# cython: boundscheck=False
-# cython: wraparound=False
-# cython: initializedcheck=False
-
 """Main expression evaluation engine (Cython orchestration layer).
 
 Layering (CLAUDE.md):
@@ -19,37 +14,17 @@ a runtime check in opteryx/expression/evaluator/__init__.py verifies this.
 import datetime
 import sys as _sys
 
-from opteryx.compiled.expression.compiled_expression cimport (
-    CompiledExpression,
-    CompiledExpressionHandle,
+from opteryx.compiled.structures.carchar_set import CarcharSetWrapper as _CarcharSetWrapper
+from opteryx.compiled.structures.perfect_hash_set import PerfectHashSet as _PerfectHashSet
+from opteryx.compiled.vector_ops import (
+    vector_bitwise_not as _vector_bitwise_not,
+    vector_string_is_empty as _vector_string_is_empty,
+    vector_string_is_not_empty as _vector_string_is_not_empty,
 )
-from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
+from opteryx.exceptions import ColumnReferencedBeforeEvaluationError, IncompatibleTypesError
+from opteryx.types import OrsoTypes as _OrsoTypes
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 
-from .arithmetic import _eval_binary_op_draken
-from .comparisons import draken_between, draken_compare
-from .function_execution import apply_bounded_function
-from .type_coercion import (
-    _coerce_date32,
-    _coerce_date32_set,
-    _coerce_float,
-    _coerce_float_set,
-    _coerce_int64,
-    _coerce_int64_set,
-    _coerce_interval,
-    _coerce_str,
-    _coerce_str_set,
-    _coerce_temporal_scalar_for_arrow,
-    _coerce_timestamp,
-    _coerce_timestamp_set,
-    _constant_scalar_value,
-    _dictionary_arrow_type,
-    _dictionary_compare_vector,
-    _is_constant_vector_like,
-    _is_dictionary_encoded_vector,
-    _is_null_as_boolvector,
-    _is_typed_constant_encoded_vector,
-)
 
 # Imports from draken are safe at module level — draken does not import opteryx.expression.
 from draken.vectors.bool_vector import BoolVector as _BoolVector
@@ -115,8 +90,7 @@ def _eval_value(node, morsel):
         if isinstance(node.value, bool):
             return _BoolVector.from_constant(node.value, morsel.num_rows)
 
-        from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
-        if isinstance(node.value, CarcharSetWrapper):
+        if isinstance(node.value, (_CarcharSetWrapper, _PerfectHashSet)):
             return node.value
 
         vec = _const_scalar(node.value, morsel.num_rows)
@@ -210,14 +184,11 @@ cdef _unary_draken(str op, centre_node, morsel):
     if op == "IsNotNull":
         return _is_null_as_boolvector(vec).not_vector()
     if op == "IsEmpty":
-        from opteryx.compiled.vector_ops import vector_string_is_empty
-        return vector_string_is_empty(vec)
+        return _vector_string_is_empty(vec)
     if op == "IsNotEmpty":
-        from opteryx.compiled.vector_ops import vector_string_is_not_empty
-        return vector_string_is_not_empty(vec)
+        return _vector_string_is_not_empty(vec)
     if op == "BitwiseNot":
-        from opteryx.compiled.vector_ops import vector_bitwise_not
-        return vector_bitwise_not(vec)
+        return _vector_bitwise_not(vec)
     if op == "IsTrue" or op == "IsNotFalse" or op == "IsFalse" or op == "IsNotTrue":
         bv = vec if get_vector_type(vec) == VectorType.BOOL else None
         if bv is None:
@@ -237,10 +208,9 @@ cdef _unary_draken(str op, centre_node, morsel):
 
 cdef bint _is_temporal_type(orso_type):
     """Check if an OrsoType is DATE or TIMESTAMP."""
-    from opteryx.types import OrsoTypes
     if orso_type is None:
         return False
-    return orso_type == OrsoTypes.DATE or orso_type == OrsoTypes.TIMESTAMP
+    return orso_type == _OrsoTypes.DATE or orso_type == _OrsoTypes.TIMESTAMP
 
 
 cdef _validate_temporal_comparison(left_node, right_node, op):
@@ -262,8 +232,6 @@ cdef _validate_temporal_comparison(left_node, right_node, op):
         return
     if left_is_temporal and right_is_temporal:
         return
-
-    from opteryx.exceptions import IncompatibleTypesError
 
     non_temporal_node = right_node if left_is_temporal else left_node
     non_temporal_side = "right" if left_is_temporal else "left"
@@ -316,9 +284,7 @@ def _try_collect_numeric_eq_predicates(node):
     """Walk an AND-only subtree and collect IDENTIFIER = LITERAL predicates on
     fixed-width numeric/temporal columns. See module docstring of original.
     """
-    from opteryx.types import OrsoTypes
-
-    eligible_types = (OrsoTypes.INTEGER, OrsoTypes.BOOLEAN)
+    eligible_types = (_OrsoTypes.INTEGER, _OrsoTypes.BOOLEAN)
 
     preds = []
     stack = [node]
@@ -474,24 +440,23 @@ def evaluate_draken(node, morsel):
 
         left = _eval_value(node.left, morsel)
         right = _eval_value(node.right, morsel)
-        from opteryx.types import OrsoTypes
 
         left_sc = getattr(node.left, "schema_column", None)
         right_sc = getattr(node.right, "schema_column", None)
         left_schema_type = getattr(left_sc, "type", None) if left_sc is not None else None
         right_schema_type = getattr(right_sc, "type", None) if right_sc is not None else None
         if (
-            left_schema_type == OrsoTypes.DATE
-            or left_schema_type == OrsoTypes.TIMESTAMP
-            or right_schema_type == OrsoTypes.DATE
-            or right_schema_type == OrsoTypes.TIMESTAMP
+            left_schema_type == _OrsoTypes.DATE
+            or left_schema_type == _OrsoTypes.TIMESTAMP
+            or right_schema_type == _OrsoTypes.DATE
+            or right_schema_type == _OrsoTypes.TIMESTAMP
         ):
             if _is_scalar_value(left) and (
-                left_schema_type == OrsoTypes.DATE or left_schema_type == OrsoTypes.TIMESTAMP
+                left_schema_type == _OrsoTypes.DATE or left_schema_type == _OrsoTypes.TIMESTAMP
             ):
                 left = _coerce_temporal_scalar_for_arrow(left, left_schema_type)
             if _is_scalar_value(right) and (
-                right_schema_type == OrsoTypes.DATE or right_schema_type == OrsoTypes.TIMESTAMP
+                right_schema_type == _OrsoTypes.DATE or right_schema_type == _OrsoTypes.TIMESTAMP
             ):
                 right = _coerce_temporal_scalar_for_arrow(right, right_schema_type)
 
@@ -560,19 +525,33 @@ def evaluate_and_append_draken(nodes, morsel):
     """
     prioritize_evaluation, should_evaluate, typed_constant_vector = _get_legacy_helpers()
 
-    col_names = list(morsel.column_names)
-    col_vecs = [morsel.column(n if isinstance(n, bytes) else n.encode()) for n in col_names]
-    existing = {n.decode() if isinstance(n, bytes) else n for n in col_names}
+    if not nodes:
+        return morsel
 
+    cdef list col_names = None
+    cdef list col_vecs = None
+    cdef set existing = None
+    cdef bint appended = False
     cdef int node_type
+
     for node in prioritize_evaluation(nodes):
         if node.value == "_PASSTHRU":
             continue
         if not should_evaluate(node):
             continue
         identity = node.schema_column.identity
+
+        if existing is None:
+            existing = {n.decode() if isinstance(n, bytes) else n
+                        for n in morsel.column_names}
         if identity in existing:
             continue
+
+        if col_names is None:
+            col_names = list(morsel.column_names)
+            col_vecs = [morsel.column(n if isinstance(n, bytes) else n.encode())
+                        for n in col_names]
+
         node_type = <int>node.node_type
 
         if node_type == NT_LITERAL:
@@ -589,6 +568,7 @@ def evaluate_and_append_draken(nodes, morsel):
             col_names.append(identity)
             col_vecs.append(literal_vec)
             existing.add(identity)
+            appended = True
             continue
 
         if node_type == NT_CASE:
@@ -602,6 +582,7 @@ def evaluate_and_append_draken(nodes, morsel):
             col_names.append(identity)
             col_vecs.append(result)
             existing.add(identity)
+            appended = True
             continue
         if node_type == NT_FUNCTION:
             parameters = []
@@ -631,115 +612,301 @@ def evaluate_and_append_draken(nodes, morsel):
         col_names.append(identity)
         col_vecs.append(result)
         existing.add(identity)
+        appended = True
+
+    if not appended:
+        return morsel
 
     return _Morsel.from_vectors(col_names, col_vecs)
 
 
 # ---------------------------------------------------------------------------
-# Wedge D1: arena-driven evaluation.
+# Bytecode VM executor
 #
-# evaluate_compiled walks a CompiledExpressionHandle's flat C++ tree instead
-# of a Python Node tree. Boolean combinator layers (AND/OR/NOT/XOR/NESTED/
-# BETWEEN/DNF/CNF) dispatch via pointer chase; leaf nodes hand the source
-# Node back to evaluate_draken so the existing kernels are reused unchanged.
+# execute_bytecode() consumes the flat postfix instruction list produced by
+# build_bytecode() at bind time.  It maintains a small operand stack of
+# Draken vectors and dispatches on CompiledInstruction.node_type using a
+# chain of C-level integer compares (Cython optimize.use_switch folds these
+# into a switch statement in the generated C).
 #
-# This is the minimal step that proves the arena → eval contract end-to-end.
-# Wedge D2 will progressively resolve operands at lower-time and migrate
-# leaf dispatch onto the arena as well.
+# Native nodes: pop `arity` vectors, push one result.
+# Legacy nodes: call _eval_value(source_node, morsel), push one result.
 # ---------------------------------------------------------------------------
 
+from cpython.mem cimport PyMem_Malloc, PyMem_Free
+from cpython.ref cimport PyObject, Py_INCREF, Py_XINCREF, Py_XDECREF
 
-cdef _eval_compiled(CompiledExpression* cur, morsel):
-    if cur == NULL:
-        raise ValueError("evaluate_compiled: unexpected NULL child pointer")
-
-    cdef int nt = cur.node_type
-    cdef Py_ssize_t n
-    cdef Py_ssize_t i
-
-    if nt == NT_NESTED:
-        return _eval_compiled(cur.centre, morsel)
-
-    if nt == NT_AND:
-        # The numeric-eq hash fast path is implemented in terms of the source
-        # Node tree; look up via sys.modules so tests can monkey-patch it
-        # exactly as they do for evaluate_draken.
-        src = <object>cur.source_node
-        preds = _sys.modules[__name__]._try_collect_numeric_eq_predicates(src)
-        if preds is not None:
-            fast = _evaluate_numeric_eq_via_hash(preds, morsel)
-            if fast is not None:
-                return fast
-        left = _eval_compiled(cur.left, morsel)
-        right = _eval_compiled(cur.right, morsel)
-        return left.and_vector(right)
-
-    if nt == NT_OR:
-        left = _eval_compiled(cur.left, morsel)
-        right = _eval_compiled(cur.right, morsel)
-        return left.or_vector(right)
-
-    if nt == NT_NOT:
-        return _eval_compiled(cur.centre, morsel).not_vector()
-
-    if nt == NT_XOR:
-        left = _eval_compiled(cur.left, morsel)
-        right = _eval_compiled(cur.right, morsel)
-        return left.xor_vector(right)
-
-    if nt == NT_BETWEEN:
-        col = _eval_value(<object>cur.left.source_node, morsel)
-        lower_val = <object>cur.right.value
-        upper_val = <object>cur.centre.value
-        bounds = <object>cur.value
-        lower_inclusive, upper_inclusive = bounds
-        return draken_between(col, lower_val, upper_val, lower_inclusive, upper_inclusive)
-
-    if nt == NT_DNF:
-        n = <Py_ssize_t>cur.parameters.size()
-        if n == 0:
-            raise ValueError("evaluate_compiled: DNF node has no parameters")
-        result = _eval_compiled(cur.parameters[0], morsel)
-        for i in range(1, n):
-            if not result.any():
-                return result
-            result = result.and_vector(_eval_compiled(cur.parameters[i], morsel))
-        return result
-
-    if nt == NT_CNF:
-        n = <Py_ssize_t>cur.parameters.size()
-        if n == 0:
-            raise ValueError("evaluate_compiled: CNF node has no parameters")
-        result = _eval_compiled(cur.parameters[0], morsel)
-        for i in range(1, n):
-            if result.all():
-                return result
-            result = result.or_vector(_eval_compiled(cur.parameters[i], morsel))
-        return result
-
-    # All other node types (COMPARISON_OPERATOR, BINARY_OPERATOR, FUNCTION,
-    # UNARY_OPERATOR, LITERAL, IDENTIFIER, CASE, ...): the existing kernels
-    # consume the source Node directly, so hand it back. Wedge D2 will fold
-    # these onto the arena.
-    return evaluate_draken(<object>cur.source_node, morsel)
+# Cython 3 declares Py_INCREF/Py_XDECREF as taking `object`, not `PyObject*`.
+# The bytecode executor stores raw PyObject* on its C stack, so we need direct
+# C-level macros that accept pointers without going through the Python protocol.
+cdef extern from "Python.h":
+    void _incref "Py_INCREF" (PyObject* o)
+    void _xdecref "Py_XDECREF" (PyObject* o)
+from opteryx.compiled.expression.compiled_expression cimport (
+    BC_AND,
+    BC_CMP_LEFT_TEMPORAL,
+    BC_CMP_RIGHT_TEMPORAL,
+    BC_CNF,
+    BC_COMPARE,
+    BC_DNF,
+    BC_LEGACY,
+    BC_LOAD_COL,
+    BC_LOAD_LIT_BOOL,
+    BC_LOAD_LIT_SCALAR,
+    BC_LOAD_LIT_SET,
+    BC_NOT,
+    BC_OR,
+    BC_XOR,
+    BytecodeInstr,
+    CompiledBytecode,
+)
+from draken.morsels.morsel cimport Morsel
+from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.vector cimport Vector
 
 
-def evaluate_compiled(CompiledExpressionHandle handle, morsel):
-    """Arena-driven counterpart to evaluate_draken.
+def execute_bytecode(CompiledBytecode bc, Morsel morsel):
+    """Execute a typed bytecode against `morsel`. Returns a Vector.
 
-    Walks the lowered CompiledExpression tree owned by `handle` instead of
-    the source Python Node tree. Returns a Draken vector with identical
-    semantics to evaluate_draken(handle's source node, morsel).
+    No Python objects on the dispatch path: the instruction store is a C
+    struct array (bc.instrs), the operand stack is a PyObject** C array,
+    dispatch is a switch on the int opcode, kernel calls go through typed
+    cpdef methods on Vector / BoolVector / Morsel. CLAUDE.md §2/§3.
     """
-    cdef CompiledExpression* root = handle.root()
-    if root == NULL:
-        raise ValueError("evaluate_compiled: handle has no lowered root")
-    return _eval_compiled(root, morsel)
+    cdef Py_ssize_t n_instrs = bc.count
+    cdef Py_ssize_t cap = bc.max_stack_depth
+    if cap < 1:
+        cap = 1
+    cdef PyObject** stack = <PyObject**>PyMem_Malloc(<size_t>(cap * sizeof(PyObject*)))
+    if stack == NULL:
+        raise MemoryError("execute_bytecode: failed to allocate stack")
+
+    cdef Py_ssize_t sp = 0
+    cdef Py_ssize_t i, j, base
+    cdef int opcode
+    cdef int arity
+    cdef int flags
+    cdef BytecodeInstr* slot
+    cdef BoolVector b_left, b_right, b_result, b_cur
+    cdef Vector v_left, v_right, v_result
+    cdef Py_ssize_t num_rows = morsel.ptr.num_rows
+    cdef object scalar_obj
+    cdef object compare_result
+    cdef object legacy_result
+    cdef object left_type
+    cdef object right_type
+
+    try:
+        for i in range(n_instrs):
+            slot = &bc.instrs[i]
+            opcode = slot.opcode
+
+            # ----------------------------------------------------------
+            # BC_LOAD_COL — typed Morsel.column dispatch (cpdef)
+            # ----------------------------------------------------------
+            if opcode == BC_LOAD_COL:
+                v_result = morsel.column(
+                    <bytes>slot.column_identity, <bytes>slot.column_name
+                )
+                if v_result is None:
+                    raise ColumnReferencedBeforeEvaluationError(
+                        column=(<bytes>slot.column_name).decode()
+                    )
+                Py_INCREF(v_result)
+                stack[sp] = <PyObject*>v_result
+                sp += 1
+                continue
+
+            # ----------------------------------------------------------
+            # BC_LOAD_LIT_BOOL — typed BoolVector.from_constant
+            # ----------------------------------------------------------
+            if opcode == BC_LOAD_LIT_BOOL:
+                b_result = BoolVector.from_constant(
+                    slot.bool_value != 0, num_rows
+                )
+                Py_INCREF(b_result)
+                stack[sp] = <PyObject*>b_result
+                sp += 1
+                continue
+
+            # ----------------------------------------------------------
+            # BC_LOAD_LIT_SET — push the pre-resolved set object
+            # ----------------------------------------------------------
+            if opcode == BC_LOAD_LIT_SET:
+                Py_XINCREF(slot.literal_obj)
+                stack[sp] = slot.literal_obj
+                sp += 1
+                continue
+
+            # ----------------------------------------------------------
+            # BC_LOAD_LIT_SCALAR — typed call into draken.from_scalar
+            # ----------------------------------------------------------
+            if opcode == BC_LOAD_LIT_SCALAR:
+                scalar_obj = <object>slot.literal_obj
+                v_result = _const_scalar(scalar_obj, num_rows)
+                if v_result is None:
+                    raise TypeError(
+                        f"execute_bytecode: cannot construct vector for literal "
+                        f"{scalar_obj!r} (type {type(scalar_obj).__name__})"
+                    )
+                Py_INCREF(v_result)
+                stack[sp] = <PyObject*>v_result
+                sp += 1
+                continue
+
+            # ----------------------------------------------------------
+            # Boolean combinators — typed BoolVector cpdef dispatch
+            # ----------------------------------------------------------
+            if opcode == BC_AND:
+                sp -= 1
+                b_right = <BoolVector>stack[sp]
+                Py_XDECREF(stack[sp])
+                sp -= 1
+                b_left = <BoolVector>stack[sp]
+                Py_XDECREF(stack[sp])
+                b_result = b_left.and_vector(b_right)
+                Py_INCREF(b_result)
+                stack[sp] = <PyObject*>b_result
+                sp += 1
+                continue
+
+            if opcode == BC_OR:
+                sp -= 1
+                b_right = <BoolVector>stack[sp]
+                Py_XDECREF(stack[sp])
+                sp -= 1
+                b_left = <BoolVector>stack[sp]
+                Py_XDECREF(stack[sp])
+                b_result = b_left.or_vector(b_right)
+                Py_INCREF(b_result)
+                stack[sp] = <PyObject*>b_result
+                sp += 1
+                continue
+
+            if opcode == BC_XOR:
+                sp -= 1
+                b_right = <BoolVector>stack[sp]
+                Py_XDECREF(stack[sp])
+                sp -= 1
+                b_left = <BoolVector>stack[sp]
+                Py_XDECREF(stack[sp])
+                b_result = b_left.xor_vector(b_right)
+                Py_INCREF(b_result)
+                stack[sp] = <PyObject*>b_result
+                sp += 1
+                continue
+
+            if opcode == BC_NOT:
+                sp -= 1
+                b_cur = <BoolVector>stack[sp]
+                Py_XDECREF(stack[sp])
+                b_result = b_cur.not_vector()
+                Py_INCREF(b_result)
+                stack[sp] = <PyObject*>b_result
+                sp += 1
+                continue
+
+            # ----------------------------------------------------------
+            # Variadic AND/OR — DNF / CNF
+            # ----------------------------------------------------------
+            if opcode == BC_DNF:
+                arity = slot.arity
+                base = sp - arity
+                b_result = <BoolVector>stack[base]
+                Py_XDECREF(stack[base])
+                for j in range(1, arity):
+                    b_cur = <BoolVector>stack[base + j]
+                    Py_XDECREF(stack[base + j])
+                    if b_result.any() == 0:
+                        continue   # already empty; remaining .and_vector
+                                   # short-circuits — but we must still
+                                   # drain refs from the stack slots above
+                    b_result = b_result.and_vector(b_cur)
+                sp = base
+                Py_INCREF(b_result)
+                stack[sp] = <PyObject*>b_result
+                sp += 1
+                continue
+
+            if opcode == BC_CNF:
+                arity = slot.arity
+                base = sp - arity
+                b_result = <BoolVector>stack[base]
+                Py_XDECREF(stack[base])
+                for j in range(1, arity):
+                    b_cur = <BoolVector>stack[base + j]
+                    Py_XDECREF(stack[base + j])
+                    if b_result.all() != 0:
+                        continue
+                    b_result = b_result.or_vector(b_cur)
+                sp = base
+                Py_INCREF(b_result)
+                stack[sp] = <PyObject*>b_result
+                sp += 1
+                continue
+
+            # ----------------------------------------------------------
+            # BC_COMPARE — typed draken_compare (cpdef)
+            # ----------------------------------------------------------
+            if opcode == BC_COMPARE:
+                sp -= 1
+                v_right = <Vector>stack[sp]
+                Py_XDECREF(stack[sp])
+                sp -= 1
+                v_left = <Vector>stack[sp]
+                Py_XDECREF(stack[sp])
+                flags = slot.flags
+                left_type = <object>slot.left_orso_type if slot.left_orso_type != NULL else None
+                right_type = <object>slot.right_orso_type if slot.right_orso_type != NULL else None
+                if flags != 0:
+                    if (flags & BC_CMP_LEFT_TEMPORAL) and _is_scalar_value(v_left):
+                        v_left = _coerce_temporal_scalar_for_arrow(v_left, left_type)
+                    if (flags & BC_CMP_RIGHT_TEMPORAL) and _is_scalar_value(v_right):
+                        v_right = _coerce_temporal_scalar_for_arrow(v_right, right_type)
+                compare_result = draken_compare(
+                    <str>slot.compare_op_str, v_left, v_right, left_type, right_type
+                )
+                Py_INCREF(compare_result)
+                stack[sp] = <PyObject*>compare_result
+                sp += 1
+                continue
+
+            # ----------------------------------------------------------
+            # BC_LEGACY — GIL-required fallback to the tree-walker
+            # ----------------------------------------------------------
+            if opcode == BC_LEGACY:
+                legacy_result = _eval_value(<object>slot.source_node, morsel)
+                Py_INCREF(legacy_result)
+                stack[sp] = <PyObject*>legacy_result
+                sp += 1
+                continue
+
+            raise NotImplementedError(
+                f"execute_bytecode: unknown opcode {opcode}"
+            )
+
+        if sp != 1:
+            raise ValueError(
+                f"execute_bytecode: expected 1 result on stack, got {sp}"
+            )
+
+        # Transfer the single result out of the stack with no net refcount
+        # change: the stack slot's strong ref becomes the returned value's
+        # strong ref. Setting sp=0 prevents the finally cleanup from
+        # double-decreffing.
+        v_result = <Vector>stack[0]
+        Py_XDECREF(stack[0])
+        sp = 0
+        return v_result
+    finally:
+        for j in range(sp):
+            Py_XDECREF(stack[j])
+        PyMem_Free(stack)
 
 
 __all__ = [
     "draken_compare",
     "evaluate_and_append_draken",
-    "evaluate_compiled",
     "evaluate_draken",
+    "execute_bytecode",
 ]

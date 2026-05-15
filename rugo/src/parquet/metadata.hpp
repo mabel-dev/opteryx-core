@@ -43,6 +43,14 @@ struct ColumnStats {
   int64_t bloom_offset = -1;
   int64_t bloom_length = -1;
 
+  // Page Index (Parquet 2.x). All -1 when the file was written without page indexes.
+  // column_index = per-page min/max/null_count (for predicate pruning)
+  // offset_index = per-page byte offset + compressed length (to skip pages on read)
+  int64_t column_index_offset = -1;
+  int32_t column_index_length = -1;
+  int64_t offset_index_offset = -1;
+  int32_t offset_index_length = -1;
+
   // Encodings & codec
   std::vector<int32_t> encodings;
   int32_t codec = -1;

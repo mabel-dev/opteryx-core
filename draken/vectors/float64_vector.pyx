@@ -375,10 +375,61 @@ cdef class Float64Vector(Vector):
     # -------- Example op --------
     cpdef Float64Vector take(self, int32_t[::1] indices):
         cdef Py_ssize_t i, n = indices.shape[0]
+        cdef Py_ssize_t out_n_d = n
+        cdef uint8_t cw_d
+        cdef DrakenVarBuffer* src_dv
+        cdef Py_ssize_t dsz
+        cdef uint8_t* gc = NULL
+        cdef uint8_t* gn = NULL
+        cdef Py_ssize_t cb_d
+        cdef Py_ssize_t nb_d
+        cdef Py_ssize_t si_d
+        cdef Float64Vector dtake_result
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_float64(self).take(indices)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_float64(self).take(indices)
+            # O(n) gather: copy selected codes and copy dict verbatim.
+            # Replaces the O(total_rows) _materialize_dict_float64().take() path.
+            cw_d = self._dict_code_width
+            src_dv = self._dict_values
+            dsz = <Py_ssize_t>src_dv.length if src_dv != NULL else 0
+            cb_d = out_n_d * <Py_ssize_t>cw_d
+            if cb_d > 0:
+                gc = <uint8_t*>malloc(<size_t>cb_d)
+                if gc == NULL:
+                    raise MemoryError()
+                if cw_d == 1:
+                    for i in range(out_n_d):
+                        (<uint8_t*>gc)[i] = (<const uint8_t*>self._dict_codes)[indices[i]]
+                elif cw_d == 2:
+                    for i in range(out_n_d):
+                        (<uint16_t*>gc)[i] = (<const uint16_t*>self._dict_codes)[indices[i]]
+                else:
+                    for i in range(out_n_d):
+                        (<uint32_t*>gc)[i] = (<const uint32_t*>self._dict_codes)[indices[i]]
+            if self.ptr.null_bitmap != NULL and out_n_d > 0:
+                nb_d = (out_n_d + 7) >> 3
+                gn = <uint8_t*>malloc(<size_t>nb_d)
+                if gn == NULL:
+                    if gc != NULL: free(gc)
+                    raise MemoryError()
+                memset(gn, 0, <size_t>nb_d)
+                for i in range(out_n_d):
+                    si_d = indices[i]
+                    if (self.ptr.null_bitmap[si_d >> 3] >> (si_d & 7)) & 1:
+                        gn[i >> 3] |= (1 << (i & 7))
+            try:
+                dtake_result = make_float64_dict_only(
+                    gc,
+                    cw_d, out_n_d,
+                    <const double*>src_dv.data if src_dv != NULL else NULL,
+                    dsz,
+                    gn,
+                )
+            finally:
+                if gc != NULL: free(gc)
+                if gn != NULL: free(gn)
+            return dtake_result
         if self._has_const:
             return Float64Vector.from_constant(
                 None if self._const_is_null else self._const_value,
@@ -469,7 +520,7 @@ cdef class Float64Vector(Vector):
             return left < right
         return left <= right
 
-    cdef BoolVector _compare_scalar(self, double value, int op):
+    cpdef BoolVector _compare_scalar(self, double value, int op):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_float64(self)._compare_scalar(value, op)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
@@ -546,7 +597,7 @@ cdef class Float64Vector(Vector):
                 dispatch_scalar_branchless(op, data, value, src_null, dst, <size_t>n)
         return out
 
-    cdef BoolVector _compare_vector(self, Float64Vector other, int op):
+    cpdef BoolVector _compare_vector(self, Float64Vector other, int op):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_float64(self)._compare_vector(other, op)
         if other._encoding == DRAKEN_ENCODING_RLE:

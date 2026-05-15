@@ -17,7 +17,7 @@ from opteryx.exceptions import (
 )
 from opteryx.expression import NodeType
 from opteryx.expression.functions import get_catalog as _get_function_catalog
-from opteryx.expression.functions.registrar.constant import fixed_value_function
+from opteryx.expression.functions.registrar import fixed_value_function
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.join_helpers import get_mismatched_condition_column_types

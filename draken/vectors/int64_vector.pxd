@@ -37,9 +37,11 @@ cdef class Int64Vector(Vector):
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
     cdef BoolVector _compare_scalar_rle(self, int64_t value, int op)
     cdef BoolVector _compare_scalar_dict(self, int64_t value, int op)
-    cdef BoolVector _compare_scalar(self, int64_t value, int op)
-    cdef BoolVector _compare_vector(self, Int64Vector other, int op)
-    cdef BoolVector _compare_float64_vector(self, object other, int op)
+    # Integer-dispatched kernels. cpdef so the expression evaluator can call
+    # them directly from Python and bypass the per-op named wrappers below.
+    cpdef BoolVector _compare_scalar(self, int64_t value, int op)
+    cpdef BoolVector _compare_vector(self, Int64Vector other, int op)
+    cpdef BoolVector _compare_float64_vector(self, object other, int op)
 
     cpdef BoolVector equals(self, int64_t value)
     cpdef BoolVector equals_vector(self, Int64Vector other)

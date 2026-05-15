@@ -23,6 +23,10 @@ Probe phase uses batch read-only APIs (probe_found_32 / probe_not_found_32) that
 call into C++ CarcharSet::probe_found_32 / probe_not_found_32 — const methods
 with software prefetch on x86, fully NoGIL.
 
+PerfectHashSet fast path: when the right-side join key is a non-null Int8 or
+Int16 narrow integer column and OPTERYX_PERFECT_HASH=1, direct-address probing
+replaces hash-table probing. Build detects eligibility at first right morsel.
+
 NULL semantics
 --------------
 NULL values in join keys hash to NULL_HASH (a fixed sentinel).  This gives three
@@ -42,24 +46,24 @@ possible join modes:
                        null are also excluded (NULL NOT IN (...) = UNKNOWN).
 """
 
+import os
 from typing import Generator, Optional
 import time
 
-from libc.stdint cimport int32_t, int64_t, uint64_t
+from libc.stdint cimport int32_t
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
+from draken.vectors.vector cimport Vector
 
 from opteryx.models import QueryProperties
-# EOS sentinel available as _EOS_SENTINEL via the umbrella unit.
 
+# EOS sentinel available as _EOS_SENTINEL via the umbrella unit.
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
 
-# Actual hash produced for a null key: mix(0, raw_NULL_HASH) where raw_NULL_HASH = 0x4c3f95a36ab8ecca.
-# hash_into initialises dest to 0 (calloc), so: mixed = (0 ^ raw) * MIX_CONST + 1, then ^ >> 32.
 cdef uint64_t _NULL_HASH = <uint64_t>0x73d59cff8f94d86cULL
 
 
 # ---------------------------------------------------------------------------
-# Build phase
+# Build phase — CarcharSetWrapper path (existing)
 # ---------------------------------------------------------------------------
 
 cdef CarcharSetWrapper _build_filter_hash_set(
@@ -84,8 +88,103 @@ cdef CarcharSetWrapper _build_filter_hash_set(
 
 
 # ---------------------------------------------------------------------------
+# Build phase — PerfectHashSet path
+# ---------------------------------------------------------------------------
+
+cdef object _try_build_phash(Morsel morsel, list columns, object current_set):
+    """Attempt to insert build-side rows into a PerfectHashSet.
+
+    Returns the (possibly newly created) PerfectHashSet on success, or None
+    if the column is ineligible (wrong type, has nulls, wrong encoding).
+    On first call (current_set is None), creates the PerfectHashSet from
+    type bounds. On subsequent calls it is already a PerfectHashSet.
+    """
+    if len(columns) != 1:
+        return None
+    col = morsel.column(columns[0])
+    if not isinstance(col, IntegerVector):
+        return None
+    cdef IntegerVector ivec = <IntegerVector>col
+    # Any null on the right build side: track _right_has_null separately;
+    # null rows are skipped (not inserted) into PerfectHashSet.
+    cdef void* dp = ivec.dense_ptr()
+    if dp == NULL:
+        return None  # non-dense encoding (RLE/const) → fall back
+
+    cdef PerfectHashSet phs
+    if current_set is None:
+        if ivec.ptr.type == DRAKEN_INT8:
+            phs = PerfectHashSet(-128, 127)
+        elif ivec.ptr.type == DRAKEN_INT16:
+            phs = PerfectHashSet(-32768, 32767)
+        else:
+            return None  # Int32/Int64 — no type bound in Phase 1
+    else:
+        phs = <PerfectHashSet>current_set
+
+    cdef Py_ssize_t n = morsel.num_rows
+    cdef uint8_t* nulls = ivec.null_bitmap_ptr()
+    cdef Py_ssize_t i
+    cdef int64_t val
+
+    if nulls == NULL:
+        # No nulls: bulk insert
+        with nogil:
+            if ivec.ptr.type == DRAKEN_INT8:
+                for i in range(n):
+                    phs.insert_i64(<int64_t>(<const int8_t*>dp)[i])
+            else:
+                for i in range(n):
+                    phs.insert_i64(<int64_t>(<const int16_t*>dp)[i])
+    else:
+        # Null rows: skip them (tracked via _right_has_null flag in the node)
+        with nogil:
+            if ivec.ptr.type == DRAKEN_INT8:
+                for i in range(n):
+                    if nulls[i >> 3] & (1 << (i & 7)):
+                        phs.insert_i64(<int64_t>(<const int8_t*>dp)[i])
+            else:
+                for i in range(n):
+                    if nulls[i >> 3] & (1 << (i & 7)):
+                        phs.insert_i64(<int64_t>(<const int16_t*>dp)[i])
+
+    return phs
+
+
+# ---------------------------------------------------------------------------
+# Rebuild CarcharSetWrapper from PerfectHashSet (rare fallback path)
+# ---------------------------------------------------------------------------
+
+cdef CarcharSetWrapper _rebuild_carchar_from_phash(PerfectHashSet phs):
+    """Reconstruct a hash-based CarcharSetWrapper from an existing PerfectHashSet.
+
+    Called only when the probe side turns out to have a column encoding the
+    PerfectHashSet path can't handle (e.g. nullable or non-dense). Iterates
+    the bit-array and hashes each stored value via Draken's scalar hash machinery.
+    """
+    from draken.vectors.scalar_constructors import from_scalar as _build_scalar
+    cdef CarcharSetWrapper result = CarcharSetWrapper(<size_t>phs._range * 2 + 8)
+    cdef uint64_t[::1] hash_buf
+    cdef Py_ssize_t w, bit
+    cdef uint64_t word, mask
+    cdef int64_t slot, val
+    for w in range(phs._n_words):
+        word = phs._words[w]
+        if word == 0:
+            continue
+        for bit in range(64):
+            mask = <uint64_t>1 << bit
+            if word & mask:
+                slot = <int64_t>w * 64 + <int64_t>bit
+                val = phs._min_val + slot
+                scalar_vec = _build_scalar(val, 1)
+                hash_buf = (<Vector>scalar_vec).hash()
+                result.insert(hash_buf[0])
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Compact helper — filter out rows whose hash equals the null sentinel.
-# Used when right side has nulls and we need to exclude left-null rows.
 # ---------------------------------------------------------------------------
 
 cdef Py_ssize_t _compact_exclude_null(
@@ -94,7 +193,6 @@ cdef Py_ssize_t _compact_exclude_null(
     const uint64_t* hashes,
     uint64_t null_hash,
 ) noexcept nogil:
-    """Compact indices[0..count) in-place, dropping entries where hashes[indices[j]] == null_hash."""
     cdef Py_ssize_t r = 0, w = 0
     for r in range(count):
         if hashes[indices[r]] != null_hash:
@@ -104,7 +202,7 @@ cdef Py_ssize_t _compact_exclude_null(
 
 
 # ---------------------------------------------------------------------------
-# Probe kernels — each returns a filtered Morsel
+# Probe kernels — CarcharSetWrapper path (existing)
 # ---------------------------------------------------------------------------
 
 cdef Morsel _semi_join_filter(
@@ -113,15 +211,6 @@ cdef Morsel _semi_join_filter(
     CarcharSetWrapper seen_hashes,
     bint right_has_null,
 ):
-    """
-    LEFT SEMI JOIN probe (IN subquery).
-
-    Fast path (right has no nulls): probe_found_32 directly — left null rows
-    hash to NULL_HASH which is not in the set, so they are correctly excluded.
-
-    Slow path (right has nulls): probe_found_32, then compact out left null rows
-    (NULL IN (NULL, ...) = UNKNOWN = excluded).
-    """
     cdef Py_ssize_t num_rows = relation.num_rows
     cdef uint64_t[::1] row_hashes = relation.hash(join_columns)
     cdef int32_t* out_buf = <int32_t*>PyMem_Malloc(num_rows * sizeof(int32_t))
@@ -149,12 +238,6 @@ cdef Morsel _anti_join_filter(
     list join_columns,
     CarcharSetWrapper seen_hashes,
 ):
-    """
-    LEFT ANTI JOIN probe (EXCEPT / set operations).
-
-    No null awareness — callers that need NOT IN semantics use
-    _anti_join_null_aware_filter instead.
-    """
     cdef Py_ssize_t num_rows = relation.num_rows
     cdef uint64_t[::1] row_hashes = relation.hash(join_columns)
     cdef int32_t* out_buf = <int32_t*>PyMem_Malloc(num_rows * sizeof(int32_t))
@@ -180,15 +263,7 @@ cdef Morsel _anti_join_null_aware_filter(
     list join_columns,
     CarcharSetWrapper seen_hashes,
 ):
-    """
-    LEFT ANTI NULL-AWARE JOIN probe (NOT IN subquery).
-
-    If right side has any null: all left rows return UNKNOWN → return empty.
-    Otherwise: use probe_not_found_32, then compact out left null rows
-    (NULL NOT IN (...) = UNKNOWN = excluded).
-    """
     if seen_hashes.contains(_NULL_HASH):
-        # Right side has nulls — NOT IN returns UNKNOWN for every outer row.
         return relation.slice(0, 0)
 
     cdef Py_ssize_t num_rows = relation.num_rows
@@ -200,7 +275,6 @@ cdef Morsel _anti_join_null_aware_filter(
     cdef Py_ssize_t n_not_found
     with nogil:
         n_not_found = seen_hashes.probe_not_found_32_nogil(&row_hashes[0], num_rows, out_buf)
-        # Exclude left rows whose key is null (NULL NOT IN (...) = UNKNOWN = excluded).
         if n_not_found > 0:
             n_not_found = _compact_exclude_null(out_buf, n_not_found, &row_hashes[0], _NULL_HASH)
 
@@ -215,6 +289,77 @@ cdef Morsel _anti_join_null_aware_filter(
 
 
 # ---------------------------------------------------------------------------
+# Probe kernels — PerfectHashSet path
+# ---------------------------------------------------------------------------
+
+cdef Morsel _phash_probe(
+    Morsel relation,
+    list join_columns,
+    PerfectHashSet phash,
+    bint want_found,       # True = semi, False = anti
+    bint right_has_null,   # only relevant for semi and null-aware anti
+    bint null_aware,       # True = left anti null-aware (NOT IN)
+):
+    """Unified PerfectHashSet probe for semi/anti/null-aware-anti joins.
+
+    Falls back to None if the probe-side column is ineligible (has nulls,
+    non-dense encoding, wrong type). Caller must handle None by falling back
+    to the hash path.
+    """
+    if len(join_columns) != 1:
+        return None
+    col = relation.column(join_columns[0])
+    if not isinstance(col, IntegerVector):
+        return None
+    cdef IntegerVector ivec = <IntegerVector>col
+    cdef void* dp = ivec.dense_ptr()
+    if dp == NULL:
+        return None
+
+    cdef Py_ssize_t n = relation.num_rows
+    cdef int32_t* out_buf = <int32_t*>PyMem_Malloc(n * sizeof(int32_t))
+    if out_buf == NULL:
+        raise MemoryError()
+
+    cdef uint8_t* nulls = ivec.null_bitmap_ptr()
+    cdef Py_ssize_t count = 0
+    cdef Py_ssize_t i
+
+    if null_aware and right_has_null:
+        # NOT IN with a null on the right side → every left row is UNKNOWN → empty
+        PyMem_Free(out_buf)
+        return relation.slice(0, 0)
+
+    if nulls != NULL:
+        # Probe side has nulls: null rows are never "found" in PerfectHashSet.
+        # For semi-join: null rows correctly excluded (NULL IN (...) = UNKNOWN).
+        # For anti-join: null rows NOT excluded by probe_not_found; need manual handling.
+        # Simplest: fall back to hash path when probe side has nulls.
+        PyMem_Free(out_buf)
+        return None
+
+    with nogil:
+        if want_found:
+            if ivec.ptr.type == DRAKEN_INT8:
+                count = phash.probe_found_32_i8(<const int8_t*>dp, out_buf, n)
+            else:
+                count = phash.probe_found_32_i16(<const int16_t*>dp, out_buf, n)
+        else:
+            if ivec.ptr.type == DRAKEN_INT8:
+                count = phash.probe_not_found_32_i8(<const int8_t*>dp, out_buf, n)
+            else:
+                count = phash.probe_not_found_32_i16(<const int16_t*>dp, out_buf, n)
+
+    cdef Morsel result
+    if count > 0:
+        result = relation.take(<int32_t[:count]>out_buf)
+    else:
+        result = relation.slice(0, 0)
+    PyMem_Free(out_buf)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # FilterJoinNode
 # ---------------------------------------------------------------------------
 
@@ -223,9 +368,10 @@ cdef class FilterJoinNode(JoinNode):
     cdef public object using
     cdef public list left_columns
     cdef public list right_columns
-    cdef public CarcharSetWrapper right_hash_set
+    cdef public object right_hash_set   # CarcharSetWrapper or PerfectHashSet
     cdef public bint _right_has_null
     cdef public bint _build_phase
+    cdef public bint _use_phash
 
     def __init__(self, properties=None, **parameters):
         self.join_type = parameters["type"]
@@ -239,9 +385,10 @@ cdef class FilterJoinNode(JoinNode):
         self.right_columns = parameters.get("right_columns")
         self.right_readers = parameters.get("right_readers")
 
-        self.right_hash_set = CarcharSetWrapper()
+        self.right_hash_set = None
         self._right_has_null = False
-        self._build_phase = True  # right side arrives first
+        self._build_phase = True
+        self._use_phash = False
 
     @property
     def name(self):  # pragma: no cover
@@ -259,19 +406,64 @@ cdef class FilterJoinNode(JoinNode):
 
     cpdef void push_right(self, Morsel morsel) except *:
         cdef long long start
-        # Build side for filter joins — right side feeds the hash set.
         if morsel is _EOS_SENTINEL:
-            self._right_has_null = self.right_hash_set.has(_NULL_HASH)
+            # Finalise: check if right side had any nulls
+            if self._use_phash:
+                # Nulls tracked during build; PerfectHashSet has no null slot
+                pass
+            else:
+                if self.right_hash_set is not None:
+                    self._right_has_null = (<CarcharSetWrapper>self.right_hash_set).has(_NULL_HASH)
+                else:
+                    self._right_has_null = False
+                    self.right_hash_set = CarcharSetWrapper()
             return
+
         morsel = self._apply_join_key_casts(morsel, is_left=False)
         start = time.monotonic_ns()
+
+        # On first right morsel: decide hash vs perfect-hash path
+        if self.right_hash_set is None and os.environ.get("OPTERYX_PERFECT_HASH") == "1":
+            phash = _try_build_phash(morsel, self.right_columns, None)
+            if phash is not None:
+                self.right_hash_set = phash
+                self._use_phash = True
+                # Check for nulls in this morsel
+                if len(self.right_columns) == 1:
+                    col = morsel.column(self.right_columns[0])
+                    if isinstance(col, IntegerVector):
+                        if (<IntegerVector>col).null_bitmap_ptr() != NULL:
+                            self._right_has_null = True
+                self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
+                return
+
+        if self._use_phash:
+            phash = _try_build_phash(morsel, self.right_columns, self.right_hash_set)
+            if phash is None:
+                from opteryx.exceptions import InvalidInternalStateError
+                raise InvalidInternalStateError(
+                    "PerfectHashSet build: right-side morsel incompatible after first morsel "
+                    "(non-dense encoding or null appeared mid-stream)"
+                )
+            self.right_hash_set = phash
+            # Track nulls
+            if len(self.right_columns) == 1:
+                col = morsel.column(self.right_columns[0])
+                if isinstance(col, IntegerVector):
+                    if (<IntegerVector>col).null_bitmap_ptr() != NULL:
+                        self._right_has_null = True
+            self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
+            return
+
+        # CarcharSetWrapper path
+        if self.right_hash_set is None:
+            self.right_hash_set = CarcharSetWrapper()
         self.right_hash_set = _build_filter_hash_set(
-            morsel, self.right_columns, self.right_hash_set
+            morsel, self.right_columns, <CarcharSetWrapper>self.right_hash_set
         )
         self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
 
     cpdef void push_left(self, Morsel morsel) except *:
-        # Probe side for filter joins — filters left through the right-side hash set.
         if morsel is _EOS_SENTINEL:
             self.emit(_EOS_SENTINEL)
             return
@@ -279,13 +471,36 @@ cdef class FilterJoinNode(JoinNode):
         if morsel.num_rows == 0:
             self.emit(morsel)
             return
+
+        cdef Morsel result
+        cdef PerfectHashSet phash
+
+        if self._use_phash:
+            phash = <PerfectHashSet>self.right_hash_set
+            if self.join_type == "left semi":
+                result = _phash_probe(morsel, self.left_columns, phash,
+                                      True, self._right_has_null, False)
+            elif self.join_type == "left anti":
+                result = _phash_probe(morsel, self.left_columns, phash,
+                                      False, False, False)
+            elif self.join_type == "left anti null-aware":
+                result = _phash_probe(morsel, self.left_columns, phash,
+                                      False, self._right_has_null, True)
+            else:
+                result = None
+
+            if result is not None:
+                self.emit(result)
+                return
+            # PerfectHashSet probe fell back (probe side has nulls / non-dense).
+            # Rebuild a CarcharSetWrapper by hashing each stored value and use the hash path.
+            self._use_phash = False
+            self.right_hash_set = _rebuild_carchar_from_phash(phash)
+
+        cdef CarcharSetWrapper cs = <CarcharSetWrapper>self.right_hash_set
         if self.join_type == "left semi":
-            self.emit(_semi_join_filter(
-                morsel, self.left_columns, self.right_hash_set, self._right_has_null
-            ))
+            self.emit(_semi_join_filter(morsel, self.left_columns, cs, self._right_has_null))
         elif self.join_type == "left anti":
-            self.emit(_anti_join_filter(morsel, self.left_columns, self.right_hash_set))
+            self.emit(_anti_join_filter(morsel, self.left_columns, cs))
         elif self.join_type == "left anti null-aware":
-            self.emit(_anti_join_null_aware_filter(
-                morsel, self.left_columns, self.right_hash_set
-            ))
+            self.emit(_anti_join_null_aware_filter(morsel, self.left_columns, cs))

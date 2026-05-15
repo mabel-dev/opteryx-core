@@ -522,6 +522,14 @@ cdef class BoolVector(Vector):
         out.ptr.null_bitmap = out_null
         return out
 
+    cpdef BoolVector _compare_scalar(self, bint value, int op):
+        """Scalar compare using Draken standard op codes: 0=Eq 1=Ne."""
+        if op == 0:
+            return self.equals(value)
+        if op == 1:
+            return self.not_equals(value)
+        raise ValueError(f"BoolVector._compare_scalar: unsupported op {op}")
+
     cpdef BoolVector equals(self, bint value):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_bool(self).equals(value)

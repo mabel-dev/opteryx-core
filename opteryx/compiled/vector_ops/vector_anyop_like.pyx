@@ -433,13 +433,13 @@ cpdef BoolVector regex_match_any(StringVector arr, ArrayVector patterns, int fla
         _release_regex_vector(row_patterns)
 
 
-cpdef BoolVector vector_anyop_like(object literal, ArrayVector column):
+cpdef BoolVector vector_anyop_like(object literal, ArrayVector column, bint negate=False):
     if isinstance(literal, ArrayVector):
-        return _regex_match_any_array_array(column, <ArrayVector>literal, flags=0, invert=False)
-    return _regex_match_any_literal(column, literal, flags=0, invert=False)
+        return _regex_match_any_array_array(column, <ArrayVector>literal, flags=0, invert=negate)
+    return _regex_match_any_literal(column, literal, flags=0, invert=negate)
 
 
-cpdef BoolVector vector_anyop_ilike(object literal, ArrayVector column):
+cpdef BoolVector vector_anyop_ilike(object literal, ArrayVector column, bint negate=False):
     if isinstance(literal, ArrayVector):
-        return _regex_match_any_array_array(column, <ArrayVector>literal, flags=2, invert=False)
-    return _regex_match_any_literal(column, literal, flags=2, invert=False)
+        return _regex_match_any_array_array(column, <ArrayVector>literal, flags=2, invert=negate)
+    return _regex_match_any_literal(column, literal, flags=2, invert=negate)

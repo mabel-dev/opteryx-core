@@ -19,12 +19,15 @@ from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.int64_vector cimport Int64Vector
 from draken.vectors.string_vector cimport StringVector
+from draken.vectors.integer_vector cimport IntegerVector
+from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
+from opteryx.compiled.structures.perfect_hash_set cimport PerfectHashSet
 from opteryx.compiled.structures.buffers cimport IntBuffer, Int32Buffer
 from draken.interop.vector_sequence cimport vector_from_sequence
 from cpython.array cimport array
 
-from libc.stdint cimport int64_t, uint64_t
+from libc.stdint cimport int8_t, int16_t, int64_t, uint64_t
 from libc.stdlib cimport malloc, realloc, free
 from libc.string cimport memcpy
 

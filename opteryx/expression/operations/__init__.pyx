@@ -1,38 +1,36 @@
+# cython: language_level=3
+# cython: boundscheck=False
+# cython: wraparound=False
+# cython: initializedcheck=False
+
 """Filter operations dispatcher - Draken-native only.
 
-All array inputs must be Draken vectors. No numpy/pyarrow conversion or fallbacks.
-Null handling is native to Draken vector operations.
-If you get AttributeError, your input isn't Draken - that's a bug upstream.
+All array inputs must be Draken vectors. No numpy/pyarrow conversion or
+fallbacks. Null handling is native to Draken vector operations. If you get
+AttributeError, your input isn't Draken — that's a bug upstream.
+
+Consolidation: the leaf modules (comparisons / list_ops / array_ops /
+string_matching / special_ops / fastpath_*) are textually included into
+this umbrella so the package compiles to a single .so. All cdef/cpdef
+helpers from those files live in this module's namespace.
 """
 
 import datetime
 
 from draken.interop.vector_sequence import vector_from_sequence
-from opteryx.compiled.vector_ops import vector_contains
+from draken.vectors.bool_vector import BoolVector
+from opteryx.compiled.vector_ops import (
+    vector_contains,
+    vector_in_list,
+    vector_like,
+    vector_rlike,
+)
 from opteryx.expression.evaluator.comparisons import draken_compare
-from opteryx.expression.operations import (
-    array_ops,
-    comparisons,
-    list_ops,
-    special_ops,
-    string_matching,
+from opteryx.expression.evaluator.type_coercion import (
+    _constant_scalar_value,
+    _is_constant_vector_like,
 )
-from opteryx.expression.operations.fastpath_constant import (
-    constant_fastpath,
-    has_constant_candidate,
-    supports_constant_fastpath,
-)
-from opteryx.expression.operations.fastpath_dictionary import (
-    has_dictionary_candidate,
-    supports_dictionary_fastpath,
-    supports_dictionary_numeric_fastpath,
-)
-from opteryx.expression.operations.fastpath_telemetry import (
-    get_fastpath_telemetry,
-    record_constant_fastpath_fallback,
-    record_constant_fastpath_hit,
-    reset_fastpath_telemetry,
-)
+from opteryx.third_party import yyjson
 from opteryx.types import OrsoTypes
 from opteryx.types._datetime_conversion import (
     date_to_int64_days,
@@ -41,7 +39,21 @@ from opteryx.types._datetime_conversion import (
     timestamp_to_int64_us,
 )
 
-# Operators that should skip null compression during filtering
+# Leaf includes — order matters: telemetry has no intra-package dependencies,
+# fastpath_constant uses telemetry, fastpath_dictionary uses both, and the
+# operator wrappers (comparisons / list_ops / string_matching) rely on the
+# fastpath helpers. array_ops and special_ops are independent and follow.
+include "fastpath_telemetry.pyx"
+include "fastpath_constant.pyx"
+include "fastpath_dictionary.pyx"
+include "comparisons.pyx"
+include "list_ops.pyx"
+include "string_matching.pyx"
+include "array_ops.pyx"
+include "special_ops.pyx"
+
+
+# Operators that should skip null compression during filtering.
 _SKIP_COMPRESSION_OPS = frozenset(
     (
         "InList",
@@ -141,8 +153,6 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
 
     # Empty arrays return empty result
     if len(left_arr) == 0 or len(right_arr) == 0:
-        from draken.vectors.bool_vector import BoolVector
-
         return BoolVector.from_scalar(None, 0)
 
     # Fast path for constant-encoded vectors
@@ -155,14 +165,13 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
     elif right_type == OrsoTypes.DECIMAL and left_type == OrsoTypes.INTEGER:
         left_type = OrsoTypes.DOUBLE
 
-    # Temporal type coercions - reject INT vs temporal comparisons (no implicit conversion)
+    # Temporal type coercions — reject INT vs temporal comparisons.
     temporal_types = {OrsoTypes.DATE, OrsoTypes.TIMESTAMP}
     if (
         OrsoTypes.INTEGER in (left_type, right_type)
         or left_type in temporal_types
         or right_type in temporal_types
     ):
-        # Reject implicit INTEGER to temporal conversions
         if left_type == OrsoTypes.INTEGER and right_type in temporal_types:
             raise IncompatibleTypesError(
                 message="Ambiguous comparison: INTEGER = TIMESTAMP/DATE. "
@@ -205,7 +214,6 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
             )
         return function(left_arr, left_type, right_arr, right_type, operator)
 
-    # Dispatch to appropriate operation handler
     return _inner_filter_operations(left_arr, operator, right_arr)
 
 
@@ -243,9 +251,6 @@ def _inner_filter_operations(arr, operator, value):
 
     # InStr fast path
     if operator in ("InStr", "NotInStr", "IInStr", "NotIInStr"):
-        from opteryx.expression.operations.fastpath_dictionary import dictionary_fastpath
-        from opteryx.expression.operations.fastpath_telemetry import record_dict_fastpath_hit
-
         ignore_case = operator in ("IInStr", "NotIInStr")
         negate = operator in ("NotInStr", "NotIInStr")
         raw_value = value[0] if hasattr(value, "__len__") and len(value) == 1 else value
@@ -262,42 +267,35 @@ def _inner_filter_operations(arr, operator, value):
 
     # Dictionary-encoded fastpath
     if dict_candidate and supports_dictionary_fastpath(operator):
-        from opteryx.expression.operations.fastpath_dictionary import dictionary_fastpath
-        from opteryx.expression.operations.fastpath_telemetry import record_dict_fastpath_hit
-
         fast = dictionary_fastpath(raw_arr, operator, value)
         if fast is not None:
             record_dict_fastpath_hit()
             return fast
 
-    # Dispatch by operator type
+    # Dispatch by operator type — symbols are in-scope via the leaf includes.
     if operator in ("Eq", "Equal"):
-        return comparisons.equal(raw_arr, value, dict_candidate=dict_candidate)
+        return equal(raw_arr, value, dict_candidate=dict_candidate)
     elif operator in ("NotEq", "NotEqual"):
-        return comparisons.not_equal(raw_arr, value, dict_candidate=dict_candidate)
+        return not_equal(raw_arr, value, dict_candidate=dict_candidate)
     elif operator in ("Lt", "LessThan"):
-        return comparisons.less_than(raw_arr, value, dict_candidate=dict_candidate)
+        return less_than(raw_arr, value, dict_candidate=dict_candidate)
     elif operator in ("Gt", "GreaterThan"):
-        return comparisons.greater_than(raw_arr, value, dict_candidate=dict_candidate)
+        return greater_than(raw_arr, value, dict_candidate=dict_candidate)
     elif operator in ("LtEq", "LessThanOrEqual"):
-        return comparisons.less_than_or_equal(raw_arr, value, dict_candidate=dict_candidate)
+        return less_than_or_equal(raw_arr, value, dict_candidate=dict_candidate)
     elif operator in ("GtEq", "GreaterThanOrEqual"):
-        return comparisons.greater_than_or_equal(raw_arr, value, dict_candidate=dict_candidate)
+        return greater_than_or_equal(raw_arr, value, dict_candidate=dict_candidate)
     elif operator in ("InList",):
-        return list_ops.in_list(raw_arr, value, dict_candidate=dict_candidate)
+        return in_list(raw_arr, value, dict_candidate=dict_candidate)
     elif operator in ("NotInList",):
-        return list_ops.not_in_list(raw_arr, value, dict_candidate=dict_candidate)
+        return not_in_list(raw_arr, value, dict_candidate=dict_candidate)
     elif operator.startswith("Like"):
-        return string_matching.like_match(raw_arr, value, operator)
+        return like_match(raw_arr, value, operator)
     elif operator.startswith("RLike"):
-        return string_matching.rlike_match(raw_arr, value, operator)
-    elif operator.startswith("AnyOp"):
-        return array_ops.any_op(raw_arr, value, operator)
-    elif operator.startswith("AllOp"):
-        return array_ops.all_op(raw_arr, value, operator)
+        return rlike_match(raw_arr, value, operator)
     elif operator.startswith("ArrayContains"):
         return vector_contains(raw_arr, value)
-    elif operator in ("AtArrow",):
-        return special_ops.at_arrow(raw_arr, value)
     else:
+        # AnyOp* / AllOp* / AtArrow are dispatched via
+        # evaluator.comparisons.draken_compare before they can reach here.
         raise NotImplementedError(f"Filter operation `{operator}` not implemented.")

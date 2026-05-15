@@ -1,3 +1,8 @@
+# cython: language_level=3
+# cython: boundscheck=False
+# cython: wraparound=False
+# cython: initializedcheck=False
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -20,24 +25,32 @@ from opteryx.exceptions import (
     IncorrectTypeError,
     UnsupportedSyntaxError,
 )
-from opteryx.expression.binary_operators import binary_operations
 from opteryx.expression.evaluator import apply_bounded_function
 from opteryx.expression.operations import filter_operations
-from opteryx.expression.unary_operations import UNARY_OPERATIONS
 from opteryx.models import LogicalColumn, Node
 from opteryx.types import OrsoTypes
 from opteryx.types._datetime_conversion import date_to_int64_days, timestamp_to_int64_us
 from opteryx.utils import random_string
 
-from .formatter import (
-    ExpressionColumn,  # this is used
-    format_expression,
-)
-
 # These are bit-masks
 LOGICAL_TYPE: int = int("00010000", 2)
 INTERNAL_TYPE: int = int("00100000", 2)
 MAX_COLUMN_BYTE_SIZE: int = 50000000
+
+# ---------------------------------------------------------------------------
+# Top-level expression leaves — textually included so the package compiles
+# to a single .so. intervals must come before formatter (formatter references
+# MICROSECONDS_PER_SECOND). operator_catalog has a lazy `from . import
+# NodeType` inside one function, which the umbrella defines below — safe
+# because that import only fires at call time, after this module finishes
+# initialising.
+# ---------------------------------------------------------------------------
+include "intervals.pyx"
+include "casts.pyx"
+include "formatter.pyx"
+include "binary_operators.pyx"
+include "unary_operations.pyx"
+include "operator_catalog.pyx"
 
 __all__ = ("NodeType", "evaluate", "evaluate_and_append", "get_all_nodes_of_type")
 
@@ -848,3 +861,21 @@ def evaluate_and_append(expressions, table):
 from opteryx.expression.evaluator import _verify_node_type_constants
 _verify_node_type_constants()
 del _verify_node_type_constants
+
+
+# Submodule-alias shims so legacy `from opteryx.expression.LEAF import name`
+# imports keep working after consolidation. Each alias points at this same
+# module — the leaf names are already in this namespace via the includes.
+import sys as _sys
+_self = _sys.modules[__name__]
+for _leaf in (
+    "binary_operators",
+    "casts",
+    "formatter",
+    "intervals",
+    "operator_catalog",
+    "unary_operations",
+):
+    globals()[_leaf] = _self
+    _sys.modules[f"{__name__}.{_leaf}"] = _self
+del _leaf, _self, _sys

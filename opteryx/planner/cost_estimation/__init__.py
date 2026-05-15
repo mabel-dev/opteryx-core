@@ -22,16 +22,21 @@ from opteryx.planner.cost_estimation.predicate_ordering import PredicateStats
 from opteryx.planner.cost_estimation.predicate_ordering import order_predicates
 
 
-def enumerate_join_tree(graph: JoinGraph, *, dp_threshold: int = 12) -> JoinTree:
-    """Pick DPccp or the greedy fallback based on the vertex count.
+def enumerate_join_tree(
+    graph: JoinGraph, *, dp_threshold: int = 12, edge_threshold: int = 20
+) -> JoinTree:
+    """Pick DPccp or the greedy fallback based on vertex and edge counts.
 
-    ``dp_threshold`` is the largest vertex count that still uses DPccp; above
-    it we drop to the greedy enumerator. Default 12 keeps DPccp's runtime
-    well under 100ms on realistic join graphs.
+    DPccp runs when *both* ``graph.n <= dp_threshold`` and
+    ``len(graph.edges) <= edge_threshold``; otherwise the greedy enumerator
+    is used. The edge threshold guards against pathologically dense schemas
+    where DPccp's exponential enumeration becomes too slow (17v/24e ≈ 600ms).
     """
     if dp_threshold < 1:
         raise ValueError(f"dp_threshold must be >= 1 (got {dp_threshold})")
-    if graph.n <= dp_threshold:
+    if edge_threshold < 0:
+        raise ValueError(f"edge_threshold must be >= 0 (got {edge_threshold})")
+    if graph.n <= dp_threshold and len(graph.edges) <= edge_threshold:
         return dpccp(graph)
     return greedy_join_order(graph)
 

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import List
 
 # Local implementation imports (kept as late imports inside function if heavy)
@@ -27,7 +25,6 @@ from opteryx.expression.functions.implementations.utility import (
 )
 
 # Local helpers provided by registrar package
-from opteryx.expression.functions.registrar import _coalesce_return_type
 from opteryx.types import OrsoTypes
 
 

@@ -519,7 +519,7 @@ cdef class DecimalVector(Vector):
     # Scalar comparison
     # ------------------------------------------------------------------
 
-    cdef BoolVector _compare_scalar(self, int op, int64_t rhs):
+    cpdef BoolVector _compare_scalar(self, int op, int64_t rhs):
         cdef DrakenFixedBuffer* ptr
         cdef int64_t* data
         cdef uint8_t* src_null
@@ -602,7 +602,7 @@ cdef class DecimalVector(Vector):
     # Vector-vector comparison
     # ------------------------------------------------------------------
 
-    cdef BoolVector _compare_vector(self, DecimalVector other, int op):
+    cpdef BoolVector _compare_vector(self, DecimalVector other, int op):
         """Element-wise comparison between two DecimalVectors of the same scale."""
         cdef DrakenFixedBuffer* ptr1
         cdef DrakenFixedBuffer* ptr2

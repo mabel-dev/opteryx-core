@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import List
 
 from opteryx.expression.functions import (
@@ -12,7 +10,6 @@ from opteryx.expression.functions import (
 )
 
 # Use package-level helper to construct concise FunctionDefinition entries.
-from opteryx.expression.functions.registrar import _make
 from opteryx.types import OrsoTypes
 
 

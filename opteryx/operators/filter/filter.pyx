@@ -21,25 +21,18 @@ This is a SQL Query Execution Plan Node.
 This node is responsible for applying filters to datasets.
 """
 
-import os as _os
 from typing import Generator, Optional
+from opteryx.compiled.expression.compiled_expression import build_bytecode as _build_bytecode
 from opteryx.compiled.expression.compiled_expression import lower as _lower_expr
 from opteryx.expression import NodeType
 from opteryx.expression import format_expression
 from opteryx.expression import get_all_nodes_of_type
-from opteryx.expression.evaluator import evaluate_compiled as _evaluate_compiled
-from opteryx.expression.evaluator import evaluate_draken as _evaluate_draken
+from opteryx.expression.evaluator import execute_bytecode as _execute_bytecode
 from opteryx.models import QueryProperties
 
+from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode
 from draken.vectors.vector cimport Vector
 from draken.encoding import DRAKEN_ENCODING_CONSTANT as _CONSTANT_ENCODING
-
-
-# Wedge D1 benchmark flag. When OPTERYX_COMPILED_EXPR=1 we lower the filter
-# predicate to a CompiledExpression arena at bind time and walk it via
-# evaluate_compiled instead of evaluate_draken. Used to measure whether the
-# arena dispatch is worth the deeper Wedge D2 investment.
-_USE_COMPILED_EXPR = _os.environ.get("OPTERYX_COMPILED_EXPR") == "1"
 
 # BasePlanNode is defined at the top of _operators.pyx (the umbrella unit) and
 # is in scope here via textual include.
@@ -171,7 +164,7 @@ cdef class FilterNode(BasePlanNode):
     cdef public object post_filter_columns
     cdef public list function_evaluations
     cdef public list _const_replacements
-    cdef public object _compiled_filter
+    cdef CompiledBytecode _compiled_filter
 
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
@@ -185,11 +178,11 @@ cdef class FilterNode(BasePlanNode):
 
         self._const_replacements = _extract_constant_replacements(self.filter)
 
-        # When the Wedge D1 benchmark flag is set, lower the predicate once at
-        # bind time so every morsel walks the C++ arena instead of the Python
-        # Node tree. The handle holds its own refs to value/schema_column.
-        if _USE_COMPILED_EXPR and self.filter is not None:
-            self._compiled_filter = _lower_expr(self.filter)
+        # Lower the filter predicate to a C++ arena and linearise it into a
+        # typed CompiledBytecode at bind time.  Every morsel iterates a C
+        # struct array — no Python Node tree traversal at execute time.
+        if self.filter is not None:
+            self._compiled_filter = _build_bytecode(_lower_expr(self.filter))
         else:
             self._compiled_filter = None
 
@@ -209,10 +202,7 @@ cdef class FilterNode(BasePlanNode):
             self._emit_cdef(morsel)
             return
 
-        if self._compiled_filter is not None:
-            mask = _evaluate_compiled(self._compiled_filter, morsel)
-        else:
-            mask = _evaluate_draken(self.filter, morsel)
+        mask = _execute_bytecode(self._compiled_filter, morsel)
         filtered = morsel.filter_mask(mask)
 
         if self._const_replacements:

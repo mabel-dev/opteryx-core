@@ -982,81 +982,49 @@ extensions = [
         include_dirs=include_dirs,
         extra_compile_args=C_FLAGS,
     ),
-    # Expression evaluator orchestration (Cython tree walk + dispatch).
-    # Built as C++ because Wedge D1 cimports the CompiledExpression cdef extern
-    # declarations from opteryx/compiled/expression/compiled_expression.pxd,
-    # which references the C++ arena header.
     Extension(
-        "opteryx.expression.evaluator.evaluation",
-        sources=["opteryx/expression/evaluator/evaluation.pyx"],
+        "opteryx.compiled.structures.perfect_hash_set",
+        sources=["opteryx/compiled/structures/perfect_hash_set.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=C_FLAGS,
+    ),
+    # evaluator/* leaf modules are textually included by evaluator/_impl.pyx
+    # and built into a single .so at opteryx/expression/evaluator/_impl.so.
+    # The sibling __init__.py imports _impl, re-exports the public API, and
+    # registers legacy submodule aliases.
+    #
+    # We compile a `_impl` submodule (not `__init__`) because Cython 3.x emits
+    # an internal `PyImport_ImportModule("<pkg>.__init__")` call when typed
+    # memoryviews are involved, and Python can't resolve that synthetic name
+    # when the extension is named with `.__init__`.
+    #
+    # Built as C++ because evaluation.pyx cimports CompiledExpression from the
+    # opteryx/compiled/expression/ C++ arena header.
+    Extension(
+        "opteryx.expression.evaluator._impl",
+        sources=["opteryx/expression/evaluator/_impl.pyx"],
         include_dirs=include_dirs + ["src/cpp"],
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
-    # Comparison dispatch — all WHERE predicate evaluation routes through here.
-    Extension(
-        "opteryx.expression.evaluator.comparisons",
-        sources=["opteryx/expression/evaluator/comparisons.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    # Binary arithmetic dispatch.
-    Extension(
-        "opteryx.expression.evaluator.arithmetic",
-        sources=["opteryx/expression/evaluator/arithmetic.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    # Temporal (date/timestamp/interval) comparison + arithmetic dispatch.
-    Extension(
-        "opteryx.expression.evaluator.temporal_ops",
-        sources=["opteryx/expression/evaluator/temporal_ops.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    # VectorType → kernel routing called from arithmetic.pyx per binary op.
-    Extension(
-        "opteryx.expression.evaluator.arithmetic_dispatch",
-        sources=["opteryx/expression/evaluator/arithmetic_dispatch.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    # StringVector comparison dispatch (LIKE / RLIKE / IN / etc.).
-    Extension(
-        "opteryx.expression.evaluator.string_ops",
-        sources=["opteryx/expression/evaluator/string_ops.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    # JSON/array vector operations (@>, @?, contains-all).
-    Extension(
-        "opteryx.expression.evaluator.json_ops",
-        sources=["opteryx/expression/evaluator/json_ops.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    # FUNCTION-node application helper.
-    Extension(
-        "opteryx.expression.evaluator.function_execution",
-        sources=["opteryx/expression/evaluator/function_execution.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    # Type-coercion utilities cimported by every kernel.
-    Extension(
-        "opteryx.expression.evaluator.type_coercion",
-        sources=["opteryx/expression/evaluator/type_coercion.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    # CASE WHEN lazy evaluator (Decide / Compute / Assemble orchestration on
-    # top of the native kernels in compiled/vector_ops/case_helpers).
-    Extension(
-        "opteryx.expression.evaluator.case_eval",
-        sources=["opteryx/expression/evaluator/case_eval.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
+    *[
+        Extension(
+            _name,
+            sources=[_src],
+            include_dirs=include_dirs,
+            extra_compile_args=C_FLAGS,
+        )
+        for _name, _src in (
+            ("opteryx.expression.__init__",                          "opteryx/expression/__init__.pyx"),
+            ("opteryx.expression.functions.__init__",                "opteryx/expression/functions/__init__.pyx"),
+            ("opteryx.expression.functions.implementations.__init__","opteryx/expression/functions/implementations/__init__.pyx"),
+            ("opteryx.expression.functions.registrar.__init__",      "opteryx/expression/functions/registrar/__init__.pyx"),
+            ("opteryx.expression.operations.__init__",               "opteryx/expression/operations/__init__.pyx"),
+        )
+    ],
+    # functions/catalog.pyx is textually included by functions/__init__.pyx;
+    # registrar/* and implementations/* are similarly consolidated into their
+    # package __init__ files. No per-leaf Extensions needed for any of them.
     # Compiled (C++) representation of an expression tree; lowered from Node
     # at bind time and walked by the evaluator. See src/cpp/expression/.
     Extension(

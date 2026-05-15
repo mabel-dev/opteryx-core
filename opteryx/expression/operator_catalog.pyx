@@ -1,7 +1,5 @@
 """Curated operator metadata layered onto generated operator exports."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Optional
 
@@ -29,9 +27,11 @@ class OperatorDefinition:
     signatures: tuple[OperatorSignatureDefinition, ...] = ()
 
 
-def default_operator_friendly_name(operator: str) -> str:
-    words: list[str] = []
-    current = ""
+cpdef str default_operator_friendly_name(str operator):
+    cdef list words = []
+    cdef str current = ""
+    cdef Py_ssize_t index
+    cdef str character
     for index, character in enumerate(operator):
         if index > 0 and character.isupper() and current:
             words.append(current)
@@ -43,29 +43,29 @@ def default_operator_friendly_name(operator: str) -> str:
     return " ".join(words) if words else operator
 
 
-def get_operator_definition(operator: str) -> OperatorDefinition | None:
+cpdef get_operator_definition(str operator):
     return OPERATOR_DEFINITIONS.get(operator)
 
 
-def is_known_operator(operator: str) -> bool:
+cpdef bint is_known_operator(str operator):
     return operator in OPERATOR_DEFINITIONS
 
 
-def get_operator_token(operator: str) -> str | None:
+cpdef get_operator_token(str operator):
     definition = get_operator_definition(operator)
     if definition and definition.token:
         return definition.token
     return None
 
 
-def get_operator_sql_symbol(operator: str) -> str | None:
+cpdef get_operator_sql_symbol(str operator):
     definition = get_operator_definition(operator)
     if definition and definition.sql_symbol:
         return definition.sql_symbol
     return get_operator_token(operator)
 
 
-def get_operator_node_type(operator: str):
+def get_operator_node_type(operator):
     from opteryx.expression import NodeType
 
     definition = get_operator_definition(operator)
@@ -87,7 +87,7 @@ def get_operator_node_type(operator: str):
     return None
 
 
-def get_operator_signatures(operator: str) -> tuple[OperatorSignatureDefinition, ...]:
+def get_operator_signatures(operator):
     definition = get_operator_definition(operator)
     if definition is None:
         return ()

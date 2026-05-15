@@ -6,7 +6,6 @@ from opteryx.expression.functions import (
     ParameterSpec,
     ReturnSpec,
 )
-from opteryx.expression.functions.registrar import _make
 from opteryx.types import OrsoTypes
 
 

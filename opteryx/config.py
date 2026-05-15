@@ -159,6 +159,10 @@ Default 64 gives ~16x throughput vs the previous hardcoded 4.
 # MORSEL_SIZE remains a plain constant
 MORSEL_SIZE: int = int(get("MORSEL_SIZE", 64 * 1024 * 1024))
 
+# target row count per emitted morsel from Parquet reads
+# Parquet pages are ~8-16K rows; 16384 matches that granularity
+PARQUET_MORSEL_ROWS: int = int(get("PARQUET_MORSEL_ROWS", 16384))
+
 
 if environ.get("FEATURE_DRAKEN_DICT_EXPR_STRICT") is not None:
     import warnings
@@ -201,7 +205,7 @@ class Features:
     parquet_pool_reader = str(get("FEATURE_PARQUET_POOL_READER", "1")).lower() in ("1", "true", "yes")
     parquet_thread_scheduler = str(get("FEATURE_PARQUET_THREAD_SCHEDULER", "0")).lower() in ("1", "true", "yes")
     parquet_late_materialization = str(get("FEATURE_PARQUET_LATE_MATERIALIZATION", "1")).lower() in ("1", "true", "yes")
-    enable_dpccp_join_planning = bool(get("FEATURE_ENABLE_DPCCP_JOIN_PLANNING", False))
+    enable_dpccp_join_planning = bool(get("FEATURE_ENABLE_DPCCP_JOIN_PLANNING", True))
 
 
 features = Features()

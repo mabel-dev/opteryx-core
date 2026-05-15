@@ -10,8 +10,6 @@ callables in opteryx.expression.functions.implementations.text and to a small
 set of compiled vector ops when available.
 """
 
-from __future__ import annotations
-
 from typing import List
 
 from opteryx.compiled import vector_ops as compiled_vector_ops
@@ -47,7 +45,6 @@ from opteryx.expression.functions import (
     ParameterSpec,
     ReturnSpec,
 )
-from opteryx.expression.functions.registrar import _make
 from opteryx.types import OrsoTypes
 
 

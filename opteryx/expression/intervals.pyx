@@ -1,36 +1,47 @@
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# See the License at http://www.apache.org/licenses/LICENSE-2.0
-# Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+"""INTERVAL kernel registry and helpers.
 
-from typing import Callable, Dict, Optional, Tuple
+Cython migration of the former intervals.py. INTERVAL_KERNELS is consumed
+by the binary-operator dispatcher; the helper functions handle interval ⊕
+interval and interval ⊕ date/timestamp operations on top of the native
+IntervalVector kernels.
+"""
 
+from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.types import OrsoTypes
 from opteryx.utils.vector_types import VectorType, get_vector_type
 
+
+# Native IntervalVector exposes integer op-codes for compare_vector; mirror
+# them as compile-time DEFs so the dispatcher folds to literal ints.
+DEF INTERVAL_OP_EQ = 0
+DEF INTERVAL_OP_NEQ = 1
+DEF INTERVAL_OP_GT = 2
+DEF INTERVAL_OP_GTE = 3
+DEF INTERVAL_OP_LT = 4
+DEF INTERVAL_OP_LTE = 5
+
+# Conversion constants — exposed at module level for callers that historically
+# imported them. Module-level Python ints; no need for cdef in the rare
+# read path.
 MICROSECONDS_PER_SECOND = 1_000_000
 MICROSECONDS_PER_MINUTE = 60 * MICROSECONDS_PER_SECOND
 MICROSECONDS_PER_HOUR = 60 * MICROSECONDS_PER_MINUTE
 MICROSECONDS_PER_DAY = 24 * MICROSECONDS_PER_HOUR
 NANOSECONDS_PER_MICROSECOND = 1_000
-INTERVAL_OP_EQ = 0
-INTERVAL_OP_NEQ = 1
-INTERVAL_OP_GT = 2
-INTERVAL_OP_GTE = 3
-INTERVAL_OP_LT = 4
-INTERVAL_OP_LTE = 5
 
 
-def normalize_interval_value(value) -> Tuple[int, int]:
-    """Normalize interval literals to canonical (months, microseconds)."""
+cpdef tuple normalize_interval_value(value):
+    """Normalise interval literals to a canonical (months, microseconds) tuple."""
     if not (isinstance(value, tuple) and len(value) == 2):
         raise TypeError(
-            f"INTERVAL literal must be a (months, microseconds) tuple, got {type(value)!r}."
+            f"INTERVAL literal must be a (months, microseconds) tuple, "
+            f"got {type(value)!r}."
         )
     return (int(value[0]), int(value[1]))
 
 
-def _as_interval_vector(values):
+cpdef _as_interval_vector(values):
+    """Verify `values` is an IntervalVector; fail-fast otherwise."""
     if get_vector_type(values) == VectorType.INTERVAL:
         return values
     raise TypeError(
@@ -39,8 +50,9 @@ def _as_interval_vector(values):
     )
 
 
-def _date_plus_interval(left, left_type, right, right_type, operator):
-    signum = 1 if operator == "Plus" else -1
+cpdef _date_plus_interval(left, left_type, right, right_type, str operator):
+    """date/timestamp ⊕ interval (operands may be in either order)."""
+    cdef int signum = 1 if operator == "Plus" else -1
     if left_type == OrsoTypes.INTERVAL:
         left, right = right, left
 
@@ -48,41 +60,41 @@ def _date_plus_interval(left, left_type, right, right_type, operator):
     return interval_vector.apply_to_temporal(left, signum)
 
 
-def _interval_interval_op(left, left_type, right, right_type, operator):
+cpdef _interval_interval_op(left, left_type, right, right_type, str operator):
+    """interval ⊕ interval — addition, subtraction, and the six comparisons."""
     left_vector = _as_interval_vector(left)
     right_vector = _as_interval_vector(right)
 
-    if operator in ("Plus", "Minus"):
-        return (
-            left_vector.add_vector(right_vector)
-            if operator == "Plus"
-            else left_vector.subtract_vector(right_vector)
-        )
+    if operator == "Plus":
+        return left_vector.add_vector(right_vector)
+    if operator == "Minus":
+        return left_vector.subtract_vector(right_vector)
 
-    compare_ops = {
-        "Eq": INTERVAL_OP_EQ,
-        "NotEq": INTERVAL_OP_NEQ,
-        "Gt": INTERVAL_OP_GT,
-        "GtEq": INTERVAL_OP_GTE,
-        "Lt": INTERVAL_OP_LT,
-        "LtEq": INTERVAL_OP_LTE,
-    }
-
-    op_code = compare_ops.get(operator)
-    if op_code is None:
-        from opteryx.exceptions import UnsupportedSyntaxError
-
+    cdef int op_code
+    if operator == "Eq":
+        op_code = INTERVAL_OP_EQ
+    elif operator == "NotEq":
+        op_code = INTERVAL_OP_NEQ
+    elif operator == "Gt":
+        op_code = INTERVAL_OP_GT
+    elif operator == "GtEq":
+        op_code = INTERVAL_OP_GTE
+    elif operator == "Lt":
+        op_code = INTERVAL_OP_LT
+    elif operator == "LtEq":
+        op_code = INTERVAL_OP_LTE
+    else:
         raise UnsupportedSyntaxError(f"Unsupported INTERVAL operation `{operator}`.")
 
     try:
         return left_vector.compare_vector(right_vector, op_code, True)
     except ValueError as err:
-        from opteryx.exceptions import UnsupportedSyntaxError
-
+        # The kernel surfaces precision-mismatch / unsupported-shape errors as
+        # ValueError; convert to a user-facing syntax error.
         raise UnsupportedSyntaxError(str(err)) from err
 
 
-INTERVAL_KERNELS: Dict[Tuple[OrsoTypes, OrsoTypes, str], Optional[Callable]] = {
+INTERVAL_KERNELS = {
     (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Plus"): _interval_interval_op,
     (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Minus"): _interval_interval_op,
     (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Eq"): _interval_interval_op,

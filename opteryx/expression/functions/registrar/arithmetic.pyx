@@ -4,8 +4,6 @@ Provides all arithmetic and numeric functions (rounding, magnitude, exponentiati
 with Draken vector kernels.
 """
 
-from __future__ import annotations
-
 from opteryx.expression.functions import (
     FunctionDefinition,
     FunctionOverload,
@@ -16,7 +14,6 @@ from opteryx.expression.functions import (
 )
 from opteryx.expression.functions.implementations import arithmetic as number_functions
 from opteryx.expression.functions.implementations import temporal as date_functions
-from opteryx.expression.functions.registrar import _make
 from opteryx.types import OrsoTypes
 
 

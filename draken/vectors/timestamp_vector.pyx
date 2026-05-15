@@ -546,7 +546,7 @@ cdef class TimestampVector(Vector):
 
         return out
 
-    cdef BoolVector _compare_scalar(self, int64_t value, int op):
+    cpdef BoolVector _compare_scalar(self, int64_t value, int op):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return self._compare_scalar_rle(value, op)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
@@ -689,7 +689,7 @@ cdef class TimestampVector(Vector):
                         dst[i >> 3] |= <uint8_t>(1 << (i & 7))
         return out
 
-    cdef BoolVector _compare_vector(self, TimestampVector other, int op):
+    cpdef BoolVector _compare_vector(self, TimestampVector other, int op):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_timestamp(self)._compare_vector(other, op)
         if other._encoding == DRAKEN_ENCODING_RLE:

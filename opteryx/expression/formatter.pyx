@@ -1,7 +1,11 @@
-from dataclasses import dataclass
-from typing import Any
+"""Expression rendering for diagnostics / EXPLAIN / display.
 
-from opteryx.expression.intervals import MICROSECONDS_PER_SECOND
+Recursive walk over a bound expression tree producing a SQL-like string.
+Not on the per-row hot path — called once per shown expression.
+"""
+
+from dataclasses import dataclass
+
 from opteryx.types import OrsoTypes
 from opteryx.types.schema import FlatColumn
 from opteryx.utils import random_string
@@ -9,10 +13,11 @@ from opteryx.utils import random_string
 
 @dataclass
 class ExpressionColumn(FlatColumn):
-    expression: Any = None
+    expression: object = None
 
 
-def _format_interval(value):
+cpdef str _format_interval(value):
+    """Render an interval (months, microseconds) as a SQL INTERVAL literal."""
     months, microseconds = value
 
     seconds = microseconds / MICROSECONDS_PER_SECOND
@@ -20,7 +25,7 @@ def _format_interval(value):
     hours, seconds = divmod(seconds, 3600)
     minutes, seconds = divmod(seconds, 60)
     years, months = divmod(months, 12)
-    parts = []
+    cdef list parts = []
     if years >= 1:
         parts.append(f"{int(years)} YEAR")
     if months >= 1:
@@ -36,27 +41,30 @@ def _format_interval(value):
     return " ".join(parts)
 
 
-def format_expression(root, qualify: bool = False):
-    # circular imports
+def format_expression(root, qualify=False):
+    # Lazy: opteryx.expression imports format_expression at module load,
+    # and opteryx.expression.operator_catalog imports from .expression — a
+    # cycle that's only safe to break at first call.
     from . import INTERNAL_TYPE, NodeType
     from .operator_catalog import get_operator_token
 
     if root is None:
         return "null"
 
-    if not qualify and root.left and root.right:
-        # if left and right would look the same without qualifying, force qualification
-        qualify = (root.left.current_name == root.right.current_name) and (
+    cdef bint qualify_b = qualify
+    if not qualify_b and root.left and root.right:
+        # Force qualification when both sides render identically.
+        qualify_b = (root.left.current_name == root.right.current_name) and (
             root.right.current_name is not None
         )
 
     if type(root) is list:
-        return [format_expression(item, qualify) for item in root]
+        return [format_expression(item, qualify_b) for item in root]
 
     node_type = root.node_type
-    _map: dict = {}
+    cdef dict _map
 
-    # LITERAL TYPES
+    # LITERALS
     if node_type == NodeType.LITERAL:
         literal_type = root.type
         if literal_type == OrsoTypes.VARCHAR:
@@ -75,33 +83,45 @@ def format_expression(root, qualify: bool = False):
                 items = ", ".join(shown)
                 return "{" + items + (f", ...{rest} more" if rest else "") + "}"
         return str(root.value)
-    # INTERAL IDENTIFIERS
+
     if node_type == NodeType.CASE:
         parts = "".join(
-            f"WHEN {format_expression(c, qualify)} THEN {format_expression(v, qualify)} "
+            f"WHEN {format_expression(c, qualify_b)} THEN {format_expression(v, qualify_b)} "
             for c, v in zip(root.conditions or [], root.results or [])
         )
         else_part = (
-            f"ELSE {format_expression(root.else_result, qualify)} " if root.else_result is not None else ""
+            f"ELSE {format_expression(root.else_result, qualify_b)} "
+            if root.else_result is not None
+            else ""
         )
         return f"CASE {parts}{else_part}END"
+
     if node_type & INTERNAL_TYPE == INTERNAL_TYPE:
-        if node_type in (NodeType.FUNCTION, NodeType.AGGREGATOR):
+        if node_type == NodeType.FUNCTION or node_type == NodeType.AGGREGATOR:
             distinct = "DISTINCT " if root.duplicate_treatment else ""
             order = ""
             if root.order:
-                order = f" ORDER BY {', '.join(item[0].value + (' DESC' if not item[1] else '') for item in (root.order or []))}"
+                order = " ORDER BY " + ", ".join(
+                    item[0].value + (" DESC" if not item[1] else "")
+                    for item in (root.order or [])
+                )
             if root.value == "ARRAY_AGG":
                 limit = f" LIMIT {root.limit}" if root.limit else ""
-                return f"{root.value.upper()}({distinct}{root.parameters[0].current_name}{order}{limit})"
-            return f"{root.value.upper()}({distinct}{','.join([format_expression(e, qualify) for e in root.parameters])}{order})"
+                return (
+                    f"{root.value.upper()}({distinct}"
+                    f"{root.parameters[0].current_name}{order}{limit})"
+                )
+            params = ",".join(
+                [format_expression(e, qualify_b) for e in root.parameters]
+            )
+            return f"{root.value.upper()}({distinct}{params}{order})"
         if node_type == NodeType.CAST:
-            # Format CAST expressions: expr::TYPE or expr::TYPE(params)
-            source_expr = format_expression(root.left, qualify)
+            source_expr = format_expression(root.left, qualify_b)
             target_type = root.value
             if root.parameters:
-                # Include parameters like precision/scale if present
-                params = ",".join([format_expression(p, qualify) for p in root.parameters])
+                params = ",".join(
+                    [format_expression(p, qualify_b) for p in root.parameters]
+                )
                 return f"{source_expr}::{target_type}({params})"
             return f"{source_expr}::{target_type}"
         if node_type == NodeType.WILDCARD:
@@ -110,20 +130,30 @@ def format_expression(root, qualify: bool = False):
             return "*"
         if node_type == NodeType.BINARY_OPERATOR:
             token = (get_operator_token(root.value) or root.value).upper()
-            return f"{format_expression(root.left, qualify)} {token} {format_expression(root.right, qualify)}"
+            return (
+                f"{format_expression(root.left, qualify_b)} {token} "
+                f"{format_expression(root.right, qualify_b)}"
+            )
         if node_type == NodeType.EXTRACTION_OPERATOR:
             if root.value == "MapAccess":
                 return (
-                    f"{format_expression(root.left, qualify)}"
-                    f"[{format_expression(root.right, qualify)}]"
+                    f"{format_expression(root.left, qualify_b)}"
+                    f"[{format_expression(root.right, qualify_b)}]"
                 )
             token = (get_operator_token(root.value) or root.value).upper()
-            return f"{format_expression(root.left, qualify)} {token} {format_expression(root.right, qualify)}"
+            return (
+                f"{format_expression(root.left, qualify_b)} {token} "
+                f"{format_expression(root.right, qualify_b)}"
+            )
         if node_type == NodeType.EXPRESSION_LIST:
             return f"<EXPRESSIONS {random_string(4)}>"
+
     if node_type == NodeType.COMPARISON_OPERATOR:
         token = (get_operator_token(root.value) or root.value).upper()
-        return f"{format_expression(root.left, qualify)} {token} {format_expression(root.right, qualify)}"
+        return (
+            f"{format_expression(root.left, qualify_b)} {token} "
+            f"{format_expression(root.right, qualify_b)}"
+        )
     if node_type == NodeType.UNARY_OPERATOR:
         _map = {
             "IsNull": "%s IS NULL",
@@ -133,31 +163,38 @@ def format_expression(root, qualify: bool = False):
             "BitwiseNot": "~%s",
         }
         return _map.get(root.value, root.value + "(%s)").replace(
-            "%s", format_expression(root.centre, qualify)
+            "%s", format_expression(root.centre, qualify_b)
         )
     if node_type == NodeType.NOT:
-        return f"NOT {format_expression(root.centre, qualify)}"
-    if node_type in (NodeType.AND, NodeType.OR, NodeType.XOR):
+        return f"NOT {format_expression(root.centre, qualify_b)}"
+    if node_type == NodeType.AND or node_type == NodeType.OR or node_type == NodeType.XOR:
         _map = {
             NodeType.AND: "AND",
             NodeType.OR: "OR",
             NodeType.XOR: "XOR",
-        }  # type: ignore
-        return f"({format_expression(root.left, qualify)} {_map[node_type]} {format_expression(root.right, qualify)})"
+        }
+        return (
+            f"({format_expression(root.left, qualify_b)} "
+            f"{_map[node_type]} {format_expression(root.right, qualify_b)})"
+        )
     if node_type == NodeType.NESTED:
-        return f"({format_expression(root.centre, qualify)})"
+        return f"({format_expression(root.centre, qualify_b)})"
     if node_type == NodeType.IDENTIFIER:
-        if qualify and root.source:
+        if qualify_b and root.source:
             return root.qualified_name
         return root.current_name
     if node_type == NodeType.DNF:
-        return " AND ".join([format_expression(e, qualify) for e in root.parameters])
+        return " AND ".join(
+            [format_expression(e, qualify_b) for e in root.parameters]
+        )
     if node_type == NodeType.CNF:
-        return " OR ".join([format_expression(e, qualify) for e in root.parameters])
+        return " OR ".join(
+            [format_expression(e, qualify_b) for e in root.parameters]
+        )
     if node_type == NodeType.BETWEEN:
-        col = format_expression(root.left, qualify)
-        lower = format_expression(root.right, qualify)
-        upper = format_expression(root.centre, qualify)
+        col = format_expression(root.left, qualify_b)
+        lower = format_expression(root.right, qualify_b)
+        upper = format_expression(root.centre, qualify_b)
         lower_inclusive, upper_inclusive = root.value
         if lower_inclusive and upper_inclusive:
             return f"{col} BETWEEN {lower} AND {upper}"

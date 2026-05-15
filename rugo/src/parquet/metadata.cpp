@@ -670,6 +670,22 @@ static void ParseColumnChunk(TInput &in, ColumnStats &out,
       ParseColumnMeta(in, out, opts);
       break;
     }
+    case 4: { // offset_index_offset (i64)
+      out.offset_index_offset = ReadI64(in);
+      break;
+    }
+    case 5: { // offset_index_length (i32)
+      out.offset_index_length = ReadI32(in);
+      break;
+    }
+    case 6: { // column_index_offset (i64)
+      out.column_index_offset = ReadI64(in);
+      break;
+    }
+    case 7: { // column_index_length (i32)
+      out.column_index_length = ReadI32(in);
+      break;
+    }
     // skip everything else
     default:
       SkipField(in, fh.type);

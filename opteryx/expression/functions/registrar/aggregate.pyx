@@ -11,8 +11,6 @@ builtin functions by name-based checks in the binder/planner while keeping the
 module structure consistent for future work.
 """
 
-from __future__ import annotations
-
 from typing import List
 
 from opteryx.expression.functions import FunctionDefinition  # type: ignore

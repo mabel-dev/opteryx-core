@@ -1,8 +1,3 @@
-# cython: language_level=3
-# cython: boundscheck=False
-# cython: wraparound=False
-# cython: initializedcheck=False
-
 """Temporal (date/timestamp/interval) comparison and arithmetic dispatch.
 
 Cython migration of the former temporal_ops.py. Callers (comparisons.pyx,
@@ -14,7 +9,7 @@ this layer is dispatch: pick the right kernel based on the right-hand
 operand's class and the requested op string.
 """
 
-from opteryx.compiled.vector_ops import vector_in_list
+from opteryx.compiled.vector_ops import build_in_list_carchar, vector_in_list
 from opteryx.types import OrsoTypes
 
 from draken.vectors.bool_vector import BoolVector
@@ -23,13 +18,6 @@ from draken.vectors.int64_vector import Int64Vector
 from draken.vectors.timestamp_vector import TimestampVector
 from draken.interop.vector_sequence import vector_from_sequence
 
-from .type_coercion import (
-    _coerce_date32,
-    _coerce_date32_set,
-    _coerce_interval,
-    _coerce_timestamp,
-    _coerce_timestamp_set,
-)
 
 
 # Microseconds per day — used to convert Date32 (days since epoch) into
@@ -44,25 +32,13 @@ cdef _convert_date32_to_timestamp_vector(d_vec):
     return vector_from_sequence(ts_values)
 
 
-cdef _compare_timestamp_date32_vectors(str op, ts_vec, d_vec):
+cdef _compare_timestamp_date32_vectors(int op_code, ts_vec, d_vec):
     """Compare a TimestampVector against a Date32Vector via native vector ops."""
     d_as_ts = _convert_date32_to_timestamp_vector(d_vec)
-    if op == "Eq":
-        return ts_vec.equals_vector(d_as_ts)
-    if op == "NotEq":
-        return ts_vec.not_equals_vector(d_as_ts)
-    if op == "Lt":
-        return ts_vec.less_than_vector(d_as_ts)
-    if op == "Gt":
-        return ts_vec.greater_than_vector(d_as_ts)
-    if op == "LtEq":
-        return ts_vec.less_than_or_equals_vector(d_as_ts)
-    if op == "GtEq":
-        return ts_vec.greater_than_or_equals_vector(d_as_ts)
-    raise NotImplementedError(f"Timestamp/Date32 comparison: unsupported op {op!r}")
+    return ts_vec._compare_vector(d_as_ts, _DRAKEN_CMP_OP[op_code])
 
 
-cpdef _int64_temporal_compare(str op, vec, right, temporal_type):
+cdef _int64_temporal_compare(int op_code, vec, right, temporal_type):
     cdef bint is_timestamp
     cdef bint is_date
 
@@ -82,137 +58,72 @@ cpdef _int64_temporal_compare(str op, vec, right, temporal_type):
         else:
             value_set = _coerce_date32_set(right)
     elif isinstance(right, (Int64Vector, TimestampVector, Date32Vector)):
-        # Physically int64, temporal semantics: native vector-vector dispatch.
-        if op == "Eq":
-            return vec.equals_vector(right)
-        if op == "Lt":
-            return vec.less_than_vector(right)
-        if op == "Gt":
-            return vec.greater_than_vector(right)
-        if op == "LtEq":
-            return vec.less_than_or_equals_vector(right)
-        if op == "GtEq":
-            return vec.greater_than_or_equals_vector(right)
-        raise NotImplementedError(
-            f"{type(right).__name__} temporal vector-vector: unsupported op {op!r}"
-        )
+        return vec._compare_vector(right, _DRAKEN_CMP_OP[op_code])
     else:
         if is_timestamp:
             value = _coerce_timestamp(right)
         else:
             value = _coerce_date32(right)
 
-    if op == "Eq":
-        return vec.equals(value)
-    if op == "Lt":
-        return vec.less_than(value)
-    if op == "Gt":
-        return vec.greater_than(value)
-    if op == "LtEq":
-        return vec.less_than_or_equals(value)
-    if op == "GtEq":
-        return vec.greater_than_or_equals(value)
-    if op == "InList":
-        return vector_in_list(vec, value_set)
-    raise NotImplementedError(f"Int64Vector temporal: unsupported op {op!r}")
+    if op_code == OP_IN_LIST:
+        return vector_in_list(vec, build_in_list_carchar(value_set))
+    return vec._compare_scalar(value, _DRAKEN_CMP_OP[op_code])
 
 
-cpdef _timestamp_compare(str op, vec, right):
+cdef _timestamp_compare(int op_code, vec, right):
     if right is None:
         return BoolVector(len(vec))
 
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = _coerce_timestamp_set(right)
     elif isinstance(right, TimestampVector):
-        if op == "Eq":
-            return vec.equals_vector(right)
-        if op == "NotEq":
-            return vec.not_equals_vector(right)
-        if op == "Lt":
-            return vec.less_than_vector(right)
-        if op == "Gt":
-            return vec.greater_than_vector(right)
-        if op == "LtEq":
-            return vec.less_than_or_equals_vector(right)
-        if op == "GtEq":
-            return vec.greater_than_or_equals_vector(right)
-        raise NotImplementedError(f"TimestampVector vector-vector: unsupported op {op!r}")
+        return vec._compare_vector(right, _DRAKEN_CMP_OP[op_code])
     elif isinstance(right, Date32Vector):
-        return _compare_timestamp_date32_vectors(op, vec, right)
+        return _compare_timestamp_date32_vectors(op_code, vec, right)
     else:
         value = _coerce_timestamp(right)
         if value is None:
             return BoolVector(len(vec))
 
-    if op == "Eq":
-        return vec.equals(value)
-    if op == "Lt":
-        return vec.less_than(value)
-    if op == "Gt":
-        return vec.greater_than(value)
-    if op == "LtEq":
-        return vec.less_than_or_equals(value)
-    if op == "GtEq":
-        return vec.greater_than_or_equals(value)
-    if op == "InList":
-        return vector_in_list(vec, value_set)
-    raise NotImplementedError(f"TimestampVector: unsupported op {op!r}")
+    if op_code == OP_IN_LIST:
+        return vector_in_list(vec, build_in_list_carchar(value_set))
+    return vec._compare_scalar(value, _DRAKEN_CMP_OP[op_code])
 
 
-cpdef _date32_compare(str op, vec, right):
+cdef _date32_compare(int op_code, vec, right):
     if right is None:
         return BoolVector(len(vec))
 
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = _coerce_date32_set(right)
     elif isinstance(right, Date32Vector):
-        if op == "Eq":
-            return vec.equals_vector(right)
-        if op == "Lt":
-            return vec.less_than_vector(right)
-        if op == "Gt":
-            return vec.greater_than_vector(right)
-        if op == "LtEq":
-            return vec.less_than_or_equals_vector(right)
-        if op == "GtEq":
-            return vec.greater_than_or_equals_vector(right)
-        raise NotImplementedError(f"Date32Vector vector-vector: unsupported op {op!r}")
+        return vec._compare_vector_op(right, _DRAKEN_CMP_OP[op_code])
     elif isinstance(right, TimestampVector):
-        return _compare_timestamp_date32_vectors(op, right, vec)
+        return _compare_timestamp_date32_vectors(op_code, right, vec)
     else:
         value = _coerce_date32(right)
 
-    if op == "Eq":
-        return vec.equals(value)
-    if op == "Lt":
-        return vec.less_than(value)
-    if op == "Gt":
-        return vec.greater_than(value)
-    if op == "LtEq":
-        return vec.less_than_or_equals(value)
-    if op == "GtEq":
-        return vec.greater_than_or_equals(value)
-    if op == "InList":
-        return vector_in_list(vec, value_set)
-    raise NotImplementedError(f"Date32Vector: unsupported op {op!r}")
+    if op_code == OP_IN_LIST:
+        return vector_in_list(vec, build_in_list_carchar(value_set))
+    return vec._compare_scalar(value, _DRAKEN_CMP_OP[op_code])
 
 
-cpdef _interval_compare(str op, vec, right):
+cdef _interval_compare(int op_code, vec, right):
     if right is None:
         return BoolVector(len(vec))
 
     literal = _coerce_interval(right)
-    if op == "Eq":
+    if op_code == OP_EQ:
         return vec.equals(literal)
-    if op == "Lt":
+    if op_code == OP_LT:
         return vec.less_than(literal)
-    if op == "Gt":
+    if op_code == OP_GT:
         return vec.greater_than(literal)
-    if op == "LtEq":
+    if op_code == OP_LT_EQ:
         return vec.less_than_or_equals(literal)
-    if op == "GtEq":
+    if op_code == OP_GT_EQ:
         return vec.greater_than_or_equals(literal)
-    raise NotImplementedError(f"IntervalVector: unsupported op {op!r}")
+    raise NotImplementedError(f"IntervalVector: unsupported op (code {op_code})")
 
 
 cpdef _date_minus_date_draken(left_vec, right_vec):

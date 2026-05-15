@@ -1,8 +1,3 @@
-# cython: language_level=3
-# cython: boundscheck=False
-# cython: wraparound=False
-# cython: initializedcheck=False
-
 """Function execution helpers for the expression evaluator.
 
 Cython migration of the former function_execution.py. The kernel call itself

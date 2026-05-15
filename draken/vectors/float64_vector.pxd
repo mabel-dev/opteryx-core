@@ -34,8 +34,10 @@ cdef class Float64Vector(Vector):
 
     cpdef Float64Vector take(self, int32_t[::1] indices)
     cdef bint _compare_float_values(self, double left, double right, int op) nogil
-    cdef BoolVector _compare_scalar(self, double value, int op)
-    cdef BoolVector _compare_vector(self, Float64Vector other, int op)
+    # Integer-dispatched kernels — cpdef so the expression evaluator can call
+    # them directly and bypass the per-op named wrappers below.
+    cpdef BoolVector _compare_scalar(self, double value, int op)
+    cpdef BoolVector _compare_vector(self, Float64Vector other, int op)
 
     cpdef BoolVector equals(self, double value)
     cpdef BoolVector equals_vector(self, Float64Vector other)

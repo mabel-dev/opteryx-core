@@ -1,8 +1,3 @@
-# cython: language_level=3
-# cython: boundscheck=False
-# cython: wraparound=False
-# cython: initializedcheck=False
-
 """Lazy CASE WHEN evaluator.
 
 Three-phase model:
@@ -30,7 +25,12 @@ from opteryx.compiled.vector_ops import (
     group_indices_and_perm,
 )
 from opteryx.compiled.vector_ops.vector_ops import _make_const_int16, _make_range_int32
-from opteryx.expression import NodeType
+
+# Note: NodeType is intentionally not imported here. The only use case in
+# this file is the LITERAL test, which is compared against the DEF
+# NT_LITERAL integer constant below. Importing NodeType at module level
+# creates a circular import when this leaf is included into the evaluator
+# package __init__ (which is itself imported during expression/__init__).
 
 from draken.morsels.morsel import Morsel
 from draken.vectors.bool_vector import BoolVector

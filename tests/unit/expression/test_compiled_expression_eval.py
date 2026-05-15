@@ -1,14 +1,14 @@
-"""Parity tests for evaluate_compiled vs evaluate_draken.
+"""Parity tests for the bytecode VM vs evaluate_draken.
 
-Wedge D1 introduces an arena-driven evaluator that walks a flat C++ tree
-instead of the source Python Node tree. The two paths must agree on every
-boolean orchestration node (AND, OR, NOT, XOR, NESTED, BETWEEN, DNF, CNF).
+build_bytecode(lower(node)) produces a flat postfix instruction list that
+execute_bytecode() consumes at morsel-eval time without walking the Python
+Node tree. The two paths must agree on every boolean orchestration node
+(AND, OR, NOT, XOR, NESTED, BETWEEN, DNF, CNF) and on literal push.
 
 These tests synthesize Node trees over LITERAL booleans plus a single real
 Morsel scanned from $planets so we exercise both the synthetic shape and
-realistic row counts. Leaf dispatch (COMPARISON, BINARY, FUNCTION, etc.)
-still falls through to evaluate_draken in Wedge D1, so parity at leaves is
-guaranteed by construction; we don't reinforce it here.
+realistic row counts. Leaf dispatch for FUNCTION / CASE etc. goes via the
+_eval_value legacy path, so parity there is guaranteed by construction.
 """
 
 import os
@@ -17,9 +17,9 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "..", "..", ".."))
 
 import opteryx
-from opteryx.compiled.expression.compiled_expression import lower
+from opteryx.compiled.expression.compiled_expression import build_bytecode, lower
 from opteryx.expression import NodeType
-from opteryx.expression.evaluator import evaluate_compiled, evaluate_draken
+from opteryx.expression.evaluator import evaluate_draken, execute_bytecode
 from opteryx.models import Node
 
 
@@ -41,7 +41,7 @@ def _bool_vector_equal(a, b):
 
 def _parity(node, morsel):
     left = evaluate_draken(node, morsel)
-    right = evaluate_compiled(lower(node), morsel)
+    right = execute_bytecode(build_bytecode(lower(node)), morsel)
     _bool_vector_equal(left, right)
 
 

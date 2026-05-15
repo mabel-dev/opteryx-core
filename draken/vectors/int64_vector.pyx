@@ -627,7 +627,7 @@ cdef class Int64Vector(Vector):
 
         return out
 
-    cdef BoolVector _compare_scalar(self, int64_t value, int op):
+    cpdef BoolVector _compare_scalar(self, int64_t value, int op):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return self._compare_scalar_rle(value, op)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
@@ -697,7 +697,7 @@ cdef class Int64Vector(Vector):
                 dispatch_scalar_branchless(op, data, value, src_null, dst, <size_t>n)
         return out
 
-    cdef BoolVector _compare_vector(self, Int64Vector other, int op):
+    cpdef BoolVector _compare_vector(self, Int64Vector other, int op):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_int64(self)._compare_vector(other, op)
         if other._encoding == DRAKEN_ENCODING_RLE:
@@ -789,7 +789,7 @@ cdef class Int64Vector(Vector):
             dispatch_vector_both_null_branchless(op, data1, data2, null1, null2, dst, out_null, <size_t>n)
         return out
 
-    cdef BoolVector _compare_float64_vector(self, object other, int op):
+    cpdef BoolVector _compare_float64_vector(self, object other, int op):
         """Compare Int64Vector with Float64Vector.
 
         Converts int64 values to float64 for comparison. Uses native float64 vector
@@ -1153,14 +1153,35 @@ cdef class Int64Vector(Vector):
 
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
         """Compare two values at given indices. Returns -1, 0, 1. Assumes non-null."""
+        cdef DrakenFixedBuffer* ptr
+        cdef int64_t* data
+        cdef int64_t left_val, right_val
+        cdef int64_t* dict_data
+        cdef uint32_t lc, rc
+
         if self._encoding == DRAKEN_ENCODING_RLE:
             return _materialize_rle_int64(self).compare_at(left_idx, right_idx)
-        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_int64(self).compare_at(left_idx, right_idx)
 
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int64_t* data = <int64_t*> ptr.data
-        cdef int64_t left_val, right_val
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            # Dict-aware path: dereference codes into the dictionary's int64
+            # backing buffer and compare values directly. No O(N) materialization
+            # per call.  (Previous implementation materialized the entire dense
+            # column on every compare — a Q27 hotspot.)
+            lc = _read_packed_code(self._dict_codes, self._dict_code_width, left_idx)
+            rc = _read_packed_code(self._dict_codes, self._dict_code_width, right_idx)
+            if lc == rc:
+                return 0
+            dict_data = <int64_t*>self._dict_values.data
+            left_val = dict_data[lc]
+            right_val = dict_data[rc]
+            if left_val < right_val:
+                return -1
+            elif left_val > right_val:
+                return 1
+            return 0
+
+        ptr = self.ptr
+        data = <int64_t*> ptr.data
 
         if self._has_const:
             return 0

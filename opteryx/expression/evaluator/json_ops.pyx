@@ -1,8 +1,3 @@
-# cython: language_level=3
-# cython: boundscheck=False
-# cython: wraparound=False
-# cython: initializedcheck=False
-
 """JSON and array vector operations.
 
 Cython migration of the former json_ops.py. Called from comparisons.pyx

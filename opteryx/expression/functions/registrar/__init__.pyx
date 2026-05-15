@@ -1,3 +1,8 @@
+# cython: language_level=3
+# cython: boundscheck=False
+# cython: wraparound=False
+# cython: initializedcheck=False
+
 """
 Registrar package initializer.
 
@@ -14,8 +19,6 @@ This module exposes helpers so domain modules can import them as:
 
     from opteryx.expression.functions.registrar import _make, _coalesce_return_type
 """
-
-from __future__ import annotations
 
 from typing import Any
 
@@ -175,63 +178,47 @@ def _datepart_return_type(arg_nodes) -> OrsoTypes:
     return OrsoTypes.INTEGER
 
 
+# ---------------------------------------------------------------------------
+# Consolidated leaf includes.
+#
+# The per-domain registrar files (aggregate / arithmetic / text / …) are
+# textually included here so the package compiles to a single .so. Their
+# getter functions land in this module's namespace, so get_builtin_functions
+# below can call them directly without intermediate module objects.
+# Order isn't significant for these — none reference each other.
+# ---------------------------------------------------------------------------
+include "aggregate.pyx"
+include "arithmetic.pyx"
+include "constant.pyx"
+include "hash_encoding.pyx"
+include "logical.pyx"
+include "temporal.pyx"
+include "temporal_extra.pyx"
+include "text.pyx"
+include "utility.pyx"
+# `get_builtin_array_misc_functions` is defined directly in utility.pyx;
+# the former array_misc.pyx forwarder was redundant and has been removed.
+
+
 def get_builtin_functions() -> list[FunctionDefinition]:
-    """Aggregate builtin function definitions from registrar submodules.
+    """Aggregate builtin function definitions across all registrar domains.
 
-    Each registrar submodule must expose a getter function returning a list
-    of FunctionDefinition objects. Example names:
-
-      - get_builtin_text_functions()
-      - get_builtin_text_extended_functions()
-      - get_builtin_arithmetic_functions()
-      - get_builtin_arithmetic_extended_functions()
-      - get_builtin_type_conversion_functions()
-      - get_builtin_logical_functions()
-      - get_builtin_aggregate_functions()
-      - get_builtin_constant_functions()
-      - get_builtin_temporal_extra_functions()
-      - get_builtin_temporal_functions()
-      - get_builtin_utility_functions()
-      - get_builtin_hash_encoding_functions()
-      - get_builtin_array_misc_functions()
-
-    Using relative imports allows domain modules to import helpers from this
-    package without creating import cycles with the top-level native registrar
-    (which is being removed).
+    Each domain's getter is defined directly in this module via the include
+    statements above; no submodule round-trip is needed.
     """
     functions: list[FunctionDefinition] = []
-
-    # Import registrar domain modules relatively; each module must provide the
-    # appropriate getter as noted above.
-    from . import aggregate as _agg
-    from . import arithmetic as _arith
-    from . import array_misc as _array
-    from . import constant as _const
-    from . import hash_encoding as _hash
-    from . import logical as _logical
-    from . import temporal as _temp
-    from . import temporal_extra as _temp_ext
-    from . import text as _text
-    from . import utility as _util
-
-    # Collect from each domain getter. Domain modules should implement these
-    # functions (or alias them) to return lists of FunctionDefinition objects.
-    functions.extend(_text.get_builtin_text_functions())
-    # Extended text functions (regex, split, replace, etc.) were historically
-    # collected here as well. Add them so functions like REGEXP_REPLACE are
-    # available to the SQL engine.
-    functions.extend(_text.get_builtin_text_extended_functions())
-    functions.extend(_arith.get_builtin_arithmetic_functions())
-    functions.extend(_arith.get_builtin_arithmetic_extended_functions())
-    functions.extend(_logical.get_builtin_logical_functions())
-    functions.extend(_agg.get_builtin_aggregate_functions())
-    functions.extend(_const.get_builtin_constant_functions())
-    functions.extend(_temp_ext.get_builtin_temporal_extra_functions())
-    functions.extend(_temp.get_builtin_temporal_functions())
-    functions.extend(_util.get_builtin_utility_functions())
-    functions.extend(_hash.get_builtin_hash_encoding_functions())
-    functions.extend(_array.get_builtin_array_misc_functions())
-
+    functions.extend(get_builtin_text_functions())
+    functions.extend(get_builtin_text_extended_functions())
+    functions.extend(get_builtin_arithmetic_functions())
+    functions.extend(get_builtin_arithmetic_extended_functions())
+    functions.extend(get_builtin_logical_functions())
+    functions.extend(get_builtin_aggregate_functions())
+    functions.extend(get_builtin_constant_functions())
+    functions.extend(get_builtin_temporal_extra_functions())
+    functions.extend(get_builtin_temporal_functions())
+    functions.extend(get_builtin_utility_functions())
+    functions.extend(get_builtin_hash_encoding_functions())
+    functions.extend(get_builtin_array_misc_functions())
     return functions
 
 

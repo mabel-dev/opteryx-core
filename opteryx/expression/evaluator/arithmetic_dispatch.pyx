@@ -1,8 +1,3 @@
-# cython: language_level=3
-# cython: boundscheck=False
-# cython: wraparound=False
-# cython: initializedcheck=False
-
 """Arithmetic operation dispatch for Draken vectors.
 
 Architecture:
@@ -44,14 +39,29 @@ cpdef call_arithmetic_op(str op, left, right):
     left_type = get_vector_type(left) if left_is_draken else None
     right_type = get_vector_type(right) if right_is_draken else None
 
-    # Materialize DICTIONARY_ENCODED / CONSTANT_ENCODED vectors to their base
-    # types — the kernel registry only carries handlers for the concrete
-    # numeric types. materialize() expands without an Arrow round-trip.
-    if left_type == VectorType.DICTIONARY_ENCODED or left_type == VectorType.CONSTANT_ENCODED:
+    # When exactly one operand is CONSTANT_ENCODED, extract its scalar instead
+    # of materializing a full N-row vector per morsel — the kernel registry
+    # has vector⊕scalar handlers that avoid the allocation. Both sides
+    # CONSTANT_ENCODED, or any side DICTIONARY_ENCODED, still materialize as
+    # before so the kernel sees concrete numeric vectors.
+    cdef bint left_const = left_type == VectorType.CONSTANT_ENCODED
+    cdef bint right_const = right_type == VectorType.CONSTANT_ENCODED
+    cdef bint extract_left = left_const and not right_const and len(left) > 0
+    cdef bint extract_right = right_const and not left_const and len(right) > 0
+
+    if extract_left:
+        left = left[0]
+        left_is_draken = False
+        left_type = None
+    elif left_type == VectorType.DICTIONARY_ENCODED or left_const:
         left = left.materialize()
         left_type = get_vector_type(left)
 
-    if right_type == VectorType.DICTIONARY_ENCODED or right_type == VectorType.CONSTANT_ENCODED:
+    if extract_right:
+        right = right[0]
+        right_is_draken = False
+        right_type = None
+    elif right_type == VectorType.DICTIONARY_ENCODED or right_const:
         right = right.materialize()
         right_type = get_vector_type(right)
 

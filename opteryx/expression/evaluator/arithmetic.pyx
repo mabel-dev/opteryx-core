@@ -1,8 +1,3 @@
-# cython: language_level=3
-# cython: boundscheck=False
-# cython: wraparound=False
-# cython: initializedcheck=False
-
 """Binary arithmetic operations."""
 
 import datetime
@@ -10,19 +5,6 @@ import datetime
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 from opteryx.utils.vector_types import VectorType, get_vector_type
 
-from .arithmetic_dispatch import call_arithmetic_op
-from .function_execution import apply_bounded_function, is_draken_vector
-from .temporal_ops import _date_interval_op_draken, _date_minus_date_draken
-from .type_coercion import (
-    _coerce_date32,
-    _coerce_float,
-    _coerce_int64,
-    _coerce_interval,
-    _coerce_str,
-    _coerce_timestamp,
-    _constant_scalar_value,
-    _is_constant_vector_like,
-)
 
 
 cdef _str_to_bytes(v):

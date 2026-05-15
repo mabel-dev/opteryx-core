@@ -1,8 +1,3 @@
-# cython: language_level=3
-# cython: boundscheck=False
-# cython: wraparound=False
-# cython: initializedcheck=False
-
 """Type coercion utilities for Draken vector operations.
 
 Cython migration of the former type_coercion.py. cimported by every kernel
@@ -98,7 +93,11 @@ cpdef object _constant_scalar_value(value):
 
 
 cpdef bytes _coerce_str(value):
-    value = _constant_scalar_value(value)
+    # Inline _constant_scalar_value: most callers pass a Python literal, in
+    # which case the encoding-attr check is one fast getattr and we skip the
+    # body. The Draken vector path falls through to the [0] unwrap.
+    if getattr(value, "encoding", None) == _DRAKEN_ENCODING_CONSTANT:
+        value = None if len(value) == 0 else value[0]
     if isinstance(value, bytes):
         return value
     if isinstance(value, str):
@@ -127,7 +126,8 @@ cpdef frozenset _coerce_float_set(values):
 
 
 cpdef long long _coerce_int64(value):
-    value = _constant_scalar_value(value)
+    if getattr(value, "encoding", None) == _DRAKEN_ENCODING_CONSTANT:
+        value = None if len(value) == 0 else value[0]
     if isinstance(value, datetime.datetime):
         return <long long>(value.timestamp() * 1_000)
     if isinstance(value, datetime.date):
@@ -143,7 +143,8 @@ cpdef frozenset _coerce_int64_set(values):
 
 
 cpdef long long _coerce_date32(value):
-    value = _constant_scalar_value(value)
+    if getattr(value, "encoding", None) == _DRAKEN_ENCODING_CONSTANT:
+        value = None if len(value) == 0 else value[0]
     if isinstance(value, datetime.datetime):
         return (value.date() - _EPOCH_DATE).days
     if isinstance(value, datetime.date):
@@ -159,7 +160,8 @@ cpdef frozenset _coerce_date32_set(values):
 
 
 cpdef long long _coerce_timestamp(value):
-    value = _constant_scalar_value(value)
+    if getattr(value, "encoding", None) == _DRAKEN_ENCODING_CONSTANT:
+        value = None if len(value) == 0 else value[0]
     if isinstance(value, (bytes, bytearray, memoryview, str)):
         # Lazy: parse_timestamp_value lives in opteryx.expression.casts which
         # imports back through this package — keep the import inline to

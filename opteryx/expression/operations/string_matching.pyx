@@ -1,39 +1,26 @@
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# See the License at http://www.apache.org/licenses/LICENSE-2.0
-# Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+"""LIKE / ILIKE / RLIKE pattern-match dispatch.
 
-"""String matching operations (Like, RLike, etc.).
-
-Uses Draken StringVector native like() and rlike() methods.
+Calls into the native StringVector.like / rlike kernels; the wrappers handle
+list-wrapping of the pattern (some callers pass a length-1 list) and
+NotLike-style negation.
 """
 
-from opteryx.expression.operations.fastpath_dictionary import dictionary_fastpath
-from opteryx.expression.operations.fastpath_telemetry import record_dict_fastpath_hit
 
 
-def like_match(arr, value, operator):
-    """Dispatch Like/NotLike/ILike/NotILike to Draken StringVector native methods.
-
-    Called by filter_operations dispatcher with operator in:
-        'Like', 'NotLike', 'ILike', 'NotILike'
-    """
+cpdef like_match(arr, value, str operator):
+    """Dispatch Like / NotLike / ILike / NotILike to StringVector.like."""
     if isinstance(value, (list, tuple)):
         value = value[0] if value else b""
 
-    ignore_case = "ILike" in operator
-    negate = operator.startswith("Not")
+    cdef bint ignore_case = "ILike" in operator
+    cdef bint negate = operator.startswith("Not")
 
     result = arr.like(value, ignore_case=ignore_case)
     return result.not_vector() if negate else result
 
 
-def rlike_match(arr, value, operator):
-    """Dispatch RLike/NotRLike to Draken StringVector native methods.
-
-    Called by filter_operations dispatcher with operator in:
-        'RLike', 'NotRLike'
-    """
+cpdef rlike_match(arr, value, str operator):
+    """Dispatch RLike / NotRLike to StringVector.rlike."""
     if isinstance(value, (list, tuple)):
         value = value[0] if value else b""
 
@@ -42,14 +29,12 @@ def rlike_match(arr, value, operator):
     elif not isinstance(value, str):
         value = str(value)
 
+    cdef bint negate = operator.startswith("Not")
     result = arr.rlike(value)
-    return result.not_vector() if operator.startswith("Not") else result
+    return result.not_vector() if negate else result
 
 
-# Individual functions retained for any direct callers outside the dispatcher.
-
-
-def like(arr, value, dict_candidate=False):
+cpdef like(arr, value, bint dict_candidate=False):
     if dict_candidate:
         fast = dictionary_fastpath(arr, "Like", value)
         if fast is not None:
@@ -59,7 +44,7 @@ def like(arr, value, dict_candidate=False):
     return like_match(arr, value, "Like")
 
 
-def not_like(arr, value, dict_candidate=False):
+cpdef not_like(arr, value, bint dict_candidate=False):
     if dict_candidate:
         fast = dictionary_fastpath(arr, "NotLike", value)
         if fast is not None:
@@ -69,7 +54,7 @@ def not_like(arr, value, dict_candidate=False):
     return like_match(arr, value, "NotLike")
 
 
-def ilike(arr, value, dict_candidate=False):
+cpdef ilike(arr, value, bint dict_candidate=False):
     if dict_candidate:
         fast = dictionary_fastpath(arr, "ILike", value)
         if fast is not None:
@@ -79,7 +64,7 @@ def ilike(arr, value, dict_candidate=False):
     return like_match(arr, value, "ILike")
 
 
-def not_ilike(arr, value, dict_candidate=False):
+cpdef not_ilike(arr, value, bint dict_candidate=False):
     if dict_candidate:
         fast = dictionary_fastpath(arr, "NotILike", value)
         if fast is not None:
@@ -89,7 +74,7 @@ def not_ilike(arr, value, dict_candidate=False):
     return like_match(arr, value, "NotILike")
 
 
-def rlike(arr, value, dict_candidate=False):
+cpdef rlike(arr, value, bint dict_candidate=False):
     if dict_candidate:
         fast = dictionary_fastpath(arr, "RLike", value)
         if fast is not None:
@@ -99,7 +84,7 @@ def rlike(arr, value, dict_candidate=False):
     return rlike_match(arr, value, "RLike")
 
 
-def not_rlike(arr, value, dict_candidate=False):
+cpdef not_rlike(arr, value, bint dict_candidate=False):
     if dict_candidate:
         fast = dictionary_fastpath(arr, "NotRLike", value)
         if fast is not None:

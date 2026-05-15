@@ -155,7 +155,7 @@ cdef StringVector _slice_left_dict(StringVector vec, Int64Vector length_iv, Py_s
     cdef Py_ssize_t j
     cdef uint8_t* codes = vec._dict_codes
     cdef uint8_t code_width = vec._dict_code_width
-    cdef uint8_t* row_nulls = vec._dict_accessor.row_nulls
+    cdef uint8_t* row_nulls = vec.ptr.null_bitmap
     cdef uint32_t code
     cdef Py_ssize_t i
     cdef StringVector new_dict_sv
@@ -341,7 +341,7 @@ cdef StringVector _slice_right_dict(StringVector vec, Int64Vector length_iv, Py_
     cdef Py_ssize_t j
     cdef uint8_t* codes = vec._dict_codes
     cdef uint8_t code_width = vec._dict_code_width
-    cdef uint8_t* row_nulls = vec._dict_accessor.row_nulls
+    cdef uint8_t* row_nulls = vec.ptr.null_bitmap
     cdef uint32_t code
     cdef Py_ssize_t i
     cdef StringVector new_dict_sv
@@ -554,7 +554,7 @@ cdef StringVector _substring_dict(
     cdef Py_ssize_t j
     cdef uint8_t* codes = vec._dict_codes
     cdef uint8_t code_width = vec._dict_code_width
-    cdef uint8_t* row_nulls = vec._dict_accessor.row_nulls
+    cdef uint8_t* row_nulls = vec.ptr.null_bitmap
     cdef uint32_t code
     cdef Py_ssize_t i
     cdef StringVector new_dict_sv

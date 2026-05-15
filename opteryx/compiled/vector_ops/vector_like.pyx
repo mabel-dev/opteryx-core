@@ -72,10 +72,19 @@ cdef bint _sv_sql_like_match(
     return pi == pattern_len
 
 
-cpdef BoolVector vector_like(StringVector vec, bytes pattern, bint ignore_case=False):
+cpdef BoolVector vector_like(
+    StringVector vec,
+    bytes pattern,
+    bint ignore_case=False,
+    bint negate=False,
+):
     """Return mask: 1 if element matches SQL LIKE pattern, else 0. Propagates NULLs.
 
     Optimized for dictionary-encoded vectors: tests each unique value once.
+
+    If `negate` is True, the result is the row-wise NotLike: True where the
+    element does NOT match the pattern. Fuses what would otherwise be a
+    second full-pass `.not_vector()`.
     """
     cdef DrakenVarBuffer* ptr = vec.ptr
     cdef Py_ssize_t n = ptr.length
@@ -108,11 +117,18 @@ cpdef BoolVector vector_like(StringVector vec, bytes pattern, bint ignore_case=F
                 <const uint8_t*>pat_ptr,
                 pat_len,
                 ignore_case,
-            ),
+            ) != negate,  # XOR-style: match==True with negate flips to False
             False,
         )
 
-    memset(dst, 0, nbytes)
+    # Initial fill matches the wanted result for the "no match" rows so the
+    # inner loop only touches bits at matches.
+    if negate:
+        memset(dst, 0xFF, nbytes)
+        if (n & 7) != 0:
+            dst[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
+    else:
+        memset(dst, 0, nbytes)
     if nb_ptr != NULL and nbytes != 0:
         out_null = <uint8_t*> malloc(nbytes)
         if out_null == NULL:
@@ -160,27 +176,49 @@ cpdef BoolVector vector_like(StringVector vec, bytes pattern, bint ignore_case=F
                 else:
                     dict_like_results[dict_idx] = 0
 
-            # Scatter results by code index
-            for i in range(n):
-                if dict_row_nulls != NULL and ((dict_row_nulls[i >> 3] >> (i & 7)) & 1) == 0:
-                    continue
-                code = _read_packed_code(dict_codes, dict_code_width, i)
-                if dict_like_results[code]:
-                    dst[i >> 3] |= (1 << (i & 7))
+            # Scatter results by code index. Under `negate`, matches clear
+            # bits from an all-ones init; otherwise they set bits from zero.
+            if negate:
+                for i in range(n):
+                    if dict_row_nulls != NULL and ((dict_row_nulls[i >> 3] >> (i & 7)) & 1) == 0:
+                        continue
+                    code = _read_packed_code(dict_codes, dict_code_width, i)
+                    if dict_like_results[code]:
+                        dst[i >> 3] &= ~(1 << (i & 7))
+            else:
+                for i in range(n):
+                    if dict_row_nulls != NULL and ((dict_row_nulls[i >> 3] >> (i & 7)) & 1) == 0:
+                        continue
+                    code = _read_packed_code(dict_codes, dict_code_width, i)
+                    if dict_like_results[code]:
+                        dst[i >> 3] |= (1 << (i & 7))
 
         # Dense vector path (non-dictionary, non-constant)
         else:
-            for i in range(n):
-                if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
-                    continue
-                start = ptr.offsets[i]
-                end = ptr.offsets[i + 1]
-                str_len = end - start
-                if _sv_sql_like_match(
-                    <const uint8_t*>ptr.data + start, <Py_ssize_t>str_len,
-                    <const uint8_t*>pat_ptr, pat_len, ignore_case,
-                ):
-                    dst[i >> 3] |= (1 << (i & 7))
+            if negate:
+                for i in range(n):
+                    if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                        continue
+                    start = ptr.offsets[i]
+                    end = ptr.offsets[i + 1]
+                    str_len = end - start
+                    if _sv_sql_like_match(
+                        <const uint8_t*>ptr.data + start, <Py_ssize_t>str_len,
+                        <const uint8_t*>pat_ptr, pat_len, ignore_case,
+                    ):
+                        dst[i >> 3] &= ~(1 << (i & 7))
+            else:
+                for i in range(n):
+                    if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                        continue
+                    start = ptr.offsets[i]
+                    end = ptr.offsets[i + 1]
+                    str_len = end - start
+                    if _sv_sql_like_match(
+                        <const uint8_t*>ptr.data + start, <Py_ssize_t>str_len,
+                        <const uint8_t*>pat_ptr, pat_len, ignore_case,
+                    ):
+                        dst[i >> 3] |= (1 << (i & 7))
     finally:
         if dict_like_results != NULL:
             free(dict_like_results)

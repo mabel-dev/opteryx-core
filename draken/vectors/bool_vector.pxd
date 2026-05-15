@@ -21,6 +21,7 @@ cdef class BoolVector(Vector):
 
     # Ops
     cpdef BoolVector take(self, int32_t[::1] indices)
+    cpdef BoolVector _compare_scalar(self, bint value, int op)
     cpdef BoolVector equals(self, bint value)
     cpdef BoolVector not_equals(self, bint value)
     cpdef int8_t any(self)

@@ -1,12 +1,9 @@
-from __future__ import annotations
-
 import datetime
 from typing import List
 
 # `_make` is the registrar package-level helper which constructs a
 # FunctionDefinition with a single overload. Use the shorthand form where
 # the second argument is the return type for zero-argument constants.
-from opteryx.expression.functions.registrar import _make  # type: ignore
 from opteryx.types import OrsoTypes
 
 

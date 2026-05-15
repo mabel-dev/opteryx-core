@@ -321,7 +321,7 @@ cdef class Date32Vector(Vector):
 
         return out
 
-    cdef BoolVector _compare_scalar(self, int32_t value, int op):
+    cpdef BoolVector _compare_scalar(self, int32_t value, int op):
         if self._encoding == DRAKEN_ENCODING_RLE:
             return self._compare_scalar_rle(value, op)
 
@@ -383,7 +383,7 @@ cdef class Date32Vector(Vector):
                 dispatch_scalar_branchless(op, data, value, src_null, dst, <size_t>n)
         return out
 
-    cdef BoolVector _compare_vector_op(self, Date32Vector other, int op):
+    cpdef BoolVector _compare_vector_op(self, Date32Vector other, int op):
         # Consolidates the 6 *_vector comparison ops. Op dispatch and null-pointer
         # specialisation happen once here; the C++ kernel runs a tight loop with
         # no per-row branching. Const fast paths avoid O(n) materialisation.

@@ -39,6 +39,12 @@ cdef extern from "metadata.hpp":
         int64_t bloom_offset
         int64_t bloom_length
 
+        # Page Index (Parquet 2.x); -1 when the file has no page indexes.
+        int64_t column_index_offset
+        int32_t column_index_length
+        int64_t offset_index_offset
+        int32_t offset_index_length
+
         # Encodings & codec
         vector[int32_t] encodings
         int32_t codec

@@ -1,8 +1,3 @@
-# cython: language_level=3
-# cython: boundscheck=False
-# cython: wraparound=False
-# cython: initializedcheck=False
-
 """String comparison operations.
 
 Cython migration of the former string_ops.py. Called from comparisons.pyx
@@ -13,15 +8,20 @@ vec.equals etc.) are Draken-native; this layer normalises the right-hand
 operand into the byte form the kernels expect and dispatches by op name.
 """
 
-from opteryx.compiled.vector_ops import vector_contains, vector_in_list, vector_like, vector_rlike
+from opteryx.compiled.vector_ops import (
+    build_in_list_carchar,
+    vector_contains,
+    vector_in_list,
+    vector_like,
+    vector_rlike,
+)
 
 from draken.vectors.bool_vector import BoolVector
 from draken.vectors.string_vector import StringVector
 
-from .type_coercion import _coerce_str, _coerce_str_set, _is_constant_vector_like
 
 
-cpdef _string_compare(str op, vec, right):
+cdef _string_compare(int op_code, vec, right):
     cdef bytes value_bytes
     cdef object value_set = None
 
@@ -40,29 +40,21 @@ cpdef _string_compare(str op, vec, right):
     else:
         value_bytes = _coerce_str(right)
 
-    if op == "Eq":
-        return vec.equals(value_bytes)
-    if op == "Lt":
-        return vec.less_than(value_bytes)
-    if op == "Gt":
-        return vec.greater_than(value_bytes)
-    if op == "LtEq":
-        return vec.less_than_or_equals(value_bytes)
-    if op == "GtEq":
-        return vec.greater_than_or_equals(value_bytes)
-    if op == "InList":
-        return vector_in_list(vec, value_set)
-    if op == "Like":
+    if op_code <= OP_GT_EQ:
+        return vec._compare_scalar(value_bytes, _DRAKEN_CMP_OP[op_code])
+    if op_code == OP_IN_LIST:
+        return vector_in_list(vec, build_in_list_carchar(value_set))
+    if op_code == OP_LIKE:
         return vector_like(vec, value_bytes, False)
-    if op == "ILike":
+    if op_code == OP_ILIKE:
         return vector_like(vec, value_bytes, True)
-    if op == "RLike":
+    if op_code == OP_RLIKE:
         return vector_rlike(vec, value_bytes)
-    if op == "InStr":
+    if op_code == OP_IN_STR:
         return vector_contains(vec, value_bytes, False)
-    if op == "IInStr":
+    if op_code == OP_I_IN_STR:
         return vector_contains(vec, value_bytes, True)
-    raise NotImplementedError(f"StringVector: unsupported op {op!r}")
+    raise NotImplementedError(f"StringVector: unsupported op (code {op_code})")
 
 
 cpdef _string_anyop_like(vec, patterns, bint ignore_case):

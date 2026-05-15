@@ -1534,6 +1534,22 @@ cdef class StringVector(Vector):
 
         return out
 
+    cpdef BoolVector _compare_scalar(self, bytes value, int op):
+        """Scalar compare using Draken standard op codes: 0=Eq 1=Ne 2=Gt 3=Ge 4=Lt 5=Le."""
+        if op == 0:
+            return self.equals(value)
+        if op == 1:
+            return self.not_equals(value)
+        if op == 2:
+            return self.greater_than(value)
+        if op == 3:
+            return self.greater_than_or_equals(value)
+        if op == 4:
+            return self.less_than(value)
+        if op == 5:
+            return self.less_than_or_equals(value)
+        raise ValueError(f"StringVector._compare_scalar: unknown op {op}")
+
     cdef inline int _string_compare_pair(
         self,
         const uint8_t* d1, int32_t s1, int32_t l1,
@@ -3804,6 +3820,90 @@ cdef StringVector from_dict_buffers(
     return vec
 
 
+cdef StringVector from_dict_buffers_dict_only(
+    const int32_t[::1] codes,
+    const int32_t[::1] dict_offsets,
+    const int32_t[::1] dict_lengths,
+    const uint8_t[::1] arena_bytes,
+    object row_validity=None,
+):
+    """Same inputs as from_dict_buffers, but produces a dict-only StringVector
+    (ptr.data == NULL). Used by the cpp-pipeline so downstream Morsel.slice /
+    StringVector.take hit the dict-preserving fast path instead of materialising
+    a fresh string buffer per slice."""
+    cdef Py_ssize_t row_count = codes.shape[0]
+    cdef Py_ssize_t dict_size = dict_lengths.shape[0]
+    cdef Py_ssize_t i
+    cdef uint8_t[::1] validity_view
+    cdef Py_ssize_t nb_bytes
+    cdef StringVector vec
+
+    if row_count == 0:
+        return StringVector(0, 0)
+    if dict_size == 0:
+        raise ValueError("StringVector.from_dict_buffers_dict_only requires a non-empty dictionary")
+    if dict_offsets.shape[0] != dict_size:
+        raise ValueError("dict_offsets length must match dict_lengths length")
+
+    for i in range(dict_size):
+        if dict_offsets[i] < 0 or dict_lengths[i] < 0:
+            raise ValueError("dictionary offsets and lengths must be non-negative")
+        if dict_offsets[i] + dict_lengths[i] > arena_bytes.shape[0]:
+            raise ValueError("dictionary offset/length out of arena bounds")
+
+    if row_validity is not None:
+        validity_view = row_validity
+        if validity_view.shape[0] != row_count:
+            raise ValueError("row_validity length must match codes length")
+        for i in range(row_count):
+            if validity_view[i] != 0:
+                if codes[i] < 0 or codes[i] >= dict_size:
+                    raise ValueError(f"dictionary index out of bounds at row {i}: {codes[i]}")
+    else:
+        for i in range(row_count):
+            if codes[i] < 0 or codes[i] >= dict_size:
+                raise ValueError(f"dictionary index out of bounds at row {i}: {codes[i]}")
+
+    # Build the dict-only skeleton: ptr.data and ptr.offsets stay NULL.
+    vec = StringVector(0, 0, True)
+    vec.ptr = <DrakenVarBuffer*>malloc(sizeof(DrakenVarBuffer))
+    if vec.ptr == NULL:
+        raise MemoryError()
+    vec.owns_data = False
+    vec.ptr.data = NULL
+    vec.ptr.offsets = NULL
+    vec.ptr.null_bitmap = NULL
+    vec.ptr.length = <size_t>row_count
+    vec.ptr.type = DRAKEN_STRING
+
+    # Convert byte-per-row validity into an Arrow-style bitmap on ptr.null_bitmap.
+    if row_validity is not None and row_count > 0:
+        nb_bytes = (row_count + 7) >> 3
+        vec.ptr.null_bitmap = <uint8_t*>malloc(<size_t>nb_bytes)
+        if vec.ptr.null_bitmap == NULL:
+            raise MemoryError()
+        memset(vec.ptr.null_bitmap, 0, <size_t>nb_bytes)
+        for i in range(row_count):
+            if validity_view[i] != 0:
+                vec.ptr.null_bitmap[i >> 3] |= (1 << (i & 7))
+
+    # Codes + dict storage: reuse the existing helper.
+    _attach_dictionary_storage_from_buffers(
+        vec, codes, dict_offsets, dict_lengths, arena_bytes, False
+    )
+
+    # Wire the dict accessor so downstream dict-aware kernels see the same view
+    # that the take() fast path produces.
+    vec._dict_accessor.codes = vec._dict_codes
+    vec._dict_accessor.code_width = vec._dict_code_width
+    vec._dict_accessor.row_nulls = vec.ptr.null_bitmap
+    vec._dict_accessor.length = <size_t>row_count
+    vec._dict_accessor.dict_values = vec._dict_values
+    vec._dict_accessor.value_type = DRAKEN_STRING
+
+    return vec
+
+
 cdef StringVector from_packed_dict(
     const uint8_t* codes,
     uint8_t code_width,
@@ -3870,7 +3970,14 @@ cdef StringVector from_packed_dict(
         offsets_view = <int32_t[:dict_size]><int32_t*>dict_offsets
         lengths_view = <int32_t[:dict_size]>lengths_buf
         arena_size = dict_offsets[dict_size]
-        arena_view = <uint8_t[:arena_size]><uint8_t*>dict_data
+        if arena_size > 0:
+            arena_view = <uint8_t[:arena_size]><uint8_t*>dict_data
+        else:
+            # Cython memoryviews can't be 0-length from a raw pointer. Use an
+            # empty bytearray so from_dict_buffers receives a valid view whose
+            # shape[0] is genuinely 0; downstream callers correctly skip the
+            # arena memcpy.
+            arena_view = bytearray(0)
         if row_validity != NULL:
             validity_view = <uint8_t[:row_count]>row_validity
             return from_dict_buffers(codes_view, offsets_view, lengths_view, arena_view, validity_view)
