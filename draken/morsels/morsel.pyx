@@ -2277,7 +2277,9 @@ cdef class Morsel:
     ) noexcept nogil:
         """Hash n_rows rows from the selected columns into out[], without the GIL.
 
-        out must be pre-zeroed (calloc).  col_indices must be pre-validated.
+        Single-column calls (n_cols==1) route through c_hash_single and do not
+        require out to be pre-zeroed.  Multi-column calls accumulate into out
+        and require it to be pre-zeroed (calloc).  col_indices must be pre-validated.
         Returns 0 if all columns hashed successfully.
         Returns 1 if any column could not hash without the GIL (unknown vector types);
         in that case the buffer contains only partial results and the caller
@@ -2289,6 +2291,9 @@ cdef class Morsel:
         """
         cdef int32_t i
         cdef bint had_fallback = 0
+
+        if n_cols == 1:
+            return (<Vector>self.ptr.columns[col_indices[0]]).c_hash_single(out, n_rows)
 
         for i in range(n_cols):
             if (<Vector>self.ptr.columns[col_indices[i]]).c_hash_into(out, n_rows) != 0:

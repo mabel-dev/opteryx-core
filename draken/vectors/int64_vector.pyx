@@ -69,6 +69,9 @@ from draken.vectors.vector cimport (
 
 from draken.vectors.bool_vector cimport BoolVector
 
+cdef extern from "simd_hash.h" nogil:
+    void simd_hash_i64(const uint64_t* src, uint64_t* dst, size_t count)
+
 cdef extern from "simd_bitops.h" nogil:
     void simd_and_mask(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n)
 
@@ -1638,6 +1641,58 @@ cdef class Int64Vector(Vector):
                 i += block
         else:
             simd_mix_hash(out, as_uint64, <size_t>n)
+        return 0
+
+    cdef bint c_hash_single(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
+        """Single-column hash for COUNT(DISTINCT): no prior dest state, no memset."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef int64_t* data
+        cdef uint64_t* as_uint64
+        cdef uint8_t* null_bitmap
+        cdef Py_ssize_t i, j, block
+        cdef uint64_t is_valid, v
+        cdef uint64_t[1024] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*>scratch
+
+        if n == 0:
+            return 0
+
+        if self._has_const:
+            if self._const_is_null:
+                v = NULL_HASH * MIX_HASH_CONSTANT + 1
+                v ^= v >> 32
+            else:
+                v = <uint64_t>self._const_value * MIX_HASH_CONSTANT + 1
+                v ^= v >> 32
+            for i in range(n):
+                out[i] = v
+            return 0
+
+        # Dict-only path: simd_mix_hash_from_dict XORs into dest, so dest must
+        # be zero before calling c_hash_into.
+        if ptr.data == NULL and self._dict_codes != NULL:
+            memset(out, 0, <size_t>n * sizeof(uint64_t))
+            return self.c_hash_into(out, n)
+
+        data = <int64_t*>ptr.data
+        as_uint64 = <uint64_t*>data
+        null_bitmap = ptr.null_bitmap
+
+        if null_bitmap == NULL:
+            simd_hash_i64(as_uint64, out, <size_t>n)
+        else:
+            # Blocked approach: fill scratch with null-masked values, then
+            # SIMD-hash the block — matches c_hash_into performance on nullable cols.
+            i = 0
+            while i < n:
+                block = n - i
+                if block > 1024:
+                    block = 1024
+                for j in range(block):
+                    is_valid = (null_bitmap[(i + j) >> 3] >> ((i + j) & 7)) & 1
+                    scratch[j] = (as_uint64[i + j] * is_valid) | (NULL_HASH * (1 - is_valid))
+                simd_hash_i64(scratch_ptr, out + i, <size_t>block)
+                i += block
         return 0
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:

@@ -15,7 +15,7 @@ cdef class CountDistinctAggregate(UngroupedAggregate):
     """
     COUNT(DISTINCT col).
 
-    Hashes are written directly into a malloc'd buffer via c_hash_into()
+    Hashes are written directly into a malloc'd buffer via c_hash_single()
     (no Python memoryview) then inserted into a CarcharSetWrapper under nogil.
     """
     cdef CarcharSetWrapper _set
@@ -27,6 +27,8 @@ cdef class CountDistinctAggregate(UngroupedAggregate):
         self.alias       = alias
         self.result_type = AGG_RESULT_I64
         self._set        = CarcharSetWrapper()
+        self._scratch_buf = NULL
+        self._scratch_capacity = 0
 
     cdef void apply(self, Morsel morsel) except *:
         cdef Morsel typed      = <Morsel>morsel
@@ -84,24 +86,25 @@ cdef class CountDistinctAggregate(UngroupedAggregate):
                 raise MemoryError()
             self._scratch_capacity = nrows
 
-        # simd_mix_hash accumulates into dest, so zero before each call
-        memset(self._scratch_buf, 0, <size_t>nrows * sizeof(uint64_t))
-        # Hash into scratch buffer, then batch insert
-        raw.c_hash_into(self._scratch_buf, nrows)    # C-level hash, no memoryview
+        raw.c_hash_single(self._scratch_buf, nrows)
 
-        # Compact out null entries.  c_hash_into writes NULL_HASH for null
-        # rows, then simd_mix_hash mixes that with the (zeroed) destination,
-        # so the final marker for a null row is mix_hash(0, NULL_HASH).
-        # Excluding these honours ANSI SQL: COUNT(DISTINCT col) ignores NULL.
-        cdef uint64_t null_marker = mix_hash(0, NULL_HASH)
-        cdef Py_ssize_t write_idx = 0
+        cdef Py_ssize_t write_idx
         cdef Py_ssize_t read_idx
-        with nogil:
-            for read_idx in range(nrows):
-                if self._scratch_buf[read_idx] != null_marker:
-                    self._scratch_buf[write_idx] = self._scratch_buf[read_idx]
-                    write_idx += 1
-            the_set._insert_many_nogil(self._scratch_buf, <size_t>write_idx)
+        cdef uint64_t null_marker = mix_hash(0, NULL_HASH)
+        cdef uint8_t* null_bitmap = raw.null_bitmap_ptr()
+
+        if null_bitmap == NULL:
+            with nogil:
+                the_set._insert_many_nogil(self._scratch_buf, <size_t>nrows)
+        else:
+            with nogil:
+                write_idx = 0
+                for read_idx in range(nrows):
+                    if self._scratch_buf[read_idx] != null_marker:
+                        self._scratch_buf[write_idx] = self._scratch_buf[read_idx]
+                        write_idx += 1
+            with nogil:
+                the_set._insert_many_nogil(self._scratch_buf, <size_t>write_idx)
 
     cdef int64_t get_result_i64(self) noexcept:
         return <int64_t>self._set.size()
@@ -116,6 +119,5 @@ cdef class CountDistinctAggregate(UngroupedAggregate):
         return False
 
     cpdef object get_result(self):
-        # Tighten memory before counting
         self._set.tighten()
         return <int64_t>self._set.size()

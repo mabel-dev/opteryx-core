@@ -148,12 +148,11 @@ ENABLE_ZERO_COPY: bool = bool(get("ENABLE_ZERO_COPY", True))
 # GCP project ID - for Google Cloud Data
 GCP_PROJECT_ID: str = get("GCP_PROJECT_ID")
 
-PARQUET_IO_WORKERS: int = int(get("PARQUET_IO_WORKERS", 64))
-"""Worker threads for the C++ Parquet IO pipeline (read + decode + serialize per row group).
+PARQUET_LOCAL_IO_WORKERS: int = int(get("PARQUET_LOCAL_IO_WORKERS", 8))
+"""Worker threads for local-filesystem Parquet reads (mmap path, IO is near-free from OS cache)."""
 
-Threads are IO-bound on GCS/HTTP: increasing this raises concurrency without CPU cost.
-Default 64 gives ~16x throughput vs the previous hardcoded 4.
-"""
+PARQUET_GCS_IO_WORKERS: int = int(get("PARQUET_GCS_IO_WORKERS", 128))
+"""Worker threads for GCS/HTTP Parquet reads (each range read pays network RTT, so high concurrency wins)."""
 
 # size of morsels to push between steps
 # MORSEL_SIZE remains a plain constant

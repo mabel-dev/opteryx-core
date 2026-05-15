@@ -1730,14 +1730,14 @@ struct __pyx_opt_args_6draken_7vectors_6vector_6Vector_compress_into;
  *     cdef uint8_t* null_bitmap_ptr(self) noexcept
  *     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
  *     cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil
- *     cpdef uint64_t[::1] hash(self)
+ *     cdef bint c_hash_single(self, uint64_t* out, Py_ssize_t n) noexcept nogil
 */
 struct __pyx_opt_args_6draken_7vectors_6vector_6Vector_hash_into {
   int __pyx_n;
   Py_ssize_t offset;
 };
 
-/* "draken/vectors/vector.pxd":71
+/* "draken/vectors/vector.pxd":72
  *     # same semantics as `to_int` in relation_statistics. Implementations
  *     # should write into an int64 buffer provided by the caller.
  *     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
@@ -1942,6 +1942,7 @@ struct __pyx_vtabstruct_6draken_7vectors_6vector_Vector {
   uint8_t *(*null_bitmap_ptr)(struct __pyx_obj_6draken_7vectors_6vector_Vector *);
   void (*hash_into)(struct __pyx_obj_6draken_7vectors_6vector_Vector *, __Pyx_memviewslice, struct __pyx_opt_args_6draken_7vectors_6vector_6Vector_hash_into *__pyx_optional_args);
   int (*c_hash_into)(struct __pyx_obj_6draken_7vectors_6vector_Vector *, uint64_t *, Py_ssize_t);
+  int (*c_hash_single)(struct __pyx_obj_6draken_7vectors_6vector_Vector *, uint64_t *, Py_ssize_t);
   __Pyx_memviewslice (*hash)(struct __pyx_obj_6draken_7vectors_6vector_Vector *, int __pyx_skip_dispatch);
   void (*compress_into)(struct __pyx_obj_6draken_7vectors_6vector_Vector *, __Pyx_memviewslice, struct __pyx_opt_args_6draken_7vectors_6vector_6Vector_compress_into *__pyx_optional_args);
   __Pyx_memviewslice (*compress)(struct __pyx_obj_6draken_7vectors_6vector_Vector *, int __pyx_skip_dispatch);

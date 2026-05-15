@@ -91,6 +91,9 @@ cdef class GroupHashEngine:
     cdef list _group_columns                  # list[bytes] — init only
     cdef bint _resolved                       # True after first morsel type resolution
     cdef bint _telemetry_enabled
+    cdef bint _use_partial_agg                # True when all keys are dict/RLE and cardinality is low
+    cdef bint _allow_partial_agg              # False for local engines to prevent recursion
+    cdef list _original_collectors            # resolved collector instances before merge-swap
     cdef long long _time_resolve_ns
     cdef long long _time_hash_ns
     cdef long long _time_lookup_ns
@@ -111,6 +114,7 @@ cdef class GroupHashEngine:
         list collectors,
         bint telemetry_enabled=False,
         bint use_parvi=False,
+        bint allow_partial_agg=True,
     ):
         self._group_columns = group_columns
         self._collectors = collectors
@@ -121,6 +125,9 @@ cdef class GroupHashEngine:
         self._promoted_from_parvi = False
         self._parvi_final_size = 0
         self._parvi = NULL
+        self._use_partial_agg = False
+        self._allow_partial_agg = allow_partial_agg
+        self._original_collectors = None
         self._time_resolve_ns = 0
         self._time_hash_ns = 0
         self._time_lookup_ns = 0
@@ -184,8 +191,106 @@ cdef class GroupHashEngine:
         else:
             self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
         self._resolved = True
+
+        if self._allow_partial_agg:
+            self._try_enable_partial_agg(morsel)
+
         if self._telemetry_enabled:
             self._time_resolve_ns += _now_ns() - start_ns
+
+    cdef void _try_enable_partial_agg(self, object morsel):
+        """Gate: enable partial aggregation when all group keys are dict/RLE encoded
+        and the estimated group count is ≤ 50% of morsel row count.
+
+        When enabled, swaps _collectors for merge-mode collectors (reading from
+        result_name) and stores the originals in _original_collectors for local
+        engine construction each morsel.
+
+        Design intent: for low-cardinality dict/RLE-encoded string group keys, a
+        per-morsel local aggregate collapses N rows to K groups (K << N), so the
+        global hash table sees K probes per morsel instead of N.  Both the local
+        table (bounded by dict/RLE cardinality) and the global table (bounded by K
+        total distinct groups) stay cache-resident, eliminating the DRAM-speed
+        probes that dominate high-cardinality aggregation.
+
+        This gate does NOT fire on integer group keys (KEY_MULTI_FIXED_INT) because:
+          - ClickBench-style queries group on dense integers (UserID, WatchID, RegionID)
+            where every row is a near-unique group and partial agg gives no fold.
+          - Integer-keyed GROUP BY hits the irreducible cache-miss floor regardless
+            of strategy; the right fix there is radix partitioning (out of scope here).
+
+        The optimization targets real-world GROUP BY country/category/status patterns
+        where a handful of dict entries appear millions of times per morsel.
+        AVG and non-mergeable aggregates (COUNT DISTINCT, MEDIAN) are excluded;
+        see _clone_as_merge() on each collector for the merge semantics.
+        """
+        # All group key columns must be encoded strings.
+        for k in self._key_kinds:
+            if k != KEY_MULTI_ENCODED_STRING:
+                return
+
+        # All collectors must be mergeable (non-None _clone_as_merge).
+        cdef list merge_collectors = []
+        cdef BaseCollector c, mc
+        cdef StringVector svec
+        for c in self._collectors:
+            mc = (<BaseCollector>c)._clone_as_merge()
+            if mc is None:
+                return
+            merge_collectors.append(mc)
+
+        # Estimate combined group cardinality using dampened product of dict/RLE sizes.
+        cdef double estimated = 1.0
+        cdef bint first_col = True
+        cdef Py_ssize_t card
+        for col_name in self._group_columns:
+            vec = morsel.column(col_name)
+            if not isinstance(vec, StringVector):
+                return
+            svec = <StringVector>vec
+            if svec._encoding == DRAKEN_ENCODING_DICTIONARY:
+                card = svec.c_dict_size()
+            elif svec._encoding == DRAKEN_ENCODING_RLE:
+                card = svec.c_rle_run_count()
+            else:
+                return
+            if first_col:
+                estimated = <double>card
+                first_col = False
+            else:
+                estimated *= <double>card * 0.6
+
+        if estimated > <double>morsel.num_rows * 0.5:
+            return
+
+        # Gate passed: store originals, swap in merge collectors.
+        self._original_collectors = self._collectors
+        self._collectors = merge_collectors
+        self._use_partial_agg = True
+
+    cdef void _ingest_with_partial_agg(self, object morsel) except *:
+        """Route one raw morsel through a fresh local engine, then merge the
+        partial result (one row per local group) into the global hash table."""
+        cdef list local_collectors = []
+        cdef BaseCollector c
+        for c in self._original_collectors:
+            local_collectors.append((<BaseCollector>c)._clone_empty())
+
+        local_engine = GroupHashEngine(
+            self._group_columns,
+            local_collectors,
+            False,   # no telemetry on local engines
+            False,   # start with carchar; parvi (16 slots) would immediately overflow
+            False,   # allow_partial_agg=False — prevent recursion
+        )
+        local_engine.ingest(morsel)
+        for partial_morsel in local_engine.finalize_morsels():
+            self._ingest_direct(partial_morsel)
+
+    cdef void _ingest_direct(self, object morsel) except *:
+        """Ingest a partial morsel directly into the global hash table,
+        bypassing the partial-agg routing check."""
+        self._do_ingest(morsel)
 
     cdef void _ingest_rle_single_string_fast(
         self, object morsel, StringVector svec, Py_ssize_t n_rows
@@ -414,8 +519,21 @@ cdef class GroupHashEngine:
             self._time_accumulate_ns += _now_ns() - phase_start
 
     cpdef void ingest(self, object morsel):
+        """Route one input Morsel to the appropriate ingest path."""
+        cdef Py_ssize_t n_rows = morsel.num_rows
+        if n_rows == 0:
+            return
+        if not self._resolved:
+            self._resolve_on_first_morsel(morsel)
+        if self._use_partial_agg:
+            self._ingest_with_partial_agg(morsel)
+        else:
+            self._do_ingest(morsel)
+
+    cdef void _do_ingest(self, object morsel) except *:
         """
-        Process one input Morsel. No Python in the inner loop.
+        Process one input Morsel directly into the global hash table.
+        No Python in the inner loop.
         """
         cdef long long start_ns
         cdef long long phase_start

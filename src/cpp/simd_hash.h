@@ -19,6 +19,12 @@ extern "C" {
 
 void simd_mix_hash(uint64_t* dest, const uint64_t* values, size_t count);
 
+// Single-column hash: dst[i] = hash(src[i]), no prior dest state required.
+// Equivalent to memset(dst,0) + simd_mix_hash(dst,src,n) but in one pass.
+// Use for COUNT(DISTINCT) where there is no composite key to combine.
+void simd_hash_i64(const uint64_t* src, uint64_t* dst, size_t count);
+void simd_hash_f64(const double*   src, uint64_t* dst, size_t count);
+
 // Fused gather-and-mix for dict-encoded columns. Reads a packed-code per
 // row, indexes into a K-entry uint64 lookup table, and mixes the result
 // into dest[] in place — eliminating the per-chunk scratch buffer used

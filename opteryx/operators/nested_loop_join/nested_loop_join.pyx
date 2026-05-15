@@ -16,8 +16,8 @@
 """
 Inner (Nested Loop) Join Node - Draken-Native
 
-REFACTORED: 100% Draken-native, zero Arrow in execution hot path.
-Uses Draken Morsel buffering, Morsel.hash() for hashing, Draken-native alignment.
+Hash-index approach: at left EOS, build an O(L) unordered_map<hash→[left_rows]>.
+Each right morsel probes in O(R) — total join cost O(L + R×morsels), not O(L×R).
 """
 
 from typing import Generator, Optional
@@ -32,9 +32,12 @@ from opteryx.models import QueryProperties
 
 
 cdef extern from "operators/loop_join_kernels.hpp" namespace "opteryx::operators" nogil:
-    void nested_loop_match(
-        const uint64_t* left_hashes,
-        size_t nl,
+    cdef cppclass HashIndex:
+        pass
+    HashIndex* build_hash_index(const uint64_t* hashes, size_t n)
+    void destroy_hash_index(HashIndex* idx)
+    void probe_hash_index(
+        const HashIndex* idx,
         const uint64_t* right_hashes,
         size_t nr,
         vector[int32_t]& out_left,
@@ -46,7 +49,19 @@ cdef extern from "operators/loop_join_kernels.hpp" namespace "opteryx::operators
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
 
 
-# Helper to convert bit-packed results memoryview to BoolVector (avoids cdef in method)
+cdef class _HashIndexHolder:
+    """RAII wrapper for a C++ HashIndex*. __dealloc__ frees the C++ allocation."""
+    cdef HashIndex* _ptr
+
+    def __cinit__(self):
+        self._ptr = NULL
+
+    def __dealloc__(self):
+        if self._ptr != NULL:
+            destroy_hash_index(self._ptr)
+            self._ptr = NULL
+
+
 cdef BoolVector _bits_to_bool_vector(uint8_t[::1] bits, Py_ssize_t n):
     """Convert bit-packed uint8 memoryview to BoolVector (Draken-native, no Arrow)."""
     if bits is None:
@@ -54,41 +69,32 @@ cdef BoolVector _bits_to_bool_vector(uint8_t[::1] bits, Py_ssize_t n):
     return bool_vector_from_bits(&bits[0], NULL, n)
 
 
-# Nested loop join kernel - pure Draken implementation
-cdef Morsel _nested_loop_join_morsel(Morsel left_morsel, Morsel right_morsel, list left_columns, list right_columns):
+cdef Morsel _probe_hash_join_morsel(
+    Morsel left_morsel,
+    Morsel right_morsel,
+    HashIndex* hash_idx,
+    list right_columns,
+):
     """
-    Perform a nested loop join on Draken Morsels and return the aligned result.
+    Probe the pre-built hash index with one right morsel — O(R) per call.
 
-    Uses native Morsel.hash() to compute row hashes, then matches under nogil
-    using C++ vector<int32_t> for accumulation. Returns None if no matches.
+    hash_idx is built once from the full combined left morsel at EOS.
+    Returns None if there are no matching rows.
     """
-    cdef Morsel lm = left_morsel
     cdef Morsel rm = right_morsel
-
-    if lm is None or rm is None:
+    if rm is None or hash_idx == NULL:
         return None
 
-    cdef Py_ssize_t nl = lm.num_rows
     cdef Py_ssize_t nr = rm.num_rows
-
-    if nl == 0 or nr == 0:
+    if nr == 0:
         return None
 
-    # Get hash values for both sides (Draken-native)
-    cdef uint64_t[::1] left_hashes = lm.hash(left_columns)
     cdef uint64_t[::1] right_hashes = rm.hash(right_columns)
-
     cdef vector[int32_t] left_idx_vec
     cdef vector[int32_t] right_idx_vec
 
-    # Nested-loop hash equality. C++ kernel picks smaller side as outer and
-    # uses SIMD (NEON / AVX2) for the inner sweep where available.
     with nogil:
-        nested_loop_match(
-            &left_hashes[0], <size_t>nl,
-            &right_hashes[0], <size_t>nr,
-            left_idx_vec, right_idx_vec,
-        )
+        probe_hash_index(hash_idx, &right_hashes[0], <size_t>nr, left_idx_vec, right_idx_vec)
 
     cdef Py_ssize_t nmatch = <Py_ssize_t>left_idx_vec.size()
     if nmatch == 0:
@@ -101,7 +107,7 @@ cdef Morsel _nested_loop_join_morsel(Morsel left_morsel, Morsel right_morsel, li
     memcpy(&left_view[0], left_idx_vec.data(), nmatch * sizeof(int32_t))
     memcpy(&right_view[0], right_idx_vec.data(), nmatch * sizeof(int32_t))
 
-    return align_tables(lm, rm, left_view, right_view)
+    return align_tables(left_morsel, rm, left_view, right_view)
 
 
 cdef class NestedLoopJoinNode(JoinNode):
@@ -110,6 +116,7 @@ cdef class NestedLoopJoinNode(JoinNode):
     cdef public Morsel left_morsel
     cdef public list left_morsels
     cdef public object left_filter
+    cdef public object left_hash_index   # _HashIndexHolder or None
     cdef public bint _build_phase
 
     join_type = "nested_loop"
@@ -124,6 +131,7 @@ cdef class NestedLoopJoinNode(JoinNode):
         self.left_morsels = []
 
         self.left_filter = None
+        self.left_hash_index = None
         self._build_phase = True
 
     @property
@@ -136,19 +144,35 @@ cdef class NestedLoopJoinNode(JoinNode):
 
     cpdef void push_left(self, Morsel morsel) except *:
         cdef long long start
+        cdef uint64_t[::1] left_hashes
+        cdef _HashIndexHolder holder
+        cdef HashIndex* idx
+
         if morsel is _EOS_SENTINEL:
             if self.left_morsels:
                 self.left_morsel = Morsel.combine(self.left_morsels)
                 self.left_morsels = []
             else:
                 self.left_morsel = None
+
             if self.left_morsel is not None and self.left_morsel.num_rows > 0:
                 from opteryx.compiled.structures.bloom_filter import create_bloom_filter_morsel
                 start = time.monotonic_ns()
                 self.left_filter = create_bloom_filter_morsel(self.left_morsel, self.left_columns)
                 self.readings["time_build_bloom_filter"] += time.monotonic_ns() - start
                 self.readings["feature_bloom_filter"] += 1
+
+                # Build hash index — O(L), done once. The bloom filter uses its
+                # own internal hash; we hash separately here for the index.
+                left_hashes = self.left_morsel.hash(self.left_columns)
+                idx = build_hash_index(&left_hashes[0], <size_t>self.left_morsel.num_rows)
+                if idx == NULL:
+                    raise MemoryError("build_hash_index returned NULL")
+                holder = _HashIndexHolder()
+                holder._ptr = idx
+                self.left_hash_index = holder
             return
+
         if morsel is not None:
             self.left_morsels.append(morsel)
 
@@ -157,6 +181,8 @@ cdef class NestedLoopJoinNode(JoinNode):
         cdef Py_ssize_t eliminated_rows
         cdef Morsel morsel_filtered
         cdef Morsel result
+        cdef _HashIndexHolder holder
+
         if morsel is _EOS_SENTINEL:
             self.emit(_EOS_SENTINEL)
             return
@@ -177,9 +203,10 @@ cdef class NestedLoopJoinNode(JoinNode):
                 self.readings["rows_eliminated_by_bloom_filter"] += eliminated_rows
                 morsel = morsel_filtered
 
-        if morsel.num_rows > 0:
-            result = _nested_loop_join_morsel(
-                self.left_morsel, morsel, self.left_columns, self.right_columns
+        holder = self.left_hash_index
+        if morsel.num_rows > 0 and holder is not None:
+            result = _probe_hash_join_morsel(
+                self.left_morsel, morsel, holder._ptr, self.right_columns
             )
             if result is not None:
                 self.emit(result)

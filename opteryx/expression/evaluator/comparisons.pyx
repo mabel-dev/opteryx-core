@@ -315,7 +315,81 @@ cdef _bool_compare(int op_code, left, right):
 
 
 # ---------------------------------------------------------------------------
-# Main dispatch
+# Main dispatch — int-op variant (used by bytecode executor)
+# ---------------------------------------------------------------------------
+
+cdef draken_compare_int(int op_code, left, right, left_schema_type=None, right_schema_type=None):
+    """Same as draken_compare but takes a pre-computed integer op_code.
+
+    Called by execute_bytecode() for BC_COMPARE instructions where
+    slot.op_code != OP_UNKNOWN.  Skips the string→int translation and the
+    AnyOp/AllOp/JSON string-dispatch chain that draken_compare() must walk.
+    """
+    # Map negated op codes to their positive counterpart and set negate flag.
+    # All "Not" variants are: NotEq=2, NotInList=8, NotLike=10, NotILike=12,
+    # NotRLike=14, NotInStr=16, NotIInStr=18.
+    cdef bint negate = False
+    if op_code == OP_NOT_EQ:
+        op_code = OP_EQ; negate = True
+    elif op_code == OP_NOT_IN_LIST:
+        op_code = OP_IN_LIST; negate = True
+    elif op_code == OP_NOT_LIKE:
+        op_code = OP_LIKE; negate = True
+    elif op_code == OP_NOT_ILIKE:
+        op_code = OP_ILIKE; negate = True
+    elif op_code == OP_NOT_RLIKE:
+        op_code = OP_RLIKE; negate = True
+    elif op_code == OP_NOT_IN_STR:
+        op_code = OP_IN_STR; negate = True
+    elif op_code == OP_NOT_I_IN_STR:
+        op_code = OP_I_IN_STR; negate = True
+
+    if op_code == OP_IN_LIST:
+        if isinstance(right, (CarcharSetWrapper, PerfectHashSet)):
+            result = vector_in_list(left, right, negate)
+            return result
+
+    if is_scalar(left) and is_draken_vector(right):
+        flip_ops = {OP_GT: OP_LT, OP_LT: OP_GT, OP_GT_EQ: OP_LT_EQ, OP_LT_EQ: OP_GT_EQ}
+        op_code = flip_ops.get(op_code, op_code)
+        left, right = right, left
+
+    if right is None and not isinstance(left, (str, int, float, bytes, bool, type(None))):
+        return BoolVector(len(left))
+
+    vec_type = get_vector_type(left)
+
+    if vec_type == VectorType.CONSTANT_ENCODED:
+        result = _constant_compare(op_code, left, right)
+    elif vec_type == VectorType.DICTIONARY_ENCODED:
+        result = _dict_compare(op_code, left, right)
+    elif vec_type == VectorType.STRING:
+        result = _string_compare(op_code, left, right)
+    elif vec_type in (VectorType.INT64, VectorType.INTEGER):
+        if left_schema_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP):
+            result = _int64_temporal_compare(op_code, left, right, left_schema_type)
+        else:
+            result = _int64_compare(op_code, left, right)
+    elif vec_type == VectorType.FLOAT64:
+        result = _float64_compare(op_code, left, right)
+    elif vec_type == VectorType.TIMESTAMP:
+        result = _timestamp_compare(op_code, left, right)
+    elif vec_type == VectorType.DATE32:
+        result = _date32_compare(op_code, left, right)
+    elif vec_type == VectorType.INTERVAL:
+        result = _interval_compare(op_code, left, right)
+    elif vec_type == VectorType.BOOL:
+        result = _bool_compare(op_code, left, right)
+    elif vec_type == VectorType.DECIMAL:
+        result = _decimal_compare(op_code, left, right)
+    else:
+        raise NotImplementedError(f"draken_compare_int: unsupported vector type {vec_type!r}")
+
+    return result.not_vector() if negate else result
+
+
+# ---------------------------------------------------------------------------
+# Main dispatch — string-op variant (legacy / AnyOp / AllOp paths)
 # ---------------------------------------------------------------------------
 
 

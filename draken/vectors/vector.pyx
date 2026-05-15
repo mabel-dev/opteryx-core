@@ -23,6 +23,7 @@ types (Int64Vector, StringVector, etc.) implement.
 """
 
 from libc.stdint cimport uint64_t, int64_t, uint8_t
+from libc.string cimport memset
 from cpython.mem cimport PyMem_Calloc, PyMem_Free
 
 from draken.core.buffers cimport ConstAccessor, DictAccessor, DrakenEncoding, DRAKEN_ENCODING_DENSE
@@ -166,6 +167,12 @@ cdef class Vector:
     cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
         """Nogil hash variant. Returns 0 on success, 1 if GIL is required."""
         return 1  # base class / unknown type; caller must fall back to hash_into
+
+    cdef bint c_hash_single(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
+        """Single-column hash: out[i] = hash(row_i), no prior dest state.
+        Falls back to c_hash_into on a zeroed buffer for unknown types."""
+        memset(out, 0, <size_t>n * sizeof(uint64_t))
+        return self.c_hash_into(out, n)
 
     cpdef uint64_t[::1] hash(self):
         """Create an output buffer, call `hash_into`, and return the buffer.

@@ -158,6 +158,82 @@ void simd_mix_hash(uint64_t* dest, const uint64_t* values, std::size_t count) {
 }
 
 // ---------------------------------------------------------------------------
+// simd_hash_i64 / simd_hash_f64: single-column hash, no prior dest state.
+//
+// Equivalent to memset(dst,0,n*8) + simd_mix_hash(dst,src,n) in one pass.
+// Used by COUNT(DISTINCT) where there is no composite key to accumulate into.
+// The hash is identical to simd_mix_hash applied to a zeroed destination:
+//   dst[i] = (src[i] * CONST + 1) ^ ((src[i] * CONST + 1) >> 32)
+// ---------------------------------------------------------------------------
+
+static void simd_hash_i64_scalar(const uint64_t* src, uint64_t* dst, std::size_t count) {
+    for (std::size_t i = 0; i < count; ++i) {
+        uint64_t v = src[i] * MIX_HASH_CONSTANT + 1;
+        dst[i] = v ^ (v >> 32);
+    }
+}
+
+#if defined(__AVX2__)
+static void simd_hash_i64_avx2(const uint64_t* src, uint64_t* dst, std::size_t count) {
+    const __m256i kc  = _mm256_set1_epi64x(static_cast<long long>(MIX_HASH_CONSTANT));
+    const __m256i one = _mm256_set1_epi64x(1);
+    std::size_t i = 0;
+    for (; i + 4 <= count; i += 4) {
+        __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
+        v = _mm256_add_epi64(mullo_u64(v, kc), one);
+        v = _mm256_xor_si256(v, _mm256_srli_epi64(v, 32));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), v);
+    }
+    if (i < count) simd_hash_i64_scalar(src + i, dst + i, count - i);
+}
+#endif
+
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+static void simd_hash_i64_neon(const uint64_t* src, uint64_t* dst, std::size_t count) {
+    const uint64x2_t kc  = vdupq_n_u64(MIX_HASH_CONSTANT);
+    const uint64x2_t one = vdupq_n_u64(1);
+    std::size_t i = 0;
+    for (; i + 4 <= count; i += 4) {
+        uint64x2_t v0 = vld1q_u64(src + i);
+        uint64x2_t v1 = vld1q_u64(src + i + 2);
+        v0 = vaddq_u64(mullo_u64(v0, kc), one);
+        v1 = vaddq_u64(mullo_u64(v1, kc), one);
+        v0 = veorq_u64(v0, vshrq_n_u64(v0, 32));
+        v1 = veorq_u64(v1, vshrq_n_u64(v1, 32));
+        vst1q_u64(dst + i,     v0);
+        vst1q_u64(dst + i + 2, v1);
+    }
+    for (; i + 2 <= count; i += 2) {
+        uint64x2_t v = vld1q_u64(src + i);
+        v = vaddq_u64(mullo_u64(v, kc), one);
+        v = veorq_u64(v, vshrq_n_u64(v, 32));
+        vst1q_u64(dst + i, v);
+    }
+    if (i < count) simd_hash_i64_scalar(src + i, dst + i, count - i);
+}
+#endif
+
+void simd_hash_i64(const uint64_t* src, uint64_t* dst, std::size_t count) {
+    if (!src || !dst || !count) return;
+    using fn_t = void(*)(const uint64_t*, uint64_t*, std::size_t);
+    static std::atomic<fn_t> cache{nullptr};
+    fn_t fn = simd::select_dispatch<fn_t>(cache, {
+#if defined(__AVX2__)
+        { &cpu_supports_avx2, simd_hash_i64_avx2 },
+#endif
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        { &cpu_supports_neon, simd_hash_i64_neon },
+#endif
+    }, simd_hash_i64_scalar);
+    fn(src, dst, count);
+}
+
+void simd_hash_f64(const double* src, uint64_t* dst, std::size_t count) {
+    // Reinterpret double bits as uint64 then apply the same mixer.
+    simd_hash_i64(reinterpret_cast<const uint64_t*>(src), dst, count);
+}
+
+// ---------------------------------------------------------------------------
 // simd_mix_hash_from_dict_*: fused gather + mix for dict-encoded columns.
 //
 // The scatter+mix pattern used elsewhere first writes K-indexed lookups into a

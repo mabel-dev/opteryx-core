@@ -153,15 +153,20 @@ cdef class CountDistinctCollector(BaseCollector):
                 raise MemoryError()
             self._scratch_capacity = n_rows
 
-        memset(self._scratch_buf, 0, <size_t>n_rows * sizeof(uint64_t))
-        raw.c_hash_into(self._scratch_buf, n_rows)
+        raw.c_hash_single(self._scratch_buf, n_rows)
 
+        cdef uint8_t* null_bitmap = raw.null_bitmap_ptr()
         with nogil:
-            for i in range(n_rows):
-                if self._scratch_buf[i] == null_marker:
-                    continue
-                scratch = &self._scratch_per_group[state_indices[i]]
-                scratch.push_back(self._scratch_buf[i])
+            if null_bitmap == NULL:
+                for i in range(n_rows):
+                    scratch = &self._scratch_per_group[state_indices[i]]
+                    scratch.push_back(self._scratch_buf[i])
+            else:
+                for i in range(n_rows):
+                    if self._scratch_buf[i] == null_marker:
+                        continue
+                    scratch = &self._scratch_per_group[state_indices[i]]
+                    scratch.push_back(self._scratch_buf[i])
 
         for g in range(self._sets.size()):
             per_group = &self._scratch_per_group[g]
@@ -241,6 +246,18 @@ cdef class AnyValueInt64Collector(BaseCollector):
         self._time_finalize_ns += _now_ns() - start_ns
         return vector_from_sequence(vals)
 
+    cpdef BaseCollector _clone_empty(self):
+        cdef AnyValueInt64Collector c = AnyValueInt64Collector()
+        c.column_name = self.column_name
+        c.result_name = self.result_name
+        return c
+
+    cpdef BaseCollector _clone_as_merge(self):
+        cdef AnyValueInt64Collector c = AnyValueInt64Collector()
+        c.column_name = self.result_name
+        c.result_name = self.result_name
+        return c
+
 
 # ---------------------------------------------------------------------------
 # ANY_VALUE(float64)
@@ -300,6 +317,18 @@ cdef class AnyValueFloat64Collector(BaseCollector):
         self._time_finalize_ns += _now_ns() - start_ns
         return vector_from_sequence(vals)
 
+    cpdef BaseCollector _clone_empty(self):
+        cdef AnyValueFloat64Collector c = AnyValueFloat64Collector()
+        c.column_name = self.column_name
+        c.result_name = self.result_name
+        return c
+
+    cpdef BaseCollector _clone_as_merge(self):
+        cdef AnyValueFloat64Collector c = AnyValueFloat64Collector()
+        c.column_name = self.result_name
+        c.result_name = self.result_name
+        return c
+
 
 # ---------------------------------------------------------------------------
 # ANY_VALUE(object) — string, date, time, etc.
@@ -346,3 +375,15 @@ cdef class AnyValueObjectCollector(BaseCollector):
         result = vector_from_sequence(self._values[:num_groups])
         self._time_finalize_ns += _now_ns() - start_ns
         return result
+
+    cpdef BaseCollector _clone_empty(self):
+        cdef AnyValueObjectCollector c = AnyValueObjectCollector()
+        c.column_name = self.column_name
+        c.result_name = self.result_name
+        return c
+
+    cpdef BaseCollector _clone_as_merge(self):
+        cdef AnyValueObjectCollector c = AnyValueObjectCollector()
+        c.column_name = self.result_name
+        c.result_name = self.result_name
+        return c

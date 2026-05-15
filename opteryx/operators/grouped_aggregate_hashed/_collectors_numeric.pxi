@@ -265,6 +265,18 @@ cdef class CountStarCollector(BaseCollector):
         self._time_finalize_ns += _now_ns() - start_ns
         return out
 
+    cpdef BaseCollector _clone_empty(self):
+        cdef CountStarCollector c = CountStarCollector()
+        c.column_name = self.column_name
+        c.result_name = self.result_name
+        return c
+
+    cpdef BaseCollector _clone_as_merge(self):
+        cdef SumInt64Collector c = SumInt64Collector()
+        c.column_name = self.result_name
+        c.result_name = self.result_name
+        return c
+
 
 # ---------------------------------------------------------------------------
 # COUNT(col) — skip NULLs
@@ -333,6 +345,18 @@ cdef class CountValueCollector(BaseCollector):
         cdef Vector out = _slice_int64_buffer(self._counts, start, stop)
         self._time_finalize_ns += _now_ns() - start_ns
         return out
+
+    cpdef BaseCollector _clone_empty(self):
+        cdef CountValueCollector c = CountValueCollector()
+        c.column_name = self.column_name
+        c.result_name = self.result_name
+        return c
+
+    cpdef BaseCollector _clone_as_merge(self):
+        cdef SumInt64Collector c = SumInt64Collector()
+        c.column_name = self.result_name
+        c.result_name = self.result_name
+        return c
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +468,18 @@ cdef class SumInt64Collector(BaseCollector):
         self._time_finalize_ns += _now_ns() - start_ns
         return result
 
+    cpdef BaseCollector _clone_empty(self):
+        cdef SumInt64Collector c = SumInt64Collector()
+        c.column_name = self.column_name
+        c.result_name = self.result_name
+        return c
+
+    cpdef BaseCollector _clone_as_merge(self):
+        cdef SumInt64Collector c = SumInt64Collector()
+        c.column_name = self.result_name
+        c.result_name = self.result_name
+        return c
+
 
 # ---------------------------------------------------------------------------
 # SUM(float64)
@@ -548,6 +584,18 @@ cdef class SumFloat64Collector(BaseCollector):
                 self._seen = NULL
 
         return _slice_float64_buffer(out, start, stop)
+
+    cpdef BaseCollector _clone_empty(self):
+        cdef SumFloat64Collector c = SumFloat64Collector()
+        c.column_name = self.column_name
+        c.result_name = self.result_name
+        return c
+
+    cpdef BaseCollector _clone_as_merge(self):
+        cdef SumFloat64Collector c = SumFloat64Collector()
+        c.column_name = self.result_name
+        c.result_name = self.result_name
+        return c
 
 
 # ---------------------------------------------------------------------------
@@ -681,6 +729,20 @@ cdef class MinMaxInt64Collector(BaseCollector):
 
         return _slice_int64_buffer(out, start, stop)
 
+    cpdef BaseCollector _clone_empty(self):
+        cdef MinMaxInt64Collector c = MinMaxInt64Collector()
+        c.column_name = self.column_name
+        c.result_name = self.result_name
+        c._direction = self._direction
+        return c
+
+    cpdef BaseCollector _clone_as_merge(self):
+        cdef MinMaxInt64Collector c = MinMaxInt64Collector()
+        c.column_name = self.result_name
+        c.result_name = self.result_name
+        c._direction = self._direction
+        return c
+
 
 # ---------------------------------------------------------------------------
 # MIN/MAX(float64)
@@ -813,6 +875,20 @@ cdef class MinMaxFloat64Collector(BaseCollector):
                 self._seen = NULL
 
         return _slice_float64_buffer(out, start, stop)
+
+    cpdef BaseCollector _clone_empty(self):
+        cdef MinMaxFloat64Collector c = MinMaxFloat64Collector()
+        c.column_name = self.column_name
+        c.result_name = self.result_name
+        c._direction = self._direction
+        return c
+
+    cpdef BaseCollector _clone_as_merge(self):
+        cdef MinMaxFloat64Collector c = MinMaxFloat64Collector()
+        c.column_name = self.result_name
+        c.result_name = self.result_name
+        c._direction = self._direction
+        return c
 
 
 # ---------------------------------------------------------------------------
@@ -948,6 +1024,20 @@ cdef class MinMaxObjectCollector(BaseCollector):
             else:
                 result.append(bytes(vec.data()[:vec.size()]).decode('utf-8'))
         return vector_from_sequence(result)
+
+    cpdef BaseCollector _clone_empty(self):
+        cdef MinMaxObjectCollector c = MinMaxObjectCollector()
+        c.column_name = self.column_name
+        c.result_name = self.result_name
+        c._direction = self._direction
+        return c
+
+    cpdef BaseCollector _clone_as_merge(self):
+        cdef MinMaxObjectCollector c = MinMaxObjectCollector()
+        c.column_name = self.result_name
+        c.result_name = self.result_name
+        c._direction = self._direction
+        return c
 
 
 # ---------------------------------------------------------------------------

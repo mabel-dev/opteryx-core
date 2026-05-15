@@ -64,3 +64,13 @@ cdef class BaseCollector:
     cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
         """Return an output Vector for groups in [start, stop)."""
         return None
+
+    cpdef BaseCollector _clone_empty(self):
+        """Return a fresh zero-state instance of this collector with the same config.
+        Returns None for collectors that cannot participate in partial aggregation."""
+        return None
+
+    cpdef BaseCollector _clone_as_merge(self):
+        """Return a collector that accumulates partial aggregates from a finalised morsel.
+        Reads from result_name instead of column_name.  Returns None if non-mergeable."""
+        return None

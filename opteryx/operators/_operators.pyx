@@ -247,18 +247,14 @@ cdef class BasePlanNode:
             self.bytes_in += nbytes
         self.calls += 1
 
-        # Hot path: skip clock_gettime entirely when tracing is off (default).
-        # EXPLAIN ANALYZE flips _tracing_enabled True before driving the plan.
+        clock_gettime(CLOCK_MONOTONIC, &ts_start)
+        self._dispatch_push(morsel)
+        clock_gettime(CLOCK_MONOTONIC, &ts_end)
+        duration_ns = (<uint64_t>(ts_end.tv_sec - ts_start.tv_sec)) * <uint64_t>1000000000
+        duration_ns += <uint64_t>(ts_end.tv_nsec - ts_start.tv_nsec)
+        self.execution_time += duration_ns
         if self._tracing_enabled:
-            clock_gettime(CLOCK_MONOTONIC, &ts_start)
-            self._dispatch_push(morsel)
-            clock_gettime(CLOCK_MONOTONIC, &ts_end)
-            duration_ns = (<uint64_t>(ts_end.tv_sec - ts_start.tv_sec)) * <uint64_t>1000000000
-            duration_ns += <uint64_t>(ts_end.tv_nsec - ts_start.tv_nsec)
-            self.execution_time += duration_ns
             self._append_trace(rows, 0, nbytes, 0, duration_ns, 0)
-        else:
-            self._dispatch_push(morsel)
 
         self._morsel_index += 1
 

@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <vector>
+#include <unordered_map>
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
   #include <arm_neon.h>
@@ -190,6 +191,66 @@ inline void non_equi_emit_indices(
         if (((data_bits[byte] >> bit) & 1u) != 0u) {
             out_left.push_back(left_index);
             out_right.push_back(static_cast<int32_t>(j));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HashIndex — build once from the full left side (O(L)), probe O(1) per
+// right row. Replaces the O(L×R) nested_loop_match sweep for inner joins
+// where the left side is small enough to materialise but too large for the
+// pairwise sweep to be cheap.
+//
+// Usage:
+//   HashIndex* idx = build_hash_index(left_hashes, nl);   // once at EOS
+//   probe_hash_index(idx, right_hashes, nr, out_l, out_r); // per morsel
+//   destroy_hash_index(idx);                               // via RAII holder
+// ---------------------------------------------------------------------------
+
+struct HashIndex {
+    std::unordered_map<uint64_t, std::vector<int32_t>> table;
+};
+
+inline HashIndex* build_hash_index(
+    const uint64_t* __restrict hashes,
+    std::size_t n) noexcept
+{
+    HashIndex* idx = nullptr;
+    try {
+        idx = new HashIndex();
+        idx->table.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            idx->table[hashes[i]].push_back(static_cast<int32_t>(i));
+        }
+    } catch (...) {
+        delete idx;
+        return nullptr;
+    }
+    return idx;
+}
+
+inline void destroy_hash_index(HashIndex* idx) noexcept {
+    delete idx;
+}
+
+inline void probe_hash_index(
+    const HashIndex* __restrict idx,
+    const uint64_t* __restrict right_hashes,
+    std::size_t nr,
+    std::vector<int32_t>& out_left,
+    std::vector<int32_t>& out_right) noexcept
+{
+    if (idx == nullptr || nr == 0) return;
+    const auto& table = idx->table;
+    const auto end = table.cend();
+    for (std::size_t j = 0; j < nr; ++j) {
+        const auto it = table.find(right_hashes[j]);
+        if (it != end) {
+            const auto ri = static_cast<int32_t>(j);
+            for (const int32_t li : it->second) {
+                out_left.push_back(li);
+                out_right.push_back(ri);
+            }
         }
     }
 }

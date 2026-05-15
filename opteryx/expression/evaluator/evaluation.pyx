@@ -677,9 +677,18 @@ def execute_bytecode(CompiledBytecode bc, Morsel morsel):
     cdef Py_ssize_t cap = bc.max_stack_depth
     if cap < 1:
         cap = 1
-    cdef PyObject** stack = <PyObject**>PyMem_Malloc(<size_t>(cap * sizeof(PyObject*)))
-    if stack == NULL:
-        raise MemoryError("execute_bytecode: failed to allocate stack")
+
+    # Use a fixed C-stack array for the common case (depth ≤ 16).
+    # Only fall back to heap allocation for unusually deep expression trees.
+    cdef PyObject* _small_stack[16]
+    cdef PyObject** stack
+    cdef bint _stack_is_heap = cap > 16
+    if _stack_is_heap:
+        stack = <PyObject**>PyMem_Malloc(<size_t>(cap * sizeof(PyObject*)))
+        if stack == NULL:
+            raise MemoryError("execute_bytecode: failed to allocate stack")
+    else:
+        stack = _small_stack
 
     cdef Py_ssize_t sp = 0
     cdef Py_ssize_t i, j, base
@@ -863,9 +872,14 @@ def execute_bytecode(CompiledBytecode bc, Morsel morsel):
                         v_left = _coerce_temporal_scalar_for_arrow(v_left, left_type)
                     if (flags & BC_CMP_RIGHT_TEMPORAL) and _is_scalar_value(v_right):
                         v_right = _coerce_temporal_scalar_for_arrow(v_right, right_type)
-                compare_result = draken_compare(
-                    <str>slot.compare_op_str, v_left, v_right, left_type, right_type
-                )
+                if slot.op_code != OP_UNKNOWN:
+                    compare_result = draken_compare_int(
+                        slot.op_code, v_left, v_right, left_type, right_type
+                    )
+                else:
+                    compare_result = draken_compare(
+                        <str>slot.compare_op_str, v_left, v_right, left_type, right_type
+                    )
                 Py_INCREF(compare_result)
                 stack[sp] = <PyObject*>compare_result
                 sp += 1
@@ -901,7 +915,8 @@ def execute_bytecode(CompiledBytecode bc, Morsel morsel):
     finally:
         for j in range(sp):
             Py_XDECREF(stack[j])
-        PyMem_Free(stack)
+        if _stack_is_heap:
+            PyMem_Free(stack)
 
 
 __all__ = [

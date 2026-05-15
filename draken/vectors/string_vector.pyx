@@ -2587,6 +2587,125 @@ cdef class StringVector(Vector):
             i += block
         return 0
 
+    cdef bint c_hash_single(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
+        """Single-column hash: out[i] = xxhash(row_i). No mix step, no memset.
+
+        Null sentinel matches mix_hash(0, NULL_HASH) — same as c_hash_into —
+        so callers can use the same null_marker for compaction.
+        """
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef Py_ssize_t i, dict_idx, dict_size
+        cdef uint64_t value
+        cdef uint64_t null_sentinel = NULL_HASH * MIX_HASH_CONSTANT + 1
+        null_sentinel ^= null_sentinel >> 32
+        cdef int32_t start, end
+        cdef size_t str_len
+        cdef uint8_t byte
+        cdef uint64_t* dict_hashes_ptr = NULL
+        cdef DrakenVarBuffer* dict_values_buf
+        cdef const uint8_t* data
+        cdef int32_t* offsets
+        cdef uint8_t* nb_ptr
+        cdef const uint8_t* dict_codes
+        cdef uint8_t dict_code_width
+        cdef uint8_t* dict_row_nulls
+        cdef uint32_t code
+
+        if n == 0:
+            return 0
+
+        if self._has_const:
+            if self._const_is_null:
+                value = null_sentinel
+            elif self._const_value.length <= 32:
+                value = _short_string_hash(<const uint8_t*>self._const_value.data, <size_t>self._const_value.length)
+            else:
+                value = XXH3_64bits(<const void*>self._const_value.data, <size_t>self._const_value.length)
+            for i in range(n):
+                out[i] = value
+            return 0
+
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY:
+            dict_values_buf = self._dict_values
+            if dict_values_buf == NULL or dict_values_buf.data == NULL:
+                return 1
+            dict_size = <Py_ssize_t>dict_values_buf.length
+            dict_codes = self._dict_codes
+            if dict_codes == NULL:
+                return 1
+            dict_code_width = self._dict_code_width
+            dict_row_nulls = self.ptr.null_bitmap
+
+            dict_hashes_ptr = <uint64_t*>malloc(dict_size * sizeof(uint64_t))
+            if dict_hashes_ptr == NULL:
+                return 1
+
+            data = <const uint8_t*>dict_values_buf.data
+            for dict_idx in range(dict_size):
+                start = dict_values_buf.offsets[dict_idx]
+                end = dict_values_buf.offsets[dict_idx + 1]
+                str_len = <size_t>(end - start)
+                if str_len <= 32:
+                    dict_hashes_ptr[dict_idx] = _short_string_hash(data + start, str_len)
+                else:
+                    dict_hashes_ptr[dict_idx] = XXH3_64bits(<const void*>(data + start), str_len)
+
+            # Scatter directly — no mix step.
+            if dict_row_nulls != NULL:
+                if dict_code_width == 1:
+                    for i in range(n):
+                        out[i] = null_sentinel if not ((dict_row_nulls[i >> 3] >> (i & 7)) & 1) else dict_hashes_ptr[(<const uint8_t*>dict_codes)[i]]
+                elif dict_code_width == 2:
+                    for i in range(n):
+                        out[i] = null_sentinel if not ((dict_row_nulls[i >> 3] >> (i & 7)) & 1) else dict_hashes_ptr[(<const uint16_t*>dict_codes)[i]]
+                else:
+                    for i in range(n):
+                        out[i] = null_sentinel if not ((dict_row_nulls[i >> 3] >> (i & 7)) & 1) else dict_hashes_ptr[(<const uint32_t*>dict_codes)[i]]
+            else:
+                if dict_code_width == 1:
+                    for i in range(n):
+                        out[i] = dict_hashes_ptr[(<const uint8_t*>dict_codes)[i]]
+                elif dict_code_width == 2:
+                    for i in range(n):
+                        out[i] = dict_hashes_ptr[(<const uint16_t*>dict_codes)[i]]
+                else:
+                    for i in range(n):
+                        out[i] = dict_hashes_ptr[(<const uint32_t*>dict_codes)[i]]
+
+            free(dict_hashes_ptr)
+            return 0
+
+        if ptr.data == NULL or ptr.offsets == NULL:
+            return 1
+
+        data = <const uint8_t*>ptr.data
+        offsets = ptr.offsets
+        nb_ptr = ptr.null_bitmap
+
+        if nb_ptr != NULL:
+            for i in range(n):
+                byte = nb_ptr[i >> 3]
+                if ((byte >> (i & 7)) & 1) == 0:
+                    out[i] = null_sentinel
+                    continue
+                start = offsets[i]
+                end = offsets[i + 1]
+                str_len = <size_t>(end - start)
+                if str_len <= 32:
+                    out[i] = _short_string_hash(data + start, str_len)
+                else:
+                    out[i] = XXH3_64bits(data + start, str_len)
+        else:
+            for i in range(n):
+                start = offsets[i]
+                end = offsets[i + 1]
+                str_len = <size_t>(end - start)
+                if str_len <= 32:
+                    out[i] = _short_string_hash(data + start, str_len)
+                else:
+                    out[i] = XXH3_64bits(data + start, str_len)
+        return 0
+
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for StringVector: pack first 7 bytes into big-endian int64."""
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:

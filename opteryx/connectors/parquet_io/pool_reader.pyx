@@ -604,6 +604,9 @@ def iter_row_groups_ipc(
             row_group['__path__'] = cpp_to_orig.get(result['path'], result['path'])
             row_group['__row_group__'] = result['rg_idx']
             row_group['__parquet_scan_strategy__'] = 'cpp-pipeline'
+            row_group['__bytes_fetched__'] = result.get('bytes_fetched', 0)
+            row_group['__time_read_ranges_ns__'] = result.get('read_ns', 0)
+            row_group['__time_decode_columns_ns__'] = result.get('decode_ns', 0)
 
             results_received += 1
             yield row_group
@@ -721,6 +724,8 @@ def iter_pass2_row_groups_ipc(
             row_group['__row_group__'] = result['rg_idx']
             row_group['__parquet_scan_strategy__'] = 'cpp-pipeline-pass2'
             row_group['__bytes_fetched__'] = result['bytes_fetched']
+            row_group['__time_read_ranges_ns__'] = result.get('read_ns', 0)
+            row_group['__time_decode_columns_ns__'] = result.get('decode_ns', 0)
 
             results_received += 1
             yield row_group
