@@ -67,6 +67,51 @@ def decompose_aggregates(aggregates, projection):
 
             result_projection.append(calculation_node)
 
+        elif aggregate.value == "SUM":
+            identifier = aggregate.parameters[0].left
+            operator = aggregate.parameters[0].value
+            literal = aggregate.parameters[0].right
+
+            if (
+                identifier.node_type != NodeType.IDENTIFIER
+                or literal.node_type != NodeType.LITERAL
+                or operator not in ("Plus", "Minus")
+                or not isinstance(literal.value, int)
+                or isinstance(literal.value, bool)
+            ):
+                result_aggregates.append(aggregate)
+                continue
+
+            if f"SUM_{identifier.qualified_name}" not in aggregate_set:
+                sum_node = Node(node_type=NodeType.AGGREGATOR, value="SUM", parameters=[identifier])
+                result_aggregates.append(sum_node)
+                aggregate_set[f"SUM_{identifier.qualified_name}"] = sum_node
+            else:
+                sum_node = aggregate_set[f"SUM_{identifier.qualified_name}"]
+
+            if f"COUNT_{identifier.qualified_name}" not in aggregate_set:
+                count_node = Node(
+                    node_type=NodeType.AGGREGATOR, value="COUNT", parameters=[identifier]
+                )
+                result_aggregates.append(count_node)
+                aggregate_set[f"COUNT_{identifier.qualified_name}"] = count_node
+            else:
+                count_node = aggregate_set[f"COUNT_{identifier.qualified_name}"]
+
+            scaling_node = Node(
+                node_type=NodeType.BINARY_OPERATOR, value="Multiply", left=count_node, right=literal
+            )
+            calculation_node = Node(
+                node_type=NodeType.BINARY_OPERATOR,
+                value=operator,
+                left=sum_node,
+                right=scaling_node,
+                alias=aggregate.alias or aggregate.qualified_name,
+            )
+
+            result_projection = [p for p in result_projection if p != aggregate]
+            result_projection.append(calculation_node)
+
         else:
             result_aggregates.append(aggregate)
 
