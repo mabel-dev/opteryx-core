@@ -270,12 +270,8 @@ def detect_system_libcurl():
     if not shutil.which("pkg-config"):
         return None
 
-    cflags = subprocess.run(
-        ["pkg-config", "--cflags", "libcurl"], capture_output=True, text=True
-    )
-    libs = subprocess.run(
-        ["pkg-config", "--libs", "libcurl"], capture_output=True, text=True
-    )
+    cflags = subprocess.run(["pkg-config", "--cflags", "libcurl"], capture_output=True, text=True)
+    libs = subprocess.run(["pkg-config", "--libs", "libcurl"], capture_output=True, text=True)
     if cflags.returncode != 0 or libs.returncode != 0:
         return None
 
@@ -368,7 +364,9 @@ C_FLAGS = ["-O3", "-std=c11"]  # C11 required for xxhash _Alignas support
 OPTERYX_ENABLE_LTO = os.environ.get("OPTERYX_ENABLE_LTO", "0").lower() in ("1", "true", "yes")
 OPTERYX_ENABLE_PGO = os.environ.get("OPTERYX_ENABLE_PGO", "0").lower() in ("1", "true", "yes")
 OPTERYX_PGO_PHASE = os.environ.get("OPTERYX_PGO_PHASE", "generate").lower()  # 'generate' or 'use'
-INCLUDE_DEBUG_SYMBOLS_IN_COMPILED_CODE = os.environ.get("INCLUDE_DEBUG_SYMBOLS_IN_COMPILED_CODE", "NO").upper() == "YES"
+INCLUDE_DEBUG_SYMBOLS_IN_COMPILED_CODE = (
+    os.environ.get("INCLUDE_DEBUG_SYMBOLS_IN_COMPILED_CODE", "NO").upper() == "YES"
+)
 
 if is_win():
     CPP_FLAGS = ["/O2", "/std:c++20"]
@@ -436,12 +434,12 @@ C_FLAGS.extend(WARNING_FLAGS)
 
 # Include directories
 include_dirs = [
-    ".",                              # repo root for Cython cimport (draken.core.buffers etc.)
+    ".",  # repo root for Cython cimport (draken.core.buffers etc.)
     "src/cpp",
     "src/c",
-    "draken/src",                     # draken C++ headers (e.g. <core/buffers.h>)
-    "draken/src/core",                # draken C++ headers, quote-include form
-    "draken/src/interop",             # draken arrow_c_data_interface.h
+    "draken/src",  # draken C++ headers (e.g. <core/buffers.h>)
+    "draken/src/core",  # draken C++ headers, quote-include form
+    "draken/src/interop",  # draken arrow_c_data_interface.h
     "third_party/mabel/carchar",
     "third_party/mabel/parvi",
     "third_party/fastfloat",
@@ -836,8 +834,11 @@ extensions = [
     make_draken_extension(
         "vectors.timestamp_vector",
         "vectors/timestamp_vector.pyx",
-        depends=["draken/src/core/buffers.h", "draken/vectors/_timestamp_compare.hpp",
-                 "draken/vectors/_int64_compare.hpp"],
+        depends=[
+            "draken/src/core/buffers.h",
+            "draken/vectors/_timestamp_compare.hpp",
+            "draken/vectors/_int64_compare.hpp",
+        ],
     ),
     make_draken_extension("morsels.morsel", "morsels/morsel.pyx"),
     make_draken_extension("storage.morsel_io", "storage/morsel_io.pyx"),
@@ -1020,11 +1021,20 @@ extensions = [
             extra_compile_args=C_FLAGS,
         )
         for _name, _src in (
-            ("opteryx.expression.__init__",                          "opteryx/expression/__init__.pyx"),
-            ("opteryx.expression.functions.__init__",                "opteryx/expression/functions/__init__.pyx"),
-            ("opteryx.expression.functions.implementations.__init__","opteryx/expression/functions/implementations/__init__.pyx"),
-            ("opteryx.expression.functions.registrar.__init__",      "opteryx/expression/functions/registrar/__init__.pyx"),
-            ("opteryx.expression.operations.__init__",               "opteryx/expression/operations/__init__.pyx"),
+            ("opteryx.expression.__init__", "opteryx/expression/__init__.pyx"),
+            ("opteryx.expression.functions.__init__", "opteryx/expression/functions/__init__.pyx"),
+            (
+                "opteryx.expression.functions.implementations.__init__",
+                "opteryx/expression/functions/implementations/__init__.pyx",
+            ),
+            (
+                "opteryx.expression.functions.registrar.__init__",
+                "opteryx/expression/functions/registrar/__init__.pyx",
+            ),
+            (
+                "opteryx.expression.operations.__init__",
+                "opteryx/expression/operations/__init__.pyx",
+            ),
         )
     ],
     # functions/catalog.pyx is textually included by functions/__init__.pyx;
@@ -1053,6 +1063,7 @@ extensions = [
         sources=[
             "opteryx/compiled/structures/column_deserializer.pyx",
             "src/cpp/ipc_deserialize.cpp",
+            "src/cpp/memory_pool.cpp",
         ],
         # column_deserializer.pyx does `cdef extern from "ipc_deserialize.hpp"`;
         # add src/cpp to the include path so Cython can resolve the header.
@@ -1206,6 +1217,13 @@ _curl_include_dirs: list[str] = []
 _curl_link_args: list[str] = []
 if not _skip_build:
     _curl_include_dirs, _curl_link_args = resolve_libcurl()
+
+    for ext in extensions:
+        if ext.name == "rugo.parquet_reader":
+            ext.sources = list(ext.sources) + ["src/cpp/http_client.cpp"]
+            ext.include_dirs = list(ext.include_dirs) + _curl_include_dirs
+            ext.extra_link_args = list(ext.extra_link_args) + _curl_link_args
+            break
 
     # HTTP client extension - MANDATORY (only add if not cleaning)
     extensions.append(

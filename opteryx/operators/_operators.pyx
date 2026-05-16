@@ -59,11 +59,22 @@ cdef packed struct TraceEvent:
 
 
 cdef class PipelineContext:
-    """Per-query shared state. Used for backpressure (LIMIT short-circuit)."""
-    cdef public bint terminated
+    """Per-query shared state. Used for backpressure (LIMIT short-circuit).
+
+    Termination is mediated through is_terminated()/terminate() rather than a
+    public attribute so the underlying signalling primitive (today: bint; later:
+    threading.Event) can change without touching every call site.
+    """
+    cdef bint _terminated
 
     def __cinit__(self):
-        self.terminated = False
+        self._terminated = False
+
+    cpdef bint is_terminated(self):
+        return self._terminated
+
+    cpdef void terminate(self):
+        self._terminated = True
 
 
 # Sentinels — Python-level objects from opteryx top-level. We resolve them at
@@ -237,7 +248,7 @@ cdef class BasePlanNode:
         cdef uint64_t rows = 0
         cdef uint64_t nbytes = 0
 
-        if self._ctx is not None and self._ctx.terminated:
+        if self._ctx is not None and self._ctx.is_terminated():
             return
 
         if morsel is not None:
@@ -500,16 +511,16 @@ def drive_scan(BasePlanNode scan, BasePlanNode chain_head, exit_node, PipelineCo
         morsel = scan.next_morsel()
         if morsel is None:
             break
-        if ctx.terminated:
+        if ctx.is_terminated():
             break
         chain_head.push(morsel)
         if has_exit:
             while exit_node.has_pending():
                 yield exit_node.pop_pending()
-        if ctx.terminated:
+        if ctx.is_terminated():
             break
 
-    if ctx.terminated:
+    if ctx.is_terminated():
         if has_exit:
             while exit_node.has_pending():
                 yield exit_node.pop_pending()

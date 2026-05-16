@@ -231,6 +231,77 @@ cdef inline void _coerce_logical_types(
                 row_group[col_name] = _int64_to_timestamp(v, "us")
 
 
+cdef class _Pass1Result:
+    """Outcome of evaluating one row group's pass-1 filter columns.
+
+    Pure value object. Produced by `_evaluate_pass1_row_group()` (no side effects);
+    consumed by `ParquetReadNode._record_pass1_*` (all mutation lives there). This
+    split is what would let pass-1 evaluation run on a worker thread in future:
+    the worker produces results, the caller serially funnels them into shared
+    state.
+    """
+    cdef public object path           # str
+    cdef public object rg_idx         # int
+    cdef public int64_t rows_before_filter
+    cdef public bint survived          # True iff at least one row passes the predicate
+    cdef public bint empty             # True iff row_group had no recognised columns
+    # Populated only when survived == True:
+    cdef public object p1_filtered     # Morsel filtered by the mask
+    cdef public list   p1_identity_names
+    cdef public object mask_bytes      # bytes — serialised survival mask for pass-2
+
+
+cdef _Pass1Result _evaluate_pass1_row_group(
+    object path,
+    object rg_idx,
+    dict row_group,
+    object predicate_root,
+    object predicate_function_nodes,
+    dict pass1_name_to_identity,
+    dict decimal_col_map,
+    set date_col_set,
+    set timestamp_col_set,
+    object evaluate_and_append_draken,
+    object evaluate_draken,
+):
+    """Pure pass-1 evaluation for a single row group.
+
+    Reads only from its arguments; performs no mutation on `self`, on shared
+    work-lists, or on telemetry. The caller threads the outcome into shared
+    state via `_record_pass1_survivor` / `_record_pass1_skip`.
+    """
+    cdef _Pass1Result result = _Pass1Result()
+    result.path = path
+    result.rg_idx = rg_idx
+    result.survived = False
+    result.empty = False
+    result.rows_before_filter = 0
+
+    _coerce_logical_types(row_group, decimal_col_map, date_col_set, timestamp_col_set)
+
+    cdef list p1_identity_names = [pass1_name_to_identity[col] for col in row_group]
+    cdef list p1_vectors = list(row_group.values())
+    if not p1_identity_names:
+        result.empty = True
+        return result
+
+    p1_morsel = Morsel.from_vectors(p1_identity_names, p1_vectors)
+    result.rows_before_filter = p1_morsel.num_rows
+
+    if predicate_function_nodes:
+        p1_morsel = evaluate_and_append_draken(predicate_function_nodes, p1_morsel)
+    mask = evaluate_draken(predicate_root, p1_morsel)
+
+    if not mask.any():
+        return result
+
+    result.survived = True
+    result.p1_filtered = p1_morsel.filter_mask(mask)
+    result.p1_identity_names = p1_identity_names
+    result.mask_bytes = bytes(mask.to_byte_array())
+    return result
+
+
 cdef class ParquetReadNode(ReaderNode):
     """Read node backed by column-chunk range reads via ``parquet_io``.
 
@@ -561,6 +632,38 @@ cdef class ParquetReadNode(ReaderNode):
             return morsel.slice(0, 0), rows_before_filter, 0
         return filtered, rows_before_filter, filtered.num_rows
 
+    cdef bint _mark_file_seen(self, object path):
+        """Record `path` as newly seen. Returns True iff this is the first sighting.
+
+        Encapsulates the check-then-add on `_parquet_files_seen` and the derived
+        `files_read`/`blobs_seen` accounting. A single named site is what a
+        future lock would protect; today it just collapses three identical
+        copies of the same idiom into one.
+        """
+        if path in self._parquet_files_seen:
+            return False
+        self._parquet_files_seen.add(path)
+        self.scan_readings.files_read = len(self._parquet_files_seen)
+        self.scan_readings.blobs_seen += 1
+        return True
+
+    cdef void _record_pass1_survivor(self, _Pass1Result r, list pass2_work, dict p1_cache):
+        """Funnel a surviving pass-1 row group into shared work-state.
+
+        All mutation of `pass2_work`, `p1_cache`, and pass-1 telemetry happens
+        here so the evaluator function can stay pure.
+        """
+        self.scan_readings.parquet_latmat_pass1_row_groups += 1
+        p1_cache[(r.path, r.rg_idx)] = (r.p1_filtered, r.p1_identity_names)
+        pass2_work.append((r.path, r.rg_idx, r.mask_bytes))
+
+    cdef void _record_pass1_skip(self, _Pass1Result r):
+        """Funnel a pruned (mask-all-false) pass-1 row group into shared state."""
+        self.scan_readings.parquet_latmat_pass1_row_groups += 1
+        self.scan_readings.parquet_latmat_skipped_row_groups += 1
+        self.scan_readings.row_groups_read += 1
+        self._mark_file_seen(r.path)
+
     cdef tuple _extract_row_group_metadata(self, dict row_group):
         """Extract and accumulate per-row-group pipeline metadata into scan_readings.
 
@@ -845,34 +948,28 @@ cdef class ParquetReadNode(ReaderNode):
                 ):
                     path, rg_idx = self._extract_row_group_metadata(row_group)
 
-                    # Coerce DATE/TIMESTAMP/DECIMAL in pass-1 filter columns.
-                    _coerce_logical_types(row_group, _decimal_col_map, _date_col_set, _timestamp_col_set)
-
-                    p1_identity_names = [pass1_name_to_identity[col] for col in row_group]
-                    p1_vectors = list(row_group.values())
-                    if not p1_identity_names:
-                        continue
-                    p1_morsel = Morsel.from_vectors(p1_identity_names, p1_vectors)
-                    rows_before_filter = p1_morsel.num_rows
-
-                    if self._predicate_function_nodes_cached:
-                        p1_morsel = evaluate_and_append_draken(self._predicate_function_nodes_cached, p1_morsel)
-                    mask = evaluate_draken(predicate_root, p1_morsel)
-
-                    self.scan_readings.parquet_latmat_pass1_row_groups += 1
-                    total_rows_before_filter += rows_before_filter
-
-                    if not mask.any():
-                        self.scan_readings.parquet_latmat_skipped_row_groups += 1
-                        self.scan_readings.row_groups_read += 1
-                        if path not in self._parquet_files_seen:
-                            self._parquet_files_seen.add(path)
-                            self.scan_readings.files_read = len(self._parquet_files_seen)
-                            self.scan_readings.blobs_seen += 1
+                    result = _evaluate_pass1_row_group(
+                        path,
+                        rg_idx,
+                        row_group,
+                        predicate_root,
+                        self._predicate_function_nodes_cached,
+                        pass1_name_to_identity,
+                        _decimal_col_map,
+                        _date_col_set,
+                        _timestamp_col_set,
+                        evaluate_and_append_draken,
+                        evaluate_draken,
+                    )
+                    if result.empty:
                         continue
 
-                    p1_cache[(path, rg_idx)] = (p1_morsel.filter_mask(mask), p1_identity_names)
-                    pass2_work.append((path, rg_idx, bytes(mask.to_byte_array())))
+                    total_rows_before_filter += result.rows_before_filter
+
+                    if result.survived:
+                        self._record_pass1_survivor(result, pass2_work, p1_cache)
+                    else:
+                        self._record_pass1_skip(result)
 
                 # ── Phase 2: parallel pass-2 decode via C++ pipeline ──────────────────────
                 for row_group in iter_pass2_row_groups_ipc(
@@ -929,10 +1026,7 @@ cdef class ParquetReadNode(ReaderNode):
                     self.scan_readings.rows_seen += rows_after_filter
                     self.scan_readings.row_groups_read += 1
 
-                    if path not in self._parquet_files_seen:
-                        self._parquet_files_seen.add(path)
-                        self.scan_readings.files_read = len(self._parquet_files_seen)
-                        self.scan_readings.blobs_seen += 1
+                    self._mark_file_seen(path)
 
                     # Already assembled in output_identity_order — no select() needed.
                     num_rows = result_morsel.num_rows
@@ -1004,10 +1098,7 @@ cdef class ParquetReadNode(ReaderNode):
                     self.scan_readings.rows_seen += num_rows
                     self.scan_readings.row_groups_read += 1
 
-                    if path not in self._parquet_files_seen:
-                        self._parquet_files_seen.add(path)
-                        self.scan_readings.files_read = len(self._parquet_files_seen)
-                        self.scan_readings.blobs_seen += 1
+                    self._mark_file_seen(path)
 
                     if records_to_read < num_rows:
                         result_morsel = result_morsel.slice(0, int(records_to_read))

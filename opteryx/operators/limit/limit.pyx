@@ -84,5 +84,5 @@ cdef class LimitNode(BasePlanNode):
             # LIMIT reached — signal upstream to stop and emit terminal EOS
             # so downstream operators flush.
             if self._ctx is not None:
-                self._ctx.terminated = True
+                self._ctx.terminate()
             self._emit_cdef(_EOS_SENTINEL)

@@ -12,9 +12,10 @@ the caller as a single generator. The per-morsel hot path is a typed
 Cython vtable call (`chain_head.push(morsel)`) — no generator protocol, no
 graph traversal, no Python wrapper.
 
-LIMIT short-circuit: the LIMIT operator sets `ctx.terminated = True` when
-its quota is reached; the scan loop checks this between morsels and breaks
-promptly, dropping the scan iterator (which closes the underlying I/O).
+LIMIT short-circuit: the LIMIT operator calls `ctx.terminate()` when its
+quota is reached; the scan loop checks `ctx.is_terminated()` between morsels
+and breaks promptly, dropping the scan iterator (which closes the underlying
+I/O).
 
 Special operators (Explain, SetVariable, ShowValue, ShowCreate, Insert,
 ViewManagement, TableManagement, RelationManagement) do not enter the push
@@ -88,7 +89,7 @@ def execute(
         # the morsels it produces (one yield per emitted result).
         for scan, chain_head in chains:
             yield from drive_scan(scan, chain_head, exit_node, ctx)
-            if ctx.terminated:
+            if ctx.is_terminated():
                 return
 
     return stream(), ResultType.TABULAR
@@ -109,7 +110,7 @@ def _drain_pipeline(plan: PhysicalPlan, enable_tracing: bool = False):
         # Consume drive_scan but discard all yielded morsels.
         for _ in drive_scan(scan, chain_head, exit_node, ctx):
             pass
-        if ctx.terminated:
+        if ctx.is_terminated():
             break
 
 
