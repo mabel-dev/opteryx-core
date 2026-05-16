@@ -262,3 +262,10 @@ def render_drop_view(node: LogicalPlanNode) -> str:
 @register_render(LogicalPlanStepType.Analyze)
 def render_analyze(node: LogicalPlanNode) -> str:
     return f"ANALYZE TABLE ({node.table_name})"
+
+
+@register_render(LogicalPlanStepType.Window)
+def render_window(node: LogicalPlanNode) -> str:
+    aggs = ", ".join(format_expression(a) for a in (node.aggregates or []))
+    parts = ", ".join(format_expression(p) for p in (node.partition_by or []))
+    return f"WINDOW [{aggs}] OVER (PARTITION BY [{parts}])"

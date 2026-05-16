@@ -53,6 +53,7 @@ class LogicalPlanStepType(int, Enum):
 
     CTE = auto()
     Subquery = auto()
+    Window = auto()  # OVER (PARTITION BY ...) — rewritten to join by plan rewriter
     FunctionDataset = auto()  # Unnest, GenerateSeries, values + Fake
     DependentJoin = auto()  # Correlated subquery awaiting decorrelation
 
@@ -343,6 +344,20 @@ def _validate_where_clause_expression(node: Node) -> None:
     )
 
 
+def _find_base_scan(plan: LogicalPlan) -> "LogicalPlanNode":
+    """Return the sole Scan node from plan, for use as the CTE source in a window rewrite."""
+    scans = [node for _, node in plan.nodes(True) if node.node_type == LogicalPlanStepType.Scan]
+    if not scans:
+        raise UnsupportedSyntaxError(
+            "Window functions require a base table — cannot be used without a FROM clause."
+        )
+    if len(scans) > 1:
+        raise UnsupportedSyntaxError(
+            "Window functions over multiple joined tables are not yet supported."
+        )
+    return scans[0]
+
+
 def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     if "Query" in ast_branch:
         # Sometimes we get a full query plan here (e.g. when queries in set
@@ -454,9 +469,65 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             "Qualified wild cards (`table.*`) must be the first column when used with additional columns."
         )
 
+    # Detect window functions (AGGREGATOR nodes with an OVER clause) before aggregate extraction.
+    # Replace each window function in _projection with a plain column reference to its output alias,
+    # so the regular aggregate path does not see them. Window logical nodes are inserted here so
+    # they sit between the scan/filter chain and the project, ready for the plan rewriter.
+    _window_specs: list = []  # (index, agg_node, partition_by_nodes)
+    for _i, proj_col in enumerate(_projection):
+        _over = getattr(proj_col, "over", None)
+        if _over is not None and proj_col.node_type == NodeType.AGGREGATOR:
+            if _over.get("order_by"):
+                raise UnsupportedSyntaxError(
+                    "Window functions with ORDER BY are not supported. Use PARTITION BY only."
+                )
+            if _over.get("window_frame") is not None:
+                raise UnsupportedSyntaxError(
+                    "Window functions with frame specifications (ROWS/RANGE BETWEEN) are not supported."
+                )
+            _partition_by = [
+                logical_planner_builders.build(pb) for pb in _over.get("partition_by", [])
+            ]
+            _win_alias = proj_col.alias or f"$win_{random_string(6)}"
+            proj_col.alias = _win_alias
+            proj_col.query_column = _win_alias
+            proj_col.over = None  # clear so it acts as a plain aggregate inside the CTE
+            _window_specs.append((_i, proj_col, _partition_by))
+            _ref = LogicalColumn(
+                node_type=NodeType.IDENTIFIER,
+                source_column=_win_alias,
+                alias=_win_alias,
+            )
+            _ref.query_column = _win_alias
+            _projection[_i] = _ref
+
     _aggregates = get_all_nodes_of_type(_projection, select_nodes=(NodeType.AGGREGATOR,))
     _aggregates, _projection = decompose_aggregates(_aggregates, _projection)
     _groups = logical_planner_builders.build(ast_branch["Select"].get("group_by"))[0]
+
+    if _window_specs:
+        if _groups is not None and _groups != []:
+            raise UnsupportedSyntaxError("Window functions cannot be combined with GROUP BY.")
+        _source_scan = _find_base_scan(inner_plan)
+        # Group by distinct partition spec; same partition → one Window node (shared CTE).
+        _by_partition: dict = {}
+        for _i, _agg_node, _partition_by in _window_specs:
+            _key = tuple(
+                getattr(pb, "source_column", None) or getattr(pb, "value", None) or format_expression(pb)
+                for pb in _partition_by
+            )
+            if _key not in _by_partition:
+                _by_partition[_key] = (_partition_by, [])
+            _by_partition[_key][1].append(_agg_node)
+        for _key, (_partition_by, _agg_nodes) in _by_partition.items():
+            _window_step = LogicalPlanNode(node_type=LogicalPlanStepType.Window)
+            _window_step.aggregates = _agg_nodes
+            _window_step.partition_by = _partition_by
+            _window_step.source_scan = _source_scan.copy()
+            previous_step_id, step_id = step_id, random_string()
+            inner_plan.add_node(step_id, _window_step)
+            inner_plan.add_edge(previous_step_id, step_id)
+
     if _groups is not None and _groups != []:
         if any(p.node_type == NodeType.WILDCARD for p in _projection):
             raise UnsupportedSyntaxError(

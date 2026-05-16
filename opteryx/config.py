@@ -6,8 +6,7 @@
 import json
 import typing
 from os import environ
-from typing import Optional
-from typing import Union
+from typing import Optional, Union
 
 
 def memory_allocation_calculation(allocation: Union[float, int]) -> int:
@@ -159,8 +158,9 @@ PARQUET_GCS_IO_WORKERS: int = int(get("PARQUET_GCS_IO_WORKERS", 128))
 MORSEL_SIZE: int = int(get("MORSEL_SIZE", 64 * 1024 * 1024))
 
 # target row count per emitted morsel from Parquet reads
-# Parquet pages are ~8-16K rows; 16384 matches that granularity
-PARQUET_MORSEL_ROWS: int = int(get("PARQUET_MORSEL_ROWS", 16384))
+# 65536 is the empirical sweet spot on ARM: join build cost plateaus here,
+# all other operations (hash, group-by) are flat across chunk sizes.
+PARQUET_MORSEL_ROWS: int = MORSEL_SIZE
 
 
 if environ.get("FEATURE_DRAKEN_DICT_EXPR_STRICT") is not None:

@@ -73,6 +73,62 @@ _INVERT_COMPARISON_OP: dict = {
     "Eq": "Eq", "NotEq": "NotEq",
 }
 
+_SIMPLE_COMPARISON_OPS: frozenset = frozenset({"Eq", "Lt", "LtEq", "Gt", "GtEq", "NotEq"})
+
+
+def _get_equi_join_pairs(on_node):
+    """Extract (left_col, right_col) IDENTIFIER pairs from an equi-join ON condition."""
+    if on_node is None:
+        return []
+    if on_node.node_type == NodeType.AND:
+        return _get_equi_join_pairs(on_node.left) + _get_equi_join_pairs(on_node.right)
+    if (
+        on_node.node_type == NodeType.COMPARISON_OPERATOR
+        and on_node.value == "Eq"
+        and getattr(on_node, "left", None) is not None
+        and getattr(on_node, "right", None) is not None
+        and on_node.left.node_type == NodeType.IDENTIFIER
+        and on_node.right.node_type == NodeType.IDENTIFIER
+    ):
+        return [(on_node.left, on_node.right)]
+    return []
+
+
+def _normalize_col_op_lit(condition):
+    """Return (ident, op, literal) for a simple col OP literal predicate, col on left.
+
+    Returns (None, None, None) if the condition is not a plain col-vs-scalar comparison.
+    """
+    if condition.node_type != NodeType.COMPARISON_OPERATOR:
+        return None, None, None
+    if condition.value not in _SIMPLE_COMPARISON_OPS:
+        return None, None, None
+    left = getattr(condition, "left", None)
+    right = getattr(condition, "right", None)
+    if left is None or right is None:
+        return None, None, None
+    if get_all_nodes_of_type(condition, (NodeType.FUNCTION, NodeType.CAST, NodeType.AGGREGATOR)):
+        return None, None, None
+    if left.node_type == NodeType.IDENTIFIER and right.node_type == NodeType.LITERAL:
+        return left, condition.value, right
+    if right.node_type == NodeType.IDENTIFIER and left.node_type == NodeType.LITERAL:
+        return right, _INVERT_COMPARISON_OP[condition.value], left
+    return None, None, None
+
+
+def _make_implied_filter(op, target_col, lit_node):
+    """Build a Filter LogicalPlanNode applying op between target_col and lit_node."""
+    new_cond = Node(NodeType.COMPARISON_OPERATOR, value=op, left=target_col, right=lit_node)
+    return LogicalPlanNode(
+        node_type=LogicalPlanStepType.Filter,
+        condition=new_cond,
+        columns=[target_col],
+        relations={target_col.source},
+        all_relations={target_col.source},
+        nid=random_string(),
+    )
+
+
 
 def _try_normalize_cast_predicate(condition: Node):
     """Strip CAST from CAST(IDENTIFIER) op LITERAL predicates and rescale the literal.
@@ -532,6 +588,45 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                         else:
                             remaining_predicates.append(predicate)
                     context.collected_predicates = remaining_predicates
+
+                # For INNER equi-joins, derive implied predicates: if col_A op literal
+                # is collected for one join key, emit the same predicate for the partner key.
+                if node.on and node.type == "inner" and context.collected_predicates:
+                    equi_pairs = _get_equi_join_pairs(node.on)
+                    if equi_pairs:
+                        existing_keys: set = set()
+                        for p in context.collected_predicates:
+                            ident, op, lit = _normalize_col_op_lit(p.condition)
+                            if ident is not None and getattr(ident, "schema_column", None) is not None:
+                                existing_keys.add((ident.schema_column.identity, op, str(lit.value)))
+
+                        derived = []
+                        for predicate in context.collected_predicates:
+                            ident, op, lit = _normalize_col_op_lit(predicate.condition)
+                            if ident is None or getattr(ident, "schema_column", None) is None:
+                                continue
+                            col_id = ident.schema_column.identity
+                            for left_col, right_col in equi_pairs:
+                                lsc = getattr(left_col, "schema_column", None)
+                                rsc = getattr(right_col, "schema_column", None)
+                                if lsc is None or rsc is None:
+                                    continue
+                                if lsc.identity == col_id:
+                                    target_col = right_col
+                                elif rsc.identity == col_id:
+                                    target_col = left_col
+                                else:
+                                    continue
+                                tsc = getattr(target_col, "schema_column", None)
+                                if tsc is None:
+                                    continue
+                                dedup_key = (tsc.identity, op, str(lit.value))
+                                if dedup_key in existing_keys:
+                                    continue
+                                existing_keys.add(dedup_key)
+                                derived.append(_make_implied_filter(op, target_col, lit))
+                                self.telemetry.optimization_predicate_pullup_implied += 1
+                        context.collected_predicates.extend(derived)
 
                 self.telemetry.optimization_predicate_pushdown += 1
                 context.optimized_plan.add_node(context.node_id, node)

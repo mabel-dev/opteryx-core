@@ -83,16 +83,39 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
             summary="Convert string to lowercase.",
             cost=133.0,
         ),
-        _make(
-            "LENGTH",
-            vector_string_length,
-            OrsoTypes.INTEGER,
-            (_string,),
+        FunctionDefinition(
+            name="LENGTH",
             aliases=("CHAR_LENGTH", "CHARACTER_LENGTH"),
             category="text",
-            engine="draken",
-            summary="Return length of string.",
-            cost=221.0,
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Return length of string or number of elements in an array.",
+            documentation=None,
+            overloads=(
+                FunctionOverload(
+                    id="LENGTH_string",
+                    parameters=(_string,),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
+                    kernel=KernelSpec(
+                        engine="draken",
+                        id="default",
+                        callable_ref=vector_string_length,
+                        cost_us_per_million=221.0,
+                    ),
+                ),
+                FunctionOverload(
+                    id="LENGTH_array",
+                    parameters=(ParameterSpec(name="arr", type_family="array"),),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
+                    kernel=KernelSpec(
+                        engine="draken",
+                        id="default",
+                        callable_ref=vector_length,
+                        cost_us_per_million=221.0,
+                    ),
+                ),
+            ),
         ),
         _make(
             "INITCAP",

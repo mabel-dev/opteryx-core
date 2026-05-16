@@ -874,6 +874,11 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
         limit=limit,
     )
     node.qualified_name = format_expression(node)
+
+    over = branch.get("over")
+    if over and over != "None" and isinstance(over, dict) and "WindowSpec" in over:
+        node.over = over["WindowSpec"]
+
     return node
 
 

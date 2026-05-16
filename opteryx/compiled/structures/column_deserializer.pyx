@@ -48,6 +48,7 @@ from draken.vectors.float32_vector cimport from_packed_dict as float32_from_pack
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.bool_vector cimport from_decoded as bool_from_decoded
 from draken.vectors.string_vector cimport StringVector, from_packed_dict, from_dict_buffers, make_string_dict_only
+from draken.vectors.array_vector cimport ArrayVector, array_vector_from_parts
 
 
 cdef extern from "ipc_deserialize.hpp" namespace "opteryx":
@@ -93,6 +94,7 @@ DEF TAG_STR_PLAIN   = 7
 DEF TAG_INT64_DICT  = 8
 DEF TAG_FLOAT32_DICT = 9
 DEF TAG_FLOAT64_DICT = 10
+DEF TAG_ARRAY       = 11
 
 
 cdef inline const uint8_t* _read_u32(const uint8_t* p, uint32_t* out) noexcept nogil:
@@ -280,6 +282,107 @@ cdef object _build_string_plain(const uint8_t* p, uint32_t num_rows,
     return vec
 
 
+cdef object _build_array_vector(const uint8_t* p, uint32_t num_rows,
+                                const uint8_t* list_null_bmap, uint32_t list_null_bmap_len):
+    """Deserialize TAG_ARRAY (11) into an ArrayVector.
+
+    p points to the byte immediately after the common IPC header
+    (tag + num_rows + null_bitmap_len + null_bitmap).
+
+    Wire layout after the header:
+      uint32_t  child_count
+      int32_t[(num_rows+1)]  offsets
+      uint32_t  child_null_bmap_len
+      uint8_t[child_null_bmap_len]  child_null_bmap
+      for i in 0..child_count-1:
+        uint32_t len
+        uint8_t[len] bytes
+    """
+    cdef uint32_t child_count
+    p = _read_u32(p, &child_count)
+
+    # Copy offsets — array_vector_from_parts takes ownership (frees them), so
+    # we give it a malloc'd buffer it can free.
+    cdef uint32_t offsets_bytes = (num_rows + 1) * sizeof(int32_t)
+    cdef int32_t* offsets = <int32_t*>malloc(offsets_bytes)
+    if offsets == NULL:
+        raise MemoryError()
+    memcpy(offsets, p, offsets_bytes)
+    p += offsets_bytes
+
+    # Child null bitmap (may be absent).
+    cdef uint32_t child_null_bmap_len
+    p = _read_u32(p, &child_null_bmap_len)
+    cdef const uint8_t* child_null_bmap = p
+    p += child_null_bmap_len
+
+    # Two-pass child string scan: first pass computes total arena bytes.
+    cdef const uint8_t* scan = p
+    cdef uint32_t slen, i, total_arena = 0
+    for i in range(child_count):
+        scan = _read_u32(scan, &slen)
+        total_arena += slen
+        scan += slen
+
+    # Allocate StringVector internals (from_dict_buffers owns nothing; we free after).
+    cdef int32_t* codes   = <int32_t*>malloc(child_count * sizeof(int32_t))
+    cdef int32_t* c_offs  = <int32_t*>malloc((child_count + 1) * sizeof(int32_t))
+    cdef int32_t* c_lens  = <int32_t*>malloc(child_count * sizeof(int32_t))
+    cdef uint32_t arena_alloc = total_arena if total_arena > 0 else 1
+    cdef uint8_t* arena   = <uint8_t*>malloc(arena_alloc)
+    if codes == NULL or c_offs == NULL or c_lens == NULL or arena == NULL:
+        free(codes); free(c_offs); free(c_lens); free(arena); free(offsets)
+        raise MemoryError()
+
+    # Second pass: fill buffers.
+    cdef uint32_t arena_pos = 0
+    for i in range(child_count):
+        p = _read_u32(p, &slen)
+        codes[i]  = <int32_t>i
+        c_offs[i] = <int32_t>arena_pos
+        c_lens[i] = <int32_t>slen
+        if slen > 0:
+            memcpy(arena + arena_pos, p, slen)
+        p += slen
+        arena_pos += slen
+    c_offs[child_count] = <int32_t>arena_pos
+
+    # Copy list null bitmap so array_vector_from_parts can free it.
+    cdef uint8_t* bmap_copy = NULL
+    if list_null_bmap_len > 0:
+        bmap_copy = <uint8_t*>malloc(list_null_bmap_len)
+        if bmap_copy == NULL:
+            free(codes); free(c_offs); free(c_lens); free(arena); free(offsets)
+            raise MemoryError()
+        memcpy(bmap_copy, list_null_bmap, list_null_bmap_len)
+
+    # Build typed memoryviews for from_dict_buffers.
+    cdef int32_t[::1]  codes_v  = <int32_t[:child_count]>codes
+    cdef int32_t[::1]  offs_v   = <int32_t[:child_count]>c_offs
+    cdef int32_t[::1]  lens_v   = <int32_t[:child_count]>c_lens
+    cdef uint32_t view_len = arena_pos if arena_pos > 0 else 1
+    cdef uint8_t[::1]  arena_v  = <uint8_t[:view_len]>arena
+
+    cdef StringVector child_sv
+    cdef ArrayVector  result
+    try:
+        if child_null_bmap_len > 0:
+            validity_v = <uint8_t[:child_null_bmap_len]>_copy_null_bitmap(child_null_bmap, child_null_bmap_len)
+            child_sv = from_dict_buffers(codes_v, offs_v, lens_v, arena_v, validity_v)
+        else:
+            child_sv = from_dict_buffers(codes_v, offs_v, lens_v, arena_v)
+        # array_vector_from_parts copies offsets and bmap_copy; we free them after.
+        result = array_vector_from_parts(child_sv, offsets, bmap_copy, <Py_ssize_t>num_rows)
+    finally:
+        free(codes); free(c_offs); free(c_lens); free(arena)
+        free(offsets)
+        if bmap_copy != NULL:
+            free(bmap_copy)
+
+    result._child_decode_utf8 = True
+    return result
+
+
 cdef inline object _wrap_decoded_fixed(DecodedFixedColumn& dc):
     """Transfer ownership of the malloc'd buffers in `dc` into a Draken Vector.
 
@@ -394,6 +497,8 @@ cpdef object deserialize_column(int64_t ref_id, MemoryPool pool):
                 result = _build_numeric_dict_float32(p, num_rows, null_bitmap, null_bitmap_len)
             elif tag == TAG_FLOAT64_DICT:
                 result = _build_numeric_dict_float64(p, num_rows, null_bitmap, null_bitmap_len)
+            elif tag == TAG_ARRAY:
+                result = _build_array_vector(p, num_rows, null_bitmap, null_bitmap_len)
             else:
                 raise ValueError(f"Unknown IPC type tag: {tag}")
     finally:

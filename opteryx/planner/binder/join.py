@@ -237,6 +237,23 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         for schema in node.right_relation_names:
             context.schemas.pop(schema, None)
 
+    # Window joins: the CTE subquery exposes each partition column under the same name and
+    # identity as the outer scan (because the CTE scan is a copy of the outer scan node).
+    # Both schemas would otherwise contain e.g. "group", triggering AmbiguousIdentifierError
+    # when the outer Project binds it. Remove the subquery's copies — only the outer scan's
+    # copy should be visible downstream.
+    if getattr(node, "is_window_join", False) and node.on and node.right_relation_names:
+        right_set = set(node.right_relation_names)
+        partition_col_names = {
+            n.schema_column.name
+            for n in get_all_nodes_of_type(node.on, (NodeType.IDENTIFIER,))
+            if n.source in right_set and n.schema_column is not None
+        }
+        for right_rel in node.right_relation_names:
+            if right_rel in context.schemas:
+                schema = context.schemas[right_rel]
+                schema.columns = [c for c in schema.columns if c.name not in partition_col_names]
+
     # This is very much not how we want to do this, but let's start somewhere
     # we're estimating the size of each side of the join, but here all we're doing is
     # using the row estimates for each table, ignoring any filtering etc.

@@ -9,10 +9,10 @@
 # cython: optimize.unpack_method_calls=True
 
 from libc.stdint cimport int64_t, uint8_t
-from libc.stdlib cimport malloc, free
+from libc.stdlib cimport malloc
 
 from draken.vectors.array_vector cimport ArrayVector
-from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.vectors.int64_vector cimport Int64Vector, from_decoded as int64_from_decoded
 from draken.core.buffers cimport DrakenArrayBuffer
 
 
@@ -38,15 +38,12 @@ cpdef Int64Vector vector_length(ArrayVector vec):
     if result_ptr == NULL:
         raise MemoryError("Failed to allocate memory for result array")
 
-    try:
-        result_view = <int64_t[:n]>result_ptr
+    result_view = <int64_t[:n]>result_ptr
 
-        for i in range(n):
-            if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
-                result_view[i] = 0
-            else:
-                result_view[i] = ptr.offsets[i + 1] - ptr.offsets[i]
+    for i in range(n):
+        if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
+            result_view[i] = 0
+        else:
+            result_view[i] = ptr.offsets[i + 1] - ptr.offsets[i]
 
-        return int64_from_sequence(result_view)
-    finally:
-        free(result_ptr)
+    return int64_from_decoded(result_ptr, NULL, <size_t>n)

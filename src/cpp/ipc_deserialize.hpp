@@ -39,6 +39,7 @@ enum IpcTag : uint8_t {
     kTagInt64Dict   = 8,
     kTagFloat32Dict = 9,
     kTagFloat64Dict = 10,
+    kTagArray       = 11,  // list columns; Cython handles via _build_array_vector
 };
 
 // IpcKind describes the Vector shape produced for the caller.

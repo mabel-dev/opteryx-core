@@ -183,23 +183,48 @@ def cast_to_int(arr, *args):
     raise TypeError(f"Unsupported type for cast_to_int: {type(arr).__name__}")
 
 
+cdef str _array_row_to_json(object row):
+    """Encode a list row (from ArrayVector.to_pylist) as a JSON array string.
+
+    Elements are strings or bytes (needing UTF-8 decode) or None (→ null).
+    Only `\\` and `"` are escaped — control characters in Parquet string data
+    are uncommon and the standard library handles the general case if needed.
+    """
+    cdef list parts = []
+    cdef str s
+    for elem in row:
+        if elem is None:
+            parts.append("null")
+        else:
+            if isinstance(elem, bytes):
+                s = elem.decode("utf-8")
+            else:
+                s = str(elem)
+            s = s.replace("\\", "\\\\").replace('"', '\\"')
+            parts.append('"' + s + '"')
+    return "[" + ", ".join(parts) + "]"
+
+
 def cast_to_varchar(arr, *args):
     """Cast `arr` to VARCHAR / StringVector."""
-    from draken.vectors.string_vector import StringVector
+    from draken.interop.vector_sequence import vector_from_sequence
 
     cdef object v_type
+    cdef object row
     if is_draken_vector_fn(arr):
         v_type = get_vector_type(arr)
         if v_type == VectorType.STRING:
             return arr
-        return StringVector.from_list(
-            [str(v) if v is not None else None for v in arr.to_pylist()]
-        )
+        rows = arr.to_pylist()
+        if v_type == VectorType.ARRAY:
+            result = [_array_row_to_json(row) if row is not None else None for row in rows]
+        else:
+            result = [v.decode("utf-8") if isinstance(v, bytes) else (str(v) if v is not None else None) for v in rows]
+        return vector_from_sequence(result, dtype=OrsoTypes.VARCHAR)
 
     if isinstance(arr, (list, tuple)):
-        return StringVector.from_list(
-            [str(v) if v is not None else None for v in arr]
-        )
+        result = [v.decode("utf-8") if isinstance(v, bytes) else (str(v) if v is not None else None) for v in arr]
+        return vector_from_sequence(result, dtype=OrsoTypes.VARCHAR)
 
     if isinstance(arr, str):
         return arr
@@ -366,6 +391,9 @@ def cast(arr, _type, args=(), unit=None):
         if _type == "VECTOR":
             result = [caster(i, **kwargs) for i in arr]
             return vector_from_sequence(result, dtype=OrsoTypes.VECTOR)
+
+        if _type == "VARCHAR" and is_draken_vector_fn(arr):
+            return cast_to_varchar(arr)
 
         result = [caster(i, **kwargs) for i in arr]
         if decimal_quantizer is not None:

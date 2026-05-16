@@ -1490,6 +1490,8 @@ cdef ArrayVector _make_array_vector(
         null_bitmap[b] = 0
 
     # Estimate flat child capacity for StringVectorBuilder.
+    # dict_codes_array mode: C++ scattered one packed code per slot into dict_codes_array;
+    #   dict_indices is empty; arena holds the dictionary strings.
     # dict mode: per-row indices are in dict_indices; the dictionary strings live in
     #   string_dict_arena/offsets/lens (flat arena format, NOT string_values).
     # plain mode: element strings are in string_values directly.
@@ -1497,11 +1499,18 @@ cdef ArrayVector _make_array_vector(
     cdef Py_ssize_t estimated_bytes = 0
     cdef bint dict_mode = decoded_col.dict_indices.size() > 0
     cdef bint use_arena = decoded_col.string_dict_arena.size() > 0
+    cdef bint use_codes_array = decoded_col.dict_codes_array.size() > 0 and not dict_mode
+    cdef uint8_t code_width = decoded_col.code_width
     cdef const uint8_t* arena_data_ptr = NULL
+    cdef const uint8_t* codes_arr_ptr = NULL
     cdef int32_t _didx
     cdef int32_t _arena_slen
     cdef const char* _arena_sptr
-    if dict_mode and use_arena:
+    if use_codes_array and use_arena:
+        codes_arr_ptr = decoded_col.dict_codes_array.data()
+        arena_data_ptr = decoded_col.string_dict_arena.data()
+        estimated_bytes = max(flat_child_count * 8, 1)
+    elif dict_mode and use_arena:
         arena_data_ptr = decoded_col.string_dict_arena.data()
         for i in range(<Py_ssize_t>decoded_col.dict_indices.size()):
             _didx = decoded_col.dict_indices[i]
@@ -1539,23 +1548,38 @@ cdef ArrayVector _make_array_vector(
 
         if def_ == max_def:
             # Present element: consume next string value
-            if dict_mode and use_arena:
+            if use_codes_array:
+                # i is the global slot index; C++ wrote one code per slot position
+                if code_width == 1:
+                    _didx = <int32_t>codes_arr_ptr[i]
+                elif code_width == 2:
+                    _didx = <int32_t>(codes_arr_ptr[2*i] | (codes_arr_ptr[2*i+1] << 8))
+                else:
+                    _didx = <int32_t>(codes_arr_ptr[4*i] | (codes_arr_ptr[4*i+1] << 8) |
+                                      (codes_arr_ptr[4*i+2] << 16) | (codes_arr_ptr[4*i+3] << 24))
+                _arena_slen = decoded_col.string_dict_lens[_didx]
+                _arena_sptr = <const char*>(arena_data_ptr + decoded_col.string_dict_offsets[_didx])
+                builder.append_bytes(_arena_sptr, <Py_ssize_t>_arena_slen)
+                # val_idx not used or incremented — codes_arr_ptr is indexed by i
+            elif dict_mode and use_arena:
                 _didx = decoded_col.dict_indices[val_idx]
                 _arena_slen = decoded_col.string_dict_lens[_didx]
                 _arena_sptr = <const char*>(arena_data_ptr + decoded_col.string_dict_offsets[_didx])
                 builder.append_bytes(_arena_sptr, <Py_ssize_t>_arena_slen)
+                val_idx += 1
             elif dict_mode:
                 _didx = decoded_col.dict_indices[val_idx]
                 builder.append_bytes(
                     <const char*> decoded_col.string_values[_didx].data(),
                     <Py_ssize_t> decoded_col.string_values[_didx].size()
                 )
+                val_idx += 1
             else:
                 builder.append_bytes(
                     <const char*> decoded_col.string_values[val_idx].data(),
                     <Py_ssize_t> decoded_col.string_values[val_idx].size()
                 )
-            val_idx += 1
+                val_idx += 1
             flat_idx += 1
         elif def_ == max_def - 1:
             # Null element within a non-null list

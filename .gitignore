@@ -342,3 +342,4 @@ opteryx/expression/functions/implementations/__init__.c
 opteryx/expression/evaluator/__init__.c
 opteryx/expression/evaluator/__init__.cpp
 opteryx/expression/evaluator/_impl.cpp
+draken/vectors/null_vector.cpp

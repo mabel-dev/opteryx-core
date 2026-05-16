@@ -1161,6 +1161,8 @@ cdef class Float64Vector(Vector):
         return data_bytes + bm_bytes
 
     cpdef list to_pylist(self):
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+            return _materialize_dict_float64(self).to_pylist()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
         cdef list out = []

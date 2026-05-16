@@ -21,8 +21,10 @@ from opteryx.planner.plan_rewriter.strategies.in_subquery_to_join import (
 from opteryx.planner.plan_rewriter.strategies.intersect_to_inner_join import (
     IntersectToSemiJoinStrategy,
 )
+from opteryx.planner.plan_rewriter.strategies.window_to_join import WindowToJoinStrategy
 
 STRATEGIES: list = [
+    WindowToJoinStrategy,          # runs first — Window nodes must be eliminated before join planning
     ExceptToAntiJoinStrategy,
     ExistsSubqueryToJoinStrategy,
     IntersectToSemiJoinStrategy,

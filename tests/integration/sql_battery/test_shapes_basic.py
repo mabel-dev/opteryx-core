@@ -246,6 +246,27 @@ STATEMENTS = [
 
         # REGEXP_REPLACE
         ("SELECT COUNT(*), cve FROM (SELECT REGEXP_REPLACE(cve_id, '^CVE-([^-]+)-.*$', r'\\1') AS cve FROM testdata.nvd) GROUP BY cve;", 15, 2, None),
+
+        # CAST to VARCHAR — array column (list<string>) and integer column
+        ("SELECT CAST(missions AS VARCHAR) FROM testdata.astronauts", 357, 1, None),
+        ("SELECT CAST(space_flights AS VARCHAR) FROM testdata.astronauts", 357, 1, None),
+
+        # WINDOW FUNCTIONS (PARTITION BY aggregates — rewritten to CTE + inner join)
+        # Single aggregate window, unique partition key (each planet has a unique id)
+        ("SELECT name, SUM(gravity) OVER (PARTITION BY id) FROM $planets", 9, 2, None),
+        # Explicit alias
+        ("SELECT name, COUNT(id) OVER (PARTITION BY id) AS cnt FROM $planets", 9, 2, None),
+        # Multiple window functions with the same PARTITION BY — shared CTE
+        ("SELECT name, SUM(gravity) OVER (PARTITION BY id), AVG(mass) OVER (PARTITION BY id) FROM $planets", 9, 3, None),
+        # Non-unique partition key: each satellite belongs to a planet
+        ("SELECT name, COUNT(name) OVER (PARTITION BY planetId) FROM testdata.satellites", 177, 2, None),
+        # Unsupported: ORDER BY inside window spec
+        ("SELECT id, SUM(gravity) OVER (PARTITION BY id ORDER BY id) FROM $planets", None, None, UnsupportedSyntaxError),
+        # Unsupported: window function combined with GROUP BY
+        ("SELECT id, SUM(gravity) OVER (PARTITION BY id) FROM $planets GROUP BY id", None, None, UnsupportedSyntaxError),
+
+        # casting array vectors segfaulted
+        ("SELECT CAST(missions AS VARCHAR) FROM testdata.astronauts", 357, 1, None),
 ]
 
 # fmt:on

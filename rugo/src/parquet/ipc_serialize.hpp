@@ -408,6 +408,127 @@ static void serialize_string_plain(std::vector<uint8_t>& out, const DecodedColum
     }
 }
 
+// ── list (array) column serializer ─────────────────────────────────────────
+// TAG_ARRAY = 11
+//
+// Layout:
+//   uint8_t   tag = 11
+//   uint32_t  num_rows          (outer row count, e.g. 357)
+//   uint32_t  list_null_bmap_len
+//   uint8_t[list_null_bmap_len] list_null_bmap  (bit i=1: row i has non-null list)
+//   uint32_t  child_count       (total child slots, e.g. 869)
+//   int32_t[(num_rows+1)]       offsets         (Arrow-style child start indices)
+//   uint32_t  child_null_bmap_len (0 if no null child elements)
+//   uint8_t[child_null_bmap_len]  child_null_bmap
+//   for each child slot i in 0..child_count-1:
+//     uint32_t len
+//     uint8_t[len]  bytes        (0 bytes for null elements; len field still present)
+
+static inline int32_t _read_packed_code(const uint8_t* arr, size_t idx, uint8_t width) {
+    if (width == 1) return static_cast<int32_t>(arr[idx]);
+    if (width == 2) return static_cast<int32_t>(arr[2*idx] | (static_cast<uint32_t>(arr[2*idx+1]) << 8));
+    return static_cast<int32_t>(arr[4*idx] | (static_cast<uint32_t>(arr[4*idx+1]) << 8) |
+                                (static_cast<uint32_t>(arr[4*idx+2]) << 16) |
+                                (static_cast<uint32_t>(arr[4*idx+3]) << 24));
+}
+
+static void serialize_list_column(std::vector<uint8_t>& out, const DecodedColumn& col) {
+    int32_t max_def = col.max_def_level;
+    size_t  n_levels = col.rep_levels.size();
+
+    // Count outer rows and build list-level null bitmap + offsets.
+    int32_t outer_rows = 0;
+    for (size_t i = 0; i < n_levels; ++i)
+        if (col.rep_levels[i] == 0) ++outer_rows;
+
+    uint32_t bmap_bytes = static_cast<uint32_t>((outer_rows + 7) / 8);
+    std::vector<uint8_t> list_bmap(bmap_bytes, 0);
+    std::vector<int32_t> offsets(outer_rows + 1, 0);
+
+    bool use_codes  = !col.dict_codes_array.empty();
+    bool use_arena  = !col.string_dict_arena.empty();
+    bool use_dix    = !col.dict_indices.empty();
+
+    // Collect child strings in one pass.
+    struct ChildEntry { const uint8_t* ptr; uint32_t len; bool valid; };
+    std::vector<ChildEntry> children;
+    children.reserve(n_levels);
+
+    int32_t row     = -1;
+    int32_t val_idx = 0;     // index into dict_indices / string_values
+    int32_t child_idx = 0;
+
+    for (size_t i = 0; i < n_levels; ++i) {
+        int32_t rep = col.rep_levels[i];
+        int32_t def = col.def_levels[i];
+
+        if (rep == 0) {
+            ++row;
+            offsets[row] = child_idx;
+            if (def >= 1)
+                list_bmap[row >> 3] |= static_cast<uint8_t>(1 << (row & 7));
+        }
+
+        if (def == max_def) {
+            // Non-null child element.
+            ChildEntry ce;
+            ce.valid = true;
+            if (use_codes) {
+                int32_t code = _read_packed_code(col.dict_codes_array.data(), i, col.code_width);
+                ce.ptr = col.string_dict_arena.data() + col.string_dict_offsets[code];
+                ce.len = static_cast<uint32_t>(col.string_dict_lens[code]);
+            } else if (use_dix && use_arena) {
+                int32_t code = col.dict_indices[val_idx++];
+                ce.ptr = col.string_dict_arena.data() + col.string_dict_offsets[code];
+                ce.len = static_cast<uint32_t>(col.string_dict_lens[code]);
+            } else if (use_dix) {
+                const auto& s = col.string_values[col.dict_indices[val_idx++]];
+                ce.ptr = reinterpret_cast<const uint8_t*>(s.data());
+                ce.len = static_cast<uint32_t>(s.size());
+            } else {
+                const auto& s = col.string_values[val_idx++];
+                ce.ptr = reinterpret_cast<const uint8_t*>(s.data());
+                ce.len = static_cast<uint32_t>(s.size());
+            }
+            children.push_back(ce);
+            ++child_idx;
+        } else if (def == max_def - 1) {
+            // Null child element within a non-null list.
+            children.push_back({nullptr, 0, false});
+            if (!use_codes) ++val_idx;
+            ++child_idx;
+        }
+        // def == 0 (null list) or def == 1 (empty list): no child entry.
+    }
+    if (row >= 0) offsets[row + 1] = child_idx;
+
+    uint32_t child_count = static_cast<uint32_t>(children.size());
+
+    // Build child null bitmap only if there are null child elements.
+    bool has_null_children = false;
+    for (const auto& ce : children) if (!ce.valid) { has_null_children = true; break; }
+    uint32_t child_bmap_bytes = has_null_children ? (child_count + 7) / 8 : 0;
+    std::vector<uint8_t> child_bmap(child_bmap_bytes, 0);
+    if (has_null_children) {
+        for (uint32_t i = 0; i < child_count; ++i)
+            if (children[i].valid) child_bmap[i >> 3] |= static_cast<uint8_t>(1 << (i & 7));
+    }
+
+    // Serialize.
+    write_u8(out, 11);  // TAG_ARRAY
+    write_u32(out, static_cast<uint32_t>(outer_rows));
+    write_u32(out, bmap_bytes);
+    write_bytes(out, list_bmap.data(), bmap_bytes);
+    write_u32(out, child_count);
+    write_bytes(out, offsets.data(), static_cast<size_t>(outer_rows + 1) * sizeof(int32_t));
+    write_u32(out, child_bmap_bytes);
+    write_bytes(out, child_bmap.data(), child_bmap_bytes);
+    for (const auto& ce : children) {
+        write_u32(out, ce.len);
+        if (ce.len > 0) write_bytes(out, ce.ptr, ce.len);
+    }
+}
+
 // ── public entry point ──────────────────────────────────────────────────────
 
 /**
@@ -417,6 +538,12 @@ static void serialize_string_plain(std::vector<uint8_t>& out, const DecodedColum
 static void serialize_decoded_column(const DecodedColumn& col,
                                      std::vector<uint8_t>& out) {
     out.clear();
+
+    // List columns (rep_levels present) take precedence over the flat byte_array path.
+    if (!col.rep_levels.empty()) {
+        serialize_list_column(out, col);
+        return;
+    }
 
     const std::string& t = col.type;
 
