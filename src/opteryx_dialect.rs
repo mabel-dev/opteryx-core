@@ -4,7 +4,7 @@
 // Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 // This is a custom dialect for Opteryx using the DataFusion SQL parser as the engine.
-// Opteryx originally used the MySQL dialect, but it has been modified to support 
+// Opteryx originally used the MySQL dialect, but it has been modified to support
 // features available in other syntaxes.
 //
 // Extends:
@@ -15,8 +15,8 @@ use std::boxed::Box;
 use sqlparser::ast::{BinaryOperator, Expr};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
+use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::Token;
-use sqlparser::parser::{ParserError};
 
 /// A [`Dialect`] for [Opteryx](https://www.opteryx.dev/)
 #[derive(Debug)]
@@ -138,9 +138,16 @@ impl Dialect for OpteryxDialect {
         true
     }
 
+    /// See <https://docs.databricks.com/en/sql/language-manual/delta-optimize.html>
+    /// OPTIMIZE TABLE table [WHERE ]
+    /// TODO - not implemented
+    fn supports_optimize_table(&self) -> bool {
+        true
+    }
+
     /// Returns true if the dialect supports modifiers on SELECT statements, such as `DISTINCT` or `ALL`.
     /// This enables syntax like:
-    /// - SELECT 
+    /// - SELECT
     ///    [HIGH_PRIORITY]
     ///    [STRAIGHT_JOIN]
     ///    [SQL_SMALL_RESULT]
@@ -148,8 +155,8 @@ impl Dialect for OpteryxDialect {
     ///    [SQL_BUFFER_RESULT]
     ///    [SQL_NO_CACHE]
     ///    [SQL_CALC_FOUND_ROWS]
+    /// TODO - not implemented
     fn supports_select_modifiers(&self) -> bool {
         true
     }
-
 }

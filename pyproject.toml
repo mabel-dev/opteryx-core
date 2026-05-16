@@ -1,6 +1,6 @@
 [project]
 name = "opteryx_core"
-version = "0.7.7"
+version = "0.7.8"
 description = "Opteryx Query Engine"
 requires-python = '>=3.13'
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -110,4 +110,7 @@ testing = [
 ]
 performance = [
     'orjson==3.11.*',  # Faster JSON serialization (not available on free-threaded Python)
+]
+embeddings = [
+    # minilm_native and ONNX Runtime are vendored; build with OPTERYX_BUILD_EMBEDDINGS=1
 ]

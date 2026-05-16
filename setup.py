@@ -368,6 +368,7 @@ C_FLAGS = ["-O3", "-std=c11"]  # C11 required for xxhash _Alignas support
 OPTERYX_ENABLE_LTO = os.environ.get("OPTERYX_ENABLE_LTO", "0").lower() in ("1", "true", "yes")
 OPTERYX_ENABLE_PGO = os.environ.get("OPTERYX_ENABLE_PGO", "0").lower() in ("1", "true", "yes")
 OPTERYX_PGO_PHASE = os.environ.get("OPTERYX_PGO_PHASE", "generate").lower()  # 'generate' or 'use'
+INCLUDE_DEBUG_SYMBOLS_IN_COMPILED_CODE = os.environ.get("INCLUDE_DEBUG_SYMBOLS_IN_COMPILED_CODE", "NO").upper() == "YES"
 
 if is_win():
     CPP_FLAGS = ["/O2", "/std:c++20"]
@@ -410,6 +411,10 @@ if OPTERYX_ENABLE_LTO and not is_win():
 if is_win() and OPTERYX_ENABLE_LTO:
     # '/LTCG' enables link-time code generation on MSVC
     LD_EXTRA.append("/LTCG")
+
+if not INCLUDE_DEBUG_SYMBOLS_IN_COMPILED_CODE and not is_win():
+    CPP_FLAGS.append("-s")
+    C_FLAGS.append("-s")
 
 # SIMD-specific flags (deterministic baseline to avoid host-specific AVX512/etc.)
 if arch == "x86_64":
@@ -1500,45 +1505,48 @@ def _find_onnxruntime_library_path(lib_dir: str) -> str | None:
     return None
 
 
-_ort_root, _ort_rpath = _select_onnxruntime_sdk()
-_ort_include = os.path.join(_ort_root, "include") if _ort_root else None
-_ort_lib = os.path.join(_ort_root, "lib") if _ort_root else None
-if _ort_include and _ort_lib and os.path.exists(_ort_include) and os.path.exists(_ort_lib):
-    ort_lib_path = _find_onnxruntime_library_path(_ort_lib)
-    extra_link = []
-    if ort_lib_path:
-        # Use direct library path so the linker finds the versioned shared lib.
-        extra_link.append(ort_lib_path)
-    else:
-        # Fallback to search by linker name.
-        extra_link.append("-lonnxruntime")
+BUILD_EMBEDDINGS = os.environ.get("OPTERYX_BUILD_EMBEDDINGS", "0").lower() in ("1", "true", "yes")
 
-    extensions.append(
-        Extension(
-            "opteryx.compiled.nanobind.minilm_native",
-            sources=[
-                "src/cpp/minilm_native.cpp",
-                "third_party/nanobind/src/nb_combined.cpp",
-            ],
-            include_dirs=include_dirs
-            + [
-                _ort_include,
-                "third_party/nanobind",
-                "third_party/nanobind/src",
-                "third_party/nanobind/ext/robin_map/include",
-            ],
-            extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-            extra_link_args=LD_EXTRA
-            + [
-                f"-L{_ort_lib}",
-            ]
-            + extra_link
-            + [
-                f"-Wl,-rpath,{_ort_rpath}",
-            ],
-            language="c++",
+if BUILD_EMBEDDINGS:
+    _ort_root, _ort_rpath = _select_onnxruntime_sdk()
+    _ort_include = os.path.join(_ort_root, "include") if _ort_root else None
+    _ort_lib = os.path.join(_ort_root, "lib") if _ort_root else None
+    if _ort_include and _ort_lib and os.path.exists(_ort_include) and os.path.exists(_ort_lib):
+        ort_lib_path = _find_onnxruntime_library_path(_ort_lib)
+        extra_link = []
+        if ort_lib_path:
+            # Use direct library path so the linker finds the versioned shared lib.
+            extra_link.append(ort_lib_path)
+        else:
+            # Fallback to search by linker name.
+            extra_link.append("-lonnxruntime")
+
+        extensions.append(
+            Extension(
+                "opteryx.compiled.nanobind.minilm_native",
+                sources=[
+                    "src/cpp/minilm_native.cpp",
+                    "third_party/nanobind/src/nb_combined.cpp",
+                ],
+                include_dirs=include_dirs
+                + [
+                    _ort_include,
+                    "third_party/nanobind",
+                    "third_party/nanobind/src",
+                    "third_party/nanobind/ext/robin_map/include",
+                ],
+                extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+                extra_link_args=LD_EXTRA
+                + [
+                    f"-L{_ort_lib}",
+                ]
+                + extra_link
+                + [
+                    f"-Wl,-rpath,{_ort_rpath}",
+                ],
+                language="c++",
+            )
         )
-    )
 
 # C++ Parquet IO pipeline with lock-free queues
 extensions.append(
