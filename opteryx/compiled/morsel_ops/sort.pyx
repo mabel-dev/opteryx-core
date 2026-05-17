@@ -43,7 +43,7 @@ from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, u
 from libc.string cimport memset, memcpy
 
 from draken.core.buffers cimport (
-    DictAccessor,
+    DrakenVector,
     DrakenVarBuffer,
     DrakenType,
     DRAKEN_INT8,
@@ -66,18 +66,21 @@ from draken.vectors.vector cimport Vector
 
 # ── Inline helpers (replaces phantom vector_readers cimport) ──────────────────
 
-cdef inline DictAccessor* _vector_dict_accessor(object vec) noexcept:
-    """Return the DictAccessor* for a dictionary-encoded Vector, or NULL."""
-    return (<Vector>vec).dict_accessor()
+cdef inline DrakenVector* _vector_dict_accessor(object vec) noexcept:
+    """Return the unified DrakenVector* for a dictionary-encoded Vector, or NULL."""
+    cdef DrakenVector* uv = (<Vector>vec).unified()
+    if uv.selection == NULL:
+        return NULL
+    return uv
 
 
-cdef inline uint32_t _dict_read_code(const DictAccessor* acc, Py_ssize_t i) noexcept nogil:
+cdef inline uint32_t _dict_read_code(const DrakenVector* uv, Py_ssize_t i) noexcept nogil:
     """Read the dictionary code at row i, handling 1/2/4-byte code widths."""
-    if acc.code_width == 1:
-        return (<uint8_t*>acc.codes)[i]
-    if acc.code_width == 2:
-        return (<uint16_t*>acc.codes)[i]
-    return (<uint32_t*>acc.codes)[i]
+    if uv.sel_width == 1:
+        return (<uint8_t*>uv.selection)[i]
+    if uv.sel_width == 2:
+        return (<uint16_t*>uv.selection)[i]
+    return (<uint32_t*>uv.selection)[i]
 
 
 # ── Inline C++: std::sort helpers ────────────────────────────────────────────
@@ -301,7 +304,7 @@ cdef inline int64_t _dict_value_as_int64(
 
 
 cdef uint32_t* _build_numeric_dict_remap(
-    const DictAccessor* acc,
+    const DrakenVector* uv,
 ) noexcept:
     """
     Build a remap table for a numeric-valued dictionary column.
@@ -313,7 +316,7 @@ cdef uint32_t* _build_numeric_dict_remap(
     Returns a heap-allocated uint32[D] array, or NULL on malloc failure.
     The caller is responsible for freeing it with PyMem_Free.
     """
-    cdef DrakenVarBuffer* dv = acc.dict_values
+    cdef DrakenVarBuffer* dv = <DrakenVarBuffer*>uv.data
     if dv == NULL:
         return NULL
 
@@ -334,7 +337,7 @@ cdef uint32_t* _build_numeric_dict_remap(
 
     cdef Py_ssize_t i
     for i in range(D):
-        sort_keys[i] = _dict_value_as_int64(dv, acc.value_type, <uint32_t>i)
+        sort_keys[i] = _dict_value_as_int64(dv, dv.type, <uint32_t>i)
         order[i] = <uint32_t>i
 
     # O(D log D) sort via std::sort — correct for all dictionary sizes,
@@ -351,7 +354,7 @@ cdef uint32_t* _build_numeric_dict_remap(
 
 
 cdef uint32_t* _build_string_dict_remap(
-    const DictAccessor* acc,
+    const DrakenVector* uv,
 ) noexcept:
     """
     Build a remap table for a string-valued dictionary column.
@@ -362,7 +365,7 @@ cdef uint32_t* _build_string_dict_remap(
 
     Returns a heap-allocated uint32[D] array, or NULL on malloc failure.
     """
-    cdef DrakenVarBuffer* dv = acc.dict_values
+    cdef DrakenVarBuffer* dv = <DrakenVarBuffer*>uv.data
     if dv == NULL or dv.offsets == NULL:
         return NULL
 
@@ -441,8 +444,9 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
         perm_buf[i] = <uint32_t>i
 
     cdef int64_t[::1] signed_mv
-    cdef DictAccessor* acc
+    cdef DrakenVector* acc
     cdef StringVector sv
+    cdef DrakenVector* sv_uv
     cdef DrakenVarBuffer* sv_ptr
     cdef uint64_t key_xor
     cdef bint asc
@@ -467,9 +471,9 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
                 # Build a remap[old_code] = semantic_rank table (O(D log D)),
                 # then radix-sort on ranks.  This is ORDER BY-correct unlike
                 # raw code order which is insertion-ordered.
-                n_passes = acc.code_width
+                n_passes = acc.sel_width
 
-                if acc.value_type == DRAKEN_STRING:
+                if (<DrakenVarBuffer*>acc.data).type == DRAKEN_STRING:
                     remap = _build_string_dict_remap(acc)
                 else:
                     remap = _build_numeric_dict_remap(acc)
@@ -481,7 +485,7 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
                     if n_passes == 1:
                         with nogil:
                             for i in range(n):
-                                keys[i] = <uint64_t>remap[(<uint8_t*>acc.codes)[i]]
+                                keys[i] = <uint64_t>remap[(<uint8_t*>acc.selection)[i]]
                             if not asc:
                                 flip = (<uint64_t>1 << (8 * n_passes)) - 1
                                 for i in range(n):
@@ -490,7 +494,7 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
                     elif n_passes == 2:
                         with nogil:
                             for i in range(n):
-                                keys[i] = <uint64_t>remap[(<uint16_t*>acc.codes)[i]]
+                                keys[i] = <uint64_t>remap[(<uint16_t*>acc.selection)[i]]
                             if not asc:
                                 flip = (<uint64_t>1 << (8 * n_passes)) - 1
                                 for i in range(n):
@@ -499,7 +503,7 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
                     else:  # n_passes == 4
                         with nogil:
                             for i in range(n):
-                                keys[i] = <uint64_t>remap[(<uint32_t*>acc.codes)[i]]
+                                keys[i] = <uint64_t>remap[(<uint32_t*>acc.selection)[i]]
                             if not asc:
                                 flip = (<uint64_t>1 << (8 * n_passes)) - 1
                                 for i in range(n):
@@ -527,7 +531,8 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
                 # leading bytes >= 0x80 (Cyrillic, CJK, etc.) to sort before
                 # ASCII — a correctness bug.
                 sv = <StringVector>vec
-                if not sv._has_const:
+                sv_uv = sv.unified()
+                if sv_uv.data_length != 1:
                     sv_ptr = sv.ptr
                     with nogil:
                         _sort_strings(

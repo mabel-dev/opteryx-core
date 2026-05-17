@@ -248,7 +248,7 @@ cdef class GroupHashEngine:
             if not isinstance(vec, StringVector):
                 return
             svec = <StringVector>vec
-            if svec._encoding == DRAKEN_ENCODING_DICTIONARY:
+            if svec.unified().selection != NULL:
                 card = svec.c_dict_size()
             else:
                 return
@@ -301,9 +301,10 @@ cdef class GroupHashEngine:
         entirely.  Assumes carchar (non-parvi) mode and a non-NULL index.
         """
         cdef Py_ssize_t dict_size = svec.c_dict_size()
-        cdef const uint8_t* codes = svec.c_dict_codes_ptr()
-        cdef uint8_t code_width = svec.c_dict_code_width()
-        cdef const uint8_t* row_nulls = svec.c_row_null_bitmap()
+        cdef DrakenVector* _suv = svec.unified()
+        cdef const uint8_t* codes = <const uint8_t*>_suv.selection
+        cdef uint8_t code_width = _suv.sel_width
+        cdef const uint8_t* row_nulls = _suv.validity
         cdef const int64_t* counts = svec.c_dict_code_counts_ptr()
         cdef int64_t* si_buf = self._state_indices_buf.data()
         cdef int64_t num_groups = self._num_groups
@@ -495,9 +496,7 @@ cdef class GroupHashEngine:
                 # hash + cached lookups beat our K-independent path.  Only
                 # take the fast path when K is meaningfully smaller than N.
                 if (
-                    svec_key._encoding == DRAKEN_ENCODING_DICTIONARY
-                    and svec_key._dict_codes != NULL
-                    and svec_key._dict_values != NULL
+                    svec_key.unified().selection != NULL
                     and svec_key.c_dict_size() <= (n_rows >> 2)
                 ):
                     if self._telemetry_enabled:

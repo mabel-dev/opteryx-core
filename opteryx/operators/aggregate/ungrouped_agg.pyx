@@ -17,8 +17,8 @@ from libc.string cimport memset
 from draken.vectors.vector cimport Vector, NULL_HASH, mix_hash
 from draken.vectors.integer_vector cimport IntegerVector
 from draken.core.buffers cimport (
-    ConstAccessor, DictAccessor, DrakenFixedBuffer, DrakenVarBuffer,
-    DrakenConstantStringPayload, DRAKEN_ENCODING_DICTIONARY,
+    DrakenFixedBuffer, DrakenVarBuffer,
+    DrakenConstantStringPayload, DrakenVector,
 )
 cdef extern from "_agg_kernels.hpp" namespace "opteryx::ungrouped":
     int compare_bytes(const char* a, size_t la, const char* b, size_t lb) noexcept
@@ -42,32 +42,6 @@ cdef inline int64_t _read_integer_value(DrakenFixedBuffer* buf, Py_ssize_t index
     if buf.type == 3:
         return (<int32_t*>buf.data)[index]
     return (<int64_t*>buf.data)[index]
-
-
-cdef inline int64_t _dict_accessor_read_int_value(DictAccessor* dacc, Py_ssize_t index) noexcept nogil:
-    cdef DrakenVarBuffer* dv = dacc.dict_values
-    cdef uint32_t code
-    if dacc.code_width == 1:
-        code = (<uint8_t*>dacc.codes)[index]
-    elif dacc.code_width == 2:
-        code = (<uint16_t*>dacc.codes)[index]
-    else:
-        code = (<uint32_t*>dacc.codes)[index]
-
-    # Defensive: ensure code is within the dictionary length. If not, return 0
-    # to avoid out-of-bounds access that can cause a native crash.
-    if dv is NULL:
-        return 0
-    if code >= dv.length:
-        return 0
-
-    if dv.type == 1:
-        return (<int8_t*>dv.data)[code]
-    if dv.type == 2:
-        return (<int16_t*>dv.data)[code]
-    if dv.type == 3:
-        return (<int32_t*>dv.data)[code]
-    return (<int64_t*>dv.data)[code]
 
 
 # ---------------------------------------------------------------------------

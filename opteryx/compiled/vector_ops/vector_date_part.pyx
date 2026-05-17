@@ -28,16 +28,15 @@ Phase 4 (Future):
 - OpenMP parallel extraction for >10 M row vectors
 """
 
-from libc.stdint cimport int64_t
+from libc.stdint cimport int64_t, uint8_t
 from libc.stddef cimport size_t
 from cpython.array cimport array, clone
 
-from draken.core.buffers cimport DictAccessor
+from draken.core.buffers cimport DrakenVector, DRAKEN_INT64
 from draken.vectors.timestamp_vector cimport TimestampVector
 from draken.vectors.int64_vector cimport Int64Vector, from_packed_dict as int64_from_packed_dict, from_sequence as int64_from_sequence
 from draken.vectors.scalar_constructors cimport from_scalar
 from draken.vectors.vector cimport Vector
-from draken.core.buffers cimport DRAKEN_INT64
 
 # ---------------------------------------------------------------------------
 # SIMD-accelerated kernels for minute / hour / second extraction.
@@ -147,9 +146,12 @@ cdef inline int64_t _find_seconds_divisor_int64(
     return 1  # All zeros — default to seconds
 
 
-cdef inline bint _is_constant_encoded(object vec):
-    """Check if vector is constant-encoded (encoding==3)."""
-    return getattr(vec, "encoding", None) == 3
+cdef inline bint _is_constant_encoded(object vec) noexcept:
+    cdef DrakenVector* uv
+    if not isinstance(vec, Vector):
+        return False
+    uv = (<Vector>vec).unified()
+    return uv.data_length == 1
 
 
 cdef inline int64_t _constant_scalar_value_i64(object vec):
@@ -160,7 +162,7 @@ cdef inline int64_t _constant_scalar_value_i64(object vec):
 
 
 cdef Int64Vector _datepart_i64_dict_subsecond(Int64Vector int64_vec, int part_kind):
-    cdef DictAccessor* dict_accessor = (<Vector>int64_vec).dict_accessor()
+    cdef DrakenVector* uv = (<Vector>int64_vec).unified()
     cdef Py_ssize_t row_count
     cdef Py_ssize_t dict_size
     cdef int64_t* dictionary_ptr
@@ -172,21 +174,21 @@ cdef Int64Vector _datepart_i64_dict_subsecond(Int64Vector int64_vec, int part_ki
     cdef int64_t* output_ptr
     cdef Int64Vector result
 
-    if dict_accessor == NULL:
+    if uv.selection == NULL:
         return None
 
-    row_count = <Py_ssize_t>dict_accessor.length
-    dict_size = <Py_ssize_t>dict_accessor.dict_values.length
-    dictionary_ptr = <int64_t*>dict_accessor.dict_values.data
+    row_count = <Py_ssize_t>uv.length
+    dict_size = <Py_ssize_t>uv.data_length
+    dictionary_ptr = <int64_t*>uv.data
 
     if row_count == 0:
         return int64_from_packed_dict(
-            dict_accessor.codes,
-            dict_accessor.code_width,
+            <uint8_t*>uv.selection,
+            uv.sel_width,
             0,
             dictionary_ptr,
             dict_size,
-            dict_accessor.row_nulls,
+            uv.validity,
             False,
         )
 
@@ -229,12 +231,12 @@ cdef Int64Vector _datepart_i64_dict_subsecond(Int64Vector int64_vec, int part_ki
                 output_ptr[i] = (dictionary_ptr[i] // divisor) % 60
 
     result = int64_from_packed_dict(
-        dict_accessor.codes,
-        dict_accessor.code_width,
+        <uint8_t*>uv.selection,
+        uv.sel_width,
         row_count,
         <const int64_t*>output_ptr,
         dict_size,
-        dict_accessor.row_nulls,
+        uv.validity,
         int64_vec.ordered,
     )
     pass
@@ -242,7 +244,7 @@ cdef Int64Vector _datepart_i64_dict_subsecond(Int64Vector int64_vec, int part_ki
 
 
 cdef Int64Vector _datepart_i64_dict_calendar(Int64Vector int64_vec, int part_kind):
-    cdef DictAccessor* dict_accessor = (<Vector>int64_vec).dict_accessor()
+    cdef DrakenVector* uv = (<Vector>int64_vec).unified()
     cdef Py_ssize_t row_count
     cdef Py_ssize_t dict_size
     cdef int64_t* dictionary_ptr
@@ -256,21 +258,21 @@ cdef Int64Vector _datepart_i64_dict_calendar(Int64Vector int64_vec, int part_kin
     cdef int64_t* output_ptr
     cdef Int64Vector result
 
-    if dict_accessor == NULL:
+    if uv.selection == NULL:
         return None
 
-    row_count = <Py_ssize_t>dict_accessor.length
-    dict_size = <Py_ssize_t>dict_accessor.dict_values.length
-    dictionary_ptr = <int64_t*>dict_accessor.dict_values.data
+    row_count = <Py_ssize_t>uv.length
+    dict_size = <Py_ssize_t>uv.data_length
+    dictionary_ptr = <int64_t*>uv.data
 
     if row_count == 0:
         return int64_from_packed_dict(
-            dict_accessor.codes,
-            dict_accessor.code_width,
+            <uint8_t*>uv.selection,
+            uv.sel_width,
             0,
             dictionary_ptr,
             dict_size,
-            dict_accessor.row_nulls,
+            uv.validity,
             int64_vec.ordered,
         )
 
@@ -309,12 +311,12 @@ cdef Int64Vector _datepart_i64_dict_calendar(Int64Vector int64_vec, int part_kin
             simd_datepart_quarter(dictionary_ptr, output_ptr, <size_t>dict_size, unit_code)
 
     result = int64_from_packed_dict(
-        dict_accessor.codes,
-        dict_accessor.code_width,
+        <uint8_t*>uv.selection,
+        uv.sel_width,
         row_count,
         <const int64_t*>output_ptr,
         dict_size,
-        dict_accessor.row_nulls,
+        uv.validity,
         int64_vec.ordered,
     )
     pass
@@ -332,7 +334,7 @@ cdef Int64Vector _datepart_i64_dict_calendar(Int64Vector int64_vec, int part_kin
 # ===========================================================================
 
 cdef Int64Vector _datepart_ts_dict_subsecond(TimestampVector ts_vec, int part_kind):
-    cdef DictAccessor* dict_accessor = (<Vector>ts_vec).dict_accessor()
+    cdef DrakenVector* uv = (<Vector>ts_vec).unified()
     cdef Py_ssize_t row_count
     cdef Py_ssize_t dict_size
     cdef int64_t* dictionary_ptr
@@ -344,21 +346,21 @@ cdef Int64Vector _datepart_ts_dict_subsecond(TimestampVector ts_vec, int part_ki
     cdef int64_t* output_ptr
     cdef Int64Vector result
 
-    if dict_accessor == NULL:
+    if uv.selection == NULL:
         return None
 
-    row_count = <Py_ssize_t>dict_accessor.length
-    dict_size = <Py_ssize_t>dict_accessor.dict_values.length
-    dictionary_ptr = <int64_t*>dict_accessor.dict_values.data
+    row_count = <Py_ssize_t>uv.length
+    dict_size = <Py_ssize_t>uv.data_length
+    dictionary_ptr = <int64_t*>uv.data
 
     if row_count == 0:
         return int64_from_packed_dict(
-            dict_accessor.codes,
-            dict_accessor.code_width,
+            <uint8_t*>uv.selection,
+            uv.sel_width,
             0,
             dictionary_ptr,
             dict_size,
-            dict_accessor.row_nulls,
+            uv.validity,
             False,
         )
 
@@ -411,12 +413,12 @@ cdef Int64Vector _datepart_ts_dict_subsecond(TimestampVector ts_vec, int part_ki
                 output_ptr[i] = (dictionary_ptr[i] // divisor) % 60
 
     result = int64_from_packed_dict(
-        dict_accessor.codes,
-        dict_accessor.code_width,
+        <uint8_t*>uv.selection,
+        uv.sel_width,
         row_count,
         <const int64_t*>output_ptr,
         dict_size,
-        dict_accessor.row_nulls,
+        uv.validity,
         False,
     )
     pass
@@ -424,7 +426,7 @@ cdef Int64Vector _datepart_ts_dict_subsecond(TimestampVector ts_vec, int part_ki
 
 
 cdef Int64Vector _datepart_ts_dict_calendar(TimestampVector ts_vec, int part_kind):
-    cdef DictAccessor* dict_accessor = (<Vector>ts_vec).dict_accessor()
+    cdef DrakenVector* uv = (<Vector>ts_vec).unified()
     cdef Py_ssize_t row_count
     cdef Py_ssize_t dict_size
     cdef int64_t* dictionary_ptr
@@ -437,21 +439,21 @@ cdef Int64Vector _datepart_ts_dict_calendar(TimestampVector ts_vec, int part_kin
     cdef int64_t* output_ptr
     cdef Int64Vector result
 
-    if dict_accessor == NULL:
+    if uv.selection == NULL:
         return None
 
-    row_count = <Py_ssize_t>dict_accessor.length
-    dict_size = <Py_ssize_t>dict_accessor.dict_values.length
-    dictionary_ptr = <int64_t*>dict_accessor.dict_values.data
+    row_count = <Py_ssize_t>uv.length
+    dict_size = <Py_ssize_t>uv.data_length
+    dictionary_ptr = <int64_t*>uv.data
 
     if row_count == 0:
         return int64_from_packed_dict(
-            dict_accessor.codes,
-            dict_accessor.code_width,
+            <uint8_t*>uv.selection,
+            uv.sel_width,
             0,
             dictionary_ptr,
             dict_size,
-            dict_accessor.row_nulls,
+            uv.validity,
             False,
         )
 
@@ -489,12 +491,12 @@ cdef Int64Vector _datepart_ts_dict_calendar(TimestampVector ts_vec, int part_kin
             simd_datepart_quarter(dictionary_ptr, output_ptr, <size_t>dict_size, unit_code)
 
     result = int64_from_packed_dict(
-        dict_accessor.codes,
-        dict_accessor.code_width,
+        <uint8_t*>uv.selection,
+        uv.sel_width,
         row_count,
         <const int64_t*>output_ptr,
         dict_size,
-        dict_accessor.row_nulls,
+        uv.validity,
         False,
     )
     pass

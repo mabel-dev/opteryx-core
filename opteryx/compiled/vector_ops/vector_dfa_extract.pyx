@@ -178,8 +178,9 @@ else:
     simd_find_char = avx_search
 
 from draken.core.buffers cimport (
+    DrakenVector,
+    DrakenConstantStringPayload,
     DrakenVarBuffer,
-    DRAKEN_ENCODING_DICTIONARY,
 )
 from draken.vectors.string_vector cimport StringVector, from_packed_dict
 
@@ -744,13 +745,16 @@ cdef inline void _extract_const_slice(
     const char** data_ptr,
     Py_ssize_t* data_len,
 ) except *:
-    if not vec._has_const:
+    cdef DrakenVector* uv = vec.unified()
+    cdef DrakenConstantStringPayload* csp
+    if uv.data_length != 1:  # not constant
         raise ValueError("vector_dfa_extract: compiled program must be constant encoded")
-    if vec._const_is_null or vec._const_value == NULL:
+    if uv.validity != NULL:  # null constant
         raise ValueError("vector_dfa_extract: compiled program must be non-null")
 
-    data_ptr[0] = <const char*>vec._const_value.data
-    data_len[0] = <Py_ssize_t>vec._const_value.length
+    csp = <DrakenConstantStringPayload*>uv.data
+    data_ptr[0] = <const char*>csp.data
+    data_len[0] = <Py_ssize_t>csp.length
 
 
 
@@ -852,12 +856,13 @@ cpdef StringVector vector_dfa_extract(
     _extract_const_slice(compiled_program, &program_ptr, &program_len)
     _decode_procedure(program_ptr, program_len, &proc)
 
-    cdef Py_ssize_t n = data.ptr.length
+    cdef DrakenVector* uv = data.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t i
     cdef int32_t start, end
     cdef const char* out_ptr = NULL
     cdef Py_ssize_t out_len = 0
-    cdef DrakenVarBuffer* ptr
+    cdef DrakenVarBuffer* vbuf
     cdef StringVector out_vec
     cdef DrakenVarBuffer* out_ptr_buf
     cdef Py_ssize_t total_bytes = 0
@@ -867,10 +872,11 @@ cpdef StringVector vector_dfa_extract(
     cdef Py_ssize_t null_bytes = 0
     cdef Py_ssize_t dict_size
     cdef object new_dict_sv
+    cdef DrakenConstantStringPayload* csp
 
     # Constant encoding: execute once, replicate.
-    if data._has_const:
-        if data._const_is_null or data._const_value == NULL:
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             out_vec = StringVector(n, 0)
             out_ptr_buf = out_vec.ptr
             null_bytes = (n + 7) >> 3
@@ -880,8 +886,9 @@ cpdef StringVector vector_dfa_extract(
                 out_ptr_buf.offsets[i] = 0
             return out_vec
 
-        row_ptr = <const char*>data._const_value.data
-        row_len = <Py_ssize_t>data._const_value.length
+        csp = <DrakenConstantStringPayload*>uv.data
+        row_ptr = <const char*>csp.data
+        row_len = <Py_ssize_t>csp.length
         if _execute_procedure(
             row_ptr,
             row_len,
@@ -915,16 +922,17 @@ cpdef StringVector vector_dfa_extract(
     # DFA output is always <= input (capture is a substring, passthrough is the
     # original), so pre-allocate from the original dict byte total and write in
     # a single pass — no size-counting pass needed.
-    if data._encoding == DRAKEN_ENCODING_DICTIONARY:
-        dict_size = data._dict_values.length
-        new_dict_sv = StringVector(dict_size, <Py_ssize_t>data._dict_values.offsets[dict_size])
+    if uv.selection != NULL:  # dictionary
+        vbuf = <DrakenVarBuffer*>uv.data
+        dict_size = <Py_ssize_t>vbuf.length
+        new_dict_sv = StringVector(dict_size, <Py_ssize_t>vbuf.offsets[dict_size])
         out_ptr_buf = (<StringVector>new_dict_sv).ptr
         write_offset = 0
         out_ptr_buf.offsets[0] = 0
         for i in range(dict_size):
-            start = data._dict_values.offsets[i]
-            end = data._dict_values.offsets[i + 1]
-            row_ptr = (<const char*>data._dict_values.data) + start
+            start = vbuf.offsets[i]
+            end = vbuf.offsets[i + 1]
+            row_ptr = (<const char*>vbuf.data) + start
             row_len = <Py_ssize_t>(end - start)
             if _execute_procedure(row_ptr, row_len, &proc, &out_ptr, &out_len):
                 if out_len > 0:
@@ -936,12 +944,13 @@ cpdef StringVector vector_dfa_extract(
                 write_offset += row_len
             out_ptr_buf.offsets[i + 1] = <int32_t>write_offset
         return from_packed_dict(
-            data._dict_codes, data._dict_code_width, n,
+            <uint8_t*>uv.selection, uv.sel_width, n,
             out_ptr_buf.offsets, <const uint8_t*>out_ptr_buf.data, dict_size,
-            data._dict_accessor.row_nulls,
+            uv.validity,
         )
 
-    ptr = data.ptr
+    vbuf = <DrakenVarBuffer*>uv.data
+    cdef DrakenVarBuffer* ptr = vbuf
 
     # Cache (capture_offset_from_data_start, capture_len) per row so the write
     # pass never calls _execute_procedure again — pure array reads + memcpy.

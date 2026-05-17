@@ -1,6 +1,7 @@
 from libc.stdint cimport int8_t, int32_t, int64_t, uint64_t, uint8_t
 
 from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenRLEBuffer, DrakenType
+from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
 
@@ -18,6 +19,7 @@ cdef class IntegerVector(Vector):
     cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
+    cdef DrakenVector* unified(self) noexcept
 
     cpdef list to_pylist(self)
     cpdef IntegerVector take(self, int32_t[::1] indices)

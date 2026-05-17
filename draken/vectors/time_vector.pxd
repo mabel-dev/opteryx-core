@@ -4,6 +4,7 @@ from libc.stdint cimport int8_t
 from libc.stdint cimport uint64_t, uint8_t
 
 from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenRLEBuffer
+from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
 
 cdef class TimeVector(Vector):
@@ -21,6 +22,7 @@ cdef class TimeVector(Vector):
     cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
+    cdef DrakenVector* unified(self) noexcept
 
     cpdef TimeVector take(self, int32_t[::1] indices)
 

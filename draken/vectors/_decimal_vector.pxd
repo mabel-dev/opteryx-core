@@ -12,7 +12,7 @@ from libc.stdint cimport int64_t
 from libc.stdint cimport uint64_t
 from libc.stdint cimport uint8_t
 
-from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
+from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenVector
 from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.int64_vector cimport Int64Vector
@@ -47,6 +47,7 @@ cdef class DecimalVector(Vector):
     cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
+    cdef DrakenVector* unified(self) noexcept
 
     # ------------------------------------------------------------------
     # Row selection
@@ -124,3 +125,5 @@ cdef class DecimalVector(Vector):
 # Module-level factories exposed for cimport by other consumers
 cdef DecimalVector from_arrow(object array)
 cpdef DecimalVector from_int64_vector(Int64Vector source, int precision, int scale)
+
+cdef void _refresh_unified_Decimal(DecimalVector vec) noexcept

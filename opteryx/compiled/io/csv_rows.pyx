@@ -30,10 +30,8 @@ from draken.core.buffers cimport DRAKEN_INT16
 from draken.core.buffers cimport DRAKEN_INT32
 from draken.core.buffers cimport DRAKEN_INT64
 from draken.core.buffers cimport DRAKEN_STRING
-from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
-from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
-from draken.core.buffers cimport ConstAccessor
 from draken.core.buffers cimport DrakenConstantStringPayload
+from draken.core.buffers cimport DrakenVector
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.bool_vector cimport BoolVector
@@ -214,75 +212,74 @@ cdef char _normalize_separator(object separator):
     return ptr[0]
 
 
-cdef inline ConstAccessor* _typed_constant_accessor(object vec_obj) noexcept:
-    if getattr(vec_obj, "encoding", None) != DRAKEN_ENCODING_CONSTANT:
-        return NULL
+cdef inline DrakenVector* _typed_unified(object vec_obj) noexcept:
     if isinstance(vec_obj, Int64Vector):
-        return (<Int64Vector>vec_obj).const_accessor()
+        return (<Int64Vector>vec_obj).unified()
     if isinstance(vec_obj, IntegerVector):
-        return (<IntegerVector>vec_obj).const_accessor()
+        return (<IntegerVector>vec_obj).unified()
     if isinstance(vec_obj, Float64Vector):
-        return (<Float64Vector>vec_obj).const_accessor()
+        return (<Float64Vector>vec_obj).unified()
     if isinstance(vec_obj, BoolVector):
-        return (<BoolVector>vec_obj).const_accessor()
+        return (<BoolVector>vec_obj).unified()
     if isinstance(vec_obj, StringVector):
-        return (<StringVector>vec_obj).const_accessor()
+        return (<StringVector>vec_obj).unified()
     return NULL
 
 
 cdef inline int _typed_constant_encoder(object vec_obj):
-    cdef ConstAccessor* accessor = _typed_constant_accessor(vec_obj)
-    if accessor == NULL:
+    cdef DrakenVector* uv = _typed_unified(vec_obj)
+    if uv == NULL or uv.data_length != 1:
         return 0
-    if accessor.value_type == DRAKEN_INT8 or accessor.value_type == DRAKEN_INT16 or accessor.value_type == DRAKEN_INT32 or accessor.value_type == DRAKEN_INT64:
+    if uv.type == DRAKEN_INT8 or uv.type == DRAKEN_INT16 or uv.type == DRAKEN_INT32 or uv.type == DRAKEN_INT64:
         return ENC_CONST_INT
-    if accessor.value_type == DRAKEN_FLOAT64:
+    if uv.type == DRAKEN_FLOAT64:
         return ENC_CONST_FLOAT
-    if accessor.value_type == DRAKEN_BOOL:
+    if uv.type == DRAKEN_BOOL:
         return ENC_CONST_BOOL
-    if accessor.value_type == DRAKEN_STRING:
+    if uv.type == DRAKEN_STRING:
         return ENC_CONST_STRING
     return 0
 
 
 cdef inline bint _constant_is_null(object vec_obj) noexcept:
-    cdef ConstAccessor* accessor
-    accessor = _typed_constant_accessor(vec_obj)
-    if accessor == NULL:
+    cdef DrakenVector* uv = _typed_unified(vec_obj)
+    if uv == NULL:
         return False
-    return accessor.is_null != 0
+    return uv.validity != NULL
 
 
 cdef inline int64_t _constant_int_value(object vec_obj) noexcept:
-    cdef ConstAccessor* accessor
-    accessor = _typed_constant_accessor(vec_obj)
-    if accessor == NULL or accessor.value_ptr == NULL:
+    cdef DrakenVector* uv = _typed_unified(vec_obj)
+    if uv == NULL or uv.data == NULL:
         return 0
-    return (<int64_t*>accessor.value_ptr)[0]
+    if uv.type == DRAKEN_INT8:
+        return (<int8_t*>uv.data)[0]
+    if uv.type == DRAKEN_INT16:
+        return (<int16_t*>uv.data)[0]
+    if uv.type == DRAKEN_INT32:
+        return (<int32_t*>uv.data)[0]
+    return (<int64_t*>uv.data)[0]
 
 
 cdef inline double _constant_float_value(object vec_obj) noexcept:
-    cdef ConstAccessor* accessor
-    accessor = _typed_constant_accessor(vec_obj)
-    if accessor == NULL or accessor.value_ptr == NULL:
+    cdef DrakenVector* uv = _typed_unified(vec_obj)
+    if uv == NULL or uv.data == NULL:
         return 0.0
-    return (<double*>accessor.value_ptr)[0]
+    return (<double*>uv.data)[0]
 
 
 cdef inline bint _constant_bool_value(object vec_obj) noexcept:
-    cdef ConstAccessor* accessor
-    accessor = _typed_constant_accessor(vec_obj)
-    if accessor == NULL or accessor.value_ptr == NULL:
+    cdef DrakenVector* uv = _typed_unified(vec_obj)
+    if uv == NULL or uv.data == NULL:
         return False
-    return (<uint8_t*>accessor.value_ptr)[0] != 0
+    return (<uint8_t*>uv.data)[0] != 0
 
 
 cdef inline DrakenConstantStringPayload* _constant_string_payload(object vec_obj) noexcept:
-    cdef ConstAccessor* accessor
-    accessor = _typed_constant_accessor(vec_obj)
-    if accessor == NULL or accessor.value_ptr == NULL:
+    cdef DrakenVector* uv = _typed_unified(vec_obj)
+    if uv == NULL or uv.data == NULL:
         return NULL
-    return <DrakenConstantStringPayload*>accessor.value_ptr
+    return <DrakenConstantStringPayload*>uv.data
 
 
 cdef Py_ssize_t _estimate_value_bytes(int encoder, object vec_obj, object aux_obj, Py_ssize_t num_rows) except -1:
@@ -441,6 +438,7 @@ cpdef StringVector morsel_to_csv_rows(
     cdef object aux_obj
     cdef bytes col_name
     cdef int encoder
+    cdef DrakenVector* _uv
     cdef StringVectorBuilder builder
     cdef _StringVectorView string_view
     cdef DrakenConstantStringPayload* payload
@@ -462,7 +460,8 @@ cpdef StringVector morsel_to_csv_rows(
             col_name = <bytes>selected_columns[col_index]
             vec_obj = morsel.column(col_name)
 
-            if getattr(vec_obj, "encoding", None) == DRAKEN_ENCODING_CONSTANT:
+            _uv = _typed_unified(vec_obj)
+            if _uv != NULL and _uv.data_length == 1:
                 encoder = _typed_constant_encoder(vec_obj)
                 if encoder == 0:
                     raise NotImplementedError(
@@ -490,7 +489,7 @@ cpdef StringVector morsel_to_csv_rows(
                 encoder = ENC_STRING
                 aux_obj = vec_obj.view()
                 null_bitmaps[col_index] = NULL
-            elif getattr(vec_obj, "encoding", None) == DRAKEN_ENCODING_DICTIONARY:
+            elif _uv != NULL and _uv.selection != NULL:
                 encoder = ENC_GENERIC
                 aux_obj = vec_obj.to_pylist()
                 null_bitmaps[col_index] = NULL

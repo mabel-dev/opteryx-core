@@ -32,7 +32,7 @@ from opteryx.models import QueryProperties
 
 from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode
 from draken.vectors.vector cimport Vector
-from draken.encoding import DRAKEN_ENCODING_CONSTANT as _CONSTANT_ENCODING
+from draken.core.buffers cimport DrakenVector
 
 # BasePlanNode is defined at the top of _operators.pyx (the umbrella unit) and
 # is in scope here via textual include.
@@ -149,7 +149,7 @@ cdef void _apply_constant_replacements(Morsel morsel, list replacements) except 
         cur = <Vector>morsel._columns[idx]
         if cur is None:
             continue
-        if cur._encoding == _CONSTANT_ENCODING:
+        if cur.unified().data_length == 1:
             continue
         new_vec = _build_constant_vector(cur, value, length)
         if new_vec is None:

@@ -10,7 +10,7 @@
 
 from draken.vectors.string_vector cimport StringVector, DrakenVarBuffer
 from draken.vectors.bool_vector cimport BoolVector
-from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
+from draken.core.buffers cimport DrakenVector, DrakenConstantStringPayload
 from cpython.bytes cimport PyBytes_AS_STRING
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
@@ -61,10 +61,10 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
     - Dictionary-encoded vectors: tests each unique value once
     - Case-insensitive: pre-lowers entire buffer before comparison
     """
-    cdef DrakenVarBuffer* ptr = vec.ptr
-    cdef Py_ssize_t n = ptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
-    cdef uint8_t* nb_ptr = ptr.null_bitmap
+    cdef uint8_t* nb_ptr = uv.validity
     cdef BoolVector out = BoolVector(<size_t>n)
     cdef uint8_t* dst = <uint8_t*> out.ptr.data
     cdef uint8_t* out_null = NULL
@@ -76,20 +76,19 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
     cdef Py_ssize_t i, j, dict_idx, dict_size
     cdef uint32_t code
     cdef uint8_t byte
-    cdef DrakenVarBuffer* dict_values_buf
+    cdef DrakenVarBuffer* vbuf
     cdef const uint8_t* dict_data
     cdef uint8_t* dict_contains_results = NULL
-    cdef const uint8_t* dict_codes
-    cdef uint8_t dict_code_width
-    cdef uint8_t* dict_row_nulls
     cdef uint8_t* data_lower = NULL
     cdef Py_ssize_t data_len
     cdef VolnitskyTable* tbl = NULL
+    cdef DrakenConstantStringPayload* csp
 
     # Constant vector case
-    if vec._has_const:
-        if vec._const_is_null:
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             return _constant_bool_result(n, False, True)
+        csp = <DrakenConstantStringPayload*>uv.data
         if ignore_case and ndl_len > 0:
             ndl_lower = <uint8_t*>malloc(<size_t>ndl_len)
             if ndl_lower == NULL:
@@ -110,8 +109,8 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
                 return _constant_bool_result(
                     n,
                     _sv_contains_ci(
-                        <const uint8_t*>vec._const_value.data,
-                        vec._const_value.length,
+                        <const uint8_t*>csp.data,
+                        csp.length,
                         ndl_lower if ndl_lower != NULL else <uint8_t*>ndl_ptr_char,
                         ndl_len,
                         tbl,
@@ -121,8 +120,8 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
             return _constant_bool_result(
                 n,
                 _sv_contains_cs(
-                    <const uint8_t*>vec._const_value.data,
-                    vec._const_value.length,
+                    <const uint8_t*>csp.data,
+                    csp.length,
                     <const uint8_t*>ndl_ptr_char,
                     ndl_len,
                     tbl,
@@ -170,19 +169,16 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
 
     try:
         # Dictionary-encoded path: check each unique value once
-        if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
-            dict_values_buf = vec._dict_values
-            if dict_values_buf == NULL or dict_values_buf.data == NULL:
+        if uv.selection != NULL:  # dictionary
+            vbuf = <DrakenVarBuffer*>uv.data
+            if vbuf == NULL or vbuf.data == NULL:
                 return out  # Fallback to empty result
 
-            dict_size = <Py_ssize_t>dict_values_buf.length
-            dict_codes = vec._dict_codes
-            if dict_codes == NULL or dict_size == 0:
+            dict_size = <Py_ssize_t>vbuf.length
+            if uv.selection == NULL or dict_size == 0:
                 return out  # Fallback to empty result
 
-            dict_code_width = vec._dict_code_width
-            dict_row_nulls = vec.ptr.null_bitmap
-            dict_data = <const uint8_t*>dict_values_buf.data
+            dict_data = <const uint8_t*>vbuf.data
 
             # Allocate results array for each dictionary entry
             dict_contains_results = <uint8_t*>malloc(dict_size)
@@ -191,8 +187,8 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
 
             # Test each unique dictionary value once
             for dict_idx in range(dict_size):
-                start = dict_values_buf.offsets[dict_idx]
-                end = dict_values_buf.offsets[dict_idx + 1]
+                start = vbuf.offsets[dict_idx]
+                end = vbuf.offsets[dict_idx + 1]
                 str_len = end - start
 
                 if ignore_case:
@@ -218,30 +214,31 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
 
             # Scatter results by code index
             for i in range(n):
-                if dict_row_nulls != NULL and ((dict_row_nulls[i >> 3] >> (i & 7)) & 1) == 0:
+                if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                     continue
-                code = _read_packed_code(dict_codes, dict_code_width, i)
+                code = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
                 if dict_contains_results[code]:
                     dst[i >> 3] |= (1 << (i & 7))
 
         # Dense vector path (non-dictionary, non-constant)
         else:
+            vbuf = <DrakenVarBuffer*>uv.data
             # For case-insensitive: pre-lowercase entire buffer once
-            if ignore_case and ptr.data != NULL:
-                data_len = ptr.offsets[n]
+            if ignore_case and vbuf.data != NULL:
+                data_len = vbuf.offsets[n]
                 data_lower = <uint8_t*>malloc(data_len)
                 if data_lower == NULL:
                     raise MemoryError()
                 # Copy and lowercase entire buffer in one pass
                 for j in range(data_len):
-                    data_lower[j] = _sv_ascii_lower((<const uint8_t*>ptr.data)[j])
+                    data_lower[j] = _sv_ascii_lower((<const uint8_t*>vbuf.data)[j])
 
             # Process each row
             for i in range(n):
                 if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                     continue
-                start = ptr.offsets[i]
-                end = ptr.offsets[i + 1]
+                start = vbuf.offsets[i]
+                end = vbuf.offsets[i + 1]
                 str_len = end - start
 
                 if ignore_case:
@@ -255,7 +252,7 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
                         dst[i >> 3] |= (1 << (i & 7))
                 else:
                     if _sv_contains_cs(
-                        <const uint8_t*>ptr.data + start, <Py_ssize_t>str_len,
+                        <const uint8_t*>vbuf.data + start, <Py_ssize_t>str_len,
                         <const uint8_t*>ndl_ptr_char, ndl_len,
                         tbl,
                     ):

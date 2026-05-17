@@ -47,15 +47,17 @@ cdef class AnyValueAggregate(UngroupedAggregate):
         cdef const uint8_t*     nulls
         cdef DrakenVarBuffer*   buf
         cdef DrakenFixedBuffer* ibuf
+        cdef DrakenVector*      uv
         cdef Py_ssize_t i
         cdef const char* ptr_c
         cdef Py_ssize_t  length_c
 
         if self._col_type == _VTYPE_INT64:
             vec_i = <Int64Vector>raw
-            if vec_i._has_const:
-                if not vec_i._const_is_null:
-                    self._value = vec_i._const_value; self._seen = True
+            uv = vec_i.unified()
+            if uv.data_length == 1:
+                if uv.validity == NULL:
+                    self._value = (<int64_t*>uv.data)[0]; self._seen = True
                 return
             idata = <const int64_t*>vec_i.dense_ptr()
             nulls = vec_i.null_bitmap_ptr()
@@ -66,9 +68,10 @@ cdef class AnyValueAggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_FLOAT64:
             vec_f = <Float64Vector>raw
-            if vec_f._has_const:
-                if not vec_f._const_is_null:
-                    self._value = vec_f._const_value; self._seen = True
+            uv = vec_f.unified()
+            if uv.data_length == 1:
+                if uv.validity == NULL:
+                    self._value = (<double*>uv.data)[0]; self._seen = True
                 return
             fdata = <const double*>vec_f.dense_ptr()
             nulls = vec_f.null_bitmap_ptr()
@@ -79,24 +82,21 @@ cdef class AnyValueAggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_STRING:
             svec = <StringVector>raw
-            if svec._has_const:
-                if not svec._const_is_null:
-                    ptr_c    = <const char*>svec._const_value.data
-                    length_c = <Py_ssize_t>svec._const_value.length
+            uv = svec.unified()
+            if uv.data_length == 1:
+                if uv.validity == NULL:
+                    ptr_c    = <const char*>(<DrakenConstantStringPayload*>uv.data).data
+                    length_c = <Py_ssize_t>(<DrakenConstantStringPayload*>uv.data).length
                     self._value = ptr_c[:length_c]; self._seen = True
                 return
             # Dict-encoded fast path: find the first dict entry that has a
             # referenced, non-null row, and return its value.
-            if (
-                svec._encoding == DRAKEN_ENCODING_DICTIONARY
-                and svec._dict_codes != NULL
-                and svec._dict_values != NULL
-            ):
+            if uv.selection != NULL:
                 if self._take_first_dict(svec):
                     self._seen = True
                 return
-            buf = svec.ptr
-            nulls = buf.null_bitmap
+            buf   = <DrakenVarBuffer*>uv.data
+            nulls = uv.validity
             for i in range(nrows):
                 if nulls == NULL or _bitmap_is_valid(nulls, i):
                     ptr_c    = <const char*>(buf.data + buf.offsets[i])
@@ -106,9 +106,10 @@ cdef class AnyValueAggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_INTEGER:
             vec_n = <IntegerVector>raw
-            if vec_n._has_const:
-                if not vec_n._const_is_null:
-                    self._value = vec_n._const_value; self._seen = True
+            uv = vec_n.unified()
+            if uv.data_length == 1:
+                if uv.validity == NULL:
+                    self._value = _read_integer_value(vec_n.ptr, 0); self._seen = True
                 return
             ibuf  = vec_n.ptr
             nulls = <const uint8_t*>ibuf.null_bitmap
@@ -130,8 +131,9 @@ cdef class AnyValueAggregate(UngroupedAggregate):
         """Walk the dict codes once; on the first valid (non-null) row whose
         dict entry is itself not null, capture its value and return True."""
         cdef Py_ssize_t n = svec.c_length()
-        cdef const uint8_t* codes = svec.c_dict_codes_ptr()
-        cdef uint8_t code_width = svec.c_dict_code_width()
+        cdef DrakenVector* uv_td = svec.unified()
+        cdef const uint8_t* codes = <const uint8_t*>uv_td.selection
+        cdef uint8_t code_width = uv_td.sel_width
         cdef const uint8_t* row_nulls = svec.c_row_null_bitmap()
         cdef Py_ssize_t dict_size = svec.c_dict_size()
         cdef Py_ssize_t i, vlen

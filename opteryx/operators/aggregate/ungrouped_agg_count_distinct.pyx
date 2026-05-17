@@ -40,6 +40,7 @@ cdef class CountDistinctAggregate(UngroupedAggregate):
 
         cdef CarcharSetWrapper the_set = self._set
         cdef StringVector svec
+        cdef DrakenVector* uv
         cdef Py_ssize_t dict_size, di
         cdef const int64_t* counts
         cdef uint64_t h
@@ -50,11 +51,8 @@ cdef class CountDistinctAggregate(UngroupedAggregate):
         cdef Py_ssize_t run_count
         if isinstance(raw, StringVector):
             svec = <StringVector>raw
-            if (
-                svec._encoding == DRAKEN_ENCODING_DICTIONARY
-                and svec._dict_codes != NULL
-                and svec._dict_values != NULL
-            ):
+            uv = svec.unified()
+            if uv.selection != NULL:
                 dict_size = svec.c_dict_size()
                 counts = svec.c_dict_code_counts_ptr()
                 with nogil:

@@ -10,12 +10,11 @@
 
 from draken.vectors.string_vector cimport StringVector, from_packed_dict
 from draken.vectors import string_vector as string_vector_module
-from draken.core.buffers cimport ConstAccessor
 from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.core.buffers cimport DrakenVarBuffer
+from draken.core.buffers cimport DrakenVector
 from libc.stdint cimport int32_t, uint8_t
 from cpython.bytes cimport PyBytes_FromStringAndSize
-from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 
 
 # ----------------------------------------------------------------------
@@ -50,9 +49,9 @@ cdef void build_trim_flags(uint8_t flags[256], object chars) except *:
 
 
 cdef inline object _trim_chars_bytes(object chars):
-    cdef ConstAccessor* accessor
     cdef DrakenConstantStringPayload* payload
-    cdef DrakenVarBuffer* ptr
+    cdef DrakenVector* uv
+    cdef DrakenVarBuffer* vbuf
     cdef uint8_t* null_bm
     cdef int32_t start, end
 
@@ -66,24 +65,25 @@ cdef inline object _trim_chars_bytes(object chars):
         return chars.encode("utf-8")
 
     if isinstance(chars, StringVector):
-        if chars.encoding == DRAKEN_ENCODING_CONSTANT:
-            accessor = (<StringVector>chars).const_accessor()
-            if accessor == NULL or accessor.is_null != 0 or accessor.value_ptr == NULL:
+        uv = (<StringVector>chars).unified()
+        if uv.data_length == 1:  # constant
+            if uv.validity != NULL:  # null constant
                 return None
-            payload = <DrakenConstantStringPayload*>accessor.value_ptr
+            payload = <DrakenConstantStringPayload*>uv.data
             return PyBytes_FromStringAndSize(<const char*>payload.data, payload.length)
 
-        ptr = (<StringVector>chars).ptr
-        if ptr.length != 1:
+        # non-constant: must be a single-row dense vector
+        if uv.length != 1:
             raise TypeError("trim chars must be a constant or single-value StringVector")
 
-        null_bm = ptr.null_bitmap
+        null_bm = uv.validity
         if null_bm != NULL and not (null_bm[0] & 1):
             return None
 
-        start = ptr.offsets[0]
-        end = ptr.offsets[1]
-        return PyBytes_FromStringAndSize(<const char*>ptr.data + start, end - start)
+        vbuf = <DrakenVarBuffer*>uv.data
+        start = vbuf.offsets[0]
+        end = vbuf.offsets[1]
+        return PyBytes_FromStringAndSize(<const char*>vbuf.data + start, end - start)
 
     if isinstance(chars, (list, tuple)):
         if len(chars) != 1:
@@ -99,25 +99,19 @@ cdef inline object _trim_chars_bytes(object chars):
 # are defined in _helper_const.pyx)
 # ----------------------------------------------------------------------
 cpdef StringVector vector_trim(StringVector vec, object chars=None):
-    cdef DrakenVarBuffer* ptr = vec.ptr
-    cdef Py_ssize_t n
-    cdef uint8_t* null_bm = NULL
+    cdef DrakenVector* uv = vec.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
+    cdef uint8_t* null_bm
     cdef uint8_t trim_flags[256]
     cdef object trim_chars
-    cdef const uint8_t* const_data_ptr
-    cdef int32_t const_data_len
-    cdef bint is_constant_vec
     cdef Py_ssize_t dict_size
+    cdef DrakenVarBuffer* vbuf
     cdef DrakenVarBuffer* ndp
+    cdef DrakenConstantStringPayload* csp
 
     # Convert trim specification to a byte‑flag array.
     trim_chars = _trim_chars_bytes(chars)
     build_trim_flags(trim_flags, trim_chars)
-
-    is_constant_vec = _constant_string_value(vec, &const_data_ptr, &const_data_len, &n)
-    if not is_constant_vec:
-        n = ptr.length
-        null_bm = ptr.null_bitmap
 
     builder = string_vector_module.StringVectorBuilder.with_estimate(n, 16)
 
@@ -127,14 +121,15 @@ cpdef StringVector vector_trim(StringVector vec, object chars=None):
     cdef int length, left, right
     cdef bytes trimmed_bytes
 
-    if is_constant_vec:
-        if const_data_ptr == NULL:
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
             return builder.finish()
 
-        data_ptr = <uint8_t*>const_data_ptr
-        length = const_data_len
+        csp = <DrakenConstantStringPayload*>uv.data
+        data_ptr = <uint8_t*>csp.data
+        length = csp.length
 
         left = 0
         while left < length and trim_flags[data_ptr[left]]:
@@ -156,13 +151,14 @@ cpdef StringVector vector_trim(StringVector vec, object chars=None):
         return builder.finish()
 
     # Dictionary encoding: trim each unique entry, repack with same codes
-    if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
-        dict_size = vec._dict_values.length
+    if uv.selection != NULL:  # dictionary
+        vbuf = <DrakenVarBuffer*>uv.data
+        dict_size = <Py_ssize_t>vbuf.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 16)
         for i in range(dict_size):
-            start = vec._dict_values.offsets[i]
-            end = vec._dict_values.offsets[i + 1]
-            data_ptr = <uint8_t*>vec._dict_values.data + start
+            start = vbuf.offsets[i]
+            end = vbuf.offsets[i + 1]
+            data_ptr = <uint8_t*>vbuf.data + start
             length = end - start
             left = 0
             while left < length and trim_flags[data_ptr[left]]:
@@ -178,20 +174,23 @@ cpdef StringVector vector_trim(StringVector vec, object chars=None):
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            vec._dict_codes, vec._dict_code_width, n,
+            <uint8_t*>uv.selection, uv.sel_width, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
-            vec._dict_accessor.row_nulls,
+            uv.validity,
         )
 
+    # Dense
+    vbuf = <DrakenVarBuffer*>uv.data
+    null_bm = uv.validity
     for i in range(n):
         # Handle nulls
         if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
             continue
 
-        start = ptr.offsets[i]
-        end = ptr.offsets[i + 1]
-        data_ptr = <uint8_t*>ptr.data + start
+        start = vbuf.offsets[i]
+        end = vbuf.offsets[i + 1]
+        data_ptr = <uint8_t*>vbuf.data + start
         length = end - start
 
         # Trim left
@@ -218,24 +217,18 @@ cpdef StringVector vector_trim(StringVector vec, object chars=None):
 
 
 cpdef StringVector vector_ltrim(StringVector vec, object chars=None):
-    cdef DrakenVarBuffer* ptr = vec.ptr
-    cdef Py_ssize_t n
-    cdef uint8_t* null_bm = NULL
+    cdef DrakenVector* uv = vec.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
+    cdef uint8_t* null_bm
     cdef uint8_t trim_flags[256]
     cdef object trim_chars
-    cdef const uint8_t* const_data_ptr
-    cdef int32_t const_data_len
-    cdef bint is_constant_vec
     cdef Py_ssize_t dict_size
+    cdef DrakenVarBuffer* vbuf
     cdef DrakenVarBuffer* ndp
+    cdef DrakenConstantStringPayload* csp
 
     trim_chars = _trim_chars_bytes(chars)
     build_trim_flags(trim_flags, trim_chars)
-
-    is_constant_vec = _constant_string_value(vec, &const_data_ptr, &const_data_len, &n)
-    if not is_constant_vec:
-        n = ptr.length
-        null_bm = ptr.null_bitmap
 
     builder = string_vector_module.StringVectorBuilder.with_estimate(n, 16)
 
@@ -245,14 +238,15 @@ cpdef StringVector vector_ltrim(StringVector vec, object chars=None):
     cdef int length, left
     cdef bytes trimmed_bytes
 
-    if is_constant_vec:
-        if const_data_ptr == NULL:
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
             return builder.finish()
 
-        data_ptr = <uint8_t*>const_data_ptr
-        length = const_data_len
+        csp = <DrakenConstantStringPayload*>uv.data
+        data_ptr = <uint8_t*>csp.data
+        length = csp.length
 
         left = 0
         while left < length and trim_flags[data_ptr[left]]:
@@ -270,13 +264,14 @@ cpdef StringVector vector_ltrim(StringVector vec, object chars=None):
         return builder.finish()
 
     # Dictionary encoding: ltrim each unique entry, repack with same codes
-    if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
-        dict_size = vec._dict_values.length
+    if uv.selection != NULL:  # dictionary
+        vbuf = <DrakenVarBuffer*>uv.data
+        dict_size = <Py_ssize_t>vbuf.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 16)
         for i in range(dict_size):
-            start = vec._dict_values.offsets[i]
-            end = vec._dict_values.offsets[i + 1]
-            data_ptr = <uint8_t*>vec._dict_values.data + start
+            start = vbuf.offsets[i]
+            end = vbuf.offsets[i + 1]
+            data_ptr = <uint8_t*>vbuf.data + start
             length = end - start
             left = 0
             while left < length and trim_flags[data_ptr[left]]:
@@ -289,19 +284,22 @@ cpdef StringVector vector_ltrim(StringVector vec, object chars=None):
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            vec._dict_codes, vec._dict_code_width, n,
+            <uint8_t*>uv.selection, uv.sel_width, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
-            vec._dict_accessor.row_nulls,
+            uv.validity,
         )
 
+    # Dense
+    vbuf = <DrakenVarBuffer*>uv.data
+    null_bm = uv.validity
     for i in range(n):
         if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
             continue
 
-        start = ptr.offsets[i]
-        end = ptr.offsets[i + 1]
-        data_ptr = <uint8_t*>ptr.data + start
+        start = vbuf.offsets[i]
+        end = vbuf.offsets[i + 1]
+        data_ptr = <uint8_t*>vbuf.data + start
         length = end - start
 
         left = 0
@@ -321,24 +319,18 @@ cpdef StringVector vector_ltrim(StringVector vec, object chars=None):
 
 
 cpdef StringVector vector_rtrim(StringVector vec, object chars=None):
-    cdef DrakenVarBuffer* ptr = vec.ptr
-    cdef Py_ssize_t n
-    cdef uint8_t* null_bm = NULL
+    cdef DrakenVector* uv = vec.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
+    cdef uint8_t* null_bm
     cdef uint8_t trim_flags[256]
     cdef object trim_chars
-    cdef const uint8_t* const_data_ptr
-    cdef int32_t const_data_len
-    cdef bint is_constant_vec
     cdef Py_ssize_t dict_size
+    cdef DrakenVarBuffer* vbuf
     cdef DrakenVarBuffer* ndp
+    cdef DrakenConstantStringPayload* csp
 
     trim_chars = _trim_chars_bytes(chars)
     build_trim_flags(trim_flags, trim_chars)
-
-    is_constant_vec = _constant_string_value(vec, &const_data_ptr, &const_data_len, &n)
-    if not is_constant_vec:
-        n = ptr.length
-        null_bm = ptr.null_bitmap
 
     builder = string_vector_module.StringVectorBuilder.with_estimate(n, 16)
 
@@ -348,14 +340,15 @@ cpdef StringVector vector_rtrim(StringVector vec, object chars=None):
     cdef int length, right
     cdef bytes trimmed_bytes
 
-    if is_constant_vec:
-        if const_data_ptr == NULL:
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
             return builder.finish()
 
-        data_ptr = <uint8_t*>const_data_ptr
-        length = const_data_len
+        csp = <DrakenConstantStringPayload*>uv.data
+        data_ptr = <uint8_t*>csp.data
+        length = csp.length
 
         right = length
         while right > 0 and trim_flags[data_ptr[right - 1]]:
@@ -373,13 +366,14 @@ cpdef StringVector vector_rtrim(StringVector vec, object chars=None):
         return builder.finish()
 
     # Dictionary encoding: rtrim each unique entry, repack with same codes
-    if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
-        dict_size = vec._dict_values.length
+    if uv.selection != NULL:  # dictionary
+        vbuf = <DrakenVarBuffer*>uv.data
+        dict_size = <Py_ssize_t>vbuf.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 16)
         for i in range(dict_size):
-            start = vec._dict_values.offsets[i]
-            end = vec._dict_values.offsets[i + 1]
-            data_ptr = <uint8_t*>vec._dict_values.data + start
+            start = vbuf.offsets[i]
+            end = vbuf.offsets[i + 1]
+            data_ptr = <uint8_t*>vbuf.data + start
             length = end - start
             right = length
             while right > 0 and trim_flags[data_ptr[right - 1]]:
@@ -392,19 +386,22 @@ cpdef StringVector vector_rtrim(StringVector vec, object chars=None):
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            vec._dict_codes, vec._dict_code_width, n,
+            <uint8_t*>uv.selection, uv.sel_width, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
-            vec._dict_accessor.row_nulls,
+            uv.validity,
         )
 
+    # Dense
+    vbuf = <DrakenVarBuffer*>uv.data
+    null_bm = uv.validity
     for i in range(n):
         if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
             continue
 
-        start = ptr.offsets[i]
-        end = ptr.offsets[i + 1]
-        data_ptr = <uint8_t*>ptr.data + start
+        start = vbuf.offsets[i]
+        end = vbuf.offsets[i + 1]
+        data_ptr = <uint8_t*>vbuf.data + start
         length = end - start
 
         right = length

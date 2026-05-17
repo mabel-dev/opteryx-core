@@ -13,7 +13,7 @@ from libc.stdint cimport uint8_t, uint16_t, uint32_t, int64_t
 from libc.string cimport memset
 from cpython.array cimport array, clone
 
-from draken.core.buffers cimport DictAccessor
+from draken.core.buffers cimport DrakenVarBuffer, DrakenVector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.float32_vector cimport Float32Vector
 from draken.vectors.string_vector cimport StringVector
@@ -29,17 +29,17 @@ cdef inline bint _is_ascii_whitespace(unsigned char ch) noexcept nogil:
     return ch == 9 or ch == 10 or ch == 11 or ch == 12 or ch == 13 or ch == 32
 
 
-cdef inline uint32_t _read_code(const DictAccessor* ptr, Py_ssize_t i) noexcept nogil:
-    if ptr.code_width == 1:
-        return (<uint8_t*>ptr.codes)[i]
-    if ptr.code_width == 2:
-        return (<uint16_t*>ptr.codes)[i]
-    return (<uint32_t*>ptr.codes)[i]
+cdef inline uint32_t _read_code(const DrakenVector* uv, Py_ssize_t i) noexcept nogil:
+    if uv.sel_width == 1:
+        return (<uint8_t*>uv.selection)[i]
+    if uv.sel_width == 2:
+        return (<uint16_t*>uv.selection)[i]
+    return (<uint32_t*>uv.selection)[i]
 
 
-cdef StringVector _wrap_dictionary_values(object owner, const DictAccessor* values):
+cdef StringVector _wrap_dictionary_values(object owner, const DrakenVector* uv):
     cdef StringVector wrapped = StringVector(wrap=True)
-    wrapped.ptr = values.dict_values
+    wrapped.ptr = <DrakenVarBuffer*>uv.data
     wrapped.owns_data = False
     wrapped._arrow_data_buf = owner
     wrapped._arrow_offs_buf = None
@@ -149,16 +149,16 @@ cdef BoolVector _vector_match_against_string_vector(
 
 cdef BoolVector _vector_match_against_dictionary_accessor(
     object owner,
-    const DictAccessor* ptr,
+    const DrakenVector* uv,
     object provider,
     str query_text,
     float min_score=0.6,
 ):
-    cdef Py_ssize_t n = ptr.length
+    cdef Py_ssize_t n = uv.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
     cdef BoolVector out = BoolVector(<size_t>n)
     cdef uint8_t* dst = <uint8_t*>out.ptr.data
-    cdef uint8_t* row_nulls = ptr.row_nulls
+    cdef uint8_t* row_nulls = uv.validity
     cdef BoolVector dict_matches
     cdef uint8_t* dict_bits
     cdef Py_ssize_t i
@@ -166,11 +166,11 @@ cdef BoolVector _vector_match_against_dictionary_accessor(
 
     memset(dst, 0, nbytes)
 
-    if ptr.dict_values == NULL or ptr.dict_values.length == 0:
+    if uv.data == NULL or uv.data_length == 0:
         return out
 
     dict_matches = _vector_match_against_string_vector(
-        _wrap_dictionary_values(owner, ptr),
+        _wrap_dictionary_values(owner, uv),
         provider,
         query_text,
         min_score,
@@ -180,7 +180,7 @@ cdef BoolVector _vector_match_against_dictionary_accessor(
     for i in range(n):
         if row_nulls != NULL and ((row_nulls[i >> 3] >> (i & 7)) & 1) == 0:
             continue
-        code = _read_code(ptr, i)
+        code = _read_code(uv, i)
         if (dict_bits[code >> 3] >> (code & 7)) & 1:
             dst[i >> 3] |= <uint8_t>(1 << (i & 7))
 
@@ -240,16 +240,16 @@ cpdef BoolVector vector_match_against(
     str query_text,
     float min_score=0.6,
 ):
-    cdef DictAccessor* dict_accessor = NULL
+    cdef DrakenVector* uv = NULL
 
     if isinstance(values, VectorVector):
         return _vector_match_against_vector_vector(values, query_text, min_score)
 
     if isinstance(values, Vector):
-        dict_accessor = (<Vector>values).dict_accessor()
+        uv = (<Vector>values).unified()
 
-    if dict_accessor != NULL:
-        return _vector_match_against_dictionary_accessor(values, dict_accessor, provider, query_text, min_score)
+    if uv != NULL and uv.selection != NULL:
+        return _vector_match_against_dictionary_accessor(values, uv, provider, query_text, min_score)
     if isinstance(values, StringVector):
         return _vector_match_against_string_vector(values, provider, query_text, min_score)
     raise TypeError(f"vector_match_against requires StringVector, dictionary-encoded Vector, or VectorVector, got {type(values)}")

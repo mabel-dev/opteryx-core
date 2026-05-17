@@ -320,3 +320,7 @@ cdef class Vector:
             abort()
 
         return &self._unified_view
+
+    cpdef bint is_constant_encoded(self):
+        """True iff this vector is constant-encoded (data_length == 1)."""
+        return self.unified().data_length == 1

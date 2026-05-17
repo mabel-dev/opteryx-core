@@ -14,6 +14,7 @@ from cpython.array cimport array, clone
 from draken.vectors.date32_vector cimport Date32Vector
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.timestamp_vector cimport TimestampVector
+from draken.core.buffers cimport DrakenVector, DrakenConstantStringPayload, DrakenVarBuffer
 
 # Constants
 cdef const int64_t SECONDS_PER_MINUTE = 60
@@ -213,27 +214,28 @@ cdef inline str _extract_truncate_op(StringVector truncate_to) except *:
 
     DATE_TRUNC expects a constant unit; non-constant vectors are rejected.
     """
-    cdef const uint8_t* data_ptr
-    cdef int32_t* offsets
+    cdef DrakenVector* uv = truncate_to.unified()
+    cdef DrakenConstantStringPayload* csp
+    cdef DrakenVarBuffer* vbuf
     cdef int32_t length
     cdef bytes raw
 
-    if truncate_to._has_const:
-        if truncate_to._const_is_null:
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             raise ValueError("DATE_TRUNC unit cannot be NULL")
-        raw = (<const char*>truncate_to._const_value.data)[:truncate_to._const_value.length]
+        csp = <DrakenConstantStringPayload*>uv.data
+        raw = (<const char*>csp.data)[:csp.length]
         return raw.decode("utf-8").lower()
 
-    if truncate_to.ptr.length != 1:
+    if uv.length != 1:
         raise ValueError("DATE_TRUNC unit must be a constant or single-value StringVector")
 
-    if truncate_to.ptr.null_bitmap != NULL and ((truncate_to.ptr.null_bitmap[0] & 1) == 0):
+    if uv.validity != NULL and ((uv.validity[0] & 1) == 0):
         raise ValueError("DATE_TRUNC unit cannot be NULL")
 
-    data_ptr = <const uint8_t*>truncate_to.ptr.data
-    offsets = truncate_to.ptr.offsets
-    length = offsets[1] - offsets[0]
-    raw = (<const char*>(data_ptr + offsets[0]))[:length]
+    vbuf = <DrakenVarBuffer*>uv.data
+    length = vbuf.offsets[1] - vbuf.offsets[0]
+    raw = (<const char*>vbuf.data + vbuf.offsets[0])[:length]
     return raw.decode("utf-8").lower()
 
 # Main fast processing function - delegates to timestamp kernel

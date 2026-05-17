@@ -27,12 +27,11 @@ from libc.stdint cimport uint8_t, uint16_t, uint32_t, int64_t, int32_t, int16_t,
 from libc.stdlib cimport malloc
 from libc.string cimport memcpy
 
-from draken.core.buffers cimport DictAccessor
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.int64_vector cimport Int64Vector
 from draken.vectors.scalar_constructors cimport from_scalar
 from draken.vectors.vector cimport Vector
-from draken.core.buffers cimport DrakenVarBuffer
+from draken.core.buffers cimport DrakenVarBuffer, DrakenVector
 from draken.core.buffers cimport DRAKEN_FLOAT64, DRAKEN_FLOAT32, DRAKEN_INT64, DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8
 
 
@@ -156,18 +155,17 @@ cpdef Float64Vector vector_round_digits(object values, int digits):
     cdef int64_t* in_data_i = NULL
     cdef Float64Vector fvals
     cdef Int64Vector ivals
-    cdef DictAccessor* d_ptr = NULL
+    cdef DrakenVector* uv = NULL
     cdef DrakenVarBuffer* dict_buf
     cdef int d_val_type
-    cdef uint32_t code
 
     if isinstance(values, Vector):
-        d_ptr = (<Vector>values).dict_accessor()
+        uv = (<Vector>values).unified()
 
-    if d_ptr != NULL:
-        dict_buf = d_ptr.dict_values
+    if uv != NULL and uv.selection != NULL:
+        dict_buf = <DrakenVarBuffer*> uv.data
         d_val_type = dict_buf.type
-        in_null = <uint8_t*> d_ptr.row_nulls
+        in_null = uv.validity
 
         if in_null != NULL and n > 0:
             out_null = <uint8_t*> malloc((n + 7) >> 3)
@@ -179,12 +177,12 @@ cpdef Float64Vector vector_round_digits(object values, int digits):
         if d_val_type not in (DRAKEN_FLOAT64, DRAKEN_FLOAT32, DRAKEN_INT64, DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8):
             for i in range(n):
                 out_data[i] = 0.0
-        elif d_ptr.code_width == 1:
-            _dispatch_round_dict[uint8_t](out_data, <uint8_t*>d_ptr.codes, dict_buf, d_val_type, in_null, <Py_ssize_t>n, digits)
-        elif d_ptr.code_width == 2:
-            _dispatch_round_dict[uint16_t](out_data, <uint16_t*>d_ptr.codes, dict_buf, d_val_type, in_null, <Py_ssize_t>n, digits)
+        elif uv.sel_width == 1:
+            _dispatch_round_dict[uint8_t](out_data, <uint8_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, digits)
+        elif uv.sel_width == 2:
+            _dispatch_round_dict[uint16_t](out_data, <uint16_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, digits)
         else:
-            _dispatch_round_dict[uint32_t](out_data, <uint32_t*>d_ptr.codes, dict_buf, d_val_type, in_null, <Py_ssize_t>n, digits)
+            _dispatch_round_dict[uint32_t](out_data, <uint32_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, digits)
 
     elif isinstance(values, Int64Vector):
         ivals = <Int64Vector> values

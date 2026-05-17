@@ -6,6 +6,7 @@ from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.core.buffers cimport DictAccessor
 from draken.core.buffers cimport DrakenRLEBuffer
 from draken.core.buffers cimport DrakenVarBuffer
+from draken.core.buffers cimport DrakenVector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.vector cimport Vector
 
@@ -41,6 +42,7 @@ cdef class StringVector(Vector):
     cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
+    cdef DrakenVector* unified(self) noexcept
 
     # Encoded-form accessors for dict/RLE-aware operators.
     # Each method assumes the caller has already verified the encoding.
@@ -173,6 +175,7 @@ cdef StringVector from_rle_builder(
     int32_t* run_lengths,
     size_t num_runs,
     size_t total_length)
+cdef void _refresh_unified_string(StringVector vec) noexcept
 cdef StringVector _materialize_dict_string(StringVector vec)
 cdef StringVector make_string_dict_only(
     const uint8_t* codes,

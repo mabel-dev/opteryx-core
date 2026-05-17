@@ -11,115 +11,121 @@
 
 from draken.vectors.string_vector cimport StringVector, from_packed_dict
 from draken.vectors import string_vector as string_vector_module
-from draken.core.buffers cimport DrakenVarBuffer, DRAKEN_ENCODING_DICTIONARY
+from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector
 from opteryx.third_party.mabel.base64 cimport encode as b64_encode, decode as b64_decode
 
 
 cpdef StringVector vector_base64_encode(StringVector data):
-    cdef DrakenVarBuffer* ptr = data.ptr
-    cdef Py_ssize_t n = ptr.length
+    cdef DrakenVector* uv = data.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t i
     cdef int32_t start, end
     cdef uint8_t* null_bm
     cdef bytes input_bytes, encoded_bytes
-    cdef DrakenVarBuffer* dict_ptr
+    cdef DrakenVarBuffer* vbuf
     cdef Py_ssize_t dict_size
     cdef DrakenVarBuffer* ndp
+    cdef DrakenConstantStringPayload* csp
 
     builder = string_vector_module.StringVectorBuilder.with_estimate(n, 32)
 
-    if data._has_const:
-        if data._const_is_null:
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
         else:
-            const_val = data._const_value
-            input_bytes = bytes(const_val.data[:const_val.length])
+            csp = <DrakenConstantStringPayload*>uv.data
+            input_bytes = bytes((<uint8_t*>csp.data)[:csp.length])
             encoded_bytes = b64_encode(input_bytes)
             for i in range(n):
                 builder.append(encoded_bytes)
         return builder.finish()
 
-    if data._encoding == DRAKEN_ENCODING_DICTIONARY:
-        dict_ptr = data._dict_values
-        dict_size = dict_ptr.length
+    if uv.selection != NULL:  # dictionary
+        vbuf = <DrakenVarBuffer*>uv.data
+        dict_size = <Py_ssize_t>vbuf.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 32)
         for i in range(dict_size):
-            start = dict_ptr.offsets[i]
-            end = dict_ptr.offsets[i + 1]
-            input_bytes = bytes(dict_ptr.data[start:end])
+            start = vbuf.offsets[i]
+            end = vbuf.offsets[i + 1]
+            input_bytes = bytes((<uint8_t*>vbuf.data)[start:end])
             dict_builder.append(b64_encode(input_bytes))
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            data._dict_codes, data._dict_code_width, n,
+            <uint8_t*>uv.selection, uv.sel_width, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
-            data._dict_accessor.row_nulls,
+            uv.validity,
         )
 
-    null_bm = ptr.null_bitmap
+    # dense
+    vbuf = <DrakenVarBuffer*>uv.data
+    null_bm = uv.validity
     for i in range(n):
         if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
         else:
-            start = ptr.offsets[i]
-            end = ptr.offsets[i + 1]
-            input_bytes = bytes(ptr.data[start:end])
+            start = vbuf.offsets[i]
+            end = vbuf.offsets[i + 1]
+            input_bytes = bytes((<uint8_t*>vbuf.data)[start:end])
             builder.append(b64_encode(input_bytes))
 
     return builder.finish()
 
 
 cpdef StringVector vector_base64_decode(StringVector data):
-    cdef DrakenVarBuffer* ptr = data.ptr
-    cdef Py_ssize_t n = ptr.length
+    cdef DrakenVector* uv = data.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t i
     cdef int32_t start, end
     cdef uint8_t* null_bm
     cdef bytes input_bytes, decoded_bytes
-    cdef DrakenVarBuffer* dict_ptr
+    cdef DrakenVarBuffer* vbuf
     cdef Py_ssize_t dict_size
     cdef DrakenVarBuffer* ndp
+    cdef DrakenConstantStringPayload* csp
 
     builder = string_vector_module.StringVectorBuilder.with_estimate(n, 32)
 
-    if data._has_const:
-        if data._const_is_null:
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
         else:
-            const_val = data._const_value
-            input_bytes = bytes(const_val.data[:const_val.length])
+            csp = <DrakenConstantStringPayload*>uv.data
+            input_bytes = bytes((<uint8_t*>csp.data)[:csp.length])
             decoded_bytes = b64_decode(input_bytes)
             for i in range(n):
                 builder.append(decoded_bytes)
         return builder.finish()
 
-    if data._encoding == DRAKEN_ENCODING_DICTIONARY:
-        dict_ptr = data._dict_values
-        dict_size = dict_ptr.length
+    if uv.selection != NULL:  # dictionary
+        vbuf = <DrakenVarBuffer*>uv.data
+        dict_size = <Py_ssize_t>vbuf.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 32)
         for i in range(dict_size):
-            start = dict_ptr.offsets[i]
-            end = dict_ptr.offsets[i + 1]
-            input_bytes = bytes(dict_ptr.data[start:end])
+            start = vbuf.offsets[i]
+            end = vbuf.offsets[i + 1]
+            input_bytes = bytes((<uint8_t*>vbuf.data)[start:end])
             dict_builder.append(b64_decode(input_bytes))
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            data._dict_codes, data._dict_code_width, n,
+            <uint8_t*>uv.selection, uv.sel_width, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
-            data._dict_accessor.row_nulls,
+            uv.validity,
         )
 
-    null_bm = ptr.null_bitmap
+    # dense
+    vbuf = <DrakenVarBuffer*>uv.data
+    null_bm = uv.validity
     for i in range(n):
         if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
         else:
-            start = ptr.offsets[i]
-            end = ptr.offsets[i + 1]
-            input_bytes = bytes(ptr.data[start:end])
+            start = vbuf.offsets[i]
+            end = vbuf.offsets[i + 1]
+            input_bytes = bytes((<uint8_t*>vbuf.data)[start:end])
             builder.append(b64_decode(input_bytes))
 
     return builder.finish()

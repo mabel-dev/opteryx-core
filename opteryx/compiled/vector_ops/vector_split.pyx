@@ -185,7 +185,7 @@ cdef class _BufferCleanup:
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.array_vector cimport array_vector_from_parts
-from draken.core.buffers cimport DrakenVarBuffer, DRAKEN_ENCODING_DICTIONARY, DRAKEN_STRING
+from draken.core.buffers cimport DrakenVector, DrakenConstantStringPayload, DrakenVarBuffer, DRAKEN_STRING
 from draken.vectors.string_vector cimport from_arrow as string_vector_from_arrow
 
 def vector_split(StringVector vec, char delimiter):
@@ -193,8 +193,8 @@ def vector_split(StringVector vec, char delimiter):
     FAST string splitting that actually compiles.
     Works on x86 and ARM, no compiler errors.
     """
-    cdef DrakenVarBuffer* dptr = vec.ptr
-    cdef int64_t n = <int64_t>dptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef int64_t n = <int64_t>uv.length
     cdef StringVector flat_child
     cdef StringVector empty_child
     cdef StringVector null_child
@@ -207,6 +207,7 @@ def vector_split(StringVector vec, char delimiter):
     cdef int32_t seg_count
     cdef int64_t idx
     cdef int64_t i
+    cdef DrakenConstantStringPayload* csp
 
     # Handle empty input: return empty ArrayVector
     if n <= 0:
@@ -218,8 +219,8 @@ def vector_split(StringVector vec, char delimiter):
         return array_vector_from_parts(empty_child, empty_offsets, NULL, 0)
 
     # Constant encoding: split once, replicate n times
-    if vec._has_const:
-        if vec._const_is_null or vec._const_value == NULL:
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             # Return ArrayVector with all nulls
             null_child = StringVector(0)  # Empty child for null values
             null_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
@@ -229,8 +230,9 @@ def vector_split(StringVector vec, char delimiter):
                 null_offsets[idx] = 0
             return array_vector_from_parts(null_child, null_offsets, NULL, n)
 
+        csp = <DrakenConstantStringPayload*>uv.data
         const_bytes = PyBytes_FromStringAndSize(
-            <const char*>vec._const_value.data, vec._const_value.length
+            <const char*>csp.data, csp.length
         )
         parts = const_bytes.split(bytes([delimiter]))
 
@@ -258,7 +260,7 @@ def vector_split(StringVector vec, char delimiter):
             free(list_offsets)
 
     # Dictionary encoding: process per row via to_pylist (rare path)
-    if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
+    if uv.selection != NULL:  # dictionary
         py_list = vec.to_pylist()
         delim_bytes = bytes([delimiter])
         result = []
@@ -295,6 +297,7 @@ def vector_split(StringVector vec, char delimiter):
         return array_vector_from_parts(flat_child, list_offs, NULL, n)
 
     # Dense encoding: SIMD fast path
+    cdef DrakenVarBuffer* dptr = <DrakenVarBuffer*>uv.data
     cdef const char* raw_data = <const char*>dptr.data
     cdef const int32_t* dense_offsets = dptr.offsets
 

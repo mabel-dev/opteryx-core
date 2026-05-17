@@ -802,7 +802,7 @@ cdef int _execute_bytecode_prepass(
             return -1  # not a BoolVector — caller must fall back
 
         bv = <BoolVector>v
-        if bv._has_const:
+        if bv.unified().data_length == 1:
             bv = <BoolVector>bv.materialize()
         anchors.append(bv)  # keep alive during inner loop
         col_cache[k].is_bool = True

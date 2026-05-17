@@ -8,9 +8,9 @@
 # cython: optimize.use_switch=True
 # cython: optimize.unpack_method_calls=True
 
-from draken.vectors.string_vector cimport StringVector, DrakenVarBuffer, from_packed_dict
+from draken.vectors.string_vector cimport StringVector, from_packed_dict
 from draken.vectors import string_vector as string_vector_module
-from draken.core.buffers cimport ConstAccessor, DrakenConstantStringPayload, DRAKEN_ENCODING_CONSTANT, DRAKEN_ENCODING_DICTIONARY
+from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector
 from libc.string cimport memcpy
 from libc.stdlib cimport malloc, free
 from libc.stddef cimport size_t
@@ -32,71 +32,49 @@ cpdef StringVector vector_uppercase(object input):
         raise TypeError(f"vector_uppercase: expected StringVector, got {type(input)}")
 
     cdef StringVector vec = <StringVector>input
-    cdef DrakenVarBuffer* in_ptr
-    cdef Py_ssize_t n
+    cdef DrakenVector* uv = vec.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef int32_t total_bytes
     cdef Py_ssize_t nb_size
     cdef Py_ssize_t dict_size
     cdef DrakenVarBuffer* ndp
-    cdef uint8_t* nb = NULL
-
-    # Dictionary encoding path
+    cdef DrakenVarBuffer* vbuf
     cdef int32_t start, end
-    cdef DrakenVarBuffer* dict_ptr
-
-    cdef object result_bytes
-    cdef object dict_builder
-    cdef object new_dict_sv
-    cdef object dict_result_bytes
     cdef char* tmp_dict_buf
     cdef Py_ssize_t i
-    cdef object builder
-    cdef const uint8_t* const_data_ptr
-    cdef int32_t const_data_len
-    cdef Py_ssize_t const_row_count
-    cdef bint is_constant_vec
-    cdef char* out_data_ptr
+    cdef object builder, dict_builder, new_dict_sv, dict_result_bytes
     cdef bytes upper_bytes
-
-    in_ptr = vec.ptr
-
-    # Check for constant encoding FIRST (before accessing dense structure)
-    is_constant_vec = _constant_string_value(vec, &const_data_ptr, &const_data_len, &const_row_count)
-    if not is_constant_vec:
-        n = in_ptr.length
-        nb = in_ptr.null_bitmap
-    else:
-        n = const_row_count
+    cdef DrakenConstantStringPayload* csp
 
     # Handle constant encoding
-    if is_constant_vec:
-        if const_data_ptr == NULL:
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             builder = string_vector_module.StringVectorBuilder.with_estimate(n, 0)
             for i in range(n):
                 builder.append_null()
             return builder.finish()
         else:
-            builder = string_vector_module.StringVectorBuilder.with_estimate(n, const_data_len)
-            # Uppercase the constant value
-            upper_bytes = PyBytes_FromStringAndSize(<const char*>const_data_ptr, const_data_len).upper()
+            csp = <DrakenConstantStringPayload*>uv.data
+            builder = string_vector_module.StringVectorBuilder.with_estimate(n, csp.length)
+            upper_bytes = PyBytes_FromStringAndSize(<const char*>csp.data, csp.length).upper()
             for i in range(n):
                 builder.append(upper_bytes)
             return builder.finish()
 
     # Dictionary encoding path
-    if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
-        dict_size = vec._dict_values.length
-        dict_ptr = vec._dict_values
+    if uv.selection != NULL:  # dictionary
+        vbuf = <DrakenVarBuffer*>uv.data
+        dict_size = <Py_ssize_t>vbuf.length
 
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 16)
         for i in range(dict_size):
-            start = dict_ptr.offsets[i]
-            end = dict_ptr.offsets[i + 1]
+            start = vbuf.offsets[i]
+            end = vbuf.offsets[i + 1]
             tmp_dict_buf = <char*>malloc(end - start)
             if tmp_dict_buf == NULL:
                 raise MemoryError()
             try:
-                memcpy(tmp_dict_buf, <char*>dict_ptr.data + start, end - start)
+                memcpy(tmp_dict_buf, <char*>vbuf.data + start, end - start)
                 simd_to_upper(tmp_dict_buf, end - start)
                 dict_result_bytes = PyBytes_FromStringAndSize(tmp_dict_buf, end - start)
                 dict_builder.append(dict_result_bytes)
@@ -106,19 +84,20 @@ cpdef StringVector vector_uppercase(object input):
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            vec._dict_codes, vec._dict_code_width, n,
+            <uint8_t*>uv.selection, uv.sel_width, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
-            vec._dict_accessor.row_nulls,
+            uv.validity,
         )
 
     # Dense encoding path
-    total_bytes = in_ptr.offsets[n]
+    vbuf = <DrakenVarBuffer*>uv.data
+    total_bytes = vbuf.offsets[n]
 
     # Allocate new buffer with same size
     cdef StringVector result = StringVector(n, total_bytes)
     cdef DrakenVarBuffer* out_ptr = result.ptr
 
-    cdef char* in_data = <char*>in_ptr.data
+    cdef char* in_data = <char*>vbuf.data
     cdef char* out_data = <char*>out_ptr.data
 
     # Copy entire data buffer
@@ -128,14 +107,14 @@ cpdef StringVector vector_uppercase(object input):
         simd_to_upper(out_data, total_bytes)
 
     # Copy offsets
-    memcpy(out_ptr.offsets, in_ptr.offsets, (n + 1) * sizeof(int32_t))
+    memcpy(out_ptr.offsets, vbuf.offsets, (n + 1) * sizeof(int32_t))
 
     # Copy null bitmap if present
-    if in_ptr.null_bitmap != NULL:
+    if uv.validity != NULL:
         nb_size = (n + 7) // 8
         out_ptr.null_bitmap = <uint8_t*> malloc(nb_size)
         if out_ptr.null_bitmap == NULL:
             raise MemoryError()
-        memcpy(out_ptr.null_bitmap, in_ptr.null_bitmap, nb_size)
+        memcpy(out_ptr.null_bitmap, uv.validity, nb_size)
 
     return result

@@ -94,3 +94,7 @@ cdef class Vector:
     # The returned pointer is &self._unified_view — lifetime == self.
     # RLE encoding aborts (must be expanded at scan boundaries before execution).
     cdef DrakenVector* unified(self) noexcept
+
+    # Python-accessible constant-encoding check: True iff data_length == 1.
+    # Used by included .pyx files that cannot cimport (e.g. expression/__init__).
+    cpdef bint is_constant_encoded(self)

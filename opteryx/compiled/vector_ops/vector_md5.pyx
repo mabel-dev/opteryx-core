@@ -15,8 +15,7 @@ from draken.vectors.string_vector cimport StringVector
 from draken.vectors.string_vector cimport from_packed_dict
 from draken.vectors import string_vector as string_vector_module
 from draken.core.buffers cimport (
-    DrakenVarBuffer, DrakenConstantStringPayload,
-    DRAKEN_ENCODING_DICTIONARY,
+    DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector,
 )
 
 cdef extern from "md5.h":
@@ -29,28 +28,30 @@ cdef extern from "md5.h":
 
 cpdef StringVector vector_md5(StringVector vec):
     """MD5 hash of each string element."""
-    cdef Py_ssize_t n = vec.ptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t i
     cdef int32_t start, end
     cdef MD5_CTX ctx
     cdef unsigned char digest[16]
     cdef char hex_buf[33]
-    cdef DrakenVarBuffer* ptr
+    cdef DrakenVarBuffer* vbuf
     cdef uint8_t* null_bm
     cdef Py_ssize_t dict_size
     cdef DrakenVarBuffer* ndp
+    cdef DrakenConstantStringPayload* csp
     hex_buf[32] = 0
 
     # --- Constant encoding: compute once, replicate ---
-    if vec._has_const:
+    if uv.data_length == 1:  # constant
         builder = string_vector_module.StringVectorBuilder.with_estimate(n, 32)
-        if vec._const_is_null or vec._const_value == NULL:
+        if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
         else:
+            csp = <DrakenConstantStringPayload*>uv.data
             MD5_Init(&ctx)
-            MD5_Update(&ctx, <const void*>vec._const_value.data,
-                       <size_t>vec._const_value.length)
+            MD5_Update(&ctx, <const void*>csp.data, <size_t>csp.length)
             MD5_Final(digest, &ctx)
             _to_hex(digest, 16, hex_buf)
             for i in range(n):
@@ -58,38 +59,38 @@ cpdef StringVector vector_md5(StringVector vec):
         return builder.finish()
 
     # --- Dictionary encoding: transform dict entries, repack with same codes ---
-    if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
-        dict_size = vec._dict_values.length
+    if uv.selection != NULL:  # dictionary
+        vbuf = <DrakenVarBuffer*>uv.data
+        dict_size = <Py_ssize_t>vbuf.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 32)
         for i in range(dict_size):
-            start = vec._dict_values.offsets[i]
-            end = vec._dict_values.offsets[i + 1]
+            start = vbuf.offsets[i]
+            end = vbuf.offsets[i + 1]
             MD5_Init(&ctx)
-            MD5_Update(&ctx, <const uint8_t*>vec._dict_values.data + start,
-                       <size_t>(end - start))
+            MD5_Update(&ctx, <const uint8_t*>vbuf.data + start, <size_t>(end - start))
             MD5_Final(digest, &ctx)
             _to_hex(digest, 16, hex_buf)
             dict_builder.append_bytes(hex_buf, 32)
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            vec._dict_codes, vec._dict_code_width, n,
+            <uint8_t*>uv.selection, uv.sel_width, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
-            vec._dict_accessor.row_nulls,
+            uv.validity,
         )
 
     # --- Dense encoding: row-by-row ---
     builder = string_vector_module.StringVectorBuilder.with_estimate(n, 32)
-    ptr = vec.ptr
-    null_bm = ptr.null_bitmap
+    vbuf = <DrakenVarBuffer*>uv.data
+    null_bm = uv.validity
     for i in range(n):
         if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
             continue
-        start = ptr.offsets[i]
-        end = ptr.offsets[i + 1]
+        start = vbuf.offsets[i]
+        end = vbuf.offsets[i + 1]
         MD5_Init(&ctx)
-        MD5_Update(&ctx, (<const uint8_t*>ptr.data) + start, <size_t>(end - start))
+        MD5_Update(&ctx, (<const uint8_t*>vbuf.data) + start, <size_t>(end - start))
         MD5_Final(digest, &ctx)
         _to_hex(digest, 16, hex_buf)
         builder.append_bytes(hex_buf, 32)

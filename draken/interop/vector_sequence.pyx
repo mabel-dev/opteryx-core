@@ -41,7 +41,7 @@ from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.float64_vector cimport from_sequence as float64_from_sequence
 from draken.vectors.int64_vector cimport Int64Vector
 from draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
-from draken.vectors._decimal_vector cimport DecimalVector
+from draken.vectors._decimal_vector cimport DecimalVector, _refresh_unified_Decimal
 from draken.vectors.scalar_constructors cimport from_sequence as constant_from_sequence
 from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
 
@@ -195,6 +195,7 @@ cdef DecimalVector _decimal_from_pylist(list data):
                 item = _decimal.Decimal(str(item))
             data_ptr[i] = <int64_t> int(item * multiplier)
 
+    _refresh_unified_Decimal(vec)
     return vec
 
 

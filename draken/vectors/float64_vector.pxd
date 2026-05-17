@@ -8,6 +8,7 @@ from draken.core.buffers cimport DictAccessor
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DrakenRLEBuffer
 from draken.core.buffers cimport DrakenVarBuffer
+from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
 
@@ -31,6 +32,8 @@ cdef class Float64Vector(Vector):
     cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
+    cdef DrakenVector* unified(self) noexcept
+    cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
 
     cpdef Float64Vector take(self, int32_t[::1] indices)
     cdef bint _compare_float_values(self, double left, double right, int op) nogil
@@ -99,6 +102,7 @@ cdef Float64Vector from_rle_builder(
     size_t num_runs,
     uint8_t* null_bitmap=*,
 )
+cdef void _refresh_unified_float64(Float64Vector vec) noexcept
 cdef Float64Vector _materialize_dict_float64(Float64Vector vec)
 cdef Float64Vector make_float64_dict_only(
     const uint8_t* codes,

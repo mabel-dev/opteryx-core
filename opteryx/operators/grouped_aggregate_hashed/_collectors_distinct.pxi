@@ -16,7 +16,7 @@ from draken.vectors.vector cimport Vector
 from draken.vectors.int64_vector cimport Int64Vector
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.string_vector cimport StringVector
-from draken.core.buffers cimport DrakenVarBuffer, DRAKEN_ENCODING_DICTIONARY
+from draken.core.buffers cimport DrakenVarBuffer, DrakenVector
 
 
 cdef extern from "carchar_set.hpp" namespace "opteryx::carchar":
@@ -91,6 +91,7 @@ cdef class CountDistinctCollector(BaseCollector):
         cdef uint8_t code_width
         cdef const uint8_t* row_nulls
         cdef uint32_t code
+        cdef DrakenVector* uv
 
         # Resolve column index on first call
         if self._col_idx < 0:
@@ -101,11 +102,8 @@ cdef class CountDistinctCollector(BaseCollector):
         # then scatter via dict-code table lookup — no _scratch_buf write.
         if isinstance(raw, StringVector):
             svec = <StringVector>raw
-            if (
-                svec._encoding == DRAKEN_ENCODING_DICTIONARY
-                and svec._dict_codes != NULL
-                and svec._dict_values != NULL
-            ):
+            uv = svec.unified()
+            if uv.selection != NULL:
                 dict_size = svec.c_dict_size()
                 dict_hashes = <uint64_t*>malloc(<size_t>dict_size * sizeof(uint64_t))
                 if dict_hashes == NULL:
@@ -116,8 +114,8 @@ cdef class CountDistinctCollector(BaseCollector):
                             dict_hashes[di] = null_marker
                         else:
                             dict_hashes[di] = svec.c_dict_value_hash(di)
-                dict_codes = svec.c_dict_codes_ptr()
-                code_width = svec.c_dict_code_width()
+                dict_codes = <uint8_t*>uv.selection
+                code_width = uv.sel_width
                 row_nulls = svec.c_row_null_bitmap()
                 with nogil:
                     for i in range(n_rows):
@@ -216,10 +214,12 @@ cdef class AnyValueInt64Collector(BaseCollector):
         cdef Py_ssize_t i
         cdef int64_t si
         cdef int64_t const_val
+        cdef DrakenVector* uv
 
-        if vec._has_const:
-            if not vec._const_is_null:
-                const_val = vec._const_value
+        uv = vec.unified()
+        if uv.data_length == 1:
+            if uv.validity == NULL:
+                const_val = (<int64_t*>uv.data)[0]
                 for i in range(n_rows):
                     si = state_indices[i]
                     if not seen[si]:
@@ -287,10 +287,12 @@ cdef class AnyValueFloat64Collector(BaseCollector):
         cdef Py_ssize_t i
         cdef int64_t si
         cdef double const_val
+        cdef DrakenVector* uv
 
-        if vec._has_const:
-            if not vec._const_is_null:
-                const_val = vec._const_value
+        uv = vec.unified()
+        if uv.data_length == 1:
+            if uv.validity == NULL:
+                const_val = (<double*>uv.data)[0]
                 for i in range(n_rows):
                     si = state_indices[i]
                     if not seen[si]:

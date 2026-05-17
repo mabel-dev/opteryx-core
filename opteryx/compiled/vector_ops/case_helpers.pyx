@@ -24,7 +24,7 @@ from libc.stdlib cimport free, malloc
 from libc.string cimport memcpy, memset
 
 from draken.core.buffers cimport (
-    DRAKEN_ENCODING_DICTIONARY,
+    DrakenVector,
     DrakenFixedBuffer,
 )
 from draken.vectors.bool_vector cimport BoolVector
@@ -86,10 +86,12 @@ def decide_one_branch(
     cdef uint8_t* null_bm
     cdef Py_ssize_t i, ii
     cdef Py_ssize_t not_won_count = 0
+    cdef DrakenVector* bv_uv
 
     # Constant-encoded BoolVector (e.g. from BoolVector.from_constant or a LITERAL node)
-    if bv._has_const:
-        if bv._const_is_null or not bv._const_value:
+    bv_uv = bv.unified()
+    if bv_uv.data_length == 1:  # const-encoded
+        if bv_uv.validity != NULL or not (<uint8_t*>bv_uv.data)[0]:
             # False or NULL condition — no rows won, all remain live
             return live
         # True condition — every live row wins this branch
@@ -352,6 +354,7 @@ def assemble_bool(
     cdef BoolVector bv
     cdef DrakenFixedBuffer* src_ptr
     cdef int32_t[::1] rows_i
+    cdef DrakenVector* bv_uv
 
     for bid_py in range(len(parts)):
         if parts[bid_py] is None:
@@ -359,11 +362,12 @@ def assemble_bool(
         bv = <BoolVector>parts[bid_py]
         src_ptr = bv.ptr
         rows_i = rows_per_branch[bid_py]
-        if bv._has_const:
-            if not bv._const_is_null:
+        bv_uv = bv.unified()
+        if bv_uv.data_length == 1:  # const-encoded
+            if bv_uv.validity == NULL:  # const non-null
                 for j in range(rows_i.shape[0]):
                     row_r = rows_i[j]
-                    if bv._const_value:
+                    if (<uint8_t*>bv_uv.data)[0]:
                         _sel_set_true_bit(out_bits, row_r)
                     _sel_set_true_bit(out_null, row_r)
             else:
@@ -381,11 +385,12 @@ def assemble_bool(
     if else_part is not None:
         bv = <BoolVector>else_part
         src_ptr = bv.ptr
-        if bv._has_const:
-            if not bv._const_is_null:
+        bv_uv = bv.unified()
+        if bv_uv.data_length == 1:  # const-encoded
+            if bv_uv.validity == NULL:  # const non-null
                 for j in range(unmatched.shape[0]):
                     row_r = unmatched[j]
-                    if bv._const_value:
+                    if (<uint8_t*>bv_uv.data)[0]:
                         _sel_set_true_bit(out_bits, row_r)
                     _sel_set_true_bit(out_null, row_r)
             else:
@@ -559,6 +564,8 @@ def assemble_dict_string(
     cdef int32_t* remap_ptr2
     cdef StringRow srow
 
+    cdef DrakenVector* _sv_uv
+
     for r in range(n):
         bid_v = branch_id[r]
         pos = pos_in_branch[r]
@@ -566,8 +573,9 @@ def assemble_dict_string(
             sv_part = <StringVector>parts[bid_v]
             srow = string_vec_get_at(sv_part, pos)
             if not srow.is_null:
+                _sv_uv = sv_part.unified()
                 old_code = <int32_t>_read_packed_code(
-                    sv_part._dict_codes, sv_part._dict_code_width, pos
+                    <uint8_t*>_sv_uv.selection, _sv_uv.sel_width, pos
                 )
                 remap_ptr2 = <int32_t*>(<_cparr>remaps[bid_v]).data.as_ints
                 new_code = remap_ptr2[old_code]
@@ -578,8 +586,9 @@ def assemble_dict_string(
             sv_part = <StringVector>else_part
             srow = string_vec_get_at(sv_part, pos)
             if not srow.is_null:
+                _sv_uv = sv_part.unified()
                 old_code = <int32_t>_read_packed_code(
-                    sv_part._dict_codes, sv_part._dict_code_width, pos
+                    <uint8_t*>_sv_uv.selection, _sv_uv.sel_width, pos
                 )
                 new_code = else_remap_ptr[old_code]
                 if new_code >= 0:

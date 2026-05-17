@@ -28,7 +28,6 @@ and no instrumentation syscalls.
 
 from libc.stdint cimport uint8_t, int64_t
 
-from draken.vectors.vector cimport Vector
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 # evaluate_and_append_draken in scope from _operators evaluator includes
@@ -38,8 +37,6 @@ from opteryx.types import OrsoTypes
 
 # BasePlanNode in scope via textual include from _operators.pyx (umbrella unit).
 # EOS sentinel available as _EOS_SENTINEL in the same scope.
-
-# _DRAKEN_ENCODING_CONSTANT = 3 via DEF in type_coercion.pyx (same compilation unit)
 
 # Literal-aggregate-kind tags (typed, no string comparisons on hot path)
 cdef int _LITERAL_NONE          = 0
@@ -55,8 +52,6 @@ def _column_bytes(identity):
     return identity if isinstance(identity, bytes) else str(identity).encode("utf-8")
 
 
-def _is_constant_vector_like(vector) -> bool:
-    return getattr(vector, "encoding", None) == _DRAKEN_ENCODING_CONSTANT
 
 
 def _constant_scalar_value(vector):

@@ -11,14 +11,14 @@ recognise the operand pair.
 from opteryx.compiled.vector_ops import build_in_list_carchar, vector_in_list
 
 from draken.vectors.bool_vector import BoolVector
-
-
-DEF _ENC_CONSTANT = 3
+from draken.vectors.vector import Vector
 
 
 cdef _constant_vector(arr):
     """Return `arr` iff it's a constant-encoded Draken vector."""
-    if getattr(arr, "encoding", None) == _ENC_CONSTANT:
+    if not isinstance(arr, Vector):
+        return None
+    if arr.is_constant_encoded():
         return arr
     return None
 

@@ -4,6 +4,7 @@ from libc.stdint cimport int8_t
 from libc.stdint cimport uint64_t, uint8_t
 
 from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenRLEBuffer
+from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.int64_vector cimport Int64Vector
@@ -23,6 +24,7 @@ cdef class Date32Vector(Vector):
     cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
+    cdef DrakenVector* unified(self) noexcept
 
     cpdef Date32Vector take(self, int32_t[::1] indices)
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)

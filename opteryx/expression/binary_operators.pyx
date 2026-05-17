@@ -19,15 +19,11 @@ from draken.vectors.int64_vector import Int64Vector
 from draken.vectors.string_vector import StringVector
 
 
-# Mirror draken.encoding.DRAKEN_ENCODING_CONSTANT for compile-time folding.
-DEF _ENC_CONSTANT = 3
-
-
 cpdef bytes _json_key_constant(key):
     """Unwrap a constant-encoded StringVector to its raw key bytes."""
     if not isinstance(key, StringVector):
         raise IncorrectTypeError("JSON extraction key must be a StringVector")
-    if <int>key.encoding != _ENC_CONSTANT:
+    if not key.is_constant_encoded():
         raise IncorrectTypeError("JSON extraction key must be constant encoded")
     raw_key = key[0]
     if raw_key is None:
@@ -69,7 +65,7 @@ def MapAccessOp(array, key):
     if not isinstance(key, Int64Vector):
         raise IncorrectTypeError("Map/iterable subscript key must be an Int64Vector")
 
-    if getattr(key, "encoding", None) != _ENC_CONSTANT:
+    if not key.is_constant_encoded():
         raise IncorrectTypeError("Map/iterable subscript key must be constant encoded")
 
     if isinstance(array, StringVector):

@@ -17,8 +17,7 @@ from libc.stdlib cimport malloc, free
 from libc.string cimport memcmp, memset
 from cython cimport Py_ssize_t
 
-from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
-from draken.core.buffers cimport DrakenVarBuffer
+from draken.core.buffers cimport DrakenVector, DrakenConstantStringPayload, DrakenVarBuffer
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.string_vector cimport StringVector
 
@@ -117,21 +116,27 @@ cdef BoolVector _constant_starts_ends(
     bint negated,
     bint is_suffix,
 ) except *:
-    cdef Py_ssize_t n = vec.ptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
     cdef BoolVector out = BoolVector(<size_t>n)
     cdef uint8_t* out_bits = <uint8_t*>out.ptr.data
-    cdef uint8_t* const_data = <uint8_t*>vec._const_value.data
-    cdef Py_ssize_t const_len = vec._const_value.length
+    cdef DrakenConstantStringPayload* csp
+    cdef uint8_t* const_data
+    cdef Py_ssize_t const_len
     cdef bint matched
     cdef uint8_t* const_lower = NULL
     cdef uint8_t* needle_lower = NULL
 
     memset(out_bits, 0, nbytes)
 
-    if vec._const_is_null:
+    if uv.validity != NULL:  # null constant
         _finalize_bool_null_bitmap(out, n, False)
         return out
+
+    csp = <DrakenConstantStringPayload*>uv.data
+    const_data = <uint8_t*>csp.data
+    const_len = <Py_ssize_t>csp.length
 
     if ignore_case:
         const_lower = <uint8_t*>malloc(<size_t>const_len)
@@ -280,15 +285,16 @@ cdef BoolVector _dictionary_starts_ends(
     bint negated,
     bint is_suffix,
 ) except *:
-    cdef Py_ssize_t n = vec.ptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
     cdef BoolVector out = BoolVector(<size_t>n)
     cdef uint8_t* out_bits = <uint8_t*>out.ptr.data
-    cdef uint8_t* row_nulls = vec._dict_accessor.row_nulls
-    cdef uint8_t* codes = vec._dict_codes
-    cdef uint8_t code_width = vec._dict_code_width
-    cdef DrakenVarBuffer* dict_values = vec._dict_values
-    cdef Py_ssize_t dict_size = dict_values.length
+    cdef uint8_t* row_nulls = uv.validity
+    cdef uint8_t* codes = <uint8_t*>uv.selection
+    cdef uint8_t code_width = uv.sel_width
+    cdef DrakenVarBuffer* dict_values = <DrakenVarBuffer*>uv.data
+    cdef Py_ssize_t dict_size = <Py_ssize_t>dict_values.length
     cdef int32_t* dict_offsets = dict_values.offsets
     cdef uint8_t* dict_data = <uint8_t*>dict_values.data
     cdef Py_ssize_t i, d, start, length
@@ -385,19 +391,34 @@ cdef BoolVector _dictionary_starts_ends(
 # ----------------------------------------------------------------------
 # Public API (unchanged)
 # ----------------------------------------------------------------------
+cdef inline void _extract_const_needle(
+    StringVector sv,
+    const uint8_t** needle_out,
+    Py_ssize_t* needle_len_out,
+    const char* fn_name,
+) except *:
+    cdef DrakenVector* uv = sv.unified()
+    cdef DrakenConstantStringPayload* csp
+    if uv.data_length != 1:  # not constant
+        raise ValueError(f"{fn_name} does not support non-constant needle")
+    if uv.validity != NULL:  # null constant
+        needle_out[0] = NULL
+        needle_len_out[0] = 0
+        return
+    csp = <DrakenConstantStringPayload*>uv.data
+    needle_out[0] = <const uint8_t*>csp.data
+    needle_len_out[0] = <Py_ssize_t>csp.length
+
+
 cpdef BoolVector vector_starts_with(StringVector vec, StringVector prefix):
     cdef Py_ssize_t needle_len
     cdef const uint8_t* needle
+    _extract_const_needle(prefix, &needle, &needle_len, b"vector_starts_with")
 
-    if prefix._has_const:
-        needle = <const uint8_t*>prefix._const_value.data
-        needle_len = prefix._const_value.length
-    else:
-        raise ValueError("vector_starts_with does not support non-constant prefixes")
-
-    if vec._has_const:
+    cdef DrakenVector* uv = vec.unified()
+    if uv.data_length == 1:  # constant
         return _constant_starts_ends(vec, needle, needle_len, False, False, False)
-    if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec._dict_values != NULL:
+    if uv.selection != NULL:  # dictionary
         return _dictionary_starts_ends(vec, needle, needle_len, False, False, False)
     return _dense_starts_ends(vec, needle, needle_len, False, False, False)
 
@@ -405,16 +426,12 @@ cpdef BoolVector vector_starts_with(StringVector vec, StringVector prefix):
 cpdef BoolVector vector_ci_starts_with(StringVector vec, StringVector prefix):
     cdef Py_ssize_t needle_len
     cdef const uint8_t* needle
+    _extract_const_needle(prefix, &needle, &needle_len, b"vector_ci_starts_with")
 
-    if prefix._has_const:
-        needle = <const uint8_t*>prefix._const_value.data
-        needle_len = prefix._const_value.length
-    else:
-        raise ValueError("vector_ci_starts_with does not support non-constant prefixes")
-
-    if vec._has_const:
+    cdef DrakenVector* uv = vec.unified()
+    if uv.data_length == 1:  # constant
         return _constant_starts_ends(vec, needle, needle_len, True, False, False)
-    if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec._dict_values != NULL:
+    if uv.selection != NULL:  # dictionary
         return _dictionary_starts_ends(vec, needle, needle_len, True, False, False)
     return _dense_starts_ends(vec, needle, needle_len, True, False, False)
 
@@ -422,16 +439,12 @@ cpdef BoolVector vector_ci_starts_with(StringVector vec, StringVector prefix):
 cpdef BoolVector vector_ends_with(StringVector vec, StringVector suffix):
     cdef Py_ssize_t needle_len
     cdef const uint8_t* needle
+    _extract_const_needle(suffix, &needle, &needle_len, b"vector_ends_with")
 
-    if suffix._has_const:
-        needle = <const uint8_t*>suffix._const_value.data
-        needle_len = suffix._const_value.length
-    else:
-        raise ValueError("vector_ends_with does not support non-constant suffixes")
-
-    if vec._has_const:
+    cdef DrakenVector* uv = vec.unified()
+    if uv.data_length == 1:  # constant
         return _constant_starts_ends(vec, needle, needle_len, False, False, True)
-    if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec._dict_values != NULL:
+    if uv.selection != NULL:  # dictionary
         return _dictionary_starts_ends(vec, needle, needle_len, False, False, True)
     return _dense_starts_ends(vec, needle, needle_len, False, False, True)
 
@@ -439,15 +452,11 @@ cpdef BoolVector vector_ends_with(StringVector vec, StringVector suffix):
 cpdef BoolVector vector_ci_ends_with(StringVector vec, StringVector suffix):
     cdef Py_ssize_t needle_len
     cdef const uint8_t* needle
+    _extract_const_needle(suffix, &needle, &needle_len, b"vector_ci_ends_with")
 
-    if suffix._has_const:
-        needle = <const uint8_t*>suffix._const_value.data
-        needle_len = suffix._const_value.length
-    else:
-        raise ValueError("vector_ci_ends_with does not support non-constant suffixes")
-
-    if vec._has_const:
+    cdef DrakenVector* uv = vec.unified()
+    if uv.data_length == 1:  # constant
         return _constant_starts_ends(vec, needle, needle_len, True, False, True)
-    if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec._dict_values != NULL:
+    if uv.selection != NULL:  # dictionary
         return _dictionary_starts_ends(vec, needle, needle_len, True, False, True)
     return _dense_starts_ends(vec, needle, needle_len, True, False, True)

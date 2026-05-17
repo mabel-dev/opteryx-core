@@ -8,6 +8,7 @@ from draken.core.buffers cimport DictAccessor
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DrakenRLEBuffer
 from draken.core.buffers cimport DrakenVarBuffer
+from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
 
@@ -31,10 +32,10 @@ cdef class Float32Vector(Vector):
     cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
+    cdef DrakenVector* unified(self) noexcept
 
     cpdef Float32Vector take(self, int32_t[::1] indices)
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
-    cdef BoolVector _compare_scalar_dict(self, float value, int op)
     cdef BoolVector _compare_scalar(self, float value, int op)
     cdef BoolVector _compare_vector(self, Float32Vector other, int op)
 

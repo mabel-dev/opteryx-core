@@ -17,7 +17,7 @@ from libcpp.unordered_map cimport unordered_map
 
 from draken.vectors.string_vector cimport StringVector, from_packed_dict
 from draken.vectors import string_vector as string_vector_module
-from draken.core.buffers cimport DrakenVarBuffer
+from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector
 
 cdef extern from "re2/stringpiece.h" namespace "re2":
     cdef cppclass StringPiece:
@@ -44,7 +44,8 @@ cpdef StringVector vector_regex_replace(StringVector data, bytes pattern, bytes 
     Accepts and returns StringVector directly, eliminating Python/Arrow conversion overhead.
     Handles constant, dictionary, and dense encodings correctly.
     """
-    cdef Py_ssize_t n = data.ptr.length
+    cdef DrakenVector* uv = data.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t i
     cdef int32_t start, end
 
@@ -59,9 +60,10 @@ cpdef StringVector vector_regex_replace(StringVector data, bytes pattern, bytes 
     cdef string repl_str
     cdef string value_str
     cdef size_t buffer_capacity = 256
-    cdef DrakenVarBuffer* ptr
+    cdef DrakenVarBuffer* vbuf
     cdef Py_ssize_t dict_size
     cdef DrakenVarBuffer* ndp
+    cdef DrakenConstantStringPayload* csp
 
     PyBytes_AsStringAndSize(pattern, &pattern_buf, &pattern_len)
     PyBytes_AsStringAndSize(replacement, &repl_buf, &repl_len)
@@ -81,54 +83,56 @@ cpdef StringVector vector_regex_replace(StringVector data, bytes pattern, bytes 
     value_str.reserve(256)
 
     # Constant encoding: apply once, replicate
-    if data._has_const:
+    if uv.data_length == 1 and uv.selection == NULL:  # constant
         builder = string_vector_module.StringVectorBuilder.with_estimate(n, 100)
-        if data._const_is_null or data._const_value == NULL:
+        if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
         else:
-            value_str.assign(<const char*>data._const_value.data, <size_t>data._const_value.length)
+            csp = <DrakenConstantStringPayload*>uv.data
+            value_str.assign(<const char*>csp.data, <size_t>csp.length)
             RE2.GlobalReplace(&value_str, regex[0], repl_piece)
             for i in range(n):
                 builder.append_bytes(value_str.c_str(), value_str.size())
         return builder.finish()
 
     # Dictionary encoding: transform each unique entry, repack with same codes
-    if data._encoding == DRAKEN_ENCODING_DICTIONARY:
-        dict_size = data._dict_values.length
+    if uv.selection != NULL:  # dictionary
+        vbuf = <DrakenVarBuffer*>uv.data
+        dict_size = <Py_ssize_t>vbuf.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 100)
         for i in range(dict_size):
-            start = data._dict_values.offsets[i]
-            end = data._dict_values.offsets[i + 1]
+            start = vbuf.offsets[i]
+            end = vbuf.offsets[i + 1]
             if buffer_capacity < <size_t>(end - start):
                 buffer_capacity = <size_t>(end - start) * 2
                 value_str.reserve(buffer_capacity)
-            value_str.assign((<const char*>data._dict_values.data) + start, <size_t>(end - start))
+            value_str.assign((<const char*>vbuf.data) + start, <size_t>(end - start))
             RE2.GlobalReplace(&value_str, regex[0], repl_piece)
             dict_builder.append_bytes(value_str.c_str(), value_str.size())
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            data._dict_codes, data._dict_code_width, n,
+            <uint8_t*>uv.selection, uv.sel_width, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
-            data._dict_accessor.row_nulls,
+            uv.validity,
         )
 
     # Dense encoding: row by row
     builder = string_vector_module.StringVectorBuilder.with_estimate(n, 100)
-    ptr = data.ptr
+    vbuf = <DrakenVarBuffer*>uv.data
     for i in range(n):
-        if ptr.null_bitmap != NULL and not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
+        if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
             continue
 
-        start = ptr.offsets[i]
-        end = ptr.offsets[i + 1]
+        start = vbuf.offsets[i]
+        end = vbuf.offsets[i + 1]
 
         if buffer_capacity < <size_t>(end - start):
             buffer_capacity = <size_t>(end - start) * 2
             value_str.reserve(buffer_capacity)
-        value_str.assign((<const char*>ptr.data) + start, <size_t>(end - start))
+        value_str.assign((<const char*>vbuf.data) + start, <size_t>(end - start))
         RE2.GlobalReplace(&value_str, regex[0], repl_piece)
         builder.append_bytes(value_str.c_str(), value_str.size())
 

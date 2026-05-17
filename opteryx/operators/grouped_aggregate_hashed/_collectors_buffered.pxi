@@ -19,7 +19,7 @@ from draken.vectors.vector cimport Vector
 from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
 from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
 from draken.vectors._decimal_vector cimport DecimalVector
-from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
+from draken.core.buffers cimport DrakenVector
 
 
 cdef extern from "../aggregate/_agg_kernels.hpp" namespace "opteryx::ungrouped":
@@ -92,16 +92,19 @@ cdef class MedianFloat64Collector(BaseCollector):
         cdef double* fdata
         cdef list pylist
 
+        cdef DrakenVector* uv
+
         if isinstance(vec, Int64Vector):
             iv = <Int64Vector>vec
-            if iv._has_const:
-                if iv._const_is_null:
+            uv = iv.unified()
+            if uv.data_length == 1:  # constant
+                if uv.validity != NULL:
                     return
-                v = <double>iv._const_value
+                v = <double>(<int64_t*>uv.data)[0]
                 for i in range(n_rows):
                     self._append(state_indices[i], v)
                 return
-            if iv._encoding == DRAKEN_ENCODING_DICTIONARY and iv.ptr.data == NULL:
+            if uv.selection != NULL:
                 iv = _materialize_dict_int64(iv)
             idata = <int64_t*>iv.dense_ptr()
             nulls = iv.null_bitmap_ptr()
@@ -113,14 +116,15 @@ cdef class MedianFloat64Collector(BaseCollector):
 
         if isinstance(vec, Float64Vector):
             fv = <Float64Vector>vec
-            if fv._has_const:
-                if fv._const_is_null:
+            uv = fv.unified()
+            if uv.data_length == 1:  # constant
+                if uv.validity != NULL:
                     return
-                v = fv._const_value
+                v = (<double*>uv.data)[0]
                 for i in range(n_rows):
                     self._append(state_indices[i], v)
                 return
-            if fv._encoding == DRAKEN_ENCODING_DICTIONARY and fv.ptr.data == NULL:
+            if uv.selection != NULL:
                 fv = _materialize_dict_float64(fv)
             fdata = <double*>fv.dense_ptr()
             nulls = fv.null_bitmap_ptr()

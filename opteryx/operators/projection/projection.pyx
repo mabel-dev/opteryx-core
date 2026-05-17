@@ -25,12 +25,34 @@ that performs column renames.
 from typing import Generator, Optional
 from collections.abc import Iterable
 
-from draken.encoding import DRAKEN_ENCODING_CONSTANT
+from draken.core.buffers cimport DrakenVector
+from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.float64_vector cimport Float64Vector
+from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer_vector cimport IntegerVector
+from draken.vectors.string_vector cimport StringVector
 from opteryx.expression import NodeType
 # evaluate_and_append_draken in scope from _operators evaluator includes
 from opteryx.models import QueryProperties
 
 # BasePlanNode in scope via textual include from _operators.pyx.
+
+
+cdef inline bint _is_constant_vector(object vec) noexcept:
+    cdef DrakenVector* uv
+    if isinstance(vec, Float64Vector):
+        uv = (<Float64Vector>vec).unified()
+    elif isinstance(vec, Int64Vector):
+        uv = (<Int64Vector>vec).unified()
+    elif isinstance(vec, IntegerVector):
+        uv = (<IntegerVector>vec).unified()
+    elif isinstance(vec, BoolVector):
+        uv = (<BoolVector>vec).unified()
+    elif isinstance(vec, StringVector):
+        uv = (<StringVector>vec).unified()
+    else:
+        return False
+    return uv.data_length == 1
 
 
 cdef class ProjectionNode(BasePlanNode):
@@ -75,7 +97,7 @@ cdef class ProjectionNode(BasePlanNode):
                 col = morsel.column(identity)
             except Exception:
                 continue
-            if getattr(col, "encoding", None) == DRAKEN_ENCODING_CONSTANT:
+            if _is_constant_vector(col):
                 emitted += 1
         return emitted
 

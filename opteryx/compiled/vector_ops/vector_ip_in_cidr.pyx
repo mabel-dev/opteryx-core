@@ -13,7 +13,8 @@ from libc.string cimport memset
 
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.bool_vector cimport BoolVector
-from draken.core.buffers cimport DrakenVarBuffer
+from draken.core.buffers cimport DrakenVarBuffer, DrakenVector, DrakenConstantStringPayload
+from cpython.bytes cimport PyBytes_FromStringAndSize
 
 
 cdef inline int parse_ip_to_int(const char* ip, size_t length, uint32_t* out) nogil:
@@ -69,14 +70,18 @@ cpdef BoolVector vector_ip_in_cidr(StringVector vec, StringVector cidr):
     Returns:
         BoolVector: True where the IP is inside the CIDR block.
     """
-    from draken import encoding as draken_encoding
     from opteryx.exceptions import IncorrectTypeError
 
+    cdef DrakenVector* _cidr_uv = cidr.unified()
+    cdef DrakenConstantStringPayload* _cidr_csp
     cdef bytes cidr_bytes
 
-    if cidr.encoding != draken_encoding.DRAKEN_ENCODING_CONSTANT:
+    if _cidr_uv.data_length != 1:
         raise IncorrectTypeError("CIDR argument must be constant encoded StringVector")
-    cidr_bytes = cidr[0]
+    if _cidr_uv.validity != NULL:
+        raise ValueError("CIDR argument must not be NULL")
+    _cidr_csp = <DrakenConstantStringPayload*>_cidr_uv.data
+    cidr_bytes = PyBytes_FromStringAndSize(<const char*>_cidr_csp.data, _cidr_csp.length)
 
     cdef int slash_idx = cidr_bytes.find(b'/')
     if slash_idx == -1:

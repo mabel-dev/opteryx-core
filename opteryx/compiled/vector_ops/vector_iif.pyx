@@ -30,10 +30,10 @@ from libc.stdlib cimport free, malloc
 from libc.string cimport memcpy, memset
 
 from draken.core.buffers cimport (
-    ConstAccessor,
     DRAKEN_BOOL,
     DRAKEN_STRING,
     DrakenFixedBuffer,
+    DrakenVector,
 )
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.string_vector cimport (
@@ -74,12 +74,12 @@ cdef object _iif_select_fixed(
     cdef Py_ssize_t row
     cdef bint choose_true
 
-    cdef ConstAccessor* true_acc = when_true.const_accessor()
-    cdef ConstAccessor* false_acc = when_false.const_accessor()
-    cdef bint true_is_const = true_acc != NULL
-    cdef bint false_is_const = false_acc != NULL
-    cdef bint true_const_null = true_is_const and (true_acc.is_null != 0)
-    cdef bint false_const_null = false_is_const and (false_acc.is_null != 0)
+    cdef DrakenVector* true_uv = when_true.unified()
+    cdef DrakenVector* false_uv = when_false.unified()
+    cdef bint true_is_const = true_uv.data_length == 1
+    cdef bint false_is_const = false_uv.data_length == 1
+    cdef bint true_const_null = true_is_const and (true_uv.validity != NULL)
+    cdef bint false_const_null = false_is_const and (false_uv.validity != NULL)
 
     cdef DrakenFixedBuffer* true_ptr = NULL
     cdef DrakenFixedBuffer* false_ptr = NULL
@@ -166,19 +166,19 @@ cdef object _iif_select_bool(
     cdef bint any_null = False
     cdef bint value
 
-    cdef ConstAccessor* true_acc = when_true.const_accessor()
-    cdef ConstAccessor* false_acc = when_false.const_accessor()
-    cdef bint true_is_const = true_acc != NULL
-    cdef bint false_is_const = false_acc != NULL
-    cdef bint true_const_null = true_is_const and (true_acc.is_null != 0)
-    cdef bint false_const_null = false_is_const and (false_acc.is_null != 0)
+    cdef DrakenVector* true_uv = when_true.unified()
+    cdef DrakenVector* false_uv = when_false.unified()
+    cdef bint true_is_const = true_uv.data_length == 1
+    cdef bint false_is_const = false_uv.data_length == 1
+    cdef bint true_const_null = true_is_const and (true_uv.validity != NULL)
+    cdef bint false_const_null = false_is_const and (false_uv.validity != NULL)
 
     cdef bint true_const_val = False
     cdef bint false_const_val = False
     if true_is_const and not true_const_null:
-        true_const_val = (<uint8_t*>true_acc.value_ptr)[0] != 0
+        true_const_val = (<uint8_t*>true_uv.data)[0] != 0
     if false_is_const and not false_const_null:
-        false_const_val = (<uint8_t*>false_acc.value_ptr)[0] != 0
+        false_const_val = (<uint8_t*>false_uv.data)[0] != 0
 
     cdef BoolVector true_vec
     cdef BoolVector false_vec
@@ -240,12 +240,12 @@ cdef object _iif_select_string(
     Vector when_false,
     Py_ssize_t length,
 ):
-    cdef ConstAccessor* true_acc = when_true.const_accessor()
-    cdef ConstAccessor* false_acc = when_false.const_accessor()
-    cdef bint true_is_const = true_acc != NULL
-    cdef bint false_is_const = false_acc != NULL
-    cdef bint true_const_null = true_is_const and (true_acc.is_null != 0)
-    cdef bint false_const_null = false_is_const and (false_acc.is_null != 0)
+    cdef DrakenVector* true_uv = when_true.unified()
+    cdef DrakenVector* false_uv = when_false.unified()
+    cdef bint true_is_const = true_uv.data_length == 1
+    cdef bint false_is_const = false_uv.data_length == 1
+    cdef bint true_const_null = true_is_const and (true_uv.validity != NULL)
+    cdef bint false_const_null = false_is_const and (false_uv.validity != NULL)
 
     cdef object true_scalar = None
     cdef object false_scalar = None
@@ -345,7 +345,7 @@ cpdef Vector vector_iif(
         )
 
     cdef Py_ssize_t length = len(condition)
-    cdef ConstAccessor* cond_acc
+    cdef DrakenVector* cond_uv
     cdef BoolVector cond_vec
     cdef int true_family
     cdef int false_family
@@ -367,15 +367,15 @@ cpdef Vector vector_iif(
     if isinstance(condition, BoolVector):
         cond_vec = <BoolVector>condition
     else:
-        cond_acc = condition.const_accessor()
-        if cond_acc == NULL or cond_acc.value_type != DRAKEN_BOOL:
+        cond_uv = condition.unified()
+        if cond_uv.data_length != 1 or cond_uv.type != DRAKEN_BOOL:
             raise TypeError(
                 f"vector_iif: condition must be BoolVector, got "
                 f"{type(condition).__name__}"
             )
         # Const condition short-circuits — every row picks the same branch.
         # Null condition is treated as FALSE (SQL three-valued logic).
-        if cond_acc.is_null != 0 or (<uint8_t*>cond_acc.value_ptr)[0] == 0:
+        if cond_uv.validity != NULL or (<uint8_t*>cond_uv.data)[0] == 0:
             return when_false
         return when_true
 

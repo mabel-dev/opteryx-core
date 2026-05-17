@@ -8,9 +8,9 @@
 # cython: optimize.use_switch=True
 # cython: optimize.unpack_method_calls=True
 
-from draken.vectors.string_vector cimport StringVector, DrakenVarBuffer
+from draken.vectors.string_vector cimport StringVector
 from draken.vectors.bool_vector cimport BoolVector
-from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
+from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector
 from cpython.bytes cimport PyBytes_AS_STRING
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
@@ -86,10 +86,10 @@ cpdef BoolVector vector_like(
     element does NOT match the pattern. Fuses what would otherwise be a
     second full-pass `.not_vector()`.
     """
-    cdef DrakenVarBuffer* ptr = vec.ptr
-    cdef Py_ssize_t n = ptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
-    cdef uint8_t* nb_ptr = ptr.null_bitmap
+    cdef uint8_t* nb_ptr = uv.validity
     cdef BoolVector out = BoolVector(<size_t>n)
     cdef uint8_t* dst = <uint8_t*> out.ptr.data
     cdef uint8_t* out_null = NULL
@@ -99,25 +99,24 @@ cpdef BoolVector vector_like(
     cdef int32_t start, end, str_len
     cdef Py_ssize_t i, dict_idx, dict_size
     cdef uint32_t code
-    cdef DrakenVarBuffer* dict_values_buf
-    cdef const uint8_t* dict_data
+    cdef DrakenVarBuffer* vbuf
+    cdef const uint8_t* vdata
     cdef uint8_t* dict_like_results = NULL
-    cdef const uint8_t* dict_codes
-    cdef uint8_t dict_code_width
-    cdef uint8_t* dict_row_nulls
+    cdef DrakenConstantStringPayload* csp
 
-    if vec._has_const:
-        if vec._const_is_null:
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             return _constant_bool_result(n, False, True)
+        csp = <DrakenConstantStringPayload*>uv.data
         return _constant_bool_result(
             n,
             _sv_sql_like_match(
-                <const uint8_t*>vec._const_value.data,
-                vec._const_value.length,
+                <const uint8_t*>csp.data,
+                csp.length,
                 <const uint8_t*>pat_ptr,
                 pat_len,
                 ignore_case,
-            ) != negate,  # XOR-style: match==True with negate flips to False
+            ) != negate,
             False,
         )
 
@@ -142,68 +141,58 @@ cpdef BoolVector vector_like(
         out.ptr.null_bitmap = NULL
 
     try:
-        # Dictionary-encoded path: check each unique value once
-        if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
-            dict_values_buf = vec._dict_values
-            if dict_values_buf == NULL or dict_values_buf.data == NULL:
-                return out  # Fallback to empty result
+        if uv.selection != NULL:  # dictionary
+            vbuf = <DrakenVarBuffer*>uv.data
+            if vbuf == NULL or vbuf.data == NULL:
+                return out
 
-            dict_size = <Py_ssize_t>dict_values_buf.length
-            dict_codes = vec._dict_codes
-            if dict_codes == NULL or dict_size == 0:
-                return out  # Fallback to empty result
+            dict_size = <Py_ssize_t>vbuf.length
+            if dict_size == 0:
+                return out
 
-            dict_code_width = vec._dict_code_width
-            dict_row_nulls = vec.ptr.null_bitmap
-            dict_data = <const uint8_t*>dict_values_buf.data
-
-            # Allocate results array for each dictionary entry
+            vdata = <const uint8_t*>vbuf.data
             dict_like_results = <uint8_t*>malloc(dict_size)
             if dict_like_results == NULL:
                 raise MemoryError()
 
-            # Test each unique dictionary value once
             for dict_idx in range(dict_size):
-                start = dict_values_buf.offsets[dict_idx]
-                end = dict_values_buf.offsets[dict_idx + 1]
+                start = vbuf.offsets[dict_idx]
+                end = vbuf.offsets[dict_idx + 1]
                 str_len = end - start
-
                 if _sv_sql_like_match(
-                    dict_data + start, <Py_ssize_t>str_len,
+                    vdata + start, <Py_ssize_t>str_len,
                     <const uint8_t*>pat_ptr, pat_len, ignore_case,
                 ):
                     dict_like_results[dict_idx] = 1
                 else:
                     dict_like_results[dict_idx] = 0
 
-            # Scatter results by code index. Under `negate`, matches clear
-            # bits from an all-ones init; otherwise they set bits from zero.
-            if negate:
-                for i in range(n):
-                    if dict_row_nulls != NULL and ((dict_row_nulls[i >> 3] >> (i & 7)) & 1) == 0:
-                        continue
-                    code = _read_packed_code(dict_codes, dict_code_width, i)
-                    if dict_like_results[code]:
-                        dst[i >> 3] &= ~(1 << (i & 7))
-            else:
-                for i in range(n):
-                    if dict_row_nulls != NULL and ((dict_row_nulls[i >> 3] >> (i & 7)) & 1) == 0:
-                        continue
-                    code = _read_packed_code(dict_codes, dict_code_width, i)
-                    if dict_like_results[code]:
-                        dst[i >> 3] |= (1 << (i & 7))
-
-        # Dense vector path (non-dictionary, non-constant)
-        else:
             if negate:
                 for i in range(n):
                     if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                         continue
-                    start = ptr.offsets[i]
-                    end = ptr.offsets[i + 1]
+                    code = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
+                    if dict_like_results[code]:
+                        dst[i >> 3] &= ~(1 << (i & 7))
+            else:
+                for i in range(n):
+                    if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                        continue
+                    code = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
+                    if dict_like_results[code]:
+                        dst[i >> 3] |= (1 << (i & 7))
+
+        else:  # dense
+            vbuf = <DrakenVarBuffer*>uv.data
+            if negate:
+                for i in range(n):
+                    if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                        continue
+                    start = vbuf.offsets[i]
+                    end = vbuf.offsets[i + 1]
                     str_len = end - start
                     if _sv_sql_like_match(
-                        <const uint8_t*>ptr.data + start, <Py_ssize_t>str_len,
+                        <const uint8_t*>vbuf.data + start, <Py_ssize_t>str_len,
                         <const uint8_t*>pat_ptr, pat_len, ignore_case,
                     ):
                         dst[i >> 3] &= ~(1 << (i & 7))
@@ -211,11 +200,11 @@ cpdef BoolVector vector_like(
                 for i in range(n):
                     if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                         continue
-                    start = ptr.offsets[i]
-                    end = ptr.offsets[i + 1]
+                    start = vbuf.offsets[i]
+                    end = vbuf.offsets[i + 1]
                     str_len = end - start
                     if _sv_sql_like_match(
-                        <const uint8_t*>ptr.data + start, <Py_ssize_t>str_len,
+                        <const uint8_t*>vbuf.data + start, <Py_ssize_t>str_len,
                         <const uint8_t*>pat_ptr, pat_len, ignore_case,
                     ):
                         dst[i >> 3] |= (1 << (i & 7))

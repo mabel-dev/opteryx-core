@@ -41,6 +41,7 @@ from draken.core.buffers cimport DRAKEN_TIMESTAMP64
 from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT, DRAKEN_ENCODING_RLE
 from draken.core.buffers cimport DRAKEN_ENCODING_DENSE
 from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
+from draken.core.buffers cimport DrakenVector
 from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
 from draken.core.fixed_vector cimport buf_dtype
@@ -73,6 +74,7 @@ cdef int64_t MICROSECONDS_PER_SECOND = 1_000_000
 cdef int64_t MICROSECONDS_PER_MILLISECOND = 1_000
 cdef const int64_t INT64_MIN_VALUE = <int64_t>0x8000000000000000
 cdef int64_t NULL_FLAG = INT64_MIN_VALUE
+cdef uint8_t _CONST_NULL_BYTE = 0
 
 # Integer unit codes — avoids Python str comparison in the compress hot loop
 DEF TIMESTAMP_HASH_CHUNK = 1024
@@ -127,6 +129,31 @@ cdef void _release_rle_storage_timestamp(TimestampVector vec) noexcept:
             free(vec._rle_buffer.null_bitmap)
         free(vec._rle_buffer)
         vec._rle_buffer = NULL
+
+
+cdef void _refresh_unified_timestamp(TimestampVector vec) noexcept:
+    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
+    vec._unified_view.length = <size_t>n
+    vec._unified_view.itemsize = sizeof(int64_t)
+    vec._unified_view.type = DRAKEN_TIMESTAMP64
+    if vec._has_const:
+        vec._unified_view.data = <void*>&vec._const_value
+        vec._unified_view.data_length = 1
+        vec._unified_view.selection = NULL
+        vec._unified_view.sel_width = 0
+        vec._unified_view.validity = &_CONST_NULL_BYTE if vec._const_is_null else NULL
+    elif vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec.ptr.data == NULL:
+        vec._unified_view.data = vec._dict_values.data
+        vec._unified_view.data_length = <size_t>vec._dict_values.length
+        vec._unified_view.selection = vec._dict_codes
+        vec._unified_view.sel_width = vec._dict_code_width
+        vec._unified_view.validity = vec.ptr.null_bitmap
+    else:
+        vec._unified_view.data = vec.ptr.data
+        vec._unified_view.data_length = <size_t>n
+        vec._unified_view.selection = NULL
+        vec._unified_view.sel_width = 0
+        vec._unified_view.validity = vec.ptr.null_bitmap
 
 
 cdef void _attach_dictionary_storage(TimestampVector vec, const int32_t[::1] codes, const int64_t[::1] dictionary, bint ordered) except *:
@@ -245,6 +272,7 @@ cdef class TimestampVector(Vector):
         vec._const_is_null = bool(is_null)
         vec._const_value = 0 if is_null or value is None else <int64_t>int(value)
         vec._encoding = DRAKEN_ENCODING_CONSTANT
+        _refresh_unified_timestamp(vec)
         return vec
 
     @classmethod
@@ -307,6 +335,16 @@ cdef class TimestampVector(Vector):
         self._dict_accessor.dict_values = NULL
         self._dict_accessor.value_type = DRAKEN_TIMESTAMP64
         self._rle_buffer = NULL
+        self._unified_view.data = NULL
+        self._unified_view.data_length = 0
+        self._unified_view.selection = NULL
+        self._unified_view.sel_width = 0
+        self._unified_view.length = 0
+        self._unified_view.validity = NULL
+        self._unified_view.itemsize = sizeof(int64_t)
+        self._unified_view.type = DRAKEN_TIMESTAMP64
+        if not wrap:
+            _refresh_unified_timestamp(self)
 
     def __dealloc__(self):
         _release_rle_storage_timestamp(self)
@@ -345,6 +383,9 @@ cdef class TimestampVector(Vector):
         if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.null_bitmap
+
+    cdef DrakenVector* unified(self) noexcept:
+        return &self._unified_view
 
     # Python-friendly properties (backed by C getters for kernels)
     @property
@@ -407,7 +448,8 @@ cdef class TimestampVector(Vector):
 
     # -------- Example op --------
     cpdef TimestampVector take(self, int32_t[::1] indices):
-        if self._has_const:
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
             return TimestampVector.from_constant(
                 None if self._const_is_null else self._const_value,
                 indices.shape[0],
@@ -420,6 +462,7 @@ cdef class TimestampVector(Vector):
         cdef int64_t* dst = <int64_t*> out.ptr.data
         for i in range(n):
             dst[i] = src[indices[i]]
+        _refresh_unified_timestamp(out)
         return out
 
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n):
@@ -438,111 +481,46 @@ cdef class TimestampVector(Vector):
             out.ptr.null_bitmap = NULL
         return out
 
-    cdef BoolVector _compare_scalar_dict(self, int64_t value, int op):
-        # Evaluate predicate once per dict entry, then gather bits by code index.
-        # Null bitmap applied via a single simd_and_mask pass at the end.
-        cdef Py_ssize_t dict_size = <Py_ssize_t>self._dict_values.length
-        cdef int64_t* dict_data = <int64_t*>self._dict_values.data
-        cdef uint8_t* codes = self._dict_codes
-        cdef uint8_t code_width = self._dict_code_width
-        cdef uint8_t* row_nulls = self.ptr.null_bitmap
-        cdef Py_ssize_t n = <Py_ssize_t>self.ptr.length
+    cpdef BoolVector _compare_scalar(self, int64_t value, int op):
+        cdef DrakenVector* uv = self.unified()
+        cdef Py_ssize_t n = <Py_ssize_t>uv.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
-
-        cdef uint8_t* match_table = <uint8_t*>malloc(<size_t>dict_size)
-        if match_table == NULL:
-            raise MemoryError()
-
-        cdef Py_ssize_t d
-        for d in range(dict_size):
-            match_table[d] = 1 if dispatch_compare_once(op, dict_data[d], value) else 0
-
         cdef BoolVector out = BoolVector(<size_t>n)
         cdef uint8_t* dst = <uint8_t*>out.ptr.data
-        memset(dst, 0, nbytes)
-
-        cdef uint8_t* out_null = NULL
-        if row_nulls != NULL and nbytes != 0:
-            out_null = <uint8_t*>malloc(nbytes)
-            if out_null == NULL:
-                free(match_table)
-                raise MemoryError()
-            memcpy(out_null, row_nulls, nbytes)
-            out.ptr.null_bitmap = out_null
-        else:
-            out.ptr.null_bitmap = NULL
-
-        cdef Py_ssize_t i
-        cdef const uint8_t* codes8
-        cdef const uint16_t* codes16
-        cdef const uint32_t* codes32
-        if code_width == 1:
-            codes8 = <const uint8_t*>codes
-            for i in range(n):
-                if match_table[codes8[i]]:
-                    dst[i >> 3] |= <uint8_t>(1 << (i & 7))
-        elif code_width == 2:
-            codes16 = <const uint16_t*>codes
-            for i in range(n):
-                if match_table[codes16[i]]:
-                    dst[i >> 3] |= <uint8_t>(1 << (i & 7))
-        else:
-            codes32 = <const uint32_t*>codes
-            for i in range(n):
-                if match_table[codes32[i]]:
-                    dst[i >> 3] |= <uint8_t>(1 << (i & 7))
-
-        free(match_table)
-
-        if out_null != NULL:
-            simd_and_mask(dst, dst, out_null, <size_t>nbytes)
-
-        return out
-
-    cpdef BoolVector _compare_scalar(self, int64_t value, int op):
-        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return self._compare_scalar_dict(value, op)
-
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t n
-        cdef Py_ssize_t nbytes
-        cdef BoolVector out
-        cdef uint8_t* dst
         cdef uint8_t* out_null = NULL
         cdef uint8_t mask
         cdef bint matched
+        cdef int64_t* data = <int64_t*>uv.data
+        cdef Py_ssize_t dict_size
+        cdef uint8_t* codes
+        cdef uint8_t code_width
+        cdef uint8_t* match_table
+        cdef Py_ssize_t d, i
+        cdef const uint8_t* codes8
+        cdef const uint16_t* codes16
+        cdef const uint32_t* codes32
+        cdef uint8_t* src_null
+        cdef size_t valid_count
 
-        if self._has_const:
-            n = ptr.length
-            nbytes = (n + 7) >> 3
-            out = BoolVector(<size_t>n)
-            dst = <uint8_t*>out.ptr.data
-            if nbytes > 0:
-                memset(dst, 0, nbytes)
-            if self._const_is_null:
+        if nbytes > 0:
+            memset(dst, 0, nbytes)
+
+        if uv.data_length == 1:
+            if uv.validity != NULL:
                 return self._make_all_null_bool(n)
-            matched = dispatch_compare_once(op, self._const_value, value)
+            matched = dispatch_compare_once(op, data[0], value)
             if matched and nbytes > 0:
                 memset(dst, 0xFF, nbytes)
                 if (n & 7) != 0:
-                    mask = <uint8_t>((1 << (n & 7)) - 1)
-                    dst[nbytes - 1] &= mask
+                    dst[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
             out.ptr.null_bitmap = NULL
             return out
 
-        cdef int64_t* data = <int64_t*> ptr.data
-        cdef uint8_t* src_null = ptr.null_bitmap
-        n = ptr.length
-        nbytes = (n + 7) >> 3
-        out = BoolVector(<size_t>n)
-        dst = <uint8_t*> out.ptr.data
-
-        memset(dst, 0, nbytes)
-        if src_null != NULL and nbytes != 0:
-            out_null = <uint8_t*> malloc(nbytes)
+        if uv.validity != NULL and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
             if out_null == NULL:
                 raise MemoryError()
-            memcpy(out_null, src_null, nbytes)
+            memcpy(out_null, uv.validity, nbytes)
             if (n & 7) != 0:
                 mask = <uint8_t>((1 << (n & 7)) - 1)
                 out_null[nbytes - 1] &= mask
@@ -550,10 +528,36 @@ cdef class TimestampVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        cdef size_t valid_count
-        # Gate: above ~70% null density, the branching kernel wins by
-        # short-circuiting writes for null rows. Below that, the branchless
-        # kernel wins by avoiding mispredicted comparison-result branches.
+        if uv.selection != NULL:
+            dict_size = <Py_ssize_t>uv.data_length
+            codes = <uint8_t*>uv.selection
+            code_width = uv.sel_width
+            match_table = <uint8_t*>malloc(<size_t>dict_size if dict_size > 0 else 1)
+            if match_table == NULL:
+                raise MemoryError()
+            for d in range(dict_size):
+                match_table[d] = 1 if dispatch_compare_once(op, data[d], value) else 0
+            if code_width == 1:
+                codes8 = <const uint8_t*>codes
+                for i in range(n):
+                    if match_table[codes8[i]]:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            elif code_width == 2:
+                codes16 = <const uint16_t*>codes
+                for i in range(n):
+                    if match_table[codes16[i]]:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            else:
+                codes32 = <const uint32_t*>codes
+                for i in range(n):
+                    if match_table[codes32[i]]:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            free(match_table)
+            if out_null != NULL:
+                simd_and_mask(dst, dst, out_null, <size_t>nbytes)
+            return out
+
+        src_null = uv.validity
         if src_null == NULL:
             dispatch_scalar_nonnull(op, data, value, dst, <size_t>n)
         else:
@@ -585,7 +589,8 @@ cdef class TimestampVector(Vector):
     cpdef BoolVector between(self, int64_t lower, int64_t upper,
                               bint lower_inclusive=True, bint upper_inclusive=True):
         """Single-pass range check: lower OP value OP upper. NULL in → NULL out."""
-        if self._has_const:
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
             return _materialize_const_timestamp(self).between(lower, upper, lower_inclusive, upper_inclusive)
 
         cdef DrakenFixedBuffer* ptr = self.ptr
@@ -641,9 +646,10 @@ cdef class TimestampVector(Vector):
     cpdef BoolVector _compare_vector(self, TimestampVector other, int op):
         # Const fast paths: avoid O(n) materialisation.
         # self[i] OP other[i] where self is const V: equivalent to other[i] reversed_op V.
+        cdef DrakenVector* uv = self.unified()
         cdef Py_ssize_t const_n
         cdef int reversed_op
-        if self._has_const:
+        if uv.data_length == 1:
             const_n = self.ptr.length
             if const_n != other.ptr.length:
                 raise ValueError("Vectors must have the same length")
@@ -770,12 +776,13 @@ cdef class TimestampVector(Vector):
         return out
 
     cpdef int64_t min(self):
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t* data = <int64_t*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
         if n == 0:
             raise ValueError("Cannot compute min of empty column")
-        if self._has_const:
+        if uv.data_length == 1:
             if self._const_is_null:
                 raise ValueError("Cannot compute min of all-null column")
             return self._const_value
@@ -806,12 +813,13 @@ cdef class TimestampVector(Vector):
         return m
 
     cpdef int64_t max(self):
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t* data = <int64_t*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
         if n == 0:
             raise ValueError("Cannot compute max of empty column")
-        if self._has_const:
+        if uv.data_length == 1:
             if self._const_is_null:
                 raise ValueError("Cannot compute max of all-null column")
             return self._const_value
@@ -842,7 +850,8 @@ cdef class TimestampVector(Vector):
         return m
 
     cpdef int64_t sum(self):
-        if self._has_const:
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
             if self._const_is_null:
                 return 0
             return <int64_t>(self.ptr.length * self._const_value)
@@ -943,6 +952,7 @@ cdef class TimestampVector(Vector):
         """
         Return a memoryview of int8_t, where each element is 1 if the value is null, 0 otherwise.
         """
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n
         cdef int8_t* buf
@@ -952,7 +962,7 @@ cdef class TimestampVector(Vector):
         buf = <int8_t*> PyMem_Malloc(n)
         if buf == NULL:
             raise MemoryError()
-        if self._has_const:
+        if uv.data_length == 1:
             for i in range(n):
                 buf[i] = 1 if self._const_is_null else 0
             return <int8_t[:n]> buf
@@ -992,6 +1002,7 @@ cdef class TimestampVector(Vector):
         return data_bytes + bm_bytes
 
     cpdef list to_pylist(self):
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t* data = <int64_t*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
@@ -1012,7 +1023,7 @@ cdef class TimestampVector(Vector):
         cdef int32_t ts_run_len
         cdef int64_t ts_run_val
 
-        if self._has_const:
+        if uv.data_length == 1:
             if self._const_is_null:
                 for i in range(n):
                     out.append(None)
@@ -1119,6 +1130,7 @@ cdef class TimestampVector(Vector):
         uint64_t[::1] out_buf,
         Py_ssize_t offset=0,
     ) except *:
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t* data = <int64_t*> ptr.data
         cdef Py_ssize_t n = ptr.length
@@ -1131,7 +1143,7 @@ cdef class TimestampVector(Vector):
         cdef uint64_t[TIMESTAMP_HASH_CHUNK] scratch
         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
 
-        if self._has_const:
+        if uv.data_length == 1:
             value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
             for j in range(TIMESTAMP_HASH_CHUNK):
                 scratch[j] = value
@@ -1217,6 +1229,7 @@ cdef class TimestampVector(Vector):
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for TimestampVector: scale raw int64 values to microseconds."""
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t* src = <int64_t*> ptr.data
         cdef Py_ssize_t n = ptr.length
@@ -1231,7 +1244,7 @@ cdef class TimestampVector(Vector):
 
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("TimestampVector.compress: output buffer too small")
-        if self._has_const:
+        if uv.data_length == 1:
             value = 0 if self._const_is_null else _apply_unit_scale(self._const_value, self._unit_code)
             for i in range(n):
                 dst[i] = NULL_FLAG if self._const_is_null else value
@@ -1348,6 +1361,7 @@ cdef TimestampVector from_arrow(object array):
         vec.ptr.null_bitmap = NULL
         vec.null_bit_offset = 0
 
+    _refresh_unified_timestamp(vec)
     return vec
 
 
@@ -1378,6 +1392,7 @@ cdef TimestampVector from_dict(
 
     _attach_dictionary_storage(vec, codes, dictionary, False)
 
+    _refresh_unified_timestamp(vec)
     return vec
 
 
@@ -1423,7 +1438,47 @@ cdef TimestampVector from_dict_nullable(
 
     _attach_dictionary_storage(vec, codes, dictionary, False)
 
+    _refresh_unified_timestamp(vec)
     return vec
+
+
+cdef TimestampVector timestamp_dict_from_raw(
+    int64_t num_rows,
+    uint8_t* packed_codes,      # takes ownership
+    uint8_t code_width,
+    DrakenVarBuffer* dict_values,  # takes ownership
+    uint8_t ordered,
+    uint8_t* row_nulls,         # validity bitmap (1=valid); NULL if all valid; NOT owned
+    str timestamp_unit,
+):
+    """Build a dict-encoded TimestampVector from pre-built raw buffers.
+
+    ptr.data is NULL (pure dict encoding). Ownership of packed_codes and dict_values
+    transfers to the returned vector. row_nulls is copied if non-NULL.
+    """
+    cdef TimestampVector vec = TimestampVector(0)  # ptr header only; ptr.data = NULL
+    cdef Py_ssize_t nb_bytes
+
+    vec.ptr.length = <size_t>num_rows
+    vec.timestamp_unit = timestamp_unit
+    vec._unit_code = _unit_code_from_str(timestamp_unit)
+
+    if row_nulls != NULL:
+        nb_bytes = (num_rows + 7) >> 3
+        vec.ptr.null_bitmap = <uint8_t*>malloc(<size_t>nb_bytes)
+        if vec.ptr.null_bitmap == NULL:
+            raise MemoryError()
+        memcpy(vec.ptr.null_bitmap, row_nulls, <size_t>nb_bytes)
+
+    vec._dict_codes = packed_codes
+    vec._dict_code_width = code_width
+    vec._dict_ordered = ordered
+    vec._dict_values = dict_values
+    vec._encoding = DRAKEN_ENCODING_DICTIONARY
+
+    _refresh_unified_timestamp(vec)
+    return vec
+
 
 cpdef TimestampVector from_int64_vector(Int64Vector source, str timestamp_unit="us"):
     """
@@ -1471,6 +1526,7 @@ cpdef TimestampVector from_int64_vector(Int64Vector source, str timestamp_unit="
         out.ptr.null_bitmap = NULL
         out.null_bit_offset = 0
 
+    _refresh_unified_timestamp(out)
     return out
 
 
@@ -1497,6 +1553,7 @@ cdef TimestampVector _materialize_const_timestamp(TimestampVector const_vec):
     else:
         for i in range(n):
             dst[i] = val
+    _refresh_unified_timestamp(dense)
     return dense
 
 

@@ -65,27 +65,16 @@ cdef class CountAggregate(UngroupedAggregate):
 
         cdef const uint8_t* nulls
         cdef Py_ssize_t i
-        cdef DictAccessor* dacc
+        cdef DrakenVector* uv
 
         if self._col_type == _VTYPE_INT64:
             vec_i = <Int64Vector>raw
-            if vec_i._has_const:
-                if not vec_i._const_is_null:
+            uv = vec_i.unified()
+            if uv.data_length == 1:  # constant
+                if uv.validity == NULL:  # not null constant
                     self._count += nrows
                 return
-            if vec_i._dict_codes != NULL:
-                dacc  = vec_i.dict_accessor()
-                nulls = dacc.row_nulls
-                if nulls == NULL:
-                    self._count += nrows   # no row-level nulls — O(1)
-                    return
-                # Bitmap present — use precomputed null_count (simd_popcount).
-                # The per-row walk used to dominate for nullable columns even
-                # when there were zero nulls (parquet always allocates the
-                # bitmap), eating ~90ms on a 100M-row Q04.
-                self._count += <int64_t>nrows - <int64_t>vec_i.null_count
-                return
-            nulls = vec_i.null_bitmap_ptr()
+            nulls = uv.validity
             if nulls == NULL:
                 self._count += nrows
                 return
@@ -94,32 +83,22 @@ cdef class CountAggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_STRING:
             vec_s = <StringVector>raw
-            if vec_s._has_const:
-                if not vec_s._const_is_null:
+            uv = vec_s.unified()
+            if uv.data_length == 1:  # constant
+                if uv.validity == NULL:  # not null constant
                     self._count += nrows
                 return
-            # Dict-encoded and RLE fast paths: COUNT(col) = length - null_count.
-            # The vector's null_count is computed via simd_popcount.
-            if vec_s._encoding == DRAKEN_ENCODING_DICTIONARY:
-                self._count += <int64_t>nrows - <int64_t>vec_s.null_count
-                return
-            nulls = vec_s.null_bitmap_ptr()
-            if nulls == NULL:
-                self._count += nrows
-                return
-            with nogil:
-                for i in range(nrows):
-                    if _bitmap_is_valid(nulls, i):
-                        self._count += 1
+            self._count += <int64_t>nrows - <int64_t>vec_s.null_count
             return
 
         if self._col_type == _VTYPE_FLOAT64:
             vec_f = <Float64Vector>raw
-            if vec_f._has_const:
-                if not vec_f._const_is_null:
+            uv = vec_f.unified()
+            if uv.data_length == 1:  # constant
+                if uv.validity == NULL:
                     self._count += nrows
                 return
-            nulls = vec_f.null_bitmap_ptr()
+            nulls = uv.validity
             if nulls == NULL:
                 self._count += nrows
                 return
@@ -128,11 +107,12 @@ cdef class CountAggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_INTEGER:
             vec_n = <IntegerVector>raw
-            if vec_n._has_const:
-                if not vec_n._const_is_null:
+            uv = vec_n.unified()
+            if uv.data_length == 1:  # constant
+                if uv.validity == NULL:
                     self._count += nrows
                 return
-            nulls = vec_n.null_bitmap_ptr()
+            nulls = uv.validity
             if nulls == NULL:
                 self._count += nrows
                 return

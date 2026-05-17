@@ -12,14 +12,8 @@
 # Used by vector_trim, vector_uppercase, vector_lowercase, etc.
 
 from draken.vectors.string_vector cimport StringVector
-from draken.core.buffers cimport ConstAccessor, DrakenConstantStringPayload, DRAKEN_ENCODING_CONSTANT
+from draken.core.buffers cimport DrakenConstantStringPayload, DrakenVector
 from libc.stdint cimport int32_t, uint8_t
-
-
-cdef inline ConstAccessor* _constant_string_accessor(StringVector vec) noexcept:
-    if vec.encoding != DRAKEN_ENCODING_CONSTANT:
-        return NULL
-    return vec.const_accessor()
 
 
 cdef inline bint _is_null(uint8_t* null_bitmap, Py_ssize_t idx) noexcept:
@@ -28,25 +22,26 @@ cdef inline bint _is_null(uint8_t* null_bitmap, Py_ssize_t idx) noexcept:
         return False
     return not ((null_bitmap[idx >> 3] >> (idx & 7)) & 1)
 
+
 cdef inline bint _constant_string_value(
     StringVector vec,
     const uint8_t** data_ptr,
     int32_t* data_len,
     Py_ssize_t* row_count,
 ) except? False:
-    cdef ConstAccessor* accessor = _constant_string_accessor(vec)
+    cdef DrakenVector* uv = vec.unified()
     cdef DrakenConstantStringPayload* payload
 
-    if accessor == NULL:
+    if uv.data_length != 1:
         return False
 
-    row_count[0] = accessor.length
-    if accessor.is_null != 0 or accessor.value_ptr == NULL:
+    row_count[0] = <Py_ssize_t>uv.length
+    if uv.validity != NULL:  # null constant
         data_ptr[0] = NULL
         data_len[0] = 0
         return True
 
-    payload = <DrakenConstantStringPayload*>accessor.value_ptr
+    payload = <DrakenConstantStringPayload*>uv.data
     data_ptr[0] = payload.data
     data_len[0] = payload.length
     return True

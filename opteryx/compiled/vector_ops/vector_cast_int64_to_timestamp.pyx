@@ -19,8 +19,8 @@ from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy
 
 from draken.vectors.int64_vector cimport Int64Vector
-from draken.vectors.timestamp_vector cimport TimestampVector
-from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DRAKEN_ENCODING_DICTIONARY, DRAKEN_TIMESTAMP64
+from draken.vectors.timestamp_vector cimport TimestampVector, timestamp_dict_from_raw
+from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenVector, DRAKEN_TIMESTAMP64
 from draken.core.var_vector cimport alloc_var_buffer
 
 # C++ SIMD dispatch functions
@@ -59,12 +59,12 @@ cpdef TimestampVector vector_cast_int64_to_timestamp(Int64Vector int_vec, str un
     else:
         raise ValueError(f"Unsupported timestamp unit: {unit!r}")
 
+    cdef DrakenVector* uv = int_vec.unified()
+
     # Check if vector is dictionary-encoded
-    if int_vec._dict_codes != NULL:
-        # Dictionary-encoded path: transform only dictionary values
-        return _cast_dict_encoded(int_vec, factor, use_divide)
+    if uv.selection != NULL:  # dictionary
+        return _cast_dict_encoded(int_vec, uv, factor, use_divide)
     else:
-        # Dense path
         return _cast_dense(int_vec, factor, use_divide)
 
 
@@ -93,34 +93,28 @@ cdef TimestampVector _cast_dense(Int64Vector int_vec, int64_t factor, bint use_d
     return result
 
 
-cdef TimestampVector _cast_dict_encoded(Int64Vector int_vec, int64_t factor, bint use_divide):
+cdef TimestampVector _cast_dict_encoded(Int64Vector int_vec, DrakenVector* uv, int64_t factor, bint use_divide):
     """
     Transform dictionary-encoded Int64Vector by casting only the dictionary.
 
     Returns dictionary-encoded TimestampVector with transformed dictionary, same codes.
+    ptr.data is NULL (pure dict encoding — no dense materialization).
     """
-    cdef DrakenVarBuffer* dict_buf = int_vec._dict_values
+    cdef DrakenVarBuffer* dict_buf = <DrakenVarBuffer*>uv.data
     cdef int64_t* dict_data = <int64_t*>dict_buf.data
-    cdef int64_t dict_size = dict_buf.length
+    cdef int64_t dict_size = <int64_t>dict_buf.length
     cdef uint8_t* dict_nulls = dict_buf.null_bitmap
 
-    cdef uint8_t* codes_raw = int_vec._dict_codes
-    cdef uint8_t code_width = int_vec._dict_code_width
-    cdef int64_t num_rows = int_vec.ptr.length
-    cdef uint8_t* row_nulls = int_vec.ptr.null_bitmap
+    cdef uint8_t* codes_raw = <uint8_t*>uv.selection
+    cdef uint8_t code_width = uv.sel_width
+    cdef int64_t num_rows = <int64_t>uv.length
 
     cdef int64_t i
-    cdef uint32_t code
-    cdef int64_t bitmap_bytes
-    cdef TimestampVector result
-    cdef int64_t* result_data
-    cdef uint8_t* result_nulls
     cdef DrakenVarBuffer* result_dict
     cdef int64_t* transformed_dict
     cdef uint8_t* packed_codes
     cdef Py_ssize_t code_bytes
 
-    # Allocate and transform dictionary
     transformed_dict = <int64_t*>malloc(dict_size * sizeof(int64_t))
     if transformed_dict == NULL:
         raise MemoryError()
@@ -134,35 +128,7 @@ cdef TimestampVector _cast_dict_encoded(Int64Vector int_vec, int64_t factor, bin
         else:
             multiply_int64_simd(dict_data, transformed_dict, factor, dict_size)
 
-        # Create new TimestampVector and materialize with transformed dictionary
-        result = TimestampVector(<size_t>num_rows)
-        result.timestamp_unit = "us"
-        result._unit_code = 1  # UNIT_US
-        result_data = <int64_t*>result.ptr.data
-
-        # Copy null bitmap if present
-        if row_nulls != NULL:
-            bitmap_bytes = (num_rows + 7) >> 3
-            result.ptr.null_bitmap = <uint8_t*>malloc(bitmap_bytes)
-            if result.ptr.null_bitmap == NULL:
-                raise MemoryError()
-            memcpy(result.ptr.null_bitmap, row_nulls, <size_t>bitmap_bytes)
-
-        # Materialize by looking up transformed dictionary values using codes
-        for i in range(num_rows):
-            if row_nulls != NULL and ((row_nulls[i >> 3] >> (i & 7)) & 1) == 0:
-                result_data[i] = 0
-                continue
-            # Read packed code with variable width
-            if code_width == 1:
-                code = <uint32_t>(<uint8_t*>codes_raw)[i]
-            elif code_width == 2:
-                code = <uint32_t>(<uint16_t*>codes_raw)[i]
-            else:
-                code = <uint32_t>(<uint32_t*>codes_raw)[i]
-            result_data[i] = transformed_dict[code]
-
-        # Allocate and copy packed codes
+        # Copy packed codes
         code_bytes = num_rows * code_width
         if code_bytes > 0:
             packed_codes = <uint8_t*>malloc(code_bytes)
@@ -172,12 +138,7 @@ cdef TimestampVector _cast_dict_encoded(Int64Vector int_vec, int64_t factor, bin
         else:
             packed_codes = NULL
 
-        # Set dictionary encoding fields
-        result._dict_codes = packed_codes
-        result._dict_code_width = code_width
-        result._dict_ordered = int_vec._dict_ordered
-
-        # Create dictionary storage (DrakenVarBuffer)
+        # Build dictionary storage (DrakenVarBuffer)
         result_dict = alloc_var_buffer(DRAKEN_TIMESTAMP64, <size_t>dict_size, <size_t>(dict_size * sizeof(int64_t)))
         result_dict.offsets[0] = 0
         for i in range(dict_size):
@@ -186,9 +147,9 @@ cdef TimestampVector _cast_dict_encoded(Int64Vector int_vec, int64_t factor, bin
         if dict_nulls != NULL:
             memcpy(result_dict.null_bitmap, dict_nulls, (dict_size + 7) >> 3)
 
-        result._dict_values = result_dict
-        result._encoding = DRAKEN_ENCODING_DICTIONARY
-
-        return result
+        return timestamp_dict_from_raw(
+            num_rows, packed_codes, code_width, result_dict,
+            int_vec._dict_ordered, uv.validity, "us",
+        )
     finally:
         free(transformed_dict)

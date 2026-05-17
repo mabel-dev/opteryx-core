@@ -8,6 +8,7 @@ from draken.core.buffers cimport DictAccessor
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DrakenRLEBuffer
 from draken.core.buffers cimport DrakenVarBuffer
+from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.float64_vector cimport Float64Vector
@@ -35,7 +36,7 @@ cdef class Int64Vector(Vector):
 
     cpdef Int64Vector take(self, int32_t[::1] indices)
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
-    cdef BoolVector _compare_scalar_dict(self, int64_t value, int op)
+    cdef DrakenVector* unified(self) noexcept
     # Integer-dispatched kernels. cpdef so the expression evaluator can call
     # them directly from Python and bypass the per-op named wrappers below.
     cpdef BoolVector _compare_scalar(self, int64_t value, int op)
@@ -108,6 +109,7 @@ cdef Int64Vector from_rle_builder(
     size_t num_runs,
     uint8_t* null_bitmap=*,
 )
+cdef void _refresh_unified_int64(Int64Vector vec) noexcept
 cdef Int64Vector _materialize_dict_int64(Int64Vector vec)
 cdef Int64Vector make_int64_dict_only(
     const uint8_t* codes,

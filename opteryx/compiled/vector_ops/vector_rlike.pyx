@@ -10,7 +10,7 @@
 
 from draken.vectors.string_vector cimport StringVector, DrakenVarBuffer
 from draken.vectors.bool_vector cimport BoolVector
-from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
+from draken.core.buffers cimport DrakenVector, DrakenConstantStringPayload
 from cpython.bytes cimport PyBytes_AsStringAndSize
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
@@ -50,10 +50,9 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
     no lookaround. Matches the engine used by vector_anyop_like and the same
     engine ClickHouse, BigQuery, and DuckDB use for REGEXP_LIKE.
     """
-    cdef DrakenVarBuffer* ptr = vec.ptr
-    cdef Py_ssize_t n = ptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
-    cdef uint8_t* nb_ptr = ptr.null_bitmap
     cdef BoolVector out = BoolVector(<size_t>n)
     cdef uint8_t* dst = <uint8_t*> out.ptr.data
     cdef uint8_t* out_null = NULL
@@ -61,12 +60,11 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
     cdef int32_t start, end, str_len
     cdef Py_ssize_t i, dict_idx, dict_size
     cdef uint32_t code
-    cdef DrakenVarBuffer* dict_values_buf
+    cdef DrakenVarBuffer* vbuf
     cdef const uint8_t* dict_data
     cdef uint8_t* dict_rlike_results = NULL
-    cdef const uint8_t* dict_codes
-    cdef uint8_t dict_code_width
-    cdef uint8_t* dict_row_nulls
+    cdef uint8_t* nb_ptr
+    cdef DrakenConstantStringPayload* csp
     cdef char* pat_buf = <char*>0
     cdef Py_ssize_t pat_len = 0
     cdef RE2OptionsRL options
@@ -83,12 +81,13 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
         if not regex.ok():
             raise ValueError("Invalid REGEXP pattern")
 
-        if vec._has_const:
-            if vec._const_is_null:
+        if uv.data_length == 1:  # constant
+            if uv.validity != NULL:  # null constant
                 return _constant_bool_result(n, False, True)
+            csp = <DrakenConstantStringPayload*>uv.data
             text_piece = StringPieceRL(
-                <const char*>vec._const_value.data,
-                <size_t>vec._const_value.length,
+                <const char*>csp.data,
+                <size_t>csp.length,
             )
             return _constant_bool_result(
                 n,
@@ -96,6 +95,7 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
                 False,
             )
 
+        nb_ptr = uv.validity
         if negate:
             memset(dst, 0xFF, nbytes)
             if (n & 7) != 0:
@@ -116,19 +116,16 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
 
         try:
             # Dictionary-encoded path: check each unique value once
-            if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
-                dict_values_buf = vec._dict_values
-                if dict_values_buf == NULL or dict_values_buf.data == NULL:
-                    return out  # Fallback to empty result
+            if uv.selection != NULL:  # dictionary
+                vbuf = <DrakenVarBuffer*>uv.data
+                if vbuf == NULL or vbuf.data == NULL:
+                    return out
 
-                dict_size = <Py_ssize_t>dict_values_buf.length
-                dict_codes = vec._dict_codes
-                if dict_codes == NULL or dict_size == 0:
-                    return out  # Fallback to empty result
+                dict_size = <Py_ssize_t>vbuf.length
+                if dict_size == 0:
+                    return out
 
-                dict_code_width = vec._dict_code_width
-                dict_row_nulls = vec.ptr.null_bitmap
-                dict_data = <const uint8_t*>dict_values_buf.data
+                dict_data = <const uint8_t*>vbuf.data
 
                 # Allocate results array for each dictionary entry
                 dict_rlike_results = <uint8_t*>malloc(dict_size)
@@ -137,8 +134,8 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
 
                 # Test each unique dictionary value once
                 for dict_idx in range(dict_size):
-                    start = dict_values_buf.offsets[dict_idx]
-                    end = dict_values_buf.offsets[dict_idx + 1]
+                    start = vbuf.offsets[dict_idx]
+                    end = vbuf.offsets[dict_idx + 1]
                     str_len = end - start
                     text_piece = StringPieceRL(
                         <const char*>dict_data + start, <size_t>str_len,
@@ -148,34 +145,34 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
                     else:
                         dict_rlike_results[dict_idx] = 0
 
-                # Scatter results by code index. Under `negate`, matches clear
-                # bits from an all-ones init; otherwise they set bits from zero.
-                if negate:
-                    for i in range(n):
-                        if dict_row_nulls != NULL and ((dict_row_nulls[i >> 3] >> (i & 7)) & 1) == 0:
-                            continue
-                        code = _read_packed_code(dict_codes, dict_code_width, i)
-                        if dict_rlike_results[code]:
-                            dst[i >> 3] &= ~(1 << (i & 7))
-                else:
-                    for i in range(n):
-                        if dict_row_nulls != NULL and ((dict_row_nulls[i >> 3] >> (i & 7)) & 1) == 0:
-                            continue
-                        code = _read_packed_code(dict_codes, dict_code_width, i)
-                        if dict_rlike_results[code]:
-                            dst[i >> 3] |= (1 << (i & 7))
-
-            # Dense vector path (non-dictionary, non-constant)
-            else:
+                # Scatter results by code index
                 if negate:
                     for i in range(n):
                         if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                             continue
-                        start = ptr.offsets[i]
-                        end = ptr.offsets[i + 1]
+                        code = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
+                        if dict_rlike_results[code]:
+                            dst[i >> 3] &= ~(1 << (i & 7))
+                else:
+                    for i in range(n):
+                        if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                            continue
+                        code = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
+                        if dict_rlike_results[code]:
+                            dst[i >> 3] |= (1 << (i & 7))
+
+            # Dense vector path
+            else:
+                vbuf = <DrakenVarBuffer*>uv.data
+                if negate:
+                    for i in range(n):
+                        if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                            continue
+                        start = vbuf.offsets[i]
+                        end = vbuf.offsets[i + 1]
                         str_len = end - start
                         text_piece = StringPieceRL(
-                            <const char*>ptr.data + start, <size_t>str_len,
+                            <const char*>vbuf.data + start, <size_t>str_len,
                         )
                         if RE2RL.PartialMatch(text_piece, regex[0]):
                             dst[i >> 3] &= ~(1 << (i & 7))
@@ -183,11 +180,11 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
                     for i in range(n):
                         if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                             continue
-                        start = ptr.offsets[i]
-                        end = ptr.offsets[i + 1]
+                        start = vbuf.offsets[i]
+                        end = vbuf.offsets[i + 1]
                         str_len = end - start
                         text_piece = StringPieceRL(
-                            <const char*>ptr.data + start, <size_t>str_len,
+                            <const char*>vbuf.data + start, <size_t>str_len,
                         )
                         if RE2RL.PartialMatch(text_piece, regex[0]):
                             dst[i >> 3] |= (1 << (i & 7))

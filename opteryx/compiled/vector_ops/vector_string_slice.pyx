@@ -16,8 +16,7 @@ from draken.vectors.vector cimport Vector
 from draken.vectors.string_vector cimport StringVector, StringVectorBuilder, from_packed_dict, _materialize_dict_string
 from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence, _materialize_dict_int64
 from draken.vectors.null_vector cimport NullVector
-from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload
-from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
+from draken.core.buffers cimport DrakenVector, DrakenVarBuffer, DrakenConstantStringPayload
 
 # ---------------------------------------------------------------------------
 # Local helpers
@@ -31,17 +30,19 @@ cdef inline Int64Vector _prepare_int_arg(Vector arg):
 
     All arguments must be vectors — NullVector or Int64Vector. Scalars are not accepted.
     RLE and dict-only encodings are materialised once here; the caller then reads
-    _has_const/_const_value or data[i] directly in the tight loop.
+    unified().data_length / unified().validity or data[i] directly in the tight loop.
     """
     cdef Int64Vector iv
+    cdef DrakenVector* uv
     if isinstance(arg, NullVector):
         return None  # caller checks for None → all rows null
     if not isinstance(arg, Int64Vector):
         raise TypeError(f"integer argument must be an Int64Vector or NullVector, got {type(arg).__name__}")
     iv = <Int64Vector>arg
-    if iv._has_const:
+    uv = iv.unified()
+    if uv.data_length == 1:
         return iv
-    if iv._encoding == DRAKEN_ENCODING_DICTIONARY and iv.ptr.data == NULL:
+    if uv.selection != NULL:
         return _materialize_dict_int64(iv)
     return iv  # already dense
 
@@ -50,12 +51,14 @@ cdef inline int64_t _read_int_arg(Int64Vector iv, Py_ssize_t row, bint* is_null)
     """Read element-at-row from a const-or-dense Int64Vector prepared by _prepare_int_arg."""
     cdef int64_t* data
     cdef uint8_t* nulls
+    cdef DrakenVector* uv
     is_null[0] = False
-    if iv._has_const:
-        if iv._const_is_null:
+    uv = iv.unified()
+    if uv.data_length == 1:  # const-encoded
+        if uv.validity != NULL:  # null constant
             is_null[0] = True
             return 0
-        return iv._const_value
+        return (<int64_t*>uv.data)[0]
     data = <int64_t*>iv.ptr.data
     nulls = iv.ptr.null_bitmap
     if nulls != NULL and not ((nulls[row >> 3] >> (row & 7)) & 1):
@@ -82,12 +85,13 @@ cpdef StringVector vector_string_slice_left(StringVector vec, Vector length):
     cdef Int64Vector length_iv = _prepare_int_arg(length)
     cdef bint length_is_null_vec = length_iv is None
 
-    cdef Py_ssize_t n = vec.ptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t i
     cdef int64_t length_val
     cdef Py_ssize_t take
     cdef bint length_null
-    cdef DrakenConstantStringPayload* const_val
+    cdef DrakenConstantStringPayload* csp
     cdef int32_t const_len
     cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(n, 8)
 
@@ -99,13 +103,13 @@ cpdef StringVector vector_string_slice_left(StringVector vec, Vector length):
     # ------------------------------------------------------------------
     # Const-encoded string
     # ------------------------------------------------------------------
-    if vec._has_const:
-        if vec._const_is_null or vec._const_value == NULL:
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
             return builder.finish()
-        const_val = vec._const_value
-        const_len = const_val.length
+        csp = <DrakenConstantStringPayload*>uv.data
+        const_len = <int32_t>csp.length
         for i in range(n):
             length_val = _read_int_arg(length_iv, i, &length_null)
             if length_null:
@@ -119,19 +123,14 @@ cpdef StringVector vector_string_slice_left(StringVector vec, Vector length):
                 take = <Py_ssize_t>length_val
             if take > const_len:
                 take = const_len
-            builder.append_bytes(<const char*>const_val.data, take)
+            builder.append_bytes(<const char*>csp.data, take)
         return builder.finish()
 
     # ------------------------------------------------------------------
     # Dict-encoded string
     # ------------------------------------------------------------------
-    if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
+    if uv.selection != NULL:  # dictionary
         return _slice_left_dict(vec, length_iv, n)
-
-    # ------------------------------------------------------------------
-    # RLE-encoded string — materialize to dense then fall through
-    # ------------------------------------------------------------------
-    cdef StringVector dense_vec
 
     # ------------------------------------------------------------------
     # Dense-encoded string
@@ -141,25 +140,28 @@ cpdef StringVector vector_string_slice_left(StringVector vec, Vector length):
 
 cdef StringVector _slice_left_dict(StringVector vec, Int64Vector length_iv, Py_ssize_t n):
     """Dict encoding path for slice_left."""
-    cdef DrakenVarBuffer* dict_ptr = vec._dict_values
-    cdef Py_ssize_t dict_size = dict_ptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef DrakenVarBuffer* dict_ptr = <DrakenVarBuffer*>uv.data
+    cdef Py_ssize_t dict_size = <Py_ssize_t>dict_ptr.length
     cdef int32_t dict_start, dict_end, dict_len
     cdef int64_t length_val
     cdef Py_ssize_t take
     cdef bint length_null
     cdef Py_ssize_t j
-    cdef uint8_t* codes = vec._dict_codes
-    cdef uint8_t code_width = vec._dict_code_width
-    cdef uint8_t* row_nulls = vec.ptr.null_bitmap
+    cdef uint8_t* codes = <uint8_t*>uv.selection
+    cdef uint8_t code_width = uv.sel_width
+    cdef uint8_t* row_nulls = uv.validity
     cdef uint32_t code
     cdef Py_ssize_t i
     cdef StringVector new_dict_sv
     cdef StringVectorBuilder dict_builder
     cdef StringVectorBuilder builder
+    cdef DrakenVector* liv_uv
 
     # When int arg is const we can operate on dict values only — O(dict_size)
-    if length_iv._has_const and not length_iv._const_is_null:
-        length_val = length_iv._const_value
+    liv_uv = length_iv.unified()
+    if liv_uv.data_length == 1 and liv_uv.validity == NULL:  # const non-null
+        length_val = (<int64_t*>liv_uv.data)[0]
         dict_builder = StringVectorBuilder.with_estimate(dict_size, 8)
         for j in range(dict_size):
             dict_start = dict_ptr.offsets[j]
@@ -182,8 +184,7 @@ cdef StringVector _slice_left_dict(StringVector vec, Int64Vector length_iv, Py_s
         )
 
     # Varying int arg — per-row dict code lookup (no full materialisation)
-    if length_iv._has_const and length_iv._const_is_null:
-        # const-null length → all rows null
+    if liv_uv.data_length == 1 and liv_uv.validity != NULL:  # const-null length → all rows null
         builder = StringVectorBuilder.with_estimate(n, 0)
         for i in range(n):
             builder.append_null()
@@ -266,12 +267,13 @@ cpdef StringVector vector_string_slice_right(StringVector vec, Vector length):
     cdef Int64Vector length_iv = _prepare_int_arg(length)
     cdef bint length_is_null_vec = length_iv is None
 
-    cdef Py_ssize_t n = vec.ptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t i
     cdef int64_t length_val
     cdef Py_ssize_t take, actual_start
     cdef bint length_null
-    cdef DrakenConstantStringPayload* const_val
+    cdef DrakenConstantStringPayload* csp
     cdef int32_t const_len
     cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(n, 8)
 
@@ -283,13 +285,13 @@ cpdef StringVector vector_string_slice_right(StringVector vec, Vector length):
     # ------------------------------------------------------------------
     # Const-encoded string
     # ------------------------------------------------------------------
-    if vec._has_const:
-        if vec._const_is_null or vec._const_value == NULL:
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
             return builder.finish()
-        const_val = vec._const_value
-        const_len = const_val.length
+        csp = <DrakenConstantStringPayload*>uv.data
+        const_len = <int32_t>csp.length
         for i in range(n):
             length_val = _read_int_arg(length_iv, i, &length_null)
             if length_null:
@@ -302,19 +304,14 @@ cpdef StringVector vector_string_slice_right(StringVector vec, Vector length):
             if take > const_len:
                 take = const_len
             actual_start = const_len - take
-            builder.append_bytes(<const char*>const_val.data + actual_start, take)
+            builder.append_bytes(<const char*>csp.data + actual_start, take)
         return builder.finish()
 
     # ------------------------------------------------------------------
     # Dict-encoded string
     # ------------------------------------------------------------------
-    if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
+    if uv.selection != NULL:  # dictionary
         return _slice_right_dict(vec, length_iv, n)
-
-    # ------------------------------------------------------------------
-    # RLE-encoded string — materialize to dense then fall through
-    # ------------------------------------------------------------------
-    cdef StringVector dense_vec
 
     # ------------------------------------------------------------------
     # Dense-encoded string
@@ -324,24 +321,27 @@ cpdef StringVector vector_string_slice_right(StringVector vec, Vector length):
 
 cdef StringVector _slice_right_dict(StringVector vec, Int64Vector length_iv, Py_ssize_t n):
     """Dict encoding path for slice_right."""
-    cdef DrakenVarBuffer* dict_ptr = vec._dict_values
-    cdef Py_ssize_t dict_size = dict_ptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef DrakenVarBuffer* dict_ptr = <DrakenVarBuffer*>uv.data
+    cdef Py_ssize_t dict_size = <Py_ssize_t>dict_ptr.length
     cdef int32_t dict_start, dict_end, dict_len
     cdef int64_t length_val
     cdef Py_ssize_t take, actual_start
     cdef bint length_null
     cdef Py_ssize_t j
-    cdef uint8_t* codes = vec._dict_codes
-    cdef uint8_t code_width = vec._dict_code_width
-    cdef uint8_t* row_nulls = vec.ptr.null_bitmap
+    cdef uint8_t* codes = <uint8_t*>uv.selection
+    cdef uint8_t code_width = uv.sel_width
+    cdef uint8_t* row_nulls = uv.validity
     cdef uint32_t code
     cdef Py_ssize_t i
     cdef StringVector new_dict_sv
     cdef StringVectorBuilder dict_builder
     cdef StringVectorBuilder builder
+    cdef DrakenVector* liv_uv
 
-    if length_iv._has_const and not length_iv._const_is_null:
-        length_val = length_iv._const_value
+    liv_uv = length_iv.unified()
+    if liv_uv.data_length == 1 and liv_uv.validity == NULL:  # const non-null
+        length_val = (<int64_t*>liv_uv.data)[0]
         dict_builder = StringVectorBuilder.with_estimate(dict_size, 8)
         for j in range(dict_size):
             dict_start = dict_ptr.offsets[j]
@@ -362,7 +362,7 @@ cdef StringVector _slice_right_dict(StringVector vec, Int64Vector length_iv, Py_
             row_nulls,
         )
 
-    if length_iv._has_const and length_iv._const_is_null:
+    if liv_uv.data_length == 1 and liv_uv.validity != NULL:  # const-null length → all rows null
         builder = StringVectorBuilder.with_estimate(n, 0)
         for i in range(n):
             builder.append_null()
@@ -447,12 +447,13 @@ cpdef StringVector vector_string_substring(StringVector vec, object from_pos, ob
     cdef bint pos_is_null_vec = pos_iv is None
     cdef bint cnt_is_null_vec = cnt_iv is None
 
-    cdef Py_ssize_t n = vec.ptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t i
     cdef int64_t start_val, count_val
     cdef Py_ssize_t s_idx, take
     cdef bint pos_null, cnt_null
-    cdef DrakenConstantStringPayload* const_val
+    cdef DrakenConstantStringPayload* csp
     cdef int32_t const_len
     cdef const char* row_data
     cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(n, 8)
@@ -466,13 +467,13 @@ cpdef StringVector vector_string_substring(StringVector vec, object from_pos, ob
     # ------------------------------------------------------------------
     # Const-encoded string
     # ------------------------------------------------------------------
-    if vec._has_const:
-        if vec._const_is_null or vec._const_value == NULL:
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
             return builder.finish()
-        const_val = vec._const_value
-        const_len = const_val.length
+        csp = <DrakenConstantStringPayload*>uv.data
+        const_len = <int32_t>csp.length
         for i in range(n):
             start_val = _read_int_arg(pos_iv, i, &pos_null)
             if pos_null:
@@ -506,19 +507,14 @@ cpdef StringVector vector_string_substring(StringVector vec, object from_pos, ob
             if take < 0:
                 take = 0
 
-            builder.append_bytes(<const char*>const_val.data + s_idx, take)
+            builder.append_bytes(<const char*>csp.data + s_idx, take)
         return builder.finish()
 
     # ------------------------------------------------------------------
     # Dict-encoded string
     # ------------------------------------------------------------------
-    if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
+    if uv.selection != NULL:  # dictionary
         return _substring_dict(vec, pos_iv, cnt_iv, cnt_is_null_vec, n)
-
-    # ------------------------------------------------------------------
-    # RLE-encoded string — materialize to dense then fall through
-    # ------------------------------------------------------------------
-    cdef StringVector dense_vec
 
     # ------------------------------------------------------------------
     # Dense-encoded string
@@ -534,26 +530,32 @@ cdef StringVector _substring_dict(
     Py_ssize_t n,
 ):
     """Dict encoding path for substring."""
-    cdef DrakenVarBuffer* dict_ptr = vec._dict_values
-    cdef Py_ssize_t dict_size = dict_ptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef DrakenVarBuffer* dict_ptr = <DrakenVarBuffer*>uv.data
+    cdef Py_ssize_t dict_size = <Py_ssize_t>dict_ptr.length
     cdef int32_t dict_start, dict_end, dict_len
     cdef int64_t start_val, count_val
     cdef Py_ssize_t s_idx, take
     cdef bint pos_null, cnt_null
     cdef Py_ssize_t j
-    cdef uint8_t* codes = vec._dict_codes
-    cdef uint8_t code_width = vec._dict_code_width
-    cdef uint8_t* row_nulls = vec.ptr.null_bitmap
+    cdef uint8_t* codes = <uint8_t*>uv.selection
+    cdef uint8_t code_width = uv.sel_width
+    cdef uint8_t* row_nulls = uv.validity
     cdef uint32_t code
     cdef Py_ssize_t i
     cdef StringVector new_dict_sv
     cdef StringVectorBuilder dict_builder
     cdef StringVectorBuilder builder
+    cdef DrakenVector* piv_uv
+    cdef DrakenVector* civ_uv
+
+    piv_uv = pos_iv.unified()
 
     # Const pos + const (or null) count → operate on dict values only — O(dict_size)
-    if pos_iv._has_const and not pos_iv._const_is_null:
-        if cnt_is_null_vec or (cnt_iv._has_const and not cnt_iv._const_is_null):
-            start_val = pos_iv._const_value
+    if piv_uv.data_length == 1 and piv_uv.validity == NULL:  # const non-null pos
+        civ_uv = cnt_iv.unified() if not cnt_is_null_vec else NULL
+        if cnt_is_null_vec or (civ_uv != NULL and civ_uv.data_length == 1 and civ_uv.validity == NULL):
+            start_val = (<int64_t*>piv_uv.data)[0]
             dict_builder = StringVectorBuilder.with_estimate(dict_size, 8)
             for j in range(dict_size):
                 dict_start = dict_ptr.offsets[j]
@@ -574,7 +576,7 @@ cdef StringVector _substring_dict(
                 if cnt_is_null_vec:
                     count_val = dict_len
                 else:
-                    count_val = cnt_iv._const_value
+                    count_val = (<int64_t*>civ_uv.data)[0]
 
                 if count_val < 0:
                     take = 0
@@ -594,18 +596,20 @@ cdef StringVector _substring_dict(
             )
 
     # Const-null pos → all rows null
-    if pos_iv._has_const and pos_iv._const_is_null:
+    if piv_uv.data_length == 1 and piv_uv.validity != NULL:
         builder = StringVectorBuilder.with_estimate(n, 0)
         for i in range(n):
             builder.append_null()
         return builder.finish()
 
     # Const-null count → all rows null (count=NULL propagates)
-    if not cnt_is_null_vec and cnt_iv is not None and cnt_iv._has_const and cnt_iv._const_is_null:
-        builder = StringVectorBuilder.with_estimate(n, 0)
-        for i in range(n):
-            builder.append_null()
-        return builder.finish()
+    if not cnt_is_null_vec and cnt_iv is not None:
+        civ_uv = cnt_iv.unified()
+        if civ_uv.data_length == 1 and civ_uv.validity != NULL:
+            builder = StringVectorBuilder.with_estimate(n, 0)
+            for i in range(n):
+                builder.append_null()
+            return builder.finish()
 
     # Varying args — per-row dict code lookup (no full materialisation)
     builder = StringVectorBuilder.with_estimate(n, 8)

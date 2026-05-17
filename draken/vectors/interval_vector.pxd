@@ -4,6 +4,7 @@ from libc.stdint cimport int8_t
 from libc.stdint cimport uint64_t, uint8_t
 
 from draken.core.buffers cimport DrakenFixedBuffer, DrakenRLEBuffer
+from draken.core.buffers cimport DrakenVector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.timestamp_vector cimport TimestampVector
 from draken.vectors.vector cimport Vector
@@ -17,6 +18,7 @@ cdef class IntervalVector(Vector):
 
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
+    cdef DrakenVector* unified(self) noexcept
 
     cpdef IntervalVector take(self, int32_t[::1] indices)
 

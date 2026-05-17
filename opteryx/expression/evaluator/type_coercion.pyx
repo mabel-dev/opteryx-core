@@ -21,6 +21,9 @@ from draken.vectors.string_vector import StringVector
 from draken.vectors.time_vector import TimeVector
 from draken.vectors.timestamp_vector import TimestampVector
 
+from draken.core.buffers cimport DrakenVector
+from draken.vectors.vector cimport Vector
+
 from opteryx.compiled.vector_ops import (
     bool_vector_all_true,
     bool_vector_from_int8_mask,
@@ -31,9 +34,13 @@ from opteryx.compiled.vector_ops import (
 cdef object _EPOCH_DATE = datetime.date(1970, 1, 1)
 cdef object _EPOCH_DATETIME = datetime.datetime(1970, 1, 1)
 
-# Mirrors draken.encoding.DRAKEN_ENCODING_CONSTANT; duplicated as a DEF so
-# the _is_typed_constant_encoded_vector check folds to a literal compare.
-DEF _DRAKEN_ENCODING_CONSTANT = 3
+
+cdef inline bint _is_const_vector(object value) noexcept:
+    cdef DrakenVector* uv
+    if not isinstance(value, Vector):
+        return False
+    uv = (<Vector>value).unified()
+    return uv.data_length == 1
 
 
 cpdef object _dictionary_arrow_type(vec):
@@ -76,7 +83,7 @@ cpdef object _dictionary_compare_vector(vec):
 
 cpdef bint _is_typed_constant_encoded_vector(value):
     """True when `value` is a Draken vector with CONSTANT encoding."""
-    return getattr(value, "encoding", None) == _DRAKEN_ENCODING_CONSTANT
+    return _is_const_vector(value)
 
 
 cpdef bint _is_constant_vector_like(value):
@@ -94,9 +101,9 @@ cpdef object _constant_scalar_value(value):
 
 cpdef bytes _coerce_str(value):
     # Inline _constant_scalar_value: most callers pass a Python literal, in
-    # which case the encoding-attr check is one fast getattr and we skip the
-    # body. The Draken vector path falls through to the [0] unwrap.
-    if getattr(value, "encoding", None) == _DRAKEN_ENCODING_CONSTANT:
+    # which case the isinstance check is fast and we skip the body.
+    # The Draken vector path falls through to the [0] unwrap.
+    if _is_const_vector(value):
         value = None if len(value) == 0 else value[0]
     if isinstance(value, bytes):
         return value
@@ -126,7 +133,7 @@ cpdef frozenset _coerce_float_set(values):
 
 
 cpdef long long _coerce_int64(value):
-    if getattr(value, "encoding", None) == _DRAKEN_ENCODING_CONSTANT:
+    if _is_const_vector(value):
         value = None if len(value) == 0 else value[0]
     if isinstance(value, datetime.datetime):
         return <long long>(value.timestamp() * 1_000)
@@ -143,7 +150,7 @@ cpdef frozenset _coerce_int64_set(values):
 
 
 cpdef long long _coerce_date32(value):
-    if getattr(value, "encoding", None) == _DRAKEN_ENCODING_CONSTANT:
+    if _is_const_vector(value):
         value = None if len(value) == 0 else value[0]
     if isinstance(value, datetime.datetime):
         return (value.date() - _EPOCH_DATE).days
@@ -160,7 +167,7 @@ cpdef frozenset _coerce_date32_set(values):
 
 
 cpdef long long _coerce_timestamp(value):
-    if getattr(value, "encoding", None) == _DRAKEN_ENCODING_CONSTANT:
+    if _is_const_vector(value):
         value = None if len(value) == 0 else value[0]
     if isinstance(value, (bytes, bytearray, memoryview, str)):
         # Lazy: parse_timestamp_value lives in opteryx.expression.casts which

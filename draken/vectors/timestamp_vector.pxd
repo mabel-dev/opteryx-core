@@ -1,9 +1,10 @@
 from libc.stdint cimport int32_t
 from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
-from libc.stdint cimport uint64_t, uint8_t
+from libc.stdint cimport uint64_t, uint8_t, uint16_t, uint32_t
 
 from draken.core.buffers cimport ConstAccessor, DictAccessor, DrakenFixedBuffer, DrakenRLEBuffer, DrakenVarBuffer
+from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.int64_vector cimport Int64Vector
@@ -32,10 +33,10 @@ cdef class TimestampVector(Vector):
     cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
+    cdef DrakenVector* unified(self) noexcept
 
     cpdef TimestampVector take(self, int32_t[::1] indices)
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
-    cdef BoolVector _compare_scalar_dict(self, int64_t value, int op)
     cpdef BoolVector _compare_scalar(self, int64_t value, int op)
     cpdef BoolVector _compare_vector(self, TimestampVector other, int op)
 
@@ -89,4 +90,13 @@ cdef TimestampVector from_rle_builder(
     size_t num_runs,
     str timestamp_unit,
     uint8_t* null_bitmap=*,
+)
+cdef TimestampVector timestamp_dict_from_raw(
+    int64_t num_rows,
+    uint8_t* packed_codes,
+    uint8_t code_width,
+    DrakenVarBuffer* dict_values,
+    uint8_t ordered,
+    uint8_t* row_nulls,
+    str timestamp_unit,
 )

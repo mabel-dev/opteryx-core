@@ -16,16 +16,15 @@ from libc.math cimport HUGE_VAL
 from libc.string cimport memset, memcpy, memcmp
 from libc.stdlib cimport malloc, free
 
-from draken.core.buffers cimport DrakenFixedBuffer
+from draken.core.buffers cimport DrakenFixedBuffer, DrakenVector
 from draken.core.buffers cimport DRAKEN_INT64
 from draken.core.buffers cimport DRAKEN_FLOAT64
 from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.fixed_vector cimport free_fixed_buffer
 from draken.vectors.vector cimport Vector
-from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
-from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
+from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64, _refresh_unified_int64
+from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64, _refresh_unified_float64
 from draken.vectors.string_vector cimport StringVector, _StringVectorCIterator, StringElement, _materialize_dict_string
-from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 from draken.vectors._decimal_vector cimport DecimalVector
 
 
@@ -143,6 +142,7 @@ cdef inline Int64Vector _wrap_int64_buffer(DrakenFixedBuffer* buf) except *:
     vec._const_value = 0
     vec._has_const = False
     vec._const_is_null = False
+    _refresh_unified_int64(vec)
     return vec
 
 
@@ -167,6 +167,7 @@ cdef inline Float64Vector _wrap_float64_buffer(DrakenFixedBuffer* buf) except *:
     vec._const_value = 0.0
     vec._has_const = False
     vec._const_is_null = False
+    _refresh_unified_float64(vec)
     return vec
 
 
@@ -315,19 +316,22 @@ cdef class CountValueCollector(BaseCollector):
         cdef uint8_t* nulls
         cdef Int64Vector iv
         cdef Float64Vector fv
+        cdef DrakenVector* uv
 
         # Constant-encoded vector: either all-null or all-non-null
         if isinstance(vec, Int64Vector):
             iv = <Int64Vector>vec
-            if iv._has_const:
-                if not iv._const_is_null:
+            uv = iv.unified()
+            if uv.data_length == 1:
+                if uv.validity == NULL:
                     for i in range(n_rows):
                         counts[state_indices[i]] += 1
                 return
         elif isinstance(vec, Float64Vector):
             fv = <Float64Vector>vec
-            if fv._has_const:
-                if not fv._const_is_null:
+            uv = fv.unified()
+            if uv.data_length == 1:
+                if uv.validity == NULL:
                     for i in range(n_rows):
                         counts[state_indices[i]] += 1
                 return
@@ -403,17 +407,19 @@ cdef class SumInt64Collector(BaseCollector):
         cdef uint8_t* nulls
         cdef Py_ssize_t i
         cdef int64_t si, const_val
+        cdef DrakenVector* uv
 
-        if vec._has_const:
-            if not vec._const_is_null:
-                const_val = vec._const_value
+        uv = vec.unified()
+        if uv.data_length == 1:
+            if uv.validity == NULL:
+                const_val = (<int64_t*>uv.data)[0]
                 for i in range(n_rows):
                     si = state_indices[i]
                     sums[si] += const_val
                     _bitmap_set(seen, si)
             return
 
-        if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec.ptr.data == NULL:
+        if uv.selection != NULL:
             vec = _materialize_dict_int64(vec)
         data = <int64_t*>vec.dense_ptr()
         nulls = vec.null_bitmap_ptr()
@@ -525,17 +531,19 @@ cdef class SumFloat64Collector(BaseCollector):
         cdef Py_ssize_t i
         cdef int64_t si
         cdef double const_val
+        cdef DrakenVector* uv
 
-        if vec._has_const:
-            if not vec._const_is_null:
-                const_val = vec._const_value
+        uv = vec.unified()
+        if uv.data_length == 1:
+            if uv.validity == NULL:
+                const_val = (<double*>uv.data)[0]
                 for i in range(n_rows):
                     si = state_indices[i]
                     sums[si] += const_val
                     _bitmap_set(seen, si)
             return
 
-        if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec.ptr.data == NULL:
+        if uv.selection != NULL:
             vec = _materialize_dict_float64(vec)
         data = <double*>vec.dense_ptr()
         nulls = vec.null_bitmap_ptr()
@@ -650,10 +658,12 @@ cdef class MinMaxInt64Collector(BaseCollector):
         cdef uint8_t* nulls
         cdef Py_ssize_t i
         cdef int64_t si, v
+        cdef DrakenVector* uv
 
-        if vec._has_const:
-            if not vec._const_is_null:
-                v = vec._const_value
+        uv = vec.unified()
+        if uv.data_length == 1:
+            if uv.validity == NULL:
+                v = (<int64_t*>uv.data)[0]
                 if self._direction == 1:   # MIN
                     for i in range(n_rows):
                         si = state_indices[i]
@@ -668,7 +678,7 @@ cdef class MinMaxInt64Collector(BaseCollector):
                         _bitmap_set(seen, si)
             return
 
-        if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec.ptr.data == NULL:
+        if uv.selection != NULL:
             vec = _materialize_dict_int64(vec)
         data = <int64_t*>vec.dense_ptr()
         nulls = vec.null_bitmap_ptr()
@@ -797,10 +807,12 @@ cdef class MinMaxFloat64Collector(BaseCollector):
         cdef Py_ssize_t i
         cdef int64_t si
         cdef double v
+        cdef DrakenVector* uv
 
-        if vec._has_const:
-            if not vec._const_is_null:
-                v = vec._const_value
+        uv = vec.unified()
+        if uv.data_length == 1:
+            if uv.validity == NULL:
+                v = (<double*>uv.data)[0]
                 if self._direction == 1:   # MIN
                     for i in range(n_rows):
                         si = state_indices[i]
@@ -815,7 +827,7 @@ cdef class MinMaxFloat64Collector(BaseCollector):
                         _bitmap_set(seen, si)
             return
 
-        if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec.ptr.data == NULL:
+        if uv.selection != NULL:
             vec = _materialize_dict_float64(vec)
         data = <double*>vec.dense_ptr()
         nulls = vec.null_bitmap_ptr()
@@ -927,7 +939,7 @@ cdef class MinMaxObjectCollector(BaseCollector):
         # Fast path: StringVector with C-level iteration (no Python materialization)
         if isinstance(vec, StringVector):
             sv_native = <StringVector>vec
-            if sv_native._encoding == DRAKEN_ENCODING_DICTIONARY and sv_native.ptr.data == NULL:
+            if sv_native.unified().selection != NULL:
                 sv_native = _materialize_dict_string(sv_native)
             self._accumulate_string_vector_native(sv_native, state_indices, n_rows, seen)
         else:
@@ -1091,18 +1103,20 @@ cdef class AvgCollector(BaseCollector):
         cdef double const_f64
         cdef double dec_factor
         cdef int64_t const_i64
+        cdef DrakenVector* uv
 
         if isinstance(raw, Int64Vector):
             iv = <Int64Vector>raw
-            if iv._has_const:
-                if not iv._const_is_null:
-                    const_i64 = iv._const_value
+            uv = iv.unified()
+            if uv.data_length == 1:
+                if uv.validity == NULL:
+                    const_i64 = (<int64_t*>uv.data)[0]
                     for i in range(n_rows):
                         si = state_indices[i]
                         sums[si] += const_i64
                         counts[si] += 1
                 return
-            if iv._encoding == DRAKEN_ENCODING_DICTIONARY and iv.ptr.data == NULL:
+            if uv.selection != NULL:
                 iv = _materialize_dict_int64(iv)
             i64 = <int64_t*>iv.dense_ptr()
             nulls = iv.null_bitmap_ptr()
@@ -1114,9 +1128,10 @@ cdef class AvgCollector(BaseCollector):
         elif isinstance(raw, DecimalVector):
             dv = <DecimalVector>raw
             dec_factor = 10.0 ** (-dv._scale)
-            if dv._has_const:
-                if not dv._const_is_null:
-                    const_f64 = <double>dv._const_value * dec_factor
+            uv = dv.unified()
+            if uv.data_length == 1:
+                if uv.validity == NULL:
+                    const_f64 = <double>(<int64_t*>uv.data)[0] * dec_factor
                     for i in range(n_rows):
                         si = state_indices[i]
                         sums[si] += const_f64
@@ -1131,15 +1146,16 @@ cdef class AvgCollector(BaseCollector):
                     counts[si] += 1
         else:
             fv = <Float64Vector>raw
-            if fv._has_const:
-                if not fv._const_is_null:
-                    const_f64 = fv._const_value
+            uv = fv.unified()
+            if uv.data_length == 1:
+                if uv.validity == NULL:
+                    const_f64 = (<double*>uv.data)[0]
                     for i in range(n_rows):
                         si = state_indices[i]
                         sums[si] += const_f64
                         counts[si] += 1
                 return
-            if fv._encoding == DRAKEN_ENCODING_DICTIONARY and fv.ptr.data == NULL:
+            if uv.selection != NULL:
                 fv = _materialize_dict_float64(fv)
             f64 = <double*>fv.dense_ptr()
             nulls = fv.null_bitmap_ptr()
@@ -1245,10 +1261,12 @@ cdef class SumDecimalCollector(BaseCollector):
         cdef int64_t si
         cdef double const_val
         cdef double factor = self._factor
+        cdef DrakenVector* uv
 
-        if vec._has_const:
-            if not vec._const_is_null:
-                const_val = <double>vec._const_value * factor
+        uv = vec.unified()
+        if uv.data_length == 1:
+            if uv.validity == NULL:
+                const_val = <double>(<int64_t*>uv.data)[0] * factor
                 for i in range(n_rows):
                     si = state_indices[i]
                     sums[si] += const_val
@@ -1361,10 +1379,12 @@ cdef class MinMaxDecimalCollector(BaseCollector):
         cdef uint8_t* nulls
         cdef Py_ssize_t i
         cdef int64_t si, v
+        cdef DrakenVector* uv
 
-        if vec._has_const:
-            if not vec._const_is_null:
-                v = vec._const_value
+        uv = vec.unified()
+        if uv.data_length == 1:
+            if uv.validity == NULL:
+                v = (<int64_t*>uv.data)[0]
                 if self._direction == 1:   # MIN
                     for i in range(n_rows):
                         si = state_indices[i]

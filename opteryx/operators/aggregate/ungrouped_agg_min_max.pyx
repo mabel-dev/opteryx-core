@@ -299,6 +299,7 @@ cdef class MinBytesAggregate(UngroupedAggregate):
             self._col_type = _classify_vector(raw)
 
         cdef DrakenVarBuffer* buf
+        cdef DrakenVector*    uv
         cdef const uint8_t*   nulls
         cdef Py_ssize_t i
         cdef const char* ptr_a
@@ -307,10 +308,11 @@ cdef class MinBytesAggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_STRING:
             svec = <StringVector>raw
-            if svec._has_const:
-                if not svec._const_is_null:
-                    ptr_b = <const char*>svec._const_value.data
-                    len_b = <size_t>svec._const_value.length
+            uv = svec.unified()
+            if uv.data_length == 1:
+                if uv.validity == NULL:
+                    ptr_b = <const char*>(<DrakenConstantStringPayload*>uv.data).data
+                    len_b = <size_t>(<DrakenConstantStringPayload*>uv.data).length
                     if self._result is None:
                         self._result = ptr_b[:len_b]
                     else:
@@ -322,15 +324,13 @@ cdef class MinBytesAggregate(UngroupedAggregate):
             # only.  Only worthwhile when K << N — at K ~ N this loses to
             # the dense path's tighter inner loop.
             if (
-                svec._encoding == DRAKEN_ENCODING_DICTIONARY
-                and svec._dict_codes != NULL
-                and svec._dict_values != NULL
+                uv.selection != NULL
                 and svec.c_dict_size() <= (nrows >> 2)
             ):
                 self._scan_dict_min(svec)
                 return
-            buf   = svec.ptr
-            nulls = buf.null_bitmap
+            buf   = <DrakenVarBuffer*>uv.data
+            nulls = uv.validity
             for i in range(nrows):
                 if nulls == NULL or _bitmap_is_valid(nulls, i):
                     ptr_b = <const char*>(buf.data + buf.offsets[i])
@@ -411,6 +411,7 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
             self._col_type = _classify_vector(raw)
 
         cdef DrakenVarBuffer* buf
+        cdef DrakenVector*    uv
         cdef const uint8_t*   nulls
         cdef Py_ssize_t i
         cdef const char* ptr_a
@@ -419,10 +420,11 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_STRING:
             svec = <StringVector>raw
-            if svec._has_const:
-                if not svec._const_is_null:
-                    ptr_b = <const char*>svec._const_value.data
-                    len_b = <size_t>svec._const_value.length
+            uv = svec.unified()
+            if uv.data_length == 1:
+                if uv.validity == NULL:
+                    ptr_b = <const char*>(<DrakenConstantStringPayload*>uv.data).data
+                    len_b = <size_t>(<DrakenConstantStringPayload*>uv.data).length
                     if self._result is None:
                         self._result = ptr_b[:len_b]
                     else:
@@ -431,15 +433,13 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
                             self._result = ptr_b[:len_b]
                 return
             if (
-                svec._encoding == DRAKEN_ENCODING_DICTIONARY
-                and svec._dict_codes != NULL
-                and svec._dict_values != NULL
+                uv.selection != NULL
                 and svec.c_dict_size() <= (nrows >> 2)
             ):
                 self._scan_dict_max(svec)
                 return
-            buf   = svec.ptr
-            nulls = buf.null_bitmap
+            buf   = <DrakenVarBuffer*>uv.data
+            nulls = uv.validity
             for i in range(nrows):
                 if nulls == NULL or _bitmap_is_valid(nulls, i):
                     ptr_b = <const char*>(buf.data + buf.offsets[i])

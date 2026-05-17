@@ -29,8 +29,9 @@ Semantics:
 The Python entry point validates inputs and pre-extracts raw buffer pointers
 into C arrays. The inner kernels are pure C: typed Vector returns, no
 Python lists, no Python scalar intermediates. Constant values are read
-directly from each argument's `ConstAccessor.value_ptr` and copied into
-the output via `memcpy` — no boxing through Python `int`/`float`/`bytes`.
+directly from each argument's `DrakenVector.data` (via `unified()`) and
+copied into the output via `memcpy` — no boxing through Python
+`int`/`float`/`bytes`.
 
 Shared bitmap / type-classification / vector-construction helpers live in
 _helper_select.pyx and are prefixed with `_sel_`.
@@ -41,11 +42,11 @@ from libc.stdlib cimport free, malloc
 from libc.string cimport memcpy, memset
 
 from draken.core.buffers cimport (
-    ConstAccessor,
     DRAKEN_BOOL,
     DRAKEN_STRING,
     DrakenConstantStringPayload,
     DrakenFixedBuffer,
+    DrakenVector,
 )
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.string_vector cimport (
@@ -61,16 +62,16 @@ from draken.vectors.vector cimport Vector
 # ---------------------------------------------------------------------------
 
 cdef Vector _coalesce_fixed_kernel(
-    ConstAccessor** const_accs,
+    DrakenVector** unified_vecs,
     DrakenFixedBuffer** src_ptrs,
     Py_ssize_t n_args,
     Py_ssize_t length,
     int output_type,
     Vector template,
 ):
-    """Pure C inner loop. const_accs[i] is non-NULL iff arg i is constant-encoded;
+    """Pure C inner loop. unified_vecs[i].data_length == 1 iff arg i is constant-encoded;
     src_ptrs[i] is non-NULL iff arg i is a regular fixed-width buffer.
-    Exactly one of (const_accs[i], src_ptrs[i]) must be non-NULL per arg.
+    Exactly one of (is_const, src_ptrs[i] != NULL) must hold per arg.
     """
     cdef Vector result = _sel_new_fixed_vector(output_type, length, template)
     cdef DrakenFixedBuffer* out_ptr = _sel_fixed_ptr(result)
@@ -80,7 +81,7 @@ cdef Vector _coalesce_fixed_kernel(
     cdef Py_ssize_t row
     cdef Py_ssize_t arg_idx
     cdef bint found
-    cdef ConstAccessor* acc
+    cdef DrakenVector* uv
     cdef DrakenFixedBuffer* src_ptr
     cdef char* out_data = <char*>out_ptr.data
     cdef Py_ssize_t itemsize = out_ptr.itemsize
@@ -94,13 +95,13 @@ cdef Vector _coalesce_fixed_kernel(
     for row in range(length):
         found = False
         for arg_idx in range(n_args):
-            acc = const_accs[arg_idx]
-            if acc != NULL:
-                if acc.is_null != 0:
+            uv = unified_vecs[arg_idx]
+            if uv.data_length == 1:
+                if uv.validity != NULL:
                     continue
                 memcpy(
                     out_data + row * itemsize,
-                    acc.value_ptr,
+                    uv.data,
                     itemsize,
                 )
                 found = True
@@ -137,7 +138,7 @@ cdef Vector _coalesce_fixed_kernel(
 # ---------------------------------------------------------------------------
 
 cdef Vector _coalesce_bool_kernel(
-    ConstAccessor** const_accs,
+    DrakenVector** unified_vecs,
     DrakenFixedBuffer** bv_ptrs,
     Py_ssize_t n_args,
     Py_ssize_t length,
@@ -145,8 +146,8 @@ cdef Vector _coalesce_bool_kernel(
     """Pure C inner loop for BoolVector args.
 
     bv_ptrs[i] is the BoolVector data buffer (same DrakenFixedBuffer struct,
-    interpreted as bit-packed). const_accs[i] is non-NULL iff arg i is
-    constant-encoded; in that case the bool value is at value_ptr[0].
+    interpreted as bit-packed). unified_vecs[i].data_length == 1 iff arg i is
+    constant-encoded; in that case the bool value is at uv.data[0].
     """
     cdef BoolVector result = BoolVector(length)
     cdef Py_ssize_t nbytes = (length + 7) >> 3
@@ -157,7 +158,7 @@ cdef Vector _coalesce_bool_kernel(
     cdef Py_ssize_t arg_idx
     cdef bint found
     cdef bint value
-    cdef ConstAccessor* acc
+    cdef DrakenVector* uv
     cdef DrakenFixedBuffer* bv_ptr
 
     if nbytes != 0:
@@ -171,11 +172,11 @@ cdef Vector _coalesce_bool_kernel(
         found = False
         value = False
         for arg_idx in range(n_args):
-            acc = const_accs[arg_idx]
-            if acc != NULL:
-                if acc.is_null != 0:
+            uv = unified_vecs[arg_idx]
+            if uv.data_length == 1:
+                if uv.validity != NULL:
                     continue
-                value = (<uint8_t*>acc.value_ptr)[0] != 0
+                value = (<uint8_t*>uv.data)[0] != 0
                 found = True
                 break
 
@@ -214,7 +215,7 @@ cdef Vector _coalesce_bool_kernel(
 # ---------------------------------------------------------------------------
 
 cdef Vector _coalesce_string_kernel(
-    ConstAccessor** const_accs,
+    DrakenVector** unified_vecs,
     DrakenConstantStringPayload** const_payloads,
     tuple views,
     Py_ssize_t n_args,
@@ -222,7 +223,8 @@ cdef Vector _coalesce_string_kernel(
 ):
     """Pure C inner loop for StringVector args.
 
-    const_accs[i] / const_payloads[i] are non-NULL iff arg i is constant-encoded;
+    unified_vecs[i].data_length == 1 iff arg i is constant-encoded;
+    const_payloads[i] is non-NULL for constant-encoded args;
     views[i] holds a _StringVectorView for non-const args, None otherwise.
     `views` is a tuple of cdef class instances — Cython generates C-level
     dispatch for the .is_null/.value_len/.value_ptr method calls.
@@ -233,7 +235,7 @@ cdef Vector _coalesce_string_kernel(
     cdef Py_ssize_t value_len
     cdef const char* value_ptr
     cdef bint found
-    cdef ConstAccessor* acc
+    cdef DrakenVector* uv
     cdef DrakenConstantStringPayload* payload
     cdef _StringVectorView view
     cdef StringVectorBuilder builder
@@ -242,9 +244,9 @@ cdef Vector _coalesce_string_kernel(
     for row in range(length):
         found = False
         for arg_idx in range(n_args):
-            acc = const_accs[arg_idx]
-            if acc != NULL:
-                if acc.is_null != 0:
+            uv = unified_vecs[arg_idx]
+            if uv.data_length == 1:
+                if uv.validity != NULL:
                     continue
                 payload = const_payloads[arg_idx]
                 total_bytes += payload.length
@@ -265,9 +267,9 @@ cdef Vector _coalesce_string_kernel(
     for row in range(length):
         found = False
         for arg_idx in range(n_args):
-            acc = const_accs[arg_idx]
-            if acc != NULL:
-                if acc.is_null != 0:
+            uv = unified_vecs[arg_idx]
+            if uv.data_length == 1:
+                if uv.validity != NULL:
                     continue
                 payload = const_payloads[arg_idx]
                 builder.append_bytes(
@@ -304,15 +306,15 @@ cdef Vector _coalesce_fixed_dispatch(
     int output_type,
     Vector template,
 ):
-    cdef ConstAccessor** const_accs = <ConstAccessor**>malloc(
-        n_args * sizeof(ConstAccessor*)
+    cdef DrakenVector** unified_vecs = <DrakenVector**>malloc(
+        n_args * sizeof(DrakenVector*)
     )
     cdef DrakenFixedBuffer** src_ptrs = <DrakenFixedBuffer**>malloc(
         n_args * sizeof(DrakenFixedBuffer*)
     )
-    if const_accs == NULL or src_ptrs == NULL:
-        if const_accs != NULL:
-            free(const_accs)
+    if unified_vecs == NULL or src_ptrs == NULL:
+        if unified_vecs != NULL:
+            free(unified_vecs)
         if src_ptrs != NULL:
             free(src_ptrs)
         raise MemoryError()
@@ -324,17 +326,17 @@ cdef Vector _coalesce_fixed_dispatch(
     try:
         for arg_idx in range(n_args):
             vec = <Vector>arrays[arg_idx]
-            const_accs[arg_idx] = vec.const_accessor()
-            if const_accs[arg_idx] == NULL:
-                src_ptrs[arg_idx] = _sel_fixed_ptr(vec)
-            else:
+            unified_vecs[arg_idx] = vec.unified()
+            if unified_vecs[arg_idx].data_length == 1:
                 src_ptrs[arg_idx] = NULL
+            else:
+                src_ptrs[arg_idx] = _sel_fixed_ptr(vec)
 
         result = _coalesce_fixed_kernel(
-            const_accs, src_ptrs, n_args, length, output_type, template
+            unified_vecs, src_ptrs, n_args, length, output_type, template
         )
     finally:
-        free(const_accs)
+        free(unified_vecs)
         free(src_ptrs)
 
     return result
@@ -345,15 +347,15 @@ cdef Vector _coalesce_bool_dispatch(
     Py_ssize_t n_args,
     Py_ssize_t length,
 ):
-    cdef ConstAccessor** const_accs = <ConstAccessor**>malloc(
-        n_args * sizeof(ConstAccessor*)
+    cdef DrakenVector** unified_vecs = <DrakenVector**>malloc(
+        n_args * sizeof(DrakenVector*)
     )
     cdef DrakenFixedBuffer** bv_ptrs = <DrakenFixedBuffer**>malloc(
         n_args * sizeof(DrakenFixedBuffer*)
     )
-    if const_accs == NULL or bv_ptrs == NULL:
-        if const_accs != NULL:
-            free(const_accs)
+    if unified_vecs == NULL or bv_ptrs == NULL:
+        if unified_vecs != NULL:
+            free(unified_vecs)
         if bv_ptrs != NULL:
             free(bv_ptrs)
         raise MemoryError()
@@ -366,16 +368,16 @@ cdef Vector _coalesce_bool_dispatch(
     try:
         for arg_idx in range(n_args):
             vec = <Vector>arrays[arg_idx]
-            const_accs[arg_idx] = vec.const_accessor()
-            if const_accs[arg_idx] == NULL:
+            unified_vecs[arg_idx] = vec.unified()
+            if unified_vecs[arg_idx].data_length == 1:
+                bv_ptrs[arg_idx] = NULL
+            else:
                 bv = <BoolVector>vec
                 bv_ptrs[arg_idx] = bv.ptr
-            else:
-                bv_ptrs[arg_idx] = NULL
 
-        result = _coalesce_bool_kernel(const_accs, bv_ptrs, n_args, length)
+        result = _coalesce_bool_kernel(unified_vecs, bv_ptrs, n_args, length)
     finally:
-        free(const_accs)
+        free(unified_vecs)
         free(bv_ptrs)
 
     return result
@@ -386,17 +388,17 @@ cdef Vector _coalesce_string_dispatch(
     Py_ssize_t n_args,
     Py_ssize_t length,
 ):
-    cdef ConstAccessor** const_accs = <ConstAccessor**>malloc(
-        n_args * sizeof(ConstAccessor*)
+    cdef DrakenVector** unified_vecs = <DrakenVector**>malloc(
+        n_args * sizeof(DrakenVector*)
     )
     cdef DrakenConstantStringPayload** const_payloads = (
         <DrakenConstantStringPayload**>malloc(
             n_args * sizeof(DrakenConstantStringPayload*)
         )
     )
-    if const_accs == NULL or const_payloads == NULL:
-        if const_accs != NULL:
-            free(const_accs)
+    if unified_vecs == NULL or const_payloads == NULL:
+        if unified_vecs != NULL:
+            free(unified_vecs)
         if const_payloads != NULL:
             free(const_payloads)
         raise MemoryError()
@@ -410,10 +412,10 @@ cdef Vector _coalesce_string_dispatch(
     try:
         for arg_idx in range(n_args):
             vec = <Vector>arrays[arg_idx]
-            const_accs[arg_idx] = vec.const_accessor()
-            if const_accs[arg_idx] != NULL:
+            unified_vecs[arg_idx] = vec.unified()
+            if unified_vecs[arg_idx].data_length == 1:
                 const_payloads[arg_idx] = (
-                    <DrakenConstantStringPayload*>const_accs[arg_idx].value_ptr
+                    <DrakenConstantStringPayload*>unified_vecs[arg_idx].data
                 )
             else:
                 const_payloads[arg_idx] = NULL
@@ -421,10 +423,10 @@ cdef Vector _coalesce_string_dispatch(
                 view_list[arg_idx] = sv.view()
 
         result = _coalesce_string_kernel(
-            const_accs, const_payloads, tuple(view_list), n_args, length
+            unified_vecs, const_payloads, tuple(view_list), n_args, length
         )
     finally:
-        free(const_accs)
+        free(unified_vecs)
         free(const_payloads)
 
     return result

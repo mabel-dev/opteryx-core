@@ -12,7 +12,7 @@ from libc.stdint cimport int32_t, uint8_t
 
 from draken.vectors.string_vector cimport StringVector, from_packed_dict
 from draken.vectors import string_vector as string_vector_module
-from draken.core.buffers cimport DrakenVarBuffer
+from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector
 
 
 cdef inline str _initcap_string(str text):
@@ -38,24 +38,27 @@ cdef inline str _initcap_string(str text):
 
 cpdef StringVector vector_initcap(StringVector vec):
     """Apply INITCAP transformation to each element of a StringVector."""
-    cdef Py_ssize_t n = vec.ptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t i
     cdef int32_t start, end
     cdef bytes raw
     cdef str text, transformed
-    cdef DrakenVarBuffer* ptr
+    cdef DrakenVarBuffer* vbuf
     cdef uint8_t* null_bm
     cdef Py_ssize_t dict_size
     cdef DrakenVarBuffer* ndp
+    cdef DrakenConstantStringPayload* csp
 
     # Constant encoding: process once, replicate
-    if vec._has_const:
+    if uv.data_length == 1:  # constant
         builder = string_vector_module.StringVectorBuilder.with_estimate(n, 16)
-        if vec._const_is_null or vec._const_value == NULL:
+        if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
         else:
-            raw = bytes(<uint8_t*>vec._const_value.data)[:vec._const_value.length]
+            csp = <DrakenConstantStringPayload*>uv.data
+            raw = bytes((<uint8_t*>csp.data)[:csp.length])
             try:
                 text = raw.decode("utf-8")
             except UnicodeDecodeError:
@@ -67,13 +70,14 @@ cpdef StringVector vector_initcap(StringVector vec):
         return builder.finish()
 
     # Dictionary encoding: transform each unique entry, repack with same codes
-    if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
-        dict_size = vec._dict_values.length
+    if uv.selection != NULL:  # dictionary
+        vbuf = <DrakenVarBuffer*>uv.data
+        dict_size = <Py_ssize_t>vbuf.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 16)
         for i in range(dict_size):
-            start = vec._dict_values.offsets[i]
-            end = vec._dict_values.offsets[i + 1]
-            raw = bytes(<uint8_t*>vec._dict_values.data + start)[:end - start]
+            start = vbuf.offsets[i]
+            end = vbuf.offsets[i + 1]
+            raw = bytes((<uint8_t*>vbuf.data + start)[:end - start])
             try:
                 text = raw.decode("utf-8")
             except UnicodeDecodeError:
@@ -82,22 +86,22 @@ cpdef StringVector vector_initcap(StringVector vec):
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            vec._dict_codes, vec._dict_code_width, n,
+            <uint8_t*>uv.selection, uv.sel_width, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
-            vec._dict_accessor.row_nulls,
+            uv.validity,
         )
 
     # Dense encoding: row by row
     builder = string_vector_module.StringVectorBuilder.with_estimate(n, 16)
-    ptr = vec.ptr
-    null_bm = ptr.null_bitmap
+    vbuf = <DrakenVarBuffer*>uv.data
+    null_bm = uv.validity
     for i in range(n):
         if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
             continue
-        start = ptr.offsets[i]
-        end = ptr.offsets[i + 1]
-        raw = bytes(<uint8_t*>ptr.data + start)[:end - start]
+        start = vbuf.offsets[i]
+        end = vbuf.offsets[i + 1]
+        raw = bytes((<uint8_t*>vbuf.data + start)[:end - start])
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:

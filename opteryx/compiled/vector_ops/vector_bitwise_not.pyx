@@ -23,11 +23,9 @@ See: vector_bitwise_or.pyx, vector_bitwise_and.pyx, vector_bitwise_xor.pyx,
 """
 
 from libc.stdint cimport int64_t, uint8_t
-from libc.stdlib cimport malloc, free
-from libc.string cimport memcpy
 
 from draken.vectors.int64_vector cimport Int64Vector
-from draken.core.buffers cimport DrakenFixedBuffer
+from draken.core.buffers cimport DrakenVector, DrakenFixedBuffer
 from draken.interop.vector_sequence cimport vector_from_sequence
 
 
@@ -51,16 +49,16 @@ cpdef object vector_bitwise_not(Int64Vector operand):
         Python's ~ operator on integers implements two's complement NOT.
         The result follows Python semantics: ~x = -x - 1
     """
-    cdef DrakenFixedBuffer* op = operand.ptr
-    cdef Py_ssize_t n = op.length
+    cdef DrakenVector* uv = operand.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
 
-    # Handle constant-encoded vector: data buffer is not materialised; use the
-    # stored scalar and return another constant vector.
-    if operand._has_const:
-        if operand._const_is_null:
+    # Handle constant-encoded vector
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             return Int64Vector.from_constant(None, n, is_null=True)
-        return Int64Vector.from_constant(~operand._const_value, n)
+        return Int64Vector.from_constant(~(<int64_t*>uv.data)[0], n)
 
+    cdef DrakenFixedBuffer* op = operand.ptr
     cdef int64_t* op_data = <int64_t*>op.data
     cdef uint8_t* op_null = op.null_bitmap
 

@@ -73,15 +73,17 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
         cdef const int64_t*     idata
         cdef const uint8_t*     nulls
         cdef DrakenFixedBuffer* ibuf
+        cdef DrakenVector*      uv
         cdef Py_ssize_t i
         cdef double v
 
         if self._col_type == _VTYPE_FLOAT64:
             vec_f = <Float64Vector>raw
-            if vec_f._has_const:
-                if not vec_f._const_is_null:
+            uv = vec_f.unified()
+            if uv.data_length == 1:
+                if uv.validity == NULL:
                     for i in range(nrows):
-                        if not self._state.append(vec_f._const_value):
+                        if not self._state.append((<double*>uv.data)[0]):
                             self._raise_append_failure()
                 return
             fdata = <const double*>vec_f.dense_ptr()
@@ -99,9 +101,10 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_INT64:
             vec_i = <Int64Vector>raw
-            if vec_i._has_const:
-                if not vec_i._const_is_null:
-                    v = <double>vec_i._const_value
+            uv = vec_i.unified()
+            if uv.data_length == 1:
+                if uv.validity == NULL:
+                    v = <double>(<int64_t*>uv.data)[0]
                     for i in range(nrows):
                         if not self._state.append(v):
                             self._raise_append_failure()
@@ -121,9 +124,10 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_INTEGER:
             vec_n = <IntegerVector>raw
-            if vec_n._has_const:
-                if not vec_n._const_is_null:
-                    v = <double>vec_n._const_value
+            uv = vec_n.unified()
+            if uv.data_length == 1:
+                if uv.validity == NULL:
+                    v = <double>(<int64_t*>uv.data)[0]
                     for i in range(nrows):
                         if not self._state.append(v):
                             self._raise_append_failure()

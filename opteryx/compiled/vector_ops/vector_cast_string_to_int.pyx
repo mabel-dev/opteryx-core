@@ -8,12 +8,12 @@
 # cython: optimize.use_switch=True
 # cython: optimize.unpack_method_calls=True
 
-from libc.stdint cimport int32_t, int64_t
+from libc.stdint cimport int32_t, int64_t, uint8_t
 from libc.stdlib cimport malloc, free
 
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
-from draken.core.buffers cimport DrakenVarBuffer, DRAKEN_ENCODING_DICTIONARY
+from draken.core.buffers cimport DrakenVarBuffer, DrakenVector
 
 
 cdef inline int64_t parse_int64(const char* data, int32_t length) except -1:
@@ -38,7 +38,8 @@ cdef inline int64_t parse_int64(const char* data, int32_t length) except -1:
 
 cpdef Int64Vector vector_cast_bytes_to_int(StringVector vec):
     """Parse each element of a StringVector as a decimal integer."""
-    cdef Py_ssize_t n = vec.ptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t i
     cdef StringRow row
     cdef int64_t* result_ptr
@@ -57,8 +58,8 @@ cpdef Int64Vector vector_cast_bytes_to_int(StringVector vec):
     try:
         result_view = <int64_t[:n]>result_ptr
 
-        if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
-            dv = vec._dict_values
+        if uv.selection != NULL:  # dictionary
+            dv = <DrakenVarBuffer*>uv.data
             dict_size = <Py_ssize_t>dv.length
             dict_ints = <int64_t*>malloc(<size_t>dict_size * sizeof(int64_t))
             if dict_ints == NULL:
@@ -69,12 +70,12 @@ cpdef Int64Vector vector_cast_bytes_to_int(StringVector vec):
                         <const char*>dv.data + dv.offsets[i],
                         dv.offsets[i + 1] - dv.offsets[i],
                     )
-                null_bm = vec._dict_accessor.row_nulls
+                null_bm = uv.validity
                 for i in range(n):
                     if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
                         result_view[i] = 0
                     else:
-                        code = _read_packed_code(vec._dict_codes, vec._dict_code_width, i)
+                        code = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
                         result_view[i] = dict_ints[code]
             finally:
                 free(dict_ints)

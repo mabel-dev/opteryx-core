@@ -18,15 +18,17 @@ binary_operators.
 
 from typing import List
 
-_DRAKEN_ENCODING_CONSTANT = 3
+from draken.vectors.vector import Vector
 
 
-def _is_constant_like(value) -> bool:
-    return getattr(value, "encoding", None) == _DRAKEN_ENCODING_CONSTANT
+cdef inline bint _is_constant_like(object value) noexcept:
+    if not isinstance(value, Vector):
+        return False
+    return value.is_constant_encoded()
 
 
 def _constant_scalar(value):
-    if getattr(value, "encoding", None) == _DRAKEN_ENCODING_CONSTANT:
+    if _is_constant_like(value):
         if len(value) == 0:
             return None
         return value[0]

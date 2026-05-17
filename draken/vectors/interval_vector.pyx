@@ -42,6 +42,7 @@ from libc.string cimport memcpy
 from libc.string cimport memset
 
 from draken.core.buffers cimport DrakenFixedBuffer, DrakenRLEBuffer
+from draken.core.buffers cimport DrakenVector
 from draken.core.buffers cimport DRAKEN_ENCODING_RLE
 from draken.core.buffers cimport DRAKEN_INTERVAL
 from draken.core.buffers cimport DRAKEN_TIMESTAMP64
@@ -86,6 +87,18 @@ cdef int8_t INTERVAL_OP_GT = 2
 cdef int8_t INTERVAL_OP_GTE = 3
 cdef int8_t INTERVAL_OP_LT = 4
 cdef int8_t INTERVAL_OP_LTE = 5
+
+cdef void _refresh_unified_Interval(IntervalVector vec) noexcept:
+    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
+    vec._unified_view.length = <size_t>n
+    vec._unified_view.itemsize = INTERVAL_ITEMSIZE
+    vec._unified_view.type = DRAKEN_INTERVAL
+    vec._unified_view.data = vec.ptr.data
+    vec._unified_view.data_length = <size_t>n
+    vec._unified_view.selection = NULL
+    vec._unified_view.sel_width = 0
+    vec._unified_view.validity = vec.ptr.null_bitmap
+
 
 cdef inline bint _is_valid(DrakenFixedBuffer* ptr, Py_ssize_t idx) nogil:
     if ptr.null_bitmap == NULL:
@@ -246,6 +259,16 @@ cdef class IntervalVector(Vector):
         else:
             self.ptr = alloc_fixed_buffer(DRAKEN_INTERVAL, length, INTERVAL_ITEMSIZE)
             self.owns_data = True
+        self._unified_view.data = NULL
+        self._unified_view.data_length = 0
+        self._unified_view.selection = NULL
+        self._unified_view.sel_width = 0
+        self._unified_view.length = 0
+        self._unified_view.validity = NULL
+        self._unified_view.itemsize = INTERVAL_ITEMSIZE
+        self._unified_view.type = DRAKEN_INTERVAL
+        if not wrap:
+            _refresh_unified_Interval(self)
 
     def __dealloc__(self):
         if self._rle_buffer != NULL:
@@ -270,6 +293,9 @@ cdef class IntervalVector(Vector):
         if self.ptr == NULL:
             return NULL
         return self.ptr.null_bitmap
+
+    cdef DrakenVector* unified(self) noexcept:
+        return &self._unified_view
 
     @property
     def length(self):
@@ -806,6 +832,7 @@ cdef class IntervalVector(Vector):
                 for i in range(n):
                     if _is_valid(self.ptr, indices[i]):
                         out.ptr.null_bitmap[i >> 3] |= (1 << (i & 7))
+        _refresh_unified_Interval(out)
         return out
 
     cpdef int8_t[::1] is_null(self):
@@ -1199,6 +1226,7 @@ cdef IntervalVector from_arrow_interval(object array):
     cdef Py_ssize_t length = len(array)
     cdef IntervalVector vec = IntervalVector(<size_t> length)
     if length == 0:
+        _refresh_unified_Interval(vec)
         return vec
 
     _copy_arrow_null_bitmap(vec.ptr, array)
@@ -1220,6 +1248,7 @@ cdef IntervalVector from_arrow_interval(object array):
                 <int64_t>src_mdn[i].days * MICROSECONDS_PER_DAY
                 + src_mdn[i].nanoseconds // NANOSECONDS_PER_MICROSECOND
             )
+        _refresh_unified_Interval(vec)
         return vec
 
     if is_month_only:
@@ -1227,6 +1256,7 @@ cdef IntervalVector from_arrow_interval(object array):
         for i in range(length):
             dst[i].months = <int64_t> src_months[i]
             dst[i].microseconds = 0
+        _refresh_unified_Interval(vec)
         return vec
 
     if is_day_time:
@@ -1237,6 +1267,7 @@ cdef IntervalVector from_arrow_interval(object array):
                 <int64_t>src_dt[i].days * MICROSECONDS_PER_DAY
                 + <int64_t>src_dt[i].milliseconds * MICROSECONDS_PER_MILLISECOND
             )
+        _refresh_unified_Interval(vec)
         return vec
 
     raise TypeError(f"Unsupported Arrow interval subtype: {pa_type}")
@@ -1275,4 +1306,5 @@ cdef IntervalVector from_arrow_binary(object array):
     else:
         vec.ptr.null_bitmap = NULL
 
+    _refresh_unified_Interval(vec)
     return vec

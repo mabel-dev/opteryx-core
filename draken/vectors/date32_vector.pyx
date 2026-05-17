@@ -39,6 +39,7 @@ from libc.stdlib cimport malloc, free
 from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenRLEBuffer
 from draken.core.buffers cimport DRAKEN_DATE32
 from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT, DRAKEN_ENCODING_DICTIONARY, DRAKEN_ENCODING_RLE
+from draken.core.buffers cimport DrakenVector
 from draken.vectors.int64_vector cimport _materialize_dict_int64
 from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.fixed_vector cimport buf_dtype
@@ -71,6 +72,7 @@ cdef extern from "draken/vectors/_date32_compare.hpp" namespace "draken::date32_
 # Constants for temporal arithmetic (Phase 5b)
 cdef int64_t MICROSECONDS_PER_DAY = 86_400_000_000
 cdef const int64_t INT64_MIN_VALUE = <int64_t>0x8000000000000000
+cdef uint8_t _CONST_NULL_BYTE = 0
 
 DEF DATE32_HASH_CHUNK = 1024
 _DATE_EPOCH_ORDINAL = _dt.date(1970, 1, 1).toordinal()
@@ -94,6 +96,25 @@ cdef void _release_rle_storage_date32(Date32Vector vec) noexcept:
         vec._rle_buffer = NULL
 
 
+cdef void _refresh_unified_date32(Date32Vector vec) noexcept:
+    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
+    vec._unified_view.length = <size_t>n
+    vec._unified_view.itemsize = sizeof(int32_t)
+    vec._unified_view.type = DRAKEN_DATE32
+    if vec._has_const:
+        vec._unified_view.data = <void*>&vec._const_value
+        vec._unified_view.data_length = 1
+        vec._unified_view.selection = NULL
+        vec._unified_view.sel_width = 0
+        vec._unified_view.validity = &_CONST_NULL_BYTE if vec._const_is_null else NULL
+    else:
+        vec._unified_view.data = vec.ptr.data
+        vec._unified_view.data_length = <size_t>n
+        vec._unified_view.selection = NULL
+        vec._unified_view.sel_width = 0
+        vec._unified_view.validity = vec.ptr.null_bitmap
+
+
 cdef class Date32Vector(Vector):
 
     @classmethod
@@ -109,6 +130,7 @@ cdef class Date32Vector(Vector):
         vec._const_is_null = bool(is_null)
         vec._const_value = 0 if is_null or value is None else <int32_t>int(value)
         vec._encoding = DRAKEN_ENCODING_CONSTANT
+        _refresh_unified_date32(vec)
         return vec
 
     @classmethod
@@ -154,6 +176,16 @@ cdef class Date32Vector(Vector):
         self._has_const = False
         self._const_is_null = False
         self._rle_buffer = NULL
+        self._unified_view.data = NULL
+        self._unified_view.data_length = 0
+        self._unified_view.selection = NULL
+        self._unified_view.sel_width = 0
+        self._unified_view.length = 0
+        self._unified_view.validity = NULL
+        self._unified_view.itemsize = sizeof(int32_t)
+        self._unified_view.type = DRAKEN_DATE32
+        if not wrap:
+            _refresh_unified_date32(self)
 
     def __dealloc__(self):
         _release_rle_storage_date32(self)
@@ -180,6 +212,9 @@ cdef class Date32Vector(Vector):
         if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.null_bitmap
+
+    cdef DrakenVector* unified(self) noexcept:
+        return &self._unified_view
 
     # Python-friendly properties (backed by C getters for kernels)
     @property
@@ -242,7 +277,8 @@ cdef class Date32Vector(Vector):
 
     # -------- Example op --------
     cpdef Date32Vector take(self, int32_t[::1] indices):
-        if self._has_const:
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
             return Date32Vector.from_constant(
                 None if self._const_is_null else self._const_value,
                 indices.shape[0],
@@ -254,6 +290,7 @@ cdef class Date32Vector(Vector):
         cdef int32_t* dst = <int32_t*> out.ptr.data
         for i in range(n):
             dst[i] = src[indices[i]]
+        _refresh_unified_date32(out)
         return out
 
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n):
@@ -273,6 +310,7 @@ cdef class Date32Vector(Vector):
         return out
 
     cpdef BoolVector _compare_scalar(self, int32_t value, int op):
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n
         cdef Py_ssize_t nbytes
@@ -282,7 +320,7 @@ cdef class Date32Vector(Vector):
         cdef uint8_t mask
         cdef bint matched
 
-        if self._has_const:
+        if uv.data_length == 1:
             n = ptr.length
             nbytes = (n + 7) >> 3
             out = BoolVector(<size_t>n)
@@ -336,9 +374,10 @@ cdef class Date32Vector(Vector):
         # specialisation happen once here; the C++ kernel runs a tight loop with
         # no per-row branching. Const fast paths avoid O(n) materialisation.
         # Const fast paths: avoid O(n) materialisation.
+        cdef DrakenVector* uv = self.unified()
         cdef Py_ssize_t const_n
         cdef int reversed_op
-        if self._has_const:
+        if uv.data_length == 1:
             const_n = self.ptr.length
             if const_n != other.ptr.length:
                 raise ValueError("Vectors must have the same length")
@@ -432,7 +471,8 @@ cdef class Date32Vector(Vector):
     cpdef BoolVector between(self, int32_t lower, int32_t upper,
                               bint lower_inclusive=True, bint upper_inclusive=True):
         """Single-pass range check: lower OP value OP upper. NULL in → NULL out."""
-        if self._has_const:
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
             return _materialize_const_date32(self).between(lower, upper, lower_inclusive, upper_inclusive)
 
         cdef DrakenFixedBuffer* ptr = self.ptr
@@ -553,12 +593,13 @@ cdef class Date32Vector(Vector):
         return out
 
     cpdef int32_t min(self):
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int32_t* data = <int32_t*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
         if n == 0:
             raise ValueError("Cannot compute min of empty column")
-        if self._has_const:
+        if uv.data_length == 1:
             if self._const_is_null:
                 raise ValueError("Cannot compute min of all-null column")
             return self._const_value
@@ -588,12 +629,13 @@ cdef class Date32Vector(Vector):
         return m
 
     cpdef int32_t max(self):
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int32_t* data = <int32_t*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
         if n == 0:
             raise ValueError("Cannot compute max of empty column")
-        if self._has_const:
+        if uv.data_length == 1:
             if self._const_is_null:
                 raise ValueError("Cannot compute max of all-null column")
             return self._const_value
@@ -621,7 +663,8 @@ cdef class Date32Vector(Vector):
         return m
 
     cpdef int64_t sum(self):
-        if self._has_const:
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
             if self._const_is_null:
                 return 0
             return <int64_t>(self.ptr.length * self._const_value)
@@ -725,6 +768,7 @@ cdef class Date32Vector(Vector):
         """
         Return a memoryview of int8_t, where each element is 1 if the value is null, 0 otherwise.
         """
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n
         cdef int8_t* buf
@@ -734,7 +778,7 @@ cdef class Date32Vector(Vector):
         buf = <int8_t*> PyMem_Malloc(n)
         if buf == NULL:
             raise MemoryError()
-        if self._has_const:
+        if uv.data_length == 1:
             for i in range(n):
                 buf[i] = 1 if self._const_is_null else 0
             return <int8_t[:n]> buf
@@ -776,6 +820,7 @@ cdef class Date32Vector(Vector):
         return data_bytes + bm_bytes
 
     cpdef list to_pylist(self):
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int32_t* data = <int32_t*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
@@ -791,7 +836,7 @@ cdef class Date32Vector(Vector):
         cdef size_t d32r
         cdef int32_t d32_run_len, d32_run_val
 
-        if self._has_const:
+        if uv.data_length == 1:
             if self._const_is_null:
                 for i in range(n):
                     out.append(None)
@@ -860,6 +905,7 @@ cdef class Date32Vector(Vector):
         uint64_t[::1] out_buf,
         Py_ssize_t offset=0
     ) except *:
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int32_t* data = <int32_t*> ptr.data
         cdef Py_ssize_t n = ptr.length
@@ -874,7 +920,7 @@ cdef class Date32Vector(Vector):
         cdef uint64_t[DATE32_HASH_CHUNK] scratch
         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
 
-        if self._has_const:
+        if uv.data_length == 1:
             value = NULL_HASH if self._const_is_null else <uint64_t><int64_t>self._const_value
             for j in range(DATE32_HASH_CHUNK):
                 scratch[j] = value
@@ -956,6 +1002,7 @@ cdef class Date32Vector(Vector):
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for Date32Vector: scale int32 days to int64 microseconds (to match datetimes)."""
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int32_t* data = <int32_t*> ptr.data
         cdef Py_ssize_t n = ptr.length
@@ -967,7 +1014,7 @@ cdef class Date32Vector(Vector):
         cdef Py_ssize_t i
         cdef uint8_t byte, bit
 
-        if self._has_const:
+        if uv.data_length == 1:
             for i in range(n):
                 dst[i] = <int64_t> (-(1 << 63)) if self._const_is_null else (<int64_t> self._const_value * MICROSECONDS_PER_DAY)
             return
@@ -1075,6 +1122,7 @@ cdef Date32Vector from_arrow(object array):
     else:
         vec.ptr.null_bitmap = NULL
 
+    _refresh_unified_date32(vec)
     return vec
 
 
@@ -1096,6 +1144,7 @@ cdef Date32Vector from_dict(const int32_t[::1] codes, const int32_t[::1] diction
             raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
         dst[i] = dictionary[code]
 
+    _refresh_unified_date32(vec)
     return vec
 
 
@@ -1135,6 +1184,7 @@ cdef Date32Vector from_dict_nullable(
         else:
             dst[i] = 0
 
+    _refresh_unified_date32(vec)
     return vec
 
 
@@ -1194,6 +1244,7 @@ cpdef Date32Vector from_int64_vector(Int64Vector source):
             raise OverflowError(f"date32 value out of range at row {i}: {value64}")
         dst_data[i] = <int32_t>value64
 
+    _refresh_unified_date32(out)
     return out
 
 
@@ -1218,6 +1269,7 @@ cdef Date32Vector _materialize_const_date32(Date32Vector const_vec):
     else:
         for i in range(n):
             dst[i] = val
+    _refresh_unified_date32(dense)
     return dense
 
 

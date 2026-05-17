@@ -31,7 +31,7 @@ from libc.string cimport memset
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
-from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenType
+from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenType, DrakenVector
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.vector cimport Vector, NULL_HASH, mix_hash
 include "_key_store.pxi"

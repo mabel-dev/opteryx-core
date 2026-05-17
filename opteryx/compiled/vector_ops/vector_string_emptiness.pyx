@@ -30,8 +30,9 @@ from libc.stdlib cimport malloc, free
 from libc.string cimport memset, memcpy
 
 from draken.core.buffers cimport (
+    DrakenVector,
+    DrakenConstantStringPayload,
     DrakenVarBuffer,
-    DRAKEN_ENCODING_DICTIONARY,
 )
 from draken.vectors.string_vector cimport StringVector, _materialize_dict_string
 from draken.vectors.bool_vector cimport BoolVector
@@ -123,13 +124,14 @@ cdef BoolVector _emptiness_dense(StringVector vec, bint emit_when_empty):
 
 
 cdef BoolVector _emptiness_dict(StringVector vec, bint emit_when_empty):
-    cdef DrakenVarBuffer* dict_ptr = vec._dict_values
-    cdef Py_ssize_t dict_size = dict_ptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef DrakenVarBuffer* dict_ptr = <DrakenVarBuffer*>uv.data
+    cdef Py_ssize_t dict_size = <Py_ssize_t>dict_ptr.length
     cdef int32_t* dict_offsets = dict_ptr.offsets
-    cdef uint8_t* codes = vec._dict_codes
-    cdef uint8_t code_width = vec._dict_code_width
-    cdef uint8_t* row_nulls = vec._dict_accessor.row_nulls
-    cdef Py_ssize_t n = vec.ptr.length
+    cdef uint8_t* codes = <uint8_t*>uv.selection
+    cdef uint8_t code_width = uv.sel_width
+    cdef uint8_t* row_nulls = uv.validity
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
 
     cdef BoolVector out = _alloc_bool_with_nulls(n, row_nulls)
     cdef uint8_t* dst = <uint8_t*> out.ptr.data
@@ -159,18 +161,21 @@ cdef BoolVector _emptiness_dict(StringVector vec, bint emit_when_empty):
 
 
 cdef BoolVector _string_emptiness_kernel(StringVector vec, bint emit_when_empty):
-    cdef Py_ssize_t n = vec.ptr.length
+    cdef DrakenVector* uv = vec.unified()
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
+    cdef DrakenConstantStringPayload* csp
 
-    if vec._has_const:
-        if vec._const_is_null:
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             return _make_constant_bool(n, False, True)
+        csp = <DrakenConstantStringPayload*>uv.data
         return _make_constant_bool(
             n,
-            (vec._const_value.length == 0) == emit_when_empty,
+            (<Py_ssize_t>csp.length == 0) == emit_when_empty,
             False,
         )
 
-    if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec.ptr.data == NULL:
+    if uv.selection != NULL:  # dictionary
         return _emptiness_dict(vec, emit_when_empty)
 
     return _emptiness_dense(vec, emit_when_empty)

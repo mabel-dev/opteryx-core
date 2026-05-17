@@ -29,11 +29,7 @@
 
 from libc.stdint cimport int32_t, uint8_t, uint16_t, uint32_t
 from draken.vectors.string_vector cimport StringVector
-from draken.core.buffers cimport (
-    DrakenVarBuffer, DrakenConstantStringPayload,
-    DrakenEncoding, DRAKEN_ENCODING_DICTIONARY,
-    DictAccessor,
-)
+from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector
 
 
 cdef struct StringRow:
@@ -44,8 +40,7 @@ cdef struct StringRow:
 
 # ---------------------------------------------------------------------------
 # _read_packed_code
-# Identical to the implementation in string_vector.pyx (not exported there).
-# Reads the code at row i for a dictionary-encoded vector.
+# Reads a selection-vector code at row i (1/2/4-byte wide).
 # ---------------------------------------------------------------------------
 
 cdef inline uint32_t _read_packed_code(
@@ -62,52 +57,47 @@ cdef inline uint32_t _read_packed_code(
 
 # ---------------------------------------------------------------------------
 # string_vec_get_at
-# O(1) random access for any encoding. Use for secondary inputs in multi-input
-# functions (needle, search term, replacement, etc.) so they are correct
-# regardless of how the caller constructed them.
+# O(1) random access via the unified DrakenVector view.
 # ---------------------------------------------------------------------------
 
 cdef inline StringRow string_vec_get_at(StringVector vec, Py_ssize_t i) noexcept:
     cdef StringRow row
-    cdef DrakenVarBuffer* ptr
+    cdef DrakenVector* uv = vec.unified()
+    cdef DrakenVarBuffer* vbuf
+    cdef DrakenConstantStringPayload* csp
     cdef uint8_t* null_bm
     cdef uint32_t code
     cdef int32_t start
 
-    if vec._has_const:
-        row.is_null = vec._const_is_null
-        if vec._const_is_null or vec._const_value == NULL:
-            row.data = NULL
-            row.length = 0
-        else:
-            row.data = <const char*>vec._const_value.data
-            row.length = vec._const_value.length
-        return row
-
-    if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
-        null_bm = vec._dict_accessor.row_nulls
-        if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
+    if uv.data_length == 1:  # constant
+        if uv.validity != NULL:  # null constant
             row.data = NULL
             row.length = 0
             row.is_null = True
-            return row
-        code = _read_packed_code(vec._dict_codes, vec._dict_code_width, i)
-        start = vec._dict_values.offsets[code]
-        row.data = <const char*>vec._dict_values.data + start
-        row.length = vec._dict_values.offsets[code + 1] - start
-        row.is_null = False
+        else:
+            csp = <DrakenConstantStringPayload*>uv.data
+            row.data = <const char*>csp.data
+            row.length = csp.length
+            row.is_null = False
         return row
 
-    # Dense
-    ptr = vec.ptr
-    null_bm = ptr.null_bitmap
+    null_bm = uv.validity
     if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
         row.data = NULL
         row.length = 0
         row.is_null = True
         return row
-    start = ptr.offsets[i]
-    row.data = <const char*>ptr.data + start
-    row.length = ptr.offsets[i + 1] - start
+
+    if uv.selection != NULL:  # dictionary
+        vbuf = <DrakenVarBuffer*>uv.data
+        code = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
+        start = vbuf.offsets[code]
+        row.data = <const char*>vbuf.data + start
+        row.length = vbuf.offsets[code + 1] - start
+    else:  # dense
+        vbuf = <DrakenVarBuffer*>uv.data
+        start = vbuf.offsets[i]
+        row.data = <const char*>vbuf.data + start
+        row.length = vbuf.offsets[i + 1] - start
     row.is_null = False
     return row
