@@ -1,0 +1,6 @@
+# Source: case_expressions_05.results_tests
+# Test CASE (searched) no match
+query T rowsort
+SELECT CASE WHEN 1=2 THEN 'one' END AS C
+----
+NULL

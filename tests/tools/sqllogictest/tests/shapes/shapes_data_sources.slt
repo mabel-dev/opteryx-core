@@ -1,0 +1,517 @@
+# Source: test_shapes_data_sources.py
+
+query shape 1 20
+SELECT * FROM $planets WHERE `name` = 'Earth'
+
+query shape 1 20
+SELECT * FROM $planets WHERE name = 'Mars'
+
+query shape 8 20
+SELECT * FROM $planets WHERE name <> 'Venus'
+
+query shape 0
+SELECT * FROM $planets WHERE name = '********'
+
+query shape 6 1
+SELECT id FROM $planets WHERE diameter > 10000
+
+query shape 6 2
+SELECT name, mass FROM $planets WHERE gravity > 5
+
+query shape 5 20
+SELECT * FROM $planets WHERE numberOfMoons >= 5
+
+query shape 5 20
+SELECT * FROM $planets WHERE mass < 10 AND diameter > 1000
+
+query shape 9 20
+SELECT * FROM $planets ORDER BY distanceFromSun DESC
+
+query shape 3 1
+SELECT name FROM $planets WHERE escapeVelocity < 10
+
+query shape 6 20
+SELECT * FROM $planets WHERE obliquityToOrbit > 25
+
+query shape 6 20
+SELECT * FROM $planets WHERE meanTemperature < 0
+
+query shape 4 20
+SELECT * FROM $planets WHERE surfacePressure IS NULL
+
+query shape 7 1
+SELECT name FROM $planets WHERE orbitalEccentricity < 0.1
+
+query shape 3 20
+SELECT * FROM $planets WHERE orbitalPeriod BETWEEN 100 AND 1000
+
+query shape 3 20
+SELECT * FROM $planets WHERE LENGTH(name) = 5
+
+query shape 6 20
+SELECT * FROM $planets WHERE LENGTH(name) <> 5
+
+query shape 3 20
+SELECT * FROM $planets WHERE LENGTH(name) == 5
+
+query shape 6 20
+SELECT * FROM $planets WHERE LENGTH(name) != 5
+
+query shape 3 20
+SELECT * FROM $planets WHERE LENGTH(name) = 5
+
+query shape 6 20
+SELECT * FROM $planets WHERE NOT LENGTH(name) = 5
+
+query shape 6 20
+SELECT * FROM $planets WHERE NOT LENGTH(name) == 5
+
+query shape 5 20
+SELECT * FROM $planets LIMIT 5
+
+query shape 2 20
+SELECT * FROM $planets WHERE numberOfMoons = 0
+
+query shape 3 1
+SELECT id FROM $planets WHERE density > 4000 ORDER BY id ASC
+
+query shape 4 20
+SELECT * FROM $planets WHERE gravity > 10 OR meanTemperature > 100
+
+query shape 7 20
+SELECT * FROM $planets WHERE orbitalInclination <= 5
+
+query shape 6 20
+SELECT * FROM $planets WHERE perihelion >= 150
+
+query shape 5 1
+SELECT name FROM $planets WHERE aphelion < 1000
+
+query shape 3 20
+SELECT * FROM $planets WHERE LENGTH(name) >= 7
+
+query shape 3 20
+SELECT * FROM $planets WHERE id IN (1, 3, 5)
+
+query shape 6 20
+SELECT * FROM $planets WHERE id NOT IN (1, 3, 5)
+
+query shape 3 20
+SELECT * FROM $planets WHERE rotationPeriod < 0
+
+query shape 2 20
+SELECT * FROM $planets WHERE mass > 100 AND mass < 1000
+
+query shape 2 20
+SELECT * FROM $planets WHERE name LIKE 'M%'
+
+query shape 4 20
+SELECT * FROM $planets WHERE orbitalVelocity > 20
+
+query shape 2 20
+SELECT * FROM $planets WHERE escapeVelocity BETWEEN 10 AND 20
+
+query shape 6 20
+SELECT * FROM $planets WHERE LENGTH(name) <= 6
+
+query shape 3 20
+SELECT * FROM $planets ORDER BY id DESC LIMIT 3
+
+query shape 9 20
+SELECT * FROM $planets WHERE gravity IS NOT NULL
+
+query shape 5 20
+SELECT * FROM $planets WHERE surfacePressure IS NOT NULL
+
+query shape 7 20
+SELECT * FROM $planets WHERE meanTemperature <= 100
+
+query shape 4 20
+SELECT * FROM $planets WHERE numberOfMoons > 10
+
+query shape 0
+SELECT * FROM $planets WHERE LENGTH(name) > 7
+
+query shape 4 20
+SELECT * FROM $planets WHERE distanceFromSun BETWEEN 100 AND 1000
+
+query shape 1 20
+SELECT * FROM testdata.planets WHERE `name` = 'Earth'
+
+query shape 1 20
+SELECT * FROM testdata.planets WHERE name = 'Mars'
+
+query shape 8 20
+SELECT * FROM testdata.planets WHERE name <> 'Venus'
+
+query shape 0
+SELECT * FROM testdata.planets WHERE name = '********'
+
+query shape 6 1
+SELECT id FROM testdata.planets WHERE diameter > 10000
+
+query shape 6 2
+SELECT name, mass FROM testdata.planets WHERE gravity > 5
+
+query shape 5 20
+SELECT * FROM testdata.planets WHERE numberOfMoons >= 5
+
+query shape 5 20
+SELECT * FROM testdata.planets WHERE mass < 10 AND diameter > 1000
+
+query shape 9 20
+SELECT * FROM testdata.planets ORDER BY distanceFromSun DESC
+
+query shape 3 1
+SELECT name FROM testdata.planets WHERE escapeVelocity < 10
+
+query shape 6 20
+SELECT * FROM testdata.planets WHERE obliquityToOrbit > 25
+
+query shape 6 20
+SELECT * FROM testdata.planets WHERE meanTemperature < 0
+
+query shape 4 20
+SELECT * FROM testdata.planets WHERE surfacePressure IS NULL
+
+query shape 7 1
+SELECT name FROM testdata.planets WHERE orbitalEccentricity < 0.1
+
+query shape 3 20
+SELECT * FROM testdata.planets WHERE orbitalPeriod BETWEEN 100 AND 1000
+
+query error io failed
+SELECT * FROM testdata.planets WHERE LENGTH(name) = 5
+
+query error io failed
+SELECT * FROM testdata.planets WHERE LENGTH(name) <> 5
+
+query error io failed
+SELECT * FROM testdata.planets WHERE LENGTH(name) == 5
+
+query error io failed
+SELECT * FROM testdata.planets WHERE LENGTH(name) != 5
+
+query error io failed
+SELECT * FROM testdata.planets WHERE LENGTH(name) = 5
+
+query error io failed
+SELECT * FROM testdata.planets WHERE NOT LENGTH(name) = 5
+
+query error io failed
+SELECT * FROM testdata.planets WHERE NOT LENGTH(name) == 5
+
+query error io failed
+SELECT * FROM testdata.planets LIMIT 5
+
+query error io failed
+SELECT * FROM testdata.planets WHERE numberOfMoons = 0
+
+query error io failed
+SELECT id FROM testdata.planets WHERE density > 4000 ORDER BY id ASC
+
+query error io failed
+SELECT * FROM testdata.planets WHERE gravity > 10 OR meanTemperature > 100
+
+query error io failed
+SELECT * FROM testdata.planets WHERE orbitalInclination <= 5
+
+query error io failed
+SELECT * FROM testdata.planets WHERE perihelion >= 150
+
+query error io failed
+SELECT name FROM testdata.planets WHERE aphelion < 1000
+
+query error io failed
+SELECT * FROM testdata.planets WHERE LENGTH(name) >= 7
+
+query error io failed
+SELECT * FROM testdata.planets WHERE id IN (1, 3, 5)
+
+query error io failed
+SELECT * FROM testdata.planets WHERE id NOT IN (1, 3, 5)
+
+query error io failed
+SELECT * FROM testdata.planets WHERE rotationPeriod < 0
+
+query error io failed
+SELECT * FROM testdata.planets WHERE mass > 100 AND mass < 1000
+
+query error io failed
+SELECT * FROM testdata.planets WHERE name LIKE 'M%'
+
+query error io failed
+SELECT * FROM testdata.planets WHERE orbitalVelocity > 20
+
+query error io failed
+SELECT * FROM testdata.planets WHERE escapeVelocity BETWEEN 10 AND 20
+
+query error io failed
+SELECT * FROM testdata.planets WHERE LENGTH(name) <= 6
+
+query error io failed
+SELECT * FROM testdata.planets ORDER BY id DESC LIMIT 3
+
+query error io failed
+SELECT * FROM testdata.planets WHERE gravity IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.planets WHERE surfacePressure IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.planets WHERE meanTemperature <= 100
+
+query error io failed
+SELECT * FROM testdata.planets WHERE numberOfMoons > 10
+
+query error io failed
+SELECT * FROM testdata.planets WHERE LENGTH(name) > 7
+
+query error io failed
+SELECT * FROM testdata.planets WHERE distanceFromSun BETWEEN 100 AND 1000
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+select * from testdata.satellites
+
+query error io failed
+Select * From testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SeLeCt * FrOm testdata.satellites
+
+query error io failed
+SeLeCt * fRoM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SeLeCt * FrOm testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SeLEcT * fROm testdata.satellites
+
+query error io failed
+sElEcT * FrOm testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * /* comment */ FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+/* comment */SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+SELECT * FROM testdata.satellites
+
+query error io failed
+/* This is a comment */ SELECT * /* This is a multiline comment */ FROM $planets WHERE /* FALSE AND */ /* FALSE id > /* 0 */ 1
+
+query error io failed
+SELECT testdata.satellites.* FROM testdata.satellites
+
+query error io failed
+SELECT s.* FROM testdata.satellites AS s
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name = 'Calypso'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE (name = 'Calypso')
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE NOT name = 'Calypso'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE NOT (name = 'Calypso')
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE `name` = 'Calypso'
+
+query error io failed
+select * from testdata.satellites where name = 'Calypso'
+
+query error io failed
+select * from testdata.satellites where name == 'Calypso'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name <> 'Calypso'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name < 'Calypso'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name <= 'Calypso'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name > 'Calypso'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name >= 'Calypso'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name is null
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE not name is null
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name is not null
+
+statement error io failed
+SELECT * FROM testdata.satellites WHERE name is true
+
+statement error io failed
+SELECT * FROM testdata.satellites WHERE not name is true
+
+statement error io failed
+SELECT * FROM testdata.satellites WHERE name is not true
+
+statement error io failed
+SELECT * FROM testdata.satellites WHERE name is false
+
+statement error io failed
+SELECT * FROM testdata.satellites WHERE not name is false
+
+statement error io failed
+SELECT * FROM testdata.satellites WHERE name is not false
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name != 'Calypso'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name = '********'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name LIKE '_a_y_s_'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name LIKE 'Cal%%'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name LIKE 'Cal%'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name like 'Cal%'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name ILIKE '_a_y_s_'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name ILIKE 'Cal%'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name ilike 'Cal%'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name RLIKE '.a.y.s.'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name RLIKE '^Cal.*'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name rlike '^Cal.*'
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE name RLIKE '(?i)cal.*'
+
+statement error io failed
+SELECT * FROM testdata.satellites WHERE TRUE
+
+statement error io failed
+SELECT * FROM testdata.satellites WHERE FALSE
+
+statement error io failed
+SELECT * FROM testdata.satellites WHERE NOT TRUE
+
+statement error io failed
+SELECT * FROM testdata.satellites WHERE NOT FALSE
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE `name` = 'Calypso'
+
+query error io failed
+SELECT * FROM `testdata.satellites` WHERE name = 'Calypso'
+
+query error io failed
+SELECT * FROM `testdata.satellites` WHERE `name` = 'Calypso'
+
+query error io failed
+SELECT * FROM testdata.satellites WITH (NO_CACHE)

@@ -12,7 +12,7 @@ from libc.stdint cimport int64_t
 from libc.stdint cimport uint64_t
 from libc.stdint cimport uint8_t
 
-from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenVector
+from draken.core.buffers cimport DrakenFixedBuffer, DrakenVector
 from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.int64_vector cimport Int64Vector
@@ -29,22 +29,10 @@ cdef class DecimalVector(Vector):
     cdef int8_t _precision
     cdef int8_t _scale
 
-    # Constant-encoding support: when _has_const is True the buffer is
-    # length-only; all comparison/hash/compress methods use _const_value
-    # or treat every row as null when _const_is_null is True.
-    cdef bint _has_const
-    cdef bint _const_is_null
-    cdef int64_t _const_value   # unscaled int64 at _scale
-
-    # ConstAccessor struct kept for the base-class protocol (always returns NULL
-    # since DecimalVector has no constant-encoding path via DictAccessor).
-    cdef ConstAccessor _const_accessor
-
     # ------------------------------------------------------------------
     # C-level accessor protocol (Vector base interface)
     # ------------------------------------------------------------------
 
-    cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
     cdef DrakenVector* unified(self) noexcept
@@ -126,4 +114,3 @@ cdef class DecimalVector(Vector):
 cdef DecimalVector from_arrow(object array)
 cpdef DecimalVector from_int64_vector(Int64Vector source, int precision, int scale)
 
-cdef void _refresh_unified_Decimal(DecimalVector vec) noexcept

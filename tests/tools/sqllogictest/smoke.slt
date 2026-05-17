@@ -1,0 +1,28 @@
+# Smoke test — Opteryx through the sqllogictest external-engine driver.
+
+query I
+SELECT 1
+----
+1
+
+query II
+SELECT 1, 2
+----
+1 2
+
+query I
+SELECT id FROM $planets WHERE name = 'Earth'
+----
+3
+
+query I
+SELECT count(*) FROM $planets
+----
+9
+
+query T
+SELECT name FROM $planets ORDER BY id LIMIT 3
+----
+Mercury
+Venus
+Earth

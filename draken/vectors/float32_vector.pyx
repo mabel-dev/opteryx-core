@@ -22,11 +22,6 @@ from libc.stddef cimport size_t
 from libc.stdlib cimport free, malloc
 from libc.math cimport isinf, isnan, llround
 
-from draken.core.buffers cimport ConstAccessor
-from draken.core.buffers cimport DictAccessor
-from draken.core.buffers cimport DRAKEN_ENCODING_DENSE
-from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
-from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DrakenVarBuffer
 from draken.core.buffers cimport DrakenVector
@@ -77,47 +72,15 @@ cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx) noexcept nogi
     return (byte >> (idx & 7)) & 1
 
 
-cdef void _refresh_unified_float32(Float32Vector vec) noexcept:
-    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
-    vec._unified_view.length = <size_t>n
-    vec._unified_view.itemsize = sizeof(float)
-    vec._unified_view.type = DRAKEN_FLOAT32
-    if vec._has_const:
-        vec._unified_view.data = <void*>&vec._const_value
-        vec._unified_view.data_length = 1
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = &_CONST_NULL_BYTE if vec._const_is_null else NULL
-    elif vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec.ptr.data == NULL:
-        vec._unified_view.data = vec._dict_values.data
-        vec._unified_view.data_length = <size_t>vec._dict_values.length
-        vec._unified_view.selection = vec._dict_codes
-        vec._unified_view.sel_width = vec._dict_code_width
-        vec._unified_view.validity = vec.ptr.null_bitmap
-    else:
-        vec._unified_view.data = vec.ptr.data
-        vec._unified_view.data_length = <size_t>n
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = vec.ptr.null_bitmap
-
-
 cdef void _release_dict_storage(Float32Vector vec) noexcept:
-    if vec._dict_codes != NULL:
-        free(vec._dict_codes)
-        vec._dict_codes = NULL
+    if vec._unified_view.selection != NULL:
+        free(vec._unified_view.selection)
+        vec._unified_view.selection = NULL
+        vec._unified_view.sel_width = 0
     if vec._dict_values != NULL:
         free_var_buffer(vec._dict_values, True)
         vec._dict_values = NULL
-    vec._dict_code_width = 0
     vec._dict_ordered = 0
-    vec._dict_accessor.codes = NULL
-    vec._dict_accessor.code_width = 0
-    vec._dict_accessor.row_nulls = NULL
-    vec._dict_accessor.length = 0
-    vec._dict_accessor.dict_values = NULL
-    vec._dict_accessor.value_type = DRAKEN_FLOAT32
-    vec._encoding = DRAKEN_ENCODING_DENSE
 
 
 cdef void _attach_dictionary_storage(Float32Vector vec, const int32_t[::1] codes, const float[::1] dictionary, bint ordered, const uint8_t* dict_entry_null_bitmap=NULL) except *:
@@ -130,15 +93,16 @@ cdef void _attach_dictionary_storage(Float32Vector vec, const int32_t[::1] codes
     cdef Py_ssize_t code
     cdef DrakenVarBuffer* dict_values
     cdef Py_ssize_t bitmap_bytes
+    cdef uint8_t* codes_ptr
 
     _release_dict_storage(vec)
 
     if code_bytes > 0:
-        vec._dict_codes = <uint8_t*>malloc(code_bytes)
-        if vec._dict_codes == NULL:
+        codes_ptr = <uint8_t*>malloc(code_bytes)
+        if codes_ptr == NULL:
             raise MemoryError()
     else:
-        vec._dict_codes = NULL
+        codes_ptr = NULL
 
     dict_values = alloc_var_buffer(DRAKEN_FLOAT32, <size_t>dict_size, <size_t>dict_bytes)
     dict_values.offsets[0] = 0
@@ -157,16 +121,19 @@ cdef void _attach_dictionary_storage(Float32Vector vec, const int32_t[::1] codes
     for i in range(row_count):
         code = <Py_ssize_t>codes[i]
         if code_width == 1:
-            (<uint8_t*>vec._dict_codes)[i] = <uint8_t>code
+            (<uint8_t*>codes_ptr)[i] = <uint8_t>code
         elif code_width == 2:
-            (<uint16_t*>vec._dict_codes)[i] = <uint16_t>code
+            (<uint16_t*>codes_ptr)[i] = <uint16_t>code
         else:
-            (<uint32_t*>vec._dict_codes)[i] = <uint32_t>code
+            (<uint32_t*>codes_ptr)[i] = <uint32_t>code
 
     vec._dict_values = dict_values
-    vec._dict_code_width = code_width
     vec._dict_ordered = 1 if ordered else 0
-    vec._encoding = DRAKEN_ENCODING_DICTIONARY
+    vec._unified_view.data = dict_values.data
+    vec._unified_view.data_length = <size_t>dict_size
+    vec._unified_view.selection = codes_ptr
+    vec._unified_view.sel_width = code_width
+    vec._unified_view.validity = vec.ptr.null_bitmap
 
 
 cdef class Float32Vector(Vector):
@@ -201,15 +168,16 @@ cdef class Float32Vector(Vector):
             raise ValueError("length must be non-negative")
         if value is None and not is_null:
             raise ValueError("value cannot be None unless is_null=True")
-        cdef Float32Vector vec = Float32Vector(0)
-
+        cdef Float32Vector vec = Float32Vector(1)
+        cdef float val = 0.0 if (is_null or value is None) else <float>float(value)
+        (<float*>vec.ptr.data)[0] = val
         vec.ptr.length = <size_t>length
-        vec.ptr.null_bitmap = NULL
-        vec._has_const = True
-        vec._const_is_null = bool(is_null)
-        vec._const_value = 0.0 if is_null or value is None else <float>float(value)
-        vec._encoding = DRAKEN_ENCODING_CONSTANT
-        _refresh_unified_float32(vec)
+        vec._unified_view.length = <size_t>length
+        vec._unified_view.data = vec.ptr.data
+        vec._unified_view.data_length = 1
+        vec._unified_view.selection = NULL
+        vec._unified_view.sel_width = 0
+        vec._unified_view.validity = &_CONST_NULL_BYTE if is_null else NULL
         return vec
 
     def __cinit__(self, size_t length=0, bint wrap=False):
@@ -220,32 +188,15 @@ cdef class Float32Vector(Vector):
             self.ptr = alloc_fixed_buffer(DRAKEN_FLOAT32, length, 4)
             self.owns_data = True
         self._dict_values = NULL
-        self._dict_codes = NULL
-        self._dict_code_width = 0
         self._dict_ordered = 0
-        self._dict_accessor.codes = NULL
-        self._dict_accessor.code_width = 0
-        self._dict_accessor.row_nulls = NULL
-        self._dict_accessor.length = 0
-        self._dict_accessor.dict_values = NULL
-        self._dict_accessor.value_type = DRAKEN_FLOAT32
-        self._const_accessor.length = 0
-        self._const_accessor.value_type = DRAKEN_FLOAT32
-        self._const_accessor.value_ptr = NULL
-        self._const_accessor.is_null = 0
-        self._const_value = 0.0
-        self._has_const = False
-        self._const_is_null = False
-        self._unified_view.data = NULL
-        self._unified_view.data_length = 0
+        self._unified_view.data = NULL if wrap else self.ptr.data
+        self._unified_view.data_length = 0 if wrap else <size_t>length
         self._unified_view.selection = NULL
         self._unified_view.sel_width = 0
-        self._unified_view.length = 0
+        self._unified_view.length = 0 if wrap else <size_t>length
         self._unified_view.validity = NULL
         self._unified_view.itemsize = sizeof(float)
         self._unified_view.type = DRAKEN_FLOAT32
-        if not wrap:
-            _refresh_unified_float32(self)
 
     def __dealloc__(self):
         _release_dict_storage(self)
@@ -253,33 +204,13 @@ cdef class Float32Vector(Vector):
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
 
-    cdef DictAccessor* dict_accessor(self) noexcept:
-        if self._dict_values == NULL or self._dict_codes == NULL or self.ptr == NULL:
-            return NULL
-        self._dict_accessor.codes = self._dict_codes
-        self._dict_accessor.code_width = self._dict_code_width
-        self._dict_accessor.row_nulls = self.ptr.null_bitmap
-        self._dict_accessor.length = self.ptr.length
-        self._dict_accessor.dict_values = self._dict_values
-        self._dict_accessor.value_type = self._dict_values.type
-        return &self._dict_accessor
-
-    cdef ConstAccessor* const_accessor(self) noexcept:
-        if not self._has_const or self.ptr == NULL:
-            return NULL
-        self._const_accessor.length = self.ptr.length
-        self._const_accessor.value_type = DRAKEN_FLOAT32
-        self._const_accessor.value_ptr = <void*>&self._const_value
-        self._const_accessor.is_null = 1 if self._const_is_null else 0
-        return &self._const_accessor
-
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const:
+        if self.ptr == NULL or self._unified_view.data_length == 1:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const:
+        if self.ptr == NULL or self._unified_view.data_length == 1:
             return NULL
         return self.ptr.null_bitmap
 
@@ -290,10 +221,11 @@ cdef class Float32Vector(Vector):
         """Convert to a PyArrow array."""
         import pyarrow as pa
 
-        if self._has_const:
-            if self._const_is_null:
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
+            if uv.validity != NULL:
                 return pa.nulls(self.ptr.length, type=pa.float32())
-            return pa.array([self._const_value] * self.ptr.length, type=pa.float32())
+            return pa.array([(<float*>uv.data)[0]] * self.ptr.length, type=pa.float32())
 
         cdef size_t nbytes = buf_length(self.ptr) * sizeof(float)
         addr = <intptr_t> self.ptr.data
@@ -338,23 +270,24 @@ cdef class Float32Vector(Vector):
 
     @property
     def code_width(self):
-        return self._dict_code_width if self._dict_values != NULL else None
+        return self._unified_view.sel_width if self._dict_values != NULL else None
 
     @property
     def ordered(self):
         return bool(self._dict_ordered) if self._dict_values != NULL else False
 
     def __getitem__(self, Py_ssize_t i):
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef float* data
         cdef uint8_t byte
         cdef uint8_t bit
         if i < 0 or i >= ptr.length:
             raise IndexError("Index out of bounds")
-        if self._has_const:
-            if self._const_is_null:
+        if uv.data_length == 1:
+            if uv.validity != NULL:
                 return None
-            return self._const_value
+            return (<float*>uv.data)[0]
         data = <float*> ptr.data
         if ptr.null_bitmap != NULL:
             byte = ptr.null_bitmap[i >> 3]
@@ -366,11 +299,13 @@ cdef class Float32Vector(Vector):
     cpdef Float32Vector take(self, int32_t[::1] indices):
         cdef DrakenVector* uv = self.unified()
         cdef Py_ssize_t i, n = indices.shape[0]
+        cdef bint _is_null
         if uv.data_length == 1:
+            _is_null = uv.validity != NULL
             return Float32Vector.from_constant(
-                None if self._const_is_null else self._const_value,
+                None if _is_null else (<float*>uv.data)[0],
                 n,
-                is_null=self._const_is_null,
+                is_null=_is_null,
             )
         cdef Float32Vector out = Float32Vector(<size_t>n)
         cdef float* src = <float*> self.ptr.data
@@ -408,7 +343,7 @@ cdef class Float32Vector(Vector):
 
             out.ptr.null_bitmap = out_null
 
-        if self._dict_values != NULL and self._dict_codes != NULL:
+        if self._dict_values != NULL and self._unified_view.selection != NULL:
             dict_size = self._dict_values.length
             if n > 0:
                 taken_codes = <int32_t*>malloc(n * sizeof(int32_t))
@@ -425,7 +360,7 @@ cdef class Float32Vector(Vector):
                         if (byte & (1 << (src_idx & 7))) == 0:
                             taken_codes[i] = 0
                             continue
-                    taken_codes[i] = <int32_t>_read_packed_code(self._dict_codes, self._dict_code_width, src_idx)
+                    taken_codes[i] = <int32_t>_read_packed_code(<uint8_t*>self._unified_view.selection, self._unified_view.sel_width, src_idx)
 
                 if n > 0:
                     taken_codes_view = <int32_t[:n]>taken_codes
@@ -439,7 +374,6 @@ cdef class Float32Vector(Vector):
             finally:
                 if taken_codes != NULL:
                     free(taken_codes)
-        _refresh_unified_float32(out)
         return out
 
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n):
@@ -550,11 +484,12 @@ cdef class Float32Vector(Vector):
         # self[i] OP other[i] where self is const V = V OP other[i]
         #   = other[i] reversed_op V, so flip directional ops.
         cdef DrakenVector* uv = self.unified()
+        cdef DrakenVector* ouv = other.unified()
         cdef int reversed_op
         if uv.data_length == 1:
             if self.ptr.length != other.ptr.length:
                 raise ValueError("Vectors must have the same length")
-            if self._const_is_null:
+            if uv.validity != NULL:
                 return self._make_all_null_bool(<Py_ssize_t>self.ptr.length)
             # Reverse: gt(2)<->lt(4), ge(3)<->le(5); eq(0) and ne(1) unchanged.
             if op == 2:   reversed_op = 4
@@ -562,13 +497,13 @@ cdef class Float32Vector(Vector):
             elif op == 4: reversed_op = 2
             elif op == 5: reversed_op = 3
             else:         reversed_op = op
-            return other._compare_scalar(self._const_value, reversed_op)
-        if other._has_const:
+            return other._compare_scalar((<float*>uv.data)[0], reversed_op)
+        if ouv.data_length == 1:
             if self.ptr.length != other.ptr.length:
                 raise ValueError("Vectors must have the same length")
-            if other._const_is_null:
+            if ouv.validity != NULL:
                 return self._make_all_null_bool(<Py_ssize_t>self.ptr.length)
-            return self._compare_scalar(other._const_value, op)
+            return self._compare_scalar((<float*>ouv.data)[0], op)
 
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
@@ -681,7 +616,7 @@ cdef class Float32Vector(Vector):
             dst = <uint8_t*> out.ptr.data
             if nbytes > 0:
                 memset(dst, 0, nbytes)
-            if self._const_is_null:
+            if uv.validity != NULL:
                 if nbytes != 0:
                     out_null = <uint8_t*> malloc(nbytes)
                     if out_null == NULL:
@@ -691,7 +626,7 @@ cdef class Float32Vector(Vector):
                 else:
                     out.ptr.null_bitmap = NULL
                 return out
-            if self._const_value in value_set and nbytes > 0:
+            if (<float*>uv.data)[0] in value_set and nbytes > 0:
                 memset(dst, 0xFF, nbytes)
                 if (n & 7) != 0:
                     mask = <uint8_t>((1 << (n & 7)) - 1)
@@ -728,9 +663,9 @@ cdef class Float32Vector(Vector):
     cpdef float sum(self):
         cdef DrakenVector* uv = self.unified()
         if uv.data_length == 1:
-            if self._const_is_null:
+            if uv.validity != NULL:
                 return 0.0
-            return self.ptr.length * self._const_value
+            return self.ptr.length * (<float*>uv.data)[0]
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef float* data = <float*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
@@ -750,9 +685,9 @@ cdef class Float32Vector(Vector):
         if uv.data_length == 1:
             if self.ptr.length == 0:
                 raise ValueError("Cannot compute min of empty column")
-            if self._const_is_null:
+            if uv.validity != NULL:
                 raise ValueError("Cannot compute min of all-null column")
-            return self._const_value
+            return (<float*>uv.data)[0]
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef float* data = <float*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
@@ -789,9 +724,9 @@ cdef class Float32Vector(Vector):
         if uv.data_length == 1:
             if self.ptr.length == 0:
                 raise ValueError("Cannot compute max of empty column")
-            if self._const_is_null:
+            if uv.validity != NULL:
                 raise ValueError("Cannot compute max of all-null column")
-            return self._const_value
+            return (<float*>uv.data)[0]
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef float* data = <float*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
@@ -847,7 +782,7 @@ cdef class Float32Vector(Vector):
         cdef uint8_t byte
 
         if uv.data_length == 1:
-            return self._const_is_null
+            return uv.validity != NULL
 
         if ptr.null_bitmap == NULL:
             return False
@@ -867,7 +802,7 @@ cdef class Float32Vector(Vector):
 
         if uv.data_length == 1:
             for i in range(n):
-                buf[i] = 1 if self._const_is_null else 0
+                buf[i] = 1 if uv.validity != NULL else 0
             return <int8_t[:n]> buf
 
         if ptr.null_bitmap == NULL:
@@ -894,7 +829,7 @@ cdef class Float32Vector(Vector):
 
         if uv.data_length == 1:
             for i in range(n):
-                buf[i] = 1 if self._const_is_null else 0
+                buf[i] = 1 if uv.validity != NULL else 0
             return <int8_t[:n]> buf
 
         data = <float*> ptr.data
@@ -917,10 +852,11 @@ cdef class Float32Vector(Vector):
 
     @property
     def null_count(self):
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
-        if self._has_const:
-            return n if self._const_is_null else 0
+        if uv.data_length == 1:
+            return n if uv.validity != NULL else 0
         if ptr.null_bitmap == NULL:
             return 0
         return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
@@ -928,10 +864,11 @@ cdef class Float32Vector(Vector):
     @property
     def nbytes(self):
         """Return the approximate memory footprint of this vector in bytes."""
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef uint64_t n = ptr.length
         cdef uint64_t data_bytes, bm_bytes
-        if self._has_const:
+        if uv.data_length == 1:
             return buf_itemsize(ptr)
         data_bytes = <uint64_t>(buf_length(ptr) * buf_itemsize(ptr))
         bm_bytes = (n + 7) >> 3 if ptr.null_bitmap != NULL else 0
@@ -945,12 +882,12 @@ cdef class Float32Vector(Vector):
         cdef uint8_t byte, bit
 
         if uv.data_length == 1:
-            if self._const_is_null:
+            if uv.validity != NULL:
                 for i in range(n):
                     out.append(None)
             else:
                 for i in range(n):
-                    out.append(self._const_value)
+                    out.append((<float*>uv.data)[0])
             return out
 
         cdef float* data = <float*> ptr.data
@@ -993,10 +930,10 @@ cdef class Float32Vector(Vector):
         cdef uint32_t fbits
 
         if uv.data_length == 1:
-            if self._const_is_null:
+            if uv.validity != NULL:
                 value = NULL_HASH
             else:
-                fbits = (<uint32_t*>&self._const_value)[0]
+                fbits = (<uint32_t*>uv.data)[0]
                 value = <uint64_t>fbits
             for j in range(FLOAT32_HASH_CHUNK):
                 scratch[j] = value
@@ -1059,10 +996,10 @@ cdef class Float32Vector(Vector):
 
         if uv.data_length == 1:
             for i in range(n):
-                if self._const_is_null:
+                if uv.validity != NULL:
                     dst[i] = NULL_FLAG
                     continue
-                v = self._const_value
+                v = (<float*>uv.data)[0]
                 if isnan(v):
                     dst[i] = NULL_FLAG
                     continue
@@ -1116,12 +1053,13 @@ cdef class Float32Vector(Vector):
                     dst[i] = <int64_t> rv
 
     def __str__(self):
+        cdef DrakenVector* uv = self.unified()
         cdef list vals = []
         cdef Py_ssize_t i, k
         cdef float* data
         k = min(<Py_ssize_t>buf_length(self.ptr), 10)
-        if self._has_const:
-            vals = [None if self._const_is_null else self._const_value] * k
+        if uv.data_length == 1:
+            vals = [None if uv.validity != NULL else (<float*>uv.data)[0]] * k
             return f"<Float32Vector len={buf_length(self.ptr)} values={vals}>"
         data = <float*> self.ptr.data
         for i in range(k):
@@ -1148,8 +1086,6 @@ cdef Float32Vector from_dict(const int32_t[::1] codes, const float[::1] dictiona
         dst[i] = dictionary[code]
 
     _attach_dictionary_storage(vec, codes, dictionary, False)
-
-    _refresh_unified_float32(vec)
     return vec
 
 
@@ -1190,8 +1126,6 @@ cdef Float32Vector from_dict_nullable(
             dst[i] = 0.0
 
     _attach_dictionary_storage(vec, codes, dictionary, False)
-
-    _refresh_unified_float32(vec)
     return vec
 
 
@@ -1258,7 +1192,6 @@ cdef Float32Vector from_packed_dict(
         if expanded_codes != NULL:
             free(expanded_codes)
 
-    _refresh_unified_float32(vec)
     return vec
 
 
@@ -1281,7 +1214,12 @@ cdef Float32Vector from_sequence(float[::1] data):
     vec.ptr.data = <void*> &data[0]
     vec.ptr.null_bitmap = NULL
 
-    _refresh_unified_float32(vec)
+    vec._unified_view.data = vec.ptr.data
+    vec._unified_view.data_length = <size_t>data.shape[0]
+    vec._unified_view.length = <size_t>data.shape[0]
+    vec._unified_view.selection = NULL
+    vec._unified_view.sel_width = 0
+    vec._unified_view.validity = NULL
     return vec
 
 
@@ -1305,7 +1243,12 @@ cdef Float32Vector from_decoded(
     vec.ptr.data = data
     vec.ptr.null_bitmap = null_bitmap
     vec.owns_data = True
-    _refresh_unified_float32(vec)
+    vec._unified_view.data = data
+    vec._unified_view.data_length = <size_t>length
+    vec._unified_view.length = <size_t>length
+    vec._unified_view.selection = NULL
+    vec._unified_view.sel_width = 0
+    vec._unified_view.validity = null_bitmap
     return vec
 
 
@@ -1353,5 +1296,10 @@ cdef Float32Vector from_arrow(object array):
     else:
         vec.ptr.null_bitmap = NULL
 
-    _refresh_unified_float32(vec)
+    vec._unified_view.data = vec.ptr.data
+    vec._unified_view.data_length = <size_t>vec.ptr.length
+    vec._unified_view.length = <size_t>vec.ptr.length
+    vec._unified_view.selection = NULL
+    vec._unified_view.sel_width = 0
+    vec._unified_view.validity = vec.ptr.null_bitmap
     return vec

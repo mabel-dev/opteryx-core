@@ -1,0 +1,6 @@
+# Source: case_expressions_06.results_tests
+# Test CASE (searched) match second condition
+query T rowsort
+SELECT CASE WHEN 2=1 THEN 'one' WHEN 2=2 THEN 'two' END AS C
+----
+two

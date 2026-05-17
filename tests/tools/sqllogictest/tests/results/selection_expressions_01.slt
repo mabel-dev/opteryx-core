@@ -1,0 +1,6 @@
+# Source: selection_expressions_01.results_tests
+# Test greater than
+query I rowsort
+SELECT 1 > 2 AS V
+----
+0

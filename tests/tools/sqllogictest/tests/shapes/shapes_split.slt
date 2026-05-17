@@ -1,0 +1,244 @@
+# Source: test_shapes_split.py
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT * FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT COUNT(*) FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT id, server FROM testdata.split LIMIT 25
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT * FROM testdata.split WHERE id = 10000
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT * FROM testdata.split WHERE times_found = 0
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT * FROM testdata.split WHERE risk_score > 9.5
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT * FROM testdata.split WHERE server LIKE 'alpha%'
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT * FROM testdata.split WHERE cves[1] IS NOT NULL
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT * FROM testdata.split WHERE cves[2] IS NOT NULL
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT server, COUNT(*) FROM testdata.split GROUP BY server
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT times_found, COUNT(*) FROM testdata.split GROUP BY times_found
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT EXTRACT(year FROM first_found) AS first_year, COUNT(*) FROM testdata.split GROUP BY EXTRACT(year FROM first_found)
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT server, COUNT(*) FROM testdata.split GROUP BY server HAVING COUNT(*) > 5
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT server, COUNT(*) FROM testdata.split GROUP BY server ORDER BY COUNT(*) DESC LIMIT 10
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split WHERE times_found = 0
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT COUNT(DISTINCT server) FROM testdata.split WHERE risk_score > 9.5
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT SUBSTR(server, 1, 5) FROM testdata.split WHERE server LIKE 'alpha%'
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT cves FROM testdata.split WHERE times_found = 0
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split WHERE cves[1] IS NOT NULL
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split WHERE cves[2] IS NOT NULL
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT server, COUNT(DISTINCT times_found) FROM testdata.split GROUP BY server
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT server, COUNT(DISTINCT patch_id) FROM testdata.split GROUP BY server ORDER BY server LIMIT 5
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT times_found FROM testdata.split WHERE cves[1] IS NOT NULL
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT EXTRACT(year FROM first_found) FROM testdata.split WHERE risk_score > 5
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split WHERE risk_score > 5
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT COUNT(DISTINCT patch_id) FROM testdata.split WHERE server LIKE 'alpha%'
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT patch_id FROM testdata.split WHERE risk_score > 9.5
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT EXTRACT(year FROM first_found) FROM testdata.split WHERE cves[1] IS NOT NULL
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT server, COUNT(DISTINCT patch_id) FROM testdata.split GROUP BY server HAVING COUNT(DISTINCT patch_id) > 5
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT server, COUNT(DISTINCT risk_score) FROM testdata.split GROUP BY server LIMIT 10
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT SUBSTR(server, 1, 3) FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split WHERE times_found > 0 AND cves[2] IS NOT NULL
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT COUNT(DISTINCT cves) FROM testdata.split WHERE EXTRACT(year FROM first_found) >= 2024
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split WHERE risk_score BETWEEN 5 AND 7
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM (SELECT * FROM testdata.split WHERE times_found = 0) AS s
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split WHERE times_found = 0 AND risk_score > 7
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM (SELECT * FROM testdata.split WHERE times_found = 0 AND risk_score > 7) s
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split WHERE cves[1] IS NOT NULL AND times_found = 0
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split WHERE cves[2] IS NOT NULL AND times_found = 0
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split WHERE SUBSTR(server,1,3) = 'alp' AND times_found = 0
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT CONCAT(server, '-', CAST(times_found AS VARCHAR)) FROM testdata.split WHERE times_found = 0
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT CONCAT(server, '-', CAST(times_found AS VARCHAR)) FROM (SELECT * FROM testdata.split WHERE times_found = 0) s
+
+statement error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split WHERE server IN (SELECT server FROM testdata.split WHERE times_found = 0)
+
+statement error sql failed UnsupportedSyntaxError: Correlated scalar subqueries are not supported\. Rewrite using EXISTS, IN, or an explicit JOIN\.
+SELECT DISTINCT server FROM testdata.split WHERE risk_score = (SELECT MAX(risk_score) FROM testdata.split)
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT server, COUNT(DISTINCT patch_id) FROM testdata.split WHERE times_found = 0 GROUP BY server
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split ORDER BY server LIMIT 10
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split ORDER BY server OFFSET 5 LIMIT 10
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM (SELECT server FROM testdata.split WHERE times_found = 0 ORDER BY server LIMIT 50) s
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM (SELECT server, risk_score FROM testdata.split WHERE risk_score > 7) s
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT SUBSTR(server, 5, 3) FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT CAST(times_found AS VARCHAR) FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT TRUNC(first_found, 'day') FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split WHERE times_found BETWEEN 1 AND 3
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT cves[1] FROM testdata.split WHERE risk_score > 9
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT CONCAT(server, '-', CAST(times_found AS VARCHAR)) FROM (SELECT * FROM testdata.split WHERE times_found = 0) s
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM (SELECT DISTINCT server, risk_score FROM testdata.split) s WHERE risk_score > 9.5
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT patch_id FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT times_found FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT cves FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT risk_score FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT EXTRACT(year FROM first_found) AS first_year FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server, times_found FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server, patch_id FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server, risk_score FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT SUBSTR(server, 1, 5) FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT CAST(risk_score AS INTEGER) FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT CONCAT(server, '-', CAST(times_found AS VARCHAR)) FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT ROUND(risk_score, 1) FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT SUBSTR(server, 1, 2) FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT SUBSTR(patch_id, 3, 2) FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT SUBSTR(cves[1],1,9) FROM testdata.split WHERE cves[1] IS NOT NULL
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT COUNT(DISTINCT server) FROM testdata.split WHERE risk_score > 8
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split WHERE EXTRACT(year FROM first_found) = 2024
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT patch_id FROM testdata.split WHERE risk_score > 8
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT LOWER(server) FROM testdata.split
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server, times_found FROM testdata.split WHERE times_found > 0
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server, times_found FROM (SELECT server, times_found FROM testdata.split WHERE times_found > 0) s
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server, times_found FROM testdata.split WHERE times_found > 0 ORDER BY times_found DESC LIMIT 10
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT server FROM testdata.split WHERE server LIKE 'alpha%' ORDER BY server LIMIT 5 OFFSET 2
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'testdata/split', could not be found\.
+SELECT DISTINCT id FROM testdata.split WHERE id % 10 = 0

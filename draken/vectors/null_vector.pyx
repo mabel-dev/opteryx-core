@@ -20,14 +20,12 @@ preserving the contract that all arguments arrive as vectors.
 from libc.stdint cimport int32_t, int64_t, uint64_t, uint8_t
 from cpython.array cimport array, clone
 
-from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 from draken.vectors.vector cimport Vector, NULL_HASH
 
 
 cdef class NullVector(Vector):
 
     def __cinit__(self, Py_ssize_t length):
-        self._encoding = DRAKEN_ENCODING_CONSTANT
         self._length = length
 
     def __len__(self):

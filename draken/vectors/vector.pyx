@@ -28,7 +28,7 @@ from libc.string cimport memset
 from cpython.mem cimport PyMem_Calloc, PyMem_Free
 
 from draken.core.buffers cimport (
-    ConstAccessor, DictAccessor, DrakenEncoding, DrakenVector,
+    DrakenVector,
     DRAKEN_ENCODING_DENSE, DRAKEN_ENCODING_DICTIONARY,
     DRAKEN_ENCODING_CONSTANT,
 )
@@ -103,7 +103,7 @@ cdef class _Uint64Buffer:
 cdef class Vector:
 
     def __cinit__(self):
-        self._encoding = DRAKEN_ENCODING_DENSE
+        pass
 
     @classmethod
     def from_arrow(cls, arrow_array):
@@ -126,23 +126,17 @@ cdef class Vector:
 
     @property
     def encoding(self):
-        """Return the storage encoding of this vector.
-
-        This facilitates a single per-morsel branch for dispatching between
-        storage layouts. The current implementation explicitly tracks the
-        active encoding rather than inferring it from the available accessors.
-        """
-        return self._encoding
+        """Return the storage encoding of this vector, derived from the unified view."""
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
+            return DRAKEN_ENCODING_CONSTANT
+        if uv.selection != NULL:
+            return DRAKEN_ENCODING_DICTIONARY
+        return DRAKEN_ENCODING_DENSE
 
     cpdef object null_bitmap(self):
         """Return the null bitmap for this vector, or ``None`` when the vector has no nulls."""
         return None
-
-    cdef DictAccessor* dict_accessor(self) noexcept:
-        return NULL
-
-    cdef ConstAccessor* const_accessor(self) noexcept:
-        return NULL
 
     cdef void* dense_ptr(self) noexcept:
         return NULL
@@ -272,47 +266,11 @@ cdef class Vector:
         return 0
 
     cdef DrakenVector* unified(self) noexcept:
-        """Return a DrakenVector* view over this vector's fields.
+        """Return the unified view for this vector.
 
-        The pointer is &self._unified_view — caller must not outlive self.
-        Concrete types override in Phase 4 with precise data/itemsize fields.
-        Encoding → unified mapping:
-          DENSE:      selection=NULL, sel_width=0, data_length=length
-          DICTIONARY: selection=codes, sel_width=code_width, data_length=0 (Phase 4 sets dict_size)
-          CONSTANT:   selection=NULL, sel_width=0, data_length=1
+        Concrete types set _unified_view directly at construction.
+        The pointer is &self._unified_view — lifetime == self.
         """
-        cdef DictAccessor* da
-        cdef ConstAccessor* ca
-        cdef Py_ssize_t n = len(self)
-
-        self._unified_view.length = <size_t>n
-
-        if self._encoding == DRAKEN_ENCODING_DENSE:
-            self._unified_view.data = self.dense_ptr()
-            self._unified_view.data_length = <size_t>n
-            self._unified_view.selection = NULL
-            self._unified_view.sel_width = 0
-            self._unified_view.validity = self.null_bitmap_ptr()
-            self._unified_view.itemsize = 0  # concrete types set correct itemsize
-
-        elif self._encoding == DRAKEN_ENCODING_DICTIONARY:
-            da = self.dict_accessor()
-            self._unified_view.data = <void*>da.dict_values
-            self._unified_view.data_length = 0  # concrete types fill dict_size in Phase 4
-            self._unified_view.selection = <void*>da.codes
-            self._unified_view.sel_width = da.code_width
-            self._unified_view.validity = da.row_nulls
-            self._unified_view.itemsize = 0
-
-        elif self._encoding == DRAKEN_ENCODING_CONSTANT:
-            ca = self.const_accessor()
-            self._unified_view.data = ca.value_ptr
-            self._unified_view.data_length = 1
-            self._unified_view.selection = NULL
-            self._unified_view.sel_width = 0
-            self._unified_view.validity = NULL  # const has a single is_null flag, not a bitmap
-            self._unified_view.itemsize = 0
-
         return &self._unified_view
 
     cpdef bint is_constant_encoded(self):

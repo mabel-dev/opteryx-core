@@ -32,7 +32,6 @@ from libc.string cimport memset, memcpy
 
 from draken.core.buffers cimport DrakenFixedBuffer, DrakenType
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64
-from draken.core.buffers cimport ConstAccessor, DRAKEN_ENCODING_CONSTANT
 from draken.core.buffers cimport DrakenVector
 from draken.core.fixed_vector cimport (
     alloc_fixed_buffer, buf_dtype, buf_itemsize, buf_length, free_fixed_buffer,
@@ -111,23 +110,14 @@ DEF INTEGER_HASH_CHUNK = 1024
 cdef uint8_t _CONST_NULL_BYTE = 0
 
 
-cdef void _refresh_unified_integer(IntegerVector vec) noexcept:
-    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
-    vec._unified_view.length = <size_t>n
-    vec._unified_view.itemsize = vec.ptr.itemsize
-    vec._unified_view.type = vec.ptr.type
-    if vec._has_const:
-        vec._unified_view.data = <void*>&vec._const_value
-        vec._unified_view.data_length = 1
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = &_CONST_NULL_BYTE if vec._const_is_null else NULL
+cdef inline int64_t _int_const_as_i64(IntegerVector vec) noexcept nogil:
+    cdef uint8_t itemsize = vec.ptr.itemsize
+    if itemsize == 1:
+        return <int64_t>(<int8_t*>vec._unified_view.data)[0]
+    elif itemsize == 2:
+        return <int64_t>(<int16_t*>vec._unified_view.data)[0]
     else:
-        vec._unified_view.data = vec.ptr.data
-        vec._unified_view.data_length = <size_t>n
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = vec.ptr.null_bitmap
+        return <int64_t>(<int32_t*>vec._unified_view.data)[0]
 
 
 cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx, Py_ssize_t bit_offset) noexcept nogil:
@@ -153,14 +143,23 @@ cdef class IntegerVector(Vector):
                 dtype = DRAKEN_INT8
             elif ivalue >= -32768 and ivalue <= 32767:
                 dtype = DRAKEN_INT16
-        cdef IntegerVector vec = IntegerVector(dtype, 0)
+        cdef IntegerVector vec = IntegerVector(dtype, 1)
+        if not (is_null or value is None):
+            if dtype == DRAKEN_INT8:
+                (<int8_t*>vec.ptr.data)[0] = <int8_t>ivalue
+            elif dtype == DRAKEN_INT16:
+                (<int16_t*>vec.ptr.data)[0] = <int16_t>ivalue
+            else:
+                (<int32_t*>vec.ptr.data)[0] = <int32_t>ivalue
         vec.ptr.length = <size_t>length
-        vec.ptr.null_bitmap = NULL
-        vec._has_const = True
-        vec._const_is_null = bool(is_null)
-        vec._const_value = 0 if is_null or value is None else ivalue
-        vec._encoding = DRAKEN_ENCODING_CONSTANT
-        _refresh_unified_integer(vec)
+        vec._unified_view.length = <size_t>length
+        vec._unified_view.data = vec.ptr.data
+        vec._unified_view.data_length = 1
+        vec._unified_view.itemsize = vec.ptr.itemsize
+        vec._unified_view.type = vec.ptr.type
+        vec._unified_view.selection = NULL
+        vec._unified_view.sel_width = 0
+        vec._unified_view.validity = &_CONST_NULL_BYTE if is_null else NULL
         return vec
 
     @classmethod
@@ -201,13 +200,6 @@ cdef class IntegerVector(Vector):
                 itemsize = 4
             self.ptr = alloc_fixed_buffer(dtype, length, itemsize)
             self.owns_data = True
-        self._const_accessor.length = 0
-        self._const_accessor.value_type = dtype
-        self._const_accessor.value_ptr = NULL
-        self._const_accessor.is_null = 0
-        self._const_value = 0
-        self._has_const = False
-        self._const_is_null = False
         self._unified_view.data = NULL
         self._unified_view.data_length = 0
         self._unified_view.selection = NULL
@@ -217,29 +209,27 @@ cdef class IntegerVector(Vector):
         self._unified_view.itemsize = 4
         self._unified_view.type = DRAKEN_INT32
         if not wrap:
-            _refresh_unified_integer(self)
+            self._unified_view.data = self.ptr.data
+            self._unified_view.data_length = <size_t>length
+            self._unified_view.length = <size_t>length
+            self._unified_view.itemsize = self.ptr.itemsize
+            self._unified_view.type = self.ptr.type
+            self._unified_view.validity = NULL
 
     def __dealloc__(self):
         if self.owns_data and self.ptr is not NULL:
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
 
-    cdef ConstAccessor* const_accessor(self) noexcept:
-        if not self._has_const or self.ptr == NULL:
-            return NULL
-        self._const_accessor.length = self.ptr.length
-        self._const_accessor.value_type = self.ptr.type
-        self._const_accessor.value_ptr = <void*>&self._const_value
-        self._const_accessor.is_null = 1 if self._const_is_null else 0
-        return &self._const_accessor
-
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const:
+        cdef DrakenVector* uv = self.unified()
+        if self.ptr == NULL or uv.data_length == 1:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const:
+        cdef DrakenVector* uv = self.unified()
+        if self.ptr == NULL or uv.data_length == 1:
             return NULL
         return self.ptr.null_bitmap
 
@@ -264,26 +254,26 @@ cdef class IntegerVector(Vector):
     @property
     def null_count(self):
         """Return the number of nulls in the vector."""
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
-        if self._has_const:
-            return n if self._const_is_null else 0
+        if uv.data_length == 1:
+            return n if uv.validity != NULL else 0
         if ptr.null_bitmap == NULL:
             return 0
         return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
 
     def __getitem__(self, Py_ssize_t i):
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef size_t cumulative = 0
-        cdef size_t run_idx
-        cdef int64_t* rle_vals_gi
-        cdef uint8_t rle_gi_byte
+        cdef int64_t const_val
         if i < 0 or i >= <Py_ssize_t>ptr.length:
             raise IndexError("Index out of bounds")
-        if self._has_const:
-            if self._const_is_null:
+        if uv.data_length == 1:
+            if uv.validity != NULL:
                 return None
-            return <int8_t>self._const_value if ptr.itemsize == 1 else (<int16_t>self._const_value if ptr.itemsize == 2 else <int32_t>self._const_value)
+            const_val = (<int64_t*>uv.data)[0]
+            return <int8_t>const_val if ptr.itemsize == 1 else (<int16_t>const_val if ptr.itemsize == 2 else <int32_t>const_val)
         if ptr.null_bitmap != NULL:
             if not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
                 return None
@@ -296,19 +286,22 @@ cdef class IntegerVector(Vector):
 
     def to_arrow(self):
         import pyarrow as pa
-        if self._has_const:
+        cdef DrakenVector* uv = self.unified()
+        cdef int64_t const_val
+        if uv.data_length == 1:
+            const_val = (<int64_t*>uv.data)[0]
             if self.ptr.type == DRAKEN_INT8:
-                if self._const_is_null:
+                if uv.validity != NULL:
                     return pa.nulls(self.ptr.length, type=pa.int8())
-                return pa.array([<int8_t>self._const_value] * self.ptr.length, type=pa.int8())
+                return pa.array([<int8_t>const_val] * self.ptr.length, type=pa.int8())
             elif self.ptr.type == DRAKEN_INT16:
-                if self._const_is_null:
+                if uv.validity != NULL:
                     return pa.nulls(self.ptr.length, type=pa.int16())
-                return pa.array([<int16_t>self._const_value] * self.ptr.length, type=pa.int16())
+                return pa.array([<int16_t>const_val] * self.ptr.length, type=pa.int16())
             else:
-                if self._const_is_null:
+                if uv.validity != NULL:
                     return pa.nulls(self.ptr.length, type=pa.int32())
-                return pa.array([<int32_t>self._const_value] * self.ptr.length, type=pa.int32())
+                return pa.array([<int32_t>const_val] * self.ptr.length, type=pa.int32())
         cdef size_t nbytes = buf_length(self.ptr) * buf_itemsize(self.ptr)
         cdef intptr_t addr = <intptr_t>self.ptr.data
         data_buf = pa.foreign_buffer(addr, nbytes, base=self)
@@ -347,7 +340,7 @@ cdef class IntegerVector(Vector):
 
         if uv.data_length == 1:
             for i in range(n):
-                out.append(None if self._const_is_null else self[i])
+                out.append(None if uv.validity != NULL else self[i])
             return out
         if ptr.itemsize == 1:
             d8 = <int8_t*>ptr.data
@@ -385,9 +378,9 @@ cdef class IntegerVector(Vector):
         if n == 0:
             raise ValueError("Cannot compute min of empty column")
         if uv.data_length == 1:
-            if self._const_is_null:
+            if uv.validity != NULL:
                 raise ValueError("Cannot compute min of all-null column")
-            return self._const_value
+            return (<int64_t*>uv.data)[0]
 
         cdef int64_t m
         cdef int8_t* d8
@@ -455,9 +448,9 @@ cdef class IntegerVector(Vector):
         if n == 0:
             raise ValueError("Cannot compute max of empty column")
         if uv.data_length == 1:
-            if self._const_is_null:
+            if uv.validity != NULL:
                 raise ValueError("Cannot compute max of all-null column")
-            return self._const_value
+            return (<int64_t*>uv.data)[0]
 
         cdef int64_t m
         cdef int8_t* d8
@@ -521,9 +514,9 @@ cdef class IntegerVector(Vector):
     cpdef int64_t sum(self):
         cdef DrakenVector* uv = self.unified()
         if uv.data_length == 1:
-            if self._const_is_null:
+            if uv.validity != NULL:
                 return 0
-            return <int64_t>(self.ptr.length * self._const_value)
+            return <int64_t>(self.ptr.length * (<int64_t*>uv.data)[0])
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
         cdef int64_t total = 0
@@ -597,11 +590,13 @@ cdef class IntegerVector(Vector):
     cpdef IntegerVector take(self, int32_t[::1] indices):
         cdef DrakenVector* uv = self.unified()
         cdef Py_ssize_t i, n = indices.shape[0]
+        cdef bint is_const_null
         if uv.data_length == 1:
+            is_const_null = uv.validity != NULL
             return IntegerVector.from_constant(
-                None if self._const_is_null else self._const_value,
+                None if is_const_null else (<int64_t*>uv.data)[0],
                 n,
-                is_null=self._const_is_null,
+                is_null=is_const_null,
             )
         cdef IntegerVector out = IntegerVector(self.ptr.type, <size_t>n)
         cdef uint8_t* src_null = self.ptr.null_bitmap
@@ -682,7 +677,8 @@ cdef class IntegerVector(Vector):
                     else:
                         dst32[i] = 0
                 out.ptr.null_bitmap = out_null
-        _refresh_unified_integer(out)
+        out._unified_view.length = <size_t>n
+        out._unified_view.validity = out.ptr.null_bitmap
         return out
 
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n):
@@ -719,10 +715,10 @@ cdef class IntegerVector(Vector):
             dst = <uint8_t*>out.ptr.data
             if nbytes > 0:
                 memset(dst, 0, nbytes)
-            if self._const_is_null:
+            if uv.validity != NULL:
                 return self._make_all_null_bool(n)
 
-            matched = dispatch_compare_once(op, self._const_value, value)
+            matched = dispatch_compare_once(op, (<int64_t*>uv.data)[0], value)
             if matched and nbytes > 0:
                 memset(dst, 0xFF, nbytes)
                 if (n & 7) != 0:
@@ -786,13 +782,14 @@ cdef class IntegerVector(Vector):
     cdef BoolVector _compare_vector(self, IntegerVector other, int op):
         # Const fast paths: avoid O(n) materialisation.
         cdef DrakenVector* uv = self.unified()
+        cdef DrakenVector* ouv = other.unified()
         cdef Py_ssize_t const_n
         cdef int reversed_op
         if uv.data_length == 1:
             const_n = self.ptr.length
             if const_n != other.ptr.length:
                 raise ValueError("Vectors must have the same length")
-            if self._const_is_null:
+            if uv.validity != NULL:
                 return self._make_all_null_bool(const_n)
             # Reverse directional ops: gt(2)↔lt(4), ge(3)↔le(5); eq/ne unchanged.
             if op == 2:   reversed_op = 4
@@ -800,13 +797,13 @@ cdef class IntegerVector(Vector):
             elif op == 4: reversed_op = 2
             elif op == 5: reversed_op = 3
             else:         reversed_op = op
-            return other._compare_scalar(self._const_value, reversed_op)
-        if other._has_const:
+            return other._compare_scalar((<int64_t*>uv.data)[0], reversed_op)
+        if ouv.data_length == 1:
             if self.ptr.length != other.ptr.length:
                 raise ValueError("Vectors must have the same length")
-            if other._const_is_null:
+            if ouv.validity != NULL:
                 return self._make_all_null_bool(self.ptr.length)
-            return self._compare_scalar(other._const_value, op)
+            return self._compare_scalar((<int64_t*>ouv.data)[0], op)
 
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
@@ -1059,7 +1056,7 @@ cdef class IntegerVector(Vector):
         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
 
         if uv.data_length == 1:
-            value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
+            value = NULL_HASH if uv.validity != NULL else <uint64_t>_int_const_as_i64(self)
             for j in range(INTEGER_HASH_CHUNK):
                 scratch[j] = value
             if n > 0:
@@ -1143,8 +1140,9 @@ cdef class IntegerVector(Vector):
         cdef uint64_t[INTEGER_HASH_CHUNK] scratch
         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
 
-        if self._has_const:
-            value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
+        cdef DrakenVector* _cuv = &self._unified_view
+        if _cuv.data_length == 1:
+            value = NULL_HASH if _cuv.validity != NULL else <uint64_t>_int_const_as_i64(self)
             for j in range(INTEGER_HASH_CHUNK):
                 scratch[j] = value
             i = 0
@@ -1300,7 +1298,13 @@ cdef IntegerVector from_arrow(object array):
     else:
         vec.ptr.null_bitmap = NULL
 
-    _refresh_unified_integer(vec)
+    cdef size_t _arr_len = <size_t>len(array)
+    vec._unified_view.data = vec.ptr.data
+    vec._unified_view.data_length = _arr_len
+    vec._unified_view.length = _arr_len
+    vec._unified_view.itemsize = vec.ptr.itemsize
+    vec._unified_view.type = vec.ptr.type
+    vec._unified_view.validity = vec.ptr.null_bitmap
     return vec
 
 
@@ -1347,7 +1351,12 @@ cdef IntegerVector from_dict(const int32_t[::1] codes, const int64_t[::1] dictio
         else:
             (<int32_t*>vec.ptr.data)[i] = <int32_t>value
 
-    _refresh_unified_integer(vec)
+    vec._unified_view.data = vec.ptr.data
+    vec._unified_view.data_length = <size_t>row_count
+    vec._unified_view.length = <size_t>row_count
+    vec._unified_view.itemsize = vec.ptr.itemsize
+    vec._unified_view.type = vec.ptr.type
+    vec._unified_view.validity = NULL
     return vec
 
 
@@ -1416,7 +1425,12 @@ cdef IntegerVector from_dict_nullable(
             else:
                 (<int32_t*>vec.ptr.data)[i] = 0
 
-    _refresh_unified_integer(vec)
+    vec._unified_view.data = vec.ptr.data
+    vec._unified_view.data_length = <size_t>row_count
+    vec._unified_view.length = <size_t>row_count
+    vec._unified_view.itemsize = vec.ptr.itemsize
+    vec._unified_view.type = vec.ptr.type
+    vec._unified_view.validity = nb
     return vec
 
 

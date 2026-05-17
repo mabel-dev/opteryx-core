@@ -1,0 +1,10 @@
+# Source: planner.run_tests
+
+statement ok
+SELECT name, id FROM $planets AS A UNION SELECT name, id FROM $planets AS B
+
+statement ok
+SELECT * FROM $planets LEFT ANTI JOIN testdata.satellites USING (id)
+
+statement ok
+EXPLAIN ANALYZE FORMAT MERMAID  SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id)

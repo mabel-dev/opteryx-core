@@ -1,0 +1,6 @@
+# Source: select_constant.results_tests
+# This is to confirm the results testing system works
+query T rowsort
+SELECT 'VALUE'
+----
+VALUE

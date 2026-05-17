@@ -1,0 +1,6 @@
+# Source: boolean_expressions_05.results_tests
+# Test OR
+query I rowsort
+SELECT TRUE OR TRUE AS T
+----
+1

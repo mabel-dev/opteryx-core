@@ -1,0 +1,510 @@
+# Source: sql92.run_tests
+
+
+# Feature E011-01
+statement ok
+SELECT +5
+
+statement ok
+SELECT -5
+
+statement ok
+SELECT 5
+
+
+# Feature E011-02
+statement ok
+SELECT +7.8
+
+statement ok
+SELECT -7.8
+
+statement ok
+SELECT +.2
+
+statement ok
+SELECT +.2E+2
+
+statement ok
+SELECT +.2E-2
+
+statement ok
+SELECT +.2E2
+
+statement ok
+SELECT +2
+
+statement ok
+SELECT +2.
+
+statement ok
+SELECT +2.2
+
+statement ok
+SELECT +2.2E+2
+
+statement ok
+SELECT +2.2E-2
+
+statement ok
+SELECT +2.2E2
+
+statement ok
+SELECT +2.E+2
+
+statement ok
+SELECT +2.E-2
+
+statement ok
+SELECT +2.E2
+
+statement ok
+SELECT +2E+2
+
+statement ok
+SELECT +2E-2
+
+statement ok
+SELECT +2E2
+
+statement ok
+SELECT -.2
+
+statement ok
+SELECT -.2E+2
+
+statement ok
+SELECT -.2E-2
+
+statement ok
+SELECT -.2E2
+
+statement ok
+SELECT -2
+
+statement ok
+SELECT -2.
+
+statement ok
+SELECT -2.2
+
+statement ok
+SELECT -2.2E+2
+
+statement ok
+SELECT -2.2E-2
+
+statement ok
+SELECT -2.2E2
+
+statement ok
+SELECT -2.E+2
+
+statement ok
+SELECT -2.E-2
+
+statement ok
+SELECT -2.E2
+
+statement ok
+SELECT -2E+2
+
+statement ok
+SELECT -2E-2
+
+statement ok
+SELECT -2E2
+
+statement ok
+SELECT .2
+
+statement ok
+SELECT .2E+2
+
+statement ok
+SELECT .2E-2
+
+statement ok
+SELECT .2E2
+
+statement ok
+SELECT 2
+
+statement ok
+SELECT 2.
+
+statement ok
+SELECT 2.2
+
+statement ok
+SELECT 2.2E+2
+
+statement ok
+SELECT 2.2E-2
+
+statement ok
+SELECT 2.2E2
+
+statement ok
+SELECT 2.E+2
+
+statement ok
+SELECT 2.E-2
+
+statement ok
+SELECT 2.E2
+
+statement ok
+SELECT 2E+2
+
+statement ok
+SELECT 2E-2
+
+statement ok
+SELECT 2E2
+
+
+# Feature E011-04
+statement ok
+SELECT 5 +3
+
+statement ok
+SELECT 5 -3
+
+statement ok
+SELECT 3.4 + 1.2
+
+statement ok
+SELECT 3.4 - 1.2
+
+
+# Feature E011-05
+statement ok
+SELECT 3 < 5
+
+statement ok
+SELECT 3 <= 5
+
+statement ok
+SELECT 3 <> 5
+
+statement ok
+SELECT 3 = 5
+
+statement ok
+SELECT 3 > 5
+
+statement ok
+SELECT 3 >= 5
+
+statement ok
+SELECT 3.7 < 5.2
+
+statement ok
+SELECT 3.7 <= 5.2
+
+statement ok
+SELECT 3.7 <> 5.2
+
+statement ok
+SELECT 3.7 = 5.2
+
+statement ok
+SELECT 3.7 > 5.2
+
+statement ok
+SELECT 3.7 >= 5.2
+
+statement ok
+SELECT ( 1 )
+
+statement ok
+SELECT ( 5.5 )
+
+
+# Feature E011-06
+statement ok
+SELECT 3 < 1.2
+
+statement ok
+SELECT 3 < 5
+
+statement ok
+SELECT 3 <= 1.2
+
+statement ok
+SELECT 3 <= 5
+
+statement ok
+SELECT 3 <> 1.2
+
+statement ok
+SELECT 3 <> 5
+
+statement ok
+SELECT 3 = 1.2
+
+statement ok
+SELECT 3 = 5
+
+statement ok
+SELECT 3 > 1.2
+
+statement ok
+SELECT 3 > 5
+
+statement ok
+SELECT 3 >= 1.2
+
+statement ok
+SELECT 3 >= 5
+
+statement ok
+SELECT 3.7 < 1.2
+
+statement ok
+SELECT 3.7 < 5
+
+statement ok
+SELECT 3.7 <= 1.2
+
+statement ok
+SELECT 3.7 <= 5
+
+statement ok
+SELECT 3.7 <> 1.2
+
+statement ok
+SELECT 3.7 <> 5
+
+statement ok
+SELECT 3.7 = 1.2
+
+statement ok
+SELECT 3.7 = 5
+
+statement ok
+SELECT 3.7 > 1.2
+
+statement ok
+SELECT 3.7 > 5
+
+statement ok
+SELECT 3.7 >= 1.2
+
+statement ok
+SELECT 3.7 >= 5
+
+
+# Feature E021-03
+statement ok
+SELECT ''
+
+statement ok
+SELECT 'a'
+
+statement ok
+SELECT 'abc'
+
+
+# Feature E021-06
+statement error TypeError
+SELECT SUBSTRING ( 'foo' FROM 1 )
+
+statement ok
+SELECT SUBSTRING ( 'foo' FROM 1 FOR 2 )
+
+
+# Feature E021-07
+statement ok
+SELECT 'foo' || 'bar'
+
+
+# Feature E021-08
+statement ok
+SELECT LOWER ( 'foo' )
+
+statement ok
+SELECT UPPER ( 'foo' )
+
+
+# Feature E021-09
+statement ok
+SELECT TRIM ( 'foo' )
+
+statement error IncompatibleTypesError
+SELECT TRIM ( 'foo' FROM 'foo' )
+
+statement error IncompatibleTypesError
+SELECT TRIM ( BOTH 'foo' FROM 'foo' )
+
+statement error IncompatibleTypesError
+SELECT TRIM ( LEADING 'foo' FROM 'foo' )
+
+statement error IncompatibleTypesError
+SELECT TRIM ( TRAILING 'foo' FROM 'foo' )
+
+
+# Feature E021-11
+statement ok
+SELECT POSITION ( 'foo' IN 'bar' )
+
+
+# Feature E021-12
+statement ok
+SELECT 'foo' < 'bar'
+
+statement ok
+SELECT 'foo' <= 'bar'
+
+statement ok
+SELECT 'foo' <> 'bar'
+
+statement ok
+SELECT 'foo' = 'bar'
+
+statement ok
+SELECT 'foo' > 'bar'
+
+statement ok
+SELECT 'foo' >= 'bar'
+
+
+# Feature E131
+statement error TypeError
+SELECT NULL
+
+
+# Feature E161
+statement ok
+SELECT 1 -- hello
+
+
+# Feature E091-01
+statement ok
+SELECT AVG(i) FROM GENERATE_SERIES(1, 10) as i
+
+
+# Feature E091-02
+statement ok
+SELECT COUNT(i) FROM GENERATE_SERIES(1, 10) as i
+
+
+# Feature E091-03
+statement ok
+SELECT MAX(i) FROM GENERATE_SERIES(1, 10) as i
+
+
+# Feature E091-04
+statement ok
+SELECT MIN(i) FROM GENERATE_SERIES(1, 10) as i
+
+
+# Feature E091-05
+statement ok
+SELECT SUM(i) FROM GENERATE_SERIES(1, 10) as i
+
+
+# Feature E121-02
+statement ok
+SELECT * FROM $planets ORDER BY mass
+
+
+# Feature F051-05
+statement ok
+SELECT CAST ( '2016-03-26' AS DATE )
+
+statement ok
+SELECT CAST ( '2016-03-26 01:02:03' AS TIMESTAMP WITHOUT TIME ZONE )
+
+statement ok
+SELECT CAST ( CAST ( '2016-03-26' AS DATE ) AS VARCHAR )
+
+statement ok
+SELECT CAST ( CAST ( '2016-03-26 01:02:03' AS TIMESTAMP WITHOUT TIME ZONE ) AS VARCHAR )
+
+statement error TypeError
+SELECT CAST ( CAST ( '2016-03-26 01:02:03' AS TIMESTAMP WITHOUT TIME ZONE ) AS TIMESTAMP )
+
+
+# Feature F051-06
+statement ok
+SELECT CURRENT_DATE
+
+
+# Feature F051-07
+statement ok
+SELECT CURRENT_TIME
+
+
+# Feature F051-08
+statement ok
+SELECT CURRENT_TIMESTAMP
+
+
+# Feature F261-01
+statement ok
+SELECT CASE 0 WHEN 2 THEN 1 ELSE 1 END
+
+statement error TypeError
+SELECT CASE 0 WHEN 2 THEN 1 ELSE NULL END
+
+statement ok
+SELECT CASE 0 WHEN 2 THEN 1 END
+
+statement error TypeError
+SELECT CASE 0 WHEN 2 THEN NULL ELSE 1 END
+
+statement error TypeError
+SELECT CASE 0 WHEN 2 THEN NULL ELSE NULL END
+
+statement error TypeError
+SELECT CASE 0 WHEN 2 THEN NULL END
+
+statement ok
+SELECT CASE 0 WHEN 2 THEN 1 ELSE 1 END
+
+statement error TypeError
+SELECT CASE 0 WHEN 2 THEN 1 ELSE NULL END
+
+statement ok
+SELECT CASE 0 WHEN 2 THEN 1 END
+
+statement error TypeError
+SELECT CASE 0 WHEN 2 THEN NULL ELSE 1 END
+
+statement error TypeError
+SELECT CASE 0 WHEN 2 THEN NULL ELSE NULL END
+
+statement error TypeError
+SELECT CASE 0 WHEN 2 THEN NULL END
+
+
+# Feature F261-02
+statement ok
+SELECT CASE WHEN 0 = 1 THEN 1 ELSE 1 END
+
+statement error TypeError
+SELECT CASE WHEN 0 = 1 THEN 1 ELSE NULL END
+
+statement ok
+SELECT CASE WHEN 0 = 1 THEN 1 END
+
+statement error TypeError
+SELECT CASE WHEN 0 = 1 THEN NULL ELSE 1 END
+
+statement error TypeError
+SELECT CASE WHEN 0 = 1 THEN NULL ELSE NULL END
+
+statement error TypeError
+SELECT CASE WHEN 0 = 1 THEN NULL END
+
+
+# Feature F261-03
+statement error TypeError
+SELECT NULLIF ( 1 , 1 )
+
+
+# Feature F261-04
+statement ok
+SELECT COALESCE ( 1 , 1 )

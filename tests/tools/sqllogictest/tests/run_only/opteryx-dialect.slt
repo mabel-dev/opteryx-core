@@ -1,0 +1,26 @@
+# Source: opteryx-dialect.run_tests
+
+# support hyphens in identifier names
+statement error DatasetNotFoundError
+SELECT * FROM testdata.hyphened-name
+
+
+statement ok
+SELECT 10_000_000
+
+statement ok
+SELECT 1_2_3_4
+
+statement ok
+SELECT * FROM testdata.satellites WHERE id > 1_00
+
+statement ok
+SELECT * FROM testdata.satellites
+
+
+# Support EXCEPT
+statement ok
+SELECT * EXCEPT(id) FROM $planets
+
+
+# SELECT postgrad && undergrad FROM testdata.astronauts

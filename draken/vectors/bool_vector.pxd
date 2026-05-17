@@ -3,7 +3,7 @@
 # cython: language_level=3
 
 from libc.stdint cimport int32_t, int8_t, int64_t, uint8_t, uint64_t
-from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenVector
+from draken.core.buffers cimport DrakenFixedBuffer, DrakenVector
 from draken.vectors.vector cimport Vector
 
 cdef class BoolVector(Vector):
@@ -11,11 +11,6 @@ cdef class BoolVector(Vector):
     cdef object _arrow_null_buf
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
-    cdef ConstAccessor _const_accessor
-    cdef uint8_t _const_value
-    cdef bint _has_const
-    cdef bint _const_is_null
-    cdef ConstAccessor* const_accessor(self) noexcept
     cdef DrakenVector* unified(self) noexcept
 
     # Ops

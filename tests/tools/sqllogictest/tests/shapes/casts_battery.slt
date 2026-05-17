@@ -1,0 +1,166 @@
+# Source: test_casts_battery.py
+
+query shape 100000 14
+SELECT * FROM testdata.tweets
+
+query error io failed
+SELECT 1 FROM testdata.tweets WHERE CAST(str_following AS INTEGER) = following
+
+query error io failed
+SELECT 1 FROM testdata.tweets WHERE CAST('-' || str_following AS INTEGER) = following * -1
+
+query error io failed
+SELECT 1 FROM testdata.tweets WHERE CAST(CAST(str_following AS INTEGER) AS VARCHAR) = str_following
+
+query error io failed
+SELECT 1 FROM testdata.tweets WHERE CAST(CAST(str_following AS INTEGER) AS BLOB) = str_following
+
+query error io failed
+SELECT 1 FROM testdata.tweets WHERE CAST(CAST('-' || str_following AS INTEGER) AS VARCHAR) = '-' || str_following
+
+query error io failed
+SELECT 1 FROM testdata.tweets WHERE CAST(CAST('-' || str_following AS INTEGER) AS BLOB) = '-' || str_following
+
+query error io failed
+SELECT 1 FROM testdata.tweets WHERE CAST(str_dbl_following AS DOUBLE) = (following / 10)
+
+query error io failed
+SELECT 1 FROM testdata.tweets WHERE CAST('-' || str_dbl_following AS DOUBLE) = (following / 10) * -1
+
+query error io failed
+SELECT 1 FROM testdata.tweets WHERE CAST(CAST(str_dbl_following AS DOUBLE) AS VARCHAR) = str_dbl_following
+
+query error io failed
+SELECT 1 FROM testdata.tweets WHERE CAST(CAST(str_dbl_following AS DOUBLE) AS BLOB) = str_dbl_following
+
+query error io failed
+SELECT 1 FROM testdata.tweets WHERE CAST(CAST('-' || str_dbl_following AS DOUBLE) AS VARCHAR) = '-' || str_dbl_following
+
+query error io failed
+SELECT 1 FROM testdata.tweets WHERE CAST(CAST('-' || str_dbl_following AS DOUBLE) AS BLOB) = '-' || str_dbl_following
+
+query error io failed
+SELECT 1 FROM testdata.tweets WHERE CAST(str_timestamp AS TIMESTAMP) == ts_timestamp
+
+query error io failed
+SELECT 1 FROM testdata.tweets WHERE str_timestamp || '.000000' == CAST(ts_timestamp AS VARCHAR)
+
+query error io failed
+SELECT 1 FROM testdata.tweets WHERE CAST(int_timestamp * 1_000_000 AS TIMESTAMP) == ts_timestamp
+
+query error io failed
+SELECT CAST(NULL AS INTEGER)
+
+query error io failed
+SELECT CAST(NULL AS VARCHAR)
+
+query error io failed
+SELECT CAST(NULL AS DOUBLE)
+
+query error io failed
+SELECT CAST(NULL AS BOOLEAN)
+
+query error io failed
+SELECT CAST(NULL AS TIMESTAMP)
+
+query error io failed
+SELECT CAST(1 AS BOOLEAN)
+
+query error io failed
+SELECT CAST(0 AS BOOLEAN)
+
+query error io failed
+SELECT CAST('true' AS BOOLEAN)
+
+query error io failed
+SELECT CAST('false' AS BOOLEAN)
+
+query error io failed
+SELECT CAST(TRUE AS VARCHAR)
+
+query error io failed
+SELECT CAST(FALSE AS VARCHAR)
+
+query error io failed
+SELECT CAST(TRUE AS INTEGER)
+
+query error io failed
+SELECT CAST(FALSE AS INTEGER)
+
+query error io failed
+SELECT CAST('hello world' AS VARCHAR)
+
+query error io failed
+SELECT CAST('123' AS INTEGER)
+
+query error io failed
+SELECT CAST('123.456' AS DOUBLE)
+
+query error io failed
+SELECT CAST('2023-01-01' AS TIMESTAMP)
+
+query error io failed
+SELECT CAST(0 AS VARCHAR)
+
+query error io failed
+SELECT CAST(-0 AS VARCHAR)
+
+query error io failed
+SELECT CAST(0.0 AS VARCHAR)
+
+query error io failed
+SELECT CAST(-0.0 AS VARCHAR)
+
+query error io failed
+SELECT CAST(999999999999 AS VARCHAR)
+
+query error io failed
+SELECT CAST(-999999999999 AS VARCHAR)
+
+query error io failed
+SELECT CAST(1.7976931348623157e+308 AS VARCHAR)
+
+query error io failed
+SELECT CAST('1e10' AS DOUBLE)
+
+query error io failed
+SELECT CAST('1.5e-5' AS DOUBLE)
+
+query error io failed
+SELECT CAST('-2.5e3' AS DOUBLE)
+
+query error io failed
+SELECT CAST('' AS VARCHAR)
+
+query error io failed
+SELECT CAST('' AS BLOB)
+
+query error io failed
+SELECT CAST(CAST(CAST(123 AS VARCHAR) AS INTEGER) AS DOUBLE)
+
+query error io failed
+SELECT CAST(CAST(CAST('456' AS INTEGER) AS DOUBLE) AS VARCHAR)
+
+query error io failed
+SELECT CAST(CAST(TRUE AS INTEGER) AS VARCHAR)
+
+query error io failed
+SELECT CAST('test' AS BLOB)
+
+query error io failed
+SELECT CAST(CAST('test' AS BLOB) AS VARCHAR)
+
+query error io failed
+SELECT CAST('test' AS VARBINARY)
+
+query error io failed
+SELECT VARBINARY('test')
+
+query error io failed
+SELECT TRY_VARBINARY('test')
+
+query error io failed
+SELECT 'test'::VARBINARY
+
+query error io failed
+SELECT CAST(CAST('test' AS VARBINARY) AS VARCHAR)

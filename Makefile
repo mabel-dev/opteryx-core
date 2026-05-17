@@ -262,3 +262,37 @@ loc: ## Count LOC for production code only (excludes tests)
 edge-executor: check-python compile ## Test edge-based executor with real physical plan
 	$(call print_blue,"Testing EdgeBasedExecutor with real Opteryx plan...")
 	@$(PYTHON) scratch/test_edge_executor_real.py
+
+# === SQL LOGIC TESTS ===
+
+SLT_DRIVER   := tests/tools/sqllogictest/opteryx_driver.py
+SLT_ROOT     := tests/tools/sqllogictest/tests
+# Use the binary on PATH if available, otherwise fall back to the sibling checkout.
+SQLLOGICTEST ?= $(shell command -v sqllogictest 2>/dev/null || echo ../sqllogictest/target/release/sqllogictest)
+
+.PHONY: slt slt-shapes slt-results slt-run-only slt-install
+
+slt-install: ## Install sqllogictest binary from mabel-dev fork
+	cargo install sqllogictest-bin \
+	  --git https://github.com/mabel-dev/sqllogictest \
+	  --locked
+
+slt-shapes: ## Run shape-checking slt tests
+	$(SQLLOGICTEST) \
+	  --engine external \
+	  --external-engine-command-template "$(PYTHON) $(SLT_DRIVER)" \
+	  '$(SLT_ROOT)/shapes/*.slt'
+
+slt-results: ## Run result-checking slt tests
+	$(SQLLOGICTEST) \
+	  --engine external \
+	  --external-engine-command-template "$(PYTHON) $(SLT_DRIVER)" \
+	  '$(SLT_ROOT)/results/*.slt'
+
+slt-run-only: ## Run execute-only slt tests (no result checks)
+	$(SQLLOGICTEST) \
+	  --engine external \
+	  --external-engine-command-template "$(PYTHON) $(SLT_DRIVER)" \
+	  '$(SLT_ROOT)/run_only/*.slt'
+
+slt: slt-shapes slt-results slt-run-only ## Run the full sqllogictest suite

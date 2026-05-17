@@ -1,0 +1,23 @@
+# Source: test_views.py
+
+statement ok
+CREATE VIEW test.views.test_01 AS SELECT * FROM $planets
+
+statement ok
+CREATE OR REPLACE VIEW test.views.test_02 (col1, col2, col3) AS SELECT name, mass, radius FROM $planets
+
+statement ok
+ALTER VIEW test.views.test_01 AS SELECT name, mass FROM $planets WHERE mass > 5e24
+
+statement ok
+DROP VIEW test.views.test_02
+
+statement ok
+CREATE VIEW test.views.test_01 AS SELECT * FROM nonexistent_table
+
+statement ok
+ALTER VIEW test.views.nonexistent_view AS SELECT * FROM $planets
+
+statement ok
+DROP VIEW test.views.nonexistent_view
+

@@ -1,0 +1,125 @@
+# Source: test_projection_pushdown_parquet.py
+
+query shape - 20
+SELECT * FROM testdata.planets
+
+query shape - 1
+SELECT name FROM testdata.planets
+
+query shape - 2
+SELECT id, name FROM testdata.planets
+
+query shape - 3
+SELECT id, name, mass FROM testdata.planets
+
+query shape - 3
+SELECT gravity, escapeVelocity, rotationPeriod FROM testdata.planets
+
+query shape - 3
+SELECT distanceFromSun, perihelion, aphelion FROM testdata.planets
+
+query shape - 4
+SELECT orbitalPeriod, orbitalVelocity, orbitalInclination, orbitalEccentricity FROM testdata.planets
+
+query shape - 3
+SELECT obliquityToOrbit, meanTemperature, surfacePressure FROM testdata.planets
+
+query shape - 2
+SELECT numberOfMoons, name FROM testdata.planets
+
+query shape - 1
+SELECT UPPER(name) FROM testdata.planets
+
+query shape - 2
+SELECT LENGTH(name), gravity FROM testdata.planets
+
+query shape - 2
+SELECT name FROM testdata.planets WHERE IFNULL(gravity, 1.0) > 9.8
+
+query shape - 2
+SELECT id, mass FROM testdata.planets WHERE density < 5
+
+query shape - 2
+SELECT escapeVelocity FROM testdata.planets WHERE name LIKE 'M%'
+
+query shape - 1
+SELECT DISTINCT name FROM testdata.planets
+
+query shape - 2
+SELECT DISTINCT id, name FROM testdata.planets
+
+query shape - 1
+SELECT name, COUNT(*) FROM testdata.planets GROUP BY name
+
+query shape - 2
+SELECT gravity, AVG(mass) FROM testdata.planets GROUP BY gravity
+
+query shape - 2
+SELECT name FROM testdata.planets ORDER BY gravity
+
+query shape - 3
+SELECT id FROM testdata.planets ORDER BY name, mass
+
+query shape - 1
+SELECT CASE WHEN gravity > 9.8 THEN 'High' ELSE 'Low' END FROM testdata.planets
+
+query shape - 2
+SELECT name, CASE WHEN mass > 5 THEN 'Massive' ELSE 'Light' END FROM testdata.planets
+
+query shape - 1
+SELECT DOUBLE(gravity) * 9.81 FROM testdata.planets
+
+query shape - 2
+SELECT mass / density FROM testdata.planets
+
+query shape - 1
+SELECT name AS planet_name FROM testdata.planets
+
+query shape - 2
+SELECT id AS planet_id, mass AS planet_mass FROM testdata.planets
+
+query shape - 1
+SELECT name FROM testdata.planets LIMIT 10
+
+query shape - 2
+SELECT id, escapeVelocity FROM testdata.planets LIMIT 5
+
+query shape - 2
+SELECT MAX(gravity), MIN(name) FROM testdata.planets
+
+query shape - 2
+SELECT SUM(diameter), AVG(density) FROM testdata.planets
+
+query shape - 1
+SELECT COUNT(*), MAX(numberOfMoons) FROM testdata.planets
+
+query shape - 3
+SELECT * FROM (SELECT Company, Mission, LENGTH(Location) AS LL FROM testdata.missions) AS launches
+
+query shape - 1
+SELECT DISTINCT Mission FROM (SELECT Company, Mission, LENGTH(Location) AS LL FROM testdata.missions) AS launches
+
+query shape - 1
+SELECT LL FROM (SELECT Company, Mission, LENGTH(Location) AS LL FROM testdata.missions) AS launches
+
+query shape - 1
+SELECT Company FROM (SELECT Company, Mission, LENGTH(Location) AS LL FROM testdata.missions) AS launches
+
+query shape - 1
+SELECT Mission FROM (SELECT Company, Mission, LENGTH(Location) AS LL FROM testdata.missions) AS launches
+
+query shape - 1
+SELECT LL FROM (SELECT Company, Mission, LENGTH(Location) AS LL FROM testdata.missions) AS launches
+
+query shape - 3
+SELECT * FROM (SELECT Company, Mission, LENGTH(Location) AS LL FROM testdata.missions) AS launches
+
+query shape - 1
+SELECT DISTINCT Company FROM (SELECT Company, Mission, LENGTH(Location) AS LL FROM testdata.missions) AS launches
+
+query shape - 1
+SELECT DISTINCT Company FROM (SELECT Company, Mission, LENGTH(Location) AS LL FROM testdata.missions) AS launches ORDER BY Company
+
+query shape - 1
+SELECT DISTINCT Mission FROM (SELECT Company, Mission, LENGTH(Location) AS LL FROM testdata.missions) AS launches
+

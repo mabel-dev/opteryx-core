@@ -1,0 +1,207 @@
+# Source: optimizer.run_tests
+
+statement ok
+SELECT NULL OR TRUE     -- TRUE
+
+statement ok
+SELECT NULL AND TRUE    -- NULL
+
+statement ok
+SELECT NULL OR FALSE    -- NULL
+
+statement ok
+SELECT NULL AND FALSE   -- FALSE
+
+
+statement ok
+SELECT TRUE OR NULL
+
+statement ok
+SELECT TRUE AND NULL
+
+statement ok
+SELECT FALSE OR NULL
+
+statement ok
+SELECT FALSE AND NULL
+
+statement ok
+SELECT (TRUE) OR NULL
+
+statement ok
+SELECT (TRUE) AND NULL
+
+statement ok
+SELECT (FALSE) OR NULL
+
+statement ok
+SELECT (FALSE) AND NULL
+
+statement ok
+SELECT TRUE OR (NULL)
+
+statement ok
+SELECT TRUE AND (NULL)
+
+statement ok
+SELECT FALSE OR (NULL)
+
+statement ok
+SELECT FALSE AND (NULL)
+
+statement ok
+SELECT (TRUE OR NULL)
+
+statement ok
+SELECT (TRUE AND NULL)
+
+statement ok
+SELECT (FALSE OR NULL)
+
+statement ok
+SELECT (FALSE AND NULL)
+
+statement ok
+SELECT * FROM (SELECT 1 * surface_pressure as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT surface_pressure * 1 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement error FunctionExecutionError
+SELECT * FROM (SELECT 0 * surface_pressure as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement error FunctionExecutionError
+SELECT * FROM (SELECT surface_pressure * 0 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 0 + surface_pressure as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT surface_pressure + 0 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT surface_pressure - 0 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT surface_pressure / 1 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement error ValueError
+SELECT * FROM (SELECT TRUE AND (surface_pressure != 0) as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT FALSE AND (surface_pressure != 0) as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT TRUE OR (surface_pressure != 0) as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement error ValueError
+SELECT * FROM (SELECT FALSE OR (surface_pressure != 0) as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement error ValueError
+SELECT * FROM (SELECT (surface_pressure != 0) AND TRUE as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT (surface_pressure != 0) AND FALSE as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT (surface_pressure != 0) OR TRUE as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement error ValueError
+SELECT * FROM (SELECT (surface_pressure != 0) OR FALSE as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 1 + surface_pressure as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT surface_pressure + 1 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 1 - surface_pressure as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT surface_pressure - 1 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 1 / surface_pressure as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 0 / surface_pressure as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 1 * 1 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 0 * 0 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 1 + 1 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 1 - 1 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 1 / 1 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 1 * 0 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 0 * 1 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 1 + 0 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 0 + 1 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 1 - 0 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 0 - 1 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+statement ok
+SELECT * FROM (SELECT 1 / 0 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL
+
+
+statement error TypeError
+SELECT * FROM $planets WHERE name = 'Earth' OR name = 'Mars' OR name = 'Venus'
+
+statement error TypeError
+SELECT * FROM $planets WHERE id = 1 OR id = 2 OR id = 3
+
+statement error TypeError
+SELECT * FROM $planets WHERE name = 'Earth' OR id = 3 OR name = 'Mars' OR id = 4
+
+statement error TypeError
+SELECT * FROM $planets WHERE name = 'Earth' OR id < 3 OR name = 'Mars' OR id = 4
+
+statement error TypeError
+SELECT * FROM $planets WHERE name = 'Mercury' OR name = 'Neptune' OR name = 'Pluto'
+
+statement error TypeError
+SELECT * FROM $planets WHERE id = 5 OR id = 6 OR id = 7 OR id = 8
+
+statement error TypeError
+SELECT * FROM $planets WHERE id = 1 OR name = 'Venus' OR id = 3 OR name = 'Jupiter'
+
+statement ok
+SELECT * FROM $planets WHERE id < 2 OR name = 'Saturn' OR id = 4
+
+statement error TypeError
+SELECT * FROM $planets WHERE name = 'Earth' OR (id = 1 OR id = 2)
+
+statement error TypeError
+SELECT * FROM $planets WHERE (name = 'Earth' OR name = 'Mars') OR (id = 3 OR id = 4)
+
+statement ok
+SELECT * FROM $planets WHERE name = 'Earth' OR name IN ('Mars', 'Venus')
+
+statement error TypeError
+SELECT * FROM $planets WHERE id = 1 OR (id = 2 OR (id = 3 OR id = 4))
+
+statement error TypeError
+SELECT * FROM $planets WHERE name = 'Venus' OR (id < 5 OR name = 'Saturn')
+
+statement error TypeError
+SELECT * FROM $planets WHERE (name = 'Earth' OR id = 3) OR (name = 'Mars' OR id = 4)

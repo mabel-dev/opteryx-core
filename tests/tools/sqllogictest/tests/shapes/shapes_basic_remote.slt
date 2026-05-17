@@ -1,0 +1,205 @@
+# Source: test_shapes_basic_remote.py
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/satellites', could not be found\.
+SELECT * FROM opteryx.test.satellites
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/space_missions', could not be found\.
+SELECT * FROM opteryx.test.space_missions
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/satellites', could not be found\.
+SELECT * FROM opteryx.test.satellites
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/space_missions', could not be found\.
+SELECT COUNT(*) FROM opteryx.test.space_missions
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/satellites', could not be found\.
+SELECT COUNT(*) FROM opteryx.test.satellites
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT COUNT(*) FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/astronauts', could not be found\.
+SELECT * FROM opteryx.test.astronauts WHERE name LIKE '%o%' AND `year` > 1900 AND gender ILIKE '%ale%' AND group IN (1,2,3,4,5,6)
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets LIMIT 5
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets LIMIT 0
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets LIMIT 1
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets OFFSET 5
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets LIMIT 3 OFFSET 2
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets LIMIT 100
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets ORDER BY id
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets ORDER BY id DESC
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets ORDER BY name ASC
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets ORDER BY id, name
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets ORDER BY id DESC, name ASC
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT DISTINCT id FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT DISTINCT name FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT DISTINCT id, name FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT COUNT(*) FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT COUNT(id) FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT COUNT(DISTINCT id) FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT SUM(id) FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT AVG(id) FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT MIN(id) FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT MAX(id) FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/satellites', could not be found\.
+SELECT COUNT(*) FROM opteryx.test.satellites GROUP BY planetId
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/satellites', could not be found\.
+SELECT planetId, COUNT(*) FROM opteryx.test.satellites GROUP BY planetId
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/satellites', could not be found\.
+SELECT planetId, COUNT(*), MAX(id) FROM opteryx.test.satellites GROUP BY planetId
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE id = 1
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE id != 1
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE id > 5
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE id >= 5
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE id < 5
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE id <= 5
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE id BETWEEN 3 AND 6
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE name LIKE 'M%'
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE name ILIKE 'm%'
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE id IN (1, 3, 5)
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE id NOT IN (1, 3, 5)
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE name IS NULL
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE name IS NOT NULL
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE id > 3 AND id < 7
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE id < 3 OR id > 7
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE (id > 3 AND id < 7) OR id = 1
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT id FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT id, name FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT name, id FROM opteryx.test.planets
+
+statement error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT id, name, id FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT id * 2 FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT id + 1 FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT id - 1, id + 1 FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM (SELECT * FROM opteryx.test.planets) AS subquery
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM (SELECT id, name FROM opteryx.test.planets) AS subquery
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT COUNT(*) FROM (SELECT * FROM opteryx.test.planets WHERE id > 5) AS subquery
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT ID FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT Id, NAME FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets WHERE ID = 1
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM opteryx.test.planets ORDER BY NAME
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT COUNT(ID) FROM opteryx.test.planets
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/satellites', could not be found\.
+SELECT planetId, COUNT(*) FROM opteryx.test.satellites GROUP BY PLANETID
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/satellites', could not be found\.
+SELECT S.id, P.name FROM opteryx.test.satellites AS S JOIN opteryx.test.planets AS P ON S.PLANETID = P.ID
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT * FROM (SELECT ID, Name FROM opteryx.test.planets) AS subquery
+
+query error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT name FROM opteryx.test.planets WHERE id IN (1, 3, 5) ORDER BY NAME DESC
+
+statement error sql failed DatasetNotFoundError: The requested dataset, 'opteryx/test/planets', could not be found\.
+SELECT ID, Name, id FROM opteryx.test.planets

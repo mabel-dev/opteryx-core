@@ -1,0 +1,570 @@
+# Source: feature_tests.run_tests
+
+
+# SHOW FUNCTIONS;
+# SHOW FUNCTIONS LIKE '%date';
+# SHOW FUNCTIONS LIKE '%date%';
+# SHOW FUNCTIONS LIKE '%zz';
+
+# crashed Opteryx (excluded): SELECT planetId, LEAST(ARRAY_AGG(magnitude)) FROM testdata.satellites group by planetId
+
+statement error UnsupportedSyntaxError
+SELECT TIMESTAMP('2022-01-01')
+
+statement error UnsupportedSyntaxError
+SELECT INTEGER('22')
+
+statement error UnsupportedSyntaxError
+SELECT DOUBLE('22.0')
+
+statement error FunctionNotFoundError
+SELECT DECIMAL('22.0')
+
+statement error UnsupportedSyntaxError
+SELECT BOOLEAN('true')
+
+statement error UnsupportedSyntaxError
+SELECT DATE('2022-01-01')
+
+
+# Prefix typed literals are discontinued; use CAST(... AS type) instead.
+
+statement ok
+SELECT CAST('2022-01-01' AS TIMESTAMP)
+
+statement ok
+SELECT CAST('22' AS INTEGER)
+
+statement ok
+SELECT CAST('22.0' AS DOUBLE)
+
+statement ok
+SELECT CAST('22.0' AS DECIMAL)
+
+statement ok
+SELECT CAST('true' AS BOOLEAN)
+
+statement ok
+SELECT CAST('2022-01-01' AS DATE)
+
+
+statement ok
+SELECT TRY_CAST('2022-01-01' AS TIMESTAMP)
+
+statement ok
+SELECT TRY_CAST('22' AS INTEGER)
+
+statement ok
+SELECT TRY_CAST('22.0' AS DOUBLE)
+
+statement ok
+SELECT TRY_CAST('22.0' AS DECIMAL)
+
+statement ok
+SELECT TRY_CAST('true' AS BOOLEAN)
+
+statement ok
+SELECT TRY_CAST('2022-01-01' AS DATE)
+
+
+statement ok
+SELECT CAST('Hello, World!' AS VARCHAR)
+
+statement ok
+SELECT CAST('12345' AS VARCHAR)
+
+statement ok
+SELECT CAST('22.5' AS VARCHAR)
+
+statement error TypeError
+SELECT CAST(NULL AS VARCHAR)
+
+statement ok
+SELECT CAST(TRUE AS VARCHAR)
+
+statement ok
+SELECT CAST(FALSE AS VARCHAR)
+
+statement ok
+SELECT CAST('48656c6c6f' AS BLOB); -- "Hello" in hexadecimal
+
+
+statement ok
+SELECT CAST('48656c6c6f' AS BLOB)
+
+statement error TypeError
+SELECT CAST(NULL AS BLOB)
+
+
+statement ok
+SELECT TRY_CAST('Hello, World!' AS VARCHAR)
+
+statement ok
+SELECT TRY_CAST('12345' AS VARCHAR)
+
+statement ok
+SELECT TRY_CAST('22.5' AS VARCHAR)
+
+statement error TypeError
+SELECT TRY_CAST(NULL AS VARCHAR)
+
+statement ok
+SELECT TRY_CAST(TRUE AS VARCHAR)
+
+statement ok
+SELECT TRY_CAST(FALSE AS VARCHAR)
+
+statement ok
+SELECT TRY_CAST('48656c6c6f' AS BLOB)
+
+statement error TypeError
+SELECT TRY_CAST(NULL AS BLOB)
+
+statement error ValueError
+SELECT TRY_CAST('Not a number' AS INTEGER)
+
+statement error ValueError
+SELECT TRY_CAST('Not a number' AS DOUBLE)
+
+statement error ValueError
+SELECT TRY_CAST('2022-01-01' AS INTEGER);  -- Invalid cast
+
+statement error ValueError
+SELECT TRY_CAST('3.14159' AS INTEGER);  -- Should return NULL
+
+statement ok
+SELECT TRY_CAST('' AS BOOLEAN);  -- Invalid cast
+
+statement ok
+SELECT TRY_CAST('42' AS BOOLEAN);  -- Invalid cast
+
+
+statement ok
+SELECT SAFE_CAST('Hello, World!' AS VARCHAR)
+
+statement ok
+SELECT SAFE_CAST('12345' AS VARCHAR)
+
+statement ok
+SELECT SAFE_CAST('22.5' AS VARCHAR)
+
+statement error TypeError
+SELECT SAFE_CAST(NULL AS VARCHAR)
+
+statement ok
+SELECT SAFE_CAST(TRUE AS VARCHAR)
+
+statement ok
+SELECT SAFE_CAST(FALSE AS VARCHAR)
+
+statement ok
+SELECT SAFE_CAST('48656c6c6f' AS BLOB)
+
+statement error TypeError
+SELECT SAFE_CAST(NULL AS BLOB)
+
+statement error ValueError
+SELECT SAFE_CAST('Not a number' AS INTEGER)
+
+statement error ValueError
+SELECT SAFE_CAST('Not a number' AS DOUBLE)
+
+statement error ValueError
+SELECT SAFE_CAST('2022-01-01' AS INTEGER);  -- Invalid cast
+
+statement error ValueError
+SELECT SAFE_CAST('3.14159' AS INTEGER);  -- Should return NULL
+
+statement ok
+SELECT SAFE_CAST('' AS BOOLEAN);  -- Invalid cast
+
+statement ok
+SELECT SAFE_CAST('42' AS BOOLEAN);  -- Invalid cast
+
+
+statement error TypeError
+SELECT CAST(NULL AS INTEGER)
+
+statement error TypeError
+SELECT CAST(NULL AS DOUBLE)
+
+statement error TypeError
+SELECT TRY_CAST(NULL AS INTEGER)
+
+statement error TypeError
+SELECT TRY_CAST(NULL AS DOUBLE)
+
+statement error TypeError
+SELECT CAST(NULL AS BOOLEAN)
+
+statement error TypeError
+SELECT TRY_CAST(NULL AS BOOLEAN)
+
+statement error TypeError
+SELECT CAST(NULL AS TIMESTAMP)
+
+statement error TypeError
+SELECT TRY_CAST(NULL AS TIMESTAMP)
+
+
+statement ok
+SELECT CAST('true' AS VARCHAR)
+
+statement ok
+SELECT CAST('false' AS VARCHAR)
+
+statement ok
+SELECT CAST('1' AS BOOLEAN);  -- Often interpreted as true
+
+statement ok
+SELECT CAST('0' AS BOOLEAN);  -- Often interpreted as false
+
+statement ok
+SELECT TRY_CAST('true' AS VARCHAR)
+
+statement ok
+SELECT TRY_CAST('false' AS VARCHAR)
+
+statement ok
+SELECT TRY_CAST('1' AS BOOLEAN)
+
+statement ok
+SELECT TRY_CAST('0' AS BOOLEAN)
+
+
+# crashed Opteryx (excluded): SELECT CEIL(1.5)
+# crashed Opteryx (excluded): SELECT FLOOR(2.5)
+# crashed Opteryx (excluded): SELECT CEIL(1.5, 1)
+# crashed Opteryx (excluded): SELECT FLOOR(2.5, 1)
+# crashed Opteryx (excluded): SELECT CEIL(1.5, -1)
+# crashed Opteryx (excluded): SELECT FLOOR(2.5, -1)
+
+# SHOW DATABASES;
+
+statement ok
+SELECT POSITION('e' IN 'barge')
+
+statement ok
+SELECT POSITION('x' IN 'barge')
+
+statement ok
+SELECT POSITION('a' IN name) FROM $planets
+
+statement ok
+SELECT POSITION(' ' IN name) FROM testdata.astronauts
+
+# crashed Opteryx (excluded): SELECT LEFT('', 1)
+statement ok
+SELECT LEFT('a', 1)
+
+statement ok
+SELECT LEFT('ab', 1)
+
+
+statement error ValueError
+SELECT CASE id WHEN 3 THEN 'Earth' WHEN 1 THEN 'Mercury' ELSE 'Elsewhere' END FROM $planets
+
+statement error ValueError
+SELECT CASE id WHEN 3 THEN 'Earth' WHEN 1 THEN 'Mercury' END FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN id = 3 THEN 'Earth' WHEN id = 1 THEN 'Mercury' ELSE 'Elsewhere' END FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN id = 3 THEN 'Earth' WHEN id = 1 THEN 'Mercury' END FROM $planets
+
+
+statement error SqlError
+SELECT * FROM testdata.astronauts WHERE death_date > current_timestamp - interval '50' YEAR
+
+statement error SqlError
+SELECT * FROM testdata.astronauts WHERE birth_date < current_timestamp + interval '50' YEAR
+
+
+statement ok
+SELECT LTRIM('   ABC')
+
+statement error IncompatibleTypesError
+SELECT TRIM(LEADING '_' FROM '___ABC')
+
+statement error IncompatibleTypesError
+SELECT TRIM('_' FROM '__init__')
+
+statement error IncompatibleTypesError
+SELECT TRIM(BOTH '_' FROM '____dunder_')
+
+statement error IncompatibleTypesError
+SELECT TRIM(TRAILING '__' FROM '_dunder_')
+
+statement ok
+SELECT RTRIM('   dunder    ')
+
+statement ok
+SELECT TRIM('    ABC   ')
+
+statement ok
+SELECT TRIM(name) FROM $planets
+
+statement error IncompatibleTypesError
+SELECT TRIM(LEADING ' ' FROM name) FROM $planets
+
+
+statement error UnsupportedSyntaxError
+SELECT HASH(name || varchar(id)) FROM $planets GROUP BY name, id
+
+
+# ANALYZE TABLE $planets;
+# ANALYZE TABLE testdata.astronauts;
+
+statement ok
+SELECT LEVENSHTEIN(name, 'zeus') FROM $planets
+
+statement error TypeError
+SELECT FROM_UNIXTIME(0)
+
+statement ok
+SELECT UNIXTIME()
+
+statement ok
+SELECT UNIXTIME(death_date), death_date from testdata.astronauts
+
+
+statement ok
+SELECT name FROM $planets ORDER BY mass, gravity
+
+statement ok
+SELECT name FROM $planets ORDER BY mass DESC
+
+statement ok
+SELECT name FROM $planets ORDER BY mass DESC, gravity ASC
+
+statement ok
+SELECT * FROM $planets ORDER BY mass
+
+statement ok
+SELECT name FROM $planets ORDER BY mass LIMIT 2
+
+
+# ANALYZE TABLE testdata.astronauts;
+# ANALYZE TABLE $planets;
+# ANALYZE TABLE 'testdata/flat/formats/parquet/tweets.parquet';
+
+# USE opteryx;
+
+# SELECT SPLIT('a,bc,def');
+# SELECT SPLIT('a,bc,def', ',');
+# SELECT SPLIT('a');
+# SELECT SPLIT('a', 'a');
+statement ok
+SELECT SPLIT(name, ' ') FROM testdata.astronauts
+
+
+statement ok
+SELECT '{"test":true}'
+
+statement error IncorrectTypeError
+SELECT ST['prod'] FROM (SELECT '{"prod": 73}' AS ST FROM $planets) AS SB
+
+
+# Function calls which are actually resolved by the binder
+
+statement ok
+SELECT VERSION()
+
+statement ok
+SELECT CURRENT_TIMESTAMP()
+
+statement ok
+SELECT CURRENT_TIME
+
+statement ok
+SELECT CURRENT_TIMESTAMP
+
+statement ok
+SELECT UTC_TIMESTAMP()
+
+statement ok
+SELECT CURRENT_DATE
+
+statement ok
+SELECT CURRENT_DATE()
+
+statement error FunctionNotFoundError
+SELECT YESTERDAY()
+
+statement ok
+SELECT CONNECTION_ID()
+
+statement ok
+SELECT E()
+
+statement ok
+SELECT PI()
+
+statement ok
+SELECT PHI()
+
+statement ok
+SELECT USER()
+
+statement ok
+SELECT DATABASE()
+
+statement error NotImplementedError
+SELECT CURRENT_TIMESTAMP() - birth_date, CURRENT_TIMESTAMP(), birth_date FROM testdata.astronauts
+
+statement ok
+SELECT E() * PI() * PHI()
+
+
+statement error AttributeError
+SELECT ['a', 'b', 'c'] @> ['g', 'h', 'a']
+
+statement error AttributeError
+SELECT ['a', 'b', 'c'] @> ['a', 'a', 'a']
+
+statement error AttributeError
+SELECT ['a', 'b', 'c'] @> ('a', 'a', 'a')
+
+statement error AttributeError
+SELECT ('a', 'b', 'c') @> ('a', 'a', 'a')
+
+statement error AttributeError
+SELECT ['a', 'b', 'c'] @> ['a', 'x']
+
+statement error AttributeError
+SELECT ['apple', 'banana', 'cherry'] @> ['dragonfruit']
+
+statement error AttributeError
+SELECT ['alpha', 'beta', 'gamma'] @> ['gamma', 'beta']
+
+statement error AttributeError
+SELECT ['a', 'b', 'c'] @> []
+
+statement error AttributeError
+SELECT [] @> ['x']
+
+statement error AttributeError
+SELECT ('a', 'b', 'c') @> ['b']
+
+statement error AttributeError
+SELECT ('a', 'b', 'c') @> ('b', 'a')
+
+statement error AttributeError
+SELECT ['one'] @> ['one']
+
+statement error IncorrectTypeError
+SELECT [1, 2, 3] @> [2]
+
+statement error IncorrectTypeError
+SELECT (1.1, 2.2, 3.3) @> [3.3]
+
+statement error AttributeError
+SELECT ['z', 'z', 'z'] @> ['z']
+
+statement error AttributeError
+SELECT ['a'] @> ['a', 'b']
+
+statement error AttributeError
+SELECT ['a', 'b', 'c'] @> ['a', 'a', 'b']
+
+statement error AttributeError
+SELECT ['a', 'b', 'c'] @> ('a', 'a')
+
+statement error AttributeError
+SELECT missions @> ('STS-1 (Columbia)', 'STS-9 (Columbia)') FROM testdata.astronauts
+
+statement error AttributeError
+SELECT missions @> ['STS-77'] FROM testdata.astronauts
+
+statement error AttributeError
+SELECT missions @> ('Gemini 3', 'STS-1 (Columbia)') FROM testdata.astronauts
+
+statement error AttributeError
+SELECT missions @> [] FROM testdata.astronauts
+
+
+statement error TypeError
+SELECT HUMANIZE('{"a":100}'->'a')
+
+statement error TypeError
+SELECT HUMANIZE(SUM('{"a":100}'->'a'))
+
+statement error TypeError
+SELECT HUMANIZE(1000000)
+
+statement error TypeError
+SELECT HUMANIZE(0)
+
+statement error TypeError
+SELECT HUMANIZE(NULL)
+
+statement error TypeError
+SELECT HUMANIZE(10000.00)
+
+statement error TypeError
+SELECT HUMANIZE(SUM(gravity)) FROM $planets
+
+statement error TypeError
+SELECT HUMANIZE(-1)
+
+
+statement ok
+WITH large_planets AS (SELECT id, name, mass, diameter FROM $planets WHERE mass > 1.0) SELECT lp.name AS large_planet FROM large_planets lp
+
+statement ok
+WITH cold_planets AS (SELECT id, name, meanTemperature FROM $planets WHERE meanTemperature < 0) SELECT name FROM cold_planets
+
+statement ok
+WITH long_days AS (SELECT id, name, lengthOfDay FROM $planets WHERE lengthOfDay > 1000) SELECT name, lengthOfDay FROM long_days
+
+statement ok
+WITH dense_planets AS (SELECT id, name, density FROM $planets WHERE density > 5) SELECT COUNT(*) FROM dense_planets
+
+statement ok
+WITH far_planets AS (SELECT id, name, distanceFromSun FROM $planets WHERE distanceFromSun > 1000) SELECT name FROM far_planets ORDER BY distanceFromSun DESC
+
+statement ok
+WITH fast_planets AS (SELECT id, name, orbitalVelocity FROM $planets WHERE orbitalVelocity > 30) SELECT name FROM fast_planets ORDER BY orbitalVelocity DESC
+
+statement ok
+WITH inclined_planets AS (SELECT id, name, orbitalInclination FROM $planets WHERE orbitalInclination > 3) SELECT COUNT(*) FROM inclined_planets
+
+statement ok
+WITH eccentric_planets AS (SELECT id, name, orbitalEccentricity FROM $planets WHERE orbitalEccentricity > 0.05) SELECT name, orbitalEccentricity FROM eccentric_planets
+
+statement ok
+WITH high_gravity AS (SELECT id, name, gravity FROM $planets WHERE gravity > 10) SELECT name FROM high_gravity
+
+statement ok
+WITH escaping_planets AS (SELECT id, name, escapeVelocity FROM $planets WHERE escapeVelocity > 50) SELECT name FROM escaping_planets
+
+statement ok
+WITH slow_rotators AS (SELECT id, name, rotationPeriod FROM $planets WHERE rotationPeriod > 500) SELECT COUNT(*) FROM slow_rotators
+
+statement ok
+WITH big_diameter AS (SELECT id, name, diameter FROM $planets WHERE diameter > 100000) SELECT name FROM big_diameter
+
+statement ok
+WITH temperate_planets AS (SELECT id, name, meanTemperature FROM $planets WHERE meanTemperature BETWEEN -50 AND 50) SELECT name FROM temperate_planets ORDER BY meanTemperature
+
+statement ok
+WITH atmospheric_planets AS (SELECT id, name, surfacePressure FROM $planets WHERE surfacePressure IS NOT NULL) SELECT COUNT(*) FROM atmospheric_planets
+
+statement ok
+WITH moonful_planets AS (SELECT id, name, numberOfMoons FROM $planets WHERE numberOfMoons > 0) SELECT name, numberOfMoons FROM moonful_planets
+
+statement ok
+WITH matching_names AS (SELECT id, name FROM $planets WHERE name LIKE 'M%') SELECT COUNT(*) FROM matching_names
+
+statement ok
+WITH short_names AS (SELECT id, name FROM $planets WHERE LENGTH(name) < 5) SELECT name FROM short_names
+
+statement ok
+WITH exact_gravity AS (SELECT id, name FROM $planets WHERE gravity = 9.8) SELECT name FROM exact_gravity
+
+statement ok
+WITH retrograde AS (SELECT id, name, obliquityToOrbit FROM $planets WHERE obliquityToOrbit > 90) SELECT name FROM retrograde
+
+statement ok
+WITH flattened_names AS (SELECT id, LOWER(name) AS name FROM $planets) SELECT name FROM flattened_names ORDER BY name

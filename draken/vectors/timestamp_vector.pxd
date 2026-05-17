@@ -3,7 +3,7 @@ from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
 from libc.stdint cimport uint64_t, uint8_t, uint16_t, uint32_t
 
-from draken.core.buffers cimport ConstAccessor, DictAccessor, DrakenFixedBuffer, DrakenVarBuffer
+from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer
 from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
@@ -18,18 +18,9 @@ cdef class TimestampVector(Vector):
     cdef bint owns_data
     cdef str timestamp_unit  # 'ns', 'us', 'ms', or 's'
     cdef int _unit_code     # integer alias for timestamp_unit (0=ns,1=us,2=ms,3=s)
-    cdef ConstAccessor _const_accessor
-    cdef int64_t _const_value
-    cdef bint _has_const
-    cdef bint _const_is_null
-    cdef DictAccessor _dict_accessor
     cdef DrakenVarBuffer* _dict_values
-    cdef uint8_t* _dict_codes
-    cdef uint8_t _dict_code_width
     cdef uint8_t _dict_ordered
 
-    cdef DictAccessor* dict_accessor(self) noexcept
-    cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
     cdef DrakenVector* unified(self) noexcept

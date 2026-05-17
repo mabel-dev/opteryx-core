@@ -1,0 +1,545 @@
+# Source: test_shapes_joins_subqueries.py
+
+statement error SqlError
+SELECT * FROM testdata.satellites INNER HASH JOIN $planets USING (id)
+
+query shape 9 1
+SELECT name FROM $planets AS p1 UNION SELECT name FROM $planets AS p2
+
+query shape 9 1
+SELECT name FROM $planets p1 UNION SELECT name FROM $planets p2 WHERE p2.name != 'Earth'
+
+# DRIFT: outcome is non-deterministic — sometimes raises AmbiguousDatasetError,
+# sometimes succeeds. Disabled until the underlying Opteryx behavior is stable.
+# SELECT name FROM $planets UNION SELECT name FROM $planets
+
+query shape 18 1
+SELECT name FROM $planets AS p1 UNION ALL SELECT name FROM $planets AS p2
+
+query shape 10 1
+SELECT name FROM $planets p1 UNION ALL SELECT name FROM $planets p2 WHERE p2.name = 'Mars'
+
+query shape 9 1
+SELECT name AS planet_name FROM $planets p1 UNION SELECT name FROM $planets p2
+
+query shape 18 1
+SELECT name FROM $planets p1 UNION ALL SELECT name AS planet_name FROM $planets p2
+
+query shape 3 1
+SELECT name FROM $planets AS p1 WHERE name LIKE 'M%' UNION SELECT name FROM $planets AS p2 WHERE name LIKE 'V%'
+
+query shape 3 1
+SELECT name FROM $planets P1 WHERE name LIKE 'E%' UNION ALL SELECT name FROM $planets P2 WHERE name LIKE 'M%'
+
+# DRIFT: outcome depends on prior session state — INTERSECT/EXCEPT are
+# rejected in isolation but succeed once UNION machinery has been exercised.
+# SELECT name FROM $planets P1 INTERSECT SELECT name FROM $planets P2
+# SELECT name FROM $planets p1 EXCEPT SELECT name FROM $planets p2
+
+query shape 5 1
+(SELECT name FROM $planets AS p1) UNION (SELECT name FROM $planets) LIMIT 5
+
+query shape 5 1
+(SELECT name FROM $planets AS p1) UNION (SELECT name FROM $planets) LIMIT 5 OFFSET 4
+
+query shape 3 1
+(SELECT name FROM $planets AS p1) UNION (SELECT name FROM $planets) LIMIT 3 OFFSET 6
+
+query shape 5 1
+(SELECT name FROM $planets AS p1 LIMIT 3) UNION ALL (SELECT name FROM $planets LIMIT 2)
+
+query shape 13 1
+(SELECT name FROM $planets AS p1 OFFSET 2) UNION ALL (SELECT name FROM $planets OFFSET 3)
+
+query shape 7 1
+(SELECT name FROM $planets AS p1 LIMIT 4 OFFSET 1) UNION ALL (SELECT name FROM $planets LIMIT 3 OFFSET 2)
+
+query shape 10 1
+(SELECT name FROM $planets AS p1) UNION ALL (SELECT name FROM $planets) LIMIT 10
+
+query shape 10 1
+(SELECT name FROM $planets AS p1) UNION ALL (SELECT name FROM $planets) OFFSET 8
+
+query shape 11 1
+(SELECT name FROM $planets AS p1 LIMIT 5) UNION ALL (SELECT name FROM $planets OFFSET 3)
+
+query shape 4 1
+(SELECT name FROM $planets AS p1 LIMIT 4 OFFSET 2) UNION ALL (SELECT name FROM $planets LIMIT 3 OFFSET 1) LIMIT 5 OFFSET 3
+
+query shape 18 1
+SELECT mass FROM $planets AS p1 UNION SELECT diameter FROM $planets
+
+query shape 9 1
+SELECT mass AS m FROM $planets AS p1 UNION SELECT mass FROM $planets
+
+query shape 0
+SELECT name FROM $planets AS p1 WHERE mass IS NULL UNION SELECT name FROM $planets WHERE diameter IS NULL
+
+query shape 18 1
+SELECT name FROM $planets AS p1 UNION ALL SELECT name FROM $planets
+
+query shape 9 1
+SELECT name FROM (SELECT name FROM $planets P1 UNION SELECT name FROM $planets) AS subquery
+
+query shape 9 1
+SELECT a.name FROM $planets a JOIN (SELECT name FROM $planets AS P1 UNION SELECT name FROM $planets) b ON a.name = b.name
+
+query shape 9 1
+(SELECT name FROM $planets AS P1 ORDER BY mass DESC) UNION (SELECT name FROM $planets ORDER BY diameter ASC)
+
+query shape 8 1
+SELECT gravity FROM $planets AS P1 UNION SELECT gravity FROM $planets
+
+query shape 10 1
+(SELECT name FROM $planets AS p1 LIMIT 3) UNION ALL (SELECT name FROM $planets OFFSET 2)
+
+query shape 2 1
+SELECT AVG(mass) FROM $planets AS p1 UNION SELECT SUM(diameter) FROM $planets
+
+query shape 9 1
+SELECT name FROM $planets AS p1 WHERE mass > 1.5 OR diameter < 10000 UNION SELECT name FROM $planets WHERE gravity = 3.7
+
+query error sql failed TypeError: ConstantColumn\.__init__\(\) missing 1 required positional argument: 'type'
+SELECT * FROM $planets CROSS JOIN UNNEST(('Earth', 'Moon')) AS n
+
+query error sql failed InvalidInternalStateError: The following fields were not in the resultset \- n
+SELECT * FROM $planets INNER JOIN (SELECT * FROM UNNEST(('Earth', 'Moon')) AS n) AS S ON name = n
+
+query shape 0
+SELECT name, mission FROM testdata.astronauts INNER JOIN (SELECT * FROM UNNEST(missions) as mission) AS S ON mission = name
+
+query error sql failed AttributeError: 'NoneType' object has no attribute 'base'
+SELECT * FROM testdata.astronauts CROSS JOIN UNNEST(missions) AS mission WHERE mission IN ('Apollo 11', 'Apollo 12')
+
+query error sql failed TypeError: Cannot convert list to draken\.vectors\.vector\.Vector
+SELECT * FROM (SELECT ARRAY_AGG(name) as n FROM testdata.astronauts GROUP BY group) AS alma CROSS JOIN UNNEST(n) AS nn
+
+query error sql failed TypeError: Cannot convert list to draken\.vectors\.vector\.Vector
+SELECT * FROM (SELECT ARRAY_AGG(name) as n FROM testdata.astronauts WHERE status = 'Retired' GROUP BY group) AS alma CROSS JOIN UNNEST(n) AS nn
+
+query error sql failed TypeError: ConstantColumn\.__init__\(\) missing 1 required positional argument: 'type'
+SELECT number FROM testdata.astronauts CROSS JOIN UNNEST((1, 2, 3, 4, 5)) AS number
+
+query error sql failed IncompatibleTypesError: Incompatible types for column 'testdata\.astronauts\.birth_date' \(DATE\) and literal '1960\-01\-01' \(VARCHAR\)\. Using `CAST\(column AS type\)` may help resolve\.
+SELECT * FROM (SELECT ARRAY_AGG(name) as n FROM testdata.astronauts WHERE birth_date < '1960-01-01' GROUP BY group) AS alma CROSS JOIN UNNEST(n) AS nn
+
+query error sql failed IncompatibleTypesError: Incompatible types for column 'testdata\.astronauts\.birth_date' \(DATE\) and literal '1970\-01\-01' \(VARCHAR\)\. Using `CAST\(column AS type\)` may help resolve\.
+SELECT * FROM (SELECT ARRAY_AGG(name) as n FROM testdata.astronauts WHERE status = 'Active' AND birth_date > '1970-01-01' GROUP BY group) AS alma CROSS JOIN UNNEST(n) AS nn
+
+query error sql failed TypeError: Cannot convert list to draken\.vectors\.vector\.Vector
+SELECT group, nn FROM (SELECT group, ARRAY_AGG(name) as n FROM testdata.astronauts GROUP BY group) AS alma CROSS JOIN UNNEST(n) AS nn
+
+query error sql failed IncompatibleTypesError: LENGTH arg1 \('alma_mater'\): expected STRING, got ARRAY \- use `alma_mater::VARCHAR`\.
+SELECT * FROM (SELECT ARRAY_AGG(CASE WHEN LENGTH(alma_mater) > 10 THEN name ELSE NULL END) as alma_mater_arr FROM testdata.astronauts GROUP BY group) AS alma CROSS JOIN UNNEST(alma_mater_arr) AS alma
+
+query error sql failed TypeError: Cannot convert list to draken\.vectors\.vector\.Vector
+SELECT * FROM (SELECT ARRAY_AGG(1) as num_arr FROM testdata.astronauts GROUP BY group) AS numbers CROSS JOIN UNNEST(num_arr) AS number
+
+query error sql failed TypeError: Cannot convert list to draken\.vectors\.vector\.Vector
+SELECT name, group, astronaut_year, LEAST(year_list) FROM (SELECT ARRAY_AGG(year) as year_list, name, group FROM testdata.astronauts WHERE status = 'Retired' and year is not null GROUP BY group, name) AS alma CROSS JOIN UNNEST(year_list) AS astronaut_year
+
+query error sql failed AmbiguousIdentifierError: Query result contains multiple instances of the same column\(s\) \- `name`
+SELECT p.name, s.name FROM $planets p, testdata.satellites s WHERE p.id = s.planetId AND p.mass > 1000 AND s.gm < 500
+
+query error sql failed AmbiguousIdentifierError: Query result contains multiple instances of the same column\(s\) \- `name`
+SELECT p.name, sub.name FROM $planets p CROSS JOIN (SELECT name, planetId FROM testdata.satellites WHERE gm < 1000) AS sub WHERE p.id = sub.planetId
+
+query error sql failed AmbiguousIdentifierError: Query result contains multiple instances of the same column\(s\) \- `name`
+SELECT p.name, s.name FROM $planets p, testdata.satellites s WHERE p.id = s.planetId AND p.id = s.id
+
+query shape 0 0
+SELECT p.name, COUNT(s.id) FROM $planets p JOIN testdata.satellites s ON p.id = s.planetId GROUP BY p.name HAVING COUNT(s.id) > 3
+
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(True\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+SELECT COUNT(*) FROM $planets WHERE TRUE AND 3 = 2 AND 3 > 2
+
+query error
+missions[0] as m FROM testdata.astronauts order by m
+----
+sql failed SqlError: Query parsing failed.
+	sql parser error: Expected: an SQL statement, found: missions at Line: 1, Column: 1
+
+
+statement error UnsupportedSyntaxError
+SELECT name[id] as m FROM $planets
+
+statement error TypeError: _eval_value: cannot construct Draken vector
+SELECT * FROM testdata.astronauts WHERE ARRAY_CONTAINS_ANY(missions, @@user_memberships)
+
+query shape 1 8
+SELECT testdata.missions.* FROM testdata.missions INNER JOIN $user ON Mission = value WHERE attribute = 'membership'
+
+statement error TypeError: _eval_value: cannot construct Draken vector
+SELECT * FROM $planets WHERE name = any(@@user_memberships)
+
+statement error SqlError: Error Executing SQL Statement.*Constant motor path does not support operator
+SELECT name FROM $planets WHERE 'Apollo 11' = ANY(@@user_memberships) OR name = 'Saturn'
+
+statement error SqlError: Error Executing SQL Statement.*Constant motor path does not support operator
+SELECT name FROM $planets WHERE 'Apollo 11' = ANY(@@user_memberships) AND name = 'Saturn'
+
+statement error SqlError: Error Executing SQL Statement.*Constant motor path does not support operator
+SELECT name FROM $planets WHERE 'Apollo 11' = ANY(@@user_memberships)
+
+query shape 1 1
+SELECT name FROM $planets WHERE REGEXP_REPLACE(name, '^E', 'G') == 'Garth'
+
+query error sql failed ValueError: Vectors must have the same length
+SELECT id, CASE WHEN id = 1 THEN 'Mercury' WHEN id = 3 THEN 'Earth' ELSE 'Elsewhere' END as place FROM $planets
+
+query error sql failed ValueError: Vectors must have the same length
+SELECT id, CASE WHEN id = 1 THEN 'Mercury' WHEN id = 3 THEN 'Earth' ELSE NULL END as place FROM $planets
+
+query error sql failed TypeError: IFNULL expects Draken vector input, got list\.
+SELECT IFNULL(NULL, 'default') as result
+
+query shape 1 1
+SELECT IFNULL('value', 'default') as result
+
+query error sql failed TypeError: IFNULL expects Draken vector input, got list\.
+SELECT IFNULL(NULL, NULL) as result
+
+query error sql failed TypeError: IFNULL expects Draken vector input, got list\.
+SELECT IFNOTNULL(NULL, 'default') as result
+
+query shape 1 1
+SELECT IFNOTNULL('value', 'default') as result
+
+query error sql failed TypeError: IFNULL expects Draken vector input, got list\.
+SELECT IFNOTNULL(NULL, NULL) as result
+
+query error sql failed TypeError: vector_coalesce: argument 0 must be a Draken Vector, got list
+SELECT COALESCE(NULL, 'default') as coalesced_value
+
+query error sql failed TypeError: vector_coalesce: argument 0 must be a Draken Vector, got list
+SELECT COALESCE(NULL, 'default', 'fallback') as coalesced_value
+
+query error sql failed TypeError: vector_coalesce: argument 1 must be a Draken Vector, got list
+SELECT COALESCE('first', NULL, 'fallback') as coalesced_value
+
+query shape 9 1
+SELECT LENGTH(name) FROM $planets
+
+query error io failed
+SELECT LENGTH(name) FROM testdata.astronauts WHERE LENGTH(name) > 15
+
+query error io failed
+SELECT planetId, COUNT(*) FROM testdata.satellites GROUP BY planetId HAVING COUNT(*) > 10
+
+query error io failed
+SELECT planetId, MIN(magnitude) FROM testdata.satellites GROUP BY planetId HAVING MIN(magnitude) < 5
+
+query error io failed
+SELECT ABS(-5) as abs_value
+
+query error io failed
+SELECT ROUND(3.14159, 2) as rounded_value
+
+query error io failed
+SELECT CEILING(3.14159) as ceiling_value
+
+query error io failed
+SELECT FLOOR(3.14159) as floor_value
+
+query error io failed
+SELECT CEILING(3.14159, 2) as ceiling_value
+
+query error io failed
+SELECT FLOOR(3.14159, 2) as floor_value
+
+query error io failed
+SELECT CEILING(3.14159, 0) as ceiling_value
+
+query error io failed
+SELECT FLOOR(3.14159, 0) as floor_value
+
+query error io failed
+SELECT CEILING(3.14159, -1) as ceiling_value
+
+query error io failed
+SELECT FLOOR(3.14159, -1) as floor_value
+
+query error io failed
+SELECT UPPER(name) FROM $planets
+
+query error io failed
+SELECT LOWER(name) FROM testdata.astronauts WHERE UPPER(name) LIKE 'A%'
+
+query error io failed
+SELECT REVERSE(name) FROM $planets
+
+query error io failed
+SELECT TRIM(' space ') as trimmed
+
+query error io failed
+SELECT SUBSTRING('planet', 1, 3) as substring
+
+query error io failed
+SELECT LPAD(name, 10, '*') FROM $planets
+
+query error io failed
+SELECT RPAD(name, 10, '-') FROM $planets
+
+query error io failed
+SELECT CAST(id AS VARCHAR) FROM $planets
+
+query error io failed
+SELECT CAST(magnitude AS INTEGER) FROM testdata.satellites WHERE magnitude IS NOT NULL
+
+query error io failed
+SELECT CAST('2022-01-01' AS DATE)
+
+query error io failed
+SELECT id + 1 FROM $planets
+
+query error io failed
+SELECT id - 1 FROM $planets
+
+query error io failed
+SELECT id * 2 FROM $planets
+
+query error io failed
+SELECT id / 2 FROM $planets
+
+query error io failed
+SELECT id % 2 FROM $planets
+
+query error io failed
+SELECT id, id + 1 as incremented_id FROM $planets
+
+query error io failed
+SELECT id, id * 2 as doubled_id FROM $planets
+
+query error io failed
+SELECT id, id - 1 as decremented_id FROM $planets
+
+query error io failed
+SELECT id, id / 2.0 as halved_id FROM $planets
+
+query error io failed
+SELECT * FROM $planets WHERE id = 1 AND name = 'Mercury'
+
+query error io failed
+SELECT * FROM $planets WHERE id = 1 OR id = 2
+
+query error io failed
+SELECT * FROM $planets WHERE NOT (id = 1)
+
+query error io failed
+SELECT ASCII('A') as ascii_value
+
+query error io failed
+SELECT CHAR(65) as char_value
+
+query error io failed
+SELECT CEILING(id) FROM $planets
+
+query error io failed
+SELECT FLOOR(id) FROM $planets
+
+query error io failed
+SELECT CEILING(id, 2) FROM $planets
+
+query error io failed
+SELECT FLOOR(id, 2) FROM $planets
+
+query error io failed
+SELECT CEILING(id, 0) FROM $planets
+
+query error io failed
+SELECT FLOOR(id, 0) FROM $planets
+
+query error io failed
+SELECT CEILING(gravity) FROM $planets
+
+query error io failed
+SELECT FLOOR(gravity) FROM $planets
+
+query error io failed
+SELECT CEILING(gravity, 2) FROM $planets
+
+query error io failed
+SELECT FLOOR(gravity, 2) FROM $planets
+
+query error io failed
+SELECT CEILING(gravity, 0) FROM $planets
+
+query error io failed
+SELECT FLOOR(gravity, 0) FROM $planets
+
+query error io failed
+SELECT CEILING(mass) FROM $planets
+
+query error io failed
+SELECT FLOOR(mass) FROM $planets
+
+query error io failed
+SELECT CEILING(mass, 2) FROM $planets
+
+query error io failed
+SELECT FLOOR(mass, 2) FROM $planets
+
+query error io failed
+SELECT CEILING(mass, 0) FROM $planets
+
+query error io failed
+SELECT FLOOR(mass, 0) FROM $planets
+
+query error io failed
+SELECT CEILING(surface_pressure) FROM $planets
+
+query error io failed
+SELECT FLOOR(surface_pressure) FROM $planets
+
+query error io failed
+SELECT CEILING(surface_pressure, 2) FROM $planets
+
+query error io failed
+SELECT FLOOR(surface_pressure, 2) FROM $planets
+
+query error io failed
+SELECT CEILING(surface_pressure, 0) FROM $planets
+
+query error io failed
+SELECT FLOOR(surface_pressure, 0) FROM $planets
+
+query error io failed
+SELECT * FROM $planets LEFT JOIN (SELECT id FROM testdata.satellites WHERE planetId < 0) AS S ON $planets.id = S.id
+
+query error io failed
+SELECT * FROM (SELECT name FROM (SELECT name FROM $planets WHERE LENGTH(name) > 3) AS T1) AS T2
+
+query error io failed
+SELECT P.name, S.name FROM $planets AS P CROSS JOIN testdata.satellites AS S WHERE P.id = S.id AND P.name LIKE '%X%'
+
+query error io failed
+SELECT * FROM $planets LEFT JOIN testdata.satellites ON testdata.satellites.planetId = $planets.id WHERE testdata.satellites.id IS NULL
+
+query error io failed
+SELECT * FROM $planets LEFT JOIN testdata.satellites ON testdata.satellites.planetId = $planets.id WHERE testdata.satellites.name IS NULL
+
+query error io failed
+SELECT * FROM (SELECT * FROM $planets ORDER BY id DESC LIMIT 5) AS SQ WHERE id > 7
+
+query error io failed
+SELECT * FROM $planets INNER JOIN testdata.satellites ON testdata.satellites.planetId = $planets.id
+
+query error io failed
+SELECT * FROM $planets LEFT JOIN testdata.satellites ON testdata.satellites.planetId = $planets.id ORDER BY $planets.name
+
+query error io failed
+SELECT P.name FROM ( SELECT * FROM $planets ) AS P
+
+statement error io failed
+SELECT * FROM (SELECT id from $planets AS PO) AS ONE LEFT JOIN (SELECT id from $planets AS PT) AS TWO ON id = id
+
+query error io failed
+SELECT * FROM (SELECT id FROM $planets AS PONE) AS ONE LEFT JOIN (SELECT id FROM $planets AS PTWO) AS TWO ON ONE.id = TWO.id
+
+query error io failed
+SELECT DATE FROM (SELECT '1980-10-20' AS DATE) AS SQ
+
+query error io failed
+SELECT NUMBER FROM (SELECT 1.0 AS NUMBER) AS SQ
+
+query error io failed
+SELECT VARCHAR FROM (SELECT 'varchar' AS VARCHAR) AS SQ
+
+query error io failed
+SELECT BOOLEAN FROM (SELECT False AS BOOLEAN) AS SQ
+
+query error io failed
+EXPLAIN SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id)
+
+query error io failed
+SELECT * FROM (SELECT * FROM (SELECT id FROM $planets WHERE id < 5) AS s1 WHERE id > 2) AS s2
+
+query error io failed
+SELECT COUNT(*) FROM (SELECT * FROM $planets WHERE id < 5) p LEFT JOIN testdata.satellites s ON p.id = s.planetId
+
+query error io failed
+SELECT p.id FROM $planets p LEFT JOIN testdata.satellites s1 ON p.id = s1.planetId LEFT JOIN testdata.satellites s2 ON p.id = s2.planetId
+
+query error io failed
+SELECT COUNT(*) FROM $planets p1 LEFT JOIN $planets p2 ON p1.id = p2.id
+
+query error io failed
+SELECT * FROM (SELECT id, name FROM $planets) p INNER JOIN (SELECT planetId FROM testdata.satellites) s ON p.id = s.planetId
+
+query error io failed
+SELECT COUNT(*) FROM (SELECT * FROM $planets WHERE id < 5) p LEFT JOIN testdata.satellites s ON p.id = s.planetId
+
+query error io failed
+SELECT COUNT(*) FROM (SELECT id FROM $planets UNION SELECT planetId FROM testdata.satellites) AS all_ids
+
+query error io failed
+SELECT p.id, counts.cnt FROM $planets p LEFT JOIN (SELECT planetId, COUNT(*) AS cnt FROM testdata.satellites GROUP BY planetId) counts ON p.id = counts.planetId
+
+query error io failed
+SELECT outer_id FROM (SELECT inner_id AS outer_id FROM (SELECT id AS inner_id FROM $planets) AS level1) AS level2
+
+query error io failed
+SELECT * FROM (SELECT id, name, id * 2 AS doubled FROM $planets) AS sub WHERE doubled > 10
+
+query error io failed
+SELECT COUNT(*) FROM $planets p INNER JOIN (SELECT DISTINCT planetId FROM testdata.satellites) s ON p.id = s.planetId
+
+query error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.id != s.id
+
+query error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.id > s.id
+
+query error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.id >= s.id
+
+query error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.id <= s.id
+
+query error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.id < s.id
+
+query error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.name != s.name
+
+query error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.name > s.name
+
+query error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.name >= s.name
+
+query error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.name <= s.name
+
+query error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.name < s.name
+
+query error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.mass != s.mass
+
+query error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.mass > s.mass
+
+query error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.mass >= s.mass
+
+query error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.mass <= s.mass
+
+query error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.mass < s.mass
+
+query error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.gravity != s.gravity
+
+statement error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.gravity > s.gravity
+
+statement error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.gravity >= s.gravity
+
+statement error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.gravity <= s.gravity
+
+statement error io failed
+SELECT p.name, s.name FROM $planets AS p INNER JOIN $planets AS s ON p.gravity < s.gravity

@@ -1,0 +1,6 @@
+# Source: case_expressions_07.results_tests
+# Test CASE (searched) match
+query T rowsort
+SELECT CASE WHEN 1=1 THEN 'one' END AS C
+----
+one

@@ -23,7 +23,7 @@ from draken.core.buffers cimport DRAKEN_STRING
 from draken.core.fixed_vector cimport alloc_fixed_buffer, free_fixed_buffer
 from draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
 from draken.vectors.vector cimport Vector
-from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64, _refresh_unified_int64
+from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
 from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
 from draken.vectors.string_vector cimport StringVector, _materialize_dict_string, _refresh_unified_string
 from draken.core.buffers cimport DrakenConstantStringPayload
@@ -1372,23 +1372,13 @@ cdef class KeyStore:
                     _fixed_iv.ptr = _fixed_buf
                     _fixed_iv.owns_data = True
                     _fixed_iv._dict_values = NULL
-                    _fixed_iv._dict_codes = NULL
-                    _fixed_iv._dict_code_width = 0
                     _fixed_iv._dict_ordered = 0
-                    _fixed_iv._dict_accessor.codes = NULL
-                    _fixed_iv._dict_accessor.code_width = 0
-                    _fixed_iv._dict_accessor.row_nulls = NULL
-                    _fixed_iv._dict_accessor.length = 0
-                    _fixed_iv._dict_accessor.dict_values = NULL
-                    _fixed_iv._dict_accessor.value_type = DRAKEN_INT64
-                    _fixed_iv._const_accessor.length = 0
-                    _fixed_iv._const_accessor.value_type = DRAKEN_INT64
-                    _fixed_iv._const_accessor.value_ptr = NULL
-                    _fixed_iv._const_accessor.is_null = 0
-                    _fixed_iv._const_value = 0
-                    _fixed_iv._has_const = False
-                    _fixed_iv._const_is_null = False
-                    _refresh_unified_int64(_fixed_iv)
+                    _fixed_iv._unified_view.data = _fixed_buf.data
+                    _fixed_iv._unified_view.data_length = <size_t>_fixed_buf.length
+                    _fixed_iv._unified_view.length = <size_t>_fixed_buf.length
+                    _fixed_iv._unified_view.selection = NULL
+                    _fixed_iv._unified_view.sel_width = 0
+                    _fixed_iv._unified_view.validity = _fixed_buf.null_bitmap
                     out_vecs.append(_fixed_iv)
 
                     self._single_fixed_buf = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
@@ -1426,23 +1416,13 @@ cdef class KeyStore:
                     _fixed_iv.ptr = _fixed_buf
                     _fixed_iv.owns_data = True
                     _fixed_iv._dict_values = NULL
-                    _fixed_iv._dict_codes = NULL
-                    _fixed_iv._dict_code_width = 0
                     _fixed_iv._dict_ordered = 0
-                    _fixed_iv._dict_accessor.codes = NULL
-                    _fixed_iv._dict_accessor.code_width = 0
-                    _fixed_iv._dict_accessor.row_nulls = NULL
-                    _fixed_iv._dict_accessor.length = 0
-                    _fixed_iv._dict_accessor.dict_values = NULL
-                    _fixed_iv._dict_accessor.value_type = DRAKEN_INT64
-                    _fixed_iv._const_accessor.length = 0
-                    _fixed_iv._const_accessor.value_type = DRAKEN_INT64
-                    _fixed_iv._const_accessor.value_ptr = NULL
-                    _fixed_iv._const_accessor.is_null = 0
-                    _fixed_iv._const_value = 0
-                    _fixed_iv._has_const = False
-                    _fixed_iv._const_is_null = False
-                    _refresh_unified_int64(_fixed_iv)
+                    _fixed_iv._unified_view.data = _fixed_buf.data
+                    _fixed_iv._unified_view.data_length = <size_t>_fixed_buf.length
+                    _fixed_iv._unified_view.length = <size_t>_fixed_buf.length
+                    _fixed_iv._unified_view.selection = NULL
+                    _fixed_iv._unified_view.sel_width = 0
+                    _fixed_iv._unified_view.validity = _fixed_buf.null_bitmap
                     out_vecs.append(_fixed_iv)
 
                     self._multi_fixed_bufs[storage_slot] = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)

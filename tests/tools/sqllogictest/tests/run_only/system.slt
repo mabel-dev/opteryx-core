@@ -1,0 +1,15 @@
+# Source: system.run_tests
+
+statement ok
+SELECT version()
+
+statement ok
+SELECT connection_id() AS pid
+
+# SHOW VARIABLES;
+statement ok
+SET @name = 'bob'
+
+
+# SELECT * FROM information_schema.tables;
+# SELECT * FROM information_schema.views;

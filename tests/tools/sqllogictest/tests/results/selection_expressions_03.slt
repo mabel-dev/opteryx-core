@@ -1,0 +1,6 @@
+# Source: selection_expressions_03.results_tests
+# Test Equals
+query I rowsort
+SELECT 1 = 2 AS V
+----
+0

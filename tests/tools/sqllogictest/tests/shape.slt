@@ -1,0 +1,18 @@
+# Shape-only assertions — verify dimensions without comparing values.
+# Useful when you care that the query produces N rows of M columns but the
+# values are too large/volatile to pin literally.
+
+query shape 9 20
+SELECT * FROM $planets
+
+query shape 9
+SELECT * FROM $planets
+
+query shape - 20
+SELECT * FROM $planets
+
+query shape 4 2
+SELECT id, name FROM $planets WHERE id <= 4
+
+query shape 0
+SELECT * FROM $planets WHERE id < 0

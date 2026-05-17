@@ -49,8 +49,7 @@ from draken.core.buffers cimport DrakenConstantBuffer
 from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.core.buffers cimport DrakenType
 from draken.core.buffers cimport DrakenVarBuffer
-from draken.core.buffers cimport ConstAccessor
-from draken.core.buffers cimport DictAccessor
+from draken.core.buffers cimport DrakenVector
 from draken.core.buffers cimport DRAKEN_BOOL
 from draken.core.buffers cimport DRAKEN_DATE32
 from draken.core.buffers cimport DRAKEN_DICTIONARY
@@ -1321,9 +1320,10 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
     cdef list segments
     cdef DrakenFixedBuffer* fixed_ptr
     cdef DrakenVarBuffer* var_ptr
-    cdef DrakenDictionaryBuffer* dict_ptr
-    cdef DrakenConstantBuffer* const_ptr
     cdef DrakenConstantStringPayload* const_str
+    cdef uint8_t* codes_ptr
+    cdef uint8_t* row_nulls
+    cdef uint8_t code_width
     cdef Py_ssize_t data_len
     cdef Py_ssize_t null_len
     cdef Py_ssize_t values_len
@@ -1356,7 +1356,7 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
     cdef uint64_t compressed_written = 0
     cdef uint64_t blocks_written = 0
     cdef object sink_bytes_view
-    cdef ConstAccessor* const_accessor
+    cdef DrakenVector* uv
 
     if codec_id == CODEC_LZ4:
         lz4 = _load_lz4()
@@ -1377,29 +1377,24 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
 
         dtype = <int>morsel.ptr.column_types[i]
         vec = <Vector>morsel.ptr.columns[i]
-        dict_accessor = vec.dict_accessor()
-        # Prefer the unified discriminant instead of type-checking for DictionaryVector.
+        uv = vec.unified()
         draken_encoding = vec.encoding
         segments = []
 
         if draken_encoding == DRAKEN_ENCODING_CONSTANT:
             encoding = ENCODING_CONST
-            const_accessor = vec.const_accessor()
-            if const_accessor == NULL:
-                raise DrakenMorselStorageError("invalid typed constant accessor")
-
-            if const_accessor.value_type == DRAKEN_STRING:
-                const_str = <DrakenConstantStringPayload*>const_accessor.value_ptr
+            if uv.type == DRAKEN_STRING:
+                const_str = <DrakenConstantStringPayload*>uv.data
                 if const_str == NULL:
                     raise DrakenMorselStorageError("invalid typed constant string payload pointer")
                 const_value_len = const_str.length
                 segments.append((SEG_CONST_VALUE, <intptr_t>const_str.data, const_value_len))
             else:
-                const_value_len = _const_value_length_for_type(<int>const_accessor.value_type)
-                segments.append((SEG_CONST_VALUE, <intptr_t>const_accessor.value_ptr, const_value_len))
+                const_value_len = _const_value_length_for_type(<int>uv.type)
+                segments.append((SEG_CONST_VALUE, <intptr_t>uv.data, const_value_len))
 
-            flags = _const_flags_from_value_type(<int>const_accessor.value_type)
-            if const_accessor.is_null != 0:
+            flags = _const_flags_from_value_type(<int>uv.type)
+            if uv.validity != NULL:
                 flags |= FLAG_HAS_NULLS
         elif dtype == DRAKEN_STRING and draken_encoding != DRAKEN_ENCODING_DICTIONARY:
             encoding = ENCODING_VAR
@@ -1416,14 +1411,13 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
         elif draken_encoding == DRAKEN_ENCODING_DICTIONARY:
             encoding = ENCODING_DICT
 
-            # Prefer the unified discriminant instead of type-checking for DictionaryVector.
-            if dict_accessor == NULL or dict_accessor.dict_values == NULL:
+            if uv.selection == NULL or uv.type != DRAKEN_STRING:
                 raise DrakenMorselStorageError("invalid dictionary accessor")
 
-            row_nulls = dict_accessor.row_nulls
-            codes_ptr = dict_accessor.codes
-            code_width = dict_accessor.code_width
-            var_ptr = dict_accessor.dict_values
+            row_nulls = uv.validity
+            codes_ptr = <uint8_t*>uv.selection
+            code_width = uv.sel_width
+            var_ptr = <DrakenVarBuffer*>uv.data
             dict_ordered = bool(getattr(vec, "ordered", False))
 
             null_len = ((row_count + 7) >> 3) if row_nulls != NULL else 0

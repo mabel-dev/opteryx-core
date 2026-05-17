@@ -1,0 +1,60 @@
+# CREATE TABLE ... AS SELECT, written to the per-process `ws` workspace
+# that the driver registers at startup against a fresh tmpdir.
+
+statement ok
+CREATE TABLE ws.literal_ctas AS SELECT 1 AS a, 'hello' AS b
+
+query IT
+SELECT a, b FROM ws.literal_ctas
+----
+1 hello
+
+statement ok
+CREATE TABLE ws.from_values AS SELECT * FROM (VALUES (1, 'a'), (2, 'b'), (3, 'c')) AS v(x, y)
+
+query IT rowsort
+SELECT x, y FROM ws.from_values
+----
+1 a
+2 b
+3 c
+
+statement ok
+CREATE TABLE ws.inner_planets AS SELECT id, name FROM $planets WHERE id <= 4
+
+query I
+SELECT count(*) FROM ws.inner_planets
+----
+4
+
+query T
+SELECT name FROM ws.inner_planets ORDER BY id
+----
+Mercury
+Venus
+Earth
+Mars
+
+# CTAS into an existing relation should fail — no append semantics.
+statement error
+CREATE TABLE ws.literal_ctas AS SELECT 2 AS a, 'world' AS b
+
+# Drop the tables we created and verify they're gone.
+statement ok
+DROP TABLE ws.literal_ctas
+
+statement ok
+DROP TABLE ws.from_values
+
+statement ok
+DROP TABLE ws.inner_planets
+
+statement error
+SELECT * FROM ws.literal_ctas
+
+# DROP TABLE IF EXISTS is a no-op on a missing table; a bare DROP TABLE errors.
+statement ok
+DROP TABLE IF EXISTS ws.literal_ctas
+
+statement error
+DROP TABLE ws.literal_ctas

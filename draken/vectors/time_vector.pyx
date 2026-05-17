@@ -32,11 +32,10 @@ from libc.stdint cimport uint8_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset, memcpy
 
-from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
+from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DrakenVector
 from draken.core.buffers cimport DRAKEN_TIME32
 from draken.core.buffers cimport DRAKEN_TIME64
-from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.fixed_vector cimport buf_dtype
 from draken.core.fixed_vector cimport buf_itemsize
@@ -54,25 +53,6 @@ cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx) noexcept nogi
     cdef uint8_t byte = bitmap[idx >> 3]
     return (byte >> (idx & 7)) & 1
 
-
-cdef void _refresh_unified_Time(TimeVector vec) noexcept:
-    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
-    vec._unified_view.length = <size_t>n
-    vec._unified_view.itemsize = vec.ptr.itemsize
-    vec._unified_view.type = DRAKEN_TIME64 if vec.is_time64 else DRAKEN_TIME32
-
-    if vec._has_const:
-        vec._unified_view.data = <void*>&vec._const_value
-        vec._unified_view.data_length = 1
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = &_CONST_NULL_BYTE if vec._const_is_null else NULL
-    else:
-        vec._unified_view.data = vec.ptr.data
-        vec._unified_view.data_length = <size_t>n
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = vec.ptr.null_bitmap
 
 
 cdef inline object _us_to_time(int64_t us):
@@ -101,14 +81,18 @@ cdef class TimeVector(Vector):
             raise ValueError("length must be non-negative")
         if value is None and not is_null:
             raise ValueError("value cannot be None unless is_null=True")
-        cdef TimeVector vec = TimeVector(0, is_time64)
+        cdef TimeVector vec = TimeVector(1, is_time64)
+        if is_time64:
+            (<int64_t*>vec.ptr.data)[0] = 0 if (is_null or value is None) else <int64_t>int(value)
+        else:
+            (<int32_t*>vec.ptr.data)[0] = 0 if (is_null or value is None) else <int32_t>int(value)
         vec.ptr.length = <size_t>length
-        vec.ptr.null_bitmap = NULL
-        vec._has_const = True
-        vec._const_is_null = bool(is_null)
-        vec._const_value = 0 if is_null or value is None else <int64_t>int(value)
-        vec._encoding = DRAKEN_ENCODING_CONSTANT
-        _refresh_unified_Time(vec)
+        vec._unified_view.length = <size_t>length
+        vec._unified_view.data = vec.ptr.data
+        vec._unified_view.data_length = 1
+        vec._unified_view.selection = NULL
+        vec._unified_view.sel_width = 0
+        vec._unified_view.validity = &_CONST_NULL_BYTE if is_null else NULL
         return vec
 
     @classmethod
@@ -151,32 +135,29 @@ cdef class TimeVector(Vector):
         wrap=True             -> do not allocate; caller will set ptr & metadata
         """
         self.is_time64 = is_time64
+        self._unified_view.itemsize = 8 if is_time64 else 4
+        self._unified_view.type = DRAKEN_TIME64 if is_time64 else DRAKEN_TIME32
         if wrap:
             self.ptr = NULL
             self.owns_data = False
+            self._unified_view.data = NULL
+            self._unified_view.data_length = 0
+            self._unified_view.selection = NULL
+            self._unified_view.sel_width = 0
+            self._unified_view.length = 0
+            self._unified_view.validity = NULL
         else:
             if is_time64:
                 self.ptr = alloc_fixed_buffer(DRAKEN_TIME64, length, 8)
             else:
                 self.ptr = alloc_fixed_buffer(DRAKEN_TIME32, length, 4)
             self.owns_data = True
-        self._const_accessor.length = 0
-        self._const_accessor.value_type = DRAKEN_TIME64 if is_time64 else DRAKEN_TIME32
-        self._const_accessor.value_ptr = NULL
-        self._const_accessor.is_null = 0
-        self._const_value = 0
-        self._has_const = False
-        self._const_is_null = False
-        self._unified_view.data = NULL
-        self._unified_view.data_length = 0
-        self._unified_view.selection = NULL
-        self._unified_view.sel_width = 0
-        self._unified_view.length = 0
-        self._unified_view.validity = NULL
-        self._unified_view.itemsize = 8 if is_time64 else 4
-        self._unified_view.type = DRAKEN_TIME64 if is_time64 else DRAKEN_TIME32
-        if not wrap:
-            _refresh_unified_Time(self)
+            self._unified_view.data = self.ptr.data
+            self._unified_view.data_length = length
+            self._unified_view.selection = NULL
+            self._unified_view.sel_width = 0
+            self._unified_view.length = length
+            self._unified_view.validity = self.ptr.null_bitmap
 
     def __dealloc__(self):
         # Only free if we own the data and the pointer is not NULL
@@ -184,22 +165,13 @@ cdef class TimeVector(Vector):
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
 
-    cdef ConstAccessor* const_accessor(self) noexcept:
-        if not self._has_const or self.ptr == NULL:
-            return NULL
-        self._const_accessor.length = self.ptr.length
-        self._const_accessor.value_type = DRAKEN_TIME64 if self.is_time64 else DRAKEN_TIME32
-        self._const_accessor.value_ptr = <void*>&self._const_value
-        self._const_accessor.is_null = 1 if self._const_is_null else 0
-        return &self._const_accessor
-
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const:
+        if self.ptr == NULL or self._unified_view.data_length == 1:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const:
+        if self.ptr == NULL or self._unified_view.data_length == 1:
             return NULL
         return self.ptr.null_bitmap
 
@@ -225,15 +197,15 @@ cdef class TimeVector(Vector):
     def __getitem__(self, Py_ssize_t i):
         """Return the value at index i, or None if null."""
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef size_t tv_cumulative = 0
-        cdef size_t tv_run
-        cdef int64_t* rle_tv_vals
+        cdef DrakenVector* uv = self.unified()
         if i < 0 or i >= <Py_ssize_t>ptr.length:
             raise IndexError("Index out of bounds")
-        if self._has_const:
-            if self._const_is_null:
+        if uv.data_length == 1:
+            if uv.validity != NULL:
                 return None
-            return self._const_value if self.is_time64 else <int32_t>self._const_value
+            if self.is_time64:
+                return (<int64_t*>uv.data)[0]
+            return <int32_t>(<int64_t*>uv.data)[0]
         if ptr.null_bitmap != NULL:
             byte = ptr.null_bitmap[i >> 3]
             bit = (byte >> (i & 7)) & 1
@@ -247,14 +219,15 @@ cdef class TimeVector(Vector):
     # -------- Interop (owned -> Arrow) --------
     def to_arrow(self):
         import pyarrow as pa
-        if self._has_const:
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
             if self.is_time64:
-                if self._const_is_null:
+                if uv.validity != NULL:
                     return pa.nulls(self.ptr.length, type=pa.time64('us'))
-                return pa.array([self._const_value] * self.ptr.length, type=pa.time64('us'))
-            if self._const_is_null:
+                return pa.array([(<int64_t*>uv.data)[0]] * self.ptr.length, type=pa.time64('us'))
+            if uv.validity != NULL:
                 return pa.nulls(self.ptr.length, type=pa.time32('s'))
-            return pa.array([<int32_t>self._const_value] * self.ptr.length, type=pa.time32('s'))
+            return pa.array([(<int32_t*>uv.data)[0]] * self.ptr.length, type=pa.time32('s'))
 
         cdef size_t nbytes = buf_length(self.ptr) * buf_itemsize(self.ptr)
         addr = <intptr_t> self.ptr.data
@@ -279,9 +252,9 @@ cdef class TimeVector(Vector):
         cdef DrakenVector* uv = self.unified()
         if uv.data_length == 1:
             return TimeVector.from_constant(
-                None if self._const_is_null else self._const_value,
+                None if uv.validity != NULL else (<int64_t*>uv.data)[0],
                 indices.shape[0],
-                is_null=self._const_is_null,
+                is_null=uv.validity != NULL,
                 is_time64=self.is_time64,
             )
         cdef Py_ssize_t i, n = indices.shape[0]
@@ -316,7 +289,12 @@ cdef class TimeVector(Vector):
                 if (src_null[idx >> 3] >> (idx & 7)) & 1:
                     dst_null[i >> 3] |= (1 << (i & 7))
             out.ptr.null_bitmap = dst_null
-        _refresh_unified_Time(out)
+        out._unified_view.data = out.ptr.data
+        out._unified_view.data_length = <size_t>n
+        out._unified_view.length = <size_t>n
+        out._unified_view.selection = NULL
+        out._unified_view.sel_width = 0
+        out._unified_view.validity = out.ptr.null_bitmap
         return out
 
     cpdef int8_t[::1] is_null(self):
@@ -335,7 +313,7 @@ cdef class TimeVector(Vector):
             raise MemoryError()
         if uv.data_length == 1:
             for i in range(n):
-                buf[i] = 1 if self._const_is_null else 0
+                buf[i] = 1 if uv.validity != NULL else 0
             return <int8_t[:n]> buf
 
         if ptr.null_bitmap == NULL:
@@ -355,9 +333,10 @@ cdef class TimeVector(Vector):
     def null_count(self):
         """Return the number of nulls in the vector."""
         cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef DrakenVector* uv = self.unified()
         cdef Py_ssize_t n = ptr.length
-        if self._has_const:
-            return n if self._const_is_null else 0
+        if uv.data_length == 1:
+            return n if uv.validity != NULL else 0
         if ptr.null_bitmap == NULL:
             return 0
         return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
@@ -366,9 +345,10 @@ cdef class TimeVector(Vector):
     def nbytes(self):
         """Return the approximate memory footprint of this vector in bytes."""
         cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef DrakenVector* uv = self.unified()
         cdef uint64_t n = ptr.length
         cdef uint64_t data_bytes, bm_bytes
-        if self._has_const:
+        if uv.data_length == 1:
             return buf_itemsize(ptr)
         data_bytes = <uint64_t>(buf_length(ptr) * buf_itemsize(ptr))
         bm_bytes = (n + 7) >> 3 if ptr.null_bitmap != NULL else 0
@@ -391,14 +371,14 @@ cdef class TimeVector(Vector):
         cdef int32_t tv_run_len
 
         if uv.data_length == 1:
-            if self._const_is_null:
+            if uv.validity != NULL:
                 for i in range(n):
                     out.append(None)
             else:
                 if self.is_time64:
-                    t = _us_to_time(self._const_value)
+                    t = _us_to_time((<int64_t*>uv.data)[0])
                 else:
-                    t = _s_to_time(<int32_t>self._const_value)
+                    t = _s_to_time(<int32_t>(<int64_t*>uv.data)[0])
                 for i in range(n):
                     out.append(t)
             return out
@@ -438,9 +418,9 @@ cdef class TimeVector(Vector):
         if n == 0:
             raise ValueError("Cannot compute min of empty column")
         if uv.data_length == 1:
-            if self._const_is_null:
+            if uv.validity != NULL:
                 raise ValueError("Cannot compute min of all-null column")
-            return self._const_value
+            return (<int64_t*>uv.data)[0]
 
         cdef int64_t m
         cdef int64_t* data64
@@ -494,9 +474,9 @@ cdef class TimeVector(Vector):
         if n == 0:
             raise ValueError("Cannot compute max of empty column")
         if uv.data_length == 1:
-            if self._const_is_null:
+            if uv.validity != NULL:
                 raise ValueError("Cannot compute max of all-null column")
-            return self._const_value
+            return (<int64_t*>uv.data)[0]
 
         cdef int64_t m
         cdef int64_t* data64
@@ -546,9 +526,9 @@ cdef class TimeVector(Vector):
     cpdef int64_t sum(self):
         cdef DrakenVector* uv = self.unified()
         if uv.data_length == 1:
-            if self._const_is_null:
+            if uv.validity != NULL:
                 return 0
-            return <int64_t>(self.ptr.length * self._const_value)
+            return <int64_t>(self.ptr.length * (<int64_t*>uv.data)[0])
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
         cdef int64_t total = 0
@@ -642,7 +622,12 @@ cdef class TimeVector(Vector):
         cdef uint64_t* scratch32_ptr = <uint64_t*> scratch32
 
         if uv.data_length == 1:
-            value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
+            if uv.validity != NULL:
+                value = NULL_HASH
+            elif self.is_time64:
+                value = <uint64_t>(<int64_t*>uv.data)[0]
+            else:
+                value = <uint64_t><int64_t>(<int32_t*>uv.data)[0]
             for j in range(TIME32_HASH_CHUNK):
                 scratch32[j] = value
             i = 0
@@ -706,8 +691,14 @@ cdef class TimeVector(Vector):
         cdef uint64_t[TIME32_HASH_CHUNK] scratch32
         cdef uint64_t* scratch32_ptr = <uint64_t*> scratch32
 
-        if self._has_const:
-            value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
+        cdef DrakenVector* _cuv = &self._unified_view
+        if _cuv.data_length == 1:
+            if _cuv.validity != NULL:
+                value = NULL_HASH
+            elif self.is_time64:
+                value = <uint64_t>(<int64_t*>_cuv.data)[0]
+            else:
+                value = <uint64_t><int64_t>(<int32_t*>_cuv.data)[0]
             for j in range(TIME32_HASH_CHUNK):
                 scratch32[j] = value
             i = 0
@@ -778,7 +769,12 @@ cdef class TimeVector(Vector):
 
         if uv.data_length == 1:
             for i in range(n):
-                dst[i] = NULL_FLAG if self._const_is_null else self._const_value
+                if uv.validity != NULL:
+                    dst[i] = NULL_FLAG
+                elif self.is_time64:
+                    dst[i] = (<int64_t*>uv.data)[0]
+                else:
+                    dst[i] = <int64_t>(<int32_t*>uv.data)[0]
             return
 
         if self.is_time64:
@@ -812,8 +808,9 @@ cdef class TimeVector(Vector):
         cdef Py_ssize_t i, k
         cdef int64_t* data64
         cdef int32_t* data32
-        if self._has_const:
-            return f"<TimeVector len={buf_length(self.ptr)} is_time64={self.is_time64} values={[None if self._const_is_null else self._const_value] * min(<Py_ssize_t>buf_length(self.ptr), 10)}>"
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
+            return f"<TimeVector len={buf_length(self.ptr)} is_time64={self.is_time64} values={[None if uv.validity != NULL else (<int64_t*>uv.data)[0]] * min(<Py_ssize_t>buf_length(self.ptr), 10)}>"
         k = min(<Py_ssize_t>buf_length(self.ptr), 10)
 
         if self.is_time64:
@@ -897,7 +894,12 @@ cdef TimeVector from_arrow(object array):
     else:
         vec.ptr.null_bitmap = NULL
 
-    _refresh_unified_Time(vec)
+    vec._unified_view.data = vec.ptr.data
+    vec._unified_view.data_length = vec.ptr.length
+    vec._unified_view.length = vec.ptr.length
+    vec._unified_view.selection = NULL
+    vec._unified_view.sel_width = 0
+    vec._unified_view.validity = vec.ptr.null_bitmap
     return vec
 
 
@@ -918,7 +920,12 @@ cdef TimeVector from_dict(const int32_t[::1] codes, const int32_t[::1] dictionar
             raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
         (<int32_t*>vec.ptr.data)[i] = dictionary[code]
 
-    _refresh_unified_Time(vec)
+    vec._unified_view.data = vec.ptr.data
+    vec._unified_view.data_length = vec.ptr.length
+    vec._unified_view.length = vec.ptr.length
+    vec._unified_view.selection = NULL
+    vec._unified_view.sel_width = 0
+    vec._unified_view.validity = vec.ptr.null_bitmap
     return vec
 
 
@@ -957,7 +964,12 @@ cdef TimeVector from_dict_nullable(
         else:
             (<int32_t*>vec.ptr.data)[i] = 0
 
-    _refresh_unified_Time(vec)
+    vec._unified_view.data = vec.ptr.data
+    vec._unified_view.data_length = vec.ptr.length
+    vec._unified_view.length = vec.ptr.length
+    vec._unified_view.selection = NULL
+    vec._unified_view.sel_width = 0
+    vec._unified_view.validity = vec.ptr.null_bitmap
     return vec
 
 
@@ -978,7 +990,12 @@ cdef TimeVector from_dict64(const int32_t[::1] codes, const int64_t[::1] diction
             raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
         (<int64_t*>vec.ptr.data)[i] = dictionary[code]
 
-    _refresh_unified_Time(vec)
+    vec._unified_view.data = vec.ptr.data
+    vec._unified_view.data_length = vec.ptr.length
+    vec._unified_view.length = vec.ptr.length
+    vec._unified_view.selection = NULL
+    vec._unified_view.sel_width = 0
+    vec._unified_view.validity = vec.ptr.null_bitmap
     return vec
 
 
@@ -1017,7 +1034,12 @@ cdef TimeVector from_dict64_nullable(
         else:
             (<int64_t*>vec.ptr.data)[i] = 0
 
-    _refresh_unified_Time(vec)
+    vec._unified_view.data = vec.ptr.data
+    vec._unified_view.data_length = vec.ptr.length
+    vec._unified_view.length = vec.ptr.length
+    vec._unified_view.selection = NULL
+    vec._unified_view.sel_width = 0
+    vec._unified_view.validity = vec.ptr.null_bitmap
     return vec
 
 

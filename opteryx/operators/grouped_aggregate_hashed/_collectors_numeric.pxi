@@ -22,8 +22,8 @@ from draken.core.buffers cimport DRAKEN_FLOAT64
 from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.fixed_vector cimport free_fixed_buffer
 from draken.vectors.vector cimport Vector
-from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64, _refresh_unified_int64
-from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64, _refresh_unified_float64
+from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
+from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
 from draken.vectors.string_vector cimport StringVector, _StringVectorCIterator, StringElement, _materialize_dict_string
 from draken.vectors._decimal_vector cimport DecimalVector
 
@@ -126,23 +126,13 @@ cdef inline Int64Vector _wrap_int64_buffer(DrakenFixedBuffer* buf) except *:
     vec.ptr = buf
     vec.owns_data = True
     vec._dict_values = NULL
-    vec._dict_codes = NULL
-    vec._dict_code_width = 0
     vec._dict_ordered = 0
-    vec._dict_accessor.codes = NULL
-    vec._dict_accessor.code_width = 0
-    vec._dict_accessor.row_nulls = NULL
-    vec._dict_accessor.length = 0
-    vec._dict_accessor.dict_values = NULL
-    vec._dict_accessor.value_type = DRAKEN_INT64
-    vec._const_accessor.length = 0
-    vec._const_accessor.value_type = DRAKEN_INT64
-    vec._const_accessor.value_ptr = NULL
-    vec._const_accessor.is_null = 0
-    vec._const_value = 0
-    vec._has_const = False
-    vec._const_is_null = False
-    _refresh_unified_int64(vec)
+    vec._unified_view.data = buf.data
+    vec._unified_view.data_length = <size_t>buf.length
+    vec._unified_view.length = <size_t>buf.length
+    vec._unified_view.selection = NULL
+    vec._unified_view.sel_width = 0
+    vec._unified_view.validity = buf.null_bitmap
     return vec
 
 
@@ -151,23 +141,13 @@ cdef inline Float64Vector _wrap_float64_buffer(DrakenFixedBuffer* buf) except *:
     vec.ptr = buf
     vec.owns_data = True
     vec._dict_values = NULL
-    vec._dict_codes = NULL
-    vec._dict_code_width = 0
     vec._dict_ordered = 0
-    vec._dict_accessor.codes = NULL
-    vec._dict_accessor.code_width = 0
-    vec._dict_accessor.row_nulls = NULL
-    vec._dict_accessor.length = 0
-    vec._dict_accessor.dict_values = NULL
-    vec._dict_accessor.value_type = DRAKEN_FLOAT64
-    vec._const_accessor.length = 0
-    vec._const_accessor.value_type = DRAKEN_FLOAT64
-    vec._const_accessor.value_ptr = NULL
-    vec._const_accessor.is_null = 0
-    vec._const_value = 0.0
-    vec._has_const = False
-    vec._const_is_null = False
-    _refresh_unified_float64(vec)
+    vec._unified_view.data = buf.data
+    vec._unified_view.data_length = <size_t>buf.length
+    vec._unified_view.length = <size_t>buf.length
+    vec._unified_view.selection = NULL
+    vec._unified_view.sel_width = 0
+    vec._unified_view.validity = buf.null_bitmap
     return vec
 
 

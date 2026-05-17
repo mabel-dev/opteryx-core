@@ -1,0 +1,6 @@
+# Source: selection_expressions_04.results_tests
+# Test NOT
+query I rowsort
+SELECT NOT 1 = 2 AS V
+----
+1

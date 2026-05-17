@@ -32,6 +32,8 @@ from libc.stdint cimport int32_t
 from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
 from libc.stdint cimport intptr_t
+from libc.stdint cimport uint16_t
+from libc.stdint cimport uint32_t
 from libc.stdint cimport uint64_t
 from libc.stdint cimport uint8_t
 from libc.limits cimport LLONG_MAX
@@ -245,6 +247,15 @@ cdef inline bint _is_valid_with_offset(uint8_t* bitmap, Py_ssize_t idx, Py_ssize
     if bitmap == NULL:
         return True
     return (bitmap[bit_index >> 3] >> (bit_index & 7)) & 1
+
+
+cdef inline uint32_t _read_packed_code(const uint8_t* codes, uint8_t code_width, Py_ssize_t row_idx) noexcept nogil:
+    if code_width == 1:
+        return (<const uint8_t*>codes)[row_idx]
+    if code_width == 2:
+        return (<const uint16_t*>codes)[row_idx]
+    return (<const uint32_t*>codes)[row_idx]
+
 
 cdef class IntervalVector(Vector):
 
@@ -667,12 +678,14 @@ cdef class IntervalVector(Vector):
         cdef Date32Vector date_values
         cdef DrakenFixedBuffer* date_ptr
         cdef int32_t* date_data
+        cdef DrakenVector* uv_date
         cdef TimestampVector ts_values
         cdef DrakenFixedBuffer* ts_ptr
         cdef int64_t* ts_data
+        cdef DrakenVector* uv_ts
         cdef int ts_unit_code
         cdef int64_t ts_raw
-        cdef Py_ssize_t ts_bit_offset
+        cdef uint32_t ts_code
         cdef bint values_is_date = isinstance(values, Date32Vector)
         cdef bint values_is_timestamp = isinstance(values, TimestampVector)
 
@@ -704,6 +717,7 @@ cdef class IntervalVector(Vector):
             date_values = <Date32Vector> values
             date_ptr = date_values.ptr
             date_data = <int32_t*> date_ptr.data
+            uv_date = date_values.unified()
 
             for i in range(out_len):
                 value_index = _broadcast_index(i, row_len)
@@ -712,12 +726,13 @@ cdef class IntervalVector(Vector):
                 if not _is_valid(ptr, interval_index):
                     continue
 
-                if date_values._has_const:
-                    if date_values._const_is_null:
+                if uv_date.data_length == 1:
+                    # constant vector
+                    if uv_date.validity != NULL:
                         continue
-                    epoch_days = <int64_t> date_values._const_value
+                    epoch_days = <int64_t>(<int32_t*>uv_date.data)[0]
                 else:
-                    if not _is_valid(date_ptr, value_index):
+                    if uv_date.validity != NULL and not ((uv_date.validity[value_index >> 3] >> (value_index & 7)) & 1):
                         continue
                     epoch_days = <int64_t> date_data[value_index]
 
@@ -751,7 +766,7 @@ cdef class IntervalVector(Vector):
             ts_ptr = ts_values.ptr
             ts_data = <int64_t*> ts_ptr.data
             ts_unit_code = ts_values._unit_code
-            ts_bit_offset = ts_values.null_bit_offset
+            uv_ts = ts_values.unified()
 
             for i in range(out_len):
                 value_index = _broadcast_index(i, row_len)
@@ -760,12 +775,24 @@ cdef class IntervalVector(Vector):
                 if not _is_valid(ptr, interval_index):
                     continue
 
-                if ts_values._has_const:
-                    if ts_values._const_is_null:
+                if uv_ts.data_length == 1:
+                    # constant vector
+                    if uv_ts.validity != NULL:
                         continue
-                    ts_raw = ts_values._const_value
+                    ts_raw = (<int64_t*>uv_ts.data)[0]
+                elif uv_ts.sel_width != 0:
+                    # dict-encoded vector
+                    if uv_ts.validity != NULL and not ((uv_ts.validity[value_index >> 3] >> (value_index & 7)) & 1):
+                        continue
+                    ts_code = _read_packed_code(
+                        <const uint8_t*>uv_ts.selection,
+                        uv_ts.sel_width,
+                        value_index,
+                    )
+                    ts_raw = (<int64_t*>uv_ts.data)[ts_code]
                 else:
-                    if not _is_valid_with_offset(ts_ptr.null_bitmap, value_index, ts_bit_offset):
+                    # dense vector
+                    if uv_ts.validity != NULL and not ((uv_ts.validity[value_index >> 3] >> (value_index & 7)) & 1):
                         continue
                     ts_raw = ts_data[value_index]
 

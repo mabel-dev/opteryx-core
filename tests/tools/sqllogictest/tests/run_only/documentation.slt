@@ -1,0 +1,116 @@
+# Source: documentation.run_tests
+
+# These are SQL statement that appear in the documentation.
+# There's nothing special about them other than it's not a good experience if they fail
+# These may be duplicates of tests elsewhere, that doesn't matter, if the statement here
+# needs to be updated to pass a test, then we know we need to go update the documentation.
+
+# numerous places
+statement ok
+SELECT * FROM $planets
+
+
+# sql introduction
+statement ok
+SELECT id, name FROM $planets WHERE name = 'Earth'
+
+statement ok
+SELECT id, UPPER(name) AS uppercase_name FROM $planets WHERE id = 3
+
+statement ok
+SELECT * FROM $planets WHERE lengthOfDay > 24 AND numberOfMoons < 10
+
+statement ok
+SELECT name, numberOfMoons FROM $planets WHERE numberOfMoons = 0
+
+statement ok
+SELECT name, numberOfMoons FROM $planets WHERE numberOfMoons = 0 ORDER BY name
+
+statement ok
+SELECT DISTINCT planetId FROM testdata.satellites
+
+statement ok
+SELECT DISTINCT planetId FROM testdata.satellites ORDER BY planetId
+
+statement error InvalidInternalStateError
+SELECT * FROM testdata.satellites, $planets WHERE planetId = $planets.id
+
+statement error InvalidInternalStateError
+SELECT * FROM testdata.satellites, $planets WHERE testdata.satellites.planetId = $planets.id
+
+statement error InvalidInternalStateError
+SELECT * FROM testdata.satellites INNER JOIN $planets ON testdata.satellites.planetId = $planets.id
+
+statement ok
+SELECT * FROM testdata.satellites LEFT OUTER JOIN $planets ON testdata.satellites.planetId = $planets.id
+
+# SELECT name FROM $planets WHERE id NOT IN (SELECT DISTINCT planetId FROM testdata.satellites);
+
+# temporary tables
+statement ok
+SELECT * FROM (VALUES ('High', 3), ('Medium', 2),('Low', 1)) AS ratings (name, rating)
+
+statement ok
+SELECT * FROM UNNEST((1,2,3)) AS TEMP
+
+statement ok
+SELECT * FROM generate_series(2, 4) AS series
+
+statement ok
+SELECT * FROM generate_series(-5, 5, 5) AS series
+
+statement error InvalidFunctionParameterError
+SELECT * FROM generate_series('2020-01-01', '2025-12-31', '1y') AS series
+
+statement error UnsupportedSyntaxError
+SELECT * FROM FAKE(3, 2) AS temp
+
+statement error UnsupportedSyntaxError
+SELECT * FROM FAKE(3, (NAME, INTEGER, VARCHAR)) AS temp(user, age, password)
+
+
+# engine configuration
+statement ok
+SET @id = 3; SELECT name FROM $planets WHERE id = @id
+
+
+# type strings
+statement ok
+SELECT CAST('2022-01-01' AS TIMESTAMP)
+
+
+# types
+statement error TypeError
+SELECT INTERVAL '1' YEAR
+
+
+# nulls
+statement error TypeError
+SELECT name = null FROM $planets
+
+statement error TypeError
+SELECT name FROM $planets WHERE name = null
+
+
+# CASE
+statement error ValueError
+SELECT name, CASE numberOfMoons WHEN 0 THEN 'none' WHEN 1 THEN 'one' ELSE 'lots' END as how_many_moons from $planets
+
+statement error ValueError
+SELECT name, CASE WHEN numberOfMoons = 0 THEN 'none' WHEN numberOfMoons = 1 THEN 'one' ELSE 'lots' END as how_many_moons from $planets
+
+
+# SELECT name FROM $planets WHERE id NOT IN (SELECT DISTINCT planetId FROM testdata.satellites);
+
+# IP
+# crashed Opteryx (excluded): SELECT '192.168.0.1' | '192.168.0.0/24'
+
+# ADVANCED STRUCTS
+statement error TypeError
+SELECT birth_place->'town' FROM testdata.astronauts
+
+statement error TypeError
+SELECT birth_place->'town', COUNT(*) FROM testdata.astronauts WHERE birth_place->'state' IS NOT NULL GROUP BY birth_place->'town'
+
+statement error FunctionNotFoundError
+SELECT name, SEARCH(birth_place, 'Italy') FROM testdata.astronauts

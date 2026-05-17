@@ -1,0 +1,6 @@
+# Source: regression_002.results_tests
+# Pushing Filters and Count optimizations were run in the wrong order
+query I rowsort
+SELECT count(*) AS ten_followers FROM testdata.flat.formats.parquet WHERE followers = 10
+----
+353

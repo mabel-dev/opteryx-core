@@ -33,9 +33,8 @@ cdef extern from "simd_bitops.h" nogil:
     void simd_xor_mask(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n)
     void simd_not_mask(uint8_t* dest, const uint8_t* src, size_t n)
 
-from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenVector
+from draken.core.buffers cimport DrakenFixedBuffer, DrakenVector
 from draken.core.buffers cimport DRAKEN_BOOL
-from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 from draken.core.fixed_vector cimport alloc_fixed_buffer, buf_dtype, buf_length, free_fixed_buffer
 from draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash, simd_popcount
 
@@ -46,23 +45,6 @@ cdef uint8_t _CONST_NULL_BYTE = 0
 DEF BOOL_HASH_CHUNK = 1024
 
 
-cdef void _refresh_unified_bool(BoolVector vec) noexcept:
-    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
-    vec._unified_view.length = <size_t>n
-    vec._unified_view.itemsize = 0  # bit-packed
-    vec._unified_view.type = DRAKEN_BOOL
-    if vec._has_const:
-        vec._unified_view.data = <void*>&vec._const_value
-        vec._unified_view.data_length = 1
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = &_CONST_NULL_BYTE if vec._const_is_null else NULL
-    else:
-        vec._unified_view.data = vec.ptr.data
-        vec._unified_view.data_length = <size_t>n
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = vec.ptr.null_bitmap
 
 
 cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx, Py_ssize_t bit_offset) noexcept nogil:
@@ -80,14 +62,16 @@ cdef class BoolVector(Vector):
             raise ValueError("length must be non-negative")
         if value is None and not is_null:
             raise ValueError("value cannot be None unless is_null=True")
-        cdef BoolVector vec = BoolVector(0)
+        cdef BoolVector vec = BoolVector(1)
+        cdef uint8_t val = 0 if (is_null or value is None) else <uint8_t>(1 if bool(value) else 0)
+        (<uint8_t*>vec.ptr.data)[0] = val
         vec.ptr.length = <size_t>length
-        vec.ptr.null_bitmap = NULL
-        vec._has_const = True
-        vec._const_is_null = bool(is_null)
-        vec._const_value = 0 if is_null or value is None else <uint8_t>(1 if bool(value) else 0)
-        vec._encoding = DRAKEN_ENCODING_CONSTANT
-        _refresh_unified_bool(vec)
+        vec._unified_view.length = <size_t>length
+        vec._unified_view.data = vec.ptr.data
+        vec._unified_view.data_length = 1
+        vec._unified_view.selection = NULL
+        vec._unified_view.sel_width = 0
+        vec._unified_view.validity = &_CONST_NULL_BYTE if is_null else NULL
         return vec
 
     def __cinit__(self, size_t length=0, bint wrap=False):
@@ -109,13 +93,6 @@ cdef class BoolVector(Vector):
                 if nbytes > 0:
                     memset(self.ptr.data, 0, nbytes)
             self.owns_data = True
-        self._const_accessor.length = 0
-        self._const_accessor.value_type = DRAKEN_BOOL
-        self._const_accessor.value_ptr = NULL
-        self._const_accessor.is_null = 0
-        self._const_value = 0
-        self._has_const = False
-        self._const_is_null = False
         self._unified_view.data = NULL
         self._unified_view.data_length = 0
         self._unified_view.selection = NULL
@@ -125,21 +102,15 @@ cdef class BoolVector(Vector):
         self._unified_view.itemsize = 0
         self._unified_view.type = DRAKEN_BOOL
         if not wrap:
-            _refresh_unified_bool(self)
+            self._unified_view.data = self.ptr.data
+            self._unified_view.data_length = <size_t>length
+            self._unified_view.length = <size_t>length
+            self._unified_view.validity = NULL
 
     def __dealloc__(self):
         if self.owns_data and self.ptr is not NULL:
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
-
-    cdef ConstAccessor* const_accessor(self) noexcept:
-        if not self._has_const or self.ptr == NULL:
-            return NULL
-        self._const_accessor.length = self.ptr.length
-        self._const_accessor.value_type = DRAKEN_BOOL
-        self._const_accessor.value_ptr = <void*>&self._const_value
-        self._const_accessor.is_null = 1 if self._const_is_null else 0
-        return &self._const_accessor
 
     cdef DrakenVector* unified(self) noexcept:
         return &self._unified_view
@@ -161,12 +132,13 @@ cdef class BoolVector(Vector):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef uint8_t val_byte
         cdef uint8_t byte, bit
+        cdef DrakenVector* uv = self.unified()
         if i < 0 or i >= <Py_ssize_t>ptr.length:
             raise IndexError("Index out of bounds")
-        if self._has_const:
-            if self._const_is_null:
+        if uv.data_length == 1:
+            if uv.validity != NULL:
                 return None
-            return bool(self._const_value)
+            return bool((<uint8_t*>uv.data)[0])
         # null check
         if ptr.null_bitmap != NULL:
             byte = ptr.null_bitmap[i >> 3]
@@ -181,10 +153,11 @@ cdef class BoolVector(Vector):
     def to_arrow(self):
         """Convert to a PyArrow array."""
         import pyarrow as pa
-        if self._has_const:
-            if self._const_is_null:
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
+            if uv.validity != NULL:
                 return pa.nulls(self.ptr.length, type=pa.bool_())
-            return pa.array([bool(self._const_value)] * self.ptr.length, type=pa.bool_())
+            return pa.array([bool((<uint8_t*>uv.data)[0])] * self.ptr.length, type=pa.bool_())
 
         cdef size_t nbytes = (buf_length(self.ptr) + 7) >> 3
         addr = <intptr_t> self.ptr.data
@@ -206,36 +179,39 @@ cdef class BoolVector(Vector):
         cdef size_t _mat_n
         cdef uint8_t* _mat_dst
         cdef Py_ssize_t _mat_nb
-        if self._has_const:
-            _mat_n = self.ptr.length
+        cdef DrakenVector* uv
+        uv = self.unified()
+        if uv.data_length == 1:
+            _mat_n = uv.length
             _mat = BoolVector(_mat_n)
             _mat_nb = (_mat_n + 7) >> 3
             _mat_dst = <uint8_t*>_mat.ptr.data
             memset(_mat_dst, 0, _mat_nb)
-            if self._const_is_null:
+            if uv.validity != NULL:
                 if _mat_nb != 0:
                     _mat.ptr.null_bitmap = <uint8_t*>malloc(_mat_nb)
                     if _mat.ptr.null_bitmap == NULL:
                         raise MemoryError()
                     memset(_mat.ptr.null_bitmap, 0, _mat_nb)
-            elif self._const_value:
+            elif (<uint8_t*>uv.data)[0]:
                 memset(_mat_dst, 0xFF, _mat_nb)
                 if _mat_n & 7:
                     _mat_dst[_mat_nb - 1] &= <uint8_t>((1 << (_mat_n & 7)) - 1)
             return _mat.and_vector(other)
-        if other._has_const:
-            _mat_n = other.ptr.length
+        uv = other.unified()
+        if uv.data_length == 1:
+            _mat_n = uv.length
             _mat = BoolVector(_mat_n)
             _mat_nb = (_mat_n + 7) >> 3
             _mat_dst = <uint8_t*>_mat.ptr.data
             memset(_mat_dst, 0, _mat_nb)
-            if other._const_is_null:
+            if uv.validity != NULL:
                 if _mat_nb != 0:
                     _mat.ptr.null_bitmap = <uint8_t*>malloc(_mat_nb)
                     if _mat.ptr.null_bitmap == NULL:
                         raise MemoryError()
                     memset(_mat.ptr.null_bitmap, 0, _mat_nb)
-            elif other._const_value:
+            elif (<uint8_t*>uv.data)[0]:
                 memset(_mat_dst, 0xFF, _mat_nb)
                 if _mat_n & 7:
                     _mat_dst[_mat_nb - 1] &= <uint8_t>((1 << (_mat_n & 7)) - 1)
@@ -319,36 +295,39 @@ cdef class BoolVector(Vector):
         cdef size_t _mat_n
         cdef uint8_t* _mat_dst
         cdef Py_ssize_t _mat_nb
-        if self._has_const:
-            _mat_n = self.ptr.length
+        cdef DrakenVector* uv
+        uv = self.unified()
+        if uv.data_length == 1:
+            _mat_n = uv.length
             _mat = BoolVector(_mat_n)
             _mat_nb = (_mat_n + 7) >> 3
             _mat_dst = <uint8_t*>_mat.ptr.data
             memset(_mat_dst, 0, _mat_nb)
-            if self._const_is_null:
+            if uv.validity != NULL:
                 if _mat_nb != 0:
                     _mat.ptr.null_bitmap = <uint8_t*>malloc(_mat_nb)
                     if _mat.ptr.null_bitmap == NULL:
                         raise MemoryError()
                     memset(_mat.ptr.null_bitmap, 0, _mat_nb)
-            elif self._const_value:
+            elif (<uint8_t*>uv.data)[0]:
                 memset(_mat_dst, 0xFF, _mat_nb)
                 if _mat_n & 7:
                     _mat_dst[_mat_nb - 1] &= <uint8_t>((1 << (_mat_n & 7)) - 1)
             return _mat.or_vector(other)
-        if other._has_const:
-            _mat_n = other.ptr.length
+        uv = other.unified()
+        if uv.data_length == 1:
+            _mat_n = uv.length
             _mat = BoolVector(_mat_n)
             _mat_nb = (_mat_n + 7) >> 3
             _mat_dst = <uint8_t*>_mat.ptr.data
             memset(_mat_dst, 0, _mat_nb)
-            if other._const_is_null:
+            if uv.validity != NULL:
                 if _mat_nb != 0:
                     _mat.ptr.null_bitmap = <uint8_t*>malloc(_mat_nb)
                     if _mat.ptr.null_bitmap == NULL:
                         raise MemoryError()
                     memset(_mat.ptr.null_bitmap, 0, _mat_nb)
-            elif other._const_value:
+            elif (<uint8_t*>uv.data)[0]:
                 memset(_mat_dst, 0xFF, _mat_nb)
                 if _mat_n & 7:
                     _mat_dst[_mat_nb - 1] &= <uint8_t>((1 << (_mat_n & 7)) - 1)
@@ -540,11 +519,12 @@ cdef class BoolVector(Vector):
 
     # -------- Ops --------
     cpdef BoolVector take(self, int32_t[::1] indices):
-        if self._has_const:
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
             return BoolVector.from_constant(
-                None if self._const_is_null else bool(self._const_value),
+                None if uv.validity != NULL else bool((<uint8_t*>uv.data)[0]),
                 indices.shape[0],
-                is_null=self._const_is_null,
+                is_null=(uv.validity != NULL),
             )
         cdef Py_ssize_t i, n = indices.shape[0]
         cdef BoolVector out = BoolVector(<size_t>n)
@@ -579,7 +559,8 @@ cdef class BoolVector(Vector):
                 dst[i >> 3] |= (1 << (i & 7))
 
         out.ptr.null_bitmap = out_null
-        _refresh_unified_bool(out)
+        out._unified_view.length = <size_t>n
+        out._unified_view.validity = out_null
         return out
 
     cpdef BoolVector _compare_scalar(self, bint value, int op):
@@ -654,36 +635,39 @@ cdef class BoolVector(Vector):
         cdef size_t _mat_n
         cdef uint8_t* _mat_dst
         cdef Py_ssize_t _mat_nb
-        if self._has_const:
-            _mat_n = self.ptr.length
+        cdef DrakenVector* uv
+        uv = self.unified()
+        if uv.data_length == 1:
+            _mat_n = uv.length
             _mat = BoolVector(_mat_n)
             _mat_nb = (_mat_n + 7) >> 3
             _mat_dst = <uint8_t*>_mat.ptr.data
             memset(_mat_dst, 0, _mat_nb)
-            if self._const_is_null:
+            if uv.validity != NULL:
                 if _mat_nb != 0:
                     _mat.ptr.null_bitmap = <uint8_t*>malloc(_mat_nb)
                     if _mat.ptr.null_bitmap == NULL:
                         raise MemoryError()
                     memset(_mat.ptr.null_bitmap, 0, _mat_nb)
-            elif self._const_value:
+            elif (<uint8_t*>uv.data)[0]:
                 memset(_mat_dst, 0xFF, _mat_nb)
                 if _mat_n & 7:
                     _mat_dst[_mat_nb - 1] &= <uint8_t>((1 << (_mat_n & 7)) - 1)
             return _mat.equals_vector(other)
-        if other._has_const:
-            _mat_n = other.ptr.length
+        uv = other.unified()
+        if uv.data_length == 1:
+            _mat_n = uv.length
             _mat = BoolVector(_mat_n)
             _mat_nb = (_mat_n + 7) >> 3
             _mat_dst = <uint8_t*>_mat.ptr.data
             memset(_mat_dst, 0, _mat_nb)
-            if other._const_is_null:
+            if uv.validity != NULL:
                 if _mat_nb != 0:
                     _mat.ptr.null_bitmap = <uint8_t*>malloc(_mat_nb)
                     if _mat.ptr.null_bitmap == NULL:
                         raise MemoryError()
                     memset(_mat.ptr.null_bitmap, 0, _mat_nb)
-            elif other._const_value:
+            elif (<uint8_t*>uv.data)[0]:
                 memset(_mat_dst, 0xFF, _mat_nb)
                 if _mat_n & 7:
                     _mat_dst[_mat_nb - 1] &= <uint8_t>((1 << (_mat_n & 7)) - 1)
@@ -727,36 +711,39 @@ cdef class BoolVector(Vector):
         cdef size_t _mat_n
         cdef uint8_t* _mat_dst
         cdef Py_ssize_t _mat_nb
-        if self._has_const:
-            _mat_n = self.ptr.length
+        cdef DrakenVector* uv
+        uv = self.unified()
+        if uv.data_length == 1:
+            _mat_n = uv.length
             _mat = BoolVector(_mat_n)
             _mat_nb = (_mat_n + 7) >> 3
             _mat_dst = <uint8_t*>_mat.ptr.data
             memset(_mat_dst, 0, _mat_nb)
-            if self._const_is_null:
+            if uv.validity != NULL:
                 if _mat_nb != 0:
                     _mat.ptr.null_bitmap = <uint8_t*>malloc(_mat_nb)
                     if _mat.ptr.null_bitmap == NULL:
                         raise MemoryError()
                     memset(_mat.ptr.null_bitmap, 0, _mat_nb)
-            elif self._const_value:
+            elif (<uint8_t*>uv.data)[0]:
                 memset(_mat_dst, 0xFF, _mat_nb)
                 if _mat_n & 7:
                     _mat_dst[_mat_nb - 1] &= <uint8_t>((1 << (_mat_n & 7)) - 1)
             return _mat.not_equals_vector(other)
-        if other._has_const:
-            _mat_n = other.ptr.length
+        uv = other.unified()
+        if uv.data_length == 1:
+            _mat_n = uv.length
             _mat = BoolVector(_mat_n)
             _mat_nb = (_mat_n + 7) >> 3
             _mat_dst = <uint8_t*>_mat.ptr.data
             memset(_mat_dst, 0, _mat_nb)
-            if other._const_is_null:
+            if uv.validity != NULL:
                 if _mat_nb != 0:
                     _mat.ptr.null_bitmap = <uint8_t*>malloc(_mat_nb)
                     if _mat.ptr.null_bitmap == NULL:
                         raise MemoryError()
                     memset(_mat.ptr.null_bitmap, 0, _mat_nb)
-            elif other._const_value:
+            elif (<uint8_t*>uv.data)[0]:
                 memset(_mat_dst, 0xFF, _mat_nb)
                 if _mat_n & 7:
                     _mat_dst[_mat_nb - 1] &= <uint8_t>((1 << (_mat_n & 7)) - 1)
@@ -803,9 +790,10 @@ cdef class BoolVector(Vector):
             return
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("BoolVector.compress: output buffer too small")
-        if self._has_const:
+        cdef DrakenVector* _cuv = self.unified()
+        if _cuv.data_length == 1:
             for i in range(n):
-                out_buf[offset + i] = <int64_t>(-(1 << 63)) if self._const_is_null else (1 if self._const_value else 0)
+                out_buf[offset + i] = <int64_t>(-(1 << 63)) if _cuv.validity != NULL else (1 if (<uint8_t*>_cuv.data)[0] else 0)
             return
         cdef uint8_t* data = <uint8_t*> ptr.data
         cdef uint8_t* null_bitmap = ptr.null_bitmap
@@ -827,8 +815,9 @@ cdef class BoolVector(Vector):
             i += remaining
 
     cpdef int8_t any(self):
-        if self._has_const:
-            return 0 if self._const_is_null else <int8_t>(1 if self._const_value else 0)
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
+            return 0 if uv.validity != NULL else <int8_t>(1 if (<uint8_t*>uv.data)[0] else 0)
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t nbytes = (ptr.length + 7) >> 3
         cdef Py_ssize_t i
@@ -838,9 +827,10 @@ cdef class BoolVector(Vector):
         return 0
 
     cpdef int8_t all(self):
-        if self._has_const:
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
             # all-null: no non-null True values, treat as vacuously true (SQL semantics)
-            return 1 if self._const_is_null else <int8_t>(1 if self._const_value else 0)
+            return 1 if uv.validity != NULL else <int8_t>(1 if (<uint8_t*>uv.data)[0] else 0)
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t i
@@ -854,12 +844,13 @@ cdef class BoolVector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         cdef int8_t* buf
         cdef uint8_t byte, bit
+        cdef DrakenVector* uv = self.unified()
         buf = <int8_t*> PyMem_Malloc(n)
         if buf == NULL:
             raise MemoryError()
-        if self._has_const:
+        if uv.data_length == 1:
             for i in range(n):
-                buf[i] = 1 if self._const_is_null else 0
+                buf[i] = 1 if uv.validity != NULL else 0
             return <int8_t[:n]> buf
         if ptr.null_bitmap == NULL:
             for i in range(n):
@@ -875,8 +866,9 @@ cdef class BoolVector(Vector):
     def null_count(self):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
-        if self._has_const:
-            return n if self._const_is_null else 0
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
+            return n if uv.validity != NULL else 0
         if ptr.null_bitmap == NULL:
             return 0
         return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
@@ -887,7 +879,8 @@ cdef class BoolVector(Vector):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef uint64_t n = ptr.length
         cdef uint64_t data_bytes, bm_bytes
-        if self._has_const:
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
             return 1  # single bool value
         # Bit-packed: 1 bit per element
         data_bytes = (n + 7) >> 3
@@ -899,13 +892,14 @@ cdef class BoolVector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         cdef list out = []
         cdef uint8_t byte, bit
-        if self._has_const:
-            if self._const_is_null:
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
+            if uv.validity != NULL:
                 for i in range(n):
                     out.append(None)
             else:
                 for i in range(n):
-                    out.append(bool(self._const_value))
+                    out.append(bool((<uint8_t*>uv.data)[0]))
             return out
         for i in range(n):
             if ptr.null_bitmap != NULL:
@@ -930,9 +924,10 @@ cdef class BoolVector(Vector):
         cdef uint8_t* data = <uint8_t*>ptr.data
         cdef uint8_t* null_bitmap = ptr.null_bitmap
         cdef uint8_t byte, bit, val, fill_val
+        cdef DrakenVector* uv = self.unified()
 
-        if self._has_const:
-            fill_val = 0 if self._const_is_null else (1 if self._const_value else 0)
+        if uv.data_length == 1:
+            fill_val = 0 if uv.validity != NULL else (1 if (<uint8_t*>uv.data)[0] else 0)
             for i in range(n):
                 out[i] = fill_val
             return bytes(out)
@@ -951,13 +946,14 @@ cdef class BoolVector(Vector):
     cpdef int64_t min(self):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
+        cdef DrakenVector* uv = self.unified()
         if n == 0:
             raise ValueError("Cannot compute min of empty column")
-        if self._has_const:
-            if self._const_is_null:
+        if uv.data_length == 1:
+            if uv.validity != NULL:
                 raise ValueError("Cannot compute min of all-null column")
             # For bool: min(true) = true, min(false) = false
-            return <int64_t>self._const_value
+            return <int64_t>(<uint8_t*>uv.data)[0]
 
         cdef uint8_t byte, bit, val
         cdef bint found = False
@@ -992,12 +988,13 @@ cdef class BoolVector(Vector):
     cpdef int64_t max(self):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
+        cdef DrakenVector* uv = self.unified()
         if n == 0:
             raise ValueError("Cannot compute max of empty column")
-        if self._has_const:
-            if self._const_is_null:
+        if uv.data_length == 1:
+            if uv.validity != NULL:
                 raise ValueError("Cannot compute max of all-null column")
-            return <int64_t>self._const_value
+            return <int64_t>(<uint8_t*>uv.data)[0]
 
         cdef uint8_t byte, bit, val
         cdef bint found = False
@@ -1031,10 +1028,11 @@ cdef class BoolVector(Vector):
 
     cpdef int64_t sum(self):
         # sum(bool) = count of true values
-        if self._has_const:
-            if self._const_is_null:
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
+            if uv.validity != NULL:
                 return 0
-            return <int64_t>(self.ptr.length * self._const_value)
+            return <int64_t>(self.ptr.length * (<uint8_t*>uv.data)[0])
 
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
@@ -1100,8 +1098,9 @@ cdef class BoolVector(Vector):
         cdef uint64_t[BOOL_HASH_CHUNK] scratch
         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
 
-        if self._has_const:
-            value = NULL_HASH if self._const_is_null else (TRUE_HASH if self._const_value else FALSE_HASH)
+        cdef DrakenVector* _huv = self.unified()
+        if _huv.data_length == 1:
+            value = NULL_HASH if _huv.validity != NULL else (TRUE_HASH if (<uint8_t*>_huv.data)[0] else FALSE_HASH)
             for j in range(BOOL_HASH_CHUNK):
                 scratch[j] = value
             if n > 0:
@@ -1163,8 +1162,9 @@ cdef class BoolVector(Vector):
         cdef uint8_t* values
         cdef bint has_nulls
 
-        if self._has_const:
-            value = NULL_HASH if self._const_is_null else (TRUE_HASH if self._const_value else FALSE_HASH)
+        cdef DrakenVector* _cuv = &self._unified_view
+        if _cuv.data_length == 1:
+            value = NULL_HASH if _cuv.validity != NULL else (TRUE_HASH if (<uint8_t*>_cuv.data)[0] else FALSE_HASH)
             for i in range(BOOL_HASH_CHUNK):
                 scratch[i] = value
             i = 0
@@ -1216,8 +1216,9 @@ cdef class BoolVector(Vector):
     def __str__(self):
         cdef list vals = []
         cdef Py_ssize_t i, k
-        if self._has_const:
-            return f"<BoolVector len={buf_length(self.ptr)} values={[None if self._const_is_null else bool(self._const_value)] * min(<Py_ssize_t>buf_length(self.ptr), 10)}>"
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
+            return f"<BoolVector len={buf_length(self.ptr)} values={[None if uv.validity != NULL else bool((<uint8_t*>uv.data)[0])] * min(<Py_ssize_t>buf_length(self.ptr), 10)}>"
         k = min(<Py_ssize_t>buf_length(self.ptr), 10)
         for i in range(k):
             vals.append(bool(((<uint8_t*>self.ptr.data)[i >> 3] >> (i & 7)) & 1))
@@ -1245,7 +1246,7 @@ cdef bint c_get_bitmap_ptrs(
     Returns 1 if the vector is not dense (const encoded) — caller must
     materialize before entering the nogil zone.  Returns 0 on success.
     """
-    if vec._has_const:
+    if vec._unified_view.data_length == 1:
         return 1
     data_out[0] = <uint8_t*>vec.ptr.data
     null_out[0] = vec.ptr.null_bitmap
@@ -1442,7 +1443,10 @@ cdef BoolVector from_decoded(
     vec.ptr.data = data
     vec.ptr.null_bitmap = null_bitmap
     vec.owns_data = True
-    _refresh_unified_bool(vec)
+    vec._unified_view.data = data
+    vec._unified_view.data_length = length
+    vec._unified_view.length = length
+    vec._unified_view.validity = null_bitmap
     return vec
 
 
@@ -1521,7 +1525,11 @@ cdef BoolVector from_arrow(object array):
     else:
         vec.ptr.null_bitmap = NULL
 
-    _refresh_unified_bool(vec)
+    cdef size_t _arr_len = <size_t>len(array)
+    vec._unified_view.data = vec.ptr.data
+    vec._unified_view.data_length = _arr_len
+    vec._unified_view.length = _arr_len
+    vec._unified_view.validity = vec.ptr.null_bitmap
     return vec
 
 
@@ -1555,8 +1563,11 @@ cdef BoolVector from_sequence(uint8_t[::1] data):
     vec.ptr.length = <size_t> (data.shape[0] * 8)
     vec.ptr.data = <void*> &data[0]
     vec.ptr.null_bitmap = NULL
-
-    _refresh_unified_bool(vec)
+    cdef size_t _seq_len = <size_t>(data.shape[0] * 8)
+    vec._unified_view.data = vec.ptr.data
+    vec._unified_view.data_length = _seq_len
+    vec._unified_view.length = _seq_len
+    vec._unified_view.validity = NULL
     return vec
 
 
@@ -1593,7 +1604,8 @@ cdef BoolVector bool_vector_from_bits(
         vec.ptr.null_bitmap = bm
     else:
         vec.ptr.null_bitmap = NULL
-    _refresh_unified_bool(vec)
+    vec._unified_view.length = <size_t>n
+    vec._unified_view.validity = vec.ptr.null_bitmap
     return vec
 
 

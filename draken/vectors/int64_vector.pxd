@@ -3,8 +3,6 @@ from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
 from libc.stdint cimport uint64_t, uint8_t
 
-from draken.core.buffers cimport ConstAccessor
-from draken.core.buffers cimport DictAccessor
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DrakenVarBuffer
 from draken.core.buffers cimport DrakenVector
@@ -17,18 +15,9 @@ cdef class Int64Vector(Vector):
     cdef object _arrow_null_buf
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
-    cdef DictAccessor _dict_accessor
     cdef DrakenVarBuffer* _dict_values
-    cdef uint8_t* _dict_codes
-    cdef uint8_t _dict_code_width
     cdef uint8_t _dict_ordered
-    cdef ConstAccessor _const_accessor
-    cdef int64_t _const_value
-    cdef bint _has_const
-    cdef bint _const_is_null
 
-    cdef DictAccessor* dict_accessor(self) noexcept
-    cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
 
@@ -101,7 +90,6 @@ cdef Int64Vector from_packed_dict(
     const uint8_t* dict_entry_null_bitmap=*,
 )
 cdef Int64Vector from_sequence(const int64_t[::1] data)
-cdef void _refresh_unified_int64(Int64Vector vec) noexcept
 cdef Int64Vector _materialize_dict_int64(Int64Vector vec)
 cdef Int64Vector make_int64_dict_only(
     const uint8_t* codes,

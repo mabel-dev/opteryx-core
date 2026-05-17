@@ -1,0 +1,1184 @@
+# Source: types.run_tests
+
+# Comparisons with BLOB and String Literal
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') = 'apple'
+
+statement error UnsupportedSyntaxError
+SELECT 'apple' = BLOB('apple')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') > 'banana'
+
+statement error UnsupportedSyntaxError
+SELECT 'banana' > BLOB('apple')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') LIKE 'a%ple'
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') != 'apple'
+
+statement error UnsupportedSyntaxError
+SELECT 'apple' != BLOB('apple')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') < 'banana'
+
+statement error UnsupportedSyntaxError
+SELECT 'banana' < BLOB('apple')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') <= 'banana'
+
+statement error UnsupportedSyntaxError
+SELECT 'banana' <= BLOB('apple')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') >= 'banana'
+
+statement error UnsupportedSyntaxError
+SELECT 'banana' >= BLOB('apple')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') NOT LIKE 'a%ple'
+
+
+# Comparisons with BLOB and b'' Literal
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') = b'apple'
+
+statement error UnsupportedSyntaxError
+SELECT b'apple' = BLOB('apple')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') > b'banana'
+
+statement error UnsupportedSyntaxError
+SELECT b'banana' > BLOB('apple')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') LIKE b'a%ple'
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') != b'apple'
+
+statement error UnsupportedSyntaxError
+SELECT b'apple' != BLOB('apple')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') < b'banana'
+
+statement error UnsupportedSyntaxError
+SELECT b'banana' < BLOB('apple')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') <= b'banana'
+
+statement error UnsupportedSyntaxError
+SELECT b'banana' <= BLOB('apple')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') >= b'banana'
+
+statement error UnsupportedSyntaxError
+SELECT b'banana' >= BLOB('apple')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') NOT LIKE b'a%ple'
+
+
+# Comparisons with b'' Literal and String Literal
+statement ok
+SELECT b'apple' = 'apple'
+
+statement ok
+SELECT 'apple' = b'apple'
+
+statement ok
+SELECT b'apple' > 'banana'
+
+statement ok
+SELECT 'banana' > b'apple'
+
+statement error SqlError
+SELECT b'apple' LIKE 'a%ple'
+
+statement ok
+SELECT b'apple' != 'apple'
+
+statement ok
+SELECT 'apple' != b'apple'
+
+statement ok
+SELECT b'apple' < 'banana'
+
+statement ok
+SELECT 'banana' < b'apple'
+
+statement ok
+SELECT b'apple' <= 'banana'
+
+statement ok
+SELECT 'banana' <= b'apple'
+
+statement ok
+SELECT b'apple' >= 'banana'
+
+statement ok
+SELECT 'banana' >= b'apple'
+
+statement error SqlError
+SELECT b'apple' NOT LIKE 'a%ple'
+
+
+# Comparisons between b'' Literals
+statement ok
+SELECT b'apple' = b'banana'
+
+statement ok
+SELECT b'apple' > b'banana'
+
+statement ok
+SELECT b'banana' = b'apple'
+
+statement error SqlError
+SELECT b'apple' LIKE b'a%ple'
+
+statement ok
+SELECT b'apple' != b'banana'
+
+statement ok
+SELECT b'apple' < b'banana'
+
+statement ok
+SELECT b'apple' <= b'banana'
+
+statement ok
+SELECT b'apple' >= b'banana'
+
+statement error SqlError
+SELECT b'apple' NOT LIKE b'a%ple'
+
+
+# Comparisons between BLOBs
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') = BLOB('banana')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') > BLOB('banana')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('banana') = BLOB('apple')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') LIKE BLOB('a%ple')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') != BLOB('banana')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') < BLOB('banana')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') <= BLOB('banana')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') >= BLOB('banana')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') NOT LIKE BLOB('a%ple')
+
+
+# Explicit Type Casting
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('apple') AS VARCHAR) = 'apple'
+
+statement error UnsupportedSyntaxError
+SELECT 'apple' = CAST(BLOB('apple') AS VARCHAR)
+
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('apple') AS BLOB) = b'apple'
+
+
+# Case Sensitivity
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') ILIKE 'a%ple'
+
+statement error SqlError
+SELECT b'apple' ILIKE b'a%ple'
+
+
+# RegEx
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') RLIKE 'a%ple'
+
+statement error SqlError
+SELECT b'apple' RLIKE b'a%ple'
+
+
+# INTEGER Comparisons
+statement ok
+SELECT 42 = 42;        -- True
+
+statement ok
+SELECT 42 != 43;       -- True
+
+statement ok
+SELECT 42 > 41;        -- True
+
+statement ok
+SELECT 42 >= 42;       -- True
+
+statement ok
+SELECT 42 < 43;        -- True
+
+statement ok
+SELECT 42 <= 42;       -- True
+
+
+# INTEGER Comparisons with Different Values
+statement ok
+SELECT 42 = 43;        -- False
+
+statement ok
+SELECT 42 != 42;       -- False
+
+statement ok
+SELECT 42 > 43;        -- False
+
+statement ok
+SELECT 42 >= 43;       -- False
+
+statement ok
+SELECT 42 < 42;        -- False
+
+statement ok
+SELECT 42 <= 41;       -- False
+
+
+# DOUBLE Comparisons
+statement ok
+SELECT 42.0 = 42.0;    -- True
+
+statement ok
+SELECT 42.0 != 43.0;   -- True
+
+statement ok
+SELECT 42.0 > 41.0;    -- True
+
+statement ok
+SELECT 42.0 >= 42.0;   -- True
+
+statement ok
+SELECT 42.0 < 43.0;    -- True
+
+statement ok
+SELECT 42.0 <= 42.0;   -- True
+
+
+# DOUBLE Comparisons with Different Values
+statement ok
+SELECT 42.0 = 43.0;    -- False
+
+statement ok
+SELECT 42.0 != 42.0;   -- False
+
+statement ok
+SELECT 42.0 > 43.0;    -- False
+
+statement ok
+SELECT 42.0 >= 43.0;   -- False
+
+statement ok
+SELECT 42.0 < 42.0;    -- False
+
+statement ok
+SELECT 42.0 <= 41.0;   -- False
+
+
+# INTEGER and DOUBLE Comparisons
+statement ok
+SELECT 42 = 42.0;      -- True
+
+statement ok
+SELECT 42.0 = 42;      -- True
+
+statement ok
+SELECT 42 != 42.0;     -- False
+
+statement ok
+SELECT 42.0 != 42;     -- False
+
+statement ok
+SELECT 42 > 41.0;      -- True
+
+statement ok
+SELECT 42.0 < 43;      -- True
+
+
+# Edge Case Comparisons
+statement ok
+SELECT 0 = 0.0;        -- True
+
+statement ok
+SELECT -1 = -1.0;      -- True
+
+statement ok
+SELECT 42 < 42.0001;   -- True
+
+statement ok
+SELECT 42.0 > 41.9999; -- True
+
+statement ok
+SELECT 42.0 < 42.0001; -- True
+
+
+# Arithmetic Operations with Comparisons
+statement ok
+SELECT 21 * 2 = 42;    -- True
+
+statement ok
+SELECT 21.0 * 2 = 42.0; -- True
+
+statement ok
+SELECT 21 + 21 = 42;   -- True
+
+statement ok
+SELECT 42 / 2 = 21;    -- True
+
+statement ok
+SELECT 42 / 2.0 = 21.0; -- True
+
+statement ok
+SELECT 43 / 2.0 = 21.5; -- True
+
+
+# Arithmetic Operations with Type Mixing (Addition)
+statement ok
+SELECT 21 + 21 = 42; -- True
+
+statement ok
+SELECT 21 + 21.0 = 42.0; -- True
+
+statement ok
+SELECT 21 + 21::DECIMAL = 42; -- True
+
+statement ok
+SELECT 21.0 + 21 = 42.0; -- True
+
+statement ok
+SELECT 21.0 + 21.0 = 42.0; -- True
+
+# SELECT 21.0 + 21::DECIMAL = 42.0; -- True
+statement error SqlError
+SELECT 21::DECIMAL + 21 = 42; -- True
+
+# SELECT 21::DECIMAL + 21.0 = 42.0; -- True
+statement error SqlError
+SELECT 21::DECIMAL + 21::DECIMAL = 42; -- True
+
+
+# Arithmetic Operations with Type Mixing (Subtraction)
+statement ok
+SELECT 42 - 21 = 21; -- True
+
+statement ok
+SELECT 42 - 21.0 = 21.0; -- True
+
+statement error SqlError
+SELECT 42 - 21::DECIMAL = 21; -- True
+
+statement ok
+SELECT 42.0 - 21 = 21.0; -- True
+
+statement ok
+SELECT 42.0 - 21.0 = 21.0; -- True
+
+# SELECT 42.0 - 21::DECIMAL = 21.0; -- True
+statement error SqlError
+SELECT 42::DECIMAL - 21 = 21; -- True
+
+# SELECT 42::DECIMAL - 21.0 = 21.0; -- True
+statement error SqlError
+SELECT 42::DECIMAL - 21::DECIMAL = 21; -- True
+
+
+# Arithmetic Operations with Type Mixing (Multiplication)
+statement ok
+SELECT 21 * 2 = 42; -- True
+
+statement ok
+SELECT 21 * 2.0 = 42.0; -- True
+
+statement error SqlError
+SELECT 21 * 2::DECIMAL = 42; -- True
+
+statement ok
+SELECT 21.0 * 2 = 42.0; -- True
+
+statement ok
+SELECT 21.0 * 2.0 = 42.0; -- True
+
+# SELECT 21.0 * 2::DECIMAL = 42.0; -- True
+statement error SqlError
+SELECT 21::DECIMAL * 2 = 42; -- True
+
+# SELECT 21::DECIMAL * 2.0 = 42.0; -- True
+statement error SqlError
+SELECT 21::DECIMAL * 2::DECIMAL = 42; -- True
+
+
+# Arithmetic Operations with Type Mixing (Division)
+statement ok
+SELECT 42 / 2 = 21; -- True
+
+statement ok
+SELECT 42 / 2.0 = 21.0; -- True
+
+statement error SqlError
+SELECT 42 / 2::DECIMAL = 21; -- True
+
+statement ok
+SELECT 42.0 / 2 = 21.0; -- True
+
+statement ok
+SELECT 42.0 / 2.0 = 21.0; -- True
+
+# SELECT 42.0 / 2::DECIMAL = 21.0; -- True
+statement error SqlError
+SELECT 42::DECIMAL / 2 = 21; -- True
+
+# SELECT 42::DECIMAL / 2.0 = 21.0; -- True
+statement error SqlError
+SELECT 42::DECIMAL / 2::DECIMAL = 21; -- True
+
+
+statement error SqlError
+SELECT * FROM testdata.astronauts WHERE birth_date - current_timestamp > INTERVAL '1' DAY
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE current_timestamp - birth_date > INTERVAL '1' DAY
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE birth_date + INTERVAL '1' DAY < current_timestamp
+
+statement error SqlError
+SELECT * FROM testdata.astronauts WHERE current_timestamp + INTERVAL '1' DAY > birth_date
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE birth_date - INTERVAL '1' DAY < current_timestamp
+
+statement error SqlError
+SELECT * FROM testdata.astronauts WHERE current_timestamp - INTERVAL '1' DAY > birth_date
+
+statement error SqlError
+SELECT * FROM testdata.astronauts WHERE (birth_date + INTERVAL '1' DAY) - current_timestamp > INTERVAL '1' DAY
+
+statement error SqlError
+SELECT * FROM testdata.astronauts WHERE (current_timestamp + INTERVAL '1' DAY) - birth_date > INTERVAL '1' DAY
+
+# SELECT * FROM testdata.astronauts WHERE (birth_date - current_timestamp) + INTERVAL '1' DAY > INTERVAL '1' DAY;
+# SELECT * FROM testdata.astronauts WHERE (current_timestamp - birth_date) + INTERVAL '1' DAY > INTERVAL '1' DAY;
+statement error SqlError
+SELECT * FROM testdata.astronauts WHERE birth_date + INTERVAL '1' DAY > INTERVAL '1' DAY - current_timestamp
+
+statement error SqlError
+SELECT * FROM testdata.astronauts WHERE (current_timestamp + INTERVAL '1' DAY) - birth_date > INTERVAL '1' DAY
+
+# SELECT * FROM testdata.astronauts WHERE (birth_date - current_timestamp) + INTERVAL '1' DAY > INTERVAL '1' DAY;
+# SELECT * FROM testdata.astronauts WHERE (current_timestamp - birth_date) + INTERVAL '1' DAY > INTERVAL '1' DAY;
+statement error SqlError
+SELECT * FROM testdata.astronauts WHERE current_timestamp + INTERVAL '1' DAY = birth_date
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE birth_date + INTERVAL '1' DAY = current_timestamp
+
+statement error SqlError
+SELECT * FROM testdata.astronauts WHERE current_timestamp - INTERVAL '1' DAY = birth_date
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE birth_date - INTERVAL '1' DAY = current_timestamp
+
+statement error SqlError
+SELECT * FROM testdata.astronauts WHERE INTERVAL '1' DAY + current_timestamp = birth_date
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE INTERVAL '1' DAY + birth_date = current_timestamp
+
+
+# NULL Handling
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') = NULL
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') != NULL
+
+statement error UnsupportedSyntaxError
+SELECT NULL = BLOB('apple')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') IS NULL
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') IS NOT NULL
+
+statement error UnsupportedSyntaxError
+SELECT NULL LIKE BLOB('a%ple')
+
+
+# Character Case Sensitivity
+statement error UnsupportedSyntaxError
+SELECT BLOB('Apple') = 'apple'
+
+statement error SqlError
+SELECT b'Apple' ILIKE b'aPpLe'
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') = BLOB('APPLE')
+
+statement error UnsupportedSyntaxError
+SELECT b'Apple' = BLOB('APPLE')
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') ILIKE BLOB('aPPLE')
+
+
+# Type Casting with Other Data Types
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('42') AS INTEGER) = 42
+
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('42.0') AS DOUBLE) = 42.0
+
+# SELECT CAST(BLOB('21.5') AS DECIMAL) = 21.5;
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('0.0') AS DOUBLE) = 0.0
+
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('apple') AS VARCHAR) = 'apple'
+
+
+# Complex Expressions Involving BLOBs
+statement error UnsupportedSyntaxError
+SELECT LENGTH(BLOB('apple')) = 5
+
+# SELECT LOWER(BLOB('APPLE')) = 'apple';
+statement error UnsupportedSyntaxError
+SELECT SUBSTRING(BLOB('apple pie'), 1, 5) = 'apple'
+
+
+# Non-ASCII Characters in BLOB Comparisons
+statement error UnsupportedSyntaxError
+SELECT BLOB('café') = 'café'
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('façade') LIKE 'faça%'
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('mañana') = 'mañana'
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('niño') != 'nino'
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('jalapeño') ILIKE 'jala%ño'
+
+
+# Whitespace Handling
+statement error UnsupportedSyntaxError
+SELECT BLOB(' apple ') = 'apple'
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple ') LIKE 'apple%'
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('  apple') = 'apple'
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') = ' apple '
+
+statement error UnsupportedSyntaxError
+SELECT BLOB('apple') LIKE ' a%ple '
+
+
+# Integer and Double Edge Case Handling
+statement ok
+SELECT 0 = 0.0
+
+statement ok
+SELECT -1 = -1.0
+
+statement ok
+SELECT 42 < 42.0001
+
+statement ok
+SELECT 42.0 > 41.9999
+
+statement ok
+SELECT -0 = 0
+
+
+# Comparisons with Interval Arithmetic
+statement error SqlError
+SELECT * FROM testdata.astronauts WHERE birth_date - current_timestamp > INTERVAL '1' DAY
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE birth_date + INTERVAL '1' DAY < current_timestamp
+
+statement error SqlError
+SELECT * FROM testdata.astronauts WHERE current_timestamp - INTERVAL '1' DAY = birth_date
+
+statement error SqlError
+SELECT * FROM testdata.astronauts WHERE INTERVAL '1' DAY + current_timestamp = birth_date
+
+
+# Explicit Type Casting to Various Types
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('42') AS INTEGER) = 42
+
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('42.0') AS DOUBLE) = 42.0
+
+# SELECT CAST(BLOB('21.5') AS DECIMAL) = 21.5;
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('true') AS BOOLEAN) = TRUE
+
+# SELECT CAST(BLOB('2024-10-09') AS DATE) = CAST('2024-10-09' AS DATE);
+# SELECT CAST(BLOB('2024-10-09 12:00:00') AS TIMESTAMP) = CAST('2024-10-09 12:00:00' AS TIMESTAMP);
+
+# Type Equivalence Checks Across Different Types (Using CAST)
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('42') AS INTEGER) = CAST('42' AS INTEGER)
+
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('42.0') AS DOUBLE) = CAST(42.0 AS DOUBLE)
+
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('apple') AS VARCHAR) = 'apple'
+
+# SELECT CAST(BLOB('2024-10-09') AS DATE) = CAST('2024-10-09' AS DATE);
+
+# Explicit Type Casting from Non-BLOB Types to BLOBs
+statement error UnsupportedSyntaxError
+SELECT CAST('apple' AS BLOB) = BLOB('apple')
+
+statement error UnsupportedSyntaxError
+SELECT CAST(b'apple' AS BLOB) = BLOB('apple')
+
+statement error UnsupportedSyntaxError
+SELECT CAST(42 AS BLOB) = BLOB('42')
+
+statement error UnsupportedSyntaxError
+SELECT CAST(42.0 AS BLOB) = BLOB('42.0')
+
+statement error UnsupportedSyntaxError
+SELECT CAST(TRUE AS BLOB) = BLOB('true')
+
+
+# Type Comparison Using CAST with Edge Cases
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('42.000') AS DECIMAL) = 42.0
+
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('') AS VARCHAR) IS NULL; -- Empty string casted to BLOB and then back
+
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('  ') AS VARCHAR) = ' '; -- Single whitespace versus multiple whitespace
+
+
+# Comparisons After Type Casting
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('42') AS INTEGER) > 41
+
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('21.5') AS DOUBLE) < 22.0
+
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('apple') AS VARCHAR) LIKE 'app%'
+
+# SELECT CAST(BLOB('2024-10-09') AS DATE) < CURRENT_DATE;
+
+# Mixed Type Equivalency Tests with Explicit Casts
+# SELECT CAST(BLOB('42') AS INTEGER) = CAST('42.0' AS DECIMAL);
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('42.0') AS DOUBLE) = CAST('42' AS INTEGER)
+
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('42.0') AS DOUBLE) != CAST('42' AS INTEGER)
+
+
+# Type Conversion Error Checks
+# These should verify that casting invalid types produces expected errors or NULL results
+statement error UnsupportedSyntaxError
+SELECT TRY_CAST(BLOB('apple') AS INTEGER); -- Expecting an error or NULL
+
+statement error UnsupportedSyntaxError
+SELECT TRY_CAST(BLOB('42.5') AS INTEGER);  -- Expecting an error or truncation behavior
+
+statement error UnsupportedSyntaxError
+SELECT TRY_CAST(BLOB('true') AS INTEGER);  -- Expecting an error
+
+
+# Special Cases with Escaped or Non-Printable Characters
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('\x00') AS VARCHAR) = ''; -- Null byte casting
+
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('hello\nworld') AS VARCHAR) = 'hello\nworld'; -- Handling newlines
+
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('tab\tcharacter') AS VARCHAR) = 'tab\tcharacter'
+
+
+# Comparing Different Length Encodings After Explicit Casts
+statement error UnsupportedSyntaxError
+SELECT LENGTH(CAST(BLOB('apple') AS VARCHAR)) = 5
+
+statement error UnsupportedSyntaxError
+SELECT LENGTH(CAST(BLOB('longer string') AS VARCHAR)) = 13
+
+# SELECT CHAR_LENGTH(CAST(BLOB('multibyte café') AS VARCHAR)) = 12;
+# SELECT OCTET_LENGTH(CAST(BLOB('café') AS VARCHAR)) = 5; -- Assuming UTF-8 encoding
+
+# Length Comparisons of Different Encoded BLOBs
+statement error UnsupportedSyntaxError
+SELECT LENGTH(BLOB('apple')) = 5
+
+statement error UnsupportedSyntaxError
+SELECT LENGTH(BLOB('apple ')) > 5; -- Trailing whitespace length check
+
+statement error UnsupportedSyntaxError
+SELECT LENGTH(BLOB('café')) = 4; -- Considering UTF-8 versus byte-length
+
+
+# Pattern Matching with Explicit Casts
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('apple pie') AS VARCHAR) LIKE '%pie'
+
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('apple') AS VARCHAR) NOT LIKE '%apple%'
+
+statement error UnsupportedSyntaxError
+SELECT CAST(BLOB('hello world') AS VARCHAR) RLIKE 'hello.*world'
+
+
+# EXTRACT returns different typed values depending on the input
+statement error InvalidFunctionParameterError
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(CENTURY FROM birth_date) <= 15
+
+statement error InvalidFunctionParameterError
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(DECADE FROM birth_date) <= 15
+
+statement error InvalidFunctionParameterError
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(isoyear FROM birth_date) < 1900
+
+statement ok
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(YEAR FROM birth_date) < 1900
+
+statement ok
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(DOY FROM birth_date) > 100
+
+statement ok
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(dayofyear FROM birth_date) > 100
+
+statement ok
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(QUARTER FROM birth_date) > 100
+
+statement ok
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(MONTH FROM birth_date) = 1
+
+statement error InvalidFunctionParameterError
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(week FROM birth_date) = 1
+
+statement error InvalidFunctionParameterError
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(isoweek FROM birth_date) = 1
+
+statement ok
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(DOW FROM birth_date) = 0
+
+statement ok
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(dayofweek FROM birth_date) < 5
+
+statement ok
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(HOUR FROM birth_date) <= 15
+
+statement ok
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(MINUTE FROM birth_date) <= 15
+
+statement ok
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(SECOND FROM birth_date) <= 15
+
+statement error InvalidFunctionParameterError
+SELECT EXTRACT(MILLISECOND FROM NOW()) < 1000
+
+statement error InvalidFunctionParameterError
+SELECT EXTRACT(MILLISECONDS FROM NOW()) < 1000
+
+statement error InvalidFunctionParameterError
+SELECT EXTRACT(NANOSECOND FROM NOW()) < 1000000000
+
+statement error InvalidFunctionParameterError
+SELECT EXTRACT(NANOSECONDS FROM NOW()) < 1000000000
+
+statement error IncompatibleTypesError
+SELECT EXTRACT(DAY FROM NOW()) = 'Monday'
+
+statement error InvalidFunctionParameterError
+SELECT EXTRACT(EPOCH FROM NOW()) > 0.0
+
+statement error InvalidFunctionParameterError
+SELECT EXTRACT(JULIAN FROM NOW()) > 2450000.0
+
+statement error InvalidFunctionParameterError
+SELECT EXTRACT(DATE FROM NOW()) > NOW()
+
+
+# CASE statements with mixed types
+statement error ValueError
+SELECT CASE WHEN id > 0 THEN 1 ELSE 1.5 END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN id > 0 THEN 1.5 ELSE 2 END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN id > 0 THEN '1' ELSE 2 END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN id > 0 THEN '1.5' ELSE 2.5 END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN id > 0 THEN 'TRUE' ELSE FALSE END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN id > 0 THEN 'short' ELSE 'much longer string' END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN id > 0 THEN 'valid' ELSE NULL END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN mass > 10 THEN 100.5 ELSE 2 END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN mass > 10 THEN 'Heavy' ELSE mass END AS result FROM $planets
+
+statement error TypeError
+SELECT CASE WHEN name = 'Earth' THEN 'Home' ELSE name END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN id > 0 THEN 'Exist' ELSE NULL END AS result FROM $planets
+
+statement ok
+SELECT CASE WHEN id > mass THEN 'IdGreater' ELSE 'MassGreater' END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN id > 0 AND mass < 10 THEN 'SmallPositive' ELSE 'Other' END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN LENGTH(name) > 4 THEN 'LongName' ELSE 'ShortName' END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN mass / id > 1 THEN 'Dense' ELSE 'Sparse' END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE id WHEN 1 THEN 'One' WHEN 2 THEN 'Two' ELSE 'Other' END AS result FROM $planets
+
+statement error TypeError
+SELECT CASE name WHEN 'Earth' THEN 'Third' WHEN 'Mars' THEN 'Fourth' ELSE 'Unknown' END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE mass WHEN 0 THEN 'Massless' WHEN 1 THEN 'UnitMass' ELSE 'Massive' END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE id WHEN 0 THEN 'Zero' WHEN 1 THEN 1.5 ELSE 'Other' END AS result FROM $planets
+
+statement error TypeError
+SELECT CASE name WHEN NULL THEN 'NoName' ELSE name END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN id > 0 THEN CASE WHEN mass < 10 THEN 'Light' ELSE 'Heavy' END ELSE 'Unknown' END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN id > 0 THEN CASE WHEN name = 'Earth' THEN 'BluePlanet' ELSE 'OtherPlanet' END ELSE 'NoId' END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN id > 0 THEN 1 WHEN id < 0 THEN 2.5 ELSE 3.0 END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN id > 0 THEN name || ' is positive' ELSE name || ' is not positive' END AS result FROM $planets
+
+statement error ValueError
+SELECT CASE WHEN id > 0 THEN UPPER(name) ELSE LOWER(name) END AS result FROM $planets
+
+
+statement ok
+SELECT COUNT(DISTINCT surfacePressure) FROM $planets; -- DOUBLE (with nulls)
+
+statement ok
+SELECT COUNT(DISTINCT mass) FROM $planets; -- DOUBLE
+
+statement ok
+SELECT COUNT(DISTINCT name) FROM $planets; -- VARCHAR
+
+statement ok
+SELECT COUNT(DISTINCT id) FROM $planets; -- INTEGER
+
+statement ok
+SELECT COUNT(DISTINCT gravity) FROM $planets; -- DECIMAL
+
+statement ok
+SELECT COUNT(DISTINCT alma_mater) AS AM FROM testdata.astronauts; -- LIST<VARCHAR>
+
+statement ok
+SELECT COUNT(DISTINCT birth_place) FROM testdata.astronauts; -- JSONB/STRUCT
+
+statement ok
+SELECT COUNT(DISTINCT death_date) AS AM FROM testdata.astronauts; -- TIMESTAMP
+
+statement ok
+SELECT COUNT(DISTINCT id > 1) AS AM FROM $planets; -- BOOLEAN
+
+statement ok
+SELECT COUNT(DISTINCT surfacePressure > 1) AS AM FROM $planets; -- BOOLEAN (with nulls)
+
+
+# crashed Opteryx (excluded): SELECT TRY_CAST(alma_mater AS ARRAY<VARCHAR>) FROM testdata.astronauts
+# crashed Opteryx (excluded): SELECT TRY_CAST(alma_mater AS ARRAY<BLOB>) FROM testdata.astronauts
+# crashed Opteryx (excluded): SELECT TRY_CAST(alma_mater AS ARRAY<INTEGER>) FROM testdata.astronauts
+# crashed Opteryx (excluded): SELECT TRY_CAST(alma_mater AS ARRAY<DOUBLE>) FROM testdata.astronauts
+# crashed Opteryx (excluded): SELECT TRY_CAST(alma_mater AS ARRAY<TIMESTAMP>) FROM testdata.astronauts
+# crashed Opteryx (excluded): SELECT TRY_CAST(alma_mater AS ARRAY<BOOLEAN>) FROM testdata.astronauts
+
+# crashed Opteryx (excluded): SELECT CAST(alma_mater AS ARRAY<VARCHAR>) FROM testdata.astronauts
+# crashed Opteryx (excluded): SELECT CAST(alma_mater AS ARRAY<BLOB>) FROM testdata.astronauts
+# crashed Opteryx (excluded): SELECT CAST(alma_mater AS ARRAY<BOOLEAN>) FROM testdata.astronauts
+# crashed Opteryx (excluded): SELECT alma_mater::ARRAY<BLOB> FROM testdata.astronauts
+# crashed Opteryx (excluded): SELECT alma_mater::ARRAY<VARCHAR> FROM testdata.astronauts
+# crashed Opteryx (excluded): SELECT alma_mater::ARRAY<BOOLEAN> FROM testdata.astronauts
+
+# crashed Opteryx (excluded): SELECT CAST(CAST(alma_mater AS ARRAY<BOOLEAN>) AS ARRAY<VARCHAR>) FROM testdata.astronauts
+# crashed Opteryx (excluded): SELECT CAST(CAST(alma_mater AS ARRAY<BLOB>) AS ARRAY<VARCHAR>) FROM testdata.astronauts
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE birth_place->>'town' ILIKE b'C%e%r'
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE birth_place->>'town' ILIKE 'C%e%r'
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE birth_place->>'town' LIKE b'C%e%r'
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE birth_place->>'town' LIKE 'C%e%r'
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE birth_place->'town' ILIKE b'C%e%r'
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE birth_place->'town' ILIKE 'C%e%r'
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE birth_place->'town' LIKE b'C%e%r'
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE birth_place->'town' LIKE 'C%e%r'
+
+statement error UnsupportedSyntaxError
+SELECT * FROM testdata.astronauts WHERE BLOB(birth_place->'town') ILIKE b'C%e%r'
+
+statement error UnsupportedSyntaxError
+SELECT * FROM testdata.astronauts WHERE BLOB(birth_place->'town') ILIKE 'C%e%r'
+
+statement error UnsupportedSyntaxError
+SELECT * FROM testdata.astronauts WHERE BLOB(birth_place->'town') LIKE b'C%e%r'
+
+statement error UnsupportedSyntaxError
+SELECT * FROM testdata.astronauts WHERE BLOB(birth_place->'town') LIKE 'C%e%r'
+
+statement error UnsupportedSyntaxError
+SELECT * FROM testdata.astronauts WHERE VARCHAR(birth_place->'town') ILIKE b'C%e%r'
+
+statement error UnsupportedSyntaxError
+SELECT * FROM testdata.astronauts WHERE VARCHAR(birth_place->'town') ILIKE 'C%e%r'
+
+statement error UnsupportedSyntaxError
+SELECT * FROM testdata.astronauts WHERE VARCHAR(birth_place->'town') LIKE b'C%e%r'
+
+statement error UnsupportedSyntaxError
+SELECT * FROM testdata.astronauts WHERE VARCHAR(birth_place->'town') LIKE 'C%e%r'
+
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE 'MIT' = ANY(alma_mater)
+
+statement error TypeError
+SELECT 1 = ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT 1 = ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT 1 = ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT '1936-03-07' = ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
+
+statement error TypeError
+SELECT CAST('1936-03-07' AS DATE) = ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
+
+statement error TypeError
+SELECT True = ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A
+
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE 'MIT' != ANY(alma_mater)
+
+statement error TypeError
+SELECT 1 != ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT 1 != ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT 1 != ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT '1936-03-07' != ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
+
+statement error TypeError
+SELECT CAST('1936-03-07' AS DATE) != ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
+
+statement error TypeError
+SELECT True != ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A
+
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE 'MIT' > ANY(alma_mater)
+
+statement error TypeError
+SELECT 1 > ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT 1 > ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT 1 > ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT '1936-03-07' > ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
+
+statement error TypeError
+SELECT CAST('1936-03-07' AS DATE) > ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
+
+statement error TypeError
+SELECT True > ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A
+
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE 'MIT' >= ANY(alma_mater)
+
+statement error TypeError
+SELECT 1 >= ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT 1 >= ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT 1 >= ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT '1936-03-07' >= ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
+
+statement error TypeError
+SELECT CAST('1936-03-07' AS DATE) >= ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
+
+statement error TypeError
+SELECT True >= ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A
+
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE 'MIT' < ANY(alma_mater)
+
+statement error TypeError
+SELECT 1 < ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT 1 < ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT 1 < ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT '1936-03-07' < ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
+
+statement error TypeError
+SELECT CAST('1936-03-07' AS DATE) < ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
+
+statement error TypeError
+SELECT True < ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A
+
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE 'MIT' <= ANY(alma_mater)
+
+statement error TypeError
+SELECT 1 <= ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT 1 <= ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT 1 <= ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT '1936-03-07' <= ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
+
+statement error TypeError
+SELECT CAST('1936-03-07' AS DATE) <= ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
+
+statement error TypeError
+SELECT True <= ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A
+
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE 'MIT' = ALL(alma_mater)
+
+statement error TypeError
+SELECT 1 = ALL(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT 1 = ALL(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT 1 = ALL(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT '1936-03-07' = ALL(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
+
+statement error TypeError
+SELECT CAST('1936-03-07' AS DATE) = ALL(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
+
+statement error TypeError
+SELECT True = ALL(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A
+
+
+statement error TypeError
+SELECT * FROM testdata.astronauts WHERE 'MIT' != ALL(alma_mater)
+
+statement error TypeError
+SELECT 1 != ALL(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT 1 != ALL(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT 1 != ALL(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A
+
+statement error TypeError
+SELECT '1936-03-07' != ALL(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
+
+statement error TypeError
+SELECT CAST('1936-03-07' AS DATE) != ALL(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
+
+statement error TypeError
+SELECT True != ALL(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A

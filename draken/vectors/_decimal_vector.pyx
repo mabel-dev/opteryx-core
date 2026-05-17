@@ -21,8 +21,8 @@ This module provides:
 Storage: unscaled int64 values. For example, 3.7 at scale=1 is stored as 37.
 
 Two storage modes:
-  Dense:    _has_const=False — one int64 per row in a DrakenFixedBuffer
-  Constant: _has_const=True  — no dense buffer; all rows share a single _const_value
+  Dense:    data_length == n — one int64 per row in a DrakenFixedBuffer
+  Constant: data_length == 1 — all rows share a single value at ptr.data[0]
 
 Precision is capped at 18 (the maximum that fits in int64). Raise NotImplementedError
 for precision > 18; callers should downcast to float64 instead.
@@ -37,12 +37,9 @@ from libc.stddef cimport size_t
 from libc.stdint cimport int8_t, int32_t, int64_t, intptr_t, uint8_t, uint64_t
 from libc.stdlib cimport malloc, free
 
-from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenVector
+from draken.core.buffers cimport DrakenFixedBuffer, DrakenVector
 from draken.core.buffers cimport DRAKEN_INT64
 from draken.core.buffers cimport DRAKEN_NON_NATIVE
-from draken.core.buffers cimport DRAKEN_ENCODING_DENSE
-from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
-from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.fixed_vector cimport buf_dtype
 from draken.core.fixed_vector cimport buf_itemsize
@@ -77,25 +74,6 @@ cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx) noexcept nogi
     return (bitmap[idx >> 3] >> (idx & 7)) & 1
 
 
-cdef void _refresh_unified_Decimal(DecimalVector vec) noexcept:
-    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
-    vec._unified_view.length = <size_t>n
-    vec._unified_view.itemsize = sizeof(int64_t)
-    vec._unified_view.type = DRAKEN_INT64
-
-    if vec._has_const:
-        vec._unified_view.data = <void*>&vec._const_value
-        vec._unified_view.data_length = 1
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = &_CONST_NULL_BYTE if vec._const_is_null else NULL
-    else:
-        vec._unified_view.data = vec.ptr.data
-        vec._unified_view.data_length = <size_t>n
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = vec.ptr.null_bitmap
-
 
 # ---------------------------------------------------------------------------
 # DecimalVector class
@@ -109,8 +87,8 @@ cdef class DecimalVector(Vector):
     Precision must be <= 18 to fit within int64 range.
 
     Two storage modes:
-      Dense:    _has_const=False — one int64 per row in a DrakenFixedBuffer.
-      Constant: _has_const=True  — no dense buffer; all rows share _const_value.
+      Dense:    data_length == n — one int64 per row in a DrakenFixedBuffer.
+      Constant: data_length == 1 — all rows share a single value at ptr.data[0].
 
     The vector always owns its buffer in dense mode; from_arrow copies all data.
     """
@@ -118,24 +96,16 @@ cdef class DecimalVector(Vector):
     def __cinit__(self, size_t length=0):
         self.ptr = alloc_fixed_buffer(DRAKEN_INT64, length, 8)
         self.owns_data = True
-        self._const_accessor.length = 0
-        self._const_accessor.value_type = DRAKEN_INT64
-        self._const_accessor.value_ptr = NULL
-        self._const_accessor.is_null = 0
         self._precision = 18
         self._scale = 0
-        self._has_const = False
-        self._const_is_null = False
-        self._const_value = 0
-        self._unified_view.data = NULL
-        self._unified_view.data_length = 0
+        self._unified_view.data = self.ptr.data
+        self._unified_view.data_length = <size_t>length
         self._unified_view.selection = NULL
         self._unified_view.sel_width = 0
-        self._unified_view.length = 0
+        self._unified_view.length = <size_t>length
         self._unified_view.validity = NULL
         self._unified_view.itemsize = sizeof(int64_t)
         self._unified_view.type = DRAKEN_INT64
-        _refresh_unified_Decimal(self)
 
     def __dealloc__(self):
         # free_fixed_buffer(ptr, True) frees: data buffer, null_bitmap (if set),
@@ -174,57 +144,57 @@ cdef class DecimalVector(Vector):
         if length < 0:
             raise ValueError("length must be non-negative")
 
-        vec = DecimalVector(0)          # stub alloc; ptr.length remains 0
+        cdef bint _is_null = bool(is_null or value is None)
+        cdef int64_t const_val = 0
+
+        if not _is_null:
+            if isinstance(value, _decimal.Decimal):
+                sign, digits, exp_obj = value.as_tuple()
+                scale = max(0, -int(exp_obj))
+                unscaled = <int64_t>int(value * (_decimal.Decimal(10) ** scale))
+            elif isinstance(value, int):
+                scale = 0
+                unscaled = <int64_t>value
+            elif isinstance(value, float):
+                d = _decimal.Decimal(str(value))
+                sign, digits, exp_obj = d.as_tuple()
+                scale = max(0, -int(exp_obj))
+                unscaled = <int64_t>int(d * (_decimal.Decimal(10) ** scale))
+            else:
+                raise TypeError(
+                    f"DecimalVector.from_constant: unsupported value type {type(value)!r}"
+                )
+            const_val = unscaled
+
+        vec = DecimalVector(1)
+        (<int64_t*>vec.ptr.data)[0] = const_val
         vec.ptr.length = <size_t>length
         vec.ptr.null_bitmap = NULL
-        vec._has_const = True
-        vec._const_is_null = bool(is_null or value is None)
-        vec._encoding = DRAKEN_ENCODING_CONSTANT
 
-        if vec._const_is_null:
-            vec._const_value = 0
-            _refresh_unified_Decimal(vec)
-            return vec
-
-        if isinstance(value, _decimal.Decimal):
-            sign, digits, exp_obj = value.as_tuple()
-            scale = max(0, -int(exp_obj))
-            unscaled = <int64_t>int(value * (_decimal.Decimal(10) ** scale))
+        if not _is_null and isinstance(value, (_decimal.Decimal, float)):
             vec._scale = <int8_t>min(scale, 18)
-            vec._precision = <int8_t>min(18, max(1, len(str(abs(int(unscaled))))))
-            vec._const_value = unscaled
-        elif isinstance(value, int):
-            vec._scale = 0
-            vec._const_value = <int64_t>value
-        elif isinstance(value, float):
-            d = _decimal.Decimal(str(value))
-            sign, digits, exp_obj = d.as_tuple()
-            scale = max(0, -int(exp_obj))
-            unscaled = <int64_t>int(d * (_decimal.Decimal(10) ** scale))
-            vec._scale = <int8_t>min(scale, 18)
-            vec._const_value = unscaled
-        else:
-            raise TypeError(
-                f"DecimalVector.from_constant: unsupported value type {type(value)!r}"
-            )
+            if isinstance(value, _decimal.Decimal):
+                vec._precision = <int8_t>min(18, max(1, len(str(abs(int(const_val))))))
 
-        _refresh_unified_Decimal(vec)
+        vec._unified_view.data = vec.ptr.data
+        vec._unified_view.data_length = 1
+        vec._unified_view.length = <size_t>length
+        vec._unified_view.selection = NULL
+        vec._unified_view.sel_width = 0
+        vec._unified_view.validity = &_CONST_NULL_BYTE if _is_null else NULL
         return vec
 
     # ------------------------------------------------------------------
     # C-level accessor protocol (required by Vector base)
     # ------------------------------------------------------------------
 
-    cdef ConstAccessor* const_accessor(self) noexcept:
-        return NULL
-
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL:
+        if self.ptr == NULL or self._unified_view.data_length == 1:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL:
+        if self.ptr == NULL or self._unified_view.data_length == 1:
             return NULL
         return self.ptr.null_bitmap
 
@@ -483,7 +453,10 @@ cdef class DecimalVector(Vector):
                 for i in range(n):
                     dst[i] = (<int64_t*>uv.data)[0]
                 out.ptr.null_bitmap = NULL
-            _refresh_unified_Decimal(out)
+            out._unified_view.data = out.ptr.data
+            out._unified_view.data_length = <size_t>n
+            out._unified_view.length = <size_t>n
+            out._unified_view.validity = out.ptr.null_bitmap
             return out
 
         src = <int64_t*>uv.data
@@ -511,7 +484,10 @@ cdef class DecimalVector(Vector):
 
             out.ptr.null_bitmap = out_null
 
-        _refresh_unified_Decimal(out)
+        out._unified_view.data = out.ptr.data
+        out._unified_view.data_length = <size_t>n
+        out._unified_view.length = <size_t>n
+        out._unified_view.validity = out.ptr.null_bitmap
         return out
 
     # ------------------------------------------------------------------
@@ -1223,7 +1199,12 @@ cdef DecimalVector from_arrow(object array):
     vec._precision = <int8_t>precision
     vec._scale = <int8_t>scale
 
-    _refresh_unified_Decimal(vec)
+    vec._unified_view.data = vec.ptr.data
+    vec._unified_view.data_length = <size_t>vec.ptr.length
+    vec._unified_view.length = <size_t>vec.ptr.length
+    vec._unified_view.selection = NULL
+    vec._unified_view.sel_width = 0
+    vec._unified_view.validity = vec.ptr.null_bitmap
     return vec
 
 
@@ -1256,40 +1237,36 @@ cpdef DecimalVector from_int64_vector(Int64Vector source, int precision, int sca
     cdef uint8_t* src_null
     cdef uint8_t* out_null
     cdef size_t nb_bytes
+    cdef DrakenVector* src_uv
+    cdef int64_t const_val_i64
 
     if precision > 18:
         raise NotImplementedError(
             f"DecimalVector supports precision up to 18; got precision={precision}."
         )
 
-    # Materialise dictionary-encoded Int64Vector before copying
-    if source._encoding == DRAKEN_ENCODING_DICTIONARY and source.ptr.data == NULL:
+    src_uv = source.unified()
+    if src_uv.selection != NULL:
         source = _materialize_dict_int64(source)
+        src_uv = source.unified()
 
-    n = <Py_ssize_t>source.ptr.length
+    n = <Py_ssize_t>src_uv.length
 
     # Constant-encoding fast path
-    if source._has_const:
-        if source._const_is_null:
-            out = DecimalVector(0)
-            out.ptr.length = <size_t>n
-            out.ptr.null_bitmap = NULL
-            out._has_const = True
-            out._const_is_null = True
-            out._const_value = 0
-            out._precision = <int8_t>precision
-            out._scale = <int8_t>scale
-            _refresh_unified_Decimal(out)
-            return out
-        out = DecimalVector(0)
+    if src_uv.data_length == 1:
+        const_val_i64 = 0 if src_uv.validity != NULL else (<int64_t*>src_uv.data)[0]
+        out = DecimalVector(1)
+        (<int64_t*>out.ptr.data)[0] = const_val_i64
         out.ptr.length = <size_t>n
         out.ptr.null_bitmap = NULL
-        out._has_const = True
-        out._const_is_null = False
-        out._const_value = source._const_value
         out._precision = <int8_t>precision
         out._scale = <int8_t>scale
-        _refresh_unified_Decimal(out)
+        out._unified_view.data = out.ptr.data
+        out._unified_view.data_length = 1
+        out._unified_view.length = <size_t>n
+        out._unified_view.selection = NULL
+        out._unified_view.sel_width = 0
+        out._unified_view.validity = &_CONST_NULL_BYTE if src_uv.validity != NULL else NULL
         return out
 
     # Dense path: allocate new buffer and copy data
@@ -1314,5 +1291,8 @@ cpdef DecimalVector from_int64_vector(Int64Vector source, int precision, int sca
     else:
         out.ptr.null_bitmap = NULL
 
-    _refresh_unified_Decimal(out)
+    out._unified_view.data = out.ptr.data
+    out._unified_view.data_length = <size_t>n
+    out._unified_view.length = <size_t>n
+    out._unified_view.validity = out.ptr.null_bitmap
     return out

@@ -1,0 +1,1693 @@
+# Source: test_shapes_aliases_distinct.py
+
+query shape 177 1
+SELECT planetId FROM testdata.satellites
+
+query shape 9 3
+SELECT escape_velocity, gravity, orbitalPeriod FROM $planets
+
+query shape 3 2
+SELECT * FROM (VALUES ('High', 3),('Medium', 2),('Low', 1)) AS ratings(name, rating)
+
+query shape 1 2
+SELECT * FROM (VALUES ('High', 3),('Medium', 2),('Low', 1)) AS ratings(name, rating) WHERE rating = 3
+
+statement error UnnamedColumnError
+SELECT * FROM UNNEST(('foo', 'bar', 'baz', 'qux', 'corge', 'garply', 'waldo', 'fred'))
+
+query shape 8 1
+SELECT * FROM UNNEST(('foo', 'bar', 'baz', 'qux', 'corge', 'garply', 'waldo', 'fred')) AS element
+
+query shape 2 1
+SELECT * FROM UNNEST(('foo', 'bar', 'baz', 'qux', 'corge', 'garply', 'waldo', 'fred')) AS element WHERE element LIKE '%e%'
+
+query shape 8 1
+SELECT * FROM UNNEST(('foo', 'bar', 'baz', 'qux', 'corge', 'garply', 'waldo', 'fred')) AS UN
+
+query shape 2 1
+SELECT * FROM UNNEST(('foo', 'bar', 'baz', 'qux', 'corge', 'garply', 'waldo', 'fred')) AS UN WHERE UN LIKE '%e%'
+
+statement error UnsupportedSyntaxError
+SELECT * FROM testdata.astronauts LEFT JOIN UNNEST(missions) as s
+
+statement error UnnamedColumnError
+SELECT * FROM generate_series(1, 10)
+
+query shape 10 1
+SELECT * FROM generate_series(1, 10) AS GS
+
+query shape 21 1
+SELECT * FROM generate_series(-10,10) AS GS
+
+query shape 5 1
+SELECT * FROM generate_series(2,10,2) AS GS
+
+query shape 20 1
+SELECT * FROM generate_series(0.5,10,0.5) AS GS
+
+query shape 5 1
+SELECT * FROM generate_series(2,11,2) AS GS
+
+query shape 19 1
+SELECT * FROM generate_series(1, 10, 0.5) AS GS
+
+query shape 1 1
+SELECT * FROM generate_series(0.1, 0.2, 10) AS GS
+
+query shape 5 1
+SELECT * FROM generate_series(0, 5, 1.1) AS GS
+
+query shape 5 1
+SELECT * FROM generate_series(2,10,2) AS nums
+
+query shape 3 1
+SELECT * FROM generate_series(2,10,2) AS GS WHERE GS > 5
+
+query shape 2 1
+SELECT * FROM generate_series(2,10,2) AS nums WHERE nums < 5
+
+query shape 2 1
+SELECT * FROM generate_series(2) AS GS WITH (NO_CACHE)
+
+statement error InvalidFunctionParameterError
+SELECT * FROM generate_series('192.168.0.0/24') AS GS WITH (NO_CACHE)
+
+query error sql failed InvalidFunctionParameterError: Unsupported value for GENERATE_SERIES, must be date or numeric series\.
+SELECT * FROM generate_series('2022-01-01', '2022-12-31', '1 month') AS GS
+
+query error sql failed InvalidFunctionParameterError: Unsupported value for GENERATE_SERIES, must be date or numeric series\.
+SELECT * FROM generate_series('2022-01-01', '2022-12-31', '1 mon') AS GS
+
+query error sql failed InvalidFunctionParameterError: Unsupported value for GENERATE_SERIES, must be date or numeric series\.
+SELECT * FROM generate_series('2022-01-01', '2022-12-31', '1mon') AS GS
+
+query error sql failed InvalidFunctionParameterError: Unsupported value for GENERATE_SERIES, must be date or numeric series\.
+SELECT * FROM generate_series('2022-01-01', '2022-12-31', '1mo') AS GS
+
+query error sql failed InvalidFunctionParameterError: Unsupported value for GENERATE_SERIES, must be date or numeric series\.
+SELECT * FROM generate_series('2022-01-01', '2022-12-31', '1mth') AS GS
+
+query error sql failed InvalidFunctionParameterError: Unsupported value for GENERATE_SERIES, must be date or numeric series\.
+SELECT * FROM generate_series('2022-01-01', '2022-12-31', '1 months') AS GS
+
+query error sql failed InvalidFunctionParameterError: Unsupported value for GENERATE_SERIES, must be date or numeric series\.
+SELECT * FROM generate_series('2022-01-01', '2022-12-31', '1 day') AS GS
+
+query error sql failed InvalidFunctionParameterError: Unsupported value for GENERATE_SERIES, must be date or numeric series\.
+SELECT * FROM generate_series('2020-01-01', '2020-12-31', '1day') AS GS
+
+query error sql failed InvalidFunctionParameterError: Unsupported value for GENERATE_SERIES, must be date or numeric series\.
+SELECT * FROM generate_series('2022-01-01', '2022-12-31', '7 days') AS GS
+
+query error sql failed InvalidFunctionParameterError: Unsupported value for GENERATE_SERIES, must be date or numeric series\.
+SELECT * FROM generate_series('2022-01-01', '2022-01-02', '1 hour') AS GS
+
+query error sql failed InvalidFunctionParameterError: Unsupported value for GENERATE_SERIES, must be date or numeric series\.
+SELECT * FROM generate_series('2022-01-01', '2022-01-01 23:59', '1 hour') AS GS
+
+query error sql failed InvalidFunctionParameterError: Unsupported value for GENERATE_SERIES, must be date or numeric series\.
+SELECT * FROM generate_series('2022-01-01 12:00', '2022-01-01 23:59', '1 hour') AS GS
+
+query error sql failed InvalidFunctionParameterError: Unsupported value for GENERATE_SERIES, must be date or numeric series\.
+SELECT * FROM generate_series('2022-01-01 12:00', '2022-01-01 12:15', '1 minute') AS GS
+
+query error sql failed InvalidFunctionParameterError: Unsupported value for GENERATE_SERIES, must be date or numeric series\.
+SELECT * FROM generate_series('2022-01-01 12:00', '2022-01-01 12:15', '1m30s') AS GS
+
+query error io failed
+SELECT * FROM generate_series(1,10) AS GS LEFT JOIN $planets ON id = GS
+
+query error io failed
+SELECT * FROM GENERATE_SERIES(5, 10) AS PID LEFT JOIN $planets ON id = PID
+
+query error io failed
+SELECT * FROM generate_series(1,5) AS GS JOIN $planets ON id = GS
+
+query error io failed
+SELECT * FROM (SELECT * FROM generate_series(1,10,2) AS gs) AS GS INNER JOIN $planets on gs = id
+
+query error io failed
+SELECT id, name FROM (SELECT id, name FROM testdata.satellites) as S
+
+query error io failed
+SELECT S.id, name FROM (SELECT id, name FROM testdata.satellites) as S
+
+query error io failed
+SELECT S.id, S.name FROM (SELECT id, name FROM testdata.satellites) as S
+
+query error io failed
+SELECT S.id, S.name FROM (SELECT id, name FROM testdata.satellites AS P) as S
+
+query error io failed
+SELECT S.id, S.name FROM (SELECT id, P.name FROM testdata.satellites AS P) as S
+
+query error io failed
+SELECT S.id, S.name FROM (SELECT P.id, P.name FROM testdata.satellites AS P) as S
+
+query error io failed
+SELECT S.id, name FROM (SELECT id, name FROM testdata.satellites AS P) as S
+
+query error io failed
+SELECT id, name FROM (SELECT id, P.name FROM testdata.satellites AS P) as S
+
+statement error io failed
+SELECT P.id, name FROM (SELECT P.id, P.name FROM testdata.satellites AS P) as S
+
+query error io failed
+SELECT * FROM (SELECT id, name FROM testdata.satellites AS P) as S
+
+query error io failed
+SELECT id, name FROM (SELECT * FROM testdata.satellites AS P) as S
+
+query error io failed
+SELECT id, name FROM (SELECT * FROM testdata.satellites) as S
+
+query error io failed
+SELECT * FROM (SELECT id, name FROM testdata.satellites) as S
+
+query error io failed
+SELECT id, name FROM (SELECT id, name FROM (SELECT id, name FROM testdata.satellites) AS T1) AS T2
+
+query error io failed
+SELECT id, name FROM (SELECT id, name FROM (SELECT id, name FROM testdata.satellites) AS T1) AS T2
+
+query error io failed
+SELECT id, name FROM (SELECT id, name FROM (SELECT id, name FROM (SELECT id, name FROM testdata.satellites) AS T0) AS T1) AS T2
+
+query error io failed
+SELECT X.id, X.name FROM (SELECT Y.id, Y.name FROM (SELECT Z.id, Z.name FROM testdata.satellites AS Z) AS Y) AS X
+
+query error io failed
+SELECT id, name FROM (SELECT id, name FROM (SELECT id, name FROM testdata.satellites WHERE id > 100) AS T1 WHERE id < 150) AS T2
+
+query error io failed
+SELECT id, name FROM (SELECT id, name FROM (SELECT id, name FROM testdata.satellites ORDER BY id ASC) AS T1 ORDER BY id DESC) AS T2
+
+query error io failed
+SELECT id, name FROM (SELECT id, name FROM (SELECT id, name FROM testdata.satellites GROUP BY id, name) AS T1) AS T2
+
+query error io failed
+SELECT MAX(id), MIN(name) FROM (SELECT id, name FROM (SELECT id, name FROM testdata.satellites) AS T1) AS T2
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE name IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE name IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE year IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE year IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE group IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE group IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE status IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE status IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE birth_date IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE birth_date IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE birth_place IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE birth_place IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE gender IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE gender IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE alma_mater IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE alma_mater IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE undergraduate_major IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE undergraduate_major IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE graduate_major IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE graduate_major IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE military_rank IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE military_rank IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE military_branch IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE military_branch IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE space_flights IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE space_flights IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE space_flight_hours IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE space_flight_hours IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE space_walks IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE space_walks IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE space_walks_hours IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE space_walks_hours IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE missions IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE missions IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE death_date IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE death_date IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE death_mission IS NULL
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE death_mission IS NOT NULL
+
+query error io failed
+SELECT * FROM testdata.flat.formats.parquet WITH(NO_PARTITION) WHERE user_verified IS TRUE
+
+query error io failed
+SELECT * FROM testdata.flat.formats.parquet WITH(NO_PARTITION) WHERE user_verified IS FALSE
+
+query error io failed
+SELECT * FROM testdata.flat.formats.parquet WITH(NO_PARTITION, PARALLEL_READ)
+
+query error io failed
+SELECT missions FROM testdata.astronauts WHERE ARRAY_CONTAINS(missions, 'Apollo 8')
+
+query error io failed
+SELECT missions FROM testdata.astronauts WHERE ARRAY_CONTAINS_ANY(missions, ('Apollo 8', 'Apollo 13'))
+
+query error io failed
+SELECT missions FROM testdata.astronauts WHERE ARRAY_CONTAINS_ALL(missions, ('Apollo 8', 'Gemini 7'))
+
+query error io failed
+SELECT missions FROM testdata.astronauts WHERE ARRAY_CONTAINS_ALL(missions, ('Gemini 7', 'Apollo 8'))
+
+query error io failed
+SELECT missions FROM testdata.astronauts WHERE missions @> ('Apollo 8', 'Apollo 13')
+
+query error io failed
+SELECT * FROM (SELECT name, IFNULL(missions, []) AS missions FROM testdata.astronauts) WHERE NOT missions @> ['Apollo 11']
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE missions @>> ('Apollo 11', 'Gemini 12')
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE missions @>> ('Gemini 7', 'Apollo 8')
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE 'Apollo 11' = any(missions)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE 'C' > any(alma_mater)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE 'X' < any(alma_mater)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE 'Apollo 11' != any(missions)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE 'Apollo 11' != all(missions)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE 'Apollo 11' = all(missions)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE 'Apollo 11' = any(missions) AND True
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE 'X' > any(alma_mater) OR 'Z' > any(alma_mater)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE name != 'Brian' AND 'B' < any(alma_mater)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE name != 'Brian' OR 'Apollo 11' != any(missions)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE 'Apollo 11' != all(missions) AND name != 'Brian'
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE name != 'Brian' AND 'Apollo 11' = all(missions)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE 'X' >= any(alma_mater)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE 'B' <= any(alma_mater)
+
+statement error io failed
+SELECT * FROM testdata.satellites WHERE planetId IN (SELECT id FROM $planets WHERE name = 'Earth')
+
+statement error io failed
+SELECT * FROM $planets WHERE id NOT IN (SELECT DISTINCT planetId FROM testdata.satellites)
+
+statement error io failed
+SELECT name FROM $planets WHERE id IN (SELECT * FROM UNNEST((1,2,3)) as id)
+
+query error io failed
+SELECT count(planetId) FROM (SELECT DISTINCT planetId FROM testdata.satellites) AS SQ
+
+query error io failed
+SELECT COUNT(*) FROM (SELECT planetId FROM testdata.satellites WHERE planetId < 7) AS SQ GROUP BY planetId
+
+query error io failed
+EXPLAIN SELECT * FROM testdata.satellites
+
+query error io failed
+EXPLAIN SELECT * FROM testdata.satellites WHERE id = 8
+
+query error io failed
+EXPLAIN SELECT * FROM $planets WHERE TRUE
+
+query error io failed
+EXPLAIN SELECT * FROM $planets WHERE 1 > 1
+
+statement error io failed
+SET version = '1.0'
+
+statement error io failed
+SET schmersion = '1.0'
+
+statement error io failed
+SET disable_optimizer = 100
+
+query error io failed
+SET disable_optimizer = false; EXPLAIN SELECT * FROM testdata.satellites WHERE id = 8
+
+query error io failed
+SET disable_optimizer = true; EXPLAIN SELECT * FROM testdata.satellites WHERE id = 8 AND id = 7
+
+query error io failed
+SET disable_optimizer = false; EXPLAIN SELECT * FROM testdata.satellites WHERE id = 8 AND id = 7
+
+query error io failed
+SET disable_optimizer = false; EXPLAIN SELECT * FROM $planets ORDER BY id LIMIT 5
+
+query error io failed
+SET disable_optimizer = true; EXPLAIN SELECT * FROM $planets ORDER BY id LIMIT 5
+
+query error io failed
+EXPLAIN SELECT * FROM $planets ORDER BY id LIMIT 5
+
+query error io failed
+SELECT name, id FROM $planets ORDER BY id LIMIT 5
+
+query error io failed
+SELECT name, id FROM $planets ORDER BY id LIMIT 100
+
+query error io failed
+SHOW COLUMNS FROM testdata.satellites
+
+query error io failed
+SHOW FULL COLUMNS FROM testdata.satellites
+
+query error io failed
+SHOW EXTENDED COLUMNS FROM testdata.satellites
+
+query error io failed
+SHOW EXTENDED COLUMNS FROM $planets
+
+query error io failed
+SHOW EXTENDED COLUMNS FROM testdata.astronauts
+
+statement error io failed
+SHOW COLUMNS FROM testdata.satellites LIKE '%d'
+
+query error io failed
+SELECT * FROM testdata.satellites CROSS JOIN testdata.astronauts
+
+query error io failed
+SELECT * FROM testdata.satellites WITH (NO_CACHE) CROSS JOIN testdata.astronauts WITH (NO_CACHE)
+
+query error io failed
+SELECT * FROM testdata.satellites, $planets
+
+query error io failed
+SELECT * FROM testdata.satellites INNER JOIN $planets USING (id)
+
+query error io failed
+SELECT * FROM testdata.satellites WITH (NO_CACHE) INNER JOIN $planets USING (id)
+
+query error io failed
+SELECT * FROM testdata.satellites WITH (NO_CACHE) INNER JOIN $planets WITH (NO_CACHE) USING (id)
+
+query error io failed
+SELECT * FROM testdata.satellites INNER JOIN $planets WITH (NO_CACHE) USING (id)
+
+query error io failed
+SELECT * FROM testdata.satellites JOIN $planets USING (id)
+
+query error io failed
+SELECT * FROM testdata.astronauts CROSS JOIN UNNEST(missions) AS mission WHERE mission = 'Apollo 11'
+
+query error io failed
+SELECT * FROM testdata.astronauts CROSS JOIN UNNEST(missions) AS m
+
+query error io failed
+SELECT * FROM $planets INNER JOIN testdata.satellites ON $planets.id = testdata.satellites.planetId
+
+query error io failed
+SELECT DISTINCT planetId FROM testdata.satellites LEFT OUTER JOIN $planets ON testdata.satellites.planetId = $planets.id
+
+query error io failed
+SELECT DISTINCT planetId FROM testdata.satellites LEFT JOIN $planets ON testdata.satellites.planetId = $planets.id
+
+query error io failed
+SELECT DISTINCT $planets.id, testdata.satellites.id FROM $planets LEFT OUTER JOIN testdata.satellites ON testdata.satellites.planetId = $planets.id
+
+query error io failed
+SELECT DISTINCT $planets.id, testdata.satellites.id FROM $planets LEFT JOIN testdata.satellites ON testdata.satellites.planetId = $planets.id
+
+query error io failed
+SELECT planetId FROM testdata.satellites LEFT JOIN $planets ON testdata.satellites.planetId = $planets.id
+
+statement error io failed
+SELECT * FROM $planets LEFT JOIN $planets USING(id)
+
+statement error io failed
+SELECT * FROM $planets LEFT OUTER JOIN $planets USING(id)
+
+statement error io failed
+SELECT * FROM $planets LEFT JOIN $planets USING(id, name)
+
+statement error io failed
+SELECT * FROM $planets INNER JOIN $planets ON id = id AND name = name
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN $planets AS P_2 ON P_1.id = P_2.id
+
+query error io failed
+SELECT P_2.* FROM $planets AS P_1 INNER JOIN $planets AS P_2 ON P_1.id = P_2.id
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN $planets AS P_2 ON P_2.id = P_1.id
+
+query error io failed
+SELECT P_2.* FROM $planets AS P_1 INNER JOIN $planets AS P_2 ON P_2.id = P_1.id
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN testdata.satellites AS P_2 ON P_1.id = P_2.id
+
+query error io failed
+SELECT P_2.* FROM $planets AS P_1 INNER JOIN testdata.satellites AS P_2 ON P_1.id = P_2.id
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN testdata.satellites AS P_2 ON P_2.id = P_1.id
+
+query error io failed
+SELECT P_2.* FROM $planets AS P_1 INNER JOIN testdata.satellites AS P_2 ON P_2.id = P_1.id
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN $planets AS P_2 ON P_1.id = P_2.id AND P_1.name = P_2.name
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN $planets AS P_2 ON P_2.id = P_1.id AND P_2.name = P_1.name
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN $planets AS P_2 ON P_1.id = P_2.id AND P_2.name = P_1.name
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN $planets AS P_2 ON P_2.id = P_1.id AND P_1.name = P_2.name
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN testdata.satellites AS P_2 ON P_1.id = P_2.id AND P_1.name = P_2.name
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN testdata.satellites AS P_2 ON P_2.id = P_1.id AND P_2.name = P_1.name
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN testdata.satellites AS P_2 ON P_1.id = P_2.id AND P_2.name = P_1.name
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN testdata.satellites AS P_2 ON P_2.id = P_1.id AND P_1.name = P_2.name
+
+query error io failed
+SELECT P_1.id, P_2.name FROM $planets AS P_1 INNER JOIN $planets AS P_2 ON P_1.id = P_2.id
+
+query error io failed
+SELECT P_1.id, P_2.id FROM $planets AS P_1 INNER JOIN testdata.satellites AS P_2 ON P_1.id = P_2.planetId
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN $planets AS P_2 ON P_1.id = P_2.id WHERE P_1.id > 5
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN testdata.satellites AS P_2 ON P_1.id = P_2.planetId WHERE P_2.id > 5
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN $planets AS P_2 ON P_1.id = P_2.id ORDER BY P_1.id
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN testdata.satellites AS P_2 ON P_1.id = P_2.planetId ORDER BY P_2.id
+
+query error io failed
+SELECT COUNT(*) FROM $planets AS P_1 INNER JOIN $planets AS P_2 ON P_1.id = P_2.id
+
+query error io failed
+SELECT COUNT(*) FROM $planets AS P_1 INNER JOIN testdata.satellites AS P_2 ON P_1.id = P_2.planetId
+
+query error io failed
+SELECT P_1.id, COUNT(P_2.id) FROM $planets AS P_1 INNER JOIN testdata.satellites AS P_2 ON P_1.id = P_2.planetId GROUP BY P_1.id
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN testdata.satellites AS P_2 ON P_1.id = P_2.planetId INNER JOIN $planets AS P_3 ON P_2.planetId = P_3.id
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN $planets AS P_2 ON P_1.id = P_2.id AND P_1.id > 2
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN testdata.satellites AS P_2 ON P_1.id = P_2.planetId AND P_2.id != 5
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN $planets AS P_2 ON P_1.id = P_2.id AND P_1.name = P_2.name AND P_1.mass = P_2.mass
+
+query error io failed
+SELECT $planets.*, testdata.satellites.planetId FROM $planets INNER JOIN testdata.satellites USING (id)
+
+query error io failed
+SELECT $planets.*, testdata.satellites.planetId FROM $planets INNER JOIN testdata.satellites USING (id) ORDER BY $planets.id
+
+query error io failed
+SELECT $planets.*, testdata.satellites.planetId FROM $planets INNER JOIN testdata.satellites USING (id) WHERE $planets.name LIKE '%r%'
+
+statement error io failed
+SELECT $planets.id, testdata.satellites.* FROM $planets INNER JOIN testdata.satellites USING (id)
+
+query error io failed
+SELECT $planets.*, testdata.satellites.planetId FROM $planets INNER JOIN testdata.satellites USING (id) WHERE testdata.satellites.planetId = 4
+
+query error io failed
+SELECT * FROM $planets AS P_1 INNER JOIN $planets AS P_2 ON P_1.id = P_2.id AND P_2.name = P_1.name
+
+query error io failed
+SELECT * FROM $planets NATURAL JOIN generate_series(1, 5) as id
+
+query error io failed
+SELECT name, surfacePressure FROM $planets AS P1 NATURAL JOIN $planets AS P2
+
+query error io failed
+SELECT * FROM testdata.satellites AS P1 NATURAL JOIN testdata.satellites AS P2
+
+statement error io failed
+SELECT * FROM $planets AS P NATURAL JOIN testdata.satellites AS S
+
+query error io failed
+SELECT id FROM $planets AS P_1 INNER JOIN $planets AS P_2 USING (id)
+
+query error io failed
+SELECT id, name FROM $planets AS P_1 INNER JOIN $planets AS P_2 USING (id, name)
+
+query error io failed
+SELECT P_1.* FROM $planets AS P_1 INNER JOIN $planets AS P_2 USING (id, name)
+
+query error io failed
+SELECT * FROM testdata.satellites AS P_1 INNER JOIN testdata.satellites AS P_2 USING (id, name)
+
+query error io failed
+SELECT testdata.satellites.name, $planets.name from $planets LEFT JOIN testdata.satellites USING (id) WHERE $planets.name != 'Earth'
+
+query error io failed
+SELECT * FROM testdata.missions WHERE COSINE_SIMILARITY(Location, 'LC-18A, Cape Canaveral AFS, Florida, USA') > 0.7
+
+query error io failed
+SELECT DISTINCT planetId FROM testdata.satellites RIGHT OUTER JOIN $planets ON testdata.satellites.planetId = $planets.id
+
+query error io failed
+SELECT DISTINCT planetId FROM testdata.satellites RIGHT JOIN $planets ON testdata.satellites.planetId = $planets.id
+
+query error io failed
+SELECT planetId FROM testdata.satellites RIGHT JOIN $planets ON testdata.satellites.planetId = $planets.id
+
+query error io failed
+SELECT DISTINCT planetId FROM testdata.satellites FULL OUTER JOIN $planets ON testdata.satellites.planetId = $planets.id
+
+query error io failed
+SELECT DISTINCT planetId FROM testdata.satellites FULL JOIN $planets ON testdata.satellites.planetId = $planets.id
+
+query error io failed
+SELECT planetId FROM testdata.satellites FULL JOIN $planets ON testdata.satellites.planetId = $planets.id
+
+query error io failed
+SELECT pid FROM ( SELECT id AS pid FROM $planets) AS SQ WHERE pid > 5
+
+query error io failed
+SELECT * FROM ( SELECT id AS pid FROM $planets) AS SQ WHERE pid > 5
+
+query error io failed
+SELECT * FROM ( SELECT COUNT(planetId) AS moons, planetId FROM testdata.satellites GROUP BY planetId ) AS SQ WHERE moons > 10
+
+query error io failed
+SELECT * FROM $planets WHERE id = -1
+
+query error io failed
+SELECT COUNT(*) FROM (SELECT DISTINCT a FROM testdata.astronauts CROSS JOIN UNNEST(alma_mater) AS a ORDER BY a) AS SQ
+
+query error io failed
+SELECT a.id, b.id, c.id FROM $planets AS a INNER JOIN $planets AS b ON a.id = b.id INNER JOIN $planets AS c ON c.id = b.id
+
+query error io failed
+SELECT * FROM $planets AS a INNER JOIN $planets AS b ON a.id = b.id RIGHT OUTER JOIN testdata.satellites AS c ON c.planetId = b.id
+
+query error io failed
+SELECT $planets.* FROM testdata.satellites INNER JOIN $planets USING (id)
+
+query error io failed
+SELECT testdata.satellites.* FROM testdata.satellites INNER JOIN $planets USING (id)
+
+query error io failed
+SELECT testdata.satellites.* FROM testdata.satellites INNER JOIN $planets ON $planets.id = testdata.satellites.id
+
+query error io failed
+SELECT p.* FROM testdata.satellites INNER JOIN $planets AS p USING (id)
+
+query error io failed
+SELECT s.* FROM testdata.satellites AS s INNER JOIN $planets USING (id)
+
+query error io failed
+SELECT s.* FROM testdata.satellites AS s INNER JOIN $planets AS p USING (id)
+
+query error io failed
+SELECT s.* FROM testdata.satellites AS s INNER JOIN $planets AS p USING (id)
+
+query error io failed
+SELECT s.* FROM $planets AS s INNER JOIN $planets AS p USING (id, name)
+
+query error io failed
+SELECT p.* FROM $planets AS s INNER JOIN $planets AS p USING (id, name)
+
+query error io failed
+SELECT id, name FROM $planets AS s INNER JOIN $planets AS p USING (id, name)
+
+query error io failed
+SELECT TRUNC(birth_date, 'month') FROM testdata.astronauts
+
+query error io failed
+SELECT DISTINCT * FROM (SELECT TRUNC(birth_date, 'year') AS BIRTH_YEAR FROM testdata.astronauts) AS SQ
+
+query error io failed
+SELECT DISTINCT * FROM (SELECT TRUNC(birth_date, 'month') AS BIRTH_YEAR_MONTH FROM testdata.astronauts) AS SQ
+
+query error io failed
+SELECT time_bucket(birth_date, 10, 'year') AS decade, count(*) from testdata.astronauts GROUP BY time_bucket(birth_date, 10, 'year')
+
+query error io failed
+SELECT time_bucket(birth_date, 6, 'month') AS half, count(*) from testdata.astronauts GROUP BY time_bucket(birth_date, 6, 'month')
+
+query error io failed
+SELECT graduate_major, undergraduate_major FROM testdata.astronauts WHERE COALESCE(graduate_major, undergraduate_major, 'high school') = 'high school'
+
+query error io failed
+SELECT graduate_major, undergraduate_major FROM testdata.astronauts WHERE COALESCE(graduate_major, undergraduate_major) = 'Aeronautical Engineering'
+
+query error io failed
+SELECT COALESCE(death_date, '2030-01-01') FROM testdata.astronauts
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE COALESCE(death_date, '2030-01-01') < '2000-01-01'
+
+statement error io failed
+SELECT TOUNT(*) FROM $planets
+
+query error io failed
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(year FROM birth_date) < 1930
+
+query error io failed
+SELECT EXTRACT(month FROM birth_date) FROM testdata.astronauts
+
+query error io failed
+SELECT EXTRACT(day FROM birth_date) FROM testdata.astronauts
+
+query error io failed
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(year FROM birth_date) < 1930
+
+query error io failed
+SELECT EXTRACT(doy FROM birth_date) FROM testdata.astronauts
+
+query error io failed
+SELECT EXTRACT(DOY FROM birth_date) FROM testdata.astronauts
+
+query error io failed
+SELECT EXTRACT(dow FROM birth_date) FROM testdata.astronauts
+
+query error io failed
+SELECT EXTRACT(DAYOFYEAR FROM birth_date) FROM testdata.astronauts
+
+query error io failed
+SELECT EXTRACT(DAYOFWEEK FROM birth_date) FROM testdata.astronauts
+
+query error io failed
+SELECT EXTRACT(DOW FROM birth_date) FROM testdata.astronauts
+
+query error io failed
+SELECT EXTRACT(YEAR FROM '2022-02-02')
+
+query error io failed
+SELECT EXTRACT(ISOYEAR FROM '2022-02-02')
+
+query error io failed
+SELECT EXTRACT(WEEK FROM '2022-02-02')
+
+query error io failed
+SELECT EXTRACT(ISOWEEK FROM '2022-02-02')
+
+query error io failed
+SELECT EXTRACT(millisecond FROM NOW())
+
+query error io failed
+SELECT EXTRACT(milliseconds FROM NOW())
+
+query error io failed
+SELECT EXTRACT(nanosecond FROM NOW())
+
+query error io failed
+SELECT EXTRACT(millisecond FROM NOW())
+
+query error io failed
+SELECT EXTRACT(nanoseconds FROM NOW())
+
+query error io failed
+SELECT EXTRACT(millisecond FROM NOW())
+
+statement error io failed
+SELECT EXTRACT(TIME FROM NOW())
+
+query error io failed
+SELECT EXTRACT(DECADE FROM NOW())
+
+query error io failed
+SELECT EXTRACT(CENTURY FROM NOW())
+
+query error io failed
+SELECT EXTRACT(EPOCH FROM NOW())
+
+query error io failed
+SELECT EXTRACT(JULIAN FROM NOW())
+
+statement error io failed
+SELECT EXTRACT(VANILLA FROM NOW())
+
+statement error io failed
+SELECT EXTRACT(millenium FROM NOW())
+
+query error io failed
+SELECT DATE_FORMAT(birth_date, '%m-%y') FROM testdata.astronauts
+
+query error io failed
+SELECT DATEDIFF('year', '2017-08-25', '2011-08-25') AS DateDiff
+
+query error io failed
+SELECT DATEDIFF('days', '2022-07-07', birth_date) FROM testdata.astronauts
+
+query error io failed
+SELECT DATEDIFF('minutes', birth_date, '2022-07-07') FROM testdata.astronauts
+
+query error io failed
+SELECT EXTRACT(DOW FROM birth_date) AS DOW, COUNT(*) FROM testdata.astronauts GROUP BY EXTRACT(DOW FROM birth_date) ORDER BY COUNT(*) DESC
+
+query error io failed
+SELECT * FROM $planets WITH(NO_PARTITION)
+
+query error io failed
+SELECT * FROM $planets WITH(NO_PUSH_PROJECTION)
+
+query error io failed
+SELECT * FROM $planets WITH(NO_PARTITION, NO_PUSH_PROJECTION)
+
+query error io failed
+SELECT SQRT(mass) FROM $planets
+
+query error io failed
+SELECT FLOOR(mass) FROM $planets
+
+query error io failed
+SELECT CEIL(mass) FROM $planets
+
+query error io failed
+SELECT ABS(mass) FROM $planets
+
+query error io failed
+SELECT SIGN(mass) FROM $planets
+
+query error io failed
+SELECT reverse(name) From $planets
+
+query error io failed
+SELECT title(reverse(name)) From $planets
+
+query error io failed
+SELECT SOUNDEX(name) From $planets
+
+query error io failed
+SELECT APPROX_PERCENTILE(radius, 0.5) AS AM FROM testdata.satellites GROUP BY planetId HAVING APPROX_PERCENTILE(radius, 0.5) > 5
+
+query error io failed
+SELECT APPROX_PERCENTILE(radius, 0.5) AS AM FROM testdata.satellites GROUP BY planetId HAVING AM > 5
+
+query error io failed
+SELECT COUNT(planetId) FROM testdata.satellites
+
+query error io failed
+SELECT COUNT_DISTINCT(planetId) FROM testdata.satellites
+
+query error io failed
+SELECT ARRAY_AGG(name), planetId FROM testdata.satellites GROUP BY planetId
+
+query error io failed
+SELECT ANY_VALUE(name), planetId FROM testdata.satellites GROUP BY planetId
+
+statement error io failed
+SELECT ANY_VALUE(name) FROM testdata.satellites
+
+query error io failed
+SELECT MAX(planetId) FROM testdata.satellites
+
+query error io failed
+SELECT AVG(planetId) FROM testdata.satellites
+
+query error io failed
+SELECT MIN(planetId) FROM testdata.satellites
+
+query error io failed
+SELECT SUM(planetId) FROM testdata.satellites
+
+query error io failed
+SELECT name || ' ' || name FROM $planets
+
+query error io failed
+SELECT 32 * 12
+
+query error io failed
+SELECT 9 / 12
+
+query error io failed
+SELECT 3 + 3
+
+query error io failed
+SELECT 12 % 2
+
+query error io failed
+SELECT 10 - 10
+
+query error io failed
+SELECT POWER(((6.67 * POWER(10, -11) * 5.97 * POWER(10, 24) * 86400 * 86400) / (4 * PI() * PI())), 1/3)
+
+query error io failed
+SELECT name || ' ' || name AS DBL FROM $planets
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE planetId = 2 + 5
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE planetId = round(density)
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE planetId * 1 = round(density * 1)
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE 1 * planetId = round(density * 1)
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE 0 + planetId = round(density * 1)
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE planetId + 0 = round(density * 1)
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE planetId - 0 = round(density * 1)
+
+query error io failed
+SELECT COUNT(*), ROUND(gm) FROM testdata.satellites GROUP BY ROUND(gm)
+
+query error io failed
+SELECT COALESCE(death_date, '1900-01-01') FROM testdata.astronauts
+
+query error io failed
+SELECT * FROM (SELECT COUNT(*) FROM testdata.flat.formats.parquet WITH(NO_PARTITION) GROUP BY followers) AS SQ
+
+statement error io failed
+SELECT a.id, b.id FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id)
+
+query error io failed
+SELECT * FROM $planets INNER JOIN $planets AS b USING (id)
+
+query error io failed
+SELECT ROUND(5 + RAND() * (10 - 5)) rand_between FROM $planets
+
+query error io failed
+SELECT BASE64_DECODE(BASE64_ENCODE('this is a string'))
+
+query error io failed
+SELECT BASE64_ENCODE('this is a string')
+
+query error io failed
+SELECT BASE64_DECODE('aGVsbG8=')
+
+query error io failed
+SELECT BASE85_DECODE(BASE85_ENCODE('this is a string'))
+
+query error io failed
+SELECT BASE85_ENCODE('this is a string')
+
+query error io failed
+SELECT BASE85_DECODE('Xk~0{Zv')
+
+query error io failed
+SELECT HEX_DECODE(HEX_ENCODE('this is a string'))
+
+query error io failed
+SELECT HEX_ENCODE('this is a string')
+
+query error io failed
+SELECT HEX_ENCODE(name) FROM $planets
+
+query error io failed
+SELECT HEX_DECODE('68656C6C6F')
+
+query error io failed
+SELECT NORMAL()
+
+query error io failed
+SELECT NORMAL() FROM testdata.astronauts
+
+query error io failed
+SELECT CONCAT(ARRAY_AGG(name)) FROM $planets GROUP BY gravity
+
+query error io failed
+SELECT CONCAT(missions) FROM testdata.astronauts
+
+query error io failed
+SELECT CONCAT(('1', '2', '3'))
+
+query error io failed
+SELECT CONCAT(('1', '2', '3')) FROM $planets
+
+query error io failed
+SELECT CONCAT_WS(', ', ARRAY_AGG(name)) FROM $planets GROUP BY gravity
+
+query error io failed
+SELECT CONCAT_WS('*', missions) FROM testdata.astronauts LIMIT 5
+
+query error io failed
+SELECT CONCAT_WS('-', ('1', '2', '3'))
+
+query error io failed
+SELECT CONCAT_WS('-', ('1', '2', '3')) FROM $planets
+
+query error io failed
+SELECT IFNULL(death_date, '1970-01-01') FROM testdata.astronauts
+
+query error io failed
+SELECT IFNOTNULL(death_date, '1970-01-01') FROM testdata.astronauts
+
+query error io failed
+SELECT RANDOM_STRING(88) FROM $planets
+
+statement error io failed
+SELECT * FROM $planets WHERE STARTS_WITH(name, 'M')
+
+statement error io failed
+SELECT * FROM testdata.astronauts WHERE STARTS_WITH(name, 'Jo')
+
+statement error io failed
+SELECT * FROM $planets WHERE ENDS_WITH(name, 'r')
+
+statement error io failed
+SELECT * FROM testdata.astronauts WHERE ENDS_WITH(name, 'son')
+
+query error io failed
+SELECT CONCAT_WS(', ', ARRAY_AGG(mass)) as MASSES FROM $planets GROUP BY gravity
+
+query error io failed
+SELECT GREATEST(ARRAY_AGG(name)) as NAMES FROM testdata.satellites GROUP BY planetId
+
+query error io failed
+SELECT GREATEST(ARRAY_AGG(gm)) as MASSES FROM testdata.satellites GROUP BY planetId
+
+query error io failed
+SELECT LEAST(ARRAY_AGG(name)) as NAMES FROM testdata.satellites GROUP BY planetId
+
+query error io failed
+SELECT LEAST(ARRAY_AGG(gm)) as MASSES FROM testdata.satellites GROUP BY planetId
+
+query error io failed
+SELECT IIF(year > 1960, 1, 0), year FROM testdata.astronauts
+
+query error io failed
+SELECT SUM(IIF(year < 1970, 1, 0)), MAX(year) FROM testdata.astronauts
+
+query error io failed
+SELECT SUM(IIF(year < 1970, 1, 0)), year FROM testdata.astronauts GROUP BY year ORDER BY year ASC
+
+query error io failed
+SELECT SUM(id) + id FROM $planets GROUP BY id
+
+query error io failed
+SELECT CURRENT_DATE() - INTERVAL '1' YEAR
+
+query error io failed
+SELECT CURRENT_DATE() - INTERVAL '1' MONTH
+
+query error io failed
+SELECT CURRENT_DATE() - INTERVAL '1' DAY
+
+query error io failed
+SELECT CURRENT_DATE() - INTERVAL '1' HOUR
+
+query error io failed
+SELECT CURRENT_DATE() - INTERVAL '1' MINUTE
+
+query error io failed
+SELECT CURRENT_DATE() - INTERVAL '1' SECOND
+
+query error io failed
+SELECT CURRENT_DATE() + INTERVAL '1' DAY
+
+query error io failed
+SELECT INTERVAL '1 1' DAY TO HOUR
+
+query error io failed
+SELECT INTERVAL '5 6' YEAR TO MONTH
+
+query error io failed
+SELECT CURRENT_DATE() - CURRENT_DATE()
+
+query error io failed
+SELECT INTERVAL '100' YEAR + birth_date, birth_date from testdata.astronauts
+
+query error io failed
+SELECT INTERVAL '1 1' MONTH to DAY + birth_date, birth_date from testdata.astronauts
+
+query error io failed
+SELECT birth_date - INTERVAL '1 1' MONTH to DAY, birth_date from testdata.astronauts
+
+query error io failed
+SELECT birth_date, death_date FROM testdata.astronauts WHERE death_date - birth_date > INTERVAL '1' DAY
+
+query error io failed
+SELECT birth_date, death_date FROM testdata.astronauts WHERE birth_date + INTERVAL '64' YEAR > death_date
+
+query error io failed
+SELECT birth_date, death_date FROM testdata.astronauts WHERE birth_date + INTERVAL '64' YEAR < death_date
+
+query error io failed
+SELECT birth_date, death_date FROM testdata.astronauts WHERE death_date < birth_date + INTERVAL '64' YEAR
+
+query error io failed
+SELECT birth_date, death_date FROM testdata.astronauts WHERE death_date > birth_date + INTERVAL '64' YEAR
+
+query error io failed
+SELECT birth_date, death_date FROM testdata.astronauts WHERE death_date - INTERVAL '64' YEAR < birth_date
+
+query error io failed
+SELECT birth_date, death_date FROM testdata.astronauts WHERE death_date - INTERVAL '64' YEAR > birth_date
+
+query error io failed
+SELECT birth_date, death_date FROM testdata.astronauts WHERE birth_date < death_date - INTERVAL '64' YEAR
+
+query error io failed
+SELECT birth_date, death_date FROM testdata.astronauts WHERE birth_date > death_date - INTERVAL '64' YEAR
+
+query error io failed
+SELECT birth_date, death_date FROM testdata.astronauts WHERE NOT (birth_date + INTERVAL '64' YEAR > death_date)
+
+query error io failed
+SELECT birth_date, death_date FROM testdata.astronauts WHERE NOT (birth_date + INTERVAL '64' YEAR < death_date)
+
+query error io failed
+SELECT birth_date, death_date FROM testdata.astronauts WHERE birth_date + INTERVAL '50' YEAR = death_date
+
+query error io failed
+SELECT birth_date, death_date FROM testdata.astronauts WHERE death_date - birth_date > INTERVAL '50' YEAR
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE EXTRACT(YEAR FROM birth_date) > 1932 OR (EXTRACT(YEAR FROM birth_date) = 1932 AND EXTRACT(MONTH FROM birth_date) > 2) OR (EXTRACT(YEAR FROM birth_date) = 1932 AND EXTRACT(MONTH FROM birth_date) = 2 AND EXTRACT(DAY FROM birth_date) > 6)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE EXTRACT(YEAR FROM birth_date) = 1932 AND EXTRACT(MONTH FROM birth_date) = 2 AND EXTRACT(DAY FROM birth_date) = 6
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE EXTRACT(YEAR FROM birth_date) < 1932 OR (EXTRACT(YEAR FROM birth_date) = 1932 AND EXTRACT(MONTH FROM birth_date) < 2) OR (EXTRACT(YEAR FROM birth_date) = 1932 AND EXTRACT(MONTH FROM birth_date) = 2 AND EXTRACT(DAY FROM birth_date) < 6)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE EXTRACT(YEAR FROM birth_date) = 1930 AND EXTRACT(MONTH FROM birth_date) = 8 AND EXTRACT(DAY FROM birth_date) = 5
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE 'Apollo 11' IN UNNEST(missions)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE 'Apollo 11' NOT IN UNNEST(missions)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE NOT 'Apollo 11' IN UNNEST(missions)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE NOT 'Apollo 11' IN UNNEST(missions) and name ILIKE '%arm%'
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE NOT 'Apollo 12' IN UNNEST(missions) and name ILIKE '%arm%'
+
+query error io failed
+SET @variable = 'Apollo 11'; SELECT * FROM testdata.astronauts WHERE @variable IN UNNEST(missions)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE NOT 'Apollo 12' = ANY(missions) or missions is null
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE NOT 'Apollo 12' = ANY(missions) and missions is null
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE 'Apollo 11' != ANY(missions)
+
+query error io failed
+SELECT * FROM testdata.astronauts WHERE 'Apollo 11' != ANY(missions) and missions is null
+
+query error io failed
+SET @id = 3; SELECT name FROM $planets WHERE id = @id
+
+query error io failed
+SET @id = 3; SELECT name FROM $planets WHERE id < @id
+
+query error io failed
+SET @id = 3; SELECT name FROM $planets WHERE id < @id OR id > @id
+
+query error io failed
+SET @dob = '1950-01-01'; SELECT name FROM testdata.astronauts WHERE birth_date < @dob
+
+query error io failed
+SET @dob = '1950-01-01'; SET @mission = 'Apollo 11'; SELECT name FROM testdata.astronauts WHERE birth_date < @dob AND @mission IN UNNEST(missions)
+
+statement error io failed
+SET @pples = 'b'; SET @ngles = 90; SHOW VARIABLES LIKE '@%s'
+
+statement error io failed
+SET @pples = 'b'; SET @rgon = 90; SHOW VARIABLES LIKE '@%gon'
+
+statement error io failed
+SET @variable = 44; SET @var = 'name'; SHOW VARIABLES LIKE '@%ri%'
+
+statement error io failed
+SHOW PARAMETER disable_optimizer
+
+statement error io failed
+SET disable_optimizer = true; SHOW PARAMETER disable_optimizer
+
+statement error io failed
+SET disable_optimizer TO true; SHOW PARAMETER disable_optimizer
+
+query error io failed
+SELECT id FROM $planets WHERE NOT NOT id > 3
+
+query error io failed
+SELECT id FROM $planets WHERE NOT NOT id < 3
+
+query error io failed
+SELECT id FROM $planets WHERE NOT id > 3
+
+query error io failed
+SELECT id FROM $planets WHERE NOT id < 3
+
+query error io failed
+SELECT id FROM $planets WHERE NOT (id < 5 AND id = 3)
+
+query error io failed
+SELECT id FROM $planets WHERE NOT NOT (id < 5 AND id = 3)
+
+query error io failed
+SELECT id FROM $planets WHERE NOT id = 2 AND NOT NOT (id < 5 AND id = 3)
+
+query error io failed
+SET disable_optimizer = true; SELECT id FROM $planets WHERE NOT id = 2 AND NOT NOT (id < 5 AND id = 3)
+
+query error io failed
+SELECT * FROM $planets WHERE NOT(id = 9 OR id = 8)
+
+query error io failed
+SELECT * FROM $planets WHERE NOT(id = 9 OR id = 8) OR True
+
+query error io failed
+SELECT * FROM $planets WHERE NOT(id = 9 OR 8 = 8)
+
+query error io failed
+SELECT * FROM $planets WHERE 1 = 1
+
+query error io failed
+SELECT * FROM $planets WHERE NOT 1 = 2
+
+statement error io failed
+SHOW CREATE TABLE $planets
+
+statement error io failed
+SHOW CREATE TABLE testdata.satellites
+
+statement error io failed
+SHOW CREATE TABLE testdata.astronauts
+
+query error io failed
+SET disable_optimizer = true; SELECT COUNT(*) FROM $planets WHERE id > 3 AND name ILIKE '%e%'
+
+query error io failed
+SET disable_optimizer = false; SELECT COUNT(*) FROM $planets WHERE id > 3 AND name ILIKE '%e%'
+
+query error io failed
+SET disable_optimizer = false; SELECT COUNT(*) FROM $planets WHERE id > 3 AND name ILIKE '%e%'
+
+query error io failed
+SET disable_optimizer = true; SELECT COUNT(*) FROM $planets WHERE id > 3 AND name ILIKE '%e%'
+
+query error io failed
+SELECT COUNT(*) FROM $planets WHERE id > 3 AND name LIKE '%e%' AND id > 1 AND id > 0 AND id > 2 AND name ILIKE '%e%'
+
+statement error io failed
+SELECT 1 WHERE ' a b ' = ' ' || 'a' || ' ' || ' b '
+
+query error io failed
+SELECT 1 FROM $planets WHERE ' a b ' = ' ' || 'a' || ' ' || ' b '
+
+query error io failed
+SELECT name FROM $planets WHERE SUBSTRING ( name, 1, 1 ) = 'M'
+
+query error io failed
+SELECT name FROM $planets WHERE SUBSTRING ( name, 2, 1 ) = 'a'
+
+query error io failed
+SELECT name FROM $planets WHERE SUBSTRING ( name, 3 ) = 'rth'
+
+query error io failed
+SELECT name FROM $planets WHERE SUBSTRING ( name, -1 ) = 's'
+
+query error io failed
+SELECT name FROM $planets WHERE SUBSTRING ( name FROM 1 FOR 1 ) = 'M'
+
+query error io failed
+SELECT name FROM $planets WHERE SUBSTRING ( name FROM 2 FOR 1 ) = 'a'
+
+query error io failed
+SELECT name FROM $planets WHERE SUBSTRING ( name FROM 3 ) = 'rth'
+
+query error io failed
+SELECT name FROM $planets WHERE SUBSTRING ( name FROM -1 ) = 's'
+
+query error io failed
+SELECT SUBSTRING ( name FROM 5 FOR 2 ) FROM $planets
+
+query error io failed
+SELECT TIMESTAMP('2022-01-02'), DATEDIFF('days', TIMESTAMP('2022-01-02'), TIMESTAMP('2022-10-01')) FROM testdata.astronauts
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE NULLIF(planetId, 5) IS NULL
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE NULLIF(planetId, 5) IS NOT NULL
+
+statement error io failed
+SHOW STORES LIKE 'apple'
+
+query error io failed
+SELECT name FROM testdata.astronauts WHERE LEFT(name, POSITION(' ' IN name) - 1) = 'Andrew'
+
+query error io failed
+SELECT name FROM testdata.astronauts WHERE LEFT(name, POSITION(' ' IN name)) = 'Andrew '
+
+query error io failed
+SELECT ARRAY_AGG(name) from testdata.satellites GROUP BY planetId
+
+query error io failed
+SELECT ARRAY_AGG(DISTINCT name) from testdata.satellites GROUP BY planetId
+
+statement error io failed
+SELECT ARRAY_AGG(name ORDER BY name) from testdata.satellites GROUP BY TRUE
+
+query error io failed
+SELECT ARRAY_AGG(name LIMIT 1) from testdata.satellites GROUP BY planetId
+
+query error io failed
+SELECT ARRAY_AGG(DISTINCT name LIMIT 1) from testdata.satellites GROUP BY planetId
+
+query error io failed
+SELECT COUNT(*), ARRAY_AGG(name) from testdata.satellites GROUP BY planetId
+
+query error io failed
+SELECT planetId, COUNT(*), ARRAY_AGG(name) from testdata.satellites GROUP BY planetId
+
+query error io failed
+SELECT ARRAY_AGG(DISTINCT LEFT(name, 1)) from testdata.satellites GROUP BY planetId
+
+query error io failed
+SELECT ARRAY_AGG(name ORDER BY name LIMIT 2) FROM testdata.satellites GROUP BY planetId
+
+query error io failed
+SELECT ARRAY_AGG(name ORDER BY name DESC LIMIT 2) FROM testdata.satellites GROUP BY planetId
+
+statement error io failed
+SELECT ARRAY_AGG(name ORDER BY id) FROM testdata.satellites GROUP BY planetId
+
+statement error io failed
+SELECT ARRAY_AGG(name ORDER BY name, name) FROM testdata.satellites GROUP BY planetId
+
+query error io failed
+SELECT name FROM testdata.satellites WHERE '192.168.0.1' | '192.168.0.0/24'
+
+query error io failed
+SELECT name FROM testdata.satellites WHERE '192.168.0.1' | '192.167.0.0/24'
+
+statement error io failed
+SELECT name FROM testdata.satellites WHERE 12 | 22
+
+statement error io failed
+SELECT '1' | '1'
+
+statement error io failed
+SELECT 'abc' | '192.168.1.1'
+
+statement error io failed
+SELECT 123 | '192.168.1.1'
+
+statement error io failed
+SELECT '192.168.1.1' | 'abc'
+
+statement error io failed
+SELECT '192.168.1.1' | 123
+
+statement error io failed
+SELECT '192.168.1.1' | 0
+
+statement error io failed
+SELECT 0 | '192.168.1.1'
+
+statement error io failed
+SELECT '0' | '192.168.1.1'
+
+statement error io failed
+SELECT '192.168.1.1' | '0'
+
+statement error io failed
+SELECT name FROM testdata.satellites WHERE '1' | '1'
+
+statement error io failed
+SELECT name FROM testdata.satellites WHERE 'abc' | '192.168.1.1'
+
+query error io failed
+SELECT name FROM testdata.satellites WHERE null | '192.168.1.1/8'
+
+statement error io failed
+SELECT name FROM testdata.satellites WHERE 123 | '192.168.1.1'
+
+statement error io failed
+SELECT name FROM testdata.satellites WHERE '10.10.10.10' | '192.168.1.1'
+
+statement error io failed
+SELECT name FROM testdata.satellites WHERE 0 | 0
+
+statement error io failed
+SELECT name FROM testdata.satellites WHERE 0 | 123456
+
+statement error io failed
+SELECT name FROM testdata.satellites WHERE 123456 | 0
+
+statement error io failed
+SELECT name FROM testdata.satellites WHERE 987654321 | 123456789
+
+statement error io failed
+SELECT '192.168.1.1' | '255.255..255'
+
+statement error io failed
+SELECT '192.168.1.1/32' | '192.168.1.1/8'
+
+statement error io failed
+SELECT '192.168.1.*' | '192.168.1.1/8'
+
+statement error io failed
+SELECT '!!' | '192.168.1.1/8'
+
+statement error io failed
+SELECT null | '192.168.1.1'
+
+query error io failed
+SELECT null | '192.168.1.1/8'
+
+query error io failed
+SELECT * FROM testdata.flat.different
+
+query error io failed
+SELECT * FROM testdata.flat.different WHERE following < 10
+
+query error io failed
+SELECT is_quoting, COUNT(*) FROM testdata.flat.different GROUP BY is_quoting
+
+query error io failed
+SELECT is_quoting FROM testdata.flat.different
+
+query error io failed
+SELECT * FROM testdata.flat.different WHERE following IS NULL
+
+statement error io failed
+SELECT name FROM testdata.flat.different
+
+query error io failed
+SELECT COUNT(*), place FROM (SELECT CASE id WHEN 3 THEN 'Earth' WHEN 1 THEN 'Mercury' ELSE 'Elsewhere' END as place FROM $planets) AS SQ GROUP BY place
+
+query error io failed
+SELECT COUNT(*), place FROM (SELECT CASE id WHEN 3 THEN 'Earth' WHEN 1 THEN 'Mercury' END as place FROM $planets) AS SQ GROUP BY place HAVING place IS NULL
+
+query error io failed
+SELECT COUNT(*), place FROM (SELECT CASE id WHEN 3 THEN 'Earth' WHEN 1 THEN 'Mercury' ELSE 'Elsewhere' END as place FROM $planets) AS SQ GROUP BY place HAVING place IS NULL
+
+query error io failed
+SELECT TRIM(LEADING 'E' FROM name) FROM $planets
+
+query error io failed
+SELECT * FROM $planets WHERE TRIM(TRAILING 'arth' FROM name) = 'E'
+
+query error io failed
+SELECT * FROM $planets WHERE TRIM(TRAILING 'ahrt' FROM name) = 'E'
+
+query error io failed
+SELECT TRIM ( 'MVEJSONP' FROM name ) FROM $planets
+
+query error io failed
+SELECT user_name, user_verified FROM testdata.flat.formats.parquet WITH(NO_PARTITION) WHERE user_verified IS TRUE
+
+query error io failed
+SELECT user_name, user_verified FROM testdata.flat.formats.parquet WITH(NO_PARTITION) WHERE user_verified = TRUE
+
+query error io failed
+SELECT user_name, user_verified FROM testdata.flat.formats.parquet WITH(NO_PARTITION) WHERE user_verified IS TRUE AND followers < 1000
+
+query error io failed
+SELECT user_name, user_verified FROM testdata.flat.formats.parquet WITH(NO_PARTITION) WHERE followers < 1000 and user_name LIKE '%news%'
+
+query error io failed
+SELECT user_name, user_verified FROM testdata.flat.formats.parquet WITH(NO_PARTITION) WHERE followers < 1000 and followers < 500 and followers < 250
+
+query error io failed
+SELECT user_name, user_verified FROM testdata.flat.formats.parquet WITH(NO_PARTITION) WHERE followers BETWEEN 0 AND 251
+
+query error io failed
+SELECT * FROM $planets AS p JOIN $planets AS g ON p.id = g.id AND g.name = 'Earth'
+
+query error io failed
+SELECT * FROM $planets AS p JOIN $planets AS g ON p.id = g.id AND p.name = 'Earth'
+
+query error io failed
+SELECT * FROM $planets AS p JOIN $planets AS g ON g.name = 'Earth' AND p.id = g.id
+
+query error io failed
+SELECT * FROM $planets AS p JOIN $planets AS g ON p.name = 'Earth' AND p.id = g.id
+
+query error io failed
+SELECT * FROM $planets AS p JOIN $planets AS g ON p.id = g.id AND 'Earth' = g.name
+
+query error io failed
+SELECT * FROM $planets AS p JOIN $planets AS g ON p.id = g.id AND 'Earth' = p.name
+
+query error io failed
+SELECT * FROM $planets AS p JOIN $planets AS g ON 'Earth' = g.name AND p.id = g.id
+
+query error io failed
+SELECT * FROM $planets AS p JOIN $planets AS g ON 'Earth' = p.name AND p.id = g.id
+
+statement error io failed
+SELECT SPLIT(name, ' ', 0) FROM testdata.astronauts
+
+query error io failed
+SELECT SPLIT(name, ' ', 1) FROM testdata.astronauts
+
+query error io failed
+SELECT SPLIT(name, ' ')[0] AS names FROM testdata.astronauts
+
+query error io failed
+SELECT SPLIT(name, ' ')[-1] AS names FROM testdata.astronauts
+
+query error io failed
+SELECT * FROM testdata.astronauts AS FK AS nom
+
+query error io failed
+SELECT * FROM testdata.astronauts AS FK(nom)
+
+query error io failed
+SELECT * FROM testdata.astronauts AS FK
+
+query error io failed
+SELECT * FROM testdata.astronauts AS FK(nom, nim, nam)
+
+query error io failed
+SELECT * FROM testdata.astronauts AS FK
+
+query error io failed
+SELECT * FROM $planets WHERE diameter > 10000 AND gravity BETWEEN 0.5 AND 2.0
+
+query error io failed
+SELECT * FROM $planets WHERE diameter > 100 AND gravity BETWEEN 0.5 AND 2.0
+
+query error io failed
+SELECT * FROM $planets INNER JOIN testdata.satellites ON $planets.name <> testdata.satellites.name
+
+query error io failed
+SELECT * FROM $planets CROSS JOIN testdata.satellites WHERE $planets.name != testdata.satellites.name
+
+statement error io failed
+SELECT * FROM $planets INNER JOIN testdata.satellites WHERE $planets.name != testdata.satellites.name
+
+query error io failed
+SELECT * FROM $planets INNER JOIN testdata.satellites ON $planets.name != testdata.satellites.name
+
+statement error io failed
+SELECT * FROM $planets INNER JOIN testdata.satellites ON INTEGER($planets.id) = INTEGER(testdata.satellites.planetId)
+
+statement error io failed
+SELECT alma_mater LIKE '%a%' FROM testdata.astronauts
+
+statement error io failed
+SELECT * FROM $planets INNER JOIN testdata.satellites ON gm = 4
+
+statement error io failed
+SELECT * FROM $planets INNER JOIN testdata.satellites ON $planets.id = 4
+
+statement error io failed
+SELECT * FROM $planets CROSS JOIN UNNEST(name) AS G
+
+query error io failed
+SELECT VARCHAR(birth_place) FROM testdata.astronauts
+
+query error io failed
+SELECT name FROM testdata.astronauts WHERE CAST(birth_place AS VARCHAR)->'state' = birth_place->'state'
+
+query error io failed
+SELECT * FROM testdata.missions WHERE MATCH (Location) AGAINST ('Florida USA')
+
+query error io failed
+SELECT * FROM testdata.missions WHERE MATCH (Location) AGAINST ('Russia, Kapustin')
+
+query error io failed
+SELECT * EXCEPT (id, name, gravity) FROM $planets
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE CAST(CAST(id AS VARCHAR) AS INTEGER) == id
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE CAST(CAST(id AS BLOB) AS INTEGER) == id
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE CAST(CAST(id * -1 AS VARCHAR) AS INTEGER) == id * -1
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE CAST(CAST(id * -1 AS BLOB) AS INTEGER) == id * -1
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE CAST(CAST(gm AS VARCHAR) AS DOUBLE) == gm
+
+query error io failed
+SELECT * FROM testdata.satellites WHERE CAST(CAST(gm AS BLOB) AS DOUBLE) == gm
+
+query error io failed
+SELECT p1.name AS planet1_name, p2.name AS planet2_name, p3.name AS planet3_name, p4.name AS planet4_name, p5.name AS planet5_name, p6.name AS planet6_name, p7.name AS planet7_name, p8.name AS planet8_name, p9.name AS planet9_name, p10.name AS planet10_name, p1.diameter AS planet1_diameter, p2.gravity AS planet2_gravity, p3.orbitalPeriod AS planet3_orbitalPeriod, p4.numberOfMoons AS planet4_numberOfMoons, p5.meanTemperature AS planet5_meanTemperature FROM $planets p1 JOIN $planets p2 ON p1.id = p2.id JOIN $planets p3 ON p1.id = p3.id JOIN $planets p4 ON p1.id = p4.id JOIN $planets p5 ON p1.id = p5.id JOIN $planets p6 ON p1.id = p6.id JOIN $planets p7 ON p1.id = p7.id JOIN $planets p8 ON p1.id = p8.id JOIN $planets p9 ON p1.id = p9.id JOIN $planets p10 ON p1.id = p10.id WHERE p1.diameter > 10000 ORDER BY p1.name, p2.name, p3.name, p4.name, p5.name
+
+query error io failed
+SELECT a_mission as mission, ARRAY_AGG(name) FROM testdata.missions INNER JOIN (SELECT * FROM testdata.astronauts CROSS JOIN UNNEST(missions) AS a_mission) AS astronauts ON Mission = a_mission GROUP BY a_mission
+
+query error io failed
+SELECT alma_matered FROM (SELECT alma_mater FROM testdata.astronauts CROSS JOIN testdata.satellites) AS bulked CROSS JOIN UNNEST(alma_mater) AS alma_matered
+
+statement error io failed
+SELECT * FROM $RomanGods
+
+statement error io failed
+SELECT * FROM non.existent
+
+statement error io failed
+SELECT awesomeness_factor FROM $planets
+
+statement error io failed
+SELECT * FROM $planets WHERE awesomeness_factor > 'Mega'
+
+statement error io failed
+SELECT ARRAY_AGG(name) FILTER (WHERE name IS NOT NULL) FROM $planets
+
+statement error io failed
+SELECT * FROM testdata.astronauts WHERE 'Apollo 11' IN missions
+
+query error io failed
+SELECT DISTINCT MAX(density) FROM $planets WHERE orbitalInclination > 1 GROUP BY numberOfMoons
+
+query error io failed
+SELECT * FROM (SELECT * FROM (SELECT * FROM $planets WHERE id > 5) AS SQ1) AS SQ2 WHERE id < 10
+
+query error io failed
+SELECT name, LENGTH(name) AS len FROM $planets ORDER BY len DESC
+
+query error io failed
+SELECT DISTINCT name FROM (VALUES (null),(null),('apple')) AS booleans (name)
+
+query error io failed
+SELECT name, COUNT(*) FROM testdata.astronauts WHERE name = 'Jim' GROUP BY name
+
+query error io failed
+SELECT $planets.* FROM $planets INNER JOIN (SELECT id FROM $planets AS IP) AS b USING (id)
+
+query error io failed
+SELECT birth_place->'town' FROM testdata.astronauts WHERE birth_place->'town' = "Rome"
+
+query error io failed
+SELECT * FROM (SELECT COUNT(*) AS bodies FROM $planets) AS space WHERE space.bodies > 5

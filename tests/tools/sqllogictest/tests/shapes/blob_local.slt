@@ -1,0 +1,67 @@
+# Source: test_blob_local.py
+
+query shape 9 20
+SELECT * FROM testdata.planets
+
+query shape 177 8
+SELECT * FROM testdata.satellites
+
+query shape 1 1
+SELECT COUNT(*) FROM testdata.planets
+
+query shape 1 1
+SELECT COUNT(*) FROM testdata.satellites
+
+query shape 1 1
+SELECT COUNT(*) FROM (SELECT * FROM testdata.planets) AS p
+
+query shape 1 1
+SELECT COUNT(*) FROM (SELECT COUNT(*) FROM testdata.planets) AS p
+
+query shape 1 1
+SELECT COUNT(*) FROM (SELECT * FROM testdata.planets WHERE id > 4) AS p
+
+query shape 1 1
+SELECT COUNT(*) FROM (SELECT * FROM testdata.planets) AS p WHERE id > 4
+
+query shape 9 1
+SELECT name FROM testdata.planets
+
+query shape 177 1
+SELECT name FROM testdata.satellites
+
+query shape 177 28
+SELECT * FROM testdata.planets INNER JOIN testdata.satellites ON testdata.planets.id = testdata.satellites.planetId
+
+query shape 177 28
+SELECT * FROM testdata.planets, testdata.satellites WHERE testdata.planets.id = testdata.satellites.planetId
+
+query shape 177 28
+SELECT * FROM testdata.planets CROSS JOIN testdata.satellites WHERE testdata.planets.id = testdata.satellites.planetId
+
+query shape 177 28
+SELECT * FROM testdata.planets INNER JOIN testdata.satellites ON testdata.planets.id = testdata.satellites.planetId
+
+query shape 1 1
+SELECT name FROM testdata.planets WHERE name LIKE 'Earth'
+
+query shape 2 20
+SELECT * FROM testdata.planets WHERE id > gravity
+
+query shape 4 20
+SELECT * FROM testdata.planets WHERE surfacePressure IS NULL
+
+query shape 5 20
+SELECT * FROM testdata.planets WHERE surfacePressure IS NOT NULL
+
+query shape 67 28
+SELECT * FROM testdata.planets, testdata.satellites WHERE testdata.planets.id = 5 AND testdata.satellites.planetId = 5
+
+query shape 177 28
+SELECT * FROM testdata.planets, testdata.satellites WHERE testdata.planets.id - testdata.satellites.planetId = 0
+
+query shape 1416 28
+SELECT * FROM testdata.planets, testdata.satellites WHERE testdata.planets.id - testdata.satellites.planetId != 0
+
+query shape 4 20
+SELECT * FROM testdata.planets WHERE testdata.planets.id - testdata.planets.numberOfMoons < 0

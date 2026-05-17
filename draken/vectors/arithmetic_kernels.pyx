@@ -33,7 +33,14 @@ from libc.stdlib cimport malloc, free
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.vectors.int64_vector cimport Int64Vector
 from draken.vectors.float64_vector cimport Float64Vector
+
 from draken.interop.vector_sequence cimport vector_from_sequence
+
+cdef inline int64_t _i64_const(Int64Vector vec) noexcept:
+    return (<int64_t*>vec._unified_view.data)[0]
+
+cdef inline double _f64_const(Float64Vector vec) noexcept:
+    return (<double*>vec._unified_view.data)[0]
 
 from opteryx.utils.vector_types import VectorType, is_scalar
 
@@ -154,15 +161,15 @@ def int64_add(left, right):
         return _int64_int64_add_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
         # Left constant, right dense
-        const_val = left_vec._const_value
+        const_val = _i64_const(left_vec)
         return _int64_scalar_int64_add_dense(const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
         # Left dense, right constant
-        const_val = right_vec._const_value
+        const_val = _i64_const(right_vec)
         return _int64_int64_add_scalar_dense(left_vec, const_val, length)
     elif left_enc == 3 and right_enc == 3:
         # Both constant
-        result_val = left_vec._const_value + right_vec._const_value
+        result_val = _i64_const(left_vec) + _i64_const(right_vec)
         return Int64Vector.from_constant(result_val, length)
     else:
         # Unsupported encoding combination
@@ -203,15 +210,15 @@ def int64_subtract(left, right):
         return _int64_int64_subtract_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
         # Left constant, right dense
-        const_val = left_vec._const_value
+        const_val = _i64_const(left_vec)
         return _int64_scalar_int64_subtract_dense(const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
         # Left dense, right constant
-        const_val = right_vec._const_value
+        const_val = _i64_const(right_vec)
         return _int64_int64_subtract_scalar_dense(left_vec, const_val, length)
     elif left_enc == 3 and right_enc == 3:
         # Both constant
-        result_val = left_vec._const_value - right_vec._const_value
+        result_val = _i64_const(left_vec) - _i64_const(right_vec)
         return Int64Vector.from_constant(result_val, length)
     else:
         # Unsupported encoding combination
@@ -252,15 +259,15 @@ def int64_multiply(left, right):
         return _int64_int64_multiply_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
         # Left constant, right dense
-        const_val = left_vec._const_value
+        const_val = _i64_const(left_vec)
         return _int64_scalar_int64_multiply_dense(const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
         # Left dense, right constant
-        const_val = right_vec._const_value
+        const_val = _i64_const(right_vec)
         return _int64_int64_multiply_scalar_dense(left_vec, const_val, length)
     elif left_enc == 3 and right_enc == 3:
         # Both constant
-        result_val = left_vec._const_value * right_vec._const_value
+        result_val = _i64_const(left_vec) * _i64_const(right_vec)
         return Int64Vector.from_constant(result_val, length)
     else:
         # Unsupported encoding combination
@@ -301,18 +308,18 @@ def int64_divide(left, right):
         return _int64_int64_divide_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
         # Left constant, right dense
-        const_val = left_vec._const_value
+        const_val = _i64_const(left_vec)
         return _int64_scalar_int64_divide_dense(const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
         # Left dense, right constant
-        const_val = right_vec._const_value
+        const_val = _i64_const(right_vec)
         return _int64_int64_divide_scalar_dense(left_vec, const_val, length)
     elif left_enc == 3 and right_enc == 3:
         # Both constant
-        if right_vec._const_value == 0:
+        if _i64_const(right_vec) == 0:
             result_val = 0.0
         else:
-            result_val = <double>left_vec._const_value / <double>right_vec._const_value
+            result_val = <double>_i64_const(left_vec) / <double>_i64_const(right_vec)
         from draken.vectors.float64_vector import Float64Vector as FV
         return FV.from_constant(result_val, length)
     else:
@@ -354,18 +361,18 @@ def int64_floordiv(left, right):
         return _int64_int64_floordiv_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
         # Left constant, right dense
-        const_val = left_vec._const_value
+        const_val = _i64_const(left_vec)
         return _int64_scalar_int64_floordiv_dense(const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
         # Left dense, right constant
-        const_val = right_vec._const_value
+        const_val = _i64_const(right_vec)
         return _int64_int64_floordiv_scalar_dense(left_vec, const_val, length)
     elif left_enc == 3 and right_enc == 3:
         # Both constant
-        if right_vec._const_value == 0:
+        if _i64_const(right_vec) == 0:
             result_val = 0
         else:
-            result_val = left_vec._const_value // right_vec._const_value
+            result_val = _i64_const(left_vec) // _i64_const(right_vec)
         return Int64Vector.from_constant(result_val, length)
     else:
         # Unsupported encoding combination
@@ -406,18 +413,18 @@ def int64_modulo(left, right):
         return _int64_int64_modulo_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
         # Left constant, right dense
-        const_val = left_vec._const_value
+        const_val = _i64_const(left_vec)
         return _int64_scalar_int64_modulo_dense(const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
         # Left dense, right constant
-        const_val = right_vec._const_value
+        const_val = _i64_const(right_vec)
         return _int64_int64_modulo_scalar_dense(left_vec, const_val, length)
     elif left_enc == 3 and right_enc == 3:
         # Both constant
-        if right_vec._const_value == 0:
+        if _i64_const(right_vec) == 0:
             result_val = 0
         else:
-            result_val = left_vec._const_value % right_vec._const_value
+            result_val = _i64_const(left_vec) % _i64_const(right_vec)
         return Int64Vector.from_constant(result_val, length)
     else:
         # Unsupported encoding combination
@@ -446,16 +453,16 @@ def float64_add(left, right):
         return _float64_float64_add_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
         # Left constant, right dense
-        const_val = left_vec._const_value
+        const_val = _f64_const(left_vec)
         # Note: const_value is int64, need to cast to double
         return _float64_scalar_float64_add_dense(<double>const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
         # Left dense, right constant
-        const_val = right_vec._const_value
+        const_val = _f64_const(right_vec)
         return _float64_float64_add_scalar_dense(left_vec, <double>const_val, length)
     elif left_enc == 3 and right_enc == 3:
         # Both constant
-        result_val = <double>left_vec._const_value + <double>right_vec._const_value
+        result_val = <double>_f64_const(left_vec) + <double>_f64_const(right_vec)
         return Float64Vector.from_constant(result_val, length)
     else:
         # Unsupported encoding combination
@@ -484,15 +491,15 @@ def float64_subtract(left, right):
         return _float64_float64_subtract_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
         # Left constant, right dense
-        const_val = left_vec._const_value
+        const_val = _f64_const(left_vec)
         return _float64_scalar_float64_subtract_dense(<double>const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
         # Left dense, right constant
-        const_val = right_vec._const_value
+        const_val = _f64_const(right_vec)
         return _float64_float64_subtract_scalar_dense(left_vec, <double>const_val, length)
     elif left_enc == 3 and right_enc == 3:
         # Both constant
-        result_val = <double>left_vec._const_value - <double>right_vec._const_value
+        result_val = <double>_f64_const(left_vec) - <double>_f64_const(right_vec)
         return Float64Vector.from_constant(result_val, length)
     else:
         # Unsupported encoding combination
@@ -508,28 +515,27 @@ def float64_multiply(left, right):
     if len(left) == 0:
         return Float64Vector(0)
 
+    # Detect encodings
+    left_enc = getattr(left, 'encoding', 0)
+    right_enc = getattr(right, 'encoding', 0)
     cdef Float64Vector left_vec = <Float64Vector>left
     cdef Float64Vector right_vec = <Float64Vector>right
     cdef size_t length = len(left)
-
-    # Detect encodings
-    cdef int left_enc = left_vec._encoding
-    cdef int right_enc = right_vec._encoding
 
     if left_enc == 0 and right_enc == 0:
         # Both dense
         return _float64_float64_multiply_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
         # Left constant, right dense
-        const_val = left_vec._const_value
+        const_val = _f64_const(left_vec)
         return _float64_scalar_float64_multiply_dense(<double>const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
         # Left dense, right constant
-        const_val = right_vec._const_value
+        const_val = _f64_const(right_vec)
         return _float64_float64_multiply_scalar_dense(left_vec, <double>const_val, length)
     elif left_enc == 3 and right_enc == 3:
         # Both constant
-        result_val = <double>left_vec._const_value * <double>right_vec._const_value
+        result_val = <double>_f64_const(left_vec) * <double>_f64_const(right_vec)
         return Float64Vector.from_constant(result_val, length)
     else:
         # Unsupported encoding combination
@@ -558,18 +564,18 @@ def float64_divide(left, right):
         return _float64_float64_divide_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
         # Left constant, right dense
-        const_val = left_vec._const_value
+        const_val = _f64_const(left_vec)
         return _float64_scalar_float64_divide_dense(<double>const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
         # Left dense, right constant
-        const_val = right_vec._const_value
+        const_val = _f64_const(right_vec)
         return _float64_float64_divide_scalar_dense(left_vec, <double>const_val, length)
     elif left_enc == 3 and right_enc == 3:
         # Both constant
-        if right_vec._const_value == 0:
+        if _f64_const(right_vec) == 0:
             result_val = 0.0
         else:
-            result_val = <double>left_vec._const_value / <double>right_vec._const_value
+            result_val = <double>_f64_const(left_vec) / <double>_f64_const(right_vec)
         return Float64Vector.from_constant(result_val, length)
     else:
         # Unsupported encoding combination
@@ -598,15 +604,15 @@ def int64_float64_add(left, right):
         return _int64_float64_add_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
         # Left int64 constant, right float64 dense
-        const_val = left_vec._const_value
+        const_val = _i64_const(left_vec)
         return _int64_scalar_float64_add_dense(const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
         # Left int64 dense, right float64 constant
-        const_val_f64 = right_vec._const_value
+        const_val_f64 = _f64_const(right_vec)
         return _float64_int64_scalar_add_dense(left_vec, <int64_t>const_val_f64, length)
     elif left_enc == 3 and right_enc == 3:
         # Both constant
-        result_val = <double>left_vec._const_value + right_vec._const_value
+        result_val = <double>_i64_const(left_vec) + _f64_const(right_vec)
         return Float64Vector.from_constant(result_val, length)
     else:
         # Unsupported encoding combination
@@ -635,15 +641,15 @@ def float64_int64_add(left, right):
         return _float64_int64_add_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
         # Left float64 constant, right int64 dense
-        const_val = left_vec._const_value
+        const_val = _f64_const(left_vec)
         return _float64_scalar_int64_add_dense(const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
         # Left float64 dense, right int64 constant
-        const_val_i64 = right_vec._const_value
+        const_val_i64 = _i64_const(right_vec)
         return _float64_int64_scalar_add_dense(left_vec, const_val_i64, length)
     elif left_enc == 3 and right_enc == 3:
         # Both constant
-        result_val = left_vec._const_value + <double>right_vec._const_value
+        result_val = _f64_const(left_vec) + <double>_i64_const(right_vec)
         return Float64Vector.from_constant(result_val, length)
     else:
         # Unsupported encoding combination
@@ -668,13 +674,13 @@ def int64_float64_subtract(left, right):
     if left_enc == 0 and right_enc == 0:
         return _int64_float64_subtract_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
-        const_val = left_vec._const_value
+        const_val = _i64_const(left_vec)
         return _int64_scalar_float64_subtract_dense(<int64_t>const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
-        const_val = right_vec._const_value
+        const_val = _f64_const(right_vec)
         return _int64_float64_scalar_subtract_dense(left_vec, <double>const_val, length)
     elif left_enc == 3 and right_enc == 3:
-        result_val = <double>left_vec._const_value - right_vec._const_value
+        result_val = <double>_i64_const(left_vec) - _f64_const(right_vec)
         return Float64Vector.from_constant(result_val, length)
     else:
         return None
@@ -698,13 +704,13 @@ def int64_float64_multiply(left, right):
     if left_enc == 0 and right_enc == 0:
         return _int64_float64_multiply_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
-        const_val = left_vec._const_value
+        const_val = _i64_const(left_vec)
         return _int64_scalar_float64_multiply_dense(<int64_t>const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
-        const_val = right_vec._const_value
+        const_val = _f64_const(right_vec)
         return _int64_float64_scalar_multiply_dense(left_vec, <double>const_val, length)
     elif left_enc == 3 and right_enc == 3:
-        result_val = <double>left_vec._const_value * right_vec._const_value
+        result_val = <double>_i64_const(left_vec) * _f64_const(right_vec)
         return Float64Vector.from_constant(result_val, length)
     else:
         return None
@@ -728,16 +734,16 @@ def int64_float64_divide(left, right):
     if left_enc == 0 and right_enc == 0:
         return _int64_float64_divide_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
-        const_val = left_vec._const_value
+        const_val = _i64_const(left_vec)
         return _int64_scalar_float64_divide_dense(<int64_t>const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
-        const_val = right_vec._const_value
+        const_val = _f64_const(right_vec)
         return _int64_float64_scalar_divide_dense(left_vec, <double>const_val, length)
     elif left_enc == 3 and right_enc == 3:
-        if right_vec._const_value == 0.0:
+        if _f64_const(right_vec) == 0.0:
             result_val = 0.0
         else:
-            result_val = <double>left_vec._const_value / right_vec._const_value
+            result_val = <double>_i64_const(left_vec) / _f64_const(right_vec)
         return Float64Vector.from_constant(result_val, length)
     else:
         return None
@@ -761,16 +767,16 @@ def int64_float64_floordiv(left, right):
     if left_enc == 0 and right_enc == 0:
         return _int64_float64_floordiv_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
-        const_val = left_vec._const_value
+        const_val = _i64_const(left_vec)
         return _int64_scalar_float64_floordiv_dense(<int64_t>const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
-        const_val = right_vec._const_value
+        const_val = _f64_const(right_vec)
         return _int64_float64_scalar_floordiv_dense(left_vec, <double>const_val, length)
     elif left_enc == 3 and right_enc == 3:
-        if right_vec._const_value == 0.0:
+        if _f64_const(right_vec) == 0.0:
             result_val = 0.0
         else:
-            result_val = <double>left_vec._const_value // right_vec._const_value
+            result_val = <double>_i64_const(left_vec) // _f64_const(right_vec)
         return Float64Vector.from_constant(result_val, length)
     else:
         return None
@@ -794,13 +800,13 @@ def float64_int64_subtract(left, right):
     if left_enc == 0 and right_enc == 0:
         return _float64_int64_subtract_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
-        const_val = left_vec._const_value
+        const_val = _f64_const(left_vec)
         return _float64_scalar_int64_subtract_dense(const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
-        const_val_i64 = right_vec._const_value
+        const_val_i64 = _i64_const(right_vec)
         return _float64_int64_scalar_subtract_dense(left_vec, const_val_i64, length)
     elif left_enc == 3 and right_enc == 3:
-        result_val = left_vec._const_value - <double>right_vec._const_value
+        result_val = _f64_const(left_vec) - <double>_i64_const(right_vec)
         return Float64Vector.from_constant(result_val, length)
     else:
         return None
@@ -827,13 +833,13 @@ def float64_int64_multiply(left, right):
     if left_enc == 0 and right_enc == 0:
         return _float64_int64_multiply_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
-        const_val = left_vec._const_value
+        const_val = _f64_const(left_vec)
         return _float64_scalar_int64_multiply_dense(const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
-        const_val_i64 = right_vec._const_value
+        const_val_i64 = _i64_const(right_vec)
         return _float64_int64_scalar_multiply_dense(left_vec, const_val_i64, length)
     elif left_enc == 3 and right_enc == 3:
-        result_val = left_vec._const_value * <double>right_vec._const_value
+        result_val = _f64_const(left_vec) * <double>_i64_const(right_vec)
         return Float64Vector.from_constant(result_val, length)
     else:
         return None
@@ -857,16 +863,16 @@ def float64_int64_divide(left, right):
     if left_enc == 0 and right_enc == 0:
         return _float64_int64_divide_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
-        const_val = left_vec._const_value
+        const_val = _f64_const(left_vec)
         return _float64_scalar_int64_divide_dense(const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
-        const_val_i64 = right_vec._const_value
+        const_val_i64 = _i64_const(right_vec)
         return _float64_int64_scalar_divide_dense(left_vec, const_val_i64, length)
     elif left_enc == 3 and right_enc == 3:
-        if right_vec._const_value == 0:
+        if _i64_const(right_vec) == 0:
             result_val = 0.0
         else:
-            result_val = left_vec._const_value / <double>right_vec._const_value
+            result_val = _f64_const(left_vec) / <double>_i64_const(right_vec)
         return Float64Vector.from_constant(result_val, length)
     else:
         return None
@@ -890,16 +896,16 @@ def float64_int64_floordiv(left, right):
     if left_enc == 0 and right_enc == 0:
         return _float64_int64_floordiv_dense(left_vec, right_vec, length)
     elif left_enc == 3 and right_enc == 0:
-        const_val = left_vec._const_value
+        const_val = _f64_const(left_vec)
         return _float64_scalar_int64_floordiv_dense(const_val, right_vec, length)
     elif left_enc == 0 and right_enc == 3:
-        const_val_i64 = right_vec._const_value
+        const_val_i64 = _i64_const(right_vec)
         return _float64_int64_scalar_floordiv_dense(left_vec, const_val_i64, length)
     elif left_enc == 3 and right_enc == 3:
-        if right_vec._const_value == 0:
+        if _i64_const(right_vec) == 0:
             result_val = 0.0
         else:
-            result_val = left_vec._const_value // <double>right_vec._const_value
+            result_val = _f64_const(left_vec) // <double>_i64_const(right_vec)
         return Float64Vector.from_constant(result_val, length)
     else:
         return None

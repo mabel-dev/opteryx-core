@@ -29,11 +29,6 @@ from libc.stdint cimport int32_t, int8_t, intptr_t, uint16_t, uint32_t, uint64_t
 from libc.stdlib cimport free, malloc
 from libc.math cimport isinf, isnan, llround
 
-from draken.core.buffers cimport ConstAccessor
-from draken.core.buffers cimport DictAccessor
-from draken.core.buffers cimport DRAKEN_ENCODING_DENSE
-from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
-from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DrakenVarBuffer
 from draken.core.buffers cimport DrakenVector
@@ -95,47 +90,15 @@ cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx) noexcept nogi
     return (byte >> (idx & 7)) & 1
 
 
-cdef void _refresh_unified_float64(Float64Vector vec) noexcept:
-    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
-    vec._unified_view.length = <size_t>n
-    vec._unified_view.itemsize = sizeof(double)
-    vec._unified_view.type = DRAKEN_FLOAT64
-    if vec._has_const:
-        vec._unified_view.data = <void*>&vec._const_value
-        vec._unified_view.data_length = 1
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = &_CONST_NULL_BYTE if vec._const_is_null else NULL
-    elif vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec.ptr.data == NULL:
-        vec._unified_view.data = vec._dict_values.data
-        vec._unified_view.data_length = <size_t>vec._dict_values.length
-        vec._unified_view.selection = vec._dict_codes
-        vec._unified_view.sel_width = vec._dict_code_width
-        vec._unified_view.validity = vec.ptr.null_bitmap
-    else:
-        vec._unified_view.data = vec.ptr.data
-        vec._unified_view.data_length = <size_t>n
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = vec.ptr.null_bitmap
-
-
 cdef void _release_dict_storage(Float64Vector vec) noexcept:
-    if vec._dict_codes != NULL:
-        free(vec._dict_codes)
-        vec._dict_codes = NULL
+    if vec._unified_view.selection != NULL:
+        free(vec._unified_view.selection)
+        vec._unified_view.selection = NULL
+        vec._unified_view.sel_width = 0
     if vec._dict_values != NULL:
         free_var_buffer(vec._dict_values, True)
         vec._dict_values = NULL
-    vec._dict_code_width = 0
     vec._dict_ordered = 0
-    vec._dict_accessor.codes = NULL
-    vec._dict_accessor.code_width = 0
-    vec._dict_accessor.row_nulls = NULL
-    vec._dict_accessor.length = 0
-    vec._dict_accessor.dict_values = NULL
-    vec._dict_accessor.value_type = DRAKEN_FLOAT64
-    vec._encoding = DRAKEN_ENCODING_DENSE
 
 
 cdef void _attach_dictionary_storage(Float64Vector vec, const int32_t[::1] codes, const double[::1] dictionary, bint ordered, const uint8_t* dict_entry_null_bitmap=NULL) except *:
@@ -151,12 +114,11 @@ cdef void _attach_dictionary_storage(Float64Vector vec, const int32_t[::1] codes
 
     _release_dict_storage(vec)
 
+    cdef uint8_t* codes_ptr = NULL
     if code_bytes > 0:
-        vec._dict_codes = <uint8_t*>malloc(code_bytes)
-        if vec._dict_codes == NULL:
+        codes_ptr = <uint8_t*>malloc(code_bytes)
+        if codes_ptr == NULL:
             raise MemoryError()
-    else:
-        vec._dict_codes = NULL
 
     dict_values = alloc_var_buffer(DRAKEN_FLOAT64, <size_t>dict_size, <size_t>dict_bytes)
     dict_values.offsets[0] = 0
@@ -176,16 +138,18 @@ cdef void _attach_dictionary_storage(Float64Vector vec, const int32_t[::1] codes
     for i in range(row_count):
         code = <Py_ssize_t>codes[i]
         if code_width == 1:
-            (<uint8_t*>vec._dict_codes)[i] = <uint8_t>code
+            (<uint8_t*>codes_ptr)[i] = <uint8_t>code
         elif code_width == 2:
-            (<uint16_t*>vec._dict_codes)[i] = <uint16_t>code
+            (<uint16_t*>codes_ptr)[i] = <uint16_t>code
         else:
-            (<uint32_t*>vec._dict_codes)[i] = <uint32_t>code
+            (<uint32_t*>codes_ptr)[i] = <uint32_t>code
 
     vec._dict_values = dict_values
-    vec._dict_code_width = code_width
     vec._dict_ordered = 1 if ordered else 0
-    vec._encoding = DRAKEN_ENCODING_DICTIONARY
+    vec._unified_view.selection = codes_ptr
+    vec._unified_view.sel_width = code_width
+    vec._unified_view.data = dict_values.data
+    vec._unified_view.data_length = <size_t>dict_size
 
 cdef class Float64Vector(Vector):
 
@@ -219,15 +183,16 @@ cdef class Float64Vector(Vector):
             raise ValueError("length must be non-negative")
         if value is None and not is_null:
             raise ValueError("value cannot be None unless is_null=True")
-        cdef Float64Vector vec = Float64Vector(0)
-
+        cdef Float64Vector vec = Float64Vector(1)
+        cdef double val = 0.0 if (is_null or value is None) else <double>float(value)
+        (<double*>vec.ptr.data)[0] = val
         vec.ptr.length = <size_t>length
-        vec.ptr.null_bitmap = NULL
-        vec._has_const = True
-        vec._const_is_null = bool(is_null)
-        vec._const_value = 0.0 if is_null or value is None else <double>float(value)
-        vec._encoding = DRAKEN_ENCODING_CONSTANT
-        _refresh_unified_float64(vec)
+        vec._unified_view.length = <size_t>length
+        vec._unified_view.data = vec.ptr.data
+        vec._unified_view.data_length = 1
+        vec._unified_view.selection = NULL
+        vec._unified_view.sel_width = 0
+        vec._unified_view.validity = &_CONST_NULL_BYTE if is_null else NULL
         return vec
 
     def __cinit__(self, size_t length=0, bint wrap=False):
@@ -238,22 +203,7 @@ cdef class Float64Vector(Vector):
             self.ptr = alloc_fixed_buffer(DRAKEN_FLOAT64, length, 8)
             self.owns_data = True
         self._dict_values = NULL
-        self._dict_codes = NULL
-        self._dict_code_width = 0
         self._dict_ordered = 0
-        self._dict_accessor.codes = NULL
-        self._dict_accessor.code_width = 0
-        self._dict_accessor.row_nulls = NULL
-        self._dict_accessor.length = 0
-        self._dict_accessor.dict_values = NULL
-        self._dict_accessor.value_type = DRAKEN_FLOAT64
-        self._const_accessor.length = 0
-        self._const_accessor.value_type = DRAKEN_FLOAT64
-        self._const_accessor.value_ptr = NULL
-        self._const_accessor.is_null = 0
-        self._const_value = 0.0
-        self._has_const = False
-        self._const_is_null = False
         self._unified_view.data = NULL
         self._unified_view.data_length = 0
         self._unified_view.selection = NULL
@@ -263,7 +213,10 @@ cdef class Float64Vector(Vector):
         self._unified_view.itemsize = sizeof(double)
         self._unified_view.type = DRAKEN_FLOAT64
         if not wrap:
-            _refresh_unified_float64(self)
+            self._unified_view.data = self.ptr.data
+            self._unified_view.data_length = <size_t>length
+            self._unified_view.length = <size_t>length
+            self._unified_view.validity = NULL
 
     def __dealloc__(self):
         _release_dict_storage(self)
@@ -271,33 +224,21 @@ cdef class Float64Vector(Vector):
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
 
-    cdef DictAccessor* dict_accessor(self) noexcept:
-        if self._dict_values == NULL or self._dict_codes == NULL or self.ptr == NULL:
-            return NULL
-        self._dict_accessor.codes = self._dict_codes
-        self._dict_accessor.code_width = self._dict_code_width
-        self._dict_accessor.row_nulls = self.ptr.null_bitmap
-        self._dict_accessor.length = self.ptr.length
-        self._dict_accessor.dict_values = self._dict_values
-        self._dict_accessor.value_type = self._dict_values.type
-        return &self._dict_accessor
-
-    cdef ConstAccessor* const_accessor(self) noexcept:
-        if not self._has_const or self.ptr == NULL:
-            return NULL
-        self._const_accessor.length = self.ptr.length
-        self._const_accessor.value_type = DRAKEN_FLOAT64
-        self._const_accessor.value_ptr = <void*>&self._const_value
-        self._const_accessor.is_null = 1 if self._const_is_null else 0
-        return &self._const_accessor
-
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const:
+        if self.ptr == NULL:
             return NULL
-        return self.ptr.data
+        cdef DrakenVector* uv = &self._unified_view
+        if uv.selection != NULL:
+            return NULL
+        if uv.data_length == 1 and uv.length != 1:
+            return NULL
+        return uv.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const:
+        if self.ptr == NULL:
+            return NULL
+        cdef DrakenVector* uv = &self._unified_view
+        if uv.data_length == 1 and uv.selection == NULL and uv.length != 1:
             return NULL
         return self.ptr.null_bitmap
 
@@ -350,29 +291,28 @@ cdef class Float64Vector(Vector):
 
     @property
     def code_width(self):
-        return self._dict_code_width if self._dict_values != NULL else None
+        return self._unified_view.sel_width if self._dict_values != NULL else None
 
     @property
     def ordered(self):
         return bool(self._dict_ordered) if self._dict_values != NULL else False
 
     cdef object item_at(self, Py_ssize_t i):
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef double* data
         cdef uint8_t byte
         cdef uint8_t bit
         if i < 0 or i >= <Py_ssize_t>ptr.length:
             raise IndexError("Index out of bounds")
-        if self._has_const:
-            if self._const_is_null:
+        if uv.data_length == 1:
+            if uv.validity != NULL:
                 return None
-            return self._const_value
-        if self._encoding == DRAKEN_ENCODING_DICTIONARY and ptr.data == NULL:
-            if ptr.null_bitmap != NULL and not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
+            return (<double*>uv.data)[0]
+        if uv.selection != NULL:
+            if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
                 return None
-            return (<double*>self._dict_values.data)[
-                <Py_ssize_t>_read_packed_code(self._dict_codes, self._dict_code_width, i)
-            ]
+            return (<double*>uv.data)[<Py_ssize_t>_read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)]
         data = <double*> ptr.data
         if ptr.null_bitmap != NULL:
             byte = ptr.null_bitmap[i >> 3]
@@ -390,10 +330,11 @@ cdef class Float64Vector(Vector):
         """Convert to a PyArrow array."""
         import pyarrow as pa
 
-        if self._has_const:
-            if self._const_is_null:
-                return pa.nulls(self.ptr.length, type=pa.float64())
-            return pa.array([self._const_value] * self.ptr.length, type=pa.float64())
+        cdef DrakenVector* uv = self.unified()
+        if uv.data_length == 1:
+            if uv.validity != NULL:
+                return pa.nulls(uv.length, type=pa.float64())
+            return pa.array([(<double*>uv.data)[0]] * uv.length, type=pa.float64())
 
         cdef size_t nbytes = buf_length(self.ptr) * sizeof(double)
         addr = <intptr_t> self.ptr.data
@@ -411,6 +352,7 @@ cdef class Float64Vector(Vector):
 
     # -------- Example op --------
     cpdef Float64Vector take(self, int32_t[::1] indices):
+        cdef DrakenVector* uv = self.unified()
         cdef Py_ssize_t i, n = indices.shape[0]
         cdef Py_ssize_t out_n_d = n
         cdef uint8_t cw_d
@@ -422,10 +364,10 @@ cdef class Float64Vector(Vector):
         cdef Py_ssize_t nb_d
         cdef Py_ssize_t si_d
         cdef Float64Vector dtake_result
-        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
+        if uv.selection != NULL:
             # O(n) gather: copy selected codes and copy dict verbatim.
             # Replaces the O(total_rows) _materialize_dict_float64().take() path.
-            cw_d = self._dict_code_width
+            cw_d = uv.sel_width
             src_dv = self._dict_values
             dsz = <Py_ssize_t>src_dv.length if src_dv != NULL else 0
             cb_d = out_n_d * <Py_ssize_t>cw_d
@@ -435,13 +377,13 @@ cdef class Float64Vector(Vector):
                     raise MemoryError()
                 if cw_d == 1:
                     for i in range(out_n_d):
-                        (<uint8_t*>gc)[i] = (<const uint8_t*>self._dict_codes)[indices[i]]
+                        (<uint8_t*>gc)[i] = (<const uint8_t*>uv.selection)[indices[i]]
                 elif cw_d == 2:
                     for i in range(out_n_d):
-                        (<uint16_t*>gc)[i] = (<const uint16_t*>self._dict_codes)[indices[i]]
+                        (<uint16_t*>gc)[i] = (<const uint16_t*>uv.selection)[indices[i]]
                 else:
                     for i in range(out_n_d):
-                        (<uint32_t*>gc)[i] = (<const uint32_t*>self._dict_codes)[indices[i]]
+                        (<uint32_t*>gc)[i] = (<const uint32_t*>uv.selection)[indices[i]]
             if self.ptr.null_bitmap != NULL and out_n_d > 0:
                 nb_d = (out_n_d + 7) >> 3
                 gn = <uint8_t*>malloc(<size_t>nb_d)
@@ -465,11 +407,12 @@ cdef class Float64Vector(Vector):
                 if gc != NULL: free(gc)
                 if gn != NULL: free(gn)
             return dtake_result
-        if self._has_const:
+        cdef DrakenVector* _tuv = self.unified()
+        if _tuv.data_length == 1:
             return Float64Vector.from_constant(
-                None if self._const_is_null else self._const_value,
+                None if _tuv.validity != NULL else (<double*>_tuv.data)[0],
                 n,
-                is_null=self._const_is_null,
+                is_null=(_tuv.validity != NULL),
             )
         cdef Float64Vector out = Float64Vector(<size_t>n)
         cdef double* src = <double*> self.ptr.data
@@ -509,7 +452,7 @@ cdef class Float64Vector(Vector):
 
             out.ptr.null_bitmap = out_null
 
-        if self._dict_values != NULL and self._dict_codes != NULL:
+        if self._dict_values != NULL and uv.selection != NULL:
             dict_size = self._dict_values.length
             if n > 0:
                 taken_codes = <int32_t*>malloc(n * sizeof(int32_t))
@@ -526,7 +469,7 @@ cdef class Float64Vector(Vector):
                         if (byte & (1 << (src_idx & 7))) == 0:
                             taken_codes[i] = 0
                             continue
-                    taken_codes[i] = <int32_t>_read_packed_code(self._dict_codes, self._dict_code_width, src_idx)
+                    taken_codes[i] = <int32_t>_read_packed_code(<uint8_t*>uv.selection, uv.sel_width, src_idx)
 
                 if n > 0:
                     taken_codes_view = <int32_t[:n]>taken_codes
@@ -540,7 +483,8 @@ cdef class Float64Vector(Vector):
             finally:
                 if taken_codes != NULL:
                     free(taken_codes)
-        _refresh_unified_float64(out)
+        out._unified_view.length = <size_t>n
+        out._unified_view.validity = out.ptr.null_bitmap
         return out
 
     cdef inline bint _compare_float_values(self, double left, double right, int op) nogil:
@@ -683,9 +627,9 @@ cdef class Float64Vector(Vector):
 
         # For dict-encoded on either side: materialize then compare
         if uv.selection != NULL:
-            return _materialize_dict_float64(self)._compare_vector(other, op)
+            return self.materialize()._compare_vector(other, op)
         if ouv.selection != NULL:
-            return self._compare_vector(_materialize_dict_float64(other), op)
+            return self._compare_vector(other.materialize(), op)
 
         data1 = <double*>self.ptr.data
         data2 = <double*>other.ptr.data
@@ -785,9 +729,54 @@ cdef class Float64Vector(Vector):
         cdef Py_ssize_t i
         cdef uint8_t mask
         cdef bint in_range
+        cdef Py_ssize_t dict_size, d, match_idx
+        cdef uint8_t* match_table
+        cdef uint8_t* codes
+        cdef uint8_t sel_width
+        cdef double v
 
         if uv.selection != NULL:
-            return _materialize_dict_float64(self).between(lower, upper, lower_inclusive, upper_inclusive)
+            data = <double*>uv.data
+            dict_size = <Py_ssize_t>uv.data_length
+            src_null = uv.validity
+            match_table = <uint8_t*>malloc(<size_t>dict_size if dict_size > 0 else 1)
+            if match_table == NULL:
+                raise MemoryError()
+            for d in range(dict_size):
+                v = data[d]
+                if lower_inclusive and upper_inclusive:
+                    match_table[d] = 1 if (lower <= v <= upper) else 0
+                elif lower_inclusive:
+                    match_table[d] = 1 if (lower <= v < upper) else 0
+                elif upper_inclusive:
+                    match_table[d] = 1 if (lower < v <= upper) else 0
+                else:
+                    match_table[d] = 1 if (lower < v < upper) else 0
+            codes = <uint8_t*>uv.selection
+            sel_width = uv.sel_width
+            if nbytes > 0:
+                memset(dst, 0, nbytes)
+            if src_null != NULL and nbytes != 0:
+                out_null = <uint8_t*>malloc(nbytes)
+                if out_null == NULL:
+                    free(match_table)
+                    raise MemoryError()
+                memcpy(out_null, src_null, nbytes)
+                if (n & 7) != 0:
+                    mask = <uint8_t>((1 << (n & 7)) - 1)
+                    out_null[nbytes - 1] &= mask
+                out.ptr.null_bitmap = out_null
+            else:
+                out.ptr.null_bitmap = NULL
+            for i in range(n):
+                if src_null != NULL and not ((src_null[i >> 3] >> (i & 7)) & 1):
+                    pass
+                else:
+                    match_idx = <Py_ssize_t>_read_packed_code(codes, sel_width, i)
+                    if match_table[match_idx]:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            free(match_table)
+            return out
 
         memset(dst, 0, nbytes)
 
@@ -885,9 +874,47 @@ cdef class Float64Vector(Vector):
         cdef double* data
         cdef uint8_t* src_null
         cdef Py_ssize_t i
+        cdef Py_ssize_t dict_size, d, match_idx
+        cdef uint8_t* match_table_il
+        cdef uint8_t* codes_il
+        cdef uint8_t sel_width_il
 
         if uv.selection != NULL:
-            return _materialize_dict_float64(self).in_list(value_set)
+            if not isinstance(value_set, (set, frozenset)):
+                value_set = set(value_set)
+            data = <double*>uv.data
+            dict_size = <Py_ssize_t>uv.data_length
+            src_null = uv.validity
+            match_table_il = <uint8_t*>malloc(<size_t>dict_size if dict_size > 0 else 1)
+            if match_table_il == NULL:
+                raise MemoryError()
+            for d in range(dict_size):
+                match_table_il[d] = 1 if data[d] in value_set else 0
+            codes_il = <uint8_t*>uv.selection
+            sel_width_il = uv.sel_width
+            out = BoolVector(<size_t>n)
+            dst = <uint8_t*>out.ptr.data
+            if nbytes > 0:
+                memset(dst, 0, nbytes)
+            if src_null != NULL and nbytes != 0:
+                out_null = <uint8_t*>malloc(nbytes)
+                if out_null == NULL:
+                    free(match_table_il)
+                    raise MemoryError()
+                memcpy(out_null, src_null, nbytes)
+                if (n & 7) != 0:
+                    mask = <uint8_t>((1 << (n & 7)) - 1)
+                    out_null[nbytes - 1] &= mask
+                out.ptr.null_bitmap = out_null
+            else:
+                out.ptr.null_bitmap = NULL
+            for i in range(n):
+                if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
+                    match_idx = <Py_ssize_t>_read_packed_code(codes_il, sel_width_il, i)
+                    if match_table_il[match_idx]:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            free(match_table_il)
+            return out
 
         if not isinstance(value_set, (set, frozenset)):
             value_set = set(value_set)
@@ -1100,15 +1127,24 @@ cdef class Float64Vector(Vector):
 
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
         """Compare two values at given indices. Returns -1, 0, 1. Assumes non-null."""
-        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_float64(self).compare_at(left_idx, right_idx)
-
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef double* data = <double*> ptr.data
+        cdef DrakenVector* uv = self.unified()
         cdef double left_val, right_val
+        cdef double* data
 
-        if self._has_const:
+        if uv.data_length == 1:
             return 0
+
+        if uv.selection != NULL:
+            data = <double*>uv.data
+            left_val = data[<Py_ssize_t>_read_packed_code(<uint8_t*>uv.selection, uv.sel_width, left_idx)]
+            right_val = data[<Py_ssize_t>_read_packed_code(<uint8_t*>uv.selection, uv.sel_width, right_idx)]
+            if left_val < right_val:
+                return -1
+            elif left_val > right_val:
+                return 1
+            return 0
+
+        data = <double*>uv.data
 
         left_val = data[left_idx]
         right_val = data[right_idx]
@@ -1121,38 +1157,34 @@ cdef class Float64Vector(Vector):
 
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False:
         """Check if value at index is null."""
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef uint8_t byte
+        cdef DrakenVector* uv = self.unified()
 
-        if self._has_const:
-            return self._const_is_null
-
-        if ptr.null_bitmap == NULL:
+        if uv.validity == NULL:
             return False
 
-        byte = ptr.null_bitmap[idx >> 3]
-        return ((byte >> (idx & 7)) & 1) == 0
+        return ((uv.validity[idx >> 3] >> (idx & 7)) & 1) == 0
 
     cpdef int8_t[::1] is_null(self):
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t i, n = ptr.length
+        cdef DrakenVector* uv = self.unified()
+        cdef Py_ssize_t i, n = <Py_ssize_t>uv.length
         cdef int8_t* buf = <int8_t*> PyMem_Malloc(n)
         cdef uint8_t byte, bit
 
         if buf == NULL:
             raise MemoryError()
 
-        if self._has_const:
+        if uv.data_length == 1:
+            # const: null if validity bitmap is set
             for i in range(n):
-                buf[i] = 1 if self._const_is_null else 0
+                buf[i] = 1 if uv.validity != NULL else 0
             return <int8_t[:n]> buf
 
-        if ptr.null_bitmap == NULL:
+        if uv.validity == NULL:
             for i in range(n):
                 buf[i] = 0
         else:
             for i in range(n):
-                byte = ptr.null_bitmap[i >> 3]
+                byte = uv.validity[i >> 3]
                 bit = (byte >> (i & 7)) & 1
                 buf[i] = 0 if bit else 1
 
@@ -1162,33 +1194,43 @@ cdef class Float64Vector(Vector):
         """
         Return a memoryview of int8_t, where each element is 1 if the value is null OR NaN, 0 otherwise.
         """
-        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_float64(self).is_null_with_nan()
-
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t i, n = ptr.length
+        cdef DrakenVector* uv = self.unified()
+        cdef Py_ssize_t i, n = <Py_ssize_t>uv.length
         cdef int8_t* buf = <int8_t*> PyMem_Malloc(n)
         cdef uint8_t byte, bit
         cdef double* data
+        cdef Py_ssize_t idx
 
         if buf == NULL:
             raise MemoryError()
 
-        if self._has_const:
+        if uv.data_length == 1:
+            # const: null if validity bitmap is set; otherwise check single value for NaN
+            data = <double*>uv.data
             for i in range(n):
-                buf[i] = 1 if self._const_is_null else 0
+                buf[i] = 1 if (uv.validity != NULL or isnan(data[0])) else 0
             return <int8_t[:n]> buf
 
-        data = <double*> ptr.data
+        if uv.selection != NULL:
+            data = <double*>uv.data
+            for i in range(n):
+                if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
+                    buf[i] = 1
+                else:
+                    idx = <Py_ssize_t>_read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
+                    buf[i] = 1 if isnan(data[idx]) else 0
+            return <int8_t[:n]> buf
 
-        if ptr.null_bitmap == NULL:
+        data = <double*>uv.data
+
+        if uv.validity == NULL:
             # No explicit nulls, but check for NaN
             for i in range(n):
                 buf[i] = 1 if isnan(data[i]) else 0
         else:
             # Check both null bitmap and NaN
             for i in range(n):
-                byte = ptr.null_bitmap[i >> 3]
+                byte = uv.validity[i >> 3]
                 bit = (byte >> (i & 7)) & 1
                 if bit == 0:  # null bitmap says invalid
                     buf[i] = 1
@@ -1201,40 +1243,49 @@ cdef class Float64Vector(Vector):
 
     @property
     def null_count(self):
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t n = ptr.length
-        if self._has_const:
-            return n if self._const_is_null else 0
-        if ptr.null_bitmap == NULL:
+        cdef DrakenVector* uv = self.unified()
+        cdef Py_ssize_t n = <Py_ssize_t>uv.length
+        if uv.validity == NULL:
             return 0
-        return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
+        if uv.data_length == 1:
+            # const-null: all rows are null; const-valid handled above (validity==NULL)
+            return n
+        return n - <Py_ssize_t>simd_popcount(uv.validity, (<size_t>n + 7) >> 3)
 
     cpdef Vector materialize(self):
         """Return a dense Float64Vector, expanding dict/const encodings if needed."""
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t n = ptr.length
+        cdef DrakenVector* uv = self.unified()
+        cdef Py_ssize_t n = <Py_ssize_t>uv.length
         cdef Float64Vector dense
         cdef double* dst
+        cdef double* mat_src
+        cdef uint8_t* mat_null
         cdef Py_ssize_t i, nb_bytes
-        if self._encoding == DRAKEN_ENCODING_DICTIONARY:
-            if ptr.data == NULL:
-                # dict-only (make_float64_dict_only path): codes in _dict_codes
-                return _materialize_dict_float64(self)
-            else:
-                # from_dict path: dense data already in ptr.data, copy to new dense vector
-                dense = Float64Vector(<size_t>n)
-                memcpy(dense.ptr.data, ptr.data, <size_t>n * sizeof(double))
-                if ptr.null_bitmap != NULL:
-                    nb_bytes = (n + 7) >> 3
-                    dense.ptr.null_bitmap = <uint8_t*>malloc(<size_t>nb_bytes)
-                    if dense.ptr.null_bitmap == NULL:
-                        raise MemoryError()
-                    memcpy(dense.ptr.null_bitmap, ptr.null_bitmap, <size_t>nb_bytes)
-                return dense
-        if self._has_const:
+
+        if uv.selection != NULL:
             dense = Float64Vector(<size_t>n)
             dst = <double*>dense.ptr.data
-            if self._const_is_null:
+            mat_src = <double*>uv.data
+            mat_null = uv.validity
+            for i in range(n):
+                if mat_null != NULL and not ((mat_null[i >> 3] >> (i & 7)) & 1):
+                    dst[i] = 0.0
+                else:
+                    dst[i] = mat_src[<Py_ssize_t>_read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)]
+            if mat_null != NULL:
+                nb_bytes = (n + 7) >> 3
+                dense.ptr.null_bitmap = <uint8_t*>malloc(<size_t>nb_bytes)
+                if dense.ptr.null_bitmap == NULL:
+                    raise MemoryError()
+                memcpy(dense.ptr.null_bitmap, mat_null, <size_t>nb_bytes)
+            dense._unified_view.length = <size_t>n
+            dense._unified_view.validity = dense.ptr.null_bitmap
+            return dense
+
+        if uv.data_length == 1:
+            dense = Float64Vector(<size_t>n)
+            dst = <double*>dense.ptr.data
+            if uv.validity != NULL:
                 nb_bytes = (n + 7) >> 3
                 dense.ptr.null_bitmap = <uint8_t*>malloc(<size_t>nb_bytes)
                 if dense.ptr.null_bitmap == NULL:
@@ -1243,53 +1294,62 @@ cdef class Float64Vector(Vector):
                 memset(dst, 0, <size_t>n * sizeof(double))
             else:
                 for i in range(n):
-                    dst[i] = self._const_value
+                    dst[i] = (<double*>uv.data)[0]
                 dense.ptr.null_bitmap = NULL
+            dense._unified_view.length = <size_t>n
+            dense._unified_view.validity = dense.ptr.null_bitmap
             return dense
+
+        return self
+
         return self
 
     @property
     def nbytes(self):
         """Return the approximate memory footprint of this vector in bytes."""
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef uint64_t n = ptr.length
+        cdef uint64_t n = <uint64_t>uv.length
         cdef uint64_t dict_bytes, code_bytes, null_bytes, data_bytes, bm_bytes
-        if self._has_const:
+        if uv.data_length == 1:
             return 8  # sizeof(double)
-        if self._encoding == DRAKEN_ENCODING_DICTIONARY and ptr.data == NULL:
-            dict_bytes = self._dict_values.length * 8 if self._dict_values != NULL else 0
-            code_bytes = n * self._dict_code_width
-            null_bytes = (n + 7) >> 3 if ptr.null_bitmap != NULL else 0
+        if uv.selection != NULL:
+            dict_bytes = uv.data_length * 8
+            code_bytes = n * uv.sel_width
+            null_bytes = (n + 7) >> 3 if uv.validity != NULL else 0
             return dict_bytes + code_bytes + null_bytes
         data_bytes = <uint64_t>(buf_length(ptr) * buf_itemsize(ptr))
         bm_bytes = (n + 7) >> 3 if ptr.null_bitmap != NULL else 0
         return data_bytes + bm_bytes
 
     cpdef list to_pylist(self):
-        if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
-            return _materialize_dict_float64(self).to_pylist()
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t i, n = ptr.length
+        cdef DrakenVector* uv = self.unified()
+        cdef Py_ssize_t i, n = <Py_ssize_t>uv.length
+        cdef double* data = <double*>uv.data
         cdef list out = []
+        cdef Py_ssize_t idx
         cdef uint8_t byte, bit
 
-        if self._has_const:
-            if self._const_is_null:
-                for i in range(n):
+        if uv.data_length == 1:
+            if uv.validity != NULL:
+                return [None] * n
+            return [data[0]] * n
+
+        if uv.selection != NULL:
+            for i in range(n):
+                if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
                     out.append(None)
-            else:
-                for i in range(n):
-                    out.append(self._const_value)
+                else:
+                    idx = <Py_ssize_t>_read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
+                    out.append(data[idx])
             return out
 
-        cdef double* data = <double*> ptr.data
-
-        if ptr.null_bitmap == NULL:
+        if uv.validity == NULL:
             for i in range(n):
                 out.append(data[i])
         else:
             for i in range(n):
-                byte = ptr.null_bitmap[i >> 3]
+                byte = uv.validity[i >> 3]
                 bit = (byte >> (i & 7)) & 1
                 if bit:
                     out.append(data[i])
@@ -1302,6 +1362,7 @@ cdef class Float64Vector(Vector):
         uint64_t[::1] out_buf,
         Py_ssize_t offset=0,
     ) except *:
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t i, j, block
@@ -1328,12 +1389,12 @@ cdef class Float64Vector(Vector):
 
         dst = &out_buf[offset]
 
-        if self._encoding == DRAKEN_ENCODING_DICTIONARY and ptr.data == NULL:
-            _dict_data    = <double*>self._dict_values.data
+        if uv.selection != NULL:
+            _dict_data    = <double*>uv.data
             _dict_bits    = <uint64_t*>_dict_data
-            _dict_codes_h = self._dict_codes
-            _dict_cw_h    = self._dict_code_width
-            _dict_nb_h    = ptr.null_bitmap
+            _dict_codes_h = <uint8_t*>uv.selection
+            _dict_cw_h    = uv.sel_width
+            _dict_nb_h    = uv.validity
             i = 0
             while i < n:
                 block = n - i
@@ -1350,13 +1411,8 @@ cdef class Float64Vector(Vector):
                 i += block
             return
 
-        data = <double*> ptr.data
-        bits = <uint64_t*> data
-        null_bitmap = ptr.null_bitmap
-        has_nulls = null_bitmap != NULL
-
-        if self._has_const:
-            value = NULL_HASH if self._const_is_null else (<uint64_t*>&self._const_value)[0]
+        if uv.data_length == 1:
+            value = NULL_HASH if uv.validity != NULL else (<uint64_t*>uv.data)[0]
             for j in range(FLOAT64_HASH_CHUNK):
                 scratch[j] = value
             i = 0
@@ -1367,6 +1423,11 @@ cdef class Float64Vector(Vector):
                 simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
                 i += block
             return
+
+        data = <double*> ptr.data
+        bits = <uint64_t*> data
+        null_bitmap = ptr.null_bitmap
+        has_nulls = null_bitmap != NULL
 
         if has_nulls:
             i = 0
@@ -1385,6 +1446,7 @@ cdef class Float64Vector(Vector):
 
     cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
         cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef DrakenVector* uv = &self._unified_view
         cdef Py_ssize_t i, j, block
         cdef uint64_t value, is_valid
         cdef uint64_t[FLOAT64_HASH_CHUNK] scratch
@@ -1397,8 +1459,8 @@ cdef class Float64Vector(Vector):
         if n == 0:
             return 0
 
-        if self._has_const:
-            value = NULL_HASH if self._const_is_null else (<uint64_t*>&self._const_value)[0]
+        if uv.data_length == 1:
+            value = NULL_HASH if uv.validity != NULL else (<uint64_t*>uv.data)[0]
             for j in range(FLOAT64_HASH_CHUNK):
                 scratch[j] = value
             i = 0
@@ -1410,11 +1472,11 @@ cdef class Float64Vector(Vector):
                 i += block
             return 0
 
-        # DICTIONARY-only path: ptr.data is NULL, values looked up via codes
-        if ptr.data == NULL and self._dict_codes != NULL:
-            _cd_dict_bits  = <uint64_t*>self._dict_values.data
-            _cd_dict_codes = self._dict_codes
-            _cd_dict_cw    = self._dict_code_width
+        # DICTIONARY-only path
+        if uv.selection != NULL:
+            _cd_dict_bits  = <uint64_t*>uv.data
+            _cd_dict_codes = <uint8_t*>uv.selection
+            _cd_dict_cw    = uv.sel_width
             _cd_null_bitmap = ptr.null_bitmap
             i = 0
             while i < n:
@@ -1455,6 +1517,7 @@ cdef class Float64Vector(Vector):
     cdef bint c_hash_single(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
         """Single-column hash for COUNT(DISTINCT): no prior dest state, no memset."""
         cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef DrakenVector* uv = &self._unified_view
         cdef double* data
         cdef uint64_t* bits
         cdef uint8_t* null_bitmap
@@ -1466,17 +1529,17 @@ cdef class Float64Vector(Vector):
         if n == 0:
             return 0
 
-        if self._has_const:
-            if self._const_is_null:
+        if uv.data_length == 1:
+            if uv.validity != NULL:
                 v = NULL_HASH * MIX_HASH_CONSTANT + 1
             else:
-                v = (<uint64_t*>&self._const_value)[0] * MIX_HASH_CONSTANT + 1
+                v = (<uint64_t*>uv.data)[0] * MIX_HASH_CONSTANT + 1
             v ^= v >> 32
             for i in range(n):
                 out[i] = v
             return 0
 
-        if ptr.data == NULL and self._dict_codes != NULL:
+        if uv.selection != NULL:
             memset(out, 0, <size_t>n * sizeof(uint64_t))
             return self.c_hash_into(out, n)
 
@@ -1503,6 +1566,7 @@ cdef class Float64Vector(Vector):
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for Float64Vector with NaN/Inf handling and clamping."""
+        cdef DrakenVector* uv = self.unified()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef int64_t* dst_base
@@ -1527,10 +1591,10 @@ cdef class Float64Vector(Vector):
         dst_base = &out_buf[0]
         dst = dst_base + offset
 
-        if self._encoding == DRAKEN_ENCODING_DICTIONARY and ptr.data == NULL:
-            _ci_dict_data  = <double*>self._dict_values.data
-            _ci_dict_codes = self._dict_codes
-            _ci_dict_cw    = self._dict_code_width
+        if uv.selection != NULL:
+            _ci_dict_data  = <double*>uv.data
+            _ci_dict_codes = <uint8_t*>uv.selection
+            _ci_dict_cw    = uv.sel_width
             null_bitmap    = ptr.null_bitmap
             for i in range(n):
                 if null_bitmap != NULL and not ((null_bitmap[i >> 3] >> (i & 7)) & 1):
@@ -1554,12 +1618,12 @@ cdef class Float64Vector(Vector):
         null_bitmap = ptr.null_bitmap
         has_nulls = null_bitmap != NULL
 
-        if self._has_const:
+        if uv.data_length == 1:
             for i in range(n):
-                if self._const_is_null:
+                if uv.validity != NULL:
                     dst[i] = NULL_FLAG
                     continue
-                v = self._const_value
+                v = (<double*>uv.data)[0]
                 if isnan(v):
                     dst[i] = NULL_FLAG
                     continue
@@ -1613,10 +1677,11 @@ cdef class Float64Vector(Vector):
                     dst[i] = <int64_t> rv
 
     def __str__(self):
+        cdef DrakenVector* uv = self.unified()
         cdef list vals = []
         cdef Py_ssize_t i, k = min(<Py_ssize_t>buf_length(self.ptr), 10)
-        if self._has_const:
-            vals = [None if self._const_is_null else self._const_value] * k
+        if uv.data_length == 1:
+            vals = [None if uv.validity != NULL else (<double*>uv.data)[0]] * k
             return f"<Float64Vector len={buf_length(self.ptr)} values={vals}>"
         cdef double* data = <double*> self.ptr.data
         for i in range(k):
@@ -1626,15 +1691,16 @@ cdef class Float64Vector(Vector):
 
 cdef Float64Vector _materialize_dict_float64(Float64Vector vec):
     """Expand a dict-only Float64Vector to a dense Float64Vector (no src ptr.data needed)."""
-    if vec._dict_values == NULL or vec._dict_codes == NULL:
+    cdef DrakenVector* src_uv = vec.unified()
+    if vec._dict_values == NULL or src_uv.selection == NULL:
         raise ValueError("Dictionary encoding not properly initialized")
 
     cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
     cdef Float64Vector dense = Float64Vector(<size_t>n)
     cdef double* dst = <double*>dense.ptr.data
-    cdef double* dict_data = <double*>vec._dict_values.data
-    cdef uint8_t* codes = vec._dict_codes
-    cdef uint8_t code_width = vec._dict_code_width
+    cdef double* dict_data = <double*>src_uv.data
+    cdef uint8_t* codes = <uint8_t*>src_uv.selection
+    cdef uint8_t code_width = src_uv.sel_width
     cdef uint8_t* null_bitmap = vec.ptr.null_bitmap
     cdef Py_ssize_t i, dict_size = <Py_ssize_t>vec._dict_values.length
     cdef uint32_t code
@@ -1656,7 +1722,8 @@ cdef Float64Vector _materialize_dict_float64(Float64Vector vec):
             raise MemoryError()
         memcpy(dense.ptr.null_bitmap, null_bitmap, <size_t>nb_bytes)
 
-    _refresh_unified_float64(dense)
+    dense._unified_view.length = <size_t>n
+    dense._unified_view.validity = dense.ptr.null_bitmap
     return dense
 
 
@@ -1697,11 +1764,12 @@ cdef Float64Vector make_float64_dict_only(
             raise MemoryError()
         memcpy(vec.ptr.null_bitmap, valid_bits, <size_t>nb_bytes)
 
+    cdef uint8_t* codes_ptr = NULL
     if code_bytes > 0:
-        vec._dict_codes = <uint8_t*>malloc(<size_t>code_bytes)
-        if vec._dict_codes == NULL:
+        codes_ptr = <uint8_t*>malloc(<size_t>code_bytes)
+        if codes_ptr == NULL:
             raise MemoryError()
-        memcpy(vec._dict_codes, codes, <size_t>code_bytes)
+        memcpy(codes_ptr, codes, <size_t>code_bytes)
 
     dict_values = alloc_var_buffer(DRAKEN_FLOAT64, <size_t>dict_size, <size_t>dict_bytes)
     if dict_bytes > 0:
@@ -1710,19 +1778,13 @@ cdef Float64Vector make_float64_dict_only(
         dict_values.offsets[i] = <int32_t>(i * sizeof(double))
     dict_values.offsets[dict_size] = <int32_t>dict_bytes
     vec._dict_values = dict_values
-
-    vec._dict_code_width = code_width
     vec._dict_ordered = 0
-    vec._encoding = DRAKEN_ENCODING_DICTIONARY
-
-    vec._dict_accessor.codes = vec._dict_codes
-    vec._dict_accessor.code_width = code_width
-    vec._dict_accessor.row_nulls = vec.ptr.null_bitmap
-    vec._dict_accessor.length = <size_t>row_count
-    vec._dict_accessor.dict_values = vec._dict_values
-    vec._dict_accessor.value_type = DRAKEN_FLOAT64
-
-    _refresh_unified_float64(vec)
+    vec._unified_view.selection = codes_ptr
+    vec._unified_view.sel_width = code_width
+    vec._unified_view.data = dict_values.data
+    vec._unified_view.data_length = <size_t>dict_size
+    vec._unified_view.length = <size_t>row_count
+    vec._unified_view.validity = vec.ptr.null_bitmap
     return vec
 
 
@@ -1746,7 +1808,10 @@ cdef Float64Vector from_decoded(
     vec.ptr.data = data
     vec.ptr.null_bitmap = null_bitmap
     vec.owns_data = True
-    _refresh_unified_float64(vec)
+    vec._unified_view.data = data
+    vec._unified_view.data_length = length
+    vec._unified_view.length = length
+    vec._unified_view.validity = null_bitmap
     return vec
 
 
@@ -1813,7 +1878,11 @@ cdef Float64Vector from_arrow(object array):
     else:
         vec.ptr.null_bitmap = NULL
 
-    _refresh_unified_float64(vec)
+    cdef size_t _arr_len = <size_t>len(array)
+    vec._unified_view.data = vec.ptr.data
+    vec._unified_view.data_length = _arr_len
+    vec._unified_view.length = _arr_len
+    vec._unified_view.validity = vec.ptr.null_bitmap
     return vec
 
 
@@ -1836,8 +1905,8 @@ cdef Float64Vector from_dict(const int32_t[::1] codes, const double[::1] diction
         dst[i] = dictionary[code]
 
     _attach_dictionary_storage(vec, codes, dictionary, False)
-
-    _refresh_unified_float64(vec)
+    vec._unified_view.length = <size_t>row_count
+    vec._unified_view.validity = vec.ptr.null_bitmap
     return vec
 
 
@@ -1878,8 +1947,8 @@ cdef Float64Vector from_dict_nullable(
             dst[i] = 0.0
 
     _attach_dictionary_storage(vec, codes, dictionary, False)
-
-    _refresh_unified_float64(vec)
+    vec._unified_view.length = <size_t>row_count
+    vec._unified_view.validity = vec.ptr.null_bitmap
     return vec
 
 
@@ -1946,7 +2015,8 @@ cdef Float64Vector from_packed_dict(
         if expanded_codes != NULL:
             free(expanded_codes)
 
-    _refresh_unified_float64(vec)
+    vec._unified_view.length = <size_t>row_count
+    vec._unified_view.validity = vec.ptr.null_bitmap
     return vec
 
 
@@ -1975,8 +2045,11 @@ cdef Float64Vector from_sequence(double[::1] data):
     vec.ptr.length = <size_t> data.shape[0]
     vec.ptr.data = <void*> &data[0]
     vec.ptr.null_bitmap = NULL
-
-    _refresh_unified_float64(vec)
+    cdef size_t _seq_len = <size_t>data.shape[0]
+    vec._unified_view.data = vec.ptr.data
+    vec._unified_view.data_length = _seq_len
+    vec._unified_view.length = _seq_len
+    vec._unified_view.validity = NULL
     return vec
 
 

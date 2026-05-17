@@ -38,12 +38,12 @@ from draken.core.buffers cimport (
     DrakenMorsel,
     DrakenType,
     DrakenVarBuffer,
+    DrakenVector,
     DRAKEN_ARRAY,
     DRAKEN_BOOL,
     DRAKEN_CONSTANT,
     DRAKEN_DATE32,
     DRAKEN_DICTIONARY,
-    DRAKEN_ENCODING_DICTIONARY,
     DRAKEN_FLOAT32,
     DRAKEN_FLOAT64,
     DRAKEN_INT16,
@@ -791,7 +791,7 @@ cdef class Morsel:
                     src_str = <StringVector> (<Morsel> morsels[j]).ptr.columns[i]
                     if src_str._has_const:
                         str_sources[j] = src_str
-                    elif src_str._encoding == DRAKEN_ENCODING_DICTIONARY and (src_str.ptr == NULL or src_str.ptr.data == NULL):
+                    elif src_str._dict_codes != NULL and (src_str.ptr == NULL or src_str.ptr.data == NULL):
                         str_sources[j] = _materialize_dict_string(src_str)
                     else:
                         str_sources[j] = src_str
@@ -1602,12 +1602,14 @@ cdef class Morsel:
         cdef uint16_t* codes_u16_ptr
         cdef uint32_t* codes_u32_ptr
         cdef int64_t* dict_int_ptr
+        cdef DrakenVector* _iv_uv
 
         # Fast path: dictionary-encoded Int64Vector (e.g. from build_cartesian_indices).
         # Gathers dict values via codes directly into int32 — no intermediate dense vector.
-        if isinstance(indices, Int64Vector) and (<Int64Vector>indices)._encoding == DRAKEN_ENCODING_DICTIONARY:
+        if isinstance(indices, Int64Vector) and (<Int64Vector>indices).unified().selection != NULL:
             idx_vec = <Int64Vector>indices
-            n_indices = <int>idx_vec._dict_accessor.length
+            _iv_uv = idx_vec.unified()
+            n_indices = <int>_iv_uv.length
             if n_indices == 0:
                 self._empty_inplace()
                 return
@@ -1617,18 +1619,18 @@ cdef class Morsel:
                 raise MemoryError()
             free_indices = True
 
-            dict_int_ptr = <int64_t*>idx_vec._dict_accessor.dict_values.data
-            cw = idx_vec._dict_accessor.code_width
+            dict_int_ptr = <int64_t*>_iv_uv.data
+            cw = _iv_uv.sel_width
             if cw == 1:
-                codes_u8_ptr = idx_vec._dict_accessor.codes
+                codes_u8_ptr = <uint8_t*>_iv_uv.selection
                 for i in range(n_indices):
                     indices_ptr[i] = <int32_t>dict_int_ptr[codes_u8_ptr[i]]
             elif cw == 2:
-                codes_u16_ptr = <uint16_t*>idx_vec._dict_accessor.codes
+                codes_u16_ptr = <uint16_t*>_iv_uv.selection
                 for i in range(n_indices):
                     indices_ptr[i] = <int32_t>dict_int_ptr[codes_u16_ptr[i]]
             else:
-                codes_u32_ptr = <uint32_t*>idx_vec._dict_accessor.codes
+                codes_u32_ptr = <uint32_t*>_iv_uv.selection
                 for i in range(n_indices):
                     indices_ptr[i] = <int32_t>dict_int_ptr[codes_u32_ptr[i]]
 
