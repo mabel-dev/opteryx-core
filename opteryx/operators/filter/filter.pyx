@@ -27,7 +27,7 @@ from opteryx.compiled.expression.compiled_expression import lower as _lower_expr
 from opteryx.expression import NodeType
 from opteryx.expression import format_expression
 from opteryx.expression import get_all_nodes_of_type
-from opteryx.expression.evaluator import execute_bytecode as _execute_bytecode
+_execute_bytecode = execute_bytecode  # in scope from _operators evaluator includes
 from opteryx.models import QueryProperties
 
 from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode

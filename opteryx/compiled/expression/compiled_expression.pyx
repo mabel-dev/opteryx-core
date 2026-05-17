@@ -178,6 +178,15 @@ cdef Py_ssize_t _linearize(
     cdef dict op_codes
     cdef int op_code_val
     cdef int flags
+    # Variables for new native opcodes
+    cdef object between_val, lower_obj, upper_obj
+    cdef bint lower_incl, upper_incl
+    cdef object bin_left_sc, bin_right_sc, bin_left_type, bin_right_type, bin_op_str
+    cdef object unary_op_str
+    cdef object func_val, func_ref_obj, func_py_node, func_ref_meta, callable_obj
+    cdef object extr_op_str, extr_key
+    cdef object cast_target_type, cast_unit, cast_params, cast_kernel, cast_py_node
+    cdef object src
 
     # ------------------------------------------------------------------
     # NT_NESTED — transparent, no instruction emitted
@@ -333,12 +342,172 @@ cdef Py_ssize_t _linearize(
         return sub_depth - 1
 
     # ------------------------------------------------------------------
-    # Everything else — LEGACY: defer the whole subtree to _eval_value.
-    # The legacy path is the GIL-required slow lane that handles FUNCTION /
-    # CASE / BETWEEN / BINARY_OPERATOR / UNARY_OPERATOR / CAST /
-    # EXTRACTION_OPERATOR until native opcodes cover them.
+    # NT_BETWEEN — compile left operand, store bounds and inclusivity flags
+    # at compile time; draken_between is called at execution.
     # ------------------------------------------------------------------
-    cdef object src = <object>node.source_node
+    if nt == _NT_BETWEEN:
+        if node.left == NULL:
+            raise ValueError("compiled_expression: BETWEEN missing left operand")
+        sub_depth = _linearize(node.left, bc, depth)
+
+        between_val = <object>node.value
+        lower_incl = between_val[0]
+        upper_incl = between_val[1]
+        lower_obj = <object>node.right.value if node.right != NULL else None
+        upper_obj = <object>node.centre.value if node.centre != NULL else None
+
+        slot = bc._push_instr()
+        slot.opcode = BC_BETWEEN
+        slot.op_code = 1 if lower_incl else 0
+        slot.bool_value = 1 if upper_incl else 0
+        bc._hold(lower_obj)
+        bc._hold(upper_obj)
+        slot.literal_obj = <PyObject*>lower_obj if lower_obj is not None else NULL
+        slot.literal_obj2 = <PyObject*>upper_obj if upper_obj is not None else NULL
+        return sub_depth   # pop 1, push 1 — net 0
+
+    # ------------------------------------------------------------------
+    # NT_BINARY_OPERATOR — compile both operands, store op string and
+    # operand types for temporal coercion at execution.
+    # ------------------------------------------------------------------
+    if nt == _NT_BINARY_OPERATOR:
+        if node.left == NULL or node.right == NULL:
+            raise ValueError("compiled_expression: BINARY_OPERATOR missing operand")
+        bin_left_sc = <object>node.left.schema_column if node.left.schema_column != NULL else None
+        bin_right_sc = <object>node.right.schema_column if node.right.schema_column != NULL else None
+        bin_left_type = getattr(bin_left_sc, "type", None) if bin_left_sc is not None else None
+        bin_right_type = getattr(bin_right_sc, "type", None) if bin_right_sc is not None else None
+        bin_op_str = <object>node.value
+
+        sub_depth = _linearize(node.left, bc, depth)
+        sub_depth = _linearize(node.right, bc, sub_depth)
+
+        slot = bc._push_instr()
+        slot.opcode = BC_BINARY_OP
+        bc._hold(bin_op_str)
+        slot.compare_op_str = <PyObject*>bin_op_str
+        if bin_left_type is not None:
+            bc._hold(bin_left_type)
+            slot.left_orso_type = <PyObject*>bin_left_type
+        if bin_right_type is not None:
+            bc._hold(bin_right_type)
+            slot.right_orso_type = <PyObject*>bin_right_type
+        return sub_depth - 1   # pop 2, push 1
+
+    # ------------------------------------------------------------------
+    # NT_UNARY_OPERATOR — compile centre operand, store op string.
+    # ------------------------------------------------------------------
+    if nt == _NT_UNARY_OPERATOR:
+        if node.centre == NULL:
+            raise ValueError("compiled_expression: UNARY_OPERATOR missing centre operand")
+        unary_op_str = <object>node.value
+        sub_depth = _linearize(node.centre, bc, depth)
+        slot = bc._push_instr()
+        slot.opcode = BC_UNARY_OP
+        bc._hold(unary_op_str)
+        slot.compare_op_str = <PyObject*>unary_op_str
+        return sub_depth   # pop 1, push 1 — net 0
+
+    # ------------------------------------------------------------------
+    # NT_FUNCTION — compile each parameter, store callable and arity.
+    # _PASSTHRU is transparent: just compile the single parameter.
+    # ------------------------------------------------------------------
+    if nt == _NT_FUNCTION:
+        func_val = <object>node.value
+        if func_val == "_PASSTHRU":
+            if node.parameters.size() == 0:
+                raise ValueError("compiled_expression: _PASSTHRU FUNCTION has no parameters")
+            return _linearize(node.parameters[0], bc, depth)
+
+        n = <Py_ssize_t>node.parameters.size()
+        func_ref_obj = <object>node.source_node
+        func_py_node = func_ref_obj
+        func_ref_meta = getattr(func_py_node, "function_ref", None)
+        if func_ref_meta is None:
+            raise ValueError(
+                f"compiled_expression: FUNCTION '{func_val}' has no function_ref — not bound"
+            )
+        callable_obj = func_ref_meta.selected_overload.kernel.callable_ref
+
+        sub_depth = depth
+        for i in range(n):
+            if node.parameters[i] == NULL:
+                raise ValueError("compiled_expression: FUNCTION parameter NULL")
+            sub_depth = _linearize(node.parameters[i], bc, sub_depth)
+
+        slot = bc._push_instr()
+        slot.opcode = BC_FUNCTION
+        slot.arity = <int>n
+        bc._hold(callable_obj)
+        slot.callable_ref = <PyObject*>callable_obj
+        if n == 0:
+            return depth + 1
+        return sub_depth - n + 1   # pop n, push 1
+
+    # ------------------------------------------------------------------
+    # NT_CAST — compile source expression, pre-resolve cast closure once.
+    # The cast() factory is called at compile time; the returned callable
+    # is stored as callable_ref and invoked per-morsel in the executor.
+    # ------------------------------------------------------------------
+    if nt == _NT_CAST:
+        if node.left == NULL:
+            raise ValueError("compiled_expression: CAST missing source operand")
+        sub_depth = _linearize(node.left, bc, depth)
+
+        cast_py_node = <object>node.source_node
+        cast_target_type = cast_py_node.value
+        if cast_target_type.startswith("TRY_"):
+            cast_target_type = cast_target_type[4:]
+
+        cast_unit = None
+        _unit_map = {
+            "_TIMESTAMP_NS": ("TIMESTAMP", "ns"),
+            "_TIMESTAMP_MS": ("TIMESTAMP", "ms"),
+            "_TIMESTAMP_S":  ("TIMESTAMP", "s"),
+            "_TIMESTAMP_US": ("TIMESTAMP", "us"),
+            "_TIMESTAMP_DAYS": ("TIMESTAMP", "days"),
+        }
+        if cast_target_type in _unit_map:
+            cast_target_type, cast_unit = _unit_map[cast_target_type]
+
+        cast_params = tuple(
+            p.value for p in (cast_py_node.parameters or [])
+        )
+
+        from opteryx.expression.casts import cast as _cast_factory
+        cast_kernel = _cast_factory(None, cast_target_type, cast_params, unit=cast_unit)
+
+        slot = bc._push_instr()
+        slot.opcode = BC_CAST
+        bc._hold(cast_kernel)
+        slot.callable_ref = <PyObject*>cast_kernel
+        return sub_depth   # pop 1, push 1 — net 0
+
+    # ------------------------------------------------------------------
+    # NT_EXTRACTION_OPERATOR — compile left operand, store op and key.
+    # Key (node.right.value) is always a literal resolved at compile time.
+    # ------------------------------------------------------------------
+    if nt == _NT_EXTRACTION_OPERATOR:
+        if node.left == NULL:
+            raise ValueError("compiled_expression: EXTRACTION_OPERATOR missing left operand")
+        extr_op_str = <object>node.value
+        extr_key = <object>node.right.value if node.right != NULL else None
+
+        sub_depth = _linearize(node.left, bc, depth)
+        slot = bc._push_instr()
+        slot.opcode = BC_EXTRACTION
+        bc._hold(extr_op_str)
+        bc._hold(extr_key)
+        slot.compare_op_str = <PyObject*>extr_op_str
+        slot.literal_obj = <PyObject*>extr_key if extr_key is not None else NULL
+        return sub_depth   # pop 1, push 1 — net 0
+
+    # ------------------------------------------------------------------
+    # Everything else — LEGACY: defer the whole subtree to _eval_value.
+    # The legacy path is the GIL-required slow lane that handles CASE /
+    # CAST until native opcodes cover them.
+    # ------------------------------------------------------------------
+    src = <object>node.source_node
     slot = bc._push_instr()
     slot.opcode = BC_LEGACY
     bc._hold(src)
@@ -417,10 +586,25 @@ def lower(node):
     return handle
 
 
+_PURE_BITMAP_OPCODES = frozenset({
+    BC_LOAD_COL, BC_LOAD_LIT_BOOL,
+    BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF,
+})
+
 def build_bytecode(CompiledExpressionHandle handle):
     """Linearise the lowered tree into a typed CompiledBytecode container."""
     if handle._root == NULL:
         raise ValueError("build_bytecode: handle has no lowered root")
     cdef CompiledBytecode bc = CompiledBytecode()
     _linearize(handle._root, bc, 0)
+
+    # Scan opcodes: is_pure_bitmap is True when every instruction is GIL-free.
+    # BC_LOAD_COL is included; the runtime pre-pass verifies the column type.
+    cdef Py_ssize_t k
+    bc.is_pure_bitmap = True
+    for k in range(bc.count):
+        if bc.instrs[k].opcode not in _PURE_BITMAP_OPCODES:
+            bc.is_pure_bitmap = False
+            break
+
     return bc

@@ -27,7 +27,7 @@ from collections.abc import Iterable
 
 from draken.encoding import DRAKEN_ENCODING_CONSTANT
 from opteryx.expression import NodeType
-from opteryx.expression.evaluator import evaluate_and_append_draken
+# evaluate_and_append_draken in scope from _operators evaluator includes
 from opteryx.models import QueryProperties
 
 # BasePlanNode in scope via textual include from _operators.pyx.

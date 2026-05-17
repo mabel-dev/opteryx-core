@@ -1006,13 +1006,9 @@ extensions = [
     #
     # Built as C++ because evaluation.pyx cimports CompiledExpression from the
     # opteryx/compiled/expression/ C++ arena header.
-    Extension(
-        "opteryx.expression.evaluator._impl",
-        sources=["opteryx/expression/evaluator/_impl.pyx"],
-        include_dirs=include_dirs + ["src/cpp"],
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
+    # opteryx.expression.evaluator._impl has been merged into _operators.
+    # All evaluator leaf .pyx files are now textually included by _operators.pyx
+    # so operators can call bytecode VM functions directly at C level.
     *[
         Extension(
             _name,
@@ -1130,10 +1126,14 @@ extensions = [
         "opteryx.operators._operators",
         sources=[
             "opteryx/operators/_operators.pyx",
+            "opteryx/expression/evaluator/bytecode_worker.cpp",
             "src/cpp/hllpp.cpp",
             "third_party/tdigest-c/src/tdigest_cpp.cpp",
         ],
-        include_dirs=include_dirs + ["opteryx/operators/aggregate"],
+        include_dirs=include_dirs + [
+            "opteryx/operators/aggregate",
+            "opteryx/expression/evaluator",  # bytecode_worker.h, bitmap_worker_pool.h
+        ],
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA,

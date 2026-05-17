@@ -143,6 +143,7 @@ def _build_registry() -> OperatorRegistry:
     """Explicitly register every operator with its metadata. No magic."""
     # Local imports to avoid circular dependencies at module load time.
     from opteryx.operators.aggregate import UngroupedAggregateNode
+    from opteryx.operators.asof_join import AsofJoinNode
     from opteryx.operators.cross_join import CrossJoinNode
     from opteryx.operators.distinct import DistinctNode
     from opteryx.operators.hashed_inner_join import DrakenInnerJoinNode
@@ -269,6 +270,13 @@ def _build_registry() -> OperatorRegistry:
     )
 
     # -- Join operators -------------------------------------------------------
+    r.register(
+        AsofJoinNode,
+        name="ASOF Join",
+        category=OperatorCategory.JOIN,
+        is_join=True,
+        is_pipeline_breaking=True,
+    )
     r.register(
         DrakenInnerJoinNode,
         name="Inner Join",

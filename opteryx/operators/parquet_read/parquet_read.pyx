@@ -57,6 +57,17 @@ from draken.vectors.date32_vector import from_int64_vector as _int64_to_date32
 from draken.vectors.timestamp_vector import from_int64_vector as _int64_to_timestamp
 # Int64Vector is already cimported by the umbrella unit (_operators.pyx).
 
+# Predicate evaluation is the bytecode VM only — no alternative paths. The
+# compiler lowers the predicate AST to a typed CompiledBytecode at bind time;
+# the executor iterates a C struct array with stack-based dispatch.
+#
+# execute_bytecode is included into this compilation unit via the umbrella
+# include of evaluator/evaluation.pyx in _operators.pyx. It is cpdef, so the
+# call site below dispatches at C level with no Python function boundary.
+from opteryx.compiled.expression.compiled_expression import build_bytecode as _build_bytecode
+from opteryx.compiled.expression.compiled_expression import lower as _lower_expr
+from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode
+
 # EOS sentinel in scope as _EOS_SENTINEL via the umbrella unit.
 from opteryx import config
 
@@ -133,6 +144,149 @@ cdef class ScanReadings:
     cdef public int64_t parquet_rows_after_filter
     cdef public double  parquet_filter_selectivity
     cdef public int64_t empty_datasets
+
+    # ── Mutation API ─────────────────────────────────────────────────────────
+    # All accumulation goes through the methods below rather than direct field
+    # writes. This narrows the mutation surface to one class for future thread
+    # safety (best-effort under concurrent writers, per the telemetry contract).
+
+    cpdef int64_t merge_row_group_metadata(self, dict row_group):
+        """Consume __*__ telemetry keys from `row_group`. Returns __bytes_fetched__.
+
+        bytes_fetched is reported back to the caller because it accumulates on
+        BasePlanNode.bytes_in, not on ScanReadings. All other metadata fields
+        are absorbed here.
+        """
+        cdef int64_t val
+        cdef int64_t bytes_fetched = row_group.pop("__bytes_fetched__", 0)
+        cdef object scan_strategy
+
+        # Additive metrics
+        self.parquet_row_groups_pruned        = row_group.pop("__row_groups_pruned__", 0)
+        self.parquet_footer_bytes            += row_group.pop("__footer_bytes__", 0)
+        self.parquet_range_request_count     += row_group.pop("__range_request_count__", 0)
+        self.parquet_range_bytes_requested   += row_group.pop("__range_bytes_requested__", 0)
+        self.time_parquet_read_ranges_ns     += row_group.pop("__time_read_ranges_ns__", 0)
+        self.time_parquet_decode_columns_ns  += row_group.pop("__time_decode_columns_ns__", 0)
+        self.time_parquet_task_queue_wait_ns += row_group.pop("__task_queue_wait_ns__", 0)
+        self.time_parquet_task_total_ns      += row_group.pop("__task_total_ns__", 0)
+        self.time_parquet_footer_fetch_ns    += row_group.pop("__footer_fetch_ns__", 0)
+        self.time_parquet_scheduler_wait_ns  += row_group.pop("__scheduler_wait_ns__", 0)
+        self.time_parquet_rowgroup_completion_ns += row_group.pop("__rowgroup_completion_latency_ns__", 0)
+        self.time_parquet_emit_wait_ns       += row_group.pop("__emit_wait_ns__", 0)
+        self.time_parquet_scheduler_empty_wait_ns += row_group.pop("__scheduler_empty_wait_ns__", 0)
+        self.parquet_scheduler_empty_wait_events  += row_group.pop("__scheduler_empty_wait_events__", 0)
+        self.io_ring_producer_full_wait_ns   += row_group.pop("__io_ring_producer_full_wait_ns__", 0)
+        self.io_ring_producer_full_wait_events += row_group.pop("__io_ring_producer_full_wait_events__", 0)
+        self.io_ring_consumer_empty_wait_ns  += row_group.pop("__io_ring_consumer_empty_wait_ns__", 0)
+        self.io_ring_consumer_empty_wait_events += row_group.pop("__io_ring_consumer_empty_wait_events__", 0)
+        self.io_transfer_emit_wait_ns        += row_group.pop("__io_transfer_emit_wait_ns__", 0)
+        self.io_rowgroup_slice_count         += row_group.pop("__io_rowgroup_slice_count__", 0)
+        self.io_deserialize_ns               += row_group.pop("__io_deserialize_ns__", 0)
+        self.io_serialize_ns                 += row_group.pop("__io_serialize_ns__", 0)
+
+        # Peak/max metrics
+        val = row_group.pop("__rowgroup_peak_in_flight__", 0)
+        if val > self.parquet_rowgroup_peak_in_flight_max:
+            self.parquet_rowgroup_peak_in_flight_max = val
+        val = row_group.pop("__ranges_in_flight_peak__", 0)
+        if val > self.parquet_ranges_in_flight_peak:
+            self.parquet_ranges_in_flight_peak = val
+        val = row_group.pop("__active_files_peak__", 0)
+        if val > self.parquet_active_files_peak:
+            self.parquet_active_files_peak = val
+        val = row_group.pop("__active_rowgroups_peak__", 0)
+        if val > self.parquet_active_rowgroups_peak:
+            self.parquet_active_rowgroups_peak = val
+        val = row_group.pop("__rowgroups_in_flight_cap__", 0)
+        if val > self.parquet_rowgroups_in_flight_cap:
+            self.parquet_rowgroups_in_flight_cap = val
+        val = row_group.pop("__emit_queue_depth_at_ready__", 0)
+        if val > self.parquet_emit_queue_depth_at_ready_max:
+            self.parquet_emit_queue_depth_at_ready_max = val
+        val = row_group.pop("__io_ring_slot_bytes__", 0)
+        if val > self.io_ring_slot_bytes:
+            self.io_ring_slot_bytes = val
+        val = row_group.pop("__io_ring_slot_count__", 0)
+        if val > self.io_ring_slot_count:
+            self.io_ring_slot_count = val
+        val = row_group.pop("__io_ring_total_bytes__", 0)
+        if val > self.io_ring_total_bytes:
+            self.io_ring_total_bytes = val
+        val = row_group.pop("__io_transfer_ready_backlog_peak__", 0)
+        if val > self.io_transfer_ready_backlog_peak:
+            self.io_transfer_ready_backlog_peak = val
+        val = row_group.pop("__io_transfer_fragment_count_p50__", 0)
+        if val > self.io_transfer_fragment_count_p50:
+            self.io_transfer_fragment_count_p50 = val
+        val = row_group.pop("__io_transfer_fragment_count_p95__", 0)
+        if val > self.io_transfer_fragment_count_p95:
+            self.io_transfer_fragment_count_p95 = val
+        val = row_group.pop("__io_transfer_fragment_count_max__", 0)
+        if val > self.io_transfer_fragment_count_max:
+            self.io_transfer_fragment_count_max = val
+        val = row_group.pop("__io_transfer_payload_bytes_p50__", 0)
+        if val > self.io_transfer_payload_bytes_p50:
+            self.io_transfer_payload_bytes_p50 = val
+        val = row_group.pop("__io_transfer_payload_bytes_p95__", 0)
+        if val > self.io_transfer_payload_bytes_p95:
+            self.io_transfer_payload_bytes_p95 = val
+        val = row_group.pop("__io_transfer_payload_bytes_max__", 0)
+        if val > self.io_transfer_payload_bytes_max:
+            self.io_transfer_payload_bytes_max = val
+
+        # Scan strategy: set once
+        scan_strategy = row_group.pop("__parquet_scan_strategy__", None)
+        if scan_strategy and self.parquet_scan_strategy is None:
+            self.parquet_scan_strategy = scan_strategy
+
+        # Time to first row group: keep minimum non-zero
+        val = row_group.pop("__time_to_first_rowgroup_ns__", 0)
+        if val and (self.time_to_first_rowgroup_ns == 0 or val < self.time_to_first_rowgroup_ns):
+            self.time_to_first_rowgroup_ns = val
+
+        # Drain any remaining __*__ keys so downstream sees only data columns.
+        for key in list(row_group):
+            if key.startswith("__"):
+                row_group.pop(key, None)
+
+        return bytes_fetched
+
+    cpdef void record_pass1_evaluated(self):
+        self.parquet_latmat_pass1_row_groups += 1
+
+    cpdef void record_pass1_skipped(self):
+        self.parquet_latmat_skipped_row_groups += 1
+        self.row_groups_read += 1
+
+    cpdef void record_pass2_decoded(self, int64_t bytes_fetched):
+        self.parquet_latmat_pass2_bytes += bytes_fetched
+        self.parquet_latmat_pass2_row_groups += 1
+
+    cpdef void record_row_group_complete(self, int64_t rows_in_morsel):
+        self.rows_seen += rows_in_morsel
+        self.row_groups_read += 1
+
+    cpdef void record_morsel_yielded(
+        self,
+        int64_t num_rows,
+        int64_t num_bytes,
+        int64_t files_seen_count,
+    ):
+        self.blobs_read = files_seen_count
+        self.rows_read += num_rows
+        self.bytes_processed += num_bytes
+
+    cpdef void record_decode_time(self, int64_t ns):
+        self.time_decoding_blobs += ns
+
+    cpdef void record_filter_totals(self, int64_t rows_before, int64_t rows_after):
+        self.parquet_rows_before_filter += rows_before
+        self.parquet_rows_after_filter += rows_after
+        if self.parquet_rows_before_filter > 0:
+            self.parquet_filter_selectivity = (
+                <double>self.parquet_rows_after_filter / <double>self.parquet_rows_before_filter
+            )
 
     cpdef void flush_into(self, object readings):
         readings["parquet_row_groups_pruned"]          = self.parquet_row_groups_pruned
@@ -255,20 +409,21 @@ cdef _Pass1Result _evaluate_pass1_row_group(
     object path,
     object rg_idx,
     dict row_group,
-    object predicate_root,
-    object predicate_function_nodes,
+    CompiledBytecode compiled_predicate,
     dict pass1_name_to_identity,
     dict decimal_col_map,
     set date_col_set,
     set timestamp_col_set,
-    object evaluate_and_append_draken,
-    object evaluate_draken,
 ):
     """Pure pass-1 evaluation for a single row group.
 
     Reads only from its arguments; performs no mutation on `self`, on shared
     work-lists, or on telemetry. The caller threads the outcome into shared
     state via `_record_pass1_survivor` / `_record_pass1_skip`.
+
+    Predicate evaluation goes through the bytecode VM — the sole evaluation
+    engine. Function calls inside predicates compile to BC_FUNCTION opcodes,
+    so there is no separate "append function columns first" preamble.
     """
     cdef _Pass1Result result = _Pass1Result()
     result.path = path
@@ -288,9 +443,7 @@ cdef _Pass1Result _evaluate_pass1_row_group(
     p1_morsel = Morsel.from_vectors(p1_identity_names, p1_vectors)
     result.rows_before_filter = p1_morsel.num_rows
 
-    if predicate_function_nodes:
-        p1_morsel = evaluate_and_append_draken(predicate_function_nodes, p1_morsel)
-    mask = evaluate_draken(predicate_root, p1_morsel)
+    mask = execute_bytecode(compiled_predicate, p1_morsel)
 
     if not mask.any():
         return result
@@ -311,8 +464,7 @@ cdef class ParquetReadNode(ReaderNode):
     """
 
     cdef public set _parquet_files_seen
-    cdef public object _predicate_function_nodes_cached
-    cdef public object _compiled_predicate_dispatcher
+    cdef CompiledBytecode _compiled_predicate
     cdef public object _planner_name_to_identity_cached
     cdef public object _filter_column_names_cached
     cdef public ScanReadings scan_readings
@@ -321,175 +473,10 @@ cdef class ParquetReadNode(ReaderNode):
         ReaderNode.__init__(self, properties=properties, **parameters)
         self.predicates = parameters.get("predicates")
         self._parquet_files_seen = set()
-        self._predicate_function_nodes_cached = None  # Cache to avoid AST walking per row group
-        self._compiled_predicate_dispatcher = None  # Phase 2: Compiled predicate dispatcher
+        self._compiled_predicate = None  # CompiledBytecode, bound once at execute() time
         self._planner_name_to_identity_cached = None  # Cache name-to-identity mapping
         self._filter_column_names_cached = None  # Cache filter column names extraction
         self.scan_readings = ScanReadings()
-
-    def _analyze_predicate_type(self, object predicate_root) -> tuple:
-        """Analyze predicate structure to determine if it can be compiled.
-
-        Returns a descriptor tuple:
-        - ("int64_scalar", identity_bytes, operator, scalar_value) for simple int64 comparisons
-        - ("float64_scalar", identity_bytes, operator, scalar_value) for float comparisons
-        - ("complex_expression", predicate_root) for complex/unsupported predicates
-        - None if unable to analyze
-
-        Predicate trees are built from Node instances (there is no separate
-        Identifier class); discriminate via `node_type`, not `__class__.__name__`
-        or `hasattr`. The column reference returned is `schema_column.identity`
-        — the bytes key used by Morsel.column — not the surface SQL name.
-        """
-        if predicate_root is None:
-            return None
-
-        if predicate_root.node_type != NodeType.COMPARISON_OPERATOR:
-            return ("complex_expression", predicate_root)
-
-        left = predicate_root.left
-        right = predicate_root.right
-        operator = predicate_root.operator
-        if left is None or right is None or operator is None:
-            return ("complex_expression", predicate_root)
-
-        left_type = left.node_type
-        right_type = right.node_type
-
-        # Pattern: Column <op> Literal
-        if left_type == NodeType.IDENTIFIER and right_type == NodeType.LITERAL:
-            return self._classify_scalar_compare(left, operator, right.value)
-
-        # Pattern: Literal <op> Column → commute operator and classify
-        if right_type == NodeType.IDENTIFIER and left_type == NodeType.LITERAL:
-            commuted_op = self._commute_operator(operator)
-            return self._classify_scalar_compare(right, commuted_op, left.value)
-
-        return ("complex_expression", predicate_root)
-
-    @staticmethod
-    def _classify_scalar_compare(identifier, operator, value):
-        """Classify a (column, op, literal) triple for the typed dispatcher.
-
-        Only fires for INTEGER / DOUBLE columns paired with a numeric literal.
-        Excludes Python `bool` (which is a subclass of `int`) since boolean
-        comparisons against an integer column would silently coerce.
-        """
-        schema_column = identifier.schema_column
-        if schema_column is None:
-            return ("complex_expression", None)
-
-        identity = schema_column.identity
-        if isinstance(identity, str):
-            identity = identity.encode("utf-8")
-        if not isinstance(identity, (bytes, bytearray)):
-            return ("complex_expression", None)
-
-        col_type = schema_column.type
-        if isinstance(value, bool):
-            return ("complex_expression", None)
-        if col_type == OrsoTypes.INTEGER and isinstance(value, int):
-            return ("int64_scalar", bytes(identity), operator, value)
-        if col_type == OrsoTypes.DOUBLE and isinstance(value, (int, float)):
-            return ("float64_scalar", bytes(identity), operator, float(value))
-        return ("complex_expression", None)
-
-    @staticmethod
-    def _commute_operator(str op) -> str:
-        """Commute comparison operators (e.g., a < b becomes b > a)."""
-        # Previously a set literal accessed as a dict; that bug made the
-        # whole compiled-dispatcher path unreachable.
-        commute_map = {
-            "Lt": "Gt",
-            "Gt": "Lt",
-            "LtEq": "GtEq",
-            "GtEq": "LtEq",
-            "Eq": "Eq",
-            "NotEq": "NotEq",
-        }
-        return commute_map.get(op, op)
-
-    def _compile_predicate_dispatcher(self, object predicate_root):
-        """Generate a specialized predicate evaluation function.
-
-        Returns a callable: morsel -> BoolVector mask
-
-        This moves the dispatch decision from per-row-group evaluation time to
-        initialization time, eliminating branches from the hot loop.
-        """
-        if predicate_root is None:
-            # No predicate, return identity mask
-            return None
-
-        pred_type = self._analyze_predicate_type(predicate_root)
-
-        if pred_type is None:
-            # Can't analyze, fall back to generic
-            return None
-
-        if pred_type[0] == "int64_scalar":
-            # Compile specialized dispatcher for int64 <op> scalar
-            column_identity, operator, scalar_value = pred_type[1:4]
-            return self._compile_int64_scalar_dispatcher(column_identity, operator, scalar_value)
-        elif pred_type[0] == "float64_scalar":
-            # Compile specialized dispatcher for float64 <op> scalar
-            column_identity, operator, scalar_value = pred_type[1:4]
-            return self._compile_float64_scalar_dispatcher(column_identity, operator, scalar_value)
-
-        # Fall back to None for generic path
-        return None
-
-    @staticmethod
-    def _compile_int64_scalar_dispatcher(bytes column_identity, str operator, long scalar_value):
-        """Generate specialized function for: int64_column <op> constant
-
-        Example for Q02 (AdvEngineID <> 0):
-          Generated function calls vec.not_equals(0) directly, no dispatch.
-
-        The closure captures the planner identity (bytes) — the same key
-        Morsel.column uses internally — so the per-row-group lookup is a
-        single hash-table probe with no name fallback scan.
-        """
-        op_map = {
-            "Eq": "equals",
-            "NotEq": "not_equals",
-            "Lt": "less_than",
-            "Gt": "greater_than",
-            "LtEq": "less_than_or_equals",
-            "GtEq": "greater_than_or_equals",
-        }
-
-        method_name = op_map.get(operator)
-        if method_name is None:
-            return None
-
-        def specialized_dispatcher(morsel):
-            vec = morsel.column(column_identity)
-            return getattr(vec, method_name)(scalar_value)
-
-        return specialized_dispatcher
-
-    @staticmethod
-    def _compile_float64_scalar_dispatcher(bytes column_identity, str operator, double scalar_value):
-        """Generate specialized function for: float64_column <op> constant"""
-        op_map = {
-            "Eq": "equals",
-            "NotEq": "not_equals",
-            "Lt": "less_than",
-            "Gt": "greater_than",
-            "LtEq": "less_than_or_equals",
-            "GtEq": "greater_than_or_equals",
-        }
-
-        method_name = op_map.get(operator)
-        if method_name is None:
-            return None
-
-        def specialized_dispatcher(morsel):
-            vec = morsel.column(column_identity)
-            return getattr(vec, method_name)(scalar_value)
-
-        return specialized_dispatcher
 
     @property
     def name(self) -> str:  # pragma: no cover
@@ -598,35 +585,18 @@ cdef class ParquetReadNode(ReaderNode):
             )
         return root
 
-    def _apply_predicates_to_morsel(self, morsel: Morsel, predicate_root):
-        """Apply a predicate tree to a Draken Morsel without Arrow round-trip.
+    def _apply_predicates_to_morsel(self, morsel: Morsel):
+        """Apply the compiled predicate to a Draken Morsel.
 
-        Evaluates the expression tree natively over Draken vectors and applies
-        the resulting BoolVector mask via Morsel.filter_mask.  The eval_schema
-        pre-cast is no longer needed: the Draken evaluator handles Date32Vector
-        integer encoding directly.
+        All evaluation goes through the bytecode VM — the sole evaluation
+        engine. The predicate is compiled once at execute() time; this method
+        just executes it.
         """
-        if predicate_root is None:
+        if self._compiled_predicate is None:
             return morsel, morsel.num_rows, morsel.num_rows
 
-        from opteryx.expression.evaluator import evaluate_and_append_draken
-        from opteryx.expression.evaluator import evaluate_draken
-
         rows_before_filter = morsel.num_rows
-
-        # >> Use cached function nodes instead of recalculating (AST walk is O(n) in predicate size)
-        # Pre-computed in execute() to avoid 281 redundant AST walks for ClickBench queries
-        function_nodes = self._predicate_function_nodes_cached or []
-        if function_nodes:
-            morsel = evaluate_and_append_draken(function_nodes, morsel)
-
-        # >> Phase 2: Use compiled predicate dispatcher if available (no dynamic dispatch!)
-        # Compilation happens once at init, then reused for all 281 row groups
-        if self._compiled_predicate_dispatcher:
-            mask = self._compiled_predicate_dispatcher(morsel)
-        else:
-            mask = evaluate_draken(predicate_root, morsel)
-
+        mask = execute_bytecode(self._compiled_predicate, morsel)
         filtered = morsel.filter_mask(mask)
         if filtered.num_rows == 0:
             return morsel.slice(0, 0), rows_before_filter, 0
@@ -647,127 +617,46 @@ cdef class ParquetReadNode(ReaderNode):
         self.scan_readings.blobs_seen += 1
         return True
 
+    cdef void _record_morsel_emitted(self, object morsel):
+        """Apply per-emit accounting to both scan_readings and the telemetry mirror.
+
+        Keeps the dual-write pattern in one place so callers don't repeat the
+        six-line ScanReadings + telemetry update before every `yield`.
+        """
+        cdef int64_t num_rows = morsel.num_rows
+        cdef int64_t num_bytes = morsel.nbytes
+        cdef int64_t files_seen = len(self._parquet_files_seen)
+        self.scan_readings.record_morsel_yielded(num_rows, num_bytes, files_seen)
+        self.telemetry.blobs_read = files_seen
+        self.telemetry.rows_read += num_rows
+        self.telemetry.bytes_processed += num_bytes
+
     cdef void _record_pass1_survivor(self, _Pass1Result r, list pass2_work, dict p1_cache):
         """Funnel a surviving pass-1 row group into shared work-state.
 
         All mutation of `pass2_work`, `p1_cache`, and pass-1 telemetry happens
         here so the evaluator function can stay pure.
         """
-        self.scan_readings.parquet_latmat_pass1_row_groups += 1
+        self.scan_readings.record_pass1_evaluated()
         p1_cache[(r.path, r.rg_idx)] = (r.p1_filtered, r.p1_identity_names)
         pass2_work.append((r.path, r.rg_idx, r.mask_bytes))
 
     cdef void _record_pass1_skip(self, _Pass1Result r):
         """Funnel a pruned (mask-all-false) pass-1 row group into shared state."""
-        self.scan_readings.parquet_latmat_pass1_row_groups += 1
-        self.scan_readings.parquet_latmat_skipped_row_groups += 1
-        self.scan_readings.row_groups_read += 1
+        self.scan_readings.record_pass1_evaluated()
+        self.scan_readings.record_pass1_skipped()
         self._mark_file_seen(r.path)
 
     cdef tuple _extract_row_group_metadata(self, dict row_group):
-        """Extract and accumulate per-row-group pipeline metadata into scan_readings.
+        """Pop (path, rg_idx) and funnel the __*__ telemetry into ScanReadings.
 
-        All accumulation uses direct C-level field writes on ScanReadings —
-        no Python dict operations until flush_into() at scan completion.
-        Returns (path, rg_idx); all __*__ metadata keys are consumed from row_group.
+        bytes_fetched lives on BasePlanNode.bytes_in (not ScanReadings) so we
+        receive it back from the merge call and apply it here.
+        Returns (path, rg_idx); all __*__ metadata keys are consumed.
         """
-        cdef ScanReadings sr = self.scan_readings
         cdef object path = row_group.pop("__path__")
         cdef object rg_idx = row_group.pop("__row_group__")
-        cdef object scan_strategy
-        cdef int64_t val
-
-        # Additive metrics
-        sr.parquet_row_groups_pruned        = row_group.pop("__row_groups_pruned__", 0)
-        self.bytes_in                      += row_group.pop("__bytes_fetched__", 0)
-        sr.parquet_footer_bytes            += row_group.pop("__footer_bytes__", 0)
-        sr.parquet_range_request_count     += row_group.pop("__range_request_count__", 0)
-        sr.parquet_range_bytes_requested   += row_group.pop("__range_bytes_requested__", 0)
-        sr.time_parquet_read_ranges_ns     += row_group.pop("__time_read_ranges_ns__", 0)
-        sr.time_parquet_decode_columns_ns  += row_group.pop("__time_decode_columns_ns__", 0)
-        sr.time_parquet_task_queue_wait_ns += row_group.pop("__task_queue_wait_ns__", 0)
-        sr.time_parquet_task_total_ns      += row_group.pop("__task_total_ns__", 0)
-        sr.time_parquet_footer_fetch_ns    += row_group.pop("__footer_fetch_ns__", 0)
-        sr.time_parquet_scheduler_wait_ns  += row_group.pop("__scheduler_wait_ns__", 0)
-        sr.time_parquet_rowgroup_completion_ns += row_group.pop("__rowgroup_completion_latency_ns__", 0)
-        sr.time_parquet_emit_wait_ns       += row_group.pop("__emit_wait_ns__", 0)
-        sr.time_parquet_scheduler_empty_wait_ns += row_group.pop("__scheduler_empty_wait_ns__", 0)
-        sr.parquet_scheduler_empty_wait_events  += row_group.pop("__scheduler_empty_wait_events__", 0)
-        sr.io_ring_producer_full_wait_ns   += row_group.pop("__io_ring_producer_full_wait_ns__", 0)
-        sr.io_ring_producer_full_wait_events += row_group.pop("__io_ring_producer_full_wait_events__", 0)
-        sr.io_ring_consumer_empty_wait_ns  += row_group.pop("__io_ring_consumer_empty_wait_ns__", 0)
-        sr.io_ring_consumer_empty_wait_events += row_group.pop("__io_ring_consumer_empty_wait_events__", 0)
-        sr.io_transfer_emit_wait_ns        += row_group.pop("__io_transfer_emit_wait_ns__", 0)
-        sr.io_rowgroup_slice_count         += row_group.pop("__io_rowgroup_slice_count__", 0)
-        sr.io_deserialize_ns               += row_group.pop("__io_deserialize_ns__", 0)
-        sr.io_serialize_ns                 += row_group.pop("__io_serialize_ns__", 0)
-
-        # Peak/max metrics
-        val = row_group.pop("__rowgroup_peak_in_flight__", 0)
-        if val > sr.parquet_rowgroup_peak_in_flight_max:
-            sr.parquet_rowgroup_peak_in_flight_max = val
-        val = row_group.pop("__ranges_in_flight_peak__", 0)
-        if val > sr.parquet_ranges_in_flight_peak:
-            sr.parquet_ranges_in_flight_peak = val
-        val = row_group.pop("__active_files_peak__", 0)
-        if val > sr.parquet_active_files_peak:
-            sr.parquet_active_files_peak = val
-        val = row_group.pop("__active_rowgroups_peak__", 0)
-        if val > sr.parquet_active_rowgroups_peak:
-            sr.parquet_active_rowgroups_peak = val
-        val = row_group.pop("__rowgroups_in_flight_cap__", 0)
-        if val > sr.parquet_rowgroups_in_flight_cap:
-            sr.parquet_rowgroups_in_flight_cap = val
-        val = row_group.pop("__emit_queue_depth_at_ready__", 0)
-        if val > sr.parquet_emit_queue_depth_at_ready_max:
-            sr.parquet_emit_queue_depth_at_ready_max = val
-        val = row_group.pop("__io_ring_slot_bytes__", 0)
-        if val > sr.io_ring_slot_bytes:
-            sr.io_ring_slot_bytes = val
-        val = row_group.pop("__io_ring_slot_count__", 0)
-        if val > sr.io_ring_slot_count:
-            sr.io_ring_slot_count = val
-        val = row_group.pop("__io_ring_total_bytes__", 0)
-        if val > sr.io_ring_total_bytes:
-            sr.io_ring_total_bytes = val
-        val = row_group.pop("__io_transfer_ready_backlog_peak__", 0)
-        if val > sr.io_transfer_ready_backlog_peak:
-            sr.io_transfer_ready_backlog_peak = val
-        val = row_group.pop("__io_transfer_fragment_count_p50__", 0)
-        if val > sr.io_transfer_fragment_count_p50:
-            sr.io_transfer_fragment_count_p50 = val
-        val = row_group.pop("__io_transfer_fragment_count_p95__", 0)
-        if val > sr.io_transfer_fragment_count_p95:
-            sr.io_transfer_fragment_count_p95 = val
-        val = row_group.pop("__io_transfer_fragment_count_max__", 0)
-        if val > sr.io_transfer_fragment_count_max:
-            sr.io_transfer_fragment_count_max = val
-        val = row_group.pop("__io_transfer_payload_bytes_p50__", 0)
-        if val > sr.io_transfer_payload_bytes_p50:
-            sr.io_transfer_payload_bytes_p50 = val
-        val = row_group.pop("__io_transfer_payload_bytes_p95__", 0)
-        if val > sr.io_transfer_payload_bytes_p95:
-            sr.io_transfer_payload_bytes_p95 = val
-        val = row_group.pop("__io_transfer_payload_bytes_max__", 0)
-        if val > sr.io_transfer_payload_bytes_max:
-            sr.io_transfer_payload_bytes_max = val
-
-        # Scan strategy: set once
-        scan_strategy = row_group.pop("__parquet_scan_strategy__", None)
-        if scan_strategy and sr.parquet_scan_strategy is None:
-            sr.parquet_scan_strategy = scan_strategy
-
-        # Time to first row group: keep minimum
-        val = row_group.pop("__time_to_first_rowgroup_ns__", 0)
-        if val and (sr.time_to_first_rowgroup_ns == 0 or val < sr.time_to_first_rowgroup_ns):
-            sr.time_to_first_rowgroup_ns = val
-
-        # Clean up remaining __*__ keys without breaking the contract.
-        # Snapshot keys first via list() since we mutate during iteration.
-        for key in list(row_group):
-            if key.startswith("__"):
-                row_group.pop(key, None)
-
+        self.bytes_in += self.scan_readings.merge_row_group_metadata(row_group)
         return path, rg_idx
 
     def read_morsels(self):
@@ -821,19 +710,11 @@ cdef class ParquetReadNode(ReaderNode):
         }
         predicate_root = self._compose_predicates(self.predicates or [])
 
-        # >> OPTIMIZATION: Pre-compute function nodes once instead of per row group
-        # This avoids AST walking (O(n) in predicate size) for every row group
-        # For queries like Q02 with 281 row groups, this saves significant time
-        if self._predicate_function_nodes_cached is None and predicate_root:
-            self._predicate_function_nodes_cached = get_all_nodes_of_type(
-                predicate_root, select_nodes=(NodeType.FUNCTION,)
-            )
-
-        # >> Phase 2 OPTIMIZATION: Compile predicate dispatcher once at init time
-        # Instead of dynamic dispatch for every row group, compile to specialized function
-        # For Q02, reduces from 281 × 30+ branches to 281 × lambda calls
-        if self._compiled_predicate_dispatcher is None and predicate_root:
-            self._compiled_predicate_dispatcher = self._compile_predicate_dispatcher(predicate_root)
+        # Compile the predicate to bytecode once per execute() call. Every row
+        # group then iterates a typed C struct array — no Python AST walking,
+        # no per-row-group dispatch decisions.
+        if self._compiled_predicate is None and predicate_root is not None:
+            self._compiled_predicate = _build_bytecode(_lower_expr(predicate_root))
 
         # ── Two# Two-pass late materialization column split ────────────────────────
         # Use physical column names throughout — base_schema and the parquet file
@@ -928,9 +809,6 @@ cdef class ParquetReadNode(ReaderNode):
         total_rows_after_filter = 0
         try:
             if two_pass_eligible:
-                from opteryx.expression.evaluator import evaluate_and_append_draken
-                from opteryx.expression.evaluator import evaluate_draken
-
                 # ── Phase 1: stream pass-1 row groups, evaluate predicate, collect survivors ──
                 pass2_work = []   # list of (path, rg_idx, mask_bytes)
                 p1_cache = {}     # (path, rg_idx) -> p1_filtered Morsel
@@ -952,14 +830,11 @@ cdef class ParquetReadNode(ReaderNode):
                         path,
                         rg_idx,
                         row_group,
-                        predicate_root,
-                        self._predicate_function_nodes_cached,
+                        self._compiled_predicate,
                         pass1_name_to_identity,
                         _decimal_col_map,
                         _date_col_set,
                         _timestamp_col_set,
-                        evaluate_and_append_draken,
-                        evaluate_draken,
                     )
                     if result.empty:
                         continue
@@ -985,7 +860,7 @@ cdef class ParquetReadNode(ReaderNode):
                     rg_idx = row_group.get('__row_group__')
 
                     p2_bytes = row_group.pop('__bytes_fetched__', 0)
-                    self.scan_readings.parquet_latmat_pass2_bytes += p2_bytes
+                    self.scan_readings.record_pass2_decoded(p2_bytes)
                     self.bytes_in += p2_bytes
                     # Clean up metadata keys.
                     for _k in [k for k in row_group if k.startswith("__")]:
@@ -1022,10 +897,7 @@ cdef class ParquetReadNode(ReaderNode):
                     rows_after_filter = result_morsel.num_rows
                     total_rows_after_filter += rows_after_filter
 
-                    self.scan_readings.parquet_latmat_pass2_row_groups += 1
-                    self.scan_readings.rows_seen += rows_after_filter
-                    self.scan_readings.row_groups_read += 1
-
+                    self.scan_readings.record_row_group_complete(rows_after_filter)
                     self._mark_file_seen(path)
 
                     # Already assembled in output_identity_order — no select() needed.
@@ -1036,13 +908,7 @@ cdef class ParquetReadNode(ReaderNode):
                     else:
                         records_to_read -= num_rows
 
-                    self.scan_readings.blobs_read = len(self._parquet_files_seen)
-                    self.telemetry.blobs_read = len(self._parquet_files_seen)
-                    self.scan_readings.rows_read += result_morsel.num_rows
-                    self.telemetry.rows_read += result_morsel.num_rows
-                    self.scan_readings.bytes_processed += result_morsel.nbytes
-                    self.telemetry.bytes_processed += result_morsel.nbytes
-
+                    self._record_morsel_emitted(result_morsel)
                     yield result_morsel
 
                     if records_to_read <= 0:
@@ -1072,12 +938,9 @@ cdef class ParquetReadNode(ReaderNode):
                     result_morsel = Morsel.from_vectors(identity_names, vectors)
                     rows_before_filter = result_morsel.num_rows
                     rows_after_filter = rows_before_filter
-                    if predicate_root is not None:
+                    if self._compiled_predicate is not None:
                         result_morsel, rows_before_filter, rows_after_filter = (
-                            self._apply_predicates_to_morsel(
-                                result_morsel,
-                                predicate_root,
-                            )
+                            self._apply_predicates_to_morsel(result_morsel)
                         )
                     total_rows_before_filter += rows_before_filter
                     total_rows_after_filter += rows_after_filter
@@ -1095,9 +958,7 @@ cdef class ParquetReadNode(ReaderNode):
                         )
 
                     num_rows = result_morsel.num_rows
-                    self.scan_readings.rows_seen += num_rows
-                    self.scan_readings.row_groups_read += 1
-
+                    self.scan_readings.record_row_group_complete(num_rows)
                     self._mark_file_seen(path)
 
                     if records_to_read < num_rows:
@@ -1106,13 +967,7 @@ cdef class ParquetReadNode(ReaderNode):
                     else:
                         records_to_read -= num_rows
 
-                    self.scan_readings.blobs_read = len(self._parquet_files_seen)
-                    self.telemetry.blobs_read = len(self._parquet_files_seen)
-                    self.scan_readings.rows_read += result_morsel.num_rows
-                    self.telemetry.rows_read += result_morsel.num_rows
-                    self.scan_readings.bytes_processed += result_morsel.nbytes
-                    self.telemetry.bytes_processed += result_morsel.nbytes
-
+                    self._record_morsel_emitted(result_morsel)
                     yield result_morsel
 
                     if records_to_read <= 0:
@@ -1120,14 +975,12 @@ cdef class ParquetReadNode(ReaderNode):
 
         finally:
             decode_ns = time.monotonic_ns() - decode_start
-            self.scan_readings.time_decoding_blobs += decode_ns
+            self.scan_readings.record_decode_time(decode_ns)
             self.telemetry.time_decoding_blobs += decode_ns
-            self.scan_readings.parquet_rows_before_filter += total_rows_before_filter
-            self.scan_readings.parquet_rows_after_filter += total_rows_after_filter
-            if total_rows_before_filter > 0:
-                self.scan_readings.parquet_filter_selectivity = (
-                    total_rows_after_filter / <double>total_rows_before_filter
-                )
+            self.scan_readings.record_filter_totals(
+                total_rows_before_filter,
+                total_rows_after_filter,
+            )
             self.scan_readings.flush_into(self.readings)
 
         # ── Empty result guard ────────────────────────────────────────────────

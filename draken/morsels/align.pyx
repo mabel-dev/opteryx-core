@@ -40,7 +40,7 @@ from draken.vectors.interval_vector cimport IntervalVector
 from draken.vectors.time_vector cimport TimeVector
 from draken.vectors.array_vector cimport ArrayVector
 from draken.morsels.morsel cimport Morsel
-from draken.core.buffers cimport DrakenMorsel, DrakenType
+from draken.core.buffers cimport DrakenMorsel, DrakenType, DRAKEN_ENCODING_CONSTANT
 
 
 cdef inline Vector _take_vector_fast(Vector vec, int32_t[::1] indices):
@@ -409,6 +409,11 @@ cpdef Morsel align_tables(
         # Process source columns first
         for i in range(num_src_cols):
             vec = <Vector>source_morsel.ptr.columns[i]
+            # Constant vectors have ptr.data=NULL; _ensure_output_null_bitmap would
+            # allocate ptr.null_bitmap on them, leaving an inconsistent state that
+            # crashes downstream dense-buffer access.  Materialize to dense first.
+            if source_has_negative and vec._encoding == DRAKEN_ENCODING_CONSTANT:
+                vec = vec.materialize()
             taken_vec = _take_vector_fast(vec, source_take_indices)
             if source_has_negative or _source_null_bitmap(vec, vec.dtype) != NULL:
                 _apply_take_validity(vec, taken_vec, vec.dtype, source_indices)
@@ -424,6 +429,8 @@ cpdef Morsel align_tables(
                 continue
 
             vec = <Vector>append_morsel.ptr.columns[i]
+            if append_has_negative and vec._encoding == DRAKEN_ENCODING_CONSTANT:
+                vec = vec.materialize()
             taken_vec = _take_vector_fast(vec, append_take_indices)
             if append_has_negative or _source_null_bitmap(vec, vec.dtype) != NULL:
                 _apply_take_validity(vec, taken_vec, vec.dtype, append_indices)

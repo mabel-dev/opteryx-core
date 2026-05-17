@@ -94,11 +94,44 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     if node.right_readers is None and node.readers and len(node.readers) >= 2:
         node.right_readers = node.readers[1]
 
+    if node.type == "asof":
+        node.asof_condition, context = inner_binder(node.asof_condition, context)
+
+        comparisons = get_all_nodes_of_type(node.asof_condition, (NodeType.COMPARISON_OPERATOR,))
+        if len(comparisons) != 1:
+            raise UnsupportedSyntaxError(
+                "ASOF MATCH_CONDITION must contain exactly one comparison."
+            )
+        asof_cmp = comparisons[0]
+        if asof_cmp.value not in ("Lt", "LtEq", "Gt", "GtEq"):
+            raise UnsupportedSyntaxError(
+                "ASOF MATCH_CONDITION must use <, <=, >, or >= (not = or !=)."
+            )
+        node.asof_left_column = asof_cmp.left.schema_column.identity
+        node.asof_right_column = asof_cmp.right.schema_column.identity
+        node.asof_op = asof_cmp.value
+        node.columns = list(get_all_nodes_of_type(node.asof_condition, (NodeType.IDENTIFIER,)))
+
+        # Optional equi-partition key via ON/USING — bind it normally
+        if node.using:
+            node.on = convert_using_to_on(
+                {n.value for n in node.using},
+                node.left_relation_names,
+                node.right_relation_names,
+            )
+        if node.on:
+            node.on, context = inner_binder(node.on, context)
+            node.left_columns, node.right_columns = extract_join_fields(
+                node.on, node.left_relation_names, node.right_relation_names
+            )
+            node.columns += list(get_all_nodes_of_type(node.on, (NodeType.IDENTIFIER,)))
+
+        node.schemas = context.schemas
+        return node, context
+
     if node.type == "cross join" and node.implied_join:
         # 1438 - Check only if readers is set (not set for sequential binary joins)
         if node.readers and len(node.readers) > 2:
-            from opteryx.exceptions import UnsupportedSyntaxError
-
             raise UnsupportedSyntaxError("Cannot CROSS JOIN more than two relations.")
         # Extract from readers only if it's set (backward compat for old-style implicit joins)
         # For new sequential binary joins, left/right are already set in logical planner
@@ -142,8 +175,6 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         # All conditions have been mapped to 'on' conditions
         comparisons = get_all_nodes_of_type(node.on, (NodeType.COMPARISON_OPERATOR,))
         if not all(com.value in ("Eq", "NotEq", "Lt", "Gt", "LtEq", "GtEq") for com in comparisons):
-            from opteryx.exceptions import UnsupportedSyntaxError
-
             raise UnsupportedSyntaxError("Only JOINs with equals comparisons supported.")
 
         if not node.left_relation_names and node.right_relation_names:
@@ -195,8 +226,6 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             com.left.schema_column.type == OrsoTypes.DECIMAL and com.value not in ("Eq", "NotEq")
             for com in comparisons
         ):
-            from opteryx.exceptions import UnsupportedSyntaxError
-
             raise UnsupportedSyntaxError(
                 "JOINs on DECIMAL types only supports Equals and Not Equals."
             )

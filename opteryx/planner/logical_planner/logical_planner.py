@@ -800,6 +800,7 @@ def process_join_tree(join: dict) -> LogicalPlanNode:
 
         return {
             "Anti": "left anti",  # ANTI JOIN is a LEFT ANTI JOIN
+            "AsOf": "asof",
             "FullOuter": "full outer",
             "Join": "inner",
             "Inner": "inner",
@@ -872,7 +873,19 @@ def process_join_tree(join: dict) -> LogicalPlanNode:
             f"{join_step.type.upper()} JOIN not supported, use LEFT variations only."
         )
 
-    join_step.on, join_step.using = extract_join_condition(join)
+    if join_step.type == "asof":
+        asof_payload = join["join_operator"]["AsOf"]
+        join_step.asof_condition = logical_planner_builders.build(asof_payload["match_condition"])
+        constraint = asof_payload.get("constraint", "None")
+        if isinstance(constraint, dict) and "On" in constraint:
+            join_step.on = logical_planner_builders.build(constraint["On"])
+        elif isinstance(constraint, dict) and "Using" in constraint:
+            join_step.using = [
+                logical_planner_builders.build(i[0]) for i in constraint["Using"]
+            ]
+    else:
+        join_step.on, join_step.using = extract_join_condition(join)
+
     if not join_step.on and not join_step.using and join_step.type in ("left outer", "right outer"):
         raise UnsupportedSyntaxError(
             f"{join_step.type.upper()} JOIN must have an ON or USING clause."

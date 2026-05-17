@@ -14,8 +14,6 @@ cdef _str_to_bytes(v):
 
 
 cpdef _eval_binary_op_draken(node, morsel):
-    from .evaluation import _eval_value
-
     op = node.value
     left = _eval_value(node.left, morsel)
     right = _eval_value(node.right, morsel)
@@ -95,6 +93,74 @@ cpdef _eval_binary_op_draken(node, morsel):
     ):
         raise TypeError(
             f"Arithmetic op `{op}` returned non-Draken value type {result.__class__.__name__}."
+        )
+
+    return result
+
+
+cpdef _binary_op_from_vecs(str op, left, right, left_orso_type, right_orso_type, Py_ssize_t num_rows):
+    """Execute a binary arithmetic op on pre-evaluated vectors.
+
+    Equivalent to _eval_binary_op_draken but takes pre-evaluated vectors and
+    orso types directly — no node or morsel access. Called from the bytecode
+    executor for BC_BINARY_OP instructions.
+    """
+    from opteryx.types import OrsoTypes
+
+    if get_vector_type(left) == VectorType.UNKNOWN and left_orso_type in (
+        OrsoTypes.DATE,
+        OrsoTypes.TIMESTAMP,
+    ):
+        if left_orso_type == OrsoTypes.DATE:
+            from draken.vectors.date32_vector import Date32Vector
+            left = Date32Vector.from_constant(_coerce_date32(left), num_rows)
+        else:
+            from draken.vectors.timestamp_vector import TimestampVector
+            left = TimestampVector.from_constant(_coerce_timestamp(left), num_rows)
+
+    if get_vector_type(right) == VectorType.UNKNOWN and right_orso_type in (
+        OrsoTypes.DATE,
+        OrsoTypes.TIMESTAMP,
+    ):
+        if right_orso_type == OrsoTypes.DATE:
+            from draken.vectors.date32_vector import Date32Vector
+            right = Date32Vector.from_constant(_coerce_date32(right), num_rows)
+        else:
+            from draken.vectors.timestamp_vector import TimestampVector
+            right = TimestampVector.from_constant(_coerce_timestamp(right), num_rows)
+
+    left_type = get_vector_type(left)
+    right_type = get_vector_type(right)
+
+    cdef bint left_is_date = left_type in (VectorType.DATE32, VectorType.TIMESTAMP)
+    cdef bint right_is_date = right_type in (VectorType.DATE32, VectorType.TIMESTAMP)
+
+    if op == "Minus" and left_is_date and right_is_date:
+        return _date_minus_date_draken(left, right)
+
+    if op in ("Plus", "Minus"):
+        left_is_interval = left_type == VectorType.INTERVAL
+        right_is_interval = right_type == VectorType.INTERVAL
+        if left_is_date and right_is_interval:
+            return _date_interval_op_draken(left, right, op)
+        if left_is_interval and right_is_date:
+            return _date_interval_op_draken(right, left, op)
+
+    if op == "StringConcat":
+        from opteryx.compiled.vector_ops import vector_string_concat_binary
+        return vector_string_concat_binary(_str_to_bytes(left), _str_to_bytes(right))
+
+    from opteryx.expression.binary_operators import BINARY_OPERATORS
+
+    if op not in BINARY_OPERATORS:
+        return None
+
+    result = call_arithmetic_op(op, left, right)
+
+    if result is None:
+        raise NotImplementedError(
+            f"Operator `{op}` has no Draken kernel for {left.__class__.__name__} and "
+            f"{right.__class__.__name__}."
         )
 
     return result

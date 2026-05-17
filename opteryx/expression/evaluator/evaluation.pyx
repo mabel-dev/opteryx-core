@@ -206,6 +206,35 @@ cdef _unary_draken(str op, centre_node, morsel):
     raise NotImplementedError(f"evaluate_draken: unsupported unary op {op!r}")
 
 
+cdef _unary_op_kernel(str op, vec):
+    """Apply a unary op to a pre-evaluated vector (bytecode executor path)."""
+    if op == "IsNull":
+        return _is_null_as_boolvector(vec)
+    if op == "IsNotNull":
+        return _is_null_as_boolvector(vec).not_vector()
+    if op == "IsEmpty":
+        return _vector_string_is_empty(vec)
+    if op == "IsNotEmpty":
+        return _vector_string_is_not_empty(vec)
+    if op == "BitwiseNot":
+        return _vector_bitwise_not(vec)
+    if op == "IsTrue" or op == "IsNotFalse" or op == "IsFalse" or op == "IsNotTrue":
+        bv = vec if get_vector_type(vec) == VectorType.BOOL else None
+        if bv is None:
+            raise TypeError(
+                f"IS TRUE/IS FALSE requires a boolean expression; got {vec.__class__.__name__!r}"
+            )
+        if op == "IsTrue":
+            return bv.equals(True)
+        if op == "IsNotFalse":
+            return bv.not_equals(False)
+        if op == "IsFalse":
+            return bv.equals(False)
+        if op == "IsNotTrue":
+            return bv.not_equals(True)
+    raise NotImplementedError(f"_unary_op_kernel: unsupported unary op {op!r}")
+
+
 cdef bint _is_temporal_type(orso_type):
     """Check if an OrsoType is DATE or TIMESTAMP."""
     if orso_type is None:
@@ -633,22 +662,18 @@ def evaluate_and_append_draken(nodes, morsel):
 # Legacy nodes: call _eval_value(source_node, morsel), push one result.
 # ---------------------------------------------------------------------------
 
-from cpython.mem cimport PyMem_Malloc, PyMem_Free
-from cpython.ref cimport PyObject, Py_INCREF, Py_XINCREF, Py_XDECREF
-
-# Cython 3 declares Py_INCREF/Py_XDECREF as taking `object`, not `PyObject*`.
-# The bytecode executor stores raw PyObject* on its C stack, so we need direct
-# C-level macros that accept pointers without going through the Python protocol.
-cdef extern from "Python.h":
-    void _incref "Py_INCREF" (PyObject* o)
-    void _xdecref "Py_XDECREF" (PyObject* o)
 from opteryx.compiled.expression.compiled_expression cimport (
     BC_AND,
+    BC_BETWEEN,
+    BC_BINARY_OP,
+    BC_CAST,
     BC_CMP_LEFT_TEMPORAL,
     BC_CMP_RIGHT_TEMPORAL,
     BC_CNF,
     BC_COMPARE,
     BC_DNF,
+    BC_EXTRACTION,
+    BC_FUNCTION,
     BC_LEGACY,
     BC_LOAD_COL,
     BC_LOAD_LIT_BOOL,
@@ -656,39 +681,515 @@ from opteryx.compiled.expression.compiled_expression cimport (
     BC_LOAD_LIT_SET,
     BC_NOT,
     BC_OR,
+    BC_UNARY_OP,
     BC_XOR,
     BytecodeInstr,
     CompiledBytecode,
 )
+from libc.stdint cimport uint8_t, int8_t, uintptr_t
+from libc.stdlib cimport malloc, free
+from libc.string cimport memcpy, memset
+from libc.stddef cimport size_t
+
 from draken.morsels.morsel cimport Morsel
-from draken.vectors.bool_vector cimport BoolVector
-from draken.vectors.vector cimport Vector
+from draken.vectors.bool_vector cimport (
+    BoolVector,
+    bool_vector_from_bits,
+    c_and_bitmap,
+    c_not_bitmap,
+    c_or_bitmap,
+    c_xor_bitmap,
+    c_get_bitmap_ptrs,
+)
+from draken.vectors.vector cimport Vector, simd_popcount
 
 
-def execute_bytecode(CompiledBytecode bc, Morsel morsel):
+# ---------------------------------------------------------------------------
+# C-callable interface — worker item and global function pointer.
+# Declared extern here; the global and setter are defined in bytecode_worker.cpp.
+# ---------------------------------------------------------------------------
+
+cdef extern from "bytecode_worker.h" nogil:
+    ctypedef struct BytecodeWorkerItem:
+        const void*  instrs
+        size_t       n_instrs
+        const void*  col_cache
+        uint8_t**    bitmaps
+        uint8_t**    null_bitmaps
+        int8_t*      slot_has_null
+        size_t       n_slots
+        size_t       nbytes
+        size_t       n_rows
+        int          error_code
+
+    ctypedef int (*opteryx_worker_fn_t)(BytecodeWorkerItem*)
+    opteryx_worker_fn_t opteryx_worker_fn
+    void opteryx_set_worker_fn(opteryx_worker_fn_t fn)
+
+
+# ---------------------------------------------------------------------------
+# Bitmap VM — three-phase GIL-free predicate evaluation
+#
+# Phase 1 (_execute_bytecode_prepass): GIL held.
+#   Resolves BC_LOAD_COL columns; mallocs scratch bitmap buffers.
+# Phase 2 (c_execute_bytecode_inner): noexcept nogil.
+#   Operates entirely on uint8_t* scratch bitmaps; no Python objects.
+# Phase 3 (_execute_bytecode_postpass): GIL held.
+#   Wraps the result bitmap into a BoolVector for Python callers.
+#
+# Only runs when bc.is_pure_bitmap is True — bytecodes containing only
+# BC_LOAD_LIT_BOOL, BC_LOAD_COL (BoolVector columns), and boolean
+# combinators (AND/OR/XOR/NOT/DNF/CNF).
+# ---------------------------------------------------------------------------
+
+ctypedef struct ColCache:
+    uint8_t* data       # ptr to dense BoolVector bitmap data
+    uint8_t* null_bm    # ptr to null bitmap (NULL = no nulls)
+    bint     is_bool    # True if the column resolved to a BoolVector
+
+
+cdef int _execute_bytecode_prepass(
+    CompiledBytecode bc,
+    Morsel morsel,
+    Py_ssize_t num_rows,
+    ColCache* col_cache,
+    uint8_t** bitmaps,
+    uint8_t** null_bitmaps,
+    int8_t* slot_has_null,
+    Py_ssize_t n_slots,
+    Py_ssize_t nbytes,
+    list anchors,
+) except -1:
+    """GIL-held pre-pass: resolve columns and malloc scratch bitmap buffers.
+
+    Returns -1 (exception) if any BC_LOAD_COL column is not a BoolVector
+    (caller must fall back to execute_bytecode).  On success returns 0.
+    """
+    cdef Py_ssize_t j, k
+    cdef BytecodeInstr* slot
+    cdef Vector v
+    cdef BoolVector bv
+    cdef uint8_t* p
+
+    # Allocate n_slots + 2 bitmap buffers:
+    #   [0 .. n_slots-1] = stack slots
+    #   [n_slots]        = primary scratch for binary ops
+    #   [n_slots+1]      = secondary scratch for DNF/CNF fold
+    for j in range(n_slots + 2):
+        p = <uint8_t*>malloc(nbytes)
+        if p == NULL:
+            raise MemoryError("evaluate_bitmap: failed to allocate bitmap buffer")
+        memset(p, 0, nbytes)
+        bitmaps[j] = p
+
+        p = <uint8_t*>malloc(nbytes)
+        if p == NULL:
+            raise MemoryError("evaluate_bitmap: failed to allocate null bitmap buffer")
+        memset(p, 0, nbytes)
+        null_bitmaps[j] = p
+
+        slot_has_null[j] = 0
+
+    # Resolve BC_LOAD_COL instructions
+    for k in range(bc.count):
+        slot = &bc.instrs[k]
+        if slot.opcode != BC_LOAD_COL:
+            col_cache[k].is_bool = False
+            continue
+
+        v = morsel.column(<bytes>slot.column_identity, <bytes>slot.column_name)
+        if not isinstance(v, BoolVector):
+            return -1  # not a BoolVector — caller must fall back
+
+        bv = <BoolVector>v
+        if bv._has_const or bv._rle_buffer != NULL:
+            bv = <BoolVector>bv.materialize()
+        anchors.append(bv)  # keep alive during inner loop
+        col_cache[k].is_bool = True
+        col_cache[k].data = <uint8_t*>bv.ptr.data
+        col_cache[k].null_bm = bv.ptr.null_bitmap
+
+    return 0
+
+
+cdef int c_execute_bytecode_inner(
+    BytecodeInstr* instrs,
+    Py_ssize_t n_instrs,
+    ColCache* col_cache,
+    uint8_t** bitmaps,
+    uint8_t** null_bitmaps,
+    int8_t* slot_has_null,
+    Py_ssize_t n_slots,
+    Py_ssize_t nbytes,
+    Py_ssize_t num_rows,
+) noexcept nogil:
+    """Nogil VM inner loop for pure-bitmap bytecodes.
+
+    Operates entirely on pre-allocated uint8_t* scratch buffers — no Python
+    objects, no GIL. Stack slots are indices into the bitmaps/null_bitmaps
+    arrays. Binary ops write to bitmaps[n_slots] (scratch) then swap pointers.
+
+    Returns 0 on success, 1 if an unexpected opcode is encountered.
+    """
+    cdef Py_ssize_t sp = 0
+    cdef Py_ssize_t i, j, base, arity
+    cdef int opcode
+    cdef BytecodeInstr* slot
+    cdef uint8_t* tmp_ptr
+    cdef bint had_null
+    cdef Py_ssize_t scratch0 = n_slots
+    cdef Py_ssize_t scratch1 = n_slots + 1
+    cdef Py_ssize_t popcount_val
+
+    for i in range(n_instrs):
+        slot = &instrs[i]
+        opcode = slot.opcode
+
+        # ------------------------------------------------------------------
+        # BC_LOAD_LIT_BOOL — fill bitmap slot with constant pattern
+        # ------------------------------------------------------------------
+        if opcode == BC_LOAD_LIT_BOOL:
+            if slot.bool_value != 0:
+                memset(bitmaps[sp], 0xFF, nbytes)
+                if (num_rows & 7) != 0:
+                    bitmaps[sp][nbytes - 1] = <uint8_t>((1 << (num_rows & 7)) - 1)
+            else:
+                memset(bitmaps[sp], 0x00, nbytes)
+            slot_has_null[sp] = 0
+            sp += 1
+            continue
+
+        # ------------------------------------------------------------------
+        # BC_LOAD_COL — copy pre-resolved BoolVector bitmap into stack slot
+        # ------------------------------------------------------------------
+        if opcode == BC_LOAD_COL:
+            if not col_cache[i].is_bool:
+                return 1  # unexpected non-bool column
+            memcpy(bitmaps[sp], col_cache[i].data, nbytes)
+            if col_cache[i].null_bm != NULL:
+                memcpy(null_bitmaps[sp], col_cache[i].null_bm, nbytes)
+                slot_has_null[sp] = 1
+            else:
+                slot_has_null[sp] = 0
+            sp += 1
+            continue
+
+        # ------------------------------------------------------------------
+        # BC_AND — binary AND with pointer-swap to avoid aliasing
+        # ------------------------------------------------------------------
+        if opcode == BC_AND:
+            sp -= 2
+            had_null = c_and_bitmap(
+                bitmaps[scratch0],
+                bitmaps[sp],
+                null_bitmaps[sp] if slot_has_null[sp] else NULL,
+                bitmaps[sp + 1],
+                null_bitmaps[sp + 1] if slot_has_null[sp + 1] else NULL,
+                null_bitmaps[scratch0],
+                nbytes, num_rows,
+            )
+            tmp_ptr = bitmaps[sp]
+            bitmaps[sp] = bitmaps[scratch0]
+            bitmaps[scratch0] = tmp_ptr
+            tmp_ptr = null_bitmaps[sp]
+            null_bitmaps[sp] = null_bitmaps[scratch0]
+            null_bitmaps[scratch0] = tmp_ptr
+            slot_has_null[sp] = had_null
+            sp += 1
+            continue
+
+        # ------------------------------------------------------------------
+        # BC_OR — binary OR with pointer-swap
+        # ------------------------------------------------------------------
+        if opcode == BC_OR:
+            sp -= 2
+            had_null = c_or_bitmap(
+                bitmaps[scratch0],
+                bitmaps[sp],
+                null_bitmaps[sp] if slot_has_null[sp] else NULL,
+                bitmaps[sp + 1],
+                null_bitmaps[sp + 1] if slot_has_null[sp + 1] else NULL,
+                null_bitmaps[scratch0],
+                nbytes, num_rows,
+            )
+            tmp_ptr = bitmaps[sp]
+            bitmaps[sp] = bitmaps[scratch0]
+            bitmaps[scratch0] = tmp_ptr
+            tmp_ptr = null_bitmaps[sp]
+            null_bitmaps[sp] = null_bitmaps[scratch0]
+            null_bitmaps[scratch0] = tmp_ptr
+            slot_has_null[sp] = had_null
+            sp += 1
+            continue
+
+        # ------------------------------------------------------------------
+        # BC_XOR — binary XOR with pointer-swap
+        # ------------------------------------------------------------------
+        if opcode == BC_XOR:
+            sp -= 2
+            had_null = c_xor_bitmap(
+                bitmaps[scratch0],
+                bitmaps[sp],
+                null_bitmaps[sp] if slot_has_null[sp] else NULL,
+                bitmaps[sp + 1],
+                null_bitmaps[sp + 1] if slot_has_null[sp + 1] else NULL,
+                null_bitmaps[scratch0],
+                nbytes, num_rows,
+            )
+            tmp_ptr = bitmaps[sp]
+            bitmaps[sp] = bitmaps[scratch0]
+            bitmaps[scratch0] = tmp_ptr
+            tmp_ptr = null_bitmaps[sp]
+            null_bitmaps[sp] = null_bitmaps[scratch0]
+            null_bitmaps[scratch0] = tmp_ptr
+            slot_has_null[sp] = had_null
+            sp += 1
+            continue
+
+        # ------------------------------------------------------------------
+        # BC_NOT — unary NOT with pointer-swap
+        # ------------------------------------------------------------------
+        if opcode == BC_NOT:
+            sp -= 1
+            had_null = c_not_bitmap(
+                bitmaps[scratch0],
+                bitmaps[sp],
+                null_bitmaps[sp] if slot_has_null[sp] else NULL,
+                null_bitmaps[scratch0],
+                nbytes, num_rows,
+            )
+            tmp_ptr = bitmaps[sp]
+            bitmaps[sp] = bitmaps[scratch0]
+            bitmaps[scratch0] = tmp_ptr
+            tmp_ptr = null_bitmaps[sp]
+            null_bitmaps[sp] = null_bitmaps[scratch0]
+            null_bitmaps[scratch0] = tmp_ptr
+            slot_has_null[sp] = had_null
+            sp += 1
+            continue
+
+        # ------------------------------------------------------------------
+        # BC_DNF — variadic AND fold (uses scratch0 as accumulator, scratch1
+        # as output; alternates to avoid aliasing)
+        # ------------------------------------------------------------------
+        if opcode == BC_DNF:
+            arity = slot.arity
+            base = sp - arity
+            # initialise accumulator from bitmaps[base]
+            memcpy(bitmaps[scratch0], bitmaps[base], nbytes)
+            memcpy(null_bitmaps[scratch0], null_bitmaps[base], nbytes)
+            slot_has_null[scratch0] = slot_has_null[base]
+            for j in range(1, arity):
+                # short-circuit: if accumulator is all-false, skip the rest
+                popcount_val = <Py_ssize_t>simd_popcount(bitmaps[scratch0], <size_t>nbytes)
+                if popcount_val == 0 and not slot_has_null[scratch0]:
+                    break
+                had_null = c_and_bitmap(
+                    bitmaps[scratch1],
+                    bitmaps[scratch0],
+                    null_bitmaps[scratch0] if slot_has_null[scratch0] else NULL,
+                    bitmaps[base + j],
+                    null_bitmaps[base + j] if slot_has_null[base + j] else NULL,
+                    null_bitmaps[scratch1],
+                    nbytes, num_rows,
+                )
+                # swap scratch0 <-> scratch1 (accumulate into scratch0)
+                tmp_ptr = bitmaps[scratch0]
+                bitmaps[scratch0] = bitmaps[scratch1]
+                bitmaps[scratch1] = tmp_ptr
+                tmp_ptr = null_bitmaps[scratch0]
+                null_bitmaps[scratch0] = null_bitmaps[scratch1]
+                null_bitmaps[scratch1] = tmp_ptr
+                slot_has_null[scratch0] = had_null
+            # swap accumulator into bitmaps[base]
+            tmp_ptr = bitmaps[base]
+            bitmaps[base] = bitmaps[scratch0]
+            bitmaps[scratch0] = tmp_ptr
+            tmp_ptr = null_bitmaps[base]
+            null_bitmaps[base] = null_bitmaps[scratch0]
+            null_bitmaps[scratch0] = tmp_ptr
+            slot_has_null[base] = slot_has_null[scratch0]
+            sp = base + 1
+            continue
+
+        # ------------------------------------------------------------------
+        # BC_CNF — variadic OR fold
+        # ------------------------------------------------------------------
+        if opcode == BC_CNF:
+            arity = slot.arity
+            base = sp - arity
+            memcpy(bitmaps[scratch0], bitmaps[base], nbytes)
+            memcpy(null_bitmaps[scratch0], null_bitmaps[base], nbytes)
+            slot_has_null[scratch0] = slot_has_null[base]
+            for j in range(1, arity):
+                # short-circuit: if accumulator is all-true, skip the rest
+                popcount_val = <Py_ssize_t>simd_popcount(bitmaps[scratch0], <size_t>nbytes)
+                if popcount_val == num_rows and not slot_has_null[scratch0]:
+                    break
+                had_null = c_or_bitmap(
+                    bitmaps[scratch1],
+                    bitmaps[scratch0],
+                    null_bitmaps[scratch0] if slot_has_null[scratch0] else NULL,
+                    bitmaps[base + j],
+                    null_bitmaps[base + j] if slot_has_null[base + j] else NULL,
+                    null_bitmaps[scratch1],
+                    nbytes, num_rows,
+                )
+                tmp_ptr = bitmaps[scratch0]
+                bitmaps[scratch0] = bitmaps[scratch1]
+                bitmaps[scratch1] = tmp_ptr
+                tmp_ptr = null_bitmaps[scratch0]
+                null_bitmaps[scratch0] = null_bitmaps[scratch1]
+                null_bitmaps[scratch1] = tmp_ptr
+                slot_has_null[scratch0] = had_null
+            tmp_ptr = bitmaps[base]
+            bitmaps[base] = bitmaps[scratch0]
+            bitmaps[scratch0] = tmp_ptr
+            tmp_ptr = null_bitmaps[base]
+            null_bitmaps[base] = null_bitmaps[scratch0]
+            null_bitmaps[scratch0] = tmp_ptr
+            slot_has_null[base] = slot_has_null[scratch0]
+            sp = base + 1
+            continue
+
+        return 1  # unexpected opcode
+
+    return 0
+
+
+cdef int _c_bytecode_worker_trampoline(BytecodeWorkerItem* item) noexcept nogil:
+    """C-callable trampoline for moodycamel worker threads.
+
+    Calls c_execute_bytecode_inner with no GIL held. On return, item.error_code
+    is 0 (success, result at item.bitmaps[0]) or 1 (unexpected opcode; caller
+    must re-run via execute_bytecode from a GIL-held thread).
+    """
+    cdef int rc = c_execute_bytecode_inner(
+        <BytecodeInstr*>item.instrs,
+        <Py_ssize_t>item.n_instrs,
+        <ColCache*>item.col_cache,
+        item.bitmaps,
+        item.null_bitmaps,
+        item.slot_has_null,
+        <Py_ssize_t>item.n_slots,
+        <Py_ssize_t>item.nbytes,
+        <Py_ssize_t>item.n_rows,
+    )
+    item.error_code = rc
+    return rc
+
+
+def get_bytecode_worker_fn_ptr():
+    """Return the trampoline function pointer as a Python int.
+
+    Allows C++ code loaded via ctypes to retrieve the opteryx_worker_fn
+    address without a Python callback round-trip. Value is stable for the
+    lifetime of the process.
+    """
+    return <uintptr_t>opteryx_worker_fn
+
+
+cdef BoolVector _execute_bytecode_postpass(
+    uint8_t* result_bitmap,
+    uint8_t* result_null,
+    bint has_null,
+    Py_ssize_t num_rows,
+):
+    """Wrap a raw bitmap into a BoolVector. GIL held."""
+    return bool_vector_from_bits(
+        result_bitmap,
+        result_null if has_null else NULL,
+        num_rows,
+    )
+
+
+cpdef BoolVector evaluate_bitmap(CompiledBytecode bc, Morsel morsel):
+    """GIL-free predicate evaluation path for pure-bitmap bytecodes.
+
+    Allocates scratch buffers (GIL held), runs the nogil bitmap VM, then
+    wraps the result bitmap into a BoolVector. Falls back to execute_bytecode
+    if any BC_LOAD_COL column is not a BoolVector at runtime.
+    """
+    cdef Py_ssize_t num_rows = morsel.ptr.num_rows
+    cdef Py_ssize_t nbytes = (num_rows + 7) >> 3
+    cdef Py_ssize_t n_slots = bc.max_stack_depth
+    if n_slots < 1:
+        n_slots = 1
+
+    # Allocate ColCache (one entry per instruction) on the C heap
+    cdef ColCache* col_cache = <ColCache*>malloc(bc.count * sizeof(ColCache))
+    if col_cache == NULL:
+        raise MemoryError("evaluate_bitmap: failed to allocate ColCache")
+
+    # Allocate bitmap pointer arrays (n_slots + 2 slots: stack + 2 scratch)
+    cdef uint8_t** bitmaps = <uint8_t**>malloc((n_slots + 2) * sizeof(uint8_t*))
+    cdef uint8_t** null_bitmaps = <uint8_t**>malloc((n_slots + 2) * sizeof(uint8_t*))
+    cdef int8_t* slot_has_null = <int8_t*>malloc((n_slots + 2) * sizeof(int8_t))
+    if bitmaps == NULL or null_bitmaps == NULL or slot_has_null == NULL:
+        free(col_cache); free(bitmaps); free(null_bitmaps); free(slot_has_null)
+        raise MemoryError("evaluate_bitmap: failed to allocate stack arrays")
+
+    cdef list anchors = []  # keeps BoolVector Python objects alive during inner loop
+    cdef int rc
+    cdef Py_ssize_t j
+
+    try:
+        rc = _execute_bytecode_prepass(
+            bc, morsel, num_rows,
+            col_cache, bitmaps, null_bitmaps, slot_has_null,
+            n_slots, nbytes, anchors,
+        )
+        if rc == -1:
+            # A BC_LOAD_COL column is not a BoolVector — fall back
+            return execute_bytecode(bc, morsel)
+
+        with nogil:
+            rc = c_execute_bytecode_inner(
+                bc.instrs, bc.count,
+                col_cache, bitmaps, null_bitmaps, slot_has_null,
+                n_slots, nbytes, num_rows,
+            )
+
+        if rc != 0:
+            # Unexpected opcode — fall back (shouldn't happen if is_pure_bitmap is correct)
+            return execute_bytecode(bc, morsel)
+
+        return _execute_bytecode_postpass(
+            bitmaps[0],
+            null_bitmaps[0],
+            slot_has_null[0] != 0,
+            num_rows,
+        )
+    finally:
+        for j in range(n_slots + 2):
+            free(bitmaps[j])
+            free(null_bitmaps[j])
+        free(col_cache)
+        free(bitmaps)
+        free(null_bitmaps)
+        free(slot_has_null)
+
+
+cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
     """Execute a typed bytecode against `morsel`. Returns a Vector.
 
-    No Python objects on the dispatch path: the instruction store is a C
-    struct array (bc.instrs), the operand stack is a PyObject** C array,
-    dispatch is a switch on the int opcode, kernel calls go through typed
-    cpdef methods on Vector / BoolVector / Morsel. CLAUDE.md §2/§3.
+    If bc.is_pure_bitmap, delegates to evaluate_bitmap (nogil bitmap path).
+    Otherwise uses a pre-allocated Python list as the operand stack — Cython's
+    list item assignment manages refcounts via PyObject_SetItem, eliminating
+    manual Py_INCREF/XDECREF. CLAUDE.md §2/§3.
+
+    Promoted to cpdef so callers within the _operators compilation unit dispatch
+    at C level — no Python function call boundary. The Python `def` wrapper is
+    still synthesised by Cython for external callers (Filter, tests, etc.).
     """
+    if bc.is_pure_bitmap:
+        return evaluate_bitmap(bc, morsel)
     cdef Py_ssize_t n_instrs = bc.count
     cdef Py_ssize_t cap = bc.max_stack_depth
     if cap < 1:
         cap = 1
 
-    # Use a fixed C-stack array for the common case (depth ≤ 16).
-    # Only fall back to heap allocation for unusually deep expression trees.
-    cdef PyObject* _small_stack[16]
-    cdef PyObject** stack
-    cdef bint _stack_is_heap = cap > 16
-    if _stack_is_heap:
-        stack = <PyObject**>PyMem_Malloc(<size_t>(cap * sizeof(PyObject*)))
-        if stack == NULL:
-            raise MemoryError("execute_bytecode: failed to allocate stack")
-    else:
-        stack = _small_stack
+    cdef list stack = [None] * cap
 
     cdef Py_ssize_t sp = 0
     cdef Py_ssize_t i, j, base
@@ -704,224 +1205,287 @@ def execute_bytecode(CompiledBytecode bc, Morsel morsel):
     cdef object legacy_result
     cdef object left_type
     cdef object right_type
+    cdef object func_args
+    cdef Py_ssize_t func_base
+    cdef object extr_key
+    cdef str extr_op
+    cdef object key_vec
 
-    try:
-        for i in range(n_instrs):
-            slot = &bc.instrs[i]
-            opcode = slot.opcode
+    for i in range(n_instrs):
+        slot = &bc.instrs[i]
+        opcode = slot.opcode
 
-            # ----------------------------------------------------------
-            # BC_LOAD_COL — typed Morsel.column dispatch (cpdef)
-            # ----------------------------------------------------------
-            if opcode == BC_LOAD_COL:
-                v_result = morsel.column(
-                    <bytes>slot.column_identity, <bytes>slot.column_name
-                )
-                if v_result is None:
-                    raise ColumnReferencedBeforeEvaluationError(
-                        column=(<bytes>slot.column_name).decode()
-                    )
-                Py_INCREF(v_result)
-                stack[sp] = <PyObject*>v_result
-                sp += 1
-                continue
-
-            # ----------------------------------------------------------
-            # BC_LOAD_LIT_BOOL — typed BoolVector.from_constant
-            # ----------------------------------------------------------
-            if opcode == BC_LOAD_LIT_BOOL:
-                b_result = BoolVector.from_constant(
-                    slot.bool_value != 0, num_rows
-                )
-                Py_INCREF(b_result)
-                stack[sp] = <PyObject*>b_result
-                sp += 1
-                continue
-
-            # ----------------------------------------------------------
-            # BC_LOAD_LIT_SET — push the pre-resolved set object
-            # ----------------------------------------------------------
-            if opcode == BC_LOAD_LIT_SET:
-                Py_XINCREF(slot.literal_obj)
-                stack[sp] = slot.literal_obj
-                sp += 1
-                continue
-
-            # ----------------------------------------------------------
-            # BC_LOAD_LIT_SCALAR — typed call into draken.from_scalar
-            # ----------------------------------------------------------
-            if opcode == BC_LOAD_LIT_SCALAR:
-                scalar_obj = <object>slot.literal_obj
-                v_result = _const_scalar(scalar_obj, num_rows)
-                if v_result is None:
-                    raise TypeError(
-                        f"execute_bytecode: cannot construct vector for literal "
-                        f"{scalar_obj!r} (type {type(scalar_obj).__name__})"
-                    )
-                Py_INCREF(v_result)
-                stack[sp] = <PyObject*>v_result
-                sp += 1
-                continue
-
-            # ----------------------------------------------------------
-            # Boolean combinators — typed BoolVector cpdef dispatch
-            # ----------------------------------------------------------
-            if opcode == BC_AND:
-                sp -= 1
-                b_right = <BoolVector>stack[sp]
-                Py_XDECREF(stack[sp])
-                sp -= 1
-                b_left = <BoolVector>stack[sp]
-                Py_XDECREF(stack[sp])
-                b_result = b_left.and_vector(b_right)
-                Py_INCREF(b_result)
-                stack[sp] = <PyObject*>b_result
-                sp += 1
-                continue
-
-            if opcode == BC_OR:
-                sp -= 1
-                b_right = <BoolVector>stack[sp]
-                Py_XDECREF(stack[sp])
-                sp -= 1
-                b_left = <BoolVector>stack[sp]
-                Py_XDECREF(stack[sp])
-                b_result = b_left.or_vector(b_right)
-                Py_INCREF(b_result)
-                stack[sp] = <PyObject*>b_result
-                sp += 1
-                continue
-
-            if opcode == BC_XOR:
-                sp -= 1
-                b_right = <BoolVector>stack[sp]
-                Py_XDECREF(stack[sp])
-                sp -= 1
-                b_left = <BoolVector>stack[sp]
-                Py_XDECREF(stack[sp])
-                b_result = b_left.xor_vector(b_right)
-                Py_INCREF(b_result)
-                stack[sp] = <PyObject*>b_result
-                sp += 1
-                continue
-
-            if opcode == BC_NOT:
-                sp -= 1
-                b_cur = <BoolVector>stack[sp]
-                Py_XDECREF(stack[sp])
-                b_result = b_cur.not_vector()
-                Py_INCREF(b_result)
-                stack[sp] = <PyObject*>b_result
-                sp += 1
-                continue
-
-            # ----------------------------------------------------------
-            # Variadic AND/OR — DNF / CNF
-            # ----------------------------------------------------------
-            if opcode == BC_DNF:
-                arity = slot.arity
-                base = sp - arity
-                b_result = <BoolVector>stack[base]
-                Py_XDECREF(stack[base])
-                for j in range(1, arity):
-                    b_cur = <BoolVector>stack[base + j]
-                    Py_XDECREF(stack[base + j])
-                    if b_result.any() == 0:
-                        continue   # already empty; remaining .and_vector
-                                   # short-circuits — but we must still
-                                   # drain refs from the stack slots above
-                    b_result = b_result.and_vector(b_cur)
-                sp = base
-                Py_INCREF(b_result)
-                stack[sp] = <PyObject*>b_result
-                sp += 1
-                continue
-
-            if opcode == BC_CNF:
-                arity = slot.arity
-                base = sp - arity
-                b_result = <BoolVector>stack[base]
-                Py_XDECREF(stack[base])
-                for j in range(1, arity):
-                    b_cur = <BoolVector>stack[base + j]
-                    Py_XDECREF(stack[base + j])
-                    if b_result.all() != 0:
-                        continue
-                    b_result = b_result.or_vector(b_cur)
-                sp = base
-                Py_INCREF(b_result)
-                stack[sp] = <PyObject*>b_result
-                sp += 1
-                continue
-
-            # ----------------------------------------------------------
-            # BC_COMPARE — typed draken_compare (cpdef)
-            # ----------------------------------------------------------
-            if opcode == BC_COMPARE:
-                sp -= 1
-                v_right = <Vector>stack[sp]
-                Py_XDECREF(stack[sp])
-                sp -= 1
-                v_left = <Vector>stack[sp]
-                Py_XDECREF(stack[sp])
-                flags = slot.flags
-                left_type = <object>slot.left_orso_type if slot.left_orso_type != NULL else None
-                right_type = <object>slot.right_orso_type if slot.right_orso_type != NULL else None
-                if flags != 0:
-                    if (flags & BC_CMP_LEFT_TEMPORAL) and _is_scalar_value(v_left):
-                        v_left = _coerce_temporal_scalar_for_arrow(v_left, left_type)
-                    if (flags & BC_CMP_RIGHT_TEMPORAL) and _is_scalar_value(v_right):
-                        v_right = _coerce_temporal_scalar_for_arrow(v_right, right_type)
-                if slot.op_code != OP_UNKNOWN:
-                    compare_result = draken_compare_int(
-                        slot.op_code, v_left, v_right, left_type, right_type
-                    )
-                else:
-                    compare_result = draken_compare(
-                        <str>slot.compare_op_str, v_left, v_right, left_type, right_type
-                    )
-                Py_INCREF(compare_result)
-                stack[sp] = <PyObject*>compare_result
-                sp += 1
-                continue
-
-            # ----------------------------------------------------------
-            # BC_LEGACY — GIL-required fallback to the tree-walker
-            # ----------------------------------------------------------
-            if opcode == BC_LEGACY:
-                legacy_result = _eval_value(<object>slot.source_node, morsel)
-                Py_INCREF(legacy_result)
-                stack[sp] = <PyObject*>legacy_result
-                sp += 1
-                continue
-
-            raise NotImplementedError(
-                f"execute_bytecode: unknown opcode {opcode}"
+        # ----------------------------------------------------------
+        # BC_LOAD_COL — typed Morsel.column dispatch (cpdef)
+        # ----------------------------------------------------------
+        if opcode == BC_LOAD_COL:
+            v_result = morsel.column(
+                <bytes>slot.column_identity, <bytes>slot.column_name
             )
+            if v_result is None:
+                raise ColumnReferencedBeforeEvaluationError(
+                    column=(<bytes>slot.column_name).decode()
+                )
+            stack[sp] = v_result
+            sp += 1
+            continue
 
-        if sp != 1:
-            raise ValueError(
-                f"execute_bytecode: expected 1 result on stack, got {sp}"
+        # ----------------------------------------------------------
+        # BC_LOAD_LIT_BOOL — typed BoolVector.from_constant
+        # ----------------------------------------------------------
+        if opcode == BC_LOAD_LIT_BOOL:
+            b_result = BoolVector.from_constant(
+                slot.bool_value != 0, num_rows
             )
+            stack[sp] = b_result
+            sp += 1
+            continue
 
-        # Transfer the single result out of the stack with no net refcount
-        # change: the stack slot's strong ref becomes the returned value's
-        # strong ref. Setting sp=0 prevents the finally cleanup from
-        # double-decreffing.
-        v_result = <Vector>stack[0]
-        Py_XDECREF(stack[0])
-        sp = 0
-        return v_result
-    finally:
-        for j in range(sp):
-            Py_XDECREF(stack[j])
-        if _stack_is_heap:
-            PyMem_Free(stack)
+        # ----------------------------------------------------------
+        # BC_LOAD_LIT_SET — push the pre-resolved set object
+        # ----------------------------------------------------------
+        if opcode == BC_LOAD_LIT_SET:
+            stack[sp] = <object>slot.literal_obj
+            sp += 1
+            continue
+
+        # ----------------------------------------------------------
+        # BC_LOAD_LIT_SCALAR — typed call into draken.from_scalar
+        # ----------------------------------------------------------
+        if opcode == BC_LOAD_LIT_SCALAR:
+            scalar_obj = <object>slot.literal_obj
+            v_result = _const_scalar(scalar_obj, num_rows)
+            if v_result is None:
+                raise TypeError(
+                    f"execute_bytecode: cannot construct vector for literal "
+                    f"{scalar_obj!r} (type {type(scalar_obj).__name__})"
+                )
+            stack[sp] = v_result
+            sp += 1
+            continue
+
+        # ----------------------------------------------------------
+        # Boolean combinators — typed BoolVector cpdef dispatch
+        # ----------------------------------------------------------
+        if opcode == BC_AND:
+            sp -= 1
+            b_right = <BoolVector>stack[sp]
+            sp -= 1
+            b_left = <BoolVector>stack[sp]
+            b_result = b_left.and_vector(b_right)
+            stack[sp] = b_result
+            sp += 1
+            continue
+
+        if opcode == BC_OR:
+            sp -= 1
+            b_right = <BoolVector>stack[sp]
+            sp -= 1
+            b_left = <BoolVector>stack[sp]
+            b_result = b_left.or_vector(b_right)
+            stack[sp] = b_result
+            sp += 1
+            continue
+
+        if opcode == BC_XOR:
+            sp -= 1
+            b_right = <BoolVector>stack[sp]
+            sp -= 1
+            b_left = <BoolVector>stack[sp]
+            b_result = b_left.xor_vector(b_right)
+            stack[sp] = b_result
+            sp += 1
+            continue
+
+        if opcode == BC_NOT:
+            sp -= 1
+            b_cur = <BoolVector>stack[sp]
+            b_result = b_cur.not_vector()
+            stack[sp] = b_result
+            sp += 1
+            continue
+
+        # ----------------------------------------------------------
+        # Variadic AND/OR — DNF / CNF
+        # ----------------------------------------------------------
+        if opcode == BC_DNF:
+            arity = slot.arity
+            base = sp - arity
+            b_result = <BoolVector>stack[base]
+            for j in range(1, arity):
+                b_cur = <BoolVector>stack[base + j]
+                if b_result.any() == 0:
+                    continue
+                b_result = b_result.and_vector(b_cur)
+            sp = base
+            stack[sp] = b_result
+            sp += 1
+            continue
+
+        if opcode == BC_CNF:
+            arity = slot.arity
+            base = sp - arity
+            b_result = <BoolVector>stack[base]
+            for j in range(1, arity):
+                b_cur = <BoolVector>stack[base + j]
+                if b_result.all() != 0:
+                    continue
+                b_result = b_result.or_vector(b_cur)
+            sp = base
+            stack[sp] = b_result
+            sp += 1
+            continue
+
+        # ----------------------------------------------------------
+        # BC_COMPARE — typed draken_compare (cpdef)
+        # ----------------------------------------------------------
+        if opcode == BC_COMPARE:
+            sp -= 1
+            v_right = <Vector>stack[sp]
+            sp -= 1
+            v_left = <Vector>stack[sp]
+            flags = slot.flags
+            left_type = <object>slot.left_orso_type if slot.left_orso_type != NULL else None
+            right_type = <object>slot.right_orso_type if slot.right_orso_type != NULL else None
+            if flags != 0:
+                if (flags & BC_CMP_LEFT_TEMPORAL) and _is_scalar_value(v_left):
+                    v_left = _coerce_temporal_scalar_for_arrow(v_left, left_type)
+                if (flags & BC_CMP_RIGHT_TEMPORAL) and _is_scalar_value(v_right):
+                    v_right = _coerce_temporal_scalar_for_arrow(v_right, right_type)
+            if slot.op_code != OP_UNKNOWN:
+                compare_result = draken_compare_int(
+                    slot.op_code, v_left, v_right, left_type, right_type
+                )
+            else:
+                compare_result = draken_compare(
+                    <str>slot.compare_op_str, v_left, v_right, left_type, right_type
+                )
+            stack[sp] = compare_result
+            sp += 1
+            continue
+
+        # ----------------------------------------------------------
+        # BC_BETWEEN — typed draken_between (cpdef)
+        # ----------------------------------------------------------
+        if opcode == BC_BETWEEN:
+            sp -= 1
+            v_left = <Vector>stack[sp]
+            compare_result = draken_between(
+                v_left,
+                <object>slot.literal_obj if slot.literal_obj != NULL else None,
+                <object>slot.literal_obj2 if slot.literal_obj2 != NULL else None,
+                slot.op_code != 0,
+                slot.bool_value != 0,
+            )
+            stack[sp] = compare_result
+            sp += 1
+            continue
+
+        # ----------------------------------------------------------
+        # BC_BINARY_OP — arithmetic / string / date ops on two vecs
+        # ----------------------------------------------------------
+        if opcode == BC_BINARY_OP:
+            sp -= 1
+            v_right = <Vector>stack[sp]
+            sp -= 1
+            v_left = <Vector>stack[sp]
+            left_type = <object>slot.left_orso_type if slot.left_orso_type != NULL else None
+            right_type = <object>slot.right_orso_type if slot.right_orso_type != NULL else None
+            legacy_result = _binary_op_from_vecs(
+                <str>slot.compare_op_str, v_left, v_right,
+                left_type, right_type, num_rows,
+            )
+            stack[sp] = legacy_result
+            sp += 1
+            continue
+
+        # ----------------------------------------------------------
+        # BC_UNARY_OP — IS NULL / IS NOT NULL / bitwise-not / etc.
+        # ----------------------------------------------------------
+        if opcode == BC_UNARY_OP:
+            sp -= 1
+            v_left = <Vector>stack[sp]
+            legacy_result = _unary_op_kernel(<str>slot.compare_op_str, v_left)
+            stack[sp] = legacy_result
+            sp += 1
+            continue
+
+        # ----------------------------------------------------------
+        # BC_FUNCTION — call pre-resolved kernel callable
+        # ----------------------------------------------------------
+        if opcode == BC_FUNCTION:
+            arity = slot.arity
+            if arity == 0:
+                legacy_result = (<object>slot.callable_ref)(num_rows)
+            else:
+                func_base = sp - arity
+                func_args = []
+                for j in range(arity):
+                    func_args.append(stack[func_base + j])
+                sp = func_base
+                legacy_result = (<object>slot.callable_ref)(*func_args)
+            stack[sp] = legacy_result
+            sp += 1
+            continue
+
+        # ----------------------------------------------------------
+        # BC_EXTRACTION — Arrow / LongArrow / MapAccess
+        # ----------------------------------------------------------
+        if opcode == BC_EXTRACTION:
+            sp -= 1
+            v_left = <Vector>stack[sp]
+            extr_key = <object>slot.literal_obj if slot.literal_obj != NULL else None
+            extr_op = <str>slot.compare_op_str
+            if extr_op == "MapAccess":
+                from opteryx.expression.binary_operators import MapAccessOp
+                key_vec = _Int64Vector.from_constant(int(extr_key), 1)
+                legacy_result = MapAccessOp(v_left, key_vec)
+            elif extr_op == "Arrow":
+                from opteryx.expression.binary_operators import ArrowOp
+                key_vec = _StringVector.from_constant(extr_key, 1)
+                legacy_result = ArrowOp(v_left, key_vec)
+            else:
+                from opteryx.expression.binary_operators import LongArrowOp
+                key_vec = _StringVector.from_constant(extr_key, 1)
+                legacy_result = LongArrowOp(v_left, key_vec)
+            stack[sp] = legacy_result
+            sp += 1
+            continue
+
+        # ----------------------------------------------------------
+        # BC_CAST — pre-resolved cast closure, pop 1 push 1
+        # ----------------------------------------------------------
+        if opcode == BC_CAST:
+            sp -= 1
+            v_left = <Vector>stack[sp]
+            legacy_result = (<object>slot.callable_ref)(v_left)
+            stack[sp] = legacy_result
+            sp += 1
+            continue
+
+        # ----------------------------------------------------------
+        # BC_LEGACY — GIL-required fallback to the tree-walker
+        # ----------------------------------------------------------
+        if opcode == BC_LEGACY:
+            legacy_result = _eval_value(<object>slot.source_node, morsel)
+            stack[sp] = legacy_result
+            sp += 1
+            continue
+
+        raise NotImplementedError(
+            f"execute_bytecode: unknown opcode {opcode}"
+        )
+
+    if sp != 1:
+        raise ValueError(
+            f"execute_bytecode: expected 1 result on stack, got {sp}"
+        )
+
+    return <Vector>stack[0]
 
 
-__all__ = [
-    "draken_compare",
-    "evaluate_and_append_draken",
-    "evaluate_draken",
-    "execute_bytecode",
-]
+# Wire the trampoline into the global function pointer so C++ worker threads
+# can call it without holding the GIL. Done once at module import time.
+opteryx_set_worker_fn(_c_bytecode_worker_trampoline)
+
+

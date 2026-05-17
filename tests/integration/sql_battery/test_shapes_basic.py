@@ -267,6 +267,20 @@ STATEMENTS = [
 
         # casting array vectors segfaulted
         ("SELECT CAST(missions AS VARCHAR) FROM testdata.astronauts", 357, 1, None),
+
+        # ASOF JOIN — basic shape checks
+        # Self-join: every planet matches itself or nearest lower gravity (LEFT semantics = 9 rows)
+        ("SELECT p.name, p2.name AS match_name FROM $planets AS p ASOF JOIN $planets AS p2 MATCH_CONDITION(p.gravity >= p2.gravity)", 9, 2, None),
+        # ASOF with <= operator (find nearest-after match)
+        ("SELECT p.name, p2.name AS match_name FROM $planets AS p ASOF JOIN $planets AS p2 MATCH_CONDITION(p.gravity <= p2.gravity)", 9, 2, None),
+        # LEFT semantics: right side filtered to id >= 5; planets with id < 5 emit null right columns but still appear
+        ("SELECT p.id, p.name, p2.name AS match_name FROM $planets AS p ASOF JOIN (SELECT id, name FROM $planets WHERE id >= 5) AS p2 MATCH_CONDITION(p.id >= p2.id)", 9, 3, None),
+        # ASOF with constant column on the right — exercises align_tables constant-vector + negative-indices path
+        ("SELECT p.name, p2.marker FROM $planets AS p ASOF JOIN (SELECT gravity, 1 AS marker FROM $planets WHERE id >= 5) AS p2 MATCH_CONDITION(p.gravity >= p2.gravity)", 9, 2, None),
+        # ASOF rejects equality in MATCH_CONDITION — must raise UnsupportedSyntaxError
+        ("SELECT p.name FROM $planets AS p ASOF JOIN $planets AS p2 MATCH_CONDITION(p.gravity = p2.gravity)", None, None, UnsupportedSyntaxError),
+        # ASOF rejects not-equal in MATCH_CONDITION — must raise UnsupportedSyntaxError
+        ("SELECT p.name FROM $planets AS p ASOF JOIN $planets AS p2 MATCH_CONDITION(p.gravity != p2.gravity)", None, None, UnsupportedSyntaxError),
 ]
 
 # fmt:on

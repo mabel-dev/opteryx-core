@@ -595,12 +595,130 @@ cdef class JoinRightAdapter(BasePlanNode):
 
 
 # -----------------------------------------------------------------------------
+# Expression evaluator — included here so all operator modules can call
+# evaluation functions directly at C level (no .so boundary, no Python dispatch).
+# Previously compiled as opteryx.expression.evaluator._impl; now part of this
+# unit. opteryx/expression/evaluator/__init__.py re-exports from here.
+# -----------------------------------------------------------------------------
+
+# Operator codes — integer identifiers for operator strings stamped on Nodes.
+# 0 is reserved so a forgotten dispatcher branch fails loud, not silently.
+DEF OP_UNKNOWN          = 0
+DEF OP_EQ               = 1
+DEF OP_NOT_EQ           = 2
+DEF OP_LT               = 3
+DEF OP_GT               = 4
+DEF OP_LT_EQ            = 5
+DEF OP_GT_EQ            = 6
+DEF OP_IN_LIST          = 7
+DEF OP_NOT_IN_LIST      = 8
+DEF OP_LIKE             = 9
+DEF OP_NOT_LIKE         = 10
+DEF OP_ILIKE            = 11
+DEF OP_NOT_ILIKE        = 12
+DEF OP_RLIKE            = 13
+DEF OP_NOT_RLIKE        = 14
+DEF OP_IN_STR           = 15
+DEF OP_NOT_IN_STR       = 16
+DEF OP_I_IN_STR         = 17
+DEF OP_NOT_I_IN_STR     = 18
+
+_OP_CODE = {
+    "Eq": 1, "NotEq": 2, "Lt": 3, "Gt": 4, "LtEq": 5, "GtEq": 6,
+    "InList": 7, "NotInList": 8,
+    "Like": 9, "NotLike": 10, "ILike": 11, "NotILike": 12,
+    "RLike": 13, "NotRLike": 14,
+    "InStr": 15, "NotInStr": 16, "IInStr": 17, "NotIInStr": 18,
+}
+
+cdef int _DRAKEN_CMP_OP[19]
+_DRAKEN_CMP_OP[0]  = -1  # OP_UNKNOWN
+_DRAKEN_CMP_OP[1]  =  0  # OP_EQ        → Draken Eq
+_DRAKEN_CMP_OP[2]  =  1  # OP_NOT_EQ    → Draken Ne
+_DRAKEN_CMP_OP[3]  =  4  # OP_LT        → Draken Lt
+_DRAKEN_CMP_OP[4]  =  2  # OP_GT        → Draken Gt
+_DRAKEN_CMP_OP[5]  =  5  # OP_LT_EQ     → Draken Le
+_DRAKEN_CMP_OP[6]  =  3  # OP_GT_EQ     → Draken Ge
+_DRAKEN_CMP_OP[7]  = -1  # OP_IN_LIST       — own kernel
+_DRAKEN_CMP_OP[8]  = -1  # OP_NOT_IN_LIST   — own kernel
+_DRAKEN_CMP_OP[9]  = -1  # OP_LIKE          — own kernel
+_DRAKEN_CMP_OP[10] = -1  # OP_NOT_LIKE      — own kernel
+_DRAKEN_CMP_OP[11] = -1  # OP_ILIKE         — own kernel
+_DRAKEN_CMP_OP[12] = -1  # OP_NOT_ILIKE     — own kernel
+_DRAKEN_CMP_OP[13] = -1  # OP_RLIKE         — own kernel
+_DRAKEN_CMP_OP[14] = -1  # OP_NOT_RLIKE     — own kernel
+_DRAKEN_CMP_OP[15] = -1  # OP_IN_STR        — own kernel
+_DRAKEN_CMP_OP[16] = -1  # OP_NOT_IN_STR    — own kernel
+_DRAKEN_CMP_OP[17] = -1  # OP_I_IN_STR      — own kernel
+_DRAKEN_CMP_OP[18] = -1  # OP_NOT_I_IN_STR  — own kernel
+
+cdef int _DRAKEN_CMP_OP_FLIPPED[19]
+_DRAKEN_CMP_OP_FLIPPED[0]  = -1
+_DRAKEN_CMP_OP_FLIPPED[1]  =  0   # Eq    (symmetric)
+_DRAKEN_CMP_OP_FLIPPED[2]  =  1   # Ne    (symmetric)
+_DRAKEN_CMP_OP_FLIPPED[3]  =  2   # OP_LT       → Draken Gt
+_DRAKEN_CMP_OP_FLIPPED[4]  =  4   # OP_GT       → Draken Lt
+_DRAKEN_CMP_OP_FLIPPED[5]  =  3   # OP_LT_EQ    → Draken Ge
+_DRAKEN_CMP_OP_FLIPPED[6]  =  5   # OP_GT_EQ    → Draken Le
+_DRAKEN_CMP_OP_FLIPPED[7]  = -1
+_DRAKEN_CMP_OP_FLIPPED[8]  = -1
+_DRAKEN_CMP_OP_FLIPPED[9]  = -1
+_DRAKEN_CMP_OP_FLIPPED[10] = -1
+_DRAKEN_CMP_OP_FLIPPED[11] = -1
+_DRAKEN_CMP_OP_FLIPPED[12] = -1
+_DRAKEN_CMP_OP_FLIPPED[13] = -1
+_DRAKEN_CMP_OP_FLIPPED[14] = -1
+_DRAKEN_CMP_OP_FLIPPED[15] = -1
+_DRAKEN_CMP_OP_FLIPPED[16] = -1
+_DRAKEN_CMP_OP_FLIPPED[17] = -1
+_DRAKEN_CMP_OP_FLIPPED[18] = -1
+
+include "../expression/evaluator/type_coercion.pyx"
+include "../expression/evaluator/function_execution.pyx"
+include "../expression/evaluator/arithmetic_dispatch.pyx"
+include "../expression/evaluator/temporal_ops.pyx"
+include "../expression/evaluator/string_ops.pyx"
+include "../expression/evaluator/json_ops.pyx"
+include "../expression/evaluator/case_eval.pyx"
+include "../expression/evaluator/arithmetic.pyx"
+include "../expression/evaluator/comparisons.pyx"
+include "../expression/evaluator/evaluation.pyx"
+
+
+def _verify_node_type_constants():
+    """Fail-fast: the compile-time DEF constants in evaluation must mirror the
+    runtime NodeType enum. If this assertion fires, update the DEFs in
+    evaluator/evaluation.pyx and rebuild.
+    """
+    from opteryx.expression import NodeType
+
+    expected = {
+        "UNKNOWN": 0,
+        "AND": 17, "OR": 18, "XOR": 19, "NOT": 20, "DNF": 21, "CNF": 22,
+        "CASE": 32, "WILDCARD": 33, "COMPARISON_OPERATOR": 34,
+        "BINARY_OPERATOR": 35, "UNARY_OPERATOR": 36, "FUNCTION": 37,
+        "IDENTIFIER": 38, "SUBQUERY": 39, "NESTED": 40, "AGGREGATOR": 41,
+        "LITERAL": 42, "EXPRESSION_LIST": 43, "EVALUATED": 44, "CAST": 45,
+        "EXTRACTION_OPERATOR": 46, "BETWEEN": 47,
+    }
+    for name, value in expected.items():
+        actual = int(getattr(NodeType, name))
+        if actual != value:
+            raise AssertionError(
+                f"NodeType.{name} = {actual}, but evaluation.pyx DEF expects {value}. "
+                f"Update the DEF constants at the top of "
+                f"opteryx/expression/evaluator/evaluation.pyx and rebuild."
+            )
+
+
+# -----------------------------------------------------------------------------
 # Include order: base classes / shared types before their consumers.
 # -----------------------------------------------------------------------------
 
 # ReaderNode is subclassed by function_dataset, parquet_read, show_value
 include "read/read.pyx"
 
+include "asof_join/asof_join.pyx"
 include "cross_join/cross_join.pyx"
 include "distinct/distinct.pyx"
 include "hashed_inner_join/hashed_inner_join.pyx"

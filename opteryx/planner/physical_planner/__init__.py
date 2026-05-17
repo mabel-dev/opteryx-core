@@ -16,7 +16,7 @@ operator registry based on the node type and its properties:
 - Scan         → ParquetReadNode (all-parquet manifests), Reader (internal datasets),
                  NullReaderNode (empty-result scans with contradictory predicates)
 - Join         → DrakenInnerJoinNode, OuterJoinNode, FilterJoinNode (semi/anti),
-                 CrossJoinNode, NonEquiJoinNode, NestedLoopJoinNode
+                 CrossJoinNode, NonEquiJoinNode, NestedLoopJoinNode, AsofJoinNode
 - Aggregate    → Aggregate or AggregateAndGroupNode
 - Project      → ProjectionNode
 - Filter       → FilterNode
@@ -131,6 +131,9 @@ def _create_join_node(logical_node, query_properties, registry):
     elif join_type in ("left anti", "left semi", "left anti null-aware"):
         # LEFT SEMI, LEFT ANTI, LEFT ANTI NULL-AWARE (NOT IN) JOIN
         return registry.create("Filter Join", query_properties, **node_config)
+    elif join_type == "asof":
+        # ASOF JOIN — nearest-neighbour time-series join
+        return registry.create("ASOF Join", query_properties, **node_config)
     else:
         # We don't support other JOIN types, e.g. RIGHT SEMI, RIGHT ANTI
         raise InvalidInternalStateError(f"Unsupported JOIN type '{join_type}'")

@@ -1198,6 +1198,203 @@ cdef class BoolVector(Vector):
         return f"<BoolVector len={buf_length(self.ptr)} values={vals}>"
 
 
+# ---------------------------------------------------------------------------
+# nogil bitmap accessors and raw kernel wrappers — Stage 2 of the nogil VM plan.
+#
+# These operate on pre-allocated caller-owned uint8_t* buffers. No Python
+# objects are created or destroyed. The caller (Stage 3 pre-pass) allocates
+# all buffers; these functions only write into them.
+#
+# Return convention: 0 = all results valid (dest_null contents irrelevant),
+# 1 = at least one null result (caller must use dest_null).
+# ---------------------------------------------------------------------------
+
+cdef bint c_get_bitmap_ptrs(
+    BoolVector vec,
+    uint8_t** data_out,
+    uint8_t** null_out,
+) noexcept nogil:
+    """Return raw data/null pointers for a dense BoolVector without the GIL.
+
+    Returns 1 if the vector is not dense (const/RLE encoded) — caller must
+    materialize before entering the nogil zone.  Returns 0 on success.
+    """
+    if vec._has_const or vec._rle_buffer != NULL:
+        return 1
+    data_out[0] = <uint8_t*>vec.ptr.data
+    null_out[0] = vec.ptr.null_bitmap
+    return 0
+
+
+cdef bint c_and_bitmap(
+    uint8_t* dest,
+    const uint8_t* a,
+    uint8_t* a_null,
+    const uint8_t* b,
+    uint8_t* b_null,
+    uint8_t* dest_null,
+    Py_ssize_t nbytes,
+    Py_ssize_t n,
+) noexcept nogil:
+    """Element-wise AND on pre-allocated uint8_t bitmaps with SQL 3VL null semantics.
+
+    dest and dest_null must be pre-allocated to nbytes bytes and zero-initialised.
+    Returns 0 if all results are valid, 1 if dest_null contains meaningful bits.
+    """
+    cdef Py_ssize_t i
+    cdef uint8_t a_valid, b_valid, a_val, b_val
+    cdef bint result_true, valid
+    cdef bint any_null = False
+
+    if a_null == NULL and b_null == NULL:
+        simd_and_mask(dest, a, b, <size_t>nbytes)
+        return 0
+
+    for i in range(n):
+        a_valid = 1 if a_null == NULL else ((a_null[i >> 3] >> (i & 7)) & 1)
+        b_valid = 1 if b_null == NULL else ((b_null[i >> 3] >> (i & 7)) & 1)
+        a_val = (a[i >> 3] >> (i & 7)) & 1
+        b_val = (b[i >> 3] >> (i & 7)) & 1
+
+        valid = False
+        result_true = False
+
+        if (a_valid and not a_val) or (b_valid and not b_val):
+            valid = True
+            result_true = False
+        elif a_valid and b_valid:
+            valid = True
+            result_true = a_val and b_val
+
+        if valid:
+            dest_null[i >> 3] |= (1 << (i & 7))
+            if result_true:
+                dest[i >> 3] |= (1 << (i & 7))
+        else:
+            any_null = True
+
+    return 1 if any_null else 0
+
+
+cdef bint c_or_bitmap(
+    uint8_t* dest,
+    const uint8_t* a,
+    uint8_t* a_null,
+    const uint8_t* b,
+    uint8_t* b_null,
+    uint8_t* dest_null,
+    Py_ssize_t nbytes,
+    Py_ssize_t n,
+) noexcept nogil:
+    """Element-wise OR on pre-allocated uint8_t bitmaps with SQL 3VL null semantics.
+
+    dest and dest_null must be pre-allocated to nbytes bytes and zero-initialised.
+    Returns 0 if all results are valid, 1 if dest_null contains meaningful bits.
+    """
+    cdef Py_ssize_t i
+    cdef uint8_t a_valid, b_valid, a_val, b_val
+    cdef bint result_true, valid
+    cdef bint any_null = False
+
+    if a_null == NULL and b_null == NULL:
+        simd_or_mask(dest, a, b, <size_t>nbytes)
+        return 0
+
+    for i in range(n):
+        a_valid = 1 if a_null == NULL else ((a_null[i >> 3] >> (i & 7)) & 1)
+        b_valid = 1 if b_null == NULL else ((b_null[i >> 3] >> (i & 7)) & 1)
+        a_val = (a[i >> 3] >> (i & 7)) & 1
+        b_val = (b[i >> 3] >> (i & 7)) & 1
+
+        valid = False
+        result_true = False
+
+        if (a_valid and a_val) or (b_valid and b_val):
+            valid = True
+            result_true = True
+        elif a_valid and b_valid:
+            valid = True
+            result_true = False
+
+        if valid:
+            dest_null[i >> 3] |= (1 << (i & 7))
+            if result_true:
+                dest[i >> 3] |= (1 << (i & 7))
+        else:
+            any_null = True
+
+    return 1 if any_null else 0
+
+
+cdef bint c_xor_bitmap(
+    uint8_t* dest,
+    const uint8_t* a,
+    uint8_t* a_null,
+    const uint8_t* b,
+    uint8_t* b_null,
+    uint8_t* dest_null,
+    Py_ssize_t nbytes,
+    Py_ssize_t n,
+) noexcept nogil:
+    """Element-wise XOR on pre-allocated uint8_t bitmaps with SQL 3VL null semantics.
+
+    dest and dest_null must be pre-allocated to nbytes bytes and zero-initialised.
+    Returns 0 if all results are valid, 1 if dest_null contains meaningful bits.
+    """
+    cdef Py_ssize_t i
+    cdef uint8_t a_valid, b_valid
+    cdef bint any_null = False
+
+    if a_null == NULL and b_null == NULL:
+        simd_xor_mask(dest, a, b, <size_t>nbytes)
+        return 0
+
+    for i in range(n):
+        a_valid = 1 if a_null == NULL else ((a_null[i >> 3] >> (i & 7)) & 1)
+        b_valid = 1 if b_null == NULL else ((b_null[i >> 3] >> (i & 7)) & 1)
+        if a_valid and b_valid:
+            dest_null[i >> 3] |= (1 << (i & 7))
+            if (((a[i >> 3] >> (i & 7)) & 1) != ((b[i >> 3] >> (i & 7)) & 1)):
+                dest[i >> 3] |= (1 << (i & 7))
+        else:
+            any_null = True
+
+    return 1 if any_null else 0
+
+
+cdef bint c_not_bitmap(
+    uint8_t* dest,
+    const uint8_t* src,
+    uint8_t* src_null,
+    uint8_t* dest_null,
+    Py_ssize_t nbytes,
+    Py_ssize_t n,
+) noexcept nogil:
+    """Element-wise NOT on a pre-allocated uint8_t bitmap with SQL 3VL null semantics.
+
+    dest and dest_null must be pre-allocated to nbytes bytes and zero-initialised.
+    Returns 0 if all results are valid, 1 if dest_null contains meaningful bits.
+    """
+    cdef Py_ssize_t i
+    cdef bint any_null = False
+
+    if src_null == NULL:
+        simd_not_mask(dest, src, <size_t>nbytes)
+        if (n & 7) != 0:
+            dest[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
+        return 0
+
+    for i in range(n):
+        if (src_null[i >> 3] >> (i & 7)) & 1:
+            dest_null[i >> 3] |= (1 << (i & 7))
+            if ((src[i >> 3] >> (i & 7)) & 1) == 0:
+                dest[i >> 3] |= (1 << (i & 7))
+        else:
+            any_null = True
+
+    return 1 if any_null else 0
+
+
 cdef BoolVector from_decoded(
     void* data,
     uint8_t* null_bitmap,

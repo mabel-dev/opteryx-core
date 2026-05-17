@@ -31,7 +31,7 @@ from libc.stdint cimport uint8_t, int64_t
 from draken.vectors.vector cimport Vector
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
-from opteryx.expression.evaluator import evaluate_and_append_draken
+# evaluate_and_append_draken in scope from _operators evaluator includes
 from opteryx.models import QueryProperties
 from opteryx.operators.aggregate.helpers import extract_evaluations
 from opteryx.types import OrsoTypes
@@ -39,7 +39,7 @@ from opteryx.types import OrsoTypes
 # BasePlanNode in scope via textual include from _operators.pyx (umbrella unit).
 # EOS sentinel available as _EOS_SENTINEL in the same scope.
 
-_DRAKEN_ENCODING_CONSTANT = 3
+# _DRAKEN_ENCODING_CONSTANT = 3 via DEF in type_coercion.pyx (same compilation unit)
 
 # Literal-aggregate-kind tags (typed, no string comparisons on hot path)
 cdef int _LITERAL_NONE          = 0

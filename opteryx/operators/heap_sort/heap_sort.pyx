@@ -14,7 +14,7 @@ from collections.abc import Iterable
 from opteryx.vectors.vector_ranking import vector_exact_search_top_k
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
-from opteryx.expression.evaluator import evaluate_and_append_draken
+# evaluate_and_append_draken in scope from _operators evaluator includes
 from opteryx.models import QueryProperties
 
 # Licensed under the Apache License, Version 2.0 (the "License");

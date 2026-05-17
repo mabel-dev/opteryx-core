@@ -56,3 +56,34 @@ cdef BoolVector from_rle_builder(
     size_t num_runs,
     uint8_t* null_bitmap=*,
 )
+
+# nogil raw bitmap wrappers — write into caller-pre-allocated buffers.
+# Return 0 = all valid (dest_null irrelevant), 1 = nulls present.
+cdef bint c_get_bitmap_ptrs(
+    BoolVector vec,
+    uint8_t** data_out,
+    uint8_t** null_out,
+) noexcept nogil
+cdef bint c_and_bitmap(
+    uint8_t* dest, const uint8_t* a, uint8_t* a_null,
+    const uint8_t* b, uint8_t* b_null,
+    uint8_t* dest_null,
+    Py_ssize_t nbytes, Py_ssize_t n,
+) noexcept nogil
+cdef bint c_or_bitmap(
+    uint8_t* dest, const uint8_t* a, uint8_t* a_null,
+    const uint8_t* b, uint8_t* b_null,
+    uint8_t* dest_null,
+    Py_ssize_t nbytes, Py_ssize_t n,
+) noexcept nogil
+cdef bint c_xor_bitmap(
+    uint8_t* dest, const uint8_t* a, uint8_t* a_null,
+    const uint8_t* b, uint8_t* b_null,
+    uint8_t* dest_null,
+    Py_ssize_t nbytes, Py_ssize_t n,
+) noexcept nogil
+cdef bint c_not_bitmap(
+    uint8_t* dest, const uint8_t* src, uint8_t* src_null,
+    uint8_t* dest_null,
+    Py_ssize_t nbytes, Py_ssize_t n,
+) noexcept nogil
