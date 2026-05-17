@@ -30,7 +30,7 @@ from cpython.mem cimport PyMem_Malloc
 from libc.stddef cimport size_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy, memset, strlen
-from libc.stdint cimport int32_t, int64_t, uint8_t
+from libc.stdint cimport int32_t, int64_t, uint8_t, uint16_t, uint32_t
 from libc.stdint cimport uint64_t
 
 from draken.core.buffers cimport (
@@ -45,7 +45,6 @@ from draken.core.buffers cimport (
     DRAKEN_DATE32,
     DRAKEN_DICTIONARY,
     DRAKEN_ENCODING_DICTIONARY,
-    DRAKEN_ENCODING_RLE,
     DRAKEN_FLOAT32,
     DRAKEN_FLOAT64,
     DRAKEN_INT16,
@@ -1598,37 +1597,41 @@ cdef class Morsel:
         cdef int32_t[::1] input_view_32
         cdef bint free_indices = False
         cdef bint indices_ready = False
-        cdef DrakenRLEBuffer* rle_buf
-        cdef int64_t* rle_vals_ptr
-        cdef int32_t* rle_lens_ptr
-        cdef size_t rle_r
-        cdef int32_t rle_run_val
-        cdef int32_t rle_run_len
-        cdef int rle_j
+        cdef Int64Vector idx_vec
+        cdef uint8_t cw
+        cdef uint8_t* codes_u8_ptr
+        cdef uint16_t* codes_u16_ptr
+        cdef uint32_t* codes_u32_ptr
+        cdef int64_t* dict_int_ptr
 
-        # Fast path: RLE-encoded Int64Vector (e.g. from build_cartesian_indices).
-        # Expands runs directly to int32 in one pass — no intermediate int64 vector.
-        if isinstance(indices, Int64Vector) and (<Int64Vector>indices)._encoding == DRAKEN_ENCODING_RLE:
-            rle_buf = (<Int64Vector>indices)._rle_buffer
-            if rle_buf == NULL or rle_buf.length == 0:
+        # Fast path: dictionary-encoded Int64Vector (e.g. from build_cartesian_indices).
+        # Gathers dict values via codes directly into int32 — no intermediate dense vector.
+        if isinstance(indices, Int64Vector) and (<Int64Vector>indices)._encoding == DRAKEN_ENCODING_DICTIONARY:
+            idx_vec = <Int64Vector>indices
+            n_indices = <int>idx_vec._dict_accessor.length
+            if n_indices == 0:
                 self._empty_inplace()
                 return
 
-            n_indices = <int>rle_buf.length
             indices_ptr = <int32_t*>PyMem_Malloc(n_indices * sizeof(int32_t))
             if indices_ptr == NULL:
                 raise MemoryError()
             free_indices = True
 
-            rle_vals_ptr = <int64_t*>rle_buf.run_values
-            rle_lens_ptr = rle_buf.run_lengths
-            i = 0
-            for rle_r in range(rle_buf.num_runs):
-                rle_run_val = <int32_t>rle_vals_ptr[rle_r]
-                rle_run_len = rle_lens_ptr[rle_r]
-                for rle_j in range(rle_run_len):
-                    indices_ptr[i] = rle_run_val
-                    i += 1
+            dict_int_ptr = <int64_t*>idx_vec._dict_accessor.dict_values.data
+            cw = idx_vec._dict_accessor.code_width
+            if cw == 1:
+                codes_u8_ptr = idx_vec._dict_accessor.codes
+                for i in range(n_indices):
+                    indices_ptr[i] = <int32_t>dict_int_ptr[codes_u8_ptr[i]]
+            elif cw == 2:
+                codes_u16_ptr = <uint16_t*>idx_vec._dict_accessor.codes
+                for i in range(n_indices):
+                    indices_ptr[i] = <int32_t>dict_int_ptr[codes_u16_ptr[i]]
+            else:
+                codes_u32_ptr = <uint32_t*>idx_vec._dict_accessor.codes
+                for i in range(n_indices):
+                    indices_ptr[i] = <int32_t>dict_int_ptr[codes_u32_ptr[i]]
 
             indices_view = <int32_t[:n_indices]>indices_ptr
             indices_ready = True

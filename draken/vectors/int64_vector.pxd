@@ -35,7 +35,6 @@ cdef class Int64Vector(Vector):
 
     cpdef Int64Vector take(self, int32_t[::1] indices)
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
-    cdef BoolVector _compare_scalar_rle(self, int64_t value, int op)
     cdef BoolVector _compare_scalar_dict(self, int64_t value, int op)
     # Integer-dispatched kernels. cpdef so the expression evaluator can call
     # them directly from Python and bypass the per-op named wrappers below.
@@ -109,7 +108,6 @@ cdef Int64Vector from_rle_builder(
     size_t num_runs,
     uint8_t* null_bitmap=*,
 )
-cdef Int64Vector _materialize_rle_int64(Int64Vector rle_vec)
 cdef Int64Vector _materialize_dict_int64(Int64Vector vec)
 cdef Int64Vector make_int64_dict_only(
     const uint8_t* codes,

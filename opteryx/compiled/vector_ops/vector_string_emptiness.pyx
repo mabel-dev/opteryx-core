@@ -31,9 +31,7 @@ from libc.string cimport memset, memcpy
 
 from draken.core.buffers cimport (
     DrakenVarBuffer,
-    DrakenRLEBuffer,
     DRAKEN_ENCODING_DICTIONARY,
-    DRAKEN_ENCODING_RLE,
 )
 from draken.vectors.string_vector cimport StringVector, _materialize_dict_string
 from draken.vectors.bool_vector cimport BoolVector
@@ -160,35 +158,6 @@ cdef BoolVector _emptiness_dict(StringVector vec, bint emit_when_empty):
     return out
 
 
-cdef BoolVector _emptiness_rle(StringVector vec, bint emit_when_empty):
-    cdef DrakenRLEBuffer* rle = vec._rle_buffer
-    if rle == NULL:
-        # Defensive: fall back to materialise-then-dense if the RLE buffer is
-        # absent. Should not normally happen for an RLE-encoded vector.
-        return _emptiness_dense(_materialize_dict_string(vec), emit_when_empty)
-
-    cdef Py_ssize_t n = <Py_ssize_t>rle.length
-    cdef Py_ssize_t num_runs = <Py_ssize_t>rle.num_runs
-    cdef int32_t* run_lengths = rle.run_lengths
-    cdef int32_t* run_str_lens = rle.run_str_lens
-    cdef uint8_t* row_nulls = rle.null_bitmap
-
-    cdef BoolVector out = _alloc_bool_with_nulls(n, row_nulls)
-    cdef uint8_t* dst = <uint8_t*> out.ptr.data
-
-    cdef Py_ssize_t row = 0
-    cdef Py_ssize_t r
-    cdef Py_ssize_t rl
-    cdef bint is_empty
-    for r in range(num_runs):
-        rl = <Py_ssize_t>run_lengths[r]
-        is_empty = (run_str_lens[r] == 0)
-        if is_empty == emit_when_empty:
-            _set_bit_range(dst, row, rl)
-        row += rl
-    return out
-
-
 cdef BoolVector _string_emptiness_kernel(StringVector vec, bint emit_when_empty):
     cdef Py_ssize_t n = vec.ptr.length
 
@@ -200,9 +169,6 @@ cdef BoolVector _string_emptiness_kernel(StringVector vec, bint emit_when_empty)
             (vec._const_value.length == 0) == emit_when_empty,
             False,
         )
-
-    if vec._encoding == DRAKEN_ENCODING_RLE:
-        return _emptiness_rle(vec, emit_when_empty)
 
     if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec.ptr.data == NULL:
         return _emptiness_dict(vec, emit_when_empty)

@@ -47,4 +47,3 @@ cdef class IntervalVector(Vector):
 
 cdef IntervalVector from_arrow_interval(object array)
 cdef IntervalVector from_arrow_binary(object array)
-cdef IntervalVector _materialize_rle_interval(IntervalVector rle_vec)

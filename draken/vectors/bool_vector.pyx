@@ -150,16 +150,6 @@ cdef class BoolVector(Vector):
             if self._const_is_null:
                 return None
             return bool(self._const_value)
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            bgi_rle_vals = <uint8_t*>self._rle_buffer.run_values
-            for bgi_run in range(self._rle_buffer.num_runs):
-                bgi_cumulative += <size_t>self._rle_buffer.run_lengths[bgi_run]
-                if <size_t>i < bgi_cumulative:
-                    if self._rle_buffer.null_bitmap != NULL:
-                        if not ((self._rle_buffer.null_bitmap[i >> 3] >> (i & 7)) & 1):
-                            return None
-                    return bool(bgi_rle_vals[bgi_run])
-            raise IndexError("Index out of bounds")
         # null check
         if ptr.null_bitmap != NULL:
             byte = ptr.null_bitmap[i >> 3]
@@ -195,10 +185,6 @@ cdef class BoolVector(Vector):
 
     cpdef BoolVector and_vector(self, BoolVector other):
         """Element-wise AND between two BoolVector instances with SQL null semantics."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_bool(self).and_vector(other)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self.and_vector(_materialize_rle_bool(other))
         if self._has_const:
             return _materialize_const_bool(self).and_vector(other)
         if other._has_const:
@@ -278,10 +264,6 @@ cdef class BoolVector(Vector):
 
     cpdef BoolVector or_vector(self, BoolVector other):
         """Element-wise OR between two BoolVector instances with SQL null semantics."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_bool(self).or_vector(other)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self.or_vector(_materialize_rle_bool(other))
         if self._has_const:
             return _materialize_const_bool(self).or_vector(other)
         if other._has_const:
@@ -361,10 +343,6 @@ cdef class BoolVector(Vector):
 
     cpdef BoolVector xor_vector(self, BoolVector other):
         """Element-wise XOR between two BoolVector instances with SQL null semantics."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_bool(self).xor_vector(other)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self.xor_vector(_materialize_rle_bool(other))
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef Py_ssize_t n = ptr1.length
@@ -426,8 +404,6 @@ cdef class BoolVector(Vector):
 
     cpdef BoolVector not_vector(self):
         """Element-wise NOT with SQL null semantics."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_bool(self).not_vector()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -479,8 +455,6 @@ cdef class BoolVector(Vector):
 
     # -------- Ops --------
     cpdef BoolVector take(self, int32_t[::1] indices):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_bool(self).take(indices)
         if self._has_const:
             return BoolVector.from_constant(
                 None if self._const_is_null else bool(self._const_value),
@@ -531,8 +505,6 @@ cdef class BoolVector(Vector):
         raise ValueError(f"BoolVector._compare_scalar: unsupported op {op}")
 
     cpdef BoolVector equals(self, bint value):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_bool(self).equals(value)
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -562,8 +534,6 @@ cdef class BoolVector(Vector):
         return out
 
     cpdef BoolVector not_equals(self, bint value):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_bool(self).not_equals(value)
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -594,10 +564,6 @@ cdef class BoolVector(Vector):
 
     cpdef BoolVector equals_vector(self, BoolVector other):
         """Element-wise equality between two BoolVectors with null propagation."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_bool(self).equals_vector(other)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self.equals_vector(_materialize_rle_bool(other))
         if self._has_const:
             return _materialize_const_bool(self).equals_vector(other)
         if other._has_const:
@@ -637,10 +603,6 @@ cdef class BoolVector(Vector):
 
     cpdef BoolVector not_equals_vector(self, BoolVector other):
         """Element-wise inequality between two BoolVectors with null propagation."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_bool(self).not_equals_vector(other)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self.not_equals_vector(_materialize_rle_bool(other))
         if self._has_const:
             return _materialize_const_bool(self).not_equals_vector(other)
         if other._has_const:
@@ -680,9 +642,6 @@ cdef class BoolVector(Vector):
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Compress bools to int64_t where True=1, False=0, null=NULL_FLAG"""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            _materialize_rle_bool(self).compress_into(out_buf, offset)
-            return
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t i
@@ -714,8 +673,6 @@ cdef class BoolVector(Vector):
             i += remaining
 
     cpdef int8_t any(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_bool(self).any()
         if self._has_const:
             return 0 if self._const_is_null else <int8_t>(1 if self._const_value else 0)
         cdef DrakenFixedBuffer* ptr = self.ptr
@@ -727,8 +684,6 @@ cdef class BoolVector(Vector):
         return 0
 
     cpdef int8_t all(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_bool(self).all()
         if self._has_const:
             # all-null: no non-null True values, treat as vacuously true (SQL semantics)
             return 1 if self._const_is_null else <int8_t>(1 if self._const_value else 0)
@@ -745,20 +700,6 @@ cdef class BoolVector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         cdef int8_t* buf
         cdef uint8_t byte, bit
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            n = <Py_ssize_t>self._rle_buffer.length
-            buf = <int8_t*> PyMem_Malloc(n)
-            if buf == NULL:
-                raise MemoryError()
-            if self._rle_buffer.null_bitmap == NULL:
-                for i in range(n):
-                    buf[i] = 0
-            else:
-                for i in range(n):
-                    byte = self._rle_buffer.null_bitmap[i >> 3]
-                    bit = (byte >> (i & 7)) & 1
-                    buf[i] = 0 if bit else 1
-            return <int8_t[:n]> buf
         buf = <int8_t*> PyMem_Malloc(n)
         if buf == NULL:
             raise MemoryError()
@@ -778,12 +719,6 @@ cdef class BoolVector(Vector):
 
     @property
     def null_count(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer.null_bitmap == NULL:
-                return 0
-            return <Py_ssize_t>self._rle_buffer.length - <Py_ssize_t>simd_popcount(
-                self._rle_buffer.null_bitmap, (self._rle_buffer.length + 7) >> 3
-            )
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         if self._has_const:
@@ -817,21 +752,6 @@ cdef class BoolVector(Vector):
         cdef Py_ssize_t bool_pos
         cdef size_t br
         cdef int32_t bool_run_len
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            rle_vals_b = <uint8_t*>self._rle_buffer.run_values
-            rle_lens_b = self._rle_buffer.run_lengths
-            rle_runs_b = self._rle_buffer.num_runs
-            rle_nulls_b = self._rle_buffer.null_bitmap
-            bool_pos = 0
-            for br in range(rle_runs_b):
-                bool_run_len = rle_lens_b[br]
-                for i in range(bool_run_len):
-                    if rle_nulls_b != NULL and not ((rle_nulls_b[(bool_pos + i) >> 3] >> ((bool_pos + i) & 7)) & 1):
-                        out.append(None)
-                    else:
-                        out.append(bool(rle_vals_b[br]))
-                bool_pos += bool_run_len
-            return out
         if self._has_const:
             if self._const_is_null:
                 for i in range(n):
@@ -870,22 +790,6 @@ cdef class BoolVector(Vector):
         cdef Py_ssize_t bool_pos
         cdef int32_t bool_run_len
 
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            rle_vals_b = <uint8_t*>self._rle_buffer.run_values
-            rle_lens_b = self._rle_buffer.run_lengths
-            rle_runs_b = self._rle_buffer.num_runs
-            rle_nulls_b = self._rle_buffer.null_bitmap
-            bool_pos = 0
-            for br in range(rle_runs_b):
-                bool_run_len = rle_lens_b[br]
-                for i in range(bool_run_len):
-                    if rle_nulls_b != NULL and not ((rle_nulls_b[(bool_pos + i) >> 3] >> ((bool_pos + i) & 7)) & 1):
-                        out[bool_pos + i] = 0
-                    else:
-                        out[bool_pos + i] = 1 if rle_vals_b[br] else 0
-                bool_pos += bool_run_len
-            return bytes(out)
-
         if self._has_const:
             fill_val = 0 if self._const_is_null else (1 if self._const_value else 0)
             for i in range(n):
@@ -904,8 +808,6 @@ cdef class BoolVector(Vector):
         return bytes(out)
 
     cpdef int64_t min(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_bool(self).min()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
         if n == 0:
@@ -947,8 +849,6 @@ cdef class BoolVector(Vector):
         return <int64_t>1
 
     cpdef int64_t max(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_bool(self).max()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
         if n == 0:
@@ -990,8 +890,6 @@ cdef class BoolVector(Vector):
 
     cpdef int64_t sum(self):
         # sum(bool) = count of true values
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_bool(self).sum()
         if self._has_const:
             if self._const_is_null:
                 return 0
@@ -1013,8 +911,6 @@ cdef class BoolVector(Vector):
 
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
         """Compare bool values at two indices. Returns -1 (left < right), 0 (equal), or 1 (left > right)."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_bool(self).compare_at(left_idx, right_idx)
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef uint8_t left_val, right_val
         cdef bint left_is_null, right_is_null
@@ -1039,10 +935,6 @@ cdef class BoolVector(Vector):
 
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False:
         """Check if value at index is null."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer.null_bitmap == NULL:
-                return False
-            return not ((self._rle_buffer.null_bitmap[idx >> 3] >> (idx & 7)) & 1)
         cdef DrakenFixedBuffer* ptr = self.ptr
         if ptr.null_bitmap == NULL:
             return False
@@ -1066,10 +958,6 @@ cdef class BoolVector(Vector):
         cdef bint has_nulls
         cdef uint64_t[BOOL_HASH_CHUNK] scratch
         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
-
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            _materialize_rle_bool(self).hash_into(out_buf, offset)
-            return
 
         if self._has_const:
             value = NULL_HASH if self._const_is_null else (TRUE_HASH if self._const_value else FALSE_HASH)
@@ -1187,9 +1075,6 @@ cdef class BoolVector(Vector):
     def __str__(self):
         cdef list vals = []
         cdef Py_ssize_t i, k
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            vals = self.to_pylist()[:10]
-            return f"<BoolVector(RLE) len={self._rle_buffer.length} values={vals}>"
         if self._has_const:
             return f"<BoolVector len={buf_length(self.ptr)} values={[None if self._const_is_null else bool(self._const_value)] * min(<Py_ssize_t>buf_length(self.ptr), 10)}>"
         k = min(<Py_ssize_t>buf_length(self.ptr), 10)
@@ -1592,50 +1477,6 @@ cdef BoolVector _materialize_const_bool(BoolVector const_vec):
     return dense
 
 
-cdef BoolVector _materialize_rle_bool(BoolVector rle_vec):
-    """Expand an RLE BoolVector to a dense bit-packed BoolVector.
-
-    RLE stores uint8_t run values (0 or 1). Dense is bit-packed (Arrow format).
-    """
-    cdef size_t total = rle_vec._rle_buffer.length
-    cdef BoolVector dense = BoolVector(<size_t>total)
-
-    cdef uint8_t* rle_vals = <uint8_t*>rle_vec._rle_buffer.run_values
-    cdef int32_t* rle_lens = rle_vec._rle_buffer.run_lengths
-    cdef size_t num_runs = rle_vec._rle_buffer.num_runs
-    cdef uint8_t* rle_nulls = rle_vec._rle_buffer.null_bitmap
-
-    cdef uint8_t* dst = <uint8_t*>dense.ptr.data
-    cdef size_t pos = 0
-    cdef size_t r
-    cdef int32_t run_len
-    cdef uint8_t run_val
-    cdef Py_ssize_t j
-    cdef size_t null_bytes
-    cdef uint8_t* null_copy
-
-    for r in range(num_runs):
-        run_val = rle_vals[r]
-        run_len = rle_lens[r]
-        if run_val:
-            for j in range(run_len):
-                dst[(pos + j) >> 3] |= <uint8_t>(1 << ((pos + j) & 7))
-        # else: bit stays 0 (buffer was zeroed by BoolVector.__cinit__)
-        pos += <size_t>run_len
-
-    if rle_nulls != NULL:
-        null_bytes = (total + 7) >> 3
-        null_copy = <uint8_t*>malloc(null_bytes)
-        if null_copy == NULL:
-            raise MemoryError()
-        memcpy(null_copy, rle_nulls, null_bytes)
-        dense.ptr.null_bitmap = null_copy
-    else:
-        dense.ptr.null_bitmap = NULL
-
-    return dense
-
-
 cdef BoolVector from_rle_builder(
     uint8_t* run_values,
     int32_t* run_lengths,
@@ -1656,6 +1497,10 @@ cdef BoolVector from_rle_builder(
     Returns:
         BoolVector with DRAKEN_ENCODING_RLE encoding.
     """
+    import sys as _sys
+    _draken = _sys.modules.get('draken')
+    if _draken is not None and _draken._RLE_FORBIDDEN:
+        raise RuntimeError("RLE vector construction is forbidden (draken._RLE_FORBIDDEN=True)")
     cdef BoolVector vec = BoolVector(0)  # allocates ptr with data=NULL (length 0)
     cdef size_t total_length = 0
     cdef size_t i

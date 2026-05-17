@@ -13,11 +13,11 @@ from libc.stddef cimport size_t
 from cpython.array cimport array, clone
 
 from draken.vectors.vector cimport Vector
-from draken.vectors.string_vector cimport StringVector, StringVectorBuilder, from_packed_dict, _materialize_rle_string, _materialize_dict_string
-from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence, _materialize_rle_int64, _materialize_dict_int64
+from draken.vectors.string_vector cimport StringVector, StringVectorBuilder, from_packed_dict, _materialize_dict_string
+from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence, _materialize_dict_int64
 from draken.vectors.null_vector cimport NullVector
-from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenRLEBuffer
-from draken.core.buffers cimport DRAKEN_ENCODING_RLE, DRAKEN_ENCODING_DICTIONARY
+from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload
+from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 
 # ---------------------------------------------------------------------------
 # Local helpers
@@ -41,8 +41,6 @@ cdef inline Int64Vector _prepare_int_arg(Vector arg):
     iv = <Int64Vector>arg
     if iv._has_const:
         return iv
-    if iv._encoding == DRAKEN_ENCODING_RLE:
-        return _materialize_rle_int64(iv)
     if iv._encoding == DRAKEN_ENCODING_DICTIONARY and iv.ptr.data == NULL:
         return _materialize_dict_int64(iv)
     return iv  # already dense
@@ -134,9 +132,6 @@ cpdef StringVector vector_string_slice_left(StringVector vec, Vector length):
     # RLE-encoded string — materialize to dense then fall through
     # ------------------------------------------------------------------
     cdef StringVector dense_vec
-    if vec._encoding == DRAKEN_ENCODING_RLE:
-        dense_vec = _materialize_rle_string(vec)
-        return _slice_left_dense(dense_vec, length_iv, n)
 
     # ------------------------------------------------------------------
     # Dense-encoded string
@@ -320,9 +315,6 @@ cpdef StringVector vector_string_slice_right(StringVector vec, Vector length):
     # RLE-encoded string — materialize to dense then fall through
     # ------------------------------------------------------------------
     cdef StringVector dense_vec
-    if vec._encoding == DRAKEN_ENCODING_RLE:
-        dense_vec = _materialize_rle_string(vec)
-        return _slice_right_dense(dense_vec, length_iv, n)
 
     # ------------------------------------------------------------------
     # Dense-encoded string
@@ -527,9 +519,6 @@ cpdef StringVector vector_string_substring(StringVector vec, object from_pos, ob
     # RLE-encoded string — materialize to dense then fall through
     # ------------------------------------------------------------------
     cdef StringVector dense_vec
-    if vec._encoding == DRAKEN_ENCODING_RLE:
-        dense_vec = _materialize_rle_string(vec)
-        return _substring_dense(dense_vec, pos_iv, cnt_iv, cnt_is_null_vec, n)
 
     # ------------------------------------------------------------------
     # Dense-encoded string

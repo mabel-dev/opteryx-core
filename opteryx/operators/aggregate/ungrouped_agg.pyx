@@ -18,7 +18,7 @@ from draken.vectors.vector cimport Vector, NULL_HASH, mix_hash
 from draken.vectors.integer_vector cimport IntegerVector
 from draken.core.buffers cimport (
     ConstAccessor, DictAccessor, DrakenFixedBuffer, DrakenVarBuffer,
-    DrakenConstantStringPayload, DRAKEN_ENCODING_DICTIONARY, DRAKEN_ENCODING_RLE,
+    DrakenConstantStringPayload, DRAKEN_ENCODING_DICTIONARY,
 )
 cdef extern from "_agg_kernels.hpp" namespace "opteryx::ungrouped":
     int compare_bytes(const char* a, size_t la, const char* b, size_t lb) noexcept

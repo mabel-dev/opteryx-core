@@ -99,7 +99,6 @@ cdef Float64Vector from_rle_builder(
     size_t num_runs,
     uint8_t* null_bitmap=*,
 )
-cdef Float64Vector _materialize_rle_float64(Float64Vector rle_vec)
 cdef Float64Vector _materialize_dict_float64(Float64Vector vec)
 cdef Float64Vector make_float64_dict_only(
     const uint8_t* codes,

@@ -262,12 +262,12 @@ cdef class IntervalVector(Vector):
             self.ptr = NULL
 
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL or self._encoding == DRAKEN_ENCODING_RLE:
+        if self.ptr == NULL:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL or self._encoding == DRAKEN_ENCODING_RLE:
+        if self.ptr == NULL:
             return NULL
         return self.ptr.null_bitmap
 
@@ -287,8 +287,6 @@ cdef class IntervalVector(Vector):
         return buf_dtype(self.ptr)
 
     def __getitem__(self, Py_ssize_t i):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_interval(self)[i]
         cdef DrakenFixedBuffer* ptr = self.ptr
         if i < 0 or i >= <Py_ssize_t>ptr.length:
             raise IndexError("Index out of bounds")
@@ -301,8 +299,6 @@ cdef class IntervalVector(Vector):
         return self.to_arrow_interval()
 
     cpdef object to_arrow_interval(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_interval(self).to_arrow_interval()
         import pyarrow as pa
 
         cdef DrakenFixedBuffer* ptr = self.ptr
@@ -324,8 +320,6 @@ cdef class IntervalVector(Vector):
         return pa.array(rows, type=pa.month_day_nano_interval())
 
     cpdef object to_arrow_binary(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_interval(self).to_arrow_binary()
         import pyarrow as pa
 
         cdef size_t nbytes = buf_length(self.ptr) * buf_itemsize(self.ptr)
@@ -358,10 +352,6 @@ cdef class IntervalVector(Vector):
         )
 
     cpdef IntervalVector add_vector(self, IntervalVector other):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_interval(self).add_vector(other)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self.add_vector(_materialize_rle_interval(other))
         cdef DrakenFixedBuffer* left_ptr = self.ptr
         cdef DrakenFixedBuffer* right_ptr = other.ptr
         cdef Py_ssize_t left_len = left_ptr.length
@@ -407,10 +397,6 @@ cdef class IntervalVector(Vector):
         return out
 
     cpdef IntervalVector subtract_vector(self, IntervalVector other):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_interval(self).subtract_vector(other)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self.subtract_vector(_materialize_rle_interval(other))
         cdef DrakenFixedBuffer* left_ptr = self.ptr
         cdef DrakenFixedBuffer* right_ptr = other.ptr
         cdef Py_ssize_t left_len = left_ptr.length
@@ -461,10 +447,6 @@ cdef class IntervalVector(Vector):
         int8_t operation,
         bint reject_month_components=False,
     ):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_interval(self).compare_vector(other, operation, reject_month_components)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self.compare_vector(_materialize_rle_interval(other), operation, reject_month_components)
         cdef DrakenFixedBuffer* left_ptr = self.ptr
         cdef DrakenFixedBuffer* right_ptr = other.ptr
         cdef Py_ssize_t left_len = left_ptr.length
@@ -547,10 +529,6 @@ cdef class IntervalVector(Vector):
         int8_t operation,
         bint reject_month_components,
     ):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_interval(self)._compare_scalar(
-                sc_months, sc_microseconds, operation, reject_month_components
-            )
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef IntervalValue* data = <IntervalValue*> ptr.data
@@ -651,8 +629,6 @@ cdef class IntervalVector(Vector):
 
     cpdef TimestampVector apply_to_temporal(self, Vector values, int8_t signum=1):
         """Apply this interval vector to DATE/TIMESTAMP vectors with SQL-style month/day handling."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_interval(self).apply_to_temporal(values, signum)
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef IntervalValue* intervals = <IntervalValue*> ptr.data
         cdef Py_ssize_t interval_len = ptr.length
@@ -811,8 +787,6 @@ cdef class IntervalVector(Vector):
         return result
 
     cpdef IntervalVector take(self, int32_t[::1] indices):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_interval(self).take(indices)
         cdef Py_ssize_t n = indices.shape[0]
         cdef Py_ssize_t i
         cdef IntervalVector out = IntervalVector(<size_t> n)
@@ -835,8 +809,6 @@ cdef class IntervalVector(Vector):
         return out
 
     cpdef int8_t[::1] is_null(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_interval(self).is_null()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
         cdef int8_t* buf = <int8_t*> PyMem_Malloc(n)
@@ -856,12 +828,6 @@ cdef class IntervalVector(Vector):
 
     @property
     def null_count(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer.null_bitmap == NULL:
-                return 0
-            return <Py_ssize_t>self._rle_buffer.length - <Py_ssize_t>simd_popcount(
-                self._rle_buffer.null_bitmap, (self._rle_buffer.length + 7) >> 3
-            )
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         if ptr.null_bitmap == NULL:
@@ -892,24 +858,6 @@ cdef class IntervalVector(Vector):
         cdef IntervalValue* data
         cdef Py_ssize_t i, n
 
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            rle_vals_iv = <IntervalValue*>self._rle_buffer.run_values
-            rle_lens_iv = self._rle_buffer.run_lengths
-            rle_runs_iv = self._rle_buffer.num_runs
-            rle_nulls_iv = self._rle_buffer.null_bitmap
-            iv_pos = 0
-            for iv_r in range(rle_runs_iv):
-                iv_run_len = rle_lens_iv[iv_r]
-                for iv_j in range(iv_run_len):
-                    if rle_nulls_iv != NULL and not (
-                        (rle_nulls_iv[(iv_pos + iv_j) >> 3] >> ((iv_pos + iv_j) & 7)) & 1
-                    ):
-                        out.append(None)
-                    else:
-                        out.append((rle_vals_iv[iv_r].months, rle_vals_iv[iv_r].microseconds))
-                iv_pos += iv_run_len
-            return out
-
         ptr = self.ptr
         data = <IntervalValue*> ptr.data
         n = ptr.length
@@ -937,9 +885,6 @@ cdef class IntervalVector(Vector):
         uint64_t[::1] out_buf,
         Py_ssize_t offset=0
     ) except *:
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            _materialize_rle_interval(self).hash_into(out_buf, offset)
-            return
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         if n == 0:
@@ -1019,9 +964,6 @@ cdef class IntervalVector(Vector):
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for IntervalVector: use months component for ordering."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            _materialize_rle_interval(self).compress_into(out_buf, offset)
-            return
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef int64_t NULL_FLAG = INT64_MIN_VALUE
@@ -1050,8 +992,6 @@ cdef class IntervalVector(Vector):
 
     cpdef object min(self):
         """Return interval with minimum duration (by microseconds), or None if all null or empty."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_interval(self).min()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t i
@@ -1076,8 +1016,6 @@ cdef class IntervalVector(Vector):
 
     cpdef object max(self):
         """Return interval with maximum duration (by microseconds), or None if all null or empty."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_interval(self).max()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t i
@@ -1102,8 +1040,6 @@ cdef class IntervalVector(Vector):
 
     cpdef object sum(self):
         """Sum intervals by adding months and microseconds components separately."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_interval(self).sum()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t i
@@ -1127,57 +1063,11 @@ cdef class IntervalVector(Vector):
     def __str__(self):
         cdef list preview = []
         cdef Py_ssize_t i, n, limit
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            preview = self.to_pylist()[:10]
-            return f"<IntervalVector(RLE) len={self._rle_buffer.length} values={preview}>"
         n = buf_length(self.ptr)
         limit = n if n < 10 else 10
         for i in range(limit):
             preview.append(self[i])
         return f"<IntervalVector len={n} values={preview}>"
-
-cdef IntervalVector _materialize_rle_interval(IntervalVector rle_vec):
-    """Expand an RLE IntervalVector to a dense IntervalVector.
-
-    Each run value is an IntervalValue (months, microseconds pair).
-    Copies the null bitmap if present.
-    """
-    cdef size_t total = rle_vec._rle_buffer.length
-    cdef IntervalVector dense = IntervalVector(<size_t>total)
-
-    cdef IntervalValue* rle_vals = <IntervalValue*>rle_vec._rle_buffer.run_values
-    cdef int32_t* rle_lens = rle_vec._rle_buffer.run_lengths
-    cdef size_t num_runs = rle_vec._rle_buffer.num_runs
-    cdef uint8_t* rle_nulls = rle_vec._rle_buffer.null_bitmap
-
-    cdef IntervalValue* dst = <IntervalValue*>dense.ptr.data
-    cdef size_t pos = 0
-    cdef size_t r
-    cdef int32_t run_len
-    cdef IntervalValue run_val
-    cdef Py_ssize_t j
-    cdef size_t null_bytes
-    cdef uint8_t* null_copy
-
-    for r in range(num_runs):
-        run_val = rle_vals[r]
-        run_len = rle_lens[r]
-        for j in range(run_len):
-            dst[pos + j] = run_val
-        pos += <size_t>run_len
-
-    if rle_nulls != NULL:
-        null_bytes = (total + 7) >> 3
-        null_copy = <uint8_t*>malloc(null_bytes)
-        if null_copy == NULL:
-            raise MemoryError()
-        memcpy(null_copy, rle_nulls, null_bytes)
-        dense.ptr.null_bitmap = null_copy
-    else:
-        dense.ptr.null_bitmap = NULL
-
-    return dense
-
 
 cdef IntervalVector from_rle_builder(
     IntervalValue* run_values,
@@ -1199,6 +1089,10 @@ cdef IntervalVector from_rle_builder(
     Returns:
         IntervalVector with DRAKEN_ENCODING_RLE encoding.
     """
+    import sys as _sys
+    _draken = _sys.modules.get('draken')
+    if _draken is not None and _draken._RLE_FORBIDDEN:
+        raise RuntimeError("RLE vector construction is forbidden (draken._RLE_FORBIDDEN=True)")
     cdef IntervalVector vec = IntervalVector(0, False)  # allocates ptr, data=NULL
     cdef size_t total_length = 0
     cdef size_t i

@@ -250,8 +250,6 @@ cdef class GroupHashEngine:
             svec = <StringVector>vec
             if svec._encoding == DRAKEN_ENCODING_DICTIONARY:
                 card = svec.c_dict_size()
-            elif svec._encoding == DRAKEN_ENCODING_RLE:
-                card = svec.c_rle_run_count()
             else:
                 return
             if first_col:
@@ -291,80 +289,6 @@ cdef class GroupHashEngine:
         """Ingest a partial morsel directly into the global hash table,
         bypassing the partial-agg routing check."""
         self._do_ingest(morsel)
-
-    cdef void _ingest_rle_single_string_fast(
-        self, object morsel, StringVector svec, Py_ssize_t n_rows
-    ) except *:
-        """Fast ingest path for a single RLE-encoded string GROUP BY key.
-
-        Walks the K runs once, mapping each run-value hash to a state via
-        the index.  Then fills si_buf in O(N) but with no per-row hashing.
-        Adjacent runs that share a value still collapse to the same state
-        because the hash matches.  Caller has already verified that the
-        row-level null bitmap is NULL.
-        """
-        cdef Py_ssize_t n_runs = svec.c_rle_run_count()
-        cdef int64_t* si_buf = self._state_indices_buf.data()
-        cdef int64_t num_groups = self._num_groups
-        cdef int64_t state_idx
-        cdef uint64_t h
-        cdef Py_ssize_t r, k, vlen
-        cdef int32_t run_len
-        cdef Py_ssize_t row_offset = 0
-        cdef bint state_is_new
-
-        for r in range(n_runs):
-            run_len = svec.c_rle_run_length(r)
-            if run_len <= 0:
-                continue
-            h = svec.c_rle_run_value_hash(r)
-            state_is_new = self._index.find_or_insert_id(h, num_groups, state_idx)
-            if state_is_new:
-                num_groups += 1
-            for k in range(run_len):
-                si_buf[row_offset + k] = state_idx
-            if state_is_new:
-                # First row of the run is the canonical "new row" for key
-                # storage.  KeyStore.store_new_rows reads the morsel's
-                # column at this index — for RLE-encoded source it
-                # currently materializes; same trade-off as the dict path.
-                self._new_row_scratch.push_back(row_offset)
-            row_offset += run_len
-
-        # Sanity check: row_offset must cover every row in the morsel.
-        if row_offset != n_rows:
-            raise ValueError(
-                f"rle-fast-path row count mismatch: covered {row_offset} of {n_rows}"
-            )
-
-        self._num_groups = num_groups
-
-        cdef Py_ssize_t n_new = <Py_ssize_t>self._new_row_scratch.size()
-        cdef long long phase_start
-        if n_new > 0:
-            if self._telemetry_enabled:
-                phase_start = _now_ns()
-            self._key_store.store_new_rows(
-                morsel,
-                self._new_row_scratch.data(),
-                n_new,
-            )
-            if self._telemetry_enabled:
-                self._time_store_keys_ns += _now_ns() - phase_start
-
-            if self._telemetry_enabled:
-                phase_start = _now_ns()
-            for collector in self._collectors:
-                (<BaseCollector>collector).grow(num_groups)
-            if self._telemetry_enabled:
-                self._time_grow_ns += _now_ns() - phase_start
-
-        if self._telemetry_enabled:
-            phase_start = _now_ns()
-        for collector in self._collectors:
-            (<BaseCollector>collector).accumulate(morsel, si_buf, n_rows)
-        if self._telemetry_enabled:
-            self._time_accumulate_ns += _now_ns() - phase_start
 
     cdef void _ingest_dict_single_string_fast(
         self, object morsel, StringVector svec, Py_ssize_t n_rows
@@ -579,21 +503,6 @@ cdef class GroupHashEngine:
                     if self._telemetry_enabled:
                         phase_start = _now_ns()
                     self._ingest_dict_single_string_fast(morsel, svec_key, n_rows)
-                    if self._telemetry_enabled:
-                        self._time_lookup_ns += _now_ns() - phase_start
-                        self._time_resolve_ns += _now_ns() - start_ns
-                    return
-                # RLE single-key fast path: avoids the morsel.hash()
-                # materialization (KeyStore still materializes once).  Net
-                # win in production where data arrives as RLE; the
-                # alternative path materializes twice (hash + keystore).
-                if (
-                    svec_key._encoding == DRAKEN_ENCODING_RLE
-                    and svec_key.c_rle_null_bitmap() == NULL
-                ):
-                    if self._telemetry_enabled:
-                        phase_start = _now_ns()
-                    self._ingest_rle_single_string_fast(morsel, svec_key, n_rows)
                     if self._telemetry_enabled:
                         self._time_lookup_ns += _now_ns() - phase_start
                         self._time_resolve_ns += _now_ns() - start_ns

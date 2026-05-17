@@ -26,7 +26,6 @@ cdef class Date32Vector(Vector):
 
     cpdef Date32Vector take(self, int32_t[::1] indices)
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
-    cdef BoolVector _compare_scalar_rle(self, int32_t value, int op)
     cpdef BoolVector _compare_scalar(self, int32_t value, int op)
     cpdef BoolVector _compare_vector_op(self, Date32Vector other, int op)
 

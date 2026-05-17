@@ -92,6 +92,18 @@ cdef extern from "core/buffers.h":
         size_t num_columns
         size_t num_rows
 
+    # Unified vector view — see buffers.h for encoding semantics.
+    # Invariant: selection == NULL  XOR  sel_width == 0.
+    ctypedef struct DrakenVector:
+        void*      data
+        size_t     data_length
+        void*      selection
+        uint8_t    sel_width
+        size_t     length
+        uint8_t*   validity
+        size_t     itemsize
+        DrakenType type
+
 # Lightweight view struct returned by DictionaryVector.dict_accessor().
 # All fields are shortcuts into the underlying DrakenDictionaryBuffer so
 # callers never need raw ptr arithmetic.  Phase 1 — no C struct changes yet;

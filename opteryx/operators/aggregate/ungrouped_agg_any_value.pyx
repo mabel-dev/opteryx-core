@@ -95,10 +95,6 @@ cdef class AnyValueAggregate(UngroupedAggregate):
                 if self._take_first_dict(svec):
                     self._seen = True
                 return
-            if svec._encoding == DRAKEN_ENCODING_RLE:
-                if self._take_first_rle(svec):
-                    self._seen = True
-                return
             buf = svec.ptr
             nulls = buf.null_bitmap
             for i in range(nrows):
@@ -129,38 +125,6 @@ cdef class AnyValueAggregate(UngroupedAggregate):
             f"AnyValueAggregate cannot scan column {self.column_name!r}: "
             f"unsupported vector type {type(raw).__name__}"
         )
-
-    cdef bint _take_first_rle(self, StringVector svec) except *:
-        """Return the first run value covering a valid (non-null) row."""
-        cdef Py_ssize_t n_runs = svec.c_rle_run_count()
-        cdef const uint8_t* row_nulls = svec.c_rle_null_bitmap()
-        cdef Py_ssize_t r, vlen
-        cdef int32_t run_len
-        cdef Py_ssize_t row_offset = 0
-        cdef Py_ssize_t k
-        cdef const uint8_t* vptr
-        for r in range(n_runs):
-            run_len = svec.c_rle_run_length(r)
-            if run_len <= 0:
-                continue
-            if row_nulls == NULL:
-                # No nulls anywhere — first run wins.
-                vptr = svec.c_rle_value_ptr(r, &vlen)
-                if vptr != NULL:
-                    self._value = (<const char*>vptr)[:vlen]
-                    return True
-                row_offset += run_len
-                continue
-            # Find the first valid row covered by this run.
-            for k in range(run_len):
-                if _bitmap_is_valid(row_nulls, row_offset + k):
-                    vptr = svec.c_rle_value_ptr(r, &vlen)
-                    if vptr != NULL:
-                        self._value = (<const char*>vptr)[:vlen]
-                        return True
-                    break
-            row_offset += run_len
-        return False
 
     cdef bint _take_first_dict(self, StringVector svec) except *:
         """Walk the dict codes once; on the first valid (non-null) row whose

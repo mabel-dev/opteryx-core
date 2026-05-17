@@ -172,12 +172,12 @@ cdef class Date32Vector(Vector):
         return &self._const_accessor
 
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const or self._encoding == DRAKEN_ENCODING_RLE:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const or self._encoding == DRAKEN_ENCODING_RLE:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.null_bitmap
 
@@ -210,16 +210,6 @@ cdef class Date32Vector(Vector):
             if self._const_is_null:
                 return None
             return self._const_value
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            rle_d32_vals = <int32_t*>self._rle_buffer.run_values
-            for d32_run in range(self._rle_buffer.num_runs):
-                d32_cumulative += <size_t>self._rle_buffer.run_lengths[d32_run]
-                if <size_t>i < d32_cumulative:
-                    if self._rle_buffer.null_bitmap != NULL:
-                        if not ((self._rle_buffer.null_bitmap[i >> 3] >> (i & 7)) & 1):
-                            return None
-                    return rle_d32_vals[d32_run]
-            raise IndexError("Index out of bounds")
         if ptr.null_bitmap != NULL:
             byte = ptr.null_bitmap[i >> 3]
             bit = (byte >> (i & 7)) & 1
@@ -252,8 +242,6 @@ cdef class Date32Vector(Vector):
 
     # -------- Example op --------
     cpdef Date32Vector take(self, int32_t[::1] indices):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_date32(self).take(indices)
         if self._has_const:
             return Date32Vector.from_constant(
                 None if self._const_is_null else self._const_value,
@@ -284,47 +272,7 @@ cdef class Date32Vector(Vector):
             out.ptr.null_bitmap = NULL
         return out
 
-    cdef BoolVector _compare_scalar_rle(self, int32_t value, int op):
-        # Compare RLE vector against a scalar without materialising to dense int32.
-        # Evaluates the predicate once per run, bit-fills the result, then applies
-        # the row-level null bitmap (if any) via a single SIMD AND pass.
-        cdef size_t n = self._rle_buffer.length
-        cdef size_t num_runs = self._rle_buffer.num_runs
-        cdef int32_t* rle_vals = <int32_t*>self._rle_buffer.run_values
-        cdef int32_t* rle_lens = self._rle_buffer.run_lengths
-        cdef uint8_t* rle_nulls = self._rle_buffer.null_bitmap
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-
-        cdef BoolVector out = BoolVector(<size_t>n)
-        cdef uint8_t* dst = <uint8_t*>out.ptr.data
-        memset(dst, 0, nbytes)
-
-        cdef uint8_t* out_null = NULL
-        if rle_nulls != NULL and nbytes != 0:
-            out_null = <uint8_t*>malloc(nbytes)
-            if out_null == NULL:
-                raise MemoryError()
-            memcpy(out_null, rle_nulls, nbytes)
-            out.ptr.null_bitmap = out_null
-        else:
-            out.ptr.null_bitmap = NULL
-
-        cdef size_t pos = 0
-        cdef size_t r
-        for r in range(num_runs):
-            if dispatch_compare_once(op, rle_vals[r], value):
-                bit_fill_range(dst, pos, <size_t>rle_lens[r])
-            pos += <size_t>rle_lens[r]
-
-        if out_null != NULL:
-            simd_and_mask(dst, dst, out_null, <size_t>nbytes)
-
-        return out
-
     cpdef BoolVector _compare_scalar(self, int32_t value, int op):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return self._compare_scalar_rle(value, op)
-
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n
         cdef Py_ssize_t nbytes
@@ -387,11 +335,6 @@ cdef class Date32Vector(Vector):
         # Consolidates the 6 *_vector comparison ops. Op dispatch and null-pointer
         # specialisation happen once here; the C++ kernel runs a tight loop with
         # no per-row branching. Const fast paths avoid O(n) materialisation.
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_date32(self)._compare_vector_op(other, op)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self._compare_vector_op(_materialize_rle_date32(other), op)
-
         # Const fast paths: avoid O(n) materialisation.
         cdef Py_ssize_t const_n
         cdef int reversed_op
@@ -489,8 +432,6 @@ cdef class Date32Vector(Vector):
     cpdef BoolVector between(self, int32_t lower, int32_t upper,
                               bint lower_inclusive=True, bint upper_inclusive=True):
         """Single-pass range check: lower OP value OP upper. NULL in → NULL out."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_date32(self).between(lower, upper, lower_inclusive, upper_inclusive)
         if self._has_const:
             return _materialize_const_date32(self).between(lower, upper, lower_inclusive, upper_inclusive)
 
@@ -579,8 +520,6 @@ cdef class Date32Vector(Vector):
 
     cpdef BoolVector in_list(self, object value_set):
         """Return mask: 1 if element is in value_set, else 0. Propagates NULLs."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_date32(self).in_list(value_set)
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int32_t* data = <int32_t*> ptr.data
         cdef uint8_t* src_null = ptr.null_bitmap
@@ -791,21 +730,6 @@ cdef class Date32Vector(Vector):
         cdef int8_t* buf
         cdef uint8_t byte, bit
 
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            n = <Py_ssize_t>self._rle_buffer.length
-            buf = <int8_t*> PyMem_Malloc(n)
-            if buf == NULL:
-                raise MemoryError()
-            if self._rle_buffer.null_bitmap == NULL:
-                for i in range(n):
-                    buf[i] = 0
-            else:
-                for i in range(n):
-                    byte = self._rle_buffer.null_bitmap[i >> 3]
-                    bit = (byte >> (i & 7)) & 1
-                    buf[i] = 0 if bit else 1
-            return <int8_t[:n]> buf
-
         n = ptr.length
         buf = <int8_t*> PyMem_Malloc(n)
         if buf == NULL:
@@ -831,12 +755,6 @@ cdef class Date32Vector(Vector):
     @property
     def null_count(self):
         """Return the number of nulls in the vector."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer.null_bitmap == NULL:
-                return 0
-            return <Py_ssize_t>self._rle_buffer.length - <Py_ssize_t>simd_popcount(
-                self._rle_buffer.null_bitmap, (self._rle_buffer.length + 7) >> 3
-            )
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         if self._has_const:
@@ -872,27 +790,6 @@ cdef class Date32Vector(Vector):
         cdef Py_ssize_t d32_pos
         cdef size_t d32r
         cdef int32_t d32_run_len, d32_run_val
-
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            rle_d32_tp = <int32_t*>self._rle_buffer.run_values
-            rle_lens_d32 = self._rle_buffer.run_lengths
-            rle_runs_d32 = self._rle_buffer.num_runs
-            rle_nulls_d32 = self._rle_buffer.null_bitmap
-            d32_pos = 0
-            for d32r in range(rle_runs_d32):
-                d32_run_val = rle_d32_tp[d32r]
-                d32_run_len = rle_lens_d32[d32r]
-                for i in range(d32_run_len):
-                    if rle_nulls_d32 != NULL and not ((rle_nulls_d32[(d32_pos + i) >> 3] >> ((d32_pos + i) & 7)) & 1):
-                        out.append(None)
-                    else:
-                        ordinal = _DATE_EPOCH_ORDINAL + d32_run_val
-                        try:
-                            out.append(date_fromordinal(ordinal))
-                        except (OverflowError, ValueError):
-                            out.append(d32_run_val)
-                d32_pos += d32_run_len
-            return out
 
         if self._has_const:
             if self._const_is_null:
@@ -930,8 +827,6 @@ cdef class Date32Vector(Vector):
 
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
         """Compare date32 values at two indices. Returns -1, 0, or 1."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_date32(self).compare_at(left_idx, right_idx)
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int32_t left_val, right_val
         cdef bint left_is_null, right_is_null
@@ -955,10 +850,6 @@ cdef class Date32Vector(Vector):
 
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False:
         """Check if value at index is null."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer.null_bitmap == NULL:
-                return False
-            return not ((self._rle_buffer.null_bitmap[idx >> 3] >> (idx & 7)) & 1)
         cdef DrakenFixedBuffer* ptr = self.ptr
         if ptr.null_bitmap == NULL:
             return False
@@ -982,10 +873,6 @@ cdef class Date32Vector(Vector):
         cdef bint has_nulls = null_bitmap != NULL
         cdef uint64_t[DATE32_HASH_CHUNK] scratch
         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
-
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            _materialize_rle_date32(self).hash_into(out_buf, offset)
-            return
 
         if self._has_const:
             value = NULL_HASH if self._const_is_null else <uint64_t><int64_t>self._const_value
@@ -1069,9 +956,6 @@ cdef class Date32Vector(Vector):
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for Date32Vector: scale int32 days to int64 microseconds (to match datetimes)."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            _materialize_rle_date32(self).compress_into(out_buf, offset)
-            return
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int32_t* data = <int32_t*> ptr.data
         cdef Py_ssize_t n = ptr.length
@@ -1108,9 +992,6 @@ cdef class Date32Vector(Vector):
         cdef list vals = []
         cdef Py_ssize_t i, k
         cdef int32_t* data
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            vals = self.to_pylist()[:10]
-            return f"<Date32Vector(RLE) len={self._rle_buffer.length} values={vals}>"
         if self._has_const:
             return f"<Date32Vector len={buf_length(self.ptr)} values={[None if self._const_is_null else self._const_value] * min(<Py_ssize_t>buf_length(self.ptr), 10)}>"
         k = min(<Py_ssize_t>buf_length(self.ptr), 10)
@@ -1340,44 +1221,6 @@ cdef Date32Vector _materialize_const_date32(Date32Vector const_vec):
     return dense
 
 
-cdef Date32Vector _materialize_rle_date32(Date32Vector rle_vec):
-    """Expand an RLE Date32Vector to a dense Date32Vector."""
-    cdef size_t total = rle_vec._rle_buffer.length
-    cdef Date32Vector dense = Date32Vector(<size_t>total)
-
-    cdef int32_t* rle_vals = <int32_t*>rle_vec._rle_buffer.run_values
-    cdef int32_t* rle_lens = rle_vec._rle_buffer.run_lengths
-    cdef size_t num_runs = rle_vec._rle_buffer.num_runs
-    cdef uint8_t* rle_nulls = rle_vec._rle_buffer.null_bitmap
-
-    cdef int32_t* dst = <int32_t*>dense.ptr.data
-    cdef size_t pos = 0
-    cdef size_t r
-    cdef int32_t run_len, run_val
-    cdef Py_ssize_t j
-    cdef size_t null_bytes
-    cdef uint8_t* null_copy
-
-    for r in range(num_runs):
-        run_val = rle_vals[r]
-        run_len = rle_lens[r]
-        for j in range(run_len):
-            dst[pos + j] = run_val
-        pos += <size_t>run_len
-
-    if rle_nulls != NULL:
-        null_bytes = (total + 7) >> 3
-        null_copy = <uint8_t*>malloc(null_bytes)
-        if null_copy == NULL:
-            raise MemoryError()
-        memcpy(null_copy, rle_nulls, null_bytes)
-        dense.ptr.null_bitmap = null_copy
-    else:
-        dense.ptr.null_bitmap = NULL
-
-    return dense
-
-
 cdef Date32Vector from_rle_builder(
     int32_t* run_values,
     int32_t* run_lengths,
@@ -1395,6 +1238,10 @@ cdef Date32Vector from_rle_builder(
     Returns:
         Date32Vector with DRAKEN_ENCODING_RLE encoding.
     """
+    import sys as _sys
+    _draken = _sys.modules.get('draken')
+    if _draken is not None and _draken._RLE_FORBIDDEN:
+        raise RuntimeError("RLE vector construction is forbidden (draken._RLE_FORBIDDEN=True)")
     cdef Date32Vector vec = Date32Vector(0)  # ptr.data = NULL, ptr.length = 0
     cdef size_t total_length = 0
     cdef size_t i

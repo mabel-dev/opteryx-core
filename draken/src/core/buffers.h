@@ -108,3 +108,23 @@ typedef struct {
     size_t num_columns;
     size_t num_rows;
 } DrakenMorsel;
+
+// Unified vector view (Phase 1 — not yet used by any kernel).
+//
+// Encoding semantics via (data, selection, sel_width):
+//   DENSE:      selection == NULL, sel_width == 0, data_length == length
+//   DICTIONARY: selection = codes, sel_width in {1,2,4}, data_length = dict_size
+//   CONSTANT:   selection == NULL, sel_width == 0, data_length == 1
+//   RLE:        never reaches execution; expanded at scan boundary
+//
+// Invariant: selection == NULL  XOR  sel_width == 0.
+typedef struct {
+    void*      data;        // unique values: all rows (dense), dict entries (dict), 1 element (const)
+    size_t     data_length; // elements in data, NOT logical row count
+    void*      selection;   // gather indices; NULL = sequential identity (dense/const)
+    uint8_t    sel_width;   // 0 when selection==NULL; 1, 2, or 4 bytes per code otherwise
+    size_t     length;      // logical row count
+    uint8_t*   validity;    // 1-bit-per-logical-row null mask; NULL = all valid
+    size_t     itemsize;    // bytes per data element (0 for var-width)
+    DrakenType type;
+} DrakenVector;

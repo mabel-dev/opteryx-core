@@ -66,16 +66,6 @@ cdef class CountDistinctAggregate(UngroupedAggregate):
                         h = svec.c_dict_value_hash(di)
                         the_set._insert_many_nogil(&h, 1)
                 return
-            elif (
-                svec._encoding == DRAKEN_ENCODING_RLE
-                and svec.c_rle_null_bitmap() == NULL
-            ):
-                run_count = svec.c_rle_run_count()
-                with nogil:
-                    for di in range(run_count):
-                        h = svec.c_rle_run_value_hash(di)
-                        the_set._insert_many_nogil(&h, 1)
-                return
 
         # Reuse scratch buffer if large enough
         if nrows > self._scratch_capacity:

@@ -103,9 +103,6 @@ cdef class CountAggregate(UngroupedAggregate):
             if vec_s._encoding == DRAKEN_ENCODING_DICTIONARY:
                 self._count += <int64_t>nrows - <int64_t>vec_s.null_count
                 return
-            if vec_s._encoding == DRAKEN_ENCODING_RLE:
-                self._count += <int64_t>nrows - <int64_t>vec_s.null_count
-                return
             nulls = vec_s.null_bitmap_ptr()
             if nulls == NULL:
                 self._count += nrows

@@ -15,4 +15,8 @@ from draken.morsels.align import align_tables
 from draken.morsels.morsel import Morsel
 from draken.vectors.vector import Vector
 
-__all__ = ("Vector", "Morsel", "align_tables")
+# Set to True during testing to assert that no draken RLE vectors are
+# constructed.  Default is off; toggled in Phase 2 verification.
+_RLE_FORBIDDEN = False
+
+__all__ = ("Vector", "Morsel", "align_tables", "_RLE_FORBIDDEN")

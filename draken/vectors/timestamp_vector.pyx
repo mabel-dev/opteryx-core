@@ -337,12 +337,12 @@ cdef class TimestampVector(Vector):
         return &self._const_accessor
 
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const or self._encoding == DRAKEN_ENCODING_RLE:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const or self._encoding == DRAKEN_ENCODING_RLE:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.null_bitmap
 
@@ -375,16 +375,6 @@ cdef class TimestampVector(Vector):
             if self._const_is_null:
                 return None
             return self._const_value
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            rle_ts_vals = <int64_t*>self._rle_buffer.run_values
-            for ts_run in range(self._rle_buffer.num_runs):
-                ts_cumulative += <size_t>self._rle_buffer.run_lengths[ts_run]
-                if <size_t>i < ts_cumulative:
-                    if self._rle_buffer.null_bitmap != NULL:
-                        if not ((self._rle_buffer.null_bitmap[i >> 3] >> (i & 7)) & 1):
-                            return None
-                    return rle_ts_vals[ts_run]
-            raise IndexError("Index out of bounds")
         if ptr.null_bitmap != NULL:
             if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
                 return None
@@ -417,8 +407,6 @@ cdef class TimestampVector(Vector):
 
     # -------- Example op --------
     cpdef TimestampVector take(self, int32_t[::1] indices):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_timestamp(self).take(indices)
         if self._has_const:
             return TimestampVector.from_constant(
                 None if self._const_is_null else self._const_value,
@@ -448,41 +436,6 @@ cdef class TimestampVector(Vector):
             out.ptr.null_bitmap = null_bm
         else:
             out.ptr.null_bitmap = NULL
-        return out
-
-    cdef BoolVector _compare_scalar_rle(self, int64_t value, int op):
-        # Evaluate predicate once per run, bit-fill result, apply null bitmap via SIMD AND.
-        cdef size_t n = self._rle_buffer.length
-        cdef size_t num_runs = self._rle_buffer.num_runs
-        cdef int64_t* rle_vals = <int64_t*>self._rle_buffer.run_values
-        cdef int32_t* rle_lens = self._rle_buffer.run_lengths
-        cdef uint8_t* rle_nulls = self._rle_buffer.null_bitmap
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-
-        cdef BoolVector out = BoolVector(<size_t>n)
-        cdef uint8_t* dst = <uint8_t*>out.ptr.data
-        memset(dst, 0, nbytes)
-
-        cdef uint8_t* out_null = NULL
-        if rle_nulls != NULL and nbytes != 0:
-            out_null = <uint8_t*>malloc(nbytes)
-            if out_null == NULL:
-                raise MemoryError()
-            memcpy(out_null, rle_nulls, nbytes)
-            out.ptr.null_bitmap = out_null
-        else:
-            out.ptr.null_bitmap = NULL
-
-        cdef size_t pos = 0
-        cdef size_t r
-        for r in range(num_runs):
-            if dispatch_compare_once(op, rle_vals[r], value):
-                bit_fill_range(dst, pos, <size_t>rle_lens[r])
-            pos += <size_t>rle_lens[r]
-
-        if out_null != NULL:
-            simd_and_mask(dst, dst, out_null, <size_t>nbytes)
-
         return out
 
     cdef BoolVector _compare_scalar_dict(self, int64_t value, int op):
@@ -547,8 +500,6 @@ cdef class TimestampVector(Vector):
         return out
 
     cpdef BoolVector _compare_scalar(self, int64_t value, int op):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return self._compare_scalar_rle(value, op)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return self._compare_scalar_dict(value, op)
 
@@ -634,8 +585,6 @@ cdef class TimestampVector(Vector):
     cpdef BoolVector between(self, int64_t lower, int64_t upper,
                               bint lower_inclusive=True, bint upper_inclusive=True):
         """Single-pass range check: lower OP value OP upper. NULL in → NULL out."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_timestamp(self).between(lower, upper, lower_inclusive, upper_inclusive)
         if self._has_const:
             return _materialize_const_timestamp(self).between(lower, upper, lower_inclusive, upper_inclusive)
 
@@ -690,10 +639,6 @@ cdef class TimestampVector(Vector):
         return out
 
     cpdef BoolVector _compare_vector(self, TimestampVector other, int op):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_timestamp(self)._compare_vector(other, op)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self._compare_vector(_materialize_rle_timestamp(other), op)
         # Const fast paths: avoid O(n) materialisation.
         # self[i] OP other[i] where self is const V: equivalent to other[i] reversed_op V.
         cdef Py_ssize_t const_n
@@ -792,8 +737,6 @@ cdef class TimestampVector(Vector):
 
     cpdef BoolVector in_list(self, object value_set):
         """Return mask: 1 if element is in value_set, else 0. Propagates NULLs."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_timestamp(self).in_list(value_set)
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t* data = <int64_t*> ptr.data
         cdef uint8_t* src_null = ptr.null_bitmap
@@ -1005,21 +948,6 @@ cdef class TimestampVector(Vector):
         cdef int8_t* buf
         cdef uint8_t byte, bit
 
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            n = <Py_ssize_t>self._rle_buffer.length
-            buf = <int8_t*> PyMem_Malloc(n)
-            if buf == NULL:
-                raise MemoryError()
-            if self._rle_buffer.null_bitmap == NULL:
-                for i in range(n):
-                    buf[i] = 0
-            else:
-                for i in range(n):
-                    byte = self._rle_buffer.null_bitmap[i >> 3]
-                    bit = (byte >> (i & 7)) & 1
-                    buf[i] = 0 if bit else 1
-            return <int8_t[:n]> buf
-
         n = ptr.length
         buf = <int8_t*> PyMem_Malloc(n)
         if buf == NULL:
@@ -1043,12 +971,6 @@ cdef class TimestampVector(Vector):
     @property
     def null_count(self):
         """Return the number of nulls in the vector."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer.null_bitmap == NULL:
-                return 0
-            return <Py_ssize_t>self._rle_buffer.length - <Py_ssize_t>simd_popcount(
-                self._rle_buffer.null_bitmap, (self._rle_buffer.length + 7) >> 3
-            )
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         if self._has_const:
@@ -1089,40 +1011,6 @@ cdef class TimestampVector(Vector):
         cdef size_t tsr
         cdef int32_t ts_run_len
         cdef int64_t ts_run_val
-
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            rle_ts_tp = <int64_t*>self._rle_buffer.run_values
-            rle_lens_ts = self._rle_buffer.run_lengths
-            rle_runs_ts = self._rle_buffer.num_runs
-            rle_nulls_ts = self._rle_buffer.null_bitmap
-            ts_pos = 0
-            for tsr in range(rle_runs_ts):
-                ts_run_val = rle_ts_tp[tsr]
-                ts_run_len = rle_lens_ts[tsr]
-                for i in range(ts_run_len):
-                    if rle_nulls_ts != NULL and not ((rle_nulls_ts[(ts_pos + i) >> 3] >> ((ts_pos + i) & 7)) & 1):
-                        out.append(None)
-                    else:
-                        value = ts_run_val
-                        if self.timestamp_unit == "s":
-                            seconds = value
-                            micros = 0
-                        elif self.timestamp_unit == "ms":
-                            seconds, remainder = divmod(value, 1000)
-                            micros = remainder * 1000
-                        elif self.timestamp_unit == "ns":
-                            seconds, remainder = divmod(value, 1000000000)
-                            micros = remainder // 1000
-                        else:
-                            seconds, remainder = divmod(value, 1000000)
-                            micros = remainder
-                        try:
-                            ts = _TIMESTAMP_EPOCH + timedelta(seconds=seconds, microseconds=micros)
-                        except (OverflowError, ValueError):
-                            ts = value
-                        out.append(ts)
-                ts_pos += ts_run_len
-            return out
 
         if self._has_const:
             if self._const_is_null:
@@ -1198,8 +1086,6 @@ cdef class TimestampVector(Vector):
 
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
         """Compare timestamp values at two indices. Returns -1, 0, or 1."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_timestamp(self).compare_at(left_idx, right_idx)
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t left_val, right_val
         cdef bint left_is_null, right_is_null
@@ -1223,10 +1109,6 @@ cdef class TimestampVector(Vector):
 
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False:
         """Check if value at index is null."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer.null_bitmap == NULL:
-                return False
-            return not ((self._rle_buffer.null_bitmap[idx >> 3] >> (idx & 7)) & 1)
         cdef DrakenFixedBuffer* ptr = self.ptr
         if ptr.null_bitmap == NULL:
             return False
@@ -1248,10 +1130,6 @@ cdef class TimestampVector(Vector):
         cdef uint64_t* as_uint64 = <uint64_t*> data
         cdef uint64_t[TIMESTAMP_HASH_CHUNK] scratch
         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
-
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            _materialize_rle_timestamp(self).hash_into(out_buf, offset)
-            return
 
         if self._has_const:
             value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
@@ -1339,9 +1217,6 @@ cdef class TimestampVector(Vector):
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for TimestampVector: scale raw int64 values to microseconds."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            _materialize_rle_timestamp(self).compress_into(out_buf, offset)
-            return
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t* src = <int64_t*> ptr.data
         cdef Py_ssize_t n = ptr.length
@@ -1379,9 +1254,6 @@ cdef class TimestampVector(Vector):
         cdef list vals = []
         cdef Py_ssize_t i, k
         cdef int64_t* data
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            vals = self.to_pylist()[:10]
-            return f"<TimestampVector(RLE) len={self._rle_buffer.length} values={vals}>"
         if self._has_const:
             return f"<TimestampVector len={buf_length(self.ptr)} values={[None if self._const_is_null else self._const_value] * min(<Py_ssize_t>buf_length(self.ptr), 10)}>"
         k = min(<Py_ssize_t>buf_length(self.ptr), 10)
@@ -1628,51 +1500,6 @@ cdef TimestampVector _materialize_const_timestamp(TimestampVector const_vec):
     return dense
 
 
-cdef TimestampVector _materialize_rle_timestamp(TimestampVector rle_vec):
-    """Expand an RLE TimestampVector to a dense TimestampVector.
-
-    Preserves the timestamp_unit from the source vector.
-    """
-    cdef size_t total = rle_vec._rle_buffer.length
-    cdef TimestampVector dense = TimestampVector(<size_t>total)
-    dense.timestamp_unit = rle_vec.timestamp_unit
-    dense._unit_code = rle_vec._unit_code
-
-    cdef int64_t* rle_vals = <int64_t*>rle_vec._rle_buffer.run_values
-    cdef int32_t* rle_lens = rle_vec._rle_buffer.run_lengths
-    cdef size_t num_runs = rle_vec._rle_buffer.num_runs
-    cdef uint8_t* rle_nulls = rle_vec._rle_buffer.null_bitmap
-
-    cdef int64_t* dst = <int64_t*>dense.ptr.data
-    cdef size_t pos = 0
-    cdef size_t r
-    cdef int32_t run_len
-    cdef int64_t run_val
-    cdef Py_ssize_t j
-    cdef size_t null_bytes
-    cdef uint8_t* null_copy
-
-    for r in range(num_runs):
-        run_val = rle_vals[r]
-        run_len = rle_lens[r]
-        for j in range(run_len):
-            dst[pos + j] = run_val
-        pos += <size_t>run_len
-
-    if rle_nulls != NULL:
-        null_bytes = (total + 7) >> 3
-        null_copy = <uint8_t*>malloc(null_bytes)
-        if null_copy == NULL:
-            raise MemoryError()
-        memcpy(null_copy, rle_nulls, null_bytes)
-        dense.ptr.null_bitmap = null_copy
-    else:
-        dense.ptr.null_bitmap = NULL
-    dense.null_bit_offset = 0
-
-    return dense
-
-
 cdef TimestampVector from_rle_builder(
     int64_t* run_values,
     int32_t* run_lengths,
@@ -1692,6 +1519,10 @@ cdef TimestampVector from_rle_builder(
     Returns:
         TimestampVector with DRAKEN_ENCODING_RLE encoding.
     """
+    import sys as _sys
+    _draken = _sys.modules.get('draken')
+    if _draken is not None and _draken._RLE_FORBIDDEN:
+        raise RuntimeError("RLE vector construction is forbidden (draken._RLE_FORBIDDEN=True)")
     cdef TimestampVector vec = TimestampVector(0)
     cdef size_t total_length = 0
     cdef size_t i

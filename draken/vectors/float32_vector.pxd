@@ -34,7 +34,6 @@ cdef class Float32Vector(Vector):
 
     cpdef Float32Vector take(self, int32_t[::1] indices)
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
-    cdef BoolVector _compare_scalar_rle(self, float value, int op)
     cdef BoolVector _compare_scalar_dict(self, float value, int op)
     cdef BoolVector _compare_scalar(self, float value, int op)
     cdef BoolVector _compare_vector(self, Float32Vector other, int op)

@@ -9,7 +9,7 @@
 from libc.stddef cimport size_t
 from libc.stdint cimport uint64_t, int64_t, uint8_t, uint16_t, uint32_t
 
-from draken.core.buffers cimport ConstAccessor, DictAccessor, DrakenEncoding
+from draken.core.buffers cimport ConstAccessor, DictAccessor, DrakenEncoding, DrakenVector
 
 from draken.interop.arrow import vector_from_arrow
 from draken.interop.vector_sequence import vector_from_sequence
@@ -56,6 +56,7 @@ cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:
 cdef class Vector:
     cdef bint here
     cdef DrakenEncoding _encoding
+    cdef DrakenVector _unified_view   # scratch storage for unified() return value
     cpdef object null_bitmap(self)
     cdef DictAccessor* dict_accessor(self) noexcept
     cdef ConstAccessor* const_accessor(self) noexcept
@@ -88,3 +89,8 @@ cdef class Vector:
     # Return the value at index i as a Python object, or None if null.
     # Base delegates to __getitem__; hot subtypes override with a direct cdef.
     cdef object item_at(self, Py_ssize_t i)
+
+    # Return a DrakenVector* view over this vector's fields (Phase 1 skeleton).
+    # The returned pointer is &self._unified_view — lifetime == self.
+    # RLE encoding aborts (must be expanded at scan boundaries before execution).
+    cdef DrakenVector* unified(self) noexcept

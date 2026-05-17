@@ -593,12 +593,12 @@ cdef class StringVector(Vector):
         return &self._const_accessor
 
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const or self._encoding == DRAKEN_ENCODING_RLE:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const or self._encoding == DRAKEN_ENCODING_RLE:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.null_bitmap
 
@@ -608,8 +608,6 @@ cdef class StringVector(Vector):
     # do not validate the encoding.
     # ------------------------------------------------------------------
     cdef Py_ssize_t c_length(self) noexcept nogil:
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return <Py_ssize_t>self._rle_buffer.length
         if self.ptr == NULL:
             return 0
         return <Py_ssize_t>self.ptr.length
@@ -707,37 +705,6 @@ cdef class StringVector(Vector):
         self._dict_code_counts_valid = True
         return self._dict_code_counts
 
-    cdef Py_ssize_t c_rle_run_count(self) noexcept nogil:
-        if self._rle_buffer == NULL:
-            return 0
-        return <Py_ssize_t>self._rle_buffer.num_runs
-
-    cdef const uint8_t* c_rle_value_ptr(
-        self, Py_ssize_t i, Py_ssize_t* out_len
-    ) noexcept nogil:
-        cdef DrakenRLEBuffer* rb = self._rle_buffer
-        if rb == NULL or i < 0 or <size_t>i >= rb.num_runs:
-            out_len[0] = 0
-            return NULL
-        out_len[0] = <Py_ssize_t>rb.run_str_lens[i]
-        return (<const uint8_t*>rb.run_values) + rb.run_str_offsets[i]
-
-    cdef int32_t c_rle_run_length(self, Py_ssize_t i) noexcept nogil:
-        cdef DrakenRLEBuffer* rb = self._rle_buffer
-        if rb == NULL or i < 0 or <size_t>i >= rb.num_runs:
-            return 0
-        return rb.run_lengths[i]
-
-    cdef const int32_t* c_rle_run_lengths_ptr(self) noexcept nogil:
-        if self._rle_buffer == NULL:
-            return NULL
-        return self._rle_buffer.run_lengths
-
-    cdef const uint8_t* c_rle_null_bitmap(self) noexcept nogil:
-        if self._rle_buffer == NULL:
-            return NULL
-        return self._rle_buffer.null_bitmap
-
     cdef uint64_t c_dict_value_hash(self, Py_ssize_t i) noexcept nogil:
         """Final mixed hash for dict entry i, matching the value c_hash_into
         writes for a row pointing to entry i when the destination is zeroed."""
@@ -758,25 +725,6 @@ cdef class StringVector(Vector):
         else:
             per_string_hash = XXH3_64bits(<const void*>(<const uint8_t*>dv.data + start), str_len)
         # simd_mix_hash with dst=0: dst[0] = mix(0, per_string_hash).
-        scratch = 0
-        simd_mix_hash(&scratch, &per_string_hash, 1)
-        return scratch
-
-    cdef uint64_t c_rle_run_value_hash(self, Py_ssize_t i) noexcept nogil:
-        """Final mixed hash for RLE run value i."""
-        cdef DrakenRLEBuffer* rb = self._rle_buffer
-        cdef size_t str_len
-        cdef uint64_t per_string_hash
-        cdef uint64_t scratch
-        cdef const uint8_t* base
-        if rb == NULL or i < 0 or <size_t>i >= rb.num_runs:
-            return NULL_HASH
-        str_len = <size_t>rb.run_str_lens[i]
-        base = (<const uint8_t*>rb.run_values) + rb.run_str_offsets[i]
-        if str_len <= 32:
-            per_string_hash = _short_string_hash(base, str_len)
-        else:
-            per_string_hash = XXH3_64bits(<const void*>base, str_len)
         scratch = 0
         simd_mix_hash(&scratch, &per_string_hash, 1)
         return scratch
@@ -816,28 +764,6 @@ cdef class StringVector(Vector):
         counts = self.c_dict_code_counts_ptr()
         dict_size = self.c_dict_size()
         return [<int>counts[i] for i in range(dict_size)]
-
-    def rle_run_count_value(self):
-        if self._encoding != DRAKEN_ENCODING_RLE:
-            raise ValueError("rle_run_count_value: vector is not RLE-encoded")
-        return self.c_rle_run_count()
-
-    def rle_value_at(self, Py_ssize_t i):
-        cdef Py_ssize_t length
-        cdef const uint8_t* p
-        if self._encoding != DRAKEN_ENCODING_RLE:
-            raise ValueError("rle_value_at: vector is not RLE-encoded")
-        if i < 0 or i >= self.c_rle_run_count():
-            raise IndexError("run index out of range")
-        p = self.c_rle_value_ptr(i, &length)
-        return PyBytes_FromStringAndSize(<const char*>p, length)
-
-    def rle_run_length_at(self, Py_ssize_t i):
-        if self._encoding != DRAKEN_ENCODING_RLE:
-            raise ValueError("rle_run_length_at: vector is not RLE-encoded")
-        if i < 0 or i >= self.c_rle_run_count():
-            raise IndexError("run index out of range")
-        return <int>self.c_rle_run_length(i)
 
     @property
     def length(self):
@@ -917,8 +843,6 @@ cdef class StringVector(Vector):
         return pa.Array.from_buffers(pa.binary(), n, [null_buf, offs_buf, data_buf])
 
     cdef object item_at(self, Py_ssize_t i):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self)[i]
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _materialize_dict_string(self)[i]
         cdef DrakenVarBuffer* ptr = self.ptr
@@ -1035,13 +959,6 @@ cdef class StringVector(Vector):
         cdef uint8_t last_byte_mask
         cdef uint8_t byte_val
 
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer.null_bitmap == NULL:
-                return 0
-            return <Py_ssize_t>self._rle_buffer.length - <Py_ssize_t>simd_popcount(
-                self._rle_buffer.null_bitmap,
-                (self._rle_buffer.length + 7) >> 3)
-
         ptr = self.ptr
         n = ptr.length
         if self._has_const:
@@ -1096,8 +1013,6 @@ cdef class StringVector(Vector):
                         off_end = <Py_ssize_t>ptr.offsets[i + 1]
                         builder.append_bytes(data_ptr + off_start, off_end - off_start)
                 return builder.finish()
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self)
         if self._has_const:
             if self._const_is_null or self._const_value == NULL:
                 builder = StringVectorBuilder(n, 0)
@@ -1140,8 +1055,6 @@ cdef class StringVector(Vector):
         """
         Return a memoryview of int8_t, where each element is 1 if the value is null, 0 otherwise.
         """
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).is_null()
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
         cdef int8_t* buf = <int8_t*> PyMem_Malloc(n)
@@ -1174,8 +1087,6 @@ cdef class StringVector(Vector):
         Return mask: 1 if equal to value, else 0.
         Optimized version with reduced branching and better cache locality.
         """
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).equals(value)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             _eq_code = _dict_find_code(self, PyBytes_AS_STRING(value), len(value))
             if _eq_code < 0:
@@ -1240,8 +1151,6 @@ cdef class StringVector(Vector):
 
     cpdef BoolVector not_equals(self, bytes value):
         """Return mask: 1 if not equal to value, else 0. Propagates NULLs."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).not_equals(value)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             _neq_code = _dict_find_code(self, PyBytes_AS_STRING(value), len(value))
             if _neq_code < 0:
@@ -1300,8 +1209,6 @@ cdef class StringVector(Vector):
 
     cpdef BoolVector less_than(self, bytes value):
         """Return mask: 1 if element < value (lexicographic bytes), else 0. Propagates NULLs."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).less_than(value)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _dict_ordered_scalar(self, value, 0)
         cdef DrakenVarBuffer* ptr = self.ptr
@@ -1359,8 +1266,6 @@ cdef class StringVector(Vector):
 
     cpdef BoolVector greater_than(self, bytes value):
         """Return mask: 1 if element > value (lexicographic bytes), else 0. Propagates NULLs."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).greater_than(value)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _dict_ordered_scalar(self, value, 1)
         cdef DrakenVarBuffer* ptr = self.ptr
@@ -1418,8 +1323,6 @@ cdef class StringVector(Vector):
 
     cpdef BoolVector less_than_or_equals(self, bytes value):
         """Return mask: 1 if element <= value (lexicographic bytes), else 0. Propagates NULLs."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).less_than_or_equals(value)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _dict_ordered_scalar(self, value, 2)
         cdef DrakenVarBuffer* ptr = self.ptr
@@ -1477,8 +1380,6 @@ cdef class StringVector(Vector):
 
     cpdef BoolVector greater_than_or_equals(self, bytes value):
         """Return mask: 1 if element >= value (lexicographic bytes), else 0. Propagates NULLs."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).greater_than_or_equals(value)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _dict_ordered_scalar(self, value, 3)
         cdef DrakenVarBuffer* ptr = self.ptr
@@ -1645,10 +1546,6 @@ cdef class StringVector(Vector):
 
     cpdef BoolVector equals_vector(self, StringVector other):
         """Element-wise op 0 between two StringVectors with null propagation."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).equals_vector(other)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self.equals_vector(_materialize_rle_string(other))
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _materialize_dict_string(self).equals_vector(other)
         if other._encoding == DRAKEN_ENCODING_DICTIONARY and other.ptr.data == NULL:
@@ -1661,10 +1558,6 @@ cdef class StringVector(Vector):
 
     cpdef BoolVector not_equals_vector(self, StringVector other):
         """Element-wise op 1 between two StringVectors with null propagation."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).not_equals_vector(other)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self.not_equals_vector(_materialize_rle_string(other))
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _materialize_dict_string(self).not_equals_vector(other)
         if other._encoding == DRAKEN_ENCODING_DICTIONARY and other.ptr.data == NULL:
@@ -1677,10 +1570,6 @@ cdef class StringVector(Vector):
 
     cpdef BoolVector less_than_vector(self, StringVector other):
         """Element-wise op 2 between two StringVectors with null propagation."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).less_than_vector(other)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self.less_than_vector(_materialize_rle_string(other))
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _materialize_dict_string(self).less_than_vector(other)
         if other._encoding == DRAKEN_ENCODING_DICTIONARY and other.ptr.data == NULL:
@@ -1693,10 +1582,6 @@ cdef class StringVector(Vector):
 
     cpdef BoolVector less_than_or_equals_vector(self, StringVector other):
         """Element-wise op 3 between two StringVectors with null propagation."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).less_than_or_equals_vector(other)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self.less_than_or_equals_vector(_materialize_rle_string(other))
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _materialize_dict_string(self).less_than_or_equals_vector(other)
         if other._encoding == DRAKEN_ENCODING_DICTIONARY and other.ptr.data == NULL:
@@ -1709,10 +1594,6 @@ cdef class StringVector(Vector):
 
     cpdef BoolVector greater_than_vector(self, StringVector other):
         """Element-wise op 4 between two StringVectors with null propagation."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).greater_than_vector(other)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self.greater_than_vector(_materialize_rle_string(other))
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _materialize_dict_string(self).greater_than_vector(other)
         if other._encoding == DRAKEN_ENCODING_DICTIONARY and other.ptr.data == NULL:
@@ -1725,10 +1606,6 @@ cdef class StringVector(Vector):
 
     cpdef BoolVector greater_than_or_equals_vector(self, StringVector other):
         """Element-wise op 5 between two StringVectors with null propagation."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).greater_than_or_equals_vector(other)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self.greater_than_or_equals_vector(_materialize_rle_string(other))
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _materialize_dict_string(self).greater_than_or_equals_vector(other)
         if other._encoding == DRAKEN_ENCODING_DICTIONARY and other.ptr.data == NULL:
@@ -1744,8 +1621,6 @@ cdef class StringVector(Vector):
         Return mask: 1 if element is a member of value_set, else 0. Propagates NULLs.
         value_set must be a set or frozenset of bytes.
         """
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).in_list(value_set)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _materialize_dict_string(self).in_list(value_set)
         cdef DrakenVarBuffer* ptr = self.ptr
@@ -1796,8 +1671,6 @@ cdef class StringVector(Vector):
 
         Optimized for dictionary-encoded vectors: tests each unique value once.
         """
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).like(pattern, ignore_case)
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -1913,8 +1786,6 @@ cdef class StringVector(Vector):
 
         Optimized for dictionary-encoded vectors: tests each unique value once.
         """
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).rlike(pattern)
         import re
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
@@ -2020,8 +1891,6 @@ cdef class StringVector(Vector):
         - Dictionary-encoded vectors: tests each unique value once
         - Case-insensitive: pre-lowers entire buffer before comparison
         """
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).contains(substr, ignore_case)
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -2251,21 +2120,6 @@ cdef class StringVector(Vector):
         cdef uint8_t byte, bit
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _materialize_dict_string(self).to_pylist()
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            # Expand RLE inline — avoids a full dense materialize just for the list.
-            rle_n = self._rle_buffer.num_runs
-            rle_arena = <uint8_t*>self._rle_buffer.run_values
-            rle_run_offs = self._rle_buffer.run_str_offsets
-            rle_run_lens = self._rle_buffer.run_str_lens
-            rle_run_counts = self._rle_buffer.run_lengths
-            out = []
-            for rle_r in range(rle_n):
-                rle_s = PyBytes_FromStringAndSize(
-                    <const char*>(rle_arena + rle_run_offs[rle_r]),
-                    rle_run_lens[rle_r])
-                for rle_j in range(rle_run_counts[rle_r]):
-                    out.append(rle_s)
-            return out
         ptr = self.ptr
         n = ptr.length
         out = []
@@ -2299,9 +2153,6 @@ cdef class StringVector(Vector):
         uint64_t[::1] out_buf,
         Py_ssize_t offset=0,
     ) except *:
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            _materialize_rle_string(self).hash_into(out_buf, offset)
-            return
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef uint64_t value
@@ -2777,8 +2628,6 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t src_len_check
         cdef StringVector dict_result
 
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).take(indices)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             # Dict-in → dict-out: gather codes for the requested rows, share the
             # dictionary verbatim. Avoids materializing ~N decoded strings just
@@ -2969,8 +2818,6 @@ cdef class StringVector(Vector):
 
     cpdef object min(self):
         """Return lexicographically smallest non-null string value, or None if all null or empty."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).min()
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _materialize_dict_string(self).min()
         cdef DrakenVarBuffer* ptr = self.ptr
@@ -3025,8 +2872,6 @@ cdef class StringVector(Vector):
 
     cpdef object max(self):
         """Return lexicographically largest non-null string value, or None if all null or empty."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).max()
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _materialize_dict_string(self).max()
         cdef DrakenVarBuffer* ptr = self.ptr
@@ -3090,9 +2935,6 @@ cdef class StringVector(Vector):
         cdef const uint8_t* lp
         cdef const uint8_t* rp
 
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).compare_at(left_idx, right_idx)
-
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             # Dict-aware path: compare via packed codes without materializing the
             # dictionary. For an ordered dict, code order matches value order, so
@@ -3144,8 +2986,6 @@ cdef class StringVector(Vector):
 
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False:
         """Check if value at index is null."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_string(self).is_null_at(idx)
         cdef DrakenVarBuffer* ptr = self.ptr
 
         if self._has_const:
@@ -3164,10 +3004,6 @@ cdef class StringVector(Vector):
     def __str__(self):
         cdef list vals = []
         cdef Py_ssize_t i, k
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            k = min(<Py_ssize_t>self._rle_buffer.length, 5)
-            py_list = self.to_pylist()
-            return f"<StringVector(RLE) len={self._rle_buffer.length} values={py_list[:k]}>"
         k = min(<Py_ssize_t>self.ptr.length, 5)
         if self._has_const:
             vals = [None if self._const_is_null else PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length)] * k
@@ -4505,39 +4341,6 @@ cdef StringVector _materialize_const_string(StringVector const_vec):
     return builder.finish()
 
 
-cdef StringVector _materialize_rle_string(StringVector rle_vec):
-    """Expand an RLE-encoded StringVector into a dense StringVector."""
-    cdef size_t num_runs = rle_vec._rle_buffer.num_runs
-    cdef size_t total    = rle_vec._rle_buffer.length
-    cdef uint8_t*  arena      = <uint8_t*>rle_vec._rle_buffer.run_values
-    cdef uint32_t* run_offs   = rle_vec._rle_buffer.run_str_offsets
-    cdef int32_t*  run_lens   = rle_vec._rle_buffer.run_str_lens
-    cdef int32_t*  run_counts = rle_vec._rle_buffer.run_lengths
-    cdef size_t r
-    cdef int32_t j, slen
-    cdef size_t total_bytes = 0
-    cdef const char* src
-    cdef StringVectorBuilder builder
-
-    for r in range(num_runs):
-        total_bytes += <size_t>run_lens[r] * <size_t>run_counts[r]
-
-    builder = StringVectorBuilder(
-        <Py_ssize_t>total, <Py_ssize_t>total_bytes, resizable=False)
-
-    for r in range(num_runs):
-        src = <const char*>(arena + run_offs[r])
-        slen = run_lens[r]
-        for j in range(run_counts[r]):
-            builder.append_bytes(src, <Py_ssize_t>slen)
-
-    if rle_vec._rle_buffer.null_bitmap != NULL:
-        builder.set_validity_mask(
-            <const uint8_t[:(total + 7) >> 3]>rle_vec._rle_buffer.null_bitmap)
-
-    return builder.finish()
-
-
 cdef StringVector from_rle_builder(
         uint8_t* arena,
         uint32_t* run_str_offsets,
@@ -4553,6 +4356,10 @@ cdef StringVector from_rle_builder(
     Ownership: this function malloc-copies all inputs so the caller's C++
     vectors can be destroyed after the call returns.
     """
+    import sys as _sys
+    _draken = _sys.modules.get('draken')
+    if _draken is not None and _draken._RLE_FORBIDDEN:
+        raise RuntimeError("RLE vector construction is forbidden (draken._RLE_FORBIDDEN=True)")
     cdef StringVector vec = StringVector(0, 0, True)
     cdef DrakenRLEBuffer* buf
     cdef size_t arena_size = 0

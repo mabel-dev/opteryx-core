@@ -26,8 +26,7 @@ from draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
 from draken.vectors.vector cimport Vector
 from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
 from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
-from draken.vectors.string_vector cimport StringVector, _materialize_dict_string, _materialize_rle_string
-from draken.core.buffers cimport DRAKEN_ENCODING_RLE
+from draken.vectors.string_vector cimport StringVector, _materialize_dict_string
 from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.vectors.bool_vector cimport BoolVector
@@ -976,8 +975,6 @@ cdef class KeyStore:
                     else:
                         raise RuntimeError("single string codec path removed")
                 else:
-                    if sv._encoding == DRAKEN_ENCODING_RLE:
-                        sv = _materialize_rle_string(sv)
                     vbuf  = sv.ptr
                     nulls = sv.null_bitmap_ptr()
                     if self._single_string_direct:
@@ -1189,9 +1186,6 @@ cdef class KeyStore:
                         col_has_const[col_idx]   = not sv._const_is_null
                         col_varbuf_ptrs[col_idx] = <size_t>sv._const_value
                     else:
-                        if sv._encoding == DRAKEN_ENCODING_RLE:
-                            sv = _materialize_rle_string(sv)
-                            vecs[col_idx] = sv
                         col_dispatch[col_idx]    = _DISPATCH_STRING
                         col_null_ptrs[col_idx]   = <size_t>sv.null_bitmap_ptr()
                         col_varbuf_ptrs[col_idx] = <size_t>sv.ptr

@@ -308,12 +308,12 @@ cdef class Int64Vector(Vector):
         return &self._const_accessor
 
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const or self._encoding == DRAKEN_ENCODING_RLE:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const or self._encoding == DRAKEN_ENCODING_RLE:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.null_bitmap
 
@@ -366,17 +366,6 @@ cdef class Int64Vector(Vector):
             if self._const_is_null:
                 return None
             return self._const_value
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            rle_vals = <int64_t*>self._rle_buffer.run_values
-            for run_idx in range(self._rle_buffer.num_runs):
-                cumulative += <size_t>self._rle_buffer.run_lengths[run_idx]
-                if <size_t>i < cumulative:
-                    if self._rle_buffer.null_bitmap != NULL:
-                        byte = self._rle_buffer.null_bitmap[i >> 3]
-                        if not ((byte >> (i & 7)) & 1):
-                            return None
-                    return rle_vals[run_idx]
-            raise IndexError("Index out of bounds")
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and ptr.data == NULL:
             if ptr.null_bitmap != NULL and not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
                 return None
@@ -431,9 +420,6 @@ cdef class Int64Vector(Vector):
     # -------- Example op --------
     cpdef Int64Vector take(self, int32_t[::1] indices):
         cdef Py_ssize_t i, n = indices.shape[0]
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            # Materialize to dense then take
-            return _materialize_rle_int64(self).take(indices)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _materialize_dict_int64(self).take(indices)
         if self._has_const:
@@ -531,43 +517,6 @@ cdef class Int64Vector(Vector):
             out.ptr.null_bitmap = NULL
         return out
 
-    cdef BoolVector _compare_scalar_rle(self, int64_t value, int op):
-        # Compare RLE vector against a scalar without materialising to dense int64.
-        # Evaluates the predicate once per run, bit-fills the result, then applies
-        # the row-level null bitmap (if any) via a single SIMD AND pass.
-        cdef size_t n = self._rle_buffer.length
-        cdef size_t num_runs = self._rle_buffer.num_runs
-        cdef int64_t* rle_vals = <int64_t*>self._rle_buffer.run_values
-        cdef int32_t* rle_lens = self._rle_buffer.run_lengths
-        cdef uint8_t* rle_nulls = self._rle_buffer.null_bitmap
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-
-        cdef BoolVector out = BoolVector(<size_t>n)
-        cdef uint8_t* dst = <uint8_t*>out.ptr.data
-        memset(dst, 0, nbytes)
-
-        cdef uint8_t* out_null = NULL
-        if rle_nulls != NULL and nbytes != 0:
-            out_null = <uint8_t*>malloc(nbytes)
-            if out_null == NULL:
-                raise MemoryError()
-            memcpy(out_null, rle_nulls, nbytes)
-            out.ptr.null_bitmap = out_null
-        else:
-            out.ptr.null_bitmap = NULL
-
-        cdef size_t pos = 0
-        cdef size_t r
-        for r in range(num_runs):
-            if dispatch_compare_once(op, rle_vals[r], value):
-                bit_fill_range(dst, pos, <size_t>rle_lens[r])
-            pos += <size_t>rle_lens[r]
-
-        if out_null != NULL:
-            simd_and_mask(dst, dst, out_null, <size_t>nbytes)
-
-        return out
-
     cdef BoolVector _compare_scalar_dict(self, int64_t value, int op):
         # Compare dict-encoded vector against a scalar without materialising to dense int64.
         # Evaluates the predicate once per dictionary entry into a tiny match_table,
@@ -633,8 +582,6 @@ cdef class Int64Vector(Vector):
         return out
 
     cpdef BoolVector _compare_scalar(self, int64_t value, int op):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return self._compare_scalar_rle(value, op)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return self._compare_scalar_dict(value, op)
 
@@ -703,10 +650,6 @@ cdef class Int64Vector(Vector):
         return out
 
     cpdef BoolVector _compare_vector(self, Int64Vector other, int op):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_int64(self)._compare_vector(other, op)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self._compare_vector(_materialize_rle_int64(other), op)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY:
             return _materialize_dict_int64(self)._compare_vector(other, op)
         if other._encoding == DRAKEN_ENCODING_DICTIONARY:
@@ -904,8 +847,6 @@ cdef class Int64Vector(Vector):
     cpdef BoolVector between(self, int64_t lower, int64_t upper,
                               bint lower_inclusive=True, bint upper_inclusive=True):
         """Single-pass range check: lower OP value OP upper. NULL in → NULL out."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_int64(self).between(lower, upper, lower_inclusive, upper_inclusive)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _materialize_dict_int64(self).between(lower, upper, lower_inclusive, upper_inclusive)
 
@@ -1005,8 +946,6 @@ cdef class Int64Vector(Vector):
 
     cpdef BoolVector in_list(self, object value_set):
         """Return mask: 1 if element is in value_set, else 0. Propagates NULLs."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_int64(self).in_list(value_set)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _materialize_dict_int64(self).in_list(value_set)
 
@@ -1079,10 +1018,6 @@ cdef class Int64Vector(Vector):
         cdef int64_t* data
         cdef Py_ssize_t n
 
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer == NULL:
-                return 0
-            return _sum_rle_int64(self._rle_buffer)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _sum_dict_int64(self)
         if self._has_const:
@@ -1105,8 +1040,6 @@ cdef class Int64Vector(Vector):
         cdef int64_t out
         cdef size_t valid_count
 
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _min_rle_int64(self._rle_buffer)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _min_dict_int64(self)
         if self._has_const:
@@ -1134,8 +1067,6 @@ cdef class Int64Vector(Vector):
         cdef int64_t out
         cdef size_t valid_count
 
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _max_rle_int64(self._rle_buffer)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return _max_dict_int64(self)
         if self._has_const:
@@ -1163,9 +1094,6 @@ cdef class Int64Vector(Vector):
         cdef int64_t left_val, right_val
         cdef int64_t* dict_data
         cdef uint32_t lc, rc
-
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_int64(self).compare_at(left_idx, right_idx)
 
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             # Dict-aware path: dereference codes into the dictionary's int64
@@ -1209,12 +1137,6 @@ cdef class Int64Vector(Vector):
         if self._has_const:
             return self._const_is_null
 
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer.null_bitmap == NULL:
-                return False
-            rle_byte = self._rle_buffer.null_bitmap[idx >> 3]
-            return ((rle_byte >> (idx & 7)) & 1) == 0
-
         if ptr.null_bitmap == NULL:
             return False
 
@@ -1232,16 +1154,6 @@ cdef class Int64Vector(Vector):
 
         if buf == NULL:
             raise MemoryError()
-
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer.null_bitmap == NULL:
-                for i in range(n):
-                    buf[i] = 0
-            else:
-                for i in range(n):
-                    byte = self._rle_buffer.null_bitmap[i >> 3]
-                    buf[i] = 0 if ((byte >> (i & 7)) & 1) else 1
-            return <int8_t[:n]> buf
 
         if self._has_const:
             for i in range(n):
@@ -1266,12 +1178,6 @@ cdef class Int64Vector(Vector):
         """Return the number of nulls in the vector."""
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer.null_bitmap == NULL:
-                return 0
-            return <Py_ssize_t>self._rle_buffer.length - <Py_ssize_t>simd_popcount(
-                self._rle_buffer.null_bitmap, (self._rle_buffer.length + 7) >> 3
-            )
         if self._has_const:
             return n if self._const_is_null else 0
         if ptr.null_bitmap == NULL:
@@ -1301,8 +1207,6 @@ cdef class Int64Vector(Vector):
                         raise MemoryError()
                     memcpy(dense.ptr.null_bitmap, ptr.null_bitmap, <size_t>nb_bytes)
                 return dense
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_int64(self)
         if self._has_const:
             dense = Int64Vector(<size_t>n)
             dst = <int64_t*>dense.ptr.data
@@ -1398,23 +1302,6 @@ cdef class Int64Vector(Vector):
         cdef int32_t run_len
         cdef int64_t run_val
 
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            rle_vals = <int64_t*>self._rle_buffer.run_values
-            rle_lens = self._rle_buffer.run_lengths
-            rle_runs = self._rle_buffer.num_runs
-            rle_nulls = self._rle_buffer.null_bitmap
-            pos = 0
-            for r in range(rle_runs):
-                run_val = rle_vals[r]
-                run_len = rle_lens[r]
-                for i in range(run_len):
-                    if rle_nulls != NULL and not ((rle_nulls[(pos + i) >> 3] >> ((pos + i) & 7)) & 1):
-                        out.append(None)
-                    else:
-                        out.append(run_val)
-                pos += run_len
-            return out
-
         if self._has_const:
             if self._const_is_null:
                 for i in range(n):
@@ -1483,32 +1370,6 @@ cdef class Int64Vector(Vector):
         dst_base = &out_buf[0]
 
         dst = dst_base + offset
-
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            # RLE optimisation: hash each distinct value once, replicate run_length times
-            rle_vals = <int64_t*>self._rle_buffer.run_values
-            rle_lens = self._rle_buffer.run_lengths
-            rle_runs = self._rle_buffer.num_runs
-            rle_nulls = self._rle_buffer.null_bitmap
-            pos = 0
-            for r in range(rle_runs):
-                run_len = rle_lens[r]
-                run_hash = <uint64_t>rle_vals[r]
-                i = 0
-                while i < run_len:
-                    block = run_len - i
-                    if block > 1024:
-                        block = 1024
-                    for j in range(block):
-                        scratch[j] = run_hash
-                    if rle_nulls != NULL:
-                        for j in range(block):
-                            if not ((rle_nulls[(pos + i + j) >> 3] >> ((pos + i + j) & 7)) & 1):
-                                scratch[j] = NULL_HASH
-                    simd_mix_hash(dst + pos + i, scratch_ptr, <size_t>block)
-                    i += block
-                pos += run_len
-            return
 
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and ptr.data == NULL:
             _dict_data  = <int64_t*>self._dict_values.data
@@ -1734,24 +1595,6 @@ cdef class Int64Vector(Vector):
         dst_base = &out_buf[0]
         dst = dst_base + offset
 
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            # Expand RLE into output buffer
-            rle_vals = <int64_t*>self._rle_buffer.run_values
-            rle_lens = self._rle_buffer.run_lengths
-            rle_runs = self._rle_buffer.num_runs
-            rle_nulls = self._rle_buffer.null_bitmap
-            pos = 0
-            for r in range(rle_runs):
-                run_val = rle_vals[r]
-                run_len = rle_lens[r]
-                for i in range(run_len):
-                    if rle_nulls != NULL and not ((rle_nulls[(pos + i) >> 3] >> ((pos + i) & 7)) & 1):
-                        dst[pos + i] = INT64_MIN_VALUE
-                    else:
-                        dst[pos + i] = run_val
-                pos += run_len
-            return
-
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and ptr.data == NULL:
             _ci_dict_data  = <int64_t*>self._dict_values.data
             _ci_dict_codes = self._dict_codes
@@ -1789,9 +1632,6 @@ cdef class Int64Vector(Vector):
     def __str__(self):
         cdef list vals = []
         cdef Py_ssize_t i, k = min(<Py_ssize_t>buf_length(self.ptr), 10)
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            vals = self.to_pylist()[:k]
-            return f"<Int64Vector(RLE) len={buf_length(self.ptr)} values={vals}>"
         if self._has_const:
             vals = [None if self._const_is_null else self._const_value] * k
             return f"<Int64Vector len={buf_length(self.ptr)} values={vals}>"
@@ -1799,49 +1639,6 @@ cdef class Int64Vector(Vector):
         for i in range(k):
             vals.append(data[i])
         return f"<Int64Vector len={buf_length(self.ptr)} values={vals}>"
-
-
-cdef Int64Vector _materialize_rle_int64(Int64Vector rle_vec):
-    """Expand an RLE Int64Vector to a dense Int64Vector.
-
-    Allocates a dense array, fills it by expanding each run, then returns a new
-    Int64Vector backed by that array. The RLE vector is not modified.
-    """
-    cdef size_t total = rle_vec._rle_buffer.length
-    cdef Int64Vector dense = Int64Vector(<size_t>total)
-
-    cdef int64_t* rle_vals = <int64_t*>rle_vec._rle_buffer.run_values
-    cdef int32_t* rle_lens = rle_vec._rle_buffer.run_lengths
-    cdef size_t num_runs = rle_vec._rle_buffer.num_runs
-    cdef uint8_t* rle_nulls = rle_vec._rle_buffer.null_bitmap
-
-    cdef int64_t* dst = <int64_t*>dense.ptr.data
-    cdef size_t pos = 0
-    cdef size_t r
-    cdef int32_t run_len
-    cdef int64_t run_val
-    cdef Py_ssize_t j
-    cdef size_t null_bytes
-    cdef uint8_t* null_copy
-
-    for r in range(num_runs):
-        run_val = rle_vals[r]
-        run_len = rle_lens[r]
-        for j in range(run_len):
-            dst[pos + j] = run_val
-        pos += <size_t>run_len
-
-    if rle_nulls != NULL:
-        null_bytes = (total + 7) >> 3
-        null_copy = <uint8_t*>malloc(null_bytes)
-        if null_copy == NULL:
-            raise MemoryError()
-        memcpy(null_copy, rle_nulls, null_bytes)
-        dense.ptr.null_bitmap = null_copy
-    else:
-        dense.ptr.null_bitmap = NULL
-
-    return dense
 
 
 cdef Int64Vector _materialize_dict_int64(Int64Vector vec):
@@ -1967,6 +1764,10 @@ cdef Int64Vector from_rle_builder(
     Returns:
         Int64Vector with DRAKEN_ENCODING_RLE encoding.
     """
+    import sys as _sys
+    _draken = _sys.modules.get('draken')
+    if _draken is not None and _draken._RLE_FORBIDDEN:
+        raise RuntimeError("RLE vector construction is forbidden (draken._RLE_FORBIDDEN=True)")
     cdef Int64Vector vec = Int64Vector(0, False)  # allocates ptr, data=NULL
     cdef size_t total_length = 0
     cdef size_t i
@@ -2433,116 +2234,3 @@ cdef int64_t _max_dict_int64(Int64Vector vec):
     return m
 
 
-cdef int64_t _sum_rle_int64(DrakenRLEBuffer* rle) noexcept:
-    """Sum an RLE int64 column. Walks runs (O(K)) when no row-level null
-    bitmap is present; otherwise falls back to per-row checks."""
-    if rle == NULL or rle.num_runs == 0:
-        return 0
-
-    cdef int64_t* values = <int64_t*>rle.run_values
-    cdef int32_t* lengths = rle.run_lengths
-    cdef size_t num_runs = rle.num_runs
-    cdef uint8_t* nulls = rle.null_bitmap
-    cdef Py_ssize_t r, n, row, k
-    cdef int64_t total = 0
-
-    if nulls == NULL:
-        # Pure run-level sum
-        with nogil:
-            for r in range(num_runs):
-                total += values[r] * <int64_t>lengths[r]
-        return total
-
-    # Row-level null bitmap → walk rows by expanding runs
-    row = 0
-    for r in range(num_runs):
-        n = <Py_ssize_t>lengths[r]
-        for k in range(n):
-            if _bitmap_is_valid(nulls, row + k, 0):
-                total += values[r]
-        row += n
-    return total
-
-
-cdef int64_t _min_rle_int64(DrakenRLEBuffer* rle):
-    if rle == NULL or rle.num_runs == 0:
-        raise ValueError("Cannot compute min of empty column")
-
-    cdef int64_t* values = <int64_t*>rle.run_values
-    cdef int32_t* lengths = rle.run_lengths
-    cdef size_t num_runs = rle.num_runs
-    cdef uint8_t* nulls = rle.null_bitmap
-    cdef Py_ssize_t r, n, row, k
-    cdef int64_t m
-    cdef bint seen = False
-
-    if nulls == NULL:
-        # Find first non-empty run, then walk rest
-        for r in range(num_runs):
-            if lengths[r] > 0:
-                if not seen:
-                    m = values[r]
-                    seen = True
-                elif values[r] < m:
-                    m = values[r]
-        if not seen:
-            raise ValueError("Cannot compute min of empty column")
-        return m
-
-    row = 0
-    for r in range(num_runs):
-        n = <Py_ssize_t>lengths[r]
-        for k in range(n):
-            if _bitmap_is_valid(nulls, row + k, 0):
-                if not seen:
-                    m = values[r]
-                    seen = True
-                elif values[r] < m:
-                    m = values[r]
-                # All other rows in this run share the same value — skip ahead
-                break
-        row += n
-    if not seen:
-        raise ValueError("Cannot compute min of all-null column")
-    return m
-
-
-cdef int64_t _max_rle_int64(DrakenRLEBuffer* rle):
-    if rle == NULL or rle.num_runs == 0:
-        raise ValueError("Cannot compute max of empty column")
-
-    cdef int64_t* values = <int64_t*>rle.run_values
-    cdef int32_t* lengths = rle.run_lengths
-    cdef size_t num_runs = rle.num_runs
-    cdef uint8_t* nulls = rle.null_bitmap
-    cdef Py_ssize_t r, n, row, k
-    cdef int64_t m
-    cdef bint seen = False
-
-    if nulls == NULL:
-        for r in range(num_runs):
-            if lengths[r] > 0:
-                if not seen:
-                    m = values[r]
-                    seen = True
-                elif values[r] > m:
-                    m = values[r]
-        if not seen:
-            raise ValueError("Cannot compute max of empty column")
-        return m
-
-    row = 0
-    for r in range(num_runs):
-        n = <Py_ssize_t>lengths[r]
-        for k in range(n):
-            if _bitmap_is_valid(nulls, row + k, 0):
-                if not seen:
-                    m = values[r]
-                    seen = True
-                elif values[r] > m:
-                    m = values[r]
-                break
-        row += n
-    if not seen:
-        raise ValueError("Cannot compute max of all-null column")
-    return m

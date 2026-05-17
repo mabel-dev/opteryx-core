@@ -35,7 +35,6 @@ cdef class TimestampVector(Vector):
 
     cpdef TimestampVector take(self, int32_t[::1] indices)
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
-    cdef BoolVector _compare_scalar_rle(self, int64_t value, int op)
     cdef BoolVector _compare_scalar_dict(self, int64_t value, int op)
     cpdef BoolVector _compare_scalar(self, int64_t value, int op)
     cpdef BoolVector _compare_vector(self, TimestampVector other, int op)

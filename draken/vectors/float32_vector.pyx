@@ -252,12 +252,12 @@ cdef class Float32Vector(Vector):
         return &self._const_accessor
 
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const or self._encoding == DRAKEN_ENCODING_RLE:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const or self._encoding == DRAKEN_ENCODING_RLE:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.null_bitmap
 
@@ -330,8 +330,6 @@ cdef class Float32Vector(Vector):
             if self._const_is_null:
                 return None
             return self._const_value
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_float32(self).__getitem__(i)
         data = <float*> ptr.data
         if ptr.null_bitmap != NULL:
             byte = ptr.null_bitmap[i >> 3]
@@ -341,8 +339,6 @@ cdef class Float32Vector(Vector):
         return data[i]
 
     cpdef Float32Vector take(self, int32_t[::1] indices):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_float32(self).take(indices)
         cdef Py_ssize_t i, n = indices.shape[0]
         if self._has_const:
             return Float32Vector.from_constant(
@@ -435,43 +431,6 @@ cdef class Float32Vector(Vector):
             out.ptr.null_bitmap = NULL
         return out
 
-    cdef BoolVector _compare_scalar_rle(self, float value, int op):
-        # Compare RLE vector against a scalar without materialising to dense float.
-        # Evaluates the predicate once per run, bit-fills the result, then applies
-        # the row-level null bitmap (if any) via a single SIMD AND pass.
-        cdef size_t n = self._rle_buffer.length
-        cdef size_t num_runs = self._rle_buffer.num_runs
-        cdef float* rle_vals = <float*>self._rle_buffer.run_values
-        cdef int32_t* rle_lens = self._rle_buffer.run_lengths
-        cdef uint8_t* rle_nulls = self._rle_buffer.null_bitmap
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-
-        cdef BoolVector out = BoolVector(<size_t>n)
-        cdef uint8_t* dst = <uint8_t*>out.ptr.data
-        memset(dst, 0, nbytes)
-
-        cdef uint8_t* out_null = NULL
-        if rle_nulls != NULL and nbytes != 0:
-            out_null = <uint8_t*>malloc(nbytes)
-            if out_null == NULL:
-                raise MemoryError()
-            memcpy(out_null, rle_nulls, nbytes)
-            out.ptr.null_bitmap = out_null
-        else:
-            out.ptr.null_bitmap = NULL
-
-        cdef size_t pos = 0
-        cdef size_t r
-        for r in range(num_runs):
-            if dispatch_compare_once(op, rle_vals[r], value):
-                bit_fill_range(dst, pos, <size_t>rle_lens[r])
-            pos += <size_t>rle_lens[r]
-
-        if out_null != NULL:
-            simd_and_mask(dst, dst, out_null, <size_t>nbytes)
-
-        return out
-
     cdef BoolVector _compare_scalar_dict(self, float value, int op):
         # Compare dict-encoded vector against a scalar without materialising to dense float.
         # Evaluates the predicate once per dictionary entry into a tiny match_table,
@@ -537,8 +496,6 @@ cdef class Float32Vector(Vector):
         return out
 
     cdef BoolVector _compare_scalar(self, float value, int op):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return self._compare_scalar_rle(value, op)
         if self._encoding == DRAKEN_ENCODING_DICTIONARY and self.ptr.data == NULL:
             return self._compare_scalar_dict(value, op)
 
@@ -607,10 +564,6 @@ cdef class Float32Vector(Vector):
         return out
 
     cdef BoolVector _compare_vector(self, Float32Vector other, int op):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_float32(self)._compare_vector(other, op)
-        if other._encoding == DRAKEN_ENCODING_RLE:
-            return self._compare_vector(_materialize_rle_float32(other), op)
         # Const fast paths: avoid O(n) materialisation.
         # self[i] OP other[i] where self is const V = V OP other[i]
         #   = other[i] reversed_op V, so flip directional ops.
@@ -726,8 +679,6 @@ cdef class Float32Vector(Vector):
         return self._compare_vector(other, 5)
 
     cpdef BoolVector in_list(self, object value_set):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_float32(self).in_list(value_set)
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n
         cdef Py_ssize_t nbytes
@@ -791,8 +742,6 @@ cdef class Float32Vector(Vector):
         return out
 
     cpdef float sum(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_float32(self).sum()
         if self._has_const:
             if self._const_is_null:
                 return 0.0
@@ -812,8 +761,6 @@ cdef class Float32Vector(Vector):
         return <float>total
 
     cpdef float min(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_float32(self).min()
         if self._has_const:
             if self.ptr.length == 0:
                 raise ValueError("Cannot compute min of empty column")
@@ -852,8 +799,6 @@ cdef class Float32Vector(Vector):
         return m
 
     cpdef float max(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_float32(self).max()
         if self._has_const:
             if self.ptr.length == 0:
                 raise ValueError("Cannot compute max of empty column")
@@ -892,8 +837,6 @@ cdef class Float32Vector(Vector):
         return m
 
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_float32(self).compare_at(left_idx, right_idx)
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef float* data = <float*> ptr.data
         cdef float left_val, right_val
@@ -918,12 +861,6 @@ cdef class Float32Vector(Vector):
         if self._has_const:
             return self._const_is_null
 
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer.null_bitmap == NULL:
-                return False
-            rle_byte = self._rle_buffer.null_bitmap[idx >> 3]
-            return ((rle_byte >> (idx & 7)) & 1) == 0
-
         if ptr.null_bitmap == NULL:
             return False
 
@@ -938,16 +875,6 @@ cdef class Float32Vector(Vector):
 
         if buf == NULL:
             raise MemoryError()
-
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer.null_bitmap == NULL:
-                for i in range(n):
-                    buf[i] = 0
-            else:
-                for i in range(n):
-                    byte = self._rle_buffer.null_bitmap[i >> 3]
-                    buf[i] = 0 if ((byte >> (i & 7)) & 1) else 1
-            return <int8_t[:n]> buf
 
         if self._has_const:
             for i in range(n):
@@ -966,8 +893,6 @@ cdef class Float32Vector(Vector):
         return <int8_t[:n]> buf
 
     cpdef int8_t[::1] is_null_with_nan(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_float32(self).is_null_with_nan()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
         cdef int8_t* buf = <int8_t*> PyMem_Malloc(n)
@@ -1002,12 +927,6 @@ cdef class Float32Vector(Vector):
 
     @property
     def null_count(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer.null_bitmap == NULL:
-                return 0
-            return <Py_ssize_t>self._rle_buffer.length - <Py_ssize_t>simd_popcount(
-                self._rle_buffer.null_bitmap, (self._rle_buffer.length + 7) >> 3
-            )
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         if self._has_const:
@@ -1041,23 +960,6 @@ cdef class Float32Vector(Vector):
         cdef size_t fr
         cdef int32_t frun_len
         cdef float frun_val
-
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            rle_vals_f = <float*>self._rle_buffer.run_values
-            rle_lens_f = self._rle_buffer.run_lengths
-            rle_runs_f = self._rle_buffer.num_runs
-            rle_nulls_f = self._rle_buffer.null_bitmap
-            fpos = 0
-            for fr in range(rle_runs_f):
-                frun_val = rle_vals_f[fr]
-                frun_len = rle_lens_f[fr]
-                for i in range(frun_len):
-                    if rle_nulls_f != NULL and not ((rle_nulls_f[(fpos + i) >> 3] >> ((fpos + i) & 7)) & 1):
-                        out.append(None)
-                    else:
-                        out.append(frun_val)
-                fpos += frun_len
-            return out
 
         if self._has_const:
             if self._const_is_null:
@@ -1097,10 +999,6 @@ cdef class Float32Vector(Vector):
             return
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("Float32Vector.hash_into: output buffer too small")
-
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            _materialize_rle_float32(self).hash_into(out_buf, offset)
-            return
 
         cdef float* data = <float*> ptr.data
         cdef uint64_t* dst = &out_buf[offset]
@@ -1162,10 +1060,6 @@ cdef class Float32Vector(Vector):
             return
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("Float32Vector.compress: output buffer too small")
-
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            _materialize_rle_float32(self).compress_into(out_buf, offset)
-            return
 
         dst_base = &out_buf[0]
         cdef int64_t* dst = dst_base + offset
@@ -1240,9 +1134,6 @@ cdef class Float32Vector(Vector):
         cdef list vals = []
         cdef Py_ssize_t i, k
         cdef float* data
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            vals = self.to_pylist()[:10]
-            return f"<Float32Vector(RLE) len={self._rle_buffer.length} values={vals}>"
         k = min(<Py_ssize_t>buf_length(self.ptr), 10)
         if self._has_const:
             vals = [None if self._const_is_null else self._const_value] * k
@@ -1383,35 +1274,6 @@ cdef Float32Vector from_packed_dict(
     return vec
 
 
-cdef Float32Vector _materialize_rle_float32(Float32Vector rle_vec):
-    """Expand RLE Float32Vector to dense."""
-    cdef size_t total = rle_vec._rle_buffer.length
-    cdef Float32Vector dense = Float32Vector(<size_t>total)
-    cdef float* rle_vals = <float*>rle_vec._rle_buffer.run_values
-    cdef int32_t* rle_lens = rle_vec._rle_buffer.run_lengths
-    cdef size_t num_runs = rle_vec._rle_buffer.num_runs
-    cdef uint8_t* rle_nulls = rle_vec._rle_buffer.null_bitmap
-    cdef float* dst = <float*>dense.ptr.data
-    cdef size_t pos = 0, r
-    cdef int32_t run_len
-    cdef Py_ssize_t j
-    cdef size_t null_bytes
-    cdef uint8_t* null_copy
-    for r in range(num_runs):
-        run_len = rle_lens[r]
-        for j in range(run_len):
-            dst[pos + j] = rle_vals[r]
-        pos += <size_t>run_len
-    if rle_nulls != NULL:
-        null_bytes = (total + 7) >> 3
-        null_copy = <uint8_t*>malloc(null_bytes)
-        if null_copy == NULL:
-            raise MemoryError()
-        memcpy(null_copy, rle_nulls, null_bytes)
-        dense.ptr.null_bitmap = null_copy
-    return dense
-
-
 cdef Float32Vector from_rle_builder(
     float* run_values,
     int32_t* run_lengths,
@@ -1419,6 +1281,10 @@ cdef Float32Vector from_rle_builder(
     uint8_t* null_bitmap=NULL,
 ):
     """Create RLE-encoded Float32Vector from raw C arrays (copies data)."""
+    import sys as _sys
+    _draken = _sys.modules.get('draken')
+    if _draken is not None and _draken._RLE_FORBIDDEN:
+        raise RuntimeError("RLE vector construction is forbidden (draken._RLE_FORBIDDEN=True)")
     cdef Float32Vector vec = Float32Vector(0, False)
     cdef size_t total_length = 0, i
     cdef DrakenRLEBuffer* rle

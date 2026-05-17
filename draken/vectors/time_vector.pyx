@@ -175,12 +175,12 @@ cdef class TimeVector(Vector):
         return &self._const_accessor
 
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const or self._encoding == DRAKEN_ENCODING_RLE:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const or self._encoding == DRAKEN_ENCODING_RLE:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.null_bitmap
 
@@ -212,16 +212,6 @@ cdef class TimeVector(Vector):
             if self._const_is_null:
                 return None
             return self._const_value if self.is_time64 else <int32_t>self._const_value
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            rle_tv_vals = <int64_t*>self._rle_buffer.run_values
-            for tv_run in range(self._rle_buffer.num_runs):
-                tv_cumulative += <size_t>self._rle_buffer.run_lengths[tv_run]
-                if <size_t>i < tv_cumulative:
-                    if self._rle_buffer.null_bitmap != NULL:
-                        if not ((self._rle_buffer.null_bitmap[i >> 3] >> (i & 7)) & 1):
-                            return None
-                    return rle_tv_vals[tv_run] if self.is_time64 else <int32_t>rle_tv_vals[tv_run]
-            raise IndexError("Index out of bounds")
         if ptr.null_bitmap != NULL:
             byte = ptr.null_bitmap[i >> 3]
             bit = (byte >> (i & 7)) & 1
@@ -264,8 +254,6 @@ cdef class TimeVector(Vector):
 
     # -------- Example op --------
     cpdef TimeVector take(self, int32_t[::1] indices):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_time(self).take(indices)
         if self._has_const:
             return TimeVector.from_constant(
                 None if self._const_is_null else self._const_value,
@@ -316,21 +304,6 @@ cdef class TimeVector(Vector):
         cdef int8_t* buf
         cdef uint8_t byte, bit
 
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            n = <Py_ssize_t>self._rle_buffer.length
-            buf = <int8_t*> PyMem_Malloc(n)
-            if buf == NULL:
-                raise MemoryError()
-            if self._rle_buffer.null_bitmap == NULL:
-                for i in range(n):
-                    buf[i] = 0
-            else:
-                for i in range(n):
-                    byte = self._rle_buffer.null_bitmap[i >> 3]
-                    bit = (byte >> (i & 7)) & 1
-                    buf[i] = 0 if bit else 1
-            return <int8_t[:n]> buf
-
         n = ptr.length
         buf = <int8_t*> PyMem_Malloc(n)
         if buf == NULL:
@@ -356,12 +329,6 @@ cdef class TimeVector(Vector):
     @property
     def null_count(self):
         """Return the number of nulls in the vector."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer.null_bitmap == NULL:
-                return 0
-            return <Py_ssize_t>self._rle_buffer.length - <Py_ssize_t>simd_popcount(
-                self._rle_buffer.null_bitmap, (self._rle_buffer.length + 7) >> 3
-            )
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         if self._has_const:
@@ -396,25 +363,6 @@ cdef class TimeVector(Vector):
         cdef Py_ssize_t tv_pos
         cdef size_t tvr
         cdef int32_t tv_run_len
-
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            rle_tv_tp = <int64_t*>self._rle_buffer.run_values
-            rle_lens_tv = self._rle_buffer.run_lengths
-            rle_runs_tv = self._rle_buffer.num_runs
-            rle_nulls_tv = self._rle_buffer.null_bitmap
-            tv_pos = 0
-            for tvr in range(rle_runs_tv):
-                tv_run_len = rle_lens_tv[tvr]
-                for i in range(tv_run_len):
-                    if rle_nulls_tv != NULL and not ((rle_nulls_tv[(tv_pos + i) >> 3] >> ((tv_pos + i) & 7)) & 1):
-                        out.append(None)
-                    else:
-                        if self.is_time64:
-                            out.append(_us_to_time(rle_tv_tp[tvr]))
-                        else:
-                            out.append(_s_to_time(<int32_t>rle_tv_tp[tvr]))
-                tv_pos += tv_run_len
-            return out
 
         if self._has_const:
             if self._const_is_null:
@@ -458,8 +406,6 @@ cdef class TimeVector(Vector):
         return out
 
     cpdef int64_t min(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_time(self).min()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
         if n == 0:
@@ -515,8 +461,6 @@ cdef class TimeVector(Vector):
         return m
 
     cpdef int64_t max(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_time(self).max()
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
         if n == 0:
@@ -572,8 +516,6 @@ cdef class TimeVector(Vector):
         return m
 
     cpdef int64_t sum(self):
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_time(self).sum()
         if self._has_const:
             if self._const_is_null:
                 return 0
@@ -617,8 +559,6 @@ cdef class TimeVector(Vector):
 
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
         """Compare time values at two indices. Returns -1, 0, or 1."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            return _materialize_rle_time(self).compare_at(left_idx, right_idx)
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t left_val, right_val
         cdef bint left_is_null, right_is_null
@@ -647,10 +587,6 @@ cdef class TimeVector(Vector):
 
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False:
         """Check if value at index is null."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            if self._rle_buffer.null_bitmap == NULL:
-                return False
-            return not ((self._rle_buffer.null_bitmap[idx >> 3] >> (idx & 7)) & 1)
         cdef DrakenFixedBuffer* ptr = self.ptr
         if ptr.null_bitmap == NULL:
             return False
@@ -674,10 +610,6 @@ cdef class TimeVector(Vector):
         cdef Py_ssize_t j = 0
         cdef uint64_t[TIME32_HASH_CHUNK] scratch32
         cdef uint64_t* scratch32_ptr = <uint64_t*> scratch32
-
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            _materialize_rle_time(self).hash_into(out_buf, offset)
-            return
 
         if self._has_const:
             value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
@@ -796,9 +728,6 @@ cdef class TimeVector(Vector):
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for TimeVector: handle both time32 and time64."""
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            _materialize_rle_time(self).compress_into(out_buf, offset)
-            return
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef int64_t NULL_FLAG = INT64_MIN_VALUE
@@ -852,9 +781,6 @@ cdef class TimeVector(Vector):
         cdef Py_ssize_t i, k
         cdef int64_t* data64
         cdef int32_t* data32
-        if self._encoding == DRAKEN_ENCODING_RLE:
-            vals = self.to_pylist()[:10]
-            return f"<TimeVector(RLE) len={self._rle_buffer.length} values={vals}>"
         if self._has_const:
             return f"<TimeVector len={buf_length(self.ptr)} is_time64={self.is_time64} values={[None if self._const_is_null else self._const_value] * min(<Py_ssize_t>buf_length(self.ptr), 10)}>"
         k = min(<Py_ssize_t>buf_length(self.ptr), 10)
@@ -1059,60 +985,6 @@ cdef TimeVector from_dict64_nullable(
     return vec
 
 
-cdef TimeVector _materialize_rle_time(TimeVector rle_vec):
-    """Expand an RLE TimeVector to a dense TimeVector.
-
-    Run values are stored as int64_t; narrowed to int32_t for time32.
-    """
-    cdef size_t total = rle_vec._rle_buffer.length
-    cdef bint is64 = rle_vec.is_time64
-    cdef TimeVector dense = TimeVector(<size_t>total, is64)
-
-    cdef int64_t* rle_vals = <int64_t*>rle_vec._rle_buffer.run_values
-    cdef int32_t* rle_lens = rle_vec._rle_buffer.run_lengths
-    cdef size_t num_runs = rle_vec._rle_buffer.num_runs
-    cdef uint8_t* rle_nulls = rle_vec._rle_buffer.null_bitmap
-
-    cdef size_t pos = 0
-    cdef size_t r
-    cdef int32_t run_len
-    cdef int64_t run_val
-    cdef Py_ssize_t j
-    cdef int64_t* dst64
-    cdef int32_t* dst32
-    cdef size_t null_bytes
-    cdef uint8_t* null_copy
-
-    if is64:
-        dst64 = <int64_t*>dense.ptr.data
-        for r in range(num_runs):
-            run_val = rle_vals[r]
-            run_len = rle_lens[r]
-            for j in range(run_len):
-                dst64[pos + j] = run_val
-            pos += <size_t>run_len
-    else:
-        dst32 = <int32_t*>dense.ptr.data
-        for r in range(num_runs):
-            run_val = rle_vals[r]
-            run_len = rle_lens[r]
-            for j in range(run_len):
-                dst32[pos + j] = <int32_t>run_val
-            pos += <size_t>run_len
-
-    if rle_nulls != NULL:
-        null_bytes = (total + 7) >> 3
-        null_copy = <uint8_t*>malloc(null_bytes)
-        if null_copy == NULL:
-            raise MemoryError()
-        memcpy(null_copy, rle_nulls, null_bytes)
-        dense.ptr.null_bitmap = null_copy
-    else:
-        dense.ptr.null_bitmap = NULL
-
-    return dense
-
-
 cdef TimeVector from_rle_builder(
     int64_t* run_values,
     int32_t* run_lengths,
@@ -1134,6 +1006,10 @@ cdef TimeVector from_rle_builder(
     Returns:
         TimeVector with DRAKEN_ENCODING_RLE encoding.
     """
+    import sys as _sys
+    _draken = _sys.modules.get('draken')
+    if _draken is not None and _draken._RLE_FORBIDDEN:
+        raise RuntimeError("RLE vector construction is forbidden (draken._RLE_FORBIDDEN=True)")
     cdef TimeVector vec = TimeVector(0, is_time64)
     cdef size_t total_length = 0
     cdef size_t i

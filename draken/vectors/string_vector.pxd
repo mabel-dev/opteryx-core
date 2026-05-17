@@ -53,18 +53,10 @@ cdef class StringVector(Vector):
     cdef const uint8_t* c_row_null_bitmap(self) noexcept nogil
     cdef const int64_t* c_dict_code_counts_ptr(self) except NULL
 
-    cdef Py_ssize_t c_rle_run_count(self) noexcept nogil
-    cdef const uint8_t* c_rle_value_ptr(self, Py_ssize_t i, Py_ssize_t* out_len) noexcept nogil
-    cdef int32_t c_rle_run_length(self, Py_ssize_t i) noexcept nogil
-    cdef const int32_t* c_rle_run_lengths_ptr(self) noexcept nogil
-    cdef const uint8_t* c_rle_null_bitmap(self) noexcept nogil
-
     # Returns the final mixed hash for the i-th dict entry, matching the
     # value c_hash_into writes for a row pointing to that dict entry when
     # the destination buffer is zeroed.
     cdef uint64_t c_dict_value_hash(self, Py_ssize_t i) noexcept nogil
-    # Same shape, for the i-th RLE run value.
-    cdef uint64_t c_rle_run_value_hash(self, Py_ssize_t i) noexcept nogil
 
     cpdef BoolVector _compare_scalar(self, bytes value, int op)
     cpdef BoolVector equals(self, bytes value)
@@ -181,7 +173,6 @@ cdef StringVector from_rle_builder(
     int32_t* run_lengths,
     size_t num_runs,
     size_t total_length)
-cdef StringVector _materialize_rle_string(StringVector rle_vec)
 cdef StringVector _materialize_dict_string(StringVector vec)
 cdef StringVector make_string_dict_only(
     const uint8_t* codes,
