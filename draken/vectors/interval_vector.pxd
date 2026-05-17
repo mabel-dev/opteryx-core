@@ -3,7 +3,7 @@ from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
 from libc.stdint cimport uint64_t, uint8_t
 
-from draken.core.buffers cimport DrakenFixedBuffer, DrakenRLEBuffer
+from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DrakenVector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.timestamp_vector cimport TimestampVector
@@ -14,7 +14,6 @@ cdef class IntervalVector(Vector):
     cdef object _arrow_null_buf
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
-    cdef DrakenRLEBuffer* _rle_buffer
 
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept

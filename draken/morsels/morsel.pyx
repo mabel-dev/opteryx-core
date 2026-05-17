@@ -36,7 +36,6 @@ from libc.stdint cimport uint64_t
 from draken.core.buffers cimport (
     DrakenFixedBuffer,
     DrakenMorsel,
-    DrakenRLEBuffer,
     DrakenType,
     DrakenVarBuffer,
     DRAKEN_ARRAY,

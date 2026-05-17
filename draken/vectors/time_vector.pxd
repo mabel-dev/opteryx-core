@@ -3,7 +3,7 @@ from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
 from libc.stdint cimport uint64_t, uint8_t
 
-from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenRLEBuffer
+from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
 from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
 
@@ -17,7 +17,6 @@ cdef class TimeVector(Vector):
     cdef int64_t _const_value
     cdef bint _has_const
     cdef bint _const_is_null
-    cdef DrakenRLEBuffer* _rle_buffer
 
     cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
@@ -51,11 +50,4 @@ cdef TimeVector from_dict64_nullable(
     const int32_t[::1] codes,
     const int64_t[::1] dictionary,
     const uint8_t[::1] row_validity,
-)
-cdef TimeVector from_rle_builder(
-    int64_t* run_values,
-    int32_t* run_lengths,
-    size_t num_runs,
-    bint is_time64,
-    uint8_t* null_bitmap=*,
 )

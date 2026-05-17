@@ -41,9 +41,8 @@ from libc.stdlib cimport malloc
 from libc.string cimport memcpy
 from libc.string cimport memset
 
-from draken.core.buffers cimport DrakenFixedBuffer, DrakenRLEBuffer
+from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DrakenVector
-from draken.core.buffers cimport DRAKEN_ENCODING_RLE
 from draken.core.buffers cimport DRAKEN_INTERVAL
 from draken.core.buffers cimport DRAKEN_TIMESTAMP64
 from draken.core.fixed_vector cimport alloc_fixed_buffer
@@ -252,7 +251,6 @@ cdef class IntervalVector(Vector):
     def __cinit__(self, size_t length=0, bint wrap=False):
         self._arrow_data_buf = None
         self._arrow_null_buf = None
-        self._rle_buffer = NULL
         if wrap:
             self.ptr = NULL
             self.owns_data = False
@@ -271,15 +269,6 @@ cdef class IntervalVector(Vector):
             _refresh_unified_Interval(self)
 
     def __dealloc__(self):
-        if self._rle_buffer != NULL:
-            if self._rle_buffer.run_values != NULL:
-                free(self._rle_buffer.run_values)
-            if self._rle_buffer.run_lengths != NULL:
-                free(self._rle_buffer.run_lengths)
-            if self._rle_buffer.null_bitmap != NULL:
-                free(self._rle_buffer.null_bitmap)
-            free(self._rle_buffer)
-            self._rle_buffer = NULL
         if self.owns_data and self.ptr is not NULL:
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
@@ -952,7 +941,6 @@ cdef class IntervalVector(Vector):
             dst[i] = mix_hash(dst[i], value)
 
     cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
-        # RLE: cannot call Python from nogil; caller must materialize first if needed
         cdef DrakenFixedBuffer* ptr = self.ptr
         if n == 0:
             return 0
@@ -1095,90 +1083,6 @@ cdef class IntervalVector(Vector):
         for i in range(limit):
             preview.append(self[i])
         return f"<IntervalVector len={n} values={preview}>"
-
-cdef IntervalVector from_rle_builder(
-    IntervalValue* run_values,
-    int32_t* run_lengths,
-    size_t num_runs,
-    uint8_t* null_bitmap=NULL,
-):
-    """Create an RLE-encoded IntervalVector from raw C arrays.
-
-    Copies run data into fresh malloc'd storage.  The caller retains ownership
-    of the input arrays.
-
-    Args:
-        run_values:  Pointer to IntervalValue array (num_runs entries).
-        run_lengths: Pointer to int32_t run lengths (num_runs entries).
-        num_runs:    Number of runs.
-        null_bitmap: Optional logical-row null bitmap (NULL = no nulls).
-
-    Returns:
-        IntervalVector with DRAKEN_ENCODING_RLE encoding.
-    """
-    import sys as _sys
-    _draken = _sys.modules.get('draken')
-    if _draken is not None and _draken._RLE_FORBIDDEN:
-        raise RuntimeError("RLE vector construction is forbidden (draken._RLE_FORBIDDEN=True)")
-    cdef IntervalVector vec = IntervalVector(0, False)  # allocates ptr, data=NULL
-    cdef size_t total_length = 0
-    cdef size_t i
-    cdef DrakenRLEBuffer* rle
-    cdef IntervalValue* vals_copy
-    cdef int32_t* lens_copy
-    cdef size_t null_bytes
-    cdef uint8_t* null_copy
-
-    for i in range(num_runs):
-        total_length += <size_t>run_lengths[i]
-
-    # Set ptr.length so buf_length() / __len__ works without an extra guard
-    vec.ptr.length = total_length
-
-    if num_runs == 0:
-        vec._encoding = DRAKEN_ENCODING_RLE
-        return vec
-
-    rle = <DrakenRLEBuffer*>malloc(sizeof(DrakenRLEBuffer))
-    if rle == NULL:
-        raise MemoryError()
-
-    vals_copy = <IntervalValue*>malloc(num_runs * sizeof(IntervalValue))
-    lens_copy = <int32_t*>malloc(num_runs * sizeof(int32_t))
-    if vals_copy == NULL or lens_copy == NULL:
-        free(rle)
-        if vals_copy != NULL:
-            free(vals_copy)
-        if lens_copy != NULL:
-            free(lens_copy)
-        raise MemoryError()
-
-    memcpy(vals_copy, run_values, num_runs * sizeof(IntervalValue))
-    memcpy(lens_copy, run_lengths, num_runs * sizeof(int32_t))
-
-    rle.run_values = <void*>vals_copy
-    rle.run_lengths = lens_copy
-    rle.num_runs = num_runs
-    rle.length = total_length
-    rle.type = DRAKEN_INTERVAL
-
-    if null_bitmap != NULL:
-        null_bytes = (total_length + 7) >> 3
-        null_copy = <uint8_t*>malloc(null_bytes)
-        if null_copy == NULL:
-            free(vals_copy)
-            free(lens_copy)
-            free(rle)
-            raise MemoryError()
-        memcpy(null_copy, null_bitmap, null_bytes)
-        rle.null_bitmap = null_copy
-    else:
-        rle.null_bitmap = NULL
-
-    vec._rle_buffer = rle
-    vec._encoding = DRAKEN_ENCODING_RLE
-    return vec
-
 
 cdef inline object _maybe_call_factory(object factory):
     if factory is None:

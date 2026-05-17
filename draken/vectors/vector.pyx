@@ -24,13 +24,13 @@ types (Int64Vector, StringVector, etc.) implement.
 
 from libc.stdint cimport uint64_t, int64_t, uint8_t
 from libc.string cimport memset
-from libc.stdlib cimport abort
+
 from cpython.mem cimport PyMem_Calloc, PyMem_Free
 
 from draken.core.buffers cimport (
     ConstAccessor, DictAccessor, DrakenEncoding, DrakenVector,
     DRAKEN_ENCODING_DENSE, DRAKEN_ENCODING_DICTIONARY,
-    DRAKEN_ENCODING_CONSTANT, DRAKEN_ENCODING_RLE,
+    DRAKEN_ENCODING_CONSTANT,
 )
 from draken.interop.arrow cimport vector_from_arrow
 from opteryx.compiled.structures.relation_statistics cimport to_int
@@ -276,13 +276,10 @@ cdef class Vector:
 
         The pointer is &self._unified_view — caller must not outlive self.
         Concrete types override in Phase 4 with precise data/itemsize fields.
-        RLE encoding aborts: must be expanded at scan boundaries before execution.
-
         Encoding → unified mapping:
           DENSE:      selection=NULL, sel_width=0, data_length=length
           DICTIONARY: selection=codes, sel_width=code_width, data_length=0 (Phase 4 sets dict_size)
           CONSTANT:   selection=NULL, sel_width=0, data_length=1
-          RLE:        abort()
         """
         cdef DictAccessor* da
         cdef ConstAccessor* ca
@@ -315,9 +312,6 @@ cdef class Vector:
             self._unified_view.sel_width = 0
             self._unified_view.validity = NULL  # const has a single is_null flag, not a bitmap
             self._unified_view.itemsize = 0
-
-        else:  # DRAKEN_ENCODING_RLE — must not reach execution
-            abort()
 
         return &self._unified_view
 

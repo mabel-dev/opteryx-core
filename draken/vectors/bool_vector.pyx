@@ -33,9 +33,9 @@ cdef extern from "simd_bitops.h" nogil:
     void simd_xor_mask(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n)
     void simd_not_mask(uint8_t* dest, const uint8_t* src, size_t n)
 
-from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenRLEBuffer, DrakenVector
+from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenVector
 from draken.core.buffers cimport DRAKEN_BOOL
-from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT, DRAKEN_ENCODING_RLE
+from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 from draken.core.fixed_vector cimport alloc_fixed_buffer, buf_dtype, buf_length, free_fixed_buffer
 from draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash, simd_popcount
 
@@ -44,18 +44,6 @@ cdef const uint64_t FALSE_HASH = <uint64_t>0xc2fd8b2343f83ce7ULL
 cdef uint8_t _CONST_NULL_BYTE = 0
 
 DEF BOOL_HASH_CHUNK = 1024
-
-
-cdef void _release_rle_storage_bool(BoolVector vec) noexcept:
-    if vec._rle_buffer != NULL:
-        if vec._rle_buffer.run_values != NULL:
-            free(vec._rle_buffer.run_values)
-        if vec._rle_buffer.run_lengths != NULL:
-            free(vec._rle_buffer.run_lengths)
-        if vec._rle_buffer.null_bitmap != NULL:
-            free(vec._rle_buffer.null_bitmap)
-        free(vec._rle_buffer)
-        vec._rle_buffer = NULL
 
 
 cdef void _refresh_unified_bool(BoolVector vec) noexcept:
@@ -128,7 +116,6 @@ cdef class BoolVector(Vector):
         self._const_value = 0
         self._has_const = False
         self._const_is_null = False
-        self._rle_buffer = NULL
         self._unified_view.data = NULL
         self._unified_view.data_length = 0
         self._unified_view.selection = NULL
@@ -141,7 +128,6 @@ cdef class BoolVector(Vector):
             _refresh_unified_bool(self)
 
     def __dealloc__(self):
-        _release_rle_storage_bool(self)
         if self.owns_data and self.ptr is not NULL:
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
@@ -173,9 +159,6 @@ cdef class BoolVector(Vector):
     def __getitem__(self, Py_ssize_t i):
         """Return the value at index i, or None if null."""
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef size_t bgi_cumulative = 0
-        cdef size_t bgi_run
-        cdef uint8_t* bgi_rle_vals
         cdef uint8_t val_byte
         cdef uint8_t byte, bit
         if i < 0 or i >= <Py_ssize_t>ptr.length:
@@ -1259,10 +1242,10 @@ cdef bint c_get_bitmap_ptrs(
 ) noexcept nogil:
     """Return raw data/null pointers for a dense BoolVector without the GIL.
 
-    Returns 1 if the vector is not dense (const/RLE encoded) — caller must
+    Returns 1 if the vector is not dense (const encoded) — caller must
     materialize before entering the nogil zone.  Returns 0 on success.
     """
-    if vec._has_const or vec._rle_buffer != NULL:
+    if vec._has_const:
         return 1
     data_out[0] = <uint8_t*>vec.ptr.data
     null_out[0] = vec.ptr.null_bitmap
@@ -1614,87 +1597,3 @@ cdef BoolVector bool_vector_from_bits(
     return vec
 
 
-cdef BoolVector from_rle_builder(
-    uint8_t* run_values,
-    int32_t* run_lengths,
-    size_t num_runs,
-    uint8_t* null_bitmap=NULL,
-):
-    """Create an RLE-encoded BoolVector from raw C arrays.
-
-    Run values are uint8_t (0 = False, 1 = True).  This function copies the
-    run data into fresh malloc'd arrays owned by the vector.
-
-    Args:
-        run_values:  Pointer to uint8_t values array (num_runs entries).
-        run_lengths: Pointer to int32_t run lengths (num_runs entries).
-        num_runs:    Number of runs.
-        null_bitmap: Optional logical-row null bitmap (NULL = no nulls).
-
-    Returns:
-        BoolVector with DRAKEN_ENCODING_RLE encoding.
-    """
-    import sys as _sys
-    _draken = _sys.modules.get('draken')
-    if _draken is not None and _draken._RLE_FORBIDDEN:
-        raise RuntimeError("RLE vector construction is forbidden (draken._RLE_FORBIDDEN=True)")
-    cdef BoolVector vec = BoolVector(0)  # allocates ptr with data=NULL (length 0)
-    cdef size_t total_length = 0
-    cdef size_t i
-    cdef DrakenRLEBuffer* rle
-    cdef uint8_t* vals_copy
-    cdef int32_t* lens_copy
-    cdef size_t null_bytes
-    cdef uint8_t* null_copy
-
-    # Compute total logical length
-    for i in range(num_runs):
-        total_length += <size_t>run_lengths[i]
-
-    # Set ptr.length so the .length property returns the correct value
-    vec.ptr.length = total_length
-
-    if num_runs == 0:
-        vec._encoding = DRAKEN_ENCODING_RLE
-        return vec
-
-    # Allocate RLE buffer header
-    rle = <DrakenRLEBuffer*>malloc(sizeof(DrakenRLEBuffer))
-    if rle == NULL:
-        raise MemoryError()
-
-    vals_copy = <uint8_t*>malloc(num_runs * sizeof(uint8_t))
-    lens_copy = <int32_t*>malloc(num_runs * sizeof(int32_t))
-    if vals_copy == NULL or lens_copy == NULL:
-        free(rle)
-        if vals_copy != NULL:
-            free(vals_copy)
-        if lens_copy != NULL:
-            free(lens_copy)
-        raise MemoryError()
-
-    memcpy(vals_copy, run_values, num_runs * sizeof(uint8_t))
-    memcpy(lens_copy, run_lengths, num_runs * sizeof(int32_t))
-
-    rle.run_values = <void*>vals_copy
-    rle.run_lengths = lens_copy
-    rle.num_runs = num_runs
-    rle.length = total_length
-    rle.type = DRAKEN_BOOL
-
-    if null_bitmap != NULL:
-        null_bytes = (total_length + 7) >> 3
-        null_copy = <uint8_t*>malloc(null_bytes)
-        if null_copy == NULL:
-            free(vals_copy)
-            free(lens_copy)
-            free(rle)
-            raise MemoryError()
-        memcpy(null_copy, null_bitmap, null_bytes)
-        rle.null_bitmap = null_copy
-    else:
-        rle.null_bitmap = NULL
-
-    vec._rle_buffer = rle
-    vec._encoding = DRAKEN_ENCODING_RLE
-    return vec

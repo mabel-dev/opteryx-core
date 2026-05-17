@@ -27,7 +27,6 @@ cdef extern from "core/buffers.h":
     ctypedef enum DrakenEncoding:
         DRAKEN_ENCODING_DENSE
         DRAKEN_ENCODING_DICTIONARY
-        DRAKEN_ENCODING_RLE
         DRAKEN_ENCODING_CONSTANT
 
     # Fixed-width column
@@ -73,17 +72,6 @@ cdef extern from "core/buffers.h":
         uint8_t* null_bitmap       # optional, 1 bit per row
         size_t length              # number of array entries (rows)
         DrakenType value_type      # type of the child values
-
-    # Run-Length Encoded column
-    ctypedef struct DrakenRLEBuffer:
-        void* run_values           # Fixed-size types: flat value array; strings: byte arena
-        int32_t* run_lengths       # [num_runs] repetition counts; sum == length
-        size_t num_runs            # Number of run pairs
-        uint8_t* null_bitmap       # Optional logical row null bitmap (row-level, not run-level)
-        size_t length              # Total logical row count (sum of run_lengths)
-        DrakenType type            # Data type (DRAKEN_INT64, DRAKEN_STRING, etc.)
-        int32_t* run_str_lens      # String: byte length per run value [num_runs] (NULL for non-string)
-        uint32_t* run_str_offsets  # String: byte offset in arena per run [num_runs] (NULL for non-string)
 
     ctypedef struct DrakenMorsel:
         const char** column_names

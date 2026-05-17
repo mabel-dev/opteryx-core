@@ -34,8 +34,6 @@ from draken.core.buffers cimport DictAccessor
 from draken.core.buffers cimport DRAKEN_ENCODING_DENSE
 from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
-from draken.core.buffers cimport DRAKEN_ENCODING_RLE
-from draken.core.buffers cimport DrakenRLEBuffer
 from draken.core.buffers cimport DrakenVarBuffer
 from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.core.buffers cimport DrakenVector
@@ -565,7 +563,6 @@ cdef class StringVector(Vector):
         self._const_value = NULL
         self._has_const = False
         self._const_is_null = False
-        self._rle_buffer = NULL
         self._dict_code_counts = NULL
         self._dict_code_counts_valid = False
         self._unified_view.data = NULL
@@ -580,19 +577,6 @@ cdef class StringVector(Vector):
             _refresh_unified_string(self)
 
     def __dealloc__(self):
-        if self._rle_buffer != NULL:
-            if self._rle_buffer.run_values != NULL:
-                free(self._rle_buffer.run_values)
-            if self._rle_buffer.run_lengths != NULL:
-                free(self._rle_buffer.run_lengths)
-            if self._rle_buffer.null_bitmap != NULL:
-                free(self._rle_buffer.null_bitmap)
-            if self._rle_buffer.run_str_lens != NULL:
-                free(self._rle_buffer.run_str_lens)
-            if self._rle_buffer.run_str_offsets != NULL:
-                free(self._rle_buffer.run_str_offsets)
-            free(self._rle_buffer)
-            self._rle_buffer = NULL
         _release_dict_storage(self)
         if self._const_value != NULL:
             if self._const_value.data != NULL:
@@ -4437,206 +4421,6 @@ cdef StringVector _materialize_const_string(StringVector const_vec):
             builder.append_bytes(<char*>const_vec._const_value.data, val_len)
     return builder.finish()
 
-
-cdef StringVector from_rle_builder(
-        uint8_t* arena,
-        uint32_t* run_str_offsets,
-        int32_t* run_str_lens,
-        int32_t* run_lengths,
-        size_t num_runs,
-        size_t total_length):
-    """
-    Build an RLE StringVector from pre-built run arrays.  Called from the
-    Parquet skip-dense path where C++ has already resolved dict codes to
-    actual string bytes and packed them into a flat arena.
-
-    Ownership: this function malloc-copies all inputs so the caller's C++
-    vectors can be destroyed after the call returns.
-    """
-    import sys as _sys
-    _draken = _sys.modules.get('draken')
-    if _draken is not None and _draken._RLE_FORBIDDEN:
-        raise RuntimeError("RLE vector construction is forbidden (draken._RLE_FORBIDDEN=True)")
-    cdef StringVector vec = StringVector(0, 0, True)
-    cdef DrakenRLEBuffer* buf
-    cdef size_t arena_size = 0
-    cdef size_t r
-
-    if num_runs > 0:
-        arena_size = <size_t>run_str_offsets[num_runs - 1] + <size_t>run_str_lens[num_runs - 1]
-
-    buf = <DrakenRLEBuffer*>malloc(sizeof(DrakenRLEBuffer))
-    if buf == NULL:
-        raise MemoryError()
-
-    # Copy byte arena
-    if arena_size > 0:
-        buf.run_values = malloc(arena_size)
-        if buf.run_values == NULL:
-            free(buf)
-            raise MemoryError()
-        memcpy(buf.run_values, arena, arena_size)
-    else:
-        buf.run_values = NULL
-
-    # Copy run_lengths (repeat counts)
-    buf.run_lengths = <int32_t*>malloc(num_runs * sizeof(int32_t))
-    if buf.run_lengths == NULL:
-        if buf.run_values != NULL: free(buf.run_values)
-        free(buf)
-        raise MemoryError()
-    memcpy(buf.run_lengths, run_lengths, num_runs * sizeof(int32_t))
-
-    # Copy run_str_offsets
-    buf.run_str_offsets = <uint32_t*>malloc(num_runs * sizeof(uint32_t))
-    if buf.run_str_offsets == NULL:
-        free(buf.run_lengths)
-        if buf.run_values != NULL: free(buf.run_values)
-        free(buf)
-        raise MemoryError()
-    memcpy(buf.run_str_offsets, run_str_offsets, num_runs * sizeof(uint32_t))
-
-    # Copy run_str_lens
-    buf.run_str_lens = <int32_t*>malloc(num_runs * sizeof(int32_t))
-    if buf.run_str_lens == NULL:
-        free(buf.run_str_offsets)
-        free(buf.run_lengths)
-        if buf.run_values != NULL: free(buf.run_values)
-        free(buf)
-        raise MemoryError()
-    memcpy(buf.run_str_lens, run_str_lens, num_runs * sizeof(int32_t))
-
-    buf.null_bitmap = NULL
-    buf.num_runs    = num_runs
-    buf.length      = total_length
-    buf.type        = DRAKEN_STRING
-
-    # Allocate a minimal ptr so __len__ and length property work
-    vec.ptr = <DrakenVarBuffer*>malloc(sizeof(DrakenVarBuffer))
-    if vec.ptr == NULL:
-        free(buf.run_str_lens)
-        free(buf.run_str_offsets)
-        free(buf.run_lengths)
-        if buf.run_values != NULL: free(buf.run_values)
-        free(buf)
-        raise MemoryError()
-    vec.ptr.data        = NULL
-    vec.ptr.offsets     = NULL
-    vec.ptr.null_bitmap = NULL
-    vec.ptr.length      = total_length
-    vec.ptr.type        = DRAKEN_STRING
-    vec.owns_data       = False
-
-    vec._rle_buffer = buf
-    vec._encoding   = DRAKEN_ENCODING_RLE
-
-    return vec
-
-
-cpdef StringVector _test_make_rle_string(list values, list run_lengths, object null_bitmap=None):
-    """Construct an RLE-encoded StringVector for tests.
-
-    Each entry in ``values`` is a ``bytes``/``str`` run value, paired with the
-    matching ``run_lengths`` repetition count.  Optional ``null_bitmap`` is a
-    bytes-like row-level validity bitmap (1 = valid).
-    """
-    if len(values) != len(run_lengths):
-        raise ValueError("values and run_lengths must have the same length")
-
-    cdef Py_ssize_t num_runs = len(values)
-    cdef Py_ssize_t total = 0
-    cdef Py_ssize_t arena_size = 0
-    cdef Py_ssize_t i
-    cdef Py_ssize_t bitmap_bytes
-    cdef bytes b
-    cdef list encoded = []
-
-    for i in range(num_runs):
-        v = values[i]
-        if isinstance(v, str):
-            b = v.encode("utf8")
-        elif isinstance(v, (bytes, bytearray, memoryview)):
-            b = bytes(v)
-        else:
-            raise TypeError("RLE run value must be str/bytes")
-        encoded.append(b)
-        arena_size += len(b)
-        if run_lengths[i] < 0:
-            raise ValueError("run length must be non-negative")
-        total += <Py_ssize_t>run_lengths[i]
-
-    cdef StringVector vec = StringVector(0, 0, True)
-    cdef DrakenRLEBuffer* buf = <DrakenRLEBuffer*>malloc(sizeof(DrakenRLEBuffer))
-    if buf == NULL:
-        raise MemoryError()
-
-    cdef uint8_t* arena = NULL
-    cdef int32_t* run_lens_arr = NULL
-    cdef uint32_t* run_offs_arr = NULL
-    cdef int32_t* run_str_lens_arr = NULL
-    cdef uint32_t off = 0
-    cdef uint8_t* nb = NULL
-
-    try:
-        if arena_size > 0:
-            arena = <uint8_t*>malloc(<size_t>arena_size)
-            if arena == NULL:
-                raise MemoryError()
-        if num_runs > 0:
-            run_lens_arr = <int32_t*>malloc(<size_t>num_runs * sizeof(int32_t))
-            run_offs_arr = <uint32_t*>malloc(<size_t>num_runs * sizeof(uint32_t))
-            run_str_lens_arr = <int32_t*>malloc(<size_t>num_runs * sizeof(int32_t))
-            if run_lens_arr == NULL or run_offs_arr == NULL or run_str_lens_arr == NULL:
-                raise MemoryError()
-            for i in range(num_runs):
-                b = encoded[i]
-                run_offs_arr[i] = off
-                run_str_lens_arr[i] = <int32_t>len(b)
-                if len(b) > 0:
-                    memcpy(arena + off, <const char*>PyBytes_AS_STRING(b), <size_t>len(b))
-                off += <uint32_t>len(b)
-                run_lens_arr[i] = <int32_t>run_lengths[i]
-
-        if null_bitmap is not None:
-            bm = bytes(null_bitmap)
-            bitmap_bytes = (total + 7) >> 3
-            if len(bm) < bitmap_bytes:
-                raise ValueError("null_bitmap is shorter than required")
-            nb = <uint8_t*>malloc(<size_t>bitmap_bytes)
-            if nb == NULL:
-                raise MemoryError()
-            memcpy(nb, <const char*>PyBytes_AS_STRING(bm), <size_t>bitmap_bytes)
-
-        buf.run_values       = <void*>arena
-        buf.run_lengths      = run_lens_arr
-        buf.run_str_offsets  = run_offs_arr
-        buf.run_str_lens     = run_str_lens_arr
-        buf.null_bitmap      = nb
-        buf.num_runs         = <size_t>num_runs
-        buf.length           = <size_t>total
-        buf.type             = DRAKEN_STRING
-
-        vec.ptr = <DrakenVarBuffer*>malloc(sizeof(DrakenVarBuffer))
-        if vec.ptr == NULL:
-            raise MemoryError()
-        vec.ptr.data        = NULL
-        vec.ptr.offsets     = NULL
-        vec.ptr.null_bitmap = NULL
-        vec.ptr.length      = <size_t>total
-        vec.ptr.type        = DRAKEN_STRING
-        vec.owns_data       = False
-        vec._rle_buffer     = buf
-        vec._encoding       = DRAKEN_ENCODING_RLE
-    except:
-        if arena != NULL: free(arena)
-        if run_lens_arr != NULL: free(run_lens_arr)
-        if run_offs_arr != NULL: free(run_offs_arr)
-        if run_str_lens_arr != NULL: free(run_str_lens_arr)
-        if nb != NULL: free(nb)
-        free(buf)
-        raise
-
-    return vec
 
 
 #################################

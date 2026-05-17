@@ -6,7 +6,6 @@ from libc.stdint cimport uint64_t, uint8_t
 from draken.core.buffers cimport ConstAccessor
 from draken.core.buffers cimport DictAccessor
 from draken.core.buffers cimport DrakenFixedBuffer
-from draken.core.buffers cimport DrakenRLEBuffer
 from draken.core.buffers cimport DrakenVarBuffer
 from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
@@ -26,8 +25,6 @@ cdef class Float32Vector(Vector):
     cdef float _const_value
     cdef bint _has_const
     cdef bint _const_is_null
-    cdef DrakenRLEBuffer* _rle_buffer
-
     cdef DictAccessor* dict_accessor(self) noexcept
     cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
@@ -90,9 +87,3 @@ cdef Float32Vector from_decoded(
     size_t length,
 )
 cdef Float32Vector from_arrow(object array)
-cdef Float32Vector from_rle_builder(
-    float* run_values,
-    int32_t* run_lengths,
-    size_t num_runs,
-    uint8_t* null_bitmap=*,
-)

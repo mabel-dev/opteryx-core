@@ -4,7 +4,6 @@ from libc.stdint cimport int32_t, int8_t, int64_t, intptr_t, uint32_t, uint64_t,
 from draken.core.buffers cimport ConstAccessor
 from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.core.buffers cimport DictAccessor
-from draken.core.buffers cimport DrakenRLEBuffer
 from draken.core.buffers cimport DrakenVarBuffer
 from draken.core.buffers cimport DrakenVector
 from draken.vectors.bool_vector cimport BoolVector
@@ -34,7 +33,7 @@ cdef class StringVector(Vector):
     cdef DrakenConstantStringPayload* _const_value
     cdef bint _has_const
     cdef bint _const_is_null
-    cdef DrakenRLEBuffer* _rle_buffer
+
     cdef int64_t* _dict_code_counts
     cdef bint _dict_code_counts_valid
 
@@ -168,13 +167,7 @@ cdef class StringVectorBuilder:
 
 
 cdef StringVector from_arrow(object array)
-cdef StringVector from_rle_builder(
-    uint8_t* arena,
-    uint32_t* run_str_offsets,
-    int32_t* run_str_lens,
-    int32_t* run_lengths,
-    size_t num_runs,
-    size_t total_length)
+
 cdef void _refresh_unified_string(StringVector vec) noexcept
 cdef StringVector _materialize_dict_string(StringVector vec)
 cdef StringVector make_string_dict_only(
@@ -223,4 +216,3 @@ cdef StringVector from_arrow_struct(object array)
 cpdef StringVector uppercase(StringVector input)
 cpdef StringVector lowercase(StringVector input)
 
-cpdef StringVector _test_make_rle_string(list values, list run_lengths, object null_bitmap=*)

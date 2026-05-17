@@ -32,11 +32,11 @@ from libc.stdint cimport uint8_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset, memcpy
 
-from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenRLEBuffer
+from draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
 from draken.core.buffers cimport DrakenVector
 from draken.core.buffers cimport DRAKEN_TIME32
 from draken.core.buffers cimport DRAKEN_TIME64
-from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT, DRAKEN_ENCODING_RLE
+from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.fixed_vector cimport buf_dtype
 from draken.core.fixed_vector cimport buf_itemsize
@@ -73,18 +73,6 @@ cdef void _refresh_unified_Time(TimeVector vec) noexcept:
         vec._unified_view.selection = NULL
         vec._unified_view.sel_width = 0
         vec._unified_view.validity = vec.ptr.null_bitmap
-
-
-cdef void _release_rle_storage_time(TimeVector vec) noexcept:
-    if vec._rle_buffer != NULL:
-        if vec._rle_buffer.run_values != NULL:
-            free(vec._rle_buffer.run_values)
-        if vec._rle_buffer.run_lengths != NULL:
-            free(vec._rle_buffer.run_lengths)
-        if vec._rle_buffer.null_bitmap != NULL:
-            free(vec._rle_buffer.null_bitmap)
-        free(vec._rle_buffer)
-        vec._rle_buffer = NULL
 
 
 cdef inline object _us_to_time(int64_t us):
@@ -179,7 +167,6 @@ cdef class TimeVector(Vector):
         self._const_value = 0
         self._has_const = False
         self._const_is_null = False
-        self._rle_buffer = NULL
         self._unified_view.data = NULL
         self._unified_view.data_length = 0
         self._unified_view.selection = NULL
@@ -192,7 +179,6 @@ cdef class TimeVector(Vector):
             _refresh_unified_Time(self)
 
     def __dealloc__(self):
-        _release_rle_storage_time(self)
         # Only free if we own the data and the pointer is not NULL
         if self.owns_data and self.ptr is not NULL:
             free_fixed_buffer(self.ptr, True)
@@ -1035,85 +1021,3 @@ cdef TimeVector from_dict64_nullable(
     return vec
 
 
-cdef TimeVector from_rle_builder(
-    int64_t* run_values,
-    int32_t* run_lengths,
-    size_t num_runs,
-    bint is_time64,
-    uint8_t* null_bitmap=NULL,
-):
-    """Create an RLE-encoded TimeVector from raw C arrays.
-
-    Run values are int64_t (widened even for time32).
-
-    Args:
-        run_values:  Pointer to int64_t values array (num_runs entries).
-        run_lengths: Pointer to int32_t run lengths (num_runs entries).
-        num_runs:    Number of runs.
-        is_time64:   True for TIME64, False for TIME32.
-        null_bitmap: Optional logical-row null bitmap (NULL = no nulls).
-
-    Returns:
-        TimeVector with DRAKEN_ENCODING_RLE encoding.
-    """
-    import sys as _sys
-    _draken = _sys.modules.get('draken')
-    if _draken is not None and _draken._RLE_FORBIDDEN:
-        raise RuntimeError("RLE vector construction is forbidden (draken._RLE_FORBIDDEN=True)")
-    cdef TimeVector vec = TimeVector(0, is_time64)
-    cdef size_t total_length = 0
-    cdef size_t i
-    cdef DrakenRLEBuffer* rle
-    cdef int64_t* vals_copy
-    cdef int32_t* lens_copy
-    cdef size_t null_bytes
-    cdef uint8_t* null_copy
-
-    for i in range(num_runs):
-        total_length += <size_t>run_lengths[i]
-
-    vec.ptr.length = total_length
-
-    if num_runs == 0:
-        vec._encoding = DRAKEN_ENCODING_RLE
-        return vec
-
-    rle = <DrakenRLEBuffer*>malloc(sizeof(DrakenRLEBuffer))
-    if rle == NULL:
-        raise MemoryError()
-
-    vals_copy = <int64_t*>malloc(num_runs * sizeof(int64_t))
-    lens_copy = <int32_t*>malloc(num_runs * sizeof(int32_t))
-    if vals_copy == NULL or lens_copy == NULL:
-        free(rle)
-        if vals_copy != NULL:
-            free(vals_copy)
-        if lens_copy != NULL:
-            free(lens_copy)
-        raise MemoryError()
-
-    memcpy(vals_copy, run_values, num_runs * sizeof(int64_t))
-    memcpy(lens_copy, run_lengths, num_runs * sizeof(int32_t))
-
-    rle.run_values = <void*>vals_copy
-    rle.run_lengths = lens_copy
-    rle.num_runs = num_runs
-    rle.length = total_length
-    rle.type = DRAKEN_TIME64 if is_time64 else DRAKEN_TIME32
-
-    if null_bitmap != NULL:
-        null_bytes = (total_length + 7) >> 3
-        null_copy = <uint8_t*>malloc(null_bytes)
-        if null_copy == NULL:
-            free(vals_copy)
-            free(lens_copy)
-            free(rle)
-            raise MemoryError()
-        memcpy(null_copy, null_bitmap, null_bytes)
-        rle.null_bitmap = null_copy
-    else:
-        rle.null_bitmap = NULL
-
-    vec._rle_buffer = rle
-    vec._encoding = DRAKEN_ENCODING_RLE
-    return vec

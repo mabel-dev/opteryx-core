@@ -34,9 +34,7 @@ from draken.core.buffers cimport DictAccessor
 from draken.core.buffers cimport DRAKEN_ENCODING_DENSE
 from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
-from draken.core.buffers cimport DRAKEN_ENCODING_RLE
 from draken.core.buffers cimport DrakenFixedBuffer
-from draken.core.buffers cimport DrakenRLEBuffer
 from draken.core.buffers cimport DrakenVarBuffer
 from draken.core.buffers cimport DrakenVector
 from draken.core.buffers cimport DRAKEN_FLOAT64
@@ -95,18 +93,6 @@ cdef inline uint32_t _read_packed_code(const uint8_t* codes, uint8_t code_width,
 cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx) noexcept nogil:
     cdef uint8_t byte = bitmap[idx >> 3]
     return (byte >> (idx & 7)) & 1
-
-
-cdef void _release_rle_storage_float64(Float64Vector vec) noexcept:
-    if vec._rle_buffer != NULL:
-        if vec._rle_buffer.run_values != NULL:
-            free(vec._rle_buffer.run_values)
-        if vec._rle_buffer.run_lengths != NULL:
-            free(vec._rle_buffer.run_lengths)
-        if vec._rle_buffer.null_bitmap != NULL:
-            free(vec._rle_buffer.null_bitmap)
-        free(vec._rle_buffer)
-        vec._rle_buffer = NULL
 
 
 cdef void _refresh_unified_float64(Float64Vector vec) noexcept:
@@ -268,7 +254,6 @@ cdef class Float64Vector(Vector):
         self._const_value = 0.0
         self._has_const = False
         self._const_is_null = False
-        self._rle_buffer = NULL
         self._unified_view.data = NULL
         self._unified_view.data_length = 0
         self._unified_view.selection = NULL
@@ -282,7 +267,6 @@ cdef class Float64Vector(Vector):
 
     def __dealloc__(self):
         _release_dict_storage(self)
-        _release_rle_storage_float64(self)
         if self.owns_data and self.ptr is not NULL:
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
@@ -377,9 +361,6 @@ cdef class Float64Vector(Vector):
         cdef double* data
         cdef uint8_t byte
         cdef uint8_t bit
-        cdef size_t cumulative = 0
-        cdef size_t run_idx
-        cdef double* rle_vals
         if i < 0 or i >= <Py_ssize_t>ptr.length:
             raise IndexError("Index out of bounds")
         if self._has_const:
@@ -1141,7 +1122,6 @@ cdef class Float64Vector(Vector):
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False:
         """Check if value at index is null."""
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef uint8_t rle_byte
         cdef uint8_t byte
 
         if self._has_const:
@@ -1230,7 +1210,7 @@ cdef class Float64Vector(Vector):
         return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
 
     cpdef Vector materialize(self):
-        """Return a dense Float64Vector, expanding dict/const/RLE encodings if needed."""
+        """Return a dense Float64Vector, expanding dict/const encodings if needed."""
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Float64Vector dense
@@ -1292,14 +1272,6 @@ cdef class Float64Vector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         cdef list out = []
         cdef uint8_t byte, bit
-        cdef double* rle_vals
-        cdef int32_t* rle_lens
-        cdef size_t rle_runs
-        cdef uint8_t* rle_nulls
-        cdef Py_ssize_t pos
-        cdef size_t r
-        cdef int32_t run_len
-        cdef double run_val
 
         if self._has_const:
             if self._const_is_null:
@@ -1337,15 +1309,6 @@ cdef class Float64Vector(Vector):
         cdef uint64_t* dst
         cdef uint64_t[FLOAT64_HASH_CHUNK] scratch
         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
-        cdef double* rle_vals_hash
-        cdef uint64_t* rle_bits
-        cdef int32_t* rle_lens_hash
-        cdef size_t rle_runs_hash
-        cdef uint8_t* rle_nulls_hash
-        cdef Py_ssize_t hpos
-        cdef size_t hr
-        cdef uint64_t run_hash
-        cdef int32_t run_len_h
         cdef double* data
         cdef uint64_t* bits
         cdef uint8_t* null_bitmap
@@ -1550,14 +1513,6 @@ cdef class Float64Vector(Vector):
         cdef int64_t MIN_SIGNED = <int64_t> -9223372036854775807
         cdef int64_t MAX_SIGNED = <int64_t> 9223372036854775807
         cdef int64_t NULL_FLAG = INT64_MIN_VALUE
-        cdef double* rle_vals_c
-        cdef int32_t* rle_lens_c
-        cdef size_t rle_runs_c
-        cdef uint8_t* rle_nulls_c
-        cdef Py_ssize_t cpos
-        cdef size_t cr
-        cdef int32_t run_len_c
-        cdef double run_val_c
         cdef uint8_t* null_bitmap
         cdef bint has_nulls
         cdef double* _ci_dict_data
@@ -1768,63 +1723,6 @@ cdef Float64Vector make_float64_dict_only(
     vec._dict_accessor.value_type = DRAKEN_FLOAT64
 
     _refresh_unified_float64(vec)
-    return vec
-
-
-cdef Float64Vector from_rle_builder(
-    double* run_values,
-    int32_t* run_lengths,
-    size_t num_runs,
-    uint8_t* null_bitmap=NULL,
-):
-    """Create an RLE-encoded Float64Vector from raw C arrays (copies data)."""
-    import sys as _sys
-    _draken = _sys.modules.get('draken')
-    if _draken is not None and _draken._RLE_FORBIDDEN:
-        raise RuntimeError("RLE vector construction is forbidden (draken._RLE_FORBIDDEN=True)")
-    cdef Float64Vector vec = Float64Vector(0, False)
-    cdef size_t total_length = 0
-    cdef size_t i
-    cdef DrakenRLEBuffer* rle
-    cdef double* vals_copy
-    cdef int32_t* lens_copy
-    cdef size_t null_bytes
-    cdef uint8_t* null_copy
-    for i in range(num_runs):
-        total_length += <size_t>run_lengths[i]
-    vec.ptr.length = total_length
-    if num_runs == 0:
-        vec._encoding = DRAKEN_ENCODING_RLE
-        return vec
-    rle = <DrakenRLEBuffer*>malloc(sizeof(DrakenRLEBuffer))
-    if rle == NULL:
-        raise MemoryError()
-    vals_copy = <double*>malloc(num_runs * sizeof(double))
-    lens_copy = <int32_t*>malloc(num_runs * sizeof(int32_t))
-    if vals_copy == NULL or lens_copy == NULL:
-        free(rle)
-        if vals_copy != NULL: free(vals_copy)
-        if lens_copy != NULL: free(lens_copy)
-        raise MemoryError()
-    memcpy(vals_copy, run_values, num_runs * sizeof(double))
-    memcpy(lens_copy, run_lengths, num_runs * sizeof(int32_t))
-    rle.run_values = <void*>vals_copy
-    rle.run_lengths = lens_copy
-    rle.num_runs = num_runs
-    rle.length = total_length
-    rle.type = DRAKEN_FLOAT64
-    if null_bitmap != NULL:
-        null_bytes = (total_length + 7) >> 3
-        null_copy = <uint8_t*>malloc(null_bytes)
-        if null_copy == NULL:
-            free(vals_copy); free(lens_copy); free(rle)
-            raise MemoryError()
-        memcpy(null_copy, null_bitmap, null_bytes)
-        rle.null_bitmap = null_copy
-    else:
-        rle.null_bitmap = NULL
-    vec._rle_buffer = rle
-    vec._encoding = DRAKEN_ENCODING_RLE
     return vec
 
 

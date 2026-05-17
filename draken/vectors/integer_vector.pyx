@@ -30,9 +30,9 @@ from libc.stdint cimport (
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset, memcpy
 
-from draken.core.buffers cimport DrakenFixedBuffer, DrakenRLEBuffer, DrakenType
+from draken.core.buffers cimport DrakenFixedBuffer, DrakenType
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64
-from draken.core.buffers cimport ConstAccessor, DRAKEN_ENCODING_CONSTANT, DRAKEN_ENCODING_RLE
+from draken.core.buffers cimport ConstAccessor, DRAKEN_ENCODING_CONSTANT
 from draken.core.buffers cimport DrakenVector
 from draken.core.fixed_vector cimport (
     alloc_fixed_buffer, buf_dtype, buf_itemsize, buf_length, free_fixed_buffer,
@@ -44,7 +44,7 @@ cdef extern from "simd_bitops.h" nogil:
     void simd_and_mask(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n)
 
 cdef extern from "draken/vectors/_integer_compare.hpp" namespace "draken::integer_cmp" nogil:
-    # Single-value compare (for const / RLE paths)
+    # Single-value compare (for const paths)
     bint dispatch_compare_once(int op, int64_t a, int64_t b)
     # bit_fill_range: fill count bits in dst starting at bit-offset start
     void bit_fill_range(uint8_t* dst, size_t start, size_t count)
@@ -109,18 +109,6 @@ cdef extern from "draken/vectors/_integer_compare.hpp" namespace "draken::intege
 
 DEF INTEGER_HASH_CHUNK = 1024
 cdef uint8_t _CONST_NULL_BYTE = 0
-
-
-cdef void _release_rle_storage_integer(IntegerVector vec) noexcept:
-    if vec._rle_buffer != NULL:
-        if vec._rle_buffer.run_values != NULL:
-            free(vec._rle_buffer.run_values)
-        if vec._rle_buffer.run_lengths != NULL:
-            free(vec._rle_buffer.run_lengths)
-        if vec._rle_buffer.null_bitmap != NULL:
-            free(vec._rle_buffer.null_bitmap)
-        free(vec._rle_buffer)
-        vec._rle_buffer = NULL
 
 
 cdef void _refresh_unified_integer(IntegerVector vec) noexcept:
@@ -220,7 +208,6 @@ cdef class IntegerVector(Vector):
         self._const_value = 0
         self._has_const = False
         self._const_is_null = False
-        self._rle_buffer = NULL
         self._unified_view.data = NULL
         self._unified_view.data_length = 0
         self._unified_view.selection = NULL
@@ -233,7 +220,6 @@ cdef class IntegerVector(Vector):
             _refresh_unified_integer(self)
 
     def __dealloc__(self):
-        _release_rle_storage_integer(self)
         if self.owns_data and self.ptr is not NULL:
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
@@ -1434,92 +1420,3 @@ cdef IntegerVector from_dict_nullable(
     return vec
 
 
-cdef IntegerVector from_rle_builder(
-    int64_t* run_values,
-    int32_t* run_lengths,
-    size_t num_runs,
-    DrakenType dtype,
-    uint8_t* null_bitmap=NULL,
-):
-    """Create an RLE-encoded IntegerVector from raw C arrays.
-
-    The caller passes pointers to builder-owned arrays; this function copies
-    the run data into fresh malloc'd arrays owned by the vector.  Run values
-    are stored as int64_t regardless of the native width.
-
-    Args:
-        run_values:  Pointer to int64_t values array (num_runs entries).
-        run_lengths: Pointer to int32_t run lengths (num_runs entries).
-        num_runs:    Number of runs.
-        dtype:       DRAKEN_INT8, DRAKEN_INT16, or DRAKEN_INT32.
-        null_bitmap: Optional logical-row null bitmap (NULL = no nulls).
-
-    Returns:
-        IntegerVector with DRAKEN_ENCODING_RLE encoding.
-    """
-    import sys as _sys
-    _draken = _sys.modules.get('draken')
-    if _draken is not None and _draken._RLE_FORBIDDEN:
-        raise RuntimeError("RLE vector construction is forbidden (draken._RLE_FORBIDDEN=True)")
-    cdef IntegerVector vec = IntegerVector(dtype, 0)  # ptr.data = NULL, ptr.length = 0
-    cdef size_t total_length = 0
-    cdef size_t i
-    cdef DrakenRLEBuffer* rle
-    cdef int64_t* vals_copy
-    cdef int32_t* lens_copy
-    cdef size_t null_bytes
-    cdef uint8_t* null_copy
-
-    # Compute total logical length from run lengths
-    for i in range(num_runs):
-        total_length += <size_t>run_lengths[i]
-
-    # Set ptr.length so the .length property returns the correct value
-    vec.ptr.length = total_length
-
-    if num_runs == 0:
-        vec._encoding = DRAKEN_ENCODING_RLE
-        return vec
-
-    # Allocate RLE buffer header
-    rle = <DrakenRLEBuffer*>malloc(sizeof(DrakenRLEBuffer))
-    if rle == NULL:
-        raise MemoryError()
-
-    vals_copy = <int64_t*>malloc(num_runs * sizeof(int64_t))
-    lens_copy = <int32_t*>malloc(num_runs * sizeof(int32_t))
-    if vals_copy == NULL or lens_copy == NULL:
-        free(rle)
-        if vals_copy != NULL:
-            free(vals_copy)
-        if lens_copy != NULL:
-            free(lens_copy)
-        raise MemoryError()
-
-    memcpy(vals_copy, run_values, num_runs * sizeof(int64_t))
-    memcpy(lens_copy, run_lengths, num_runs * sizeof(int32_t))
-
-    rle.run_values = <void*>vals_copy
-    rle.run_lengths = lens_copy
-    rle.num_runs = num_runs
-    rle.length = total_length
-    rle.type = dtype
-
-    if null_bitmap != NULL:
-        null_bytes = (total_length + 7) >> 3
-        null_copy = <uint8_t*>malloc(null_bytes)
-        if null_copy == NULL:
-            free(vals_copy)
-            free(lens_copy)
-            free(rle)
-            raise MemoryError()
-        memcpy(null_copy, null_bitmap, null_bytes)
-        rle.null_bitmap = null_copy
-    else:
-        rle.null_bitmap = NULL
-
-    vec._rle_buffer = rle
-    vec._encoding = DRAKEN_ENCODING_RLE
-    return vec
-
-    return vec
