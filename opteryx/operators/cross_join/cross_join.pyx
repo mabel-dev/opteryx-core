@@ -33,8 +33,8 @@ from array import array
 from libc.stdint cimport int32_t, int64_t, uint8_t, uint16_t, uint32_t
 from libc.stdlib cimport malloc, free
 
-from draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
-from draken.vectors.int64_vector cimport make_int64_dict_only
+from draken.vectors.integer64_vector cimport from_sequence as int64_from_sequence
+from draken.vectors.integer64_vector cimport make_int64_dict_only
 
 from opteryx.models import QueryProperties
 
@@ -51,11 +51,11 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
     Right index is dense ([0..right_rows-1] repeated left_rows times).
 
     Returns:
-        tuple of (Int64Vector dict-encoded, Int64Vector dense) — left and right row indices
+        tuple of (Integer64Vector dict-encoded, Integer64Vector dense) — left and right row indices
     """
     cdef int64_t total_rows = left_rows * right_rows
     cdef int64_t i, j
-    cdef Int64Vector left_vec, right_vec
+    cdef Integer64Vector left_vec, right_vec
     cdef uint8_t code_width
     cdef uint8_t* codes = NULL
     cdef uint8_t* codes_u8
@@ -66,7 +66,7 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
     cdef int64_t[::1] right_mv
 
     if total_rows == 0:
-        return (Int64Vector(0), Int64Vector(0))
+        return (Integer64Vector(0), Integer64Vector(0))
 
     # Select code width based on the number of unique left row indices.
     if left_rows <= 255:
@@ -146,7 +146,7 @@ def _cross_join(left_morsel: Morsel, right_morsel: Morsel) -> Generator[Morsel, 
         left_count = left_morsel.column(encoded_count_identity)[0]
         right_count = right_morsel.column(encoded_count_identity)[0]
 
-        from draken.vectors.int64_vector import from_sequence
+        from draken.vectors.integer64_vector import from_sequence
         res = Morsel.from_vectors(
             [encoded_count_identity],
             [from_sequence([left_count * right_count])]

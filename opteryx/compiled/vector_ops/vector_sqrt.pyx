@@ -16,11 +16,11 @@ from libc.stdlib cimport malloc
 from libc.string cimport memcpy
 
 from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 
 
-cpdef Float64Vector vector_sqrt_int64(Int64Vector values):
-    """SQRT(values): square root for Int64Vector -> Float64Vector."""
+cpdef Float64Vector vector_sqrt_int64(Integer64Vector values):
+    """SQRT(values): square root for Integer64Vector -> Float64Vector."""
 
     cdef size_t n = <size_t>len(values)
     cdef Float64Vector out_vec = Float64Vector(n)
@@ -31,7 +31,7 @@ cpdef Float64Vector vector_sqrt_int64(Int64Vector values):
     cdef Py_ssize_t i
 
     if n > 0 and in_data == NULL:
-        raise ValueError("Int64Vector has NULL data pointer")
+        raise ValueError("Integer64Vector has NULL data pointer")
 
     if in_null != NULL and n > 0:
         out_null = <uint8_t*>malloc((n + 7) >> 3)
@@ -81,8 +81,8 @@ cpdef Float64Vector vector_sqrt_float64(Float64Vector values):
 
 cpdef Float64Vector vector_sqrt(object values):
     """SQRT(values): square root - dispatcher, always returns Float64Vector."""
-    if isinstance(values, Int64Vector):
-        return vector_sqrt_int64(<Int64Vector>values)
+    if isinstance(values, Integer64Vector):
+        return vector_sqrt_int64(<Integer64Vector>values)
     elif isinstance(values, Float64Vector):
         return vector_sqrt_float64(<Float64Vector>values)
     else:

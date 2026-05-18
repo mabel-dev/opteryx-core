@@ -12,11 +12,11 @@ from libc.stdint cimport int64_t, uint8_t
 from libc.stdlib cimport malloc
 
 from draken.vectors.array_vector cimport ArrayVector
-from draken.vectors.int64_vector cimport Int64Vector, from_decoded as int64_from_decoded
+from draken.vectors.integer64_vector cimport Integer64Vector, from_decoded as int64_from_decoded
 from draken.core.buffers cimport DrakenArrayBuffer
 
 
-cpdef Int64Vector vector_length(ArrayVector vec):
+cpdef Integer64Vector vector_length(ArrayVector vec):
     """
     Compute the length (number of elements) of each row in an ArrayVector.
 
@@ -24,7 +24,7 @@ cpdef Int64Vector vector_length(ArrayVector vec):
         vec: ArrayVector of lists.
 
     Returns:
-        Int64Vector: element counts per row (0 for null rows).
+        Integer64Vector: element counts per row (0 for null rows).
     """
     cdef DrakenArrayBuffer* ptr = vec.ptr
     cdef Py_ssize_t n = ptr.length

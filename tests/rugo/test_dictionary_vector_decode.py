@@ -103,7 +103,7 @@ def test_decode_column_from_chunk_numeric_dictionary_returns_typed_vector():
     decoded = rp.decode_column_from_chunk(chunk, col_stats)
 
     assert decoded is not None
-    assert decoded.__class__.__name__ == "Int64Vector"
+    assert decoded.__class__.__name__ == "Integer64Vector"
     assert decoded.to_pylist() == values
 
 
@@ -119,7 +119,7 @@ def test_decode_column_from_chunk_missions_nullable_int64_dictionary():
 
     decoded = rp.decode_column_from_chunk(chunk, col_stats)
     assert decoded is not None
-    assert decoded.__class__.__name__ == "Int64Vector"
+    assert decoded.__class__.__name__ == "Integer64Vector"
 
     table = pq.read_table(path, columns=["Lauched_at"])
     assert decoded.to_pylist() == table["Lauched_at"].cast(pa.int64()).to_pylist()
@@ -172,7 +172,7 @@ def test_decode_column_from_chunk_single_entry_numeric_dictionary_becomes_consta
     decoded = rp.decode_column_from_chunk(chunk, col_stats)
 
     assert decoded is not None
-    assert decoded.__class__.__name__ == "Int64Vector"
+    assert decoded.__class__.__name__ == "Integer64Vector"
     assert decoded.encoding == DRAKEN_ENCODING_CONSTANT
     assert decoded.to_pylist() == values
 

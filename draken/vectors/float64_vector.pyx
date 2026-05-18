@@ -1746,9 +1746,9 @@ cdef Float64Vector make_float64_dict_only(
         valid_bits:  Arrow-style validity bitmap (1=valid, 0=null); NULL if non-nullable.
 
     Returns:
-        Float64Vector with DRAKEN_ENCODING_DICTIONARY; ptr.data is NULL (no dense storage).
+        Dictionary-encoded Float64Vector; selection != NULL, data holds dict values.
     """
-    cdef Float64Vector vec = Float64Vector(0)   # allocates ptr header; ptr.data = NULL
+    cdef Float64Vector vec = Float64Vector(0)   # allocates ptr header; no dense data buffer
     cdef Py_ssize_t code_bytes = row_count * <Py_ssize_t>code_width
     cdef Py_ssize_t dict_bytes = dict_size * sizeof(double)
     cdef Py_ssize_t nb_bytes

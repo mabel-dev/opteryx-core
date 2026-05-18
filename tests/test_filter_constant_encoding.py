@@ -9,7 +9,6 @@ import os, sys
 sys.path.insert(0, os.path.join(sys.path[0], ".."))
 
 import opteryx
-from draken.encoding import DRAKEN_ENCODING_CONSTANT
 
 
 def _morsels(sql):
@@ -27,12 +26,12 @@ def test_int_equality_emits_constant():
     assert rows, "expected at least one row"
     for m in rows:
         col = _column(m, "id")
-        assert col.encoding == DRAKEN_ENCODING_CONSTANT, (
-            f"id should be constant-encoded, got encoding={col.encoding}"
+        assert col.is_constant_encoded(), (
+            f"id should be constant-encoded after equality filter"
         )
         # name was not in the predicate; should not be forced constant
         name_col = _column(m, "name")
-        assert name_col.encoding != DRAKEN_ENCODING_CONSTANT
+        assert not name_col.is_constant_encoded()
 
 
 def test_string_equality_emits_constant():
@@ -40,15 +39,15 @@ def test_string_equality_emits_constant():
     assert rows
     for m in rows:
         col = _column(m, "name")
-        assert col.encoding == DRAKEN_ENCODING_CONSTANT
+        assert col.is_constant_encoded()
 
 
 def test_conjunction_marks_both_constant():
     rows = _morsels("SELECT id, name FROM $planets WHERE id = 3 AND name = 'Earth'")
     assert rows
     for m in rows:
-        assert _column(m, "id").encoding == DRAKEN_ENCODING_CONSTANT
-        assert _column(m, "name").encoding == DRAKEN_ENCODING_CONSTANT
+        assert _column(m, "id").is_constant_encoded()
+        assert _column(m, "name").is_constant_encoded()
 
 
 def test_inequality_does_not_emit_constant():
@@ -56,8 +55,7 @@ def test_inequality_does_not_emit_constant():
     assert rows
     for m in rows:
         col = _column(m, "id")
-        # Multiple surviving values; must not be constant-encoded
-        assert col.encoding != DRAKEN_ENCODING_CONSTANT
+        assert not col.is_constant_encoded()
 
 
 def test_expression_lhs_does_not_emit_constant():
@@ -66,7 +64,7 @@ def test_expression_lhs_does_not_emit_constant():
     assert rows
     for m in rows:
         col = _column(m, "name")
-        assert col.encoding != DRAKEN_ENCODING_CONSTANT
+        assert not col.is_constant_encoded()
 
 
 def test_filter_correctness_unchanged():
@@ -82,5 +80,3 @@ if __name__ == "__main__":
     test_conjunction_marks_both_constant()
     test_inequality_does_not_emit_constant()
     test_expression_lhs_does_not_emit_constant()
-    test_filter_correctness_unchanged()
-    print("OK")

@@ -66,7 +66,7 @@ cdef inline object _trim_chars_bytes(object chars):
 
     if isinstance(chars, StringVector):
         uv = (<StringVector>chars).unified()
-        if uv.data_length == 1:  # constant
+        if uv.selection == NULL and (<StringVector>chars).ptr.offsets == NULL:  # constant
             if uv.validity != NULL:  # null constant
                 return None
             payload = <DrakenConstantStringPayload*>uv.data
@@ -121,7 +121,7 @@ cpdef StringVector vector_trim(StringVector vec, object chars=None):
     cdef int length, left, right
     cdef bytes trimmed_bytes
 
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
@@ -238,7 +238,7 @@ cpdef StringVector vector_ltrim(StringVector vec, object chars=None):
     cdef int length, left
     cdef bytes trimmed_bytes
 
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
@@ -340,7 +340,7 @@ cpdef StringVector vector_rtrim(StringVector vec, object chars=None):
     cdef int length, right
     cdef bytes trimmed_bytes
 
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()

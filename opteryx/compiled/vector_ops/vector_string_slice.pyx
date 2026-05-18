@@ -14,7 +14,7 @@ from cpython.array cimport array, clone
 
 from draken.vectors.vector cimport Vector
 from draken.vectors.string_vector cimport StringVector, StringVectorBuilder, from_packed_dict, _materialize_dict_string
-from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence, _materialize_dict_int64
+from draken.vectors.integer64_vector cimport Integer64Vector, from_sequence as int64_from_sequence, _materialize_dict_int64
 from draken.vectors.null_vector cimport NullVector
 from draken.core.buffers cimport DrakenVector, DrakenVarBuffer, DrakenConstantStringPayload
 
@@ -25,20 +25,20 @@ from draken.core.buffers cimport DrakenVector, DrakenVarBuffer, DrakenConstantSt
 # the consolidated-module level via the `include` directive in vector_ops.pyx.
 # ---------------------------------------------------------------------------
 
-cdef inline Int64Vector _prepare_int_arg(Vector arg):
-    """Materialise any Int64Vector encoding to const-or-dense for fast per-row reads.
+cdef inline Integer64Vector _prepare_int_arg(Vector arg):
+    """Materialise any Integer64Vector encoding to const-or-dense for fast per-row reads.
 
-    All arguments must be vectors — NullVector or Int64Vector. Scalars are not accepted.
+    All arguments must be vectors — NullVector or Integer64Vector. Scalars are not accepted.
     RLE and dict-only encodings are materialised once here; the caller then reads
     unified().data_length / unified().validity or data[i] directly in the tight loop.
     """
-    cdef Int64Vector iv
+    cdef Integer64Vector iv
     cdef DrakenVector* uv
     if isinstance(arg, NullVector):
         return None  # caller checks for None → all rows null
-    if not isinstance(arg, Int64Vector):
-        raise TypeError(f"integer argument must be an Int64Vector or NullVector, got {type(arg).__name__}")
-    iv = <Int64Vector>arg
+    if not isinstance(arg, Integer64Vector):
+        raise TypeError(f"integer argument must be an Integer64Vector or NullVector, got {type(arg).__name__}")
+    iv = <Integer64Vector>arg
     uv = iv.unified()
     if uv.data_length == 1:
         return iv
@@ -47,8 +47,8 @@ cdef inline Int64Vector _prepare_int_arg(Vector arg):
     return iv  # already dense
 
 
-cdef inline int64_t _read_int_arg(Int64Vector iv, Py_ssize_t row, bint* is_null) noexcept:
-    """Read element-at-row from a const-or-dense Int64Vector prepared by _prepare_int_arg."""
+cdef inline int64_t _read_int_arg(Integer64Vector iv, Py_ssize_t row, bint* is_null) noexcept:
+    """Read element-at-row from a const-or-dense Integer64Vector prepared by _prepare_int_arg."""
     cdef int64_t* data
     cdef uint8_t* nulls
     cdef DrakenVector* uv
@@ -77,12 +77,12 @@ cpdef StringVector vector_string_slice_left(StringVector vec, Vector length):
 
     Parameters:
         vec: StringVector of strings.
-        length: Int64Vector or NullVector — number of bytes to keep.
+        length: Integer64Vector or NullVector — number of bytes to keep.
 
     Returns:
         StringVector: sliced strings.
     """
-    cdef Int64Vector length_iv = _prepare_int_arg(length)
+    cdef Integer64Vector length_iv = _prepare_int_arg(length)
     cdef bint length_is_null_vec = length_iv is None
 
     cdef DrakenVector* uv = vec.unified()
@@ -103,7 +103,7 @@ cpdef StringVector vector_string_slice_left(StringVector vec, Vector length):
     # ------------------------------------------------------------------
     # Const-encoded string
     # ------------------------------------------------------------------
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
@@ -138,7 +138,7 @@ cpdef StringVector vector_string_slice_left(StringVector vec, Vector length):
     return _slice_left_dense(vec, length_iv, n)
 
 
-cdef StringVector _slice_left_dict(StringVector vec, Int64Vector length_iv, Py_ssize_t n):
+cdef StringVector _slice_left_dict(StringVector vec, Integer64Vector length_iv, Py_ssize_t n):
     """Dict encoding path for slice_left."""
     cdef DrakenVector* uv = vec.unified()
     cdef DrakenVarBuffer* dict_ptr = <DrakenVarBuffer*>uv.data
@@ -215,7 +215,7 @@ cdef StringVector _slice_left_dict(StringVector vec, Int64Vector length_iv, Py_s
     return builder.finish()
 
 
-cdef StringVector _slice_left_dense(StringVector vec, Int64Vector length_iv, Py_ssize_t n):
+cdef StringVector _slice_left_dense(StringVector vec, Integer64Vector length_iv, Py_ssize_t n):
     """Dense encoding path for slice_left."""
     cdef DrakenVarBuffer* ptr = vec.ptr
     cdef uint8_t* null_bm = ptr.null_bitmap
@@ -259,12 +259,12 @@ cpdef StringVector vector_string_slice_right(StringVector vec, Vector length):
 
     Parameters:
         vec: StringVector of strings.
-        length: Int64Vector or NullVector — number of bytes to keep from the right.
+        length: Integer64Vector or NullVector — number of bytes to keep from the right.
 
     Returns:
         StringVector: sliced strings.
     """
-    cdef Int64Vector length_iv = _prepare_int_arg(length)
+    cdef Integer64Vector length_iv = _prepare_int_arg(length)
     cdef bint length_is_null_vec = length_iv is None
 
     cdef DrakenVector* uv = vec.unified()
@@ -285,7 +285,7 @@ cpdef StringVector vector_string_slice_right(StringVector vec, Vector length):
     # ------------------------------------------------------------------
     # Const-encoded string
     # ------------------------------------------------------------------
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
@@ -319,7 +319,7 @@ cpdef StringVector vector_string_slice_right(StringVector vec, Vector length):
     return _slice_right_dense(vec, length_iv, n)
 
 
-cdef StringVector _slice_right_dict(StringVector vec, Int64Vector length_iv, Py_ssize_t n):
+cdef StringVector _slice_right_dict(StringVector vec, Integer64Vector length_iv, Py_ssize_t n):
     """Dict encoding path for slice_right."""
     cdef DrakenVector* uv = vec.unified()
     cdef DrakenVarBuffer* dict_ptr = <DrakenVarBuffer*>uv.data
@@ -392,7 +392,7 @@ cdef StringVector _slice_right_dict(StringVector vec, Int64Vector length_iv, Py_
     return builder.finish()
 
 
-cdef StringVector _slice_right_dense(StringVector vec, Int64Vector length_iv, Py_ssize_t n):
+cdef StringVector _slice_right_dense(StringVector vec, Integer64Vector length_iv, Py_ssize_t n):
     """Dense encoding path for slice_right."""
     cdef DrakenVarBuffer* ptr = vec.ptr
     cdef uint8_t* null_bm = ptr.null_bitmap
@@ -436,14 +436,14 @@ cpdef StringVector vector_string_substring(StringVector vec, object from_pos, ob
 
     Parameters:
         vec: StringVector of source strings.
-        from_pos: Int64Vector or NullVector — 1-based start position.
-        count: Int64Vector or NullVector — number of bytes to extract.
+        from_pos: Integer64Vector or NullVector — 1-based start position.
+        count: Integer64Vector or NullVector — number of bytes to extract.
 
     Returns:
         StringVector of extracted substrings. NULL propagates from any input.
     """
-    cdef Int64Vector pos_iv = _prepare_int_arg(from_pos)
-    cdef Int64Vector cnt_iv = _prepare_int_arg(count)
+    cdef Integer64Vector pos_iv = _prepare_int_arg(from_pos)
+    cdef Integer64Vector cnt_iv = _prepare_int_arg(count)
     cdef bint pos_is_null_vec = pos_iv is None
     cdef bint cnt_is_null_vec = cnt_iv is None
 
@@ -467,7 +467,7 @@ cpdef StringVector vector_string_substring(StringVector vec, object from_pos, ob
     # ------------------------------------------------------------------
     # Const-encoded string
     # ------------------------------------------------------------------
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
@@ -524,8 +524,8 @@ cpdef StringVector vector_string_substring(StringVector vec, object from_pos, ob
 
 cdef StringVector _substring_dict(
     StringVector vec,
-    Int64Vector pos_iv,
-    Int64Vector cnt_iv,
+    Integer64Vector pos_iv,
+    Integer64Vector cnt_iv,
     bint cnt_is_null_vec,
     Py_ssize_t n,
 ):
@@ -662,8 +662,8 @@ cdef StringVector _substring_dict(
 
 cdef StringVector _substring_dense(
     StringVector vec,
-    Int64Vector pos_iv,
-    Int64Vector cnt_iv,
+    Integer64Vector pos_iv,
+    Integer64Vector cnt_iv,
     bint cnt_is_null_vec,
     Py_ssize_t n,
 ):

@@ -69,7 +69,7 @@ cdef inline StringRow string_vec_get_at(StringVector vec, Py_ssize_t i) noexcept
     cdef uint32_t code
     cdef int32_t start
 
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         if uv.validity != NULL:  # null constant
             row.data = NULL
             row.length = 0

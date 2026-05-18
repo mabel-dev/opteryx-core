@@ -15,7 +15,7 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.map cimport map as cmap
 
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
@@ -550,7 +550,7 @@ cdef _string_vector_from_result(StringColumnResult& scr):
     cdef size_t i
     cdef StringVectorBuilder builder
     cdef StringVector string_vec
-    cdef Int64Vector int_vec
+    cdef Integer64Vector int_vec
     cdef Float64Vector float_vec
     cdef BoolVector bool_vec
 
@@ -593,7 +593,7 @@ cdef _draken_from_column_result(ColumnResult& cr):
     cdef uint8_t* owned_bitmap = NULL
     cdef uint8_t* bdata = NULL
     cdef size_t i
-    cdef Int64Vector vec_i64
+    cdef Integer64Vector vec_i64
     cdef Float64Vector vec_f64
     cdef BoolVector vec_bool
     cdef StringVectorBuilder builder
@@ -609,7 +609,7 @@ cdef _draken_from_column_result(ColumnResult& cr):
         memcpy(owned_bitmap, cr.null_bitmap.data(), bitmap_bytes)
 
     if cr.col_type == ColumnType.Int64:
-        vec_i64 = Int64Vector(num_rows)
+        vec_i64 = Integer64Vector(num_rows)
         if cr.data.size() >= num_rows * 8:
             memcpy(<void*>vec_i64.ptr.data, cr.data.data(), num_rows * 8)
         if owned_bitmap != NULL:

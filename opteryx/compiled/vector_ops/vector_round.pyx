@@ -28,7 +28,7 @@ from libc.stdlib cimport malloc
 from libc.string cimport memcpy
 
 from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.scalar_constructors cimport from_scalar
 from draken.vectors.vector cimport Vector
 from draken.core.buffers cimport DrakenVarBuffer, DrakenVector
@@ -154,7 +154,7 @@ cpdef Float64Vector vector_round_digits(object values, int digits):
     cdef double* in_data = NULL
     cdef int64_t* in_data_i = NULL
     cdef Float64Vector fvals
-    cdef Int64Vector ivals
+    cdef Integer64Vector ivals
     cdef DrakenVector* uv = NULL
     cdef DrakenVarBuffer* dict_buf
     cdef int d_val_type
@@ -184,8 +184,8 @@ cpdef Float64Vector vector_round_digits(object values, int digits):
         else:
             _dispatch_round_dict[uint32_t](out_data, <uint32_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, digits)
 
-    elif isinstance(values, Int64Vector):
-        ivals = <Int64Vector> values
+    elif isinstance(values, Integer64Vector):
+        ivals = <Integer64Vector> values
         in_data_i = <int64_t*> ivals.ptr.data
         in_null = <uint8_t*> ivals.ptr.null_bitmap
 

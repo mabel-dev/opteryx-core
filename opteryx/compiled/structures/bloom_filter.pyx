@@ -41,7 +41,7 @@ from libc.stdlib cimport calloc, free
 from libc.stdint cimport uint8_t, uint64_t, uint32_t, int64_t
 from cpython.array cimport array, clone
 
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.morsels.morsel cimport Morsel
 from opteryx.compiled.morsel_ops.null_filter cimport non_null_row_indices
 
@@ -136,7 +136,7 @@ cdef class BloomFilter:
         cdef Py_ssize_t num_bytes = (num_rows + 7) >> 3
         cdef array result_arr = clone(_UINT8_TEMPLATE, num_bytes, True)  # zero-initialised
         cdef uint8_t[::1] result = result_arr
-        cdef Int64Vector valid_row_ids_vec = non_null_row_indices(relation, columns)
+        cdef Integer64Vector valid_row_ids_vec = non_null_row_indices(relation, columns)
         cdef const int64_t* valid_row_ids_ptr = <const int64_t*>valid_row_ids_vec.dense_ptr()
         cdef Py_ssize_t num_valid_rows = len(valid_row_ids_vec)
         cdef array row_hashes_arr = clone(_UINT64_TEMPLATE, num_rows, False)
@@ -209,7 +209,7 @@ cpdef BloomFilter create_bloom_filter(object relation, list columns):
     Optimized Bloom filter creation with better cache behavior.
     """
     cdef array row_hashes_arr = clone(_UINT64_TEMPLATE, relation.num_rows, False)
-    cdef Int64Vector valid_row_ids_vec = non_null_row_indices(relation, columns)
+    cdef Integer64Vector valid_row_ids_vec = non_null_row_indices(relation, columns)
     cdef const int64_t* valid_row_ids_ptr = <const int64_t*>valid_row_ids_vec.dense_ptr()
     cdef Py_ssize_t num_valid_rows = len(valid_row_ids_vec)
     cdef uint64_t[::1] row_hashes = row_hashes_arr

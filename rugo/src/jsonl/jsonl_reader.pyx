@@ -18,7 +18,7 @@ from cpython.buffer cimport PyBUF_CONTIG_RO, PyObject_GetBuffer, PyBuffer_Releas
 from cpython.ref cimport PyObject
 from cpython.exc cimport PyErr_Occurred, PyErr_Clear
 
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
@@ -350,8 +350,8 @@ cdef object _infer_array_elem_type(object first_value):
     return None
 
 
-cdef Int64Vector _build_int64_vector(JsonlColumn* col, size_t n):
-    cdef Int64Vector vec = Int64Vector(n)
+cdef Integer64Vector _build_int64_vector(JsonlColumn* col, size_t n):
+    cdef Integer64Vector vec = Integer64Vector(n)
     cdef int64_t* dst = <int64_t*> vec.ptr.data
     cdef uint8_t* nulls = NULL
     cdef size_t j, null_bytes

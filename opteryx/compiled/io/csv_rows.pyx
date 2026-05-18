@@ -36,8 +36,11 @@ from draken.core.buffers cimport DrakenFixedBuffer
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.int64_vector cimport Int64Vector
-from draken.vectors.integer_vector cimport IntegerVector
+from draken.vectors.integer64_vector cimport Integer64Vector
+from draken.vectors.integer8_vector cimport Integer8Vector
+from draken.vectors.integer16_vector cimport Integer16Vector
+from draken.vectors.integer32_vector cimport Integer32Vector
+from draken.vectors.vector cimport Vector
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.string_vector cimport StringVectorBuilder
 from draken.vectors.string_vector cimport _StringVectorView
@@ -66,8 +69,7 @@ cdef inline bint _bool_at(const uint8_t* bits, Py_ssize_t index) noexcept nogil:
     return ((bits[index >> 3] >> (index & 7)) & 1) != 0
 
 
-cdef inline int64_t _read_integer_value(IntegerVector vec, Py_ssize_t index) noexcept nogil:
-    cdef DrakenFixedBuffer* ptr = vec.ptr
+cdef inline int64_t _read_integer_value(DrakenFixedBuffer* ptr, Py_ssize_t index) noexcept nogil:
     if ptr.type == DRAKEN_INT8:
         return (<int8_t*>ptr.data)[index]
     if ptr.type == DRAKEN_INT16:
@@ -213,10 +215,10 @@ cdef char _normalize_separator(object separator):
 
 
 cdef inline DrakenVector* _typed_unified(object vec_obj) noexcept:
-    if isinstance(vec_obj, Int64Vector):
-        return (<Int64Vector>vec_obj).unified()
-    if isinstance(vec_obj, IntegerVector):
-        return (<IntegerVector>vec_obj).unified()
+    if isinstance(vec_obj, Integer64Vector):
+        return (<Integer64Vector>vec_obj).unified()
+    if isinstance(vec_obj, (Integer8Vector, Integer16Vector, Integer32Vector)):
+        return (<Vector>vec_obj).unified()
     if isinstance(vec_obj, Float64Vector):
         return (<Float64Vector>vec_obj).unified()
     if isinstance(vec_obj, BoolVector):
@@ -311,17 +313,19 @@ cdef Py_ssize_t _estimate_value_bytes(int encoder, object vec_obj, object aux_ob
 
 
 cdef bint _value_is_null_cached(int encoder, object vec_obj, object aux_obj, Py_ssize_t row_index) except? False:
-    cdef Int64Vector int64_vec
-    cdef IntegerVector integer_vec
+    cdef Integer64Vector int64_vec
     cdef Float64Vector float_vec
     cdef BoolVector bool_vec
 
     if encoder == ENC_INT64:
-        int64_vec = <Int64Vector>vec_obj
+        int64_vec = <Integer64Vector>vec_obj
         return not _is_valid(int64_vec.ptr.null_bitmap, row_index)
     if encoder == ENC_INTEGER:
-        integer_vec = <IntegerVector>vec_obj
-        return not _is_valid(integer_vec.ptr.null_bitmap, row_index)
+        if isinstance(vec_obj, Integer8Vector):
+            return not _is_valid((<Integer8Vector>vec_obj).ptr.null_bitmap, row_index)
+        if isinstance(vec_obj, Integer16Vector):
+            return not _is_valid((<Integer16Vector>vec_obj).ptr.null_bitmap, row_index)
+        return not _is_valid((<Integer32Vector>vec_obj).ptr.null_bitmap, row_index)
     if encoder == ENC_FLOAT64:
         float_vec = <Float64Vector>vec_obj
         return not _is_valid(float_vec.ptr.null_bitmap, row_index)
@@ -350,8 +354,7 @@ cdef inline bytes _generic_csv_bytes(object value):
 
 
 cdef Py_ssize_t _write_value(int encoder, object vec_obj, object aux_obj, Py_ssize_t row_index, char* dst, char separator) except -1:
-    cdef Int64Vector int64_vec
-    cdef IntegerVector integer_vec
+    cdef Integer64Vector int64_vec
     cdef Float64Vector float_vec
     cdef BoolVector bool_vec
     cdef _StringVectorView string_view
@@ -365,11 +368,14 @@ cdef Py_ssize_t _write_value(int encoder, object vec_obj, object aux_obj, Py_ssi
     cdef Py_ssize_t generic_len = 0
 
     if encoder == ENC_INT64:
-        int64_vec = <Int64Vector>vec_obj
+        int64_vec = <Integer64Vector>vec_obj
         return _write_int64(dst, (<int64_t*>int64_vec.ptr.data)[row_index])
     if encoder == ENC_INTEGER:
-        integer_vec = <IntegerVector>vec_obj
-        return _write_int64(dst, _read_integer_value(integer_vec, row_index))
+        if isinstance(vec_obj, Integer8Vector):
+            return _write_int64(dst, _read_integer_value((<Integer8Vector>vec_obj).ptr, row_index))
+        if isinstance(vec_obj, Integer16Vector):
+            return _write_int64(dst, _read_integer_value((<Integer16Vector>vec_obj).ptr, row_index))
+        return _write_int64(dst, _read_integer_value((<Integer32Vector>vec_obj).ptr, row_index))
     if encoder == ENC_FLOAT64:
         float_vec = <Float64Vector>vec_obj
         return _write_float64(dst, (<double*>float_vec.ptr.data)[row_index])
@@ -439,6 +445,7 @@ cpdef StringVector morsel_to_csv_rows(
     cdef bytes col_name
     cdef int encoder
     cdef DrakenVector* _uv
+    cdef StringVector _sv
     cdef StringVectorBuilder builder
     cdef _StringVectorView string_view
     cdef DrakenConstantStringPayload* payload
@@ -461,7 +468,17 @@ cpdef StringVector morsel_to_csv_rows(
             vec_obj = morsel.column(col_name)
 
             _uv = _typed_unified(vec_obj)
-            if _uv != NULL and _uv.data_length == 1:
+            if isinstance(vec_obj, StringVector):
+                _sv = <StringVector>vec_obj
+                if _sv.ptr.offsets == NULL:  # constant (offsets always allocated for dense/dict)
+                    encoder = ENC_CONST_STRING
+                    aux_obj = None
+                    null_bitmaps[col_index] = NULL
+                else:
+                    encoder = ENC_STRING
+                    aux_obj = vec_obj.view()
+                    null_bitmaps[col_index] = NULL
+            elif _uv != NULL and _uv.data_length == 1:
                 encoder = _typed_constant_encoder(vec_obj)
                 if encoder == 0:
                     raise NotImplementedError(
@@ -469,14 +486,22 @@ cpdef StringVector morsel_to_csv_rows(
                     )
                 aux_obj = None
                 null_bitmaps[col_index] = NULL
-            elif isinstance(vec_obj, Int64Vector):
+            elif isinstance(vec_obj, Integer64Vector):
                 encoder = ENC_INT64
                 aux_obj = None
-                null_bitmaps[col_index] = (<Int64Vector>vec_obj).ptr.null_bitmap
-            elif isinstance(vec_obj, IntegerVector):
+                null_bitmaps[col_index] = (<Integer64Vector>vec_obj).ptr.null_bitmap
+            elif isinstance(vec_obj, Integer8Vector):
                 encoder = ENC_INTEGER
                 aux_obj = None
-                null_bitmaps[col_index] = (<IntegerVector>vec_obj).ptr.null_bitmap
+                null_bitmaps[col_index] = (<Integer8Vector>vec_obj).ptr.null_bitmap
+            elif isinstance(vec_obj, Integer16Vector):
+                encoder = ENC_INTEGER
+                aux_obj = None
+                null_bitmaps[col_index] = (<Integer16Vector>vec_obj).ptr.null_bitmap
+            elif isinstance(vec_obj, Integer32Vector):
+                encoder = ENC_INTEGER
+                aux_obj = None
+                null_bitmaps[col_index] = (<Integer32Vector>vec_obj).ptr.null_bitmap
             elif isinstance(vec_obj, Float64Vector):
                 encoder = ENC_FLOAT64
                 aux_obj = None
@@ -485,10 +510,6 @@ cpdef StringVector morsel_to_csv_rows(
                 encoder = ENC_BOOL
                 aux_obj = None
                 null_bitmaps[col_index] = (<BoolVector>vec_obj).ptr.null_bitmap
-            elif isinstance(vec_obj, StringVector):
-                encoder = ENC_STRING
-                aux_obj = vec_obj.view()
-                null_bitmaps[col_index] = NULL
             elif _uv != NULL and _uv.selection != NULL:
                 encoder = ENC_GENERIC
                 aux_obj = vec_obj.to_pylist()

@@ -102,8 +102,8 @@ cdef extern from "type_widening_wrappers.hpp":
     void rugo_widen_float32_to_float64(const float* src, double* dst, size_t count) nogil
 
 # Import Draken vector types and components
-from draken.vectors.int64_vector cimport (
-    Int64Vector,
+from draken.vectors.integer64_vector cimport (
+    Integer64Vector,
     from_dict as int64_from_dict,
     from_dict_nullable as int64_from_dict_nullable,
     make_int64_dict_only,
@@ -409,11 +409,11 @@ cdef inline void _expand_rle_float64_into(double* dst,
         off += cnt
 
 
-cdef Int64Vector _make_int64_from_int32_vector(
+cdef Integer64Vector _make_int64_from_int32_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    """Build an Int64Vector from a DecodedColumn with int32_t values (upcasting)."""
-    cdef Int64Vector vec = Int64Vector(num_rows)
+    """Build an Integer64Vector from a DecodedColumn with int32_t values (upcasting)."""
+    cdef Integer64Vector vec = Integer64Vector(num_rows)
     cdef int64_t* dst = <int64_t*> vec.ptr.data
     cdef Py_ssize_t i, val_idx = 0
     cdef Py_ssize_t nb_bytes
@@ -465,13 +465,13 @@ cdef Int64Vector _make_int64_from_int32_vector(
     return vec
 
 
-cdef Int64Vector _make_int64_vector(
+cdef Integer64Vector _make_int64_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    """Build an Int64Vector from a DecodedColumn with int64_t values."""
+    """Build an Integer64Vector from a DecodedColumn with int64_t values."""
     if num_rows == 0:
-        return Int64Vector(0)
-    cdef Int64Vector vec = Int64Vector(num_rows)
+        return Integer64Vector(0)
+    cdef Integer64Vector vec = Integer64Vector(num_rows)
     cdef int64_t* dst = <int64_t*> vec.ptr.data
     cdef Py_ssize_t i, val_idx = 0
     cdef Py_ssize_t nb_bytes
@@ -588,13 +588,13 @@ cdef Float64Vector _make_float64_from_float32_vector(
     return vec
 
 
-cdef Int64Vector _make_int32_as_int64_vector(
+cdef Integer64Vector _make_int32_as_int64_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    """Build an Int64Vector from a DecodedColumn with int32 values (upcasts int32→int64)."""
+    """Build an Integer64Vector from a DecodedColumn with int32 values (upcasts int32→int64)."""
     if num_rows == 0:
-        return Int64Vector(0)
-    cdef Int64Vector vec = Int64Vector(num_rows)
+        return Integer64Vector(0)
+    cdef Integer64Vector vec = Integer64Vector(num_rows)
     cdef int64_t* dst = <int64_t*> vec.ptr.data
     cdef Py_ssize_t i, val_idx = 0
     cdef Py_ssize_t nb_bytes
@@ -1043,7 +1043,7 @@ cdef int _fill_dict_codes_and_validity(
         return 0
 
 
-cdef Int64Vector _make_typed_int64_dictionary_vector(
+cdef Integer64Vector _make_typed_int64_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
     cdef Py_ssize_t dict_size = decoded_col.dict_int64_values.size()
@@ -1052,7 +1052,7 @@ cdef Int64Vector _make_typed_int64_dictionary_vector(
     cdef uint8_t* validity_buf
     cdef int32_t[::1] codes
     cdef uint8_t[::1] validity
-    cdef Int64Vector result
+    cdef Integer64Vector result
 
     if dict_size == 0:
         raise ValueError("typed int64 dictionary vector requires non-empty dictionary")
@@ -1089,7 +1089,7 @@ cdef Int64Vector _make_typed_int64_dictionary_vector(
     return result
 
 
-cdef Int64Vector _make_typed_int64_from_int32_dictionary_vector(
+cdef Integer64Vector _make_typed_int64_from_int32_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
     cdef Py_ssize_t dict_size = decoded_col.dict_int32_values.size()
@@ -1099,7 +1099,7 @@ cdef Int64Vector _make_typed_int64_from_int32_dictionary_vector(
     cdef int64_t[::1] dictionary
     cdef int32_t[::1] codes
     cdef uint8_t[::1] validity
-    cdef Int64Vector result
+    cdef Integer64Vector result
 
     if dict_size == 0:
         raise ValueError("typed int32 dictionary vector requires non-empty dictionary")
@@ -1337,7 +1337,7 @@ cdef Vector _make_dictionary_vector(
     """Build a dictionary-encoded Vector from decoded parquet dictionary payload.
 
     This is a compatibility shim that delegates to the typed dictionary
-    constructors (e.g. :meth:`Int64Vector.from_dict`). This avoids exposing
+    constructors (e.g. :meth:`Integer64Vector.from_dict`). This avoids exposing
     ``DictionaryVector`` as part of the public/parquet path.
     """
     cdef bytes col_type = decoded_col.type
@@ -1379,12 +1379,12 @@ cdef Vector _make_typed_constant_vector(
         return StringVector.from_constant(value, num_rows)
     if col_type == b"int32":
         if all_null:
-            return Int64Vector.from_constant(None, num_rows, is_null=True)
-        return Int64Vector.from_constant(<int64_t>decoded_col.dict_int32_values[0], num_rows)
+            return Integer64Vector.from_constant(None, num_rows, is_null=True)
+        return Integer64Vector.from_constant(<int64_t>decoded_col.dict_int32_values[0], num_rows)
     if col_type == b"int64":
         if all_null:
-            return Int64Vector.from_constant(None, num_rows, is_null=True)
-        return Int64Vector.from_constant(decoded_col.dict_int64_values[0], num_rows)
+            return Integer64Vector.from_constant(None, num_rows, is_null=True)
+        return Integer64Vector.from_constant(decoded_col.dict_int64_values[0], num_rows)
     if col_type == b"float32":
         if all_null:
             return Float64Vector.from_constant(None, num_rows, is_null=True)
@@ -1958,7 +1958,7 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
         chunk_bytes: bytes / bytearray / memoryview — the raw column chunk.
         col_stats:   dict — one column entry from read_metadata()['row_groups'][rg]['columns'][i].
 
-    Returns a Draken Vector (Int64Vector, StringVector, Float64Vector, BoolVector, or ArrayVector),
+    Returns a Draken Vector (Integer64Vector, StringVector, Float64Vector, BoolVector, or ArrayVector),
     or None on failure.
     """
     cdef const uint8_t[::1] mem_view

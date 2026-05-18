@@ -10,15 +10,10 @@
 # cython: freethreading_compatible=True
 
 """
-TimestampVector: Cython implementation of a fixed-width timestamp column vector for Draken.
-
-This module provides:
-- The TimestampVector class for efficient timestamp column storage (microseconds since Unix epoch)
-- Integration with DrakenFixedBuffer and related C helpers for memory management
-- Arrow interoperability for zero-copy conversion
-- Fast comparison and null handling for timestamp columns
-
-Used for high-performance temporal analytics and columnar data processing in Draken.
+TimestampVector: INT64 microseconds from Unix epoch, stored in a DrakenFixedBuffer
+with itemsize=8. Physical layout is identical to Integer64Vector; TimestampVector is
+a distinct class because the domain (wall-clock instants) and operations (date_trunc,
+extract, arithmetic with intervals) differ from general integer arithmetic.
 """
 
 import datetime as _dt
@@ -47,7 +42,7 @@ from draken.core.fixed_vector cimport buf_length
 from draken.core.fixed_vector cimport free_fixed_buffer
 from draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash, simd_popcount
 from draken.vectors.bool_vector cimport BoolVector
-from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
+from draken.vectors.integer64_vector cimport Integer64Vector, _materialize_dict_int64
 from draken.vectors.date32_vector cimport Date32Vector
 
 cdef extern from "simd_bitops.h" nogil:
@@ -390,10 +385,44 @@ cdef class TimestampVector(Vector):
             )
         cdef Py_ssize_t i, n = indices.shape[0]
         cdef TimestampVector out = TimestampVector(<size_t>n)
-        cdef int64_t* src = <int64_t*> self.ptr.data
         cdef int64_t* dst = <int64_t*> out.ptr.data
-        for i in range(n):
-            dst[i] = src[indices[i]]
+        cdef int64_t* src
+        cdef int64_t* dict_data
+        cdef uint8_t* codes
+        cdef uint8_t code_width
+        cdef uint32_t code
+        cdef int32_t src_idx
+        cdef Py_ssize_t nb_bytes
+
+        if uv.selection != NULL:
+            # dict-encoded: expand dict entries for the taken rows
+            dict_data = <int64_t*>uv.data
+            codes = <uint8_t*>uv.selection
+            code_width = uv.sel_width
+            for i in range(n):
+                src_idx = indices[i]
+                if code_width == 1:
+                    code = (<uint8_t*>codes)[src_idx]
+                elif code_width == 2:
+                    code = (<uint16_t*>codes)[src_idx]
+                else:
+                    code = (<uint32_t*>codes)[src_idx]
+                dst[i] = dict_data[code]
+            if self.ptr.null_bitmap != NULL:
+                nb_bytes = (n + 7) >> 3
+                out.ptr.null_bitmap = <uint8_t*>malloc(<size_t>nb_bytes)
+                if out.ptr.null_bitmap == NULL:
+                    raise MemoryError()
+                memset(out.ptr.null_bitmap, 0xFF, nb_bytes)
+                for i in range(n):
+                    src_idx = indices[i]
+                    if not ((self.ptr.null_bitmap[src_idx >> 3] >> (src_idx & 7)) & 1):
+                        out.ptr.null_bitmap[i >> 3] &= ~(<uint8_t>1 << (i & 7))
+        else:
+            src = <int64_t*> self.ptr.data
+            for i in range(n):
+                dst[i] = src[indices[i]]
+
         out._unified_view.data = out.ptr.data
         out._unified_view.data_length = <size_t>n
         out._unified_view.length = <size_t>n
@@ -870,8 +899,8 @@ cdef class TimestampVector(Vector):
             total += data[i]
         return total
 
-    cpdef Int64Vector subtract_timestamp_vector(self, TimestampVector other):
-        """Subtract two TimestampVector values and return microseconds as Int64Vector."""
+    cpdef Integer64Vector subtract_timestamp_vector(self, TimestampVector other):
+        """Subtract two TimestampVector values and return microseconds as Integer64Vector."""
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int64_t* data1 = <int64_t*> ptr1.data
@@ -880,7 +909,7 @@ cdef class TimestampVector(Vector):
         cdef uint8_t* null2 = ptr2.null_bitmap
         cdef Py_ssize_t i, n = ptr1.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef Int64Vector out
+        cdef Integer64Vector out
         cdef int64_t* dst
         cdef uint8_t* out_null = NULL
         cdef bint valid1, valid2
@@ -888,7 +917,7 @@ cdef class TimestampVector(Vector):
         if n != ptr2.length:
             raise ValueError("Vectors must have the same length")
 
-        out = Int64Vector(<size_t>n)
+        out = Integer64Vector(<size_t>n)
         dst = <int64_t*> out.ptr.data
         memset(dst, 0, n * sizeof(int64_t))
 
@@ -910,8 +939,8 @@ cdef class TimestampVector(Vector):
                 dst[i] = data1[i] - data2[i]
         return out
 
-    cpdef Int64Vector subtract_date32_vector(self, Date32Vector other):
-        """Subtract Date32Vector from TimestampVector and return microseconds as Int64Vector."""
+    cpdef Integer64Vector subtract_date32_vector(self, Date32Vector other):
+        """Subtract Date32Vector from TimestampVector and return microseconds as Integer64Vector."""
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int64_t* data1 = <int64_t*> ptr1.data
@@ -920,7 +949,7 @@ cdef class TimestampVector(Vector):
         cdef uint8_t* null2 = ptr2.null_bitmap
         cdef Py_ssize_t i, n = ptr1.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef Int64Vector out
+        cdef Integer64Vector out
         cdef int64_t* dst
         cdef uint8_t* out_null = NULL
         cdef bint valid1, valid2
@@ -929,7 +958,7 @@ cdef class TimestampVector(Vector):
         if n != ptr2.length:
             raise ValueError("Vectors must have the same length")
 
-        out = Int64Vector(<size_t>n)
+        out = Integer64Vector(<size_t>n)
         dst = <int64_t*> out.ptr.data
         memset(dst, 0, n * sizeof(int64_t))
 
@@ -1496,9 +1525,9 @@ cdef TimestampVector timestamp_dict_from_raw(
     return vec
 
 
-cpdef TimestampVector from_int64_vector(Int64Vector source, str timestamp_unit="us"):
+cpdef TimestampVector from_int64_vector(Integer64Vector source, str timestamp_unit="us"):
     """
-    Convert an Int64Vector containing epoch timestamp values to TimestampVector.
+    Convert an Integer64Vector containing epoch timestamp values to TimestampVector.
 
     This is a native Draken conversion path (no Arrow interop).
     """

@@ -6,7 +6,7 @@ from conftest import DENSE, RLE, CONSTANT, DICTIONARY
 # Vector type inventory with metadata
 VECTOR_TYPES = {
     "int64": {
-        "vector_class": "Int64Vector",
+        "vector_class": "Integer64Vector",
         "arrow_type": pa.int64(),
         "supports_encodings": [DENSE, RLE, CONSTANT, DICTIONARY],
         "is_numeric": True,

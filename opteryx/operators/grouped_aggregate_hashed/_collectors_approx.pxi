@@ -112,13 +112,13 @@ cdef class ApproxPercentileCollector(BaseCollector):
         cdef td_histogram_t** hists = self._hists.data()
         cdef Py_ssize_t i
         cdef int64_t si
-        cdef Int64Vector iv
+        cdef Integer64Vector iv
         cdef Float64Vector fv
         cdef int64_t* i64
         cdef double* f64
 
-        if isinstance(raw, Int64Vector):
-            iv = <Int64Vector>raw
+        if isinstance(raw, Integer64Vector):
+            iv = <Integer64Vector>raw
             i64 = <int64_t*>iv.dense_ptr()
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):

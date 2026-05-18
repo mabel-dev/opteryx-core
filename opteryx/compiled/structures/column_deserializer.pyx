@@ -34,10 +34,10 @@ from libcpp.vector cimport vector
 
 from opteryx.compiled.structures.memory_pool cimport MemoryPool, ReadResult, CppMemoryPool
 
-from draken.vectors.int64_vector cimport Int64Vector
-from draken.vectors.int64_vector cimport from_decoded as int64_from_decoded
-from draken.vectors.int64_vector cimport from_packed_dict as int64_from_packed_dict
-from draken.vectors.int64_vector cimport make_int64_dict_only
+from draken.vectors.integer64_vector cimport Integer64Vector
+from draken.vectors.integer64_vector cimport from_decoded as int64_from_decoded
+from draken.vectors.integer64_vector cimport from_packed_dict as int64_from_packed_dict
+from draken.vectors.integer64_vector cimport make_int64_dict_only
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.float64_vector cimport from_decoded as float64_from_decoded
 from draken.vectors.float64_vector cimport from_packed_dict as float64_from_packed_dict

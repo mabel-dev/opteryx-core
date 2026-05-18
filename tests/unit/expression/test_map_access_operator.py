@@ -3,7 +3,7 @@ import pytest
 
 import pyarrow as pa
 from draken.morsels.morsel import Morsel
-from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer64_vector import Integer64Vector
 from opteryx.exceptions import IncorrectTypeError
 from opteryx.expression.binary_operators import MapAccessOp
 
@@ -15,7 +15,7 @@ def _to_list(result):
 
 
 def _const_key(value: int):
-    return Int64Vector.from_constant(value, 1)
+    return Integer64Vector.from_constant(value, 1)
 
 
 def _vector(values):
@@ -80,7 +80,7 @@ def test_map_access_rejects_non_integer_key_types(key):
 
 def test_map_access_rejects_non_constant_int64_key():
     values = _vector(["abc"])
-    key = Int64Vector.from_arrow(pa.array([1, 2], type=pa.int64()))
+    key = Integer64Vector.from_arrow(pa.array([1, 2], type=pa.int64()))
 
     with pytest.raises(IncorrectTypeError):
         MapAccessOp(values, key)

@@ -18,8 +18,8 @@ import pytest
 from draken.vectors.date32_vector import Date32Vector
 from draken.vectors.float32_vector import Float32Vector
 from draken.vectors.float64_vector import Float64Vector
-from draken.vectors.int64_vector import Int64Vector
-from draken.vectors.integer_vector import IntegerVector
+from draken.vectors.integer64_vector import Integer64Vector
+from draken.vectors.integer32_vector import Integer32Vector
 from draken.vectors.string_vector import StringVector
 from draken.vectors.time_vector import TimeVector
 from draken.vectors.timestamp_vector import TimestampVector
@@ -31,23 +31,23 @@ from draken.vectors.timestamp_vector import TimestampVector
 
 class TestInt64Dict:
     def test_to_pylist(self):
-        v = Int64Vector.from_dict([0, 1, 2, 0], [10, 20, 30])
+        v = Integer64Vector.from_dict([0, 1, 2, 0], [10, 20, 30])
         assert v.to_pylist() == [10, 20, 30, 10]
 
     def test_sum(self):
-        v = Int64Vector.from_dict([0, 1, 2, 0], [10, 20, 30])
+        v = Integer64Vector.from_dict([0, 1, 2, 0], [10, 20, 30])
         assert v.sum() == 70
 
     def test_min(self):
-        v = Int64Vector.from_dict([0, 1, 2, 0], [10, 20, 30])
+        v = Integer64Vector.from_dict([0, 1, 2, 0], [10, 20, 30])
         assert v.min() == 10
 
     def test_max(self):
-        v = Int64Vector.from_dict([0, 1, 2, 0], [10, 20, 30])
+        v = Integer64Vector.from_dict([0, 1, 2, 0], [10, 20, 30])
         assert v.max() == 30
 
     def test_with_nulls(self):
-        v = Int64Vector.from_dict([0, 1, 2, 0], [10, 20, 30],
+        v = Integer64Vector.from_dict([0, 1, 2, 0], [10, 20, 30],
                                   row_validity=[1, 1, 1, 0])
         assert v.to_pylist() == [10, 20, 30, None]
         assert v.null_count == 1
@@ -55,16 +55,16 @@ class TestInt64Dict:
         assert v.min() == 10
 
     def test_length(self):
-        assert len(Int64Vector.from_dict([0, 0, 1], [5, 10])) == 3
+        assert len(Integer64Vector.from_dict([0, 0, 1], [5, 10])) == 3
 
     def test_repeated_code(self):
-        v = Int64Vector.from_dict([0, 0, 0, 0], [42])
+        v = Integer64Vector.from_dict([0, 0, 0, 0], [42])
         assert v.sum() == 168
         assert v.min() == 42
         assert v.max() == 42
 
     def test_negative_values(self):
-        v = Int64Vector.from_dict([0, 1, 2], [-10, 0, 10])
+        v = Integer64Vector.from_dict([0, 1, 2], [-10, 0, 10])
         assert v.sum() == 0
         assert v.min() == -10
         assert v.max() == 10
@@ -122,19 +122,19 @@ class TestFloat32Dict:
 
 class TestIntegerDict:
     def test_to_pylist(self):
-        v = IntegerVector.from_dict([0, 1, 0, 1], [5, 10])
+        v = Integer32Vector.from_dict([0, 1, 0, 1], [5, 10])
         assert v.to_pylist() == [5, 10, 5, 10]
 
     def test_sum(self):
-        assert IntegerVector.from_dict([0, 1, 0, 1], [5, 10]).sum() == 30
+        assert Integer32Vector.from_dict([0, 1, 0, 1], [5, 10]).sum() == 30
 
     def test_min_max(self):
-        v = IntegerVector.from_dict([0, 1, 2], [3, 1, 5])
+        v = Integer32Vector.from_dict([0, 1, 2], [3, 1, 5])
         assert v.min() == 1
         assert v.max() == 5
 
     def test_with_nulls(self):
-        v = IntegerVector.from_dict([0, 1, 0], [5, 10],
+        v = Integer32Vector.from_dict([0, 1, 0], [5, 10],
                                     row_validity=[1, 0, 1])
         assert v.null_count == 1
         assert v.sum() == 10

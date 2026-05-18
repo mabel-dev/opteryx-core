@@ -14,7 +14,7 @@ from opteryx.types import OrsoTypes
 
 from draken.vectors.bool_vector import BoolVector
 from draken.vectors.date32_vector import Date32Vector
-from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer64_vector import Integer64Vector
 from draken.vectors.timestamp_vector import TimestampVector
 from draken.interop.vector_sequence import vector_from_sequence
 
@@ -57,7 +57,7 @@ cdef _int64_temporal_compare(int op_code, vec, right, temporal_type):
             value_set = _coerce_timestamp_set(right)
         else:
             value_set = _coerce_date32_set(right)
-    elif isinstance(right, (Int64Vector, TimestampVector, Date32Vector)):
+    elif isinstance(right, (Integer64Vector, TimestampVector, Date32Vector)):
         return vec._compare_vector(right, _DRAKEN_CMP_OP[op_code])
     else:
         if is_timestamp:

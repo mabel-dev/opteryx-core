@@ -31,12 +31,12 @@ from libc.string cimport memcpy, memset
 from libc.stdlib cimport malloc, free
 
 from draken.core.buffers cimport DrakenFixedBuffer
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.float64_vector cimport Float64Vector
 
 from draken.interop.vector_sequence cimport vector_from_sequence
 
-cdef inline int64_t _i64_const(Int64Vector vec) noexcept:
+cdef inline int64_t _i64_const(Integer64Vector vec) noexcept:
     return (<int64_t*>vec._unified_view.data)[0]
 
 cdef inline double _f64_const(Float64Vector vec) noexcept:
@@ -128,31 +128,31 @@ cdef inline bint _vector_length_check(object left, object right):
     return True
 
 def int64_add(left, right):
-    """Add two int64 operands. Returns Int64Vector or None. Handles dense and constant encodings."""
+    """Add two int64 operands. Returns Integer64Vector or None. Handles dense and constant encodings."""
     # Handle Python scalar operands by converting to constant-encoded vectors
     if isinstance(left, int) and not isinstance(left, bool):
-        if isinstance(right, Int64Vector):
-            left = Int64Vector.from_constant(<int64_t>left, len(right))
+        if isinstance(right, Integer64Vector):
+            left = Integer64Vector.from_constant(<int64_t>left, len(right))
         else:
             return None
     if isinstance(right, int) and not isinstance(right, bool):
-        if isinstance(left, Int64Vector):
-            right = Int64Vector.from_constant(<int64_t>right, len(left))
+        if isinstance(left, Integer64Vector):
+            right = Integer64Vector.from_constant(<int64_t>right, len(left))
         else:
             return None
 
-    if not (isinstance(left, Int64Vector) and isinstance(right, Int64Vector)):
+    if not (isinstance(left, Integer64Vector) and isinstance(right, Integer64Vector)):
         return None
     if len(left) != len(right):
         return None
     if len(left) == 0:
-        return Int64Vector(0)
+        return Integer64Vector(0)
 
     # Detect encodings
     left_enc = getattr(left, 'encoding', 0)
     right_enc = getattr(right, 'encoding', 0)
-    cdef Int64Vector left_vec = <Int64Vector>left
-    cdef Int64Vector right_vec = <Int64Vector>right
+    cdef Integer64Vector left_vec = <Integer64Vector>left
+    cdef Integer64Vector right_vec = <Integer64Vector>right
     cdef size_t length = len(left)
 
     # Route to handler based on encoding pair
@@ -170,38 +170,38 @@ def int64_add(left, right):
     elif left_enc == 3 and right_enc == 3:
         # Both constant
         result_val = _i64_const(left_vec) + _i64_const(right_vec)
-        return Int64Vector.from_constant(result_val, length)
+        return Integer64Vector.from_constant(result_val, length)
     else:
         # Unsupported encoding combination
         return None
 
 
 def int64_subtract(left, right):
-    """Subtract two int64 operands. Returns Int64Vector or None. Handles dense and constant encodings."""
+    """Subtract two int64 operands. Returns Integer64Vector or None. Handles dense and constant encodings."""
     # Handle Python scalar operands by converting to constant-encoded vectors
     if isinstance(left, int) and not isinstance(left, bool):
-        if isinstance(right, Int64Vector):
-            left = Int64Vector.from_constant(<int64_t>left, len(right))
+        if isinstance(right, Integer64Vector):
+            left = Integer64Vector.from_constant(<int64_t>left, len(right))
         else:
             return None
     if isinstance(right, int) and not isinstance(right, bool):
-        if isinstance(left, Int64Vector):
-            right = Int64Vector.from_constant(<int64_t>right, len(left))
+        if isinstance(left, Integer64Vector):
+            right = Integer64Vector.from_constant(<int64_t>right, len(left))
         else:
             return None
 
-    if not (isinstance(left, Int64Vector) and isinstance(right, Int64Vector)):
+    if not (isinstance(left, Integer64Vector) and isinstance(right, Integer64Vector)):
         return None
     if len(left) != len(right):
         return None
     if len(left) == 0:
-        return Int64Vector(0)
+        return Integer64Vector(0)
 
     # Detect encodings
     left_enc = getattr(left, 'encoding', 0)
     right_enc = getattr(right, 'encoding', 0)
-    cdef Int64Vector left_vec = <Int64Vector>left
-    cdef Int64Vector right_vec = <Int64Vector>right
+    cdef Integer64Vector left_vec = <Integer64Vector>left
+    cdef Integer64Vector right_vec = <Integer64Vector>right
     cdef size_t length = len(left)
 
     # Route to handler based on encoding pair
@@ -219,38 +219,38 @@ def int64_subtract(left, right):
     elif left_enc == 3 and right_enc == 3:
         # Both constant
         result_val = _i64_const(left_vec) - _i64_const(right_vec)
-        return Int64Vector.from_constant(result_val, length)
+        return Integer64Vector.from_constant(result_val, length)
     else:
         # Unsupported encoding combination
         return None
 
 
 def int64_multiply(left, right):
-    """Multiply two int64 operands. Returns Int64Vector or None. Handles dense and constant encodings."""
+    """Multiply two int64 operands. Returns Integer64Vector or None. Handles dense and constant encodings."""
     # Handle Python scalar operands by converting to constant-encoded vectors
     if isinstance(left, int) and not isinstance(left, bool):
-        if isinstance(right, Int64Vector):
-            left = Int64Vector.from_constant(<int64_t>left, len(right))
+        if isinstance(right, Integer64Vector):
+            left = Integer64Vector.from_constant(<int64_t>left, len(right))
         else:
             return None
     if isinstance(right, int) and not isinstance(right, bool):
-        if isinstance(left, Int64Vector):
-            right = Int64Vector.from_constant(<int64_t>right, len(left))
+        if isinstance(left, Integer64Vector):
+            right = Integer64Vector.from_constant(<int64_t>right, len(left))
         else:
             return None
 
-    if not (isinstance(left, Int64Vector) and isinstance(right, Int64Vector)):
+    if not (isinstance(left, Integer64Vector) and isinstance(right, Integer64Vector)):
         return None
     if len(left) != len(right):
         return None
     if len(left) == 0:
-        return Int64Vector(0)
+        return Integer64Vector(0)
 
     # Detect encodings
     left_enc = getattr(left, 'encoding', 0)
     right_enc = getattr(right, 'encoding', 0)
-    cdef Int64Vector left_vec = <Int64Vector>left
-    cdef Int64Vector right_vec = <Int64Vector>right
+    cdef Integer64Vector left_vec = <Integer64Vector>left
+    cdef Integer64Vector right_vec = <Integer64Vector>right
     cdef size_t length = len(left)
 
     # Route to handler based on encoding pair
@@ -268,7 +268,7 @@ def int64_multiply(left, right):
     elif left_enc == 3 and right_enc == 3:
         # Both constant
         result_val = _i64_const(left_vec) * _i64_const(right_vec)
-        return Int64Vector.from_constant(result_val, length)
+        return Integer64Vector.from_constant(result_val, length)
     else:
         # Unsupported encoding combination
         return None
@@ -278,17 +278,17 @@ def int64_divide(left, right):
     """Divide two int64 operands. Returns Float64Vector or None. Handles dense and constant encodings."""
     # Handle Python scalar operands by converting to constant-encoded vectors
     if isinstance(left, int) and not isinstance(left, bool):
-        if isinstance(right, Int64Vector):
-            left = Int64Vector.from_constant(<int64_t>left, len(right))
+        if isinstance(right, Integer64Vector):
+            left = Integer64Vector.from_constant(<int64_t>left, len(right))
         else:
             return None
     if isinstance(right, int) and not isinstance(right, bool):
-        if isinstance(left, Int64Vector):
-            right = Int64Vector.from_constant(<int64_t>right, len(left))
+        if isinstance(left, Integer64Vector):
+            right = Integer64Vector.from_constant(<int64_t>right, len(left))
         else:
             return None
 
-    if not (isinstance(left, Int64Vector) and isinstance(right, Int64Vector)):
+    if not (isinstance(left, Integer64Vector) and isinstance(right, Integer64Vector)):
         return None
     if len(left) != len(right):
         return None
@@ -298,8 +298,8 @@ def int64_divide(left, right):
     # Detect encodings
     left_enc = getattr(left, 'encoding', 0)
     right_enc = getattr(right, 'encoding', 0)
-    cdef Int64Vector left_vec = <Int64Vector>left
-    cdef Int64Vector right_vec = <Int64Vector>right
+    cdef Integer64Vector left_vec = <Integer64Vector>left
+    cdef Integer64Vector right_vec = <Integer64Vector>right
     cdef size_t length = len(left)
 
     # Route to handler based on encoding pair
@@ -328,31 +328,31 @@ def int64_divide(left, right):
 
 
 def int64_floordiv(left, right):
-    """Floor divide two int64 operands. Returns Int64Vector or None. Handles dense and constant encodings."""
+    """Floor divide two int64 operands. Returns Integer64Vector or None. Handles dense and constant encodings."""
     # Handle Python scalar operands by converting to constant-encoded vectors
     if isinstance(left, int) and not isinstance(left, bool):
-        if isinstance(right, Int64Vector):
-            left = Int64Vector.from_constant(<int64_t>left, len(right))
+        if isinstance(right, Integer64Vector):
+            left = Integer64Vector.from_constant(<int64_t>left, len(right))
         else:
             return None
     if isinstance(right, int) and not isinstance(right, bool):
-        if isinstance(left, Int64Vector):
-            right = Int64Vector.from_constant(<int64_t>right, len(left))
+        if isinstance(left, Integer64Vector):
+            right = Integer64Vector.from_constant(<int64_t>right, len(left))
         else:
             return None
 
-    if not (isinstance(left, Int64Vector) and isinstance(right, Int64Vector)):
+    if not (isinstance(left, Integer64Vector) and isinstance(right, Integer64Vector)):
         return None
     if len(left) != len(right):
         return None
     if len(left) == 0:
-        return Int64Vector(0)
+        return Integer64Vector(0)
 
     # Detect encodings
     left_enc = getattr(left, 'encoding', 0)
     right_enc = getattr(right, 'encoding', 0)
-    cdef Int64Vector left_vec = <Int64Vector>left
-    cdef Int64Vector right_vec = <Int64Vector>right
+    cdef Integer64Vector left_vec = <Integer64Vector>left
+    cdef Integer64Vector right_vec = <Integer64Vector>right
     cdef size_t length = len(left)
 
     # Route to handler based on encoding pair
@@ -373,38 +373,38 @@ def int64_floordiv(left, right):
             result_val = 0
         else:
             result_val = _i64_const(left_vec) // _i64_const(right_vec)
-        return Int64Vector.from_constant(result_val, length)
+        return Integer64Vector.from_constant(result_val, length)
     else:
         # Unsupported encoding combination
         return None
 
 
 def int64_modulo(left, right):
-    """Modulo of two int64 operands. Returns Int64Vector or None. Handles dense and constant encodings."""
+    """Modulo of two int64 operands. Returns Integer64Vector or None. Handles dense and constant encodings."""
     # Handle Python scalar operands by converting to constant-encoded vectors
     if isinstance(left, int) and not isinstance(left, bool):
-        if isinstance(right, Int64Vector):
-            left = Int64Vector.from_constant(<int64_t>left, len(right))
+        if isinstance(right, Integer64Vector):
+            left = Integer64Vector.from_constant(<int64_t>left, len(right))
         else:
             return None
     if isinstance(right, int) and not isinstance(right, bool):
-        if isinstance(left, Int64Vector):
-            right = Int64Vector.from_constant(<int64_t>right, len(left))
+        if isinstance(left, Integer64Vector):
+            right = Integer64Vector.from_constant(<int64_t>right, len(left))
         else:
             return None
 
-    if not (isinstance(left, Int64Vector) and isinstance(right, Int64Vector)):
+    if not (isinstance(left, Integer64Vector) and isinstance(right, Integer64Vector)):
         return None
     if len(left) != len(right):
         return None
     if len(left) == 0:
-        return Int64Vector(0)
+        return Integer64Vector(0)
 
     # Detect encodings
     left_enc = getattr(left, 'encoding', 0)
     right_enc = getattr(right, 'encoding', 0)
-    cdef Int64Vector left_vec = <Int64Vector>left
-    cdef Int64Vector right_vec = <Int64Vector>right
+    cdef Integer64Vector left_vec = <Integer64Vector>left
+    cdef Integer64Vector right_vec = <Integer64Vector>right
     cdef size_t length = len(left)
 
     # Route to handler based on encoding pair
@@ -425,7 +425,7 @@ def int64_modulo(left, right):
             result_val = 0
         else:
             result_val = _i64_const(left_vec) % _i64_const(right_vec)
-        return Int64Vector.from_constant(result_val, length)
+        return Integer64Vector.from_constant(result_val, length)
     else:
         # Unsupported encoding combination
         return None
@@ -584,7 +584,7 @@ def float64_divide(left, right):
 
 def int64_float64_add(left, right):
     """Add int64 and float64. Returns Float64Vector or None. Handles dense and constant encodings."""
-    if not (isinstance(left, Int64Vector) and isinstance(right, Float64Vector)):
+    if not (isinstance(left, Integer64Vector) and isinstance(right, Float64Vector)):
         return None
     if len(left) != len(right):
         return None
@@ -594,7 +594,7 @@ def int64_float64_add(left, right):
     # Detect encodings
     left_enc = getattr(left, 'encoding', 0)
     right_enc = getattr(right, 'encoding', 0)
-    cdef Int64Vector left_vec = <Int64Vector>left
+    cdef Integer64Vector left_vec = <Integer64Vector>left
     cdef Float64Vector right_vec = <Float64Vector>right
     cdef size_t length = len(left)
 
@@ -621,7 +621,7 @@ def int64_float64_add(left, right):
 
 def float64_int64_add(left, right):
     """Add float64 and int64. Returns Float64Vector or None. Handles dense and constant encodings."""
-    if not (isinstance(left, Float64Vector) and isinstance(right, Int64Vector)):
+    if not (isinstance(left, Float64Vector) and isinstance(right, Integer64Vector)):
         return None
     if len(left) != len(right):
         return None
@@ -632,7 +632,7 @@ def float64_int64_add(left, right):
     left_enc = getattr(left, 'encoding', 0)
     right_enc = getattr(right, 'encoding', 0)
     cdef Float64Vector left_vec = <Float64Vector>left
-    cdef Int64Vector right_vec = <Int64Vector>right
+    cdef Integer64Vector right_vec = <Integer64Vector>right
     cdef size_t length = len(left)
 
     # Route to handler based on encoding pair
@@ -658,7 +658,7 @@ def float64_int64_add(left, right):
 
 def int64_float64_subtract(left, right):
     """Subtract float64 from int64. Returns Float64Vector or None. Handles dense and constant encodings."""
-    if not (isinstance(left, Int64Vector) and isinstance(right, Float64Vector)):
+    if not (isinstance(left, Integer64Vector) and isinstance(right, Float64Vector)):
         return None
     if len(left) != len(right):
         return None
@@ -667,7 +667,7 @@ def int64_float64_subtract(left, right):
 
     left_enc = getattr(left, 'encoding', 0)
     right_enc = getattr(right, 'encoding', 0)
-    cdef Int64Vector left_vec = <Int64Vector>left
+    cdef Integer64Vector left_vec = <Integer64Vector>left
     cdef Float64Vector right_vec = <Float64Vector>right
     cdef size_t length = len(left)
 
@@ -688,7 +688,7 @@ def int64_float64_subtract(left, right):
 
 def int64_float64_multiply(left, right):
     """Multiply int64 and float64. Returns Float64Vector or None. Handles dense and constant encodings."""
-    if not (isinstance(left, Int64Vector) and isinstance(right, Float64Vector)):
+    if not (isinstance(left, Integer64Vector) and isinstance(right, Float64Vector)):
         return None
     if len(left) != len(right):
         return None
@@ -697,7 +697,7 @@ def int64_float64_multiply(left, right):
 
     left_enc = getattr(left, 'encoding', 0)
     right_enc = getattr(right, 'encoding', 0)
-    cdef Int64Vector left_vec = <Int64Vector>left
+    cdef Integer64Vector left_vec = <Integer64Vector>left
     cdef Float64Vector right_vec = <Float64Vector>right
     cdef size_t length = len(left)
 
@@ -718,7 +718,7 @@ def int64_float64_multiply(left, right):
 
 def int64_float64_divide(left, right):
     """Divide int64 by float64. Returns Float64Vector or None. Handles dense and constant encodings."""
-    if not (isinstance(left, Int64Vector) and isinstance(right, Float64Vector)):
+    if not (isinstance(left, Integer64Vector) and isinstance(right, Float64Vector)):
         return None
     if len(left) != len(right):
         return None
@@ -727,7 +727,7 @@ def int64_float64_divide(left, right):
 
     left_enc = getattr(left, 'encoding', 0)
     right_enc = getattr(right, 'encoding', 0)
-    cdef Int64Vector left_vec = <Int64Vector>left
+    cdef Integer64Vector left_vec = <Integer64Vector>left
     cdef Float64Vector right_vec = <Float64Vector>right
     cdef size_t length = len(left)
 
@@ -751,7 +751,7 @@ def int64_float64_divide(left, right):
 
 def int64_float64_floordiv(left, right):
     """Floor divide int64 by float64. Returns Float64Vector or None. Handles dense and constant encodings."""
-    if not (isinstance(left, Int64Vector) and isinstance(right, Float64Vector)):
+    if not (isinstance(left, Integer64Vector) and isinstance(right, Float64Vector)):
         return None
     if len(left) != len(right):
         return None
@@ -760,7 +760,7 @@ def int64_float64_floordiv(left, right):
 
     left_enc = getattr(left, 'encoding', 0)
     right_enc = getattr(right, 'encoding', 0)
-    cdef Int64Vector left_vec = <Int64Vector>left
+    cdef Integer64Vector left_vec = <Integer64Vector>left
     cdef Float64Vector right_vec = <Float64Vector>right
     cdef size_t length = len(left)
 
@@ -784,7 +784,7 @@ def int64_float64_floordiv(left, right):
 
 def float64_int64_subtract(left, right):
     """Subtract int64 from float64. Returns Float64Vector or None. Handles dense and constant encodings."""
-    if not (isinstance(left, Float64Vector) and isinstance(right, Int64Vector)):
+    if not (isinstance(left, Float64Vector) and isinstance(right, Integer64Vector)):
         return None
     if len(left) != len(right):
         return None
@@ -794,7 +794,7 @@ def float64_int64_subtract(left, right):
     left_enc = getattr(left, 'encoding', 0)
     right_enc = getattr(right, 'encoding', 0)
     cdef Float64Vector left_vec = <Float64Vector>left
-    cdef Int64Vector right_vec = <Int64Vector>right
+    cdef Integer64Vector right_vec = <Integer64Vector>right
     cdef size_t length = len(left)
 
     if left_enc == 0 and right_enc == 0:
@@ -817,7 +817,7 @@ def float64_int64_subtract(left, right):
 
 def float64_int64_multiply(left, right):
     """Multiply float64 and int64. Returns Float64Vector or None. Handles dense and constant encodings."""
-    if not (isinstance(left, Float64Vector) and isinstance(right, Int64Vector)):
+    if not (isinstance(left, Float64Vector) and isinstance(right, Integer64Vector)):
         return None
     if len(left) != len(right):
         return None
@@ -827,7 +827,7 @@ def float64_int64_multiply(left, right):
     left_enc = getattr(left, 'encoding', 0)
     right_enc = getattr(right, 'encoding', 0)
     cdef Float64Vector left_vec = <Float64Vector>left
-    cdef Int64Vector right_vec = <Int64Vector>right
+    cdef Integer64Vector right_vec = <Integer64Vector>right
     cdef size_t length = len(left)
 
     if left_enc == 0 and right_enc == 0:
@@ -847,7 +847,7 @@ def float64_int64_multiply(left, right):
 
 def float64_int64_divide(left, right):
     """Divide float64 by int64. Returns Float64Vector or None. Handles dense and constant encodings."""
-    if not (isinstance(left, Float64Vector) and isinstance(right, Int64Vector)):
+    if not (isinstance(left, Float64Vector) and isinstance(right, Integer64Vector)):
         return None
     if len(left) != len(right):
         return None
@@ -857,7 +857,7 @@ def float64_int64_divide(left, right):
     left_enc = getattr(left, 'encoding', 0)
     right_enc = getattr(right, 'encoding', 0)
     cdef Float64Vector left_vec = <Float64Vector>left
-    cdef Int64Vector right_vec = <Int64Vector>right
+    cdef Integer64Vector right_vec = <Integer64Vector>right
     cdef size_t length = len(left)
 
     if left_enc == 0 and right_enc == 0:
@@ -880,7 +880,7 @@ def float64_int64_divide(left, right):
 
 def float64_int64_floordiv(left, right):
     """Floor divide float64 by int64. Returns Float64Vector or None. Handles dense and constant encodings."""
-    if not (isinstance(left, Float64Vector) and isinstance(right, Int64Vector)):
+    if not (isinstance(left, Float64Vector) and isinstance(right, Integer64Vector)):
         return None
     if len(left) != len(right):
         return None
@@ -890,7 +890,7 @@ def float64_int64_floordiv(left, right):
     left_enc = getattr(left, 'encoding', 0)
     right_enc = getattr(right, 'encoding', 0)
     cdef Float64Vector left_vec = <Float64Vector>left
-    cdef Int64Vector right_vec = <Int64Vector>right
+    cdef Integer64Vector right_vec = <Integer64Vector>right
     cdef size_t length = len(left)
 
     if left_enc == 0 and right_enc == 0:

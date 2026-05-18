@@ -15,7 +15,7 @@ if not hasattr(cio, "morsel_to_json_rows") or not hasattr(cio, "morsel_to_json_s
 from draken.morsels.morsel import Morsel
 from opteryx.compiled.io import morsel_to_json_rows
 from opteryx.compiled.io import morsel_to_json_strings
-from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer64_vector import Integer64Vector
 from draken.vectors.string_vector import StringVector
 
 
@@ -76,7 +76,7 @@ def test_morsel_to_json_rows_supports_typed_constant_columns():
     morsel = Morsel.from_vectors(
         ["id", "name"],
         [
-            Int64Vector.from_constant(7, 2),
+            Integer64Vector.from_constant(7, 2),
             StringVector.from_constant("north", 2),
         ],
     )

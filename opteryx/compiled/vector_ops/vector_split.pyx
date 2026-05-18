@@ -219,7 +219,7 @@ def vector_split(StringVector vec, char delimiter):
         return array_vector_from_parts(empty_child, empty_offsets, NULL, 0)
 
     # Constant encoding: split once, replicate n times
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         if uv.validity != NULL:  # null constant
             # Return ArrayVector with all nulls
             null_child = StringVector(0)  # Empty child for null values

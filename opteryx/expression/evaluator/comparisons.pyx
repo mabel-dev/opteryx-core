@@ -2,9 +2,9 @@
 
 Explicit comparison dispatch for all native Draken vector types.
 
-Dispatch strategy:
-  1. Check encoding schemes first (CONSTANT_ENCODED, DICTIONARY_ENCODED)
-  2. Then dispatch by underlying data type (STRING, INT64, FLOAT64, TIMESTAMP, etc.)
+Dispatch strategy: by underlying data type (STRING, INT64, FLOAT64, TIMESTAMP, etc.).
+Encoding (constant, dictionary, dense) is handled inside each type's compare kernels
+via the unified DrakenVector view.
 """
 
 import datetime
@@ -12,7 +12,7 @@ import datetime
 from draken.vectors._decimal_vector import DecimalVector
 from draken.vectors.bool_vector import BoolVector
 from draken.vectors.float64_vector import Float64Vector
-from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer64_vector import Integer64Vector
 from draken.vectors.string_vector import StringVector
 from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
 from opteryx.compiled.structures.perfect_hash_set import PerfectHashSet
@@ -75,7 +75,7 @@ cdef _int64_compare(int op_code, vec, right):
     """Int64-vs-anything compare. Translates our op_code to Draken's
     internal op numbering once, then calls the integer-dispatched kernel
     directly via the (now cpdef) `_compare_scalar` / `_compare_vector` /
-    `_compare_float64_vector` entries on Int64Vector. No per-op
+    `_compare_float64_vector` entries on Integer64Vector. No per-op
     named-method round-trip.
     """
     cdef int draken_op
@@ -87,12 +87,12 @@ cdef _int64_compare(int op_code, vec, right):
         value_set = _coerce_int64_set(right)
         if op_code == OP_IN_LIST:
             return vector_in_list(vec, build_in_list_carchar(value_set))
-        raise NotImplementedError(f"Int64Vector: set op (code {op_code}) not supported")
+        raise NotImplementedError(f"Integer64Vector: set op (code {op_code}) not supported")
 
     draken_op = _DRAKEN_CMP_OP[op_code]
     if draken_op < 0:
         raise NotImplementedError(
-            f"Int64Vector: op_code {op_code} has no Draken compare kernel"
+            f"Integer64Vector: op_code {op_code} has no Draken compare kernel"
         )
 
     right_type = get_vector_type(right)
@@ -138,7 +138,7 @@ cdef _float64_compare(int op_code, vec, right):
 
     right_type = get_vector_type(right)
 
-    if right_type in (VectorType.INT64, VectorType.CONSTANT_ENCODED):
+    if right_type in (VectorType.INT64,):
         if _is_constant_vector_like(right):
             right = _constant_scalar_value(right)
         else:
@@ -153,132 +153,6 @@ cdef _float64_compare(int op_code, vec, right):
 
     value = _coerce_float(right)
     return vec._compare_scalar(value, draken_op)
-
-
-cdef _dict_compare(int op_code, vec, right):
-    vec = _dictionary_compare_vector(vec)
-    if vec is None:
-        raise NotImplementedError("Dictionary compare path requires a dictionary-encoded vector.")
-
-    if right is None:
-        return BoolVector(len(vec))
-
-    if _is_constant_vector_like(right):
-        right = _constant_scalar_value(right)
-        if right is None:
-            return BoolVector(len(vec))
-
-    elif is_draken_vector(right):
-        right_vec = _dictionary_compare_vector(right)
-        if right_vec is None:
-            raise NotImplementedError(
-                "dictionary-encoded vector column-to-column comparison requires a "
-                "Draken-compatible right-hand vector."
-            )
-        if op_code == OP_EQ:
-            return vec.equals_vector(right_vec)
-        if op_code == OP_NOT_EQ:
-            return vec.not_equals_vector(right_vec)
-        if op_code == OP_LT:
-            return vec.less_than_vector(right_vec)
-        if op_code == OP_GT:
-            return vec.greater_than_vector(right_vec)
-        if op_code == OP_LT_EQ:
-            return vec.less_than_or_equals_vector(right_vec)
-        if op_code == OP_GT_EQ:
-            return vec.greater_than_or_equals_vector(right_vec)
-        raise NotImplementedError(
-            f"dictionary-encoded vector column-to-column: unsupported op (code {op_code})"
-        )
-
-    if isinstance(right, (datetime.datetime, datetime.date)):
-        vec_type = get_vector_type(vec)
-        int_val = _coerce_date32(right) if vec_type == VectorType.DATE32 else _coerce_timestamp(right)
-        return vec._compare_scalar(int_val, _DRAKEN_CMP_OP[op_code])
-
-    def _enc(v):
-        return v.encode() if isinstance(v, str) else v
-
-    if op_code == OP_IN_LIST:
-        if isinstance(right, (list, tuple, set, frozenset)):
-            right = frozenset(_enc(v) for v in right)
-        else:
-            right = _enc(right)
-        return vec.in_list(right)
-
-    if isinstance(right, (list, tuple, set, frozenset)):
-        value_list = [_enc(v) for v in right]
-    else:
-        value_list = _enc(right)
-
-    if op_code <= OP_GT_EQ:
-        return vec._compare_scalar(value_list, _DRAKEN_CMP_OP[op_code])
-    if op_code in (OP_LIKE, OP_ILIKE, OP_RLIKE, OP_IN_STR, OP_I_IN_STR):
-        right = _coerce_str(right)
-    if op_code == OP_LIKE:
-        return vector_like(vec, right, False)
-    if op_code == OP_ILIKE:
-        return vector_like(vec, right, True)
-    if op_code == OP_RLIKE:
-        return vector_rlike(vec, right)
-    if op_code == OP_IN_STR:
-        return vector_contains(vec, right, False)
-    if op_code == OP_I_IN_STR:
-        return vector_contains(vec, right, True)
-    raise NotImplementedError(f"dictionary-encoded vector: unsupported op (code {op_code})")
-
-
-cdef _constant_compare(int op_code, vec, right):
-    from opteryx.expression.operations import _coerce_in_list_values
-
-    if right is None:
-        return BoolVector(len(vec))
-
-    if is_draken_vector(right) and get_vector_type(right) == VectorType.CONSTANT_ENCODED:
-        right = _constant_scalar_value(right)
-
-    if is_draken_vector(right):
-        if op_code == OP_EQ:
-            return vec.equals_vector(right)
-        if op_code == OP_LT:
-            return vec.less_than_vector(right)
-        if op_code == OP_GT:
-            return vec.greater_than_vector(right)
-        if op_code == OP_LT_EQ:
-            return vec.less_than_or_equals_vector(right)
-        if op_code == OP_GT_EQ:
-            return vec.greater_than_or_equals_vector(right)
-
-    if isinstance(right, (list, tuple, set, frozenset)):
-        right = _coerce_in_list_values(right)
-
-    if op_code == OP_EQ:
-        return vec.equals(right)
-    if op_code == OP_LT:
-        return vec.less_than(right)
-    if op_code == OP_GT:
-        return vec.greater_than(right)
-    if op_code == OP_LT_EQ:
-        return vec.less_than_or_equals(right)
-    if op_code == OP_GT_EQ:
-        return vec.greater_than_or_equals(right)
-    if op_code == OP_IN_LIST:
-        return vector_in_list(vec, build_in_list_carchar(right))
-    if op_code in (OP_LIKE, OP_ILIKE, OP_RLIKE, OP_IN_STR, OP_I_IN_STR):
-        if _is_constant_vector_like(right):
-            right = _constant_scalar_value(right)
-        right = _coerce_str(right)
-    if op_code == OP_LIKE:
-        return vector_like(vec, right, False)
-    if op_code == OP_ILIKE:
-        return vector_like(vec, right, True)
-    if op_code == OP_RLIKE:
-        return vector_rlike(vec, right)
-    if op_code == OP_IN_STR:
-        return vector_contains(vec, right, False)
-    if op_code == OP_I_IN_STR:
-        return vector_contains(vec, right, True)
-    raise NotImplementedError(f"constant-encoded vector: unsupported op (code {op_code})")
 
 
 cdef _decimal_compare(int op_code, vec, right):
@@ -359,11 +233,7 @@ cdef draken_compare_int(int op_code, left, right, left_schema_type=None, right_s
 
     vec_type = get_vector_type(left)
 
-    if vec_type == VectorType.CONSTANT_ENCODED:
-        result = _constant_compare(op_code, left, right)
-    elif vec_type == VectorType.DICTIONARY_ENCODED:
-        result = _dict_compare(op_code, left, right)
-    elif vec_type == VectorType.STRING:
+    if vec_type == VectorType.STRING:
         result = _string_compare(op_code, left, right)
     elif vec_type in (VectorType.INT64, VectorType.INTEGER):
         if left_schema_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP):
@@ -460,11 +330,7 @@ cpdef draken_compare(str op, left, right, left_schema_type=None, right_schema_ty
 
     vec_type = get_vector_type(left)
 
-    if vec_type == VectorType.CONSTANT_ENCODED:
-        result = _constant_compare(op_code, left, right)
-    elif vec_type == VectorType.DICTIONARY_ENCODED:
-        result = _dict_compare(op_code, left, right)
-    elif vec_type == VectorType.STRING:
+    if vec_type == VectorType.STRING:
         result = _string_compare(op_code, left, right)
     elif vec_type in (VectorType.INT64, VectorType.INTEGER):
         if left_schema_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP):
@@ -500,20 +366,6 @@ cpdef draken_between(col, lower, upper, bint lower_inclusive, bint upper_inclusi
         return col.between(_coerce_timestamp(lower), _coerce_timestamp(upper), lower_inclusive, upper_inclusive)
     if vec_type == VectorType.DATE32:
         return col.between(_coerce_date32(lower), _coerce_date32(upper), lower_inclusive, upper_inclusive)
-    if vec_type == VectorType.CONSTANT_ENCODED:
-        if isinstance(col, Int64Vector):
-            return col.between(_coerce_int64(lower), _coerce_int64(upper),
-                               lower_inclusive, upper_inclusive)
-        if isinstance(col, Float64Vector):
-            return col.between(_coerce_float(lower), _coerce_float(upper),
-                               lower_inclusive, upper_inclusive)
-        raise NotImplementedError(
-            f"draken_between: CONSTANT_ENCODED with unsupported underlying type {type(col).__name__!r}"
-        )
-    if vec_type == VectorType.DICTIONARY_ENCODED:
-        lo_op = "GtEq" if lower_inclusive else "Gt"
-        hi_op = "LtEq" if upper_inclusive else "Lt"
-        return draken_compare(lo_op, col, lower).and_vector(draken_compare(hi_op, col, upper))
     if vec_type == VectorType.DECIMAL:
         lo_op = "GtEq" if lower_inclusive else "Gt"
         hi_op = "LtEq" if upper_inclusive else "Lt"

@@ -47,7 +47,7 @@ from draken.core.fixed_vector cimport buf_length
 from draken.core.fixed_vector cimport free_fixed_buffer
 from draken.vectors.vector cimport Vector, NULL_HASH, simd_mix_hash, simd_popcount
 from draken.vectors.bool_vector cimport BoolVector
-from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
+from draken.vectors.integer64_vector cimport Integer64Vector, _materialize_dict_int64
 from draken.vectors.float64_vector cimport Float64Vector
 
 
@@ -979,7 +979,7 @@ cdef class DecimalVector(Vector):
         return _decimal.Decimal(m) * factor
 
     # ------------------------------------------------------------------
-    # Hashing — identical logic to Int64Vector since storage IS int64
+    # Hashing — identical logic to Integer64Vector since storage IS int64
     # ------------------------------------------------------------------
 
     cdef inline void hash_into(
@@ -1212,9 +1212,9 @@ cdef DecimalVector from_arrow(object array):
 # Module-level factory: from_int64_vector
 # ---------------------------------------------------------------------------
 
-cpdef DecimalVector from_int64_vector(Int64Vector source, int precision, int scale):
+cpdef DecimalVector from_int64_vector(Integer64Vector source, int precision, int scale):
     """
-    Build a DecimalVector from an Int64Vector containing unscaled integer values.
+    Build a DecimalVector from an Integer64Vector containing unscaled integer values.
 
     This is the native Draken conversion path for parquet DECIMAL columns, which
     are stored as INT64 physical type with a decimal logical type annotation.
@@ -1223,7 +1223,7 @@ cpdef DecimalVector from_int64_vector(Int64Vector source, int precision, int sca
     Scale and precision are set from the caller-provided values.
 
     Args:
-        source:    Int64Vector with unscaled integer values (dense or const)
+        source:    Integer64Vector with unscaled integer values (dense or const)
         precision: Decimal precision (max 18 for int64 backing)
         scale:     Decimal scale (number of digits after decimal point)
 

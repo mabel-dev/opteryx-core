@@ -10,7 +10,7 @@
 
 from libc.stdint cimport int64_t, uint8_t
 
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors import string_vector as string_vector_module
 
@@ -38,8 +38,8 @@ cdef inline int int64_to_str_buf(int64_t value, char* buf) nogil:
     return 20 - i
 
 
-cpdef StringVector vector_cast_int64_to_bytes(Int64Vector vec):
-    """Cast an Int64Vector to a StringVector of UTF-8 decimal bytes."""
+cpdef StringVector vector_cast_int64_to_bytes(Integer64Vector vec):
+    """Cast an Integer64Vector to a StringVector of UTF-8 decimal bytes."""
     cdef Py_ssize_t n = vec.ptr.length
     cdef int64_t* src = <int64_t*>vec.ptr.data
     cdef uint8_t* null_bm = vec.ptr.null_bitmap
@@ -59,6 +59,6 @@ cpdef StringVector vector_cast_int64_to_bytes(Int64Vector vec):
     return builder.finish()
 
 
-cpdef StringVector vector_cast_int64_to_ascii(Int64Vector vec):
-    """Cast an Int64Vector to a StringVector of ASCII decimal strings (same as bytes)."""
+cpdef StringVector vector_cast_int64_to_ascii(Integer64Vector vec):
+    """Cast an Integer64Vector to a StringVector of ASCII decimal strings (same as bytes)."""
     return vector_cast_int64_to_bytes(vec)

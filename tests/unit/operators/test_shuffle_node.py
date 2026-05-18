@@ -2,7 +2,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 from draken.morsels.morsel import Morsel
-from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer64_vector import Integer64Vector
 
 from opteryx import EOS
 from opteryx.managers.kvstores import create_kv_store
@@ -124,8 +124,8 @@ def test_shuffle_node_spill_replays_typed_dictionary_encoding():
     morsel = Morsel.from_vectors(
         ["k", "v"],
         [
-            Int64Vector.from_dict([0, 1, 2, 1, 0, 2, 1, 0], [10, 20, 30]),
-            Int64Vector.from_arrow(pa.array([1, 2, 3, 4, 5, 6, 7, 8], type=pa.int64())),
+            Integer64Vector.from_dict([0, 1, 2, 1, 0, 2, 1, 0], [10, 20, 30]),
+            Integer64Vector.from_arrow(pa.array([1, 2, 3, 4, 5, 6, 7, 8], type=pa.int64())),
         ],
     )
     for _ in node.execute(morsel):

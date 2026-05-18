@@ -13,7 +13,7 @@ from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
 from draken.vectors.timestamp_vector cimport TimestampVector
-from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.vectors.integer64_vector cimport Integer64Vector, from_sequence as int64_from_sequence
 from draken.core.buffers cimport DrakenFixedBuffer
 
 
@@ -74,7 +74,7 @@ cdef inline int64_t days_to_years(int64_t days) noexcept nogil:
     return days // 365
 
 
-cpdef Int64Vector vector_date_diff(TimestampVector start, TimestampVector end, str part):
+cpdef Integer64Vector vector_date_diff(TimestampVector start, TimestampVector end, str part):
     """
     Compute (end - start) in the requested unit.
 
@@ -85,7 +85,7 @@ cpdef Int64Vector vector_date_diff(TimestampVector start, TimestampVector end, s
               'weeks', 'months', 'quarters', 'years'.
 
     Returns:
-        Int64Vector of integer differences.
+        Integer64Vector of integer differences.
     """
     cdef DrakenFixedBuffer* sp = start.ptr
     cdef DrakenFixedBuffer* ep = end.ptr

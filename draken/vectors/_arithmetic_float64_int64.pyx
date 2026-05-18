@@ -20,7 +20,7 @@ from libc.string cimport memcpy, memset
 from libc.stdlib cimport malloc, free
 
 from draken.core.buffers cimport DrakenFixedBuffer
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.interop.vector_sequence cimport vector_from_sequence
 
@@ -170,7 +170,7 @@ cdef Float64Vector _float64_int64_scalar_floordiv_dense(
 
 cdef Float64Vector _float64_scalar_int64_add_dense(
     double scalar,
-    Int64Vector right,
+    Integer64Vector right,
     size_t length,
 ) except *:
     """Add scalar float64 (constant-encoded) to dense int64 vector. Result is float64."""
@@ -197,7 +197,7 @@ cdef Float64Vector _float64_scalar_int64_add_dense(
 
 cdef Float64Vector _float64_scalar_int64_subtract_dense(
     double scalar,
-    Int64Vector right,
+    Integer64Vector right,
     size_t length,
 ) except *:
     """Subtract dense int64 vector from scalar float64 (constant-encoded). Result is float64."""
@@ -224,7 +224,7 @@ cdef Float64Vector _float64_scalar_int64_subtract_dense(
 
 cdef Float64Vector _float64_scalar_int64_multiply_dense(
     double scalar,
-    Int64Vector right,
+    Integer64Vector right,
     size_t length,
 ) except *:
     """Multiply scalar float64 (constant-encoded) by dense int64 vector. Result is float64."""
@@ -251,7 +251,7 @@ cdef Float64Vector _float64_scalar_int64_multiply_dense(
 
 cdef Float64Vector _float64_scalar_int64_divide_dense(
     double scalar,
-    Int64Vector right,
+    Integer64Vector right,
     size_t length,
 ) except *:
     """Divide scalar float64 (constant-encoded) by dense int64 vector. Result is float64."""
@@ -281,7 +281,7 @@ cdef Float64Vector _float64_scalar_int64_divide_dense(
 
 cdef Float64Vector _float64_scalar_int64_floordiv_dense(
     double scalar,
-    Int64Vector right,
+    Integer64Vector right,
     size_t length,
 ) except *:
     """Floor divide scalar float64 (constant-encoded) by dense int64 vector. Result is float64."""
@@ -310,7 +310,7 @@ cdef Float64Vector _float64_scalar_int64_floordiv_dense(
 
 cdef Float64Vector _float64_int64_add_dense(
     Float64Vector left,
-    Int64Vector right,
+    Integer64Vector right,
     size_t length,
 ) except *:
     """Add float64 and int64 vectors. Result is float64."""
@@ -329,7 +329,7 @@ cdef Float64Vector _float64_int64_add_dense(
 
 cdef Float64Vector _float64_int64_subtract_dense(
     Float64Vector left,
-    Int64Vector right,
+    Integer64Vector right,
     size_t length,
 ) except *:
     """Subtract int64 from float64 vectors. Result is float64."""
@@ -348,7 +348,7 @@ cdef Float64Vector _float64_int64_subtract_dense(
 
 cdef Float64Vector _float64_int64_multiply_dense(
     Float64Vector left,
-    Int64Vector right,
+    Integer64Vector right,
     size_t length,
 ) except *:
     """Multiply float64 and int64 vectors. Result is float64."""
@@ -367,7 +367,7 @@ cdef Float64Vector _float64_int64_multiply_dense(
 
 cdef Float64Vector _float64_int64_divide_dense(
     Float64Vector left,
-    Int64Vector right,
+    Integer64Vector right,
     size_t length,
 ) except *:
     """Divide float64 by int64 vectors. Result is float64."""
@@ -389,7 +389,7 @@ cdef Float64Vector _float64_int64_divide_dense(
 
 cdef Float64Vector _float64_int64_floordiv_dense(
     Float64Vector left,
-    Int64Vector right,
+    Integer64Vector right,
     size_t length,
 ) except *:
     """Floor divide float64 by int64 vectors. Result is float64."""

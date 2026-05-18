@@ -11,7 +11,7 @@
 """
 Convert timestamps and dates to Unix time (seconds since epoch).
 
-Returns an Int64Vector.
+Returns an Integer64Vector.
 """
 
 from libc.stdint cimport int32_t, int64_t, uint8_t
@@ -20,11 +20,11 @@ from libc.string cimport memset
 
 from draken.vectors.timestamp_vector cimport TimestampVector
 from draken.vectors.date32_vector cimport Date32Vector
-from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.vectors.integer64_vector cimport Integer64Vector, from_sequence as int64_from_sequence
 from draken.core.buffers cimport DrakenFixedBuffer
 
 
-cpdef Int64Vector vector_unixtime_timestamp(TimestampVector ts_vec):
+cpdef Integer64Vector vector_unixtime_timestamp(TimestampVector ts_vec):
     """
     Convert TimestampVector to Unix time (seconds since epoch).
 
@@ -32,7 +32,7 @@ cpdef Int64Vector vector_unixtime_timestamp(TimestampVector ts_vec):
         ts_vec: TimestampVector
 
     Returns:
-        Int64Vector of Unix timestamps (seconds).
+        Integer64Vector of Unix timestamps (seconds).
     """
     cdef DrakenFixedBuffer* ptr = ts_vec.ptr
     cdef int64_t length = ptr.length
@@ -74,7 +74,7 @@ cpdef Int64Vector vector_unixtime_timestamp(TimestampVector ts_vec):
         free(result_data)
 
 
-cpdef Int64Vector vector_unixtime_date32(Date32Vector date_vec):
+cpdef Integer64Vector vector_unixtime_date32(Date32Vector date_vec):
     """
     Convert Date32Vector (days since epoch) to Unix time (seconds since epoch).
 
@@ -82,7 +82,7 @@ cpdef Int64Vector vector_unixtime_date32(Date32Vector date_vec):
         date_vec: Date32Vector
 
     Returns:
-        Int64Vector of Unix timestamps (seconds).
+        Integer64Vector of Unix timestamps (seconds).
     """
     cdef DrakenFixedBuffer* ptr = date_vec.ptr
     cdef int64_t length = ptr.length
@@ -124,7 +124,7 @@ cpdef object vector_unixtime(object temporal_vec):
         temporal_vec: TimestampVector or Date32Vector
 
     Returns:
-        Int64Vector of Unix timestamps.
+        Integer64Vector of Unix timestamps.
     """
     if isinstance(temporal_vec, TimestampVector):
         return vector_unixtime_timestamp(<TimestampVector>temporal_vec)

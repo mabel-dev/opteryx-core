@@ -30,7 +30,7 @@ def test_evaluate_and_append_morsel_literal_emits_typed_constant_vector():
 
     assert result.__class__.__name__ == "Morsel"
     assert result.num_rows == 3
-    assert result.column(b"k").__class__.__name__ == "IntegerVector"
+    assert result.column(b"k").__class__.__name__ == "Integer32Vector"
     assert result.column(b"k").encoding == DRAKEN_ENCODING_CONSTANT
     assert result.column(b"k").to_pylist() == [42, 42, 42]
     assert result.column(b"x").to_pylist() == [1, 2, 3]
@@ -46,7 +46,7 @@ def test_projection_node_keeps_typed_constant_vector_on_morsel_literal_projectio
     assert result.__class__.__name__ == "Morsel"
     assert result.num_rows == 3
     assert result.column_names == [b"k"]
-    assert result.column(b"k").__class__.__name__ == "IntegerVector"
+    assert result.column(b"k").__class__.__name__ == "Integer32Vector"
     assert result.column(b"k").encoding == DRAKEN_ENCODING_CONSTANT
     assert result.column(b"k").to_pylist() == [7, 7, 7]
     assert node.readings["draken_constant_columns_emitted"] == 1
@@ -75,7 +75,7 @@ def test_evaluate_and_append_morsel_mixed_non_literal_and_literal_keeps_typed_co
 
     assert result.__class__.__name__ == "Morsel"
     assert result.column(b"y").to_pylist() == [2, 3, 4]
-    assert result.column(b"k").__class__.__name__ == "IntegerVector"
+    assert result.column(b"k").__class__.__name__ == "Integer32Vector"
     assert result.column(b"k").encoding == DRAKEN_ENCODING_CONSTANT
     assert result.column(b"k").to_pylist() == [99, 99, 99]
 
@@ -108,7 +108,7 @@ def test_projection_node_mixed_non_literal_and_literal_keeps_typed_constant():
     assert result.__class__.__name__ == "Morsel"
     assert result.column_names == [b"y", b"k"]
     assert result.column(b"y").to_pylist() == [2, 3, 4]
-    assert result.column(b"k").__class__.__name__ == "IntegerVector"
+    assert result.column(b"k").__class__.__name__ == "Integer32Vector"
     assert result.column(b"k").encoding == DRAKEN_ENCODING_CONSTANT
     assert result.column(b"k").to_pylist() == [5, 5, 5]
     assert node.readings["draken_constant_columns_emitted"] == 1
@@ -124,7 +124,7 @@ def test_projection_node_arrow_input_literal_uses_typed_constant_path():
     assert result.__class__.__name__ == "Morsel"
     assert result.num_rows == 3
     assert result.column_names == [b"k"]
-    assert result.column(b"k").__class__.__name__ == "IntegerVector"
+    assert result.column(b"k").__class__.__name__ == "Integer32Vector"
     assert result.column(b"k").encoding == DRAKEN_ENCODING_CONSTANT
     assert result.column(b"k").to_pylist() == [7, 7, 7]
     assert node.readings["draken_constant_columns_emitted"] == 1
@@ -158,7 +158,7 @@ def test_projection_node_arrow_input_mixed_preserves_typed_constant_literal():
     assert result.__class__.__name__ == "Morsel"
     assert result.column_names == [b"y", b"k"]
     assert result.column(b"y").to_pylist() == [2, 3, 4]
-    assert result.column(b"k").__class__.__name__ == "IntegerVector"
+    assert result.column(b"k").__class__.__name__ == "Integer32Vector"
     assert result.column(b"k").encoding == DRAKEN_ENCODING_CONSTANT
     assert result.column(b"k").to_pylist() == [5, 5, 5]
     assert node.readings["draken_constant_columns_emitted"] == 1

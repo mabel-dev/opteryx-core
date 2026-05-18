@@ -11,7 +11,7 @@
 """
 Native bitwise helpers for Draken integer vectors.
 
-This module implements vectorized bitwise AND operation on Int64Vector:
+This module implements vectorized bitwise AND operation on Integer64Vector:
 - Bitwise AND
 
 All operations:
@@ -23,20 +23,20 @@ All operations:
 
 from libc.stdint cimport int64_t, uint8_t
 
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.interop.vector_sequence cimport vector_from_sequence
 
 
-cpdef object vector_bitwise_and(Int64Vector left, Int64Vector right):
-    """Bitwise AND two Int64Vectors element-wise.
+cpdef object vector_bitwise_and(Integer64Vector left, Integer64Vector right):
+    """Bitwise AND two Integer64Vectors element-wise.
 
     Parameters:
-        left: Int64Vector operand.
-        right: Int64Vector operand.
+        left: Integer64Vector operand.
+        right: Integer64Vector operand.
 
     Returns:
-        Int64Vector with bitwise AND result. NULL propagates from either input.
+        Integer64Vector with bitwise AND result. NULL propagates from either input.
 
     Raises:
         ValueError: If vectors have mismatched lengths.

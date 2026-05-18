@@ -11,7 +11,7 @@
 """
 Native bitwise AND helper for Draken integer vectors.
 
-This module implements vectorized bitwise AND operations on Int64Vector:
+This module implements vectorized bitwise AND operations on Integer64Vector:
 - Bitwise AND
 
 All operations:
@@ -25,14 +25,14 @@ from libc.stdint cimport int64_t, uint8_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.interop.vector_sequence cimport vector_from_sequence
 
 
 
-cpdef object vector_bitwise_shift_left(Int64Vector left, Int64Vector right):
-    """Left shift Int64Vector elements by positions specified in right.
+cpdef object vector_bitwise_shift_left(Integer64Vector left, Integer64Vector right):
+    """Left shift Integer64Vector elements by positions specified in right.
 
     Arithmetic left shift (shift-left): shifts bits of left[i] left by right[i] positions.
     Equivalent to left[i] << right[i]. Vacated low-order bits are filled with zeros.
@@ -40,11 +40,11 @@ cpdef object vector_bitwise_shift_left(Int64Vector left, Int64Vector right):
     Shift amounts are bounded to [0, 63] to avoid undefined behavior.
 
     Parameters:
-        left: Int64Vector values to shift.
-        right: Int64Vector shift distances (in bits).
+        left: Integer64Vector values to shift.
+        right: Integer64Vector shift distances (in bits).
 
     Returns:
-        Int64Vector with left-shifted result. NULL propagates from either input.
+        Integer64Vector with left-shifted result. NULL propagates from either input.
         Out-of-range shift amounts (< 0 or > 63) produce NULL.
 
     Raises:

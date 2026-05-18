@@ -23,9 +23,9 @@ from draken.core.buffers cimport DRAKEN_STRING
 from draken.core.fixed_vector cimport alloc_fixed_buffer, free_fixed_buffer
 from draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
 from draken.vectors.vector cimport Vector
-from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
+from draken.vectors.integer64_vector cimport Integer64Vector, _materialize_dict_int64
 from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
-from draken.vectors.string_vector cimport StringVector, _materialize_dict_string, _refresh_unified_string
+from draken.vectors.string_vector cimport StringVector, _materialize_dict_string
 from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.vectors.bool_vector cimport BoolVector
 
@@ -85,23 +85,15 @@ cdef StringVector _wrap_string_buffer(DrakenVarBuffer* buf) except *:
     vec.ptr = buf
     vec.owns_data = True
     vec._dict_values = NULL
-    vec._dict_codes = NULL
-    vec._dict_code_width = 0
     vec._dict_ordered = 0
-    vec._dict_accessor.codes = NULL
-    vec._dict_accessor.code_width = 0
-    vec._dict_accessor.row_nulls = NULL
-    vec._dict_accessor.length = 0
-    vec._dict_accessor.dict_values = NULL
-    vec._dict_accessor.value_type = DRAKEN_STRING
-    vec._const_accessor.length = 0
-    vec._const_accessor.value_type = DRAKEN_STRING
-    vec._const_accessor.value_ptr = NULL
-    vec._const_accessor.is_null = 0
-    vec._const_value = NULL
-    vec._has_const = False
-    vec._const_is_null = False
-    _refresh_unified_string(vec)
+    vec._unified_view.data = <void*>buf
+    vec._unified_view.data_length = <size_t>buf.length
+    vec._unified_view.selection = NULL
+    vec._unified_view.sel_width = 0
+    vec._unified_view.length = <size_t>buf.length
+    vec._unified_view.validity = buf.null_bitmap
+    vec._unified_view.itemsize = 0
+    vec._unified_view.type = DRAKEN_STRING
     return vec
 
 
@@ -870,7 +862,7 @@ cdef class KeyStore:
         cdef int64_t key_kind
         cdef list vecs
         cdef Vector vec
-        cdef Int64Vector iv
+        cdef Integer64Vector iv
         cdef Float64Vector fv
         cdef StringVector sv
         cdef BoolVector bv
@@ -955,8 +947,8 @@ cdef class KeyStore:
                         )
                     else:
                         raise RuntimeError("single string codec path removed")
-                elif uv.data_length == 1:
-                    # Constant-encoded: same value for every row, no per-row pointer.
+                elif sv.ptr.offsets == NULL:
+                    # Constant-encoded: ptr.offsets is NULL only for constant StringVectors.
                     if self._single_string_direct:
                         if uv.validity != NULL:
                             const_str_ptr = NULL
@@ -1002,8 +994,8 @@ cdef class KeyStore:
                     else:
                         raise RuntimeError("single string codec path removed")
 
-            elif isinstance(vec, Int64Vector):
-                iv = <Int64Vector>vec
+            elif isinstance(vec, Integer64Vector):
+                iv = <Integer64Vector>vec
                 uv = iv.unified()
                 if uv.selection != NULL:
                     # Dict path: read directly from dict values — no N-row materialization.
@@ -1025,7 +1017,7 @@ cdef class KeyStore:
                         )
                     else:
                         raise RuntimeError("single fixed key codec path removed")
-                elif uv.data_length == 1:
+                elif uv.data_length == 1 and uv.length > 1:
                     const_i64 = (<int64_t*>uv.data)[0]
                     if self._single_fixed_direct:
                         _ks_store_single_fixed_bulk_int64(
@@ -1063,7 +1055,7 @@ cdef class KeyStore:
                 # BoolVector.null_bitmap_ptr() returns NULL (base impl); use ptr.null_bitmap
                 bool_nulls = bv.ptr.null_bitmap
                 if self._single_fixed_direct:
-                    if bv.unified().data_length == 1:
+                    if bv.unified().data_length == 1 and bv.unified().length > 1:
                         const_bool = (<uint8_t*>bv.unified().data)[0]
                         _ks_store_single_fixed_bulk_bool(
                             self._single_fixed_buf,
@@ -1116,7 +1108,7 @@ cdef class KeyStore:
                         )
                     else:
                         raise RuntimeError("single fixed key codec path removed")
-                elif uv.data_length == 1:
+                elif uv.data_length == 1 and uv.length > 1:
                     # Reinterpret double bits as int64 — fixed buffer slot is int64_t.
                     const_i64 = (<int64_t*>uv.data)[0]
                     if self._single_fixed_direct:
@@ -1183,8 +1175,8 @@ cdef class KeyStore:
                         col_varbuf_ptrs[col_idx]     = <size_t>uv.data
                         col_dict_code_ptrs[col_idx]  = <size_t>uv.selection
                         col_dict_code_widths[col_idx] = uv.sel_width
-                    elif uv.data_length == 1:
-                        # Constant-encoded: same string value for every row.
+                    elif sv.ptr.offsets == NULL:
+                        # Constant-encoded: ptr.offsets is NULL for constant (always set for dense).
                         col_dispatch[col_idx]    = _DISPATCH_CONST_STRING
                         col_has_const[col_idx]   = uv.validity == NULL
                         col_varbuf_ptrs[col_idx] = <size_t>uv.data
@@ -1193,8 +1185,8 @@ cdef class KeyStore:
                         col_null_ptrs[col_idx]   = <size_t>sv.null_bitmap_ptr()
                         col_varbuf_ptrs[col_idx] = <size_t>sv.ptr
 
-                elif isinstance(vec, Int64Vector):
-                    iv = <Int64Vector>vec
+                elif isinstance(vec, Integer64Vector):
+                    iv = <Integer64Vector>vec
                     uv = iv.unified()
                     if uv.selection != NULL:
                         # Dict path: capture dict pointers; no N-row materialization.
@@ -1206,7 +1198,7 @@ cdef class KeyStore:
                     else:
                         col_dispatch[col_idx]  = _DISPATCH_INT64
                         col_null_ptrs[col_idx] = <size_t>iv.null_bitmap_ptr()
-                        if uv.data_length == 1:
+                        if uv.data_length == 1 and uv.length > 1:
                             col_has_const[col_idx]  = True
                             col_const_vals[col_idx] = (<int64_t*>uv.data)[0]
                         else:
@@ -1217,7 +1209,7 @@ cdef class KeyStore:
                     bv = <BoolVector>vec
                     # BoolVector: null bitmap lives at ptr.null_bitmap, not null_bitmap_ptr()
                     col_null_ptrs[col_idx] = <size_t>bv.ptr.null_bitmap
-                    if bv.unified().data_length == 1:
+                    if bv.unified().data_length == 1 and bv.unified().length > 1:
                         col_has_const[col_idx] = True
                         col_const_vals[col_idx] = <int64_t>(<uint8_t*>bv.unified().data)[0]
                     else:
@@ -1237,7 +1229,7 @@ cdef class KeyStore:
                     else:
                         col_dispatch[col_idx]    = _DISPATCH_FLOAT64
                         col_null_ptrs[col_idx]   = <size_t>fv.null_bitmap_ptr()
-                        if uv.data_length == 1:
+                        if uv.data_length == 1 and uv.length > 1:
                             # Reinterpret double bits as int64 — fixed buffer slot is int64_t.
                             col_has_const[col_idx]  = True
                             col_const_vals[col_idx] = (<int64_t*>uv.data)[0]
@@ -1326,7 +1318,7 @@ cdef class KeyStore:
         """
         Decode stored group keys directly into Draken Vectors.
 
-        Fixed columns  → Int64Vector with owned malloc'd buffer + optional null
+        Fixed columns  → Integer64Vector with owned malloc'd buffer + optional null
                          bitmap; zero Python int objects allocated.
         String columns → StringVector built via StringVectorBuilder.append_bytes();
                          zero Python str objects; no pyarrow conversion.
@@ -1340,7 +1332,7 @@ cdef class KeyStore:
         cdef Py_ssize_t col_idx
         cdef int64_t key_kind
         cdef object col_name
-        cdef Int64Vector _fixed_iv
+        cdef Integer64Vector _fixed_iv
         cdef DrakenFixedBuffer* _fixed_buf
         cdef DrakenVarBuffer* _string_buf
 
@@ -1368,7 +1360,7 @@ cdef class KeyStore:
                     _fixed_buf.length = <size_t>self._single_fixed_rows
                     _fixed_buf.null_bitmap = self._single_fixed_nulls
 
-                    _fixed_iv = Int64Vector(0, True)
+                    _fixed_iv = Integer64Vector(0, True)
                     _fixed_iv.ptr = _fixed_buf
                     _fixed_iv.owns_data = True
                     _fixed_iv._dict_values = NULL
@@ -1412,7 +1404,7 @@ cdef class KeyStore:
                     _fixed_buf.length = <size_t>self._multi_fixed_rows[storage_slot]
                     _fixed_buf.null_bitmap = self._multi_fixed_nulls[storage_slot]
 
-                    _fixed_iv = Int64Vector(0, True)
+                    _fixed_iv = Integer64Vector(0, True)
                     _fixed_iv.ptr = _fixed_buf
                     _fixed_iv.owns_data = True
                     _fixed_iv._dict_values = NULL

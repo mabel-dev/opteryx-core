@@ -34,6 +34,7 @@ from libc.stdint cimport int32_t, int64_t, uint8_t, uint16_t, uint32_t
 from libc.stdint cimport uint64_t
 
 from draken.core.buffers cimport (
+    DrakenConstantStringPayload,
     DrakenFixedBuffer,
     DrakenMorsel,
     DrakenType,
@@ -61,8 +62,10 @@ from draken.vectors.vector cimport Vector, _Uint64Buffer, _EMPTY_UINT64_SENTINEL
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.date32_vector cimport Date32Vector
 from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.int64_vector cimport Int64Vector
-from draken.vectors.integer_vector cimport IntegerVector
+from draken.vectors.integer64_vector cimport Integer64Vector
+from draken.vectors.integer8_vector cimport Integer8Vector
+from draken.vectors.integer16_vector cimport Integer16Vector
+from draken.vectors.integer32_vector cimport Integer32Vector
 from draken.vectors.interval_vector cimport IntervalVector
 from draken.vectors.string_vector cimport StringVector, _materialize_dict_string
 from draken.vectors.time_vector cimport TimeVector
@@ -257,39 +260,46 @@ cdef void _concat_string_buffers(
     cdef Py_ssize_t const_len
     cdef uint8_t* null_bitmap = NULL
 
+    cdef DrakenConstantStringPayload* _lcp
+    cdef DrakenConstantStringPayload* _rcp
+
     # Calculate left_bytes, handling constant and NULL vectors
-    if left_vec._has_const:
-        if not left_vec._const_is_null and left_vec._const_value != NULL:
-            const_len = <Py_ssize_t>left_vec._const_value.length
+    if left_vec.ptr.offsets == NULL and left_vec._unified_view.selection == NULL:
+        if left_vec._unified_view.validity == NULL and left_vec._unified_view.data != NULL:
+            _lcp = <DrakenConstantStringPayload*>left_vec._unified_view.data
+            const_len = <Py_ssize_t>_lcp.length
             left_bytes = const_len * left_rows
     else:
         if left_ptr != NULL and left_ptr.offsets != NULL:
             left_bytes = <Py_ssize_t>left_ptr.offsets[left_rows]
 
     # Calculate right_bytes, handling constant and NULL vectors
-    if right_vec._has_const:
-        if not right_vec._const_is_null and right_vec._const_value != NULL:
-            const_len = <Py_ssize_t>right_vec._const_value.length
+    if right_vec.ptr.offsets == NULL and right_vec._unified_view.selection == NULL:
+        if right_vec._unified_view.validity == NULL and right_vec._unified_view.data != NULL:
+            _rcp = <DrakenConstantStringPayload*>right_vec._unified_view.data
+            const_len = <Py_ssize_t>_rcp.length
             right_bytes = const_len * right_rows
     else:
         if right_ptr != NULL and right_ptr.offsets != NULL:
             right_bytes = <Py_ssize_t>right_ptr.offsets[right_rows]
 
     # Copy left data
-    if left_vec._has_const and not left_vec._const_is_null and left_vec._const_value != NULL:
-        const_len = <Py_ssize_t>left_vec._const_value.length
-        if const_len > 0 and left_vec._const_value.data != NULL and out_ptr.data != NULL:
+    if left_vec.ptr.offsets == NULL and left_vec._unified_view.selection == NULL and left_vec._unified_view.validity == NULL and left_vec._unified_view.data != NULL:
+        _lcp = <DrakenConstantStringPayload*>left_vec._unified_view.data
+        const_len = <Py_ssize_t>_lcp.length
+        if const_len > 0 and _lcp.data != NULL and out_ptr.data != NULL:
             for k in range(left_rows):
-                memcpy(out_ptr.data + k * const_len, left_vec._const_value.data, const_len)
+                memcpy(out_ptr.data + k * const_len, _lcp.data, const_len)
     elif left_bytes > 0 and left_ptr != NULL and left_ptr.data != NULL:
         memcpy(out_ptr.data, left_ptr.data, left_bytes)
 
     # Copy right data
-    if right_vec._has_const and not right_vec._const_is_null and right_vec._const_value != NULL:
-        const_len = <Py_ssize_t>right_vec._const_value.length
-        if const_len > 0 and right_vec._const_value.data != NULL and out_ptr.data != NULL:
+    if right_vec.ptr.offsets == NULL and right_vec._unified_view.selection == NULL and right_vec._unified_view.validity == NULL and right_vec._unified_view.data != NULL:
+        _rcp = <DrakenConstantStringPayload*>right_vec._unified_view.data
+        const_len = <Py_ssize_t>_rcp.length
+        if const_len > 0 and _rcp.data != NULL and out_ptr.data != NULL:
             for k in range(right_rows):
-                memcpy(out_ptr.data + left_bytes + k * const_len, right_vec._const_value.data, const_len)
+                memcpy(out_ptr.data + left_bytes + k * const_len, _rcp.data, const_len)
     elif right_bytes > 0 and right_ptr != NULL and right_ptr.data != NULL:
         memcpy(out_ptr.data + left_bytes, right_ptr.data, right_bytes)
 
@@ -297,8 +307,12 @@ cdef void _concat_string_buffers(
     if out_ptr == NULL or out_ptr.offsets == NULL:
         raise RuntimeError("Output StringVector not properly initialized")
     out_ptr.offsets[0] = 0
-    if left_vec._has_const:
-        const_len = 0 if (left_vec._const_is_null or left_vec._const_value == NULL) else <Py_ssize_t>left_vec._const_value.length
+    if left_vec.ptr.offsets == NULL and left_vec._unified_view.selection == NULL:
+        if left_vec._unified_view.validity != NULL or left_vec._unified_view.data == NULL:
+            const_len = 0
+        else:
+            _lcp = <DrakenConstantStringPayload*>left_vec._unified_view.data
+            const_len = <Py_ssize_t>_lcp.length
         for j in range(1, left_rows + 1):
             out_ptr.offsets[j] = <int32_t>((<Py_ssize_t>j) * const_len)
     else:
@@ -307,8 +321,12 @@ cdef void _concat_string_buffers(
                 out_ptr.offsets[j] = left_ptr.offsets[j]
 
     # Set offsets for right side
-    if right_vec._has_const:
-        const_len = 0 if (right_vec._const_is_null or right_vec._const_value == NULL) else <Py_ssize_t>right_vec._const_value.length
+    if right_vec.ptr.offsets == NULL and right_vec._unified_view.selection == NULL:
+        if right_vec._unified_view.validity != NULL or right_vec._unified_view.data == NULL:
+            const_len = 0
+        else:
+            _rcp = <DrakenConstantStringPayload*>right_vec._unified_view.data
+            const_len = <Py_ssize_t>_rcp.length
         for j in range(1, right_rows + 1):
             out_ptr.offsets[left_rows + j] = <int32_t>(left_bytes + ((<Py_ssize_t>j) * const_len))
     else:
@@ -317,25 +335,25 @@ cdef void _concat_string_buffers(
                 out_ptr.offsets[left_rows + j] = <int32_t>(left_bytes + right_ptr.offsets[j])
 
     # Handle null bitmaps
-    if left_vec._has_const and left_vec._const_is_null:
+    if left_vec.ptr.offsets == NULL and left_vec._unified_view.selection == NULL and left_vec._unified_view.validity != NULL:
         if null_bitmap == NULL:
             null_bitmap = _allocate_valid_bitmap(left_rows + right_rows)
         for k in range(left_rows):
             _bitmap_clear(null_bitmap, k)
 
-    if right_vec._has_const and right_vec._const_is_null:
+    if right_vec.ptr.offsets == NULL and right_vec._unified_view.selection == NULL and right_vec._unified_view.validity != NULL:
         if null_bitmap == NULL:
             null_bitmap = _allocate_valid_bitmap(left_rows + right_rows)
         for k in range(right_rows):
             _bitmap_clear(null_bitmap, left_rows + k)
 
-    if not (left_vec._has_const):
+    if left_vec.ptr.offsets != NULL or left_vec._unified_view.selection != NULL:
         if left_ptr != NULL and left_ptr.null_bitmap != NULL:
             if null_bitmap == NULL:
                 null_bitmap = _allocate_valid_bitmap(left_rows + right_rows)
             _copy_bits(left_ptr.null_bitmap, 0, null_bitmap, 0, left_rows)
 
-    if not (right_vec._has_const):
+    if right_vec.ptr.offsets != NULL or right_vec._unified_view.selection != NULL:
         if right_ptr != NULL and right_ptr.null_bitmap != NULL:
             if null_bitmap == NULL:
                 null_bitmap = _allocate_valid_bitmap(left_rows + right_rows)
@@ -539,24 +557,29 @@ cdef class Morsel:
         cdef Vector new_vec
         cdef list values
         cdef uint8_t* null_bitmap
-        cdef Int64Vector out_i64
+        cdef Integer64Vector out_i64
         cdef Float64Vector out_f64
         cdef BoolVector out_bool
-        cdef IntegerVector out_int
+        cdef Integer8Vector out_int8
+        cdef Integer16Vector out_int16
+        cdef Integer32Vector out_int32
         cdef Date32Vector out_date32
         cdef TimeVector out_time
         cdef TimestampVector out_ts
         cdef IntervalVector out_interval
         cdef StringVector out_str
-        cdef Int64Vector src_i64
+        cdef Integer64Vector src_i64
         cdef Float64Vector src_f64
         cdef BoolVector src_bool
-        cdef IntegerVector src_int
+        cdef Integer8Vector src_int8
+        cdef Integer16Vector src_int16
+        cdef Integer32Vector src_int32
         cdef Date32Vector src_date32
         cdef TimeVector src_time
         cdef TimestampVector src_ts
         cdef IntervalVector src_interval
         cdef StringVector src_str
+        cdef DrakenConstantStringPayload* _scp
 
         if morsels is None:
             raise ValueError("morsels must not be None")
@@ -601,14 +624,14 @@ cdef class Morsel:
             self.ptr.column_types[i] = first.ptr.column_types[i]
             current_vec = <Vector> first.ptr.columns[i]
 
-            if isinstance(current_vec, Int64Vector):
-                out_i64 = Int64Vector(<size_t> total_rows)
+            if isinstance(current_vec, Integer64Vector):
+                out_i64 = Integer64Vector(<size_t> total_rows)
                 row_offset = 0
                 byte_offset = 0
                 null_bitmap = NULL
                 for morsel_obj in morsels:
                     morsel = <Morsel> morsel_obj
-                    src_i64 = <Int64Vector> morsel.ptr.columns[i]
+                    src_i64 = <Integer64Vector> morsel.ptr.columns[i]
                     current_rows = morsel.ptr.num_rows
                     current_bytes = current_rows * <Py_ssize_t> src_i64.ptr.itemsize
                     if current_bytes > 0 and src_i64.ptr.data != NULL:
@@ -661,33 +684,68 @@ cdef class Morsel:
                 out_bool.ptr.null_bitmap = null_bitmap
                 new_vec = <Vector> out_bool
 
-            elif isinstance(current_vec, IntegerVector):
-                out_int = IntegerVector((<IntegerVector> current_vec).ptr.type, <size_t> total_rows)
+            elif isinstance(current_vec, Integer8Vector):
+                out_int8 = Integer8Vector(<size_t> total_rows)
                 row_offset = 0
                 byte_offset = 0
                 null_bitmap = NULL
                 for morsel_obj in morsels:
                     morsel = <Morsel> morsel_obj
-                    src_int = <IntegerVector> morsel.ptr.columns[i]
-                    if src_int.ptr.type != out_int.ptr.type:
-                        values = []
-                        for morsel_obj in morsels:
-                            values.extend((<Morsel> morsel_obj).column(first._encoded_names[i]).to_pylist())
-                        new_vec = <Vector> vector_from_sequence(values, self.ptr.column_types[i])
-                        break
+                    src_int8 = <Integer8Vector> morsel.ptr.columns[i]
                     current_rows = morsel.ptr.num_rows
-                    current_bytes = current_rows * <Py_ssize_t> src_int.ptr.itemsize
-                    if current_bytes > 0 and src_int.ptr.data != NULL:
-                        memcpy(<char*> out_int.ptr.data + byte_offset, src_int.ptr.data, current_bytes)
-                    if src_int.ptr.null_bitmap != NULL:
+                    current_bytes = current_rows * <Py_ssize_t> src_int8.ptr.itemsize
+                    if current_bytes > 0 and src_int8.ptr.data != NULL:
+                        memcpy(<char*> out_int8.ptr.data + byte_offset, src_int8.ptr.data, current_bytes)
+                    if src_int8.ptr.null_bitmap != NULL:
                         if null_bitmap == NULL:
                             null_bitmap = _allocate_valid_bitmap(total_rows)
-                        _copy_bits(src_int.ptr.null_bitmap, 0, null_bitmap, row_offset, current_rows)
+                        _copy_bits(src_int8.ptr.null_bitmap, 0, null_bitmap, row_offset, current_rows)
                     row_offset += current_rows
                     byte_offset += current_bytes
-                else:
-                    out_int.ptr.null_bitmap = null_bitmap
-                    new_vec = <Vector> out_int
+                out_int8.ptr.null_bitmap = null_bitmap
+                new_vec = <Vector> out_int8
+
+            elif isinstance(current_vec, Integer16Vector):
+                out_int16 = Integer16Vector(<size_t> total_rows)
+                row_offset = 0
+                byte_offset = 0
+                null_bitmap = NULL
+                for morsel_obj in morsels:
+                    morsel = <Morsel> morsel_obj
+                    src_int16 = <Integer16Vector> morsel.ptr.columns[i]
+                    current_rows = morsel.ptr.num_rows
+                    current_bytes = current_rows * <Py_ssize_t> src_int16.ptr.itemsize
+                    if current_bytes > 0 and src_int16.ptr.data != NULL:
+                        memcpy(<char*> out_int16.ptr.data + byte_offset, src_int16.ptr.data, current_bytes)
+                    if src_int16.ptr.null_bitmap != NULL:
+                        if null_bitmap == NULL:
+                            null_bitmap = _allocate_valid_bitmap(total_rows)
+                        _copy_bits(src_int16.ptr.null_bitmap, 0, null_bitmap, row_offset, current_rows)
+                    row_offset += current_rows
+                    byte_offset += current_bytes
+                out_int16.ptr.null_bitmap = null_bitmap
+                new_vec = <Vector> out_int16
+
+            elif isinstance(current_vec, Integer32Vector):
+                out_int32 = Integer32Vector(<size_t> total_rows)
+                row_offset = 0
+                byte_offset = 0
+                null_bitmap = NULL
+                for morsel_obj in morsels:
+                    morsel = <Morsel> morsel_obj
+                    src_int32 = <Integer32Vector> morsel.ptr.columns[i]
+                    current_rows = morsel.ptr.num_rows
+                    current_bytes = current_rows * <Py_ssize_t> src_int32.ptr.itemsize
+                    if current_bytes > 0 and src_int32.ptr.data != NULL:
+                        memcpy(<char*> out_int32.ptr.data + byte_offset, src_int32.ptr.data, current_bytes)
+                    if src_int32.ptr.null_bitmap != NULL:
+                        if null_bitmap == NULL:
+                            null_bitmap = _allocate_valid_bitmap(total_rows)
+                        _copy_bits(src_int32.ptr.null_bitmap, 0, null_bitmap, row_offset, current_rows)
+                    row_offset += current_rows
+                    byte_offset += current_bytes
+                out_int32.ptr.null_bitmap = null_bitmap
+                new_vec = <Vector> out_int32
 
             elif isinstance(current_vec, Date32Vector):
                 out_date32 = Date32Vector(<size_t> total_rows)
@@ -789,9 +847,9 @@ cdef class Morsel:
                 str_sources = [None] * n_morsels
                 for j in range(n_morsels):
                     src_str = <StringVector> (<Morsel> morsels[j]).ptr.columns[i]
-                    if src_str._has_const:
+                    if src_str.ptr.offsets == NULL and src_str._unified_view.selection == NULL:
                         str_sources[j] = src_str
-                    elif src_str._dict_codes != NULL and (src_str.ptr == NULL or src_str.ptr.data == NULL):
+                    elif src_str._unified_view.selection != NULL and (src_str.ptr == NULL or src_str.ptr.offsets == NULL):
                         str_sources[j] = _materialize_dict_string(src_str)
                     else:
                         str_sources[j] = src_str
@@ -801,12 +859,13 @@ cdef class Morsel:
                     src_str = <StringVector> str_sources[j]
                     current_rows = (<Morsel> morsels[j]).ptr.num_rows
                     # Handle constant-encoded StringVectors which do not have offsets/data
-                    if src_str._has_const:
-                        if src_str._const_is_null:
+                    if src_str.ptr.offsets == NULL and src_str._unified_view.selection == NULL:
+                        if src_str._unified_view.validity != NULL:
                             # contributes no bytes
                             continue
-                        if src_str._const_value != NULL:
-                            total_string_bytes += <Py_ssize_t>src_str._const_value.length * current_rows
+                        if src_str._unified_view.data != NULL:
+                            _scp = <DrakenConstantStringPayload*>src_str._unified_view.data
+                            total_string_bytes += <Py_ssize_t>_scp.length * current_rows
                     else:
                         if src_str.ptr != NULL and src_str.ptr.offsets != NULL:
                             total_string_bytes += src_str.ptr.offsets[current_rows]
@@ -825,23 +884,24 @@ cdef class Morsel:
                 for j in range(n_morsels):
                     src_str = <StringVector> str_sources[j]
                     current_rows = (<Morsel> morsels[j]).ptr.num_rows
-                    if src_str._has_const:
-                        if src_str._const_is_null:
+                    if src_str.ptr.offsets == NULL and src_str._unified_view.selection == NULL:
+                        if src_str._unified_view.validity != NULL:
                             current_bytes = 0
-                        elif src_str._const_value != NULL:
-                            const_len = <Py_ssize_t> src_str._const_value.length
+                        elif src_str._unified_view.data != NULL:
+                            _scp = <DrakenConstantStringPayload*>src_str._unified_view.data
+                            const_len = <Py_ssize_t>_scp.length
                             current_bytes = const_len * current_rows
-                        else:
-                            current_bytes = 0
-                            if current_bytes > 0 and src_str._const_value.data != NULL:
+                            if current_bytes > 0 and _scp.data != NULL:
                                 # copy repeated constant value for each row
                                 for k in range(current_rows):
-                                    memcpy(out_str.ptr.data + string_offset + k * const_len, src_str._const_value.data, const_len)
+                                    memcpy(out_str.ptr.data + string_offset + k * const_len, _scp.data, const_len)
+                        else:
+                            current_bytes = 0
                         # set offsets for each row
                         for j in range(1, current_rows + 1):
-                            out_str.ptr.offsets[row_offset + j] = <int32_t>(string_offset + (<Py_ssize_t>j) * (0 if src_str._const_is_null else const_len))
+                            out_str.ptr.offsets[row_offset + j] = <int32_t>(string_offset + (<Py_ssize_t>j) * (0 if src_str._unified_view.validity != NULL else const_len))
                         # handle constant nulls by clearing bits
-                        if src_str._const_is_null:
+                        if src_str._unified_view.validity != NULL:
                             if null_bitmap == NULL:
                                 null_bitmap = _allocate_valid_bitmap(total_rows)
                             for k in range(current_rows):
@@ -1264,10 +1324,12 @@ cdef class Morsel:
         cdef Vector new_vec
         cdef list values
 
-        cdef Int64Vector out_i64
+        cdef Integer64Vector out_i64
         cdef Float64Vector out_f64
         cdef BoolVector out_bool
-        cdef IntegerVector out_int
+        cdef Integer8Vector out_int8
+        cdef Integer16Vector out_int16
+        cdef Integer32Vector out_int32
         cdef Date32Vector out_date32
         cdef TimeVector out_time
         cdef TimestampVector out_ts
@@ -1279,6 +1341,8 @@ cdef class Morsel:
         cdef Py_ssize_t left_bytes
         cdef Py_ssize_t right_bytes
         cdef Py_ssize_t const_len
+        cdef DrakenConstantStringPayload* _lcsp
+        cdef DrakenConstantStringPayload* _rcsp
 
         if other is None:
             return
@@ -1310,12 +1374,12 @@ cdef class Morsel:
             left_vec = <Vector> self.ptr.columns[i]
             right_vec = <Vector> other.ptr.columns[i]
 
-            if isinstance(left_vec, Int64Vector) and isinstance(right_vec, Int64Vector):
-                out_i64 = Int64Vector(<size_t>total_rows)
+            if isinstance(left_vec, Integer64Vector) and isinstance(right_vec, Integer64Vector):
+                out_i64 = Integer64Vector(<size_t>total_rows)
                 _concat_fixed_buffers(
                     out_i64.ptr,
-                    (<Int64Vector>left_vec).ptr,
-                    (<Int64Vector>right_vec).ptr,
+                    (<Integer64Vector>left_vec).ptr,
+                    (<Integer64Vector>right_vec).ptr,
                     left_rows,
                     right_rows,
                 )
@@ -1343,21 +1407,38 @@ cdef class Morsel:
                 )
                 new_vec = <Vector>out_bool
 
-            elif isinstance(left_vec, IntegerVector) and isinstance(right_vec, IntegerVector):
-                if (<IntegerVector>left_vec).ptr.type != (<IntegerVector>right_vec).ptr.type:
-                    values = left_vec.to_pylist()
-                    values.extend(right_vec.to_pylist())
-                    new_vec = <Vector>vector_from_sequence(values, self.ptr.column_types[i])
-                else:
-                    out_int = IntegerVector((<IntegerVector>left_vec).ptr.type, <size_t>total_rows)
-                    _concat_fixed_buffers(
-                        out_int.ptr,
-                        (<IntegerVector>left_vec).ptr,
-                        (<IntegerVector>right_vec).ptr,
-                        left_rows,
-                        right_rows,
-                    )
-                    new_vec = <Vector>out_int
+            elif isinstance(left_vec, Integer8Vector) and isinstance(right_vec, Integer8Vector):
+                out_int8 = Integer8Vector(<size_t>total_rows)
+                _concat_fixed_buffers(
+                    out_int8.ptr,
+                    (<Integer8Vector>left_vec).ptr,
+                    (<Integer8Vector>right_vec).ptr,
+                    left_rows,
+                    right_rows,
+                )
+                new_vec = <Vector>out_int8
+
+            elif isinstance(left_vec, Integer16Vector) and isinstance(right_vec, Integer16Vector):
+                out_int16 = Integer16Vector(<size_t>total_rows)
+                _concat_fixed_buffers(
+                    out_int16.ptr,
+                    (<Integer16Vector>left_vec).ptr,
+                    (<Integer16Vector>right_vec).ptr,
+                    left_rows,
+                    right_rows,
+                )
+                new_vec = <Vector>out_int16
+
+            elif isinstance(left_vec, Integer32Vector) and isinstance(right_vec, Integer32Vector):
+                out_int32 = Integer32Vector(<size_t>total_rows)
+                _concat_fixed_buffers(
+                    out_int32.ptr,
+                    (<Integer32Vector>left_vec).ptr,
+                    (<Integer32Vector>right_vec).ptr,
+                    left_rows,
+                    right_rows,
+                )
+                new_vec = <Vector>out_int32
 
             elif isinstance(left_vec, Date32Vector) and isinstance(right_vec, Date32Vector):
                 out_date32 = Date32Vector(<size_t>total_rows)
@@ -1419,17 +1500,19 @@ cdef class Morsel:
                 left_bytes = 0
                 right_bytes = 0
 
-                if left_str._has_const:
-                    if not left_str._const_is_null and left_str._const_value != NULL:
-                        const_len = <Py_ssize_t>left_str._const_value.length
+                if left_str.ptr.offsets == NULL and left_str._unified_view.selection == NULL:
+                    if left_str._unified_view.validity == NULL and left_str._unified_view.data != NULL:
+                        _lcsp = <DrakenConstantStringPayload*>left_str._unified_view.data
+                        const_len = <Py_ssize_t>_lcsp.length
                         left_bytes = const_len * left_rows
                 else:
                     if left_str.ptr != NULL and left_str.ptr.offsets != NULL:
                         left_bytes = <Py_ssize_t>left_str.ptr.offsets[left_rows]
 
-                if right_str._has_const:
-                    if not right_str._const_is_null and right_str._const_value != NULL:
-                        const_len = <Py_ssize_t>right_str._const_value.length
+                if right_str.ptr.offsets == NULL and right_str._unified_view.selection == NULL:
+                    if right_str._unified_view.validity == NULL and right_str._unified_view.data != NULL:
+                        _rcsp = <DrakenConstantStringPayload*>right_str._unified_view.data
+                        const_len = <Py_ssize_t>_rcsp.length
                         right_bytes = const_len * right_rows
                 else:
                     if right_str.ptr != NULL and right_str.ptr.offsets != NULL:
@@ -1596,7 +1679,7 @@ cdef class Morsel:
         cdef int32_t[::1] input_view_32
         cdef bint free_indices = False
         cdef bint indices_ready = False
-        cdef Int64Vector idx_vec
+        cdef Integer64Vector idx_vec
         cdef uint8_t cw
         cdef uint8_t* codes_u8_ptr
         cdef uint16_t* codes_u16_ptr
@@ -1604,10 +1687,10 @@ cdef class Morsel:
         cdef int64_t* dict_int_ptr
         cdef DrakenVector* _iv_uv
 
-        # Fast path: dictionary-encoded Int64Vector (e.g. from build_cartesian_indices).
+        # Fast path: dictionary-encoded Integer64Vector (e.g. from build_cartesian_indices).
         # Gathers dict values via codes directly into int32 — no intermediate dense vector.
-        if isinstance(indices, Int64Vector) and (<Int64Vector>indices).unified().selection != NULL:
-            idx_vec = <Int64Vector>indices
+        if isinstance(indices, Integer64Vector) and (<Integer64Vector>indices).unified().selection != NULL:
+            idx_vec = <Integer64Vector>indices
             _iv_uv = idx_vec.unified()
             n_indices = <int>_iv_uv.length
             if n_indices == 0:
@@ -2142,7 +2225,7 @@ cdef class Morsel:
         in that case the buffer contains only partial results and the caller
         should re-zero and fall back to the Python hash() path.
 
-        Note: Standard vector types (Int64Vector, StringVector, ArrayVector, etc.)
+        Note: Standard vector types (Integer64Vector, StringVector, ArrayVector, etc.)
         all implement c_hash_into and do not require GIL. Custom vector types that
         do not implement c_hash_into will cause this method to return 1.
         """

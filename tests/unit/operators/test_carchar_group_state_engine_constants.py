@@ -5,7 +5,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.compiled.aggregations.group_by_engine import CarcharGroupStateEngine
 from draken.morsels.morsel import Morsel
-from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer64_vector import Integer64Vector
 
 
 def _rows_by_key(rows, key_name):
@@ -20,7 +20,7 @@ def _rows_by_key(rows, key_name):
 
 def test_carchar_engine_accepts_typed_constant_key_for_count_star():
     engine = CarcharGroupStateEngine([b"k"], [("cnt", "count", None)])
-    morsel = Morsel.from_vectors(["k"], [Int64Vector.from_constant(7, 4)])
+    morsel = Morsel.from_vectors(["k"], [Integer64Vector.from_constant(7, 4)])
 
     engine.ingest(morsel)
     rows = _rows_by_key(engine.finalize().to_arrow().to_pylist(), "k")
@@ -35,8 +35,8 @@ def test_carchar_engine_uses_typed_constant_value_for_sum_in_constant_mode():
     morsel = Morsel.from_vectors(
         ["k", "v"],
         [
-            Int64Vector.from_constant(7, 4),
-            Int64Vector.from_constant(3, 4),
+            Integer64Vector.from_constant(7, 4),
+            Integer64Vector.from_constant(3, 4),
         ],
     )
 
@@ -52,8 +52,8 @@ def test_carchar_engine_handles_typed_all_null_constant_value_for_any_value():
     morsel = Morsel.from_vectors(
         ["k", "v"],
         [
-            Int64Vector.from_constant(7, 3),
-            Int64Vector.from_constant(None, 3, is_null=True),
+            Integer64Vector.from_constant(7, 3),
+            Integer64Vector.from_constant(None, 3, is_null=True),
         ],
     )
 
@@ -69,8 +69,8 @@ def test_carchar_engine_handles_typed_all_null_constant_value_for_count_value():
     morsel = Morsel.from_vectors(
         ["k", "v"],
         [
-            Int64Vector.from_constant(7, 5),
-            Int64Vector.from_constant(None, 5, is_null=True),
+            Integer64Vector.from_constant(7, 5),
+            Integer64Vector.from_constant(None, 5, is_null=True),
         ],
     )
 

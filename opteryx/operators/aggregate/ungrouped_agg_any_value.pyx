@@ -53,9 +53,9 @@ cdef class AnyValueAggregate(UngroupedAggregate):
         cdef Py_ssize_t  length_c
 
         if self._col_type == _VTYPE_INT64:
-            vec_i = <Int64Vector>raw
+            vec_i = <Integer64Vector>raw
             uv = vec_i.unified()
-            if uv.data_length == 1:
+            if uv.data_length == 1 and uv.length > 1:
                 if uv.validity == NULL:
                     self._value = (<int64_t*>uv.data)[0]; self._seen = True
                 return
@@ -69,7 +69,7 @@ cdef class AnyValueAggregate(UngroupedAggregate):
         if self._col_type == _VTYPE_FLOAT64:
             vec_f = <Float64Vector>raw
             uv = vec_f.unified()
-            if uv.data_length == 1:
+            if uv.data_length == 1 and uv.length > 1:
                 if uv.validity == NULL:
                     self._value = (<double*>uv.data)[0]; self._seen = True
                 return
@@ -83,7 +83,7 @@ cdef class AnyValueAggregate(UngroupedAggregate):
         if self._col_type == _VTYPE_STRING:
             svec = <StringVector>raw
             uv = svec.unified()
-            if uv.data_length == 1:
+            if svec.ptr.offsets == NULL:  # constant (offsets always allocated for dense/dict)
                 if uv.validity == NULL:
                     ptr_c    = <const char*>(<DrakenConstantStringPayload*>uv.data).data
                     length_c = <Py_ssize_t>(<DrakenConstantStringPayload*>uv.data).length
@@ -104,14 +104,47 @@ cdef class AnyValueAggregate(UngroupedAggregate):
                     self._value = ptr_c[:length_c]; self._seen = True; return
             return
 
-        if self._col_type == _VTYPE_INTEGER:
-            vec_n = <IntegerVector>raw
-            uv = vec_n.unified()
-            if uv.data_length == 1:
+        if self._col_type == _VTYPE_INT8:
+            ibuf  = (<Integer8Vector>raw).ptr
+            uv = (<Integer8Vector>raw).unified()
+            if uv.data_length == 1 and uv.length > 1:
                 if uv.validity == NULL:
-                    self._value = _read_integer_value(vec_n.ptr, 0); self._seen = True
+                    self._value = _read_integer_value(ibuf, 0); self._seen = True
                 return
-            ibuf  = vec_n.ptr
+            nulls = <const uint8_t*>ibuf.null_bitmap
+            if nulls == NULL:
+                if nrows > 0:
+                    self._value = _read_integer_value(ibuf, 0); self._seen = True
+                return
+            for i in range(nrows):
+                if _bitmap_is_valid(nulls, i):
+                    self._value = _read_integer_value(ibuf, i); self._seen = True; return
+            return
+
+        if self._col_type == _VTYPE_INT16:
+            ibuf  = (<Integer16Vector>raw).ptr
+            uv = (<Integer16Vector>raw).unified()
+            if uv.data_length == 1 and uv.length > 1:
+                if uv.validity == NULL:
+                    self._value = _read_integer_value(ibuf, 0); self._seen = True
+                return
+            nulls = <const uint8_t*>ibuf.null_bitmap
+            if nulls == NULL:
+                if nrows > 0:
+                    self._value = _read_integer_value(ibuf, 0); self._seen = True
+                return
+            for i in range(nrows):
+                if _bitmap_is_valid(nulls, i):
+                    self._value = _read_integer_value(ibuf, i); self._seen = True; return
+            return
+
+        if self._col_type == _VTYPE_INT32:
+            ibuf  = (<Integer32Vector>raw).ptr
+            uv = (<Integer32Vector>raw).unified()
+            if uv.data_length == 1 and uv.length > 1:
+                if uv.validity == NULL:
+                    self._value = _read_integer_value(ibuf, 0); self._seen = True
+                return
             nulls = <const uint8_t*>ibuf.null_bitmap
             if nulls == NULL:
                 if nrows > 0:

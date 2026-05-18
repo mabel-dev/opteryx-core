@@ -29,8 +29,6 @@ from libc.stdint cimport int8_t, int32_t, intptr_t, uint8_t, uint64_t, int64_t, 
 from libc.string cimport memcpy, memset, memcmp
 from libc.stdlib cimport malloc, realloc, free
 
-from draken.core.buffers cimport ConstAccessor
-from draken.core.buffers cimport DictAccessor
 from draken.core.buffers cimport DrakenVarBuffer
 from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.core.buffers cimport DrakenVector
@@ -195,9 +193,10 @@ cdef inline uint32_t _read_packed_code(const uint8_t* codes, uint8_t code_width,
 
 
 cdef void _release_dict_storage(StringVector vec) noexcept:
-    if vec._dict_codes != NULL:
-        free(vec._dict_codes)
-        vec._dict_codes = NULL
+    if vec._unified_view.selection != NULL:
+        free(vec._unified_view.selection)
+        vec._unified_view.selection = NULL
+        vec._unified_view.sel_width = 0
     if vec._dict_values != NULL:
         free_var_buffer(vec._dict_values, True)
         vec._dict_values = NULL
@@ -205,39 +204,8 @@ cdef void _release_dict_storage(StringVector vec) noexcept:
         free(vec._dict_code_counts)
         vec._dict_code_counts = NULL
     vec._dict_code_counts_valid = False
-    vec._dict_code_width = 0
     vec._dict_ordered = 0
-    vec._dict_accessor.codes = NULL
-    vec._dict_accessor.code_width = 0
-    vec._dict_accessor.row_nulls = NULL
-    vec._dict_accessor.length = 0
-    vec._dict_accessor.dict_values = NULL
-    vec._dict_accessor.value_type = DRAKEN_STRING
 
-
-cdef void _refresh_unified_string(StringVector vec) noexcept:
-    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
-    vec._unified_view.length = <size_t>n
-    vec._unified_view.itemsize = 0  # var-width
-    vec._unified_view.type = DRAKEN_STRING
-    if vec._has_const:
-        vec._unified_view.data = <void*>vec._const_value
-        vec._unified_view.data_length = 1
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = &_CONST_NULL_BYTE if vec._const_is_null else NULL
-    elif vec._dict_codes != NULL:
-        vec._unified_view.data = <void*>vec._dict_values
-        vec._unified_view.data_length = <size_t>vec._dict_values.length if vec._dict_values != NULL else 0
-        vec._unified_view.selection = vec._dict_codes
-        vec._unified_view.sel_width = vec._dict_code_width
-        vec._unified_view.validity = vec.ptr.null_bitmap
-    else:
-        vec._unified_view.data = <void*>vec.ptr
-        vec._unified_view.data_length = <size_t>n
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = vec.ptr.null_bitmap
 
 
 cdef void _attach_dictionary_storage_from_buffers(
@@ -258,15 +226,16 @@ cdef void _attach_dictionary_storage_from_buffers(
     cdef Py_ssize_t i
     cdef Py_ssize_t code
     cdef DrakenVarBuffer* dict_values
+    cdef uint8_t* codes_ptr
 
     _release_dict_storage(vec)
 
     if code_bytes > 0:
-        vec._dict_codes = <uint8_t*>malloc(code_bytes)
-        if vec._dict_codes == NULL:
+        codes_ptr = <uint8_t*>malloc(code_bytes)
+        if codes_ptr == NULL:
             raise MemoryError()
     else:
-        vec._dict_codes = NULL
+        codes_ptr = NULL
 
     dict_values = alloc_var_buffer(DRAKEN_STRING, <size_t>dict_size, <size_t>arena_size)
     if dict_size > 0:
@@ -286,15 +255,22 @@ cdef void _attach_dictionary_storage_from_buffers(
     for i in range(row_count):
         code = <Py_ssize_t>codes[i]
         if code_width == 1:
-            (<uint8_t*>vec._dict_codes)[i] = <uint8_t>code
+            (<uint8_t*>codes_ptr)[i] = <uint8_t>code
         elif code_width == 2:
-            (<uint16_t*>vec._dict_codes)[i] = <uint16_t>code
+            (<uint16_t*>codes_ptr)[i] = <uint16_t>code
         else:
-            (<uint32_t*>vec._dict_codes)[i] = <uint32_t>code
+            (<uint32_t*>codes_ptr)[i] = <uint32_t>code
 
     vec._dict_values = dict_values
-    vec._dict_code_width = code_width
     vec._dict_ordered = 1 if ordered else 0
+    vec._unified_view.data = <void*>dict_values
+    vec._unified_view.data_length = <size_t>dict_size
+    vec._unified_view.selection = codes_ptr
+    vec._unified_view.sel_width = code_width
+    vec._unified_view.length = <size_t>row_count
+    vec._unified_view.itemsize = 0
+    vec._unified_view.type = DRAKEN_STRING
+    vec._unified_view.validity = vec.ptr.null_bitmap
 
 
 cdef inline uint64_t _load_le_u64_partial(const uint8_t* ptr, size_t n) nogil:
@@ -502,15 +478,11 @@ cdef class StringVector(Vector):
         vec.ptr.null_bitmap = NULL
         vec.ptr.length = <size_t>length
         vec.ptr.type = DRAKEN_STRING
-        vec._has_const = True
-        vec._const_is_null = bool(is_null)
-
         payload = <DrakenConstantStringPayload*> malloc(sizeof(DrakenConstantStringPayload))
         if payload == NULL:
             raise MemoryError()
         payload.data = NULL
         payload.length = 0
-        vec._const_value = payload
 
         if not is_null:
             value_bytes = _coerce_literal_bytes(value)
@@ -525,7 +497,14 @@ cdef class StringVector(Vector):
                     raise MemoryError()
                 memcpy(payload.data, src, <size_t>src_len)
 
-        _refresh_unified_string(vec)
+        vec._unified_view.data = <void*>payload
+        vec._unified_view.data_length = 1
+        vec._unified_view.selection = NULL
+        vec._unified_view.sel_width = 0
+        vec._unified_view.length = <size_t>length
+        vec._unified_view.itemsize = 0
+        vec._unified_view.type = DRAKEN_STRING
+        vec._unified_view.validity = &_CONST_NULL_BYTE if is_null else NULL
         return vec
 
     def __cinit__(self, size_t length=0, size_t bytes_cap=0, bint wrap=False):
@@ -540,22 +519,7 @@ cdef class StringVector(Vector):
             self.ptr = alloc_var_buffer(DRAKEN_STRING, length, bytes_cap)
             self.owns_data = True
         self._dict_values = NULL
-        self._dict_codes = NULL
-        self._dict_code_width = 0
         self._dict_ordered = 0
-        self._dict_accessor.codes = NULL
-        self._dict_accessor.code_width = 0
-        self._dict_accessor.row_nulls = NULL
-        self._dict_accessor.length = 0
-        self._dict_accessor.dict_values = NULL
-        self._dict_accessor.value_type = DRAKEN_STRING
-        self._const_accessor.length = 0
-        self._const_accessor.value_type = DRAKEN_STRING
-        self._const_accessor.value_ptr = NULL
-        self._const_accessor.is_null = 0
-        self._const_value = NULL
-        self._has_const = False
-        self._const_is_null = False
         self._dict_code_counts = NULL
         self._dict_code_counts_valid = False
         self._unified_view.data = NULL
@@ -567,15 +531,31 @@ cdef class StringVector(Vector):
         self._unified_view.itemsize = 0
         self._unified_view.type = DRAKEN_STRING
         if not wrap:
-            _refresh_unified_string(self)
+            self._unified_view.data = <void*>self.ptr
+            self._unified_view.data_length = <size_t>self.ptr.length
+            self._unified_view.selection = NULL
+            self._unified_view.sel_width = 0
+            self._unified_view.length = <size_t>self.ptr.length
+            self._unified_view.validity = NULL
+            self._unified_view.itemsize = 0
+            self._unified_view.type = DRAKEN_STRING
 
     def __dealloc__(self):
+        cdef DrakenConstantStringPayload* _cp_dealloc = NULL
+        # Check for constant payload BEFORE releasing dict storage.
+        # Constant vectors: ptr.offsets == NULL, _dict_values == NULL, selection == NULL.
+        # Dense: ptr.offsets != NULL (even 0-row/0-byte dense has 1 offset entry).
+        # Dict: selection != NULL or _dict_values != NULL.
+        if (self.ptr != NULL and self.ptr.offsets == NULL and
+                self._dict_values == NULL and
+                self._unified_view.selection == NULL and
+                self._unified_view.data != NULL):
+            _cp_dealloc = <DrakenConstantStringPayload*>self._unified_view.data
+            if _cp_dealloc.data != NULL:
+                free(_cp_dealloc.data)
+            free(_cp_dealloc)
+            self._unified_view.data = NULL
         _release_dict_storage(self)
-        if self._const_value != NULL:
-            if self._const_value.data != NULL:
-                free(self._const_value.data)
-            free(self._const_value)
-            self._const_value = NULL
 
         if self.ptr != NULL:
             if self.owns_data:
@@ -588,33 +568,17 @@ cdef class StringVector(Vector):
             free(self.ptr)
             self.ptr = NULL
 
-    cdef DictAccessor* dict_accessor(self) noexcept:
-        if self._dict_values == NULL or self._dict_codes == NULL or self.ptr == NULL:
-            return NULL
-        self._dict_accessor.codes = self._dict_codes
-        self._dict_accessor.code_width = self._dict_code_width
-        self._dict_accessor.row_nulls = self.ptr.null_bitmap
-        self._dict_accessor.length = self.ptr.length
-        self._dict_accessor.dict_values = self._dict_values
-        self._dict_accessor.value_type = self._dict_values.type
-        return &self._dict_accessor
-
-    cdef ConstAccessor* const_accessor(self) noexcept:
-        if not self._has_const or self.ptr == NULL or self._const_value == NULL:
-            return NULL
-        self._const_accessor.length = self.ptr.length
-        self._const_accessor.value_type = DRAKEN_STRING
-        self._const_accessor.value_ptr = <void*>self._const_value
-        self._const_accessor.is_null = 1 if self._const_is_null else 0
-        return &self._const_accessor
-
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const:
+        if self.ptr == NULL or self.ptr.offsets == NULL:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL or self._has_const:
+        if self.ptr == NULL:
+            return NULL
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             return NULL
         return self.ptr.null_bitmap
 
@@ -623,7 +587,7 @@ cdef class StringVector(Vector):
 
     # ------------------------------------------------------------------
     # Encoded-form accessors (dict and RLE) for aggregation kernels.
-    # The caller must check `self._dict_codes != NULL` before calling these;
+    # The caller must check `self._unified_view.selection != NULL` before calling these;
     # they do not validate the encoding.
     # ------------------------------------------------------------------
     cdef Py_ssize_t c_length(self) noexcept nogil:
@@ -637,10 +601,10 @@ cdef class StringVector(Vector):
         return <Py_ssize_t>self._dict_values.length
 
     cdef uint8_t c_dict_code_width(self) noexcept nogil:
-        return self._dict_code_width
+        return self._unified_view.sel_width
 
     cdef const uint8_t* c_dict_codes_ptr(self) noexcept nogil:
-        return <const uint8_t*>self._dict_codes
+        return <const uint8_t*>self._unified_view.selection
 
     cdef const uint8_t* c_dict_value_ptr(
         self, Py_ssize_t i, Py_ssize_t* out_len
@@ -681,7 +645,7 @@ cdef class StringVector(Vector):
         cdef int64_t* counts
         cdef uint8_t code_width
 
-        if self._dict_codes == NULL:
+        if self._unified_view.selection == NULL:
             raise ValueError("c_dict_code_counts_ptr: vector is not dict-encoded")
         if dv == NULL:
             raise ValueError("c_dict_code_counts_ptr: missing dictionary values")
@@ -701,10 +665,10 @@ cdef class StringVector(Vector):
             raise MemoryError()
         memset(counts, 0, <size_t>(dict_size if dict_size > 0 else 1) * sizeof(int64_t))
 
-        if dict_size > 0 and self._dict_codes != NULL and self.ptr != NULL:
+        if dict_size > 0 and self._unified_view.selection != NULL and self.ptr != NULL:
             n = <Py_ssize_t>self.ptr.length
-            codes = <const uint8_t*>self._dict_codes
-            code_width = self._dict_code_width
+            codes = <const uint8_t*>self._unified_view.selection
+            code_width = self._unified_view.sel_width
             row_nulls = self.ptr.null_bitmap
             with nogil:
                 for i in range(n):
@@ -754,7 +718,7 @@ cdef class StringVector(Vector):
     def dict_value_at(self, Py_ssize_t i):
         cdef Py_ssize_t length
         cdef const uint8_t* p
-        if self._dict_codes == NULL:
+        if self._unified_view.selection == NULL:
             raise ValueError("dict_value_at: vector is not dict-encoded")
         if i < 0 or i >= self.c_dict_size():
             raise IndexError("dict index out of range")
@@ -764,21 +728,19 @@ cdef class StringVector(Vector):
         return PyBytes_FromStringAndSize(<const char*>p, length)
 
     def dict_code_at(self, Py_ssize_t i):
-        if self._dict_codes == NULL:
+        if self._unified_view.selection == NULL:
             raise ValueError("dict_code_at: vector is not dict-encoded")
-        if self._dict_codes == NULL:
-            raise ValueError("dict_code_at: missing codes")
         if i < 0 or i >= <Py_ssize_t>self.ptr.length:
             raise IndexError("row index out of range")
         return <Py_ssize_t>_read_packed_code(
-            <const uint8_t*>self._dict_codes, self._dict_code_width, i
+            <const uint8_t*>self._unified_view.selection, self._unified_view.sel_width, i
         )
 
     def dict_code_counts(self):
         cdef const int64_t* counts
         cdef Py_ssize_t dict_size
         cdef Py_ssize_t i
-        if self._dict_codes == NULL:
+        if self._unified_view.selection == NULL:
             raise ValueError("dict_code_counts: vector is not dict-encoded")
         counts = self.c_dict_code_counts_ptr()
         dict_size = self.c_dict_size()
@@ -810,7 +772,7 @@ cdef class StringVector(Vector):
 
     @property
     def code_width(self):
-        return self._dict_code_width if self._dict_values != NULL else None
+        return self._unified_view.sel_width if self._dict_values != NULL else None
 
     @property
     def ordered(self):
@@ -829,7 +791,9 @@ cdef class StringVector(Vector):
         if uv.selection != NULL:
             return self.materialize().to_arrow()
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL:
                 return pa.nulls(self.ptr.length, type=pa.binary())
             _cp = <DrakenConstantStringPayload*>uv.data
@@ -846,10 +810,8 @@ cdef class StringVector(Vector):
 
         # Data buffer: all the concatenated string bytes
         # Pass self as base object to keep the vector alive
-        # If there are no bytes or the data pointer is NULL, create an empty
-        # pyarrow buffer instead of passing a NULL pointer to foreign_buffer
         total_bytes = ptr.offsets[n]
-        if total_bytes <= 0 or ptr.data == NULL:
+        if total_bytes <= 0:
             data_buf = pa.py_buffer(b"")
         else:
             data_buf = pa.foreign_buffer(<intptr_t>ptr.data, total_bytes, base=self)
@@ -877,7 +839,9 @@ cdef class StringVector(Vector):
         if uv.selection != NULL:
             return self.materialize()[i]
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if i < 0 or i >= ptr.length:
                 raise IndexError("Index out of range")
             if uv.validity != NULL:
@@ -905,13 +869,17 @@ cdef class StringVector(Vector):
         return self.item_at(i)
 
     def __iter__(self):
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             return iter(self.to_pylist())
         return _StringVectorIterator(self)
 
     def c_iter(self):
         """Return a C-level iterator for high-performance kernel operations."""
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             raise NotImplementedError("StringVector.c_iter() is not available for constant encoding")
         return _StringVectorCIterator._from_ptr(self.ptr)
 
@@ -924,7 +892,9 @@ cdef class StringVector(Vector):
             return self.materialize().byte_length(i)
         if i < 0 or i >= ptr.length:
             raise IndexError("Index out of range")
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL:
                 return 0
             _cp = <DrakenConstantStringPayload*>uv.data
@@ -937,13 +907,15 @@ cdef class StringVector(Vector):
         cdef DrakenVarBuffer* ptr = self.ptr
         if uv.selection != NULL:
             return self.materialize().buffers()
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             raise NotImplementedError("StringVector.buffers() is not available for constant encoding")
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t total_bytes = ptr.offsets[n]
         cdef object data_view
 
-        if total_bytes <= 0 or ptr.data == NULL:
+        if total_bytes <= 0:
             data_view = memoryview(b"")
         else:
             data_view = <uint8_t[:total_bytes]> ptr.data
@@ -956,7 +928,9 @@ cdef class StringVector(Vector):
 
     cpdef object null_bitmap(self):
         """Return the null bitmap as a Python ``memoryview``, or ``None`` if all values are valid."""
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             return None
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t nb_size
@@ -972,13 +946,17 @@ cdef class StringVector(Vector):
         cdef DrakenVector* uv = self.unified()
         if uv.selection != NULL:
             return self.materialize().lengths()
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             raise NotImplementedError("StringVector.lengths() is not available for constant encoding")
         return <int32_t[: self.ptr.length + 1]> self.ptr.offsets
 
     cpdef object view(self):
         """Return a lightweight pointer/length view for zero-copy consumers."""
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             raise NotImplementedError("StringVector.view() is not available for constant encoding")
         return _StringVectorView(self)
 
@@ -997,7 +975,9 @@ cdef class StringVector(Vector):
         uv = self.unified()
         ptr = self.ptr
         n = ptr.length
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             return n if uv.validity != NULL else 0
         if ptr.null_bitmap == NULL:
             return 0
@@ -1080,7 +1060,9 @@ cdef class StringVector(Vector):
                     off_end = <Py_ssize_t>ptr.offsets[i + 1]
                     builder.append_bytes(data_ptr + off_start, off_end - off_start)
             return builder.finish()
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL:
                 builder = StringVectorBuilder(n, 0)
                 for i in range(n):
@@ -1104,7 +1086,9 @@ cdef class StringVector(Vector):
         cdef uint64_t n = ptr.length
         cdef uint64_t data_bytes, offset_bytes, null_bytes
         cdef uint64_t dict_data_bytes, dict_offset_bytes, code_bytes
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.data != NULL:
                 _cp = <DrakenConstantStringPayload*>uv.data
                 return <uint64_t>_cp.length
@@ -1139,7 +1123,9 @@ cdef class StringVector(Vector):
         if buf == NULL:
             raise MemoryError()
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             for i in range(n):
                 buf[i] = 1 if uv.validity != NULL else 0
             return <int8_t[:n]> buf
@@ -1182,7 +1168,9 @@ cdef class StringVector(Vector):
                 return BoolVector(<size_t>self.ptr.length)
             return _codes_to_boolvector_eq(self, _eq_code)
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
             _cp = <DrakenConstantStringPayload*>uv.data
@@ -1255,7 +1243,9 @@ cdef class StringVector(Vector):
                 return _codes_to_boolvector_neq(self, <Py_ssize_t>(<DrakenVarBuffer*>uv.data).length)
             return _codes_to_boolvector_neq(self, _neq_code)
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
             _cp = <DrakenConstantStringPayload*>uv.data
@@ -1315,7 +1305,9 @@ cdef class StringVector(Vector):
         if uv.selection != NULL:
             return _dict_ordered_scalar(self, value, 0)
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
             _cp = <DrakenConstantStringPayload*>uv.data
@@ -1377,7 +1369,9 @@ cdef class StringVector(Vector):
         if uv.selection != NULL:
             return _dict_ordered_scalar(self, value, 1)
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
             _cp = <DrakenConstantStringPayload*>uv.data
@@ -1439,7 +1433,9 @@ cdef class StringVector(Vector):
         if uv.selection != NULL:
             return _dict_ordered_scalar(self, value, 2)
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
             _cp = <DrakenConstantStringPayload*>uv.data
@@ -1501,7 +1497,9 @@ cdef class StringVector(Vector):
         if uv.selection != NULL:
             return _dict_ordered_scalar(self, value, 3)
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
             _cp = <DrakenConstantStringPayload*>uv.data
@@ -1658,9 +1656,11 @@ cdef class StringVector(Vector):
             return self.materialize().equals_vector(other)
         if ouv.selection != NULL:
             return self.equals_vector(other.materialize())
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             return _materialize_const_string(self).equals_vector(other)
-        if other._has_const:
+        if other.ptr.offsets == NULL and other._unified_view.selection == NULL:
             return self.equals_vector(_materialize_const_string(other))
         return self._compare_vector_op(other, 0)
 
@@ -1672,9 +1672,11 @@ cdef class StringVector(Vector):
             return self.materialize().not_equals_vector(other)
         if ouv.selection != NULL:
             return self.not_equals_vector(other.materialize())
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             return _materialize_const_string(self).not_equals_vector(other)
-        if other._has_const:
+        if other.ptr.offsets == NULL and other._unified_view.selection == NULL:
             return self.not_equals_vector(_materialize_const_string(other))
         return self._compare_vector_op(other, 1)
 
@@ -1686,9 +1688,11 @@ cdef class StringVector(Vector):
             return self.materialize().less_than_vector(other)
         if ouv.selection != NULL:
             return self.less_than_vector(other.materialize())
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             return _materialize_const_string(self).less_than_vector(other)
-        if other._has_const:
+        if other.ptr.offsets == NULL and other._unified_view.selection == NULL:
             return self.less_than_vector(_materialize_const_string(other))
         return self._compare_vector_op(other, 2)
 
@@ -1700,9 +1704,11 @@ cdef class StringVector(Vector):
             return self.materialize().less_than_or_equals_vector(other)
         if ouv.selection != NULL:
             return self.less_than_or_equals_vector(other.materialize())
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             return _materialize_const_string(self).less_than_or_equals_vector(other)
-        if other._has_const:
+        if other.ptr.offsets == NULL and other._unified_view.selection == NULL:
             return self.less_than_or_equals_vector(_materialize_const_string(other))
         return self._compare_vector_op(other, 3)
 
@@ -1714,9 +1720,11 @@ cdef class StringVector(Vector):
             return self.materialize().greater_than_vector(other)
         if ouv.selection != NULL:
             return self.greater_than_vector(other.materialize())
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             return _materialize_const_string(self).greater_than_vector(other)
-        if other._has_const:
+        if other.ptr.offsets == NULL and other._unified_view.selection == NULL:
             return self.greater_than_vector(_materialize_const_string(other))
         return self._compare_vector_op(other, 4)
 
@@ -1728,9 +1736,11 @@ cdef class StringVector(Vector):
             return self.materialize().greater_than_or_equals_vector(other)
         if ouv.selection != NULL:
             return self.greater_than_or_equals_vector(other.materialize())
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             return _materialize_const_string(self).greater_than_or_equals_vector(other)
-        if other._has_const:
+        if other.ptr.offsets == NULL and other._unified_view.selection == NULL:
             return self.greater_than_or_equals_vector(_materialize_const_string(other))
         return self._compare_vector_op(other, 5)
 
@@ -1757,7 +1767,9 @@ cdef class StringVector(Vector):
         if uv.selection != NULL:
             return self.materialize().in_list(value_set)
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
             _cp = <DrakenConstantStringPayload*>uv.data
@@ -1816,7 +1828,9 @@ cdef class StringVector(Vector):
         cdef uint8_t* dict_row_nulls
         cdef DrakenConstantStringPayload* _cp
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
             _cp = <DrakenConstantStringPayload*>uv.data
@@ -1853,11 +1867,11 @@ cdef class StringVector(Vector):
                     return out  # Fallback to empty result
 
                 dict_size = <Py_ssize_t>dict_values_buf.length
-                dict_codes = self._dict_codes
+                dict_codes = <const uint8_t*>self._unified_view.selection
                 if dict_codes == NULL or dict_size == 0:
                     return out  # Fallback to empty result
 
-                dict_code_width = self._dict_code_width
+                dict_code_width = self._unified_view.sel_width
                 dict_row_nulls = self.ptr.null_bitmap
                 dict_data = <const uint8_t*>dict_values_buf.data
 
@@ -1936,7 +1950,9 @@ cdef class StringVector(Vector):
 
         compiled = re.compile(pattern)
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
             _cp = <DrakenConstantStringPayload*>uv.data
@@ -1964,11 +1980,11 @@ cdef class StringVector(Vector):
                     return out  # Fallback to empty result
 
                 dict_size = <Py_ssize_t>dict_values_buf.length
-                dict_codes = self._dict_codes
+                dict_codes = <const uint8_t*>self._unified_view.selection
                 if dict_codes == NULL or dict_size == 0:
                     return out  # Fallback to empty result
 
-                dict_code_width = self._dict_code_width
+                dict_code_width = self._unified_view.sel_width
                 dict_row_nulls = self.ptr.null_bitmap
                 dict_data = <const uint8_t*>dict_values_buf.data
 
@@ -2048,7 +2064,9 @@ cdef class StringVector(Vector):
         cdef DrakenConstantStringPayload* _cp
 
         # Constant vector case
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
             _cp = <DrakenConstantStringPayload*>uv.data
@@ -2138,11 +2156,11 @@ cdef class StringVector(Vector):
                     return out  # Fallback to empty result
 
                 dict_size = <Py_ssize_t>dict_values_buf.length
-                dict_codes = self._dict_codes
+                dict_codes = <const uint8_t*>self._unified_view.selection
                 if dict_codes == NULL or dict_size == 0:
                     return out  # Fallback to empty result
 
-                dict_code_width = self._dict_code_width
+                dict_code_width = self._unified_view.sel_width
                 dict_row_nulls = self.ptr.null_bitmap
                 dict_data = <const uint8_t*>dict_values_buf.data
 
@@ -2252,7 +2270,9 @@ cdef class StringVector(Vector):
         out = []
         data = <char*> ptr.data
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL:
                 for i in range(n):
                     out.append(None)
@@ -2311,14 +2331,16 @@ cdef class StringVector(Vector):
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("StringVector.hash_into: output buffer too small")
 
-        if self._has_const:
-            if self._const_is_null:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
+            if self._unified_view.validity != NULL:
                 value = NULL_HASH
             else:
-                if self._const_value.length <= 32:
-                    value = _short_string_hash(<const uint8_t*>self._const_value.data, <size_t>self._const_value.length)
+                if (<DrakenConstantStringPayload*>self._unified_view.data).length <= 32:
+                    value = _short_string_hash(<const uint8_t*>(<DrakenConstantStringPayload*>self._unified_view.data).data, <size_t>(<DrakenConstantStringPayload*>self._unified_view.data).length)
                 else:
-                    value = XXH3_64bits(<const void*>self._const_value.data, <size_t>self._const_value.length)
+                    value = XXH3_64bits(<const void*>(<DrakenConstantStringPayload*>self._unified_view.data).data, <size_t>(<DrakenConstantStringPayload*>self._unified_view.data).length)
             for j in range(STRING_HASH_CHUNK):
                 scratch[j] = value
             dst = &out_buf[offset]
@@ -2334,8 +2356,8 @@ cdef class StringVector(Vector):
         # Dictionary-encoded path
         dict_values_buf = self._dict_values
         dict_size = <Py_ssize_t>dict_values_buf.length
-        dict_codes = self._dict_codes
-        dict_code_width = self._dict_code_width
+        dict_codes = <const uint8_t*>self._unified_view.selection
+        dict_code_width = self._unified_view.sel_width
         dict_row_nulls = self.ptr.null_bitmap
 
         if uv.selection != NULL:
@@ -2436,7 +2458,6 @@ cdef class StringVector(Vector):
         cdef uint32_t code
         cdef Py_ssize_t dict_size, dict_idx
         cdef uint64_t* dict_hashes_ptr = NULL
-        cdef DictAccessor* da
         cdef const uint8_t* dict_codes
         cdef uint8_t dict_code_width
         cdef uint8_t* dict_row_nulls
@@ -2448,14 +2469,16 @@ cdef class StringVector(Vector):
         if n == 0:
             return 0
 
-        if self._has_const:
-            if self._const_is_null:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
+            if self._unified_view.validity != NULL:
                 value = NULL_HASH
             else:
-                if self._const_value.length <= 32:
-                    value = _short_string_hash(<const uint8_t*>self._const_value.data, <size_t>self._const_value.length)
+                if (<DrakenConstantStringPayload*>self._unified_view.data).length <= 32:
+                    value = _short_string_hash(<const uint8_t*>(<DrakenConstantStringPayload*>self._unified_view.data).data, <size_t>(<DrakenConstantStringPayload*>self._unified_view.data).length)
                 else:
-                    value = XXH3_64bits(<const void*>self._const_value.data, <size_t>self._const_value.length)
+                    value = XXH3_64bits(<const void*>(<DrakenConstantStringPayload*>self._unified_view.data).data, <size_t>(<DrakenConstantStringPayload*>self._unified_view.data).length)
             for i in range(STRING_HASH_CHUNK):
                 scratch[i] = value
             i = 0
@@ -2475,10 +2498,10 @@ cdef class StringVector(Vector):
             if dict_values_buf == NULL or dict_values_buf.data == NULL:
                 return 1  # Fall back to Python hash
             dict_size = <Py_ssize_t>dict_values_buf.length
-            dict_codes = self._dict_codes
+            dict_codes = <const uint8_t*>self._unified_view.selection
             if dict_codes == NULL:
                 return 1  # Fall back to Python hash
-            dict_code_width = self._dict_code_width
+            dict_code_width = self._unified_view.sel_width
             dict_row_nulls = self.ptr.null_bitmap
 
             dict_hashes_ptr = <uint64_t*>malloc(dict_size * sizeof(uint64_t))
@@ -2525,8 +2548,8 @@ cdef class StringVector(Vector):
             return 0
 
         # Dense (non-dictionary, non-constant) path
-        # Validate that we have valid data and offset structures
-        if ptr.data == NULL or ptr.offsets == NULL:
+        # Validate that we have valid offset structure
+        if ptr.offsets == NULL:
             return 1  # Fall back to Python hash
 
         data = <const uint8_t*> ptr.data
@@ -2594,13 +2617,15 @@ cdef class StringVector(Vector):
         if n == 0:
             return 0
 
-        if self._has_const:
-            if self._const_is_null:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
+            if self._unified_view.validity != NULL:
                 value = null_sentinel
-            elif self._const_value.length <= 32:
-                value = _short_string_hash(<const uint8_t*>self._const_value.data, <size_t>self._const_value.length)
+            elif (<DrakenConstantStringPayload*>self._unified_view.data).length <= 32:
+                value = _short_string_hash(<const uint8_t*>(<DrakenConstantStringPayload*>self._unified_view.data).data, <size_t>(<DrakenConstantStringPayload*>self._unified_view.data).length)
             else:
-                value = XXH3_64bits(<const void*>self._const_value.data, <size_t>self._const_value.length)
+                value = XXH3_64bits(<const void*>(<DrakenConstantStringPayload*>self._unified_view.data).data, <size_t>(<DrakenConstantStringPayload*>self._unified_view.data).length)
             for i in range(n):
                 out[i] = value
             return 0
@@ -2610,10 +2635,10 @@ cdef class StringVector(Vector):
             if dict_values_buf == NULL or dict_values_buf.data == NULL:
                 return 1
             dict_size = <Py_ssize_t>dict_values_buf.length
-            dict_codes = self._dict_codes
+            dict_codes = <const uint8_t*>self._unified_view.selection
             if dict_codes == NULL:
                 return 1
-            dict_code_width = self._dict_code_width
+            dict_code_width = self._unified_view.sel_width
             dict_row_nulls = self.ptr.null_bitmap
 
             dict_hashes_ptr = <uint64_t*>malloc(dict_size * sizeof(uint64_t))
@@ -2655,7 +2680,7 @@ cdef class StringVector(Vector):
             free(dict_hashes_ptr)
             return 0
 
-        if ptr.data == NULL or ptr.offsets == NULL:
+        if ptr.offsets == NULL:
             return 1
 
         data = <const uint8_t*>ptr.data
@@ -2707,16 +2732,18 @@ cdef class StringVector(Vector):
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("StringVector.compress: output buffer too small")
 
-        if self._has_const:
-            if self._const_is_null:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
+            if self._unified_view.validity != NULL:
                 for i in range(n):
                     out_buf[offset + i] = <int64_t>(-(1 << 63))
             else:
-                copy_len = self._const_value.length
+                copy_len = (<DrakenConstantStringPayload*>self._unified_view.data).length
                 if copy_len > 7:
                     copy_len = 7
                 acc = <uint64_t>0
-                memcpy(&acc, <const void*>self._const_value.data, <size_t>copy_len)
+                memcpy(&acc, <const void*>(<DrakenConstantStringPayload*>self._unified_view.data).data, <size_t>copy_len)
                 acc = BSWAP64(acc)
                 for i in range(n):
                     out_buf[offset + i] = <int64_t>acc
@@ -2746,7 +2773,7 @@ cdef class StringVector(Vector):
         cdef uint8_t code_width_local
         cdef Py_ssize_t code_bytes
         cdef uint8_t* src_codes
-        cdef uint8_t* dst_codes
+        cdef uint8_t* dst_codes = NULL
         cdef DrakenVarBuffer* src_dict_values
         cdef DrakenVarBuffer* dst_dict_values
         cdef Py_ssize_t take_dict_size
@@ -2765,8 +2792,8 @@ cdef class StringVector(Vector):
             # to throw most away. The dictionary is typically tiny relative to
             # the row count, so the per-row work drops to a packed-code copy.
             out_n = indices.shape[0]
-            code_width_local = self._dict_code_width
-            src_codes = self._dict_codes
+            code_width_local = uv.sel_width
+            src_codes = <uint8_t*>uv.selection
             src_dict_values = self._dict_values
             src_row_nulls = self.ptr.null_bitmap
             src_has_row_nulls = src_row_nulls != NULL
@@ -2815,8 +2842,6 @@ cdef class StringVector(Vector):
                     for out_i in range(out_n):
                         gathered_code = (<const uint32_t*>src_codes)[indices[out_i]]
                         (<uint32_t*>dst_codes)[out_i] = <uint32_t>gathered_code
-                dict_result._dict_codes = dst_codes
-
             # Gather row null bitmap if present.
             if src_has_row_nulls and out_n > 0:
                 nb_bytes_dict = (out_n + 7) >> 3
@@ -2859,17 +2884,16 @@ cdef class StringVector(Vector):
                     <size_t>nb_bytes_dict,
                 )
             dict_result._dict_values = dst_dict_values
-
-            dict_result._dict_code_width = code_width_local
             dict_result._dict_ordered = self._dict_ordered
 
-            dict_result._dict_accessor.codes = dict_result._dict_codes
-            dict_result._dict_accessor.code_width = code_width_local
-            dict_result._dict_accessor.row_nulls = dict_result.ptr.null_bitmap
-            dict_result._dict_accessor.length = <size_t>out_n
-            dict_result._dict_accessor.dict_values = dict_result._dict_values
-
-            _refresh_unified_string(dict_result)
+            dict_result._unified_view.selection = dst_codes
+            dict_result._unified_view.sel_width = code_width_local
+            dict_result._unified_view.data = <void*>dst_dict_values
+            dict_result._unified_view.data_length = <size_t>take_dict_size
+            dict_result._unified_view.length = <size_t>out_n
+            dict_result._unified_view.itemsize = 0
+            dict_result._unified_view.type = DRAKEN_STRING
+            dict_result._unified_view.validity = dict_result.ptr.null_bitmap
             return dict_result
         cdef DrakenVarBuffer* src_ptr = self.ptr
         cdef Py_ssize_t n = indices.shape[0]
@@ -2885,7 +2909,17 @@ cdef class StringVector(Vector):
 
         cdef DrakenConstantStringPayload* _cp
 
-        if self._has_const:
+        # Constant discriminant — must match __dealloc__ at line 546–548:
+        # Constant: ptr.offsets == NULL AND _dict_values == NULL AND selection == NULL.
+        # Dense:    ptr.offsets != NULL.
+        # Dict:     selection != NULL or _dict_values != NULL.
+        # The previous 2-condition check (offsets+selection only) misidentified an
+        # empty-dict take output (out_n=0 → dst_codes=NULL → selection=NULL, but
+        # _dict_values still non-NULL) as constant, then cast a DrakenVarBuffer*
+        # to DrakenConstantStringPayload* and walked off into bad memory.
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL or uv.data == NULL:
                 return StringVector.from_constant(None, n, is_null=True)
             else:
@@ -2948,7 +2982,14 @@ cdef class StringVector(Vector):
                 if src_bit:
                     dst_ptr.null_bitmap[i >> 3] |= (1 << (i & 7))
 
-        _refresh_unified_string(result)
+        result._unified_view.data = <void*>result.ptr
+        result._unified_view.data_length = <size_t>n
+        result._unified_view.selection = NULL
+        result._unified_view.sel_width = 0
+        result._unified_view.length = <size_t>n
+        result._unified_view.validity = result.ptr.null_bitmap
+        result._unified_view.itemsize = 0
+        result._unified_view.type = DRAKEN_STRING
         return result
 
     cpdef object min(self):
@@ -2971,7 +3012,9 @@ cdef class StringVector(Vector):
         if uv.selection != NULL:
             return self.materialize().min()
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL:
                 return None
             _cp = <DrakenConstantStringPayload*>uv.data
@@ -3030,7 +3073,9 @@ cdef class StringVector(Vector):
         if uv.selection != NULL:
             return self.materialize().max()
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             if uv.validity != NULL:
                 return None
             _cp = <DrakenConstantStringPayload*>uv.data
@@ -3086,8 +3131,8 @@ cdef class StringVector(Vector):
             # dictionary. For an ordered dict, code order matches value order, so
             # a single integer compare suffices. Otherwise dereference into the
             # dict's varbuffer and memcmp the underlying bytes.
-            lc = _read_packed_code(self._dict_codes, self._dict_code_width, left_idx)
-            rc = _read_packed_code(self._dict_codes, self._dict_code_width, right_idx)
+            lc = _read_packed_code(<const uint8_t*>self._unified_view.selection, self._unified_view.sel_width, left_idx)
+            rc = _read_packed_code(<const uint8_t*>self._unified_view.selection, self._unified_view.sel_width, right_idx)
             if lc == rc:
                 return 0
             if self._dict_ordered:
@@ -3107,7 +3152,9 @@ cdef class StringVector(Vector):
         ptr = self.ptr
         data = <char*> ptr.data
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             return 0
 
         left_start = ptr.offsets[left_idx]
@@ -3136,7 +3183,9 @@ cdef class StringVector(Vector):
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef uint8_t byte
 
-        if self._has_const:
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
             return uv.validity != NULL
 
         if ptr.null_bitmap == NULL:
@@ -3152,9 +3201,16 @@ cdef class StringVector(Vector):
     def __str__(self):
         cdef list vals = []
         cdef Py_ssize_t i, k
+        cdef DrakenConstantStringPayload* _cp_str
         k = min(<Py_ssize_t>self.ptr.length, 5)
-        if self._has_const:
-            vals = [None if self._const_is_null else PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length)] * k
+        if (self.ptr.offsets == NULL
+                and self._dict_values == NULL
+                and self._unified_view.selection == NULL):
+            if self._unified_view.validity != NULL:
+                vals = [None] * k
+            else:
+                _cp_str = <DrakenConstantStringPayload*>self._unified_view.data
+                vals = [PyBytes_FromStringAndSize(<char*>_cp_str.data, _cp_str.length)] * k
             return f"<StringVector len={self.ptr.length} values={vals}>"
         for i in range(k):
             vals.append(self[i])
@@ -3520,7 +3576,14 @@ cdef class StringVectorBuilder:
                 f"builder consumed {self._offset} bytes but expected {self._bytes_cap}"
             )
         self._finished = True
-        _refresh_unified_string(self._vec)
+        self._vec._unified_view.data = <void*>self._vec.ptr
+        self._vec._unified_view.data_length = <size_t>self._length
+        self._vec._unified_view.selection = NULL
+        self._vec._unified_view.sel_width = 0
+        self._vec._unified_view.length = <size_t>self._length
+        self._vec._unified_view.validity = self._vec.ptr.null_bitmap
+        self._vec._unified_view.itemsize = 0
+        self._vec._unified_view.type = DRAKEN_STRING
         return self._vec
 
     cdef inline void _set_null(self, Py_ssize_t index) except *:
@@ -3654,7 +3717,14 @@ cdef StringVector from_arrow(object array):
         vec.ptr.null_bitmap = NULL
 
     vec.ptr.type = DRAKEN_STRING
-    _refresh_unified_string(vec)
+    vec._unified_view.data = <void*>vec.ptr
+    vec._unified_view.data_length = <size_t>vec.ptr.length
+    vec._unified_view.selection = NULL
+    vec._unified_view.sel_width = 0
+    vec._unified_view.length = <size_t>vec.ptr.length
+    vec._unified_view.validity = vec.ptr.null_bitmap
+    vec._unified_view.itemsize = 0
+    vec._unified_view.type = DRAKEN_STRING
     return vec
 
 
@@ -3743,7 +3813,6 @@ cdef StringVector from_dict(const int32_t[::1] codes, list dictionary):
         dict_lengths_view = <int32_t[:dict_size]>dict_lengths_buf
         arena_view = <uint8_t[:arena_bytes_count]>arena_buf
         _attach_dictionary_storage_from_buffers(vec, codes, dict_offsets_view, dict_lengths_view, arena_view, False)
-        _refresh_unified_string(vec)
         return vec
     finally:
         if dict_offsets_buf != NULL:
@@ -3849,7 +3918,6 @@ cdef StringVector from_dict_nullable(
         dict_lengths_view = <int32_t[:dict_size]>dict_lengths_buf
         arena_view = <uint8_t[:arena_bytes_count]>arena_buf
         _attach_dictionary_storage_from_buffers(vec, codes, dict_offsets_view, dict_lengths_view, arena_view, False)
-        _refresh_unified_string(vec)
         return vec
     finally:
         if dict_offsets_buf != NULL:
@@ -3879,7 +3947,6 @@ cdef StringVector from_dict_buffers(
 
     if row_count == 0:
         vec = StringVector(0, 0)
-        _refresh_unified_string(vec)
         return vec
     if dict_size == 0:
         raise ValueError("StringVector.from_dict_buffers requires a non-empty dictionary")
@@ -3926,7 +3993,6 @@ cdef StringVector from_dict_buffers(
 
     vec = builder.finish()
     _attach_dictionary_storage_from_buffers(vec, codes, dict_offsets, dict_lengths, arena_bytes, False)
-    _refresh_unified_string(vec)
     return vec
 
 
@@ -3937,10 +4003,10 @@ cdef StringVector from_dict_buffers_dict_only(
     const uint8_t[::1] arena_bytes,
     object row_validity=None,
 ):
-    """Same inputs as from_dict_buffers, but produces a dict-only StringVector
-    (ptr.data == NULL). Used by the cpp-pipeline so downstream Morsel.slice /
-    StringVector.take hit the dict-preserving fast path instead of materialising
-    a fresh string buffer per slice."""
+    """Same inputs as from_dict_buffers, but produces a dictionary-encoded StringVector
+    (selection != NULL, data points to DrakenVarBuffer dict). Used by the cpp-pipeline
+    so downstream Morsel.slice / StringVector.take hit the dict-preserving fast path
+    instead of materialising a fresh string buffer per slice."""
     cdef Py_ssize_t row_count = codes.shape[0]
     cdef Py_ssize_t dict_size = dict_lengths.shape[0]
     cdef Py_ssize_t i
@@ -3950,7 +4016,6 @@ cdef StringVector from_dict_buffers_dict_only(
 
     if row_count == 0:
         vec = StringVector(0, 0)
-        _refresh_unified_string(vec)
         return vec
     if dict_size == 0:
         raise ValueError("StringVector.from_dict_buffers_dict_only requires a non-empty dictionary")
@@ -4003,17 +4068,6 @@ cdef StringVector from_dict_buffers_dict_only(
     _attach_dictionary_storage_from_buffers(
         vec, codes, dict_offsets, dict_lengths, arena_bytes, False
     )
-
-    # Wire the dict accessor so downstream dict-aware kernels see the same view
-    # that the take() fast path produces.
-    vec._dict_accessor.codes = vec._dict_codes
-    vec._dict_accessor.code_width = vec._dict_code_width
-    vec._dict_accessor.row_nulls = vec.ptr.null_bitmap
-    vec._dict_accessor.length = <size_t>row_count
-    vec._dict_accessor.dict_values = vec._dict_values
-    vec._dict_accessor.value_type = DRAKEN_STRING
-
-    _refresh_unified_string(vec)
     return vec
 
 
@@ -4043,7 +4097,6 @@ cdef StringVector from_packed_dict(
 
     if row_count == 0:
         vec = StringVector(0, 0)
-        _refresh_unified_string(vec)
         return vec
     if dict_size == 0:
         raise ValueError("StringVector.from_packed_dict requires a non-empty dictionary")
@@ -4125,8 +4178,8 @@ cdef Py_ssize_t _dict_find_code(StringVector vec, const char* val_ptr, Py_ssize_
 
 cdef BoolVector _codes_to_boolvector_eq(StringVector vec, Py_ssize_t target_code):
     """BoolVector: codes[i] == target_code, propagating nulls."""
-    cdef uint8_t* codes = vec._dict_codes
-    cdef uint8_t code_width = vec._dict_code_width
+    cdef uint8_t* codes = <uint8_t*>vec._unified_view.selection
+    cdef uint8_t code_width = vec._unified_view.sel_width
     cdef uint8_t* nb_ptr = vec.ptr.null_bitmap
     cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -4161,8 +4214,8 @@ cdef BoolVector _codes_to_boolvector_eq(StringVector vec, Py_ssize_t target_code
 
 cdef BoolVector _codes_to_boolvector_neq(StringVector vec, Py_ssize_t target_code):
     """BoolVector: codes[i] != target_code, propagating nulls."""
-    cdef uint8_t* codes = vec._dict_codes
-    cdef uint8_t code_width = vec._dict_code_width
+    cdef uint8_t* codes = <uint8_t*>vec._unified_view.selection
+    cdef uint8_t code_width = vec._unified_view.sel_width
     cdef uint8_t* nb_ptr = vec.ptr.null_bitmap
     cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -4231,8 +4284,8 @@ cdef BoolVector _dict_ordered_scalar(StringVector vec, bytes value, int op):
 
 cdef BoolVector _dict_compare_pass_array(StringVector vec, uint8_t* pass_array):
     """BoolVector built from a per-code pass_array[code] lookup, propagating nulls."""
-    cdef uint8_t* codes = vec._dict_codes
-    cdef uint8_t code_width = vec._dict_code_width
+    cdef uint8_t* codes = <uint8_t*>vec._unified_view.selection
+    cdef uint8_t code_width = vec._unified_view.sel_width
     cdef uint8_t* nb_ptr = vec.ptr.null_bitmap
     cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -4267,11 +4320,11 @@ cdef BoolVector _dict_compare_pass_array(StringVector vec, uint8_t* pass_array):
 
 cdef StringVector _materialize_dict_string(StringVector vec):
     """Expand a dict-only StringVector to a dense StringVector (no src ptr.data needed)."""
-    if vec._dict_values == NULL or vec._dict_codes == NULL:
+    if vec._dict_values == NULL or vec._unified_view.selection == NULL:
         raise ValueError("Dictionary vector missing required data structures")
     cdef DrakenVarBuffer* dict_values = vec._dict_values
-    cdef uint8_t* codes = vec._dict_codes
-    cdef uint8_t code_width = vec._dict_code_width
+    cdef uint8_t* codes = <uint8_t*>vec._unified_view.selection
+    cdef uint8_t code_width = vec._unified_view.sel_width
     cdef uint8_t* null_bitmap = vec.ptr.null_bitmap
     cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
     cdef Py_ssize_t total_bytes = 0
@@ -4337,6 +4390,7 @@ cdef StringVector make_string_dict_only(
     cdef Py_ssize_t nb_bytes
     cdef DrakenVarBuffer* dict_values
     cdef Py_ssize_t i
+    cdef uint8_t* codes_ptr = NULL
 
     # Allocate minimal ptr header (data=NULL, offsets=NULL — dict-only, no dense storage)
     vec.ptr = <DrakenVarBuffer*>malloc(sizeof(DrakenVarBuffer))
@@ -4359,10 +4413,10 @@ cdef StringVector make_string_dict_only(
 
     # Packed code array
     if code_bytes > 0:
-        vec._dict_codes = <uint8_t*>malloc(<size_t>code_bytes)
-        if vec._dict_codes == NULL:
+        codes_ptr = <uint8_t*>malloc(<size_t>code_bytes)
+        if codes_ptr == NULL:
             raise MemoryError()
-        memcpy(vec._dict_codes, codes, <size_t>code_bytes)
+        memcpy(codes_ptr, codes, <size_t>code_bytes)
 
     # Dictionary values: arena + offsets stored as DrakenVarBuffer
     dict_values = alloc_var_buffer(DRAKEN_STRING, <size_t>dict_size, <size_t>arena_size)
@@ -4372,18 +4426,16 @@ cdef StringVector make_string_dict_only(
     if arena_size > 0:
         memcpy(dict_values.data, <const void*>dict_data, <size_t>arena_size)
     vec._dict_values = dict_values
-
-    vec._dict_code_width = code_width
     vec._dict_ordered = 0
 
-    vec._dict_accessor.codes = vec._dict_codes
-    vec._dict_accessor.code_width = code_width
-    vec._dict_accessor.row_nulls = vec.ptr.null_bitmap
-    vec._dict_accessor.length = <size_t>row_count
-    vec._dict_accessor.dict_values = vec._dict_values
-    vec._dict_accessor.value_type = DRAKEN_STRING
-
-    _refresh_unified_string(vec)
+    vec._unified_view.data = <void*>dict_values
+    vec._unified_view.data_length = <size_t>dict_size
+    vec._unified_view.selection = codes_ptr
+    vec._unified_view.sel_width = code_width
+    vec._unified_view.length = <size_t>row_count
+    vec._unified_view.itemsize = 0
+    vec._unified_view.type = DRAKEN_STRING
+    vec._unified_view.validity = vec.ptr.null_bitmap
     return vec
 
 
@@ -4481,7 +4533,14 @@ cdef StringVector from_arrow_struct(object array):
         offset += len(json_bytes)
         ptr.offsets[i+1] = offset
 
-    _refresh_unified_string(vec)
+    vec._unified_view.data = <void*>vec.ptr
+    vec._unified_view.data_length = <size_t>vec.ptr.length
+    vec._unified_view.selection = NULL
+    vec._unified_view.sel_width = 0
+    vec._unified_view.length = <size_t>vec.ptr.length
+    vec._unified_view.validity = vec.ptr.null_bitmap
+    vec._unified_view.itemsize = 0
+    vec._unified_view.type = DRAKEN_STRING
     return vec
 
 cdef StringVector _materialize_const_string(StringVector const_vec):
@@ -4491,15 +4550,15 @@ cdef StringVector _materialize_const_string(StringVector const_vec):
     cdef Py_ssize_t val_len
     cdef Py_ssize_t i
 
-    if const_vec._const_is_null or const_vec._const_value == NULL:
+    if const_vec._unified_view.validity != NULL or const_vec._unified_view.data == NULL:
         builder = StringVectorBuilder(n, 0)
         for i in range(n):
             builder.append_null()
     else:
-        val_len = <Py_ssize_t>const_vec._const_value.length
+        val_len = <Py_ssize_t>(<DrakenConstantStringPayload*>const_vec._unified_view.data).length
         builder = StringVectorBuilder(n, n * val_len)
         for i in range(n):
-            builder.append_bytes(<char*>const_vec._const_value.data, val_len)
+            builder.append_bytes(<char*>(<DrakenConstantStringPayload*>const_vec._unified_view.data).data, val_len)
     return builder.finish()
 
 
@@ -4512,7 +4571,7 @@ cpdef StringVector uppercase(StringVector input):
     Uses SIMD operations on the entire data buffer for maximum performance.
     """
     # Handle constant-encoded vectors: they have NULL offsets, so materialize first
-    if input._has_const or input.ptr.offsets == NULL:
+    if input.ptr.offsets == NULL:
         builder = StringVectorBuilder.with_estimate(len(input), 16)
         for val in input.to_pylist():
             if val is None:
@@ -4550,7 +4609,14 @@ cpdef StringVector uppercase(StringVector input):
             raise MemoryError()
         memcpy(out_ptr.null_bitmap, in_ptr.null_bitmap, nb_size)
 
-    _refresh_unified_string(result)
+    result._unified_view.data = <void*>result.ptr
+    result._unified_view.data_length = <size_t>n
+    result._unified_view.selection = NULL
+    result._unified_view.sel_width = 0
+    result._unified_view.length = <size_t>n
+    result._unified_view.validity = result.ptr.null_bitmap
+    result._unified_view.itemsize = 0
+    result._unified_view.type = DRAKEN_STRING
     return result
 
 
@@ -4560,7 +4626,7 @@ cpdef StringVector lowercase(StringVector input):
     Uses SIMD operations on the entire data buffer for maximum performance.
     """
     # Handle constant-encoded vectors: they have NULL offsets, so materialize first
-    if input._has_const or input.ptr.offsets == NULL:
+    if input.ptr.offsets == NULL:
         builder = StringVectorBuilder.with_estimate(len(input), 16)
         for val in input.to_pylist():
             if val is None:
@@ -4598,7 +4664,14 @@ cpdef StringVector lowercase(StringVector input):
             raise MemoryError()
         memcpy(out_ptr.null_bitmap, in_ptr.null_bitmap, nb_size)
 
-    _refresh_unified_string(result)
+    result._unified_view.data = <void*>result.ptr
+    result._unified_view.data_length = <size_t>n
+    result._unified_view.selection = NULL
+    result._unified_view.sel_width = 0
+    result._unified_view.length = <size_t>n
+    result._unified_view.validity = result.ptr.null_bitmap
+    result._unified_view.itemsize = 0
+    result._unified_view.type = DRAKEN_STRING
     return result
 
 

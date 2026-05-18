@@ -28,8 +28,10 @@ from collections.abc import Iterable
 from draken.core.buffers cimport DrakenVector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.int64_vector cimport Int64Vector
-from draken.vectors.integer_vector cimport IntegerVector
+from draken.vectors.integer64_vector cimport Integer64Vector
+from draken.vectors.integer8_vector cimport Integer8Vector
+from draken.vectors.integer16_vector cimport Integer16Vector
+from draken.vectors.integer32_vector cimport Integer32Vector
 from draken.vectors.string_vector cimport StringVector
 from opteryx.expression import NodeType
 # evaluate_and_append_draken in scope from _operators evaluator includes
@@ -42,14 +44,18 @@ cdef inline bint _is_constant_vector(object vec) noexcept:
     cdef DrakenVector* uv
     if isinstance(vec, Float64Vector):
         uv = (<Float64Vector>vec).unified()
-    elif isinstance(vec, Int64Vector):
-        uv = (<Int64Vector>vec).unified()
-    elif isinstance(vec, IntegerVector):
-        uv = (<IntegerVector>vec).unified()
+    elif isinstance(vec, Integer64Vector):
+        uv = (<Integer64Vector>vec).unified()
+    elif isinstance(vec, Integer8Vector):
+        uv = (<Integer8Vector>vec).unified()
+    elif isinstance(vec, Integer16Vector):
+        uv = (<Integer16Vector>vec).unified()
+    elif isinstance(vec, Integer32Vector):
+        uv = (<Integer32Vector>vec).unified()
     elif isinstance(vec, BoolVector):
         uv = (<BoolVector>vec).unified()
     elif isinstance(vec, StringVector):
-        uv = (<StringVector>vec).unified()
+        return (<StringVector>vec).ptr.offsets == NULL  # constant (offsets always allocated for dense/dict)
     else:
         return False
     return uv.data_length == 1

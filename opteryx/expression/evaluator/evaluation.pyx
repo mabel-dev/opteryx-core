@@ -28,7 +28,7 @@ from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_ve
 
 # Imports from draken are safe at module level — draken does not import opteryx.expression.
 from draken.vectors.bool_vector import BoolVector as _BoolVector
-from draken.vectors.int64_vector import Int64Vector as _Int64Vector
+from draken.vectors.integer64_vector import Integer64Vector as _Integer64Vector
 from draken.vectors.string_vector import StringVector as _StringVector
 from draken.vectors.scalar_constructors import from_scalar as _const_scalar
 from draken.morsels.morsel import Morsel as _Morsel
@@ -131,7 +131,7 @@ def _eval_value(node, morsel):
             from opteryx.expression.binary_operators import MapAccessOp
             # Keep MapAccess in native vector space where possible to avoid
             # costly Arrow <-> Draken round-trips.
-            key_vec = _Int64Vector.from_constant(int(right_val), 1)
+            key_vec = _Integer64Vector.from_constant(int(right_val), 1)
             result = MapAccessOp(left_vec, key_vec)
             if is_draken_vector(result):
                 return result
@@ -1438,7 +1438,7 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
             extr_op = <str>slot.compare_op_str
             if extr_op == "MapAccess":
                 from opteryx.expression.binary_operators import MapAccessOp
-                key_vec = _Int64Vector.from_constant(int(extr_key), 1)
+                key_vec = _Integer64Vector.from_constant(int(extr_key), 1)
                 legacy_result = MapAccessOp(v_left, key_vec)
             elif extr_op == "Arrow":
                 from opteryx.expression.binary_operators import ArrowOp

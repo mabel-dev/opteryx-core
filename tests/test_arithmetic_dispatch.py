@@ -13,8 +13,8 @@ Coverage:
 import pyarrow as pa
 import pytest
 from draken.vectors.float64_vector import Float64Vector
-from draken.vectors.int64_vector import Int64Vector
-from draken.vectors.integer_vector import IntegerVector
+from draken.vectors.integer64_vector import Integer64Vector
+from draken.vectors.integer32_vector import Integer32Vector
 
 from opteryx import session
 from opteryx.utils.vector_types import (
@@ -29,8 +29,8 @@ class TestVectorTypeDiscrimination:
     """Test VectorType-based dispatch implementation (Phase 4.1 foundation)."""
 
     def test_type_discrimination_int64_vector(self):
-        """Test VectorType discrimination for Int64Vector."""
-        v = Int64Vector.from_arrow(pa.array([1, 2, 3]))
+        """Test VectorType discrimination for Integer64Vector."""
+        v = Integer64Vector.from_arrow(pa.array([1, 2, 3]))
         vec_type = get_vector_type(v)
 
         assert vec_type == VectorType.INT64
@@ -43,8 +43,8 @@ class TestVectorTypeDiscrimination:
         assert vec_type == VectorType.FLOAT64
 
     def test_type_discrimination_integer_vector(self):
-        """Test VectorType discrimination for IntegerVector."""
-        v = IntegerVector.from_arrow(pa.array([1, 2, 3], type=pa.int32()))
+        """Test VectorType discrimination for Integer32Vector."""
+        v = Integer32Vector.from_arrow(pa.array([1, 2, 3], type=pa.int32()))
         vec_type = get_vector_type(v)
 
         assert vec_type == VectorType.INTEGER
@@ -78,7 +78,7 @@ class TestVectorTypeDiscrimination:
 
     def test_is_draken_vector_true(self):
         """Test is_draken_vector returns True for Draken vectors."""
-        v = Int64Vector.from_arrow(pa.array([1, 2, 3]))
+        v = Integer64Vector.from_arrow(pa.array([1, 2, 3]))
         assert is_draken_vector(v) is True
 
     def test_is_draken_vector_false_for_arrow(self):
@@ -225,11 +225,11 @@ class TestArithmeticDispatchRefactoring:
         """Verify call_arithmetic_op returns None in Phase 4.4 (delegating to binary_operations)."""
         import pyarrow as pa
 
-        from draken.vectors import Int64Vector
+        from draken.vectors import Integer64Vector
         from opteryx.expression.evaluator.arithmetic_dispatch import call_arithmetic_op
 
-        v1 = Int64Vector.from_arrow(pa.array([1, 2, 3]))
-        v2 = Int64Vector.from_arrow(pa.array([4, 5, 6]))
+        v1 = Integer64Vector.from_arrow(pa.array([1, 2, 3]))
+        v2 = Integer64Vector.from_arrow(pa.array([4, 5, 6]))
 
         # Phase 4.4: Should return None (no Draken kernels yet)
         result = call_arithmetic_op("Plus", v1, v2)

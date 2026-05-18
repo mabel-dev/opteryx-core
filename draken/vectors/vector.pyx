@@ -29,8 +29,6 @@ from cpython.mem cimport PyMem_Calloc, PyMem_Free
 
 from draken.core.buffers cimport (
     DrakenVector,
-    DRAKEN_ENCODING_DENSE, DRAKEN_ENCODING_DICTIONARY,
-    DRAKEN_ENCODING_CONSTANT,
 )
 from draken.interop.arrow cimport vector_from_arrow
 from opteryx.compiled.structures.relation_statistics cimport to_int
@@ -126,13 +124,17 @@ cdef class Vector:
 
     @property
     def encoding(self):
-        """Return the storage encoding of this vector, derived from the unified view."""
+        """Return the storage encoding as an integer (0=dense, 1=dict, 3=constant).
+
+        Derived from the unified view — no stored field.  Compare against
+        draken.encoding.DRAKEN_ENCODING_* constants.
+        """
         cdef DrakenVector* uv = self.unified()
         if uv.data_length == 1:
-            return DRAKEN_ENCODING_CONSTANT
+            return 3  # DRAKEN_ENCODING_CONSTANT
         if uv.selection != NULL:
-            return DRAKEN_ENCODING_DICTIONARY
-        return DRAKEN_ENCODING_DENSE
+            return 1  # DRAKEN_ENCODING_DICTIONARY
+        return 0      # DRAKEN_ENCODING_DENSE
 
     cpdef object null_bitmap(self):
         """Return the null bitmap for this vector, or ``None`` when the vector has no nulls."""

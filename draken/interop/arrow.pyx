@@ -31,9 +31,11 @@ from draken.interop.arrow_c_data_interface cimport ArrowSchema
 from draken.vectors.bool_vector cimport from_arrow as bool_from_arrow
 from draken.vectors.float64_vector cimport from_arrow as float64_from_arrow
 from draken.vectors.float32_vector cimport from_arrow as float32_from_arrow
-from draken.vectors.int64_vector cimport from_arrow as int64_from_arrow
-from draken.vectors.int64_vector cimport make_int64_dict_only as int64_make_dict_only
-from draken.vectors.integer_vector cimport from_arrow as integer_from_arrow
+from draken.vectors.integer64_vector cimport from_arrow as int64_from_arrow
+from draken.vectors.integer64_vector cimport make_int64_dict_only as int64_make_dict_only
+from draken.vectors.integer8_vector cimport integer8_from_arrow
+from draken.vectors.integer16_vector cimport integer16_from_arrow
+from draken.vectors.integer32_vector cimport integer32_from_arrow
 from draken.vectors.string_vector cimport from_arrow as string_from_arrow
 from draken.vectors.string_vector cimport from_arrow_struct as string_from_arrow_struct
 from draken.vectors.date32_vector cimport from_arrow as date32_from_arrow
@@ -49,8 +51,11 @@ from draken.vectors.array_vector cimport from_arrow as array_from_arrow
 from draken.vectors.vector_vector cimport from_arrow as vector_from_arrow_vector
 
 
-from draken.vectors.integer_vector cimport IntegerVector
-from draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
+from draken.vectors.integer64_vector cimport Integer64Vector
+from draken.vectors.integer8_vector cimport Integer8Vector
+from draken.vectors.integer16_vector cimport Integer16Vector
+from draken.vectors.integer32_vector cimport Integer32Vector
+from draken.vectors.integer64_vector cimport from_sequence as int64_from_sequence
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.float64_vector cimport from_sequence as float64_from_sequence
 from draken.vectors.bool_vector cimport BoolVector
@@ -64,18 +69,25 @@ cdef object _typed_constant_from_arrow_value(object value_type, object value, Py
     from draken.vectors.bool_vector import BoolVector
     from draken.vectors.date32_vector import Date32Vector
     from draken.vectors.float64_vector import Float64Vector
-    from draken.vectors.integer_vector import IntegerVector
+    from draken.vectors.integer64_vector import Integer64Vector
+    from draken.vectors.integer8_vector import Integer8Vector
+    from draken.vectors.integer16_vector import Integer16Vector
+    from draken.vectors.integer32_vector import Integer32Vector
     from draken.vectors.string_vector import StringVector
     from draken.vectors.time_vector import TimeVector
     from draken.vectors.timestamp_vector import TimestampVector
 
     if pa.types.is_int64(value_type):
-        return IntegerVector.from_constant(value, length, is_null=is_null)
+        return Integer64Vector.from_constant(value, length, is_null=is_null)
     if pa.types.is_uint64(value_type):
         # Treat uint64 constant as int64 (reinterpret bits as signed)
-        return IntegerVector.from_constant(value, length, is_null=is_null)
-    if pa.types.is_int8(value_type) or pa.types.is_int16(value_type) or pa.types.is_int32(value_type):
-        return IntegerVector.from_constant(value, length, is_null=is_null)
+        return Integer64Vector.from_constant(value, length, is_null=is_null)
+    if pa.types.is_int8(value_type):
+        return Integer8Vector.from_constant(value, length, is_null=is_null)
+    if pa.types.is_int16(value_type):
+        return Integer16Vector.from_constant(value, length, is_null=is_null)
+    if pa.types.is_int32(value_type):
+        return Integer32Vector.from_constant(value, length, is_null=is_null)
     if pa.types.is_float32(value_type) or pa.types.is_float64(value_type):
         return Float64Vector.from_constant(value, length, is_null=is_null)
     if pa.types.is_boolean(value_type):
@@ -367,15 +379,12 @@ cpdef object vector_from_arrow(object array):
         # Values > 2^63-1 become negative when cast to int64, but this works
         # correctly for hashing and aggregation (including COUNT DISTINCT).
         return int64_from_arrow(array.cast(pa.int64()))
-    if (
-        pa_type.equals(pa.int8())
-        or pa_type.equals(pa.int16())
-        or pa_type.equals(pa.int32())
-        or pa_type.equals(pa.uint8())
-        or pa_type.equals(pa.uint16())
-        or pa_type.equals(pa.uint32())
-    ):
-        return integer_from_arrow(array)
+    if pa_type.equals(pa.int8()) or pa_type.equals(pa.uint8()):
+        return integer8_from_arrow(array)
+    if pa_type.equals(pa.int16()) or pa_type.equals(pa.uint16()):
+        return integer16_from_arrow(array)
+    if pa_type.equals(pa.int32()) or pa_type.equals(pa.uint32()):
+        return integer32_from_arrow(array)
     if pa.types.is_interval(pa_type):
         return interval_from_arrow_interval(array)
     if pa.types.is_fixed_size_binary(pa_type) and pa_type.byte_width == 16:

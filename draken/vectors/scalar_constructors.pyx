@@ -10,6 +10,7 @@
 # cython: freethreading_compatible=True
 
 from libc.stddef cimport size_t
+from libc.stdint cimport int64_t
 
 from draken.core.buffers cimport DRAKEN_BOOL
 from draken.core.buffers cimport DRAKEN_DATE32
@@ -108,14 +109,12 @@ cdef object _typed_constant_from_scalar(object value, size_t length, object dtyp
         "uint16",
         "uint32",
     ):
-        from draken.vectors.integer_vector import IntegerVector
-
-        return IntegerVector.from_constant(0 if is_null else scalar, length, is_null=is_null)
+        return integer_from_constant(0 if is_null else scalar, length, is_null=is_null, dtype=dtype)
 
     if dtype in (DRAKEN_INT64,) or dtype_name in ("int64", "uint64"):
-        from draken.vectors.int64_vector import Int64Vector
+        from draken.vectors.integer64_vector import Integer64Vector
 
-        return Int64Vector.from_constant(0 if is_null else scalar, length, is_null=is_null)
+        return Integer64Vector.from_constant(0 if is_null else scalar, length, is_null=is_null)
 
     if dtype in (DRAKEN_FLOAT64,) or dtype_name in ("float", "float32", "float64", "double"):
         from draken.vectors.float64_vector import Float64Vector
@@ -140,9 +139,9 @@ cdef object _typed_constant_from_scalar(object value, size_t length, object dtyp
 
             return BoolVector.from_constant(False if is_null else scalar, length, is_null=is_null)
         if isinstance(scalar, int):
-            from draken.vectors.int64_vector import Int64Vector
+            from draken.vectors.integer64_vector import Integer64Vector
 
-            return Int64Vector.from_constant(0 if is_null else scalar, length, is_null=is_null)
+            return Integer64Vector.from_constant(0 if is_null else scalar, length, is_null=is_null)
         if isinstance(scalar, float):
             from draken.vectors.float64_vector import Float64Vector
 
@@ -229,3 +228,65 @@ cdef object from_sequence(object data, object dtype=None):
 
 cpdef object from_scalar(object value, size_t length, object dtype=None):
     return _typed_constant_from_scalar(value, length, dtype)
+
+
+cpdef object integer_from_constant(object value, size_t length, bint is_null=False, object dtype=None):
+    """Factory: create the narrowest Integer*Vector that fits value, or use the explicit dtype."""
+    cdef int64_t ivalue = 0
+    if not is_null and value is not None:
+        ivalue = <int64_t>int(value)
+
+    if dtype == DRAKEN_INT8:
+        from draken.vectors.integer8_vector import Integer8Vector
+        return Integer8Vector.from_constant(value, length, is_null=is_null)
+    if dtype == DRAKEN_INT16:
+        from draken.vectors.integer16_vector import Integer16Vector
+        return Integer16Vector.from_constant(value, length, is_null=is_null)
+    if dtype == DRAKEN_INT32:
+        from draken.vectors.integer32_vector import Integer32Vector
+        return Integer32Vector.from_constant(value, length, is_null=is_null)
+
+    # Auto-select narrowest type that fits the value.
+    if not is_null:
+        if ivalue >= -128 and ivalue <= 127:
+            from draken.vectors.integer8_vector import Integer8Vector
+            return Integer8Vector.from_constant(value, length)
+        if ivalue >= -32768 and ivalue <= 32767:
+            from draken.vectors.integer16_vector import Integer16Vector
+            return Integer16Vector.from_constant(value, length)
+    from draken.vectors.integer32_vector import Integer32Vector
+    return Integer32Vector.from_constant(value, length, is_null=is_null)
+
+
+cpdef object integer_from_dict(object codes, object dictionary, object row_validity=None):
+    """Decode a dictionary-encoded narrow integer column into the narrowest fitting type."""
+    from array import array as pyarray
+    if not isinstance(codes, memoryview):
+        codes = pyarray("i", codes)
+    if not isinstance(dictionary, memoryview):
+        dictionary = pyarray("q", dictionary)
+
+    dict_list = list(dictionary)
+    if not dict_list:
+        raise ValueError("integer_from_dict requires a non-empty dictionary")
+
+    min_val = min(dict_list)
+    max_val = max(dict_list)
+    codes_list = list(codes)
+
+    if row_validity is not None:
+        validity = list(row_validity)
+        values = [dict_list[codes_list[i]] if validity[i] else None for i in range(len(codes_list))]
+    else:
+        values = [dict_list[c] for c in codes_list]
+
+    import pyarrow as pa
+    if min_val >= -128 and max_val <= 127:
+        pa_arr = pa.array(values, type=pa.int8())
+    elif min_val >= -32768 and max_val <= 32767:
+        pa_arr = pa.array(values, type=pa.int16())
+    else:
+        pa_arr = pa.array(values, type=pa.int32())
+
+    from draken.interop.arrow import vector_from_arrow
+    return vector_from_arrow(pa_arr)

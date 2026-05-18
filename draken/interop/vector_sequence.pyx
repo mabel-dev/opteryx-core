@@ -21,10 +21,10 @@ The primary entry point is vector_from_sequence(), which accepts:
 
 Supported element types for Python list input:
   - str / bytes                   -> StringVector  (via StringVectorBuilder)
-  - int (non-bool)                -> Int64Vector   (with optional null bitmap)
+  - int (non-bool)                -> Integer64Vector   (with optional null bitmap)
   - float                         -> Float64Vector (with optional null bitmap)
   - decimal.Decimal               -> DecimalVector (with optional null bitmap)
-  - bool                          -> Int64Vector   (treated as 0/1)
+  - bool                          -> Integer64Vector   (treated as 0/1)
 
 The dtype hint (OrsoTypes enum or plain string) is used for dispatch when
 the list contains only None values, or when type sniffing is ambiguous.
@@ -39,8 +39,8 @@ from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.bool_vector cimport from_sequence as bool_from_sequence
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.float64_vector cimport from_sequence as float64_from_sequence
-from draken.vectors.int64_vector cimport Int64Vector
-from draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
+from draken.vectors.integer64_vector cimport Integer64Vector
+from draken.vectors.integer64_vector cimport from_sequence as int64_from_sequence
 from draken.vectors._decimal_vector cimport DecimalVector
 from draken.vectors.scalar_constructors cimport from_sequence as constant_from_sequence
 from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
@@ -50,9 +50,9 @@ from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
 # Private helpers: build owned Draken Vectors from Python lists
 # ---------------------------------------------------------------------------
 
-cdef Int64Vector _int64_from_pylist(list data):
+cdef Integer64Vector _int64_from_pylist(list data):
     """
-    Build an Int64Vector from a Python list that may contain None values.
+    Build an Integer64Vector from a Python list that may contain None values.
 
     Allocates an owned DrakenFixedBuffer. If any element is None, also
     allocates a null bitmap (Arrow convention: 1 = valid, 0 = null).
@@ -60,7 +60,7 @@ cdef Int64Vector _int64_from_pylist(list data):
     will be freed by free_fixed_buffer() in __dealloc__.
     """
     cdef Py_ssize_t n = len(data)
-    cdef Int64Vector vec = Int64Vector(n)
+    cdef Integer64Vector vec = Integer64Vector(n)
     cdef int64_t* data_ptr = <int64_t*> vec.ptr.data
     cdef uint8_t* null_bm = NULL
     cdef Py_ssize_t i, nb_size
@@ -371,8 +371,8 @@ cpdef object vector_from_sequence(object data, object dtype=None):
                 return Float64Vector(0)
             if dtype_val == 'DECIMAL':
                 return DecimalVector(0)
-            # INTEGER, BOOLEAN, unknown, or no hint — Int64Vector is a safe default
-            return Int64Vector(0)
+            # INTEGER, BOOLEAN, unknown, or no hint — Integer64Vector is a safe default
+            return Integer64Vector(0)
 
         # -- Dispatch by dtype hint --
         dtype_val = _resolve_dtype_str(dtype)
@@ -404,7 +404,7 @@ cpdef object vector_from_sequence(object data, object dtype=None):
 
         if first_val is None:
             # All elements are None — return a typed null-valued constant vector.
-            # Without a dtype hint, default to Int64Vector (consistent with the
+            # Without a dtype hint, default to Integer64Vector (consistent with the
             # empty-list path above). Returning the raw list here is unsafe:
             # downstream Cython code will treat it as a Vector and segfault.
             dtype_val = _resolve_dtype_str(dtype)
@@ -412,7 +412,7 @@ cpdef object vector_from_sequence(object data, object dtype=None):
                 return StringVector.from_constant(b"", n, is_null=True)
             if dtype_val in ('DOUBLE', 'FLOAT', 'FLOAT32', 'FLOAT64'):
                 return Float64Vector.from_constant(0.0, n, is_null=True)
-            return Int64Vector.from_constant(0, n, is_null=True)
+            return Integer64Vector.from_constant(0, n, is_null=True)
 
         # bool must be checked before int (bool is a subclass of int)
         if isinstance(first_val, bool):

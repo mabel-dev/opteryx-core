@@ -28,7 +28,7 @@ def test_vector_from_arrow_single_entry_dictionary_becomes_integer_constant():
 
     vec = vector_from_arrow(arr)
 
-    assert vec.__class__.__name__ == "IntegerVector"
+    assert vec.__class__.__name__ == "Integer32Vector"
     assert vec.encoding == DRAKEN_ENCODING_CONSTANT
     assert vec.to_pylist() == [7, 7, 7, 7]
 

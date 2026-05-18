@@ -83,7 +83,7 @@ cpdef StringVector vector_regex_replace(StringVector data, bytes pattern, bytes 
     value_str.reserve(256)
 
     # Constant encoding: apply once, replicate
-    if uv.data_length == 1 and uv.selection == NULL:  # constant
+    if uv.selection == NULL and data.ptr.offsets == NULL:  # constant
         builder = string_vector_module.StringVectorBuilder.with_estimate(n, 100)
         if uv.validity != NULL:  # null constant
             for i in range(n):

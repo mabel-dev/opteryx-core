@@ -12,7 +12,7 @@ from libc.stdint cimport int32_t, int64_t, uint8_t
 
 from draken.core.buffers cimport DrakenConstantStringPayload, DrakenVarBuffer, DrakenVector
 from draken.vectors.array_vector cimport ArrayVector
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
 from opteryx.third_party import yyjson
 
@@ -41,9 +41,9 @@ cpdef list vector_get_element(ArrayVector vec, int key):
     return result
 
 
-cpdef list vector_map_access_array(ArrayVector vec, Int64Vector key):
+cpdef list vector_map_access_array(ArrayVector vec, Integer64Vector key):
     """
-    Map/array subscript over ArrayVector using a constant Int64Vector key.
+    Map/array subscript over ArrayVector using a constant Integer64Vector key.
 
     Returns:
         Python list of extracted elements (NULL for null/out-of-range rows).
@@ -55,7 +55,7 @@ cpdef list vector_map_access_array(ArrayVector vec, Int64Vector key):
     cdef Py_ssize_t row_len
     cdef list result = [None] * n
 
-    # MapAccess enforces constant-encoded Int64Vector keys at the Python layer.
+    # MapAccess enforces constant-encoded Integer64Vector keys at the Python layer.
     # We still extract defensively here.
     index = key[0]
 
@@ -75,9 +75,9 @@ cpdef list vector_map_access_array(ArrayVector vec, Int64Vector key):
     return result
 
 
-cpdef StringVector vector_map_access_string(StringVector vec, Int64Vector key):
+cpdef StringVector vector_map_access_string(StringVector vec, Integer64Vector key):
     """
-    Map/array subscript over StringVector using a constant Int64Vector key.
+    Map/array subscript over StringVector using a constant Integer64Vector key.
 
     Returns:
         StringVector of one-byte slices; NULL for null/out-of-range rows.
@@ -96,7 +96,7 @@ cpdef StringVector vector_map_access_string(StringVector vec, Int64Vector key):
 
     index = key[0]
 
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()

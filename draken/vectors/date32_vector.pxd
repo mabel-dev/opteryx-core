@@ -7,7 +7,7 @@ from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.timestamp_vector cimport TimestampVector
 
 cdef class Date32Vector(Vector):
@@ -51,8 +51,8 @@ cdef class Date32Vector(Vector):
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False
 
     # Temporal arithmetic operations (Phase 5b)
-    cpdef Int64Vector subtract_date32_vector(self, Date32Vector other)
-    cpdef Int64Vector subtract_timestamp_vector(self, TimestampVector other)
+    cpdef Integer64Vector subtract_date32_vector(self, Date32Vector other)
+    cpdef Integer64Vector subtract_timestamp_vector(self, TimestampVector other)
 
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 

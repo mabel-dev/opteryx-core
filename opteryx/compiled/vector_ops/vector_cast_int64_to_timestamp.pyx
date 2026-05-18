@@ -9,7 +9,7 @@
 # cython: optimize.unpack_method_calls=True
 
 """
-Cast Int64Vector or dictionary-encoded Int64Vector to TimestampVector with unit conversion.
+Cast Integer64Vector or dictionary-encoded Integer64Vector to TimestampVector with unit conversion.
 
 Transforms only dictionary values when dictionary-encoded, preserving codes/indices.
 """
@@ -18,7 +18,7 @@ from libc.stdint cimport int64_t, uint8_t, uint16_t, uint32_t, int32_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy
 
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.timestamp_vector cimport TimestampVector, timestamp_dict_from_raw
 from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenVector, DRAKEN_TIMESTAMP64
 from draken.core.var_vector cimport alloc_var_buffer
@@ -29,14 +29,14 @@ cdef extern from "../../src/cpp/simd_timestamp_cast.h":
     void divide_int64_simd(const int64_t* src, int64_t* dst, int64_t divisor, size_t n) nogil
 
 
-cpdef TimestampVector vector_cast_int64_to_timestamp(Int64Vector int_vec, str unit="us"):
+cpdef TimestampVector vector_cast_int64_to_timestamp(Integer64Vector int_vec, str unit="us"):
     """
-    Cast Int64Vector (dense or dictionary-encoded) to TimestampVector.
+    Cast Integer64Vector (dense or dictionary-encoded) to TimestampVector.
 
     For dictionary-encoded vectors: transforms only the dictionary, preserving codes.
 
     Args:
-        int_vec: Int64Vector (may be dictionary-encoded)
+        int_vec: Integer64Vector (may be dictionary-encoded)
         unit: Unit of input values: 'ms', 's', 'us', 'ns', or 'days'
 
     Returns:
@@ -68,8 +68,8 @@ cpdef TimestampVector vector_cast_int64_to_timestamp(Int64Vector int_vec, str un
         return _cast_dense(int_vec, factor, use_divide)
 
 
-cdef TimestampVector _cast_dense(Int64Vector int_vec, int64_t factor, bint use_divide):
-    """Transform dense Int64Vector to TimestampVector."""
+cdef TimestampVector _cast_dense(Integer64Vector int_vec, int64_t factor, bint use_divide):
+    """Transform dense Integer64Vector to TimestampVector."""
     cdef DrakenFixedBuffer* ptr = int_vec.ptr
     cdef int64_t length = ptr.length
     cdef int64_t* int_data = <int64_t*>ptr.data
@@ -93,17 +93,18 @@ cdef TimestampVector _cast_dense(Int64Vector int_vec, int64_t factor, bint use_d
     return result
 
 
-cdef TimestampVector _cast_dict_encoded(Int64Vector int_vec, DrakenVector* uv, int64_t factor, bint use_divide):
+cdef TimestampVector _cast_dict_encoded(Integer64Vector int_vec, DrakenVector* uv, int64_t factor, bint use_divide):
     """
-    Transform dictionary-encoded Int64Vector by casting only the dictionary.
+    Transform dictionary-encoded Integer64Vector by casting only the dictionary.
 
     Returns dictionary-encoded TimestampVector with transformed dictionary, same codes.
     ptr.data is NULL (pure dict encoding — no dense materialization).
     """
-    cdef DrakenVarBuffer* dict_buf = <DrakenVarBuffer*>uv.data
-    cdef int64_t* dict_data = <int64_t*>dict_buf.data
-    cdef int64_t dict_size = <int64_t>dict_buf.length
-    cdef uint8_t* dict_nulls = dict_buf.null_bitmap
+    # Integer64Vector unified view stores dict_values.data (raw int64_t array), not the DrakenVarBuffer*.
+    # dict_size and dict_nulls come from the original _dict_values buffer.
+    cdef int64_t* dict_data = <int64_t*>uv.data
+    cdef int64_t dict_size = <int64_t>uv.data_length
+    cdef uint8_t* dict_nulls = int_vec._dict_values.null_bitmap if int_vec._dict_values != NULL else NULL
 
     cdef uint8_t* codes_raw = <uint8_t*>uv.selection
     cdef uint8_t code_width = uv.sel_width

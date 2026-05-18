@@ -14,15 +14,15 @@ from libc.stdint cimport uint8_t, int64_t
 from libc.stdlib cimport malloc
 from libc.string cimport memcpy
 
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.float64_vector cimport Float64Vector
 
 
-cpdef Int64Vector vector_sign_int64(Int64Vector values):
-    """SIGN(values): sign for Int64Vector -> Int64Vector."""
+cpdef Integer64Vector vector_sign_int64(Integer64Vector values):
+    """SIGN(values): sign for Integer64Vector -> Integer64Vector."""
 
     cdef size_t n = <size_t>len(values)
-    cdef Int64Vector out_vec = Int64Vector(n)
+    cdef Integer64Vector out_vec = Integer64Vector(n)
     cdef int64_t* out_data = <int64_t*>out_vec.ptr.data
     cdef int64_t* in_data = <int64_t*>values.ptr.data
     cdef uint8_t* in_null = <uint8_t*>values.ptr.null_bitmap
@@ -31,7 +31,7 @@ cpdef Int64Vector vector_sign_int64(Int64Vector values):
     cdef int64_t val
 
     if n > 0 and in_data == NULL:
-        raise ValueError("Int64Vector has NULL data pointer")
+        raise ValueError("Integer64Vector has NULL data pointer")
 
     if in_null != NULL and n > 0:
         out_null = <uint8_t*>malloc((n + 7) >> 3)
@@ -50,11 +50,11 @@ cpdef Int64Vector vector_sign_int64(Int64Vector values):
     return out_vec
 
 
-cpdef Int64Vector vector_sign_float64(Float64Vector values):
-    """SIGN(values): sign for Float64Vector -> Int64Vector."""
+cpdef Integer64Vector vector_sign_float64(Float64Vector values):
+    """SIGN(values): sign for Float64Vector -> Integer64Vector."""
 
     cdef size_t n = <size_t>len(values)
-    cdef Int64Vector out_vec = Int64Vector(n)
+    cdef Integer64Vector out_vec = Integer64Vector(n)
     cdef int64_t* out_data = <int64_t*>out_vec.ptr.data
     cdef double* in_data = <double*>values.ptr.data
     cdef uint8_t* in_null = <uint8_t*>values.ptr.null_bitmap
@@ -82,10 +82,10 @@ cpdef Int64Vector vector_sign_float64(Float64Vector values):
     return out_vec
 
 
-cpdef Int64Vector vector_sign(object values):
-    """SIGN(values): sign dispatcher, always returns Int64Vector."""
-    if isinstance(values, Int64Vector):
-        return vector_sign_int64(<Int64Vector>values)
+cpdef Integer64Vector vector_sign(object values):
+    """SIGN(values): sign dispatcher, always returns Integer64Vector."""
+    if isinstance(values, Integer64Vector):
+        return vector_sign_int64(<Integer64Vector>values)
     elif isinstance(values, Float64Vector):
         return vector_sign_float64(<Float64Vector>values)
     else:

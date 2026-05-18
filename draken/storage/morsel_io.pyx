@@ -53,8 +53,6 @@ from draken.core.buffers cimport DrakenVector
 from draken.core.buffers cimport DRAKEN_BOOL
 from draken.core.buffers cimport DRAKEN_DATE32
 from draken.core.buffers cimport DRAKEN_DICTIONARY
-from draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
-from draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 from draken.core.buffers cimport DRAKEN_FLOAT32
 from draken.core.buffers cimport DRAKEN_FLOAT64
 from draken.core.buffers cimport DRAKEN_INT8
@@ -71,9 +69,11 @@ from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.date32_vector cimport Date32Vector
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.float64_vector cimport from_packed_dict as float64_from_packed_dict
-from draken.vectors.int64_vector cimport Int64Vector
-from draken.vectors.int64_vector cimport from_packed_dict as int64_from_packed_dict
-from draken.vectors.integer_vector cimport IntegerVector
+from draken.vectors.integer64_vector cimport Integer64Vector
+from draken.vectors.integer64_vector cimport from_packed_dict as int64_from_packed_dict
+from draken.vectors.integer8_vector cimport Integer8Vector
+from draken.vectors.integer16_vector cimport Integer16Vector
+from draken.vectors.integer32_vector cimport Integer32Vector
 from draken.vectors.interval_vector cimport IntervalVector
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.string_vector cimport StringVectorBuilder
@@ -796,11 +796,9 @@ cdef inline Vector _build_typed_const_vector(
     bint is_null,
 ):
     cdef Vector vec
-    cdef IntegerVector int_vec
-    cdef size_t itemsize
 
     if dtype == DRAKEN_INT64:
-        return <Vector>Int64Vector.from_constant(scalar_value, row_count, is_null=is_null)
+        return <Vector>Integer64Vector.from_constant(scalar_value, row_count, is_null=is_null)
     if dtype == DRAKEN_FLOAT64:
         return <Vector>Float64Vector.from_constant(scalar_value, row_count, is_null=is_null)
     if dtype == DRAKEN_BOOL:
@@ -830,17 +828,12 @@ cdef inline Vector _build_typed_const_vector(
             is_null=is_null,
             is_time64=True,
         )
-    if dtype == DRAKEN_INT8 or dtype == DRAKEN_INT16 or dtype == DRAKEN_INT32:
-        int_vec = IntegerVector.from_constant(scalar_value, row_count, is_null=is_null)
-        int_vec.ptr.type = <DrakenType>dtype
-        if dtype == DRAKEN_INT8:
-            itemsize = 1
-        elif dtype == DRAKEN_INT16:
-            itemsize = 2
-        else:
-            itemsize = 4
-        int_vec.ptr.itemsize = itemsize
-        return <Vector>int_vec
+    if dtype == DRAKEN_INT8:
+        return <Vector>Integer8Vector.from_constant(scalar_value, row_count, is_null=is_null)
+    if dtype == DRAKEN_INT16:
+        return <Vector>Integer16Vector.from_constant(scalar_value, row_count, is_null=is_null)
+    if dtype == DRAKEN_INT32:
+        return <Vector>Integer32Vector.from_constant(scalar_value, row_count, is_null=is_null)
     raise DrakenMorselStorageError(
         f"unsupported typed constant restore for dtype {dtype} and constant value type {const_value_type}"
     )
@@ -867,10 +860,14 @@ cdef inline uint32_t _dict_read_packed_code(
 
 
 cdef DrakenFixedBuffer* _fixed_ptr_from_vector(Vector vec, int dtype):
-    if dtype == DRAKEN_INT8 or dtype == DRAKEN_INT16 or dtype == DRAKEN_INT32:
-        return (<IntegerVector>vec).ptr
+    if dtype == DRAKEN_INT8:
+        return (<Integer8Vector>vec).ptr
+    if dtype == DRAKEN_INT16:
+        return (<Integer16Vector>vec).ptr
+    if dtype == DRAKEN_INT32:
+        return (<Integer32Vector>vec).ptr
     if dtype == DRAKEN_INT64:
-        return (<Int64Vector>vec).ptr
+        return (<Integer64Vector>vec).ptr
     if dtype == DRAKEN_FLOAT64:
         return (<Float64Vector>vec).ptr
     if dtype == DRAKEN_BOOL:
@@ -1086,10 +1083,14 @@ cdef Vector _build_dense_string_dict_vector(
 cdef Vector _allocate_fixed_vector(int dtype, Py_ssize_t row_count):
     cdef Vector out
 
-    if dtype == DRAKEN_INT8 or dtype == DRAKEN_INT16 or dtype == DRAKEN_INT32:
-        out = IntegerVector(<DrakenType>dtype, <size_t>row_count)
+    if dtype == DRAKEN_INT8:
+        out = Integer8Vector(<size_t>row_count)
+    elif dtype == DRAKEN_INT16:
+        out = Integer16Vector(<size_t>row_count)
+    elif dtype == DRAKEN_INT32:
+        out = Integer32Vector(<size_t>row_count)
     elif dtype == DRAKEN_INT64:
-        out = Int64Vector(<size_t>row_count)
+        out = Integer64Vector(<size_t>row_count)
     elif dtype == DRAKEN_FLOAT64:
         out = Float64Vector(<size_t>row_count)
     elif dtype == DRAKEN_BOOL:
@@ -1315,7 +1316,6 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
     cdef bytes name_bytes
     cdef int dtype
     cdef int encoding
-    cdef int draken_encoding
     cdef int flags
     cdef list segments
     cdef DrakenFixedBuffer* fixed_ptr
@@ -1378,10 +1378,11 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
         dtype = <int>morsel.ptr.column_types[i]
         vec = <Vector>morsel.ptr.columns[i]
         uv = vec.unified()
-        draken_encoding = vec.encoding
         segments = []
 
-        if draken_encoding == DRAKEN_ENCODING_CONSTANT:
+        if uv.data_length == 1 and (
+                uv.type != DRAKEN_STRING or (
+                    isinstance(vec, StringVector) and (<StringVector>vec).ptr.offsets == NULL)):
             encoding = ENCODING_CONST
             if uv.type == DRAKEN_STRING:
                 const_str = <DrakenConstantStringPayload*>uv.data
@@ -1396,7 +1397,7 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
             flags = _const_flags_from_value_type(<int>uv.type)
             if uv.validity != NULL:
                 flags |= FLAG_HAS_NULLS
-        elif dtype == DRAKEN_STRING and draken_encoding != DRAKEN_ENCODING_DICTIONARY:
+        elif dtype == DRAKEN_STRING and uv.selection == NULL:
             encoding = ENCODING_VAR
             var_ptr = (<StringVector>(<Vector>morsel.ptr.columns[i])).ptr
             null_len = ((row_count + 7) >> 3) if var_ptr.null_bitmap != NULL else 0
@@ -1408,7 +1409,7 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
                 values_len = <Py_ssize_t>var_ptr.offsets[row_count]
             segments.append((SEG_VALUES, <intptr_t>var_ptr.data, values_len))
             flags = FLAG_HAS_NULLS if null_len > 0 else 0
-        elif draken_encoding == DRAKEN_ENCODING_DICTIONARY:
+        elif uv.selection != NULL:
             encoding = ENCODING_DICT
 
             if uv.selection == NULL or uv.type != DRAKEN_STRING:

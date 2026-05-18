@@ -39,8 +39,10 @@ from draken.core.buffers cimport (
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.date32_vector cimport Date32Vector
 from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.int64_vector cimport Int64Vector
-from draken.vectors.integer_vector cimport IntegerVector
+from draken.vectors.integer64_vector cimport Integer64Vector
+from draken.vectors.integer8_vector cimport Integer8Vector
+from draken.vectors.integer16_vector cimport Integer16Vector
+from draken.vectors.integer32_vector cimport Integer32Vector
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.time_vector cimport TimeVector
 from draken.vectors.timestamp_vector cimport TimestampVector
@@ -96,12 +98,16 @@ cdef inline int _sel_fixed_family(Vector value) noexcept:
     BOOL and STRING are excluded — they have dedicated kernels.
     """
     cdef DrakenVector* uv
-    if isinstance(value, Int64Vector):
+    if isinstance(value, Integer64Vector):
         return DRAKEN_INT64
     if isinstance(value, Float64Vector):
         return DRAKEN_FLOAT64
-    if isinstance(value, IntegerVector):
-        return (<IntegerVector>value).ptr.type
+    if isinstance(value, Integer8Vector):
+        return DRAKEN_INT8
+    if isinstance(value, Integer16Vector):
+        return DRAKEN_INT16
+    if isinstance(value, Integer32Vector):
+        return DRAKEN_INT32
     if isinstance(value, Date32Vector):
         return DRAKEN_DATE32
     if isinstance(value, TimeVector):
@@ -115,12 +121,16 @@ cdef inline int _sel_fixed_family(Vector value) noexcept:
 
 
 cdef inline DrakenFixedBuffer* _sel_fixed_ptr(Vector value) noexcept:
-    if isinstance(value, Int64Vector):
-        return (<Int64Vector>value).ptr
+    if isinstance(value, Integer64Vector):
+        return (<Integer64Vector>value).ptr
     if isinstance(value, Float64Vector):
         return (<Float64Vector>value).ptr
-    if isinstance(value, IntegerVector):
-        return (<IntegerVector>value).ptr
+    if isinstance(value, Integer8Vector):
+        return (<Integer8Vector>value).ptr
+    if isinstance(value, Integer16Vector):
+        return (<Integer16Vector>value).ptr
+    if isinstance(value, Integer32Vector):
+        return (<Integer32Vector>value).ptr
     if isinstance(value, Date32Vector):
         return (<Date32Vector>value).ptr
     if isinstance(value, TimeVector):
@@ -170,11 +180,15 @@ cdef object _sel_const_scalar(Vector value):
 cdef Vector _sel_new_fixed_vector(int output_type, Py_ssize_t length, Vector template):
     cdef TimestampVector ts_result
     if output_type == DRAKEN_INT64:
-        return Int64Vector(length)
+        return Integer64Vector(length)
     if output_type == DRAKEN_FLOAT64:
         return Float64Vector(length)
-    if output_type in (DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32):
-        return IntegerVector(output_type, length)
+    if output_type == DRAKEN_INT8:
+        return Integer8Vector(length)
+    if output_type == DRAKEN_INT16:
+        return Integer16Vector(length)
+    if output_type == DRAKEN_INT32:
+        return Integer32Vector(length)
     if output_type == DRAKEN_DATE32:
         return Date32Vector(length)
     if output_type == DRAKEN_TIME32:

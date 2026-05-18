@@ -242,8 +242,9 @@ cdef object _iif_select_string(
 ):
     cdef DrakenVector* true_uv = when_true.unified()
     cdef DrakenVector* false_uv = when_false.unified()
-    cdef bint true_is_const = true_uv.data_length == 1
-    cdef bint false_is_const = false_uv.data_length == 1
+    # ptr.offsets == NULL iff constant (alloc_var_buffer always allocates offsets for dense/dict)
+    cdef bint true_is_const = (<StringVector>when_true).ptr.offsets == NULL
+    cdef bint false_is_const = (<StringVector>when_false).ptr.offsets == NULL
     cdef bint true_const_null = true_is_const and (true_uv.validity != NULL)
     cdef bint false_const_null = false_is_const and (false_uv.validity != NULL)
 

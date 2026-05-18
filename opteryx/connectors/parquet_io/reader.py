@@ -53,7 +53,7 @@ def _coerce_decimal_vector(decoded: Any, col_stats: dict) -> Any:
     """
     Ensure parquet logical DECIMAL columns materialise as DecimalVector.
 
-    The rugo decoder emits Int64Vector for DECIMAL columns (INT64 physical type).
+    The rugo decoder emits Integer64Vector for DECIMAL columns (INT64 physical type).
     This helper converts those to DecimalVector at the parquet → vector boundary,
     preserving precision and scale from the logical type annotation.
     """
@@ -62,7 +62,7 @@ def _coerce_decimal_vector(decoded: Any, col_stats: dict) -> Any:
         return decoded
 
     cls_name = decoded.__class__.__name__
-    if cls_name != "Int64Vector":
+    if cls_name != "Integer64Vector":
         return decoded
 
     # Parse "decimal(precision,scale)" from logical type string
@@ -91,7 +91,7 @@ def _coerce_temporal_vector(decoded: Any, col_stats: dict) -> Any:
     """
     Ensure parquet logical temporal columns materialize as temporal vectors.
 
-    The rugo decoder currently emits Int64Vector for date32/timestamp columns.
+    The rugo decoder currently emits Integer64Vector for date32/timestamp columns.
     This helper normalizes those to Date32Vector/TimestampVector at the parquet
     -> vector boundary.
     """
@@ -100,7 +100,7 @@ def _coerce_temporal_vector(decoded: Any, col_stats: dict) -> Any:
         return decoded
 
     cls_name = decoded.__class__.__name__
-    if cls_name != "Int64Vector":
+    if cls_name != "Integer64Vector":
         return decoded
 
     if not (logical_type.startswith("date32") or logical_type.startswith("timestamp")):

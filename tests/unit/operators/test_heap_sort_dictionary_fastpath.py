@@ -13,7 +13,7 @@ from opteryx.types.schema import ConstantColumn, FlatColumn, FunctionColumn
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from draken.morsels.morsel import Morsel
-from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer64_vector import Integer64Vector
 from draken.vectors.string_vector import StringVector
 from opteryx.operators.heap_sort_node import HeapSortNode
 from opteryx.operators.sort_node import SortNode
@@ -125,13 +125,13 @@ def _make_q19_style_chunk(user_ids, minutes, phrases, counts):
     return Morsel.from_vectors(
         ["UserID", "m", "SearchPhrase", "COUNT(*)"],
         [
-            Int64Vector.from_arrow(pa.array(user_ids, type=pa.int64())),
-            Int64Vector.from_dict(
+            Integer64Vector.from_arrow(pa.array(user_ids, type=pa.int64())),
+            Integer64Vector.from_dict(
                 list(range(len(minutes))),
                 minutes,
             ),
             StringVector.from_arrow(pa.array(phrases, type=pa.binary())),
-            Int64Vector.from_arrow(pa.array(counts, type=pa.int64())),
+            Integer64Vector.from_arrow(pa.array(counts, type=pa.int64())),
         ],
     )
 

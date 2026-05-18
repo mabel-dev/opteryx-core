@@ -6,6 +6,6 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 
-cdef Int64Vector non_null_row_indices(object relation, list column_names)
+cdef Integer64Vector non_null_row_indices(object relation, list column_names)

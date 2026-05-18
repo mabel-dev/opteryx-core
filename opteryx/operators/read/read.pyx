@@ -50,11 +50,11 @@ cdef dict _NULL_CONSTRUCTORS = {}
 
 def _build_null_constructors():
     table = [
-        ("INTEGER", Int64Vector),
-        ("INT8", Int64Vector),
-        ("INT16", Int64Vector),
-        ("INT32", Int64Vector),
-        ("INT64", Int64Vector),
+        ("INTEGER", Integer64Vector),
+        ("INT8", Integer64Vector),
+        ("INT16", Integer64Vector),
+        ("INT32", Integer64Vector),
+        ("INT64", Integer64Vector),
         ("DOUBLE", Float64Vector),
         ("FLOAT32", Float64Vector),
         ("FLOAT64", Float64Vector),

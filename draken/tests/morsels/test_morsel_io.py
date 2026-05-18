@@ -18,7 +18,7 @@ from draken.storage.morsel_io import read_morsel
 from draken.storage.morsel_io import write_morsel
 from draken.vectors.date32_vector import Date32Vector
 from draken.vectors.float64_vector import Float64Vector
-from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer64_vector import Integer64Vector
 from draken.vectors.string_vector import StringVector
 from draken.vectors.time_vector import TimeVector
 from draken.vectors.timestamp_vector import TimestampVector
@@ -119,7 +119,7 @@ def test_morsel_io_round_trip_numeric_dictionary_column(tmp_path):
 def test_morsel_io_round_trip_typed_int64_dictionary_storage(tmp_path):
     original = Morsel.from_vectors(
         ["k"],
-        [Int64Vector.from_dict([0, 1, 2, 1, 0], [10, 20, 30])],
+        [Integer64Vector.from_dict([0, 1, 2, 1, 0], [10, 20, 30])],
     )
     path = tmp_path / "morsel_typed_int64_dict.drkm"
 
@@ -128,7 +128,7 @@ def test_morsel_io_round_trip_typed_int64_dictionary_storage(tmp_path):
 
     assert stats["rows"] == original.num_rows
     assert stats["columns"] == original.num_columns
-    assert restored.column(b"k").__class__.__name__ == "Int64Vector"
+    assert restored.column(b"k").__class__.__name__ == "Integer64Vector"
     assert getattr(restored.column(b"k"), "dictionary_value_type", None) is not None
     assert _as_py_columns(restored) == _as_py_columns(original)
 
@@ -176,7 +176,7 @@ def test_morsel_io_round_trip_typed_constant_columns(tmp_path):
     original = Morsel.from_vectors(
         ["i", "s", "d", "t", "ts", "n"],
         [
-            Int64Vector.from_constant(7, 4),
+            Integer64Vector.from_constant(7, 4),
             StringVector.from_constant("x", 4),
             Date32Vector.from_constant(12_345, 4),
             TimeVector.from_constant(1_000_000, 4, is_time64=True),
@@ -191,7 +191,7 @@ def test_morsel_io_round_trip_typed_constant_columns(tmp_path):
 
     assert stats["rows"] == original.num_rows
     assert stats["columns"] == original.num_columns
-    assert restored.column(b"i").__class__.__name__ == "Int64Vector"
+    assert restored.column(b"i").__class__.__name__ == "Integer64Vector"
     assert restored.column(b"s").__class__.__name__ == "StringVector"
     assert restored.column(b"d").__class__.__name__ == "Date32Vector"
     assert restored.column(b"t").__class__.__name__ == "TimeVector"

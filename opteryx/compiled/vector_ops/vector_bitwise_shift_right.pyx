@@ -11,7 +11,7 @@
 """
 Native bitwise shift-right helpers for Draken integer vectors.
 
-This module implements vectorized right shift operations on Int64Vector:
+This module implements vectorized right shift operations on Integer64Vector:
 - Bitwise arithmetic right shift (sign-extending)
 
 Key implementation details:
@@ -26,14 +26,14 @@ from libc.stdint cimport int64_t, uint8_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.interop.vector_sequence cimport vector_from_sequence
 
 
-cpdef object vector_bitwise_shift_right(Int64Vector left, Int64Vector right):
+cpdef object vector_bitwise_shift_right(Integer64Vector left, Integer64Vector right):
     """
-    Arithmetic right shift Int64Vector elements by positions specified in right.
+    Arithmetic right shift Integer64Vector elements by positions specified in right.
 
     This performs an arithmetic right shift (sign-extending shift), not a logical
     or circular shift. The sign bit is preserved and propagated into the vacated
@@ -48,11 +48,11 @@ cpdef object vector_bitwise_shift_right(Int64Vector left, Int64Vector right):
     outside this range produce NULL.
 
     Parameters:
-        left: Int64Vector values to shift.
-        right: Int64Vector shift distances (in bits).
+        left: Integer64Vector values to shift.
+        right: Integer64Vector shift distances (in bits).
 
     Returns:
-        Int64Vector with right-shifted result. NULL propagates from either input.
+        Integer64Vector with right-shifted result. NULL propagates from either input.
         Out-of-range shift amounts (< 0 or > 63) produce NULL.
 
     Raises:

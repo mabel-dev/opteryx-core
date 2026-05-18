@@ -19,8 +19,9 @@ from libc.string cimport memset
 
 from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
-from draken.vectors.int64_vector cimport Int64Vector
-from draken.vectors.integer_vector cimport IntegerVector
+from draken.vectors.integer64_vector cimport Integer64Vector
+from draken.vectors.integer8_vector cimport Integer8Vector
+from draken.vectors.integer16_vector cimport Integer16Vector
 from draken.vectors.date32_vector cimport Date32Vector
 from draken.vectors.timestamp_vector cimport TimestampVector
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16
@@ -102,31 +103,37 @@ cdef BoolVector _vector_in_list_phash(
     cdef Py_ssize_t count = 0
     cdef Py_ssize_t i
     cdef void* dp
-    cdef IntegerVector ivec_int
-    cdef Int64Vector ivec64
+    cdef Integer64Vector ivec64
     cdef Date32Vector ivec_d32
     cdef TimestampVector ivec_ts
 
     # Narrow integers (Int8 / Int16): type-safe, no-null guaranteed path
-    if isinstance(arr, IntegerVector):
-        ivec_int = <IntegerVector>arr
-        if ivec_int.null_bitmap_ptr() != NULL:
+    if isinstance(arr, Integer8Vector):
+        if (<Integer8Vector>arr).null_bitmap_ptr() != NULL:
             free(idx_buf)
             return None  # has nulls → fall back
-        dp = ivec_int.dense_ptr()
+        dp = (<Integer8Vector>arr).dense_ptr()
+        if dp == NULL:
+            free(idx_buf)
+            return None  # non-dense encoding → fall back
+        with nogil:
+            count = phs.probe_found_32_i8(<const int8_t*>dp, idx_buf, n)
+
+    elif isinstance(arr, Integer16Vector):
+        if (<Integer16Vector>arr).null_bitmap_ptr() != NULL:
+            free(idx_buf)
+            return None  # has nulls → fall back
+        dp = (<Integer16Vector>arr).dense_ptr()
         if dp == NULL:
             free(idx_buf)
             return None  # non-dense encoding → fall back
         # probe_found gives us matched row indices; probe_not_found gives unmatched.
         # For negate we want bits SET for unmatched rows. Compute probe_found and invert.
         with nogil:
-            if ivec_int.ptr.type == DRAKEN_INT8:
-                count = phs.probe_found_32_i8(<const int8_t*>dp, idx_buf, n)
-            else:
-                count = phs.probe_found_32_i16(<const int16_t*>dp, idx_buf, n)
+            count = phs.probe_found_32_i16(<const int16_t*>dp, idx_buf, n)
 
-    elif isinstance(arr, Int64Vector):
-        ivec64 = <Int64Vector>arr
+    elif isinstance(arr, Integer64Vector):
+        ivec64 = <Integer64Vector>arr
         if ivec64.null_bitmap_ptr() != NULL:
             free(idx_buf)
             return None  # has nulls → fall back

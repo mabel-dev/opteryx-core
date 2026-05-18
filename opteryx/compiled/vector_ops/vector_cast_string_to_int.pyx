@@ -12,7 +12,7 @@ from libc.stdint cimport int32_t, int64_t, uint8_t
 from libc.stdlib cimport malloc, free
 
 from draken.vectors.string_vector cimport StringVector
-from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.vectors.integer64_vector cimport Integer64Vector, from_sequence as int64_from_sequence
 from draken.core.buffers cimport DrakenVarBuffer, DrakenVector
 
 
@@ -36,7 +36,7 @@ cdef inline int64_t parse_int64(const char* data, int32_t length) except -1:
     return sign * value
 
 
-cpdef Int64Vector vector_cast_bytes_to_int(StringVector vec):
+cpdef Integer64Vector vector_cast_bytes_to_int(StringVector vec):
     """Parse each element of a StringVector as a decimal integer."""
     cdef DrakenVector* uv = vec.unified()
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
@@ -44,7 +44,7 @@ cpdef Int64Vector vector_cast_bytes_to_int(StringVector vec):
     cdef StringRow row
     cdef int64_t* result_ptr
     cdef int64_t[::1] result_view
-    cdef Int64Vector result_vector
+    cdef Integer64Vector result_vector
     cdef DrakenVarBuffer* dv
     cdef Py_ssize_t dict_size
     cdef int64_t* dict_ints
@@ -93,6 +93,6 @@ cpdef Int64Vector vector_cast_bytes_to_int(StringVector vec):
         free(result_ptr)
 
 
-cpdef Int64Vector vector_cast_ascii_to_int(StringVector vec):
+cpdef Integer64Vector vector_cast_ascii_to_int(StringVector vec):
     """Same as vector_cast_bytes_to_int (StringVector is always UTF-8/ASCII)."""
     return vector_cast_bytes_to_int(vec)

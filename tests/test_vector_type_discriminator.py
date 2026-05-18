@@ -103,10 +103,10 @@ class TestGetVectorType:
     """Tests for get_vector_type() function."""
 
     def test_int64_vector(self):
-        """Int64Vector should be discriminated correctly."""
-        from draken.vectors.int64_vector import Int64Vector
+        """Integer64Vector should be discriminated correctly."""
+        from draken.vectors.integer64_vector import Integer64Vector
 
-        vec = Int64Vector.from_arrow(pa.array([1, 2, 3], type=pa.int64()))
+        vec = Integer64Vector.from_arrow(pa.array([1, 2, 3], type=pa.int64()))
         assert get_vector_type(vec) == VectorType.INT64
 
     def test_float64_vector(self):
@@ -160,10 +160,10 @@ class TestIsDrakenVector:
     """Tests for is_draken_vector() function."""
 
     def test_int64_vector_is_draken(self):
-        """Int64Vector should be recognized as a Draken vector."""
-        from draken.vectors.int64_vector import Int64Vector
+        """Integer64Vector should be recognized as a Draken vector."""
+        from draken.vectors.integer64_vector import Integer64Vector
 
-        vec = Int64Vector.from_arrow(pa.array([1, 2, 3], type=pa.int64()))
+        vec = Integer64Vector.from_arrow(pa.array([1, 2, 3], type=pa.int64()))
         assert is_draken_vector(vec) is True
 
     def test_float64_vector_is_draken(self):

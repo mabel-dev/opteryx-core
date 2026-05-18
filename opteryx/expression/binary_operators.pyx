@@ -12,10 +12,9 @@ from opteryx.exceptions import IncorrectTypeError, UnsupportedTypeError
 from opteryx.expression.evaluator.arithmetic_dispatch import call_arithmetic_op
 from opteryx.types import OrsoTypes
 
-from draken import encoding as _draken_encoding
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.vectors.array_vector import ArrayVector
-from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer64_vector import Integer64Vector
 from draken.vectors.string_vector import StringVector
 
 
@@ -62,8 +61,8 @@ def MapAccessOp(array, key):
     """Map / iterable subscript over Draken vectors."""
     from opteryx.compiled.vector_ops import vector_map_access_array, vector_map_access_string
 
-    if not isinstance(key, Int64Vector):
-        raise IncorrectTypeError("Map/iterable subscript key must be an Int64Vector")
+    if not isinstance(key, Integer64Vector):
+        raise IncorrectTypeError("Map/iterable subscript key must be an Integer64Vector")
 
     if not key.is_constant_encoded():
         raise IncorrectTypeError("Map/iterable subscript key must be constant encoded")

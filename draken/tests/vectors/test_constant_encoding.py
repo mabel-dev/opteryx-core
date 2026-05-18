@@ -24,8 +24,8 @@ from draken.vectors.bool_vector import BoolVector
 from draken.vectors.date32_vector import Date32Vector
 from draken.vectors.float32_vector import Float32Vector
 from draken.vectors.float64_vector import Float64Vector
-from draken.vectors.int64_vector import Int64Vector
-from draken.vectors.integer_vector import IntegerVector
+from draken.vectors.integer64_vector import Integer64Vector
+from draken.vectors.integer32_vector import Integer32Vector
 from draken.vectors.string_vector import StringVector
 from draken.vectors.time_vector import TimeVector
 from draken.vectors.timestamp_vector import TimestampVector
@@ -38,42 +38,42 @@ from draken.vectors._decimal_vector import DecimalVector
 
 class TestInt64Constant:
     def test_sum(self):
-        assert Int64Vector.from_constant(7, 4).sum() == 28
+        assert Integer64Vector.from_constant(7, 4).sum() == 28
 
     def test_min_max(self):
-        v = Int64Vector.from_constant(42, 5)
+        v = Integer64Vector.from_constant(42, 5)
         assert v.min() == 42
         assert v.max() == 42
 
     def test_all_null_sum_zero(self):
-        assert Int64Vector.from_constant(None, 3, is_null=True).sum() == 0
+        assert Integer64Vector.from_constant(None, 3, is_null=True).sum() == 0
 
     def test_all_null_min_raises(self):
         with pytest.raises(ValueError):
-            Int64Vector.from_constant(None, 3, is_null=True).min()
+            Integer64Vector.from_constant(None, 3, is_null=True).min()
 
     def test_all_null_max_raises(self):
         with pytest.raises(ValueError):
-            Int64Vector.from_constant(None, 3, is_null=True).max()
+            Integer64Vector.from_constant(None, 3, is_null=True).max()
 
     def test_null_count(self):
-        assert Int64Vector.from_constant(5, 4).null_count == 0
-        assert Int64Vector.from_constant(None, 4, is_null=True).null_count == 4
+        assert Integer64Vector.from_constant(5, 4).null_count == 0
+        assert Integer64Vector.from_constant(None, 4, is_null=True).null_count == 4
 
     def test_length(self):
-        assert len(Int64Vector.from_constant(1, 10)) == 10
+        assert len(Integer64Vector.from_constant(1, 10)) == 10
 
     def test_to_pylist(self):
-        assert Int64Vector.from_constant(9, 3).to_pylist() == [9, 9, 9]
-        assert Int64Vector.from_constant(None, 2, is_null=True).to_pylist() == [None, None]
+        assert Integer64Vector.from_constant(9, 3).to_pylist() == [9, 9, 9]
+        assert Integer64Vector.from_constant(None, 2, is_null=True).to_pylist() == [None, None]
 
     def test_subscript(self):
-        v = Int64Vector.from_constant(99, 5)
+        v = Integer64Vector.from_constant(99, 5)
         assert v[0] == 99
         assert v[4] == 99
 
     def test_zero_length(self):
-        v = Int64Vector.from_constant(1, 0)
+        v = Integer64Vector.from_constant(1, 0)
         assert len(v) == 0
         assert v.sum() == 0
 
@@ -129,18 +129,18 @@ class TestFloat32Constant:
 
 class TestIntegerConstant:
     def test_sum(self):
-        assert IntegerVector.from_constant(7, 3).sum() == 21
+        assert Integer32Vector.from_constant(7, 3).sum() == 21
 
     def test_min_max(self):
-        v = IntegerVector.from_constant(42, 4)
+        v = Integer32Vector.from_constant(42, 4)
         assert v.min() == 42
         assert v.max() == 42
 
     def test_null_count(self):
-        assert IntegerVector.from_constant(None, 5, is_null=True).null_count == 5
+        assert Integer32Vector.from_constant(None, 5, is_null=True).null_count == 5
 
     def test_to_pylist(self):
-        assert IntegerVector.from_constant(3, 4).to_pylist() == [3, 3, 3, 3]
+        assert Integer32Vector.from_constant(3, 4).to_pylist() == [3, 3, 3, 3]
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +361,7 @@ class TestConstantArrowRoundTrip:
     """Constant vectors converted to Arrow and back must preserve values."""
 
     def test_int64_roundtrip(self):
-        v = Int64Vector.from_constant(42, 5)
+        v = Integer64Vector.from_constant(42, 5)
         arr = v.to_arrow()
         v2 = Vector.from_arrow(arr)
         assert v2.to_pylist() == [42, 42, 42, 42, 42]
@@ -379,7 +379,7 @@ class TestConstantArrowRoundTrip:
         assert v2.to_pylist() == [b"draken", b"draken", b"draken"]
 
     def test_int64_null_roundtrip(self):
-        v = Int64Vector.from_constant(None, 3, is_null=True)
+        v = Integer64Vector.from_constant(None, 3, is_null=True)
         arr = v.to_arrow()
         v2 = Vector.from_arrow(arr)
         assert v2.null_count == 3

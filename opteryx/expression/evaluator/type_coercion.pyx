@@ -15,7 +15,7 @@ import decimal
 from draken.vectors.bool_vector import BoolVector
 from draken.vectors.date32_vector import Date32Vector
 from draken.vectors.float64_vector import Float64Vector
-from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer64_vector import Integer64Vector
 from draken.vectors.interval_vector import IntervalVector
 from draken.vectors.string_vector import StringVector
 from draken.vectors.time_vector import TimeVector
@@ -52,33 +52,6 @@ cpdef object _dictionary_arrow_type(vec):
 
 cpdef bint _is_dictionary_encoded_vector(vec):
     return _dictionary_arrow_type(vec) is not None
-
-
-cpdef object _dictionary_compare_vector(vec):
-    """Return vec iff it implements every comparison method we'll dispatch through.
-
-    Returns None for non-dictionary-encoded vectors. Raises TypeError when a
-    dictionary-encoded vector is missing comparison methods — that's a real
-    bug in the vector implementation, not a fallback condition.
-    """
-    if not _is_dictionary_encoded_vector(vec):
-        return None
-
-    cdef list missing = []
-    cdef str method
-    for method in (
-        "equals", "not_equals", "in_list", "less_than", "greater_than",
-        "less_than_or_equals", "greater_than_or_equals",
-    ):
-        if getattr(vec, method, None) is None:
-            missing.append(method)
-    if missing:
-        raise TypeError(
-            f"Dictionary-encoded vector {type(vec).__name__!r} is missing "
-            f"required comparison methods: {missing!r}. Vector types must "
-            f"implement native comparison operations."
-        )
-    return vec
 
 
 cpdef bint _is_typed_constant_encoded_vector(value):
@@ -236,7 +209,7 @@ cpdef object _coerce_temporal_scalar_for_arrow(value, target_type):
 # layouts are handled by different branches in _is_null_as_boolvector.
 cdef tuple _FIXED_BUFFER_VECTORS = (
     BoolVector,
-    Int64Vector,
+    Integer64Vector,
     Date32Vector,
     IntervalVector,
     TimestampVector,

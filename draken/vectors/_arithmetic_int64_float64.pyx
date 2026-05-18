@@ -20,12 +20,12 @@ from libc.string cimport memcpy, memset
 from libc.stdlib cimport malloc, free
 
 from draken.core.buffers cimport DrakenFixedBuffer
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.interop.vector_sequence cimport vector_from_sequence
 
 cdef Float64Vector _int64_float64_add_dense(
-    Int64Vector left,
+    Integer64Vector left,
     Float64Vector right,
     size_t length,
 ) except *:
@@ -44,7 +44,7 @@ cdef Float64Vector _int64_float64_add_dense(
 
 
 cdef Float64Vector _int64_float64_subtract_dense(
-    Int64Vector left,
+    Integer64Vector left,
     Float64Vector right,
     size_t length,
 ) except *:
@@ -63,7 +63,7 @@ cdef Float64Vector _int64_float64_subtract_dense(
 
 
 cdef Float64Vector _int64_float64_multiply_dense(
-    Int64Vector left,
+    Integer64Vector left,
     Float64Vector right,
     size_t length,
 ) except *:
@@ -82,7 +82,7 @@ cdef Float64Vector _int64_float64_multiply_dense(
 
 
 cdef Float64Vector _int64_float64_divide_dense(
-    Int64Vector left,
+    Integer64Vector left,
     Float64Vector right,
     size_t length,
 ) except *:
@@ -104,7 +104,7 @@ cdef Float64Vector _int64_float64_divide_dense(
 
 
 cdef Float64Vector _int64_float64_floordiv_dense(
-    Int64Vector left,
+    Integer64Vector left,
     Float64Vector right,
     size_t length,
 ) except *:
@@ -271,7 +271,7 @@ cdef Float64Vector _int64_scalar_float64_floordiv_dense(
 # ============================================================================
 
 cdef Float64Vector _int64_float64_scalar_subtract_dense(
-    Int64Vector left,
+    Integer64Vector left,
     double scalar,
     size_t length,
 ) except *:
@@ -298,7 +298,7 @@ cdef Float64Vector _int64_float64_scalar_subtract_dense(
 
 
 cdef Float64Vector _int64_float64_scalar_multiply_dense(
-    Int64Vector left,
+    Integer64Vector left,
     double scalar,
     size_t length,
 ) except *:
@@ -325,7 +325,7 @@ cdef Float64Vector _int64_float64_scalar_multiply_dense(
 
 
 cdef Float64Vector _int64_float64_scalar_divide_dense(
-    Int64Vector left,
+    Integer64Vector left,
     double scalar,
     size_t length,
 ) except *:
@@ -357,7 +357,7 @@ cdef Float64Vector _int64_float64_scalar_divide_dense(
 
 
 cdef Float64Vector _int64_float64_scalar_floordiv_dense(
-    Int64Vector left,
+    Integer64Vector left,
     double scalar,
     size_t length,
 ) except *:
@@ -389,7 +389,7 @@ cdef Float64Vector _int64_float64_scalar_floordiv_dense(
 
 
 cdef Float64Vector _int64_float64_scalar_add_dense(
-    Int64Vector left,
+    Integer64Vector left,
     double scalar,
     size_t length,
 ) except *:

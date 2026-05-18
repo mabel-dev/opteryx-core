@@ -17,9 +17,11 @@
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.string_vector cimport StringVector
-from draken.vectors.integer_vector cimport IntegerVector
+from draken.vectors.integer8_vector cimport Integer8Vector
+from draken.vectors.integer16_vector cimport Integer16Vector
+from draken.vectors.integer32_vector cimport Integer32Vector
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 from opteryx.compiled.structures.perfect_hash_set cimport PerfectHashSet

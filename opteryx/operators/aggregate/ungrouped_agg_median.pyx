@@ -80,7 +80,7 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
         if self._col_type == _VTYPE_FLOAT64:
             vec_f = <Float64Vector>raw
             uv = vec_f.unified()
-            if uv.data_length == 1:
+            if uv.data_length == 1 and uv.length > 1:
                 if uv.validity == NULL:
                     for i in range(nrows):
                         if not self._state.append((<double*>uv.data)[0]):
@@ -100,9 +100,9 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
             return
 
         if self._col_type == _VTYPE_INT64:
-            vec_i = <Int64Vector>raw
+            vec_i = <Integer64Vector>raw
             uv = vec_i.unified()
-            if uv.data_length == 1:
+            if uv.data_length == 1 and uv.length > 1:
                 if uv.validity == NULL:
                     v = <double>(<int64_t*>uv.data)[0]
                     for i in range(nrows):
@@ -122,17 +122,60 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
                         self._raise_append_failure()
             return
 
-        if self._col_type == _VTYPE_INTEGER:
-            vec_n = <IntegerVector>raw
-            uv = vec_n.unified()
-            if uv.data_length == 1:
+        if self._col_type == _VTYPE_INT8:
+            ibuf  = (<Integer8Vector>raw).ptr
+            uv = (<Integer8Vector>raw).unified()
+            if uv.data_length == 1 and uv.length > 1:
                 if uv.validity == NULL:
                     v = <double>(<int64_t*>uv.data)[0]
                     for i in range(nrows):
                         if not self._state.append(v):
                             self._raise_append_failure()
                 return
-            ibuf  = vec_n.ptr
+            nulls = <const uint8_t*>ibuf.null_bitmap
+            if nulls == NULL:
+                for i in range(nrows):
+                    if not self._state.append(<double>_read_integer_value(ibuf, i)):
+                        self._raise_append_failure()
+                return
+            for i in range(nrows):
+                if _bitmap_is_valid(nulls, i):
+                    if not self._state.append(<double>_read_integer_value(ibuf, i)):
+                        self._raise_append_failure()
+            return
+
+        if self._col_type == _VTYPE_INT16:
+            ibuf  = (<Integer16Vector>raw).ptr
+            uv = (<Integer16Vector>raw).unified()
+            if uv.data_length == 1 and uv.length > 1:
+                if uv.validity == NULL:
+                    v = <double>(<int64_t*>uv.data)[0]
+                    for i in range(nrows):
+                        if not self._state.append(v):
+                            self._raise_append_failure()
+                return
+            nulls = <const uint8_t*>ibuf.null_bitmap
+            if nulls == NULL:
+                for i in range(nrows):
+                    if not self._state.append(<double>_read_integer_value(ibuf, i)):
+                        self._raise_append_failure()
+                return
+            for i in range(nrows):
+                if _bitmap_is_valid(nulls, i):
+                    if not self._state.append(<double>_read_integer_value(ibuf, i)):
+                        self._raise_append_failure()
+            return
+
+        if self._col_type == _VTYPE_INT32:
+            ibuf  = (<Integer32Vector>raw).ptr
+            uv = (<Integer32Vector>raw).unified()
+            if uv.data_length == 1 and uv.length > 1:
+                if uv.validity == NULL:
+                    v = <double>(<int64_t*>uv.data)[0]
+                    for i in range(nrows):
+                        if not self._state.append(v):
+                            self._raise_append_failure()
+                return
             nulls = <const uint8_t*>ibuf.null_bitmap
             if nulls == NULL:
                 for i in range(nrows):

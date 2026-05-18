@@ -18,7 +18,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import numpy
 import pyarrow as pa
 import pyarrow.compute as pc
-from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer64_vector import Integer64Vector
 from opteryx.compiled.vector_ops.function_definitions import (
     vector_datepart_day_i64,
     vector_datepart_dayofweek_i64,
@@ -140,7 +140,7 @@ def test_datepart_dictionary_timestamp_falls_back_cleanly():
 
 
 def test_datepart_typed_int64_dictionary_vector_uses_typed_dispatch_cleanly():
-    vector = Int64Vector.from_dict(
+    vector = Integer64Vector.from_dict(
         [0, 1, 0, 2],
         [1705329045, 1705332645, 1705336245],
         [1, 1, 0, 1],
@@ -249,7 +249,7 @@ def test_datepart_query_level_phase2_units_from_clickbench():
 
 def test_datepart_int64_dictionary_vector_preserves_dictionary_encoding():
     values = [1705329045, 1705332645, 1705336245]
-    vector = Int64Vector.from_dict([0, 1, 0, 2], values, [1, 1, 0, 1])
+    vector = Integer64Vector.from_dict([0, 1, 0, 2], values, [1, 1, 0, 1])
 
     minute = vector_datepart_minute_i64(vector)
     hour = vector_datepart_hour_i64(vector)
@@ -266,7 +266,7 @@ def test_datepart_int64_dictionary_vector_preserves_dictionary_encoding():
 
 def test_datepart_int64_dictionary_vector_preserves_dictionary_encoding_for_calendar_units():
     values = [1705329045, 1705332645, 1705336245]
-    vector = Int64Vector.from_dict([0, 1, 0, 2], values, [1, 1, 0, 1])
+    vector = Integer64Vector.from_dict([0, 1, 0, 2], values, [1, 1, 0, 1])
 
     year = vector_datepart_year_i64(vector)
     month = vector_datepart_month_i64(vector)

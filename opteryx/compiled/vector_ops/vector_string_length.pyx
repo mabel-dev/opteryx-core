@@ -13,11 +13,11 @@ from libc.stdlib cimport malloc, free
 from cpython.array cimport array, clone
 
 from draken.vectors.string_vector cimport StringVector
-from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.vectors.integer64_vector cimport Integer64Vector, from_sequence as int64_from_sequence
 from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector
 
 
-cpdef Int64Vector vector_string_length(StringVector vec):
+cpdef Integer64Vector vector_string_length(StringVector vec):
     """Return byte-length of each string in a StringVector."""
     cdef DrakenVector* uv = vec.unified()
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
@@ -33,7 +33,7 @@ cpdef Int64Vector vector_string_length(StringVector vec):
     cdef array result_array = clone(template, n, False)
     rview = result_array
 
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         if uv.validity == NULL:  # non-null constant
             csp = <DrakenConstantStringPayload*>uv.data
             for i in range(n):

@@ -24,8 +24,8 @@ import pyarrow.compute as pc
 from draken import Vector
 from draken.vectors.date32_vector import Date32Vector
 from draken.vectors.float64_vector import Float64Vector
-from draken.vectors.int64_vector import Int64Vector
-from draken.vectors.integer_vector import IntegerVector
+from draken.vectors.integer64_vector import Integer64Vector
+from draken.vectors.integer32_vector import Integer32Vector
 from draken.vectors.time_vector import TimeVector
 from draken.vectors.timestamp_vector import TimestampVector
 
@@ -258,18 +258,18 @@ def test_typed_numeric_constructors_use_from_dict_for_dictionary_input():
     )
 
     with pytest.raises(TypeError, match="from_dict"):
-        Int64Vector.from_arrow(int64_arr)
+        Integer64Vector.from_arrow(int64_arr)
     with pytest.raises(TypeError, match="from_dict"):
-        IntegerVector.from_arrow(int32_arr)
+        Integer32Vector.from_arrow(int32_arr)
     with pytest.raises(TypeError, match="from_dict"):
         Float64Vector.from_arrow(float64_arr)
 
-    int64_vec = Int64Vector.from_dict([0, 1, 0, 0], [10, 20], [True, True, True, False])
-    int32_vec = IntegerVector.from_dict([0, 1, 0, 0], [1, 2], [True, True, True, False])
+    int64_vec = Integer64Vector.from_dict([0, 1, 0, 0], [10, 20], [True, True, True, False])
+    int32_vec = Integer32Vector.from_dict([0, 1, 0, 0], [1, 2], [True, True, True, False])
     float64_vec = Float64Vector.from_dict([0, 1, 0, 0], [1.5, 2.5], [True, True, True, False])
 
-    assert int64_vec.__class__.__name__ == "Int64Vector"
-    assert int32_vec.__class__.__name__ == "IntegerVector"
+    assert int64_vec.__class__.__name__ == "Integer64Vector"
+    assert int32_vec.__class__.__name__ == "Integer32Vector"
     assert float64_vec.__class__.__name__ == "Float64Vector"
     assert int64_vec.to_pylist() == [10, 20, 10, None]
     assert int32_vec.to_pylist() == [1, 2, 1, None]

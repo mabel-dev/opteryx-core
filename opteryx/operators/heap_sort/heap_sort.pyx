@@ -383,9 +383,9 @@ cdef void _sift_down_single_vector(
 
 _EXACT_COMPRESS_VECTOR_TYPES = frozenset({
     "BoolVector", "Date32Vector", "Float64Vector",
-    "Int8Vector", "Int16Vector", "Int32Vector", "Int64Vector",
+    "Int8Vector", "Int16Vector", "Int32Vector", "Integer64Vector",
     "StringVector", "TimeVector", "TimestampVector",
-    "UInt8Vector", "UInt16Vector", "UInt32Vector", "UInt64Vector",
+    "UInt8Vector", "UInt16Vector", "UInt32Vector", "UInteger64Vector",
 })
 
 

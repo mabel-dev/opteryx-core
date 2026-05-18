@@ -101,35 +101,41 @@ cdef object _try_build_phash(Morsel morsel, list columns, object current_set):
     if len(columns) != 1:
         return None
     col = morsel.column(columns[0])
-    if not isinstance(col, IntegerVector):
-        return None
-    cdef IntegerVector ivec = <IntegerVector>col
+    cdef bint is_int8 = isinstance(col, Integer8Vector)
+    cdef bint is_int16 = isinstance(col, Integer16Vector)
+    if not (is_int8 or is_int16):
+        return None  # Int32/Int64 — no type bound in Phase 1
+
     # Any null on the right build side: track _right_has_null separately;
     # null rows are skipped (not inserted) into PerfectHashSet.
-    cdef void* dp = ivec.dense_ptr()
+    cdef void* dp
+    cdef uint8_t* nulls
+    if is_int8:
+        dp = (<Integer8Vector>col).dense_ptr()
+        nulls = (<Integer8Vector>col).null_bitmap_ptr()
+    else:
+        dp = (<Integer16Vector>col).dense_ptr()
+        nulls = (<Integer16Vector>col).null_bitmap_ptr()
     if dp == NULL:
         return None  # non-dense encoding (RLE/const) → fall back
 
     cdef PerfectHashSet phs
     if current_set is None:
-        if ivec.ptr.type == DRAKEN_INT8:
+        if is_int8:
             phs = PerfectHashSet(-128, 127)
-        elif ivec.ptr.type == DRAKEN_INT16:
-            phs = PerfectHashSet(-32768, 32767)
         else:
-            return None  # Int32/Int64 — no type bound in Phase 1
+            phs = PerfectHashSet(-32768, 32767)
     else:
         phs = <PerfectHashSet>current_set
 
     cdef Py_ssize_t n = morsel.num_rows
-    cdef uint8_t* nulls = ivec.null_bitmap_ptr()
     cdef Py_ssize_t i
     cdef int64_t val
 
     if nulls == NULL:
         # No nulls: bulk insert
         with nogil:
-            if ivec.ptr.type == DRAKEN_INT8:
+            if is_int8:
                 for i in range(n):
                     phs.insert_i64(<int64_t>(<const int8_t*>dp)[i])
             else:
@@ -138,7 +144,7 @@ cdef object _try_build_phash(Morsel morsel, list columns, object current_set):
     else:
         # Null rows: skip them (tracked via _right_has_null flag in the node)
         with nogil:
-            if ivec.ptr.type == DRAKEN_INT8:
+            if is_int8:
                 for i in range(n):
                     if nulls[i >> 3] & (1 << (i & 7)):
                         phs.insert_i64(<int64_t>(<const int8_t*>dp)[i])
@@ -308,10 +314,18 @@ cdef Morsel _phash_probe(
     if len(join_columns) != 1:
         return None
     col = relation.column(join_columns[0])
-    if not isinstance(col, IntegerVector):
+    cdef bint is_int8 = isinstance(col, Integer8Vector)
+    cdef bint is_int16 = isinstance(col, Integer16Vector)
+    if not (is_int8 or is_int16):
         return None
-    cdef IntegerVector ivec = <IntegerVector>col
-    cdef void* dp = ivec.dense_ptr()
+    cdef void* dp
+    cdef uint8_t* nulls
+    if is_int8:
+        dp = (<Integer8Vector>col).dense_ptr()
+        nulls = (<Integer8Vector>col).null_bitmap_ptr()
+    else:
+        dp = (<Integer16Vector>col).dense_ptr()
+        nulls = (<Integer16Vector>col).null_bitmap_ptr()
     if dp == NULL:
         return None
 
@@ -320,7 +334,6 @@ cdef Morsel _phash_probe(
     if out_buf == NULL:
         raise MemoryError()
 
-    cdef uint8_t* nulls = ivec.null_bitmap_ptr()
     cdef Py_ssize_t count = 0
     cdef Py_ssize_t i
 
@@ -339,12 +352,12 @@ cdef Morsel _phash_probe(
 
     with nogil:
         if want_found:
-            if ivec.ptr.type == DRAKEN_INT8:
+            if is_int8:
                 count = phash.probe_found_32_i8(<const int8_t*>dp, out_buf, n)
             else:
                 count = phash.probe_found_32_i16(<const int16_t*>dp, out_buf, n)
         else:
-            if ivec.ptr.type == DRAKEN_INT8:
+            if is_int8:
                 count = phash.probe_not_found_32_i8(<const int8_t*>dp, out_buf, n)
             else:
                 count = phash.probe_not_found_32_i16(<const int16_t*>dp, out_buf, n)
@@ -430,8 +443,9 @@ cdef class FilterJoinNode(JoinNode):
                 # Check for nulls in this morsel
                 if len(self.right_columns) == 1:
                     col = morsel.column(self.right_columns[0])
-                    if isinstance(col, IntegerVector):
-                        if (<IntegerVector>col).null_bitmap_ptr() != NULL:
+                    if isinstance(col, (Integer8Vector, Integer16Vector)):
+                        if (isinstance(col, Integer8Vector) and (<Integer8Vector>col).null_bitmap_ptr() != NULL) or \
+                           (isinstance(col, Integer16Vector) and (<Integer16Vector>col).null_bitmap_ptr() != NULL):
                             self._right_has_null = True
                 self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
                 return
@@ -448,8 +462,9 @@ cdef class FilterJoinNode(JoinNode):
             # Track nulls
             if len(self.right_columns) == 1:
                 col = morsel.column(self.right_columns[0])
-                if isinstance(col, IntegerVector):
-                    if (<IntegerVector>col).null_bitmap_ptr() != NULL:
+                if isinstance(col, (Integer8Vector, Integer16Vector)):
+                    if (isinstance(col, Integer8Vector) and (<Integer8Vector>col).null_bitmap_ptr() != NULL) or \
+                       (isinstance(col, Integer16Vector) and (<Integer16Vector>col).null_bitmap_ptr() != NULL):
                         self._right_has_null = True
             self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
             return

@@ -55,7 +55,7 @@ from opteryx.types import OrsoTypes
 from draken.vectors._decimal_vector import from_int64_vector as _int64_to_decimal
 from draken.vectors.date32_vector import from_int64_vector as _int64_to_date32
 from draken.vectors.timestamp_vector import from_int64_vector as _int64_to_timestamp
-# Int64Vector is already cimported by the umbrella unit (_operators.pyx).
+# Integer64Vector is already cimported by the umbrella unit (_operators.pyx).
 
 # Predicate evaluation is the bytecode VM only — no alternative paths. The
 # compiler lowers the predicate AST to a typed CompiledBytecode at bind time;
@@ -356,7 +356,7 @@ cdef inline void _coerce_logical_types(
     set date_col_set,
     set timestamp_col_set,
 ):
-    """Coerce Int64Vector physical columns to their logical types (DATE/TIMESTAMP/DECIMAL).
+    """Coerce Integer64Vector physical columns to their logical types (DATE/TIMESTAMP/DECIMAL).
 
     The C++ parquet pipeline serialises DATE/TIMESTAMP/DECIMAL as TAG_INT64 (the
     physical type) and the IPC format carries no logical type info, so we apply
@@ -369,19 +369,19 @@ cdef inline void _coerce_logical_types(
     if decimal_col_map:
         for col_name, dec in decimal_col_map.items():
             v = row_group.get(col_name)
-            if v is not None and isinstance(v, Int64Vector):
+            if v is not None and isinstance(v, Integer64Vector):
                 precision = dec[0]
                 scale = dec[1]
                 row_group[col_name] = _int64_to_decimal(v, precision, scale)
     if date_col_set:
         for col_name in date_col_set:
             v = row_group.get(col_name)
-            if v is not None and isinstance(v, Int64Vector):
+            if v is not None and isinstance(v, Integer64Vector):
                 row_group[col_name] = _int64_to_date32(v)
     if timestamp_col_set:
         for col_name in timestamp_col_set:
             v = row_group.get(col_name)
-            if v is not None and isinstance(v, Int64Vector):
+            if v is not None and isinstance(v, Integer64Vector):
                 row_group[col_name] = _int64_to_timestamp(v, "us")
 
 
@@ -693,7 +693,7 @@ cdef class ParquetReadNode(ReaderNode):
         ]
 
         # Build DECIMAL column map: col_name → (precision, scale) for any DECIMAL column
-        # in the schema.  Used to coerce Int64Vector → DecimalVector after IPC deserialization,
+        # in the schema.  Used to coerce Integer64Vector → DecimalVector after IPC deserialization,
         # since the C++ pipeline serializes DECIMAL as TAG_INT64 (the physical type) and
         # the IPC format carries no logical type info.
         from opteryx.types import OrsoTypes as _OrsoTypes

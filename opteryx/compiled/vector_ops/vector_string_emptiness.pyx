@@ -16,8 +16,7 @@
 # offset / length metadata:
 #   - dense:  offsets[i+1] == offsets[i]
 #   - dict:   dict_offsets[code+1] == dict_offsets[code]   (per-code, then row-walk)
-#   - RLE:    run_str_lens[r] == 0                          (per-run, then bit-fill)
-#   - const:  vec._const_value.length == 0
+#   - const:  DrakenConstantStringPayload.length == 0
 #
 # NULL propagation matches SQL 3VL: the output null bitmap is the input's
 # null bitmap copied verbatim (rows that were NULL stay NULL).
@@ -165,7 +164,7 @@ cdef BoolVector _string_emptiness_kernel(StringVector vec, bint emit_when_empty)
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef DrakenConstantStringPayload* csp
 
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         if uv.validity != NULL:  # null constant
             return _make_constant_bool(n, False, True)
         csp = <DrakenConstantStringPayload*>uv.data

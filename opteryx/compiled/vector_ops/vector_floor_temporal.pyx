@@ -19,7 +19,7 @@ from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
 from draken.vectors.timestamp_vector cimport TimestampVector
-from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.vectors.integer64_vector cimport Integer64Vector, from_sequence as int64_from_sequence
 from draken.core.buffers cimport DrakenFixedBuffer
 
 

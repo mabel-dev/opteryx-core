@@ -10,15 +10,10 @@
 # cython: freethreading_compatible=True
 
 """
-Date32Vector: Cython implementation of a fixed-width date32 column vector for Draken.
-
-This module provides:
-- The Date32Vector class for efficient date32 column storage (days since Unix epoch)
-- Integration with DrakenFixedBuffer and related C helpers for memory management
-- Arrow interoperability for zero-copy conversion
-- Fast comparison and null handling for date32 columns
-
-Used for high-performance temporal analytics and columnar data processing in Draken.
+Date32Vector: INT32 day-count from Unix epoch (1970-01-01 == 0), stored in a
+DrakenFixedBuffer with itemsize=4. Physical layout is identical to Integer32Vector;
+Date32Vector is a distinct class because the domain (calendar dates) and operations
+(date arithmetic, truncation) differ from general integer arithmetic.
 """
 
 import datetime as _dt
@@ -39,7 +34,7 @@ from libc.stdlib cimport malloc, free
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DRAKEN_DATE32
 from draken.core.buffers cimport DrakenVector
-from draken.vectors.int64_vector cimport _materialize_dict_int64
+from draken.vectors.integer64_vector cimport _materialize_dict_int64
 from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.fixed_vector cimport buf_dtype
 from draken.core.fixed_vector cimport buf_itemsize
@@ -47,7 +42,7 @@ from draken.core.fixed_vector cimport buf_length
 from draken.core.fixed_vector cimport free_fixed_buffer
 from draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash, simd_popcount
 from draken.vectors.bool_vector cimport BoolVector
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.timestamp_vector cimport TimestampVector
 
 cdef extern from "simd_hash.h":
@@ -643,8 +638,8 @@ cdef class Date32Vector(Vector):
             total += data[i]
         return total
 
-    cpdef Int64Vector subtract_date32_vector(self, Date32Vector other):
-        """Subtract two Date32Vector values and return microseconds as Int64Vector."""
+    cpdef Integer64Vector subtract_date32_vector(self, Date32Vector other):
+        """Subtract two Date32Vector values and return microseconds as Integer64Vector."""
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int32_t* data1 = <int32_t*> ptr1.data
@@ -653,7 +648,7 @@ cdef class Date32Vector(Vector):
         cdef uint8_t* null2 = ptr2.null_bitmap
         cdef Py_ssize_t i, n = ptr1.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef Int64Vector out
+        cdef Integer64Vector out
         cdef int64_t* dst
         cdef uint8_t* out_null = NULL
         cdef bint valid1, valid2
@@ -662,7 +657,7 @@ cdef class Date32Vector(Vector):
         if n != ptr2.length:
             raise ValueError("Vectors must have the same length")
 
-        out = Int64Vector(<size_t>n)
+        out = Integer64Vector(<size_t>n)
         dst = <int64_t*> out.ptr.data
         memset(dst, 0, n * sizeof(int64_t))
 
@@ -686,8 +681,8 @@ cdef class Date32Vector(Vector):
                 dst[i] = left_us - right_us
         return out
 
-    cpdef Int64Vector subtract_timestamp_vector(self, TimestampVector other):
-        """Subtract TimestampVector from Date32Vector and return microseconds as Int64Vector."""
+    cpdef Integer64Vector subtract_timestamp_vector(self, TimestampVector other):
+        """Subtract TimestampVector from Date32Vector and return microseconds as Integer64Vector."""
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef int32_t* data1 = <int32_t*> ptr1.data
@@ -696,7 +691,7 @@ cdef class Date32Vector(Vector):
         cdef uint8_t* null2 = ptr2.null_bitmap
         cdef Py_ssize_t i, n = ptr1.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef Int64Vector out
+        cdef Integer64Vector out
         cdef int64_t* dst
         cdef uint8_t* out_null = NULL
         cdef bint valid1, valid2
@@ -705,7 +700,7 @@ cdef class Date32Vector(Vector):
         if n != ptr2.length:
             raise ValueError("Vectors must have the same length")
 
-        out = Int64Vector(<size_t>n)
+        out = Integer64Vector(<size_t>n)
         dst = <int64_t*> out.ptr.data
         memset(dst, 0, n * sizeof(int64_t))
 
@@ -1166,9 +1161,9 @@ cdef Date32Vector from_dict_nullable(
     return vec
 
 
-cpdef Date32Vector from_int64_vector(Int64Vector source):
+cpdef Date32Vector from_int64_vector(Integer64Vector source):
     """
-    Convert an Int64Vector containing epoch-day values to Date32Vector.
+    Convert an Integer64Vector containing epoch-day values to Date32Vector.
 
     This is a native Draken conversion path (no Arrow interop).
     """

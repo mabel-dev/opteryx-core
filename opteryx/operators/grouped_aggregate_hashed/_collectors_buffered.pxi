@@ -16,7 +16,7 @@ from libc.string cimport memcpy
 from libcpp.vector cimport vector
 
 from draken.vectors.vector cimport Vector
-from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
+from draken.vectors.integer64_vector cimport Integer64Vector, _materialize_dict_int64
 from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
 from draken.vectors._decimal_vector cimport DecimalVector
 from draken.core.buffers cimport DrakenVector
@@ -83,7 +83,7 @@ cdef class MedianFloat64Collector(BaseCollector):
         Py_ssize_t n_rows,
     ):
         cdef Vector vec = morsel.column(self.column_name)
-        cdef Int64Vector iv
+        cdef Integer64Vector iv
         cdef Float64Vector fv
         cdef Py_ssize_t i
         cdef double v
@@ -94,10 +94,10 @@ cdef class MedianFloat64Collector(BaseCollector):
 
         cdef DrakenVector* uv
 
-        if isinstance(vec, Int64Vector):
-            iv = <Int64Vector>vec
+        if isinstance(vec, Integer64Vector):
+            iv = <Integer64Vector>vec
             uv = iv.unified()
-            if uv.data_length == 1:  # constant
+            if uv.data_length == 1 and uv.length > 1:  # constant
                 if uv.validity != NULL:
                     return
                 v = <double>(<int64_t*>uv.data)[0]
@@ -117,7 +117,7 @@ cdef class MedianFloat64Collector(BaseCollector):
         if isinstance(vec, Float64Vector):
             fv = <Float64Vector>vec
             uv = fv.unified()
-            if uv.data_length == 1:  # constant
+            if uv.data_length == 1 and uv.length > 1:  # constant
                 if uv.validity != NULL:
                     return
                 v = (<double*>uv.data)[0]

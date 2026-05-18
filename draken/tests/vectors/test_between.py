@@ -6,7 +6,7 @@ Covers:
 - Boundary values (exact lower, exact upper)
 - Out-of-range values
 - Constant-encoded vectors
-- Int64Vector, Float64Vector, TimestampVector, Date32Vector, IntegerVector
+- Integer64Vector, Float64Vector, TimestampVector, Date32Vector, IntegerVector
 """
 
 import sys
@@ -44,7 +44,7 @@ def _date32(values):
 
 
 # ---------------------------------------------------------------------------
-# Int64Vector
+# Integer64Vector
 # ---------------------------------------------------------------------------
 
 
@@ -128,20 +128,20 @@ class TestInt64Between:
         assert result.to_pylist() == [False, True, False, False, False]
 
     def test_constant_encoded_match(self):
-        from draken.vectors.int64_vector import Int64Vector
-        vec = Int64Vector.from_constant(7, 5)
+        from draken.vectors.integer64_vector import Integer64Vector
+        vec = Integer64Vector.from_constant(7, 5)
         result = vec.between(5, 10, True, True)
         assert result.to_pylist() == [True, True, True, True, True]
 
     def test_constant_encoded_no_match(self):
-        from draken.vectors.int64_vector import Int64Vector
-        vec = Int64Vector.from_constant(20, 3)
+        from draken.vectors.integer64_vector import Integer64Vector
+        vec = Integer64Vector.from_constant(20, 3)
         result = vec.between(5, 10, True, True)
         assert result.to_pylist() == [False, False, False]
 
     def test_constant_encoded_null(self):
-        from draken.vectors.int64_vector import Int64Vector
-        vec = Int64Vector.from_constant(0, 4, is_null=True)
+        from draken.vectors.integer64_vector import Integer64Vector
+        vec = Integer64Vector.from_constant(0, 4, is_null=True)
         result = vec.between(0, 10, True, True)
         assert result.to_pylist() == [None, None, None, None]
 

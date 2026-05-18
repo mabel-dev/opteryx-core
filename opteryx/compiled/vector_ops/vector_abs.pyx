@@ -18,16 +18,16 @@ from libc.string cimport memcpy
 from draken.core.buffers cimport DrakenVector
 from draken.core.buffers cimport DRAKEN_FLOAT64, DRAKEN_FLOAT32, DRAKEN_INT64, DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8
 from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.scalar_constructors cimport from_scalar
 from draken.vectors.vector cimport Vector
 
 
-cpdef Int64Vector vector_abs_int64(object values):
-    """ABS(values): element-wise absolute value for Int64Vector or dict-encoded variant."""
+cpdef Integer64Vector vector_abs_int64(object values):
+    """ABS(values): element-wise absolute value for Integer64Vector or dict-encoded variant."""
 
     cdef size_t n = <size_t>len(values)
-    cdef Int64Vector out_vec = Int64Vector(n)
+    cdef Integer64Vector out_vec = Integer64Vector(n)
     cdef int64_t* out_data = <int64_t*>out_vec.ptr.data
     cdef uint8_t* in_null = NULL
     cdef uint8_t* out_null = NULL
@@ -79,11 +79,11 @@ cpdef Int64Vector vector_abs_int64(object values):
                 out_data[i] = 0
 
     else:
-        in_data = <int64_t*>(<Int64Vector>values).ptr.data
-        in_null = <uint8_t*>(<Int64Vector>values).ptr.null_bitmap
+        in_data = <int64_t*>(<Integer64Vector>values).ptr.data
+        in_null = <uint8_t*>(<Integer64Vector>values).ptr.null_bitmap
 
         if n > 0 and in_data == NULL:
-            raise ValueError("Int64Vector has NULL data pointer")
+            raise ValueError("Integer64Vector has NULL data pointer")
 
         if in_null != NULL and n > 0:
             out_null = <uint8_t*>malloc((n + 7) >> 3)
@@ -203,7 +203,7 @@ cpdef object vector_abs(object values):
         uv = (<Vector>values).unified()
     if uv != NULL and uv.data_length == 1:
         return vector_abs_constant(values)
-    elif isinstance(values, Int64Vector):
+    elif isinstance(values, Integer64Vector):
         return vector_abs_int64(values)
     elif isinstance(values, Float64Vector):
         return vector_abs_float64(values)

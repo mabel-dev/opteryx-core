@@ -1,9 +1,7 @@
 # cython: language_level=3
 
 from libc.stdint cimport int32_t, int8_t, int64_t, intptr_t, uint32_t, uint64_t, uint8_t
-from draken.core.buffers cimport ConstAccessor
 from draken.core.buffers cimport DrakenConstantStringPayload
-from draken.core.buffers cimport DictAccessor
 from draken.core.buffers cimport DrakenVarBuffer
 from draken.core.buffers cimport DrakenVector
 from draken.vectors.bool_vector cimport BoolVector
@@ -24,21 +22,12 @@ cdef class StringVector(Vector):
 
     cdef DrakenVarBuffer* ptr
     cdef bint owns_data
-    cdef DictAccessor _dict_accessor
     cdef DrakenVarBuffer* _dict_values
-    cdef uint8_t* _dict_codes
-    cdef uint8_t _dict_code_width
     cdef uint8_t _dict_ordered
-    cdef ConstAccessor _const_accessor
-    cdef DrakenConstantStringPayload* _const_value
-    cdef bint _has_const
-    cdef bint _const_is_null
 
     cdef int64_t* _dict_code_counts
     cdef bint _dict_code_counts_valid
 
-    cdef DictAccessor* dict_accessor(self) noexcept
-    cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
     cdef DrakenVector* unified(self) noexcept
@@ -168,7 +157,6 @@ cdef class StringVectorBuilder:
 
 cdef StringVector from_arrow(object array)
 
-cdef void _refresh_unified_string(StringVector vec) noexcept
 cdef StringVector _materialize_dict_string(StringVector vec)
 cdef StringVector make_string_dict_only(
     const uint8_t* codes,

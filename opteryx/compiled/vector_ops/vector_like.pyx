@@ -104,7 +104,7 @@ cpdef BoolVector vector_like(
     cdef uint8_t* dict_like_results = NULL
     cdef DrakenConstantStringPayload* csp
 
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         if uv.validity != NULL:  # null constant
             return _constant_bool_result(n, False, True)
         csp = <DrakenConstantStringPayload*>uv.data

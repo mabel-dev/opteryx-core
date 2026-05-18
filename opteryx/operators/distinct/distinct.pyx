@@ -68,14 +68,13 @@ cdef class DistinctNode(BasePlanNode):
         if cols is None or len(cols) != 1:
             return None
         col = morsel.column(cols[0])
-        if not isinstance(col, IntegerVector):
-            return None
-        cdef IntegerVector ivec = <IntegerVector>col
-        if ivec.null_bitmap_ptr() != NULL:
-            return None  # has nulls — fall back
-        if ivec.ptr.type == DRAKEN_INT8:
+        if isinstance(col, Integer8Vector):
+            if (<Integer8Vector>col).null_bitmap_ptr() != NULL:
+                return None  # has nulls — fall back
             return PerfectHashSet(-128, 127)
-        if ivec.ptr.type == DRAKEN_INT16:
+        if isinstance(col, Integer16Vector):
+            if (<Integer16Vector>col).null_bitmap_ptr() != NULL:
+                return None  # has nulls — fall back
             return PerfectHashSet(-32768, 32767)
         return None
 
@@ -83,14 +82,6 @@ cdef class DistinctNode(BasePlanNode):
         """Filter morsel in-place using PerfectHashSet. Returns False always (no overflow)."""
         cols = self._distinct_on
         col = morsel.column(cols[0])
-        if not isinstance(col, IntegerVector):
-            return False
-        cdef IntegerVector ivec = <IntegerVector>col
-        if ivec.null_bitmap_ptr() != NULL:
-            return False
-        cdef void* dp = ivec.dense_ptr()
-        if dp == NULL:
-            return False
 
         cdef Py_ssize_t n = morsel.num_rows
         cdef int32_t* idx_buf = <int32_t*>PyMem_Malloc(n * sizeof(int32_t))
@@ -99,12 +90,31 @@ cdef class DistinctNode(BasePlanNode):
 
         cdef PerfectHashSet phs = <PerfectHashSet>self._hash_set
         cdef Py_ssize_t count
+        cdef void* dp
 
-        with nogil:
-            if ivec.ptr.type == DRAKEN_INT8:
+        if isinstance(col, Integer8Vector):
+            if (<Integer8Vector>col).null_bitmap_ptr() != NULL:
+                PyMem_Free(idx_buf)
+                return False
+            dp = (<Integer8Vector>col).dense_ptr()
+            if dp == NULL:
+                PyMem_Free(idx_buf)
+                return False
+            with nogil:
                 count = phs.find_new_indices_out_32_i8(<const int8_t*>dp, idx_buf, n)
-            else:
+        elif isinstance(col, Integer16Vector):
+            if (<Integer16Vector>col).null_bitmap_ptr() != NULL:
+                PyMem_Free(idx_buf)
+                return False
+            dp = (<Integer16Vector>col).dense_ptr()
+            if dp == NULL:
+                PyMem_Free(idx_buf)
+                return False
+            with nogil:
                 count = phs.find_new_indices_out_32_i16(<const int16_t*>dp, idx_buf, n)
+        else:
+            PyMem_Free(idx_buf)
+            return False
 
         if count == 0:
             morsel._empty_inplace()

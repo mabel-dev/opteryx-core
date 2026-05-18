@@ -29,7 +29,7 @@ cpdef StringVector vector_base85_encode(StringVector data):
 
     builder = string_vector_module.StringVectorBuilder.with_estimate(n, 32)
 
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and data.ptr.offsets == NULL:  # constant
         if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
@@ -87,7 +87,7 @@ cpdef StringVector vector_base85_decode(StringVector data):
 
     builder = string_vector_module.StringVectorBuilder.with_estimate(n, 32)
 
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and data.ptr.offsets == NULL:  # constant
         if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()

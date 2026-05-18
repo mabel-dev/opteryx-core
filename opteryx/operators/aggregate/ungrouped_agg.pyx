@@ -15,7 +15,9 @@ from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
 from draken.vectors.vector cimport Vector, NULL_HASH, mix_hash
-from draken.vectors.integer_vector cimport IntegerVector
+from draken.vectors.integer8_vector cimport Integer8Vector
+from draken.vectors.integer16_vector cimport Integer16Vector
+from draken.vectors.integer32_vector cimport Integer32Vector
 from draken.core.buffers cimport (
     DrakenFixedBuffer, DrakenVarBuffer,
     DrakenConstantStringPayload, DrakenVector,
@@ -58,16 +60,22 @@ cdef int AGG_RESULT_OBJECT = 3
 # ---------------------------------------------------------------------------
 cdef int _VTYPE_UNKNOWN = 0
 cdef int _VTYPE_INT64   = 1
-cdef int _VTYPE_INTEGER = 2
-cdef int _VTYPE_FLOAT64 = 3
-cdef int _VTYPE_STRING   = 4
-cdef int _VTYPE_GENERIC  = 5
+cdef int _VTYPE_INT8    = 2
+cdef int _VTYPE_INT16   = 3
+cdef int _VTYPE_INT32   = 4
+cdef int _VTYPE_FLOAT64 = 5
+cdef int _VTYPE_STRING   = 6
+cdef int _VTYPE_GENERIC  = 7
 
 cdef inline int _classify_vector(Vector v) noexcept:
-    if isinstance(v, Int64Vector):
+    if isinstance(v, Integer64Vector):
         return _VTYPE_INT64
-    if isinstance(v, IntegerVector):
-        return _VTYPE_INTEGER
+    if isinstance(v, Integer8Vector):
+        return _VTYPE_INT8
+    if isinstance(v, Integer16Vector):
+        return _VTYPE_INT16
+    if isinstance(v, Integer32Vector):
+        return _VTYPE_INT32
     if isinstance(v, Float64Vector):
         return _VTYPE_FLOAT64
     if isinstance(v, StringVector):

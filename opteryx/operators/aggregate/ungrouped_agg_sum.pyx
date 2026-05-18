@@ -44,11 +44,19 @@ cdef class SumInt64Aggregate(UngroupedAggregate):
             self._col_type = _classify_vector(raw)
 
         if self._col_type == _VTYPE_INT64:
-            self._total += (<Int64Vector>raw).sum()
+            self._total += (<Integer64Vector>raw).sum()
             self._seen = True
             return
-        if self._col_type == _VTYPE_INTEGER:
-            self._total += (<IntegerVector>raw).sum()
+        if self._col_type == _VTYPE_INT8:
+            self._total += (<Integer8Vector>raw).sum()
+            self._seen = True
+            return
+        if self._col_type == _VTYPE_INT16:
+            self._total += (<Integer16Vector>raw).sum()
+            self._seen = True
+            return
+        if self._col_type == _VTYPE_INT32:
+            self._total += (<Integer32Vector>raw).sum()
             self._seen = True
             return
 
@@ -106,11 +114,19 @@ cdef class SumFloat64Aggregate(UngroupedAggregate):
             self._seen = True
             return
         if self._col_type == _VTYPE_INT64:
-            self._total += <double>((<Int64Vector>raw).sum())
+            self._total += <double>((<Integer64Vector>raw).sum())
             self._seen = True
             return
-        if self._col_type == _VTYPE_INTEGER:
-            self._total += <double>((<IntegerVector>raw).sum())
+        if self._col_type == _VTYPE_INT8:
+            self._total += <double>((<Integer8Vector>raw).sum())
+            self._seen = True
+            return
+        if self._col_type == _VTYPE_INT16:
+            self._total += <double>((<Integer16Vector>raw).sum())
+            self._seen = True
+            return
+        if self._col_type == _VTYPE_INT32:
+            self._total += <double>((<Integer32Vector>raw).sum())
             self._seen = True
             return
 

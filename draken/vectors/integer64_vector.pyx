@@ -10,10 +10,10 @@
 # cython: freethreading_compatible=True
 
 """
-Int64Vector: Cython implementation of a fixed-width int64 column vector for Draken.
+Integer64Vector: Cython implementation of a fixed-width int64 column vector for Draken.
 
 This module provides:
-- The Int64Vector class for efficient int64 column storage and manipulation
+- The Integer64Vector class for efficient int64 column storage and manipulation
 - Integration with DrakenFixedBuffer and related C helpers for memory management
 - Arrow interoperability for zero-copy conversion
 - Fast hashing, comparison, and null handling for int64 columns
@@ -122,7 +122,7 @@ cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx, Py_ssize_t bi
     return (byte >> (bit_index & 7)) & 1
 
 
-cdef void _release_dict_storage(Int64Vector vec) noexcept:
+cdef void _release_dict_storage(Integer64Vector vec) noexcept:
     if vec._unified_view.selection != NULL:
         free(vec._unified_view.selection)
         vec._unified_view.selection = NULL
@@ -134,7 +134,7 @@ cdef void _release_dict_storage(Int64Vector vec) noexcept:
 
 
 
-cdef void _attach_dictionary_storage(Int64Vector vec, const int32_t[::1] codes, const int64_t[::1] dictionary, bint ordered, const uint8_t* dict_entry_null_bitmap=NULL) except *:
+cdef void _attach_dictionary_storage(Integer64Vector vec, const int32_t[::1] codes, const int64_t[::1] dictionary, bint ordered, const uint8_t* dict_entry_null_bitmap=NULL) except *:
     cdef Py_ssize_t row_count = codes.shape[0]
     cdef Py_ssize_t dict_size = dictionary.shape[0]
     cdef uint8_t code_width = _dict_code_width_for_size(dict_size)
@@ -187,7 +187,7 @@ cdef void _attach_dictionary_storage(Int64Vector vec, const int32_t[::1] codes, 
     vec._unified_view.sel_width = code_width
     vec._unified_view.validity = vec.ptr.null_bitmap
 
-cdef class Int64Vector(Vector):
+cdef class Integer64Vector(Vector):
 
     @classmethod
     def from_dict(cls, codes, dictionary, row_validity=None):
@@ -219,7 +219,7 @@ cdef class Int64Vector(Vector):
             raise ValueError("length must be non-negative")
         if value is None and not is_null:
             raise ValueError("value cannot be None unless is_null=True")
-        cdef Int64Vector vec = Int64Vector(1)  # allocate 1-element buffer for const value
+        cdef Integer64Vector vec = Integer64Vector(1)  # allocate 1-element buffer for const value
         cdef int64_t val = 0 if (is_null or value is None) else <int64_t>int(value)
         (<int64_t*>vec.ptr.data)[0] = val
         vec.ptr.length = <size_t>length
@@ -387,12 +387,12 @@ cdef class Int64Vector(Vector):
         return pa.Array.from_buffers(pa.int64(), buf_length(self.ptr), buffers)
 
     # -------- Example op --------
-    cpdef Int64Vector take(self, int32_t[::1] indices):
+    cpdef Integer64Vector take(self, int32_t[::1] indices):
         cdef DrakenVector* uv = self.unified()
         cdef Py_ssize_t i, n = indices.shape[0]
         cdef int32_t src_idx
         cdef Py_ssize_t code_idx
-        cdef Int64Vector out
+        cdef Integer64Vector out
         cdef int64_t* data = <int64_t*>uv.data
         cdef int64_t* dst
         cdef uint8_t* src_null
@@ -401,7 +401,7 @@ cdef class Int64Vector(Vector):
         cdef uint8_t byte
 
         if uv.selection != NULL:
-            out = Int64Vector(<size_t>n)
+            out = Integer64Vector(<size_t>n)
             dst = <int64_t*>out.ptr.data
             src_null = uv.validity
             out_null = NULL
@@ -423,12 +423,12 @@ cdef class Int64Vector(Vector):
             out.ptr.null_bitmap = out_null
             return out
         if uv.data_length == 1:
-            return Int64Vector.from_constant(
+            return Integer64Vector.from_constant(
                 None if uv.validity != NULL else data[0],
                 n,
                 is_null=uv.validity != NULL,
             )
-        out = Int64Vector(<size_t>n)
+        out = Integer64Vector(<size_t>n)
         dst = <int64_t*> out.ptr.data
         src_null = <uint8_t*> self.ptr.null_bitmap
         out_null = NULL
@@ -570,7 +570,7 @@ cdef class Int64Vector(Vector):
                 dispatch_scalar_branchless(op, data, value, src_null, dst, <size_t>n)
         return out
 
-    cpdef BoolVector _compare_vector(self, Int64Vector other, int op):
+    cpdef BoolVector _compare_vector(self, Integer64Vector other, int op):
         cdef DrakenVector* uv = self.unified()
         cdef DrakenVector* ouv = other.unified()
         cdef Py_ssize_t n = <Py_ssize_t>uv.length
@@ -665,7 +665,7 @@ cdef class Int64Vector(Vector):
         return out
 
     cpdef BoolVector _compare_float64_vector(self, object other, int op):
-        """Compare Int64Vector with Float64Vector.
+        """Compare Integer64Vector with Float64Vector.
 
         Converts int64 values to float64 for comparison. Uses native float64 vector
         comparison methods which are faster than element-by-element Python comparison.
@@ -702,71 +702,71 @@ cdef class Int64Vector(Vector):
     cpdef BoolVector equals(self, int64_t value):
         return self._compare_scalar(value, 0)
 
-    cpdef BoolVector equals_vector(self, Int64Vector other):
+    cpdef BoolVector equals_vector(self, Integer64Vector other):
         return self._compare_vector(other, 0)
 
     cpdef BoolVector not_equals(self, int64_t value):
         return self._compare_scalar(value, 1)
 
-    cpdef BoolVector not_equals_vector(self, Int64Vector other):
+    cpdef BoolVector not_equals_vector(self, Integer64Vector other):
         return self._compare_vector(other, 1)
 
     cpdef BoolVector greater_than(self, int64_t value):
         return self._compare_scalar(value, 2)
 
-    cpdef BoolVector greater_than_vector(self, Int64Vector other):
+    cpdef BoolVector greater_than_vector(self, Integer64Vector other):
         return self._compare_vector(other, 2)
 
     cpdef BoolVector greater_than_or_equals(self, int64_t value):
         return self._compare_scalar(value, 3)
 
-    cpdef BoolVector greater_than_or_equals_vector(self, Int64Vector other):
+    cpdef BoolVector greater_than_or_equals_vector(self, Integer64Vector other):
         return self._compare_vector(other, 3)
 
     cpdef BoolVector less_than(self, int64_t value):
         return self._compare_scalar(value, 4)
 
-    cpdef BoolVector less_than_vector(self, Int64Vector other):
+    cpdef BoolVector less_than_vector(self, Integer64Vector other):
         return self._compare_vector(other, 4)
 
     cpdef BoolVector less_than_or_equals(self, int64_t value):
         return self._compare_scalar(value, 5)
 
-    cpdef BoolVector less_than_or_equals_vector(self, Int64Vector other):
+    cpdef BoolVector less_than_or_equals_vector(self, Integer64Vector other):
         return self._compare_vector(other, 5)
 
     cpdef BoolVector equals_float64_vector(self, object other):
-        """Compare Int64Vector with Float64Vector using native cross-type comparison."""
+        """Compare Integer64Vector with Float64Vector using native cross-type comparison."""
         if other.__class__.__name__ != "Float64Vector":
             raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
         return self._compare_float64_vector(other, 0)
 
     cpdef BoolVector not_equals_float64_vector(self, object other):
-        """Compare Int64Vector with Float64Vector using native cross-type comparison."""
+        """Compare Integer64Vector with Float64Vector using native cross-type comparison."""
         if other.__class__.__name__ != "Float64Vector":
             raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
         return self._compare_float64_vector(other, 1)
 
     cpdef BoolVector greater_than_float64_vector(self, object other):
-        """Compare Int64Vector with Float64Vector using native cross-type comparison."""
+        """Compare Integer64Vector with Float64Vector using native cross-type comparison."""
         if other.__class__.__name__ != "Float64Vector":
             raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
         return self._compare_float64_vector(other, 2)
 
     cpdef BoolVector greater_than_or_equals_float64_vector(self, object other):
-        """Compare Int64Vector with Float64Vector using native cross-type comparison."""
+        """Compare Integer64Vector with Float64Vector using native cross-type comparison."""
         if other.__class__.__name__ != "Float64Vector":
             raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
         return self._compare_float64_vector(other, 3)
 
     cpdef BoolVector less_than_float64_vector(self, object other):
-        """Compare Int64Vector with Float64Vector using native cross-type comparison."""
+        """Compare Integer64Vector with Float64Vector using native cross-type comparison."""
         if other.__class__.__name__ != "Float64Vector":
             raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
         return self._compare_float64_vector(other, 4)
 
     cpdef BoolVector less_than_or_equals_float64_vector(self, object other):
-        """Compare Int64Vector with Float64Vector using native cross-type comparison."""
+        """Compare Integer64Vector with Float64Vector using native cross-type comparison."""
         if other.__class__.__name__ != "Float64Vector":
             raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
         return self._compare_float64_vector(other, 5)
@@ -1273,17 +1273,17 @@ cdef class Int64Vector(Vector):
         return n - <Py_ssize_t>simd_popcount(uv.validity, (<size_t>n + 7) >> 3)
 
     cpdef Vector materialize(self):
-        """Return a dense Int64Vector, expanding dict/const encodings if needed."""
+        """Return a dense Integer64Vector, expanding dict/const encodings if needed."""
         cdef DrakenVector* uv = self.unified()
         cdef Py_ssize_t n = <Py_ssize_t>uv.length
-        cdef Int64Vector dense
+        cdef Integer64Vector dense
         cdef int64_t* dst
         cdef int64_t* mat_src
         cdef uint8_t* mat_null
         cdef Py_ssize_t i, nb_bytes
 
         if uv.selection != NULL:
-            dense = Int64Vector(<size_t>n)
+            dense = Integer64Vector(<size_t>n)
             dst = <int64_t*>dense.ptr.data
             mat_src = <int64_t*>uv.data
             mat_null = uv.validity
@@ -1301,7 +1301,7 @@ cdef class Int64Vector(Vector):
             return dense
 
         if uv.data_length == 1:
-            dense = Int64Vector(<size_t>n)
+            dense = Integer64Vector(<size_t>n)
             dst = <int64_t*>dense.ptr.data
             if uv.validity != NULL:
                 nb_bytes = (n + 7) >> 3
@@ -1442,7 +1442,7 @@ cdef class Int64Vector(Vector):
             return
 
         if offset < 0 or offset + n > out_buf.shape[0]:
-            raise ValueError("Int64Vector.hash_into: output buffer too small")
+            raise ValueError("Integer64Vector.hash_into: output buffer too small")
         dst_base = &out_buf[0]
 
         dst = dst_base + offset
@@ -1529,13 +1529,13 @@ cdef class Int64Vector(Vector):
                 i += block
             return 0
 
-        # DICTIONARY-only path: ptr.data is NULL, values looked up via codes.
+        # Dictionary-encoded path: selection != NULL, values gathered via codes.
         # The dict_data buffer is read as the uint64 lookup table (raw int64
         # bits — simd_mix_hash already treats values as opaque uint64), so the
         # fused kernel can scatter+mix in a single pass without a scratch
         # buffer. Specialized per code width (1/2/4 bytes) to keep the inner
         # loop branch-free.
-        if ptr.data == NULL and uv.selection != NULL:
+        if uv.selection != NULL:
             _cd_dict_data  = <int64_t*>uv.data
             _cd_dict_codes = <uint8_t*>uv.selection
             _cd_dict_cw    = uv.sel_width
@@ -1613,7 +1613,7 @@ cdef class Int64Vector(Vector):
 
         # Dict-only path: simd_mix_hash_from_dict XORs into dest, so dest must
         # be zero before calling c_hash_into.
-        if ptr.data == NULL and uv.selection != NULL:
+        if uv.selection != NULL:
             memset(out, 0, <size_t>n * sizeof(uint64_t))
             return self.c_hash_into(out, n)
 
@@ -1639,7 +1639,7 @@ cdef class Int64Vector(Vector):
         return 0
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
-        """Fast per-element compress for Int64Vector (no Python conversions).
+        """Fast per-element compress for Integer64Vector (no Python conversions).
 
         Null values map to the NULL sentinel; non-null values are copied
         directly into the output buffer.
@@ -1660,7 +1660,7 @@ cdef class Int64Vector(Vector):
             return
 
         if offset < 0 or offset + n > out_buf.shape[0]:
-            raise ValueError("Int64Vector.compress: output buffer too small")
+            raise ValueError("Integer64Vector.compress: output buffer too small")
 
         dst_base = &out_buf[0]
         dst = dst_base + offset
@@ -1705,21 +1705,21 @@ cdef class Int64Vector(Vector):
         cdef Py_ssize_t i, k = min(<Py_ssize_t>uv.length, 10)
         if uv.data_length == 1 and uv.selection == NULL:
             vals = [None if uv.validity != NULL else (<int64_t*>uv.data)[0]] * k
-            return f"<Int64Vector len={uv.length} values={vals}>"
+            return f"<Integer64Vector len={uv.length} values={vals}>"
         cdef int64_t* data = <int64_t*> self.ptr.data
         for i in range(k):
             vals.append(data[i])
-        return f"<Int64Vector len={buf_length(self.ptr)} values={vals}>"
+        return f"<Integer64Vector len={buf_length(self.ptr)} values={vals}>"
 
 
-cdef Int64Vector _materialize_dict_int64(Int64Vector vec):
-    """Expand a dict-only Int64Vector to a dense Int64Vector (no src ptr.data needed)."""
+cdef Integer64Vector _materialize_dict_int64(Integer64Vector vec):
+    """Expand a dict-only Integer64Vector to a dense Integer64Vector (no src ptr.data needed)."""
     if vec._dict_values == NULL or vec._unified_view.selection == NULL:
         raise ValueError("Dictionary encoding not properly initialized")
 
     cdef DrakenVector* uv = vec.unified()
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
-    cdef Int64Vector dense = Int64Vector(<size_t>n)
+    cdef Integer64Vector dense = Integer64Vector(<size_t>n)
     cdef int64_t* dst = <int64_t*>dense.ptr.data
     cdef int64_t* dict_data = <int64_t*>uv.data
     cdef uint8_t* codes = <uint8_t*>uv.selection
@@ -1752,7 +1752,7 @@ cdef Int64Vector _materialize_dict_int64(Int64Vector vec):
     return dense
 
 
-cdef Int64Vector make_int64_dict_only(
+cdef Integer64Vector make_int64_dict_only(
     const uint8_t* codes,
     uint8_t code_width,
     Py_ssize_t row_count,
@@ -1760,7 +1760,7 @@ cdef Int64Vector make_int64_dict_only(
     Py_ssize_t dict_size,
     const uint8_t* valid_bits,
 ):
-    """Create a dictionary-encoded Int64Vector with no dense materialization.
+    """Create a dictionary-encoded Integer64Vector with no dense materialization.
 
     Args:
         codes:       Packed code array (code_width bytes per row, row_count entries).
@@ -1771,9 +1771,9 @@ cdef Int64Vector make_int64_dict_only(
         valid_bits:  Arrow-style validity bitmap (1=valid, 0=null); NULL if non-nullable.
 
     Returns:
-        Int64Vector with DRAKEN_ENCODING_DICTIONARY; ptr.data is NULL (no dense storage).
+        Dictionary-encoded Integer64Vector; selection != NULL, data holds dict values.
     """
-    cdef Int64Vector vec = Int64Vector(0)   # allocates ptr header; ptr.data = NULL
+    cdef Integer64Vector vec = Integer64Vector(0)   # allocates ptr header; no dense data buffer
     cdef Py_ssize_t code_bytes = row_count * <Py_ssize_t>code_width
     cdef Py_ssize_t dict_bytes = dict_size * sizeof(int64_t)
     cdef Py_ssize_t nb_bytes
@@ -1817,12 +1817,12 @@ cdef Int64Vector make_int64_dict_only(
     return vec
 
 
-cdef Int64Vector from_decoded(
+cdef Integer64Vector from_decoded(
     void* data,
     uint8_t* null_bitmap,
     size_t length,
 ):
-    """Wrap externally-malloc'd data + null_bitmap into an Int64Vector.
+    """Wrap externally-malloc'd data + null_bitmap into an Integer64Vector.
 
     Ownership of `data` and `null_bitmap` transfers to the Vector — both must
     have been allocated with the C standard library `malloc` (or be NULL),
@@ -1831,7 +1831,7 @@ cdef Int64Vector from_decoded(
     Used by the C++ IPC deserialiser (`src/cpp/ipc_deserialize.cpp`) to
     transfer ownership of nogil-allocated buffers without a second copy.
     """
-    cdef Int64Vector vec = Int64Vector(0, True)   # wrap=True: no alloc
+    cdef Integer64Vector vec = Integer64Vector(0, True)   # wrap=True: no alloc
     vec.ptr = <DrakenFixedBuffer*> malloc(sizeof(DrakenFixedBuffer))
     if vec.ptr == NULL:
         # We have not yet taken ownership of data/null_bitmap; the caller
@@ -1850,16 +1850,16 @@ cdef Int64Vector from_decoded(
     return vec
 
 
-cdef Int64Vector from_arrow(object array):
+cdef Integer64Vector from_arrow(object array):
     import pyarrow as pa
 
     if pa.types.is_dictionary(array.type):
         raise TypeError(
-            "Int64Vector.from_arrow expects a dense int64 Arrow array; "
-            "use Int64Vector.from_dict for dictionary input"
+            "Integer64Vector.from_arrow expects a dense int64 Arrow array; "
+            "use Integer64Vector.from_dict for dictionary input"
         )
 
-    cdef Int64Vector vec = Int64Vector(0, True)   # wrap=True: no alloc
+    cdef Integer64Vector vec = Integer64Vector(0, True)   # wrap=True: no alloc
     vec.ptr = <DrakenFixedBuffer*> malloc(sizeof(DrakenFixedBuffer))
     if vec.ptr == NULL:
         raise MemoryError()
@@ -1920,16 +1920,16 @@ cdef Int64Vector from_arrow(object array):
     return vec
 
 
-cdef Int64Vector from_dict(const int32_t[::1] codes, const int64_t[::1] dictionary):
+cdef Integer64Vector from_dict(const int32_t[::1] codes, const int64_t[::1] dictionary):
     cdef Py_ssize_t row_count = codes.shape[0]
     cdef Py_ssize_t dict_size = dictionary.shape[0]
-    cdef Int64Vector vec = Int64Vector(<size_t>row_count)
+    cdef Integer64Vector vec = Integer64Vector(<size_t>row_count)
     cdef int64_t* dst = <int64_t*>vec.ptr.data
     cdef Py_ssize_t i
     cdef Py_ssize_t code
 
     if dict_size == 0:
-        raise ValueError("Int64Vector.from_dict requires a non-empty dictionary")
+        raise ValueError("Integer64Vector.from_dict requires a non-empty dictionary")
 
     vec.ptr.null_bitmap = NULL
     for i in range(row_count):
@@ -1942,14 +1942,14 @@ cdef Int64Vector from_dict(const int32_t[::1] codes, const int64_t[::1] dictiona
     return vec
 
 
-cdef Int64Vector from_dict_nullable(
+cdef Integer64Vector from_dict_nullable(
     const int32_t[::1] codes,
     const int64_t[::1] dictionary,
     const uint8_t[::1] row_validity,
 ):
     cdef Py_ssize_t row_count = codes.shape[0]
     cdef Py_ssize_t dict_size = dictionary.shape[0]
-    cdef Int64Vector vec = Int64Vector(<size_t>row_count)
+    cdef Integer64Vector vec = Integer64Vector(<size_t>row_count)
     cdef int64_t* dst = <int64_t*>vec.ptr.data
     cdef Py_ssize_t i
     cdef Py_ssize_t code
@@ -1957,7 +1957,7 @@ cdef Int64Vector from_dict_nullable(
     cdef uint8_t* nb
 
     if dict_size == 0:
-        raise ValueError("Int64Vector.from_dict requires a non-empty dictionary")
+        raise ValueError("Integer64Vector.from_dict requires a non-empty dictionary")
     if row_validity.shape[0] != row_count:
         raise ValueError("row_validity length must match codes length")
 
@@ -1982,7 +1982,7 @@ cdef Int64Vector from_dict_nullable(
     return vec
 
 
-cdef Int64Vector from_packed_dict(
+cdef Integer64Vector from_packed_dict(
     const uint8_t* codes,
     uint8_t code_width,
     Py_ssize_t row_count,
@@ -1992,7 +1992,7 @@ cdef Int64Vector from_packed_dict(
     bint ordered=False,
     const uint8_t* dict_entry_null_bitmap=NULL,
 ):
-    cdef Int64Vector vec = Int64Vector(<size_t>row_count)
+    cdef Integer64Vector vec = Integer64Vector(<size_t>row_count)
     cdef int64_t* dst = <int64_t*>vec.ptr.data
     cdef Py_ssize_t i
     cdef uint32_t code
@@ -2002,7 +2002,7 @@ cdef Int64Vector from_packed_dict(
     cdef int32_t* expanded_codes = NULL
 
     if dict_size == 0:
-        raise ValueError("Int64Vector.from_packed_dict requires a non-empty dictionary")
+        raise ValueError("Integer64Vector.from_packed_dict requires a non-empty dictionary")
     if code_width != 1 and code_width != 2 and code_width != 4:
         raise ValueError("unsupported packed dictionary code width")
 
@@ -2048,17 +2048,17 @@ cdef Int64Vector from_packed_dict(
     return vec
 
 
-cdef Int64Vector from_sequence(const int64_t[::1] data):
+cdef Integer64Vector from_sequence(const int64_t[::1] data):
     """
-    Create Int64Vector from a typed int64 memoryview (zero-copy).
+    Create Integer64Vector from a typed int64 memoryview (zero-copy).
 
     Args:
         data: const int64_t[::1] memoryview (C-contiguous)
 
     Returns:
-        Int64Vector wrapping the memoryview data
+        Integer64Vector wrapping the memoryview data
     """
-    cdef Int64Vector vec = Int64Vector(0, True)   # wrap=True: no alloc
+    cdef Integer64Vector vec = Integer64Vector(0, True)   # wrap=True: no alloc
     vec.ptr = <DrakenFixedBuffer*> malloc(sizeof(DrakenFixedBuffer))
     if vec.ptr == NULL:
         raise MemoryError()

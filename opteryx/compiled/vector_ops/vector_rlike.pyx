@@ -81,7 +81,7 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
         if not regex.ok():
             raise ValueError("Invalid REGEXP pattern")
 
-        if uv.data_length == 1:  # constant
+        if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
             if uv.validity != NULL:  # null constant
                 return _constant_bool_result(n, False, True)
             csp = <DrakenConstantStringPayload*>uv.data

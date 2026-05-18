@@ -12,7 +12,7 @@
 from libc.stdint cimport int64_t
 
 from draken.vectors.vector cimport Vector
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors._decimal_vector cimport DecimalVector
@@ -138,7 +138,7 @@ cpdef void resolve_deferred_collectors(
 
         if isinstance(c, _DeferredSumCollector):
             vec = morsel.column(c.column_name)
-            if isinstance(vec, Int64Vector):
+            if isinstance(vec, Integer64Vector):
                 typed_c = SumInt64Collector()
             elif isinstance(vec, DecimalVector):
                 typed_c = SumDecimalCollector()
@@ -151,7 +151,7 @@ cpdef void resolve_deferred_collectors(
 
         elif isinstance(c, _DeferredMinCollector):
             vec = morsel.column(c.column_name)
-            if isinstance(vec, Int64Vector):
+            if isinstance(vec, Integer64Vector):
                 typed_c = MinMaxInt64Collector()
                 (<MinMaxInt64Collector>typed_c)._direction = 1
             elif isinstance(vec, Float64Vector):
@@ -170,7 +170,7 @@ cpdef void resolve_deferred_collectors(
 
         elif isinstance(c, _DeferredMaxCollector):
             vec = morsel.column(c.column_name)
-            if isinstance(vec, Int64Vector):
+            if isinstance(vec, Integer64Vector):
                 typed_c = MinMaxInt64Collector()
                 (<MinMaxInt64Collector>typed_c)._direction = -1
             elif isinstance(vec, Float64Vector):
@@ -189,7 +189,7 @@ cpdef void resolve_deferred_collectors(
 
         elif isinstance(c, _DeferredAnyValueCollector):
             vec = morsel.column(c.column_name)
-            if isinstance(vec, Int64Vector):
+            if isinstance(vec, Integer64Vector):
                 typed_c = AnyValueInt64Collector()
             elif isinstance(vec, Float64Vector):
                 typed_c = AnyValueFloat64Collector()
@@ -206,7 +206,7 @@ cpdef void resolve_deferred_collectors(
                     "MEDIAN does not support DECIMAL inputs; CAST the column "
                     "to DOUBLE first (e.g. MEDIAN(CAST(col AS DOUBLE)))."
                 )
-            if not isinstance(vec, (Int64Vector, Float64Vector)):
+            if not isinstance(vec, (Integer64Vector, Float64Vector)):
                 # Allow integer-narrow vectors through — MedianFloat64Collector
                 # has a to_pylist fallback for them. Reject obvious non-numerics.
                 pass

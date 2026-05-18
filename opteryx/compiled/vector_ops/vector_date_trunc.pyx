@@ -8,13 +8,74 @@
 # cython: optimize.use_switch=True
 # cython: optimize.unpack_method_calls=True
 
-from libc.stdint cimport int32_t, int64_t, uint8_t
+from libc.stdint cimport int32_t, int64_t, uint8_t, uint16_t, uint32_t
+from libc.stdlib cimport malloc, free
 from cpython.array cimport array, clone
 
 from draken.vectors.date32_vector cimport Date32Vector
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.timestamp_vector cimport TimestampVector
 from draken.core.buffers cimport DrakenVector, DrakenConstantStringPayload, DrakenVarBuffer
+
+
+cdef inline int64_t* _ts_materialize_dense(
+    DrakenVector* uv, int64_t length, bint* owned,
+) except NULL:
+    """Return a dense int64_t* of `length` values for a TimestampVector's unified view.
+
+    For genuine dense (`selection == NULL` and `data_length == length`), aliases
+    `uv.data` — no copy, `owned[0]` stays False.
+
+    For constant (`data_length == 1`) or dict-encoded (`selection != NULL`),
+    mallocs a `length`-long buffer and gathers values from `uv.data` via the
+    appropriate path, setting `owned[0]` to True. Caller is responsible for
+    `free`-ing when owned.
+
+    Required because _vector_trunc_core's existing kernels read `ptr.data`
+    directly; dictionary-encoded vectors have selection!=NULL (data holds dict values)
+    and constant-encoded vectors have data_length==1. Q43 hit this via
+    `EventTime::TIMESTAMP[ms]` → `vector_cast_int64_to_timestamp` →
+    `timestamp_dict_from_raw` → dict-encoded TimestampVector → NULL deref.
+    """
+    cdef int64_t* src = <int64_t*>uv.data
+    cdef int64_t* dst
+    cdef int64_t i
+    cdef uint8_t* codes
+    cdef uint8_t sw
+    cdef int64_t idx
+    cdef int64_t v
+
+    owned[0] = False
+
+    if uv.selection == NULL and <int64_t>uv.data_length == length:
+        # Dense — alias the existing buffer.
+        return src
+
+    dst = <int64_t*>malloc(<size_t>length * sizeof(int64_t))
+    if dst == NULL:
+        raise MemoryError()
+    owned[0] = True
+
+    if uv.selection == NULL and uv.data_length == 1:
+        # Constant — broadcast data[0] across `length` rows.
+        v = src[0]
+        for i in range(length):
+            dst[i] = v
+        return dst
+
+    # Dict-encoded — gather via packed codes (1/2/4-byte width).
+    codes = <uint8_t*>uv.selection
+    sw = uv.sel_width
+    if sw == 1:
+        for i in range(length):
+            dst[i] = src[(<uint8_t*>codes)[i]]
+    elif sw == 2:
+        for i in range(length):
+            dst[i] = src[(<uint16_t*>codes)[i]]
+    else:
+        for i in range(length):
+            dst[i] = src[(<uint32_t*>codes)[i]]
+    return dst
 
 # Constants
 cdef const int64_t SECONDS_PER_MINUTE = 60
@@ -273,12 +334,19 @@ cdef TimestampVector _vector_trunc_core(StringVector truncate_to, object tempora
     cdef array template = array('q')  # 'q' = signed long long (int64)
     cdef bint is_date_input = False
     cdef TimestampVector timestamp_array
+    cdef bint data_ptr_owned = False
+    cdef DrakenVector* uv
 
     if isinstance(temporal_array, TimestampVector):
         timestamp_array = <TimestampVector>temporal_array
         unit = timestamp_array.timestamp_unit
-        length = <int64_t>timestamp_array.ptr.length
-        data_ptr = <int64_t*>timestamp_array.ptr.data
+        # Use the unified view so dict-encoded and constant-encoded TimestampVectors
+        # (with ptr.data NULL or only 1 element) work. The materializer aliases the
+        # dense buffer when possible (no copy); otherwise mallocs and gathers. The
+        # local `data_ptr_owned` flag governs the free in the cleanup block.
+        uv = timestamp_array.unified()
+        length = <int64_t>uv.length
+        data_ptr = _ts_materialize_dense(uv, length, &data_ptr_owned)
     elif isinstance(temporal_array, Date32Vector):
         is_date_input = True
         # Keep Date32 truncation outputs in microseconds to match the engine's
@@ -425,6 +493,8 @@ cdef TimestampVector _vector_trunc_core(StringVector truncate_to, object tempora
             for i in range(length):
                 output_ptr[i] = data_ptr[i]
     else:
+        if data_ptr_owned:
+            free(data_ptr)
         raise ValueError(f"Invalid unit: {op}")
 
     # Create TimestampVector directly from processed int64 data
@@ -436,6 +506,11 @@ cdef TimestampVector _vector_trunc_core(StringVector truncate_to, object tempora
     cdef Py_ssize_t j
     for j in range(length):
         result_ptr[j] = output_ptr[j]
+
+    # Free the materialized dense buffer if we owned it (constant or dict input).
+    # Dense input aliased ptr.data and is not freed here.
+    if data_ptr_owned:
+        free(data_ptr)
 
     return result
 

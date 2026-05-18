@@ -6,14 +6,12 @@ import pytest
 from draken import Vector
 from draken.encoding import (
     DRAKEN_ENCODING_DENSE,
-    DRAKEN_ENCODING_RLE,
     DRAKEN_ENCODING_CONSTANT,
     DRAKEN_ENCODING_DICTIONARY,
 )
 from _matrix import VECTOR_TYPES
 
 DENSE = DRAKEN_ENCODING_DENSE
-RLE = DRAKEN_ENCODING_RLE
 CONSTANT = DRAKEN_ENCODING_CONSTANT
 DICTIONARY = DRAKEN_ENCODING_DICTIONARY
 
@@ -66,7 +64,7 @@ def create_vector_with_encoding(type_name, encoding, size=100, nullable=False, s
     elif encoding == CONSTANT:
         # Create constant vector using the specific vector type's from_constant method
         # Import the specific vector class for this type
-        from draken.vectors.int64_vector import Int64Vector
+        from draken.vectors.integer64_vector import Integer64Vector
         from draken.vectors.float64_vector import Float64Vector
         from draken.vectors.string_vector import StringVector
         from draken.vectors.bool_vector import BoolVector
@@ -76,7 +74,7 @@ def create_vector_with_encoding(type_name, encoding, size=100, nullable=False, s
         from draken.vectors._decimal_vector import DecimalVector
 
         vector_classes = {
-            "int64": Int64Vector,
+            "int64": Integer64Vector,
             "float64": Float64Vector,
             "string": StringVector,
             "bool": BoolVector,
@@ -105,29 +103,6 @@ def create_vector_with_encoding(type_name, encoding, size=100, nullable=False, s
                 size,
                 is_null=False,
             )
-        return vec
-
-    elif encoding == RLE:
-        # Create RLE by repeating values in runs
-        # Use first 2 non-null values alternating in runs
-        non_null_values = [v for v in sample_values if v is not None]
-        v1, v2 = non_null_values[0], non_null_values[1] if len(non_null_values) > 1 else non_null_values[0]
-
-        rle_values = (
-            [v1] * (size // 4)
-            + [v2] * (size // 4)
-            + [v1] * (size // 4)
-            + [v2] * (size - 3 * (size // 4))
-        )
-
-        arr = pa.array(rle_values, type=arrow_type)
-        vec = Vector.from_arrow(arr)
-        # Check if it got RLE encoded
-        if hasattr(vec, "encoding"):
-            if vec.encoding != RLE:
-                # PyArrow didn't create RLE, fall back to dense
-                # In real tests, we might need special handling for this
-                pass
         return vec
 
     elif encoding == DICTIONARY:

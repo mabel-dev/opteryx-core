@@ -13,7 +13,7 @@ from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
 from draken.vectors.string_vector cimport StringVector
-from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.vectors.integer64_vector cimport Integer64Vector, from_sequence as int64_from_sequence
 from draken.core.buffers cimport DrakenVarBuffer
 
 
@@ -62,7 +62,7 @@ cdef int64_t levenshtein_bytes(
         free(dp_data)
 
 
-cpdef Int64Vector vector_levenshtein(StringVector a, StringVector b):
+cpdef Integer64Vector vector_levenshtein(StringVector a, StringVector b):
     """
     Compute Levenshtein distance for each row pair in StringVectors a and b.
 
@@ -71,7 +71,7 @@ cpdef Int64Vector vector_levenshtein(StringVector a, StringVector b):
         b: StringVector of strings (same length as a).
 
     Returns:
-        Int64Vector: Levenshtein distances; -1 where either input is null.
+        Integer64Vector: Levenshtein distances; -1 where either input is null.
     """
     cdef Py_ssize_t n = a.ptr.length
     cdef Py_ssize_t i

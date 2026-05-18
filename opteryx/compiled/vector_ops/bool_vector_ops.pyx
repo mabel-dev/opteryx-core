@@ -17,7 +17,7 @@ from draken.vectors.bool_vector cimport BoolVector
 cpdef BoolVector bool_vector_from_int8_mask(object mask_obj, Py_ssize_t n):
     """Build a BoolVector from a byte-per-element null mask (1=null, 0=valid).
 
-    Used for IS NULL evaluation on fixed-buffer vector types (Int64Vector,
+    Used for IS NULL evaluation on fixed-buffer vector types (Integer64Vector,
     Float64Vector, TimestampVector, Date32Vector, etc.) which expose their null
     information via ``is_null() -> int8_t[::1]``.
 

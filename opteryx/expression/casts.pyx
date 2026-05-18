@@ -117,7 +117,7 @@ def _parse_array_value(value, element_type, bint safe_cast=False):
 def cast_to_double(arr, *args):
     """Cast `arr` to FLOAT64.
 
-    Primary: Draken vectors (Float64Vector / Int64Vector / StringVector).
+    Primary: Draken vectors (Float64Vector / Integer64Vector / StringVector).
     Fallback: Python scalar or list.
     Fails on PyArrow/NumPy arrays per the architectural contract.
     """
@@ -150,7 +150,7 @@ def cast_to_double(arr, *args):
 
 def cast_to_int(arr, *args):
     """Cast `arr` to INT64."""
-    from draken.vectors.int64_vector import from_sequence
+    from draken.vectors.integer64_vector import from_sequence
     from opteryx.compiled.vector_ops import vector_cast_ascii_to_int
     from opteryx.expression.evaluator.type_coercion import (
         _coerce_date32,
@@ -352,7 +352,7 @@ def cast(arr, _type, args=(), unit=None):
         if _type == "TIMESTAMP":
             if is_draken_vector_fn(arr) and unit is not None:
                 v_type = get_vector_type(arr)
-                if v_type in (VectorType.INT64, VectorType.DICTIONARY_ENCODED):
+                if v_type == VectorType.INT64:
                     from opteryx.compiled.vector_ops import (
                         vector_cast_int64_to_timestamp,
                     )

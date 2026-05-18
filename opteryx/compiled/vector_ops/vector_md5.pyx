@@ -43,7 +43,7 @@ cpdef StringVector vector_md5(StringVector vec):
     hex_buf[32] = 0
 
     # --- Constant encoding: compute once, replicate ---
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         builder = string_vector_module.StringVectorBuilder.with_estimate(n, 32)
         if uv.validity != NULL:  # null constant
             for i in range(n):

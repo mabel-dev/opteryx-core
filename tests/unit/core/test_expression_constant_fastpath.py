@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from draken.vectors.integer_vector import IntegerVector
+from draken.vectors.integer32_vector import Integer32Vector
 from draken.vectors.scalar_constructors import from_scalar
 from draken.vectors.string_vector import StringVector
 
@@ -44,10 +44,10 @@ def test_constant_fastpath_eq_noteq_and_telemetry():
 
 def test_constant_fastpath_matches_materialized_parity():
     reset_dict_expr_telemetry()
-    vec = IntegerVector.from_constant(None, 5, is_null=True)
+    vec = Integer32Vector.from_constant(None, 5, is_null=True)
     materialized = pa.array([3, None, 3, 3, 3], type=pa.int64())
 
-    assert _as_list(_inner_filter_operations(IntegerVector.from_constant(3, 5), "Eq", 3)) == [
+    assert _as_list(_inner_filter_operations(Integer32Vector.from_constant(3, 5), "Eq", 3)) == [
         True,
         True,
         True,
@@ -66,7 +66,7 @@ def test_constant_fastpath_unsupported_operator_raises():
 
 def test_typed_constant_fastpath_uses_constant_encoding_not_legacy_class():
     reset_dict_expr_telemetry()
-    vec = IntegerVector.from_constant(9, 4)
+    vec = Integer32Vector.from_constant(9, 4)
 
     eq = _inner_filter_operations(vec, "Eq", 9)
     neq = _inner_filter_operations(vec, "NotEq", 9)
@@ -81,7 +81,7 @@ def test_typed_constant_fastpath_uses_constant_encoding_not_legacy_class():
 
 def test_typed_constant_fastpath_all_null_matches_materialized_parity():
     reset_dict_expr_telemetry()
-    vec = IntegerVector.from_constant(None, 4, is_null=True)
+    vec = Integer32Vector.from_constant(None, 4, is_null=True)
     materialized = pa.array([None, None, None, None], type=pa.int32())
 
     assert _as_list(_inner_filter_operations(vec, "Eq", 3)) == _as_list(

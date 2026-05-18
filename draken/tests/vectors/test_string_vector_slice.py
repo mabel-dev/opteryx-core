@@ -11,18 +11,18 @@ import pytest
 import pyarrow as pa
 from array import array
 from draken.vectors import string_vector as string_vector_module
-from draken.vectors import int64_vector as int64_vector_module
+from draken.vectors import integer64_vector as integer64_vector_module
 from opteryx.compiled import vector_ops
 
 
 def _ic(value, n):
-    """Build an Int64Vector const of length n."""
-    return int64_vector_module.Int64Vector.from_constant(value, n)
+    """Build an Integer64Vector const of length n."""
+    return integer64_vector_module.Integer64Vector.from_constant(value, n)
 
 
 def _iv(values):
-    """Build an Int64Vector from a Python sequence."""
-    return int64_vector_module.Int64Vector.from_arrow(pa.array(values, type=pa.int64()))
+    """Build an Integer64Vector from a Python sequence."""
+    return integer64_vector_module.Integer64Vector.from_arrow(pa.array(values, type=pa.int64()))
 
 
 class TestStringSliceLeft:

@@ -15,7 +15,7 @@ from libc.stdint cimport int64_t, int32_t
 from libcpp.vector cimport vector
 from libc.string cimport memcpy
 
-from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.vectors.integer64_vector cimport Integer64Vector, from_sequence as int64_from_sequence
 
 cdef extern from "intbuffer.h":
     cdef cppclass CIntBuffer:
@@ -113,8 +113,8 @@ cdef class IntBuffer:
             for item in iterable:
                 self.c_buffer.append(item)
 
-    cpdef Int64Vector to_int64_vector(self):
-        """Convert to Int64Vector (Draken vector)."""
+    cpdef Integer64Vector to_int64_vector(self):
+        """Convert to Integer64Vector (Draken vector)."""
         cdef size_t n = self.c_buffer.size()
         cdef const int64_t[::1] data_view = <int64_t[:n]>self.c_buffer.data()
         return int64_from_sequence(data_view)

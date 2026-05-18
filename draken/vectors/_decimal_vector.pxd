@@ -15,7 +15,7 @@ from libc.stdint cimport uint8_t
 from draken.core.buffers cimport DrakenFixedBuffer, DrakenVector
 from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.float64_vector cimport Float64Vector
 
 
@@ -112,5 +112,5 @@ cdef class DecimalVector(Vector):
 
 # Module-level factories exposed for cimport by other consumers
 cdef DecimalVector from_arrow(object array)
-cpdef DecimalVector from_int64_vector(Int64Vector source, int precision, int scale)
+cpdef DecimalVector from_int64_vector(Integer64Vector source, int precision, int scale)
 

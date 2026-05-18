@@ -22,7 +22,7 @@ from array import array as _pyarray
 
 from draken.morsels.align import align_tables
 from draken.morsels.morsel import Morsel
-from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer64_vector import Integer64Vector
 from draken.vectors.float64_vector import Float64Vector
 from draken.vectors.string_vector import StringVector
 
@@ -34,7 +34,7 @@ def _make_left(n):
 
 def _make_right_int64_const(value, n):
     """Right morsel with a single constant INT64 column."""
-    vec = Int64Vector.from_constant(value, n)
+    vec = Integer64Vector.from_constant(value, n)
     return Morsel.from_vectors([b"marker"], [vec])
 
 
@@ -125,7 +125,7 @@ def test_align_float64_constant_null_semantics():
 
 def test_align_multiple_constant_columns_with_negatives():
     left = _make_left(3)
-    int_vec = Int64Vector.from_constant(10, 3)
+    int_vec = Integer64Vector.from_constant(10, 3)
     flt_vec = Float64Vector.from_constant(2.0, 3)
     right = Morsel.from_vectors([b"a", b"b"], [int_vec, flt_vec])
     result = _align(left, right, [0, 1, 2], [-1, 1, -1])

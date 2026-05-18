@@ -261,6 +261,8 @@ def assemble_fixed(
     cdef int32_t[::1] rows_i
 
     cdef object scalar_val
+    cdef DrakenVector* uv
+    cdef uint32_t dict_idx
 
     for bid_py in range(len(parts)):
         if parts[bid_py] is None:
@@ -268,53 +270,94 @@ def assemble_fixed(
         vec = <Vector>parts[bid_py]
         src_ptr = _sel_fixed_ptr(vec)
         rows_i = rows_per_branch[bid_py]
-        if src_ptr == NULL or src_ptr.data == NULL:
-            # Constant-encoded source: read scalar once, scatter to all matched rows
-            scalar_val = _sel_const_scalar(vec)
-            if scalar_val is None:
-                any_null = True
-            else:
+        if src_ptr == NULL:
+            # StringVector — not fixed-width; handled by assemble_string.
+            pass
+        else:
+            uv = vec.unified()
+            if uv.selection != NULL:
+                # Dict-encoded: gather per-row value via selection codes.
                 for j in range(rows_i.shape[0]):
                     row_r = rows_i[j]
-                    _sel_write_fixed_scalar(out_ptr, row_r, output_type, scalar_val)
-                    _sel_set_true_bit(out_null, row_r)
-        else:
-            for j in range(rows_i.shape[0]):
-                row_r = rows_i[j]
-                if not _sel_is_valid(src_ptr.null_bitmap, j):
+                    if not _sel_is_valid(uv.validity, j):
+                        any_null = True
+                    else:
+                        dict_idx = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, j)
+                        memcpy(
+                            out_data + row_r * itemsize,
+                            <char*>uv.data + dict_idx * itemsize,
+                            itemsize,
+                        )
+                        _sel_set_true_bit(out_null, row_r)
+            elif uv.data_length == 1:
+                # Constant: broadcast single value to all matched rows.
+                scalar_val = _sel_const_scalar(vec)
+                if scalar_val is None:
                     any_null = True
                 else:
-                    memcpy(
-                        out_data + row_r * itemsize,
-                        <char*>src_ptr.data + j * itemsize,
-                        itemsize,
-                    )
-                    _sel_set_true_bit(out_null, row_r)
+                    for j in range(rows_i.shape[0]):
+                        row_r = rows_i[j]
+                        _sel_write_fixed_scalar(out_ptr, row_r, output_type, scalar_val)
+                        _sel_set_true_bit(out_null, row_r)
+            else:
+                # Dense: direct indexed copy.
+                for j in range(rows_i.shape[0]):
+                    row_r = rows_i[j]
+                    if not _sel_is_valid(src_ptr.null_bitmap, j):
+                        any_null = True
+                    else:
+                        memcpy(
+                            out_data + row_r * itemsize,
+                            <char*>src_ptr.data + j * itemsize,
+                            itemsize,
+                        )
+                        _sel_set_true_bit(out_null, row_r)
 
     if else_part is not None:
         vec = <Vector>else_part
         src_ptr = _sel_fixed_ptr(vec)
-        if src_ptr == NULL or src_ptr.data == NULL:
-            scalar_val = _sel_const_scalar(vec)
-            if scalar_val is None:
-                any_null = True
-            else:
+        if src_ptr == NULL:
+            # StringVector — not fixed-width; handled by assemble_string.
+            pass
+        else:
+            uv = vec.unified()
+            if uv.selection != NULL:
+                # Dict-encoded: gather per-row value via selection codes.
                 for j in range(unmatched.shape[0]):
                     row_r = unmatched[j]
-                    _sel_write_fixed_scalar(out_ptr, row_r, output_type, scalar_val)
-                    _sel_set_true_bit(out_null, row_r)
-        else:
-            for j in range(unmatched.shape[0]):
-                row_r = unmatched[j]
-                if not _sel_is_valid(src_ptr.null_bitmap, j):
+                    if not _sel_is_valid(uv.validity, j):
+                        any_null = True
+                    else:
+                        dict_idx = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, j)
+                        memcpy(
+                            out_data + row_r * itemsize,
+                            <char*>uv.data + dict_idx * itemsize,
+                            itemsize,
+                        )
+                        _sel_set_true_bit(out_null, row_r)
+            elif uv.data_length == 1:
+                # Constant: broadcast single value to all matched rows.
+                scalar_val = _sel_const_scalar(vec)
+                if scalar_val is None:
                     any_null = True
                 else:
-                    memcpy(
-                        out_data + row_r * itemsize,
-                        <char*>src_ptr.data + j * itemsize,
-                        itemsize,
-                    )
-                    _sel_set_true_bit(out_null, row_r)
+                    for j in range(unmatched.shape[0]):
+                        row_r = unmatched[j]
+                        _sel_write_fixed_scalar(out_ptr, row_r, output_type, scalar_val)
+                        _sel_set_true_bit(out_null, row_r)
+            else:
+                # Dense: direct indexed copy.
+                for j in range(unmatched.shape[0]):
+                    row_r = unmatched[j]
+                    if not _sel_is_valid(src_ptr.null_bitmap, j):
+                        any_null = True
+                    else:
+                        memcpy(
+                            out_data + row_r * itemsize,
+                            <char*>src_ptr.data + j * itemsize,
+                            itemsize,
+                        )
+                        _sel_set_true_bit(out_null, row_r)
     elif unmatched.shape[0] > 0:
         any_null = True
 

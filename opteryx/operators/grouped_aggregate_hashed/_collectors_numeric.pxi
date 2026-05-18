@@ -22,7 +22,7 @@ from draken.core.buffers cimport DRAKEN_FLOAT64
 from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.fixed_vector cimport free_fixed_buffer
 from draken.vectors.vector cimport Vector
-from draken.vectors.int64_vector cimport Int64Vector, _materialize_dict_int64
+from draken.vectors.integer64_vector cimport Integer64Vector, _materialize_dict_int64
 from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
 from draken.vectors.string_vector cimport StringVector, _StringVectorCIterator, StringElement, _materialize_dict_string
 from draken.vectors._decimal_vector cimport DecimalVector
@@ -121,8 +121,8 @@ cdef inline void _grow_bitmap(uint8_t** bitmap_ref, int64_t old_count, int64_t n
     bitmap_ref[0] = new_bitmap
 
 
-cdef inline Int64Vector _wrap_int64_buffer(DrakenFixedBuffer* buf) except *:
-    cdef Int64Vector vec = Int64Vector(0, True)
+cdef inline Integer64Vector _wrap_int64_buffer(DrakenFixedBuffer* buf) except *:
+    cdef Integer64Vector vec = Integer64Vector(0, True)
     vec.ptr = buf
     vec.owns_data = True
     vec._dict_values = NULL
@@ -151,13 +151,13 @@ cdef inline Float64Vector _wrap_float64_buffer(DrakenFixedBuffer* buf) except *:
     return vec
 
 
-cdef inline Int64Vector _slice_int64_buffer(
+cdef inline Integer64Vector _slice_int64_buffer(
     DrakenFixedBuffer* src,
     int64_t start,
     int64_t stop,
 ) except *:
     cdef Py_ssize_t length = <Py_ssize_t>(stop - start)
-    cdef Int64Vector out = Int64Vector(<size_t>length)
+    cdef Integer64Vector out = Integer64Vector(<size_t>length)
     cdef int64_t* src_data = <int64_t*>src.data
     cdef int64_t* out_data = <int64_t*>out.ptr.data
     cdef Py_ssize_t i
@@ -294,15 +294,15 @@ cdef class CountValueCollector(BaseCollector):
         cdef int64_t* counts = <int64_t*>self._counts.data
         cdef Py_ssize_t i
         cdef uint8_t* nulls
-        cdef Int64Vector iv
+        cdef Integer64Vector iv
         cdef Float64Vector fv
         cdef DrakenVector* uv
 
         # Constant-encoded vector: either all-null or all-non-null
-        if isinstance(vec, Int64Vector):
-            iv = <Int64Vector>vec
+        if isinstance(vec, Integer64Vector):
+            iv = <Integer64Vector>vec
             uv = iv.unified()
-            if uv.data_length == 1:
+            if uv.data_length == 1 and uv.length > 1:
                 if uv.validity == NULL:
                     for i in range(n_rows):
                         counts[state_indices[i]] += 1
@@ -310,7 +310,7 @@ cdef class CountValueCollector(BaseCollector):
         elif isinstance(vec, Float64Vector):
             fv = <Float64Vector>vec
             uv = fv.unified()
-            if uv.data_length == 1:
+            if uv.data_length == 1 and uv.length > 1:
                 if uv.validity == NULL:
                     for i in range(n_rows):
                         counts[state_indices[i]] += 1
@@ -380,7 +380,7 @@ cdef class SumInt64Collector(BaseCollector):
         const int64_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Int64Vector vec = <Int64Vector>morsel.column(self.column_name)
+        cdef Integer64Vector vec = <Integer64Vector>morsel.column(self.column_name)
         cdef int64_t* sums = <int64_t*>self._sums.data
         cdef uint8_t* seen = self._seen
         cdef int64_t* data
@@ -390,7 +390,7 @@ cdef class SumInt64Collector(BaseCollector):
         cdef DrakenVector* uv
 
         uv = vec.unified()
-        if uv.data_length == 1:
+        if uv.data_length == 1 and uv.length > 1:
             if uv.validity == NULL:
                 const_val = (<int64_t*>uv.data)[0]
                 for i in range(n_rows):
@@ -514,7 +514,7 @@ cdef class SumFloat64Collector(BaseCollector):
         cdef DrakenVector* uv
 
         uv = vec.unified()
-        if uv.data_length == 1:
+        if uv.data_length == 1 and uv.length > 1:
             if uv.validity == NULL:
                 const_val = (<double*>uv.data)[0]
                 for i in range(n_rows):
@@ -631,7 +631,7 @@ cdef class MinMaxInt64Collector(BaseCollector):
         const int64_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Int64Vector vec = <Int64Vector>morsel.column(self.column_name)
+        cdef Integer64Vector vec = <Integer64Vector>morsel.column(self.column_name)
         cdef int64_t* values = <int64_t*>self._values.data
         cdef uint8_t* seen = self._seen
         cdef int64_t* data
@@ -641,7 +641,7 @@ cdef class MinMaxInt64Collector(BaseCollector):
         cdef DrakenVector* uv
 
         uv = vec.unified()
-        if uv.data_length == 1:
+        if uv.data_length == 1 and uv.length > 1:
             if uv.validity == NULL:
                 v = (<int64_t*>uv.data)[0]
                 if self._direction == 1:   # MIN
@@ -790,7 +790,7 @@ cdef class MinMaxFloat64Collector(BaseCollector):
         cdef DrakenVector* uv
 
         uv = vec.unified()
-        if uv.data_length == 1:
+        if uv.data_length == 1 and uv.length > 1:
             if uv.validity == NULL:
                 v = (<double*>uv.data)[0]
                 if self._direction == 1:   # MIN
@@ -1073,7 +1073,7 @@ cdef class AvgCollector(BaseCollector):
         cdef int64_t* counts = <int64_t*>self._counts.data
         cdef Py_ssize_t i
         cdef int64_t si
-        cdef Int64Vector iv
+        cdef Integer64Vector iv
         cdef Float64Vector fv
         cdef DecimalVector dv
         cdef int64_t* i64
@@ -1085,10 +1085,10 @@ cdef class AvgCollector(BaseCollector):
         cdef int64_t const_i64
         cdef DrakenVector* uv
 
-        if isinstance(raw, Int64Vector):
-            iv = <Int64Vector>raw
+        if isinstance(raw, Integer64Vector):
+            iv = <Integer64Vector>raw
             uv = iv.unified()
-            if uv.data_length == 1:
+            if uv.data_length == 1 and uv.length > 1:
                 if uv.validity == NULL:
                     const_i64 = (<int64_t*>uv.data)[0]
                     for i in range(n_rows):
@@ -1109,7 +1109,7 @@ cdef class AvgCollector(BaseCollector):
             dv = <DecimalVector>raw
             dec_factor = 10.0 ** (-dv._scale)
             uv = dv.unified()
-            if uv.data_length == 1:
+            if uv.data_length == 1 and uv.length > 1:
                 if uv.validity == NULL:
                     const_f64 = <double>(<int64_t*>uv.data)[0] * dec_factor
                     for i in range(n_rows):
@@ -1127,7 +1127,7 @@ cdef class AvgCollector(BaseCollector):
         else:
             fv = <Float64Vector>raw
             uv = fv.unified()
-            if uv.data_length == 1:
+            if uv.data_length == 1 and uv.length > 1:
                 if uv.validity == NULL:
                     const_f64 = (<double*>uv.data)[0]
                     for i in range(n_rows):
@@ -1244,7 +1244,7 @@ cdef class SumDecimalCollector(BaseCollector):
         cdef DrakenVector* uv
 
         uv = vec.unified()
-        if uv.data_length == 1:
+        if uv.data_length == 1 and uv.length > 1:
             if uv.validity == NULL:
                 const_val = <double>(<int64_t*>uv.data)[0] * factor
                 for i in range(n_rows):
@@ -1362,7 +1362,7 @@ cdef class MinMaxDecimalCollector(BaseCollector):
         cdef DrakenVector* uv
 
         uv = vec.unified()
-        if uv.data_length == 1:
+        if uv.data_length == 1 and uv.length > 1:
             if uv.validity == NULL:
                 v = (<int64_t*>uv.data)[0]
                 if self._direction == 1:   # MIN

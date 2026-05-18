@@ -18,8 +18,8 @@ non-null, using Draken vector capabilities.
 """
 
 
-from draken.vectors.int64_vector cimport Int64Vector
-from draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
+from draken.vectors.integer64_vector cimport Integer64Vector
+from draken.vectors.integer64_vector cimport from_sequence as int64_from_sequence
 from opteryx.compiled.structures.buffers cimport IntBuffer
 
 from libc.stdint cimport int64_t, uint8_t, uintptr_t
@@ -27,10 +27,10 @@ from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
 
-cdef inline Int64Vector non_null_row_indices(object relation, list column_names):
+cdef inline Integer64Vector non_null_row_indices(object relation, list column_names):
     """
     Compute indices of rows where all `column_names` in `relation` are non-null.
-    Returns a native Int64Vector of row indices.
+    Returns a native Integer64Vector of row indices.
 
     Uses Draken vector types to wrap results.
     """
@@ -45,7 +45,7 @@ cdef inline Int64Vector non_null_row_indices(object relation, list column_names)
         Py_ssize_t bit_index, chunk_offset
         IntBuffer indices_buf
         const int64_t[::1] mv
-        Int64Vector vec
+        Integer64Vector vec
 
     if not combined_nulls:
         raise MemoryError()
@@ -90,7 +90,7 @@ cdef inline Int64Vector non_null_row_indices(object relation, list column_names)
             if combined_nulls[i]:
                 indices_buf.append(i)
 
-        # Convert to Int64Vector
+        # Convert to Integer64Vector
         mv = indices_buf.get_buffer()
         vec = int64_from_sequence(mv)
         # Anchor the buffer object to ensure memory safety
@@ -102,9 +102,9 @@ cdef inline Int64Vector non_null_row_indices(object relation, list column_names)
         free(combined_nulls)
 
 
-cpdef Int64Vector non_null_indices(object relation, list column_names):
+cpdef Integer64Vector non_null_indices(object relation, list column_names):
     """
-    Public interface for finding non-null rows, returning a native Draken Int64Vector.
+    Public interface for finding non-null rows, returning a native Draken Integer64Vector.
 
     Parameters
     ----------
@@ -115,7 +115,7 @@ cpdef Int64Vector non_null_indices(object relation, list column_names):
 
     Returns
     -------
-    Int64Vector
-        Draken Int64Vector containing indices of rows where all specified columns are non-null
+    Integer64Vector
+        Draken Integer64Vector containing indices of rows where all specified columns are non-null
     """
     return non_null_row_indices(relation, column_names)

@@ -24,7 +24,7 @@ from libc.string cimport memchr, memcmp
 from libc.stdlib cimport malloc, free
 
 from draken.vectors.string_vector cimport StringVector
-from draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from draken.vectors.integer64_vector cimport Integer64Vector, from_sequence as int64_from_sequence
 from draken.core.buffers cimport DrakenVarBuffer
 
 
@@ -70,7 +70,7 @@ cdef inline int64_t _find_position(const char *haystack, size_t haystack_len,
     return 0
 
 
-cpdef Int64Vector vector_position(StringVector haystack, object needle):
+cpdef Integer64Vector vector_position(StringVector haystack, object needle):
     """
     Vectorized POSITION(needle IN haystack).
 
@@ -83,7 +83,7 @@ cpdef Int64Vector vector_position(StringVector haystack, object needle):
 
     Returns
     -------
-    Int64Vector
+    Integer64Vector
         1-based positions; 0 where not found; 0 for null rows.
     """
     cdef Py_ssize_t n = haystack.ptr.length

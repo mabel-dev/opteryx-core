@@ -17,7 +17,7 @@ import pytest
 
 from draken.morsels.morsel import Morsel
 from draken.vectors.bool_vector import BoolVector
-from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer64_vector import Integer64Vector
 from draken.vectors.null_vector import NullVector
 from draken.vectors.string_vector import StringVector
 from opteryx.compiled.vector_ops import (
@@ -39,10 +39,10 @@ from opteryx.compiled.vector_ops.vector_ops import (
 # ---------------------------------------------------------------------------
 
 def _int64_vec(values):
-    """Build an Int64Vector from a list (None → null)."""
+    """Build an Integer64Vector from a list (None → null)."""
     import pyarrow as pa
     arr = pa.array(values, type=pa.int64())
-    return Int64Vector.from_arrow(arr)
+    return Integer64Vector.from_arrow(arr)
 
 
 def _bool_vec(values):
@@ -383,7 +383,7 @@ def test_evaluate_case_literal_true_condition():
     """CASE WHEN TRUE THEN 42 END — every row gets 42."""
     from opteryx.expression.evaluator.case_eval import evaluate_case
 
-    morsel = _morsel(x=Int64Vector.from_constant(0, 5))
+    morsel = _morsel(x=Integer64Vector.from_constant(0, 5))
     node = _make_case_node(
         conditions=[_make_literal_node(True)],
         results=[_make_literal_node(42)],
@@ -397,7 +397,7 @@ def test_evaluate_case_literal_false_with_else():
     """CASE WHEN FALSE THEN 1 ELSE 99 END — every row gets 99."""
     from opteryx.expression.evaluator.case_eval import evaluate_case
 
-    morsel = _morsel(x=Int64Vector.from_constant(0, 3))
+    morsel = _morsel(x=Integer64Vector.from_constant(0, 3))
     node = _make_case_node(
         conditions=[_make_literal_node(False)],
         results=[_make_literal_node(1)],
@@ -411,7 +411,7 @@ def test_evaluate_case_no_match_no_else_is_null():
     """CASE WHEN FALSE THEN 1 END — every row is NULL."""
     from opteryx.expression.evaluator.case_eval import evaluate_case
 
-    morsel = _morsel(x=Int64Vector.from_constant(0, 3))
+    morsel = _morsel(x=Integer64Vector.from_constant(0, 3))
     node = _make_case_node(
         conditions=[_make_literal_node(False)],
         results=[_make_literal_node(1)],
@@ -425,7 +425,7 @@ def test_evaluate_case_first_branch_wins():
     """CASE WHEN TRUE THEN 'a' WHEN TRUE THEN 'b' END — first branch wins."""
     from opteryx.expression.evaluator.case_eval import evaluate_case
 
-    morsel = _morsel(x=Int64Vector.from_constant(0, 2))
+    morsel = _morsel(x=Integer64Vector.from_constant(0, 2))
     node = _make_case_node(
         conditions=[_make_literal_node(True), _make_literal_node(True)],
         results=[_make_literal_node("a"), _make_literal_node("b")],

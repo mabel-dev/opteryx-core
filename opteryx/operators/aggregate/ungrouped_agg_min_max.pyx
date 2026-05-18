@@ -48,9 +48,13 @@ cdef class MinInt64Aggregate(UngroupedAggregate):
         cdef int64_t val
         try:
             if self._col_type == _VTYPE_INT64:
-                val = (<Int64Vector>raw).min()
-            elif self._col_type == _VTYPE_INTEGER:
-                val = (<IntegerVector>raw).min()
+                val = (<Integer64Vector>raw).min()
+            elif self._col_type == _VTYPE_INT8:
+                val = (<Integer8Vector>raw).min()
+            elif self._col_type == _VTYPE_INT16:
+                val = (<Integer16Vector>raw).min()
+            elif self._col_type == _VTYPE_INT32:
+                val = (<Integer32Vector>raw).min()
             else:
                 raise TypeError(
                     f"MinInt64Aggregate cannot scan column {self.column_name!r}: "
@@ -115,9 +119,13 @@ cdef class MaxInt64Aggregate(UngroupedAggregate):
         cdef int64_t val
         try:
             if self._col_type == _VTYPE_INT64:
-                val = (<Int64Vector>raw).max()
-            elif self._col_type == _VTYPE_INTEGER:
-                val = (<IntegerVector>raw).max()
+                val = (<Integer64Vector>raw).max()
+            elif self._col_type == _VTYPE_INT8:
+                val = (<Integer8Vector>raw).max()
+            elif self._col_type == _VTYPE_INT16:
+                val = (<Integer16Vector>raw).max()
+            elif self._col_type == _VTYPE_INT32:
+                val = (<Integer32Vector>raw).max()
             else:
                 raise TypeError(
                     f"MaxInt64Aggregate cannot scan column {self.column_name!r}: "
@@ -309,7 +317,7 @@ cdef class MinBytesAggregate(UngroupedAggregate):
         if self._col_type == _VTYPE_STRING:
             svec = <StringVector>raw
             uv = svec.unified()
-            if uv.data_length == 1:
+            if svec.ptr.offsets == NULL:  # constant (offsets always allocated for dense/dict)
                 if uv.validity == NULL:
                     ptr_b = <const char*>(<DrakenConstantStringPayload*>uv.data).data
                     len_b = <size_t>(<DrakenConstantStringPayload*>uv.data).length
@@ -421,7 +429,7 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
         if self._col_type == _VTYPE_STRING:
             svec = <StringVector>raw
             uv = svec.unified()
-            if uv.data_length == 1:
+            if svec.ptr.offsets == NULL:  # constant (offsets always allocated for dense/dict)
                 if uv.validity == NULL:
                     ptr_b = <const char*>(<DrakenConstantStringPayload*>uv.data).data
                     len_b = <size_t>(<DrakenConstantStringPayload*>uv.data).length

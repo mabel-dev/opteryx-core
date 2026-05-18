@@ -38,8 +38,8 @@ def date_part(part, arr):
 
     vector_type = arr.__class__.__name__
 
-    # Reject Int64Vector — no implicit temporal coercion
-    if vector_type == "Int64Vector":
+    # Reject Integer64Vector — no implicit temporal coercion
+    if vector_type == "Integer64Vector":
         raise InvalidFunctionParameterError(
             f"EXTRACT({part.decode().upper()}) cannot operate on INTEGER values. "
             "Provide a TIMESTAMP or DATE column instead. "
@@ -115,7 +115,7 @@ def date_diff(part, start, end):
     """Calculate the difference between two timestamps.
 
     All inputs must be TimestampVector or Date32Vector.
-    Returns a Draken Int64Vector.
+    Returns a Draken Integer64Vector.
     """
     from opteryx.compiled.vector_ops import vector_date_diff
 
@@ -127,7 +127,7 @@ def date_diff(part, start, end):
     def _to_timestamp_vector(arr):
         """Ensure input is a Draken TimestampVector."""
         type_name = arr.__class__.__name__
-        if type_name == "Int64Vector":
+        if type_name == "Integer64Vector":
             raise InvalidFunctionParameterError(
                 f"DATEDIFF cannot operate on INTEGER values. "
                 "Provide TIMESTAMP or DATE columns instead. "
@@ -147,7 +147,7 @@ def date_diff(part, start, end):
     start_vec = _to_timestamp_vector(start)
     end_vec = _to_timestamp_vector(end)
 
-    # Use Draken vector_date_diff directly - returns Int64Vector
+    # Use Draken vector_date_diff directly - returns Integer64Vector
     return vector_date_diff(start_vec, end_vec, part)
 
 
@@ -177,7 +177,7 @@ def date_floor(dates, magnitude, units):  # [#325]
 
     # Extract scalars from constant vectors if needed
     mag_type = magnitude.__class__.__name__
-    if mag_type in ("ConstantVector", "Int64Vector", "Int32Vector"):
+    if mag_type in ("ConstantVector", "Integer64Vector", "Int32Vector"):
         magnitude = magnitude[0]
     magnitude = int(magnitude)
 
@@ -207,18 +207,18 @@ def unixtime(array):
     """
     Convert a Draken vector of timestamps or dates to Unix time (seconds since epoch).
 
-    Returns an Int64Vector of Unix timestamps.
+    Returns an Integer64Vector of Unix timestamps.
 
     Inputs:
-      - TimestampVector → Int64Vector of seconds since epoch
-      - Date32Vector → Int64Vector of seconds since epoch
+      - TimestampVector → Integer64Vector of seconds since epoch
+      - Date32Vector → Integer64Vector of seconds since epoch
     """
     from opteryx.compiled.vector_ops import vector_unixtime
 
     vector_type = array.__class__.__name__
 
     if vector_type in ("TimestampVector", "Date32Vector"):
-        # Use Draken vector_unixtime - returns Int64Vector
+        # Use Draken vector_unixtime - returns Integer64Vector
         return vector_unixtime(array)
 
     raise TypeError(

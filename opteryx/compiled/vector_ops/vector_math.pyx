@@ -19,7 +19,7 @@ Provides element-wise implementations of:
 
 All kernels follow the same structure as vector_round.pyx:
   - dict-accessor (dictionary-encoded) fast path
-  - Int64Vector path
+  - Integer64Vector path
   - Float64Vector path
   - TypeError for anything else
 
@@ -49,7 +49,7 @@ from draken.core.buffers cimport (
     DRAKEN_INT64,  DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8,
 )
 from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.int64_vector   cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.scalar_constructors cimport from_scalar
 from draken.vectors.vector cimport Vector
 from opteryx.third_party.pcg.pcg cimport oneseq_xsh_rs_32_16, static_arbitrary_seed
@@ -354,7 +354,7 @@ cpdef Float64Vector vector_ceil(object values, int scale=0):
     cdef double*   in_data   = NULL
     cdef int64_t*  in_data_i = NULL
     cdef Float64Vector fvals
-    cdef Int64Vector   ivals
+    cdef Integer64Vector   ivals
 
     cdef DrakenVector*    uv       = NULL
     cdef DrakenVarBuffer* dict_buf
@@ -386,8 +386,8 @@ cpdef Float64Vector vector_ceil(object values, int scale=0):
         else:
             _dispatch_ceil_dict[uint32_t](out_data, <uint32_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
 
-    elif isinstance(values, Int64Vector):
-        ivals    = <Int64Vector>values
+    elif isinstance(values, Integer64Vector):
+        ivals    = <Integer64Vector>values
         in_data_i = <int64_t*>ivals.ptr.data
         in_null   = <uint8_t*>ivals.ptr.null_bitmap
 
@@ -446,7 +446,7 @@ cpdef Float64Vector vector_floor(object values, int scale=0):
     cdef double*   in_data   = NULL
     cdef int64_t*  in_data_i = NULL
     cdef Float64Vector fvals
-    cdef Int64Vector   ivals
+    cdef Integer64Vector   ivals
 
     cdef DrakenVector*    uv       = NULL
     cdef DrakenVarBuffer* dict_buf
@@ -478,8 +478,8 @@ cpdef Float64Vector vector_floor(object values, int scale=0):
         else:
             _dispatch_floor_dict[uint32_t](out_data, <uint32_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
 
-    elif isinstance(values, Int64Vector):
-        ivals    = <Int64Vector>values
+    elif isinstance(values, Integer64Vector):
+        ivals    = <Integer64Vector>values
         in_data_i = <int64_t*>ivals.ptr.data
         in_null   = <uint8_t*>ivals.ptr.null_bitmap
 
@@ -538,7 +538,7 @@ cpdef Float64Vector vector_trunc(object values, int scale=0):
     cdef double*   in_data   = NULL
     cdef int64_t*  in_data_i = NULL
     cdef Float64Vector fvals
-    cdef Int64Vector   ivals
+    cdef Integer64Vector   ivals
 
     cdef DrakenVector*    uv       = NULL
     cdef DrakenVarBuffer* dict_buf
@@ -570,8 +570,8 @@ cpdef Float64Vector vector_trunc(object values, int scale=0):
         else:
             _dispatch_trunc_dict[uint32_t](out_data, <uint32_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
 
-    elif isinstance(values, Int64Vector):
-        ivals    = <Int64Vector>values
+    elif isinstance(values, Integer64Vector):
+        ivals    = <Integer64Vector>values
         in_data_i = <int64_t*>ivals.ptr.data
         in_null   = <uint8_t*>ivals.ptr.null_bitmap
 
@@ -634,7 +634,7 @@ cpdef Float64Vector vector_power(object base_array, double exponent):
     cdef double*   in_data   = NULL
     cdef int64_t*  in_data_i = NULL
     cdef Float64Vector fvals
-    cdef Int64Vector   ivals
+    cdef Integer64Vector   ivals
 
     cdef DrakenVector*    uv       = NULL
     cdef DrakenVarBuffer* dict_buf
@@ -681,8 +681,8 @@ cpdef Float64Vector vector_power(object base_array, double exponent):
             else:
                 out_data[i] = 0.0
 
-    elif isinstance(base_array, Int64Vector):
-        ivals    = <Int64Vector>base_array
+    elif isinstance(base_array, Integer64Vector):
+        ivals    = <Integer64Vector>base_array
         in_data_i = <int64_t*>ivals.ptr.data
         in_null   = <uint8_t*>ivals.ptr.null_bitmap
 

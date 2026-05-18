@@ -9,7 +9,7 @@
 # cython: optimize.unpack_method_calls=True
 
 """
-Vectorized bitwise XOR operation for Int64Vectors.
+Vectorized bitwise XOR operation for Integer64Vectors.
 
 This module implements element-wise XOR on Draken integer vectors:
 - Propagates NULLs explicitly (NULL input → NULL output)
@@ -23,19 +23,19 @@ from libc.stdint cimport int64_t, uint8_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.interop.vector_sequence cimport vector_from_sequence
 
-cpdef object vector_bitwise_xor(Int64Vector left, Int64Vector right):
-    """Bitwise XOR two Int64Vectors element-wise.
+cpdef object vector_bitwise_xor(Integer64Vector left, Integer64Vector right):
+    """Bitwise XOR two Integer64Vectors element-wise.
 
     Parameters:
-        left: Int64Vector operand.
-        right: Int64Vector operand.
+        left: Integer64Vector operand.
+        right: Integer64Vector operand.
 
     Returns:
-        Int64Vector with bitwise XOR result. NULL propagates from either input.
+        Integer64Vector with bitwise XOR result. NULL propagates from either input.
 
     Raises:
         ValueError: If vectors have mismatched lengths.

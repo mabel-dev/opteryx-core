@@ -32,8 +32,6 @@ class VectorType(Enum):
     VECTOR = auto()
     DECIMAL = auto()  # Decimal column, int64-backed with scale metadata
 
-    CONSTANT_ENCODED = auto()  # Special: constant values encoded as typed vector
-    DICTIONARY_ENCODED = auto()  # Special: dictionary-encoded categorical vectors
     UNKNOWN = auto()  # Unrecognized type (error condition)
 
 
@@ -63,8 +61,10 @@ def get_vector_type(obj) -> VectorType:
     # Direct class name mapping - fast path for common cases
     TYPE_MAP = {
         "StringVector": VectorType.STRING,
-        "Int64Vector": VectorType.INT64,
-        "IntegerVector": VectorType.INTEGER,
+        "Integer64Vector": VectorType.INT64,
+        "Integer8Vector": VectorType.INTEGER,
+        "Integer16Vector": VectorType.INTEGER,
+        "Integer32Vector": VectorType.INTEGER,
         "Float64Vector": VectorType.FLOAT64,
         "BoolVector": VectorType.BOOL,
         "TimestampVector": VectorType.TIMESTAMP,
@@ -76,25 +76,7 @@ def get_vector_type(obj) -> VectorType:
     }
 
     if cls_name in TYPE_MAP:
-        base_type = TYPE_MAP[cls_name]
-
-        # Check vector encoding for special cases (constant or dictionary)
-        # BUT: only for numeric/string vectors, not temporal types
-        if hasattr(obj, "encoding") and base_type in (VectorType.INT64, VectorType.FLOAT64, VectorType.STRING):
-            encoding = obj.encoding
-            if encoding == 1:  # Dictionary encoding
-                return VectorType.DICTIONARY_ENCODED
-            elif encoding == 3:  # Constant encoding
-                return VectorType.CONSTANT_ENCODED
-
-        return base_type
-
-    # Special cases: constant/dictionary encoded vectors
-    # These are detected by special flags rather than class name
-    if hasattr(obj, "_is_constant_encoded") and obj._is_constant_encoded:
-        return VectorType.CONSTANT_ENCODED
-    if hasattr(obj, "_is_dictionary_encoded") and obj._is_dictionary_encoded:
-        return VectorType.DICTIONARY_ENCODED
+        return TYPE_MAP[cls_name]
 
     return VectorType.UNKNOWN
 
@@ -103,7 +85,7 @@ def is_draken_vector(obj) -> bool:
     """Check if object is a native Draken vector (not a scalar or Arrow wrapper).
 
     Native Draken vectors are compiled/optimized vector types (StringVector,
-    Int64Vector, etc.). This excludes:
+    Integer64Vector, etc.). This excludes:
     - Raw Python scalars (int, str, bool, etc.)
 
     Args:
@@ -141,8 +123,8 @@ def is_scalar(obj) -> bool:
         >>> is_scalar(datetime.date(2024, 1, 1))
         True
         >>> # For vectors, False:
-        >>> from draken.vectors import Int64Vector
-        >>> vec = Int64Vector.from_constant(1, 3)
+        >>> from draken.vectors import Integer64Vector
+        >>> vec = Integer64Vector.from_constant(1, 3)
         >>> is_scalar(vec)
         False
     """

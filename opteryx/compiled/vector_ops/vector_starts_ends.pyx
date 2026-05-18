@@ -416,7 +416,7 @@ cpdef BoolVector vector_starts_with(StringVector vec, StringVector prefix):
     _extract_const_needle(prefix, &needle, &needle_len, b"vector_starts_with")
 
     cdef DrakenVector* uv = vec.unified()
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         return _constant_starts_ends(vec, needle, needle_len, False, False, False)
     if uv.selection != NULL:  # dictionary
         return _dictionary_starts_ends(vec, needle, needle_len, False, False, False)
@@ -429,7 +429,7 @@ cpdef BoolVector vector_ci_starts_with(StringVector vec, StringVector prefix):
     _extract_const_needle(prefix, &needle, &needle_len, b"vector_ci_starts_with")
 
     cdef DrakenVector* uv = vec.unified()
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         return _constant_starts_ends(vec, needle, needle_len, True, False, False)
     if uv.selection != NULL:  # dictionary
         return _dictionary_starts_ends(vec, needle, needle_len, True, False, False)
@@ -442,7 +442,7 @@ cpdef BoolVector vector_ends_with(StringVector vec, StringVector suffix):
     _extract_const_needle(suffix, &needle, &needle_len, b"vector_ends_with")
 
     cdef DrakenVector* uv = vec.unified()
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         return _constant_starts_ends(vec, needle, needle_len, False, False, True)
     if uv.selection != NULL:  # dictionary
         return _dictionary_starts_ends(vec, needle, needle_len, False, False, True)
@@ -455,7 +455,7 @@ cpdef BoolVector vector_ci_ends_with(StringVector vec, StringVector suffix):
     _extract_const_needle(suffix, &needle, &needle_len, b"vector_ci_ends_with")
 
     cdef DrakenVector* uv = vec.unified()
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         return _constant_starts_ends(vec, needle, needle_len, True, False, True)
     if uv.selection != NULL:  # dictionary
         return _dictionary_starts_ends(vec, needle, needle_len, True, False, True)

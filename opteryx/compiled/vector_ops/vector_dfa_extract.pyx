@@ -875,7 +875,7 @@ cpdef StringVector vector_dfa_extract(
     cdef DrakenConstantStringPayload* csp
 
     # Constant encoding: execute once, replicate.
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and data.ptr.offsets == NULL:  # constant
         if uv.validity != NULL:  # null constant
             out_vec = StringVector(n, 0)
             out_ptr_buf = out_vec.ptr

@@ -20,7 +20,7 @@ from libc.string cimport memcpy, memset
 from libc.stdlib cimport malloc, free
 
 from draken.core.buffers cimport DrakenFixedBuffer
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.interop.vector_sequence cimport vector_from_sequence
 

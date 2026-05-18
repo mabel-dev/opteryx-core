@@ -245,7 +245,7 @@ cdef Vector _coalesce_string_kernel(
         found = False
         for arg_idx in range(n_args):
             uv = unified_vecs[arg_idx]
-            if uv.data_length == 1:
+            if const_payloads[arg_idx] != NULL:
                 if uv.validity != NULL:
                     continue
                 payload = const_payloads[arg_idx]
@@ -268,7 +268,7 @@ cdef Vector _coalesce_string_kernel(
         found = False
         for arg_idx in range(n_args):
             uv = unified_vecs[arg_idx]
-            if uv.data_length == 1:
+            if const_payloads[arg_idx] != NULL:
                 if uv.validity != NULL:
                     continue
                 payload = const_payloads[arg_idx]
@@ -411,15 +411,14 @@ cdef Vector _coalesce_string_dispatch(
 
     try:
         for arg_idx in range(n_args):
-            vec = <Vector>arrays[arg_idx]
-            unified_vecs[arg_idx] = vec.unified()
-            if unified_vecs[arg_idx].data_length == 1:
+            sv = <StringVector>arrays[arg_idx]
+            unified_vecs[arg_idx] = sv.unified()
+            if unified_vecs[arg_idx].selection == NULL and sv.ptr.offsets == NULL:
                 const_payloads[arg_idx] = (
                     <DrakenConstantStringPayload*>unified_vecs[arg_idx].data
                 )
             else:
                 const_payloads[arg_idx] = NULL
-                sv = <StringVector>vec
                 view_list[arg_idx] = sv.view()
 
         result = _coalesce_string_kernel(

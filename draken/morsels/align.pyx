@@ -30,7 +30,7 @@ from libc.stdlib cimport malloc
 from libc.string cimport strlen, memcpy, memset
 
 from draken.vectors.vector cimport Vector
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.string_vector cimport StringVector
@@ -40,7 +40,7 @@ from draken.vectors.interval_vector cimport IntervalVector
 from draken.vectors.time_vector cimport TimeVector
 from draken.vectors.array_vector cimport ArrayVector
 from draken.morsels.morsel cimport Morsel
-from draken.core.buffers cimport DrakenMorsel, DrakenType, DRAKEN_ENCODING_CONSTANT
+from draken.core.buffers cimport DrakenMorsel, DrakenType, DrakenVector
 
 
 cdef inline Vector _take_vector_fast(Vector vec, int32_t[::1] indices):
@@ -53,7 +53,7 @@ cdef inline Vector _take_vector_fast(Vector vec, int32_t[::1] indices):
 
     # Fast dispatch based on type
     if dtype == DrakenType.DRAKEN_INT64:
-        return (<Int64Vector>vec).take(indices)
+        return (<Integer64Vector>vec).take(indices)
     elif dtype == DrakenType.DRAKEN_FLOAT64:
         return (<Float64Vector>vec).take(indices)
     elif dtype == DrakenType.DRAKEN_BOOL:
@@ -88,7 +88,7 @@ cdef inline uint8_t* _source_null_bitmap(Vector vec, DrakenType dtype):
     if null_bitmap != NULL:
         return null_bitmap
     if dtype == DrakenType.DRAKEN_INT64:
-        return (<Int64Vector>vec).ptr.null_bitmap
+        return (<Integer64Vector>vec).ptr.null_bitmap
     elif dtype == DrakenType.DRAKEN_FLOAT64:
         return (<Float64Vector>vec).ptr.null_bitmap
     elif dtype == DrakenType.DRAKEN_BOOL:
@@ -116,12 +116,12 @@ cdef inline uint8_t* _ensure_output_null_bitmap(Vector vec, DrakenType dtype, Py
         return NULL
 
     if dtype == DrakenType.DRAKEN_INT64:
-        out_null = (<Int64Vector>vec).ptr.null_bitmap
+        out_null = (<Integer64Vector>vec).ptr.null_bitmap
         if out_null == NULL:
             out_null = <uint8_t*>malloc(nb_size)
             if out_null == NULL:
                 raise MemoryError()
-            (<Int64Vector>vec).ptr.null_bitmap = out_null
+            (<Integer64Vector>vec).ptr.null_bitmap = out_null
         return out_null
     elif dtype == DrakenType.DRAKEN_FLOAT64:
         out_null = (<Float64Vector>vec).ptr.null_bitmap
@@ -412,7 +412,7 @@ cpdef Morsel align_tables(
             # Constant vectors have ptr.data=NULL; _ensure_output_null_bitmap would
             # allocate ptr.null_bitmap on them, leaving an inconsistent state that
             # crashes downstream dense-buffer access.  Materialize to dense first.
-            if source_has_negative and vec.encoding == DRAKEN_ENCODING_CONSTANT:
+            if source_has_negative and vec.unified().data_length == 1:
                 vec = vec.materialize()
             taken_vec = _take_vector_fast(vec, source_take_indices)
             if source_has_negative or _source_null_bitmap(vec, vec.dtype) != NULL:
@@ -429,7 +429,7 @@ cpdef Morsel align_tables(
                 continue
 
             vec = <Vector>append_morsel.ptr.columns[i]
-            if append_has_negative and vec.encoding == DRAKEN_ENCODING_CONSTANT:
+            if append_has_negative and vec.unified().data_length == 1:
                 vec = vec.materialize()
             taken_vec = _take_vector_fast(vec, append_take_indices)
             if append_has_negative or _source_null_bitmap(vec, vec.dtype) != NULL:

@@ -232,7 +232,7 @@ cdef _assemble(
 
     # First non-None part determines the output family. Use isinstance rather
     # than get_vector_type: constant-encoded vectors are still concrete vector
-    # instances (BoolVector / StringVector / Int64Vector / …) even when
+    # instances (BoolVector / StringVector / Integer64Vector / …) even when
     # encoding == _ENC_CONSTANT.
     first = None
     for p in parts:

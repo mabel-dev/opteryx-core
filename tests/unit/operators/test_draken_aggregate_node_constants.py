@@ -6,7 +6,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 import pyarrow as pa
 
 from draken.morsels.morsel import Morsel
-from draken.vectors.integer_vector import IntegerVector
+from draken.vectors.integer32_vector import Integer32Vector
 from draken.vectors.string_vector import StringVector
 
 from opteryx.operators.aggregate.ungrouped_agg import (
@@ -24,19 +24,19 @@ except ModuleNotFoundError:
 
 
 def test_vector_sum_uses_typed_constant_encoding():
-    vec = IntegerVector.from_constant(7, 4)
+    vec = Integer32Vector.from_constant(7, 4)
 
     assert _vector_sum(vec) == 28
 
 
 def test_vector_sum_all_null_typed_constant_returns_none():
-    vec = IntegerVector.from_constant(None, 4, is_null=True)
+    vec = Integer32Vector.from_constant(None, 4, is_null=True)
 
     assert _vector_sum(vec) is None
 
 
 def test_vector_sum_uses_null_bitmap_for_non_constant_integer_vectors():
-    vec = IntegerVector.from_arrow(pa.array([1, None, 3], type=pa.int32()))
+    vec = Integer32Vector.from_arrow(pa.array([1, None, 3], type=pa.int32()))
 
     assert _vector_sum(vec) == 4
 
@@ -56,7 +56,7 @@ def test_vector_min_max_all_null_typed_constant_return_none():
 
 
 def test_vector_min_max_use_null_bitmap_for_non_constant_integer_vectors():
-    vec = IntegerVector.from_arrow(pa.array([5, None, 3], type=pa.int32()))
+    vec = Integer32Vector.from_arrow(pa.array([5, None, 3], type=pa.int32()))
 
     assert _vector_min(vec) == 3
     assert _vector_max(vec) == 5
@@ -68,7 +68,7 @@ def test_ungrouped_engine_avg_uses_typed_constant_vector():
     engine.add_aggregate(CountAggregate(b"value", b"__avg_count_value"))
     engine.add_avg_finalizer(b"__avg_sum_value", b"__avg_count_value", b"avg_value")
 
-    engine.ingest(Morsel.from_vectors([b"value"], [IntegerVector.from_constant(5, 4)]))
+    engine.ingest(Morsel.from_vectors([b"value"], [Integer32Vector.from_constant(5, 4)]))
     result = engine.finalize()
 
     assert result.column(b"avg_value")[0] == 5

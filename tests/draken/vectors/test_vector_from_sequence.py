@@ -12,62 +12,62 @@ import pytest
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.vectors.bool_vector import BoolVector
 from draken.vectors.float64_vector import Float64Vector
-from draken.vectors.int64_vector import Int64Vector
+from draken.vectors.integer64_vector import Integer64Vector
 
 
 class TestVectorFromSequenceInt64:
     """Tests for vector_from_sequence with int64 data."""
 
     def test_int64_memoryview_basic(self):
-        """Test creating Int64Vector from int64 memoryview."""
+        """Test creating Integer64Vector from int64 memoryview."""
         arr = array("q", [1, 2, 3, 4, 5])  # 'q' = signed long long (int64)
         vec = vector_from_sequence(arr)
 
-        assert isinstance(vec, Int64Vector)
+        assert isinstance(vec, Integer64Vector)
         arrow_result = vec.to_arrow()
         assert arrow_result.to_pylist() == [1, 2, 3, 4, 5]
 
     def test_int64_memoryview_empty(self):
-        """Test creating Int64Vector from empty array."""
+        """Test creating Integer64Vector from empty array."""
         arr = array("q", [])
         vec = vector_from_sequence(arr)
 
-        assert isinstance(vec, Int64Vector)
+        assert isinstance(vec, Integer64Vector)
         arrow_result = vec.to_arrow()
         assert len(arrow_result) == 0
 
     def test_int64_memoryview_single(self):
-        """Test creating Int64Vector from single element."""
+        """Test creating Integer64Vector from single element."""
         arr = array("q", [42])
         vec = vector_from_sequence(arr)
 
-        assert isinstance(vec, Int64Vector)
+        assert isinstance(vec, Integer64Vector)
         arrow_result = vec.to_arrow()
         assert arrow_result.to_pylist() == [42]
 
     def test_int64_memoryview_negative(self):
-        """Test creating Int64Vector with negative values."""
+        """Test creating Integer64Vector with negative values."""
         arr = array("q", [-100, -50, 0, 50, 100])
         vec = vector_from_sequence(arr)
 
-        assert isinstance(vec, Int64Vector)
+        assert isinstance(vec, Integer64Vector)
         arrow_result = vec.to_arrow()
         assert arrow_result.to_pylist() == [-100, -50, 0, 50, 100]
 
     def test_int64_memoryview_large(self):
-        """Test creating Int64Vector from large array."""
+        """Test creating Integer64Vector from large array."""
         n = 100000
         arr = array("q", range(n))
         vec = vector_from_sequence(arr)
 
-        assert isinstance(vec, Int64Vector)
+        assert isinstance(vec, Integer64Vector)
         arrow_result = vec.to_arrow()
         assert len(arrow_result) == n
         assert arrow_result[0].as_py() == 0
         assert arrow_result[n - 1].as_py() == n - 1
 
     def test_int64_memoryview_extremes(self):
-        """Test Int64Vector with min/max int64 values."""
+        """Test Integer64Vector with min/max int64 values."""
         # int64 range: -2^63 to 2^63-1
         min_val = -9223372036854775808
         max_val = 9223372036854775807
@@ -91,12 +91,12 @@ class TestVectorFromSequenceInt64:
         assert arrow_result.to_pylist() == [1, 2, 3]
 
     def test_int64_memoryview_directly(self):
-        """Test creating Int64Vector from explicit memoryview."""
+        """Test creating Integer64Vector from explicit memoryview."""
         arr = array("q", [10, 20, 30])
         mv = memoryview(arr)
         vec = vector_from_sequence(mv)
 
-        assert isinstance(vec, Int64Vector)
+        assert isinstance(vec, Integer64Vector)
         arrow_result = vec.to_arrow()
         assert arrow_result.to_pylist() == [10, 20, 30]
 
@@ -310,7 +310,7 @@ class TestVectorFromSequenceFallback:
         arr = array("i", [1, 2, 3])  # 'i' = signed int (int32)
         vec = vector_from_sequence(arr)
 
-        # Should create a vector via Arrow (not Int64Vector)
+        # Should create a vector via Arrow (not Integer64Vector)
         arrow_result = vec.to_arrow()
         assert arrow_result.to_pylist() == [1, 2, 3]
 
@@ -328,7 +328,7 @@ class TestVectorFromSequenceConstant:
 
     def test_constant_int_sequence(self):
         vec = vector_from_sequence([7, 7, 7, 7])
-        assert isinstance(vec, Int64Vector)
+        assert isinstance(vec, Integer64Vector)
         assert getattr(vec, "encoding", None) == 3
         assert vec.to_pylist() == [7, 7, 7, 7]
 
@@ -351,7 +351,7 @@ class TestVectorFromSequenceWithDtype:
         arr = array("q", [1, 2, 3])
         vec = vector_from_sequence(arr, dtype=pa.int64())
 
-        assert isinstance(vec, Int64Vector)
+        assert isinstance(vec, Integer64Vector)
 
     def test_dtype_float64(self):
         """Test explicit float64 dtype."""
@@ -493,7 +493,7 @@ class TestVectorFromSequenceIntegration:
         bool_vec = vector_from_sequence(array("B", [0xFF]))
         str_vec = vector_from_sequence(["a", "b"])
 
-        assert isinstance(int_vec, Int64Vector)
+        assert isinstance(int_vec, Integer64Vector)
         assert isinstance(float_vec, Float64Vector)
         assert isinstance(bool_vec, BoolVector)
         # str_vec will be StringVector via fallback

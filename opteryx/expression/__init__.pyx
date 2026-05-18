@@ -117,9 +117,9 @@ def _typed_constant_vector(value, length: int, schema_column):
         return BoolVector.from_constant(False if is_null else value, length, is_null=is_null)
 
     if target_type == OrsoTypes.INTEGER:
-        from draken.vectors.integer_vector import IntegerVector
+        from draken.vectors.integer32_vector import Integer32Vector
 
-        return IntegerVector.from_constant(0 if is_null else value, length, is_null=is_null)
+        return Integer32Vector.from_constant(0 if is_null else value, length, is_null=is_null)
 
     if target_type == OrsoTypes.DOUBLE:
         from draken.vectors.float64_vector import Float64Vector
@@ -449,7 +449,7 @@ def _inner_evaluate(root: Node, table):
     if node_type == NodeType.LITERAL:
         from draken.vectors.bool_vector import BoolVector
         from draken.vectors.float64_vector import Float64Vector
-        from draken.vectors.int64_vector import Int64Vector
+        from draken.vectors.integer64_vector import Integer64Vector
         from draken.vectors.string_vector import StringVector
 
         literal_type = root.type or (
@@ -472,17 +472,17 @@ def _inner_evaluate(root: Node, table):
                 pass
             else:
                 value = int(value)
-            return Int64Vector.from_constant(value, length)
+            return Integer64Vector.from_constant(value, length)
 
         if literal_type == OrsoTypes.TIMESTAMP:
             if isinstance(value, datetime.datetime) or isinstance(value, datetime.date):
                 value = timestamp_to_int64_us(value)
             elif not isinstance(value, int):
                 value = int(value)
-            return Int64Vector.from_constant(value, length)
+            return Integer64Vector.from_constant(value, length)
 
         if literal_type == OrsoTypes.INTEGER:
-            return Int64Vector.from_constant(int(value), length)
+            return Integer64Vector.from_constant(int(value), length)
 
         if literal_type == OrsoTypes.DOUBLE:
             return Float64Vector.from_constant(float(value), length)

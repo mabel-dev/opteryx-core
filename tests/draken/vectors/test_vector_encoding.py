@@ -9,8 +9,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 from draken.vectors.bool_vector import BoolVector
 from draken.vectors.date32_vector import Date32Vector
 from draken.vectors.float64_vector import Float64Vector
-from draken.vectors.int64_vector import Int64Vector
-from draken.vectors.integer_vector import IntegerVector
+from draken.vectors.integer64_vector import Integer64Vector
+from draken.vectors.integer32_vector import Integer32Vector
 from draken.vectors.scalar_constructors import from_scalar
 from draken.vectors.string_vector import StringVector
 from draken.vectors.time_vector import TimeVector
@@ -53,12 +53,12 @@ def test_encoding_enum_values_are_stable():
 
 
 def test_dense_vector_encoding():
-    vec = Int64Vector(3)
+    vec = Integer64Vector(3)
     assert vec.encoding == DRAKEN_ENCODING_DENSE
 
 
 def test_dictionary_vector_encoding():
-    vec = Int64Vector.from_dict([0, 1, 0], [10, 20])
+    vec = Integer64Vector.from_dict([0, 1, 0], [10, 20])
     assert vec.encoding == DRAKEN_ENCODING_DICTIONARY
 
 
@@ -83,7 +83,7 @@ def test_string_dictionary_take_preserves_dictionary_encoding():
 def test_constant_from_scalar_prefers_typed_integer_vector_for_int8_dtype():
     vec = from_scalar(1, 4, dtype="int8")
 
-    assert vec.__class__.__name__ == "IntegerVector"
+    assert vec.__class__.__name__ == "Integer32Vector"
     assert vec.encoding == DRAKEN_ENCODING_CONSTANT
     assert vec.to_pylist() == [1, 1, 1, 1]
 
@@ -97,7 +97,7 @@ def test_constant_from_scalar_prefers_typed_string_vector_for_strings():
 
 
 def test_int64_constant_vector_encoding_and_access():
-    vec = Int64Vector.from_constant(7, 4)
+    vec = Integer64Vector.from_constant(7, 4)
 
     assert vec.encoding == DRAKEN_ENCODING_CONSTANT
     assert len(vec) == 4
@@ -108,7 +108,7 @@ def test_int64_constant_vector_encoding_and_access():
 
 
 def test_int64_constant_all_null_vector():
-    vec = Int64Vector.from_constant(0, 3, is_null=True)
+    vec = Integer64Vector.from_constant(0, 3, is_null=True)
 
     assert vec.encoding == DRAKEN_ENCODING_CONSTANT
     assert vec.to_pylist() == [None, None, None]
@@ -118,7 +118,7 @@ def test_int64_constant_all_null_vector():
 
 
 def test_int64_constant_take_preserves_constant_encoding():
-    vec = Int64Vector.from_constant(11, 5)
+    vec = Integer64Vector.from_constant(11, 5)
     taken = vec.take(array("i", [4, 2, 0]))
 
     assert taken.encoding == DRAKEN_ENCODING_CONSTANT
@@ -127,7 +127,7 @@ def test_int64_constant_take_preserves_constant_encoding():
 
 
 def test_int64_constant_to_arrow_roundtrips():
-    vec = Int64Vector.from_constant(13, 4)
+    vec = Integer64Vector.from_constant(13, 4)
     arr = vec.to_arrow()
 
     assert arr.type == pa.int64()
@@ -135,7 +135,7 @@ def test_int64_constant_to_arrow_roundtrips():
 
 
 def test_int64_constant_null_to_arrow_roundtrips():
-    vec = Int64Vector.from_constant(0, 2, is_null=True)
+    vec = Integer64Vector.from_constant(0, 2, is_null=True)
     arr = vec.to_arrow()
 
     assert arr.type == pa.int64()
@@ -286,7 +286,7 @@ def test_timestamp_constant_vector_encoding_and_access():
 
 
 def test_integer_constant_vector_encoding_and_width_inference():
-    vec = IntegerVector.from_constant(7, 4)
+    vec = Integer32Vector.from_constant(7, 4)
 
     assert vec.encoding == DRAKEN_ENCODING_CONSTANT
     assert vec.to_pylist() == [7, 7, 7, 7]
@@ -294,7 +294,7 @@ def test_integer_constant_vector_encoding_and_width_inference():
 
 
 def test_integer_constant_all_null_vector():
-    vec = IntegerVector.from_constant(0, 2, is_null=True)
+    vec = Integer32Vector.from_constant(0, 2, is_null=True)
 
     assert vec.encoding == DRAKEN_ENCODING_CONSTANT
     assert vec.to_pylist() == [None, None]

@@ -104,7 +104,7 @@ cdef Vector _build_constant_vector(Vector cur, object value, Py_ssize_t length):
     Returns None for vector types we don't yet handle (temporal, decimal, etc.)
     or when the literal's Python type can't safely map onto the column dtype.
     """
-    from draken.vectors.int64_vector import Int64Vector
+    from draken.vectors.integer64_vector import Integer64Vector
     from draken.vectors.float64_vector import Float64Vector
     from draken.vectors.bool_vector import BoolVector
     from draken.vectors.string_vector import StringVector
@@ -113,10 +113,10 @@ cdef Vector _build_constant_vector(Vector cur, object value, Py_ssize_t length):
         if not isinstance(value, bool):
             return None
         return BoolVector.from_constant(value, length)
-    if isinstance(cur, Int64Vector):
+    if isinstance(cur, Integer64Vector):
         if isinstance(value, bool) or not isinstance(value, int):
             return None
-        return Int64Vector.from_constant(value, length)
+        return Integer64Vector.from_constant(value, length)
     if isinstance(cur, Float64Vector):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
@@ -149,7 +149,7 @@ cdef void _apply_constant_replacements(Morsel morsel, list replacements) except 
         cur = <Vector>morsel._columns[idx]
         if cur is None:
             continue
-        if cur.unified().data_length == 1:
+        if cur.unified().data_length == 1 and cur.unified().length > 1:
             continue
         new_vec = _build_constant_vector(cur, value, length)
         if new_vec is None:

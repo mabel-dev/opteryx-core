@@ -24,11 +24,6 @@ cdef extern from "core/buffers.h":
 
         DRAKEN_NON_NATIVE
 
-    ctypedef enum DrakenEncoding:
-        DRAKEN_ENCODING_DENSE
-        DRAKEN_ENCODING_DICTIONARY
-        DRAKEN_ENCODING_CONSTANT
-
     # Fixed-width column
     ctypedef struct DrakenFixedBuffer:
         void* data                 # int64_t*, double*, etc.

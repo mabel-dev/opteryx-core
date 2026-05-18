@@ -10,7 +10,7 @@ from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.float64_vector cimport Float64Vector
 
-cdef class Int64Vector(Vector):
+cdef class Integer64Vector(Vector):
     cdef object _arrow_data_buf
     cdef object _arrow_null_buf
     cdef DrakenFixedBuffer* ptr
@@ -21,27 +21,27 @@ cdef class Int64Vector(Vector):
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
 
-    cpdef Int64Vector take(self, int32_t[::1] indices)
+    cpdef Integer64Vector take(self, int32_t[::1] indices)
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
     cdef DrakenVector* unified(self) noexcept
     # Integer-dispatched kernels. cpdef so the expression evaluator can call
     # them directly from Python and bypass the per-op named wrappers below.
     cpdef BoolVector _compare_scalar(self, int64_t value, int op)
-    cpdef BoolVector _compare_vector(self, Int64Vector other, int op)
+    cpdef BoolVector _compare_vector(self, Integer64Vector other, int op)
     cpdef BoolVector _compare_float64_vector(self, object other, int op)
 
     cpdef BoolVector equals(self, int64_t value)
-    cpdef BoolVector equals_vector(self, Int64Vector other)
+    cpdef BoolVector equals_vector(self, Integer64Vector other)
     cpdef BoolVector not_equals(self, int64_t value)
-    cpdef BoolVector not_equals_vector(self, Int64Vector other)
+    cpdef BoolVector not_equals_vector(self, Integer64Vector other)
     cpdef BoolVector greater_than(self, int64_t value)
-    cpdef BoolVector greater_than_vector(self, Int64Vector other)
+    cpdef BoolVector greater_than_vector(self, Integer64Vector other)
     cpdef BoolVector greater_than_or_equals(self, int64_t value)
-    cpdef BoolVector greater_than_or_equals_vector(self, Int64Vector other)
+    cpdef BoolVector greater_than_or_equals_vector(self, Integer64Vector other)
     cpdef BoolVector less_than(self, int64_t value)
-    cpdef BoolVector less_than_vector(self, Int64Vector other)
+    cpdef BoolVector less_than_vector(self, Integer64Vector other)
     cpdef BoolVector less_than_or_equals(self, int64_t value)
-    cpdef BoolVector less_than_or_equals_vector(self, Int64Vector other)
+    cpdef BoolVector less_than_or_equals_vector(self, Integer64Vector other)
     cpdef BoolVector equals_float64_vector(self, object other)
     cpdef BoolVector not_equals_float64_vector(self, object other)
     cpdef BoolVector greater_than_float64_vector(self, object other)
@@ -67,19 +67,19 @@ cdef class Int64Vector(Vector):
 
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 
-cdef Int64Vector from_decoded(
+cdef Integer64Vector from_decoded(
     void* data,
     uint8_t* null_bitmap,
     size_t length,
 )
-cdef Int64Vector from_arrow(object array)
-cdef Int64Vector from_dict(const int32_t[::1] codes, const int64_t[::1] dictionary)
-cdef Int64Vector from_dict_nullable(
+cdef Integer64Vector from_arrow(object array)
+cdef Integer64Vector from_dict(const int32_t[::1] codes, const int64_t[::1] dictionary)
+cdef Integer64Vector from_dict_nullable(
     const int32_t[::1] codes,
     const int64_t[::1] dictionary,
     const uint8_t[::1] row_validity,
 )
-cdef Int64Vector from_packed_dict(
+cdef Integer64Vector from_packed_dict(
     const uint8_t* codes,
     uint8_t code_width,
     Py_ssize_t row_count,
@@ -89,9 +89,9 @@ cdef Int64Vector from_packed_dict(
     bint ordered=*,
     const uint8_t* dict_entry_null_bitmap=*,
 )
-cdef Int64Vector from_sequence(const int64_t[::1] data)
-cdef Int64Vector _materialize_dict_int64(Int64Vector vec)
-cdef Int64Vector make_int64_dict_only(
+cdef Integer64Vector from_sequence(const int64_t[::1] data)
+cdef Integer64Vector _materialize_dict_int64(Integer64Vector vec)
+cdef Integer64Vector make_int64_dict_only(
     const uint8_t* codes,
     uint8_t code_width,
     Py_ssize_t row_count,

@@ -47,7 +47,7 @@ cpdef StringVector vector_uppercase(object input):
     cdef DrakenConstantStringPayload* csp
 
     # Handle constant encoding
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         if uv.validity != NULL:  # null constant
             builder = string_vector_module.StringVectorBuilder.with_estimate(n, 0)
             for i in range(n):

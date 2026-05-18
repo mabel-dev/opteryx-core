@@ -85,7 +85,7 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
     cdef DrakenConstantStringPayload* csp
 
     # Constant vector case
-    if uv.data_length == 1:  # constant
+    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
         if uv.validity != NULL:  # null constant
             return _constant_bool_result(n, False, True)
         csp = <DrakenConstantStringPayload*>uv.data

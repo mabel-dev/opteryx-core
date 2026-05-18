@@ -13,7 +13,7 @@ from libc.stdlib cimport malloc, free
 from libcpp.vector cimport vector
 
 from draken.vectors.vector cimport Vector
-from draken.vectors.int64_vector cimport Int64Vector
+from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.string_vector cimport StringVector
 from draken.core.buffers cimport DrakenVarBuffer, DrakenVector
@@ -206,7 +206,7 @@ cdef class AnyValueInt64Collector(BaseCollector):
         const int64_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Int64Vector vec = <Int64Vector>morsel.column(self.column_name)
+        cdef Integer64Vector vec = <Integer64Vector>morsel.column(self.column_name)
         cdef int64_t* data
         cdef uint8_t* nulls
         cdef int64_t* values = self._values.data()
@@ -217,7 +217,7 @@ cdef class AnyValueInt64Collector(BaseCollector):
         cdef DrakenVector* uv
 
         uv = vec.unified()
-        if uv.data_length == 1:
+        if uv.data_length == 1 and uv.length > 1:
             if uv.validity == NULL:
                 const_val = (<int64_t*>uv.data)[0]
                 for i in range(n_rows):
@@ -290,7 +290,7 @@ cdef class AnyValueFloat64Collector(BaseCollector):
         cdef DrakenVector* uv
 
         uv = vec.unified()
-        if uv.data_length == 1:
+        if uv.data_length == 1 and uv.length > 1:
             if uv.validity == NULL:
                 const_val = (<double*>uv.data)[0]
                 for i in range(n_rows):
