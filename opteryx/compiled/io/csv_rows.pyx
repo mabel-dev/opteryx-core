@@ -510,7 +510,7 @@ cpdef StringVector morsel_to_csv_rows(
                 encoder = ENC_BOOL
                 aux_obj = None
                 null_bitmaps[col_index] = (<BoolVector>vec_obj).ptr.null_bitmap
-            elif _uv != NULL and _uv.selection != NULL:
+            elif _uv != NULL:
                 encoder = ENC_GENERIC
                 aux_obj = vec_obj.to_pylist()
                 null_bitmaps[col_index] = NULL

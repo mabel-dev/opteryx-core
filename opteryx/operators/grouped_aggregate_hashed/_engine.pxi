@@ -248,7 +248,7 @@ cdef class GroupHashEngine:
             if not isinstance(vec, StringVector):
                 return
             svec = <StringVector>vec
-            if svec.unified().selection != NULL:
+            if svec._german_dict_values != NULL:
                 card = svec.c_dict_size()
             else:
                 return
@@ -302,8 +302,7 @@ cdef class GroupHashEngine:
         """
         cdef Py_ssize_t dict_size = svec.c_dict_size()
         cdef DrakenVector* _suv = svec.unified()
-        cdef const uint8_t* codes = <const uint8_t*>_suv.selection
-        cdef uint8_t code_width = _suv.sel_width
+        cdef const uint32_t* codes = _suv.selection
         cdef const uint8_t* row_nulls = _suv.validity
         cdef const int64_t* counts = svec.c_dict_code_counts_ptr()
         cdef int64_t* si_buf = self._state_indices_buf.data()
@@ -367,12 +366,7 @@ cdef class GroupHashEngine:
                     si_buf[i] = null_state_idx
                     continue
 
-                if code_width == 1:
-                    code = (<const uint8_t*>codes)[i]
-                elif code_width == 2:
-                    code = (<const uint16_t*>codes)[i]
-                else:
-                    code = (<const uint32_t*>codes)[i]
+                code = codes[i]
 
                 if <Py_ssize_t>code >= dict_size:
                     raise ValueError(
@@ -496,7 +490,7 @@ cdef class GroupHashEngine:
                 # hash + cached lookups beat our K-independent path.  Only
                 # take the fast path when K is meaningfully smaller than N.
                 if (
-                    svec_key.unified().selection != NULL
+                    svec_key._german_dict_values != NULL
                     and svec_key.c_dict_size() <= (n_rows >> 2)
                 ):
                     if self._telemetry_enabled:

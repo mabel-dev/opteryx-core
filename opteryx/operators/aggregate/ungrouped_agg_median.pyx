@@ -86,7 +86,7 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
                         if not self._state.append((<double*>uv.data)[0]):
                             self._raise_append_failure()
                 return
-            fdata = <const double*>vec_f.dense_ptr()
+            fdata = <const double*>vec_f.ptr.data
             nulls = vec_f.null_bitmap_ptr()
             if nulls == NULL:
                 for i in range(nrows):
@@ -109,7 +109,7 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
                         if not self._state.append(v):
                             self._raise_append_failure()
                 return
-            idata = <const int64_t*>vec_i.dense_ptr()
+            idata = <const int64_t*>vec_i.ptr.data
             nulls = vec_i.null_bitmap_ptr()
             if nulls == NULL:
                 for i in range(nrows):

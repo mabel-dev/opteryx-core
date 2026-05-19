@@ -10,7 +10,7 @@
 
 from libc.stdint cimport int32_t, int64_t, uint8_t
 
-from draken.core.buffers cimport DrakenConstantStringPayload, DrakenVarBuffer, DrakenVector
+from draken.core.buffers cimport DrakenConstantStringPayload, DrakenVarBuffer, DrakenVector, DrakenGermanArena, GermanString, gs_length, gs_data
 from draken.vectors.array_vector cimport ArrayVector
 from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
@@ -96,7 +96,7 @@ cpdef StringVector vector_map_access_string(StringVector vec, Integer64Vector ke
 
     index = key[0]
 
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
@@ -173,15 +173,20 @@ cpdef StringVector vector_json_extract_text(StringVector docs, bytes key):
     cdef int32_t start, end
     cdef uint8_t* null_bm
     cdef uint32_t code
+    cdef DrakenGermanArena* jxt_gdv
+    cdef GermanString* jxt_slot
+    cdef const uint8_t* jxt_sdata
+    cdef uint32_t jxt_slen
 
-    if uv.selection != NULL:  # dictionary
-        vbuf = <DrakenVarBuffer*>uv.data
-        dict_size = <Py_ssize_t>vbuf.length
+    if docs._german_dict_values != NULL:  # dictionary
+        jxt_gdv = docs._german_dict_values
+        dict_size = <Py_ssize_t>jxt_gdv.length
         dict_results = [None] * dict_size
         for i in range(dict_size):
-            start = vbuf.offsets[i]
-            end = vbuf.offsets[i + 1]
-            doc_bytes = bytes((<uint8_t*>vbuf.data)[start:end])
+            jxt_slot = &jxt_gdv.slots[i]
+            jxt_slen = gs_length(jxt_slot)
+            jxt_sdata = gs_data(jxt_slot, jxt_gdv.arena)
+            doc_bytes = bytes(jxt_sdata[:jxt_slen])
             dict_results[i] = _json_extract_text_value(doc_bytes, key)
 
         null_bm = uv.validity
@@ -189,7 +194,7 @@ cpdef StringVector vector_json_extract_text(StringVector docs, bytes key):
             if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
                 builder.append_null()
                 continue
-            code = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
+            code = uv.selection[i]
             out_bytes = dict_results[code]
             if out_bytes is None:
                 builder.append_null()
@@ -251,22 +256,27 @@ cpdef list vector_json_extract_variant(StringVector docs, bytes key):
     cdef int32_t start, end
     cdef uint8_t* null_bm
     cdef uint32_t code
+    cdef DrakenGermanArena* jxv_gdv
+    cdef GermanString* jxv_slot
+    cdef const uint8_t* jxv_sdata
+    cdef uint32_t jxv_slen
 
-    if uv.selection != NULL:  # dictionary
-        vbuf = <DrakenVarBuffer*>uv.data
-        dict_size = <Py_ssize_t>vbuf.length
+    if docs._german_dict_values != NULL:  # dictionary
+        jxv_gdv = docs._german_dict_values
+        dict_size = <Py_ssize_t>jxv_gdv.length
         dict_results = [None] * dict_size
         for i in range(dict_size):
-            start = vbuf.offsets[i]
-            end = vbuf.offsets[i + 1]
-            doc_bytes = bytes((<uint8_t*>vbuf.data)[start:end])
+            jxv_slot = &jxv_gdv.slots[i]
+            jxv_slen = gs_length(jxv_slot)
+            jxv_sdata = gs_data(jxv_slot, jxv_gdv.arena)
+            doc_bytes = bytes(jxv_sdata[:jxv_slen])
             dict_results[i] = _json_extract_variant_value(doc_bytes, key)
 
         null_bm = uv.validity
         for i in range(n):
             if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
                 continue
-            code = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
+            code = uv.selection[i]
             result[i] = dict_results[code]
         return result
 

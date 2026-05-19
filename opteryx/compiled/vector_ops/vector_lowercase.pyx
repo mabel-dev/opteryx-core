@@ -10,7 +10,7 @@
 
 from draken.vectors.string_vector cimport StringVector, from_packed_dict
 from draken.vectors import string_vector as string_vector_module
-from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector
+from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector, DrakenGermanArena, GermanString, gs_length, gs_data
 from libc.string cimport memcpy
 from libc.stdlib cimport malloc, free
 from libc.stddef cimport size_t
@@ -45,9 +45,13 @@ cpdef StringVector vector_lowercase(object input):
     cdef object builder, dict_builder, new_dict_sv, dict_result_bytes
     cdef bytes lower_bytes
     cdef DrakenConstantStringPayload* csp
+    cdef DrakenGermanArena* lc_gdv
+    cdef GermanString* lc_slot
+    cdef const uint8_t* lc_sdata
+    cdef uint32_t lc_slen
 
     # Handle constant encoding
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         if uv.validity != NULL:  # null constant
             builder = string_vector_module.StringVectorBuilder.with_estimate(n, 0)
             for i in range(n):
@@ -62,21 +66,22 @@ cpdef StringVector vector_lowercase(object input):
             return builder.finish()
 
     # Dictionary encoding path
-    if uv.selection != NULL:  # dictionary
-        vbuf = <DrakenVarBuffer*>uv.data
-        dict_size = <Py_ssize_t>vbuf.length
+    if vec._german_dict_values != NULL:  # dictionary
+        lc_gdv = vec._german_dict_values
+        dict_size = <Py_ssize_t>lc_gdv.length
 
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 16)
         for i in range(dict_size):
-            start = vbuf.offsets[i]
-            end = vbuf.offsets[i + 1]
-            tmp_dict_buf = <char*>malloc(end - start)
+            lc_slot = &lc_gdv.slots[i]
+            lc_slen = gs_length(lc_slot)
+            lc_sdata = gs_data(lc_slot, lc_gdv.arena)
+            tmp_dict_buf = <char*>malloc(<size_t>lc_slen)
             if tmp_dict_buf == NULL:
                 raise MemoryError()
             try:
-                memcpy(tmp_dict_buf, <char*>vbuf.data + start, end - start)
-                simd_to_lower(tmp_dict_buf, end - start)
-                dict_result_bytes = PyBytes_FromStringAndSize(tmp_dict_buf, end - start)
+                memcpy(tmp_dict_buf, lc_sdata, <size_t>lc_slen)
+                simd_to_lower(tmp_dict_buf, <size_t>lc_slen)
+                dict_result_bytes = PyBytes_FromStringAndSize(tmp_dict_buf, <Py_ssize_t>lc_slen)
                 dict_builder.append(dict_result_bytes)
             finally:
                 free(tmp_dict_buf)
@@ -84,7 +89,7 @@ cpdef StringVector vector_lowercase(object input):
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            <uint8_t*>uv.selection, uv.sel_width, n,
+            <uint8_t*>uv.selection, 4, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
             uv.validity,
         )

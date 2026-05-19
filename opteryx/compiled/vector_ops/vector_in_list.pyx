@@ -112,10 +112,7 @@ cdef BoolVector _vector_in_list_phash(
         if (<Integer8Vector>arr).null_bitmap_ptr() != NULL:
             free(idx_buf)
             return None  # has nulls → fall back
-        dp = (<Integer8Vector>arr).dense_ptr()
-        if dp == NULL:
-            free(idx_buf)
-            return None  # non-dense encoding → fall back
+        dp = (<Integer8Vector>arr).ptr.data
         with nogil:
             count = phs.probe_found_32_i8(<const int8_t*>dp, idx_buf, n)
 
@@ -123,10 +120,7 @@ cdef BoolVector _vector_in_list_phash(
         if (<Integer16Vector>arr).null_bitmap_ptr() != NULL:
             free(idx_buf)
             return None  # has nulls → fall back
-        dp = (<Integer16Vector>arr).dense_ptr()
-        if dp == NULL:
-            free(idx_buf)
-            return None  # non-dense encoding → fall back
+        dp = (<Integer16Vector>arr).ptr.data
         # probe_found gives us matched row indices; probe_not_found gives unmatched.
         # For negate we want bits SET for unmatched rows. Compute probe_found and invert.
         with nogil:
@@ -137,10 +131,10 @@ cdef BoolVector _vector_in_list_phash(
         if ivec64.null_bitmap_ptr() != NULL:
             free(idx_buf)
             return None  # has nulls → fall back
-        dp = ivec64.dense_ptr()
-        if dp == NULL:
+        if ivec64._dict_values != NULL:
             free(idx_buf)
-            return None  # dict/RLE/const → fall back
+            return None  # dict-encoded → fall back
+        dp = ivec64.ptr.data
         with nogil:
             count = phs.probe_found_32_i64(<const int64_t*>dp, idx_buf, n)
 
@@ -149,10 +143,7 @@ cdef BoolVector _vector_in_list_phash(
         if ivec_d32.null_bitmap_ptr() != NULL:
             free(idx_buf)
             return None
-        dp = ivec_d32.dense_ptr()
-        if dp == NULL:
-            free(idx_buf)
-            return None
+        dp = ivec_d32.ptr.data
         with nogil:
             count = phs.probe_found_32_i32(<const int32_t*>dp, idx_buf, n)
 
@@ -161,10 +152,10 @@ cdef BoolVector _vector_in_list_phash(
         if ivec_ts.null_bitmap_ptr() != NULL:
             free(idx_buf)
             return None
-        dp = ivec_ts.dense_ptr()
-        if dp == NULL:
+        if ivec_ts._dict_values != NULL:
             free(idx_buf)
-            return None
+            return None  # dict-encoded → fall back
+        dp = ivec_ts.ptr.data
         with nogil:
             count = phs.probe_found_32_i64(<const int64_t*>dp, idx_buf, n)
 

@@ -29,7 +29,7 @@ from draken.vectors.integer32_vector import Integer32Vector
 from draken.vectors.string_vector import StringVector
 from draken.vectors.time_vector import TimeVector
 from draken.vectors.timestamp_vector import TimestampVector
-from draken.vectors._decimal_vector import DecimalVector
+from draken.vectors.decimal_vector import DecimalVector
 
 
 # ---------------------------------------------------------------------------

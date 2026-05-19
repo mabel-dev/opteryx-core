@@ -15,7 +15,7 @@ from draken.vectors.vector cimport Vector
 from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.string_vector cimport StringVector
-from draken.vectors._decimal_vector cimport DecimalVector
+from draken.vectors.decimal_vector cimport DecimalVector
 
 
 # ---------------------------------------------------------------------------

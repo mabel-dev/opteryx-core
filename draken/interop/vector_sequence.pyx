@@ -30,18 +30,19 @@ The dtype hint (OrsoTypes enum or plain string) is used for dispatch when
 the list contains only None values, or when type sniffing is ambiguous.
 """
 
-from libc.stdint cimport int8_t, int64_t, uint8_t, uint64_t
+from libc.stdint cimport int8_t, int64_t, uint8_t, uint32_t, uint64_t
 from libc.stdlib cimport malloc
 from libc.string cimport memset
 
-from draken.core.buffers cimport DrakenFixedBuffer, DrakenType
+from draken.core.buffers cimport DrakenFixedBuffer, DrakenType, DRAKEN_INT64
+from draken.core.buffers cimport draken_vector_from_dense
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.bool_vector cimport from_sequence as bool_from_sequence
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.float64_vector cimport from_sequence as float64_from_sequence
 from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.integer64_vector cimport from_sequence as int64_from_sequence
-from draken.vectors._decimal_vector cimport DecimalVector
+from draken.vectors.decimal_vector cimport DecimalVector
 from draken.vectors.scalar_constructors cimport from_sequence as constant_from_sequence
 from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
 
@@ -196,12 +197,8 @@ cdef DecimalVector _decimal_from_pylist(list data):
             data_ptr[i] = <int64_t> int(item * multiplier)
 
     vec.ptr.null_bitmap = null_bm
-    vec._unified_view.data = vec.ptr.data
-    vec._unified_view.data_length = <size_t>n
-    vec._unified_view.length = <size_t>n
-    vec._unified_view.selection = NULL
-    vec._unified_view.sel_width = 0
-    vec._unified_view.validity = null_bm
+    vec._unified_view = draken_vector_from_dense(
+        vec.ptr.data, <uint32_t>n, DRAKEN_INT64, null_bm)
     return vec
 
 

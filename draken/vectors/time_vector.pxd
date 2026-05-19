@@ -14,7 +14,6 @@ cdef class TimeVector(Vector):
     cdef bint owns_data
     cdef bint is_time64  # True if time64, False if time32
 
-    cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
     cdef DrakenVector* unified(self) noexcept
 

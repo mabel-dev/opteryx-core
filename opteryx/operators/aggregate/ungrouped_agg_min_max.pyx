@@ -332,7 +332,7 @@ cdef class MinBytesAggregate(UngroupedAggregate):
             # only.  Only worthwhile when K << N — at K ~ N this loses to
             # the dense path's tighter inner loop.
             if (
-                uv.selection != NULL
+                svec._german_dict_values != NULL
                 and svec.c_dict_size() <= (nrows >> 2)
             ):
                 self._scan_dict_min(svec)
@@ -441,7 +441,7 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
                             self._result = ptr_b[:len_b]
                 return
             if (
-                uv.selection != NULL
+                svec._german_dict_values != NULL
                 and svec.c_dict_size() <= (nrows >> 2)
             ):
                 self._scan_dict_max(svec)

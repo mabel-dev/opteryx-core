@@ -4,6 +4,15 @@ from libc.stdint cimport int32_t, int8_t, int64_t, intptr_t, uint32_t, uint64_t,
 from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.core.buffers cimport DrakenVarBuffer
 from draken.core.buffers cimport DrakenVector
+from draken.core.buffers cimport DrakenGermanArena
+from draken.core.buffers cimport GermanString
+from draken.core.buffers cimport GS_INLINE_MAX
+from draken.core.buffers cimport gs_data
+from draken.core.buffers cimport gs_length
+from draken.core.buffers cimport gs_equals
+from draken.core.buffers cimport gs_compare
+from draken.core.german_arena cimport alloc_german_arena
+from draken.core.german_arena cimport free_german_arena
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.vector cimport Vector
 
@@ -22,13 +31,26 @@ cdef class StringVector(Vector):
 
     cdef DrakenVarBuffer* ptr
     cdef bint owns_data
-    cdef DrakenVarBuffer* _dict_values
+    cdef DrakenGermanArena* _german_dict_values
     cdef uint8_t _dict_ordered
 
     cdef int64_t* _dict_code_counts
     cdef bint _dict_code_counts_valid
 
-    cdef void* dense_ptr(self) noexcept
+    # min/max metadata. When _min_max_valid is True:
+    #   - if _min_max_all_null is True, the vector is empty/all-null (min/max → None)
+    #   - else _cached_min_ptr/_cached_min_len and _cached_max_ptr/_cached_max_len
+    #     point into a buffer the vector owns (vec.ptr.data, vec._german_dict_values arena,
+    #     or vec's constant payload). Pointers are stable for the vector's lifetime;
+    #     PyBytes are materialized only when min()/max() is called from Python.
+    # When False, min()/max() recompute on demand. Default: invalid (safe fallback).
+    cdef const uint8_t* _cached_min_ptr
+    cdef Py_ssize_t _cached_min_len
+    cdef const uint8_t* _cached_max_ptr
+    cdef Py_ssize_t _cached_max_len
+    cdef bint _min_max_all_null
+    cdef bint _min_max_valid
+
     cdef uint8_t* null_bitmap_ptr(self) noexcept
     cdef DrakenVector* unified(self) noexcept
 

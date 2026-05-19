@@ -52,7 +52,7 @@ cdef class CountDistinctAggregate(UngroupedAggregate):
         if isinstance(raw, StringVector):
             svec = <StringVector>raw
             uv = svec.unified()
-            if uv.selection != NULL:
+            if svec._german_dict_values != NULL:
                 dict_size = svec.c_dict_size()
                 counts = svec.c_dict_code_counts_ptr()
                 with nogil:

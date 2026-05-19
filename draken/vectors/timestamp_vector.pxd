@@ -1,7 +1,7 @@
 from libc.stdint cimport int32_t
 from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
-from libc.stdint cimport uint64_t, uint8_t, uint16_t, uint32_t
+from libc.stdint cimport uint64_t, uint8_t, uint32_t
 
 from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer
 from draken.core.buffers cimport DrakenVector
@@ -21,7 +21,6 @@ cdef class TimestampVector(Vector):
     cdef DrakenVarBuffer* _dict_values
     cdef uint8_t _dict_ordered
 
-    cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
     cdef DrakenVector* unified(self) noexcept
 
@@ -76,8 +75,7 @@ cdef TimestampVector from_dict_nullable(
 )
 cdef TimestampVector timestamp_dict_from_raw(
     int64_t num_rows,
-    uint8_t* packed_codes,
-    uint8_t code_width,
+    uint32_t* codes,
     DrakenVarBuffer* dict_values,
     uint8_t ordered,
     uint8_t* row_nulls,

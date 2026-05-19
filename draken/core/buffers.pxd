@@ -1,6 +1,7 @@
 from libc.stdint cimport int32_t
 from libc.stdint cimport uint8_t
 from libc.stdint cimport uint32_t
+from libc.stdint cimport uint64_t
 
 cdef extern from "core/buffers.h":
 
@@ -53,6 +54,48 @@ cdef extern from "core/buffers.h":
         uint8_t* data
         int32_t length
 
+# German string (a.k.a. Umbra string). 16-byte slot:
+#   inline (len <= 12):  uint32_t length + 12 inline bytes
+#   extern (len  > 12):  uint32_t length + 4-byte prefix + uint64_t arena_offset
+# Defined in draken/src/core/german_string.h. Treated as opaque on the Cython
+# side; production code accesses fields exclusively through the C inline
+# helpers (gs_equals, gs_compare, gs_data, gs_prefix4, gs_lp_word) which
+# inline cleanly via cdef extern.
+cdef extern from "core/german_string.h":
+    int GS_INLINE_MAX
+
+    ctypedef struct GermanString:
+        pass  # opaque; sizeof(GermanString) still resolves at C compile time
+
+    uint32_t gs_length(const GermanString* s) noexcept nogil
+    int      gs_is_inline(const GermanString* s) noexcept nogil
+    uint32_t gs_prefix4(const GermanString* s) noexcept nogil
+    const uint8_t* gs_data(const GermanString* s, const uint8_t* arena_base) noexcept nogil
+    int      gs_equals(const GermanString* a, const uint8_t* arena_a,
+                       const GermanString* b, const uint8_t* arena_b) noexcept nogil
+    int      gs_compare(const GermanString* a, const uint8_t* arena_a,
+                        const GermanString* b, const uint8_t* arena_b) noexcept nogil
+    # Builder-side initializers. Each zeroes the slot before writing so that
+    # short strings with length < 4 produce deterministic lp_word bytes.
+    void     gs_init_null(GermanString* s) nogil
+    void     gs_init_inline(GermanString* s, const uint8_t* src, uint32_t length) nogil
+    void     gs_init_extern(GermanString* s, const uint8_t* src,
+                            uint32_t length, uint64_t arena_offset) nogil
+
+cdef extern from "core/buffers.h":
+
+    # German-string storage. Used as the `data` payload of a string
+    # DrakenVector under the unified format (Track B).
+    ctypedef struct DrakenGermanArena:
+        GermanString* slots
+        uint8_t*      arena
+        size_t        length
+        size_t        arena_used
+        size_t        arena_cap
+        uint8_t*      null_bitmap
+        uint8_t       owns_buffers
+        DrakenType    type
+
     ctypedef struct DrakenConstantBuffer:
         DrakenType type
         DrakenType value_type
@@ -75,17 +118,33 @@ cdef extern from "core/buffers.h":
         size_t num_columns
         size_t num_rows
 
-    # Unified vector view — see buffers.h for encoding semantics.
-    # Invariant: selection == NULL  XOR  sel_width == 0.
+    # Unified vector view — one shape, one access pattern.
+    # Access is always: data[selection[i]] for i in [0, length).
+    # `selection` is never NULL; it points at the global identity (former dense),
+    # global zero (former constant), or owned uint32 codes (former dict).
+    # See buffers.h for full semantics and vector_alloc.h for constructors.
     ctypedef struct DrakenVector:
-        void*      data
-        size_t     data_length
-        void*      selection
-        uint8_t    sel_width
-        size_t     length
-        uint8_t*   validity
-        size_t     itemsize
-        DrakenType type
+        void*           data
+        const uint32_t* selection
+        uint32_t        data_length
+        uint32_t        length
+        uint8_t*        validity
+        DrakenType      type
+
+cdef extern from "core/vector_alloc.h":
+    const uint32_t* draken_identity_sel(uint32_t length) nogil
+    const uint32_t* draken_zero_sel(uint32_t length) nogil
+
+    DrakenVector draken_vector_from_dense(
+        void* data, uint32_t length, DrakenType type, uint8_t* validity) nogil
+
+    DrakenVector draken_vector_from_constant(
+        void* data, uint32_t length, DrakenType type, uint8_t* validity) nogil
+
+    DrakenVector draken_vector_from_dict(
+        void* data, uint32_t data_length,
+        const uint32_t* codes, uint32_t length,
+        DrakenType type, uint8_t* validity) nogil
 
 # Lightweight view struct returned by DictionaryVector.dict_accessor().
 # All fields are shortcuts into the underlying DrakenDictionaryBuffer so

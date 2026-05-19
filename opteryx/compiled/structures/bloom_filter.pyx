@@ -137,7 +137,7 @@ cdef class BloomFilter:
         cdef array result_arr = clone(_UINT8_TEMPLATE, num_bytes, True)  # zero-initialised
         cdef uint8_t[::1] result = result_arr
         cdef Integer64Vector valid_row_ids_vec = non_null_row_indices(relation, columns)
-        cdef const int64_t* valid_row_ids_ptr = <const int64_t*>valid_row_ids_vec.dense_ptr()
+        cdef const int64_t* valid_row_ids_ptr = <const int64_t*>valid_row_ids_vec.ptr.data
         cdef Py_ssize_t num_valid_rows = len(valid_row_ids_vec)
         cdef array row_hashes_arr = clone(_UINT64_TEMPLATE, num_rows, False)
         cdef uint64_t[::1] row_hashes = row_hashes_arr
@@ -210,7 +210,7 @@ cpdef BloomFilter create_bloom_filter(object relation, list columns):
     """
     cdef array row_hashes_arr = clone(_UINT64_TEMPLATE, relation.num_rows, False)
     cdef Integer64Vector valid_row_ids_vec = non_null_row_indices(relation, columns)
-    cdef const int64_t* valid_row_ids_ptr = <const int64_t*>valid_row_ids_vec.dense_ptr()
+    cdef const int64_t* valid_row_ids_ptr = <const int64_t*>valid_row_ids_vec.ptr.data
     cdef Py_ssize_t num_valid_rows = len(valid_row_ids_vec)
     cdef uint64_t[::1] row_hashes = row_hashes_arr
     cdef Py_ssize_t i

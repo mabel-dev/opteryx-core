@@ -37,7 +37,7 @@ cpdef StringVector vector_soundex(StringVector vec):
     cdef DrakenConstantStringPayload* csp
 
     # Constant encoding: process once, replicate
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         builder = string_vector_module.StringVectorBuilder.with_estimate(n, 4)
         if uv.validity != NULL:  # null constant
             for i in range(n):
@@ -59,7 +59,7 @@ cpdef StringVector vector_soundex(StringVector vec):
     # Dictionary encoding: per-row via string_vec_get_at (soundex can yield null from
     # non-null empty strings, so we cannot use dict->dict transform without rebuilding
     # the null bitmap; per-row access is correct and dict values are typically low cardinality)
-    if uv.selection != NULL:  # dictionary
+    if vec._german_dict_values != NULL:  # dictionary
         builder = string_vector_module.StringVectorBuilder.with_estimate(n, 4)
         for i in range(n):
             row = string_vec_get_at(vec, i)

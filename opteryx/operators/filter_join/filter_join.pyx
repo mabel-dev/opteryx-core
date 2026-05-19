@@ -111,10 +111,10 @@ cdef object _try_build_phash(Morsel morsel, list columns, object current_set):
     cdef void* dp
     cdef uint8_t* nulls
     if is_int8:
-        dp = (<Integer8Vector>col).dense_ptr()
+        dp = (<Integer8Vector>col).ptr.data
         nulls = (<Integer8Vector>col).null_bitmap_ptr()
     else:
-        dp = (<Integer16Vector>col).dense_ptr()
+        dp = (<Integer16Vector>col).ptr.data
         nulls = (<Integer16Vector>col).null_bitmap_ptr()
     if dp == NULL:
         return None  # non-dense encoding (RLE/const) → fall back
@@ -321,10 +321,10 @@ cdef Morsel _phash_probe(
     cdef void* dp
     cdef uint8_t* nulls
     if is_int8:
-        dp = (<Integer8Vector>col).dense_ptr()
+        dp = (<Integer8Vector>col).ptr.data
         nulls = (<Integer8Vector>col).null_bitmap_ptr()
     else:
-        dp = (<Integer16Vector>col).dense_ptr()
+        dp = (<Integer16Vector>col).ptr.data
         nulls = (<Integer16Vector>col).null_bitmap_ptr()
     if dp == NULL:
         return None

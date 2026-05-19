@@ -219,7 +219,7 @@ def vector_split(StringVector vec, char delimiter):
         return array_vector_from_parts(empty_child, empty_offsets, NULL, 0)
 
     # Constant encoding: split once, replicate n times
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         if uv.validity != NULL:  # null constant
             # Return ArrayVector with all nulls
             null_child = StringVector(0)  # Empty child for null values
@@ -260,7 +260,7 @@ def vector_split(StringVector vec, char delimiter):
             free(list_offsets)
 
     # Dictionary encoding: process per row via to_pylist (rare path)
-    if uv.selection != NULL:  # dictionary
+    if vec._german_dict_values != NULL:  # dictionary
         py_list = vec.to_pylist()
         delim_bytes = bytes([delimiter])
         result = []

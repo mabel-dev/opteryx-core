@@ -16,6 +16,7 @@ from draken.vectors.string_vector cimport from_packed_dict
 from draken.vectors import string_vector as string_vector_module
 from draken.core.buffers cimport (
     DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector,
+    DrakenGermanArena, GermanString, gs_length, gs_data,
 )
 
 cdef extern from "sha1.h":
@@ -52,9 +53,13 @@ cpdef StringVector vector_sha1(StringVector vec):
     cdef Py_ssize_t dict_size
     cdef DrakenVarBuffer* ndp
     cdef DrakenConstantStringPayload* csp
+    cdef DrakenGermanArena* sha1_gdv
+    cdef GermanString* sha1_slot
+    cdef const uint8_t* sha1_sdata
+    cdef uint32_t sha1_slen
     hex_buf[40] = 0
 
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         builder = string_vector_module.StringVectorBuilder.with_estimate(n, 40)
         if uv.validity != NULL:  # null constant
             for i in range(n):
@@ -69,22 +74,23 @@ cpdef StringVector vector_sha1(StringVector vec):
                 builder.append_bytes(hex_buf, 40)
         return builder.finish()
 
-    if uv.selection != NULL:  # dictionary
-        vbuf = <DrakenVarBuffer*>uv.data
-        dict_size = <Py_ssize_t>vbuf.length
+    if vec._german_dict_values != NULL:  # dictionary
+        sha1_gdv = vec._german_dict_values
+        dict_size = <Py_ssize_t>sha1_gdv.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 40)
         for i in range(dict_size):
-            start = vbuf.offsets[i]
-            end = vbuf.offsets[i + 1]
+            sha1_slot = &sha1_gdv.slots[i]
+            sha1_slen = gs_length(sha1_slot)
+            sha1_sdata = gs_data(sha1_slot, sha1_gdv.arena)
             SHA1_Init(&ctx)
-            SHA1_Update(&ctx, <const uint8_t*>vbuf.data + start, <size_t>(end - start))
+            SHA1_Update(&ctx, <const void*>sha1_sdata, <size_t>sha1_slen)
             SHA1_Final(digest, &ctx)
             _to_hex(digest, 20, hex_buf)
             dict_builder.append_bytes(hex_buf, 40)
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            <uint8_t*>uv.selection, uv.sel_width, n,
+            <uint8_t*>uv.selection, 4, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
             uv.validity,
         )
@@ -120,9 +126,13 @@ cpdef StringVector vector_sha256(StringVector vec):
     cdef Py_ssize_t dict_size
     cdef DrakenVarBuffer* ndp
     cdef DrakenConstantStringPayload* csp
+    cdef DrakenGermanArena* sha256_gdv
+    cdef GermanString* sha256_slot
+    cdef const uint8_t* sha256_sdata
+    cdef uint32_t sha256_slen
     hex_buf[64] = 0
 
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         builder = string_vector_module.StringVectorBuilder.with_estimate(n, 64)
         if uv.validity != NULL:  # null constant
             for i in range(n):
@@ -137,22 +147,23 @@ cpdef StringVector vector_sha256(StringVector vec):
                 builder.append_bytes(hex_buf, 64)
         return builder.finish()
 
-    if uv.selection != NULL:  # dictionary
-        vbuf = <DrakenVarBuffer*>uv.data
-        dict_size = <Py_ssize_t>vbuf.length
+    if vec._german_dict_values != NULL:  # dictionary
+        sha256_gdv = vec._german_dict_values
+        dict_size = <Py_ssize_t>sha256_gdv.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 64)
         for i in range(dict_size):
-            start = vbuf.offsets[i]
-            end = vbuf.offsets[i + 1]
+            sha256_slot = &sha256_gdv.slots[i]
+            sha256_slen = gs_length(sha256_slot)
+            sha256_sdata = gs_data(sha256_slot, sha256_gdv.arena)
             SHA256_Init(&ctx)
-            SHA256_Update(&ctx, <const uint8_t*>vbuf.data + start, <size_t>(end - start))
+            SHA256_Update(&ctx, <const void*>sha256_sdata, <size_t>sha256_slen)
             SHA256_Final(digest, &ctx)
             _to_hex(digest, 32, hex_buf)
             dict_builder.append_bytes(hex_buf, 64)
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            <uint8_t*>uv.selection, uv.sel_width, n,
+            <uint8_t*>uv.selection, 4, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
             uv.validity,
         )
@@ -188,9 +199,13 @@ cpdef StringVector vector_sha512(StringVector vec):
     cdef Py_ssize_t dict_size
     cdef DrakenVarBuffer* ndp
     cdef DrakenConstantStringPayload* csp
+    cdef DrakenGermanArena* sha512_gdv
+    cdef GermanString* sha512_slot
+    cdef const uint8_t* sha512_sdata
+    cdef uint32_t sha512_slen
     hex_buf[128] = 0
 
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         builder = string_vector_module.StringVectorBuilder.with_estimate(n, 128)
         if uv.validity != NULL:  # null constant
             for i in range(n):
@@ -205,22 +220,23 @@ cpdef StringVector vector_sha512(StringVector vec):
                 builder.append_bytes(hex_buf, 128)
         return builder.finish()
 
-    if uv.selection != NULL:  # dictionary
-        vbuf = <DrakenVarBuffer*>uv.data
-        dict_size = <Py_ssize_t>vbuf.length
+    if vec._german_dict_values != NULL:  # dictionary
+        sha512_gdv = vec._german_dict_values
+        dict_size = <Py_ssize_t>sha512_gdv.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 128)
         for i in range(dict_size):
-            start = vbuf.offsets[i]
-            end = vbuf.offsets[i + 1]
+            sha512_slot = &sha512_gdv.slots[i]
+            sha512_slen = gs_length(sha512_slot)
+            sha512_sdata = gs_data(sha512_slot, sha512_gdv.arena)
             SHA512_Init(&ctx)
-            SHA512_Update(&ctx, <const uint8_t*>vbuf.data + start, <size_t>(end - start))
+            SHA512_Update(&ctx, <const void*>sha512_sdata, <size_t>sha512_slen)
             SHA512_Final(digest, &ctx)
             _to_hex(digest, 64, hex_buf)
             dict_builder.append_bytes(hex_buf, 128)
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            <uint8_t*>uv.selection, uv.sel_width, n,
+            <uint8_t*>uv.selection, 4, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
             uv.validity,
         )

@@ -478,7 +478,7 @@ with open("README.md", "r", encoding="UTF8") as f:
 
 def make_draken_extension(module_path, source_file, language="c++", depends=None):
     if depends is None:
-        depends = ["draken/src/core/buffers.h"]
+        depends = ["draken/src/core/buffers.h", "draken/src/core/vector_alloc.h"]
 
     sources = [f"draken/{source_file}"]
     # Include SIMD implementations for all draken vector modules so
@@ -486,6 +486,12 @@ def make_draken_extension(module_path, source_file, language="c++", depends=None
     for s in ("src/cpp/simd_hash.cpp", "src/cpp/simd_bitops.cpp"):
         if s not in sources:
             sources.append(s)
+
+    # Unified DrakenVector constructors (one copy per extension; globals are
+    # extension-local — owned-vs-shared discrimination lives in the Cython
+    # typed wrapper, never in cross-extension pointer comparison).
+    if "draken/src/core/vector_alloc.cpp" not in sources:
+        sources.append("draken/src/core/vector_alloc.cpp")
 
     # Common SIMD/environment sources - CPU features and SIMDs
     for s in ("src/cpp/simd_env.cpp", "src/cpp/cpu_features.cpp", "src/cpp/simd_search.cpp"):
@@ -688,6 +694,7 @@ extensions = [
                 "rugo/src/parquet/compression.cpp",
                 "rugo/src/parquet/bloom_filter.cpp",
                 "src/cpp/cpu_features.cpp",
+                "draken/src/core/vector_alloc.cpp",
             ]
             + get_parquet_vendor_sources()
         ),
@@ -714,6 +721,7 @@ extensions = [
             "src/cpp/simd_env.cpp",
             "src/cpp/cpu_features.cpp",
             "src/cpp/simd_search.cpp",
+            "draken/src/core/vector_alloc.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",
@@ -733,6 +741,7 @@ extensions = [
             "src/cpp/simd_env.cpp",
             "src/cpp/cpu_features.cpp",
             "src/cpp/simd_search.cpp",
+            "draken/src/core/vector_alloc.cpp",
         ],
         include_dirs=include_dirs + ["rugo/src/_jsonl/core"],
         language="c++",
@@ -837,12 +846,22 @@ extensions = [
         language="c++",
     ),
     make_draken_extension(
+        "vectors.german_string_builder",
+        "vectors/german_string_builder.pyx",
+        language="c++",
+        depends=[
+            "draken/src/core/buffers.h",
+            "draken/src/core/german_string.h",
+            "draken/core/german_arena.pxd",
+        ],
+    ),
+    make_draken_extension(
         "vectors.date32_vector",
         "vectors/date32_vector.pyx",
         language="c++",
         depends=["draken/src/core/buffers.h", "draken/vectors/_date32_compare.hpp"],
     ),
-    make_draken_extension("vectors._decimal_vector", "vectors/_decimal_vector.pyx"),
+    make_draken_extension("vectors.decimal_vector", "vectors/decimal_vector.pyx"),
     make_draken_extension(
         "vectors.timestamp_vector",
         "vectors/timestamp_vector.pyx",

@@ -11,13 +11,14 @@
 
 from cpython.bytes cimport PyBytes_AS_STRING, PyBytes_FromStringAndSize
 from libc.stddef cimport size_t
-from libc.stdint cimport int32_t, int64_t, uint8_t, uint64_t, intptr_t
+from libc.stdint cimport int32_t, int64_t, uint8_t, uint32_t, uint64_t, intptr_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset, memcpy
 
 from draken.core.buffers cimport DrakenFixedBuffer, DrakenType
 from draken.core.buffers cimport DRAKEN_INT32
 from draken.core.buffers cimport DrakenVector
+from draken.core.buffers cimport draken_vector_from_dense, draken_vector_from_constant
 from draken.core.fixed_vector cimport (
     alloc_fixed_buffer, buf_dtype, buf_itemsize, buf_length, free_fixed_buffer,
 )
@@ -62,47 +63,26 @@ cdef class Integer32Vector(Vector):
         if not (is_null or value is None):
             (<int32_t*>vec.ptr.data)[0] = <int32_t>ivalue
         vec.ptr.length = <size_t>length
-        vec._unified_view.length = <size_t>length
-        vec._unified_view.data = vec.ptr.data
-        vec._unified_view.data_length = 1
-        vec._unified_view.itemsize = 4
-        vec._unified_view.type = DRAKEN_INT32
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = &_CONST_NULL_BYTE if is_null else NULL
+        vec._unified_view = draken_vector_from_constant(
+            vec.ptr.data, <uint32_t>length, DRAKEN_INT32,
+            &_CONST_NULL_BYTE if is_null else NULL)
         return vec
 
     def __cinit__(self, size_t length=0, bint wrap=False):
         if wrap:
             self.ptr = NULL
             self.owns_data = False
+            self._unified_view = draken_vector_from_dense(NULL, 0, DRAKEN_INT32, NULL)
         else:
             self.ptr = alloc_fixed_buffer(DRAKEN_INT32, length, 4)
             self.owns_data = True
-        self._unified_view.data = NULL
-        self._unified_view.data_length = 0
-        self._unified_view.selection = NULL
-        self._unified_view.sel_width = 0
-        self._unified_view.length = 0
-        self._unified_view.validity = NULL
-        self._unified_view.itemsize = 4
-        self._unified_view.type = DRAKEN_INT32
-        if not wrap:
-            self._unified_view.data = self.ptr.data
-            self._unified_view.data_length = <size_t>length
-            self._unified_view.length = <size_t>length
-            self._unified_view.validity = NULL
+            self._unified_view = draken_vector_from_dense(
+                self.ptr.data, <uint32_t>length, DRAKEN_INT32, NULL)
 
     def __dealloc__(self):
         if self.owns_data and self.ptr is not NULL:
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
-
-    cdef void* dense_ptr(self) noexcept:
-        cdef DrakenVector* uv = self.unified()
-        if self.ptr == NULL or uv.data_length == 1:
-            return NULL
-        return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
         cdef DrakenVector* uv = self.unified()
@@ -322,8 +302,8 @@ cdef class Integer32Vector(Vector):
                 else:
                     dst32[i] = 0
             out.ptr.null_bitmap = out_null
-        out._unified_view.length = <size_t>n
-        out._unified_view.validity = out.ptr.null_bitmap
+        out._unified_view = draken_vector_from_dense(
+            out.ptr.data, <uint32_t>n, DRAKEN_INT32, out.ptr.null_bitmap)
         return out
 
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n):
@@ -628,10 +608,6 @@ cdef Integer32Vector integer32_from_arrow(object array):
         vec.ptr.null_bitmap = NULL
 
     arr_len = <size_t>len(array)
-    vec._unified_view.data = vec.ptr.data
-    vec._unified_view.data_length = arr_len
-    vec._unified_view.length = arr_len
-    vec._unified_view.itemsize = 4
-    vec._unified_view.type = DRAKEN_INT32
-    vec._unified_view.validity = vec.ptr.null_bitmap
+    vec._unified_view = draken_vector_from_dense(
+        vec.ptr.data, <uint32_t>arr_len, DRAKEN_INT32, vec.ptr.null_bitmap)
     return vec

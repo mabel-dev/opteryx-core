@@ -76,7 +76,7 @@ cpdef BoolVector vector_ip_in_cidr(StringVector vec, StringVector cidr):
     cdef DrakenConstantStringPayload* _cidr_csp
     cdef bytes cidr_bytes
 
-    if cidr.ptr.offsets != NULL:  # ptr.offsets == NULL only for constant (always allocated for dense/dict)
+    if cidr.ptr.offsets != NULL or cidr._german_dict_values != NULL:  # constant iff both are NULL
         raise IncorrectTypeError("CIDR argument must be constant encoded StringVector")
     if _cidr_uv.validity != NULL:
         raise ValueError("CIDR argument must not be NULL")

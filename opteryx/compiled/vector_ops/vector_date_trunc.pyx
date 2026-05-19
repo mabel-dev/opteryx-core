@@ -23,32 +23,17 @@ cdef inline int64_t* _ts_materialize_dense(
 ) except NULL:
     """Return a dense int64_t* of `length` values for a TimestampVector's unified view.
 
-    For genuine dense (`selection == NULL` and `data_length == length`), aliases
-    `uv.data` — no copy, `owned[0]` stays False.
-
-    For constant (`data_length == 1`) or dict-encoded (`selection != NULL`),
-    mallocs a `length`-long buffer and gathers values from `uv.data` via the
-    appropriate path, setting `owned[0]` to True. Caller is responsible for
-    `free`-ing when owned.
-
-    Required because _vector_trunc_core's existing kernels read `ptr.data`
-    directly; dictionary-encoded vectors have selection!=NULL (data holds dict values)
-    and constant-encoded vectors have data_length==1. Q43 hit this via
-    `EventTime::TIMESTAMP[ms]` → `vector_cast_int64_to_timestamp` →
-    `timestamp_dict_from_raw` → dict-encoded TimestampVector → NULL deref.
+    Gathers values via uv.data[uv.selection[i]] — uniform access for dense,
+    constant, and dict-encoded vectors. Caller must free when owned[0] is True.
     """
     cdef int64_t* src = <int64_t*>uv.data
     cdef int64_t* dst
     cdef int64_t i
-    cdef uint8_t* codes
-    cdef uint8_t sw
-    cdef int64_t idx
-    cdef int64_t v
 
     owned[0] = False
 
-    if uv.selection == NULL and <int64_t>uv.data_length == length:
-        # Dense — alias the existing buffer.
+    if uv.data_length == <uint32_t>length:
+        # Dense (identity selection) — alias the existing buffer.
         return src
 
     dst = <int64_t*>malloc(<size_t>length * sizeof(int64_t))
@@ -56,25 +41,8 @@ cdef inline int64_t* _ts_materialize_dense(
         raise MemoryError()
     owned[0] = True
 
-    if uv.selection == NULL and uv.data_length == 1:
-        # Constant — broadcast data[0] across `length` rows.
-        v = src[0]
-        for i in range(length):
-            dst[i] = v
-        return dst
-
-    # Dict-encoded — gather via packed codes (1/2/4-byte width).
-    codes = <uint8_t*>uv.selection
-    sw = uv.sel_width
-    if sw == 1:
-        for i in range(length):
-            dst[i] = src[(<uint8_t*>codes)[i]]
-    elif sw == 2:
-        for i in range(length):
-            dst[i] = src[(<uint16_t*>codes)[i]]
-    else:
-        for i in range(length):
-            dst[i] = src[(<uint32_t*>codes)[i]]
+    for i in range(length):
+        dst[i] = src[uv.selection[i]]
     return dst
 
 # Constants
@@ -281,7 +249,7 @@ cdef inline str _extract_truncate_op(StringVector truncate_to) except *:
     cdef int32_t length
     cdef bytes raw
 
-    if uv.data_length == 1:  # constant
+    if truncate_to.ptr.offsets == NULL and truncate_to._german_dict_values == NULL:  # constant
         if uv.validity != NULL:  # null constant
             raise ValueError("DATE_TRUNC unit cannot be NULL")
         csp = <DrakenConstantStringPayload*>uv.data

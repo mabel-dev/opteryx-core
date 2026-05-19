@@ -1397,9 +1397,9 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
             flags = _const_flags_from_value_type(<int>uv.type)
             if uv.validity != NULL:
                 flags |= FLAG_HAS_NULLS
-        elif dtype == DRAKEN_STRING and uv.selection == NULL:
+        elif dtype == DRAKEN_STRING and (<StringVector>vec)._german_dict_values == NULL:
             encoding = ENCODING_VAR
-            var_ptr = (<StringVector>(<Vector>morsel.ptr.columns[i])).ptr
+            var_ptr = (<StringVector>vec).ptr
             null_len = ((row_count + 7) >> 3) if var_ptr.null_bitmap != NULL else 0
             if null_len > 0:
                 segments.append((SEG_NULL, <intptr_t>var_ptr.null_bitmap, null_len))
@@ -1409,15 +1409,15 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
                 values_len = <Py_ssize_t>var_ptr.offsets[row_count]
             segments.append((SEG_VALUES, <intptr_t>var_ptr.data, values_len))
             flags = FLAG_HAS_NULLS if null_len > 0 else 0
-        elif uv.selection != NULL:
+        elif dtype == DRAKEN_STRING and (<StringVector>vec)._german_dict_values != NULL:
             encoding = ENCODING_DICT
 
-            if uv.selection == NULL or uv.type != DRAKEN_STRING:
+            if uv.type != DRAKEN_STRING:
                 raise DrakenMorselStorageError("invalid dictionary accessor")
 
             row_nulls = uv.validity
             codes_ptr = <uint8_t*>uv.selection
-            code_width = uv.sel_width
+            code_width = 4
             var_ptr = <DrakenVarBuffer*>uv.data
             dict_ordered = bool(getattr(vec, "ordered", False))
 

@@ -424,7 +424,7 @@ static void serialize_string_plain(std::vector<uint8_t>& out, const DecodedColum
 //     uint32_t len
 //     uint8_t[len]  bytes        (0 bytes for null elements; len field still present)
 
-static inline int32_t _read_packed_code(const uint8_t* arr, size_t idx, uint8_t width) {
+static inline int32_t _decode_packed_parquet_code(const uint8_t* arr, size_t idx, uint8_t width) {
     if (width == 1) return static_cast<int32_t>(arr[idx]);
     if (width == 2) return static_cast<int32_t>(arr[2*idx] | (static_cast<uint32_t>(arr[2*idx+1]) << 8));
     return static_cast<int32_t>(arr[4*idx] | (static_cast<uint32_t>(arr[4*idx+1]) << 8) |
@@ -474,7 +474,7 @@ static void serialize_list_column(std::vector<uint8_t>& out, const DecodedColumn
             ChildEntry ce;
             ce.valid = true;
             if (use_codes) {
-                int32_t code = _read_packed_code(col.dict_codes_array.data(), i, col.code_width);
+                int32_t code = _decode_packed_parquet_code(col.dict_codes_array.data(), i, col.code_width);
                 ce.ptr = col.string_dict_arena.data() + col.string_dict_offsets[code];
                 ce.len = static_cast<uint32_t>(col.string_dict_lens[code]);
             } else if (use_dix && use_arena) {

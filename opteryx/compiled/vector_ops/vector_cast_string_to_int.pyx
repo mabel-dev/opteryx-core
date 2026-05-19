@@ -13,7 +13,7 @@ from libc.stdlib cimport malloc, free
 
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.integer64_vector cimport Integer64Vector, from_sequence as int64_from_sequence
-from draken.core.buffers cimport DrakenVarBuffer, DrakenVector
+from draken.core.buffers cimport DrakenVarBuffer, DrakenVector, DrakenGermanArena, GermanString, gs_length, gs_data
 
 
 cdef inline int64_t parse_int64(const char* data, int32_t length) except -1:
@@ -50,6 +50,10 @@ cpdef Integer64Vector vector_cast_bytes_to_int(StringVector vec):
     cdef int64_t* dict_ints
     cdef uint8_t* null_bm
     cdef uint32_t code
+    cdef DrakenGermanArena* csi_gdv
+    cdef GermanString* csi_slot
+    cdef const uint8_t* csi_sdata
+    cdef uint32_t csi_slen
 
     result_ptr = <int64_t*>malloc(n * sizeof(int64_t))
     if result_ptr == NULL:
@@ -58,24 +62,27 @@ cpdef Integer64Vector vector_cast_bytes_to_int(StringVector vec):
     try:
         result_view = <int64_t[:n]>result_ptr
 
-        if uv.selection != NULL:  # dictionary
-            dv = <DrakenVarBuffer*>uv.data
-            dict_size = <Py_ssize_t>dv.length
+        if vec._german_dict_values != NULL:  # dictionary
+            csi_gdv = vec._german_dict_values
+            dict_size = <Py_ssize_t>csi_gdv.length
             dict_ints = <int64_t*>malloc(<size_t>dict_size * sizeof(int64_t))
             if dict_ints == NULL:
                 raise MemoryError()
             try:
                 for i in range(dict_size):
+                    csi_slot = &csi_gdv.slots[i]
+                    csi_slen = gs_length(csi_slot)
+                    csi_sdata = gs_data(csi_slot, csi_gdv.arena)
                     dict_ints[i] = parse_int64(
-                        <const char*>dv.data + dv.offsets[i],
-                        dv.offsets[i + 1] - dv.offsets[i],
+                        <const char*>csi_sdata,
+                        <int32_t>csi_slen,
                     )
                 null_bm = uv.validity
                 for i in range(n):
                     if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
                         result_view[i] = 0
                     else:
-                        code = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
+                        code = uv.selection[i]
                         result_view[i] = dict_ints[code]
             finally:
                 free(dict_ints)

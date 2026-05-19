@@ -13,6 +13,7 @@ from draken.vectors import string_vector as string_vector_module
 from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.core.buffers cimport DrakenVarBuffer
 from draken.core.buffers cimport DrakenVector
+from draken.core.buffers cimport DrakenGermanArena, GermanString, gs_length, gs_data
 from libc.stdint cimport int32_t, uint8_t
 from cpython.bytes cimport PyBytes_FromStringAndSize
 
@@ -66,7 +67,7 @@ cdef inline object _trim_chars_bytes(object chars):
 
     if isinstance(chars, StringVector):
         uv = (<StringVector>chars).unified()
-        if uv.selection == NULL and (<StringVector>chars).ptr.offsets == NULL:  # constant
+        if (<StringVector>chars).ptr.offsets == NULL:  # constant
             if uv.validity != NULL:  # null constant
                 return None
             payload = <DrakenConstantStringPayload*>uv.data
@@ -120,8 +121,12 @@ cpdef StringVector vector_trim(StringVector vec, object chars=None):
     cdef uint8_t* data_ptr
     cdef int length, left, right
     cdef bytes trimmed_bytes
+    cdef DrakenGermanArena* trim_gdv
+    cdef GermanString* trim_slot
+    cdef const uint8_t* trim_sdata
+    cdef uint32_t trim_slen
 
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
@@ -151,15 +156,16 @@ cpdef StringVector vector_trim(StringVector vec, object chars=None):
         return builder.finish()
 
     # Dictionary encoding: trim each unique entry, repack with same codes
-    if uv.selection != NULL:  # dictionary
-        vbuf = <DrakenVarBuffer*>uv.data
-        dict_size = <Py_ssize_t>vbuf.length
+    if vec._german_dict_values != NULL:  # dictionary
+        trim_gdv = vec._german_dict_values
+        dict_size = <Py_ssize_t>trim_gdv.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 16)
         for i in range(dict_size):
-            start = vbuf.offsets[i]
-            end = vbuf.offsets[i + 1]
-            data_ptr = <uint8_t*>vbuf.data + start
-            length = end - start
+            trim_slot = &trim_gdv.slots[i]
+            trim_slen = gs_length(trim_slot)
+            trim_sdata = gs_data(trim_slot, trim_gdv.arena)
+            data_ptr = <uint8_t*>trim_sdata
+            length = <int>trim_slen
             left = 0
             while left < length and trim_flags[data_ptr[left]]:
                 left += 1
@@ -174,7 +180,7 @@ cpdef StringVector vector_trim(StringVector vec, object chars=None):
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            <uint8_t*>uv.selection, uv.sel_width, n,
+            <uint8_t*>uv.selection, 4, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
             uv.validity,
         )
@@ -237,8 +243,12 @@ cpdef StringVector vector_ltrim(StringVector vec, object chars=None):
     cdef uint8_t* data_ptr
     cdef int length, left
     cdef bytes trimmed_bytes
+    cdef DrakenGermanArena* ltrim_gdv
+    cdef GermanString* ltrim_slot
+    cdef const uint8_t* ltrim_sdata
+    cdef uint32_t ltrim_slen
 
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
@@ -264,15 +274,16 @@ cpdef StringVector vector_ltrim(StringVector vec, object chars=None):
         return builder.finish()
 
     # Dictionary encoding: ltrim each unique entry, repack with same codes
-    if uv.selection != NULL:  # dictionary
-        vbuf = <DrakenVarBuffer*>uv.data
-        dict_size = <Py_ssize_t>vbuf.length
+    if vec._german_dict_values != NULL:  # dictionary
+        ltrim_gdv = vec._german_dict_values
+        dict_size = <Py_ssize_t>ltrim_gdv.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 16)
         for i in range(dict_size):
-            start = vbuf.offsets[i]
-            end = vbuf.offsets[i + 1]
-            data_ptr = <uint8_t*>vbuf.data + start
-            length = end - start
+            ltrim_slot = &ltrim_gdv.slots[i]
+            ltrim_slen = gs_length(ltrim_slot)
+            ltrim_sdata = gs_data(ltrim_slot, ltrim_gdv.arena)
+            data_ptr = <uint8_t*>ltrim_sdata
+            length = <int>ltrim_slen
             left = 0
             while left < length and trim_flags[data_ptr[left]]:
                 left += 1
@@ -284,7 +295,7 @@ cpdef StringVector vector_ltrim(StringVector vec, object chars=None):
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            <uint8_t*>uv.selection, uv.sel_width, n,
+            <uint8_t*>uv.selection, 4, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
             uv.validity,
         )
@@ -339,8 +350,12 @@ cpdef StringVector vector_rtrim(StringVector vec, object chars=None):
     cdef uint8_t* data_ptr
     cdef int length, right
     cdef bytes trimmed_bytes
+    cdef DrakenGermanArena* rtrim_gdv
+    cdef GermanString* rtrim_slot
+    cdef const uint8_t* rtrim_sdata
+    cdef uint32_t rtrim_slen
 
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
@@ -366,15 +381,16 @@ cpdef StringVector vector_rtrim(StringVector vec, object chars=None):
         return builder.finish()
 
     # Dictionary encoding: rtrim each unique entry, repack with same codes
-    if uv.selection != NULL:  # dictionary
-        vbuf = <DrakenVarBuffer*>uv.data
-        dict_size = <Py_ssize_t>vbuf.length
+    if vec._german_dict_values != NULL:  # dictionary
+        rtrim_gdv = vec._german_dict_values
+        dict_size = <Py_ssize_t>rtrim_gdv.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 16)
         for i in range(dict_size):
-            start = vbuf.offsets[i]
-            end = vbuf.offsets[i + 1]
-            data_ptr = <uint8_t*>vbuf.data + start
-            length = end - start
+            rtrim_slot = &rtrim_gdv.slots[i]
+            rtrim_slen = gs_length(rtrim_slot)
+            rtrim_sdata = gs_data(rtrim_slot, rtrim_gdv.arena)
+            data_ptr = <uint8_t*>rtrim_sdata
+            length = <int>rtrim_slen
             right = length
             while right > 0 and trim_flags[data_ptr[right - 1]]:
                 right -= 1
@@ -386,7 +402,7 @@ cpdef StringVector vector_rtrim(StringVector vec, object chars=None):
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            <uint8_t*>uv.selection, uv.sel_width, n,
+            <uint8_t*>uv.selection, 4, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
             uv.validity,
         )

@@ -32,7 +32,6 @@ from libc.stdint cimport int32_t
 from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
 from libc.stdint cimport intptr_t
-from libc.stdint cimport uint16_t
 from libc.stdint cimport uint32_t
 from libc.stdint cimport uint64_t
 from libc.stdint cimport uint8_t
@@ -47,6 +46,7 @@ from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DrakenVector
 from draken.core.buffers cimport DRAKEN_INTERVAL
 from draken.core.buffers cimport DRAKEN_TIMESTAMP64
+from draken.core.buffers cimport draken_vector_from_dense, draken_vector_from_constant
 from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.fixed_vector cimport buf_dtype
 from draken.core.fixed_vector cimport buf_itemsize
@@ -90,15 +90,8 @@ cdef int8_t INTERVAL_OP_LT = 4
 cdef int8_t INTERVAL_OP_LTE = 5
 
 cdef void _refresh_unified_Interval(IntervalVector vec) noexcept:
-    cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
-    vec._unified_view.length = <size_t>n
-    vec._unified_view.itemsize = INTERVAL_ITEMSIZE
-    vec._unified_view.type = DRAKEN_INTERVAL
-    vec._unified_view.data = vec.ptr.data
-    vec._unified_view.data_length = <size_t>n
-    vec._unified_view.selection = NULL
-    vec._unified_view.sel_width = 0
-    vec._unified_view.validity = vec.ptr.null_bitmap
+    cdef uint32_t n = <uint32_t>vec.ptr.length
+    vec._unified_view = draken_vector_from_dense(vec.ptr.data, n, DRAKEN_INTERVAL, vec.ptr.null_bitmap)
 
 
 cdef inline bint _is_valid(DrakenFixedBuffer* ptr, Py_ssize_t idx) nogil:
@@ -249,14 +242,6 @@ cdef inline bint _is_valid_with_offset(uint8_t* bitmap, Py_ssize_t idx, Py_ssize
     return (bitmap[bit_index >> 3] >> (bit_index & 7)) & 1
 
 
-cdef inline uint32_t _read_packed_code(const uint8_t* codes, uint8_t code_width, Py_ssize_t row_idx) noexcept nogil:
-    if code_width == 1:
-        return (<const uint8_t*>codes)[row_idx]
-    if code_width == 2:
-        return (<const uint16_t*>codes)[row_idx]
-    return (<const uint32_t*>codes)[row_idx]
-
-
 cdef class IntervalVector(Vector):
 
     def __cinit__(self, size_t length=0, bint wrap=False):
@@ -265,29 +250,16 @@ cdef class IntervalVector(Vector):
         if wrap:
             self.ptr = NULL
             self.owns_data = False
+            self._unified_view = draken_vector_from_dense(NULL, 0, DRAKEN_INTERVAL, NULL)
         else:
             self.ptr = alloc_fixed_buffer(DRAKEN_INTERVAL, length, INTERVAL_ITEMSIZE)
             self.owns_data = True
-        self._unified_view.data = NULL
-        self._unified_view.data_length = 0
-        self._unified_view.selection = NULL
-        self._unified_view.sel_width = 0
-        self._unified_view.length = 0
-        self._unified_view.validity = NULL
-        self._unified_view.itemsize = INTERVAL_ITEMSIZE
-        self._unified_view.type = DRAKEN_INTERVAL
-        if not wrap:
             _refresh_unified_Interval(self)
 
     def __dealloc__(self):
         if self.owns_data and self.ptr is not NULL:
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
-
-    cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL:
-            return NULL
-        return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
         if self.ptr == NULL:
@@ -685,7 +657,6 @@ cdef class IntervalVector(Vector):
         cdef DrakenVector* uv_ts
         cdef int ts_unit_code
         cdef int64_t ts_raw
-        cdef uint32_t ts_code
         cdef bint values_is_date = isinstance(values, Date32Vector)
         cdef bint values_is_timestamp = isinstance(values, TimestampVector)
 
@@ -780,16 +751,6 @@ cdef class IntervalVector(Vector):
                     if uv_ts.validity != NULL:
                         continue
                     ts_raw = (<int64_t*>uv_ts.data)[0]
-                elif uv_ts.sel_width != 0:
-                    # dict-encoded vector
-                    if uv_ts.validity != NULL and not ((uv_ts.validity[value_index >> 3] >> (value_index & 7)) & 1):
-                        continue
-                    ts_code = _read_packed_code(
-                        <const uint8_t*>uv_ts.selection,
-                        uv_ts.sel_width,
-                        value_index,
-                    )
-                    ts_raw = (<int64_t*>uv_ts.data)[ts_code]
                 else:
                     # dense vector
                     if uv_ts.validity != NULL and not ((uv_ts.validity[value_index >> 3] >> (value_index & 7)) & 1):

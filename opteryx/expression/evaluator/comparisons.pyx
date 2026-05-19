@@ -9,7 +9,7 @@ via the unified DrakenVector view.
 
 import datetime
 
-from draken.vectors._decimal_vector import DecimalVector
+from draken.vectors.decimal_vector import DecimalVector
 from draken.vectors.bool_vector import BoolVector
 from draken.vectors.float64_vector import Float64Vector
 from draken.vectors.integer64_vector import Integer64Vector

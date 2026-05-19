@@ -18,7 +18,7 @@ from libcpp.vector cimport vector
 from draken.vectors.vector cimport Vector
 from draken.vectors.integer64_vector cimport Integer64Vector, _materialize_dict_int64
 from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
-from draken.vectors._decimal_vector cimport DecimalVector
+from draken.vectors.decimal_vector cimport DecimalVector
 from draken.core.buffers cimport DrakenVector
 
 
@@ -92,21 +92,11 @@ cdef class MedianFloat64Collector(BaseCollector):
         cdef double* fdata
         cdef list pylist
 
-        cdef DrakenVector* uv
-
         if isinstance(vec, Integer64Vector):
             iv = <Integer64Vector>vec
-            uv = iv.unified()
-            if uv.data_length == 1 and uv.length > 1:  # constant
-                if uv.validity != NULL:
-                    return
-                v = <double>(<int64_t*>uv.data)[0]
-                for i in range(n_rows):
-                    self._append(state_indices[i], v)
-                return
-            if uv.selection != NULL:
+            if iv._dict_values != NULL:
                 iv = _materialize_dict_int64(iv)
-            idata = <int64_t*>iv.dense_ptr()
+            idata = <int64_t*>iv.ptr.data
             nulls = iv.null_bitmap_ptr()
             for i in range(n_rows):
                 if nulls != NULL and not _num_bitmap_valid(nulls, i):
@@ -116,17 +106,9 @@ cdef class MedianFloat64Collector(BaseCollector):
 
         if isinstance(vec, Float64Vector):
             fv = <Float64Vector>vec
-            uv = fv.unified()
-            if uv.data_length == 1 and uv.length > 1:  # constant
-                if uv.validity != NULL:
-                    return
-                v = (<double*>uv.data)[0]
-                for i in range(n_rows):
-                    self._append(state_indices[i], v)
-                return
-            if uv.selection != NULL:
+            if fv._dict_values != NULL:
                 fv = _materialize_dict_float64(fv)
-            fdata = <double*>fv.dense_ptr()
+            fdata = <double*>fv.ptr.data
             nulls = fv.null_bitmap_ptr()
             for i in range(n_rows):
                 if nulls != NULL and not _num_bitmap_valid(nulls, i):

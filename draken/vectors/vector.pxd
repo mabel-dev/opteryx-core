@@ -29,18 +29,8 @@ cdef class _Uint64Buffer:
 
 cdef extern from "simd_hash.h":
     void simd_mix_hash(uint64_t* dest, const uint64_t* values, size_t count) nogil
-    void simd_mix_hash_from_dict_cw1(uint64_t* dest, const uint64_t* dict_lookup,
-                                      const uint8_t* codes, size_t count) nogil
-    void simd_mix_hash_from_dict_cw2(uint64_t* dest, const uint64_t* dict_lookup,
-                                      const uint16_t* codes, size_t count) nogil
     void simd_mix_hash_from_dict_cw4(uint64_t* dest, const uint64_t* dict_lookup,
                                       const uint32_t* codes, size_t count) nogil
-    void simd_mix_hash_from_dict_nullable_cw1(uint64_t* dest, const uint64_t* dict_lookup,
-                                               const uint8_t* codes, const uint8_t* null_bitmap,
-                                               size_t start_row, size_t count) nogil
-    void simd_mix_hash_from_dict_nullable_cw2(uint64_t* dest, const uint64_t* dict_lookup,
-                                               const uint16_t* codes, const uint8_t* null_bitmap,
-                                               size_t start_row, size_t count) nogil
     void simd_mix_hash_from_dict_nullable_cw4(uint64_t* dest, const uint64_t* dict_lookup,
                                                const uint32_t* codes, const uint8_t* null_bitmap,
                                                size_t start_row, size_t count) nogil
@@ -57,7 +47,6 @@ cdef class Vector:
     cdef bint here
     cdef DrakenVector _unified_view   # scratch storage for unified() return value
     cpdef object null_bitmap(self)
-    cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
     cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil

@@ -23,7 +23,7 @@ inputs are the correct Draken vector types.
 
 from libc.math cimport round as c_round
 from libc.math cimport pow as c_pow
-from libc.stdint cimport uint8_t, uint16_t, uint32_t, int64_t, int32_t, int16_t, int8_t
+from libc.stdint cimport uint8_t, uint32_t, int64_t, int32_t, int16_t, int8_t
 from libc.stdlib cimport malloc
 from libc.string cimport memcpy
 
@@ -48,13 +48,6 @@ cdef inline double _round_to_digits(double value, int digits) nogil:
     return c_round(value / scale) * scale
 
 
-# Fused-type specialization for dict-encoded paths
-ctypedef fused _code_t_round:
-    uint8_t
-    uint16_t
-    uint32_t
-
-
 ctypedef fused _dict_t_round:
     int8_t
     int16_t
@@ -66,7 +59,7 @@ ctypedef fused _dict_t_round:
 
 cdef inline void _round_dict_no_null(
     double* out_data,
-    _code_t_round* codes,
+    uint32_t* codes,
     _dict_t_round* dict_data,
     Py_ssize_t n,
     int digits,
@@ -78,7 +71,7 @@ cdef inline void _round_dict_no_null(
 
 cdef inline void _round_dict_with_null(
     double* out_data,
-    _code_t_round* codes,
+    uint32_t* codes,
     _dict_t_round* dict_data,
     uint8_t* nulls,
     Py_ssize_t n,
@@ -94,7 +87,7 @@ cdef inline void _round_dict_with_null(
 
 cdef inline void _dispatch_round_dict(
     double* out_data,
-    _code_t_round* codes,
+    uint32_t* codes,
     DrakenVarBuffer* dict_buf,
     int d_val_type,
     uint8_t* nulls,
@@ -162,7 +155,10 @@ cpdef Float64Vector vector_round_digits(object values, int digits):
     if isinstance(values, Vector):
         uv = (<Vector>values).unified()
 
-    if uv != NULL and uv.selection != NULL:
+    if uv != NULL and (
+        (isinstance(values, Integer64Vector) and (<Integer64Vector>values)._dict_values != NULL) or
+        (isinstance(values, Float64Vector) and (<Float64Vector>values)._dict_values != NULL)
+    ):
         dict_buf = <DrakenVarBuffer*> uv.data
         d_val_type = dict_buf.type
         in_null = uv.validity
@@ -177,12 +173,8 @@ cpdef Float64Vector vector_round_digits(object values, int digits):
         if d_val_type not in (DRAKEN_FLOAT64, DRAKEN_FLOAT32, DRAKEN_INT64, DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8):
             for i in range(n):
                 out_data[i] = 0.0
-        elif uv.sel_width == 1:
-            _dispatch_round_dict[uint8_t](out_data, <uint8_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, digits)
-        elif uv.sel_width == 2:
-            _dispatch_round_dict[uint16_t](out_data, <uint16_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, digits)
         else:
-            _dispatch_round_dict[uint32_t](out_data, <uint32_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, digits)
+            _dispatch_round_dict(out_data, <uint32_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, digits)
 
     elif isinstance(values, Integer64Vector):
         ivals = <Integer64Vector> values

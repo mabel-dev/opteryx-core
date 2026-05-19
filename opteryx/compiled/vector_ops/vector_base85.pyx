@@ -11,7 +11,7 @@
 
 from draken.vectors.string_vector cimport StringVector, from_packed_dict
 from draken.vectors import string_vector as string_vector_module
-from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector
+from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector, DrakenGermanArena, GermanString, gs_length, gs_data
 from opteryx.third_party.mabel.base85 cimport encode as b85_encode, decode as b85_decode
 
 
@@ -26,10 +26,14 @@ cpdef StringVector vector_base85_encode(StringVector data):
     cdef Py_ssize_t dict_size
     cdef DrakenVarBuffer* ndp
     cdef DrakenConstantStringPayload* csp
+    cdef DrakenGermanArena* b85e_gdv
+    cdef GermanString* b85e_slot
+    cdef const uint8_t* b85e_sdata
+    cdef uint32_t b85e_slen
 
     builder = string_vector_module.StringVectorBuilder.with_estimate(n, 32)
 
-    if uv.selection == NULL and data.ptr.offsets == NULL:  # constant
+    if data.ptr.offsets == NULL and data._german_dict_values == NULL:  # constant
         if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
@@ -41,19 +45,20 @@ cpdef StringVector vector_base85_encode(StringVector data):
                 builder.append(encoded_bytes)
         return builder.finish()
 
-    if uv.selection != NULL:  # dictionary
-        vbuf = <DrakenVarBuffer*>uv.data
-        dict_size = <Py_ssize_t>vbuf.length
+    if data._german_dict_values != NULL:  # dictionary
+        b85e_gdv = data._german_dict_values
+        dict_size = <Py_ssize_t>b85e_gdv.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 32)
         for i in range(dict_size):
-            start = vbuf.offsets[i]
-            end = vbuf.offsets[i + 1]
-            input_bytes = bytes((<uint8_t*>vbuf.data)[start:end])
+            b85e_slot = &b85e_gdv.slots[i]
+            b85e_slen = gs_length(b85e_slot)
+            b85e_sdata = gs_data(b85e_slot, b85e_gdv.arena)
+            input_bytes = bytes(b85e_sdata[:b85e_slen])
             dict_builder.append(b85_encode(input_bytes))
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            <uint8_t*>uv.selection, uv.sel_width, n,
+            <uint8_t*>uv.selection, 4, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
             uv.validity,
         )
@@ -84,10 +89,14 @@ cpdef StringVector vector_base85_decode(StringVector data):
     cdef Py_ssize_t dict_size
     cdef DrakenVarBuffer* ndp
     cdef DrakenConstantStringPayload* csp
+    cdef DrakenGermanArena* b85d_gdv
+    cdef GermanString* b85d_slot
+    cdef const uint8_t* b85d_sdata
+    cdef uint32_t b85d_slen
 
     builder = string_vector_module.StringVectorBuilder.with_estimate(n, 32)
 
-    if uv.selection == NULL and data.ptr.offsets == NULL:  # constant
+    if data.ptr.offsets == NULL and data._german_dict_values == NULL:  # constant
         if uv.validity != NULL:  # null constant
             for i in range(n):
                 builder.append_null()
@@ -99,19 +108,20 @@ cpdef StringVector vector_base85_decode(StringVector data):
                 builder.append(decoded_bytes)
         return builder.finish()
 
-    if uv.selection != NULL:  # dictionary
-        vbuf = <DrakenVarBuffer*>uv.data
-        dict_size = <Py_ssize_t>vbuf.length
+    if data._german_dict_values != NULL:  # dictionary
+        b85d_gdv = data._german_dict_values
+        dict_size = <Py_ssize_t>b85d_gdv.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 32)
         for i in range(dict_size):
-            start = vbuf.offsets[i]
-            end = vbuf.offsets[i + 1]
-            input_bytes = bytes((<uint8_t*>vbuf.data)[start:end])
+            b85d_slot = &b85d_gdv.slots[i]
+            b85d_slen = gs_length(b85d_slot)
+            b85d_sdata = gs_data(b85d_slot, b85d_gdv.arena)
+            input_bytes = bytes(b85d_sdata[:b85d_slen])
             dict_builder.append(b85_decode(input_bytes))
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            <uint8_t*>uv.selection, uv.sel_width, n,
+            <uint8_t*>uv.selection, 4, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
             uv.validity,
         )

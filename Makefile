@@ -174,6 +174,16 @@ h2o: ## Run H2O db-benchmark vs DuckDB (groupby + join, size=small)
 h2o-duckdb: ## Re-run DuckDB H2O calibration (regenerates duckdb/results.<size>.json)
 	@$(PYTHON) tests/performance/h2o/duckdb/runner.py --size small --workload both
 
+medicare1-fetch: ## Download and convert Medicare1 benchmark data
+	@$(PYTHON) tests/performance/medicare1/fetch_data.py
+
+medicare1: ## Run Medicare1 benchmark vs DuckDB
+	@clear || true
+	@$(PYTHON) tests/performance/medicare1/run.py
+
+medicare1-duckdb: ## Re-run DuckDB Medicare1 calibration (regenerates duckdb/results.json)
+	@$(PYTHON) tests/performance/medicare1/duckdb/runner.py
+
 # Aliases for backward compatibility
 t: test-quick
 

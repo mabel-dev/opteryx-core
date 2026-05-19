@@ -27,13 +27,14 @@ from libc.stdint cimport int32_t
 from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
 from libc.stdint cimport intptr_t
-from libc.stdint cimport uint64_t
+from libc.stdint cimport uint32_t, uint64_t
 from libc.stdint cimport uint8_t
 from libc.stdlib cimport malloc, free
 
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DRAKEN_DATE32
 from draken.core.buffers cimport DrakenVector
+from draken.core.buffers cimport draken_vector_from_dense, draken_vector_from_constant
 from draken.vectors.integer64_vector cimport _materialize_dict_int64
 from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.fixed_vector cimport buf_dtype
@@ -91,12 +92,9 @@ cdef class Date32Vector(Vector):
         cdef int32_t val = 0 if (is_null or value is None) else <int32_t>int(value)
         (<int32_t*>vec.ptr.data)[0] = val
         vec.ptr.length = <size_t>length
-        vec._unified_view.length = <size_t>length
-        vec._unified_view.data = vec.ptr.data
-        vec._unified_view.data_length = 1
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = &_CONST_NULL_BYTE if is_null else NULL
+        vec._unified_view = draken_vector_from_constant(
+            vec.ptr.data, <uint32_t>length, DRAKEN_DATE32,
+            &_CONST_NULL_BYTE if is_null else NULL)
         return vec
 
     @classmethod
@@ -128,26 +126,15 @@ cdef class Date32Vector(Vector):
         length>0, wrap=False  -> allocate new owned buffer
         wrap=True             -> do not allocate; caller will set ptr & metadata
         """
-        self._unified_view.itemsize = sizeof(int32_t)
-        self._unified_view.type = DRAKEN_DATE32
         if wrap:
             self.ptr = NULL
             self.owns_data = False
-            self._unified_view.data = NULL
-            self._unified_view.data_length = 0
-            self._unified_view.selection = NULL
-            self._unified_view.sel_width = 0
-            self._unified_view.length = 0
-            self._unified_view.validity = NULL
+            self._unified_view = draken_vector_from_dense(NULL, 0, DRAKEN_DATE32, NULL)
         else:
             self.ptr = alloc_fixed_buffer(DRAKEN_DATE32, length, 4)
             self.owns_data = True
-            self._unified_view.data = self.ptr.data
-            self._unified_view.data_length = length
-            self._unified_view.selection = NULL
-            self._unified_view.sel_width = 0
-            self._unified_view.length = length
-            self._unified_view.validity = self.ptr.null_bitmap
+            self._unified_view = draken_vector_from_dense(
+                self.ptr.data, <uint32_t>length, DRAKEN_DATE32, NULL)
 
     def __dealloc__(self):
         # Only free if we own the data and the pointer is not NULL
@@ -155,13 +142,9 @@ cdef class Date32Vector(Vector):
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
 
-    cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL or self._unified_view.data_length == 1:
-            return NULL
-        return self.ptr.data
-
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL or self._unified_view.data_length == 1:
+        cdef DrakenVector* uv = self.unified()
+        if self.ptr == NULL or uv.data_length == 1:
             return NULL
         return self.ptr.null_bitmap
 
@@ -243,12 +226,8 @@ cdef class Date32Vector(Vector):
         cdef int32_t* dst = <int32_t*> out.ptr.data
         for i in range(n):
             dst[i] = src[indices[i]]
-        out._unified_view.data = out.ptr.data
-        out._unified_view.data_length = <size_t>n
-        out._unified_view.length = <size_t>n
-        out._unified_view.selection = NULL
-        out._unified_view.sel_width = 0
-        out._unified_view.validity = out.ptr.null_bitmap
+        out._unified_view = draken_vector_from_dense(
+            out.ptr.data, <uint32_t>n, DRAKEN_DATE32, out.ptr.null_bitmap)
         return out
 
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n):
@@ -1080,12 +1059,8 @@ cdef Date32Vector from_arrow(object array):
     else:
         vec.ptr.null_bitmap = NULL
 
-    vec._unified_view.data = vec.ptr.data
-    vec._unified_view.data_length = vec.ptr.length
-    vec._unified_view.length = vec.ptr.length
-    vec._unified_view.selection = NULL
-    vec._unified_view.sel_width = 0
-    vec._unified_view.validity = vec.ptr.null_bitmap
+    vec._unified_view = draken_vector_from_dense(
+        vec.ptr.data, <uint32_t>vec.ptr.length, DRAKEN_DATE32, vec.ptr.null_bitmap)
     return vec
 
 
@@ -1107,12 +1082,8 @@ cdef Date32Vector from_dict(const int32_t[::1] codes, const int32_t[::1] diction
             raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
         dst[i] = dictionary[code]
 
-    vec._unified_view.data = vec.ptr.data
-    vec._unified_view.data_length = <size_t>row_count
-    vec._unified_view.length = <size_t>row_count
-    vec._unified_view.selection = NULL
-    vec._unified_view.sel_width = 0
-    vec._unified_view.validity = vec.ptr.null_bitmap
+    vec._unified_view = draken_vector_from_dense(
+        vec.ptr.data, <uint32_t>row_count, DRAKEN_DATE32, vec.ptr.null_bitmap)
     return vec
 
 
@@ -1152,12 +1123,8 @@ cdef Date32Vector from_dict_nullable(
         else:
             dst[i] = 0
 
-    vec._unified_view.data = vec.ptr.data
-    vec._unified_view.data_length = <size_t>row_count
-    vec._unified_view.length = <size_t>row_count
-    vec._unified_view.selection = NULL
-    vec._unified_view.sel_width = 0
-    vec._unified_view.validity = vec.ptr.null_bitmap
+    vec._unified_view = draken_vector_from_dense(
+        vec.ptr.data, <uint32_t>row_count, DRAKEN_DATE32, vec.ptr.null_bitmap)
     return vec
 
 
@@ -1181,10 +1148,6 @@ cpdef Date32Vector from_int64_vector(Integer64Vector source):
     cdef int64_t int32_max = 2147483647
     cdef DrakenVector* src_uv = source.unified()
     cdef int64_t cv
-
-    if src_uv.selection != NULL:
-        source = _materialize_dict_int64(source)
-        src_uv = source.unified()
 
     if src_uv.data_length == 1:
         if src_uv.validity != NULL:
@@ -1221,12 +1184,8 @@ cpdef Date32Vector from_int64_vector(Integer64Vector source):
             raise OverflowError(f"date32 value out of range at row {i}: {value64}")
         dst_data[i] = <int32_t>value64
 
-    out._unified_view.data = out.ptr.data
-    out._unified_view.data_length = <size_t>n
-    out._unified_view.length = <size_t>n
-    out._unified_view.selection = NULL
-    out._unified_view.sel_width = 0
-    out._unified_view.validity = out.ptr.null_bitmap
+    out._unified_view = draken_vector_from_dense(
+        out.ptr.data, <uint32_t>n, DRAKEN_DATE32, out.ptr.null_bitmap)
     return out
 
 
@@ -1252,12 +1211,8 @@ cdef Date32Vector _materialize_const_date32(Date32Vector const_vec):
         val = (<int32_t*>uv.data)[0]
         for i in range(n):
             dst[i] = val
-    dense._unified_view.data = dense.ptr.data
-    dense._unified_view.data_length = n
-    dense._unified_view.length = n
-    dense._unified_view.selection = NULL
-    dense._unified_view.sel_width = 0
-    dense._unified_view.validity = dense.ptr.null_bitmap
+    dense._unified_view = draken_vector_from_dense(
+        dense.ptr.data, <uint32_t>n, DRAKEN_DATE32, dense.ptr.null_bitmap)
     return dense
 
 

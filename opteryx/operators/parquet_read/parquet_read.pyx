@@ -52,7 +52,7 @@ from opteryx.types import OrsoTypes
 
 # Hoisted out of the per-row-group hot path. Previously these imports happened
 # 3× per row group via `from ... import ...` inside the loop body.
-from draken.vectors._decimal_vector import from_int64_vector as _int64_to_decimal
+from draken.vectors.decimal_vector import from_int64_vector as _int64_to_decimal
 from draken.vectors.date32_vector import from_int64_vector as _int64_to_date32
 from draken.vectors.timestamp_vector import from_int64_vector as _int64_to_timestamp
 # Integer64Vector is already cimported by the umbrella unit (_operators.pyx).

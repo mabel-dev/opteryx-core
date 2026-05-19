@@ -11,7 +11,7 @@
 """Draken-native ABS kernel."""
 
 from libc.math cimport fabs as c_fabs
-from libc.stdint cimport uint8_t, uint16_t, uint32_t, int64_t, int32_t, int16_t, int8_t
+from libc.stdint cimport uint8_t, uint32_t, int64_t, int32_t, int16_t, int8_t
 from libc.stdlib cimport malloc
 from libc.string cimport memcpy
 
@@ -34,7 +34,6 @@ cpdef Integer64Vector vector_abs_int64(object values):
     cdef Py_ssize_t i
     cdef int64_t val
 
-    cdef int64_t* in_data = NULL
     cdef DrakenVector* uv = NULL
     cdef int d_val_type
     cdef uint32_t code
@@ -42,7 +41,7 @@ cpdef Integer64Vector vector_abs_int64(object values):
     if isinstance(values, Vector):
         uv = (<Vector>values).unified()
 
-    if uv != NULL and uv.selection != NULL:
+    if uv != NULL:
         d_val_type = uv.type
         in_null = uv.validity
 
@@ -57,12 +56,7 @@ cpdef Integer64Vector vector_abs_int64(object values):
             if in_null != NULL and ((in_null[i >> 3] >> (i & 7)) & 1) == 0:
                 out_data[i] = 0
                 continue
-            if uv.sel_width == 1:
-                code = (<uint8_t*>uv.selection)[i]
-            elif uv.sel_width == 2:
-                code = (<uint16_t*>uv.selection)[i]
-            else:
-                code = (<uint32_t*>uv.selection)[i]
+            code = uv.selection[i]
             if d_val_type == DRAKEN_INT64:
                 val = (<int64_t*>uv.data)[code]
                 out_data[i] = val if val >= 0 else -val
@@ -121,7 +115,7 @@ cpdef Float64Vector vector_abs_float64(object values):
     if isinstance(values, Vector):
         uv = (<Vector>values).unified()
 
-    if uv != NULL and uv.selection != NULL:
+    if uv != NULL:
         d_val_type = uv.type
         in_null = uv.validity
 
@@ -136,12 +130,7 @@ cpdef Float64Vector vector_abs_float64(object values):
             if in_null != NULL and ((in_null[i >> 3] >> (i & 7)) & 1) == 0:
                 out_data[i] = 0.0
                 continue
-            if uv.sel_width == 1:
-                code = (<uint8_t*>uv.selection)[i]
-            elif uv.sel_width == 2:
-                code = (<uint16_t*>uv.selection)[i]
-            else:
-                code = (<uint32_t*>uv.selection)[i]
+            code = uv.selection[i]
             if d_val_type == DRAKEN_FLOAT64:
                 out_data[i] = c_fabs((<double*>uv.data)[code])
             elif d_val_type == DRAKEN_FLOAT32:
@@ -198,12 +187,7 @@ cpdef object vector_abs_constant(object values):
 
 cpdef object vector_abs(object values):
     """ABS(values): element-wise absolute value - dispatcher."""
-    cdef DrakenVector* uv = NULL
-    if isinstance(values, Vector):
-        uv = (<Vector>values).unified()
-    if uv != NULL and uv.data_length == 1:
-        return vector_abs_constant(values)
-    elif isinstance(values, Integer64Vector):
+    if isinstance(values, Integer64Vector):
         return vector_abs_int64(values)
     elif isinstance(values, Float64Vector):
         return vector_abs_float64(values)

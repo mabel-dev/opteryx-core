@@ -9,16 +9,17 @@
 # cython: optimize.unpack_method_calls=True
 
 from libc.stddef cimport size_t
-from libc.stdint cimport uint8_t, uint16_t, uint32_t, int64_t
+from libc.stdint cimport uint8_t, uint32_t, int64_t
 from libc.string cimport memset
 from cpython.array cimport array, clone
 
-from draken.core.buffers cimport DrakenVarBuffer, DrakenVector
+from draken.core.buffers cimport DrakenVarBuffer, DrakenVector, DrakenGermanArena, GermanString, gs_length, gs_data
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.float32_vector cimport Float32Vector
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.string_vector cimport _StringVectorCIterator
 from draken.vectors.string_vector cimport StringElement
+from draken.vectors.string_vector cimport StringVectorBuilder
 from draken.vectors.vector cimport Vector
 from draken.vectors.vector_vector cimport VectorVector
 
@@ -29,22 +30,21 @@ cdef inline bint _is_ascii_whitespace(unsigned char ch) noexcept nogil:
     return ch == 9 or ch == 10 or ch == 11 or ch == 12 or ch == 13 or ch == 32
 
 
-cdef inline uint32_t _read_code(const DrakenVector* uv, Py_ssize_t i) noexcept nogil:
-    if uv.sel_width == 1:
-        return (<uint8_t*>uv.selection)[i]
-    if uv.sel_width == 2:
-        return (<uint16_t*>uv.selection)[i]
-    return (<uint32_t*>uv.selection)[i]
-
-
-cdef StringVector _wrap_dictionary_values(object owner, const DrakenVector* uv):
-    cdef StringVector wrapped = StringVector(wrap=True)
-    wrapped.ptr = <DrakenVarBuffer*>uv.data
-    wrapped.owns_data = False
-    wrapped._arrow_data_buf = owner
-    wrapped._arrow_offs_buf = None
-    wrapped._arrow_null_buf = None
-    return wrapped
+cdef StringVector _materialize_german_dict_entries(StringVector vec):
+    """Build a dense StringVector containing only the dict entries (not full expansion)."""
+    cdef DrakenGermanArena* gdv = vec._german_dict_values
+    cdef Py_ssize_t dict_size = <Py_ssize_t>gdv.length
+    cdef GermanString* slot
+    cdef const uint8_t* sdata
+    cdef uint32_t slen
+    cdef Py_ssize_t j
+    cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(dict_size, 16)
+    for j in range(dict_size):
+        slot = &gdv.slots[j]
+        slen = gs_length(slot)
+        sdata = gs_data(slot, gdv.arena)
+        builder.append_bytes(<const char*>sdata, <Py_ssize_t>slen)
+    return builder.finish()
 
 
 cdef BoolVector _vector_match_against_string_vector(
@@ -170,7 +170,7 @@ cdef BoolVector _vector_match_against_dictionary_accessor(
         return out
 
     dict_matches = _vector_match_against_string_vector(
-        _wrap_dictionary_values(owner, uv),
+        _materialize_german_dict_entries(<StringVector>owner),
         provider,
         query_text,
         min_score,
@@ -180,7 +180,7 @@ cdef BoolVector _vector_match_against_dictionary_accessor(
     for i in range(n):
         if row_nulls != NULL and ((row_nulls[i >> 3] >> (i & 7)) & 1) == 0:
             continue
-        code = _read_code(uv, i)
+        code = uv.selection[i]
         if (dict_bits[code >> 3] >> (code & 7)) & 1:
             dst[i >> 3] |= <uint8_t>(1 << (i & 7))
 
@@ -248,7 +248,7 @@ cpdef BoolVector vector_match_against(
     if isinstance(values, Vector):
         uv = (<Vector>values).unified()
 
-    if uv != NULL and uv.selection != NULL:
+    if uv != NULL and isinstance(values, StringVector) and (<StringVector>values)._german_dict_values != NULL:
         return _vector_match_against_dictionary_accessor(values, uv, provider, query_text, min_score)
     if isinstance(values, StringVector):
         return _vector_match_against_string_vector(values, provider, query_text, min_score)

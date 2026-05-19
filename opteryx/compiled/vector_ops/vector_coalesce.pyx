@@ -96,23 +96,11 @@ cdef Vector _coalesce_fixed_kernel(
         found = False
         for arg_idx in range(n_args):
             uv = unified_vecs[arg_idx]
-            if uv.data_length == 1:
-                if uv.validity != NULL:
-                    continue
-                memcpy(
-                    out_data + row * itemsize,
-                    uv.data,
-                    itemsize,
-                )
-                found = True
-                break
-
-            src_ptr = src_ptrs[arg_idx]
-            if not _sel_is_valid(src_ptr.null_bitmap, row):
+            if not _sel_is_valid(uv.validity, row):
                 continue
             memcpy(
                 out_data + row * itemsize,
-                <char*>src_ptr.data + row * src_ptr.itemsize,
+                <char*>uv.data + uv.selection[row] * itemsize,
                 itemsize,
             )
             found = True
@@ -145,9 +133,7 @@ cdef Vector _coalesce_bool_kernel(
 ):
     """Pure C inner loop for BoolVector args.
 
-    bv_ptrs[i] is the BoolVector data buffer (same DrakenFixedBuffer struct,
-    interpreted as bit-packed). unified_vecs[i].data_length == 1 iff arg i is
-    constant-encoded; in that case the bool value is at uv.data[0].
+    Accesses bool values via unified DrakenVector: data[selection[row]] bit index.
     """
     cdef BoolVector result = BoolVector(length)
     cdef Py_ssize_t nbytes = (length + 7) >> 3
@@ -159,7 +145,6 @@ cdef Vector _coalesce_bool_kernel(
     cdef bint found
     cdef bint value
     cdef DrakenVector* uv
-    cdef DrakenFixedBuffer* bv_ptr
 
     if nbytes != 0:
         memset(out_bits, 0, nbytes)
@@ -168,22 +153,16 @@ cdef Vector _coalesce_bool_kernel(
             raise MemoryError()
         memset(out_null, 0, nbytes)
 
+    cdef uint32_t sel_idx
     for row in range(length):
         found = False
         value = False
         for arg_idx in range(n_args):
             uv = unified_vecs[arg_idx]
-            if uv.data_length == 1:
-                if uv.validity != NULL:
-                    continue
-                value = (<uint8_t*>uv.data)[0] != 0
-                found = True
-                break
-
-            bv_ptr = bv_ptrs[arg_idx]
-            if not _sel_is_valid(bv_ptr.null_bitmap, row):
+            if not _sel_is_valid(uv.validity, row):
                 continue
-            value = _sel_bit_is_set(<uint8_t*>bv_ptr.data, row)
+            sel_idx = uv.selection[row]
+            value = ((<uint8_t*>uv.data)[sel_idx >> 3] >> (sel_idx & 7)) & 1
             found = True
             break
 
@@ -327,10 +306,7 @@ cdef Vector _coalesce_fixed_dispatch(
         for arg_idx in range(n_args):
             vec = <Vector>arrays[arg_idx]
             unified_vecs[arg_idx] = vec.unified()
-            if unified_vecs[arg_idx].data_length == 1:
-                src_ptrs[arg_idx] = NULL
-            else:
-                src_ptrs[arg_idx] = _sel_fixed_ptr(vec)
+            src_ptrs[arg_idx] = _sel_fixed_ptr(vec)
 
         result = _coalesce_fixed_kernel(
             unified_vecs, src_ptrs, n_args, length, output_type, template
@@ -350,35 +326,21 @@ cdef Vector _coalesce_bool_dispatch(
     cdef DrakenVector** unified_vecs = <DrakenVector**>malloc(
         n_args * sizeof(DrakenVector*)
     )
-    cdef DrakenFixedBuffer** bv_ptrs = <DrakenFixedBuffer**>malloc(
-        n_args * sizeof(DrakenFixedBuffer*)
-    )
-    if unified_vecs == NULL or bv_ptrs == NULL:
-        if unified_vecs != NULL:
-            free(unified_vecs)
-        if bv_ptrs != NULL:
-            free(bv_ptrs)
+    if unified_vecs == NULL:
         raise MemoryError()
 
     cdef Py_ssize_t arg_idx
     cdef Vector vec
-    cdef BoolVector bv
     cdef Vector result
 
     try:
         for arg_idx in range(n_args):
             vec = <Vector>arrays[arg_idx]
             unified_vecs[arg_idx] = vec.unified()
-            if unified_vecs[arg_idx].data_length == 1:
-                bv_ptrs[arg_idx] = NULL
-            else:
-                bv = <BoolVector>vec
-                bv_ptrs[arg_idx] = bv.ptr
 
-        result = _coalesce_bool_kernel(unified_vecs, bv_ptrs, n_args, length)
+        result = _coalesce_bool_kernel(unified_vecs, NULL, n_args, length)
     finally:
         free(unified_vecs)
-        free(bv_ptrs)
 
     return result
 
@@ -413,7 +375,7 @@ cdef Vector _coalesce_string_dispatch(
         for arg_idx in range(n_args):
             sv = <StringVector>arrays[arg_idx]
             unified_vecs[arg_idx] = sv.unified()
-            if unified_vecs[arg_idx].selection == NULL and sv.ptr.offsets == NULL:
+            if sv.ptr.offsets == NULL and sv._german_dict_values == NULL:
                 const_payloads[arg_idx] = (
                     <DrakenConstantStringPayload*>unified_vecs[arg_idx].data
                 )

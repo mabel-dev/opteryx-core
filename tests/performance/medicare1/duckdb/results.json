@@ -1,0 +1,155 @@
+{
+  "system": "DuckDB (Medicare1 / Parquet views)",
+  "date": "2026-05-19",
+  "machine": "Justins-MacBook-Pro.local",
+  "iterations": 3,
+  "data_path": "testdata/medicare1",
+  "result": [
+    {
+      "name": "1",
+      "min_ms": 11.427749996073544,
+      "max_ms": 11.626000021351501,
+      "avg_ms": 11.544694347927967,
+      "iterations": 3,
+      "times": [
+        11.580333026358858,
+        11.626000021351501,
+        11.427749996073544
+      ],
+      "shape": [
+        15,
+        2
+      ],
+      "status": "ok"
+    },
+    {
+      "name": "2",
+      "min_ms": 43.53637498570606,
+      "max_ms": 44.721333018969744,
+      "avg_ms": 43.982847001946844,
+      "iterations": 3,
+      "times": [
+        43.69083300116472,
+        44.721333018969744,
+        43.53637498570606
+      ],
+      "shape": [
+        14196,
+        5
+      ],
+      "status": "ok"
+    },
+    {
+      "name": "3",
+      "min_ms": 10.077249986352399,
+      "max_ms": 10.176625015446916,
+      "avg_ms": 10.11050000670366,
+      "iterations": 3,
+      "times": [
+        10.176625015446916,
+        10.077249986352399,
+        10.077625018311664
+      ],
+      "shape": [
+        1,
+        1
+      ],
+      "status": "ok"
+    },
+    {
+      "name": "4",
+      "error": "ParserException: Parser Error: syntax error at or near \"$\"\n\nLINE 1: ...(CAST(Medicare1_2.Calculation_3170826185505725 AS double)) AS $__alias__0   FROM Medicare1_2   GROUP BY Medicare1_2.DRUG_...\n                                                                         ^",
+      "shape": [
+        0,
+        0
+      ],
+      "status": "error"
+    },
+    {
+      "name": "5",
+      "min_ms": 11.800291016697884,
+      "max_ms": 12.724207976134494,
+      "avg_ms": 12.340763331546137,
+      "iterations": 3,
+      "times": [
+        12.497791001806036,
+        12.724207976134494,
+        11.800291016697884
+      ],
+      "shape": [
+        15,
+        2
+      ],
+      "status": "ok"
+    },
+    {
+      "name": "6",
+      "error": "ParserException: Parser Error: syntax error at or near \"$\"\n\nLINE 1: ...(CAST(Medicare1_2.Calculation_3170826185505725 AS double)) AS $__alias__0   FROM Medicare1_2   GROUP BY Medicare1_2.DRUG_...\n                                                                         ^",
+      "shape": [
+        0,
+        0
+      ],
+      "status": "error"
+    },
+    {
+      "name": "7",
+      "min_ms": 21.64754198747687,
+      "max_ms": 22.11225000792183,
+      "avg_ms": 21.887111332034692,
+      "iterations": 3,
+      "times": [
+        22.11225000792183,
+        21.64754198747687,
+        21.901542000705376
+      ],
+      "shape": [
+        15439,
+        3
+      ],
+      "status": "ok"
+    },
+    {
+      "name": "8",
+      "min_ms": 9.954707988072187,
+      "max_ms": 10.120958002517,
+      "avg_ms": 10.019027657108381,
+      "iterations": 3,
+      "times": [
+        9.981416980735958,
+        9.954707988072187,
+        10.120958002517
+      ],
+      "shape": [
+        54,
+        2
+      ],
+      "status": "ok"
+    },
+    {
+      "name": "9",
+      "min_ms": 10.741417005192488,
+      "max_ms": 10.991666000336409,
+      "avg_ms": 10.904750000918284,
+      "iterations": 3,
+      "times": [
+        10.981166997225955,
+        10.991666000336409,
+        10.741417005192488
+      ],
+      "shape": [
+        15,
+        2
+      ],
+      "status": "ok"
+    },
+    {
+      "name": "10",
+      "error": "ParserException: Parser Error: syntax error at or near \"$\"\n\nLINE 1: ...(CAST(Medicare1_2.Calculation_3170826185505725 AS double)) AS $__alias__0   FROM Medicare1_2   GROUP BY Medicare1_2.DRUG_...\n                                                                         ^",
+      "shape": [
+        0,
+        0
+      ],
+      "status": "error"
+    }
+  ]
+}

@@ -38,7 +38,7 @@ from libc.math cimport cos   as c_cos
 from libc.math cimport sin   as c_sin
 from libc.math cimport sqrt  as c_sqrt
 
-from libc.stdint cimport uint8_t, uint16_t, uint32_t, int64_t, int32_t, int16_t, int8_t
+from libc.stdint cimport uint8_t, uint32_t, int64_t, int32_t, int16_t, int8_t
 from libc.stdlib cimport malloc
 from libc.string cimport memcpy
 
@@ -124,12 +124,6 @@ cdef inline double _trunc_scaled(double x, int scale) nogil:
 # Fused-type specialization for dict-encoded paths
 # ---------------------------------------------------------------------------
 
-ctypedef fused _code_t:
-    uint8_t
-    uint16_t
-    uint32_t
-
-
 ctypedef fused _dict_t:
     int8_t
     int16_t
@@ -141,7 +135,7 @@ ctypedef fused _dict_t:
 
 cdef inline void _ceil_dict_no_null(
     double* out_data,
-    _code_t* codes,
+    uint32_t* codes,
     _dict_t* dict_data,
     Py_ssize_t n,
     int scale,
@@ -153,7 +147,7 @@ cdef inline void _ceil_dict_no_null(
 
 cdef inline void _ceil_dict_with_null(
     double* out_data,
-    _code_t* codes,
+    uint32_t* codes,
     _dict_t* dict_data,
     uint8_t* nulls,
     Py_ssize_t n,
@@ -169,7 +163,7 @@ cdef inline void _ceil_dict_with_null(
 
 cdef inline void _dispatch_ceil_dict(
     double* out_data,
-    _code_t* codes,
+    uint32_t* codes,
     DrakenVarBuffer* dict_buf,
     int d_val_type,
     uint8_t* nulls,
@@ -207,7 +201,7 @@ cdef inline void _dispatch_ceil_dict(
 # Floor variants
 cdef inline void _floor_dict_no_null(
     double* out_data,
-    _code_t* codes,
+    uint32_t* codes,
     _dict_t* dict_data,
     Py_ssize_t n,
     int scale,
@@ -219,7 +213,7 @@ cdef inline void _floor_dict_no_null(
 
 cdef inline void _floor_dict_with_null(
     double* out_data,
-    _code_t* codes,
+    uint32_t* codes,
     _dict_t* dict_data,
     uint8_t* nulls,
     Py_ssize_t n,
@@ -235,7 +229,7 @@ cdef inline void _floor_dict_with_null(
 
 cdef inline void _dispatch_floor_dict(
     double* out_data,
-    _code_t* codes,
+    uint32_t* codes,
     DrakenVarBuffer* dict_buf,
     int d_val_type,
     uint8_t* nulls,
@@ -273,7 +267,7 @@ cdef inline void _dispatch_floor_dict(
 # Trunc variants
 cdef inline void _trunc_dict_no_null(
     double* out_data,
-    _code_t* codes,
+    uint32_t* codes,
     _dict_t* dict_data,
     Py_ssize_t n,
     int scale,
@@ -285,7 +279,7 @@ cdef inline void _trunc_dict_no_null(
 
 cdef inline void _trunc_dict_with_null(
     double* out_data,
-    _code_t* codes,
+    uint32_t* codes,
     _dict_t* dict_data,
     uint8_t* nulls,
     Py_ssize_t n,
@@ -301,7 +295,7 @@ cdef inline void _trunc_dict_with_null(
 
 cdef inline void _dispatch_trunc_dict(
     double* out_data,
-    _code_t* codes,
+    uint32_t* codes,
     DrakenVarBuffer* dict_buf,
     int d_val_type,
     uint8_t* nulls,
@@ -364,7 +358,10 @@ cpdef Float64Vector vector_ceil(object values, int scale=0):
     if isinstance(values, Vector):
         uv = (<Vector>values).unified()
 
-    if uv.selection != NULL:
+    if uv != NULL and (
+        (isinstance(values, Integer64Vector) and (<Integer64Vector>values)._dict_values != NULL) or
+        (isinstance(values, Float64Vector) and (<Float64Vector>values)._dict_values != NULL)
+    ):
         dict_buf   = <DrakenVarBuffer*>uv.data
         d_val_type = dict_buf.type
         in_null    = <uint8_t*>uv.validity
@@ -379,12 +376,8 @@ cpdef Float64Vector vector_ceil(object values, int scale=0):
         if d_val_type not in (DRAKEN_FLOAT64, DRAKEN_FLOAT32, DRAKEN_INT64, DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8):
             for i in range(n):
                 out_data[i] = 0.0
-        elif uv.sel_width == 1:
-            _dispatch_ceil_dict[uint8_t](out_data, <uint8_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
-        elif uv.sel_width == 2:
-            _dispatch_ceil_dict[uint16_t](out_data, <uint16_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
         else:
-            _dispatch_ceil_dict[uint32_t](out_data, <uint32_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
+            _dispatch_ceil_dict(out_data, <uint32_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
 
     elif isinstance(values, Integer64Vector):
         ivals    = <Integer64Vector>values
@@ -456,7 +449,10 @@ cpdef Float64Vector vector_floor(object values, int scale=0):
     if isinstance(values, Vector):
         uv = (<Vector>values).unified()
 
-    if uv.selection != NULL:
+    if uv != NULL and (
+        (isinstance(values, Integer64Vector) and (<Integer64Vector>values)._dict_values != NULL) or
+        (isinstance(values, Float64Vector) and (<Float64Vector>values)._dict_values != NULL)
+    ):
         dict_buf   = <DrakenVarBuffer*>uv.data
         d_val_type = dict_buf.type
         in_null    = <uint8_t*>uv.validity
@@ -471,12 +467,8 @@ cpdef Float64Vector vector_floor(object values, int scale=0):
         if d_val_type not in (DRAKEN_FLOAT64, DRAKEN_FLOAT32, DRAKEN_INT64, DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8):
             for i in range(n):
                 out_data[i] = 0.0
-        elif uv.sel_width == 1:
-            _dispatch_floor_dict[uint8_t](out_data, <uint8_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
-        elif uv.sel_width == 2:
-            _dispatch_floor_dict[uint16_t](out_data, <uint16_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
         else:
-            _dispatch_floor_dict[uint32_t](out_data, <uint32_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
+            _dispatch_floor_dict(out_data, <uint32_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
 
     elif isinstance(values, Integer64Vector):
         ivals    = <Integer64Vector>values
@@ -548,7 +540,10 @@ cpdef Float64Vector vector_trunc(object values, int scale=0):
     if isinstance(values, Vector):
         uv = (<Vector>values).unified()
 
-    if uv.selection != NULL:
+    if uv != NULL and (
+        (isinstance(values, Integer64Vector) and (<Integer64Vector>values)._dict_values != NULL) or
+        (isinstance(values, Float64Vector) and (<Float64Vector>values)._dict_values != NULL)
+    ):
         dict_buf   = <DrakenVarBuffer*>uv.data
         d_val_type = dict_buf.type
         in_null    = <uint8_t*>uv.validity
@@ -563,12 +558,8 @@ cpdef Float64Vector vector_trunc(object values, int scale=0):
         if d_val_type not in (DRAKEN_FLOAT64, DRAKEN_FLOAT32, DRAKEN_INT64, DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8):
             for i in range(n):
                 out_data[i] = 0.0
-        elif uv.sel_width == 1:
-            _dispatch_trunc_dict[uint8_t](out_data, <uint8_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
-        elif uv.sel_width == 2:
-            _dispatch_trunc_dict[uint16_t](out_data, <uint16_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
         else:
-            _dispatch_trunc_dict[uint32_t](out_data, <uint32_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
+            _dispatch_trunc_dict(out_data, <uint32_t*>uv.selection, dict_buf, d_val_type, in_null, <Py_ssize_t>n, scale)
 
     elif isinstance(values, Integer64Vector):
         ivals    = <Integer64Vector>values
@@ -644,7 +635,10 @@ cpdef Float64Vector vector_power(object base_array, double exponent):
     if isinstance(base_array, Vector):
         uv = (<Vector>base_array).unified()
 
-    if uv.selection != NULL:
+    if uv != NULL and (
+        (isinstance(base_array, Integer64Vector) and (<Integer64Vector>base_array)._dict_values != NULL) or
+        (isinstance(base_array, Float64Vector) and (<Float64Vector>base_array)._dict_values != NULL)
+    ):
         dict_buf   = <DrakenVarBuffer*>uv.data
         d_val_type = dict_buf.type
         in_null    = <uint8_t*>uv.validity
@@ -660,12 +654,7 @@ cpdef Float64Vector vector_power(object base_array, double exponent):
             if in_null != NULL and ((in_null[i >> 3] >> (i & 7)) & 1) == 0:
                 out_data[i] = 0.0
                 continue
-            if uv.sel_width == 1:
-                code = (<uint8_t*>uv.selection)[i]
-            elif uv.sel_width == 2:
-                code = (<uint16_t*>uv.selection)[i]
-            else:
-                code = (<uint32_t*>uv.selection)[i]
+            code = uv.selection[i]
             if d_val_type == DRAKEN_FLOAT64:
                 out_data[i] = c_pow((<double*>dict_buf.data)[code], exponent)
             elif d_val_type == DRAKEN_FLOAT32:

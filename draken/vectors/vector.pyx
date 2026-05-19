@@ -126,22 +126,20 @@ cdef class Vector:
     def encoding(self):
         """Return the storage encoding as an integer (0=dense, 1=dict, 3=constant).
 
-        Derived from the unified view — no stored field.  Compare against
-        draken.encoding.DRAKEN_ENCODING_* constants.
+        Informational only — derived from data_length vs length. The data path
+        does NOT branch on this; all access is data[selection[i]]. Exposed for
+        Python-side introspection (tests, debug, the registrar UI).
         """
         cdef DrakenVector* uv = self.unified()
-        if uv.data_length == 1:
+        if uv.data_length == 1 and uv.length != 1:
             return 3  # DRAKEN_ENCODING_CONSTANT
-        if uv.selection != NULL:
+        if uv.data_length < uv.length:
             return 1  # DRAKEN_ENCODING_DICTIONARY
         return 0      # DRAKEN_ENCODING_DENSE
 
     cpdef object null_bitmap(self):
         """Return the null bitmap for this vector, or ``None`` when the vector has no nulls."""
         return None
-
-    cdef void* dense_ptr(self) noexcept:
-        return NULL
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
         return NULL

@@ -82,7 +82,7 @@ def _coerce_decimal_vector(decoded: Any, col_stats: dict) -> Any:
         except (ValueError, IndexError):
             pass
 
-    from draken.vectors._decimal_vector import from_int64_vector as _int64_to_decimal
+    from draken.vectors.decimal_vector import from_int64_vector as _int64_to_decimal
 
     return _int64_to_decimal(decoded, precision, scale)
 

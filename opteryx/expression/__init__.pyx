@@ -188,7 +188,7 @@ def _typed_constant_vector(value, length: int, schema_column):
         )
 
     if target_type == OrsoTypes.DECIMAL:
-        from draken.vectors._decimal_vector import DecimalVector
+        from draken.vectors.decimal_vector import DecimalVector
 
         return DecimalVector.from_constant(None if is_null else value, length, is_null=is_null)
 

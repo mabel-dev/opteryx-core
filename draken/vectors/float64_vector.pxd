@@ -1,7 +1,7 @@
 from libc.stdint cimport int32_t
 from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
-from libc.stdint cimport uint64_t, uint8_t
+from libc.stdint cimport uint32_t, uint64_t, uint8_t
 
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DrakenVarBuffer
@@ -16,7 +16,6 @@ cdef class Float64Vector(Vector):
     cdef bint owns_data
     cdef DrakenVarBuffer* _dict_values
     cdef uint8_t _dict_ordered
-    cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
     cdef DrakenVector* unified(self) noexcept
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
@@ -84,8 +83,7 @@ cdef Float64Vector from_packed_dict(
 cdef Float64Vector from_sequence(double[::1] data)
 cdef Float64Vector _materialize_dict_float64(Float64Vector vec)
 cdef Float64Vector make_float64_dict_only(
-    const uint8_t* codes,
-    uint8_t code_width,
+    const uint32_t* codes,
     Py_ssize_t row_count,
     const double* dictionary,
     Py_ssize_t dict_size,

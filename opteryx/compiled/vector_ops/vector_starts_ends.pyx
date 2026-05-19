@@ -17,7 +17,7 @@ from libc.stdlib cimport malloc, free
 from libc.string cimport memcmp, memset
 from cython cimport Py_ssize_t
 
-from draken.core.buffers cimport DrakenVector, DrakenConstantStringPayload, DrakenVarBuffer
+from draken.core.buffers cimport DrakenVector, DrakenConstantStringPayload, DrakenVarBuffer, DrakenGermanArena, GermanString, gs_length, gs_data
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.string_vector cimport StringVector
 
@@ -58,14 +58,6 @@ cdef inline void _finalize_bool_null_bitmap(BoolVector out, Py_ssize_t n, bint a
     if n & 7:
         out_null[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
     out.ptr.null_bitmap = out_null
-
-
-cdef inline uint32_t _starts_ends_read_packed_code(const uint8_t* codes, uint8_t code_width, Py_ssize_t i) noexcept nogil:
-    if code_width == 1:
-        return (<const uint8_t*>codes)[i]
-    if code_width == 2:
-        return (<const uint16_t*>codes)[i]
-    return (<const uint32_t*>codes)[i]
 
 
 
@@ -291,18 +283,17 @@ cdef BoolVector _dictionary_starts_ends(
     cdef BoolVector out = BoolVector(<size_t>n)
     cdef uint8_t* out_bits = <uint8_t*>out.ptr.data
     cdef uint8_t* row_nulls = uv.validity
-    cdef uint8_t* codes = <uint8_t*>uv.selection
-    cdef uint8_t code_width = uv.sel_width
-    cdef DrakenVarBuffer* dict_values = <DrakenVarBuffer*>uv.data
-    cdef Py_ssize_t dict_size = <Py_ssize_t>dict_values.length
-    cdef int32_t* dict_offsets = dict_values.offsets
-    cdef uint8_t* dict_data = <uint8_t*>dict_values.data
-    cdef Py_ssize_t i, d, start, length
+    cdef DrakenGermanArena* se_gdv = vec._german_dict_values
+    cdef GermanString* se_slot
+    cdef const uint8_t* se_sdata
+    cdef uint32_t se_slen
+    cdef Py_ssize_t dict_size = <Py_ssize_t>se_gdv.length
+    cdef Py_ssize_t i, d, length
     cdef uint32_t code
     cdef bint all_valid = True
     cdef uint8_t* dict_match = NULL
     cdef uint8_t* lower_needle = NULL
-    cdef uint8_t* lower_dict = NULL
+    cdef uint8_t* lower_entry = NULL
     cdef bint matched
 
     memset(out_bits, 0, nbytes)
@@ -323,52 +314,68 @@ cdef BoolVector _dictionary_starts_ends(
             raise MemoryError()
         _lower_ascii_buffer(lower_needle, needle, needle_len)
 
-        lower_dict = <uint8_t*>malloc(<size_t>dict_offsets[dict_size])
-        if lower_dict == NULL:
-            free(dict_match)
-            free(lower_needle)
-            raise MemoryError()
-        _lower_ascii_buffer(lower_dict, dict_data, dict_offsets[dict_size])
-
-        # Case‑insensitive dictionary matching – branch only over dict_size (small)
+        # Case-insensitive: lowercase each entry on the fly
         if is_suffix:
             for d in range(dict_size):
-                start = dict_offsets[d]
-                length = dict_offsets[d + 1] - start
-                matched = _match_suffix_ci(lower_dict + start, length, lower_needle, needle_len)
+                se_slot = &se_gdv.slots[d]
+                se_slen = gs_length(se_slot)
+                se_sdata = gs_data(se_slot, se_gdv.arena)
+                length = <Py_ssize_t>se_slen
+                lower_entry = <uint8_t*>malloc(<size_t>se_slen if se_slen > 0 else 1)
+                if lower_entry == NULL:
+                    free(dict_match)
+                    free(lower_needle)
+                    raise MemoryError()
+                _lower_ascii_buffer(lower_entry, se_sdata, length)
+                matched = _match_suffix_ci(lower_entry, length, lower_needle, needle_len)
+                free(lower_entry)
+                lower_entry = NULL
                 if negated:
                     matched = not matched
                 if matched:
                     dict_match[d] = 1
         else:
             for d in range(dict_size):
-                start = dict_offsets[d]
-                length = dict_offsets[d + 1] - start
-                matched = _match_prefix_ci(lower_dict + start, length, lower_needle, needle_len)
+                se_slot = &se_gdv.slots[d]
+                se_slen = gs_length(se_slot)
+                se_sdata = gs_data(se_slot, se_gdv.arena)
+                length = <Py_ssize_t>se_slen
+                lower_entry = <uint8_t*>malloc(<size_t>se_slen if se_slen > 0 else 1)
+                if lower_entry == NULL:
+                    free(dict_match)
+                    free(lower_needle)
+                    raise MemoryError()
+                _lower_ascii_buffer(lower_entry, se_sdata, length)
+                matched = _match_prefix_ci(lower_entry, length, lower_needle, needle_len)
+                free(lower_entry)
+                lower_entry = NULL
                 if negated:
                     matched = not matched
                 if matched:
                     dict_match[d] = 1
 
         free(lower_needle)
-        free(lower_dict)
 
     else:
-        # Case‑sensitive dictionary matching
+        # Case-sensitive dictionary matching
         if is_suffix:
             for d in range(dict_size):
-                start = dict_offsets[d]
-                length = dict_offsets[d + 1] - start
-                matched = _match_suffix(dict_data + start, length, needle, needle_len)
+                se_slot = &se_gdv.slots[d]
+                se_slen = gs_length(se_slot)
+                se_sdata = gs_data(se_slot, se_gdv.arena)
+                length = <Py_ssize_t>se_slen
+                matched = _match_suffix(se_sdata, length, needle, needle_len)
                 if negated:
                     matched = not matched
                 if matched:
                     dict_match[d] = 1
         else:
             for d in range(dict_size):
-                start = dict_offsets[d]
-                length = dict_offsets[d + 1] - start
-                matched = _match_prefix(dict_data + start, length, needle, needle_len)
+                se_slot = &se_gdv.slots[d]
+                se_slen = gs_length(se_slot)
+                se_sdata = gs_data(se_slot, se_gdv.arena)
+                length = <Py_ssize_t>se_slen
+                matched = _match_prefix(se_sdata, length, needle, needle_len)
                 if negated:
                     matched = not matched
                 if matched:
@@ -379,7 +386,7 @@ cdef BoolVector _dictionary_starts_ends(
         if not _row_is_valid(row_nulls, i):
             all_valid = False
             continue
-        code = _starts_ends_read_packed_code(codes, code_width, i)
+        code = uv.selection[i]
         if code < <uint32_t>dict_size and dict_match[code]:
             _set_bit(out_bits, i)
 
@@ -399,7 +406,7 @@ cdef inline void _extract_const_needle(
 ) except *:
     cdef DrakenVector* uv = sv.unified()
     cdef DrakenConstantStringPayload* csp
-    if uv.data_length != 1:  # not constant
+    if sv.ptr.offsets != NULL:  # not constant
         raise ValueError(f"{fn_name} does not support non-constant needle")
     if uv.validity != NULL:  # null constant
         needle_out[0] = NULL
@@ -416,9 +423,9 @@ cpdef BoolVector vector_starts_with(StringVector vec, StringVector prefix):
     _extract_const_needle(prefix, &needle, &needle_len, b"vector_starts_with")
 
     cdef DrakenVector* uv = vec.unified()
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         return _constant_starts_ends(vec, needle, needle_len, False, False, False)
-    if uv.selection != NULL:  # dictionary
+    if vec._german_dict_values != NULL:  # dictionary
         return _dictionary_starts_ends(vec, needle, needle_len, False, False, False)
     return _dense_starts_ends(vec, needle, needle_len, False, False, False)
 
@@ -429,9 +436,9 @@ cpdef BoolVector vector_ci_starts_with(StringVector vec, StringVector prefix):
     _extract_const_needle(prefix, &needle, &needle_len, b"vector_ci_starts_with")
 
     cdef DrakenVector* uv = vec.unified()
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         return _constant_starts_ends(vec, needle, needle_len, True, False, False)
-    if uv.selection != NULL:  # dictionary
+    if vec._german_dict_values != NULL:  # dictionary
         return _dictionary_starts_ends(vec, needle, needle_len, True, False, False)
     return _dense_starts_ends(vec, needle, needle_len, True, False, False)
 
@@ -442,9 +449,9 @@ cpdef BoolVector vector_ends_with(StringVector vec, StringVector suffix):
     _extract_const_needle(suffix, &needle, &needle_len, b"vector_ends_with")
 
     cdef DrakenVector* uv = vec.unified()
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         return _constant_starts_ends(vec, needle, needle_len, False, False, True)
-    if uv.selection != NULL:  # dictionary
+    if vec._german_dict_values != NULL:  # dictionary
         return _dictionary_starts_ends(vec, needle, needle_len, False, False, True)
     return _dense_starts_ends(vec, needle, needle_len, False, False, True)
 
@@ -455,8 +462,8 @@ cpdef BoolVector vector_ci_ends_with(StringVector vec, StringVector suffix):
     _extract_const_needle(suffix, &needle, &needle_len, b"vector_ci_ends_with")
 
     cdef DrakenVector* uv = vec.unified()
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         return _constant_starts_ends(vec, needle, needle_len, True, False, True)
-    if uv.selection != NULL:  # dictionary
+    if vec._german_dict_values != NULL:  # dictionary
         return _dictionary_starts_ends(vec, needle, needle_len, True, False, True)
     return _dense_starts_ends(vec, needle, needle_len, True, False, True)

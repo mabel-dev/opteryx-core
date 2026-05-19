@@ -17,7 +17,6 @@
 # API:
 #   StringRow          — {data, length, is_null} for one string value
 #   string_vec_get_at  — random access across all 3 encodings (const/dict/dense)
-#   _read_packed_code  — dict code at row i (1/2/4-byte wide)
 #
 # Single-input string-to-string functions use the three-branch pattern directly:
 #   1. const:  process one value, replicate n times
@@ -27,32 +26,15 @@
 # Multi-input functions use string_vec_get_at for O(1) per-row access on any
 # encoding for secondary inputs (needle, search, replace_val, etc.).
 
-from libc.stdint cimport int32_t, uint8_t, uint16_t, uint32_t
+from libc.stdint cimport int32_t, uint32_t
 from draken.vectors.string_vector cimport StringVector
-from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector
+from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector, DrakenGermanArena, GermanString, gs_length, gs_data
 
 
 cdef struct StringRow:
     const char* data     # NULL when is_null is True
     Py_ssize_t length
     bint is_null
-
-
-# ---------------------------------------------------------------------------
-# _read_packed_code
-# Reads a selection-vector code at row i (1/2/4-byte wide).
-# ---------------------------------------------------------------------------
-
-cdef inline uint32_t _read_packed_code(
-    const uint8_t* codes,
-    uint8_t code_width,
-    Py_ssize_t i,
-) noexcept nogil:
-    if code_width == 1:
-        return (<const uint8_t*>codes)[i]
-    if code_width == 2:
-        return (<const uint16_t*>codes)[i]
-    return (<const uint32_t*>codes)[i]
 
 
 # ---------------------------------------------------------------------------
@@ -64,12 +46,14 @@ cdef inline StringRow string_vec_get_at(StringVector vec, Py_ssize_t i) noexcept
     cdef StringRow row
     cdef DrakenVector* uv = vec.unified()
     cdef DrakenVarBuffer* vbuf
+    cdef DrakenGermanArena* gdv
     cdef DrakenConstantStringPayload* csp
     cdef uint8_t* null_bm
     cdef uint32_t code
     cdef int32_t start
+    cdef GermanString* slot
 
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         if uv.validity != NULL:  # null constant
             row.data = NULL
             row.length = 0
@@ -88,13 +72,13 @@ cdef inline StringRow string_vec_get_at(StringVector vec, Py_ssize_t i) noexcept
         row.is_null = True
         return row
 
-    if uv.selection != NULL:  # dictionary
-        vbuf = <DrakenVarBuffer*>uv.data
-        code = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
-        start = vbuf.offsets[code]
-        row.data = <const char*>vbuf.data + start
-        row.length = vbuf.offsets[code + 1] - start
-    else:  # dense
+    if vec._german_dict_values != NULL:  # dictionary — backed by DrakenGermanArena
+        gdv = vec._german_dict_values
+        code = uv.selection[i]
+        slot = &gdv.slots[code]
+        row.data = <const char*>gs_data(slot, gdv.arena)
+        row.length = <Py_ssize_t>gs_length(slot)
+    else:  # dense — backed by DrakenVarBuffer
         vbuf = <DrakenVarBuffer*>uv.data
         start = vbuf.offsets[i]
         row.data = <const char*>vbuf.data + start

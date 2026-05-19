@@ -37,7 +37,6 @@ from opteryx.compiled.structures.memory_pool cimport MemoryPool, ReadResult, Cpp
 from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.integer64_vector cimport from_decoded as int64_from_decoded
 from draken.vectors.integer64_vector cimport from_packed_dict as int64_from_packed_dict
-from draken.vectors.integer64_vector cimport make_int64_dict_only
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.float64_vector cimport from_decoded as float64_from_decoded
 from draken.vectors.float64_vector cimport from_packed_dict as float64_from_packed_dict
@@ -136,7 +135,7 @@ cdef object _build_numeric_dict_int64(const uint8_t* p, uint32_t num_rows,
     cdef uint32_t values_len
     p = _read_u32(p, &values_len)
     cdef const int64_t* dict_ptr = <const int64_t*>p
-    return make_int64_dict_only(
+    return int64_from_packed_dict(
         codes_ptr, code_width, <Py_ssize_t>num_rows,
         dict_ptr, <Py_ssize_t>dict_size,
         null_bitmap if null_bitmap_len > 0 else NULL,
@@ -176,7 +175,7 @@ cdef object _build_numeric_dict_float64(const uint8_t* p, uint32_t num_rows,
     cdef uint32_t values_len
     p = _read_u32(p, &values_len)
     cdef const double* dict_ptr = <const double*>p
-    return make_float64_dict_only(
+    return float64_from_packed_dict(
         codes_ptr, code_width, <Py_ssize_t>num_rows,
         dict_ptr, <Py_ssize_t>dict_size,
         null_bitmap if null_bitmap_len > 0 else NULL,

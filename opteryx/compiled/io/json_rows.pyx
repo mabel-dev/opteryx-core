@@ -723,7 +723,7 @@ cpdef StringVector morsel_to_json_rows(
                 encoder = ENC_FLOAT64
             elif isinstance(vec_obj, BoolVector):
                 encoder = ENC_BOOL
-            elif _uv != NULL and _uv.selection != NULL:
+            elif _uv != NULL:
                 encoder = ENC_GENERIC
             else:
                 raise NotImplementedError(

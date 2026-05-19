@@ -23,7 +23,7 @@ from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AS_STRING
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from libc.string cimport memcpy, memset
 
-from libc.stdint cimport int32_t, int8_t, intptr_t, uint64_t, uint8_t, int64_t
+from libc.stdint cimport int32_t, int8_t, intptr_t, uint32_t, uint64_t, uint8_t, int64_t
 from libc.stdlib cimport malloc, free
 from libc.stddef cimport size_t
 
@@ -35,6 +35,7 @@ cdef extern from "simd_bitops.h" nogil:
 
 from draken.core.buffers cimport DrakenFixedBuffer, DrakenVector
 from draken.core.buffers cimport DRAKEN_BOOL
+from draken.core.buffers cimport draken_vector_from_dense, draken_vector_from_constant
 from draken.core.fixed_vector cimport alloc_fixed_buffer, buf_dtype, buf_length, free_fixed_buffer
 from draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash, simd_popcount
 
@@ -66,12 +67,9 @@ cdef class BoolVector(Vector):
         cdef uint8_t val = 0 if (is_null or value is None) else <uint8_t>(1 if bool(value) else 0)
         (<uint8_t*>vec.ptr.data)[0] = val
         vec.ptr.length = <size_t>length
-        vec._unified_view.length = <size_t>length
-        vec._unified_view.data = vec.ptr.data
-        vec._unified_view.data_length = 1
-        vec._unified_view.selection = NULL
-        vec._unified_view.sel_width = 0
-        vec._unified_view.validity = &_CONST_NULL_BYTE if is_null else NULL
+        vec._unified_view = draken_vector_from_constant(
+            vec.ptr.data, <uint32_t>length, DRAKEN_BOOL,
+            &_CONST_NULL_BYTE if is_null else NULL)
         return vec
 
     def __cinit__(self, size_t length=0, bint wrap=False):
@@ -80,6 +78,7 @@ cdef class BoolVector(Vector):
         if wrap:
             self.ptr = NULL
             self.owns_data = False
+            self._unified_view = draken_vector_from_dense(NULL, 0, DRAKEN_BOOL, NULL)
         else:
             # bit-packed, so allocate ceil(length/8) bytes
             nbytes = (length + 7) >> 3
@@ -93,19 +92,8 @@ cdef class BoolVector(Vector):
                 if nbytes > 0:
                     memset(self.ptr.data, 0, nbytes)
             self.owns_data = True
-        self._unified_view.data = NULL
-        self._unified_view.data_length = 0
-        self._unified_view.selection = NULL
-        self._unified_view.sel_width = 0
-        self._unified_view.length = 0
-        self._unified_view.validity = NULL
-        self._unified_view.itemsize = 0
-        self._unified_view.type = DRAKEN_BOOL
-        if not wrap:
-            self._unified_view.data = self.ptr.data
-            self._unified_view.data_length = <size_t>length
-            self._unified_view.length = <size_t>length
-            self._unified_view.validity = NULL
+            self._unified_view = draken_vector_from_dense(
+                self.ptr.data, <uint32_t>length, DRAKEN_BOOL, NULL)
 
     def __dealloc__(self):
         if self.owns_data and self.ptr is not NULL:
@@ -559,8 +547,8 @@ cdef class BoolVector(Vector):
                 dst[i >> 3] |= (1 << (i & 7))
 
         out.ptr.null_bitmap = out_null
-        out._unified_view.length = <size_t>n
-        out._unified_view.validity = out_null
+        out._unified_view = draken_vector_from_dense(
+            out.ptr.data, <uint32_t>n, DRAKEN_BOOL, out.ptr.null_bitmap)
         return out
 
     cpdef BoolVector _compare_scalar(self, bint value, int op):
@@ -1443,10 +1431,8 @@ cdef BoolVector from_decoded(
     vec.ptr.data = data
     vec.ptr.null_bitmap = null_bitmap
     vec.owns_data = True
-    vec._unified_view.data = data
-    vec._unified_view.data_length = length
-    vec._unified_view.length = length
-    vec._unified_view.validity = null_bitmap
+    vec._unified_view = draken_vector_from_dense(
+        data, <uint32_t>length, DRAKEN_BOOL, null_bitmap)
     return vec
 
 
@@ -1525,11 +1511,8 @@ cdef BoolVector from_arrow(object array):
     else:
         vec.ptr.null_bitmap = NULL
 
-    cdef size_t _arr_len = <size_t>len(array)
-    vec._unified_view.data = vec.ptr.data
-    vec._unified_view.data_length = _arr_len
-    vec._unified_view.length = _arr_len
-    vec._unified_view.validity = vec.ptr.null_bitmap
+    vec._unified_view = draken_vector_from_dense(
+        vec.ptr.data, <uint32_t>len(array), DRAKEN_BOOL, vec.ptr.null_bitmap)
     return vec
 
 
@@ -1563,11 +1546,8 @@ cdef BoolVector from_sequence(uint8_t[::1] data):
     vec.ptr.length = <size_t> (data.shape[0] * 8)
     vec.ptr.data = <void*> &data[0]
     vec.ptr.null_bitmap = NULL
-    cdef size_t _seq_len = <size_t>(data.shape[0] * 8)
-    vec._unified_view.data = vec.ptr.data
-    vec._unified_view.data_length = _seq_len
-    vec._unified_view.length = _seq_len
-    vec._unified_view.validity = NULL
+    vec._unified_view = draken_vector_from_dense(
+        vec.ptr.data, <uint32_t>(data.shape[0] * 8), DRAKEN_BOOL, NULL)
     return vec
 
 
@@ -1604,8 +1584,8 @@ cdef BoolVector bool_vector_from_bits(
         vec.ptr.null_bitmap = bm
     else:
         vec.ptr.null_bitmap = NULL
-    vec._unified_view.length = <size_t>n
-    vec._unified_view.validity = vec.ptr.null_bitmap
+    vec._unified_view = draken_vector_from_dense(
+        vec.ptr.data, <uint32_t>n, DRAKEN_BOOL, vec.ptr.null_bitmap)
     return vec
 
 

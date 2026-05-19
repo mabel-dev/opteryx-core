@@ -21,7 +21,8 @@ Used to enable efficient interchange between Draken and Apache Arrow for analyti
 
 from libc.stdlib cimport free
 from libc.stdlib cimport malloc
-from libc.stdint cimport int64_t, uint8_t
+from libc.stdint cimport int64_t, uint8_t, uint16_t, uint32_t
+from libc.string cimport memcpy
 
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DrakenType
@@ -61,7 +62,7 @@ from draken.vectors.float64_vector cimport from_sequence as float64_from_sequenc
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.bool_vector cimport from_sequence as bool_from_sequence
 from draken.vectors.scalar_constructors cimport from_sequence as constant_from_sequence
-from draken.vectors._decimal_vector cimport from_arrow as decimal_from_arrow
+from draken.vectors.decimal_vector cimport from_arrow as decimal_from_arrow
 from draken.interop.vector_sequence cimport vector_from_sequence as generic_vector_from_sequence
 
 cdef object _typed_constant_from_arrow_value(object value_type, object value, Py_ssize_t length, bint is_null):
@@ -218,7 +219,7 @@ cdef object _int64_vector_from_dictionary_array(object pa_dict_array):
     cdef Py_ssize_t row_count = len(pa_dict_array)
     cdef Py_ssize_t dict_size
     cdef uint8_t code_width
-    cdef const uint8_t* codes_ptr = NULL
+    cdef const uint8_t* raw_codes_ptr = NULL
     cdef const int64_t* dict_ptr = NULL
     cdef const uint8_t* valid_ptr = NULL
     cdef uint8_t[::1] codes_view
@@ -226,6 +227,8 @@ cdef object _int64_vector_from_dictionary_array(object pa_dict_array):
     cdef uint8_t[::1] valid_view
     cdef Py_ssize_t i
     cdef Py_ssize_t byte_offset
+    cdef uint32_t* expanded_codes = NULL
+    cdef const uint32_t* final_codes_ptr = NULL
 
     indices = pa_dict_array.indices
     dictionary = pa_dict_array.dictionary
@@ -253,7 +256,7 @@ cdef object _int64_vector_from_dictionary_array(object pa_dict_array):
     codes_ba = bytearray(bytes(idx_bufs[1])[byte_offset:byte_offset + row_count * code_width])
     codes_view = codes_ba
     if row_count > 0:
-        codes_ptr = &codes_view[0]
+        raw_codes_ptr = &codes_view[0]
 
     # Build validity bitmap (Arrow-style: 1=valid, 0=null)
     null_mask = pc.is_null(pa_dict_array).to_pylist()
@@ -266,7 +269,26 @@ cdef object _int64_vector_from_dictionary_array(object pa_dict_array):
         valid_view = valid_ba
         valid_ptr = &valid_view[0]
 
-    return int64_make_dict_only(codes_ptr, code_width, row_count, dict_ptr, dict_size, valid_ptr)
+    # Expand codes to uint32 (make_int64_dict_only always uses uint32 codes)
+    if row_count > 0:
+        expanded_codes = <uint32_t*>malloc(row_count * sizeof(uint32_t))
+        if expanded_codes == NULL:
+            raise MemoryError()
+        try:
+            if code_width == 1:
+                for i in range(row_count):
+                    expanded_codes[i] = <uint32_t>(<const uint8_t*>raw_codes_ptr)[i]
+            elif code_width == 2:
+                for i in range(row_count):
+                    expanded_codes[i] = <uint32_t>(<const uint16_t*>raw_codes_ptr)[i]
+            else:
+                memcpy(expanded_codes, raw_codes_ptr, row_count * sizeof(uint32_t))
+            final_codes_ptr = expanded_codes
+            return int64_make_dict_only(final_codes_ptr, row_count, dict_ptr, dict_size, valid_ptr)
+        finally:
+            free(expanded_codes)
+    else:
+        return int64_make_dict_only(NULL, 0, dict_ptr, dict_size, valid_ptr)
 
 
 cdef object _string_vector_from_dictionary_array(object pa_dict_array):

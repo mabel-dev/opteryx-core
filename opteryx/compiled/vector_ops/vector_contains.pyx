@@ -10,7 +10,8 @@
 
 from draken.vectors.string_vector cimport StringVector, DrakenVarBuffer
 from draken.vectors.bool_vector cimport BoolVector
-from draken.core.buffers cimport DrakenVector, DrakenConstantStringPayload
+from draken.core.buffers cimport DrakenVector, DrakenConstantStringPayload, DrakenGermanArena, GermanString
+from draken.core.buffers cimport gs_length, gs_data
 from cpython.bytes cimport PyBytes_AS_STRING
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
@@ -77,6 +78,10 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
     cdef uint32_t code
     cdef uint8_t byte
     cdef DrakenVarBuffer* vbuf
+    cdef DrakenGermanArena* cn_gdict
+    cdef GermanString* cn_slot
+    cdef const uint8_t* cn_sdata
+    cdef uint32_t cn_slen
     cdef const uint8_t* dict_data
     cdef uint8_t* dict_contains_results = NULL
     cdef uint8_t* data_lower = NULL
@@ -85,7 +90,7 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
     cdef DrakenConstantStringPayload* csp
 
     # Constant vector case
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         if uv.validity != NULL:  # null constant
             return _constant_bool_result(n, False, True)
         csp = <DrakenConstantStringPayload*>uv.data
@@ -169,16 +174,14 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
 
     try:
         # Dictionary-encoded path: check each unique value once
-        if uv.selection != NULL:  # dictionary
-            vbuf = <DrakenVarBuffer*>uv.data
-            if vbuf == NULL or vbuf.data == NULL:
+        if vec._german_dict_values != NULL:  # dictionary
+            cn_gdict = <DrakenGermanArena*>uv.data
+            if cn_gdict == NULL:
                 return out  # Fallback to empty result
 
-            dict_size = <Py_ssize_t>vbuf.length
-            if uv.selection == NULL or dict_size == 0:
+            dict_size = <Py_ssize_t>cn_gdict.length
+            if dict_size == 0:
                 return out  # Fallback to empty result
-
-            dict_data = <const uint8_t*>vbuf.data
 
             # Allocate results array for each dictionary entry
             dict_contains_results = <uint8_t*>malloc(dict_size)
@@ -187,13 +190,13 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
 
             # Test each unique dictionary value once
             for dict_idx in range(dict_size):
-                start = vbuf.offsets[dict_idx]
-                end = vbuf.offsets[dict_idx + 1]
-                str_len = end - start
+                cn_slot = &cn_gdict.slots[dict_idx]
+                cn_slen = gs_length(cn_slot)
+                cn_sdata = gs_data(cn_slot, cn_gdict.arena)
 
                 if ignore_case:
                     if _sv_contains_ci(
-                        dict_data + start, <Py_ssize_t>str_len,
+                        cn_sdata, <Py_ssize_t>cn_slen,
                         ndl_lower if ndl_lower != NULL else <uint8_t*>ndl_ptr_char,
                         ndl_len,
                         tbl,
@@ -203,7 +206,7 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
                         dict_contains_results[dict_idx] = 0
                 else:
                     if _sv_contains_cs(
-                        dict_data + start, <Py_ssize_t>str_len,
+                        cn_sdata, <Py_ssize_t>cn_slen,
                         <const uint8_t*>ndl_ptr_char,
                         ndl_len,
                         tbl,
@@ -216,7 +219,7 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
             for i in range(n):
                 if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                     continue
-                code = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
+                code = uv.selection[i]
                 if dict_contains_results[code]:
                     dst[i >> 3] |= (1 << (i & 7))
 

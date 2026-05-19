@@ -32,7 +32,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
-from draken.vectors._decimal_vector import DecimalVector
+from draken.vectors.decimal_vector import DecimalVector
 
 # ---------------------------------------------------------------------------
 # Helpers

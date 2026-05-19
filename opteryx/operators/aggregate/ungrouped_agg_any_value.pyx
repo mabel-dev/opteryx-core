@@ -59,7 +59,7 @@ cdef class AnyValueAggregate(UngroupedAggregate):
                 if uv.validity == NULL:
                     self._value = (<int64_t*>uv.data)[0]; self._seen = True
                 return
-            idata = <const int64_t*>vec_i.dense_ptr()
+            idata = <const int64_t*>vec_i.ptr.data
             nulls = vec_i.null_bitmap_ptr()
             for i in range(nrows):
                 if nulls == NULL or _bitmap_is_valid(nulls, i):
@@ -73,7 +73,7 @@ cdef class AnyValueAggregate(UngroupedAggregate):
                 if uv.validity == NULL:
                     self._value = (<double*>uv.data)[0]; self._seen = True
                 return
-            fdata = <const double*>vec_f.dense_ptr()
+            fdata = <const double*>vec_f.ptr.data
             nulls = vec_f.null_bitmap_ptr()
             for i in range(nrows):
                 if nulls == NULL or _bitmap_is_valid(nulls, i):
@@ -91,7 +91,7 @@ cdef class AnyValueAggregate(UngroupedAggregate):
                 return
             # Dict-encoded fast path: find the first dict entry that has a
             # referenced, non-null row, and return its value.
-            if uv.selection != NULL:
+            if svec._german_dict_values != NULL:
                 if self._take_first_dict(svec):
                     self._seen = True
                 return
@@ -165,8 +165,7 @@ cdef class AnyValueAggregate(UngroupedAggregate):
         dict entry is itself not null, capture its value and return True."""
         cdef Py_ssize_t n = svec.c_length()
         cdef DrakenVector* uv_td = svec.unified()
-        cdef const uint8_t* codes = <const uint8_t*>uv_td.selection
-        cdef uint8_t code_width = uv_td.sel_width
+        cdef const uint32_t* codes = uv_td.selection
         cdef const uint8_t* row_nulls = svec.c_row_null_bitmap()
         cdef Py_ssize_t dict_size = svec.c_dict_size()
         cdef Py_ssize_t i, vlen
@@ -175,12 +174,7 @@ cdef class AnyValueAggregate(UngroupedAggregate):
         for i in range(n):
             if row_nulls != NULL and not _bitmap_is_valid(row_nulls, i):
                 continue
-            if code_width == 1:
-                code = (<const uint8_t*>codes)[i]
-            elif code_width == 2:
-                code = (<const uint16_t*>codes)[i]
-            else:
-                code = (<const uint32_t*>codes)[i]
+            code = codes[i]
             if <Py_ssize_t>code >= dict_size:
                 raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
             if svec.c_dict_value_is_null(<Py_ssize_t>code):

@@ -96,7 +96,7 @@ cdef class DistinctNode(BasePlanNode):
             if (<Integer8Vector>col).null_bitmap_ptr() != NULL:
                 PyMem_Free(idx_buf)
                 return False
-            dp = (<Integer8Vector>col).dense_ptr()
+            dp = (<Integer8Vector>col).ptr.data
             if dp == NULL:
                 PyMem_Free(idx_buf)
                 return False
@@ -106,7 +106,7 @@ cdef class DistinctNode(BasePlanNode):
             if (<Integer16Vector>col).null_bitmap_ptr() != NULL:
                 PyMem_Free(idx_buf)
                 return False
-            dp = (<Integer16Vector>col).dense_ptr()
+            dp = (<Integer16Vector>col).ptr.data
             if dp == NULL:
                 PyMem_Free(idx_buf)
                 return False

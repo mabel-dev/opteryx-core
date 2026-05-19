@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
+#include "german_string.h"
 
 typedef enum {
     // Integer types: 1–19
@@ -66,6 +67,25 @@ typedef struct {
     int32_t length;
 } DrakenConstantStringPayload;
 
+// German-string storage. Replaces DrakenVarBuffer for string values: an array
+// of 16-byte GermanString slots (length + inline-12 OR length + prefix + arena
+// offset) plus a byte arena for long-form payloads (> 12 bytes). Used as the
+// `data` payload of a string DrakenVector under the unified format.
+//
+// Lifetime: slots and arena are both owned by this struct when owns_buffers
+// is non-zero. arena_used tracks bytes consumed during construction; arena_cap
+// is the allocation size. Slots whose length <= 12 do not reference the arena.
+typedef struct {
+    GermanString* slots;       // [length] slot array
+    uint8_t*      arena;       // long-form byte arena (may be NULL when all rows inline)
+    size_t        length;      // number of slots
+    size_t        arena_used;  // bytes consumed in arena
+    size_t        arena_cap;   // arena allocation size
+    uint8_t*      null_bitmap; // optional, 1 bit per row
+    uint8_t       owns_buffers;// free slots/arena/null_bitmap on free?
+    DrakenType    type;        // DRAKEN_STRING (or DRAKEN_NON_NATIVE for binary)
+} DrakenGermanArena;
+
 typedef struct {
     DrakenType type;          // DRAKEN_CONSTANT
     DrakenType value_type;    // scalar value type
@@ -102,22 +122,26 @@ typedef struct {
     size_t num_rows;
 } DrakenMorsel;
 
-// Unified vector view (Phase 1 — not yet used by any kernel).
+// Unified vector view — one shape, one access pattern.
 //
-// Encoding semantics via (data, selection, sel_width):
-//   DENSE:      selection == NULL, sel_width == 0, data_length == length
-//   DICTIONARY: selection = codes, sel_width in {1,2,4}, data_length = dict_size
-//   CONSTANT:   selection == NULL, sel_width == 0, data_length == 1
-//   RLE:        never reaches execution; expanded at scan boundary
+// Access is always: data[selection[i]]  for i in [0, length).
 //
-// Invariant: selection == NULL  XOR  sel_width == 0.
+// `selection` is never NULL. For dense vectors it points at the lazy-grown
+// global identity permutation; for constant vectors at the lazy-grown global
+// zero vector; for dict-encoded vectors at owned uint32 codes. The choice of
+// pointer is owned by the C constructors in vector_alloc.h. No operator,
+// kernel, or wrapper may specialize on encoding shape — there is no
+// "dense fast-path", no `data_length == 1` shortcut, no NULL check.
+//
+// Memory-layout hints (informational only — never used in hot loops):
+//   former-dense    => selection points at draken_identity_sel,  data_length == length
+//   former-constant => selection points at draken_zero_sel,      data_length == 1
+//   former-dict     => selection is owned codes,                 data_length <  length
 typedef struct {
-    void*      data;        // unique values: all rows (dense), dict entries (dict), 1 element (const)
-    size_t     data_length; // elements in data, NOT logical row count
-    void*      selection;   // gather indices; NULL = sequential identity (dense/const)
-    uint8_t    sel_width;   // 0 when selection==NULL; 1, 2, or 4 bytes per code otherwise
-    size_t     length;      // logical row count
-    uint8_t*   validity;    // 1-bit-per-logical-row null mask; NULL = all valid
-    size_t     itemsize;    // bytes per data element (0 for var-width)
-    DrakenType type;
+    void*             data;        // typed payload (cast at Cython typed-wrapper level)
+    const uint32_t*   selection;   // always valid; indices into data
+    uint32_t          data_length; // number of unique values in data
+    uint32_t          length;      // logical row count
+    uint8_t*          validity;    // 1-bit-per-logical-row null mask; NULL = all valid
+    DrakenType        type;
 } DrakenVector;

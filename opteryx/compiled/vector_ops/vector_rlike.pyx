@@ -10,7 +10,8 @@
 
 from draken.vectors.string_vector cimport StringVector, DrakenVarBuffer
 from draken.vectors.bool_vector cimport BoolVector
-from draken.core.buffers cimport DrakenVector, DrakenConstantStringPayload
+from draken.core.buffers cimport DrakenVector, DrakenConstantStringPayload, DrakenGermanArena, GermanString
+from draken.core.buffers cimport gs_length, gs_data
 from cpython.bytes cimport PyBytes_AsStringAndSize
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
@@ -61,6 +62,10 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
     cdef Py_ssize_t i, dict_idx, dict_size
     cdef uint32_t code
     cdef DrakenVarBuffer* vbuf
+    cdef DrakenGermanArena* rl_gdict
+    cdef GermanString* rl_slot
+    cdef const uint8_t* rl_sdata
+    cdef uint32_t rl_slen
     cdef const uint8_t* dict_data
     cdef uint8_t* dict_rlike_results = NULL
     cdef uint8_t* nb_ptr
@@ -81,7 +86,7 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
         if not regex.ok():
             raise ValueError("Invalid REGEXP pattern")
 
-        if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+        if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
             if uv.validity != NULL:  # null constant
                 return _constant_bool_result(n, False, True)
             csp = <DrakenConstantStringPayload*>uv.data
@@ -116,16 +121,14 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
 
         try:
             # Dictionary-encoded path: check each unique value once
-            if uv.selection != NULL:  # dictionary
-                vbuf = <DrakenVarBuffer*>uv.data
-                if vbuf == NULL or vbuf.data == NULL:
+            if vec._german_dict_values != NULL:  # dictionary
+                rl_gdict = <DrakenGermanArena*>uv.data
+                if rl_gdict == NULL:
                     return out
 
-                dict_size = <Py_ssize_t>vbuf.length
+                dict_size = <Py_ssize_t>rl_gdict.length
                 if dict_size == 0:
                     return out
-
-                dict_data = <const uint8_t*>vbuf.data
 
                 # Allocate results array for each dictionary entry
                 dict_rlike_results = <uint8_t*>malloc(dict_size)
@@ -134,11 +137,11 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
 
                 # Test each unique dictionary value once
                 for dict_idx in range(dict_size):
-                    start = vbuf.offsets[dict_idx]
-                    end = vbuf.offsets[dict_idx + 1]
-                    str_len = end - start
+                    rl_slot = &rl_gdict.slots[dict_idx]
+                    rl_slen = gs_length(rl_slot)
+                    rl_sdata = gs_data(rl_slot, rl_gdict.arena)
                     text_piece = StringPieceRL(
-                        <const char*>dict_data + start, <size_t>str_len,
+                        <const char*>rl_sdata, <size_t>rl_slen,
                     )
                     if RE2RL.PartialMatch(text_piece, regex[0]):
                         dict_rlike_results[dict_idx] = 1
@@ -150,14 +153,14 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
                     for i in range(n):
                         if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                             continue
-                        code = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
+                        code = uv.selection[i]
                         if dict_rlike_results[code]:
                             dst[i >> 3] &= ~(1 << (i & 7))
                 else:
                     for i in range(n):
                         if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                             continue
-                        code = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
+                        code = uv.selection[i]
                         if dict_rlike_results[code]:
                             dst[i >> 3] |= (1 << (i & 7))
 

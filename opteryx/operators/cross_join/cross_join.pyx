@@ -30,7 +30,7 @@ REFACTORED (Session 46): Draken-native Cartesian product
 from typing import Generator, Optional
 from array import array
 
-from libc.stdint cimport int32_t, int64_t, uint8_t, uint16_t, uint32_t
+from libc.stdint cimport int64_t, uint32_t
 from libc.stdlib cimport malloc, free
 
 from draken.vectors.integer64_vector cimport from_sequence as int64_from_sequence
@@ -56,11 +56,7 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
     cdef int64_t total_rows = left_rows * right_rows
     cdef int64_t i, j
     cdef Integer64Vector left_vec, right_vec
-    cdef uint8_t code_width
-    cdef uint8_t* codes = NULL
-    cdef uint8_t* codes_u8
-    cdef uint16_t* codes_u16
-    cdef uint32_t* codes_u32
+    cdef uint32_t* codes = NULL
     cdef int64_t* dict_vals = NULL
     cdef int64_t* rvals
     cdef int64_t[::1] right_mv
@@ -68,21 +64,13 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
     if total_rows == 0:
         return (Integer64Vector(0), Integer64Vector(0))
 
-    # Select code width based on the number of unique left row indices.
-    if left_rows <= 255:
-        code_width = 1
-    elif left_rows <= 65535:
-        code_width = 2
-    else:
-        code_width = 4
-
     # dict values: [0, 1, ..., left_rows-1]
     dict_vals = <int64_t*>malloc(<size_t>left_rows * sizeof(int64_t))
     if dict_vals == NULL:
         raise MemoryError()
 
     # codes[i * right_rows + j] = i  (same run value repeated right_rows times)
-    codes = <uint8_t*>malloc(<size_t>total_rows * <size_t>code_width)
+    codes = <uint32_t*>malloc(<size_t>total_rows * sizeof(uint32_t))
     if codes == NULL:
         free(dict_vals)
         raise MemoryError()
@@ -96,22 +84,9 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
         for i in range(left_rows):
             dict_vals[i] = i
 
-        codes_u8 = codes
-        codes_u16 = <uint16_t*>codes
-        codes_u32 = <uint32_t*>codes
-
-        if code_width == 1:
-            for i in range(left_rows):
-                for j in range(right_rows):
-                    codes_u8[i * right_rows + j] = <uint8_t>i
-        elif code_width == 2:
-            for i in range(left_rows):
-                for j in range(right_rows):
-                    codes_u16[i * right_rows + j] = <uint16_t>i
-        else:
-            for i in range(left_rows):
-                for j in range(right_rows):
-                    codes_u32[i * right_rows + j] = <uint32_t>i
+        for i in range(left_rows):
+            for j in range(right_rows):
+                codes[i * right_rows + j] = <uint32_t>i
 
         for i in range(left_rows):
             for j in range(right_rows):
@@ -119,7 +94,7 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
 
     # make_int64_dict_only copies both codes and dict_vals internally.
     left_vec = make_int64_dict_only(
-        codes, code_width, <Py_ssize_t>total_rows,
+        codes, <Py_ssize_t>total_rows,
         dict_vals, <Py_ssize_t>left_rows, NULL
     )
     free(codes)

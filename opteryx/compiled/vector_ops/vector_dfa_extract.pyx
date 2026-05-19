@@ -181,6 +181,10 @@ from draken.core.buffers cimport (
     DrakenVector,
     DrakenConstantStringPayload,
     DrakenVarBuffer,
+    DrakenGermanArena,
+    GermanString,
+    gs_length,
+    gs_data,
 )
 from draken.vectors.string_vector cimport StringVector, from_packed_dict
 
@@ -747,7 +751,7 @@ cdef inline void _extract_const_slice(
 ) except *:
     cdef DrakenVector* uv = vec.unified()
     cdef DrakenConstantStringPayload* csp
-    if uv.data_length != 1:  # not constant
+    if vec.ptr.offsets != NULL:  # not constant
         raise ValueError("vector_dfa_extract: compiled program must be constant encoded")
     if uv.validity != NULL:  # null constant
         raise ValueError("vector_dfa_extract: compiled program must be non-null")
@@ -873,9 +877,14 @@ cpdef StringVector vector_dfa_extract(
     cdef Py_ssize_t dict_size
     cdef object new_dict_sv
     cdef DrakenConstantStringPayload* csp
+    cdef DrakenGermanArena* dfa_gdv
+    cdef GermanString* dfa_slot
+    cdef const uint8_t* dfa_sdata
+    cdef uint32_t dfa_slen
+    cdef Py_ssize_t dfa_total_input
 
     # Constant encoding: execute once, replicate.
-    if uv.selection == NULL and data.ptr.offsets == NULL:  # constant
+    if data.ptr.offsets == NULL and data._german_dict_values == NULL:  # constant
         if uv.validity != NULL:  # null constant
             out_vec = StringVector(n, 0)
             out_ptr_buf = out_vec.ptr
@@ -919,21 +928,24 @@ cpdef StringVector vector_dfa_extract(
         return out_vec
 
     # Dictionary encoding: apply DFA once per unique entry, repack with same codes.
-    # DFA output is always <= input (capture is a substring, passthrough is the
-    # original), so pre-allocate from the original dict byte total and write in
-    # a single pass — no size-counting pass needed.
-    if uv.selection != NULL:  # dictionary
-        vbuf = <DrakenVarBuffer*>uv.data
-        dict_size = <Py_ssize_t>vbuf.length
-        new_dict_sv = StringVector(dict_size, <Py_ssize_t>vbuf.offsets[dict_size])
+    if data._german_dict_values != NULL:  # dictionary
+        dfa_gdv = data._german_dict_values
+        dict_size = <Py_ssize_t>dfa_gdv.length
+        # Estimate output size: each entry is at most the input size.
+        # Compute total input bytes for pre-allocation.
+        dfa_total_input = 0
+        for i in range(dict_size):
+            dfa_total_input += <Py_ssize_t>gs_length(&dfa_gdv.slots[i])
+        new_dict_sv = StringVector(dict_size, dfa_total_input)
         out_ptr_buf = (<StringVector>new_dict_sv).ptr
         write_offset = 0
         out_ptr_buf.offsets[0] = 0
         for i in range(dict_size):
-            start = vbuf.offsets[i]
-            end = vbuf.offsets[i + 1]
-            row_ptr = (<const char*>vbuf.data) + start
-            row_len = <Py_ssize_t>(end - start)
+            dfa_slot = &dfa_gdv.slots[i]
+            dfa_slen = gs_length(dfa_slot)
+            dfa_sdata = gs_data(dfa_slot, dfa_gdv.arena)
+            row_ptr = <const char*>dfa_sdata
+            row_len = <Py_ssize_t>dfa_slen
             if _execute_procedure(row_ptr, row_len, &proc, &out_ptr, &out_len):
                 if out_len > 0:
                     memcpy((<char*>out_ptr_buf.data) + write_offset, out_ptr, <size_t>out_len)
@@ -944,7 +956,7 @@ cpdef StringVector vector_dfa_extract(
                 write_offset += row_len
             out_ptr_buf.offsets[i + 1] = <int32_t>write_offset
         return from_packed_dict(
-            <uint8_t*>uv.selection, uv.sel_width, n,
+            <uint8_t*>uv.selection, 4, n,
             out_ptr_buf.offsets, <const uint8_t*>out_ptr_buf.data, dict_size,
             uv.validity,
         )

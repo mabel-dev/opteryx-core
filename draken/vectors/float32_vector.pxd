@@ -1,7 +1,7 @@
 from libc.stdint cimport int32_t
 from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
-from libc.stdint cimport uint64_t, uint8_t
+from libc.stdint cimport uint32_t, uint64_t, uint8_t
 
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DrakenVarBuffer
@@ -16,12 +16,11 @@ cdef class Float32Vector(Vector):
     cdef bint owns_data
     cdef DrakenVarBuffer* _dict_values
     cdef uint8_t _dict_ordered
-    cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
     cdef DrakenVector* unified(self) noexcept
+    cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
 
     cpdef Float32Vector take(self, int32_t[::1] indices)
-    cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
     cdef BoolVector _compare_scalar(self, float value, int op)
     cdef BoolVector _compare_vector(self, Float32Vector other, int op)
 
@@ -37,6 +36,8 @@ cdef class Float32Vector(Vector):
     cpdef BoolVector less_than_vector(self, Float32Vector other)
     cpdef BoolVector less_than_or_equals(self, float value)
     cpdef BoolVector less_than_or_equals_vector(self, Float32Vector other)
+    cpdef BoolVector between(self, float lower, float upper,
+                              bint lower_inclusive=*, bint upper_inclusive=*)
     cpdef BoolVector in_list(self, object value_set)
 
     cpdef int8_t[::1] is_null(self)
@@ -76,3 +77,11 @@ cdef Float32Vector from_decoded(
     size_t length,
 )
 cdef Float32Vector from_arrow(object array)
+cdef Float32Vector _materialize_dict_float32(Float32Vector vec)
+cdef Float32Vector make_float32_dict_only(
+    const uint32_t* codes,
+    Py_ssize_t row_count,
+    const float* dictionary,
+    Py_ssize_t dict_size,
+    const uint8_t* valid_bits,
+)

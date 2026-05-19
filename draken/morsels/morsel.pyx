@@ -264,7 +264,7 @@ cdef void _concat_string_buffers(
     cdef DrakenConstantStringPayload* _rcp
 
     # Calculate left_bytes, handling constant and NULL vectors
-    if left_vec.ptr.offsets == NULL and left_vec._unified_view.selection == NULL:
+    if left_vec.ptr.offsets == NULL:
         if left_vec._unified_view.validity == NULL and left_vec._unified_view.data != NULL:
             _lcp = <DrakenConstantStringPayload*>left_vec._unified_view.data
             const_len = <Py_ssize_t>_lcp.length
@@ -274,7 +274,7 @@ cdef void _concat_string_buffers(
             left_bytes = <Py_ssize_t>left_ptr.offsets[left_rows]
 
     # Calculate right_bytes, handling constant and NULL vectors
-    if right_vec.ptr.offsets == NULL and right_vec._unified_view.selection == NULL:
+    if right_vec.ptr.offsets == NULL:
         if right_vec._unified_view.validity == NULL and right_vec._unified_view.data != NULL:
             _rcp = <DrakenConstantStringPayload*>right_vec._unified_view.data
             const_len = <Py_ssize_t>_rcp.length
@@ -284,7 +284,7 @@ cdef void _concat_string_buffers(
             right_bytes = <Py_ssize_t>right_ptr.offsets[right_rows]
 
     # Copy left data
-    if left_vec.ptr.offsets == NULL and left_vec._unified_view.selection == NULL and left_vec._unified_view.validity == NULL and left_vec._unified_view.data != NULL:
+    if left_vec.ptr.offsets == NULL and left_vec._unified_view.validity == NULL and left_vec._unified_view.data != NULL:
         _lcp = <DrakenConstantStringPayload*>left_vec._unified_view.data
         const_len = <Py_ssize_t>_lcp.length
         if const_len > 0 and _lcp.data != NULL and out_ptr.data != NULL:
@@ -294,7 +294,7 @@ cdef void _concat_string_buffers(
         memcpy(out_ptr.data, left_ptr.data, left_bytes)
 
     # Copy right data
-    if right_vec.ptr.offsets == NULL and right_vec._unified_view.selection == NULL and right_vec._unified_view.validity == NULL and right_vec._unified_view.data != NULL:
+    if right_vec.ptr.offsets == NULL and right_vec._unified_view.validity == NULL and right_vec._unified_view.data != NULL:
         _rcp = <DrakenConstantStringPayload*>right_vec._unified_view.data
         const_len = <Py_ssize_t>_rcp.length
         if const_len > 0 and _rcp.data != NULL and out_ptr.data != NULL:
@@ -307,7 +307,7 @@ cdef void _concat_string_buffers(
     if out_ptr == NULL or out_ptr.offsets == NULL:
         raise RuntimeError("Output StringVector not properly initialized")
     out_ptr.offsets[0] = 0
-    if left_vec.ptr.offsets == NULL and left_vec._unified_view.selection == NULL:
+    if left_vec.ptr.offsets == NULL:
         if left_vec._unified_view.validity != NULL or left_vec._unified_view.data == NULL:
             const_len = 0
         else:
@@ -321,7 +321,7 @@ cdef void _concat_string_buffers(
                 out_ptr.offsets[j] = left_ptr.offsets[j]
 
     # Set offsets for right side
-    if right_vec.ptr.offsets == NULL and right_vec._unified_view.selection == NULL:
+    if right_vec.ptr.offsets == NULL:
         if right_vec._unified_view.validity != NULL or right_vec._unified_view.data == NULL:
             const_len = 0
         else:
@@ -335,25 +335,25 @@ cdef void _concat_string_buffers(
                 out_ptr.offsets[left_rows + j] = <int32_t>(left_bytes + right_ptr.offsets[j])
 
     # Handle null bitmaps
-    if left_vec.ptr.offsets == NULL and left_vec._unified_view.selection == NULL and left_vec._unified_view.validity != NULL:
+    if left_vec.ptr.offsets == NULL and left_vec._unified_view.validity != NULL:
         if null_bitmap == NULL:
             null_bitmap = _allocate_valid_bitmap(left_rows + right_rows)
         for k in range(left_rows):
             _bitmap_clear(null_bitmap, k)
 
-    if right_vec.ptr.offsets == NULL and right_vec._unified_view.selection == NULL and right_vec._unified_view.validity != NULL:
+    if right_vec.ptr.offsets == NULL and right_vec._unified_view.validity != NULL:
         if null_bitmap == NULL:
             null_bitmap = _allocate_valid_bitmap(left_rows + right_rows)
         for k in range(right_rows):
             _bitmap_clear(null_bitmap, left_rows + k)
 
-    if left_vec.ptr.offsets != NULL or left_vec._unified_view.selection != NULL:
+    if left_vec.ptr.offsets != NULL or left_vec._german_dict_values != NULL:
         if left_ptr != NULL and left_ptr.null_bitmap != NULL:
             if null_bitmap == NULL:
                 null_bitmap = _allocate_valid_bitmap(left_rows + right_rows)
             _copy_bits(left_ptr.null_bitmap, 0, null_bitmap, 0, left_rows)
 
-    if right_vec.ptr.offsets != NULL or right_vec._unified_view.selection != NULL:
+    if right_vec.ptr.offsets != NULL or right_vec._german_dict_values != NULL:
         if right_ptr != NULL and right_ptr.null_bitmap != NULL:
             if null_bitmap == NULL:
                 null_bitmap = _allocate_valid_bitmap(left_rows + right_rows)
@@ -847,9 +847,9 @@ cdef class Morsel:
                 str_sources = [None] * n_morsels
                 for j in range(n_morsels):
                     src_str = <StringVector> (<Morsel> morsels[j]).ptr.columns[i]
-                    if src_str.ptr.offsets == NULL and src_str._unified_view.selection == NULL:
+                    if src_str.ptr.offsets == NULL:
                         str_sources[j] = src_str
-                    elif src_str._unified_view.selection != NULL and (src_str.ptr == NULL or src_str.ptr.offsets == NULL):
+                    elif src_str._german_dict_values != NULL:
                         str_sources[j] = _materialize_dict_string(src_str)
                     else:
                         str_sources[j] = src_str
@@ -859,7 +859,7 @@ cdef class Morsel:
                     src_str = <StringVector> str_sources[j]
                     current_rows = (<Morsel> morsels[j]).ptr.num_rows
                     # Handle constant-encoded StringVectors which do not have offsets/data
-                    if src_str.ptr.offsets == NULL and src_str._unified_view.selection == NULL:
+                    if src_str.ptr.offsets == NULL:
                         if src_str._unified_view.validity != NULL:
                             # contributes no bytes
                             continue
@@ -884,7 +884,7 @@ cdef class Morsel:
                 for j in range(n_morsels):
                     src_str = <StringVector> str_sources[j]
                     current_rows = (<Morsel> morsels[j]).ptr.num_rows
-                    if src_str.ptr.offsets == NULL and src_str._unified_view.selection == NULL:
+                    if src_str.ptr.offsets == NULL:
                         if src_str._unified_view.validity != NULL:
                             current_bytes = 0
                         elif src_str._unified_view.data != NULL:
@@ -1500,7 +1500,7 @@ cdef class Morsel:
                 left_bytes = 0
                 right_bytes = 0
 
-                if left_str.ptr.offsets == NULL and left_str._unified_view.selection == NULL:
+                if left_str.ptr.offsets == NULL:
                     if left_str._unified_view.validity == NULL and left_str._unified_view.data != NULL:
                         _lcsp = <DrakenConstantStringPayload*>left_str._unified_view.data
                         const_len = <Py_ssize_t>_lcsp.length
@@ -1509,7 +1509,7 @@ cdef class Morsel:
                     if left_str.ptr != NULL and left_str.ptr.offsets != NULL:
                         left_bytes = <Py_ssize_t>left_str.ptr.offsets[left_rows]
 
-                if right_str.ptr.offsets == NULL and right_str._unified_view.selection == NULL:
+                if right_str.ptr.offsets == NULL:
                     if right_str._unified_view.validity == NULL and right_str._unified_view.data != NULL:
                         _rcsp = <DrakenConstantStringPayload*>right_str._unified_view.data
                         const_len = <Py_ssize_t>_rcsp.length
@@ -1680,16 +1680,12 @@ cdef class Morsel:
         cdef bint free_indices = False
         cdef bint indices_ready = False
         cdef Integer64Vector idx_vec
-        cdef uint8_t cw
-        cdef uint8_t* codes_u8_ptr
-        cdef uint16_t* codes_u16_ptr
-        cdef uint32_t* codes_u32_ptr
         cdef int64_t* dict_int_ptr
         cdef DrakenVector* _iv_uv
 
         # Fast path: dictionary-encoded Integer64Vector (e.g. from build_cartesian_indices).
         # Gathers dict values via codes directly into int32 — no intermediate dense vector.
-        if isinstance(indices, Integer64Vector) and (<Integer64Vector>indices).unified().selection != NULL:
+        if isinstance(indices, Integer64Vector) and (<Integer64Vector>indices)._dict_values != NULL:
             idx_vec = <Integer64Vector>indices
             _iv_uv = idx_vec.unified()
             n_indices = <int>_iv_uv.length
@@ -1703,19 +1699,8 @@ cdef class Morsel:
             free_indices = True
 
             dict_int_ptr = <int64_t*>_iv_uv.data
-            cw = _iv_uv.sel_width
-            if cw == 1:
-                codes_u8_ptr = <uint8_t*>_iv_uv.selection
-                for i in range(n_indices):
-                    indices_ptr[i] = <int32_t>dict_int_ptr[codes_u8_ptr[i]]
-            elif cw == 2:
-                codes_u16_ptr = <uint16_t*>_iv_uv.selection
-                for i in range(n_indices):
-                    indices_ptr[i] = <int32_t>dict_int_ptr[codes_u16_ptr[i]]
-            else:
-                codes_u32_ptr = <uint32_t*>_iv_uv.selection
-                for i in range(n_indices):
-                    indices_ptr[i] = <int32_t>dict_int_ptr[codes_u32_ptr[i]]
+            for i in range(n_indices):
+                indices_ptr[i] = <int32_t>dict_int_ptr[_iv_uv.selection[i]]
 
             indices_view = <int32_t[:n_indices]>indices_ptr
             indices_ready = True

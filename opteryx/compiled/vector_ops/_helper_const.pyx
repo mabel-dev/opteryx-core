@@ -32,7 +32,7 @@ cdef inline bint _constant_string_value(
     cdef DrakenVector* uv = vec.unified()
     cdef DrakenConstantStringPayload* payload
 
-    if vec.ptr.offsets != NULL:  # ptr.offsets == NULL only for constant (always allocated for dense/dict)
+    if vec.ptr.offsets != NULL or vec._german_dict_values != NULL:  # constant iff both are NULL
         return False
 
     row_count[0] = <Py_ssize_t>uv.length

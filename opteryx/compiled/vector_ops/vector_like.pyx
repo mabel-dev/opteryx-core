@@ -10,7 +10,7 @@
 
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.bool_vector cimport BoolVector
-from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector
+from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector, DrakenGermanArena, GermanString, gs_length, gs_data
 from cpython.bytes cimport PyBytes_AS_STRING
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
@@ -96,15 +96,19 @@ cpdef BoolVector vector_like(
     cdef uint8_t mask
     cdef char* pat_ptr = PyBytes_AS_STRING(pattern)
     cdef Py_ssize_t pat_len = len(pattern)
-    cdef int32_t start, end, str_len
+    cdef int32_t str_len
     cdef Py_ssize_t i, dict_idx, dict_size
     cdef uint32_t code
     cdef DrakenVarBuffer* vbuf
     cdef const uint8_t* vdata
     cdef uint8_t* dict_like_results = NULL
     cdef DrakenConstantStringPayload* csp
+    cdef DrakenGermanArena* lk_gdict
+    cdef GermanString* lk_slot
+    cdef const uint8_t* lk_sdata
+    cdef uint32_t lk_slen
 
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         if uv.validity != NULL:  # null constant
             return _constant_bool_result(n, False, True)
         csp = <DrakenConstantStringPayload*>uv.data
@@ -141,26 +145,26 @@ cpdef BoolVector vector_like(
         out.ptr.null_bitmap = NULL
 
     try:
-        if uv.selection != NULL:  # dictionary
-            vbuf = <DrakenVarBuffer*>uv.data
-            if vbuf == NULL or vbuf.data == NULL:
+        if vec._german_dict_values != NULL:  # dictionary
+            lk_gdict = vec._german_dict_values
+            if lk_gdict == NULL:
                 return out
 
-            dict_size = <Py_ssize_t>vbuf.length
+            dict_size = <Py_ssize_t>lk_gdict.length
             if dict_size == 0:
                 return out
 
-            vdata = <const uint8_t*>vbuf.data
             dict_like_results = <uint8_t*>malloc(dict_size)
             if dict_like_results == NULL:
                 raise MemoryError()
 
             for dict_idx in range(dict_size):
-                start = vbuf.offsets[dict_idx]
-                end = vbuf.offsets[dict_idx + 1]
-                str_len = end - start
+                lk_slot = &lk_gdict.slots[dict_idx]
+                lk_slen = gs_length(lk_slot)
+                lk_sdata = gs_data(lk_slot, lk_gdict.arena)
+                str_len = <int32_t>lk_slen
                 if _sv_sql_like_match(
-                    vdata + start, <Py_ssize_t>str_len,
+                    lk_sdata, <Py_ssize_t>str_len,
                     <const uint8_t*>pat_ptr, pat_len, ignore_case,
                 ):
                     dict_like_results[dict_idx] = 1
@@ -171,14 +175,14 @@ cpdef BoolVector vector_like(
                 for i in range(n):
                     if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                         continue
-                    code = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
+                    code = uv.selection[i]
                     if dict_like_results[code]:
                         dst[i >> 3] &= ~(1 << (i & 7))
             else:
                 for i in range(n):
                     if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                         continue
-                    code = _read_packed_code(<uint8_t*>uv.selection, uv.sel_width, i)
+                    code = uv.selection[i]
                     if dict_like_results[code]:
                         dst[i >> 3] |= (1 << (i & 7))
 

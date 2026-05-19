@@ -119,14 +119,14 @@ cdef class ApproxPercentileCollector(BaseCollector):
 
         if isinstance(raw, Integer64Vector):
             iv = <Integer64Vector>raw
-            i64 = <int64_t*>iv.dense_ptr()
+            i64 = <int64_t*>iv.ptr.data
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
                     td_add(hists[si], <double>i64[i], 1)
         else:
             fv = <Float64Vector>raw
-            f64 = <double*>fv.dense_ptr()
+            f64 = <double*>fv.ptr.data
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]

@@ -17,7 +17,7 @@ from libcpp.unordered_map cimport unordered_map
 
 from draken.vectors.string_vector cimport StringVector, from_packed_dict
 from draken.vectors import string_vector as string_vector_module
-from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector
+from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector, DrakenGermanArena, GermanString, gs_length, gs_data
 
 cdef extern from "re2/stringpiece.h" namespace "re2":
     cdef cppclass StringPiece:
@@ -61,9 +61,12 @@ cpdef StringVector vector_regex_replace(StringVector data, bytes pattern, bytes 
     cdef string value_str
     cdef size_t buffer_capacity = 256
     cdef DrakenVarBuffer* vbuf
+    cdef DrakenGermanArena* gdv
+    cdef GermanString* slot
     cdef Py_ssize_t dict_size
     cdef DrakenVarBuffer* ndp
     cdef DrakenConstantStringPayload* csp
+    cdef const uint8_t* slot_data
 
     PyBytes_AsStringAndSize(pattern, &pattern_buf, &pattern_len)
     PyBytes_AsStringAndSize(replacement, &repl_buf, &repl_len)
@@ -83,7 +86,7 @@ cpdef StringVector vector_regex_replace(StringVector data, bytes pattern, bytes 
     value_str.reserve(256)
 
     # Constant encoding: apply once, replicate
-    if uv.selection == NULL and data.ptr.offsets == NULL:  # constant
+    if data.ptr.offsets == NULL and data._german_dict_values == NULL:  # constant
         builder = string_vector_module.StringVectorBuilder.with_estimate(n, 100)
         if uv.validity != NULL:  # null constant
             for i in range(n):
@@ -97,23 +100,24 @@ cpdef StringVector vector_regex_replace(StringVector data, bytes pattern, bytes 
         return builder.finish()
 
     # Dictionary encoding: transform each unique entry, repack with same codes
-    if uv.selection != NULL:  # dictionary
-        vbuf = <DrakenVarBuffer*>uv.data
-        dict_size = <Py_ssize_t>vbuf.length
+    if data._german_dict_values != NULL:  # dictionary — backed by DrakenGermanArena
+        gdv = data._german_dict_values
+        dict_size = <Py_ssize_t>gdv.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 100)
         for i in range(dict_size):
-            start = vbuf.offsets[i]
-            end = vbuf.offsets[i + 1]
-            if buffer_capacity < <size_t>(end - start):
-                buffer_capacity = <size_t>(end - start) * 2
+            slot = &gdv.slots[i]
+            slot_data = gs_data(slot, gdv.arena)
+            slot_len = <Py_ssize_t>gs_length(slot)
+            if buffer_capacity < <size_t>slot_len:
+                buffer_capacity = <size_t>slot_len * 2
                 value_str.reserve(buffer_capacity)
-            value_str.assign((<const char*>vbuf.data) + start, <size_t>(end - start))
+            value_str.assign(<const char*>slot_data, <size_t>slot_len)
             RE2.GlobalReplace(&value_str, regex[0], repl_piece)
             dict_builder.append_bytes(value_str.c_str(), value_str.size())
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            <uint8_t*>uv.selection, uv.sel_width, n,
+            <uint8_t*>uv.selection, 4, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
             uv.validity,
         )

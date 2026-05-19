@@ -79,9 +79,6 @@ cdef class NullVector(Vector):
     cpdef object null_bitmap(self):
         return None
 
-    cdef void* dense_ptr(self) noexcept:
-        return NULL
-
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
         return NULL
 

@@ -15,7 +15,7 @@
 # The byte content is never inspected. Emptiness is decided purely from
 # offset / length metadata:
 #   - dense:  offsets[i+1] == offsets[i]
-#   - dict:   dict_offsets[code+1] == dict_offsets[code]   (per-code, then row-walk)
+#   - dict:   gs_length(&german_arena.slots[c]) == 0   (per-code, then row-walk)
 #   - const:  DrakenConstantStringPayload.length == 0
 #
 # NULL propagation matches SQL 3VL: the output null bitmap is the input's
@@ -32,6 +32,9 @@ from draken.core.buffers cimport (
     DrakenVector,
     DrakenConstantStringPayload,
     DrakenVarBuffer,
+    DrakenGermanArena,
+    GermanString,
+    gs_length,
 )
 from draken.vectors.string_vector cimport StringVector, _materialize_dict_string
 from draken.vectors.bool_vector cimport BoolVector
@@ -124,11 +127,8 @@ cdef BoolVector _emptiness_dense(StringVector vec, bint emit_when_empty):
 
 cdef BoolVector _emptiness_dict(StringVector vec, bint emit_when_empty):
     cdef DrakenVector* uv = vec.unified()
-    cdef DrakenVarBuffer* dict_ptr = <DrakenVarBuffer*>uv.data
-    cdef Py_ssize_t dict_size = <Py_ssize_t>dict_ptr.length
-    cdef int32_t* dict_offsets = dict_ptr.offsets
-    cdef uint8_t* codes = <uint8_t*>uv.selection
-    cdef uint8_t code_width = uv.sel_width
+    cdef DrakenGermanArena* gdv = vec._german_dict_values
+    cdef Py_ssize_t dict_size = <Py_ssize_t>gdv.length
     cdef uint8_t* row_nulls = uv.validity
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
 
@@ -145,13 +145,13 @@ cdef BoolVector _emptiness_dict(StringVector vec, bint emit_when_empty):
     cdef uint32_t code
     try:
         for c in range(dict_size):
-            is_empty = (dict_offsets[c + 1] == dict_offsets[c])
+            is_empty = (gs_length(&gdv.slots[c]) == 0)
             code_match[c] = 1 if is_empty == emit_when_empty else 0
 
         for i in range(n):
             if row_nulls != NULL and not ((row_nulls[i >> 3] >> (i & 7)) & 1):
                 continue
-            code = _decode_dict_code(codes, code_width, i)
+            code = uv.selection[i]
             if code_match[code]:
                 dst[i >> 3] |= <uint8_t>(1 << (i & 7))
     finally:
@@ -164,7 +164,7 @@ cdef BoolVector _string_emptiness_kernel(StringVector vec, bint emit_when_empty)
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef DrakenConstantStringPayload* csp
 
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         if uv.validity != NULL:  # null constant
             return _make_constant_bool(n, False, True)
         csp = <DrakenConstantStringPayload*>uv.data
@@ -174,7 +174,7 @@ cdef BoolVector _string_emptiness_kernel(StringVector vec, bint emit_when_empty)
             False,
         )
 
-    if uv.selection != NULL:  # dictionary
+    if vec._german_dict_values != NULL:  # dictionary
         return _emptiness_dict(vec, emit_when_empty)
 
     return _emptiness_dense(vec, emit_when_empty)

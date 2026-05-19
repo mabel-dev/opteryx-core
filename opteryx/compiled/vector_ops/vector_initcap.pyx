@@ -12,7 +12,7 @@ from libc.stdint cimport int32_t, uint8_t
 
 from draken.vectors.string_vector cimport StringVector, from_packed_dict
 from draken.vectors import string_vector as string_vector_module
-from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector
+from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector, DrakenGermanArena, GermanString, gs_length, gs_data
 
 
 cdef inline str _initcap_string(str text):
@@ -49,9 +49,13 @@ cpdef StringVector vector_initcap(StringVector vec):
     cdef Py_ssize_t dict_size
     cdef DrakenVarBuffer* ndp
     cdef DrakenConstantStringPayload* csp
+    cdef DrakenGermanArena* ic_gdv
+    cdef GermanString* ic_slot
+    cdef const uint8_t* ic_sdata
+    cdef uint32_t ic_slen
 
     # Constant encoding: process once, replicate
-    if uv.selection == NULL and vec.ptr.offsets == NULL:  # constant
+    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
         builder = string_vector_module.StringVectorBuilder.with_estimate(n, 16)
         if uv.validity != NULL:  # null constant
             for i in range(n):
@@ -70,14 +74,15 @@ cpdef StringVector vector_initcap(StringVector vec):
         return builder.finish()
 
     # Dictionary encoding: transform each unique entry, repack with same codes
-    if uv.selection != NULL:  # dictionary
-        vbuf = <DrakenVarBuffer*>uv.data
-        dict_size = <Py_ssize_t>vbuf.length
+    if vec._german_dict_values != NULL:  # dictionary
+        ic_gdv = vec._german_dict_values
+        dict_size = <Py_ssize_t>ic_gdv.length
         dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 16)
         for i in range(dict_size):
-            start = vbuf.offsets[i]
-            end = vbuf.offsets[i + 1]
-            raw = bytes((<uint8_t*>vbuf.data + start)[:end - start])
+            ic_slot = &ic_gdv.slots[i]
+            ic_slen = gs_length(ic_slot)
+            ic_sdata = gs_data(ic_slot, ic_gdv.arena)
+            raw = bytes(ic_sdata[:ic_slen])
             try:
                 text = raw.decode("utf-8")
             except UnicodeDecodeError:
@@ -86,7 +91,7 @@ cpdef StringVector vector_initcap(StringVector vec):
         new_dict_sv = dict_builder.finish()
         ndp = (<StringVector>new_dict_sv).ptr
         return from_packed_dict(
-            <uint8_t*>uv.selection, uv.sel_width, n,
+            <uint8_t*>uv.selection, 4, n,
             ndp.offsets, <const uint8_t*>ndp.data, dict_size,
             uv.validity,
         )

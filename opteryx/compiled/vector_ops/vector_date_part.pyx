@@ -32,7 +32,7 @@ from libc.stdint cimport int64_t, uint8_t
 from libc.stddef cimport size_t
 from cpython.array cimport array, clone
 
-from draken.core.buffers cimport DrakenVector, DRAKEN_INT64
+from draken.core.buffers cimport DrakenVector, DRAKEN_INT64, draken_zero_sel
 from draken.vectors.timestamp_vector cimport TimestampVector
 from draken.vectors.integer64_vector cimport Integer64Vector, from_packed_dict as int64_from_packed_dict, from_sequence as int64_from_sequence
 from draken.vectors.scalar_constructors cimport from_scalar
@@ -147,11 +147,12 @@ cdef inline int64_t _find_seconds_divisor_int64(
 
 
 cdef inline bint _is_constant_encoded(object vec) noexcept:
+    """Check if vec is constant-encoded (selection == draken_zero_sel)."""
     cdef DrakenVector* uv
     if not isinstance(vec, Vector):
         return False
     uv = (<Vector>vec).unified()
-    return uv.data_length == 1
+    return uv.selection == draken_zero_sel(uv.length)
 
 
 cdef inline int64_t _constant_scalar_value_i64(object vec):
@@ -174,7 +175,7 @@ cdef Integer64Vector _datepart_i64_dict_subsecond(Integer64Vector int64_vec, int
     cdef int64_t* output_ptr
     cdef Integer64Vector result
 
-    if uv.selection == NULL:
+    if int64_vec._dict_values == NULL:
         return None
 
     row_count = <Py_ssize_t>uv.length
@@ -184,7 +185,7 @@ cdef Integer64Vector _datepart_i64_dict_subsecond(Integer64Vector int64_vec, int
     if row_count == 0:
         return int64_from_packed_dict(
             <uint8_t*>uv.selection,
-            uv.sel_width,
+            4,
             0,
             dictionary_ptr,
             dict_size,
@@ -232,7 +233,7 @@ cdef Integer64Vector _datepart_i64_dict_subsecond(Integer64Vector int64_vec, int
 
     result = int64_from_packed_dict(
         <uint8_t*>uv.selection,
-        uv.sel_width,
+        4,
         row_count,
         <const int64_t*>output_ptr,
         dict_size,
@@ -258,7 +259,7 @@ cdef Integer64Vector _datepart_i64_dict_calendar(Integer64Vector int64_vec, int 
     cdef int64_t* output_ptr
     cdef Integer64Vector result
 
-    if uv.selection == NULL:
+    if int64_vec._dict_values == NULL:
         return None
 
     row_count = <Py_ssize_t>uv.length
@@ -268,7 +269,7 @@ cdef Integer64Vector _datepart_i64_dict_calendar(Integer64Vector int64_vec, int 
     if row_count == 0:
         return int64_from_packed_dict(
             <uint8_t*>uv.selection,
-            uv.sel_width,
+            4,
             0,
             dictionary_ptr,
             dict_size,
@@ -312,7 +313,7 @@ cdef Integer64Vector _datepart_i64_dict_calendar(Integer64Vector int64_vec, int 
 
     result = int64_from_packed_dict(
         <uint8_t*>uv.selection,
-        uv.sel_width,
+        4,
         row_count,
         <const int64_t*>output_ptr,
         dict_size,
@@ -346,7 +347,7 @@ cdef Integer64Vector _datepart_ts_dict_subsecond(TimestampVector ts_vec, int par
     cdef int64_t* output_ptr
     cdef Integer64Vector result
 
-    if uv.selection == NULL:
+    if ts_vec._dict_values == NULL:
         return None
 
     row_count = <Py_ssize_t>uv.length
@@ -356,7 +357,7 @@ cdef Integer64Vector _datepart_ts_dict_subsecond(TimestampVector ts_vec, int par
     if row_count == 0:
         return int64_from_packed_dict(
             <uint8_t*>uv.selection,
-            uv.sel_width,
+            4,
             0,
             dictionary_ptr,
             dict_size,
@@ -414,7 +415,7 @@ cdef Integer64Vector _datepart_ts_dict_subsecond(TimestampVector ts_vec, int par
 
     result = int64_from_packed_dict(
         <uint8_t*>uv.selection,
-        uv.sel_width,
+        4,
         row_count,
         <const int64_t*>output_ptr,
         dict_size,
@@ -439,7 +440,7 @@ cdef Integer64Vector _datepart_ts_dict_calendar(TimestampVector ts_vec, int part
     cdef int64_t* output_ptr
     cdef Integer64Vector result
 
-    if uv.selection == NULL:
+    if ts_vec._dict_values == NULL:
         return None
 
     row_count = <Py_ssize_t>uv.length
@@ -449,7 +450,7 @@ cdef Integer64Vector _datepart_ts_dict_calendar(TimestampVector ts_vec, int part
     if row_count == 0:
         return int64_from_packed_dict(
             <uint8_t*>uv.selection,
-            uv.sel_width,
+            4,
             0,
             dictionary_ptr,
             dict_size,
@@ -492,7 +493,7 @@ cdef Integer64Vector _datepart_ts_dict_calendar(TimestampVector ts_vec, int part
 
     result = int64_from_packed_dict(
         <uint8_t*>uv.selection,
-        uv.sel_width,
+        4,
         row_count,
         <const int64_t*>output_ptr,
         dict_size,

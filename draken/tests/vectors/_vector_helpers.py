@@ -71,7 +71,7 @@ def create_vector_with_encoding(type_name, encoding, size=100, nullable=False, s
         from draken.vectors.date32_vector import Date32Vector
         from draken.vectors.timestamp_vector import TimestampVector
         from draken.vectors.time_vector import TimeVector
-        from draken.vectors._decimal_vector import DecimalVector
+        from draken.vectors.decimal_vector import DecimalVector
 
         vector_classes = {
             "int64": Integer64Vector,

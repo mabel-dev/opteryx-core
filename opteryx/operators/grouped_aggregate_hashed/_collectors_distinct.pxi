@@ -87,8 +87,6 @@ cdef class CountDistinctCollector(BaseCollector):
         cdef uint64_t null_marker = mix_hash(0, NULL_HASH)
         cdef uint64_t h
         cdef uint64_t* dict_hashes
-        cdef const uint8_t* dict_codes
-        cdef uint8_t code_width
         cdef const uint8_t* row_nulls
         cdef uint32_t code
         cdef DrakenVector* uv
@@ -103,7 +101,7 @@ cdef class CountDistinctCollector(BaseCollector):
         if isinstance(raw, StringVector):
             svec = <StringVector>raw
             uv = svec.unified()
-            if uv.selection != NULL:
+            if svec._german_dict_values != NULL:
                 dict_size = svec.c_dict_size()
                 dict_hashes = <uint64_t*>malloc(<size_t>dict_size * sizeof(uint64_t))
                 if dict_hashes == NULL:
@@ -114,19 +112,12 @@ cdef class CountDistinctCollector(BaseCollector):
                             dict_hashes[di] = null_marker
                         else:
                             dict_hashes[di] = svec.c_dict_value_hash(di)
-                dict_codes = <uint8_t*>uv.selection
-                code_width = uv.sel_width
                 row_nulls = svec.c_row_null_bitmap()
                 with nogil:
                     for i in range(n_rows):
                         if row_nulls != NULL and not ((row_nulls[i >> 3] >> (i & 7)) & 1):
                             continue
-                        if code_width == 1:
-                            code = (<const uint8_t*>dict_codes)[i]
-                        elif code_width == 2:
-                            code = (<const uint16_t*>dict_codes)[i]
-                        else:
-                            code = (<const uint32_t*>dict_codes)[i]
+                        code = uv.selection[i]
                         h = dict_hashes[code]
                         if h == null_marker:
                             continue
@@ -213,21 +204,8 @@ cdef class AnyValueInt64Collector(BaseCollector):
         cdef uint8_t* seen = self._seen.data()
         cdef Py_ssize_t i
         cdef int64_t si
-        cdef int64_t const_val
-        cdef DrakenVector* uv
 
-        uv = vec.unified()
-        if uv.data_length == 1 and uv.length > 1:
-            if uv.validity == NULL:
-                const_val = (<int64_t*>uv.data)[0]
-                for i in range(n_rows):
-                    si = state_indices[i]
-                    if not seen[si]:
-                        values[si] = const_val
-                        seen[si] = 1
-            return
-
-        data = <int64_t*>vec.dense_ptr()
+        data = <int64_t*>vec.ptr.data
         nulls = vec.null_bitmap_ptr()
         for i in range(n_rows):
             if _num_bitmap_valid(nulls, i):
@@ -286,21 +264,8 @@ cdef class AnyValueFloat64Collector(BaseCollector):
         cdef uint8_t* seen = self._seen.data()
         cdef Py_ssize_t i
         cdef int64_t si
-        cdef double const_val
-        cdef DrakenVector* uv
 
-        uv = vec.unified()
-        if uv.data_length == 1 and uv.length > 1:
-            if uv.validity == NULL:
-                const_val = (<double*>uv.data)[0]
-                for i in range(n_rows):
-                    si = state_indices[i]
-                    if not seen[si]:
-                        values[si] = const_val
-                        seen[si] = 1
-            return
-
-        data = <double*>vec.dense_ptr()
+        data = <double*>vec.ptr.data
         nulls = vec.null_bitmap_ptr()
         for i in range(n_rows):
             if _num_bitmap_valid(nulls, i):

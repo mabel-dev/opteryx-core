@@ -106,12 +106,13 @@ from draken.vectors.integer64_vector cimport (
     Integer64Vector,
     from_dict as int64_from_dict,
     from_dict_nullable as int64_from_dict_nullable,
-    make_int64_dict_only,
+    from_packed_dict as int64_from_packed_dict,
 )
 from draken.vectors.float64_vector cimport (
     Float64Vector,
     from_dict as float64_from_dict,
     from_dict_nullable as float64_from_dict_nullable,
+    from_packed_dict as float64_from_packed_dict,
     make_float64_dict_only,
 )
 from draken.vectors.string_vector cimport (
@@ -743,32 +744,21 @@ cdef StringVector _make_string_vector(
         for r in range(num_runs):
             rtotal_bytes += <Py_ssize_t>decoded_col.rle_str_lens[r] * \
                             <Py_ssize_t>decoded_col.rle_run_lengths[r]
-        if rtotal_bytes == 0:
-            rtotal_bytes = 1
-        vec = StringVector(num_rows, <int32_t>rtotal_bytes)
-        buf = vec.ptr
-        dst = <char*>buf.data
-        roffsets = buf.offsets
-        offset = 0
-        i = 0
+        # Route through the builder so finish() populates min/max metadata and
+        # the construction invariants (offsets, validity, unified view) live in
+        # one place. with_counts guarantees an exact byte budget.
+        builder = StringVectorBuilder.with_counts(num_rows, rtotal_bytes)
         for r in range(num_runs):
             roff = <int32_t>decoded_col.rle_str_offsets[r]
             rlen = decoded_col.rle_str_lens[r]
             run_cnt = decoded_col.rle_run_lengths[r]
             for j in range(run_cnt):
-                roffsets[i] = offset
-                if rlen > 0:
-                    memcpy(dst + offset, rle_arena + roff, rlen)
-                offset += rlen
-                i += 1
-        roffsets[num_rows] = offset
-        return vec
+                builder.append_bytes(<const char*>rle_arena + roff, rlen)
+        return builder.finish()
 
     # ── Dict mode ─────────────────────────────────────────────────────────────
     # C++ stores: string_dict_arena = flat packed bytes, string_dict_offsets/lens
     # = per-entry index, dict_indices = one index per (non-null) row.
-    # We bypass StringVectorBuilder entirely and write directly to the
-    # DrakenVarBuffer data/offsets pointers to eliminate per-row call overhead.
     if num_indices > 0:
         num_dict = <Py_ssize_t>decoded_col.string_dict_lens.size()
         arena_data = decoded_col.string_dict_arena.data()
@@ -798,60 +788,28 @@ cdef StringVector _make_string_vector(
             free(dict_lens)
             raise OverflowError("StringVector materialization exceeds 2 GiB")
         total_bytes = <int32_t>total_bytes64
-        if total_bytes == 0:
-            total_bytes = 1
 
-        # Step 3: allocate StringVector with exact capacity and grab raw ptrs.
-        vec = StringVector(num_rows, total_bytes)
-        buf = vec.ptr
-        dst = <char*>buf.data
-        offsets = buf.offsets
-        offset = 0
-
-        # Step 4a: non-null path — no null bitmap required, tightest inner loop.
-        if decoded_col.valid_bits.size() == 0:
-            # Pass 2: SIMD build of exclusive offsets[0..num_rows].
-            # offsets[num_rows] == total_bytes (already validated to fit int32).
-            parquet_reader.build_offsets(
-                dict_lens,
-                <const int32_t*>decoded_col.dict_indices.data(),
-                <size_t>num_rows,
-                offsets,
-            )
-            # Body memcpy walk uses the precomputed offsets[]; Pass 3 will
-            # unroll this with software prefetch.
-            for i in range(num_rows):
-                dict_idx = decoded_col.dict_indices[i]
-                slen = dict_lens[dict_idx]
-                if slen > 0:
-                    memcpy(dst + offsets[i], dict_ptrs[dict_idx], slen)
-
-        else:
-            # Step 4b: nullable — allocate and fill validity bitmap.
-            nb_bytes = (num_rows + 7) >> 3
-            nb = <uint8_t*>malloc(nb_bytes)
-            if nb == NULL:
-                free(dict_ptrs)
-                free(dict_lens)
-                raise MemoryError()
-            memset(nb, 0, nb_bytes)
-            val_idx = 0
-            for i in range(num_rows):
-                offsets[i] = offset
-                if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
-                    dict_idx = decoded_col.dict_indices[val_idx]
-                    val_idx += 1
-                    slen = dict_lens[dict_idx]
-                    if slen > 0:
-                        memcpy(dst + offset, dict_ptrs[dict_idx], slen)
-                    offset += slen
-                    nb[i >> 3] |= (1 << (i & 7))
-            offsets[num_rows] = offset
-            buf.null_bitmap = nb
-
-        free(dict_ptrs)
-        free(dict_lens)
-        return vec
+        # Route through the builder so finish() populates min/max metadata
+        # and the construction invariants live in one place.
+        try:
+            builder = StringVectorBuilder.with_counts(num_rows, total_bytes)
+            if decoded_col.valid_bits.size() == 0:
+                for i in range(num_rows):
+                    dict_idx = decoded_col.dict_indices[i]
+                    builder.append_bytes(dict_ptrs[dict_idx], dict_lens[dict_idx])
+            else:
+                val_idx = 0
+                for i in range(num_rows):
+                    if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
+                        dict_idx = decoded_col.dict_indices[val_idx]
+                        val_idx += 1
+                        builder.append_bytes(dict_ptrs[dict_idx], dict_lens[dict_idx])
+                    else:
+                        builder.append_null()
+            return builder.finish()
+        finally:
+            free(dict_ptrs)
+            free(dict_lens)
 
     # ── Plain mode ─────────────────────────────────────────────────────────────
     estimated_bytes = 0
@@ -1060,7 +1018,7 @@ cdef Integer64Vector _make_typed_int64_dictionary_vector(
     # Fast path: packed codes array built in C++ (nullable dict column, zero materialization)
     if not decoded_col.dict_codes_array.empty():
         _record_dictionary_decode(decoded_col)
-        return make_int64_dict_only(
+        return int64_from_packed_dict(
             decoded_col.dict_codes_array.data(),
             decoded_col.code_width,
             num_rows,
@@ -1121,7 +1079,7 @@ cdef Integer64Vector _make_typed_int64_from_int32_dictionary_vector(
         # Fast path: packed codes array built in C++ (zero materialization)
         if not decoded_col.dict_codes_array.empty():
             _record_dictionary_decode(decoded_col)
-            result = make_int64_dict_only(
+            result = int64_from_packed_dict(
                 decoded_col.dict_codes_array.data(),
                 decoded_col.code_width,
                 num_rows,
@@ -1162,7 +1120,7 @@ cdef Float64Vector _make_typed_float64_dictionary_vector(
     # Fast path: packed codes array built in C++ (nullable dict column, zero materialization)
     if not decoded_col.dict_codes_array.empty():
         _record_dictionary_decode(decoded_col)
-        return make_float64_dict_only(
+        return float64_from_packed_dict(
             decoded_col.dict_codes_array.data(),
             decoded_col.code_width,
             num_rows,
@@ -1223,7 +1181,7 @@ cdef Float64Vector _make_typed_float64_from_float32_dictionary_vector(
         # Fast path: packed codes array built in C++ (zero materialization)
         if not decoded_col.dict_codes_array.empty():
             _record_dictionary_decode(decoded_col)
-            result = make_float64_dict_only(
+            result = float64_from_packed_dict(
                 decoded_col.dict_codes_array.data(),
                 decoded_col.code_width,
                 num_rows,

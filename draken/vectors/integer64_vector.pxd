@@ -1,7 +1,7 @@
 from libc.stdint cimport int32_t
 from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
-from libc.stdint cimport uint64_t, uint8_t
+from libc.stdint cimport uint32_t, uint64_t, uint8_t
 
 from draken.core.buffers cimport DrakenFixedBuffer
 from draken.core.buffers cimport DrakenVarBuffer
@@ -18,7 +18,6 @@ cdef class Integer64Vector(Vector):
     cdef DrakenVarBuffer* _dict_values
     cdef uint8_t _dict_ordered
 
-    cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
 
     cpdef Integer64Vector take(self, int32_t[::1] indices)
@@ -92,8 +91,7 @@ cdef Integer64Vector from_packed_dict(
 cdef Integer64Vector from_sequence(const int64_t[::1] data)
 cdef Integer64Vector _materialize_dict_int64(Integer64Vector vec)
 cdef Integer64Vector make_int64_dict_only(
-    const uint8_t* codes,
-    uint8_t code_width,
+    const uint32_t* codes,
     Py_ssize_t row_count,
     const int64_t* dictionary,
     Py_ssize_t dict_size,

@@ -343,3 +343,9 @@ opteryx/expression/evaluator/__init__.c
 opteryx/expression/evaluator/__init__.cpp
 opteryx/expression/evaluator/_impl.cpp
 draken/vectors/null_vector.cpp
+draken/vectors/german_string_builder.cpp
+draken/vectors/integer16_vector.cpp
+draken/vectors/integer32_vector.cpp
+draken/vectors/integer64_vector.cpp
+draken/vectors/integer8_vector.cpp
+draken/vectors/decimal_vector.cpp
