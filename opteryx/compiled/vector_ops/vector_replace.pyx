@@ -29,7 +29,7 @@ cpdef StringVector vector_replace(StringVector data, StringVector search, String
     Returns:
         StringVector: result after replacements.
     """
-    cdef Py_ssize_t n = data.ptr.length
+    cdef Py_ssize_t n = data._unified_view.length
     cdef Py_ssize_t i
     cdef StringRow data_row, search_row, replace_row
     cdef bytes val_b, srch_b, repl_b

@@ -17,6 +17,7 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 
 from draken.core.buffers cimport DRAKEN_STRING, DrakenArrayBuffer, DrakenVarBuffer
+from draken.core.buffers cimport DrakenStringArena, DrakenStringSlot, str_length, str_data, DrakenVector
 from draken.vectors.array_vector cimport ArrayVector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.string_vector cimport StringVector
@@ -62,9 +63,12 @@ cdef BoolVector _regex_match_any_literal(ArrayVector arr, object patterns, int f
 
     cdef StringVector child
     cdef DrakenArrayBuffer* aptr = arr.ptr
-    cdef DrakenVarBuffer* cptr
+    cdef DrakenVector* child_uv
+    cdef DrakenStringArena* child_arena
     cdef object pattern_src, p, p_str, regex_text
-    cdef Py_ssize_t i, j, k, n, nbytes, row_start, row_end, start, end, text_len
+    cdef Py_ssize_t i, j, k, n, nbytes, row_start, row_end, text_len
+    cdef uint32_t slen
+    cdef const uint8_t* sptr
     cdef BoolVector out
     cdef uint8_t* dst
     cdef uint8_t* out_null = NULL
@@ -86,9 +90,10 @@ cdef BoolVector _regex_match_any_literal(ArrayVector arr, object patterns, int f
     if aptr.value_type != DRAKEN_STRING or not isinstance(arr._child, StringVector):
         raise TypeError("regex_match_any expects ArrayVector with StringVector child")
     child = <StringVector>arr._child
-    cptr = child.ptr
-    if cptr == NULL:
+    child_uv = child.unified()
+    if child_uv == NULL:
         raise ValueError("ArrayVector child StringVector is not initialized")
+    child_arena = <DrakenStringArena*>child_uv.data
 
     options = RE2OptionsAny()
     options.set_case_sensitive(not ignore_case)
@@ -128,7 +133,7 @@ cdef BoolVector _regex_match_any_literal(ArrayVector arr, object patterns, int f
             memset(dst, 0, nbytes)
 
         row_nulls = aptr.null_bitmap
-        child_nulls = cptr.null_bitmap
+        child_nulls = child_uv.validity
 
         if row_nulls != NULL and nbytes != 0:
             out_null = <uint8_t*>malloc(nbytes)
@@ -154,10 +159,10 @@ cdef BoolVector _regex_match_any_literal(ArrayVector arr, object patterns, int f
                 if child_nulls != NULL and ((child_nulls[j >> 3] >> (j & 7)) & 1) == 0:
                     continue
 
-                start = cptr.offsets[j]
-                end = cptr.offsets[j + 1]
-                text_len = end - start
-                text_piece = StringPieceAny(<const char*>cptr.data + start, <size_t>text_len)
+                slen = str_length(&child_arena.slots[j])
+                sptr = str_data(&child_arena.slots[j], child_arena.arena)
+                text_len = <Py_ssize_t>slen
+                text_piece = StringPieceAny(<const char*>sptr, <size_t>slen)
 
                 for k in range(<Py_ssize_t>compiled_patterns.size()):
                     if RE2Any.PartialMatch(text_piece, compiled_patterns[k][0]):
@@ -186,11 +191,16 @@ cdef BoolVector _regex_match_any_array_array(ArrayVector arr, ArrayVector patter
     cdef DrakenArrayBuffer* p_aptr = patterns.ptr
     cdef StringVector child
     cdef StringVector p_child
-    cdef DrakenVarBuffer* cptr
-    cdef DrakenVarBuffer* p_cptr
+    cdef DrakenVector* child_uv
+    cdef DrakenVector* p_child_uv
+    cdef DrakenStringArena* child_arena
+    cdef DrakenStringArena* p_child_arena
     cdef Py_ssize_t i, j, pj, k, n, nbytes
     cdef Py_ssize_t row_start, row_end, p_row_start, p_row_end
-    cdef Py_ssize_t start, end, p_start, p_end, text_len, pat_text_len
+    cdef uint32_t slen, p_slen
+    cdef const uint8_t* sptr
+    cdef const uint8_t* p_sptr
+    cdef Py_ssize_t text_len, pat_text_len
     cdef BoolVector out
     cdef uint8_t* dst
     cdef uint8_t* out_null = NULL
@@ -222,10 +232,12 @@ cdef BoolVector _regex_match_any_array_array(ArrayVector arr, ArrayVector patter
 
     child = <StringVector>arr._child
     p_child = <StringVector>patterns._child
-    cptr = child.ptr
-    p_cptr = p_child.ptr
-    if cptr == NULL or p_cptr == NULL:
+    child_uv = child.unified()
+    p_child_uv = p_child.unified()
+    if child_uv == NULL or p_child_uv == NULL:
         raise ValueError("ArrayVector child StringVector is not initialized")
+    child_arena = <DrakenStringArena*>child_uv.data
+    p_child_arena = <DrakenStringArena*>p_child_uv.data
 
     n = <Py_ssize_t>aptr.length
     nbytes = (n + 7) >> 3
@@ -236,8 +248,8 @@ cdef BoolVector _regex_match_any_array_array(ArrayVector arr, ArrayVector patter
 
     row_nulls = aptr.null_bitmap
     pattern_row_nulls = p_aptr.null_bitmap
-    child_nulls = cptr.null_bitmap
-    p_child_nulls = p_cptr.null_bitmap
+    child_nulls = child_uv.validity
+    p_child_nulls = p_child_uv.validity
 
     if (row_nulls != NULL or pattern_row_nulls != NULL) and nbytes != 0:
         out_null = <uint8_t*>malloc(nbytes)
@@ -268,11 +280,11 @@ cdef BoolVector _regex_match_any_array_array(ArrayVector arr, ArrayVector patter
             for pj in range(p_row_start, p_row_end):
                 if not _bit_is_set(p_child_nulls, pj):
                     continue
-                p_start = p_cptr.offsets[pj]
-                p_end = p_cptr.offsets[pj + 1]
-                pat_text_len = p_end - p_start
+                p_slen = str_length(&p_child_arena.slots[pj])
+                p_sptr = str_data(&p_child_arena.slots[pj], p_child_arena.arena)
+                pat_text_len = <Py_ssize_t>p_slen
                 pattern_bytes = PyBytes_FromStringAndSize(
-                    <char*>p_cptr.data + p_start, <Py_ssize_t>pat_text_len
+                    <char*>p_sptr, <Py_ssize_t>pat_text_len
                 )
                 regex_text = sql_like_to_regex(pattern_bytes.decode("utf-8", errors="replace"))
                 regex_bytes = (<str>regex_text).encode("utf-8")
@@ -288,10 +300,10 @@ cdef BoolVector _regex_match_any_array_array(ArrayVector arr, ArrayVector patter
             for j in range(row_start, row_end):
                 if not _bit_is_set(child_nulls, j):
                     continue
-                start = cptr.offsets[j]
-                end = cptr.offsets[j + 1]
-                text_len = end - start
-                text_piece = StringPieceAny(<const char*>cptr.data + start, <size_t>text_len)
+                slen = str_length(&child_arena.slots[j])
+                sptr = str_data(&child_arena.slots[j], child_arena.arena)
+                text_len = <Py_ssize_t>slen
+                text_piece = StringPieceAny(<const char*>sptr, <size_t>slen)
                 for k in range(<Py_ssize_t>row_patterns.size()):
                     if RE2Any.PartialMatch(text_piece, row_patterns[k][0]):
                         matched = True
@@ -319,12 +331,18 @@ cpdef BoolVector regex_match_any(StringVector arr, ArrayVector patterns, int fla
     """
     from opteryx.utils.sql import sql_like_to_regex
 
-    cdef DrakenVarBuffer* cptr = arr.ptr
+    cdef DrakenVector* arr_uv = arr.unified()
+    cdef DrakenStringArena* arr_arena = <DrakenStringArena*>arr_uv.data
     cdef DrakenArrayBuffer* p_aptr = patterns.ptr
     cdef StringVector p_child
-    cdef DrakenVarBuffer* p_cptr
+    cdef DrakenVector* p_child_uv
+    cdef DrakenStringArena* p_child_arena
     cdef Py_ssize_t i, pj, k, n, nbytes
-    cdef Py_ssize_t p_row_start, p_row_end, p_start, p_end, start, end, text_len, pat_text_len
+    cdef Py_ssize_t p_row_start, p_row_end
+    cdef uint32_t slen, p_slen
+    cdef const uint8_t* sptr
+    cdef const uint8_t* p_sptr
+    cdef Py_ssize_t text_len, pat_text_len
     cdef BoolVector out
     cdef uint8_t* dst
     cdef uint8_t* out_null = NULL
@@ -344,28 +362,29 @@ cpdef BoolVector regex_match_any(StringVector arr, ArrayVector patterns, int fla
     cdef StringPieceAny text_piece
     cdef vector[RE2Any*] row_patterns
 
-    if cptr == NULL or p_aptr == NULL:
+    if arr_uv == NULL or p_aptr == NULL:
         raise ValueError("vector is not initialized")
-    if cptr.length != p_aptr.length:
+    if arr_uv.length != p_aptr.length:
         raise ValueError("array and pattern vectors must have the same length")
     if p_aptr.value_type != DRAKEN_STRING or not isinstance(patterns._child, StringVector):
         raise TypeError("regex_match_any expects patterns ArrayVector with StringVector child")
 
     p_child = <StringVector>patterns._child
-    p_cptr = p_child.ptr
-    if p_cptr == NULL:
+    p_child_uv = p_child.unified()
+    if p_child_uv == NULL:
         raise ValueError("patterns ArrayVector child StringVector is not initialized")
+    p_child_arena = <DrakenStringArena*>p_child_uv.data
 
-    n = <Py_ssize_t>cptr.length
+    n = <Py_ssize_t>arr_uv.length
     nbytes = (n + 7) >> 3
     out = BoolVector(<size_t>n)
     dst = <uint8_t*>out.ptr.data
     if nbytes != 0:
         memset(dst, 0, nbytes)
 
-    row_nulls = cptr.null_bitmap
+    row_nulls = arr_uv.validity
     pattern_row_nulls = p_aptr.null_bitmap
-    p_child_nulls = p_cptr.null_bitmap
+    p_child_nulls = p_child_uv.validity
 
     if (row_nulls != NULL or pattern_row_nulls != NULL) and nbytes != 0:
         out_null = <uint8_t*>malloc(nbytes)
@@ -396,11 +415,11 @@ cpdef BoolVector regex_match_any(StringVector arr, ArrayVector patterns, int fla
             for pj in range(p_row_start, p_row_end):
                 if not _bit_is_set(p_child_nulls, pj):
                     continue
-                p_start = p_cptr.offsets[pj]
-                p_end = p_cptr.offsets[pj + 1]
-                pat_text_len = p_end - p_start
+                p_slen = str_length(&p_child_arena.slots[pj])
+                p_sptr = str_data(&p_child_arena.slots[pj], p_child_arena.arena)
+                pat_text_len = <Py_ssize_t>p_slen
                 pattern_bytes = PyBytes_FromStringAndSize(
-                    <char*>p_cptr.data + p_start, <Py_ssize_t>pat_text_len
+                    <char*>p_sptr, <Py_ssize_t>pat_text_len
                 )
                 regex_text = sql_like_to_regex(pattern_bytes.decode("utf-8", errors="replace"))
                 regex_bytes = (<str>regex_text).encode("utf-8")
@@ -411,10 +430,10 @@ cpdef BoolVector regex_match_any(StringVector arr, ArrayVector patterns, int fla
                     raise ValueError("Invalid LIKE pattern")
                 row_patterns.push_back(regex)
 
-            start = cptr.offsets[i]
-            end = cptr.offsets[i + 1]
-            text_len = end - start
-            text_piece = StringPieceAny(<const char*>cptr.data + start, <size_t>text_len)
+            slen = str_length(&arr_arena.slots[i])
+            sptr = str_data(&arr_arena.slots[i], arr_arena.arena)
+            text_len = <Py_ssize_t>slen
+            text_piece = StringPieceAny(<const char*>sptr, <size_t>slen)
             for k in range(<Py_ssize_t>row_patterns.size()):
                 if RE2Any.PartialMatch(text_piece, row_patterns[k][0]):
                     matched = True

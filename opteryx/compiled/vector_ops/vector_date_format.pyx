@@ -50,7 +50,7 @@ cpdef list vector_date_format(object temporal_vec, bytes pattern):
     # Handle TimestampVector
     if isinstance(temporal_vec, TimestampVector):
         ts_vec = <TimestampVector>temporal_vec
-        length = ts_vec.ptr.length
+        length = ts_vec._unified_view.length
         ts_data = <int64_t*>ts_vec.ptr.data
         null_bitmap = ts_vec.ptr.null_bitmap
         unit = ts_vec.timestamp_unit
@@ -84,7 +84,7 @@ cpdef list vector_date_format(object temporal_vec, bytes pattern):
     # Handle Date32Vector
     if isinstance(temporal_vec, Date32Vector):
         date_vec = <Date32Vector>temporal_vec
-        length = date_vec.ptr.length
+        length = date_vec._unified_view.length
         date_data = <int32_t*>date_vec.ptr.data
         null_bitmap = date_vec.ptr.null_bitmap
 

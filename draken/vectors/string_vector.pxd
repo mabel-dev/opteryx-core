@@ -4,15 +4,15 @@ from libc.stdint cimport int32_t, int8_t, int64_t, intptr_t, uint32_t, uint64_t,
 from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.core.buffers cimport DrakenVarBuffer
 from draken.core.buffers cimport DrakenVector
-from draken.core.buffers cimport DrakenGermanArena
-from draken.core.buffers cimport GermanString
-from draken.core.buffers cimport GS_INLINE_MAX
-from draken.core.buffers cimport gs_data
-from draken.core.buffers cimport gs_length
-from draken.core.buffers cimport gs_equals
-from draken.core.buffers cimport gs_compare
-from draken.core.german_arena cimport alloc_german_arena
-from draken.core.german_arena cimport free_german_arena
+from draken.core.buffers cimport DrakenStringArena
+from draken.core.buffers cimport DrakenStringSlot
+from draken.core.buffers cimport STR_INLINE_MAX
+from draken.core.buffers cimport str_data
+from draken.core.buffers cimport str_length
+from draken.core.buffers cimport str_equals
+from draken.core.buffers cimport str_compare
+from draken.core.string_arena cimport alloc_string_arena
+from draken.core.string_arena cimport free_string_arena
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.vector cimport Vector
 
@@ -24,6 +24,30 @@ cdef struct StringElement:
     bint is_null
 
 
+# Phase 5: constant string view. A constant StringVector stores its one value
+# as the single slot of a 1-slot DrakenStringArena under _unified_view.data.
+# Readers used to cast _unified_view.data as `DrakenConstantStringPayload*`
+# and read .data / .length directly; they now get the same two fields via this
+# stack-local view. Defined here (in the .pxd) so it can be cimported across
+# the vector_ops/ and operators/ modules.
+ctypedef struct _ConstView:
+    uint8_t* data
+    int32_t length
+
+
+cdef inline _ConstView _const_view(DrakenStringArena* arena) noexcept nogil:
+    cdef _ConstView v
+    cdef DrakenStringSlot* slot
+    if arena == NULL or arena.length == 0:
+        v.data = NULL
+        v.length = 0
+        return v
+    slot = &arena.slots[0]
+    v.data = <uint8_t*>str_data(slot, arena.arena)
+    v.length = <int32_t>str_length(slot)
+    return v
+
+
 cdef class StringVector(Vector):
     cdef object _arrow_data_buf
     cdef object _arrow_offs_buf
@@ -31,8 +55,11 @@ cdef class StringVector(Vector):
 
     cdef DrakenVarBuffer* ptr
     cdef bint owns_data
-    cdef DrakenGermanArena* _german_dict_values
-    cdef uint8_t _dict_ordered
+    # Independent ownership of the two buffers that back a dict-encoded value
+    # payload. They can diverge: a view may allocate fresh codes while
+    # referencing a parent vector's arena, or take over an arena while
+    # borrowing codes. _release_dict_storage frees each independently.
+    cdef bint _owns_codes        # owns _unified_view.selection
 
     cdef int64_t* _dict_code_counts
     cdef bint _dict_code_counts_valid
@@ -40,9 +67,10 @@ cdef class StringVector(Vector):
     # min/max metadata. When _min_max_valid is True:
     #   - if _min_max_all_null is True, the vector is empty/all-null (min/max → None)
     #   - else _cached_min_ptr/_cached_min_len and _cached_max_ptr/_cached_max_len
-    #     point into a buffer the vector owns (vec.ptr.data, vec._german_dict_values arena,
-    #     or vec's constant payload). Pointers are stable for the vector's lifetime;
-    #     PyBytes are materialized only when min()/max() is called from Python.
+    #     point into a buffer the vector owns (vec.ptr.data, the German arena under
+    #     _unified_view.data, or vec's constant payload). Pointers are stable for the
+    #     vector's lifetime; PyBytes are materialized only when min()/max() is called
+    #     from Python.
     # When False, min()/max() recompute on demand. Default: invalid (safe fallback).
     cdef const uint8_t* _cached_min_ptr
     cdef Py_ssize_t _cached_min_len
@@ -114,26 +142,26 @@ cdef class StringVector(Vector):
 
 cdef class _StringVectorCIterator:
     """C-level iterator for high-performance kernel operations."""
-    cdef DrakenVarBuffer* _ptr
+    cdef DrakenStringArena* _arena
     cdef Py_ssize_t _pos
     cdef Py_ssize_t _length
-    cdef char* _base
-    cdef int32_t* _offsets
     cdef uint8_t* _nulls
     cdef bint _has_nulls
 
     @staticmethod
     cdef _StringVectorCIterator _from_ptr(DrakenVarBuffer* ptr)
+    @staticmethod
+    cdef _StringVectorCIterator _from_arena(DrakenStringArena* arena, Py_ssize_t length, uint8_t* nulls)
     cdef bint next(self, StringElement* elem) nogil
     cpdef void reset(self)
     cpdef StringElement get_at(self, Py_ssize_t index)
 
 
 cdef class _StringVectorView:
-    cdef DrakenVarBuffer* _ptr
-    cdef char* _data
-    cdef int32_t* _offsets
+    cdef DrakenStringArena* _arena
+    cdef const uint32_t* _selection
     cdef uint8_t* _nulls
+    cdef Py_ssize_t _length
 
     cpdef intptr_t value_ptr(self, Py_ssize_t i)
     cpdef Py_ssize_t value_len(self, Py_ssize_t i)
@@ -176,6 +204,13 @@ cdef class StringVectorBuilder:
     cdef void _initialize_null_bitmap(self) except *
     cdef void _require_index(self, Py_ssize_t index) except *
 
+
+cdef DrakenStringArena* _varbuffer_to_string_arena(
+    const uint8_t* data,
+    const int32_t* offsets,
+    const uint8_t* null_bitmap,
+    Py_ssize_t n_rows,
+)
 
 cdef StringVector from_arrow(object array)
 

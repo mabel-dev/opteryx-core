@@ -846,13 +846,13 @@ extensions = [
         language="c++",
     ),
     make_draken_extension(
-        "vectors.german_string_builder",
-        "vectors/german_string_builder.pyx",
+        "vectors.string_arena_builder",
+        "vectors/string_arena_builder.pyx",
         language="c++",
         depends=[
             "draken/src/core/buffers.h",
-            "draken/src/core/german_string.h",
-            "draken/core/german_arena.pxd",
+            "draken/src/core/string_slot.h",
+            "draken/core/string_arena.pxd",
         ],
     ),
     make_draken_extension(

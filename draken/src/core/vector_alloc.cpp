@@ -21,6 +21,8 @@ std::atomic<const uint32_t*> g_identity_buf{nullptr};
 std::atomic<uint32_t>        g_identity_cap{0};
 std::atomic<const uint32_t*> g_zero_buf{nullptr};
 std::atomic<uint32_t>        g_zero_cap{0};
+std::atomic<const uint8_t*>  g_zero_validity_buf{nullptr};
+std::atomic<uint32_t>        g_zero_validity_cap{0};  // capacity in bits (logical rows)
 std::mutex                   g_grow_mutex;
 
 uint32_t next_capacity(uint32_t current, uint32_t required) {
@@ -94,6 +96,33 @@ const uint32_t* draken_zero_sel(uint32_t length) {
     }
     g_zero_buf.store(new_buf, std::memory_order_release);
     g_zero_cap.store(new_cap, std::memory_order_release);
+    return new_buf;
+}
+
+const uint8_t* draken_zero_validity(uint32_t length) {
+    if (length == 0) {
+        const uint8_t* buf = g_zero_validity_buf.load(std::memory_order_acquire);
+        if (buf) return buf;
+    } else if (length <= g_zero_validity_cap.load(std::memory_order_acquire)) {
+        return g_zero_validity_buf.load(std::memory_order_acquire);
+    }
+
+    std::lock_guard<std::mutex> lock(g_grow_mutex);
+    uint32_t cap = g_zero_validity_cap.load(std::memory_order_relaxed);
+    if (length <= cap && cap > 0) {
+        return g_zero_validity_buf.load(std::memory_order_relaxed);
+    }
+
+    uint32_t new_cap = next_capacity(cap, length ? length : INITIAL_CAPACITY);
+    // Pad byte count to a multiple of 8 for SIMD safety.
+    uint32_t byte_count = ((new_cap + 63) / 64) * 8;
+    uint8_t* new_buf = static_cast<uint8_t*>(std::calloc(byte_count, 1));
+    if (!new_buf) {
+        return g_zero_validity_buf.load(std::memory_order_relaxed);
+    }
+    g_zero_validity_buf.store(new_buf, std::memory_order_release);
+    g_zero_validity_cap.store(new_cap, std::memory_order_release);
+    // Old buffer intentionally leaked — other threads may still hold pointers.
     return new_buf;
 }
 

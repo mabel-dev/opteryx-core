@@ -124,8 +124,6 @@ cdef inline Integer64Vector _wrap_int64_buffer(DrakenFixedBuffer* buf) except *:
     cdef Integer64Vector vec = Integer64Vector(0, True)
     vec.ptr = buf
     vec.owns_data = True
-    vec._dict_values = NULL
-    vec._dict_ordered = 0
     vec._unified_view = draken_vector_from_dense(buf.data, <uint32_t>buf.length, DRAKEN_INT64, buf.null_bitmap)
     return vec
 
@@ -134,8 +132,6 @@ cdef inline Float64Vector _wrap_float64_buffer(DrakenFixedBuffer* buf) except *:
     cdef Float64Vector vec = Float64Vector(0, True)
     vec.ptr = buf
     vec.owns_data = True
-    vec._dict_values = NULL
-    vec._dict_ordered = 0
     vec._unified_view = draken_vector_from_dense(buf.data, <uint32_t>buf.length, DRAKEN_FLOAT64, buf.null_bitmap)
     return vec
 
@@ -390,7 +386,7 @@ cdef class SumInt64Collector(BaseCollector):
                     _bitmap_set(seen, si)
             return
 
-        if vec._dict_values != NULL:
+        if vec._unified_view.data_length < vec._unified_view.length:
             dict_data = <int64_t*>uv.data
             nulls = uv.validity
             for i in range(n_rows):
@@ -525,7 +521,7 @@ cdef class SumFloat64Collector(BaseCollector):
                     _bitmap_set(seen, si)
             return
 
-        if vec._dict_values != NULL:
+        if vec._unified_view.data_length < vec._unified_view.length:
             dict_data = <double*>uv.data
             nulls = uv.validity
             for i in range(n_rows):
@@ -671,7 +667,7 @@ cdef class MinMaxInt64Collector(BaseCollector):
                         _bitmap_set(seen, si)
             return
 
-        if vec._dict_values != NULL:
+        if vec._unified_view.data_length < vec._unified_view.length:
             dict_data = <int64_t*>uv.data
             nulls = uv.validity
             if self._direction == 1:   # MIN
@@ -843,7 +839,7 @@ cdef class MinMaxFloat64Collector(BaseCollector):
                         _bitmap_set(seen, si)
             return
 
-        if vec._dict_values != NULL:
+        if vec._unified_view.data_length < vec._unified_view.length:
             dict_data = <double*>uv.data
             nulls = uv.validity
             if self._direction == 1:   # MIN
@@ -976,7 +972,7 @@ cdef class MinMaxObjectCollector(BaseCollector):
         # Fast path: StringVector with C-level iteration (no Python materialization)
         if isinstance(vec, StringVector):
             sv_native = <StringVector>vec
-            if sv_native._german_dict_values != NULL:
+            if sv_native._unified_view.data_length < sv_native._unified_view.length:
                 sv_native = _materialize_dict_string(sv_native)
             self._accumulate_string_vector_native(sv_native, state_indices, n_rows, seen)
         else:
@@ -1154,7 +1150,7 @@ cdef class AvgCollector(BaseCollector):
                         sums[si] += const_i64
                         counts[si] += 1
                 return
-            if iv._dict_values != NULL:
+            if iv._unified_view.data_length < iv._unified_view.length:
                 nulls = uv.validity
                 i64 = <int64_t*>uv.data
                 for i in range(n_rows):
@@ -1201,7 +1197,7 @@ cdef class AvgCollector(BaseCollector):
                         sums[si] += const_f64
                         counts[si] += 1
                 return
-            if fv._dict_values != NULL:
+            if fv._unified_view.data_length < fv._unified_view.length:
                 nulls = uv.validity
                 f64 = <double*>uv.data
                 for i in range(n_rows):

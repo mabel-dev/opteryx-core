@@ -84,6 +84,13 @@ from draken.vectors.timestamp_vector cimport TimestampVector
 from draken.vectors.vector cimport Vector
 from opteryx.third_party.cyan4973.xxhash cimport cy_xxhash3_64
 from opteryx.third_party.cyan4973.xxhash cimport hash_bytes
+from draken.vectors.string_vector cimport _ConstView
+from draken.vectors.string_vector cimport _const_view
+from draken.vectors.string_vector cimport _varbuffer_to_string_arena
+from draken.core.buffers cimport DrakenStringArena
+from draken.core.buffers cimport DrakenStringSlot
+from draken.core.buffers cimport str_length, str_data
+from cpython.bytearray cimport PyByteArray_AS_STRING
 
 import io
 import os
@@ -1320,7 +1327,7 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
     cdef list segments
     cdef DrakenFixedBuffer* fixed_ptr
     cdef DrakenVarBuffer* var_ptr
-    cdef DrakenConstantStringPayload* const_str
+    cdef _ConstView const_str
     cdef uint8_t* codes_ptr
     cdef uint8_t* row_nulls
     cdef uint8_t code_width
@@ -1357,6 +1364,17 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
     cdef uint64_t blocks_written = 0
     cdef object sink_bytes_view
     cdef DrakenVector* uv
+    cdef list temp_bufs = []
+    cdef DrakenStringArena* ser_arena
+    cdef DrakenStringSlot* ser_slot
+    cdef Py_ssize_t ser_ri
+    cdef Py_ssize_t ser_slen
+    cdef Py_ssize_t ser_write_pos
+    cdef int32_t* tmp_offsets
+    cdef uint8_t* tmp_data
+    cdef object offsets_ba
+    cdef object values_ba
+    cdef Py_ssize_t ser_total_bytes
 
     if codec_id == CODEC_LZ4:
         lz4 = _load_lz4()
@@ -1385,8 +1403,8 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
                     isinstance(vec, StringVector) and (<StringVector>vec).ptr.offsets == NULL)):
             encoding = ENCODING_CONST
             if uv.type == DRAKEN_STRING:
-                const_str = <DrakenConstantStringPayload*>uv.data
-                if const_str == NULL:
+                const_str = _const_view(<DrakenStringArena*>uv.data)
+                if const_str.data == NULL and const_str.length != 0:
                     raise DrakenMorselStorageError("invalid typed constant string payload pointer")
                 const_value_len = const_str.length
                 segments.append((SEG_CONST_VALUE, <intptr_t>const_str.data, const_value_len))
@@ -1397,19 +1415,46 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
             flags = _const_flags_from_value_type(<int>uv.type)
             if uv.validity != NULL:
                 flags |= FLAG_HAS_NULLS
-        elif dtype == DRAKEN_STRING and (<StringVector>vec)._german_dict_values == NULL:
+        elif dtype == DRAKEN_STRING and (<StringVector>vec)._unified_view.data_length >= (<StringVector>vec)._unified_view.length:
             encoding = ENCODING_VAR
             var_ptr = (<StringVector>vec).ptr
             null_len = ((row_count + 7) >> 3) if var_ptr.null_bitmap != NULL else 0
-            if null_len > 0:
-                segments.append((SEG_NULL, <intptr_t>var_ptr.null_bitmap, null_len))
-            segments.append((SEG_OFFSETS, <intptr_t>var_ptr.offsets, (row_count + 1) * sizeof(int32_t)))
-            values_len = 0
-            if row_count > 0:
-                values_len = <Py_ssize_t>var_ptr.offsets[row_count]
-            segments.append((SEG_VALUES, <intptr_t>var_ptr.data, values_len))
+            if var_ptr.data != NULL:
+                # VarBuffer still populated: use directly
+                if null_len > 0:
+                    segments.append((SEG_NULL, <intptr_t>var_ptr.null_bitmap, null_len))
+                segments.append((SEG_OFFSETS, <intptr_t>var_ptr.offsets, (row_count + 1) * sizeof(int32_t)))
+                values_len = 0
+                if row_count > 0:
+                    values_len = <Py_ssize_t>var_ptr.offsets[row_count]
+                segments.append((SEG_VALUES, <intptr_t>var_ptr.data, values_len))
+            else:
+                # Arena-only (post-Step 4): reconstruct VarBuffer format from arena
+                ser_arena = <DrakenStringArena*>(<StringVector>vec)._unified_view.data
+                ser_total_bytes = 0
+                for ser_ri in range(row_count):
+                    ser_total_bytes += <Py_ssize_t>str_length(&ser_arena.slots[ser_ri])
+                offsets_ba = bytearray((row_count + 1) * sizeof(int32_t))
+                values_ba = bytearray(ser_total_bytes) if ser_total_bytes > 0 else bytearray(1)
+                tmp_offsets = <int32_t*>PyByteArray_AS_STRING(offsets_ba)
+                tmp_data = <uint8_t*>PyByteArray_AS_STRING(values_ba)
+                tmp_offsets[0] = 0
+                ser_write_pos = 0
+                for ser_ri in range(row_count):
+                    ser_slot = &ser_arena.slots[ser_ri]
+                    ser_slen = <Py_ssize_t>str_length(ser_slot)
+                    if ser_slen > 0:
+                        memcpy(tmp_data + ser_write_pos, str_data(ser_slot, ser_arena.arena), ser_slen)
+                    ser_write_pos += ser_slen
+                    tmp_offsets[ser_ri + 1] = <int32_t>ser_write_pos
+                temp_bufs.append(offsets_ba)
+                temp_bufs.append(values_ba)
+                if null_len > 0:
+                    segments.append((SEG_NULL, <intptr_t>var_ptr.null_bitmap, null_len))
+                segments.append((SEG_OFFSETS, <intptr_t>tmp_offsets, (row_count + 1) * sizeof(int32_t)))
+                segments.append((SEG_VALUES, <intptr_t>tmp_data, ser_total_bytes))
             flags = FLAG_HAS_NULLS if null_len > 0 else 0
-        elif dtype == DRAKEN_STRING and (<StringVector>vec)._german_dict_values != NULL:
+        elif dtype == DRAKEN_STRING and (<StringVector>vec)._unified_view.data_length < (<StringVector>vec)._unified_view.length:
             encoding = ENCODING_DICT
 
             if uv.type != DRAKEN_STRING:
@@ -1418,7 +1463,7 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
             row_nulls = uv.validity
             codes_ptr = <uint8_t*>uv.selection
             code_width = 4
-            var_ptr = <DrakenVarBuffer*>uv.data
+            ser_arena = <DrakenStringArena*>uv.data
             dict_ordered = bool(getattr(vec, "ordered", False))
 
             null_len = ((row_count + 7) >> 3) if row_nulls != NULL else 0
@@ -1428,16 +1473,36 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
             dict_codes_len = row_count * <Py_ssize_t>code_width
             segments.append((SEG_CODES, <intptr_t>codes_ptr, dict_codes_len))
 
-            dict_len = <Py_ssize_t>var_ptr.length
+            # Reconstruct VarBuffer-format dict offsets+data from arena
+            dict_len = <Py_ssize_t>ser_arena.length
+            ser_total_bytes = 0
+            for ser_ri in range(dict_len):
+                ser_total_bytes += <Py_ssize_t>str_length(&ser_arena.slots[ser_ri])
+            offsets_ba = bytearray((dict_len + 1) * sizeof(int32_t))
+            values_ba = bytearray(ser_total_bytes) if ser_total_bytes > 0 else bytearray(1)
+            tmp_offsets = <int32_t*>PyByteArray_AS_STRING(offsets_ba)
+            tmp_data = <uint8_t*>PyByteArray_AS_STRING(values_ba)
+            tmp_offsets[0] = 0
+            ser_write_pos = 0
+            for ser_ri in range(dict_len):
+                ser_slot = &ser_arena.slots[ser_ri]
+                ser_slen = <Py_ssize_t>str_length(ser_slot)
+                if ser_slen > 0:
+                    memcpy(tmp_data + ser_write_pos, str_data(ser_slot, ser_arena.arena), ser_slen)
+                ser_write_pos += ser_slen
+                tmp_offsets[ser_ri + 1] = <int32_t>ser_write_pos
+            temp_bufs.append(offsets_ba)
+            temp_bufs.append(values_ba)
+
             dict_offsets_len = (dict_len + 1) * sizeof(int32_t)
-            segments.append((SEG_DICT_OFFSETS, <intptr_t>var_ptr.offsets, dict_offsets_len))
+            segments.append((SEG_DICT_OFFSETS, <intptr_t>tmp_offsets, dict_offsets_len))
 
-            values_len = 0
-            if dict_len > 0:
-                values_len = <Py_ssize_t>var_ptr.offsets[dict_len]
-            segments.append((SEG_DICT_VALUES, <intptr_t>var_ptr.data, values_len))
+            segments.append((SEG_DICT_VALUES, <intptr_t>tmp_data, ser_total_bytes))
 
-            dict_null_len = (dict_len + 7) >> 3 if var_ptr.null_bitmap != NULL else 0
+            # Dict null bitmap: stored in var_ptr.null_bitmap (if any)
+            # For arena-backed dicts the null bitmap is on the old var_ptr or absent
+            var_ptr = (<StringVector>vec).ptr
+            dict_null_len = (dict_len + 7) >> 3 if (var_ptr != NULL and var_ptr.null_bitmap != NULL) else 0
             if dict_null_len > 0:
                 segments.append((SEG_DICT_NULL, <intptr_t>var_ptr.null_bitmap, dict_null_len))
 
@@ -1449,7 +1514,7 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
             if dict_null_len > 0:
                 flags |= FLAG_DICT_HAS_DICT_NULLS
             flags |= _dict_flags_from_code_width(code_width)
-            flags |= _dict_flags_from_value_type(var_ptr.type)
+            flags |= _dict_flags_from_value_type(DRAKEN_STRING)
         elif _is_supported_fixed_type(dtype):
             encoding = ENCODING_FIXED
             fixed_ptr = _fixed_ptr_from_vector(<Vector>morsel.ptr.columns[i], dtype)
@@ -2272,6 +2337,11 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                     raise DrakenMorselStorageError(
                         f"offset tail mismatch in column {i}: expected {values_payload[1]}, got {var_ptr.offsets[row_count]}"
                     )
+
+                # Convert to arena-backed so arena-aware readers work correctly
+                (<StringVector>vec)._unified_view.data = <void*>_varbuffer_to_string_arena(
+                    var_ptr.data, var_ptr.offsets, var_ptr.null_bitmap, row_count)
+                (<StringVector>vec)._unified_view.data_length = row_count
             else:
                 raise DrakenMorselCorruptionError(f"invalid encoding kind {encoding} for column {i}")
 

@@ -40,7 +40,7 @@ cdef inline int int64_to_str_buf(int64_t value, char* buf) nogil:
 
 cpdef StringVector vector_cast_int64_to_bytes(Integer64Vector vec):
     """Cast an Integer64Vector to a StringVector of UTF-8 decimal bytes."""
-    cdef Py_ssize_t n = vec.ptr.length
+    cdef Py_ssize_t n = vec._unified_view.length
     cdef int64_t* src = <int64_t*>vec.ptr.data
     cdef uint8_t* null_bm = vec.ptr.null_bitmap
     cdef char buf[21]

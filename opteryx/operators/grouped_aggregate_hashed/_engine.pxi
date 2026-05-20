@@ -248,7 +248,7 @@ cdef class GroupHashEngine:
             if not isinstance(vec, StringVector):
                 return
             svec = <StringVector>vec
-            if svec._german_dict_values != NULL:
+            if svec._unified_view.data_length < svec._unified_view.length:
                 card = svec.c_dict_size()
             else:
                 return
@@ -490,7 +490,7 @@ cdef class GroupHashEngine:
                 # hash + cached lookups beat our K-independent path.  Only
                 # take the fast path when K is meaningfully smaller than N.
                 if (
-                    svec_key._german_dict_values != NULL
+                    svec_key._unified_view.data_length < svec_key._unified_view.length
                     and svec_key.c_dict_size() <= (n_rows >> 2)
                 ):
                     if self._telemetry_enabled:

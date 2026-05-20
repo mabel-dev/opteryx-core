@@ -179,14 +179,13 @@ else:
 
 from draken.core.buffers cimport (
     DrakenVector,
-    DrakenConstantStringPayload,
     DrakenVarBuffer,
-    DrakenGermanArena,
-    GermanString,
-    gs_length,
-    gs_data,
+    DrakenStringArena,
+    DrakenStringSlot,
+    str_length,
+    str_data,
 )
-from draken.vectors.string_vector cimport StringVector, from_packed_dict
+from draken.vectors.string_vector cimport StringVector
 
 
 cdef enum DfaOpType:
@@ -750,15 +749,18 @@ cdef inline void _extract_const_slice(
     Py_ssize_t* data_len,
 ) except *:
     cdef DrakenVector* uv = vec.unified()
-    cdef DrakenConstantStringPayload* csp
+    cdef DrakenStringArena* prog_arena
+    cdef DrakenStringSlot* prog_slot
     if vec.ptr.offsets != NULL:  # not constant
         raise ValueError("vector_dfa_extract: compiled program must be constant encoded")
     if uv.validity != NULL:  # null constant
         raise ValueError("vector_dfa_extract: compiled program must be non-null")
 
-    csp = <DrakenConstantStringPayload*>uv.data
-    data_ptr[0] = <const char*>csp.data
-    data_len[0] = <Py_ssize_t>csp.length
+    # Constant StringVector: single slot at index 0, no selection array.
+    prog_arena = <DrakenStringArena*>uv.data
+    prog_slot = &prog_arena.slots[0]
+    data_ptr[0] = <const char*>str_data(prog_slot, prog_arena.arena)
+    data_len[0] = <Py_ssize_t>str_length(prog_slot)
 
 
 
@@ -847,11 +849,6 @@ cpdef StringVector vector_dfa_extract(
 
     The execution kernel consumes a constant-encoded compiled program blob,
     decodes it once, and interprets the decoded procedure over the input data.
-
-    Encoding behavior:
-    - constant input    -> execute once, replicate result/null
-    - dictionary input  -> transform dictionary values once, preserve row codes
-    - dense input       -> row-by-row native execution
     """
     cdef const char* program_ptr = NULL
     cdef Py_ssize_t program_len = 0
@@ -861,12 +858,13 @@ cpdef StringVector vector_dfa_extract(
     _decode_procedure(program_ptr, program_len, &proc)
 
     cdef DrakenVector* uv = data.unified()
+    cdef DrakenStringArena* arena = <DrakenStringArena*>uv.data
+    cdef uint32_t* sel = <uint32_t*>uv.selection
+    cdef uint8_t* nulls = uv.validity
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t i
-    cdef int32_t start, end
     cdef const char* out_ptr = NULL
     cdef Py_ssize_t out_len = 0
-    cdef DrakenVarBuffer* vbuf
     cdef StringVector out_vec
     cdef DrakenVarBuffer* out_ptr_buf
     cdef Py_ssize_t total_bytes = 0
@@ -874,134 +872,49 @@ cpdef StringVector vector_dfa_extract(
     cdef const char* row_ptr = NULL
     cdef Py_ssize_t write_offset = 0
     cdef Py_ssize_t null_bytes = 0
-    cdef Py_ssize_t dict_size
-    cdef object new_dict_sv
-    cdef DrakenConstantStringPayload* csp
-    cdef DrakenGermanArena* dfa_gdv
-    cdef GermanString* dfa_slot
-    cdef const uint8_t* dfa_sdata
-    cdef uint32_t dfa_slen
-    cdef Py_ssize_t dfa_total_input
+    cdef DrakenStringSlot* slot
+    cdef const uint8_t* sdata
+    cdef uint32_t slen
 
-    # Constant encoding: execute once, replicate.
-    if data.ptr.offsets == NULL and data._german_dict_values == NULL:  # constant
-        if uv.validity != NULL:  # null constant
-            out_vec = StringVector(n, 0)
-            out_ptr_buf = out_vec.ptr
-            null_bytes = (n + 7) >> 3
-            if null_bytes > 0 and out_ptr_buf.null_bitmap != NULL:
-                memset(out_ptr_buf.null_bitmap, 0, <size_t>null_bytes)
-            for i in range(n + 1):
-                out_ptr_buf.offsets[i] = 0
-            return out_vec
-
-        csp = <DrakenConstantStringPayload*>uv.data
-        row_ptr = <const char*>csp.data
-        row_len = <Py_ssize_t>csp.length
-        if _execute_procedure(
-            row_ptr,
-            row_len,
-            &proc,
-            &out_ptr,
-            &out_len,
-        ):
-            total_bytes = out_len * n
-        else:
-            out_ptr = row_ptr
-            out_len = row_len
-            total_bytes = row_len * n
-
-        out_vec = StringVector(n, total_bytes)
-        out_ptr_buf = out_vec.ptr
-        if out_ptr_buf.null_bitmap != NULL:
-            null_bytes = (n + 7) >> 3
-            if null_bytes > 0:
-                memset(out_ptr_buf.null_bitmap, 0xFF, <size_t>null_bytes)
-
-        write_offset = 0
-        out_ptr_buf.offsets[0] = 0
-        for i in range(n):
-            if out_len > 0:
-                memcpy((<char*>out_ptr_buf.data) + write_offset, out_ptr, <size_t>out_len)
-            write_offset += out_len
-            out_ptr_buf.offsets[i + 1] = <int32_t>write_offset
-        return out_vec
-
-    # Dictionary encoding: apply DFA once per unique entry, repack with same codes.
-    if data._german_dict_values != NULL:  # dictionary
-        dfa_gdv = data._german_dict_values
-        dict_size = <Py_ssize_t>dfa_gdv.length
-        # Estimate output size: each entry is at most the input size.
-        # Compute total input bytes for pre-allocation.
-        dfa_total_input = 0
-        for i in range(dict_size):
-            dfa_total_input += <Py_ssize_t>gs_length(&dfa_gdv.slots[i])
-        new_dict_sv = StringVector(dict_size, dfa_total_input)
-        out_ptr_buf = (<StringVector>new_dict_sv).ptr
-        write_offset = 0
-        out_ptr_buf.offsets[0] = 0
-        for i in range(dict_size):
-            dfa_slot = &dfa_gdv.slots[i]
-            dfa_slen = gs_length(dfa_slot)
-            dfa_sdata = gs_data(dfa_slot, dfa_gdv.arena)
-            row_ptr = <const char*>dfa_sdata
-            row_len = <Py_ssize_t>dfa_slen
-            if _execute_procedure(row_ptr, row_len, &proc, &out_ptr, &out_len):
-                if out_len > 0:
-                    memcpy((<char*>out_ptr_buf.data) + write_offset, out_ptr, <size_t>out_len)
-                write_offset += out_len
-            else:
-                if row_len > 0:
-                    memcpy((<char*>out_ptr_buf.data) + write_offset, row_ptr, <size_t>row_len)
-                write_offset += row_len
-            out_ptr_buf.offsets[i + 1] = <int32_t>write_offset
-        return from_packed_dict(
-            <uint8_t*>uv.selection, 4, n,
-            out_ptr_buf.offsets, <const uint8_t*>out_ptr_buf.data, dict_size,
-            uv.validity,
-        )
-
-    vbuf = <DrakenVarBuffer*>uv.data
-    cdef DrakenVarBuffer* ptr = vbuf
-
-    # Cache (capture_offset_from_data_start, capture_len) per row so the write
-    # pass never calls _execute_procedure again — pure array reads + memcpy.
-    # Negative capture_len signals "no match; emit original row".
-    cdef int32_t* cap_offsets = <int32_t*>malloc(<size_t>n * sizeof(int32_t))
+    # Cache (captured_ptr, captured_len) per row; captured_ptr==NULL means null row,
+    # captured_len < 0 means "no match; passthrough the original bytes".
+    # We store pointers directly (arena slots are stable for the vector's lifetime).
+    cdef const char** cap_ptrs = <const char**>malloc(<size_t>n * sizeof(const char*))
     cdef int32_t* cap_lens = <int32_t*>malloc(<size_t>n * sizeof(int32_t))
 
-    if cap_offsets == NULL or cap_lens == NULL:
-        free(cap_offsets)
+    if cap_ptrs == NULL or cap_lens == NULL:
+        free(cap_ptrs)
         free(cap_lens)
         raise MemoryError("vector_dfa_extract: cache allocation failed")
 
     for i in range(n):
-        if ptr.null_bitmap != NULL and not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
-            cap_offsets[i] = 0
+        if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
+            cap_ptrs[i] = NULL
             cap_lens[i] = 0
             continue
 
-        start = ptr.offsets[i]
-        end = ptr.offsets[i + 1]
-        row_ptr = (<const char*>ptr.data) + start
-        row_len = <Py_ssize_t>(end - start)
+        slot = &arena.slots[sel[i]]
+        slen = str_length(slot)
+        sdata = str_data(slot, arena.arena)
+        row_ptr = <const char*>sdata
+        row_len = <Py_ssize_t>slen
 
         if _execute_procedure(row_ptr, row_len, &proc, &out_ptr, &out_len):
-            cap_offsets[i] = <int32_t>(out_ptr - (<const char*>ptr.data))
+            cap_ptrs[i] = out_ptr
             cap_lens[i] = <int32_t>out_len
             total_bytes += out_len
         else:
-            cap_offsets[i] = start
+            cap_ptrs[i] = row_ptr
             cap_lens[i] = <int32_t>(-row_len - 1)  # sentinel: negative means passthrough
             total_bytes += row_len
 
     out_vec = StringVector(n, total_bytes)
     out_ptr_buf = out_vec.ptr
 
-    if ptr.null_bitmap != NULL and out_ptr_buf.null_bitmap != NULL:
+    if nulls != NULL and out_ptr_buf.null_bitmap != NULL:
         null_bytes = (n + 7) >> 3
         if null_bytes > 0:
-            memcpy(out_ptr_buf.null_bitmap, ptr.null_bitmap, <size_t>null_bytes)
+            memcpy(out_ptr_buf.null_bitmap, nulls, <size_t>null_bytes)
     elif out_ptr_buf.null_bitmap != NULL:
         null_bytes = (n + 7) >> 3
         if null_bytes > 0:
@@ -1010,40 +923,34 @@ cpdef StringVector vector_dfa_extract(
     write_offset = 0
     out_ptr_buf.offsets[0] = 0
 
-    cdef int32_t cached_off, cached_len, copy_len
+    cdef const char* cached_ptr
+    cdef int32_t cached_len, copy_len
 
     for i in range(n):
-        if ptr.null_bitmap != NULL and not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
+        if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
             out_ptr_buf.offsets[i + 1] = <int32_t>write_offset
             continue
 
-        cached_off = cap_offsets[i]
+        cached_ptr = cap_ptrs[i]
         cached_len = cap_lens[i]
 
         if cached_len >= 0:
             # DFA matched: emit the cached capture slice
             copy_len = cached_len
-            if copy_len > 0:
-                memcpy(
-                    (<char*>out_ptr_buf.data) + write_offset,
-                    (<const char*>ptr.data) + cached_off,
-                    <size_t>copy_len,
-                )
-            write_offset += copy_len
         else:
             # Passthrough: negative sentinel encodes original row length as (-len - 1)
             copy_len = <int32_t>(-cached_len - 1)
-            if copy_len > 0:
-                memcpy(
-                    (<char*>out_ptr_buf.data) + write_offset,
-                    (<const char*>ptr.data) + cached_off,
-                    <size_t>copy_len,
-                )
-            write_offset += copy_len
 
+        if copy_len > 0:
+            memcpy(
+                (<char*>out_ptr_buf.data) + write_offset,
+                cached_ptr,
+                <size_t>copy_len,
+            )
+        write_offset += copy_len
         out_ptr_buf.offsets[i + 1] = <int32_t>write_offset
 
-    free(cap_offsets)
+    free(cap_ptrs)
     free(cap_lens)
 
     return out_vec

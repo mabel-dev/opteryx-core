@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
-#include "german_string.h"
+#include "string_slot.h"
 
 typedef enum {
     // Integer types: 1–19
@@ -68,7 +68,7 @@ typedef struct {
 } DrakenConstantStringPayload;
 
 // German-string storage. Replaces DrakenVarBuffer for string values: an array
-// of 16-byte GermanString slots (length + inline-12 OR length + prefix + arena
+// of 16-byte DrakenStringSlot slots (length + inline-12 OR length + prefix + arena
 // offset) plus a byte arena for long-form payloads (> 12 bytes). Used as the
 // `data` payload of a string DrakenVector under the unified format.
 //
@@ -76,7 +76,7 @@ typedef struct {
 // is non-zero. arena_used tracks bytes consumed during construction; arena_cap
 // is the allocation size. Slots whose length <= 12 do not reference the arena.
 typedef struct {
-    GermanString* slots;       // [length] slot array
+    DrakenStringSlot* slots;       // [length] slot array
     uint8_t*      arena;       // long-form byte arena (may be NULL when all rows inline)
     size_t        length;      // number of slots
     size_t        arena_used;  // bytes consumed in arena
@@ -84,7 +84,7 @@ typedef struct {
     uint8_t*      null_bitmap; // optional, 1 bit per row
     uint8_t       owns_buffers;// free slots/arena/null_bitmap on free?
     DrakenType    type;        // DRAKEN_STRING (or DRAKEN_NON_NATIVE for binary)
-} DrakenGermanArena;
+} DrakenStringArena;
 
 typedef struct {
     DrakenType type;          // DRAKEN_CONSTANT

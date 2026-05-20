@@ -68,10 +68,16 @@ from draken.vectors.integer16_vector cimport Integer16Vector
 from draken.vectors.integer32_vector cimport Integer32Vector
 from draken.vectors.interval_vector cimport IntervalVector
 from draken.vectors.string_vector cimport StringVector, _materialize_dict_string
+from draken.vectors.string_vector cimport StringVectorBuilder
 from draken.vectors.time_vector cimport TimeVector
 from draken.vectors.timestamp_vector cimport TimestampVector
 from draken.interop.arrow cimport vector_from_arrow
 from draken.interop.vector_sequence cimport vector_from_sequence
+from draken.vectors.string_vector cimport _ConstView
+from draken.vectors.string_vector cimport _const_view
+from draken.core.buffers cimport DrakenStringArena
+from draken.core.buffers cimport DrakenStringSlot
+from draken.core.buffers cimport str_length, str_data
 
 cdef extern from "draken/vectors/_bool_select.hpp" nogil:
     size_t draken_bool_select_extract_indices \
@@ -244,122 +250,79 @@ cdef void _concat_bool_buffers(
     )
 
 
-cdef void _concat_string_buffers(
-    StringVector out_vec,
+cdef StringVector _concat_string_buffers(
     StringVector left_vec,
     StringVector right_vec,
     Py_ssize_t left_rows,
     Py_ssize_t right_rows,
 ) except *:
-    cdef DrakenVarBuffer* out_ptr = out_vec.ptr
-    cdef DrakenVarBuffer* left_ptr = left_vec.ptr
-    cdef DrakenVarBuffer* right_ptr = right_vec.ptr
-    cdef Py_ssize_t i, j, k
-    cdef Py_ssize_t left_bytes = 0
-    cdef Py_ssize_t right_bytes = 0
-    cdef Py_ssize_t const_len
-    cdef uint8_t* null_bitmap = NULL
+    cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(left_rows + right_rows, 12)
+    cdef DrakenStringArena* arena
+    cdef DrakenStringSlot* slot
+    cdef _ConstView csp
+    cdef uint8_t* nulls
+    cdef Py_ssize_t i
+    cdef Py_ssize_t n_rows
 
-    cdef DrakenConstantStringPayload* _lcp
-    cdef DrakenConstantStringPayload* _rcp
-
-    # Calculate left_bytes, handling constant and NULL vectors
-    if left_vec.ptr.offsets == NULL:
-        if left_vec._unified_view.validity == NULL and left_vec._unified_view.data != NULL:
-            _lcp = <DrakenConstantStringPayload*>left_vec._unified_view.data
-            const_len = <Py_ssize_t>_lcp.length
-            left_bytes = const_len * left_rows
-    else:
-        if left_ptr != NULL and left_ptr.offsets != NULL:
-            left_bytes = <Py_ssize_t>left_ptr.offsets[left_rows]
-
-    # Calculate right_bytes, handling constant and NULL vectors
-    if right_vec.ptr.offsets == NULL:
-        if right_vec._unified_view.validity == NULL and right_vec._unified_view.data != NULL:
-            _rcp = <DrakenConstantStringPayload*>right_vec._unified_view.data
-            const_len = <Py_ssize_t>_rcp.length
-            right_bytes = const_len * right_rows
-    else:
-        if right_ptr != NULL and right_ptr.offsets != NULL:
-            right_bytes = <Py_ssize_t>right_ptr.offsets[right_rows]
-
-    # Copy left data
-    if left_vec.ptr.offsets == NULL and left_vec._unified_view.validity == NULL and left_vec._unified_view.data != NULL:
-        _lcp = <DrakenConstantStringPayload*>left_vec._unified_view.data
-        const_len = <Py_ssize_t>_lcp.length
-        if const_len > 0 and _lcp.data != NULL and out_ptr.data != NULL:
-            for k in range(left_rows):
-                memcpy(out_ptr.data + k * const_len, _lcp.data, const_len)
-    elif left_bytes > 0 and left_ptr != NULL and left_ptr.data != NULL:
-        memcpy(out_ptr.data, left_ptr.data, left_bytes)
-
-    # Copy right data
-    if right_vec.ptr.offsets == NULL and right_vec._unified_view.validity == NULL and right_vec._unified_view.data != NULL:
-        _rcp = <DrakenConstantStringPayload*>right_vec._unified_view.data
-        const_len = <Py_ssize_t>_rcp.length
-        if const_len > 0 and _rcp.data != NULL and out_ptr.data != NULL:
-            for k in range(right_rows):
-                memcpy(out_ptr.data + left_bytes + k * const_len, _rcp.data, const_len)
-    elif right_bytes > 0 and right_ptr != NULL and right_ptr.data != NULL:
-        memcpy(out_ptr.data + left_bytes, right_ptr.data, right_bytes)
-
-    # Set offsets for left side
-    if out_ptr == NULL or out_ptr.offsets == NULL:
-        raise RuntimeError("Output StringVector not properly initialized")
-    out_ptr.offsets[0] = 0
-    if left_vec.ptr.offsets == NULL:
-        if left_vec._unified_view.validity != NULL or left_vec._unified_view.data == NULL:
-            const_len = 0
+    # Append left_vec rows
+    n_rows = left_rows
+    if left_vec._unified_view.data_length == 1:  # constant
+        if left_vec._unified_view.validity != NULL:  # null constant
+            for i in range(n_rows):
+                builder.append_null()
         else:
-            _lcp = <DrakenConstantStringPayload*>left_vec._unified_view.data
-            const_len = <Py_ssize_t>_lcp.length
-        for j in range(1, left_rows + 1):
-            out_ptr.offsets[j] = <int32_t>((<Py_ssize_t>j) * const_len)
-    else:
-        if left_ptr != NULL and left_ptr.offsets != NULL:
-            for j in range(1, left_rows + 1):
-                out_ptr.offsets[j] = left_ptr.offsets[j]
+            csp = _const_view(<DrakenStringArena*>left_vec._unified_view.data)
+            nulls = left_vec.ptr.null_bitmap if left_vec.ptr != NULL else NULL
+            for i in range(n_rows):
+                if nulls != NULL and not _bitmap_get(nulls, i):
+                    builder.append_null()
+                else:
+                    builder.append_bytes(<const char*>csp.data, csp.length)
+    elif left_vec._unified_view.data_length < left_vec._unified_view.length:
+        raise RuntimeError("_concat_string_buffers received un-materialized dict vector")
+    else:  # dense arena
+        arena = <DrakenStringArena*>left_vec._unified_view.data
+        nulls = left_vec.ptr.null_bitmap if left_vec.ptr != NULL else NULL
+        for i in range(n_rows):
+            if nulls != NULL and not _bitmap_get(nulls, i):
+                builder.append_null()
+            else:
+                slot = &arena.slots[i]
+                builder.append_bytes(
+                    <const char*>str_data(slot, arena.arena),
+                    <Py_ssize_t>str_length(slot),
+                )
 
-    # Set offsets for right side
-    if right_vec.ptr.offsets == NULL:
-        if right_vec._unified_view.validity != NULL or right_vec._unified_view.data == NULL:
-            const_len = 0
+    # Append right_vec rows
+    n_rows = right_rows
+    if right_vec._unified_view.data_length == 1:  # constant
+        if right_vec._unified_view.validity != NULL:  # null constant
+            for i in range(n_rows):
+                builder.append_null()
         else:
-            _rcp = <DrakenConstantStringPayload*>right_vec._unified_view.data
-            const_len = <Py_ssize_t>_rcp.length
-        for j in range(1, right_rows + 1):
-            out_ptr.offsets[left_rows + j] = <int32_t>(left_bytes + ((<Py_ssize_t>j) * const_len))
-    else:
-        if right_ptr != NULL and right_ptr.offsets != NULL:
-            for j in range(1, right_rows + 1):
-                out_ptr.offsets[left_rows + j] = <int32_t>(left_bytes + right_ptr.offsets[j])
+            csp = _const_view(<DrakenStringArena*>right_vec._unified_view.data)
+            nulls = right_vec.ptr.null_bitmap if right_vec.ptr != NULL else NULL
+            for i in range(n_rows):
+                if nulls != NULL and not _bitmap_get(nulls, i):
+                    builder.append_null()
+                else:
+                    builder.append_bytes(<const char*>csp.data, csp.length)
+    elif right_vec._unified_view.data_length < right_vec._unified_view.length:
+        raise RuntimeError("_concat_string_buffers received un-materialized dict vector")
+    else:  # dense arena
+        arena = <DrakenStringArena*>right_vec._unified_view.data
+        nulls = right_vec.ptr.null_bitmap if right_vec.ptr != NULL else NULL
+        for i in range(n_rows):
+            if nulls != NULL and not _bitmap_get(nulls, i):
+                builder.append_null()
+            else:
+                slot = &arena.slots[i]
+                builder.append_bytes(
+                    <const char*>str_data(slot, arena.arena),
+                    <Py_ssize_t>str_length(slot),
+                )
 
-    # Handle null bitmaps
-    if left_vec.ptr.offsets == NULL and left_vec._unified_view.validity != NULL:
-        if null_bitmap == NULL:
-            null_bitmap = _allocate_valid_bitmap(left_rows + right_rows)
-        for k in range(left_rows):
-            _bitmap_clear(null_bitmap, k)
-
-    if right_vec.ptr.offsets == NULL and right_vec._unified_view.validity != NULL:
-        if null_bitmap == NULL:
-            null_bitmap = _allocate_valid_bitmap(left_rows + right_rows)
-        for k in range(right_rows):
-            _bitmap_clear(null_bitmap, left_rows + k)
-
-    if left_vec.ptr.offsets != NULL or left_vec._german_dict_values != NULL:
-        if left_ptr != NULL and left_ptr.null_bitmap != NULL:
-            if null_bitmap == NULL:
-                null_bitmap = _allocate_valid_bitmap(left_rows + right_rows)
-            _copy_bits(left_ptr.null_bitmap, 0, null_bitmap, 0, left_rows)
-
-    if right_vec.ptr.offsets != NULL or right_vec._german_dict_values != NULL:
-        if right_ptr != NULL and right_ptr.null_bitmap != NULL:
-            if null_bitmap == NULL:
-                null_bitmap = _allocate_valid_bitmap(left_rows + right_rows)
-            _copy_bits(right_ptr.null_bitmap, 0, null_bitmap, left_rows, right_rows)
-
-    out_ptr.null_bitmap = null_bitmap
+    return builder.finish()
 
 
 cdef uint8_t* _allocate_valid_bitmap(Py_ssize_t total_rows) except NULL:
@@ -549,7 +512,6 @@ cdef class Morsel:
         cdef Py_ssize_t string_offset
         cdef Py_ssize_t current_rows
         cdef Py_ssize_t current_bytes
-        cdef Py_ssize_t total_string_bytes
         cdef object morsel_obj
         cdef Morsel morsel
         cdef Morsel first
@@ -579,7 +541,12 @@ cdef class Morsel:
         cdef TimestampVector src_ts
         cdef IntervalVector src_interval
         cdef StringVector src_str
-        cdef DrakenConstantStringPayload* _scp
+        cdef _ConstView _scp
+        cdef StringVectorBuilder str_builder
+        cdef DrakenStringArena* str_arena
+        cdef DrakenStringSlot* str_slot
+        cdef uint8_t* str_nulls
+        cdef Py_ssize_t k
 
         if morsels is None:
             raise ValueError("morsels must not be None")
@@ -841,86 +808,37 @@ cdef class Morsel:
                 new_vec = <Vector> out_interval
 
             elif isinstance(current_vec, StringVector):
-                # Materialize dict/RLE-encoded source StringVectors up front so the
-                # byte-counting and copy passes can rely on a dense ptr.data /
-                # ptr.offsets layout.  Holds references for the duration of combine.
-                str_sources = [None] * n_morsels
+                str_builder = StringVectorBuilder.with_estimate(total_rows, 16)
                 for j in range(n_morsels):
                     src_str = <StringVector> (<Morsel> morsels[j]).ptr.columns[i]
-                    if src_str.ptr.offsets == NULL:
-                        str_sources[j] = src_str
-                    elif src_str._german_dict_values != NULL:
-                        str_sources[j] = _materialize_dict_string(src_str)
-                    else:
-                        str_sources[j] = src_str
-
-                total_string_bytes = 0
-                for j in range(n_morsels):
-                    src_str = <StringVector> str_sources[j]
+                    # Materialize dict encoding
+                    if src_str._unified_view.data_length < src_str._unified_view.length:
+                        src_str = _materialize_dict_string(src_str)
                     current_rows = (<Morsel> morsels[j]).ptr.num_rows
-                    # Handle constant-encoded StringVectors which do not have offsets/data
-                    if src_str.ptr.offsets == NULL:
-                        if src_str._unified_view.validity != NULL:
-                            # contributes no bytes
-                            continue
-                        if src_str._unified_view.data != NULL:
-                            _scp = <DrakenConstantStringPayload*>src_str._unified_view.data
-                            total_string_bytes += <Py_ssize_t>_scp.length * current_rows
-                    else:
-                        if src_str.ptr != NULL and src_str.ptr.offsets != NULL:
-                            total_string_bytes += src_str.ptr.offsets[current_rows]
-                        else:
-                            # defensive: no bytes contributed
-                            continue
-                # StringVector offsets are int32_t, max value ~2.1GB
-                if total_string_bytes > 2147483647:
-                    raise MemoryError(f"StringVector buffer size {total_string_bytes} bytes exceeds int32_t maximum (2.1GB)")
-                out_str = StringVector(<size_t> total_rows, <size_t> total_string_bytes)
-                row_offset = 0
-                string_offset = 0
-                null_bitmap = NULL
-                const_len = 0
-                out_str.ptr.offsets[0] = 0
-                for j in range(n_morsels):
-                    src_str = <StringVector> str_sources[j]
-                    current_rows = (<Morsel> morsels[j]).ptr.num_rows
-                    if src_str.ptr.offsets == NULL:
-                        if src_str._unified_view.validity != NULL:
-                            current_bytes = 0
-                        elif src_str._unified_view.data != NULL:
-                            _scp = <DrakenConstantStringPayload*>src_str._unified_view.data
-                            const_len = <Py_ssize_t>_scp.length
-                            current_bytes = const_len * current_rows
-                            if current_bytes > 0 and _scp.data != NULL:
-                                # copy repeated constant value for each row
-                                for k in range(current_rows):
-                                    memcpy(out_str.ptr.data + string_offset + k * const_len, _scp.data, const_len)
-                        else:
-                            current_bytes = 0
-                        # set offsets for each row
-                        for j in range(1, current_rows + 1):
-                            out_str.ptr.offsets[row_offset + j] = <int32_t>(string_offset + (<Py_ssize_t>j) * (0 if src_str._unified_view.validity != NULL else const_len))
-                        # handle constant nulls by clearing bits
-                        if src_str._unified_view.validity != NULL:
-                            if null_bitmap == NULL:
-                                null_bitmap = _allocate_valid_bitmap(total_rows)
+                    str_nulls = src_str.ptr.null_bitmap if src_str.ptr != NULL else NULL
+                    if src_str._unified_view.data_length == 1:  # constant
+                        if src_str._unified_view.validity != NULL:  # null constant
                             for k in range(current_rows):
-                                _bitmap_clear(null_bitmap, row_offset + k)
-                    else:
-                        current_bytes = src_str.ptr.offsets[current_rows] if src_str.ptr != NULL and src_str.ptr.offsets != NULL else 0
-                        if current_bytes > 0 and src_str.ptr.data != NULL:
-                            memcpy(out_str.ptr.data + string_offset, src_str.ptr.data, current_bytes)
-                        for j in range(1, current_rows + 1):
-                            out_str.ptr.offsets[row_offset + j] = <int32_t>(
-                                string_offset + src_str.ptr.offsets[j]
-                            )
-                        if src_str.ptr.null_bitmap != NULL:
-                            if null_bitmap == NULL:
-                                null_bitmap = _allocate_valid_bitmap(total_rows)
-                            _copy_bits(src_str.ptr.null_bitmap, 0, null_bitmap, row_offset, current_rows)
-                    row_offset += current_rows
-                    string_offset += current_bytes
-                out_str.ptr.null_bitmap = null_bitmap
+                                str_builder.append_null()
+                        else:
+                            _scp = _const_view(<DrakenStringArena*>src_str._unified_view.data)
+                            for k in range(current_rows):
+                                if str_nulls != NULL and not _bitmap_get(str_nulls, k):
+                                    str_builder.append_null()
+                                else:
+                                    str_builder.append_bytes(<const char*>_scp.data, _scp.length)
+                    else:  # dense arena
+                        str_arena = <DrakenStringArena*>src_str._unified_view.data
+                        for k in range(current_rows):
+                            if str_nulls != NULL and not _bitmap_get(str_nulls, k):
+                                str_builder.append_null()
+                            else:
+                                str_slot = &str_arena.slots[k]
+                                str_builder.append_bytes(
+                                    <const char*>str_data(str_slot, str_arena.arena),
+                                    <Py_ssize_t>str_length(str_slot),
+                                )
+                out_str = str_builder.finish()
                 new_vec = <Vector> out_str
 
             else:
@@ -1337,12 +1255,6 @@ cdef class Morsel:
         cdef StringVector out_str
         cdef StringVector left_str
         cdef StringVector right_str
-        cdef Py_ssize_t total_string_bytes
-        cdef Py_ssize_t left_bytes
-        cdef Py_ssize_t right_bytes
-        cdef Py_ssize_t const_len
-        cdef DrakenConstantStringPayload* _lcsp
-        cdef DrakenConstantStringPayload* _rcsp
 
         if other is None:
             return
@@ -1494,40 +1406,19 @@ cdef class Morsel:
                 new_vec = <Vector>out_interval
 
             elif isinstance(left_vec, StringVector) and isinstance(right_vec, StringVector):
-                # Safely calculate total_string_bytes, handling constant and NULL vectors
                 left_str = <StringVector>left_vec
                 right_str = <StringVector>right_vec
-                left_bytes = 0
-                right_bytes = 0
-
-                if left_str.ptr.offsets == NULL:
-                    if left_str._unified_view.validity == NULL and left_str._unified_view.data != NULL:
-                        _lcsp = <DrakenConstantStringPayload*>left_str._unified_view.data
-                        const_len = <Py_ssize_t>_lcsp.length
-                        left_bytes = const_len * left_rows
-                else:
-                    if left_str.ptr != NULL and left_str.ptr.offsets != NULL:
-                        left_bytes = <Py_ssize_t>left_str.ptr.offsets[left_rows]
-
-                if right_str.ptr.offsets == NULL:
-                    if right_str._unified_view.validity == NULL and right_str._unified_view.data != NULL:
-                        _rcsp = <DrakenConstantStringPayload*>right_str._unified_view.data
-                        const_len = <Py_ssize_t>_rcsp.length
-                        right_bytes = const_len * right_rows
-                else:
-                    if right_str.ptr != NULL and right_str.ptr.offsets != NULL:
-                        right_bytes = <Py_ssize_t>right_str.ptr.offsets[right_rows]
-
-                total_string_bytes = left_bytes + right_bytes
-                out_str = StringVector(<size_t>total_rows, <size_t>total_string_bytes)
-                _concat_string_buffers(
-                    out_str,
+                # Materialize dict encoding before concat
+                if left_str._unified_view.data_length < left_str._unified_view.length:
+                    left_str = _materialize_dict_string(left_str)
+                if right_str._unified_view.data_length < right_str._unified_view.length:
+                    right_str = _materialize_dict_string(right_str)
+                new_vec = <Vector>_concat_string_buffers(
                     left_str,
                     right_str,
                     left_rows,
                     right_rows,
                 )
-                new_vec = <Vector>out_str
 
             else:
                 # Generic fallback keeps API coverage for less common vector
@@ -1685,7 +1576,7 @@ cdef class Morsel:
 
         # Fast path: dictionary-encoded Integer64Vector (e.g. from build_cartesian_indices).
         # Gathers dict values via codes directly into int32 — no intermediate dense vector.
-        if isinstance(indices, Integer64Vector) and (<Integer64Vector>indices)._dict_values != NULL:
+        if isinstance(indices, Integer64Vector) and (<Integer64Vector>indices)._unified_view.data_length < (<Integer64Vector>indices)._unified_view.length:
             idx_vec = <Integer64Vector>indices
             _iv_uv = idx_vec.unified()
             n_indices = <int>_iv_uv.length

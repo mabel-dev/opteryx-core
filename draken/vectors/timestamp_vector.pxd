@@ -18,8 +18,8 @@ cdef class TimestampVector(Vector):
     cdef bint owns_data
     cdef str timestamp_unit  # 'ns', 'us', 'ms', or 's'
     cdef int _unit_code     # integer alias for timestamp_unit (0=ns,1=us,2=ms,3=s)
-    cdef DrakenVarBuffer* _dict_values
-    cdef uint8_t _dict_ordered
+    cdef bint _owns_dict_data
+    cdef bint _owns_selection
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept
     cdef DrakenVector* unified(self) noexcept

@@ -416,6 +416,18 @@ def test_builder_resizable_never_exceeds_when_strict():
     """Test that non-resizable builder rejects overflow."""
     builder = StringVectorBuilder.with_counts(2, 3)
     builder.append(b"ab")
-    
+
     with pytest.raises(ValueError, match="not enough remaining capacity"):
         builder.append(b"cdef")  # Would exceed 3 bytes total
+
+
+def test_string_vector_view_works_for_constant_layout():
+    """view() must not raise for any layout — unified access is uniform."""
+    StringVector = string_vector_module.StringVector
+
+    vec = StringVector.from_constant(b"hello", 5)
+    view = vec.view()  # previously raised NotImplementedError
+
+    assert view.value_len(0) == 5
+    assert view.value_len(4) == 5
+    assert view.is_null(0) is False

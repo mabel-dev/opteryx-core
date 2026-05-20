@@ -85,7 +85,7 @@ cpdef Float32Vector vector_cosine_distance(object arr, object val):
     typed Cython loop. Null rows propagate.
     """
     cdef Float32Vector sims = vector_cosine_similarity(arr, val)
-    cdef Py_ssize_t n = sims.ptr.length
+    cdef Py_ssize_t n = sims._unified_view.length
     cdef float* data = <float*> sims.ptr.data
     cdef Py_ssize_t i
     cdef float v

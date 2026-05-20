@@ -73,7 +73,7 @@ cpdef Integer64Vector vector_levenshtein(StringVector a, StringVector b):
     Returns:
         Integer64Vector: Levenshtein distances; -1 where either input is null.
     """
-    cdef Py_ssize_t n = a.ptr.length
+    cdef Py_ssize_t n = a._unified_view.length
     cdef Py_ssize_t i
     cdef StringRow a_row, b_row
 

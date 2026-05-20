@@ -13,7 +13,7 @@ from libc.stdlib cimport malloc, free
 
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.integer64_vector cimport Integer64Vector, from_sequence as int64_from_sequence
-from draken.core.buffers cimport DrakenVarBuffer, DrakenVector, DrakenGermanArena, GermanString, gs_length, gs_data
+from draken.core.buffers cimport DrakenVector, DrakenStringArena, DrakenStringSlot, str_length, str_data
 
 
 cdef inline int64_t parse_int64(const char* data, int32_t length) except -1:
@@ -39,21 +39,17 @@ cdef inline int64_t parse_int64(const char* data, int32_t length) except -1:
 cpdef Integer64Vector vector_cast_bytes_to_int(StringVector vec):
     """Parse each element of a StringVector as a decimal integer."""
     cdef DrakenVector* uv = vec.unified()
+    cdef DrakenStringArena* arena = <DrakenStringArena*>uv.data
+    cdef uint32_t* sel = <uint32_t*>uv.selection
+    cdef uint8_t* nulls = uv.validity
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t i
-    cdef StringRow row
     cdef int64_t* result_ptr
     cdef int64_t[::1] result_view
     cdef Integer64Vector result_vector
-    cdef DrakenVarBuffer* dv
-    cdef Py_ssize_t dict_size
-    cdef int64_t* dict_ints
-    cdef uint8_t* null_bm
-    cdef uint32_t code
-    cdef DrakenGermanArena* csi_gdv
-    cdef GermanString* csi_slot
-    cdef const uint8_t* csi_sdata
-    cdef uint32_t csi_slen
+    cdef DrakenStringSlot* slot
+    cdef const uint8_t* sdata
+    cdef uint32_t slen
 
     result_ptr = <int64_t*>malloc(n * sizeof(int64_t))
     if result_ptr == NULL:
@@ -62,37 +58,14 @@ cpdef Integer64Vector vector_cast_bytes_to_int(StringVector vec):
     try:
         result_view = <int64_t[:n]>result_ptr
 
-        if vec._german_dict_values != NULL:  # dictionary
-            csi_gdv = vec._german_dict_values
-            dict_size = <Py_ssize_t>csi_gdv.length
-            dict_ints = <int64_t*>malloc(<size_t>dict_size * sizeof(int64_t))
-            if dict_ints == NULL:
-                raise MemoryError()
-            try:
-                for i in range(dict_size):
-                    csi_slot = &csi_gdv.slots[i]
-                    csi_slen = gs_length(csi_slot)
-                    csi_sdata = gs_data(csi_slot, csi_gdv.arena)
-                    dict_ints[i] = parse_int64(
-                        <const char*>csi_sdata,
-                        <int32_t>csi_slen,
-                    )
-                null_bm = uv.validity
-                for i in range(n):
-                    if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
-                        result_view[i] = 0
-                    else:
-                        code = uv.selection[i]
-                        result_view[i] = dict_ints[code]
-            finally:
-                free(dict_ints)
-        else:
-            for i in range(n):
-                row = string_vec_get_at(vec, i)
-                if row.is_null:
-                    result_view[i] = 0
-                else:
-                    result_view[i] = parse_int64(row.data, <int32_t>row.length)
+        for i in range(n):
+            if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
+                result_view[i] = 0
+                continue
+            slot = &arena.slots[sel[i]]
+            slen = str_length(slot)
+            sdata = str_data(slot, arena.arena)
+            result_view[i] = parse_int64(<const char*>sdata, <int32_t>slen)
 
         result_vector = int64_from_sequence(result_view)
         return result_vector

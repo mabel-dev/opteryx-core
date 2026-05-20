@@ -2,10 +2,13 @@
 
 from libc.stdint cimport int32_t, int64_t, uint64_t
 from draken.vectors.vector cimport Vector
+from draken.core.buffers cimport DrakenVector
 
 cdef class NullVector(Vector):
     cdef Py_ssize_t _length
 
+    cdef DrakenVector* unified(self) noexcept
+    cpdef tuple _unified_view_fields(self)
     cpdef NullVector take(self, int32_t[::1] indices)
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0

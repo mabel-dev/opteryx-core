@@ -94,7 +94,7 @@ cdef class MedianFloat64Collector(BaseCollector):
 
         if isinstance(vec, Integer64Vector):
             iv = <Integer64Vector>vec
-            if iv._dict_values != NULL:
+            if iv._unified_view.data_length < iv._unified_view.length:
                 iv = _materialize_dict_int64(iv)
             idata = <int64_t*>iv.ptr.data
             nulls = iv.null_bitmap_ptr()
@@ -106,7 +106,7 @@ cdef class MedianFloat64Collector(BaseCollector):
 
         if isinstance(vec, Float64Vector):
             fv = <Float64Vector>vec
-            if fv._dict_values != NULL:
+            if fv._unified_view.data_length < fv._unified_view.length:
                 fv = _materialize_dict_float64(fv)
             fdata = <double*>fv.ptr.data
             nulls = fv.null_bitmap_ptr()

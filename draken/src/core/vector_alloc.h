@@ -20,6 +20,10 @@ const uint32_t* draken_identity_sel(uint32_t length);
 /* Lazy-grown global zero vector. selection[i] == 0 for all i. */
 const uint32_t* draken_zero_sel(uint32_t length);
 
+/* Lazy-grown global all-zero validity bitmap. bit[i] == 0 (null) for all i.
+ * Buffer size is ceil(length/8) bytes, padded to a multiple of 8 for SIMD safety. */
+const uint8_t* draken_zero_validity(uint32_t length);
+
 /* The only sanctioned way to populate a DrakenVector.
  *
  * `validity` may be NULL (all valid). Ownership of `data` and `validity` is

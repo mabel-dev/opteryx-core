@@ -62,7 +62,7 @@ cpdef TimestampVector vector_cast_int64_to_timestamp(Integer64Vector int_vec, st
     cdef DrakenVector* uv = int_vec.unified()
 
     # Check if vector is dictionary-encoded
-    if int_vec._dict_values != NULL:  # dictionary
+    if int_vec._unified_view.data_length < int_vec._unified_view.length:  # dictionary
         return _cast_dict_encoded(int_vec, uv, factor, use_divide)
     else:
         return _cast_dense(int_vec, factor, use_divide)
@@ -100,11 +100,12 @@ cdef TimestampVector _cast_dict_encoded(Integer64Vector int_vec, DrakenVector* u
     Returns dictionary-encoded TimestampVector with transformed dictionary, same codes.
     ptr.data is NULL (pure dict encoding — no dense materialization).
     """
-    # Integer64Vector unified view stores dict_values.data (raw int64_t array), not the DrakenVarBuffer*.
-    # dict_size and dict_nulls come from the original _dict_values buffer.
+    # Unified view: dict values in uv.data (raw int64_t), codes in uv.selection.
+    # Per-dict-entry nulls are no longer stored separately; they're materialized
+    # into the row-level validity bitmap (uv.validity) at decode time.
     cdef int64_t* dict_data = <int64_t*>uv.data
     cdef int64_t dict_size = <int64_t>uv.data_length
-    cdef uint8_t* dict_nulls = int_vec._dict_values.null_bitmap if int_vec._dict_values != NULL else NULL
+    cdef uint8_t* dict_nulls = NULL
 
     cdef const uint32_t* src_codes = uv.selection
     cdef int64_t num_rows = <int64_t>uv.length
@@ -149,7 +150,7 @@ cdef TimestampVector _cast_dict_encoded(Integer64Vector int_vec, DrakenVector* u
 
         return timestamp_dict_from_raw(
             num_rows, codes_copy, result_dict,
-            int_vec._dict_ordered, uv.validity, "us",
+            0, uv.validity, "us",
         )
     finally:
         free(transformed_dict)

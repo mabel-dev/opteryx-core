@@ -10,8 +10,8 @@
 
 from draken.vectors.string_vector cimport StringVector, DrakenVarBuffer
 from draken.vectors.bool_vector cimport BoolVector
-from draken.core.buffers cimport DrakenVector, DrakenConstantStringPayload, DrakenGermanArena, GermanString
-from draken.core.buffers cimport gs_length, gs_data
+from draken.core.buffers cimport DrakenVector, DrakenStringArena, DrakenStringSlot
+from draken.core.buffers cimport str_length, str_data
 from cpython.bytes cimport PyBytes_AsStringAndSize
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
@@ -41,8 +41,6 @@ cdef extern from "re2/re2.h":
 cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False):
     """Return mask: 1 if element matches regex pattern, else 0. Propagates NULLs.
 
-    Optimized for dictionary-encoded vectors: tests each unique value once.
-
     If `negate` is True, returns the row-wise NotRLike: True where the
     element does NOT match the pattern. Fuses what would otherwise be a
     second full-pass `.not_vector()`.
@@ -52,24 +50,19 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
     engine ClickHouse, BigQuery, and DuckDB use for REGEXP_LIKE.
     """
     cdef DrakenVector* uv = vec.unified()
+    cdef DrakenStringArena* arena = <DrakenStringArena*>uv.data
+    cdef uint32_t* sel = <uint32_t*>uv.selection
+    cdef uint8_t* nulls = uv.validity
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
     cdef BoolVector out = BoolVector(<size_t>n)
-    cdef uint8_t* dst = <uint8_t*> out.ptr.data
+    cdef uint8_t* dst = <uint8_t*>out.ptr.data
     cdef uint8_t* out_null = NULL
     cdef uint8_t mask
-    cdef int32_t start, end, str_len
-    cdef Py_ssize_t i, dict_idx, dict_size
-    cdef uint32_t code
-    cdef DrakenVarBuffer* vbuf
-    cdef DrakenGermanArena* rl_gdict
-    cdef GermanString* rl_slot
-    cdef const uint8_t* rl_sdata
-    cdef uint32_t rl_slen
-    cdef const uint8_t* dict_data
-    cdef uint8_t* dict_rlike_results = NULL
-    cdef uint8_t* nb_ptr
-    cdef DrakenConstantStringPayload* csp
+    cdef Py_ssize_t i
+    cdef DrakenStringSlot* slot
+    cdef const uint8_t* sdata
+    cdef uint32_t slen
     cdef char* pat_buf = <char*>0
     cdef Py_ssize_t pat_len = 0
     cdef RE2OptionsRL options
@@ -86,32 +79,18 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
         if not regex.ok():
             raise ValueError("Invalid REGEXP pattern")
 
-        if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
-            if uv.validity != NULL:  # null constant
-                return _constant_bool_result(n, False, True)
-            csp = <DrakenConstantStringPayload*>uv.data
-            text_piece = StringPieceRL(
-                <const char*>csp.data,
-                <size_t>csp.length,
-            )
-            return _constant_bool_result(
-                n,
-                RE2RL.PartialMatch(text_piece, regex[0]) != negate,
-                False,
-            )
-
-        nb_ptr = uv.validity
         if negate:
             memset(dst, 0xFF, nbytes)
             if (n & 7) != 0:
                 dst[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
         else:
             memset(dst, 0, nbytes)
-        if nb_ptr != NULL and nbytes != 0:
-            out_null = <uint8_t*> malloc(nbytes)
+
+        if nulls != NULL and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
             if out_null == NULL:
                 raise MemoryError()
-            memcpy(out_null, nb_ptr, nbytes)
+            memcpy(out_null, nulls, nbytes)
             if (n & 7) != 0:
                 mask = <uint8_t>((1 << (n & 7)) - 1)
                 out_null[nbytes - 1] &= mask
@@ -119,81 +98,26 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
         else:
             out.ptr.null_bitmap = NULL
 
-        try:
-            # Dictionary-encoded path: check each unique value once
-            if vec._german_dict_values != NULL:  # dictionary
-                rl_gdict = <DrakenGermanArena*>uv.data
-                if rl_gdict == NULL:
-                    return out
-
-                dict_size = <Py_ssize_t>rl_gdict.length
-                if dict_size == 0:
-                    return out
-
-                # Allocate results array for each dictionary entry
-                dict_rlike_results = <uint8_t*>malloc(dict_size)
-                if dict_rlike_results == NULL:
-                    raise MemoryError()
-
-                # Test each unique dictionary value once
-                for dict_idx in range(dict_size):
-                    rl_slot = &rl_gdict.slots[dict_idx]
-                    rl_slen = gs_length(rl_slot)
-                    rl_sdata = gs_data(rl_slot, rl_gdict.arena)
-                    text_piece = StringPieceRL(
-                        <const char*>rl_sdata, <size_t>rl_slen,
-                    )
-                    if RE2RL.PartialMatch(text_piece, regex[0]):
-                        dict_rlike_results[dict_idx] = 1
-                    else:
-                        dict_rlike_results[dict_idx] = 0
-
-                # Scatter results by code index
-                if negate:
-                    for i in range(n):
-                        if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
-                            continue
-                        code = uv.selection[i]
-                        if dict_rlike_results[code]:
-                            dst[i >> 3] &= ~(1 << (i & 7))
-                else:
-                    for i in range(n):
-                        if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
-                            continue
-                        code = uv.selection[i]
-                        if dict_rlike_results[code]:
-                            dst[i >> 3] |= (1 << (i & 7))
-
-            # Dense vector path
-            else:
-                vbuf = <DrakenVarBuffer*>uv.data
-                if negate:
-                    for i in range(n):
-                        if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
-                            continue
-                        start = vbuf.offsets[i]
-                        end = vbuf.offsets[i + 1]
-                        str_len = end - start
-                        text_piece = StringPieceRL(
-                            <const char*>vbuf.data + start, <size_t>str_len,
-                        )
-                        if RE2RL.PartialMatch(text_piece, regex[0]):
-                            dst[i >> 3] &= ~(1 << (i & 7))
-                else:
-                    for i in range(n):
-                        if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
-                            continue
-                        start = vbuf.offsets[i]
-                        end = vbuf.offsets[i + 1]
-                        str_len = end - start
-                        text_piece = StringPieceRL(
-                            <const char*>vbuf.data + start, <size_t>str_len,
-                        )
-                        if RE2RL.PartialMatch(text_piece, regex[0]):
-                            dst[i >> 3] |= (1 << (i & 7))
-        finally:
-            if dict_rlike_results != NULL:
-                free(dict_rlike_results)
+        if negate:
+            for i in range(n):
+                if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
+                    continue
+                slot = &arena.slots[sel[i]]
+                slen = str_length(slot)
+                sdata = str_data(slot, arena.arena)
+                text_piece = StringPieceRL(<const char*>sdata, <size_t>slen)
+                if RE2RL.PartialMatch(text_piece, regex[0]):
+                    dst[i >> 3] &= ~(1 << (i & 7))
+        else:
+            for i in range(n):
+                if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
+                    continue
+                slot = &arena.slots[sel[i]]
+                slen = str_length(slot)
+                sdata = str_data(slot, arena.arena)
+                text_piece = StringPieceRL(<const char*>sdata, <size_t>slen)
+                if RE2RL.PartialMatch(text_piece, regex[0]):
+                    dst[i >> 3] |= (1 << (i & 7))
 
         return out
     finally:

@@ -34,11 +34,11 @@ from cpython.mem cimport PyMem_Free, PyMem_Malloc
 
 from libc.math cimport sqrt as c_sqrt
 from libc.stddef cimport size_t
-from libc.stdint cimport int32_t, int64_t, intptr_t, uint8_t, uint16_t, uint64_t
+from libc.stdint cimport int32_t, int64_t, intptr_t, uint8_t, uint16_t, uint32_t, uint64_t
 from libc.stdlib cimport free, malloc
 from libc.string cimport memcpy, memset
 
-from draken.core.buffers cimport DRAKEN_ARRAY
+from draken.core.buffers cimport DRAKEN_ARRAY, DrakenVector, draken_identity_sel
 from draken.vectors.float32_vector cimport Float32Vector
 from draken.vectors.vector cimport Vector
 
@@ -146,6 +146,43 @@ cdef class VectorVector(Vector):
         if self._owns_null_bitmap and self._null_bitmap != NULL:
             PyMem_Free(self._null_bitmap)
         self._null_bitmap = NULL
+
+    # --- Unified view ---
+
+    cdef DrakenVector* unified(self) noexcept:
+        # VectorVector is always dense at the row level. `data` exposes the raw
+        # row-major fp16 buffer; consumers needing per-row semantics downcast
+        # to <VectorVector> and read ._dimensions. This mirrors the abstraction
+        # crack already accepted for ArrayVector (variable-length rows behind a
+        # uniform selection-indexed view).
+        self._unified_view.data        = <void*>self._data
+        self._unified_view.selection   = draken_identity_sel(<uint32_t>self._length)
+        self._unified_view.data_length = <uint32_t>self._length
+        self._unified_view.length      = <uint32_t>self._length
+        self._unified_view.validity    = self._null_bitmap
+        self._unified_view.type        = DRAKEN_ARRAY
+        return &self._unified_view
+
+    def _unified_fields_for_test(self):
+        """Test-only: return key fields from the unified view as a tuple.
+
+        Returns (data_is_non_null, selection_list_or_None, length, data_length,
+                 validity_is_non_null) so Python tests can assert the invariants
+                 without native code.
+        """
+        cdef DrakenVector* uv = self.unified()
+        cdef Py_ssize_t n = <Py_ssize_t> uv.length
+        cdef Py_ssize_t i
+        sel = None
+        if uv.selection != NULL:
+            sel = [<Py_ssize_t> uv.selection[i] for i in range(n)]
+        return (
+            uv.data != NULL,
+            sel,
+            <Py_ssize_t> uv.length,
+            <Py_ssize_t> uv.data_length,
+            uv.validity != NULL,
+        )
 
     # --- Vector base overrides ---
 

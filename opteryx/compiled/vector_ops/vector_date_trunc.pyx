@@ -15,7 +15,8 @@ from cpython.array cimport array, clone
 from draken.vectors.date32_vector cimport Date32Vector
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.timestamp_vector cimport TimestampVector
-from draken.core.buffers cimport DrakenVector, DrakenConstantStringPayload, DrakenVarBuffer
+from draken.core.buffers cimport DrakenVector, DrakenVarBuffer
+from draken.core.buffers cimport DrakenStringArena, DrakenStringSlot, str_data, str_length
 
 
 cdef inline int64_t* _ts_materialize_dense(
@@ -244,27 +245,19 @@ cdef inline str _extract_truncate_op(StringVector truncate_to) except *:
     DATE_TRUNC expects a constant unit; non-constant vectors are rejected.
     """
     cdef DrakenVector* uv = truncate_to.unified()
-    cdef DrakenConstantStringPayload* csp
-    cdef DrakenVarBuffer* vbuf
-    cdef int32_t length
+    cdef DrakenStringArena* arena = <DrakenStringArena*>uv.data
+    cdef uint32_t* sel = <uint32_t*>uv.selection
+    cdef DrakenStringSlot* slot
     cdef bytes raw
-
-    if truncate_to.ptr.offsets == NULL and truncate_to._german_dict_values == NULL:  # constant
-        if uv.validity != NULL:  # null constant
-            raise ValueError("DATE_TRUNC unit cannot be NULL")
-        csp = <DrakenConstantStringPayload*>uv.data
-        raw = (<const char*>csp.data)[:csp.length]
-        return raw.decode("utf-8").lower()
 
     if uv.length != 1:
         raise ValueError("DATE_TRUNC unit must be a constant or single-value StringVector")
 
-    if uv.validity != NULL and ((uv.validity[0] & 1) == 0):
+    if uv.validity != NULL and not ((uv.validity[0] >> 0) & 1):
         raise ValueError("DATE_TRUNC unit cannot be NULL")
 
-    vbuf = <DrakenVarBuffer*>uv.data
-    length = vbuf.offsets[1] - vbuf.offsets[0]
-    raw = (<const char*>vbuf.data + vbuf.offsets[0])[:length]
+    slot = &arena.slots[sel[0]]
+    raw = (<const char*>str_data(slot, arena.arena))[:str_length(slot)]
     return raw.decode("utf-8").lower()
 
 # Main fast processing function - delegates to timestamp kernel

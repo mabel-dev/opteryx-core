@@ -106,14 +106,14 @@ cdef class BoolVector(Vector):
     # Properties
     @property
     def length(self):
-        return buf_length(self.ptr)
+        return self.ptr.length
 
     def __len__(self):
-        return buf_length(self.ptr)
+        return self.ptr.length
 
     @property
     def dtype(self):
-        return buf_dtype(self.ptr)
+        return DRAKEN_BOOL
 
     def __getitem__(self, Py_ssize_t i):
         """Return the value at index i, or None if null."""
@@ -147,7 +147,7 @@ cdef class BoolVector(Vector):
                 return pa.nulls(self.ptr.length, type=pa.bool_())
             return pa.array([bool((<uint8_t*>uv.data)[0])] * self.ptr.length, type=pa.bool_())
 
-        cdef size_t nbytes = (buf_length(self.ptr) + 7) >> 3
+        cdef size_t nbytes = (self.ptr.length + 7) >> 3
         addr = <intptr_t> self.ptr.data
         data_buf = pa.foreign_buffer(addr, nbytes, base=self)
 
@@ -159,7 +159,7 @@ cdef class BoolVector(Vector):
 
         buffers.append(data_buf)
 
-        return pa.Array.from_buffers(pa.bool_(), buf_length(self.ptr), buffers)
+        return pa.Array.from_buffers(pa.bool_(), self.ptr.length, buffers)
 
     cpdef BoolVector and_vector(self, BoolVector other):
         """Element-wise AND between two BoolVector instances with SQL null semantics."""
@@ -1206,11 +1206,11 @@ cdef class BoolVector(Vector):
         cdef Py_ssize_t i, k
         cdef DrakenVector* uv = self.unified()
         if uv.data_length == 1:
-            return f"<BoolVector len={buf_length(self.ptr)} values={[None if uv.validity != NULL else bool((<uint8_t*>uv.data)[0])] * min(<Py_ssize_t>buf_length(self.ptr), 10)}>"
-        k = min(<Py_ssize_t>buf_length(self.ptr), 10)
+            return f"<BoolVector len={self.ptr.length} values={[None if uv.validity != NULL else bool((<uint8_t*>uv.data)[0])] * min(<Py_ssize_t>self.ptr.length, 10)}>"
+        k = min(<Py_ssize_t>self.ptr.length, 10)
         for i in range(k):
             vals.append(bool(((<uint8_t*>self.ptr.data)[i >> 3] >> (i & 7)) & 1))
-        return f"<BoolVector len={buf_length(self.ptr)} values={vals}>"
+        return f"<BoolVector len={self.ptr.length} values={vals}>"
 
 
 # ---------------------------------------------------------------------------

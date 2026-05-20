@@ -30,9 +30,7 @@ from draken.core.buffers cimport DRAKEN_INT16
 from draken.core.buffers cimport DRAKEN_INT32
 from draken.core.buffers cimport DRAKEN_INT64
 from draken.core.buffers cimport DRAKEN_STRING
-from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.core.buffers cimport DrakenVector
-from draken.core.buffers cimport DrakenFixedBuffer
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.float64_vector cimport Float64Vector
@@ -43,7 +41,8 @@ from draken.vectors.integer32_vector cimport Integer32Vector
 from draken.vectors.vector cimport Vector
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.string_vector cimport StringVectorBuilder
-from draken.vectors.string_vector cimport _StringVectorView
+from draken.core.buffers cimport DrakenStringArena, DrakenStringSlot, str_length, str_data
+from libc.stdint cimport uint32_t
 
 
 cdef enum EncoderKind:
@@ -52,11 +51,7 @@ cdef enum EncoderKind:
     ENC_FLOAT64 = 3
     ENC_BOOL = 4
     ENC_STRING = 5
-    ENC_CONST_INT = 6
-    ENC_CONST_FLOAT = 7
-    ENC_CONST_BOOL = 8
-    ENC_CONST_STRING = 9
-    ENC_GENERIC = 10
+    ENC_GENERIC = 6
 
 
 cdef inline bint _is_valid(const uint8_t* bitmap, Py_ssize_t index) noexcept nogil:
@@ -67,18 +62,6 @@ cdef inline bint _is_valid(const uint8_t* bitmap, Py_ssize_t index) noexcept nog
 
 cdef inline bint _bool_at(const uint8_t* bits, Py_ssize_t index) noexcept nogil:
     return ((bits[index >> 3] >> (index & 7)) & 1) != 0
-
-
-cdef inline int64_t _read_integer_value(DrakenFixedBuffer* ptr, Py_ssize_t index) noexcept nogil:
-    if ptr.type == DRAKEN_INT8:
-        return (<int8_t*>ptr.data)[index]
-    if ptr.type == DRAKEN_INT16:
-        return (<int16_t*>ptr.data)[index]
-    if ptr.type == DRAKEN_INT32:
-        return (<int32_t*>ptr.data)[index]
-    if ptr.type == DRAKEN_INT64:
-        return (<int64_t*>ptr.data)[index]
-    return 0
 
 
 cdef inline int _int64_to_ascii(int64_t value, char* buf) noexcept nogil:
@@ -228,114 +211,34 @@ cdef inline DrakenVector* _typed_unified(object vec_obj) noexcept:
     return NULL
 
 
-cdef inline int _typed_constant_encoder(object vec_obj):
-    cdef DrakenVector* uv = _typed_unified(vec_obj)
-    if uv == NULL or uv.data_length != 1:
-        return 0
-    if uv.type == DRAKEN_INT8 or uv.type == DRAKEN_INT16 or uv.type == DRAKEN_INT32 or uv.type == DRAKEN_INT64:
-        return ENC_CONST_INT
-    if uv.type == DRAKEN_FLOAT64:
-        return ENC_CONST_FLOAT
-    if uv.type == DRAKEN_BOOL:
-        return ENC_CONST_BOOL
-    if uv.type == DRAKEN_STRING:
-        return ENC_CONST_STRING
-    return 0
-
-
-cdef inline bint _constant_is_null(object vec_obj) noexcept:
-    cdef DrakenVector* uv = _typed_unified(vec_obj)
-    if uv == NULL:
-        return False
-    return uv.validity != NULL
-
-
-cdef inline int64_t _constant_int_value(object vec_obj) noexcept:
-    cdef DrakenVector* uv = _typed_unified(vec_obj)
-    if uv == NULL or uv.data == NULL:
-        return 0
-    if uv.type == DRAKEN_INT8:
-        return (<int8_t*>uv.data)[0]
-    if uv.type == DRAKEN_INT16:
-        return (<int16_t*>uv.data)[0]
-    if uv.type == DRAKEN_INT32:
-        return (<int32_t*>uv.data)[0]
-    return (<int64_t*>uv.data)[0]
-
-
-cdef inline double _constant_float_value(object vec_obj) noexcept:
-    cdef DrakenVector* uv = _typed_unified(vec_obj)
-    if uv == NULL or uv.data == NULL:
-        return 0.0
-    return (<double*>uv.data)[0]
-
-
-cdef inline bint _constant_bool_value(object vec_obj) noexcept:
-    cdef DrakenVector* uv = _typed_unified(vec_obj)
-    if uv == NULL or uv.data == NULL:
-        return False
-    return (<uint8_t*>uv.data)[0] != 0
-
-
-cdef inline DrakenConstantStringPayload* _constant_string_payload(object vec_obj) noexcept:
-    cdef DrakenVector* uv = _typed_unified(vec_obj)
-    if uv == NULL or uv.data == NULL:
-        return NULL
-    return <DrakenConstantStringPayload*>uv.data
-
-
-cdef Py_ssize_t _estimate_value_bytes(int encoder, object vec_obj, object aux_obj, Py_ssize_t num_rows) except -1:
-    cdef StringVector string_vec
-    cdef DrakenConstantStringPayload* payload
+cdef Py_ssize_t _estimate_value_bytes(int encoder, DrakenVector* uv, object aux_obj, Py_ssize_t num_rows) except -1:
     cdef Py_ssize_t total_bytes
+    cdef DrakenStringArena* arena
+    cdef Py_ssize_t _k
 
-    if encoder == ENC_INT64 or encoder == ENC_INTEGER or encoder == ENC_CONST_INT:
+    if encoder == ENC_INT64 or encoder == ENC_INTEGER:
         return 20
-    if encoder == ENC_FLOAT64 or encoder == ENC_CONST_FLOAT:
+    if encoder == ENC_FLOAT64:
         return 24
-    if encoder == ENC_BOOL or encoder == ENC_CONST_BOOL:
+    if encoder == ENC_BOOL:
         return 5
     if encoder == ENC_STRING:
-        string_vec = <StringVector>vec_obj
         if num_rows <= 0:
             return 8
-        total_bytes = string_vec.ptr.offsets[string_vec.ptr.length]
+        arena = <DrakenStringArena*>uv.data
+        total_bytes = 0
+        for _k in range(<Py_ssize_t>uv.data_length):
+            total_bytes += <Py_ssize_t>str_length(&arena.slots[_k])
         total_bytes = total_bytes // num_rows if num_rows > 0 else 0
         return total_bytes + 4
-    if encoder == ENC_CONST_STRING:
-        payload = _constant_string_payload(vec_obj)
-        if payload == NULL:
-            return 8
-        return payload.length + 4
     if encoder == ENC_GENERIC:
         return 24
     raise NotImplementedError("unsupported encoder")
 
 
-cdef bint _value_is_null_cached(int encoder, object vec_obj, object aux_obj, Py_ssize_t row_index) except? False:
-    cdef Integer64Vector int64_vec
-    cdef Float64Vector float_vec
-    cdef BoolVector bool_vec
-
-    if encoder == ENC_INT64:
-        int64_vec = <Integer64Vector>vec_obj
-        return not _is_valid(int64_vec.ptr.null_bitmap, row_index)
-    if encoder == ENC_INTEGER:
-        if isinstance(vec_obj, Integer8Vector):
-            return not _is_valid((<Integer8Vector>vec_obj).ptr.null_bitmap, row_index)
-        if isinstance(vec_obj, Integer16Vector):
-            return not _is_valid((<Integer16Vector>vec_obj).ptr.null_bitmap, row_index)
-        return not _is_valid((<Integer32Vector>vec_obj).ptr.null_bitmap, row_index)
-    if encoder == ENC_FLOAT64:
-        float_vec = <Float64Vector>vec_obj
-        return not _is_valid(float_vec.ptr.null_bitmap, row_index)
-    if encoder == ENC_BOOL:
-        bool_vec = <BoolVector>vec_obj
-        return not _is_valid(bool_vec.ptr.null_bitmap, row_index)
-    if encoder == ENC_STRING:
-        return (<_StringVectorView>aux_obj).is_null(row_index)
-    if encoder == ENC_CONST_INT or encoder == ENC_CONST_FLOAT or encoder == ENC_CONST_BOOL or encoder == ENC_CONST_STRING:
-        return _constant_is_null(vec_obj)
+cdef bint _value_is_null_cached(int encoder, DrakenVector* uv, object aux_obj, Py_ssize_t row_index) except? False:
+    if encoder == ENC_INT64 or encoder == ENC_INTEGER or encoder == ENC_FLOAT64 or encoder == ENC_BOOL or encoder == ENC_STRING:
+        return not _is_valid(uv.validity, row_index)
     if encoder == ENC_GENERIC:
         return aux_obj[row_index] is None
     raise NotImplementedError("unsupported encoder")
@@ -353,63 +256,39 @@ cdef inline bytes _generic_csv_bytes(object value):
     return str(value).encode("utf8")
 
 
-cdef Py_ssize_t _write_value(int encoder, object vec_obj, object aux_obj, Py_ssize_t row_index, char* dst, char separator) except -1:
-    cdef Integer64Vector int64_vec
-    cdef Float64Vector float_vec
-    cdef BoolVector bool_vec
-    cdef _StringVectorView string_view
+cdef Py_ssize_t _write_value(int encoder, DrakenVector* uv, object aux_obj, Py_ssize_t row_index, char* dst, char separator) except -1:
+    cdef DrakenStringArena* arena
+    cdef DrakenStringSlot* slot
     cdef const char* ptr
     cdef Py_ssize_t length
-    cdef Py_ssize_t offset
-    cdef Py_ssize_t next_offset
-    cdef DrakenConstantStringPayload* payload
     cdef bytes generic_bytes
     cdef char* generic_ptr = NULL
     cdef Py_ssize_t generic_len = 0
+    cdef uint32_t code
 
     if encoder == ENC_INT64:
-        int64_vec = <Integer64Vector>vec_obj
-        return _write_int64(dst, (<int64_t*>int64_vec.ptr.data)[row_index])
+        return _write_int64(dst, (<int64_t*>uv.data)[uv.selection[row_index]])
     if encoder == ENC_INTEGER:
-        if isinstance(vec_obj, Integer8Vector):
-            return _write_int64(dst, _read_integer_value((<Integer8Vector>vec_obj).ptr, row_index))
-        if isinstance(vec_obj, Integer16Vector):
-            return _write_int64(dst, _read_integer_value((<Integer16Vector>vec_obj).ptr, row_index))
-        return _write_int64(dst, _read_integer_value((<Integer32Vector>vec_obj).ptr, row_index))
+        code = uv.selection[row_index]
+        if uv.type == DRAKEN_INT8:
+            return _write_int64(dst, (<int8_t*>uv.data)[code])
+        if uv.type == DRAKEN_INT16:
+            return _write_int64(dst, (<int16_t*>uv.data)[code])
+        return _write_int64(dst, (<int32_t*>uv.data)[code])
     if encoder == ENC_FLOAT64:
-        float_vec = <Float64Vector>vec_obj
-        return _write_float64(dst, (<double*>float_vec.ptr.data)[row_index])
+        return _write_float64(dst, (<double*>uv.data)[uv.selection[row_index]])
     if encoder == ENC_BOOL:
-        bool_vec = <BoolVector>vec_obj
-        if _bool_at(<uint8_t*>bool_vec.ptr.data, row_index):
+        code = uv.selection[row_index]
+        if ((<uint8_t*>uv.data)[code >> 3] >> (code & 7)) & 1:
             memcpy(dst, b"true", 4)
             return 4
         memcpy(dst, b"false", 5)
         return 5
     if encoder == ENC_STRING:
-        string_view = <_StringVectorView>aux_obj
-        # Bypass bounds checks for speed; caller guarantees row_index in range
-        offset = string_view._offsets[row_index]
-        next_offset = string_view._offsets[row_index + 1]
-        ptr = <const char*>(string_view._data + offset)
-        length = next_offset - offset
-        return _write_csv_field(dst, ptr, length, separator)
-    if encoder == ENC_CONST_INT:
-        return _write_int64(dst, _constant_int_value(vec_obj))
-    if encoder == ENC_CONST_FLOAT:
-        return _write_float64(dst, _constant_float_value(vec_obj))
-    if encoder == ENC_CONST_BOOL:
-        if _constant_bool_value(vec_obj):
-            memcpy(dst, b"true", 4)
-            return 4
-        memcpy(dst, b"false", 5)
-        return 5
-    if encoder == ENC_CONST_STRING:
-        payload = _constant_string_payload(vec_obj)
-        if payload == NULL:
-            return 0
-        ptr = <const char*>payload.data
-        length = payload.length
+        arena = <DrakenStringArena*>uv.data
+        slot  = &arena.slots[uv.selection[row_index]]
+        ptr    = <const char*>str_data(slot, arena.arena)
+        length = <Py_ssize_t>str_length(slot)
         return _write_csv_field(dst, ptr, length, separator)
     if encoder == ENC_GENERIC:
         generic_bytes = _generic_csv_bytes(aux_obj[row_index])
@@ -432,7 +311,7 @@ cpdef StringVector morsel_to_csv_rows(
     cdef list vectors = []
     cdef list aux_objects = []
     cdef int* encoders = NULL
-    cdef const uint8_t** null_bitmaps = NULL
+    cdef DrakenVector** unified_vecs = NULL
     cdef char* scratch = NULL
     cdef Py_ssize_t scratch_capacity = 0
     cdef Py_ssize_t estimated_row_bytes = max(1, num_cols)
@@ -445,12 +324,8 @@ cpdef StringVector morsel_to_csv_rows(
     cdef bytes col_name
     cdef int encoder
     cdef DrakenVector* _uv
-    cdef StringVector _sv
+    cdef DrakenStringSlot* _slot_ptr
     cdef StringVectorBuilder builder
-    cdef _StringVectorView string_view
-    cdef DrakenConstantStringPayload* payload
-    cdef Py_ssize_t offset
-    cdef Py_ssize_t next_offset
     cdef char* header_ptr = NULL
     cdef Py_ssize_t header_len = 0
 
@@ -459,8 +334,8 @@ cpdef StringVector morsel_to_csv_rows(
         if encoders == NULL:
             raise MemoryError()
 
-        null_bitmaps = <const uint8_t**>malloc(sizeof(const uint8_t*) * max(num_cols, 1))
-        if null_bitmaps == NULL:
+        unified_vecs = <DrakenVector**>malloc(sizeof(DrakenVector*) * max(num_cols, 1))
+        if unified_vecs == NULL:
             raise MemoryError()
 
         for col_index in range(num_cols):
@@ -468,62 +343,36 @@ cpdef StringVector morsel_to_csv_rows(
             vec_obj = morsel.column(col_name)
 
             _uv = _typed_unified(vec_obj)
+            unified_vecs[col_index] = _uv
             if isinstance(vec_obj, StringVector):
-                _sv = <StringVector>vec_obj
-                if _sv.ptr.offsets == NULL:  # constant (offsets always allocated for dense/dict)
-                    encoder = ENC_CONST_STRING
-                    aux_obj = None
-                    null_bitmaps[col_index] = NULL
-                else:
-                    encoder = ENC_STRING
-                    aux_obj = vec_obj.view()
-                    null_bitmaps[col_index] = NULL
-            elif _uv != NULL and _uv.data_length == 1:
-                encoder = _typed_constant_encoder(vec_obj)
-                if encoder == 0:
-                    raise NotImplementedError(
-                        f"csv serialization does not support typed constant value type for column {col_name!r}"
-                    )
+                encoder = ENC_STRING
                 aux_obj = None
-                null_bitmaps[col_index] = NULL
             elif isinstance(vec_obj, Integer64Vector):
                 encoder = ENC_INT64
                 aux_obj = None
-                null_bitmaps[col_index] = (<Integer64Vector>vec_obj).ptr.null_bitmap
-            elif isinstance(vec_obj, Integer8Vector):
+            elif isinstance(vec_obj, (Integer8Vector, Integer16Vector, Integer32Vector)):
                 encoder = ENC_INTEGER
                 aux_obj = None
-                null_bitmaps[col_index] = (<Integer8Vector>vec_obj).ptr.null_bitmap
-            elif isinstance(vec_obj, Integer16Vector):
-                encoder = ENC_INTEGER
-                aux_obj = None
-                null_bitmaps[col_index] = (<Integer16Vector>vec_obj).ptr.null_bitmap
-            elif isinstance(vec_obj, Integer32Vector):
-                encoder = ENC_INTEGER
-                aux_obj = None
-                null_bitmaps[col_index] = (<Integer32Vector>vec_obj).ptr.null_bitmap
             elif isinstance(vec_obj, Float64Vector):
                 encoder = ENC_FLOAT64
                 aux_obj = None
-                null_bitmaps[col_index] = (<Float64Vector>vec_obj).ptr.null_bitmap
             elif isinstance(vec_obj, BoolVector):
                 encoder = ENC_BOOL
                 aux_obj = None
-                null_bitmaps[col_index] = (<BoolVector>vec_obj).ptr.null_bitmap
             elif _uv != NULL:
                 encoder = ENC_GENERIC
                 aux_obj = vec_obj.to_pylist()
-                null_bitmaps[col_index] = NULL
             else:
                 raise NotImplementedError(
-                    f"csv serialization does not support vector type {type(vec_obj).__name__} for column {col_name!r}"
+                    f"csv serialization does not support vector type "
+                    f"{type(vec_obj).__name__} for column {col_name!r}"
                 )
 
             vectors.append(vec_obj)
             aux_objects.append(aux_obj)
             encoders[col_index] = encoder
             estimated_row_bytes += _estimate_csv_field_bytes(PyBytes_AS_STRING(col_name), len(col_name))
-            estimated_row_bytes += _estimate_value_bytes(encoder, vec_obj, aux_obj, num_rows)
+            estimated_row_bytes += _estimate_value_bytes(encoder, unified_vecs[col_index], aux_obj, num_rows)
 
         if estimated_row_bytes < 16:
             estimated_row_bytes = 16
@@ -553,7 +402,6 @@ cpdef StringVector morsel_to_csv_rows(
         for row_index in range(num_rows):
             pos = 0
             for col_index in range(num_cols):
-                vec_obj = vectors[col_index]
                 aux_obj = aux_objects[col_index]
                 encoder = encoders[col_index]
 
@@ -562,25 +410,19 @@ cpdef StringVector morsel_to_csv_rows(
                     scratch[pos] = sep
                     pos += 1
 
-                if _value_is_null_cached(encoder, vec_obj, aux_obj, row_index):
+                if _value_is_null_cached(encoder, unified_vecs[col_index], aux_obj, row_index):
                     continue
 
                 reserve_needed = pos + 32
                 if encoder == ENC_STRING:
-                    string_view = <_StringVectorView>aux_obj
-                    # Bypass bounds checks for speed; caller guarantees row_index in range
-                    offset = string_view._offsets[row_index]
-                    next_offset = string_view._offsets[row_index + 1]
+                    _uv = unified_vecs[col_index]
+                    _slot_ptr = &(<DrakenStringArena*>_uv.data).slots[_uv.selection[row_index]]
                     reserve_needed = pos + _estimate_csv_field_bytes(
-                        <char*>string_view._data + offset,
-                        next_offset - offset,
+                        <char*>str_data(_slot_ptr, (<DrakenStringArena*>_uv.data).arena),
+                        <Py_ssize_t>str_length(_slot_ptr),
                     ) + 1
-                elif encoder == ENC_CONST_STRING:
-                    payload = _constant_string_payload(vec_obj)
-                    if payload != NULL:
-                        reserve_needed = pos + _estimate_csv_field_bytes(<char*>payload.data, payload.length) + 1
                 _ensure_scratch_capacity(&scratch, &scratch_capacity, reserve_needed)
-                pos += _write_value(encoder, vec_obj, aux_obj, row_index, scratch + pos, sep)
+                pos += _write_value(encoder, unified_vecs[col_index], aux_obj, row_index, scratch + pos, sep)
 
             builder.append_bytes(scratch, pos)
 
@@ -590,8 +432,8 @@ cpdef StringVector morsel_to_csv_rows(
             free(scratch)
         if encoders != NULL:
             free(encoders)
-        if null_bitmaps != NULL:
-            free(<void*>null_bitmaps)
+        if unified_vecs != NULL:
+            free(unified_vecs)
 
 
 cpdef list morsel_to_csv_strings(

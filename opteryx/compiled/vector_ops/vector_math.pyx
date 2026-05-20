@@ -359,8 +359,8 @@ cpdef Float64Vector vector_ceil(object values, int scale=0):
         uv = (<Vector>values).unified()
 
     if uv != NULL and (
-        (isinstance(values, Integer64Vector) and (<Integer64Vector>values)._dict_values != NULL) or
-        (isinstance(values, Float64Vector) and (<Float64Vector>values)._dict_values != NULL)
+        (isinstance(values, Integer64Vector) and (<Integer64Vector>values)._unified_view.data_length < (<Integer64Vector>values)._unified_view.length) or
+        (isinstance(values, Float64Vector) and (<Float64Vector>values)._unified_view.data_length < (<Float64Vector>values)._unified_view.length)
     ):
         dict_buf   = <DrakenVarBuffer*>uv.data
         d_val_type = dict_buf.type
@@ -450,8 +450,8 @@ cpdef Float64Vector vector_floor(object values, int scale=0):
         uv = (<Vector>values).unified()
 
     if uv != NULL and (
-        (isinstance(values, Integer64Vector) and (<Integer64Vector>values)._dict_values != NULL) or
-        (isinstance(values, Float64Vector) and (<Float64Vector>values)._dict_values != NULL)
+        (isinstance(values, Integer64Vector) and (<Integer64Vector>values)._unified_view.data_length < (<Integer64Vector>values)._unified_view.length) or
+        (isinstance(values, Float64Vector) and (<Float64Vector>values)._unified_view.data_length < (<Float64Vector>values)._unified_view.length)
     ):
         dict_buf   = <DrakenVarBuffer*>uv.data
         d_val_type = dict_buf.type
@@ -541,8 +541,8 @@ cpdef Float64Vector vector_trunc(object values, int scale=0):
         uv = (<Vector>values).unified()
 
     if uv != NULL and (
-        (isinstance(values, Integer64Vector) and (<Integer64Vector>values)._dict_values != NULL) or
-        (isinstance(values, Float64Vector) and (<Float64Vector>values)._dict_values != NULL)
+        (isinstance(values, Integer64Vector) and (<Integer64Vector>values)._unified_view.data_length < (<Integer64Vector>values)._unified_view.length) or
+        (isinstance(values, Float64Vector) and (<Float64Vector>values)._unified_view.data_length < (<Float64Vector>values)._unified_view.length)
     ):
         dict_buf   = <DrakenVarBuffer*>uv.data
         d_val_type = dict_buf.type
@@ -636,8 +636,8 @@ cpdef Float64Vector vector_power(object base_array, double exponent):
         uv = (<Vector>base_array).unified()
 
     if uv != NULL and (
-        (isinstance(base_array, Integer64Vector) and (<Integer64Vector>base_array)._dict_values != NULL) or
-        (isinstance(base_array, Float64Vector) and (<Float64Vector>base_array)._dict_values != NULL)
+        (isinstance(base_array, Integer64Vector) and (<Integer64Vector>base_array)._unified_view.data_length < (<Integer64Vector>base_array)._unified_view.length) or
+        (isinstance(base_array, Float64Vector) and (<Float64Vector>base_array)._unified_view.data_length < (<Float64Vector>base_array)._unified_view.length)
     ):
         dict_buf   = <DrakenVarBuffer*>uv.data
         d_val_type = dict_buf.type

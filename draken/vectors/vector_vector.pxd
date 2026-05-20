@@ -1,5 +1,6 @@
 from libc.stdint cimport int32_t, uint8_t, uint16_t, uint64_t
 
+from draken.core.buffers cimport DrakenVector
 from draken.vectors.float32_vector cimport Float32Vector
 from draken.vectors.vector cimport Vector
 
@@ -21,6 +22,7 @@ cdef class VectorVector(Vector):
     cdef object _arrow_data_buf
     cdef object _arrow_null_buf
 
+    cdef DrakenVector* unified(self) noexcept
     cdef Float32Vector _alloc_score_vector(self)
 
     # --- Distance kernels (the only real compute surface). ---

@@ -306,9 +306,11 @@ cdef class MinBytesAggregate(UngroupedAggregate):
         if self._col_type == _VTYPE_UNKNOWN:
             self._col_type = _classify_vector(raw)
 
-        cdef DrakenVarBuffer* buf
-        cdef DrakenVector*    uv
-        cdef const uint8_t*   nulls
+        cdef DrakenStringArena* arena
+        cdef DrakenVector*      uv
+        cdef const uint8_t*     nulls
+        cdef const uint32_t*    sel
+        cdef DrakenStringSlot*  slot
         cdef Py_ssize_t i
         cdef const char* ptr_a
         cdef const char* ptr_b
@@ -316,39 +318,22 @@ cdef class MinBytesAggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_STRING:
             svec = <StringVector>raw
-            uv = svec.unified()
-            if svec.ptr.offsets == NULL:  # constant (offsets always allocated for dense/dict)
-                if uv.validity == NULL:
-                    ptr_b = <const char*>(<DrakenConstantStringPayload*>uv.data).data
-                    len_b = <size_t>(<DrakenConstantStringPayload*>uv.data).length
-                    if self._result is None:
-                        self._result = ptr_b[:len_b]
-                    else:
-                        ptr_a = self._result; len_a = len(self._result)
-                        if compare_bytes(ptr_b, len_b, ptr_a, len_a) < 0:
-                            self._result = ptr_b[:len_b]
-                return
-            # Dict-encoded fast path: scan referenced, non-null dict entries
-            # only.  Only worthwhile when K << N — at K ~ N this loses to
-            # the dense path's tighter inner loop.
-            if (
-                svec._german_dict_values != NULL
-                and svec.c_dict_size() <= (nrows >> 2)
-            ):
-                self._scan_dict_min(svec)
-                return
-            buf   = <DrakenVarBuffer*>uv.data
+            uv    = svec.unified()
+            arena = <DrakenStringArena*>uv.data
+            sel   = <const uint32_t*>uv.selection
             nulls = uv.validity
             for i in range(nrows):
-                if nulls == NULL or _bitmap_is_valid(nulls, i):
-                    ptr_b = <const char*>(buf.data + buf.offsets[i])
-                    len_b = <size_t>(buf.offsets[i + 1] - buf.offsets[i])
-                    if self._result is None:
+                if nulls != NULL and not _bitmap_is_valid(nulls, i):
+                    continue
+                slot  = &arena.slots[sel[i]]
+                ptr_b = <const char*>str_data(slot, arena.arena)
+                len_b = <size_t>str_length(slot)
+                if self._result is None:
+                    self._result = ptr_b[:len_b]
+                else:
+                    ptr_a = self._result; len_a = len(self._result)
+                    if compare_bytes(ptr_b, len_b, ptr_a, len_a) < 0:
                         self._result = ptr_b[:len_b]
-                    else:
-                        ptr_a = self._result; len_a = len(self._result)
-                        if compare_bytes(ptr_b, len_b, ptr_a, len_a) < 0:
-                            self._result = ptr_b[:len_b]
             return
 
         for val_py in raw.to_pylist():
@@ -356,28 +341,6 @@ cdef class MinBytesAggregate(UngroupedAggregate):
                 b = val_py if isinstance(val_py, bytes) else str(val_py).encode()
                 if self._result is None or b < self._result:
                     self._result = b
-
-    cdef void _scan_dict_min(self, StringVector svec) except *:
-        cdef const int64_t* counts = svec.c_dict_code_counts_ptr()
-        cdef Py_ssize_t dict_size = svec.c_dict_size()
-        cdef Py_ssize_t di, vlen, best_len
-        cdef const uint8_t* vptr
-        cdef const char* best_ptr
-        for di in range(dict_size):
-            if counts[di] <= 0:
-                continue
-            if svec.c_dict_value_is_null(di):
-                continue
-            vptr = svec.c_dict_value_ptr(di, &vlen)
-            if vptr == NULL:
-                continue
-            if self._result is None:
-                self._result = (<const char*>vptr)[:vlen]
-            else:
-                best_ptr = self._result
-                best_len = len(self._result)
-                if compare_bytes(<const char*>vptr, <size_t>vlen, best_ptr, <size_t>best_len) < 0:
-                    self._result = (<const char*>vptr)[:vlen]
 
     cdef int64_t get_result_i64(self) noexcept:
         return 0
@@ -418,9 +381,11 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
         if self._col_type == _VTYPE_UNKNOWN:
             self._col_type = _classify_vector(raw)
 
-        cdef DrakenVarBuffer* buf
-        cdef DrakenVector*    uv
-        cdef const uint8_t*   nulls
+        cdef DrakenStringArena* arena
+        cdef DrakenVector*      uv
+        cdef const uint8_t*     nulls
+        cdef const uint32_t*    sel
+        cdef DrakenStringSlot*  slot
         cdef Py_ssize_t i
         cdef const char* ptr_a
         cdef const char* ptr_b
@@ -428,36 +393,22 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_STRING:
             svec = <StringVector>raw
-            uv = svec.unified()
-            if svec.ptr.offsets == NULL:  # constant (offsets always allocated for dense/dict)
-                if uv.validity == NULL:
-                    ptr_b = <const char*>(<DrakenConstantStringPayload*>uv.data).data
-                    len_b = <size_t>(<DrakenConstantStringPayload*>uv.data).length
-                    if self._result is None:
-                        self._result = ptr_b[:len_b]
-                    else:
-                        ptr_a = self._result; len_a = len(self._result)
-                        if compare_bytes(ptr_b, len_b, ptr_a, len_a) > 0:
-                            self._result = ptr_b[:len_b]
-                return
-            if (
-                svec._german_dict_values != NULL
-                and svec.c_dict_size() <= (nrows >> 2)
-            ):
-                self._scan_dict_max(svec)
-                return
-            buf   = <DrakenVarBuffer*>uv.data
+            uv    = svec.unified()
+            arena = <DrakenStringArena*>uv.data
+            sel   = <const uint32_t*>uv.selection
             nulls = uv.validity
             for i in range(nrows):
-                if nulls == NULL or _bitmap_is_valid(nulls, i):
-                    ptr_b = <const char*>(buf.data + buf.offsets[i])
-                    len_b = <size_t>(buf.offsets[i + 1] - buf.offsets[i])
-                    if self._result is None:
+                if nulls != NULL and not _bitmap_is_valid(nulls, i):
+                    continue
+                slot  = &arena.slots[sel[i]]
+                ptr_b = <const char*>str_data(slot, arena.arena)
+                len_b = <size_t>str_length(slot)
+                if self._result is None:
+                    self._result = ptr_b[:len_b]
+                else:
+                    ptr_a = self._result; len_a = len(self._result)
+                    if compare_bytes(ptr_b, len_b, ptr_a, len_a) > 0:
                         self._result = ptr_b[:len_b]
-                    else:
-                        ptr_a = self._result; len_a = len(self._result)
-                        if compare_bytes(ptr_b, len_b, ptr_a, len_a) > 0:
-                            self._result = ptr_b[:len_b]
             return
 
         for val_py in raw.to_pylist():
@@ -465,28 +416,6 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
                 b = val_py if isinstance(val_py, bytes) else str(val_py).encode()
                 if self._result is None or b > self._result:
                     self._result = b
-
-    cdef void _scan_dict_max(self, StringVector svec) except *:
-        cdef const int64_t* counts = svec.c_dict_code_counts_ptr()
-        cdef Py_ssize_t dict_size = svec.c_dict_size()
-        cdef Py_ssize_t di, vlen, best_len
-        cdef const uint8_t* vptr
-        cdef const char* best_ptr
-        for di in range(dict_size):
-            if counts[di] <= 0:
-                continue
-            if svec.c_dict_value_is_null(di):
-                continue
-            vptr = svec.c_dict_value_ptr(di, &vlen)
-            if vptr == NULL:
-                continue
-            if self._result is None:
-                self._result = (<const char*>vptr)[:vlen]
-            else:
-                best_ptr = self._result
-                best_len = len(self._result)
-                if compare_bytes(<const char*>vptr, <size_t>vlen, best_ptr, <size_t>best_len) > 0:
-                    self._result = (<const char*>vptr)[:vlen]
 
     cdef int64_t get_result_i64(self) noexcept:
         return 0

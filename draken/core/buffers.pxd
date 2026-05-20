@@ -57,37 +57,37 @@ cdef extern from "core/buffers.h":
 # German string (a.k.a. Umbra string). 16-byte slot:
 #   inline (len <= 12):  uint32_t length + 12 inline bytes
 #   extern (len  > 12):  uint32_t length + 4-byte prefix + uint64_t arena_offset
-# Defined in draken/src/core/german_string.h. Treated as opaque on the Cython
+# Defined in draken/src/core/string_slot.h. Treated as opaque on the Cython
 # side; production code accesses fields exclusively through the C inline
-# helpers (gs_equals, gs_compare, gs_data, gs_prefix4, gs_lp_word) which
+# helpers (str_equals, str_compare, str_data, str_prefix4, gs_lp_word) which
 # inline cleanly via cdef extern.
-cdef extern from "core/german_string.h":
-    int GS_INLINE_MAX
+cdef extern from "core/string_slot.h":
+    int STR_INLINE_MAX
 
-    ctypedef struct GermanString:
-        pass  # opaque; sizeof(GermanString) still resolves at C compile time
+    ctypedef struct DrakenStringSlot:
+        pass  # opaque; sizeof(DrakenStringSlot) still resolves at C compile time
 
-    uint32_t gs_length(const GermanString* s) noexcept nogil
-    int      gs_is_inline(const GermanString* s) noexcept nogil
-    uint32_t gs_prefix4(const GermanString* s) noexcept nogil
-    const uint8_t* gs_data(const GermanString* s, const uint8_t* arena_base) noexcept nogil
-    int      gs_equals(const GermanString* a, const uint8_t* arena_a,
-                       const GermanString* b, const uint8_t* arena_b) noexcept nogil
-    int      gs_compare(const GermanString* a, const uint8_t* arena_a,
-                        const GermanString* b, const uint8_t* arena_b) noexcept nogil
+    uint32_t str_length(const DrakenStringSlot* s) noexcept nogil
+    int      str_is_inline(const DrakenStringSlot* s) noexcept nogil
+    uint32_t str_prefix4(const DrakenStringSlot* s) noexcept nogil
+    const uint8_t* str_data(const DrakenStringSlot* s, const uint8_t* arena_base) noexcept nogil
+    int      str_equals(const DrakenStringSlot* a, const uint8_t* arena_a,
+                       const DrakenStringSlot* b, const uint8_t* arena_b) noexcept nogil
+    int      str_compare(const DrakenStringSlot* a, const uint8_t* arena_a,
+                        const DrakenStringSlot* b, const uint8_t* arena_b) noexcept nogil
     # Builder-side initializers. Each zeroes the slot before writing so that
     # short strings with length < 4 produce deterministic lp_word bytes.
-    void     gs_init_null(GermanString* s) nogil
-    void     gs_init_inline(GermanString* s, const uint8_t* src, uint32_t length) nogil
-    void     gs_init_extern(GermanString* s, const uint8_t* src,
+    void     str_init_null(DrakenStringSlot* s) nogil
+    void     str_init_inline(DrakenStringSlot* s, const uint8_t* src, uint32_t length) nogil
+    void     str_init_extern(DrakenStringSlot* s, const uint8_t* src,
                             uint32_t length, uint64_t arena_offset) nogil
 
 cdef extern from "core/buffers.h":
 
     # German-string storage. Used as the `data` payload of a string
     # DrakenVector under the unified format (Track B).
-    ctypedef struct DrakenGermanArena:
-        GermanString* slots
+    ctypedef struct DrakenStringArena:
+        DrakenStringSlot* slots
         uint8_t*      arena
         size_t        length
         size_t        arena_used
@@ -134,6 +134,7 @@ cdef extern from "core/buffers.h":
 cdef extern from "core/vector_alloc.h":
     const uint32_t* draken_identity_sel(uint32_t length) nogil
     const uint32_t* draken_zero_sel(uint32_t length) nogil
+    const uint8_t* draken_zero_validity(uint32_t length) nogil
 
     DrakenVector draken_vector_from_dense(
         void* data, uint32_t length, DrakenType type, uint8_t* validity) nogil

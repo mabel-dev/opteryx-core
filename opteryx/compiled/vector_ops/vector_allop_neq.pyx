@@ -26,7 +26,7 @@ cpdef BoolVector vector_allop_neq(object literal, ArrayVector vec):
     Returns:
         BoolVector: True where the ALL condition holds, False otherwise.
     """
-    cdef Py_ssize_t i, n = vec.ptr.length
+    cdef Py_ssize_t i, n = vec._unified_view.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
     cdef BoolVector out = BoolVector(<size_t>n)
     cdef uint8_t* dst = <uint8_t*>out.ptr.data

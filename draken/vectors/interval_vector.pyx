@@ -271,18 +271,18 @@ cdef class IntervalVector(Vector):
 
     @property
     def length(self):
-        return buf_length(self.ptr)
+        return self.ptr.length
 
     def __len__(self):
-        return buf_length(self.ptr)
+        return self.ptr.length
 
     @property
     def itemsize(self):
-        return buf_itemsize(self.ptr)
+        return 16
 
     @property
     def dtype(self):
-        return buf_dtype(self.ptr)
+        return DRAKEN_INTERVAL
 
     def __getitem__(self, Py_ssize_t i):
         cdef DrakenFixedBuffer* ptr = self.ptr
@@ -320,7 +320,7 @@ cdef class IntervalVector(Vector):
     cpdef object to_arrow_binary(self):
         import pyarrow as pa
 
-        cdef size_t nbytes = buf_length(self.ptr) * buf_itemsize(self.ptr)
+        cdef size_t nbytes = self.ptr.length * 16
         cdef intptr_t data_addr = <intptr_t> self.ptr.data
         data_buf = pa.foreign_buffer(data_addr, nbytes, base=self)
 
@@ -345,7 +345,7 @@ cdef class IntervalVector(Vector):
 
         return pa.Array.from_buffers(
             binary_type,
-            buf_length(self.ptr),
+            self.ptr.length,
             buffers,
         )
 
@@ -1066,7 +1066,7 @@ cdef class IntervalVector(Vector):
     def __str__(self):
         cdef list preview = []
         cdef Py_ssize_t i, n, limit
-        n = buf_length(self.ptr)
+        n = self.ptr.length
         limit = n if n < 10 else 10
         for i in range(limit):
             preview.append(self[i])

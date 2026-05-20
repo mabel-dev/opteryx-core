@@ -8,9 +8,9 @@
 # cython: optimize.use_switch=True
 # cython: optimize.unpack_method_calls=True
 
-from libc.stdint cimport int32_t, int64_t, uint8_t
+from libc.stdint cimport int32_t, int64_t, uint8_t, uint32_t
 
-from draken.core.buffers cimport DrakenConstantStringPayload, DrakenVarBuffer, DrakenVector, DrakenGermanArena, GermanString, gs_length, gs_data
+from draken.core.buffers cimport DrakenVarBuffer, DrakenVector, DrakenStringArena, DrakenStringSlot, str_length, str_data
 from draken.vectors.array_vector cimport ArrayVector
 from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
@@ -28,7 +28,7 @@ cpdef list vector_get_element(ArrayVector vec, int key):
     Returns:
         Python list of extracted elements (None for nulls or out-of-range rows).
     """
-    cdef Py_ssize_t n = vec.ptr.length
+    cdef Py_ssize_t n = vec._unified_view.length
     cdef Py_ssize_t i
     cdef object row
     cdef list result = [None] * n
@@ -49,7 +49,7 @@ cpdef list vector_map_access_array(ArrayVector vec, Integer64Vector key):
         Python list of extracted elements (NULL for null/out-of-range rows).
     """
     cdef int64_t index
-    cdef Py_ssize_t n = vec.ptr.length
+    cdef Py_ssize_t n = vec._unified_view.length
     cdef Py_ssize_t i
     cdef object row
     cdef Py_ssize_t row_len
@@ -84,49 +84,31 @@ cpdef StringVector vector_map_access_string(StringVector vec, Integer64Vector ke
     """
     cdef int64_t index
     cdef DrakenVector* uv = vec.unified()
+    cdef DrakenStringArena* arena = <DrakenStringArena*>uv.data
+    cdef uint32_t* sel = <uint32_t*>uv.selection
+    cdef uint8_t* nulls = uv.validity
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t i
-    cdef uint8_t* null_bm
-    cdef int32_t start, end, row_len
+    cdef DrakenStringSlot* slot
+    cdef const uint8_t* sdata
+    cdef uint32_t slen
     cdef int64_t pos
-    cdef DrakenConstantStringPayload* csp
-    cdef int32_t const_len
-    cdef DrakenVarBuffer* vbuf
     cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(n, 1)
 
     index = key[0]
 
-    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
-        if uv.validity != NULL:  # null constant
-            for i in range(n):
-                builder.append_null()
-        else:
-            csp = <DrakenConstantStringPayload*>uv.data
-            const_len = csp.length
-            pos = index if index >= 0 else const_len + index
-            if pos < 0 or pos >= const_len:
-                for i in range(n):
-                    builder.append_null()
-            else:
-                for i in range(n):
-                    builder.append_bytes(<const char*>csp.data + pos, 1)
-        return builder.finish()
-
-    vbuf = <DrakenVarBuffer*>uv.data
-    null_bm = uv.validity
     for i in range(n):
-        if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
+        if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
             continue
-
-        start = vbuf.offsets[i]
-        end = vbuf.offsets[i + 1]
-        row_len = end - start
-        pos = index if index >= 0 else row_len + index
-        if pos < 0 or pos >= row_len:
+        slot = &arena.slots[sel[i]]
+        sdata = str_data(slot, arena.arena)
+        slen = str_length(slot)
+        pos = index if index >= 0 else <int64_t>slen + index
+        if pos < 0 or pos >= <int64_t>slen:
             builder.append_null()
         else:
-            builder.append_bytes(<const char*>vbuf.data + start + pos, 1)
+            builder.append_bytes(<const char*>sdata + pos, 1)
 
     return builder.finish()
 
@@ -162,57 +144,26 @@ cpdef StringVector vector_json_extract_text(StringVector docs, bytes key):
         StringVector containing UTF-8 bytes (NULL for null/missing).
     """
     cdef DrakenVector* uv = docs.unified()
+    cdef DrakenStringArena* arena = <DrakenStringArena*>uv.data
+    cdef uint32_t* sel = <uint32_t*>uv.selection
+    cdef uint8_t* nulls = uv.validity
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t i
-    cdef object doc
     cdef bytes doc_bytes
     cdef bytes out_bytes
+    cdef DrakenStringSlot* slot
+    cdef const uint8_t* sdata
+    cdef uint32_t slen
     cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(n, 16)
-    cdef DrakenVarBuffer* vbuf
-    cdef Py_ssize_t dict_size
-    cdef int32_t start, end
-    cdef uint8_t* null_bm
-    cdef uint32_t code
-    cdef DrakenGermanArena* jxt_gdv
-    cdef GermanString* jxt_slot
-    cdef const uint8_t* jxt_sdata
-    cdef uint32_t jxt_slen
-
-    if docs._german_dict_values != NULL:  # dictionary
-        jxt_gdv = docs._german_dict_values
-        dict_size = <Py_ssize_t>jxt_gdv.length
-        dict_results = [None] * dict_size
-        for i in range(dict_size):
-            jxt_slot = &jxt_gdv.slots[i]
-            jxt_slen = gs_length(jxt_slot)
-            jxt_sdata = gs_data(jxt_slot, jxt_gdv.arena)
-            doc_bytes = bytes(jxt_sdata[:jxt_slen])
-            dict_results[i] = _json_extract_text_value(doc_bytes, key)
-
-        null_bm = uv.validity
-        for i in range(n):
-            if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
-                builder.append_null()
-                continue
-            code = uv.selection[i]
-            out_bytes = dict_results[code]
-            if out_bytes is None:
-                builder.append_null()
-            else:
-                builder.append_bytes(<const char*>out_bytes, len(out_bytes))
-        return builder.finish()
 
     for i in range(n):
-        doc = docs[i]
-        if doc is None:
+        if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
             continue
-
-        if isinstance(doc, str):
-            doc_bytes = (<str>doc).encode("utf8")
-        else:
-            doc_bytes = <bytes>doc
-
+        slot = &arena.slots[sel[i]]
+        slen = str_length(slot)
+        sdata = str_data(slot, arena.arena)
+        doc_bytes = bytes(sdata[:slen])
         out_bytes = _json_extract_text_value(doc_bytes, key)
         if out_bytes is None:
             builder.append_null()
@@ -246,50 +197,24 @@ cpdef list vector_json_extract_variant(StringVector docs, bytes key):
         Python list of extracted values (scalar/list/dict/None).
     """
     cdef DrakenVector* uv = docs.unified()
+    cdef DrakenStringArena* arena = <DrakenStringArena*>uv.data
+    cdef uint32_t* sel = <uint32_t*>uv.selection
+    cdef uint8_t* nulls = uv.validity
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t i
-    cdef object doc
     cdef bytes doc_bytes
+    cdef DrakenStringSlot* slot
+    cdef const uint8_t* sdata
+    cdef uint32_t slen
     cdef list result = [None] * n
-    cdef DrakenVarBuffer* vbuf
-    cdef Py_ssize_t dict_size
-    cdef int32_t start, end
-    cdef uint8_t* null_bm
-    cdef uint32_t code
-    cdef DrakenGermanArena* jxv_gdv
-    cdef GermanString* jxv_slot
-    cdef const uint8_t* jxv_sdata
-    cdef uint32_t jxv_slen
-
-    if docs._german_dict_values != NULL:  # dictionary
-        jxv_gdv = docs._german_dict_values
-        dict_size = <Py_ssize_t>jxv_gdv.length
-        dict_results = [None] * dict_size
-        for i in range(dict_size):
-            jxv_slot = &jxv_gdv.slots[i]
-            jxv_slen = gs_length(jxv_slot)
-            jxv_sdata = gs_data(jxv_slot, jxv_gdv.arena)
-            doc_bytes = bytes(jxv_sdata[:jxv_slen])
-            dict_results[i] = _json_extract_variant_value(doc_bytes, key)
-
-        null_bm = uv.validity
-        for i in range(n):
-            if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
-                continue
-            code = uv.selection[i]
-            result[i] = dict_results[code]
-        return result
 
     for i in range(n):
-        doc = docs[i]
-        if doc is None:
+        if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
             continue
-
-        if isinstance(doc, str):
-            doc_bytes = (<str>doc).encode("utf8")
-        else:
-            doc_bytes = <bytes>doc
-
+        slot = &arena.slots[sel[i]]
+        slen = str_length(slot)
+        sdata = str_data(slot, arena.arena)
+        doc_bytes = bytes(sdata[:slen])
         result[i] = _json_extract_variant_value(doc_bytes, key)
 
     return result

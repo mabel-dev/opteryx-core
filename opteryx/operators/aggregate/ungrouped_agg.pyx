@@ -21,6 +21,7 @@ from draken.vectors.integer32_vector cimport Integer32Vector
 from draken.core.buffers cimport (
     DrakenFixedBuffer, DrakenVarBuffer,
     DrakenConstantStringPayload, DrakenVector,
+    DrakenStringArena, DrakenStringSlot, str_length, str_data,
 )
 cdef extern from "_agg_kernels.hpp" namespace "opteryx::ungrouped":
     int compare_bytes(const char* a, size_t la, const char* b, size_t lb) noexcept

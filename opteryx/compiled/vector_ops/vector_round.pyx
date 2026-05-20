@@ -156,8 +156,8 @@ cpdef Float64Vector vector_round_digits(object values, int digits):
         uv = (<Vector>values).unified()
 
     if uv != NULL and (
-        (isinstance(values, Integer64Vector) and (<Integer64Vector>values)._dict_values != NULL) or
-        (isinstance(values, Float64Vector) and (<Float64Vector>values)._dict_values != NULL)
+        (isinstance(values, Integer64Vector) and (<Integer64Vector>values)._unified_view.data_length < (<Integer64Vector>values)._unified_view.length) or
+        (isinstance(values, Float64Vector) and (<Float64Vector>values)._unified_view.data_length < (<Float64Vector>values)._unified_view.length)
     ):
         dict_buf = <DrakenVarBuffer*> uv.data
         d_val_type = dict_buf.type

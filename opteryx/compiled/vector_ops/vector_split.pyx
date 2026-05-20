@@ -14,7 +14,7 @@ Direct SIMD/NEON string splitting with runtime CPU detection.
 This code is fast AND works - no compiler errors.
 """
 
-from libc.stdint cimport int32_t, int64_t, uintptr_t, uint8_t
+from libc.stdint cimport int32_t, int64_t, uintptr_t, uint8_t, uint32_t
 from libc.stdlib cimport malloc, free, calloc
 from libc.stddef cimport size_t
 
@@ -183,31 +183,30 @@ cdef class _BufferCleanup:
             free(self.ptr)
 
 from cpython.bytes cimport PyBytes_FromStringAndSize
-from draken.vectors.string_vector cimport StringVector
+from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
 from draken.vectors.array_vector cimport array_vector_from_parts
-from draken.core.buffers cimport DrakenVector, DrakenConstantStringPayload, DrakenVarBuffer, DRAKEN_STRING
-from draken.vectors.string_vector cimport from_arrow as string_vector_from_arrow
+from draken.core.buffers cimport DrakenVector, DrakenVarBuffer, DRAKEN_STRING
+from draken.core.buffers cimport DrakenStringArena
+from draken.core.buffers cimport DrakenStringSlot
+from draken.core.buffers cimport str_length, str_data
+from libc.string cimport memcpy
 
 def vector_split(StringVector vec, char delimiter):
     """
-    FAST string splitting that actually compiles.
+    FAST string splitting using unified arena access pattern.
     Works on x86 and ARM, no compiler errors.
     """
     cdef DrakenVector* uv = vec.unified()
+    cdef DrakenStringArena* arena = <DrakenStringArena*>uv.data
+    cdef uint32_t* sel = <uint32_t*>uv.selection
+    cdef uint8_t* nulls = uv.validity
     cdef int64_t n = <int64_t>uv.length
-    cdef StringVector flat_child
     cdef StringVector empty_child
-    cdef StringVector null_child
-    cdef int32_t num_parts
-    cdef int32_t* list_offsets
-    cdef int32_t* list_offs
     cdef int32_t* empty_offsets
-    cdef int32_t* null_offsets
     cdef int32_t* child_offsets = NULL
-    cdef int32_t seg_count
+    cdef int32_t* vector_offsets
     cdef int64_t idx
     cdef int64_t i
-    cdef DrakenConstantStringPayload* csp
 
     # Handle empty input: return empty ArrayVector
     if n <= 0:
@@ -218,98 +217,50 @@ def vector_split(StringVector vec, char delimiter):
         empty_offsets[0] = 0
         return array_vector_from_parts(empty_child, empty_offsets, NULL, 0)
 
-    # Constant encoding: split once, replicate n times
-    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
-        if uv.validity != NULL:  # null constant
-            # Return ArrayVector with all nulls
-            null_child = StringVector(0)  # Empty child for null values
-            null_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
-            if null_offsets == NULL:
-                raise MemoryError()
-            for idx in range(n + 1):
-                null_offsets[idx] = 0
-            return array_vector_from_parts(null_child, null_offsets, NULL, n)
-
-        csp = <DrakenConstantStringPayload*>uv.data
-        const_bytes = PyBytes_FromStringAndSize(
-            <const char*>csp.data, csp.length
-        )
-        parts = const_bytes.split(bytes([delimiter]))
-
-        # Build StringVector from constant split parts
-        from draken.vectors.string_vector import StringVectorBuilder
-        builder = StringVectorBuilder.with_estimate(len(parts), 8)
-        for part in parts:
-            if part is None:
-                builder.append_null()
-            else:
-                builder.append_bytes(part, len(part))
-        flat_child = builder.finish()
-        num_parts = <int32_t>len(parts)
-        list_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
-        if list_offsets == NULL:
-            raise MemoryError()
-
-        for idx in range(n + 1):
-            list_offsets[idx] = <int32_t>(idx * num_parts)
-
-        # array_vector_from_parts copies the offsets and takes ownership
-        try:
-            return array_vector_from_parts(flat_child, list_offsets, NULL, n)
-        finally:
-            free(list_offsets)
-
-    # Dictionary encoding: process per row via to_pylist (rare path)
-    if vec._german_dict_values != NULL:  # dictionary
-        py_list = vec.to_pylist()
-        delim_bytes = bytes([delimiter])
-        result = []
-        for val in py_list:
-            if val is None:
-                result.append(None)
-            elif isinstance(val, str):
-                result.append(val.encode("utf-8").split(delim_bytes))
-            else:
-                result.append(val.split(delim_bytes))
-
-        # Build ArrayVector from split results
-        from draken.vectors.string_vector import StringVectorBuilder
-        flat_builder = StringVectorBuilder.with_estimate(sum(len(r) if r else 1 for r in result), 8)
-
-        list_offs = <int32_t*>malloc((n + 1) * sizeof(int32_t))
-        if list_offs == NULL:
-            raise MemoryError()
-
-        seg_count = 0
-        list_offs[0] = 0
-
-        for i, row_parts in enumerate(result):
-            if row_parts is None:
-                # For null values, skip (single null entry per row)
-                list_offs[i + 1] = seg_count
-            else:
-                for part in row_parts:
-                    flat_builder.append_bytes(part, len(part))
-                    seg_count += 1
-                list_offs[i + 1] = seg_count
-
-        flat_child = flat_builder.finish()
-        return array_vector_from_parts(flat_child, list_offs, NULL, n)
-
-    # Dense encoding: SIMD fast path
-    cdef DrakenVarBuffer* dptr = <DrakenVarBuffer*>uv.data
-    cdef const char* raw_data = <const char*>dptr.data
-    cdef const int32_t* dense_offsets = dptr.offsets
-
+    # Build contiguous buffer from arena slots via sel[i] (unified access).
+    cdef DrakenStringSlot* dslot
+    cdef int32_t* tmp_offsets
+    cdef uint8_t* contig_buf
+    cdef int64_t total_bytes = 0
+    cdef int64_t base = 0
+    cdef int64_t di
+    cdef int64_t fill_pos
+    cdef int64_t dslot_len
+    cdef const char* raw_data
+    cdef const int32_t* dense_offsets
     cdef int64_t start, end
 
-    cdef int64_t total_bytes = dense_offsets[n] - dense_offsets[0]
-    cdef int64_t base = dense_offsets[0]
+    tmp_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
+    if tmp_offsets == NULL:
+        raise MemoryError("Failed to allocate tmp_offsets for vector_split")
+
+    tmp_offsets[0] = 0
+    for di in range(n):
+        total_bytes += <int64_t>str_length(&arena.slots[sel[di]])
+        tmp_offsets[di + 1] = <int32_t>total_bytes
+
+    contig_buf = <uint8_t*>malloc(total_bytes) if total_bytes > 0 else <uint8_t*>malloc(1)
+    if contig_buf == NULL:
+        free(tmp_offsets)
+        raise MemoryError("Failed to allocate contiguous buffer for vector_split")
+
+    fill_pos = 0
+    for di in range(n):
+        dslot = &arena.slots[sel[di]]
+        dslot_len = <int64_t>str_length(dslot)
+        if dslot_len > 0:
+            memcpy(contig_buf + fill_pos, str_data(dslot, arena.arena), dslot_len)
+        fill_pos += dslot_len
+
+    raw_data = <const char*>contig_buf
+    dense_offsets = tmp_offsets
 
     # Allocate delimiter buffer (no need for alignment here)
     cdef size_t max_delims = total_bytes + 64  # Safety margin
     cdef size_t* delim_pos = <size_t*>malloc(max_delims * sizeof(size_t))
     if delim_pos == NULL:
+        free(contig_buf)
+        free(tmp_offsets)
         raise MemoryError("Failed to allocate delimiter buffer")
 
     # Find all delimiters
@@ -322,16 +273,17 @@ def vector_split(StringVector vec, char delimiter):
         free(delim_pos)
 
         # Build result without any splitting (each string is its own single part)
-        # We can reuse the original StringVector as the child of an ArrayVector
-        # with the same offsets as the original.
         child_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
         if child_offsets == NULL:
+            free(contig_buf)
+            free(tmp_offsets)
             raise MemoryError()
 
-        # Copy original offsets to child offsets (0..n+1)
         for i in range(n + 1):
             child_offsets[i] = dense_offsets[i] - dense_offsets[0]
 
+        free(contig_buf)
+        free(tmp_offsets)
         try:
             return array_vector_from_parts(vec, child_offsets, NULL, n)
         finally:
@@ -343,6 +295,8 @@ def vector_split(StringVector vec, char delimiter):
 
     if string_delim_counts == NULL or string_delim_starts == NULL:
         free(delim_pos)
+        free(contig_buf)
+        free(tmp_offsets)
         if string_delim_counts:
             free(string_delim_counts)
         if string_delim_starts:
@@ -384,12 +338,14 @@ def vector_split(StringVector vec, char delimiter):
     # Allocate output buffers with alignment for SIMD
     cdef char* output_data = <char*>aligned_malloc(total_output_bytes + 64, 64)
     child_offsets = <int32_t*>aligned_malloc((total_segments + 1) * sizeof(int32_t), 64)
-    cdef int32_t* vector_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
+    vector_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
 
     if output_data == NULL or child_offsets == NULL or vector_offsets == NULL:
         free(delim_pos)
         free(string_delim_counts)
         free(string_delim_starts)
+        free(contig_buf)
+        free(tmp_offsets)
         if output_data:
             aligned_free(output_data)
         if child_offsets:
@@ -468,7 +424,6 @@ def vector_split(StringVector vec, char delimiter):
     child_vec.owns_data = True
 
     # Construct the resulting ArrayVector (ListArray equivalent)
-    # array_vector_from_parts copies the vector_offsets and takes ownership
     cdef object result_vector
     try:
         result_vector = array_vector_from_parts(child_vec, vector_offsets, NULL, n)
@@ -479,5 +434,7 @@ def vector_split(StringVector vec, char delimiter):
     free(delim_pos)
     free(string_delim_counts)
     free(string_delim_starts)
+    free(contig_buf)
+    free(tmp_offsets)
 
     return result_vector

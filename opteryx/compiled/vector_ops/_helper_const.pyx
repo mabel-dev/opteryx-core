@@ -8,12 +8,9 @@
 # cython: optimize.use_switch=True
 # cython: optimize.unpack_method_calls=True
 
-# Shared helper functions for constant-encoded string vectors
-# Used by vector_trim, vector_uppercase, vector_lowercase, etc.
+# Shared helper functions used by compiled vector_ops kernels.
 
-from draken.vectors.string_vector cimport StringVector
-from draken.core.buffers cimport DrakenConstantStringPayload, DrakenVector
-from libc.stdint cimport int32_t, uint8_t
+from libc.stdint cimport uint8_t
 
 
 cdef inline bint _is_null(uint8_t* null_bitmap, Py_ssize_t idx) noexcept:
@@ -21,27 +18,3 @@ cdef inline bint _is_null(uint8_t* null_bitmap, Py_ssize_t idx) noexcept:
     if null_bitmap == NULL:
         return False
     return not ((null_bitmap[idx >> 3] >> (idx & 7)) & 1)
-
-
-cdef inline bint _constant_string_value(
-    StringVector vec,
-    const uint8_t** data_ptr,
-    int32_t* data_len,
-    Py_ssize_t* row_count,
-) except? False:
-    cdef DrakenVector* uv = vec.unified()
-    cdef DrakenConstantStringPayload* payload
-
-    if vec.ptr.offsets != NULL or vec._german_dict_values != NULL:  # constant iff both are NULL
-        return False
-
-    row_count[0] = <Py_ssize_t>uv.length
-    if uv.validity != NULL:  # null constant
-        data_ptr[0] = NULL
-        data_len[0] = 0
-        return True
-
-    payload = <DrakenConstantStringPayload*>uv.data
-    data_ptr[0] = payload.data
-    data_len[0] = payload.length
-    return True

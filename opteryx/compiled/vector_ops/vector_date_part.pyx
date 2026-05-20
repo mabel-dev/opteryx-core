@@ -175,7 +175,7 @@ cdef Integer64Vector _datepart_i64_dict_subsecond(Integer64Vector int64_vec, int
     cdef int64_t* output_ptr
     cdef Integer64Vector result
 
-    if int64_vec._dict_values == NULL:
+    if int64_vec._unified_view.data_length >= int64_vec._unified_view.length:
         return None
 
     row_count = <Py_ssize_t>uv.length
@@ -259,7 +259,7 @@ cdef Integer64Vector _datepart_i64_dict_calendar(Integer64Vector int64_vec, int 
     cdef int64_t* output_ptr
     cdef Integer64Vector result
 
-    if int64_vec._dict_values == NULL:
+    if int64_vec._unified_view.data_length >= int64_vec._unified_view.length:
         return None
 
     row_count = <Py_ssize_t>uv.length
@@ -347,7 +347,7 @@ cdef Integer64Vector _datepart_ts_dict_subsecond(TimestampVector ts_vec, int par
     cdef int64_t* output_ptr
     cdef Integer64Vector result
 
-    if ts_vec._dict_values == NULL:
+    if ts_vec._unified_view.data_length >= ts_vec._unified_view.length:
         return None
 
     row_count = <Py_ssize_t>uv.length
@@ -440,7 +440,7 @@ cdef Integer64Vector _datepart_ts_dict_calendar(TimestampVector ts_vec, int part
     cdef int64_t* output_ptr
     cdef Integer64Vector result
 
-    if ts_vec._dict_values == NULL:
+    if ts_vec._unified_view.data_length >= ts_vec._unified_view.length:
         return None
 
     row_count = <Py_ssize_t>uv.length
@@ -523,7 +523,7 @@ cpdef Integer64Vector vector_datepart_minute(TimestampVector timestamps, Integer
     """Extract minute (0–59) from TimestampVector via SIMD dispatch."""
     cdef Integer64Vector dict_result = _datepart_ts_dict_subsecond(timestamps, 0)
     cdef str unit = timestamps.timestamp_unit
-    cdef int64_t length = <int64_t>timestamps.ptr.length
+    cdef int64_t length = <int64_t>timestamps._unified_view.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
 
@@ -550,8 +550,8 @@ cpdef Integer64Vector vector_datepart_minute(TimestampVector timestamps, Integer
     cdef bint reuse_out = out is not None
 
     if reuse_out:
-        if <int64_t>out.ptr.length != length:
-            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        if <int64_t>out._unified_view.length != length:
+            raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
         template = array('l')
@@ -571,7 +571,7 @@ cpdef Integer64Vector vector_datepart_hour(TimestampVector timestamps, Integer64
     """Extract hour (0–23) from TimestampVector via SIMD dispatch."""
     cdef Integer64Vector dict_result = _datepart_ts_dict_subsecond(timestamps, 1)
     cdef str unit = timestamps.timestamp_unit
-    cdef int64_t length = <int64_t>timestamps.ptr.length
+    cdef int64_t length = <int64_t>timestamps._unified_view.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
 
@@ -597,8 +597,8 @@ cpdef Integer64Vector vector_datepart_hour(TimestampVector timestamps, Integer64
     cdef bint reuse_out = out is not None
 
     if reuse_out:
-        if <int64_t>out.ptr.length != length:
-            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        if <int64_t>out._unified_view.length != length:
+            raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
         template = array('l')
@@ -618,7 +618,7 @@ cpdef Integer64Vector vector_datepart_second(TimestampVector timestamps, Integer
     """Extract second (0–59) from TimestampVector via SIMD dispatch."""
     cdef Integer64Vector dict_result = _datepart_ts_dict_subsecond(timestamps, 2)
     cdef str unit = timestamps.timestamp_unit
-    cdef int64_t length = <int64_t>timestamps.ptr.length
+    cdef int64_t length = <int64_t>timestamps._unified_view.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
 
@@ -644,8 +644,8 @@ cpdef Integer64Vector vector_datepart_second(TimestampVector timestamps, Integer
     cdef bint reuse_out = out is not None
 
     if reuse_out:
-        if <int64_t>out.ptr.length != length:
-            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        if <int64_t>out._unified_view.length != length:
+            raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
         template = array('l')
@@ -671,7 +671,7 @@ cpdef Integer64Vector vector_datepart_year(TimestampVector timestamps, Integer64
     """Extract year from TimestampVector."""
     cdef Integer64Vector dict_result = _datepart_ts_dict_calendar(timestamps, 0)
     cdef str unit = timestamps.timestamp_unit
-    cdef int64_t length = <int64_t>timestamps.ptr.length
+    cdef int64_t length = <int64_t>timestamps._unified_view.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
     cdef int unit_code = _timestamp_unit_code(unit)
@@ -688,8 +688,8 @@ cpdef Integer64Vector vector_datepart_year(TimestampVector timestamps, Integer64
     cdef bint reuse_out = out is not None
 
     if reuse_out:
-        if <int64_t>out.ptr.length != length:
-            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        if <int64_t>out._unified_view.length != length:
+            raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
         template = array('l')
@@ -708,7 +708,7 @@ cpdef Integer64Vector vector_datepart_month(TimestampVector timestamps, Integer6
     """Extract month (1–12) from TimestampVector."""
     cdef Integer64Vector dict_result = _datepart_ts_dict_calendar(timestamps, 1)
     cdef str unit = timestamps.timestamp_unit
-    cdef int64_t length = <int64_t>timestamps.ptr.length
+    cdef int64_t length = <int64_t>timestamps._unified_view.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
     cdef int unit_code = _timestamp_unit_code(unit)
@@ -725,8 +725,8 @@ cpdef Integer64Vector vector_datepart_month(TimestampVector timestamps, Integer6
     cdef bint reuse_out = out is not None
 
     if reuse_out:
-        if <int64_t>out.ptr.length != length:
-            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        if <int64_t>out._unified_view.length != length:
+            raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
         template = array('l')
@@ -745,7 +745,7 @@ cpdef Integer64Vector vector_datepart_day(TimestampVector timestamps, Integer64V
     """Extract day-of-month (1–31) from TimestampVector."""
     cdef Integer64Vector dict_result = _datepart_ts_dict_calendar(timestamps, 2)
     cdef str unit = timestamps.timestamp_unit
-    cdef int64_t length = <int64_t>timestamps.ptr.length
+    cdef int64_t length = <int64_t>timestamps._unified_view.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
     cdef int unit_code = _timestamp_unit_code(unit)
@@ -762,8 +762,8 @@ cpdef Integer64Vector vector_datepart_day(TimestampVector timestamps, Integer64V
     cdef bint reuse_out = out is not None
 
     if reuse_out:
-        if <int64_t>out.ptr.length != length:
-            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        if <int64_t>out._unified_view.length != length:
+            raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
         template = array('l')
@@ -786,7 +786,7 @@ cpdef Integer64Vector vector_datepart_dayofweek(TimestampVector timestamps, Inte
     """
     cdef Integer64Vector dict_result = _datepart_ts_dict_calendar(timestamps, 3)
     cdef str unit = timestamps.timestamp_unit
-    cdef int64_t length = <int64_t>timestamps.ptr.length
+    cdef int64_t length = <int64_t>timestamps._unified_view.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
 
@@ -813,8 +813,8 @@ cpdef Integer64Vector vector_datepart_dayofweek(TimestampVector timestamps, Inte
     cdef int64_t i, d
 
     if reuse_out:
-        if <int64_t>out.ptr.length != length:
-            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        if <int64_t>out._unified_view.length != length:
+            raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
         template = array('l')
@@ -838,7 +838,7 @@ cpdef Integer64Vector vector_datepart_dayofyear(TimestampVector timestamps, Inte
     """Extract day-of-year (1–366) from TimestampVector."""
     cdef Integer64Vector dict_result = _datepart_ts_dict_calendar(timestamps, 4)
     cdef str unit = timestamps.timestamp_unit
-    cdef int64_t length = <int64_t>timestamps.ptr.length
+    cdef int64_t length = <int64_t>timestamps._unified_view.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
     cdef int unit_code = _timestamp_unit_code(unit)
@@ -855,8 +855,8 @@ cpdef Integer64Vector vector_datepart_dayofyear(TimestampVector timestamps, Inte
     cdef bint reuse_out = out is not None
 
     if reuse_out:
-        if <int64_t>out.ptr.length != length:
-            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        if <int64_t>out._unified_view.length != length:
+            raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
         template = array('l')
@@ -875,7 +875,7 @@ cpdef Integer64Vector vector_datepart_quarter(TimestampVector timestamps, Intege
     """Extract quarter (1–4) from TimestampVector."""
     cdef Integer64Vector dict_result = _datepart_ts_dict_calendar(timestamps, 5)
     cdef str unit = timestamps.timestamp_unit
-    cdef int64_t length = <int64_t>timestamps.ptr.length
+    cdef int64_t length = <int64_t>timestamps._unified_view.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
     cdef int unit_code = _timestamp_unit_code(unit)
@@ -892,8 +892,8 @@ cpdef Integer64Vector vector_datepart_quarter(TimestampVector timestamps, Intege
     cdef bint reuse_out = out is not None
 
     if reuse_out:
-        if <int64_t>out.ptr.length != length:
-            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        if <int64_t>out._unified_view.length != length:
+            raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
         template = array('l')

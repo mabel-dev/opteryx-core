@@ -34,19 +34,20 @@ from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.core.buffers cimport DrakenVector
 from draken.core.buffers cimport DRAKEN_STRING
 from draken.core.buffers cimport draken_vector_from_dense, draken_vector_from_constant, draken_vector_from_dict
-from draken.core.buffers cimport DrakenGermanArena
-from draken.core.buffers cimport GermanString
-from draken.core.buffers cimport GS_INLINE_MAX
-from draken.core.buffers cimport gs_data
-from draken.core.buffers cimport gs_length
-from draken.core.buffers cimport gs_equals
-from draken.core.buffers cimport gs_compare
-from draken.core.buffers cimport gs_init_inline
-from draken.core.buffers cimport gs_init_extern
-from draken.core.buffers cimport gs_init_null
+from draken.core.buffers cimport DrakenStringArena
+from draken.core.buffers cimport DrakenStringSlot
+from draken.core.buffers cimport STR_INLINE_MAX
+from draken.core.buffers cimport str_data
+from draken.core.buffers cimport str_is_inline
+from draken.core.buffers cimport str_length
+from draken.core.buffers cimport str_equals
+from draken.core.buffers cimport str_compare
+from draken.core.buffers cimport str_init_inline
+from draken.core.buffers cimport str_init_extern
+from draken.core.buffers cimport str_init_null
 from draken.core.var_vector cimport alloc_var_buffer, buf_dtype, free_var_buffer
-from draken.core.german_arena cimport alloc_german_arena
-from draken.core.german_arena cimport free_german_arena
+from draken.core.string_arena cimport alloc_string_arena
+from draken.core.string_arena cimport free_string_arena
 from draken.vectors.array_vector cimport ArrayVector, DrakenArrayBuffer
 
 cdef extern from "xxhash.h":
@@ -107,6 +108,94 @@ from draken.vectors.vector cimport (
 from draken.vectors.bool_vector cimport BoolVector
 
 DEF STRING_HASH_CHUNK = 256
+
+
+# Phase 4 helper: typed accessor for the StringArena under _unified_view.data.
+# DrakenVector.data is void* (heterogeneous across vector types). For string
+# columns it is always a DrakenStringArena*. Wrapping the cast here means every
+# internal reader uses the same pattern and the cast lives in exactly one
+# place. External readers in vector_ops/ and operators/ still cast inline —
+# this helper is intentionally module-private (StringVector-internal only).
+cdef inline DrakenStringArena* _string_arena(StringVector vec) noexcept nogil:
+    return <DrakenStringArena*>vec._unified_view.data
+
+
+# _ConstView and _const_view are declared/defined in string_vector.pxd so they
+# can be cimported by external modules (vector_ops/ readers, operators/, etc.).
+
+
+# Phase 5: allocate a 1-slot DrakenStringArena holding a single constant value.
+# Caller owns the returned arena (must free via free_string_arena, typically
+# by transferring ownership to a StringVector via _owns_dict_arena).
+# Phase 6 helper: build a 1-slot-per-row DrakenStringArena from a DrakenVarBuffer.
+# Used at every dense-construction site to produce dual-alive vectors (both
+# VarBuffer-style ptr.data/offsets AND a StringArena under _unified_view.data)
+# during the migration. Phase 7 will free the VarBuffer half.
+cdef DrakenStringArena* _varbuffer_to_string_arena(
+    const uint8_t* src_data, const int32_t* src_offsets, const uint8_t* src_nulls,
+    Py_ssize_t row_count,
+) except NULL:
+    cdef Py_ssize_t i
+    cdef Py_ssize_t off
+    cdef Py_ssize_t slen
+    cdef Py_ssize_t total_extern_bytes = 0
+    cdef bint row_is_null
+
+    for i in range(row_count):
+        slen = src_offsets[i + 1] - src_offsets[i]
+        if slen > STR_INLINE_MAX:
+            total_extern_bytes += slen
+
+    cdef DrakenStringArena* arena = alloc_string_arena(
+        DRAKEN_STRING, <size_t>row_count, <size_t>total_extern_bytes,
+    )
+    if arena == NULL:
+        raise MemoryError()
+
+    cdef DrakenStringSlot* slots = arena.slots
+    cdef uint8_t* arena_bytes = arena.arena
+    cdef size_t arena_used = 0
+
+    for i in range(row_count):
+        off = src_offsets[i]
+        slen = src_offsets[i + 1] - off
+        row_is_null = (
+            src_nulls != NULL
+            and ((src_nulls[i >> 3] >> (i & 7)) & 1) == 0
+        )
+        if row_is_null:
+            str_init_null(&slots[i])
+        elif slen <= STR_INLINE_MAX:
+            str_init_inline(&slots[i], src_data + off, <uint32_t>slen)
+        else:
+            memcpy(arena_bytes + arena_used, src_data + off, <size_t>slen)
+            str_init_extern(
+                &slots[i], src_data + off, <uint32_t>slen,
+                <uint64_t>arena_used,
+            )
+            arena_used += <size_t>slen
+    arena.arena_used = arena_used
+    arena.length = <size_t>row_count
+    return arena
+
+
+cdef inline DrakenStringArena* _alloc_constant_string_arena(
+    const uint8_t* src, Py_ssize_t length,
+) except NULL:
+    cdef Py_ssize_t arena_cap = length if length > STR_INLINE_MAX else 0
+    cdef DrakenStringArena* arena = alloc_string_arena(
+        DRAKEN_STRING, 1, <size_t>arena_cap,
+    )
+    if arena == NULL:
+        raise MemoryError()
+    if length <= STR_INLINE_MAX:
+        str_init_inline(&arena.slots[0], src, <uint32_t>length)
+    else:
+        memcpy(arena.arena, src, <size_t>length)
+        str_init_extern(&arena.slots[0], src, <uint32_t>length, 0)
+        arena.arena_used = <size_t>length
+    arena.length = 1
+    return arena
 
 
 cdef inline object _coerce_literal_bytes(object literal):
@@ -196,23 +285,26 @@ cdef void _populate_dense_min_max(StringVector vec) except *:
       - min: equal common prefix → shorter string is lex-smaller
       - max: equal common prefix → longer string is lex-larger
 
-    Caller must guarantee vec.ptr is a dense buffer (offsets != NULL) and
-    that no selection is attached. For constant/dict vectors, use the
-    dedicated populators.
+    Caller must guarantee vec has a populated DrakenStringArena (_owns_dict_arena).
+    For constant/dict vectors, use the dedicated populators.
     """
-    cdef DrakenVarBuffer* ptr = vec.ptr
-    if ptr == NULL or ptr.offsets == NULL:
+    cdef DrakenStringArena* arena = <DrakenStringArena*>vec._unified_view.data
+    if arena == NULL:
         return
-    cdef Py_ssize_t n = ptr.length
+    cdef Py_ssize_t n = <Py_ssize_t>arena.length
     cdef Py_ssize_t i
-    cdef int32_t start, end
-    cdef int32_t min_start = -1, min_end = -1
-    cdef int32_t max_start = -1, max_end = -1
-    cdef char* data = <char*> ptr.data
-    cdef int32_t cur_len, best_len, common_len
+    cdef DrakenStringSlot* slot
+    cdef const uint8_t* cur_data
+    cdef Py_ssize_t cur_len
+    cdef Py_ssize_t min_idx = -1, max_idx = -1
+    cdef const uint8_t* min_data = NULL
+    cdef Py_ssize_t min_len = 0
+    cdef const uint8_t* max_data = NULL
+    cdef Py_ssize_t max_len = 0
+    cdef int32_t best_len, common_len
     cdef int cmp
     cdef uint8_t byte, bit
-    cdef uint8_t* nulls = ptr.null_bitmap
+    cdef uint8_t* nulls = vec.ptr.null_bitmap
 
     for i in range(n):
         if nulls != NULL:
@@ -220,38 +312,40 @@ cdef void _populate_dense_min_max(StringVector vec) except *:
             bit = (byte >> (i & 7)) & 1
             if not bit:
                 continue
-        start = ptr.offsets[i]
-        end = ptr.offsets[i + 1]
-        cur_len = end - start
+        slot = &arena.slots[i]
+        cur_data = str_data(slot, arena.arena)
+        cur_len = <Py_ssize_t>str_length(slot)
 
-        if min_start == -1:
-            min_start = start
-            min_end = end
-            max_start = start
-            max_end = end
+        if min_idx == -1:
+            min_idx = i
+            min_data = cur_data
+            min_len = cur_len
+            max_idx = i
+            max_data = cur_data
+            max_len = cur_len
             continue
 
         # Update min
-        best_len = min_end - min_start
-        common_len = cur_len if cur_len < best_len else best_len
-        cmp = memcmp(data + start, data + min_start, common_len)
-        if cmp == 0 and cur_len < best_len:
+        common_len = <int32_t>(cur_len if cur_len < min_len else min_len)
+        cmp = memcmp(cur_data, min_data, common_len)
+        if cmp == 0 and cur_len < min_len:
             cmp = -1
         if cmp < 0:
-            min_start = start
-            min_end = end
+            min_idx = i
+            min_data = cur_data
+            min_len = cur_len
 
         # Update max
-        best_len = max_end - max_start
-        common_len = cur_len if cur_len < best_len else best_len
-        cmp = memcmp(data + start, data + max_start, common_len)
-        if cmp == 0 and cur_len > best_len:
+        common_len = <int32_t>(cur_len if cur_len < max_len else max_len)
+        cmp = memcmp(cur_data, max_data, common_len)
+        if cmp == 0 and cur_len > max_len:
             cmp = 1
         if cmp > 0:
-            max_start = start
-            max_end = end
+            max_idx = i
+            max_data = cur_data
+            max_len = cur_len
 
-    if min_start == -1:
+    if min_idx == -1:
         # All-null or empty vector.
         vec._cached_min_ptr = NULL
         vec._cached_min_len = 0
@@ -259,10 +353,10 @@ cdef void _populate_dense_min_max(StringVector vec) except *:
         vec._cached_max_len = 0
         vec._min_max_all_null = True
     else:
-        vec._cached_min_ptr = <const uint8_t*>(data + min_start)
-        vec._cached_min_len = <Py_ssize_t>(min_end - min_start)
-        vec._cached_max_ptr = <const uint8_t*>(data + max_start)
-        vec._cached_max_len = <Py_ssize_t>(max_end - max_start)
+        vec._cached_min_ptr = min_data
+        vec._cached_min_len = min_len
+        vec._cached_max_ptr = max_data
+        vec._cached_max_len = max_len
         vec._min_max_all_null = False
     vec._min_max_valid = True
 
@@ -278,9 +372,9 @@ cdef void _populate_dict_min_max(StringVector vec) except *:
     If any row is null (validity bitmap set), this is unobservable in min/max
     semantics: we ignore nulls.
     """
-    if vec._german_dict_values == NULL:
+    if vec._unified_view.data_length >= vec._unified_view.length:
         return
-    cdef DrakenGermanArena* gdv = vec._german_dict_values
+    cdef DrakenStringArena* gdv = _string_arena(vec)
     cdef Py_ssize_t n = <Py_ssize_t>gdv.length
     # If the entire vector is all-null (no live codes), we'd produce a wrong
     # answer. Detect: scan validity bitmap of the unified view. If every row
@@ -307,9 +401,9 @@ cdef void _populate_dict_min_max(StringVector vec) except *:
         vec._min_max_valid = True
         return
 
-    cdef GermanString* slot
-    cdef GermanString* min_slot = NULL
-    cdef GermanString* max_slot = NULL
+    cdef DrakenStringSlot* slot
+    cdef DrakenStringSlot* min_slot = NULL
+    cdef DrakenStringSlot* max_slot = NULL
     cdef uint8_t* dict_nulls = gdv.null_bitmap
 
     for i in range(n):
@@ -323,9 +417,9 @@ cdef void _populate_dict_min_max(StringVector vec) except *:
             min_slot = slot
             max_slot = slot
             continue
-        if gs_compare(slot, gdv.arena, min_slot, gdv.arena) < 0:
+        if str_compare(slot, gdv.arena, min_slot, gdv.arena) < 0:
             min_slot = slot
-        if gs_compare(slot, gdv.arena, max_slot, gdv.arena) > 0:
+        if str_compare(slot, gdv.arena, max_slot, gdv.arena) > 0:
             max_slot = slot
 
     if min_slot == NULL:
@@ -335,24 +429,31 @@ cdef void _populate_dict_min_max(StringVector vec) except *:
         vec._cached_max_len = 0
         vec._min_max_all_null = True
     else:
-        vec._cached_min_ptr = gs_data(min_slot, gdv.arena)
-        vec._cached_min_len = <Py_ssize_t>gs_length(min_slot)
-        vec._cached_max_ptr = gs_data(max_slot, gdv.arena)
-        vec._cached_max_len = <Py_ssize_t>gs_length(max_slot)
+        vec._cached_min_ptr = str_data(min_slot, gdv.arena)
+        vec._cached_min_len = <Py_ssize_t>str_length(min_slot)
+        vec._cached_max_ptr = str_data(max_slot, gdv.arena)
+        vec._cached_max_len = <Py_ssize_t>str_length(max_slot)
         vec._min_max_all_null = False
     vec._min_max_valid = True
 
 
 cdef void _release_dict_storage(StringVector vec) noexcept:
-    if vec._german_dict_values != NULL:
+    """Free dict-encoded storage. Codes and arena have independent ownership.
+
+    Views and slices can own one without the other (e.g. a take() that
+    allocates fresh codes while borrowing the parent's arena).
+    """
+    if vec._owns_codes and vec._unified_view.selection != NULL:
         free(<void*>vec._unified_view.selection)
-        free_german_arena(vec._german_dict_values)
-        vec._german_dict_values = NULL
+        vec._unified_view.selection = NULL
+    vec._owns_codes = False
+    if vec._unified_view.data != NULL:
+        free_string_arena(_string_arena(vec))
+        vec._unified_view.data = NULL
     if vec._dict_code_counts != NULL:
         free(vec._dict_code_counts)
         vec._dict_code_counts = NULL
     vec._dict_code_counts_valid = False
-    vec._dict_ordered = 0
 
 
 
@@ -373,7 +474,7 @@ cdef void _attach_dictionary_storage_from_buffers(
     cdef Py_ssize_t i
     cdef Py_ssize_t code
     cdef Py_ssize_t entry_start, entry_len
-    cdef DrakenGermanArena* german_dict
+    cdef DrakenStringArena* german_dict
     cdef uint32_t* codes_ptr
 
     _release_dict_storage(vec)
@@ -386,14 +487,14 @@ cdef void _attach_dictionary_storage_from_buffers(
         codes_ptr = NULL
 
     # Build German-string arena for the dictionary values
-    german_dict = alloc_german_arena(DRAKEN_STRING, <size_t>dict_size, <size_t>arena_size)
+    german_dict = alloc_string_arena(DRAKEN_STRING, <size_t>dict_size, <size_t>arena_size)
     if german_dict == NULL:
         raise MemoryError()
     for i in range(dict_size):
         entry_start = <Py_ssize_t>dict_offsets[i]
         entry_len = <Py_ssize_t>dict_lengths[i]
-        if entry_len <= GS_INLINE_MAX:
-            gs_init_inline(
+        if entry_len <= STR_INLINE_MAX:
+            str_init_inline(
                 &german_dict.slots[i],
                 &arena_bytes[entry_start] if entry_len > 0 else NULL,
                 <uint32_t>entry_len,
@@ -401,7 +502,7 @@ cdef void _attach_dictionary_storage_from_buffers(
         else:
             memcpy(german_dict.arena + german_dict.arena_used,
                    &arena_bytes[entry_start], <size_t>entry_len)
-            gs_init_extern(
+            str_init_extern(
                 &german_dict.slots[i],
                 &arena_bytes[entry_start],
                 <uint32_t>entry_len,
@@ -419,8 +520,8 @@ cdef void _attach_dictionary_storage_from_buffers(
     for i in range(row_count):
         codes_ptr[i] = <uint32_t>codes[i]
 
-    vec._german_dict_values = german_dict
-    vec._dict_ordered = 1 if ordered else 0
+    vec._owns_codes = (codes_ptr != NULL)
+
     vec._unified_view = draken_vector_from_dict(
         <void*>german_dict, <uint32_t>dict_size,
         codes_ptr, <uint32_t>row_count,
@@ -612,11 +713,18 @@ cdef class StringVector(Vector):
 
     @classmethod
     def from_constant(cls, value, length, is_null=False):
+        """Construct a constant StringVector: one value broadcast to `length` rows.
+
+        Storage: a 1-slot DrakenStringArena under _unified_view.data, with
+        selection = draken_zero_sel(length) (set by draken_vector_from_constant).
+        Every row index resolves to slot 0 through the selection lookup.
+        """
         cdef StringVector vec
-        cdef DrakenConstantStringPayload* payload
+        cdef DrakenStringArena* arena
+        cdef DrakenStringSlot* slot
         cdef bytes value_bytes
-        cdef char* src
-        cdef Py_ssize_t src_len
+        cdef const char* src
+        cdef Py_ssize_t src_len = 0
 
         if length < 0:
             raise ValueError("length must be non-negative")
@@ -633,43 +741,37 @@ cdef class StringVector(Vector):
         vec.ptr.null_bitmap = NULL
         vec.ptr.length = <size_t>length
         vec.ptr.type = DRAKEN_STRING
-        payload = <DrakenConstantStringPayload*> malloc(sizeof(DrakenConstantStringPayload))
-        if payload == NULL:
-            raise MemoryError()
-        payload.data = NULL
-        payload.length = 0
 
-        if not is_null:
+        if is_null:
+            arena = _alloc_constant_string_arena(NULL, 0)
+        else:
             value_bytes = _coerce_literal_bytes(value)
             if value_bytes is None:
                 raise TypeError("StringVector.from_constant expects bytes-like or str value")
             src_len = len(value_bytes)
-            payload.length = <int32_t>src_len
-            if src_len > 0:
-                src = PyBytes_AS_STRING(value_bytes)
-                payload.data = <uint8_t*> malloc(<size_t>src_len)
-                if payload.data == NULL:
-                    raise MemoryError()
-                memcpy(payload.data, src, <size_t>src_len)
+            src = PyBytes_AS_STRING(value_bytes) if src_len > 0 else NULL
+            arena = _alloc_constant_string_arena(<const uint8_t*>src, src_len)
+
 
         vec._unified_view = draken_vector_from_constant(
-            <void*>payload, <uint32_t>length, DRAKEN_STRING,
+            <void*>arena, <uint32_t>length, DRAKEN_STRING,
             &_CONST_NULL_BYTE if is_null else NULL,
         )
-        # Track A: constant vector — min == max == the payload bytes
-        # (or all-null when is_null/empty). Pointer is into payload.data, which
-        # the vector owns; lifetime is tied to vec via __dealloc__.
-        if is_null or length == 0:
+        # Track A: constant vector — min == max == the slot's bytes.
+        # The slot's data pointer is stable for the vector's lifetime (arena
+        # is freed when the vector is dealloc'd via _owns_dict_arena).
+        slot = &arena.slots[0]
+        if is_null or length == 0 or src_len == 0:
             vec._cached_min_ptr = NULL
             vec._cached_min_len = 0
             vec._cached_max_ptr = NULL
             vec._cached_max_len = 0
-            vec._min_max_all_null = True
+            vec._min_max_all_null = is_null or length == 0
         else:
-            vec._cached_min_ptr = payload.data
-            vec._cached_min_len = <Py_ssize_t>payload.length
-            vec._cached_max_ptr = payload.data
-            vec._cached_max_len = <Py_ssize_t>payload.length
+            vec._cached_min_ptr = str_data(slot, arena.arena)
+            vec._cached_min_len = <Py_ssize_t>str_length(slot)
+            vec._cached_max_ptr = vec._cached_min_ptr
+            vec._cached_max_len = vec._cached_min_len
             vec._min_max_all_null = False
         vec._min_max_valid = True
         return vec
@@ -685,8 +787,7 @@ cdef class StringVector(Vector):
         else:
             self.ptr = alloc_var_buffer(DRAKEN_STRING, length, bytes_cap)
             self.owns_data = True
-        self._german_dict_values = NULL
-        self._dict_ordered = 0
+        self._owns_codes = False
         self._dict_code_counts = NULL
         self._dict_code_counts_valid = False
         self._cached_min_ptr = NULL
@@ -699,22 +800,14 @@ cdef class StringVector(Vector):
             self._unified_view = draken_vector_from_dense(NULL, 0, DRAKEN_STRING, NULL)
         else:
             self._unified_view = draken_vector_from_dense(
-                <void*>self.ptr, <uint32_t>self.ptr.length, DRAKEN_STRING, NULL)
+                NULL, <uint32_t>self.ptr.length, DRAKEN_STRING, NULL)
 
     def __dealloc__(self):
-        cdef DrakenConstantStringPayload* _cp_dealloc = NULL
-        # Check for constant payload BEFORE releasing dict storage.
-        # Constant vectors: ptr.offsets == NULL, _german_dict_values == NULL.
-        # Dense: ptr.offsets != NULL (even 0-row/0-byte dense has 1 offset entry).
-        # Dict: _german_dict_values != NULL.
-        if (self.ptr != NULL and self.ptr.offsets == NULL and
-                self._german_dict_values == NULL and
-                self._unified_view.data != NULL):
-            _cp_dealloc = <DrakenConstantStringPayload*>self._unified_view.data
-            if _cp_dealloc.data != NULL:
-                free(_cp_dealloc.data)
-            free(_cp_dealloc)
-            self._unified_view.data = NULL
+        # _release_dict_storage handles both the selection codes and the
+        # DrakenStringArena under _unified_view.data, gated on the two
+        # ownership flags. After Phase 5 the constant case also uses a
+        # DrakenStringArena (1-slot, _owns_dict_arena=True), so the same
+        # release path covers it — no separate constant-payload free.
         _release_dict_storage(self)
 
         if self.ptr != NULL:
@@ -732,23 +825,16 @@ cdef class StringVector(Vector):
         if self.ptr == NULL:
             return NULL
         # Constant vector: ptr.offsets == NULL and no dict — has no row null bitmap
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             return NULL
         return self.ptr.null_bitmap
 
     cdef DrakenVector* unified(self) noexcept:
-        # For dense wrap=True vectors, __cinit__ stored NULL; sync ptr now.
-        if (self._german_dict_values == NULL
-                and self.ptr != NULL
-                and self.ptr.offsets != NULL
-                and self._unified_view.data != <void*>self.ptr):
-            self._unified_view.data = <void*>self.ptr
-            self._unified_view.length = <uint32_t>self.ptr.length
         return &self._unified_view
 
     # ------------------------------------------------------------------
     # Encoded-form accessors (dict and RLE) for aggregation kernels.
-    # The caller must check `self._german_dict_values != NULL` before calling these;
+    # The caller must check `self._unified_view.data_length < self._unified_view.length` before calling these;
     # they do not validate the encoding.
     # ------------------------------------------------------------------
     cdef Py_ssize_t c_length(self) noexcept nogil:
@@ -757,9 +843,9 @@ cdef class StringVector(Vector):
         return <Py_ssize_t>self.ptr.length
 
     cdef Py_ssize_t c_dict_size(self) noexcept nogil:
-        if self._german_dict_values == NULL:
+        if self._unified_view.data_length >= self._unified_view.length:
             return 0
-        return <Py_ssize_t>self._german_dict_values.length
+        return <Py_ssize_t>self._unified_view.data_length
 
     cdef uint8_t c_dict_code_width(self) noexcept nogil:
         return 4
@@ -770,17 +856,17 @@ cdef class StringVector(Vector):
     cdef const uint8_t* c_dict_value_ptr(
         self, Py_ssize_t i, Py_ssize_t* out_len
     ) noexcept nogil:
-        cdef DrakenGermanArena* gdv = self._german_dict_values
-        cdef GermanString* slot
+        cdef DrakenStringArena* gdv = _string_arena(self)
+        cdef DrakenStringSlot* slot
         if gdv == NULL or i < 0 or <size_t>i >= gdv.length:
             out_len[0] = 0
             return NULL
         slot = &gdv.slots[i]
-        out_len[0] = <Py_ssize_t>gs_length(slot)
-        return gs_data(slot, gdv.arena)
+        out_len[0] = <Py_ssize_t>str_length(slot)
+        return str_data(slot, gdv.arena)
 
     cdef bint c_dict_value_is_null(self, Py_ssize_t i) noexcept nogil:
-        cdef DrakenGermanArena* gdv = self._german_dict_values
+        cdef DrakenStringArena* gdv = _string_arena(self)
         if gdv == NULL or gdv.null_bitmap == NULL:
             return False
         return not ((gdv.null_bitmap[i >> 3] >> (i & 7)) & 1)
@@ -795,7 +881,7 @@ cdef class StringVector(Vector):
         occurrence counts.  Computed once on first access and cached on the
         vector.  Counts only include rows that are *valid* (non-null in the
         row null bitmap)."""
-        cdef DrakenGermanArena* gdv = self._german_dict_values
+        cdef DrakenStringArena* gdv = _string_arena(self)
         cdef Py_ssize_t dict_size
         cdef Py_ssize_t n
         cdef Py_ssize_t i
@@ -804,7 +890,7 @@ cdef class StringVector(Vector):
         cdef const uint8_t* row_nulls
         cdef int64_t* counts
 
-        if self._german_dict_values == NULL:
+        if self._unified_view.data_length >= self._unified_view.length:
             raise ValueError("c_dict_code_counts_ptr: vector is not dict-encoded")
 
         if self._dict_code_counts_valid and self._dict_code_counts != NULL:
@@ -847,10 +933,10 @@ cdef class StringVector(Vector):
     cdef uint64_t c_dict_value_hash(self, Py_ssize_t i) noexcept nogil:
         """Final mixed hash for dict entry i, matching the value c_hash_into
         writes for a row pointing to entry i when the destination is zeroed."""
-        cdef DrakenGermanArena* gdv = self._german_dict_values
-        cdef GermanString* slot
+        cdef DrakenStringArena* gdv = _string_arena(self)
+        cdef DrakenStringSlot* slot
         cdef size_t str_len
-        cdef const uint8_t* str_data
+        cdef const uint8_t* slot_data
         cdef uint64_t per_string_hash
         cdef uint64_t scratch
         if gdv == NULL or i < 0 or <size_t>i >= gdv.length:
@@ -858,12 +944,12 @@ cdef class StringVector(Vector):
         if gdv.null_bitmap != NULL and not ((gdv.null_bitmap[i >> 3] >> (i & 7)) & 1):
             return NULL_HASH
         slot = &gdv.slots[i]
-        str_len = <size_t>gs_length(slot)
-        str_data = gs_data(slot, gdv.arena)
+        str_len = <size_t>str_length(slot)
+        slot_data = str_data(slot, gdv.arena)
         if str_len <= 32:
-            per_string_hash = _short_string_hash(str_data, str_len)
+            per_string_hash = _short_string_hash(slot_data, str_len)
         else:
-            per_string_hash = XXH3_64bits(<const void*>str_data, str_len)
+            per_string_hash = XXH3_64bits(<const void*>slot_data, str_len)
         # simd_mix_hash with dst=0: dst[0] = mix(0, per_string_hash).
         scratch = 0
         simd_mix_hash(&scratch, &per_string_hash, 1)
@@ -875,7 +961,7 @@ cdef class StringVector(Vector):
     def dict_value_at(self, Py_ssize_t i):
         cdef Py_ssize_t length
         cdef const uint8_t* p
-        if self._german_dict_values == NULL:
+        if self._unified_view.data_length >= self._unified_view.length:
             raise ValueError("dict_value_at: vector is not dict-encoded")
         if i < 0 or i >= self.c_dict_size():
             raise IndexError("dict index out of range")
@@ -885,7 +971,7 @@ cdef class StringVector(Vector):
         return PyBytes_FromStringAndSize(<const char*>p, length)
 
     def dict_code_at(self, Py_ssize_t i):
-        if self._german_dict_values == NULL:
+        if self._unified_view.data_length >= self._unified_view.length:
             raise ValueError("dict_code_at: vector is not dict-encoded")
         if i < 0 or i >= <Py_ssize_t>self.ptr.length:
             raise IndexError("row index out of range")
@@ -895,7 +981,7 @@ cdef class StringVector(Vector):
         cdef const int64_t* counts
         cdef Py_ssize_t dict_size
         cdef Py_ssize_t i
-        if self._german_dict_values == NULL:
+        if self._unified_view.data_length >= self._unified_view.length:
             raise ValueError("dict_code_counts: vector is not dict-encoded")
         counts = self.c_dict_code_counts_ptr()
         dict_size = self.c_dict_size()
@@ -915,23 +1001,23 @@ cdef class StringVector(Vector):
 
     @property
     def dictionary_value_type(self):
-        if self._german_dict_values == NULL:
+        if self._unified_view.data_length >= self._unified_view.length:
             return None
-        return self._german_dict_values.type
+        return self._unified_view.type
 
     @property
     def dictionary_size(self):
-        if self._german_dict_values == NULL:
+        if self._unified_view.data_length >= self._unified_view.length:
             return 0
-        return self._german_dict_values.length
+        return self._unified_view.data_length
 
     @property
     def code_width(self):
-        return 4 if self._german_dict_values != NULL else None
+        return 4 if self._unified_view.data_length < self._unified_view.length else None
 
     @property
     def ordered(self):
-        return bool(self._dict_ordered) if self._german_dict_values != NULL else False
+        return False
 
     def to_arrow(self):
         """
@@ -941,64 +1027,61 @@ cdef class StringVector(Vector):
         import pyarrow as pa
 
         cdef DrakenVector* uv = self.unified()
-        cdef DrakenConstantStringPayload* _cp
+        cdef _ConstView _cp
 
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             return self.materialize().to_arrow()
 
         if (self.ptr.offsets == NULL
-                and self._german_dict_values == NULL):
+                and self._unified_view.data_length >= self._unified_view.length):
             if uv.validity != NULL:
                 return pa.nulls(self.ptr.length, type=pa.binary())
-            _cp = <DrakenConstantStringPayload*>uv.data
+            _cp = _const_view(<DrakenStringArena*>uv.data)
             return pa.array(
                 [PyBytes_FromStringAndSize(<char*>_cp.data, _cp.length)] * self.ptr.length,
                 type=pa.binary(),
             )
 
+        # Dense path: materialize from StringArena into Python bytes list.
+        # Arrow zero-copy is not available for arena-encoded vectors.
+        cdef DrakenStringArena* dense_arena = <DrakenStringArena*>self._unified_view.data
         cdef DrakenVarBuffer* ptr = self.ptr
-        if ptr == NULL:
-            # Defensive: empty vector
+        if dense_arena == NULL or ptr == NULL:
             return pa.array([], type=pa.binary())
         cdef size_t n = ptr.length
-
-        # Data buffer: all the concatenated string bytes
-        # Pass self as base object to keep the vector alive
-        total_bytes = ptr.offsets[n]
-        if total_bytes <= 0:
-            data_buf = pa.py_buffer(b"")
-        else:
-            data_buf = pa.foreign_buffer(<intptr_t>ptr.data, total_bytes, base=self)
-
-        # Offsets buffer: (n+1) * int32_t entries
-        offs_buf = pa.foreign_buffer(<intptr_t>ptr.offsets, (n + 1) * sizeof(int32_t), base=self)
-
-        # Null bitmap buffer (optional)
-        if ptr.null_bitmap != NULL:
-            null_buf = pa.foreign_buffer(<intptr_t>ptr.null_bitmap, (n + 7) // 8, base=self)
-        else:
-            null_buf = None
-
-        return pa.Array.from_buffers(pa.binary(), n, [null_buf, offs_buf, data_buf])
+        cdef uint8_t* nb = ptr.null_bitmap
+        result_list = []
+        cdef size_t idx
+        cdef DrakenStringSlot* slot
+        for idx in range(n):
+            if nb != NULL and ((nb[idx >> 3] >> (idx & 7)) & 1) == 0:
+                result_list.append(None)
+            else:
+                slot = &dense_arena.slots[idx]
+                result_list.append(PyBytes_FromStringAndSize(
+                    <char*>str_data(slot, dense_arena.arena),
+                    str_length(slot),
+                ))
+        return pa.array(result_list, type=pa.binary())
 
     cdef object item_at(self, Py_ssize_t i):
         cdef DrakenVector* uv = self.unified()
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef uint8_t byte, bit
-        cdef int32_t start, end
-        cdef Py_ssize_t nbytes
-        cdef char* base
-        cdef DrakenConstantStringPayload* _cp
+        cdef _ConstView _cp
+        cdef DrakenStringArena* dense_arena
+        cdef DrakenStringSlot* dense_slot
+        cdef Py_ssize_t start, end
 
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             return self.materialize()[i]
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if i < 0 or i >= ptr.length:
                 raise IndexError("Index out of range")
             if uv.validity != NULL:
                 return None
-            _cp = <DrakenConstantStringPayload*>uv.data
+            _cp = _const_view(<DrakenStringArena*>uv.data)
             return PyBytes_FromStringAndSize(<char*>_cp.data, _cp.length)
 
         if i < 0 or i >= ptr.length:
@@ -1010,69 +1093,61 @@ cdef class StringVector(Vector):
             if not bit:
                 return None
 
-        start = ptr.offsets[i]
-        end = ptr.offsets[i+1]
-        nbytes = end - start
-        base = <char*>ptr.data
-        return PyBytes_FromStringAndSize(base + start, nbytes)
+        # Arena-backed dense
+        dense_arena = <DrakenStringArena*>self._unified_view.data
+        dense_slot = &dense_arena.slots[i]
+        return PyBytes_FromStringAndSize(
+            <const char*>str_data(dense_slot, dense_arena.arena),
+            <Py_ssize_t>str_length(dense_slot),
+        )
 
     def __getitem__(self, Py_ssize_t i):
         """Return entry i as raw bytes, or None if null."""
         return self.item_at(i)
 
     def __iter__(self):
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             return iter(self.to_pylist())
         return _StringVectorIterator(self)
 
     def c_iter(self):
         """Return a C-level iterator for high-performance kernel operations."""
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             raise NotImplementedError("StringVector.c_iter() is not available for constant encoding")
-        return _StringVectorCIterator._from_ptr(self.ptr)
+        return _StringVectorCIterator._from_arena(
+            <DrakenStringArena*>self._unified_view.data,
+            <Py_ssize_t>self.ptr.length,
+            self.ptr.null_bitmap,
+        )
 
     cpdef Py_ssize_t byte_length(self, Py_ssize_t i):
         """Return the number of bytes for row ``i`` without materializing the value."""
         cdef DrakenVector* uv = self.unified()
         cdef DrakenVarBuffer* ptr = self.ptr
-        cdef DrakenConstantStringPayload* _cp
-        if self._german_dict_values != NULL:
+        cdef _ConstView _cp
+        if self._unified_view.data_length < self._unified_view.length:
             return self.materialize().byte_length(i)
         if i < 0 or i >= ptr.length:
             raise IndexError("Index out of range")
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if uv.validity != NULL:
                 return 0
-            _cp = <DrakenConstantStringPayload*>uv.data
+            _cp = _const_view(<DrakenStringArena*>uv.data)
             return _cp.length
-        return ptr.offsets[i + 1] - ptr.offsets[i]
+        # Dense: read from the arena (Phase 6)
+        cdef DrakenStringArena* dense_arena = <DrakenStringArena*>self._unified_view.data
+        return <Py_ssize_t>str_length(&dense_arena.slots[i])
 
     cpdef object buffers(self):
         """Expose data, offsets, and null bitmap buffers as zero-copy views."""
-        cdef DrakenVector* uv = self.unified()
-        cdef DrakenVarBuffer* ptr = self.ptr
-        if self._german_dict_values != NULL:
-            return self.materialize().buffers()
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
-            raise NotImplementedError("StringVector.buffers() is not available for constant encoding")
-        cdef Py_ssize_t n = ptr.length
-        cdef Py_ssize_t total_bytes = ptr.offsets[n]
-        cdef object data_view
-
-        if total_bytes <= 0:
-            data_view = memoryview(b"")
-        else:
-            data_view = <uint8_t[:total_bytes]> ptr.data
-
-        return (
-            data_view,
-            <int32_t[:n + 1]> ptr.offsets,
-            self.null_bitmap(),
+        raise NotImplementedError(
+            "StringVector.buffers() is not implemented for arena-backed vectors. "
+            "Use to_arrow() for Arrow-format output."
         )
 
     cpdef object null_bitmap(self):
         """Return the null bitmap as a Python ``memoryview``, or ``None`` if all values are valid."""
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             return None
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t nb_size
@@ -1086,16 +1161,14 @@ cdef class StringVector(Vector):
     cpdef int32_t[::1] lengths(self):
         """Return a direct view over the offsets buffer for fast length computations."""
         cdef DrakenVector* uv = self.unified()
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             return self.materialize().lengths()
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             raise NotImplementedError("StringVector.lengths() is not available for constant encoding")
         return <int32_t[: self.ptr.length + 1]> self.ptr.offsets
 
     cpdef object view(self):
-        """Return a lightweight pointer/length view for zero-copy consumers."""
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
-            raise NotImplementedError("StringVector.view() is not available for constant encoding")
+        """Return a per-row accessor reading through the unified view."""
         return _StringVectorView(self)
 
     @property
@@ -1113,7 +1186,7 @@ cdef class StringVector(Vector):
         uv = self.unified()
         ptr = self.ptr
         n = ptr.length
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             return n if uv.validity != NULL else 0
         if ptr.null_bitmap == NULL:
             return 0
@@ -1149,16 +1222,16 @@ cdef class StringVector(Vector):
         cdef StringVectorBuilder builder
         cdef Py_ssize_t i, val_len, data_bytes, off_start, off_end
         cdef const char* data_ptr
-        cdef DrakenConstantStringPayload* _cp
-        cdef DrakenGermanArena* _gdict
-        cdef GermanString* _gslot
+        cdef _ConstView _cp
+        cdef DrakenStringArena* _gdict
+        cdef DrakenStringSlot* _gslot
         cdef const uint32_t* _codes
         cdef uint8_t* _null_bm
         cdef Py_ssize_t _total_bytes
         cdef uint32_t _code
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             # dict-only path (make_string_dict_only): codes in selection, expand via dict
-            _gdict = <DrakenGermanArena*>uv.data
+            _gdict = <DrakenStringArena*>uv.data
             _codes = uv.selection
             _null_bm = uv.validity
             _total_bytes = 0
@@ -1166,7 +1239,7 @@ cdef class StringVector(Vector):
                 if _null_bm != NULL and not ((_null_bm[i >> 3] >> (i & 7)) & 1):
                     continue
                 _code = _codes[i]
-                _total_bytes += <Py_ssize_t>gs_length(&_gdict.slots[_code])
+                _total_bytes += <Py_ssize_t>str_length(&_gdict.slots[_code])
             builder = StringVectorBuilder(n, _total_bytes, resizable=False)
             for i in range(n):
                 if _null_bm != NULL and not ((_null_bm[i >> 3] >> (i & 7)) & 1):
@@ -1175,30 +1248,20 @@ cdef class StringVector(Vector):
                     _code = _codes[i]
                     _gslot = &_gdict.slots[_code]
                     builder.append_bytes(
-                        <const char*>gs_data(_gslot, _gdict.arena),
-                        <Py_ssize_t>gs_length(_gslot),
+                        <const char*>str_data(_gslot, _gdict.arena),
+                        <Py_ssize_t>str_length(_gslot),
                     )
             return builder.finish()
-        if ptr.offsets != NULL and uv.data_length > 1 and self._german_dict_values == NULL:
-            # from_dict_buffers path: dense data already in ptr.data + ptr.offsets
-            data_bytes = <Py_ssize_t>ptr.offsets[n] if ptr.offsets != NULL else 0
-            builder = StringVectorBuilder(n, data_bytes)
-            data_ptr = <const char*>ptr.data
-            for i in range(n):
-                if ptr.null_bitmap != NULL and not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
-                    builder.append_null()
-                else:
-                    off_start = <Py_ssize_t>ptr.offsets[i]
-                    off_end = <Py_ssize_t>ptr.offsets[i + 1]
-                    builder.append_bytes(data_ptr + off_start, off_end - off_start)
-            return builder.finish()
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length >= self._unified_view.length and self._unified_view.data_length > 1:
+            # Dense — Arena-backed (Phase 6). Already in materialized form.
+            return self
+        if self._unified_view.data_length == 1:
             if uv.validity != NULL:
                 builder = StringVectorBuilder(n, 0)
                 for i in range(n):
                     builder.append_null()
             else:
-                _cp = <DrakenConstantStringPayload*>uv.data
+                _cp = _const_view(<DrakenStringArena*>uv.data)
                 val_len = <Py_ssize_t>_cp.length
                 builder = StringVectorBuilder(n, n * val_len)
                 for i in range(n):
@@ -1211,32 +1274,35 @@ cdef class StringVector(Vector):
         """Return the approximate memory footprint of this vector in bytes."""
         cdef DrakenVector* uv = self.unified()
         cdef DrakenVarBuffer* ptr = self.ptr
-        cdef DrakenGermanArena* _ga
-        cdef DrakenConstantStringPayload* _cp
+        cdef DrakenStringArena* _ga
+        cdef _ConstView _cp
         cdef uint64_t n = ptr.length
         cdef uint64_t data_bytes, offset_bytes, null_bytes
         cdef uint64_t dict_data_bytes, dict_offset_bytes, code_bytes
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if uv.data != NULL:
-                _cp = <DrakenConstantStringPayload*>uv.data
+                _cp = _const_view(<DrakenStringArena*>uv.data)
                 return <uint64_t>_cp.length
             return 0
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             code_bytes = n * sizeof(uint32_t)
-            _ga = <DrakenGermanArena*>uv.data
+            _ga = <DrakenStringArena*>uv.data
             if _ga != NULL:
-                dict_data_bytes = <uint64_t>_ga.arena_used + <uint64_t>_ga.length * sizeof(GermanString)
+                dict_data_bytes = <uint64_t>_ga.arena_used + <uint64_t>_ga.length * sizeof(DrakenStringSlot)
                 dict_offset_bytes = 0
             else:
                 dict_data_bytes = 0
                 dict_offset_bytes = 0
             null_bytes = (n + 7) >> 3 if ptr.null_bitmap != NULL else 0
             return code_bytes + dict_data_bytes + dict_offset_bytes + null_bytes
-        # Dense
-        data_bytes = <uint64_t><uint32_t>ptr.offsets[n] if ptr.offsets != NULL else 0
-        offset_bytes = (n + 1) * sizeof(int32_t)
+        # Dense — Arena-backed (Phase 6)
+        _ga = <DrakenStringArena*>self._unified_view.data
+        if _ga != NULL:
+            data_bytes = <uint64_t>_ga.arena_used + <uint64_t>_ga.length * sizeof(DrakenStringSlot)
+        else:
+            data_bytes = 0
         null_bytes = (n + 7) >> 3 if ptr.null_bitmap != NULL else 0
-        return data_bytes + offset_bytes + null_bytes
+        return data_bytes + null_bytes
 
     cpdef int8_t[::1] is_null(self):
         """
@@ -1251,7 +1317,7 @@ cdef class StringVector(Vector):
         if buf == NULL:
             raise MemoryError()
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             for i in range(n):
                 buf[i] = 1 if uv.validity != NULL else 0
             return <int8_t[:n]> buf
@@ -1286,18 +1352,18 @@ cdef class StringVector(Vector):
         cdef uint8_t mask
         cdef int cmp_res
 
-        cdef DrakenConstantStringPayload* _cp
+        cdef _ConstView _cp
 
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             _eq_code = _dict_find_code(self, PyBytes_AS_STRING(value), len(value))
             if _eq_code < 0:
                 return BoolVector(<size_t>self.ptr.length)
             return _codes_to_boolvector_eq(self, _eq_code)
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
-            _cp = <DrakenConstantStringPayload*>uv.data
+            _cp = _const_view(<DrakenStringArena*>uv.data)
             cmp_res = _compare_bytes_lex(
                 <const uint8_t*>_cp.data,
                 _cp.length,
@@ -1320,8 +1386,11 @@ cdef class StringVector(Vector):
 
         cdef char* val_ptr = PyBytes_AS_STRING(value)
         cdef Py_ssize_t val_len = len(value)
-        cdef int32_t start, end, str_len
+        cdef Py_ssize_t str_len
         cdef Py_ssize_t i
+        # Arena-backed dense (Phase 6 — produced by StringVectorBuilder.finish())
+        cdef DrakenStringArena* dense_arena = <DrakenStringArena*>self._unified_view.data
+        cdef DrakenStringSlot* dense_slot
 
         # Process in chunks for better cache performance
         for i in range(n):
@@ -1329,15 +1398,14 @@ cdef class StringVector(Vector):
             if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                 continue
 
-            start = ptr.offsets[i]
-            end = ptr.offsets[i + 1]
-            str_len = end - start
+            dense_slot = &dense_arena.slots[i]
+            str_len = <Py_ssize_t>str_length(dense_slot)
 
             # Length check before expensive memcmp
             if str_len != val_len:
                 continue
 
-            if memcmp(<char*>ptr.data + start, val_ptr, str_len) == 0:
+            if memcmp(str_data(dense_slot, dense_arena.arena), val_ptr, str_len) == 0:
                 dst[i >> 3] |= (1 << (i & 7))
 
         return out
@@ -1359,18 +1427,18 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t i
         cdef int cmp_res
 
-        cdef DrakenConstantStringPayload* _cp
+        cdef _ConstView _cp
 
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             _neq_code = _dict_find_code(self, PyBytes_AS_STRING(value), len(value))
             if _neq_code < 0:
-                return _codes_to_boolvector_neq(self, <Py_ssize_t>self._german_dict_values.length)
+                return _codes_to_boolvector_neq(self, <Py_ssize_t>self._unified_view.data_length)
             return _codes_to_boolvector_neq(self, _neq_code)
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
-            _cp = <DrakenConstantStringPayload*>uv.data
+            _cp = _const_view(<DrakenStringArena*>uv.data)
             cmp_res = _compare_bytes_lex(
                 <const uint8_t*>_cp.data,
                 _cp.length,
@@ -1392,15 +1460,17 @@ cdef class StringVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
+        # Arena-backed dense (Phase 6 — produced by StringVectorBuilder.finish())
+        cdef DrakenStringArena* dense_arena = <DrakenStringArena*>self._unified_view.data
+        cdef DrakenStringSlot* dense_slot
         for i in range(n):
             if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                 continue
-            start = ptr.offsets[i]
-            end = ptr.offsets[i + 1]
-            str_len = end - start
+            dense_slot = &dense_arena.slots[i]
+            str_len = <int32_t>str_length(dense_slot)
             if str_len != <int32_t>val_len:
                 dst[i >> 3] |= (1 << (i & 7))
-            elif memcmp(<char*>ptr.data + start, val_ptr, <size_t>str_len) != 0:
+            elif memcmp(str_data(dense_slot, dense_arena.arena), val_ptr, <size_t>str_len) != 0:
                 dst[i >> 3] |= (1 << (i & 7))
 
         return out
@@ -1422,15 +1492,15 @@ cdef class StringVector(Vector):
         cdef int cmp_res
         cdef Py_ssize_t i
 
-        cdef DrakenConstantStringPayload* _cp
+        cdef _ConstView _cp
 
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             return _dict_ordered_scalar(self, value, 0)
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
-            _cp = <DrakenConstantStringPayload*>uv.data
+            _cp = _const_view(<DrakenStringArena*>uv.data)
             cmp_res = _compare_bytes_lex(
                 <const uint8_t*>_cp.data,
                 _cp.length,
@@ -1452,16 +1522,18 @@ cdef class StringVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
+        # Arena-backed dense (Phase 6 — produced by StringVectorBuilder.finish())
+        cdef DrakenStringArena* dense_arena = <DrakenStringArena*>self._unified_view.data
+        cdef DrakenStringSlot* dense_slot
         for i in range(n):
             if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                 continue
-            start = ptr.offsets[i]
-            end = ptr.offsets[i + 1]
-            str_len = end - start
+            dense_slot = &dense_arena.slots[i]
+            str_len = <int32_t>str_length(dense_slot)
             min_len = str_len if str_len < <int32_t>val_len else <int32_t>val_len
             cmp_res = 0
             if min_len > 0:
-                cmp_res = memcmp(<char*>ptr.data + start, val_ptr, <size_t>min_len)
+                cmp_res = memcmp(str_data(dense_slot, dense_arena.arena), val_ptr, <size_t>min_len)
             if cmp_res < 0 or (cmp_res == 0 and str_len < <int32_t>val_len):
                 dst[i >> 3] |= (1 << (i & 7))
 
@@ -1484,15 +1556,15 @@ cdef class StringVector(Vector):
         cdef int cmp_res
         cdef Py_ssize_t i
 
-        cdef DrakenConstantStringPayload* _cp
+        cdef _ConstView _cp
 
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             return _dict_ordered_scalar(self, value, 1)
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
-            _cp = <DrakenConstantStringPayload*>uv.data
+            _cp = _const_view(<DrakenStringArena*>uv.data)
             cmp_res = _compare_bytes_lex(
                 <const uint8_t*>_cp.data,
                 _cp.length,
@@ -1514,16 +1586,18 @@ cdef class StringVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
+        # Arena-backed dense (Phase 6 — produced by StringVectorBuilder.finish())
+        cdef DrakenStringArena* dense_arena = <DrakenStringArena*>self._unified_view.data
+        cdef DrakenStringSlot* dense_slot
         for i in range(n):
             if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                 continue
-            start = ptr.offsets[i]
-            end = ptr.offsets[i + 1]
-            str_len = end - start
+            dense_slot = &dense_arena.slots[i]
+            str_len = <int32_t>str_length(dense_slot)
             min_len = str_len if str_len < <int32_t>val_len else <int32_t>val_len
             cmp_res = 0
             if min_len > 0:
-                cmp_res = memcmp(<char*>ptr.data + start, val_ptr, <size_t>min_len)
+                cmp_res = memcmp(str_data(dense_slot, dense_arena.arena), val_ptr, <size_t>min_len)
             if cmp_res > 0 or (cmp_res == 0 and str_len > <int32_t>val_len):
                 dst[i >> 3] |= (1 << (i & 7))
 
@@ -1546,15 +1620,15 @@ cdef class StringVector(Vector):
         cdef int cmp_res
         cdef Py_ssize_t i
 
-        cdef DrakenConstantStringPayload* _cp
+        cdef _ConstView _cp
 
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             return _dict_ordered_scalar(self, value, 2)
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
-            _cp = <DrakenConstantStringPayload*>uv.data
+            _cp = _const_view(<DrakenStringArena*>uv.data)
             cmp_res = _compare_bytes_lex(
                 <const uint8_t*>_cp.data,
                 _cp.length,
@@ -1576,16 +1650,18 @@ cdef class StringVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
+        # Arena-backed dense (Phase 6 — produced by StringVectorBuilder.finish())
+        cdef DrakenStringArena* dense_arena = <DrakenStringArena*>self._unified_view.data
+        cdef DrakenStringSlot* dense_slot
         for i in range(n):
             if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                 continue
-            start = ptr.offsets[i]
-            end = ptr.offsets[i + 1]
-            str_len = end - start
+            dense_slot = &dense_arena.slots[i]
+            str_len = <int32_t>str_length(dense_slot)
             min_len = str_len if str_len < <int32_t>val_len else <int32_t>val_len
             cmp_res = 0
             if min_len > 0:
-                cmp_res = memcmp(<char*>ptr.data + start, val_ptr, <size_t>min_len)
+                cmp_res = memcmp(str_data(dense_slot, dense_arena.arena), val_ptr, <size_t>min_len)
             if cmp_res < 0 or (cmp_res == 0 and str_len <= <int32_t>val_len):
                 dst[i >> 3] |= (1 << (i & 7))
 
@@ -1608,15 +1684,15 @@ cdef class StringVector(Vector):
         cdef int cmp_res
         cdef Py_ssize_t i
 
-        cdef DrakenConstantStringPayload* _cp
+        cdef _ConstView _cp
 
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             return _dict_ordered_scalar(self, value, 3)
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
-            _cp = <DrakenConstantStringPayload*>uv.data
+            _cp = _const_view(<DrakenStringArena*>uv.data)
             cmp_res = _compare_bytes_lex(
                 <const uint8_t*>_cp.data,
                 _cp.length,
@@ -1638,16 +1714,18 @@ cdef class StringVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
+        # Arena-backed dense (Phase 6 — produced by StringVectorBuilder.finish())
+        cdef DrakenStringArena* dense_arena = <DrakenStringArena*>self._unified_view.data
+        cdef DrakenStringSlot* dense_slot
         for i in range(n):
             if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                 continue
-            start = ptr.offsets[i]
-            end = ptr.offsets[i + 1]
-            str_len = end - start
+            dense_slot = &dense_arena.slots[i]
+            str_len = <int32_t>str_length(dense_slot)
             min_len = str_len if str_len < <int32_t>val_len else <int32_t>val_len
             cmp_res = 0
             if min_len > 0:
-                cmp_res = memcmp(<char*>ptr.data + start, val_ptr, <size_t>min_len)
+                cmp_res = memcmp(str_data(dense_slot, dense_arena.arena), val_ptr, <size_t>min_len)
             if cmp_res > 0 or (cmp_res == 0 and str_len >= <int32_t>val_len):
                 dst[i >> 3] |= (1 << (i & 7))
 
@@ -1764,73 +1842,73 @@ cdef class StringVector(Vector):
 
     cpdef BoolVector equals_vector(self, StringVector other):
         """Element-wise op 0 between two StringVectors with null propagation."""
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             return self.materialize().equals_vector(other)
-        if other._german_dict_values != NULL:
+        if other._unified_view.data_length < other._unified_view.length:
             return self.equals_vector(other.materialize())
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             return _materialize_const_string(self).equals_vector(other)
-        if other.ptr.offsets == NULL and other._german_dict_values == NULL:
+        if other._unified_view.data_length == 1:
             return self.equals_vector(_materialize_const_string(other))
         return self._compare_vector_op(other, 0)
 
     cpdef BoolVector not_equals_vector(self, StringVector other):
         """Element-wise op 1 between two StringVectors with null propagation."""
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             return self.materialize().not_equals_vector(other)
-        if other._german_dict_values != NULL:
+        if other._unified_view.data_length < other._unified_view.length:
             return self.not_equals_vector(other.materialize())
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             return _materialize_const_string(self).not_equals_vector(other)
-        if other.ptr.offsets == NULL and other._german_dict_values == NULL:
+        if other._unified_view.data_length == 1:
             return self.not_equals_vector(_materialize_const_string(other))
         return self._compare_vector_op(other, 1)
 
     cpdef BoolVector less_than_vector(self, StringVector other):
         """Element-wise op 2 between two StringVectors with null propagation."""
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             return self.materialize().less_than_vector(other)
-        if other._german_dict_values != NULL:
+        if other._unified_view.data_length < other._unified_view.length:
             return self.less_than_vector(other.materialize())
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             return _materialize_const_string(self).less_than_vector(other)
-        if other.ptr.offsets == NULL and other._german_dict_values == NULL:
+        if other._unified_view.data_length == 1:
             return self.less_than_vector(_materialize_const_string(other))
         return self._compare_vector_op(other, 2)
 
     cpdef BoolVector less_than_or_equals_vector(self, StringVector other):
         """Element-wise op 3 between two StringVectors with null propagation."""
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             return self.materialize().less_than_or_equals_vector(other)
-        if other._german_dict_values != NULL:
+        if other._unified_view.data_length < other._unified_view.length:
             return self.less_than_or_equals_vector(other.materialize())
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             return _materialize_const_string(self).less_than_or_equals_vector(other)
-        if other.ptr.offsets == NULL and other._german_dict_values == NULL:
+        if other._unified_view.data_length == 1:
             return self.less_than_or_equals_vector(_materialize_const_string(other))
         return self._compare_vector_op(other, 3)
 
     cpdef BoolVector greater_than_vector(self, StringVector other):
         """Element-wise op 4 between two StringVectors with null propagation."""
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             return self.materialize().greater_than_vector(other)
-        if other._german_dict_values != NULL:
+        if other._unified_view.data_length < other._unified_view.length:
             return self.greater_than_vector(other.materialize())
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             return _materialize_const_string(self).greater_than_vector(other)
-        if other.ptr.offsets == NULL and other._german_dict_values == NULL:
+        if other._unified_view.data_length == 1:
             return self.greater_than_vector(_materialize_const_string(other))
         return self._compare_vector_op(other, 4)
 
     cpdef BoolVector greater_than_or_equals_vector(self, StringVector other):
         """Element-wise op 5 between two StringVectors with null propagation."""
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             return self.materialize().greater_than_or_equals_vector(other)
-        if other._german_dict_values != NULL:
+        if other._unified_view.data_length < other._unified_view.length:
             return self.greater_than_or_equals_vector(other.materialize())
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             return _materialize_const_string(self).greater_than_or_equals_vector(other)
-        if other.ptr.offsets == NULL and other._german_dict_values == NULL:
+        if other._unified_view.data_length == 1:
             return self.greater_than_or_equals_vector(_materialize_const_string(other))
         return self._compare_vector_op(other, 5)
 
@@ -1852,15 +1930,15 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t i
         cdef bytes cell_bytes
 
-        cdef DrakenConstantStringPayload* _cp
+        cdef _ConstView _cp
 
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             return self.materialize().in_list(value_set)
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
-            _cp = <DrakenConstantStringPayload*>uv.data
+            _cp = _const_view(<DrakenStringArena*>uv.data)
             cell_bytes = PyBytes_FromStringAndSize(<char*>_cp.data, _cp.length)
             return _constant_bool_result(n, cell_bytes in value_set, False)
 
@@ -1877,13 +1955,18 @@ cdef class StringVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
+        # Arena-backed dense (Phase 6)
+        cdef DrakenStringArena* dense_arena = <DrakenStringArena*>self._unified_view.data
+        cdef DrakenStringSlot* dense_slot
         for i in range(n):
             if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                 continue
-            start = ptr.offsets[i]
-            end = ptr.offsets[i + 1]
-            str_len = end - start
-            cell_bytes = PyBytes_FromStringAndSize(<char*>ptr.data + start, <Py_ssize_t>str_len)
+            dense_slot = &dense_arena.slots[i]
+            str_len = <int32_t>str_length(dense_slot)
+            cell_bytes = PyBytes_FromStringAndSize(
+                <const char*>str_data(dense_slot, dense_arena.arena),
+                <Py_ssize_t>str_len,
+            )
             if cell_bytes in value_set:
                 dst[i >> 3] |= (1 << (i & 7))
 
@@ -1909,18 +1992,20 @@ cdef class StringVector(Vector):
         cdef int32_t start_l, end_l
         cdef Py_ssize_t i, dict_idx, dict_size
         cdef uint32_t code
-        cdef DrakenGermanArena* like_gdict
-        cdef GermanString* like_slot
+        cdef DrakenStringArena* like_gdict
+        cdef DrakenStringSlot* like_slot
         cdef const uint8_t* like_sdata
         cdef uint8_t* dict_like_results = NULL
         cdef const uint8_t* dict_codes
         cdef uint8_t* dict_row_nulls
-        cdef DrakenConstantStringPayload* _cp
+        cdef _ConstView _cp
+        cdef DrakenStringArena* dense_arena
+        cdef DrakenStringSlot* dense_slot
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
-            _cp = <DrakenConstantStringPayload*>uv.data
+            _cp = _const_view(<DrakenStringArena*>uv.data)
             return _constant_bool_result(
                 n,
                 _sv_sql_like_match(
@@ -1948,8 +2033,8 @@ cdef class StringVector(Vector):
 
         try:
             # Dictionary-encoded path: check each unique value once
-            if self._german_dict_values != NULL:
-                like_gdict = self._german_dict_values
+            if self._unified_view.data_length < self._unified_view.length:
+                like_gdict = _string_arena(self)
                 if like_gdict == NULL:
                     return out  # Fallback to empty result
 
@@ -1968,8 +2053,8 @@ cdef class StringVector(Vector):
                 # Test each unique dictionary value once
                 for dict_idx in range(dict_size):
                     like_slot = &like_gdict.slots[dict_idx]
-                    str_len = <Py_ssize_t>gs_length(like_slot)
-                    like_sdata = gs_data(like_slot, like_gdict.arena)
+                    str_len = <Py_ssize_t>str_length(like_slot)
+                    like_sdata = str_data(like_slot, like_gdict.arena)
 
                     if _sv_sql_like_match(
                         like_sdata, str_len,
@@ -1987,16 +2072,16 @@ cdef class StringVector(Vector):
                     if dict_like_results[code]:
                         dst[i >> 3] |= (1 << (i & 7))
 
-            # Dense vector path (non-dictionary, non-constant)
+            # Dense vector path (non-dictionary, non-constant) — Arena-backed (Phase 6)
             else:
+                dense_arena = <DrakenStringArena*>self._unified_view.data
                 for i in range(n):
                     if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                         continue
-                    start_l = ptr.offsets[i]
-                    end_l = ptr.offsets[i + 1]
-                    str_len = end_l - start_l
+                    dense_slot = &dense_arena.slots[i]
+                    str_len = <int32_t>str_length(dense_slot)
                     if _sv_sql_like_match(
-                        <const uint8_t*>ptr.data + start_l, str_len,
+                        str_data(dense_slot, dense_arena.arena), str_len,
                         <const uint8_t*>pat_ptr, pat_len, ignore_case,
                     ):
                         dst[i >> 3] |= (1 << (i & 7))
@@ -2026,19 +2111,21 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t i, dict_idx, dict_size
         cdef uint32_t code
         cdef bytes cell_bytes
-        cdef DrakenGermanArena* rlike_gdict
-        cdef GermanString* rlike_slot
+        cdef DrakenStringArena* rlike_gdict
+        cdef DrakenStringArena* dense_arena_rl
+        cdef DrakenStringSlot* dense_slot_rl
+        cdef DrakenStringSlot* rlike_slot
         cdef const uint8_t* rlike_sdata
         cdef uint8_t* dict_rlike_results = NULL
         cdef uint8_t* dict_row_nulls
-        cdef DrakenConstantStringPayload* _cp
+        cdef _ConstView _cp
 
         compiled = re.compile(pattern)
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
-            _cp = <DrakenConstantStringPayload*>uv.data
+            _cp = _const_view(<DrakenStringArena*>uv.data)
             cell_bytes = PyBytes_FromStringAndSize(<char*>_cp.data, _cp.length)
             return _constant_bool_result(n, compiled.search(cell_bytes) is not None, False)
 
@@ -2057,8 +2144,8 @@ cdef class StringVector(Vector):
 
         try:
             # Dictionary-encoded path: check each unique value once
-            if self._german_dict_values != NULL:
-                rlike_gdict = self._german_dict_values
+            if self._unified_view.data_length < self._unified_view.length:
+                rlike_gdict = _string_arena(self)
                 if rlike_gdict == NULL:
                     return out  # Fallback to empty result
 
@@ -2076,8 +2163,8 @@ cdef class StringVector(Vector):
                 # Test each unique dictionary value once
                 for dict_idx in range(dict_size):
                     rlike_slot = &rlike_gdict.slots[dict_idx]
-                    str_len = <Py_ssize_t>gs_length(rlike_slot)
-                    rlike_sdata = gs_data(rlike_slot, rlike_gdict.arena)
+                    str_len = <Py_ssize_t>str_length(rlike_slot)
+                    rlike_sdata = str_data(rlike_slot, rlike_gdict.arena)
                     cell_bytes = PyBytes_FromStringAndSize(<const char*>rlike_sdata, str_len)
                     if compiled.search(cell_bytes) is not None:
                         dict_rlike_results[dict_idx] = 1
@@ -2092,15 +2179,17 @@ cdef class StringVector(Vector):
                     if dict_rlike_results[code]:
                         dst[i >> 3] |= (1 << (i & 7))
 
-            # Dense vector path (non-dictionary, non-constant)
+            # Dense vector path — Arena-backed (Phase 6)
             else:
+                dense_arena_rl = <DrakenStringArena*>self._unified_view.data
                 for i in range(n):
                     if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                         continue
-                    start = ptr.offsets[i]
-                    end = ptr.offsets[i + 1]
-                    str_len = end - start
-                    cell_bytes = PyBytes_FromStringAndSize(<char*>ptr.data + start, str_len)
+                    dense_slot_rl = &dense_arena_rl.slots[i]
+                    str_len = <Py_ssize_t>str_length(dense_slot_rl)
+                    cell_bytes = PyBytes_FromStringAndSize(
+                        <const char*>str_data(dense_slot_rl, dense_arena_rl.arena), str_len,
+                    )
                     if compiled.search(cell_bytes):
                         dst[i >> 3] |= (1 << (i & 7))
         finally:
@@ -2133,21 +2222,25 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t i, j, dict_idx, dict_size
         cdef uint32_t code
         cdef uint8_t byte
-        cdef DrakenGermanArena* contains_gdict
-        cdef GermanString* contains_slot
+        cdef DrakenStringArena* contains_gdict
+        cdef DrakenStringSlot* contains_slot
         cdef const uint8_t* contains_sdata
         cdef uint8_t* dict_contains_results = NULL
         cdef uint8_t* dict_row_nulls
         cdef uint8_t* data_lower = NULL
         cdef Py_ssize_t data_len
         cdef VolnitskyTable* tbl = NULL
-        cdef DrakenConstantStringPayload* _cp
+        cdef _ConstView _cp
+        cdef DrakenStringArena* ctn_arena
+        cdef DrakenStringSlot* ctn_slot
+        cdef const uint8_t* ctn_sdata
+        cdef Py_ssize_t ctn_len
 
         # Constant vector case
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if uv.validity != NULL:
                 return _constant_bool_result(n, False, True)
-            _cp = <DrakenConstantStringPayload*>uv.data
+            _cp = _const_view(<DrakenStringArena*>uv.data)
             if ignore_case and ndl_len > 0:
                 ndl_lower = <uint8_t*>malloc(<size_t>ndl_len)
                 if ndl_lower == NULL:
@@ -2228,8 +2321,8 @@ cdef class StringVector(Vector):
 
         try:
             # Dictionary-encoded path: check each unique value once
-            if self._german_dict_values != NULL:
-                contains_gdict = self._german_dict_values
+            if self._unified_view.data_length < self._unified_view.length:
+                contains_gdict = _string_arena(self)
                 if contains_gdict == NULL:
                     return out  # Fallback to empty result
 
@@ -2247,8 +2340,8 @@ cdef class StringVector(Vector):
                 # Test each unique dictionary value once
                 for dict_idx in range(dict_size):
                     contains_slot = &contains_gdict.slots[dict_idx]
-                    str_len = <Py_ssize_t>gs_length(contains_slot)
-                    contains_sdata = gs_data(contains_slot, contains_gdict.arena)
+                    str_len = <Py_ssize_t>str_length(contains_slot)
+                    contains_sdata = str_data(contains_slot, contains_gdict.arena)
 
                     if ignore_case:
                         if _sv_contains_ci(
@@ -2279,30 +2372,20 @@ cdef class StringVector(Vector):
                     if dict_contains_results[code]:
                         dst[i >> 3] |= (1 << (i & 7))
 
-            # Dense vector path (non-dictionary, non-constant)
+            # Dense vector path (non-dictionary, non-constant) — arena-backed
             else:
-                # For case-insensitive: pre-lowercase entire buffer once
-                if ignore_case and ptr.data != NULL:
-                    data_len = ptr.offsets[n]
-                    data_lower = <uint8_t*>malloc(data_len)
-                    if data_lower == NULL:
-                        raise MemoryError()
-                    # Copy and lowercase entire buffer in one pass
-                    for j in range(data_len):
-                        data_lower[j] = _sv_ascii_lower((<const uint8_t*>ptr.data)[j])
+                ctn_arena = <DrakenStringArena*>self._unified_view.data
 
-                # Process each row
                 for i in range(n):
                     if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                         continue
-                    start = ptr.offsets[i]
-                    end = ptr.offsets[i + 1]
-                    str_len = end - start
+                    ctn_slot = &ctn_arena.slots[i]
+                    ctn_sdata = str_data(ctn_slot, ctn_arena.arena)
+                    ctn_len = <Py_ssize_t>str_length(ctn_slot)
 
                     if ignore_case:
-                        # Use pre-lowercased buffer for case-sensitive search
-                        if _sv_contains_cs(
-                            data_lower + start, str_len,
+                        if _sv_contains_ci(
+                            ctn_sdata, ctn_len,
                             ndl_lower if ndl_lower != NULL else <uint8_t*>ndl_ptr_char,
                             ndl_len,
                             tbl,
@@ -2310,7 +2393,7 @@ cdef class StringVector(Vector):
                             dst[i >> 3] |= (1 << (i & 7))
                     else:
                         if _sv_contains_cs(
-                            <const uint8_t*>ptr.data + start, str_len,
+                            ctn_sdata, ctn_len,
                             <const uint8_t*>ndl_ptr_char, ndl_len,
                             tbl,
                         ):
@@ -2334,27 +2417,29 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t n
         cdef list out
         cdef Py_ssize_t i
-        cdef int32_t start, end
-        cdef char* data
         cdef uint8_t byte, bit
-        cdef DrakenConstantStringPayload* _cp
-        if self._german_dict_values != NULL:
+        cdef _ConstView _cp
+        cdef DrakenStringArena* dense_arena
+        cdef DrakenStringSlot* dense_slot
+        cdef Py_ssize_t start, end
+        if self._unified_view.data_length < self._unified_view.length:
             return self.materialize().to_pylist()
         ptr = self.ptr
         n = ptr.length
         out = []
-        data = <char*> ptr.data
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if uv.validity != NULL:
                 for i in range(n):
                     out.append(None)
             else:
-                _cp = <DrakenConstantStringPayload*>uv.data
+                _cp = _const_view(<DrakenStringArena*>uv.data)
                 for i in range(n):
                     out.append(PyBytes_FromStringAndSize(<char*>_cp.data, _cp.length))
             return out
 
+        # Arena-backed dense
+        dense_arena = <DrakenStringArena*>self._unified_view.data
         for i in range(n):
             if ptr.null_bitmap != NULL:
                 byte = ptr.null_bitmap[i >> 3]
@@ -2362,10 +2447,11 @@ cdef class StringVector(Vector):
                 if not bit:
                     out.append(None)
                     continue
-
-            start = ptr.offsets[i]
-            end = ptr.offsets[i + 1]
-            out.append(PyBytes_FromStringAndSize(data + start, end - start))
+            dense_slot = &dense_arena.slots[i]
+            out.append(PyBytes_FromStringAndSize(
+                <const char*>str_data(dense_slot, dense_arena.arena),
+                <Py_ssize_t>str_length(dense_slot),
+            ))
 
         return out
 
@@ -2387,8 +2473,8 @@ cdef class StringVector(Vector):
         cdef uint64_t[STRING_HASH_CHUNK] scratch
         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
         cdef uint64_t* dst
-        cdef DrakenGermanArena* hash_gdict
-        cdef GermanString* hash_slot
+        cdef DrakenStringArena* hash_gdict
+        cdef DrakenStringSlot* hash_slot
         cdef const uint8_t* hash_sdata
         cdef Py_ssize_t dict_size
         cdef uint8_t* dict_row_nulls
@@ -2404,14 +2490,16 @@ cdef class StringVector(Vector):
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("StringVector.hash_into: output buffer too small")
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        cdef _ConstView _cv
+        if self._unified_view.data_length == 1:
             if self._unified_view.validity != NULL:
                 value = NULL_HASH
             else:
-                if (<DrakenConstantStringPayload*>self._unified_view.data).length <= 32:
-                    value = _short_string_hash(<const uint8_t*>(<DrakenConstantStringPayload*>self._unified_view.data).data, <size_t>(<DrakenConstantStringPayload*>self._unified_view.data).length)
+                _cv = _const_view(<DrakenStringArena*>self._unified_view.data)
+                if _cv.length <= 32:
+                    value = _short_string_hash(<const uint8_t*>_cv.data, <size_t>_cv.length)
                 else:
-                    value = XXH3_64bits(<const void*>(<DrakenConstantStringPayload*>self._unified_view.data).data, <size_t>(<DrakenConstantStringPayload*>self._unified_view.data).length)
+                    value = XXH3_64bits(<const void*>_cv.data, <size_t>_cv.length)
             for j in range(STRING_HASH_CHUNK):
                 scratch[j] = value
             dst = &out_buf[offset]
@@ -2424,9 +2512,9 @@ cdef class StringVector(Vector):
                 i += block
             return
 
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             # Dictionary-encoded path
-            hash_gdict = self._german_dict_values
+            hash_gdict = _string_arena(self)
             dict_size = <Py_ssize_t>hash_gdict.length
             dict_row_nulls = self.ptr.null_bitmap
             dict_hashes_ptr = <uint64_t*>malloc(dict_size * sizeof(uint64_t))
@@ -2436,8 +2524,8 @@ cdef class StringVector(Vector):
                 # Hash each dictionary entry
                 for dict_idx in range(dict_size):
                     hash_slot = &hash_gdict.slots[dict_idx]
-                    str_len = <size_t>gs_length(hash_slot)
-                    hash_sdata = gs_data(hash_slot, hash_gdict.arena)
+                    str_len = <size_t>str_length(hash_slot)
+                    hash_sdata = str_data(hash_slot, hash_gdict.arena)
                     if str_len <= 32:
                         dict_hashes_ptr[dict_idx] = _short_string_hash(hash_sdata, str_len)
                     else:
@@ -2472,11 +2560,53 @@ cdef class StringVector(Vector):
             return
 
         # Dense (non-dictionary, non-constant) path
-        dense_data = <const uint8_t*> ptr.data
-        offsets = ptr.offsets
+        cdef DrakenStringArena* dense_arena
+        cdef DrakenStringSlot* dense_slot
+        cdef const uint8_t* dense_bytes
+        cdef const uint8_t* vb_data
+        cdef int32_t* vb_offsets
         nb_ptr = ptr.null_bitmap
         dst = &out_buf[offset]
 
+        if ptr.data != NULL:
+            # VarBuffer-backed dense path: ptr.data/offsets are row-indexed and always
+            # authoritative for row access (even when _unified_view.data holds a dict arena).
+            vb_data = ptr.data
+            vb_offsets = ptr.offsets
+            i = 0
+            with nogil:
+                while i < n:
+                    block = n - i
+                    if block > STRING_HASH_CHUNK:
+                        block = STRING_HASH_CHUNK
+                    if nb_ptr != NULL:
+                        for j in range(block):
+                            idx = i + j
+                            byte = nb_ptr[idx >> 3]
+                            if ((byte >> (idx & 7)) & 1) == 0:
+                                scratch[j] = NULL_HASH
+                                continue
+                            str_len = <size_t>(vb_offsets[idx + 1] - vb_offsets[idx])
+                            dense_bytes = vb_data + vb_offsets[idx]
+                            if str_len <= 32:
+                                scratch[j] = _short_string_hash(dense_bytes, str_len)
+                            else:
+                                scratch[j] = XXH3_64bits(<const void*>dense_bytes, str_len)
+                    else:
+                        for j in range(block):
+                            idx = i + j
+                            str_len = <size_t>(vb_offsets[idx + 1] - vb_offsets[idx])
+                            dense_bytes = vb_data + vb_offsets[idx]
+                            if str_len <= 32:
+                                scratch[j] = _short_string_hash(dense_bytes, str_len)
+                            else:
+                                scratch[j] = XXH3_64bits(<const void*>dense_bytes, str_len)
+                    simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
+                    i += block
+            return
+
+        # Pure arena-backed dense (no VarBuffer, arena is row-indexed)
+        dense_arena = <DrakenStringArena*>self._unified_view.data
         i = 0
         with nogil:
             while i < n:
@@ -2491,24 +2621,24 @@ cdef class StringVector(Vector):
                         if ((byte >> (idx & 7)) & 1) == 0:
                             scratch[j] = NULL_HASH
                             continue
-                        start = offsets[idx]
-                        end = offsets[idx + 1]
-                        str_len = <size_t>(end - start)
+                        dense_slot = &dense_arena.slots[idx]
+                        str_len = <size_t>str_length(dense_slot)
+                        dense_bytes = str_data(dense_slot, dense_arena.arena)
                         if str_len <= 32:
-                            scratch[j] = _short_string_hash(dense_data + start, str_len)
+                            scratch[j] = _short_string_hash(dense_bytes, str_len)
                         else:
-                            scratch[j] = XXH3_64bits(dense_data + start, str_len)
+                            scratch[j] = XXH3_64bits(<const void*>dense_bytes, str_len)
                 else:
                     for j in range(block):
-                        start = offsets[i + j]
-                        end = offsets[i + j + 1]
-                        str_len = <size_t>(end - start)
+                        dense_slot = &dense_arena.slots[i + j]
+                        str_len = <size_t>str_length(dense_slot)
+                        dense_bytes = str_data(dense_slot, dense_arena.arena)
                         if str_len <= 32:
-                            scratch[j] = _short_string_hash(dense_data + start, str_len)
+                            scratch[j] = _short_string_hash(dense_bytes, str_len)
                         else:
-                            scratch[j] = XXH3_64bits(dense_data + start, str_len)
+                            scratch[j] = XXH3_64bits(<const void*>dense_bytes, str_len)
 
-                simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
+                simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
                 i += block
 
     cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
@@ -2525,8 +2655,8 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t dict_size, dict_idx
         cdef uint64_t* dict_hashes_ptr = NULL
         cdef uint8_t* dict_row_nulls
-        cdef DrakenGermanArena* cl_gdict
-        cdef GermanString* cl_slot
+        cdef DrakenStringArena* cl_gdict
+        cdef DrakenStringSlot* cl_slot
         cdef const uint8_t* cl_sdata
         cdef const uint8_t* data
         cdef int32_t* offsets
@@ -2535,14 +2665,16 @@ cdef class StringVector(Vector):
         if n == 0:
             return 0
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        cdef _ConstView _cv
+        if self._unified_view.data_length == 1:
             if self._unified_view.validity != NULL:
                 value = NULL_HASH
             else:
-                if (<DrakenConstantStringPayload*>self._unified_view.data).length <= 32:
-                    value = _short_string_hash(<const uint8_t*>(<DrakenConstantStringPayload*>self._unified_view.data).data, <size_t>(<DrakenConstantStringPayload*>self._unified_view.data).length)
+                _cv = _const_view(<DrakenStringArena*>self._unified_view.data)
+                if _cv.length <= 32:
+                    value = _short_string_hash(<const uint8_t*>_cv.data, <size_t>_cv.length)
                 else:
-                    value = XXH3_64bits(<const void*>(<DrakenConstantStringPayload*>self._unified_view.data).data, <size_t>(<DrakenConstantStringPayload*>self._unified_view.data).length)
+                    value = XXH3_64bits(<const void*>_cv.data, <size_t>_cv.length)
             for i in range(STRING_HASH_CHUNK):
                 scratch[i] = value
             i = 0
@@ -2555,9 +2687,9 @@ cdef class StringVector(Vector):
             return 0
 
         # Check encoding first before accessing any structures
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             # Dictionary-encoded path: access member variables directly (no GIL needed)
-            cl_gdict = self._german_dict_values
+            cl_gdict = _string_arena(self)
             if cl_gdict == NULL:
                 return 1  # Fall back to Python hash
             dict_size = <Py_ssize_t>cl_gdict.length
@@ -2570,8 +2702,8 @@ cdef class StringVector(Vector):
             # Hash each dictionary entry
             for dict_idx in range(dict_size):
                 cl_slot = &cl_gdict.slots[dict_idx]
-                str_len = <size_t>gs_length(cl_slot)
-                cl_sdata = gs_data(cl_slot, cl_gdict.arena)
+                str_len = <size_t>str_length(cl_slot)
+                cl_sdata = str_data(cl_slot, cl_gdict.arena)
                 if str_len <= 32:
                     dict_hashes_ptr[dict_idx] = _short_string_hash(cl_sdata, str_len)
                 else:
@@ -2588,13 +2720,50 @@ cdef class StringVector(Vector):
             return 0
 
         # Dense (non-dictionary, non-constant) path
-        # Validate that we have valid offset structure
-        if ptr.offsets == NULL:
-            return 1  # Fall back to Python hash
-
-        data = <const uint8_t*> ptr.data
-        offsets = ptr.offsets
+        cdef const uint8_t* chi_vb_data
+        cdef int32_t* chi_vb_offsets
         nb_ptr = ptr.null_bitmap
+
+        if ptr.data != NULL:
+            # VarBuffer-backed dense path: ptr.data/offsets are row-indexed and always
+            # authoritative (even when _unified_view.data holds a dict arena).
+            chi_vb_data = ptr.data
+            chi_vb_offsets = ptr.offsets
+            i = 0
+            while i < n:
+                block = n - i
+                if block > STRING_HASH_CHUNK:
+                    block = STRING_HASH_CHUNK
+                if nb_ptr != NULL:
+                    for j in range(block):
+                        idx = i + j
+                        byte = nb_ptr[idx >> 3]
+                        if ((byte >> (idx & 7)) & 1) == 0:
+                            scratch[j] = NULL_HASH
+                            continue
+                        str_len = <size_t>(chi_vb_offsets[idx + 1] - chi_vb_offsets[idx])
+                        cl_sdata = chi_vb_data + chi_vb_offsets[idx]
+                        if str_len <= 32:
+                            scratch[j] = _short_string_hash(cl_sdata, str_len)
+                        else:
+                            scratch[j] = XXH3_64bits(<const void*>cl_sdata, str_len)
+                else:
+                    for j in range(block):
+                        idx = i + j
+                        str_len = <size_t>(chi_vb_offsets[idx + 1] - chi_vb_offsets[idx])
+                        cl_sdata = chi_vb_data + chi_vb_offsets[idx]
+                        if str_len <= 32:
+                            scratch[j] = _short_string_hash(cl_sdata, str_len)
+                        else:
+                            scratch[j] = XXH3_64bits(<const void*>cl_sdata, str_len)
+                simd_mix_hash(out + i, scratch_ptr, <size_t>block)
+                i += block
+            return 0
+
+        # Pure arena-backed dense path (no VarBuffer; arena is row-indexed)
+        cdef DrakenStringArena* ch_arena = <DrakenStringArena*>self._unified_view.data
+        if ch_arena == NULL:
+            return 1  # Fall back to Python hash
 
         i = 0
         while i < n:
@@ -2609,22 +2778,22 @@ cdef class StringVector(Vector):
                     if ((byte >> (idx & 7)) & 1) == 0:
                         scratch[j] = NULL_HASH
                         continue
-                    start = offsets[idx]
-                    end = offsets[idx + 1]
-                    str_len = <size_t>(end - start)
+                    cl_slot = &ch_arena.slots[idx]
+                    str_len = <size_t>str_length(cl_slot)
+                    cl_sdata = str_data(cl_slot, ch_arena.arena)
                     if str_len <= 32:
-                        scratch[j] = _short_string_hash(data + start, str_len)
+                        scratch[j] = _short_string_hash(cl_sdata, str_len)
                     else:
-                        scratch[j] = XXH3_64bits(data + start, str_len)
+                        scratch[j] = XXH3_64bits(<const void*>cl_sdata, str_len)
             else:
                 for j in range(block):
-                    start = offsets[i + j]
-                    end = offsets[i + j + 1]
-                    str_len = <size_t>(end - start)
+                    cl_slot = &ch_arena.slots[i + j]
+                    str_len = <size_t>str_length(cl_slot)
+                    cl_sdata = str_data(cl_slot, ch_arena.arena)
                     if str_len <= 32:
-                        scratch[j] = _short_string_hash(data + start, str_len)
+                        scratch[j] = _short_string_hash(cl_sdata, str_len)
                     else:
-                        scratch[j] = XXH3_64bits(data + start, str_len)
+                        scratch[j] = XXH3_64bits(<const void*>cl_sdata, str_len)
 
             simd_mix_hash(out + i, scratch_ptr, <size_t> block)
             i += block
@@ -2645,8 +2814,8 @@ cdef class StringVector(Vector):
         cdef size_t str_len
         cdef uint8_t byte
         cdef uint64_t* dict_hashes_ptr = NULL
-        cdef DrakenGermanArena* hs_gdict
-        cdef GermanString* hs_slot
+        cdef DrakenStringArena* hs_gdict
+        cdef DrakenStringSlot* hs_slot
         cdef const uint8_t* hs_sdata
         cdef const uint8_t* data
         cdef int32_t* offsets
@@ -2657,19 +2826,22 @@ cdef class StringVector(Vector):
         if n == 0:
             return 0
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        cdef _ConstView _cv2
+        if self._unified_view.data_length == 1:
             if self._unified_view.validity != NULL:
                 value = null_sentinel
-            elif (<DrakenConstantStringPayload*>self._unified_view.data).length <= 32:
-                value = _short_string_hash(<const uint8_t*>(<DrakenConstantStringPayload*>self._unified_view.data).data, <size_t>(<DrakenConstantStringPayload*>self._unified_view.data).length)
             else:
-                value = XXH3_64bits(<const void*>(<DrakenConstantStringPayload*>self._unified_view.data).data, <size_t>(<DrakenConstantStringPayload*>self._unified_view.data).length)
+                _cv2 = _const_view(<DrakenStringArena*>self._unified_view.data)
+                if _cv2.length <= 32:
+                    value = _short_string_hash(<const uint8_t*>_cv2.data, <size_t>_cv2.length)
+                else:
+                    value = XXH3_64bits(<const void*>_cv2.data, <size_t>_cv2.length)
             for i in range(n):
                 out[i] = value
             return 0
 
-        if self._german_dict_values != NULL:
-            hs_gdict = self._german_dict_values
+        if self._unified_view.data_length < self._unified_view.length:
+            hs_gdict = _string_arena(self)
             if hs_gdict == NULL:
                 return 1
             dict_size = <Py_ssize_t>hs_gdict.length
@@ -2681,8 +2853,8 @@ cdef class StringVector(Vector):
 
             for dict_idx in range(dict_size):
                 hs_slot = &hs_gdict.slots[dict_idx]
-                str_len = <size_t>gs_length(hs_slot)
-                hs_sdata = gs_data(hs_slot, hs_gdict.arena)
+                str_len = <size_t>str_length(hs_slot)
+                hs_sdata = str_data(hs_slot, hs_gdict.arena)
                 if str_len <= 32:
                     dict_hashes_ptr[dict_idx] = _short_string_hash(hs_sdata, str_len)
                 else:
@@ -2699,12 +2871,42 @@ cdef class StringVector(Vector):
             free(dict_hashes_ptr)
             return 0
 
-        if ptr.offsets == NULL:
-            return 1
-
-        data = <const uint8_t*>ptr.data
-        offsets = ptr.offsets
+        # Dense (non-dictionary, non-constant) path
+        cdef const uint8_t* chs_vb_data
+        cdef int32_t* chs_vb_offsets
         nb_ptr = ptr.null_bitmap
+
+        if ptr.data != NULL:
+            # VarBuffer-backed dense path: ptr.data/offsets are row-indexed and always
+            # authoritative (even when _unified_view.data holds a dict arena).
+            chs_vb_data = ptr.data
+            chs_vb_offsets = ptr.offsets
+            if nb_ptr != NULL:
+                for i in range(n):
+                    byte = nb_ptr[i >> 3]
+                    if ((byte >> (i & 7)) & 1) == 0:
+                        out[i] = null_sentinel
+                        continue
+                    str_len = <size_t>(chs_vb_offsets[i + 1] - chs_vb_offsets[i])
+                    hs_sdata = chs_vb_data + chs_vb_offsets[i]
+                    if str_len <= 32:
+                        out[i] = _short_string_hash(hs_sdata, str_len)
+                    else:
+                        out[i] = XXH3_64bits(<const void*>hs_sdata, str_len)
+            else:
+                for i in range(n):
+                    str_len = <size_t>(chs_vb_offsets[i + 1] - chs_vb_offsets[i])
+                    hs_sdata = chs_vb_data + chs_vb_offsets[i]
+                    if str_len <= 32:
+                        out[i] = _short_string_hash(hs_sdata, str_len)
+                    else:
+                        out[i] = XXH3_64bits(<const void*>hs_sdata, str_len)
+            return 0
+
+        # Pure arena-backed dense path (no VarBuffer; arena is row-indexed)
+        cdef DrakenStringArena* cs_arena = <DrakenStringArena*>self._unified_view.data
+        if cs_arena == NULL:
+            return 1
 
         if nb_ptr != NULL:
             for i in range(n):
@@ -2712,22 +2914,22 @@ cdef class StringVector(Vector):
                 if ((byte >> (i & 7)) & 1) == 0:
                     out[i] = null_sentinel
                     continue
-                start = offsets[i]
-                end = offsets[i + 1]
-                str_len = <size_t>(end - start)
+                hs_slot = &cs_arena.slots[i]
+                str_len = <size_t>str_length(hs_slot)
+                hs_sdata = str_data(hs_slot, cs_arena.arena)
                 if str_len <= 32:
-                    out[i] = _short_string_hash(data + start, str_len)
+                    out[i] = _short_string_hash(hs_sdata, str_len)
                 else:
-                    out[i] = XXH3_64bits(data + start, str_len)
+                    out[i] = XXH3_64bits(<const void*>hs_sdata, str_len)
         else:
             for i in range(n):
-                start = offsets[i]
-                end = offsets[i + 1]
-                str_len = <size_t>(end - start)
+                hs_slot = &cs_arena.slots[i]
+                str_len = <size_t>str_length(hs_slot)
+                hs_sdata = str_data(hs_slot, cs_arena.arena)
                 if str_len <= 32:
-                    out[i] = _short_string_hash(data + start, str_len)
+                    out[i] = _short_string_hash(hs_sdata, str_len)
                 else:
-                    out[i] = XXH3_64bits(data + start, str_len)
+                    out[i] = XXH3_64bits(<const void*>hs_sdata, str_len)
         return 0
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
@@ -2735,14 +2937,15 @@ cdef class StringVector(Vector):
         cdef DrakenVector* uv = self.unified()
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
-        cdef int32_t start, end
-        cdef Py_ssize_t i, j, copy_len
-        cdef char* base = <char*> ptr.data
+        cdef Py_ssize_t i, copy_len
         cdef uint8_t* null_bitmap = ptr.null_bitmap
         cdef bint has_nulls = null_bitmap != NULL
         cdef uint64_t acc
+        cdef DrakenStringArena* ci_arena
+        cdef DrakenStringSlot* ci_slot
+        cdef const uint8_t* ci_data
 
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             self.materialize().compress_into(out_buf, offset)
             return
 
@@ -2751,33 +2954,58 @@ cdef class StringVector(Vector):
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("StringVector.compress: output buffer too small")
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        cdef _ConstView _cv_compress
+        if self._unified_view.data_length == 1:
             if self._unified_view.validity != NULL:
                 for i in range(n):
                     out_buf[offset + i] = <int64_t>(-(1 << 63))
             else:
-                copy_len = (<DrakenConstantStringPayload*>self._unified_view.data).length
+                _cv_compress = _const_view(<DrakenStringArena*>self._unified_view.data)
+                copy_len = _cv_compress.length
                 if copy_len > 7:
                     copy_len = 7
                 acc = <uint64_t>0
-                memcpy(&acc, <const void*>(<DrakenConstantStringPayload*>self._unified_view.data).data, <size_t>copy_len)
+                memcpy(&acc, <const void*>_cv_compress.data, <size_t>copy_len)
                 acc = BSWAP64(acc)
                 for i in range(n):
                     out_buf[offset + i] = <int64_t>acc
             return
 
+        cdef const uint8_t* ci_vb_data
+        cdef int32_t* ci_vb_offsets
+        if ptr.data != NULL:
+            # VarBuffer-backed dense path: ptr.data/offsets are row-indexed and always
+            # authoritative (even when _unified_view.data holds a dict arena).
+            ci_vb_data = ptr.data
+            ci_vb_offsets = ptr.offsets
+            for i in range(n):
+                if has_nulls and ((null_bitmap[i >> 3] >> (i & 7)) & 1) == 0:
+                    out_buf[offset + i] = <int64_t>(-(1 << 63))
+                    continue
+                copy_len = ci_vb_offsets[i + 1] - ci_vb_offsets[i]
+                if copy_len > 7:
+                    copy_len = 7
+                acc = <uint64_t>0
+                if copy_len > 0:
+                    memcpy(&acc, <const void*>(ci_vb_data + ci_vb_offsets[i]), <size_t>copy_len)
+                acc = BSWAP64(acc)
+                out_buf[offset + i] = <int64_t>acc
+            return
+
+        # Arena-backed dense
+        ci_arena = <DrakenStringArena*>self._unified_view.data
         for i in range(n):
             if has_nulls and ((null_bitmap[i >> 3] >> (i & 7)) & 1) == 0:
                 out_buf[offset + i] = <int64_t>(-(1 << 63))
                 continue
 
-            start = ptr.offsets[i]
-            end = ptr.offsets[i + 1]
-            copy_len = end - start
+            ci_slot = &ci_arena.slots[i]
+            ci_data = str_data(ci_slot, ci_arena.arena)
+            copy_len = <Py_ssize_t>str_length(ci_slot)
             if copy_len > 7:
                 copy_len = 7
             acc = <uint64_t>0
-            memcpy(&acc, <const void*>(base + start), <size_t>copy_len)
+            memcpy(&acc, <const void*>ci_data, <size_t>copy_len)
             acc = BSWAP64(acc)
             out_buf[offset + i] = <int64_t>acc
 
@@ -2790,8 +3018,8 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t code_bytes
         cdef uint32_t* src_codes
         cdef uint32_t* dst_codes = NULL
-        cdef DrakenGermanArena* src_german_dict
-        cdef DrakenGermanArena* dst_german_dict
+        cdef DrakenStringArena* src_german_dict
+        cdef DrakenStringArena* dst_german_dict
         cdef Py_ssize_t take_dict_size
         cdef Py_ssize_t dict_arena_size
         cdef Py_ssize_t nb_bytes_dict
@@ -2802,14 +3030,14 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t src_len_check
         cdef StringVector dict_result
 
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             # Dict-in → dict-out: gather codes for the requested rows, share the
             # dictionary verbatim. Avoids materializing ~N decoded strings just
             # to throw most away. The dictionary is typically tiny relative to
             # the row count, so the per-row work drops to a packed-code copy.
             out_n = indices.shape[0]
             src_codes = <uint32_t*>uv.selection
-            src_german_dict = self._german_dict_values
+            src_german_dict = _string_arena(self)
             src_row_nulls = self.ptr.null_bitmap
             src_has_row_nulls = src_row_nulls != NULL
             src_len_check = <Py_ssize_t>self.ptr.length
@@ -2867,17 +3095,17 @@ cdef class StringVector(Vector):
             # Copy the dictionary verbatim. The dictionary is typically small
             # relative to N, and copying keeps ownership simple (each vector
             # owns its dict storage; freeing one doesn't dangle the other).
-            dst_german_dict = alloc_german_arena(
+            dst_german_dict = alloc_string_arena(
                 DRAKEN_STRING, <size_t>take_dict_size, <size_t>dict_arena_size
             )
             if dst_german_dict == NULL:
                 raise MemoryError()
-            # Copy GermanString slots verbatim (inline strings are self-contained;
+            # Copy DrakenStringSlot slots verbatim (inline strings are self-contained;
             # extern strings carry arena_offset which remains valid in the copied arena).
             memcpy(
                 dst_german_dict.slots,
                 <const void*>src_german_dict.slots,
-                <size_t>take_dict_size * sizeof(GermanString),
+                <size_t>take_dict_size * sizeof(DrakenStringSlot),
             )
             if dict_arena_size > 0:
                 memcpy(
@@ -2898,8 +3126,8 @@ cdef class StringVector(Vector):
                     <const void*>src_german_dict.null_bitmap,
                     <size_t>nb_bytes_dict,
                 )
-            dict_result._german_dict_values = dst_german_dict
-            dict_result._dict_ordered = self._dict_ordered
+            dict_result._owns_codes = (dst_codes != NULL)
+
             dict_result._unified_view = draken_vector_from_dict(
                 <void*>dst_german_dict, <uint32_t>take_dict_size,
                 dst_codes, <uint32_t>out_n,
@@ -2908,88 +3136,53 @@ cdef class StringVector(Vector):
             return dict_result
         cdef DrakenVarBuffer* src_ptr = self.ptr
         cdef Py_ssize_t n = indices.shape[0]
-        cdef size_t total_bytes = 0
         cdef Py_ssize_t i
         cdef int32_t src_idx
-        cdef Py_ssize_t dict_size
-        cdef int32_t* taken_codes = NULL
-        cdef int32_t[::1] taken_codes_view
-        cdef int32_t[::1] dictionary_offsets_view
-        cdef int32_t[::1] dictionary_lengths_view
-        cdef uint8_t[::1] dictionary_arena_view
 
-        cdef DrakenConstantStringPayload* _cp
+        cdef _ConstView _cp
 
-        # Constant discriminant: ptr.offsets == NULL AND _german_dict_values == NULL.
-        # Dense:    ptr.offsets != NULL.
-        # Dict:     _german_dict_values != NULL.
+        # Constant: ptr.offsets == NULL AND data_length >= length.
         if (self.ptr.offsets == NULL
-                and self._german_dict_values == NULL):
+                and self._unified_view.data_length >= self._unified_view.length):
             if uv.validity != NULL or uv.data == NULL:
                 return StringVector.from_constant(None, n, is_null=True)
             else:
-                _cp = <DrakenConstantStringPayload*>uv.data
+                _cp = _const_view(<DrakenStringArena*>uv.data)
                 return StringVector.from_constant(
                     PyBytes_FromStringAndSize(<char*>_cp.data, _cp.length),
                     n,
                     is_null=False,
                 )
 
+        # Dense path — arena-backed
+        cdef DrakenStringArena* tk_arena = <DrakenStringArena*>self._unified_view.data
+        cdef DrakenStringSlot* tk_slot
+        cdef const uint8_t* tk_sdata
+        cdef Py_ssize_t tk_len
+        cdef bint has_nulls = src_ptr.null_bitmap != NULL
+        cdef uint8_t src_bit
+
+        # Bounds-check up front
         for i in range(n):
             src_idx = indices[i]
             if src_idx < 0 or src_idx >= <Py_ssize_t> src_ptr.length:
                 raise IndexError(
                     f"Index {src_idx} out of bounds for length {src_ptr.length}"
                 )
-            total_bytes += <size_t>(
-                src_ptr.offsets[src_idx + 1] - src_ptr.offsets[src_idx]
-            )
 
-        cdef StringVector result = StringVector(<size_t> n, total_bytes)
-        cdef DrakenVarBuffer* dst_ptr = result.ptr
-        cdef char* src_data = <char*> src_ptr.data
-        cdef char* dst_data = <char*> dst_ptr.data
-        cdef int32_t* dst_offsets = dst_ptr.offsets
-        cdef int32_t dst_offset = 0
-        cdef bint has_nulls = src_ptr.null_bitmap != NULL
-        cdef Py_ssize_t nb_size
-        cdef int32_t start, end
-        cdef int32_t byte_len
-        cdef uint8_t src_bit
-
-        dst_offsets[0] = 0
-
-        if has_nulls and n > 0:
-            nb_size = (n + 7) >> 3
-            dst_ptr.null_bitmap = <uint8_t*> malloc(nb_size)
-            if dst_ptr.null_bitmap == NULL:
-                raise MemoryError()
-            memset(dst_ptr.null_bitmap, 0, nb_size)
-        else:
-            dst_ptr.null_bitmap = NULL
-
+        cdef StringVectorBuilder tk_builder = StringVectorBuilder(n, 0, True, False)
         for i in range(n):
             src_idx = indices[i]
-            start = src_ptr.offsets[src_idx]
-            end = src_ptr.offsets[src_idx + 1]
-            byte_len = end - start
-
-            if byte_len > 0:
-                memcpy(dst_data + dst_offset, src_data + start, byte_len)
-
-            dst_offset += byte_len
-            dst_offsets[i + 1] = dst_offset
-
             if has_nulls:
-                src_bit = (
-                    (src_ptr.null_bitmap[src_idx >> 3] >> (src_idx & 7)) & 1
-                )
-                if src_bit:
-                    dst_ptr.null_bitmap[i >> 3] |= (1 << (i & 7))
-
-        result._unified_view = draken_vector_from_dense(
-            <void*>result.ptr, <uint32_t>n, DRAKEN_STRING, result.ptr.null_bitmap)
-        return result
+                src_bit = (src_ptr.null_bitmap[src_idx >> 3] >> (src_idx & 7)) & 1
+                if not src_bit:
+                    tk_builder.append_null()
+                    continue
+            tk_slot = &tk_arena.slots[src_idx]
+            tk_sdata = str_data(tk_slot, tk_arena.arena)
+            tk_len = <Py_ssize_t>str_length(tk_slot)
+            tk_builder.append_bytes(<const char*>tk_sdata, tk_len)
+        return tk_builder.finish()
 
     cpdef object min(self):
         """Return lexicographically smallest non-null string value, or None if all null or empty."""
@@ -3004,26 +3197,29 @@ cdef class StringVector(Vector):
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t i
-        cdef int32_t start, end
-        cdef int32_t best_start = -1, best_end = -1
-        cdef char* data = <char*> ptr.data
         cdef int cmp
-        cdef int32_t cur_len, best_len, common_len
-        cdef char* best_ptr = NULL
-        cdef char* cur_ptr
+        cdef Py_ssize_t cur_len, best_len, common_len
+        cdef const uint8_t* cur_data
+        cdef const uint8_t* best_data = NULL
+        cdef Py_ssize_t best_len_val = 0
+        cdef bint found = False
         cdef uint8_t byte, bit
+        cdef DrakenStringArena* mn_arena
+        cdef DrakenStringSlot* mn_slot
 
-        cdef DrakenConstantStringPayload* _cp
+        cdef _ConstView _cp
 
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             return self.materialize().min()
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if uv.validity != NULL:
                 return None
-            _cp = <DrakenConstantStringPayload*>uv.data
+            _cp = _const_view(<DrakenStringArena*>uv.data)
             return PyBytes_FromStringAndSize(<char*>_cp.data, _cp.length)
 
+        # Arena-backed dense
+        mn_arena = <DrakenStringArena*>self._unified_view.data
         for i in range(n):
             if ptr.null_bitmap != NULL:
                 byte = ptr.null_bitmap[i >> 3]
@@ -3031,31 +3227,28 @@ cdef class StringVector(Vector):
                 if not bit:
                     continue
 
-            start = ptr.offsets[i]
-            end = ptr.offsets[i + 1]
+            mn_slot = &mn_arena.slots[i]
+            cur_data = str_data(mn_slot, mn_arena.arena)
+            cur_len = <Py_ssize_t>str_length(mn_slot)
 
-            if best_start == -1:
-                best_start = start
-                best_end = end
-                best_ptr = data + start
+            if not found:
+                best_data = cur_data
+                best_len_val = cur_len
+                found = True
                 continue
 
-            cur_ptr = data + start
-            cur_len = end - start
-            best_len = best_end - best_start
-            common_len = cur_len if cur_len < best_len else best_len
-            cmp = memcmp(cur_ptr, best_ptr, common_len)
+            common_len = cur_len if cur_len < best_len_val else best_len_val
+            cmp = memcmp(cur_data, best_data, common_len)
             # Tie on the shared prefix: shorter string is lex-smaller.
-            if cmp == 0 and cur_len < best_len:
+            if cmp == 0 and cur_len < best_len_val:
                 cmp = -1
             if cmp < 0:
-                best_start = start
-                best_end = end
-                best_ptr = cur_ptr
+                best_data = cur_data
+                best_len_val = cur_len
 
-        if best_start == -1:
+        if not found:
             return None
-        return PyBytes_FromStringAndSize(best_ptr, best_end - best_start)
+        return PyBytes_FromStringAndSize(<const char*>best_data, best_len_val)
 
     cpdef object max(self):
         """Return lexicographically largest non-null string value, or None if all null or empty."""
@@ -3070,26 +3263,29 @@ cdef class StringVector(Vector):
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t i
-        cdef int32_t start, end
-        cdef int32_t best_start = -1, best_end = -1
-        cdef char* data = <char*> ptr.data
         cdef int cmp
-        cdef int32_t cur_len, best_len, common_len
-        cdef char* best_ptr = NULL
-        cdef char* cur_ptr
+        cdef Py_ssize_t cur_len, best_len_val, common_len
+        cdef const uint8_t* cur_data
+        cdef const uint8_t* best_data = NULL
+        cdef bint found = False
         cdef uint8_t byte, bit
+        cdef DrakenStringArena* mx_arena
+        cdef DrakenStringSlot* mx_slot
+        best_len_val = 0
 
-        cdef DrakenConstantStringPayload* _cp
+        cdef _ConstView _cp
 
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             return self.materialize().max()
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if uv.validity != NULL:
                 return None
-            _cp = <DrakenConstantStringPayload*>uv.data
+            _cp = _const_view(<DrakenStringArena*>uv.data)
             return PyBytes_FromStringAndSize(<char*>_cp.data, _cp.length)
 
+        # Arena-backed dense
+        mx_arena = <DrakenStringArena*>self._unified_view.data
         for i in range(n):
             if ptr.null_bitmap != NULL:
                 byte = ptr.null_bitmap[i >> 3]
@@ -3097,31 +3293,28 @@ cdef class StringVector(Vector):
                 if not bit:
                     continue
 
-            start = ptr.offsets[i]
-            end = ptr.offsets[i + 1]
+            mx_slot = &mx_arena.slots[i]
+            cur_data = str_data(mx_slot, mx_arena.arena)
+            cur_len = <Py_ssize_t>str_length(mx_slot)
 
-            if best_start == -1:
-                best_start = start
-                best_end = end
-                best_ptr = data + start
+            if not found:
+                best_data = cur_data
+                best_len_val = cur_len
+                found = True
                 continue
 
-            cur_ptr = data + start
-            cur_len = end - start
-            best_len = best_end - best_start
-            common_len = cur_len if cur_len < best_len else best_len
-            cmp = memcmp(cur_ptr, best_ptr, common_len)
+            common_len = cur_len if cur_len < best_len_val else best_len_val
+            cmp = memcmp(cur_data, best_data, common_len)
             # Tie on the shared prefix: longer string is lex-larger.
-            if cmp == 0 and cur_len > best_len:
+            if cmp == 0 and cur_len > best_len_val:
                 cmp = 1
             if cmp > 0:
-                best_start = start
-                best_end = end
-                best_ptr = cur_ptr
+                best_data = cur_data
+                best_len_val = cur_len
 
-        if best_start == -1:
+        if not found:
             return None
-        return PyBytes_FromStringAndSize(best_ptr, best_end - best_start)
+        return PyBytes_FromStringAndSize(<const char*>best_data, best_len_val)
 
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
         """Compare two strings at given indices lexicographically. Returns -1, 0, 1. Assumes non-null."""
@@ -3135,7 +3328,7 @@ cdef class StringVector(Vector):
         cdef const uint8_t* lp
         cdef const uint8_t* rp
 
-        if self._german_dict_values != NULL:
+        if self._unified_view.data_length < self._unified_view.length:
             # Dict-aware path: compare via codes without materializing the
             # dictionary. For an ordered dict, code order matches value order, so
             # a single integer compare suffices. Otherwise dereference into the
@@ -3144,8 +3337,8 @@ cdef class StringVector(Vector):
             rc = self._unified_view.selection[right_idx]
             if lc == rc:
                 return 0
-            if self._dict_ordered:
-                return -1 if lc < rc else 1
+            # Ordered-dict shortcut is gone; the dict-ordered flag is no longer
+            # tracked under the unified format. Fall through to value compare.
             lp = self.c_dict_value_ptr(<Py_ssize_t>lc, &left_len)
             rp = self.c_dict_value_ptr(<Py_ssize_t>rc, &right_len)
             common_len = left_len if left_len < right_len else right_len
@@ -3158,22 +3351,20 @@ cdef class StringVector(Vector):
                 return 1
             return 0
 
-        ptr = self.ptr
-        data = <char*> ptr.data
-
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             return 0
 
-        left_start = ptr.offsets[left_idx]
-        left_end = ptr.offsets[left_idx + 1]
-        right_start = ptr.offsets[right_idx]
-        right_end = ptr.offsets[right_idx + 1]
-
-        left_len = left_end - left_start
-        right_len = right_end - right_start
+        # Arena-backed dense
+        cdef DrakenStringArena* ca_arena = <DrakenStringArena*>self._unified_view.data
+        cdef DrakenStringSlot* ca_left_slot = &ca_arena.slots[left_idx]
+        cdef DrakenStringSlot* ca_right_slot = &ca_arena.slots[right_idx]
+        lp = str_data(ca_left_slot, ca_arena.arena)
+        rp = str_data(ca_right_slot, ca_arena.arena)
+        left_len = <Py_ssize_t>str_length(ca_left_slot)
+        right_len = <Py_ssize_t>str_length(ca_right_slot)
 
         common_len = left_len if left_len < right_len else right_len
-        cmp_result = memcmp(data + left_start, data + right_start, common_len)
+        cmp_result = memcmp(lp, rp, common_len)
 
         if cmp_result != 0:
             return -1 if cmp_result < 0 else 1
@@ -3190,7 +3381,7 @@ cdef class StringVector(Vector):
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef uint8_t byte
 
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             return uv.validity != NULL
 
         if ptr.null_bitmap == NULL:
@@ -3206,13 +3397,13 @@ cdef class StringVector(Vector):
     def __str__(self):
         cdef list vals = []
         cdef Py_ssize_t i, k
-        cdef DrakenConstantStringPayload* _cp_str
+        cdef _ConstView _cp_str
         k = min(<Py_ssize_t>self.ptr.length, 5)
-        if self.ptr.offsets == NULL and self._german_dict_values == NULL:
+        if self._unified_view.data_length == 1:
             if self._unified_view.validity != NULL:
                 vals = [None] * k
             else:
-                _cp_str = <DrakenConstantStringPayload*>self._unified_view.data
+                _cp_str = _const_view(<DrakenStringArena*>self._unified_view.data)
                 vals = [PyBytes_FromStringAndSize(<char*>_cp_str.data, _cp_str.length)] * k
             return f"<StringVector len={self.ptr.length} values={vals}>"
         for i in range(k):
@@ -3230,21 +3421,17 @@ cdef struct StringElement:
 cdef class _StringVectorIterator:
     """Efficient iterator that avoids repeated attribute lookups during scans."""
 
-    cdef DrakenVarBuffer* _ptr
+    cdef DrakenStringArena* _arena
     cdef Py_ssize_t _pos
     cdef Py_ssize_t _length
-    cdef char* _base
-    cdef int32_t* _offsets
     cdef uint8_t* _nulls
     cdef bint _has_nulls
 
     def __cinit__(self, StringVector vec):
-        self._ptr = vec.ptr
+        self._arena = <DrakenStringArena*>vec._unified_view.data
         self._pos = 0
-        self._length = self._ptr.length
-        self._base = <char*>self._ptr.data
-        self._offsets = self._ptr.offsets
-        self._nulls = self._ptr.null_bitmap
+        self._length = vec.ptr.length
+        self._nulls = vec.ptr.null_bitmap
         self._has_nulls = (self._nulls != NULL)
 
     def __iter__(self):
@@ -3261,9 +3448,9 @@ cdef class _StringVectorIterator:
         if self._has_nulls and ((self._nulls[i >> 3] >> (i & 7)) & 1) == 0:
             return None
 
-        cdef int32_t start = self._offsets[i]
-        cdef int32_t end = self._offsets[i + 1]
-        return PyBytes_FromStringAndSize(self._base + start, end - start)
+        cdef DrakenStringSlot* slot = &self._arena.slots[i]
+        cdef Py_ssize_t slen = str_length(slot)
+        return PyBytes_FromStringAndSize(<char*>str_data(slot, self._arena.arena), slen)
 
 
 cdef class _StringVectorCIterator:
@@ -3272,26 +3459,27 @@ cdef class _StringVectorCIterator:
     """
 
     def __cinit__(self):
-        # Initialize with NULL; must use _from_ptr factory method
-        self._ptr = NULL
+        # Initialize with NULL; must use _from_arena factory method
+        self._arena = NULL
         self._pos = 0
         self._length = 0
-        self._base = NULL
-        self._offsets = NULL
         self._nulls = NULL
         self._has_nulls = False
 
     @staticmethod
     cdef _StringVectorCIterator _from_ptr(DrakenVarBuffer* ptr):
-        """Factory method to create iterator from a buffer pointer."""
+        """Factory method - kept for API compatibility; delegates to _from_arena."""
+        raise RuntimeError("_StringVectorCIterator._from_ptr: use StringVector.c_iter() instead")
+
+    @staticmethod
+    cdef _StringVectorCIterator _from_arena(DrakenStringArena* arena, Py_ssize_t length, uint8_t* nulls):
+        """Factory method to create iterator from a StringArena."""
         cdef _StringVectorCIterator it = _StringVectorCIterator.__new__(_StringVectorCIterator)
-        it._ptr = ptr
+        it._arena = arena
         it._pos = 0
-        it._length = ptr.length
-        it._base = <char*>ptr.data
-        it._offsets = ptr.offsets
-        it._nulls = ptr.null_bitmap
-        it._has_nulls = (it._nulls != NULL)
+        it._length = length
+        it._nulls = nulls
+        it._has_nulls = (nulls != NULL)
         return it
 
     cdef inline bint next(self, StringElement* elem) nogil:
@@ -3302,6 +3490,7 @@ cdef class _StringVectorCIterator:
             return False
 
         cdef Py_ssize_t i = self._pos
+        cdef DrakenStringSlot* slot
         self._pos += 1
 
         # Check for null
@@ -3310,8 +3499,9 @@ cdef class _StringVectorCIterator:
             elem.length = 0
             elem.is_null = True
         else:
-            elem.ptr = self._base + self._offsets[i]
-            elem.length = self._offsets[i + 1] - self._offsets[i]
+            slot = &self._arena.slots[i]
+            elem.ptr = <char*>str_data(slot, self._arena.arena)
+            elem.length = str_length(slot)
             elem.is_null = False
 
         return True
@@ -3334,43 +3524,50 @@ cdef class _StringVectorCIterator:
             raise IndexError("Index out of range")
 
         cdef StringElement elem
-        cdef int32_t start, end
+        cdef DrakenStringSlot* slot
 
         if self._nulls != NULL and ((self._nulls[index >> 3] >> (index & 7)) & 1) == 0:
             elem.ptr = NULL
             elem.length = 0
             elem.is_null = True
         else:
-            start = self._ptr.offsets[index]
-            end = self._ptr.offsets[index + 1]
-            elem.ptr = self._base + start
-            elem.length = end - start
+            slot = &self._arena.slots[index]
+            elem.ptr = <char*>str_data(slot, self._arena.arena)
+            elem.length = str_length(slot)
             elem.is_null = False
 
         return elem
 
 
 cdef class _StringVectorView:
-    """Zero-copy helper exposing raw pointer/length access."""
+    """Per-row accessor reading through the unified view.
+
+    Resolves each row as ``arena.slots[selection[i]]`` — uniform across
+    every layout. Holds direct pointers captured at construction so the
+    inner loop is a single indirect read per row.
+    """
 
     def __cinit__(self, StringVector vec):
-        self._ptr = vec.ptr
-        self._data = <char*> self._ptr.data
-        self._offsets = self._ptr.offsets
-        self._nulls = self._ptr.null_bitmap
+        cdef DrakenVector* uv = vec.unified()
+        self._arena = <DrakenStringArena*>uv.data
+        self._selection = uv.selection
+        self._nulls = uv.validity
+        self._length = <Py_ssize_t>uv.length
 
     cpdef intptr_t value_ptr(self, Py_ssize_t i):
-        if i < 0 or i >= self._ptr.length:
+        if i < 0 or i >= self._length:
             raise IndexError("Index out of range")
-        return <intptr_t> (self._data + self._offsets[i])
+        cdef DrakenStringSlot* slot = &self._arena.slots[self._selection[i]]
+        return <intptr_t>str_data(slot, self._arena.arena)
 
     cpdef Py_ssize_t value_len(self, Py_ssize_t i):
-        if i < 0 or i >= self._ptr.length:
+        if i < 0 or i >= self._length:
             raise IndexError("Index out of range")
-        return <Py_ssize_t>(<uint32_t>self._offsets[i + 1] - <uint32_t>self._offsets[i])
+        cdef DrakenStringSlot* slot = &self._arena.slots[self._selection[i]]
+        return <Py_ssize_t>str_length(slot)
 
     cpdef bint is_null(self, Py_ssize_t i):
-        if i < 0 or i >= self._ptr.length:
+        if i < 0 or i >= self._length:
             raise IndexError("Index out of range")
         if self._nulls == NULL:
             return False
@@ -3565,7 +3762,15 @@ cdef class StringVectorBuilder:
         self._mask_user_provided = True
 
     cpdef StringVector finish(self):
-        """Finalize construction and hand off the built vector."""
+        """Finalize construction and hand off the built vector.
+
+        Phase 6: the builder accumulates values into the legacy DrakenVarBuffer
+        (`self._vec.ptr`), then converts to a DrakenStringArena (one slot per
+        row) at finish time. _unified_view.data points at the arena, not the
+        VarBuffer. `vec.ptr` is kept allocated as a transitional shell with
+        NULL'd data/offsets; its null_bitmap remains the canonical row-level
+        null bitmap. Phase 7 will retire `vec.ptr` entirely.
+        """
         if self._finished:
             return self._vec
         if self._next_index != self._length:
@@ -3579,11 +3784,26 @@ cdef class StringVectorBuilder:
                 f"builder consumed {self._offset} bytes but expected {self._bytes_cap}"
             )
         self._finished = True
+
+        cdef Py_ssize_t row_count = self._length
+        cdef DrakenStringArena* arena = _varbuffer_to_string_arena(
+            <const uint8_t*>self._vec.ptr.data,
+            self._vec.ptr.offsets,
+            self._vec.ptr.null_bitmap,
+            row_count,
+        )
+
+        # Phase 6 dual-alive: keep VarBuffer intact alongside the arena until
+        # morsel.pyx and other callers have been migrated away from ptr.offsets/ptr.data.
+        # Phase 7 will free data and offsets once all callers use arena exclusively.
+
+        # Wire the StringArena as the unified-view payload.
+
         self._vec._unified_view = draken_vector_from_dense(
-            <void*>self._vec.ptr, <uint32_t>self._length, DRAKEN_STRING,
+            <void*>arena, <uint32_t>row_count, DRAKEN_STRING,
             self._vec.ptr.null_bitmap,
         )
-        # Track A: populate min/max metadata over the dense buffer.
+        # Track A: populate min/max metadata over the new arena.
         _populate_dense_min_max(self._vec)
         return self._vec
 
@@ -3718,8 +3938,18 @@ cdef StringVector from_arrow(object array):
         vec.ptr.null_bitmap = NULL
 
     vec.ptr.type = DRAKEN_STRING
+    # Phase 6 dual-alive: build a StringArena alongside the VarBuffer.
+    cdef DrakenStringArena* fa_arena = _varbuffer_to_string_arena(
+        <const uint8_t*>vec.ptr.data,
+        vec.ptr.offsets,
+        vec.ptr.null_bitmap,
+        <Py_ssize_t>vec.ptr.length,
+    )
+    # Phase 6: Keep VarBuffer pointer intact (Arrow-borrowed, not freed, owns_data=False).
+    # Phase 7 will NULL vec.ptr.data / vec.ptr.offsets once morsel.pyx is migrated.
+
     vec._unified_view = draken_vector_from_dense(
-        <void*>vec.ptr, <uint32_t>vec.ptr.length, DRAKEN_STRING,
+        <void*>fa_arena, <uint32_t>vec.ptr.length, DRAKEN_STRING,
         vec.ptr.null_bitmap,
     )
     # Track A: dense Arrow ingest — compute min/max in one pass.
@@ -4003,9 +4233,9 @@ cdef StringVector from_dict_buffers_dict_only(
     object row_validity=None,
 ):
     """Same inputs as from_dict_buffers, but produces a dictionary-encoded StringVector
-    (_german_dict_values != NULL). Used by the cpp-pipeline so downstream
-    Morsel.slice / StringVector.take hit the dict-preserving fast path instead of
-    materialising a fresh string buffer per slice."""
+    (data_length < length in the unified view). Used by the cpp-pipeline so
+    downstream Morsel.slice / StringVector.take hit the dict-preserving fast path
+    instead of materialising a fresh string buffer per slice."""
     cdef Py_ssize_t row_count = codes.shape[0]
     cdef Py_ssize_t dict_size = dict_lengths.shape[0]
     cdef Py_ssize_t i
@@ -4193,18 +4423,18 @@ cdef StringVector from_packed_dict(
 
 cdef Py_ssize_t _dict_find_code(StringVector vec, const char* val_ptr, Py_ssize_t val_len) noexcept nogil:
     """Return the code index for val in vec's dictionary, or -1 if absent."""
-    cdef DrakenGermanArena* gdv = vec._german_dict_values
+    cdef DrakenStringArena* gdv = _string_arena(vec)
     cdef Py_ssize_t d = <Py_ssize_t>gdv.length
     cdef Py_ssize_t i
-    cdef GermanString* slot
+    cdef DrakenStringSlot* slot
     cdef uint32_t entry_len
     cdef const uint8_t* entry_data
     for i in range(d):
         slot = &gdv.slots[i]
-        entry_len = gs_length(slot)
+        entry_len = str_length(slot)
         if <Py_ssize_t>entry_len != val_len:
             continue
-        entry_data = gs_data(slot, gdv.arena)
+        entry_data = str_data(slot, gdv.arena)
         if val_len == 0 or memcmp(<const char*>entry_data, val_ptr, <size_t>val_len) == 0:
             return i
     return -1
@@ -4282,13 +4512,13 @@ cdef BoolVector _codes_to_boolvector_neq(StringVector vec, Py_ssize_t target_cod
 
 cdef BoolVector _dict_ordered_scalar(StringVector vec, bytes value, int op):
     """Dict-level ordered scalar compare without materializing. op: 0=lt,1=gt,2=lte,3=gte."""
-    cdef DrakenGermanArena* gdv = vec._german_dict_values
+    cdef DrakenStringArena* gdv = _string_arena(vec)
     cdef Py_ssize_t d = <Py_ssize_t>gdv.length
     cdef const char* val_ptr = PyBytes_AS_STRING(value)
     cdef Py_ssize_t val_len = len(value)
     cdef uint8_t* pass_array = <uint8_t*>malloc(d)
     cdef Py_ssize_t i
-    cdef GermanString* dos_slot
+    cdef DrakenStringSlot* dos_slot
     cdef const uint8_t* dos_data
     cdef uint32_t dos_len
     cdef int cmp_res
@@ -4298,8 +4528,8 @@ cdef BoolVector _dict_ordered_scalar(StringVector vec, bytes value, int op):
     try:
         for i in range(d):
             dos_slot = &gdv.slots[i]
-            dos_len = gs_length(dos_slot)
-            dos_data = gs_data(dos_slot, gdv.arena)
+            dos_len = str_length(dos_slot)
+            dos_data = str_data(dos_slot, gdv.arena)
             cmp_res = _compare_bytes_lex(
                 dos_data, <Py_ssize_t>dos_len,
                 <const uint8_t*>val_ptr, val_len,
@@ -4354,16 +4584,16 @@ cdef BoolVector _dict_compare_pass_array(StringVector vec, uint8_t* pass_array):
 
 cdef StringVector _materialize_dict_string(StringVector vec):
     """Expand a dict-only StringVector to a dense StringVector (no src ptr.data needed)."""
-    if vec._german_dict_values == NULL:
+    if vec._unified_view.data_length >= vec._unified_view.length:
         raise ValueError("Dictionary vector missing required data structures")
-    cdef DrakenGermanArena* mat_gdict = vec._german_dict_values
+    cdef DrakenStringArena* mat_gdict = _string_arena(vec)
     cdef const uint32_t* codes = vec._unified_view.selection
     cdef uint8_t* null_bitmap = vec.ptr.null_bitmap
     cdef Py_ssize_t n = <Py_ssize_t>vec.ptr.length
     cdef Py_ssize_t total_bytes = 0
     cdef Py_ssize_t i
     cdef uint32_t code
-    cdef GermanString* mat_slot
+    cdef DrakenStringSlot* mat_slot
     cdef const uint8_t* mat_data
     cdef uint32_t mat_len
     cdef StringVectorBuilder builder
@@ -4376,7 +4606,7 @@ cdef StringVector _materialize_dict_string(StringVector vec):
         if code >= dict_size:
             raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
         mat_slot = &mat_gdict.slots[code]
-        total_bytes += <Py_ssize_t>gs_length(mat_slot)
+        total_bytes += <Py_ssize_t>str_length(mat_slot)
 
     builder = StringVectorBuilder(<Py_ssize_t>n, total_bytes, resizable=False)
     for i in range(n):
@@ -4387,8 +4617,8 @@ cdef StringVector _materialize_dict_string(StringVector vec):
             if code >= dict_size:
                 raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
             mat_slot = &mat_gdict.slots[code]
-            mat_len = gs_length(mat_slot)
-            mat_data = gs_data(mat_slot, mat_gdict.arena)
+            mat_len = str_length(mat_slot)
+            mat_data = str_data(mat_slot, mat_gdict.arena)
             builder.append_bytes(<const char*>mat_data, <Py_ssize_t>mat_len)
 
     return builder.finish()
@@ -4421,8 +4651,8 @@ cdef StringVector make_string_dict_only(
     """
     cdef StringVector vec = StringVector(0, 0, True)  # wrap=True: ptr starts as NULL
     cdef Py_ssize_t nb_bytes
-    cdef DrakenGermanArena* gs_dict
-    cdef GermanString* gs_slot
+    cdef DrakenStringArena* gs_dict
+    cdef DrakenStringSlot* gs_slot
     cdef Py_ssize_t i
     cdef uint32_t entry_len
     cdef uint64_t arena_offset
@@ -4468,8 +4698,8 @@ cdef StringVector make_string_dict_only(
             for i in range(row_count):
                 codes_u32[i] = codes_u32_src[i]
 
-    # Dictionary values: stored as DrakenGermanArena (GermanString slots + byte arena)
-    gs_dict = alloc_german_arena(DRAKEN_STRING, <size_t>dict_size, <size_t>arena_size)
+    # Dictionary values: stored as DrakenStringArena (DrakenStringSlot slots + byte arena)
+    gs_dict = alloc_string_arena(DRAKEN_STRING, <size_t>dict_size, <size_t>arena_size)
     if gs_dict == NULL:
         raise MemoryError()
     # Populate slots from dict_offsets / dict_data.
@@ -4482,23 +4712,67 @@ cdef StringVector make_string_dict_only(
             entry_len = dict_offsets[i + 1] - dict_offsets[i]
         else:
             entry_len = <uint32_t>(<Py_ssize_t>arena_size - <Py_ssize_t>dict_offsets[i])
-        if entry_len <= <uint32_t>GS_INLINE_MAX:
-            gs_init_inline(gs_slot, dict_data + dict_offsets[i], entry_len)
+        if entry_len <= <uint32_t>STR_INLINE_MAX:
+            str_init_inline(gs_slot, dict_data + dict_offsets[i], entry_len)
         else:
             # arena_offset is the byte offset into gs_dict.arena where this string lives
-            gs_init_extern(gs_slot, dict_data + dict_offsets[i], entry_len, <uint64_t>dict_offsets[i])
+            str_init_extern(gs_slot, dict_data + dict_offsets[i], entry_len, <uint64_t>dict_offsets[i])
     if arena_size > 0:
         memcpy(gs_dict.arena, <const void*>dict_data, <size_t>arena_size)
     gs_dict.arena_used = <size_t>arena_size
     gs_dict.length = <size_t>dict_size
-    vec._german_dict_values = gs_dict
-    vec._dict_ordered = 0
+    vec._owns_codes = (codes_u32 != NULL)
+
 
     vec._unified_view = draken_vector_from_dict(
         <void*>gs_dict, <uint32_t>dict_size,
         codes_u32, <uint32_t>row_count,
         DRAKEN_STRING, vec.ptr.null_bitmap,
     )
+
+    # When dict_size >= row_count the discriminant (data_length < length) cannot
+    # distinguish dict from dense. Materialize a VarBuffer so dense-path readers
+    # can fall back to ptr.data/offsets (which are always row-indexed).
+    cdef Py_ssize_t mat_total_bytes
+    cdef Py_ssize_t mat_i
+    cdef uint32_t mat_code
+    cdef uint32_t mat_entry_len
+    cdef uint8_t* mat_data
+    cdef int32_t* mat_offsets
+    cdef int32_t mat_pos
+    if dict_size >= row_count and row_count > 0 and codes_u32 != NULL:
+        mat_total_bytes = 0
+        for mat_i in range(row_count):
+            mat_code = codes_u32[mat_i]
+            if mat_code < <uint32_t>dict_size:
+                if mat_code < <uint32_t>dict_size - 1:
+                    mat_entry_len = dict_offsets[mat_code + 1] - dict_offsets[mat_code]
+                else:
+                    mat_entry_len = <uint32_t>(<Py_ssize_t>arena_size - <Py_ssize_t>dict_offsets[mat_code])
+                mat_total_bytes += <Py_ssize_t>mat_entry_len
+
+        mat_data = <uint8_t*>malloc(<size_t>(mat_total_bytes if mat_total_bytes > 0 else 1))
+        mat_offsets = <int32_t*>malloc(<size_t>((row_count + 1) * sizeof(int32_t)))
+        if mat_data != NULL and mat_offsets != NULL:
+            mat_offsets[0] = 0
+            mat_pos = 0
+            for mat_i in range(row_count):
+                mat_code = codes_u32[mat_i]
+                if mat_code < <uint32_t>dict_size:
+                    if mat_code < <uint32_t>dict_size - 1:
+                        mat_entry_len = dict_offsets[mat_code + 1] - dict_offsets[mat_code]
+                    else:
+                        mat_entry_len = <uint32_t>(<Py_ssize_t>arena_size - <Py_ssize_t>dict_offsets[mat_code])
+                    if mat_entry_len > 0:
+                        memcpy(mat_data + mat_pos, dict_data + dict_offsets[mat_code], <size_t>mat_entry_len)
+                        mat_pos += mat_entry_len
+                mat_offsets[mat_i + 1] = mat_pos
+            vec.ptr.data = mat_data
+            vec.ptr.offsets = mat_offsets
+        else:
+            free(mat_data)
+            free(mat_offsets)
+
     # Track A: min/max over dict values (small N).
     _populate_dict_min_max(vec)
     return vec
@@ -4598,8 +4872,17 @@ cdef StringVector from_arrow_struct(object array):
         offset += len(json_bytes)
         ptr.offsets[i+1] = offset
 
+    # Phase 6 dual-alive: build a StringArena alongside the VarBuffer.
+    # Phase 7 will free VarBuffer data/offsets once morsel.pyx is migrated.
+    cdef DrakenStringArena* json_arena = _varbuffer_to_string_arena(
+        <const uint8_t*>vec.ptr.data,
+        vec.ptr.offsets,
+        vec.ptr.null_bitmap,
+        <Py_ssize_t>vec.ptr.length,
+    )
+
     vec._unified_view = draken_vector_from_dense(
-        <void*>vec.ptr, <uint32_t>vec.ptr.length, DRAKEN_STRING,
+        <void*>json_arena, <uint32_t>vec.ptr.length, DRAKEN_STRING,
         vec.ptr.null_bitmap,
     )
     return vec
@@ -4611,15 +4894,17 @@ cdef StringVector _materialize_const_string(StringVector const_vec):
     cdef Py_ssize_t val_len
     cdef Py_ssize_t i
 
+    cdef _ConstView _cv_mat
     if const_vec._unified_view.validity != NULL or const_vec._unified_view.data == NULL:
         builder = StringVectorBuilder(n, 0)
         for i in range(n):
             builder.append_null()
     else:
-        val_len = <Py_ssize_t>(<DrakenConstantStringPayload*>const_vec._unified_view.data).length
+        _cv_mat = _const_view(<DrakenStringArena*>const_vec._unified_view.data)
+        val_len = <Py_ssize_t>_cv_mat.length
         builder = StringVectorBuilder(n, n * val_len)
         for i in range(n):
-            builder.append_bytes(<char*>(<DrakenConstantStringPayload*>const_vec._unified_view.data).data, val_len)
+            builder.append_bytes(<char*>_cv_mat.data, val_len)
     return builder.finish()
 
 
@@ -4629,11 +4914,21 @@ cdef StringVector _materialize_const_string(StringVector const_vec):
 cpdef StringVector uppercase(StringVector input):
     """
     Return a new StringVector with all non-null values uppercased.
-    Uses SIMD operations on the entire data buffer for maximum performance.
+    Operates on the StringArena encoding; applies SIMD transform per string.
     """
-    # Handle constant-encoded vectors: they have NULL offsets, so materialize first
-    if input.ptr.offsets == NULL:
-        builder = StringVectorBuilder.with_estimate(len(input), 16)
+    cdef Py_ssize_t n = input.ptr.length
+    cdef DrakenStringArena* in_arena = <DrakenStringArena*>input._unified_view.data
+    cdef DrakenStringArena* out_arena
+    cdef DrakenStringSlot* in_slot
+    cdef uint8_t* nb = input.ptr.null_bitmap
+    cdef Py_ssize_t i
+    cdef Py_ssize_t slen
+    cdef const uint8_t* sdata
+    cdef Py_ssize_t nb_size
+
+    # constant: data_length == 1
+    if input._unified_view.data_length == 1:
+        builder = StringVectorBuilder.with_estimate(n, 16)
         for val in input.to_pylist():
             if val is None:
                 builder.append_null()
@@ -4641,38 +4936,55 @@ cpdef StringVector uppercase(StringVector input):
                 builder.append(val.upper())
         return builder.finish()
 
-    cdef DrakenVarBuffer* in_ptr = input.ptr
-    cdef Py_ssize_t n = in_ptr.length
-    cdef int32_t total_bytes = in_ptr.offsets[n]
-    cdef Py_ssize_t nb_size
+    # Allocate output arena with same capacity as input
+    out_arena = alloc_string_arena(DRAKEN_STRING, n, in_arena.arena_used)
 
-    # Allocate new buffer with same size
-    cdef StringVector result = StringVector(n, total_bytes)
-    cdef DrakenVarBuffer* out_ptr = result.ptr
+    # Copy arena bytes, then SIMD-transform the whole arena buffer
+    if in_arena.arena_used > 0:
+        memcpy(out_arena.arena, in_arena.arena, in_arena.arena_used)
+        simd_to_upper(<char*>out_arena.arena, in_arena.arena_used)
+    out_arena.arena_used = in_arena.arena_used
 
-    cdef char* in_data = <char*>in_ptr.data
-    cdef char* out_data = <char*>out_ptr.data
+    # Copy slots; for inline strings, apply transform to inline bytes in the raw slot memory.
+    # Long-form strings are handled by the SIMD pass over the arena buffer above.
+    memcpy(out_arena.slots, in_arena.slots, n * sizeof(DrakenStringSlot))
+    for i in range(n):
+        if nb != NULL and ((nb[i >> 3] >> (i & 7)) & 1) == 0:
+            continue  # null row: leave slot as-is
+        in_slot = &out_arena.slots[i]
+        slen = str_length(<const DrakenStringSlot*>in_slot)
+        if slen > 0 and str_is_inline(<const DrakenStringSlot*>in_slot):
+            # Inline bytes are embedded in the slot; transform in-place.
+            # str_data returns a pointer into the slot's inline storage.
+            simd_to_upper(<char*>str_data(<const DrakenStringSlot*>in_slot, NULL), slen)
 
-    # Copy entire data buffer
-    if total_bytes > 0:
-        memcpy(out_data, in_data, total_bytes)
-        # Apply uppercase transformation to entire buffer using SIMD
-        simd_to_upper(out_data, total_bytes)
-
-    # Copy offsets
-    memcpy(out_ptr.offsets, in_ptr.offsets, (n + 1) * sizeof(int32_t))
-
-    # Copy null bitmap if present
-    if in_ptr.null_bitmap != NULL:
+    # Copy null bitmap
+    cdef uint8_t* out_nb = NULL
+    if nb != NULL:
         nb_size = (n + 7) // 8
-        out_ptr.null_bitmap = <uint8_t*> malloc(nb_size)
-        if out_ptr.null_bitmap == NULL:
+        out_nb = <uint8_t*>malloc(nb_size)
+        if out_nb == NULL:
+            free_string_arena(out_arena)
             raise MemoryError()
-        memcpy(out_ptr.null_bitmap, in_ptr.null_bitmap, nb_size)
+        memcpy(out_nb, nb, nb_size)
+
+    # Build result StringVector (wrap=True: no VarBuffer allocated by __cinit__)
+    cdef StringVector result = StringVector(0, 0, wrap=True)
+    result.ptr = <DrakenVarBuffer*>malloc(sizeof(DrakenVarBuffer))
+    if result.ptr == NULL:
+        free_string_arena(out_arena)
+        if out_nb != NULL:
+            free(out_nb)
+        raise MemoryError()
+    result.ptr.data = NULL
+    result.ptr.offsets = NULL
+    result.ptr.null_bitmap = out_nb
+    result.ptr.length = n
+    result.ptr.type = DRAKEN_STRING
+    result.owns_data = True
 
     result._unified_view = draken_vector_from_dense(
-        <void*>result.ptr, <uint32_t>n, DRAKEN_STRING,
-        result.ptr.null_bitmap,
+        <void*>out_arena, <uint32_t>n, DRAKEN_STRING, out_nb,
     )
     return result
 
@@ -4680,11 +4992,20 @@ cpdef StringVector uppercase(StringVector input):
 cpdef StringVector lowercase(StringVector input):
     """
     Return a new StringVector with all non-null values lowercased.
-    Uses SIMD operations on the entire data buffer for maximum performance.
+    Operates on the StringArena encoding; applies SIMD transform per string.
     """
-    # Handle constant-encoded vectors: they have NULL offsets, so materialize first
-    if input.ptr.offsets == NULL:
-        builder = StringVectorBuilder.with_estimate(len(input), 16)
+    cdef Py_ssize_t n = input.ptr.length
+    cdef DrakenStringArena* in_arena = <DrakenStringArena*>input._unified_view.data
+    cdef DrakenStringArena* out_arena
+    cdef DrakenStringSlot* in_slot
+    cdef uint8_t* nb = input.ptr.null_bitmap
+    cdef Py_ssize_t i
+    cdef Py_ssize_t slen
+    cdef Py_ssize_t nb_size
+
+    # constant: data_length == 1
+    if input._unified_view.data_length == 1:
+        builder = StringVectorBuilder.with_estimate(n, 16)
         for val in input.to_pylist():
             if val is None:
                 builder.append_null()
@@ -4692,38 +5013,53 @@ cpdef StringVector lowercase(StringVector input):
                 builder.append(val.lower())
         return builder.finish()
 
-    cdef DrakenVarBuffer* in_ptr = input.ptr
-    cdef Py_ssize_t n = in_ptr.length
-    cdef int32_t total_bytes = in_ptr.offsets[n]
-    cdef Py_ssize_t nb_size
+    # Allocate output arena with same capacity as input
+    out_arena = alloc_string_arena(DRAKEN_STRING, n, in_arena.arena_used)
 
-    # Allocate new buffer with same size
-    cdef StringVector result = StringVector(n, total_bytes)
-    cdef DrakenVarBuffer* out_ptr = result.ptr
+    # Copy arena bytes, then SIMD-transform the whole arena buffer
+    if in_arena.arena_used > 0:
+        memcpy(out_arena.arena, in_arena.arena, in_arena.arena_used)
+        simd_to_lower(<char*>out_arena.arena, in_arena.arena_used)
+    out_arena.arena_used = in_arena.arena_used
 
-    cdef char* in_data = <char*>in_ptr.data
-    cdef char* out_data = <char*>out_ptr.data
+    # Copy slots; for inline strings, apply transform to inline bytes in the raw slot memory
+    memcpy(out_arena.slots, in_arena.slots, n * sizeof(DrakenStringSlot))
+    for i in range(n):
+        if nb != NULL and ((nb[i >> 3] >> (i & 7)) & 1) == 0:
+            continue  # null row: leave slot as-is
+        in_slot = &out_arena.slots[i]
+        slen = str_length(<const DrakenStringSlot*>in_slot)
+        if slen > 0 and str_is_inline(<const DrakenStringSlot*>in_slot):
+            # Inline bytes are embedded in the slot; transform in-place
+            simd_to_lower(<char*>str_data(<const DrakenStringSlot*>in_slot, NULL), slen)
 
-    # Copy entire data buffer
-    if total_bytes > 0:
-        memcpy(out_data, in_data, total_bytes)
-        # Apply lowercase transformation to entire buffer using SIMD
-        simd_to_lower(out_data, total_bytes)
-
-    # Copy offsets
-    memcpy(out_ptr.offsets, in_ptr.offsets, (n + 1) * sizeof(int32_t))
-
-    # Copy null bitmap if present
-    if in_ptr.null_bitmap != NULL:
+    # Copy null bitmap
+    cdef uint8_t* out_nb = NULL
+    if nb != NULL:
         nb_size = (n + 7) // 8
-        out_ptr.null_bitmap = <uint8_t*> malloc(nb_size)
-        if out_ptr.null_bitmap == NULL:
+        out_nb = <uint8_t*>malloc(nb_size)
+        if out_nb == NULL:
+            free_string_arena(out_arena)
             raise MemoryError()
-        memcpy(out_ptr.null_bitmap, in_ptr.null_bitmap, nb_size)
+        memcpy(out_nb, nb, nb_size)
+
+    # Build result StringVector (wrap=True: no VarBuffer allocated by __cinit__)
+    cdef StringVector result = StringVector(0, 0, wrap=True)
+    result.ptr = <DrakenVarBuffer*>malloc(sizeof(DrakenVarBuffer))
+    if result.ptr == NULL:
+        free_string_arena(out_arena)
+        if out_nb != NULL:
+            free(out_nb)
+        raise MemoryError()
+    result.ptr.data = NULL
+    result.ptr.offsets = NULL
+    result.ptr.null_bitmap = out_nb
+    result.ptr.length = n
+    result.ptr.type = DRAKEN_STRING
+    result.owns_data = True
 
     result._unified_view = draken_vector_from_dense(
-        <void*>result.ptr, <uint32_t>n, DRAKEN_STRING,
-        result.ptr.null_bitmap,
+        <void*>out_arena, <uint32_t>n, DRAKEN_STRING, out_nb,
     )
     return result
 

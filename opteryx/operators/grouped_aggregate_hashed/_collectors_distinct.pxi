@@ -101,7 +101,7 @@ cdef class CountDistinctCollector(BaseCollector):
         if isinstance(raw, StringVector):
             svec = <StringVector>raw
             uv = svec.unified()
-            if svec._german_dict_values != NULL:
+            if svec._unified_view.data_length < svec._unified_view.length:
                 dict_size = svec.c_dict_size()
                 dict_hashes = <uint64_t*>malloc(<size_t>dict_size * sizeof(uint64_t))
                 if dict_hashes == NULL:

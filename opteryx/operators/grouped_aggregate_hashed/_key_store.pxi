@@ -18,8 +18,8 @@ from libc.stdlib cimport realloc, free
 from libcpp.vector cimport vector
 
 from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenType, DrakenVector
-from draken.core.buffers cimport DrakenGermanArena, GermanString
-from draken.core.buffers cimport gs_length, gs_data
+from draken.core.buffers cimport DrakenStringArena, DrakenStringSlot
+from draken.core.buffers cimport str_length, str_data
 from draken.core.buffers cimport DRAKEN_INT64
 from draken.core.buffers cimport DRAKEN_STRING
 from draken.core.buffers cimport draken_vector_from_dense
@@ -31,6 +31,9 @@ from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_floa
 from draken.vectors.string_vector cimport StringVector, _materialize_dict_string
 from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.string_vector cimport _ConstView
+from draken.vectors.string_vector cimport _const_view
+from draken.vectors.string_vector cimport _varbuffer_to_string_arena
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +57,7 @@ cdef int _DISPATCH_DICT_STRING  = 4
 cdef int _DISPATCH_DICT_INT64   = 5
 cdef int _DISPATCH_DICT_FLOAT64 = 6
 cdef int _DISPATCH_CONST_STRING = 7
+cdef int _DISPATCH_STRING_VARBUF = 8  # dense VarBuffer-only (pre-arena) path
 
 
 
@@ -74,11 +78,13 @@ cdef inline bint _ks_bitmap_is_valid(uint8_t* bitmap, Py_ssize_t index) noexcept
 
 cdef StringVector _wrap_string_buffer(DrakenVarBuffer* buf) except *:
     cdef StringVector vec = StringVector(0, 0, True)
+    cdef DrakenStringArena* arena
     vec.ptr = buf
     vec.owns_data = True
-    vec._german_dict_values = NULL
-    vec._dict_ordered = 0
-    vec._unified_view = draken_vector_from_dense(<void*>buf, <uint32_t>buf.length, DRAKEN_STRING, buf.null_bitmap)
+    arena = _varbuffer_to_string_arena(
+        <const uint8_t*>buf.data, buf.offsets, buf.null_bitmap, <Py_ssize_t>buf.length)
+    vec._unified_view = draken_vector_from_dense(
+        <void*>arena, <uint32_t>buf.length, DRAKEN_STRING, buf.null_bitmap)
     return vec
 
 
@@ -598,7 +604,7 @@ cdef inline void _ks_store_fixed_bulk_dict(
 
     dict_data must point to the raw int64_t values of the dictionary buffer
     (cast from DrakenFixedBuffer.data).  For float64, caller passes the float
-    bits as int64 — matching the dense path that does <int64_t*>fv._unified_view.data.
+    bits as int64 — matching the dense path that does <int64_t*>fv.ptr.data.
     codes is always uint32_t* (selection array in unified format).
     """
     cdef Py_ssize_t start_row = row_count_ref[0]
@@ -643,7 +649,7 @@ cdef inline void _ks_store_string_bulk_dict(
     const int64_t* row_indices,
     Py_ssize_t n_new,
     uint8_t* row_nulls,
-    DrakenGermanArena* dict_garena,
+    DrakenStringArena* dict_garena,
     const uint32_t* codes,
 ) except *:
     """Store string dict-encoded keys without materializing the full column.
@@ -659,7 +665,7 @@ cdef inline void _ks_store_string_bulk_dict(
     cdef Py_ssize_t current_row_capacity = <Py_ssize_t>buf.length
     cdef Py_ssize_t current_byte_capacity = bytes_used if bytes_used > 0 else 0
     cdef uint32_t code
-    cdef GermanString* gs_slot
+    cdef DrakenStringSlot* gs_slot
     cdef const uint8_t* gs_sdata
 
     _ks_ensure_string_capacity(
@@ -686,9 +692,80 @@ cdef inline void _ks_store_string_bulk_dict(
         else:
             code = codes[row_idx]
             gs_slot = &dict_garena.slots[code]
-            str_len = <Py_ssize_t>gs_length(gs_slot)
+            str_len = <Py_ssize_t>str_length(gs_slot)
             if str_len > 0:
-                gs_sdata = gs_data(gs_slot, dict_garena.arena)
+                gs_sdata = str_data(gs_slot, dict_garena.arena)
+                if bytes_used + str_len > current_byte_capacity:
+                    _ks_ensure_string_capacity(
+                        buf,
+                        current_row_capacity,
+                        current_byte_capacity,
+                        required_rows,
+                        bytes_used + str_len,
+                        &current_byte_capacity,
+                    )
+                    current_row_capacity = <Py_ssize_t>buf.length
+                memcpy(buf.data + bytes_used, gs_sdata, str_len)
+            bytes_used += str_len
+            if null_bitmap_ref[0] != NULL:
+                _ks_bitmap_set(null_bitmap_ref[0], out_row)
+
+        buf.offsets[out_row + 1] = <int32_t>bytes_used
+
+    row_count_ref[0] = required_rows
+    bytes_used_ref[0] = bytes_used
+    buf.null_bitmap = null_bitmap_ref[0]
+
+
+cdef inline void _ks_store_multi_string_arena_bulk(
+    DrakenVarBuffer* buf,
+    uint8_t** null_bitmap_ref,
+    Py_ssize_t* row_count_ref,
+    Py_ssize_t* bytes_used_ref,
+    const int64_t* row_indices,
+    Py_ssize_t n_new,
+    uint8_t* src_nulls,
+    DrakenStringArena* src_arena,
+) except *:
+    """Store dense arena-backed string keys directly (no dict codes)."""
+    cdef Py_ssize_t start_row = row_count_ref[0]
+    cdef Py_ssize_t bytes_used = bytes_used_ref[0]
+    cdef Py_ssize_t ri
+    cdef Py_ssize_t row_idx
+    cdef Py_ssize_t out_row
+    cdef Py_ssize_t str_len
+    cdef Py_ssize_t required_rows = start_row + n_new
+    cdef Py_ssize_t current_row_capacity = <Py_ssize_t>buf.length
+    cdef Py_ssize_t current_byte_capacity = bytes_used if bytes_used > 0 else 0
+    cdef DrakenStringSlot* gs_slot
+    cdef const uint8_t* gs_sdata
+
+    _ks_ensure_string_capacity(
+        buf,
+        current_row_capacity,
+        current_byte_capacity,
+        required_rows,
+        bytes_used + max(n_new * 16, 64),
+        &current_byte_capacity,
+    )
+    current_row_capacity = <Py_ssize_t>buf.length
+
+    if start_row == 0:
+        buf.offsets[0] = 0
+
+    for ri in range(n_new):
+        row_idx = row_indices[ri]
+        out_row = start_row + ri
+
+        if src_nulls != NULL and not ((src_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
+            if null_bitmap_ref[0] == NULL:
+                _ks_ensure_bitmap_capacity(null_bitmap_ref, start_row, required_rows)
+            _ks_bitmap_clear(null_bitmap_ref[0], out_row)
+        else:
+            gs_slot = &src_arena.slots[row_idx]
+            str_len = <Py_ssize_t>str_length(gs_slot)
+            if str_len > 0:
+                gs_sdata = str_data(gs_slot, src_arena.arena)
                 if bytes_used + str_len > current_byte_capacity:
                     _ks_ensure_string_capacity(
                         buf,
@@ -872,10 +949,11 @@ cdef class KeyStore:
         cdef int32_t const_str_len
 
         # Single-column dict paths (avoids N-row materialization)
-        cdef DrakenGermanArena* sv_dv
+        cdef DrakenStringArena* sv_dv
         cdef const uint8_t* sv_dc
         cdef uint8_t* sv_rnulls
         cdef uint32_t sv_code
+        cdef DrakenStringSlot* gs_slot
         cdef int64_t* iv_dict_data
         cdef const uint8_t* iv_dc
         cdef uint8_t* iv_rnulls
@@ -895,8 +973,8 @@ cdef class KeyStore:
         cdef int storage_slot
         cdef DrakenFixedBuffer* fixed_buf
         cdef DrakenVarBuffer* string_buf
-        cdef DrakenConstantStringPayload* cpl
-        cdef DrakenConstantStringPayload* _csp
+        cdef _ConstView cpl
+        cdef _ConstView _csp
         cdef DrakenVector* uv
         cdef Py_ssize_t additional_bytes
         cdef bint needs_null_bitmap
@@ -912,9 +990,9 @@ cdef class KeyStore:
             if key_kind == KEY_MULTI_ENCODED_STRING:
                 sv = <StringVector>vec
                 uv = sv.unified()
-                if sv._german_dict_values != NULL:
+                if sv._unified_view.data_length < sv._unified_view.length:
                     # Dict path: read directly from dict values — no N-row materialization.
-                    sv_dv     = <DrakenGermanArena*>uv.data
+                    sv_dv     = <DrakenStringArena*>uv.data
                     sv_dc     = <const uint8_t*>uv.selection
                     sv_rnulls = uv.validity
                     if self._single_string_direct:
@@ -931,14 +1009,14 @@ cdef class KeyStore:
                         )
                     else:
                         raise RuntimeError("single string codec path removed")
-                elif sv.ptr.offsets == NULL:
-                    # Constant-encoded: ptr.offsets is NULL only for constant StringVectors.
+                elif sv._unified_view.data_length == 1:
+                    # Constant-encoded: data_length == 1 for constant StringVectors.
                     if self._single_string_direct:
                         if uv.validity != NULL:
                             const_str_ptr = NULL
                             const_str_len = 0
                         else:
-                            _csp = <DrakenConstantStringPayload*>uv.data
+                            _csp = _const_view(<DrakenStringArena*>uv.data)
                             const_str_ptr = <const char*>_csp.data
                             const_str_len = _csp.length
                         for ri in range(n_new):
@@ -954,34 +1032,59 @@ cdef class KeyStore:
                     else:
                         raise RuntimeError("single string codec path removed")
                 else:
-                    vbuf  = sv.ptr
                     nulls = sv.null_bitmap_ptr()
                     if self._single_string_direct:
-                        for ri in range(n_new):
-                            row_idx = row_indices[ri]
-                            valid_flag = 1 if _ks_bitmap_is_valid(nulls, row_idx) else 0
-                            if valid_flag and vbuf != NULL:
-                                str_ptr = <const char*>(vbuf.data + vbuf.offsets[row_idx])
-                                str_len  = vbuf.offsets[row_idx + 1] - vbuf.offsets[row_idx]
-                            else:
-                                str_ptr = NULL
-                                str_len  = 0
-                            _ks_append_single_string_direct(
-                                self._single_string_buf,
-                                &self._single_string_nulls,
-                                &self._single_string_rows,
-                                &self._single_string_bytes,
-                                str_ptr,
-                                str_len,
-                                valid_flag,
-                            )
+                        if sv.ptr != NULL and sv.ptr.data != NULL:
+                            # VarBuffer-backed dense path: ptr.data/offsets are row-indexed
+                            # and authoritative (covers pre-arena and hybrid arena+varbuf vectors).
+                            vbuf = sv.ptr
+                            for ri in range(n_new):
+                                row_idx = row_indices[ri]
+                                valid_flag = 1 if _ks_bitmap_is_valid(nulls, row_idx) else 0
+                                if valid_flag:
+                                    str_ptr = <const char*>(vbuf.data + vbuf.offsets[row_idx])
+                                    str_len  = vbuf.offsets[row_idx + 1] - vbuf.offsets[row_idx]
+                                else:
+                                    str_ptr = NULL
+                                    str_len  = 0
+                                _ks_append_single_string_direct(
+                                    self._single_string_buf,
+                                    &self._single_string_nulls,
+                                    &self._single_string_rows,
+                                    &self._single_string_bytes,
+                                    str_ptr,
+                                    str_len,
+                                    valid_flag,
+                                )
+                        else:
+                            # Pure arena-backed dense path (no VarBuffer; arena is row-indexed)
+                            sv_dv = <DrakenStringArena*>uv.data
+                            for ri in range(n_new):
+                                row_idx = row_indices[ri]
+                                valid_flag = 1 if _ks_bitmap_is_valid(nulls, row_idx) else 0
+                                if valid_flag and sv_dv != NULL:
+                                    gs_slot = &sv_dv.slots[row_idx]
+                                    str_ptr = <const char*>str_data(gs_slot, sv_dv.arena)
+                                    str_len = <Py_ssize_t>str_length(gs_slot)
+                                else:
+                                    str_ptr = NULL
+                                    str_len  = 0
+                                _ks_append_single_string_direct(
+                                    self._single_string_buf,
+                                    &self._single_string_nulls,
+                                    &self._single_string_rows,
+                                    &self._single_string_bytes,
+                                    str_ptr,
+                                    str_len,
+                                    valid_flag,
+                                )
                     else:
                         raise RuntimeError("single string codec path removed")
 
             elif isinstance(vec, Integer64Vector):
                 iv = <Integer64Vector>vec
                 uv = iv.unified()
-                if iv._dict_values != NULL:
+                if iv._unified_view.data_length < iv._unified_view.length:
                     # Dict path: read directly from dict values — no N-row materialization.
                     iv_dict_data = <int64_t*>uv.data
                     iv_dc        = <const uint8_t*>uv.selection
@@ -1070,7 +1173,7 @@ cdef class KeyStore:
                 # Float64Vector and other fixed-width types — store as raw int64 bits
                 fv = <Float64Vector>vec
                 uv = fv.unified()
-                if fv._dict_values != NULL:
+                if fv._unified_view.data_length < fv._unified_view.length:
                     # Dict path: float bits stored as int64 in the dict buffer.
                     fv_dict_data = <int64_t*>uv.data
                     fv_dc        = <const uint8_t*>uv.selection
@@ -1147,26 +1250,32 @@ cdef class KeyStore:
                 if key_kind == KEY_MULTI_ENCODED_STRING:
                     sv = <StringVector>vec
                     uv = sv.unified()
-                    if sv._german_dict_values != NULL:
+                    if sv._unified_view.data_length < sv._unified_view.length:
                         # Dict path: capture dict pointers; no N-row materialization.
                         col_dispatch[col_idx]        = _DISPATCH_DICT_STRING
                         col_null_ptrs[col_idx]       = <size_t>uv.validity
                         col_varbuf_ptrs[col_idx]     = <size_t>uv.data
                         col_dict_code_ptrs[col_idx]  = <size_t>uv.selection
-                    elif sv.ptr.offsets == NULL:
-                        # Constant-encoded: ptr.offsets is NULL for constant (always set for dense).
+                    elif sv._unified_view.data_length == 1:
+                        # Constant-encoded: data_length == 1 for constant.
                         col_dispatch[col_idx]    = _DISPATCH_CONST_STRING
                         col_has_const[col_idx]   = uv.validity == NULL
                         col_varbuf_ptrs[col_idx] = <size_t>uv.data
                     else:
-                        col_dispatch[col_idx]    = _DISPATCH_STRING
                         col_null_ptrs[col_idx]   = <size_t>sv.null_bitmap_ptr()
-                        col_varbuf_ptrs[col_idx] = <size_t>sv.ptr
+                        if sv.ptr != NULL and sv.ptr.data != NULL:
+                            # VarBuffer-backed: ptr.data/offsets are row-indexed and authoritative.
+                            col_dispatch[col_idx]    = _DISPATCH_STRING_VARBUF
+                            col_varbuf_ptrs[col_idx] = <size_t>sv.ptr  # DrakenVarBuffer*
+                        else:
+                            # Pure arena-backed dense (no VarBuffer; arena is row-indexed).
+                            col_dispatch[col_idx]    = _DISPATCH_STRING
+                            col_varbuf_ptrs[col_idx] = <size_t>uv.data  # DrakenStringArena*
 
                 elif isinstance(vec, Integer64Vector):
                     iv = <Integer64Vector>vec
                     uv = iv.unified()
-                    if iv._dict_values != NULL:
+                    if iv._unified_view.data_length < iv._unified_view.length:
                         # Dict path: capture dict pointers; no N-row materialization.
                         col_dispatch[col_idx]        = _DISPATCH_DICT_INT64
                         col_null_ptrs[col_idx]       = <size_t>uv.validity
@@ -1196,7 +1305,7 @@ cdef class KeyStore:
                     # Float64Vector and other fixed-width types
                     fv = <Float64Vector>vec
                     uv = fv.unified()
-                    if fv._dict_values != NULL:
+                    if fv._unified_view.data_length < fv._unified_view.length:
                         # Dict path: float bits stored as int64 — matches dense cast.
                         col_dispatch[col_idx]        = _DISPATCH_DICT_FLOAT64
                         col_null_ptrs[col_idx]       = <size_t>uv.validity
@@ -1218,6 +1327,17 @@ cdef class KeyStore:
                     storage_slot = self._multi_storage_slot[col_idx]
 
                     if disp == _DISPATCH_STRING:
+                        _ks_store_multi_string_arena_bulk(
+                            self._multi_string_bufs[storage_slot],
+                            &self._multi_string_nulls[storage_slot],
+                            &self._multi_string_rows[storage_slot],
+                            &self._multi_string_bytes[storage_slot],
+                            row_indices,
+                            n_new,
+                            <uint8_t*>col_null_ptrs[col_idx],
+                            <DrakenStringArena*>col_varbuf_ptrs[col_idx],
+                        )
+                    elif disp == _DISPATCH_STRING_VARBUF:
                         _ks_store_multi_string_bulk(
                             self._multi_string_bufs[storage_slot],
                             &self._multi_string_nulls[storage_slot],
@@ -1237,11 +1357,11 @@ cdef class KeyStore:
                             row_indices,
                             n_new,
                             <uint8_t*>col_null_ptrs[col_idx],
-                            <DrakenGermanArena*>col_varbuf_ptrs[col_idx],
+                            <DrakenStringArena*>col_varbuf_ptrs[col_idx],
                             <const uint32_t*>col_dict_code_ptrs[col_idx],
                         )
                     elif disp == _DISPATCH_CONST_STRING:
-                        cpl = <DrakenConstantStringPayload*>col_varbuf_ptrs[col_idx]
+                        cpl = _const_view(<DrakenStringArena*>col_varbuf_ptrs[col_idx])
                         _ks_store_multi_const_string_bulk(
                             self._multi_string_bufs[storage_slot],
                             &self._multi_string_nulls[storage_slot],
@@ -1249,8 +1369,8 @@ cdef class KeyStore:
                             &self._multi_string_bytes[storage_slot],
                             n_new,
                             not col_has_const[col_idx],
-                            cpl.data if cpl != NULL else NULL,
-                            cpl.length if cpl != NULL else 0,
+                            cpl.data,
+                            cpl.length,
                         )
                     elif disp == _DISPATCH_DICT_INT64 or disp == _DISPATCH_DICT_FLOAT64:
                         _ks_store_fixed_bulk_dict(
@@ -1337,8 +1457,6 @@ cdef class KeyStore:
                     _fixed_iv = Integer64Vector(0, True)
                     _fixed_iv.ptr = _fixed_buf
                     _fixed_iv.owns_data = True
-                    _fixed_iv._dict_values = NULL
-                    _fixed_iv._dict_ordered = 0
                     _fixed_iv._unified_view = draken_vector_from_dense(_fixed_buf.data, <uint32_t>_fixed_buf.length, DRAKEN_INT64, _fixed_buf.null_bitmap)
                     out_vecs.append(_fixed_iv)
 
@@ -1376,8 +1494,6 @@ cdef class KeyStore:
                     _fixed_iv = Integer64Vector(0, True)
                     _fixed_iv.ptr = _fixed_buf
                     _fixed_iv.owns_data = True
-                    _fixed_iv._dict_values = NULL
-                    _fixed_iv._dict_ordered = 0
                     _fixed_iv._unified_view = draken_vector_from_dense(_fixed_buf.data, <uint32_t>_fixed_buf.length, DRAKEN_INT64, _fixed_buf.null_bitmap)
                     out_vecs.append(_fixed_iv)
 

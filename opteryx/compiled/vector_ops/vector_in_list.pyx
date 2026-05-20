@@ -131,7 +131,7 @@ cdef BoolVector _vector_in_list_phash(
         if ivec64.null_bitmap_ptr() != NULL:
             free(idx_buf)
             return None  # has nulls → fall back
-        if ivec64._dict_values != NULL:
+        if ivec64._unified_view.data_length < ivec64._unified_view.length:
             free(idx_buf)
             return None  # dict-encoded → fall back
         dp = ivec64.ptr.data
@@ -152,7 +152,7 @@ cdef BoolVector _vector_in_list_phash(
         if ivec_ts.null_bitmap_ptr() != NULL:
             free(idx_buf)
             return None
-        if ivec_ts._dict_values != NULL:
+        if ivec_ts._unified_view.data_length < ivec_ts._unified_view.length:
             free(idx_buf)
             return None  # dict-encoded → fall back
         dp = ivec_ts.ptr.data

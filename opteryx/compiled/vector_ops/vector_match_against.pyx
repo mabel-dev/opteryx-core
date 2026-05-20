@@ -13,7 +13,7 @@ from libc.stdint cimport uint8_t, uint32_t, int64_t
 from libc.string cimport memset
 from cpython.array cimport array, clone
 
-from draken.core.buffers cimport DrakenVarBuffer, DrakenVector, DrakenGermanArena, GermanString, gs_length, gs_data
+from draken.core.buffers cimport DrakenVarBuffer, DrakenVector, DrakenStringArena, DrakenStringSlot, str_length, str_data
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.float32_vector cimport Float32Vector
 from draken.vectors.string_vector cimport StringVector
@@ -32,17 +32,17 @@ cdef inline bint _is_ascii_whitespace(unsigned char ch) noexcept nogil:
 
 cdef StringVector _materialize_german_dict_entries(StringVector vec):
     """Build a dense StringVector containing only the dict entries (not full expansion)."""
-    cdef DrakenGermanArena* gdv = vec._german_dict_values
+    cdef DrakenStringArena* gdv = <DrakenStringArena*>vec._unified_view.data
     cdef Py_ssize_t dict_size = <Py_ssize_t>gdv.length
-    cdef GermanString* slot
+    cdef DrakenStringSlot* slot
     cdef const uint8_t* sdata
     cdef uint32_t slen
     cdef Py_ssize_t j
     cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(dict_size, 16)
     for j in range(dict_size):
         slot = &gdv.slots[j]
-        slen = gs_length(slot)
-        sdata = gs_data(slot, gdv.arena)
+        slen = str_length(slot)
+        sdata = str_data(slot, gdv.arena)
         builder.append_bytes(<const char*>sdata, <Py_ssize_t>slen)
     return builder.finish()
 
@@ -63,7 +63,7 @@ cdef BoolVector _vector_match_against_string_vector(
     cdef int32_t[::1] take_view
     cdef float[::1] query_view
     cdef Py_ssize_t i
-    cdef Py_ssize_t n = values.ptr.length
+    cdef Py_ssize_t n = values._unified_view.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
     cdef Py_ssize_t row_index
     cdef Py_ssize_t text_len
@@ -248,7 +248,7 @@ cpdef BoolVector vector_match_against(
     if isinstance(values, Vector):
         uv = (<Vector>values).unified()
 
-    if uv != NULL and isinstance(values, StringVector) and (<StringVector>values)._german_dict_values != NULL:
+    if uv != NULL and isinstance(values, StringVector) and (<StringVector>values)._unified_view.data_length < (<StringVector>values)._unified_view.length:
         return _vector_match_against_dictionary_accessor(values, uv, provider, query_text, min_score)
     if isinstance(values, StringVector):
         return _vector_match_against_string_vector(values, provider, query_text, min_score)

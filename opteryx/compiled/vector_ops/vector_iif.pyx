@@ -12,20 +12,19 @@
 
 Architectural contract (strict, no exceptions):
 - All three parameters MUST be Draken Vectors of identical length.
-- condition MUST be a BoolVector (constant-encoded BOOL Vectors are accepted).
+- condition MUST be a BoolVector.
 - when_true and when_false MUST share a Draken type family:
     * matching fixed-width types, OR
     * both BOOL, OR
     * both STRING.
-- Constant-encoded Vectors (e.g. via from_scalar) are accepted on any branch.
+- Vectors of any layout (dense, constant, dict) are accepted; access is uniform via the unified view.
 - Any contract violation raises TypeError or ValueError immediately.
 
 Shared bitmap / type-classification / vector-construction helpers live in
 _helper_select.pyx and are prefixed with `_sel_`.
 """
 
-from cpython.bytes cimport PyBytes_FromStringAndSize
-from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t
+from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint32_t
 from libc.stdlib cimport free, malloc
 from libc.string cimport memcpy, memset
 
@@ -35,11 +34,11 @@ from draken.core.buffers cimport (
     DrakenFixedBuffer,
     DrakenVector,
 )
+from draken.core.buffers cimport DrakenStringArena, DrakenStringSlot, str_length, str_data
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.string_vector cimport (
     StringVector,
     StringVectorBuilder,
-    _StringVectorView,
 )
 from draken.vectors.vector cimport Vector
 
@@ -48,11 +47,22 @@ from draken.vectors.vector cimport Vector
 # Condition probe (IIF-specific)
 # ---------------------------------------------------------------------------
 
-cdef inline bint _iif_condition_at(BoolVector condition, Py_ssize_t row) noexcept:
-    """SQL semantics: NULL condition treated as FALSE."""
-    if not _sel_is_valid(condition.ptr.null_bitmap, row):
+cdef inline bint _iif_condition_at(
+    const uint8_t* data,
+    const uint32_t* selection,
+    const uint8_t* validity,
+    Py_ssize_t row,
+) noexcept nogil:
+    """SQL semantics: NULL condition treated as FALSE.
+
+    Reads through the unified view: bit at index ``selection[row]`` of
+    the packed data buffer.
+    """
+    cdef uint32_t code
+    if validity != NULL and not _sel_bit_is_set(<uint8_t*>validity, row):
         return False
-    return _sel_bit_is_set(<uint8_t*>condition.ptr.data, row)
+    code = selection[row]
+    return ((data[code >> 3] >> (code & 7)) & 1) != 0
 
 
 # ---------------------------------------------------------------------------
@@ -69,34 +79,21 @@ cdef object _iif_select_fixed(
     cdef object result = _sel_new_fixed_vector(output_type, length, when_true)
     cdef DrakenFixedBuffer* out_ptr = _sel_fixed_ptr(<Vector>result)
     cdef Py_ssize_t nbytes = (length + 7) >> 3
+    cdef Py_ssize_t itemsize = out_ptr.itemsize
     cdef uint8_t* out_null = NULL
     cdef bint any_null = False
     cdef Py_ssize_t row
-    cdef bint choose_true
 
-    cdef DrakenVector* true_uv = when_true.unified()
+    cdef DrakenVector* cond_uv  = condition.unified()
+    cdef DrakenVector* true_uv  = when_true.unified()
     cdef DrakenVector* false_uv = when_false.unified()
-    cdef bint true_is_const = true_uv.data_length == 1
-    cdef bint false_is_const = false_uv.data_length == 1
-    cdef bint true_const_null = true_is_const and (true_uv.validity != NULL)
-    cdef bint false_const_null = false_is_const and (false_uv.validity != NULL)
-
-    cdef DrakenFixedBuffer* true_ptr = NULL
-    cdef DrakenFixedBuffer* false_ptr = NULL
-    if not true_is_const:
-        true_ptr = _sel_fixed_ptr(when_true)
-    if not false_is_const:
-        false_ptr = _sel_fixed_ptr(when_false)
-
-    cdef object true_scalar = None
-    cdef object false_scalar = None
-    if true_is_const and not true_const_null:
-        true_scalar = _sel_const_scalar(when_true)
-    if false_is_const and not false_const_null:
-        false_scalar = _sel_const_scalar(when_false)
+    cdef const uint8_t*  cond_data  = <const uint8_t*>cond_uv.data
+    cdef const uint32_t* cond_sel   = cond_uv.selection
+    cdef const uint8_t*  cond_valid = cond_uv.validity
 
     cdef char* out_data = <char*>out_ptr.data
-    cdef char* source_data
+    cdef DrakenVector* src_uv
+    cdef bint choose_true
 
     if length != 0:
         out_null = <uint8_t*>malloc(nbytes)
@@ -105,39 +102,18 @@ cdef object _iif_select_fixed(
         memset(out_null, 0, nbytes)
 
     for row in range(length):
-        choose_true = _iif_condition_at(condition, row)
-        if choose_true:
-            if true_is_const:
-                if true_const_null:
-                    any_null = True
-                    continue
-                _sel_write_fixed_scalar(out_ptr, row, output_type, true_scalar)
-            else:
-                if not _sel_is_valid(true_ptr.null_bitmap, row):
-                    any_null = True
-                    continue
-                source_data = <char*>true_ptr.data
-                memcpy(
-                    out_data + (row * out_ptr.itemsize),
-                    source_data + (row * true_ptr.itemsize),
-                    out_ptr.itemsize,
-                )
-        else:
-            if false_is_const:
-                if false_const_null:
-                    any_null = True
-                    continue
-                _sel_write_fixed_scalar(out_ptr, row, output_type, false_scalar)
-            else:
-                if not _sel_is_valid(false_ptr.null_bitmap, row):
-                    any_null = True
-                    continue
-                source_data = <char*>false_ptr.data
-                memcpy(
-                    out_data + (row * out_ptr.itemsize),
-                    source_data + (row * false_ptr.itemsize),
-                    out_ptr.itemsize,
-                )
+        choose_true = _iif_condition_at(cond_data, cond_sel, cond_valid, row)
+        src_uv = true_uv if choose_true else false_uv
+
+        if not _sel_is_valid(src_uv.validity, row):
+            any_null = True
+            continue
+
+        memcpy(
+            out_data + row * itemsize,
+            <char*>src_uv.data + src_uv.selection[row] * itemsize,
+            itemsize,
+        )
         if out_null != NULL:
             _sel_set_true_bit(out_null, row)
 
@@ -161,31 +137,19 @@ cdef object _iif_select_bool(
     cdef Py_ssize_t nbytes = (length + 7) >> 3
     cdef uint8_t* out_bits = <uint8_t*>result.ptr.data
     cdef uint8_t* out_null = NULL
+    cdef bint any_null = False
     cdef Py_ssize_t row
     cdef bint choose_true
-    cdef bint any_null = False
     cdef bint value
+    cdef uint32_t code
 
-    cdef DrakenVector* true_uv = when_true.unified()
+    cdef DrakenVector* cond_uv  = condition.unified()
+    cdef DrakenVector* true_uv  = when_true.unified()
     cdef DrakenVector* false_uv = when_false.unified()
-    cdef bint true_is_const = true_uv.data_length == 1
-    cdef bint false_is_const = false_uv.data_length == 1
-    cdef bint true_const_null = true_is_const and (true_uv.validity != NULL)
-    cdef bint false_const_null = false_is_const and (false_uv.validity != NULL)
-
-    cdef bint true_const_val = False
-    cdef bint false_const_val = False
-    if true_is_const and not true_const_null:
-        true_const_val = (<uint8_t*>true_uv.data)[0] != 0
-    if false_is_const and not false_const_null:
-        false_const_val = (<uint8_t*>false_uv.data)[0] != 0
-
-    cdef BoolVector true_vec
-    cdef BoolVector false_vec
-    if not true_is_const:
-        true_vec = <BoolVector>when_true
-    if not false_is_const:
-        false_vec = <BoolVector>when_false
+    cdef const uint8_t*  cond_data  = <const uint8_t*>cond_uv.data
+    cdef const uint32_t* cond_sel   = cond_uv.selection
+    cdef const uint8_t*  cond_valid = cond_uv.validity
+    cdef DrakenVector* src_uv
 
     if nbytes != 0:
         memset(out_bits, 0, nbytes)
@@ -195,29 +159,15 @@ cdef object _iif_select_bool(
         memset(out_null, 0, nbytes)
 
     for row in range(length):
-        choose_true = _iif_condition_at(condition, row)
-        if choose_true:
-            if true_is_const:
-                if true_const_null:
-                    any_null = True
-                    continue
-                value = true_const_val
-            else:
-                if not _sel_is_valid(true_vec.ptr.null_bitmap, row):
-                    any_null = True
-                    continue
-                value = _sel_bit_is_set(<uint8_t*>true_vec.ptr.data, row)
-        else:
-            if false_is_const:
-                if false_const_null:
-                    any_null = True
-                    continue
-                value = false_const_val
-            else:
-                if not _sel_is_valid(false_vec.ptr.null_bitmap, row):
-                    any_null = True
-                    continue
-                value = _sel_bit_is_set(<uint8_t*>false_vec.ptr.data, row)
+        choose_true = _iif_condition_at(cond_data, cond_sel, cond_valid, row)
+        src_uv = true_uv if choose_true else false_uv
+
+        if not _sel_is_valid(src_uv.validity, row):
+            any_null = True
+            continue
+
+        code = src_uv.selection[row]
+        value = ((<uint8_t*>src_uv.data)[code >> 3] >> (code & 7)) & 1
 
         if value:
             _sel_set_true_bit(out_bits, row)
@@ -240,88 +190,61 @@ cdef object _iif_select_string(
     Vector when_false,
     Py_ssize_t length,
 ):
-    cdef DrakenVector* true_uv = when_true.unified()
-    cdef DrakenVector* false_uv = when_false.unified()
-    # ptr.offsets == NULL and _german_dict_values == NULL iff constant
-    cdef bint true_is_const = ((<StringVector>when_true).ptr.offsets == NULL and (<StringVector>when_true)._german_dict_values == NULL)
-    cdef bint false_is_const = ((<StringVector>when_false).ptr.offsets == NULL and (<StringVector>when_false)._german_dict_values == NULL)
-    cdef bint true_const_null = true_is_const and (true_uv.validity != NULL)
-    cdef bint false_const_null = false_is_const and (false_uv.validity != NULL)
+    cdef DrakenVector*   cond_uv     = condition.unified()
+    cdef const uint8_t*  cond_data   = <const uint8_t*>cond_uv.data
+    cdef const uint32_t* cond_sel    = cond_uv.selection
+    cdef const uint8_t*  cond_valid  = cond_uv.validity
 
-    cdef object true_scalar = None
-    cdef object false_scalar = None
-    if true_is_const and not true_const_null:
-        true_scalar = _sel_const_scalar(when_true)
-    if false_is_const and not false_const_null:
-        false_scalar = _sel_const_scalar(when_false)
+    cdef DrakenVector*      true_uv  = (<StringVector>when_true).unified()
+    cdef DrakenVector*      false_uv = (<StringVector>when_false).unified()
+    cdef DrakenStringArena* true_arena  = <DrakenStringArena*>true_uv.data
+    cdef DrakenStringArena* false_arena = <DrakenStringArena*>false_uv.data
+    cdef const uint32_t*    true_sel  = <const uint32_t*>true_uv.selection
+    cdef const uint32_t*    false_sel = <const uint32_t*>false_uv.selection
+    cdef const uint8_t*     true_nulls  = true_uv.validity
+    cdef const uint8_t*     false_nulls = false_uv.validity
 
-    cdef StringVector true_vec
-    cdef StringVector false_vec
-    cdef _StringVectorView true_view
-    cdef _StringVectorView false_view
-    if not true_is_const:
-        true_vec = <StringVector>when_true
-        true_view = <_StringVectorView>true_vec.view()
-    if not false_is_const:
-        false_vec = <StringVector>when_false
-        false_view = <_StringVectorView>false_vec.view()
-
-    cdef Py_ssize_t row
-    cdef Py_ssize_t total_bytes = 0
-    cdef bint choose_true
-    cdef Py_ssize_t value_len
-    cdef const char* value_ptr
+    cdef Py_ssize_t      row
+    cdef Py_ssize_t      total_bytes = 0
+    cdef bint            choose_true
+    cdef Py_ssize_t      value_len
+    cdef const char*     value_ptr
+    cdef DrakenStringSlot* slot
     cdef StringVectorBuilder builder
 
     # Pass 1: total byte budget for the builder.
     for row in range(length):
-        choose_true = _iif_condition_at(condition, row)
+        choose_true = _iif_condition_at(cond_data, cond_sel, cond_valid, row)
         if choose_true:
-            if true_is_const:
-                if not true_const_null:
-                    total_bytes += len(<bytes>true_scalar)
-            else:
-                if not true_view.is_null(row):
-                    total_bytes += true_view.value_len(row)
+            if true_nulls == NULL or _sel_bit_is_set(<uint8_t*>true_nulls, row):
+                slot = &true_arena.slots[true_sel[row]]
+                total_bytes += <Py_ssize_t>str_length(slot)
         else:
-            if false_is_const:
-                if not false_const_null:
-                    total_bytes += len(<bytes>false_scalar)
-            else:
-                if not false_view.is_null(row):
-                    total_bytes += false_view.value_len(row)
+            if false_nulls == NULL or _sel_bit_is_set(<uint8_t*>false_nulls, row):
+                slot = &false_arena.slots[false_sel[row]]
+                total_bytes += <Py_ssize_t>str_length(slot)
 
     builder = StringVectorBuilder(length, total_bytes, False, True)
 
     # Pass 2: emit values.
     for row in range(length):
-        choose_true = _iif_condition_at(condition, row)
+        choose_true = _iif_condition_at(cond_data, cond_sel, cond_valid, row)
         if choose_true:
-            if true_is_const:
-                if true_const_null:
-                    builder.append_null()
-                else:
-                    builder.append(<bytes>true_scalar)
+            if true_nulls != NULL and not _sel_bit_is_set(<uint8_t*>true_nulls, row):
+                builder.append_null()
             else:
-                if true_view.is_null(row):
-                    builder.append_null()
-                else:
-                    value_len = true_view.value_len(row)
-                    value_ptr = <const char*>true_view.value_ptr(row)
-                    builder.append_bytes(value_ptr if value_len > 0 else NULL, value_len)
+                slot      = &true_arena.slots[true_sel[row]]
+                value_len = <Py_ssize_t>str_length(slot)
+                value_ptr = <const char*>str_data(slot, true_arena.arena)
+                builder.append_bytes(value_ptr if value_len > 0 else NULL, value_len)
         else:
-            if false_is_const:
-                if false_const_null:
-                    builder.append_null()
-                else:
-                    builder.append(<bytes>false_scalar)
+            if false_nulls != NULL and not _sel_bit_is_set(<uint8_t*>false_nulls, row):
+                builder.append_null()
             else:
-                if false_view.is_null(row):
-                    builder.append_null()
-                else:
-                    value_len = false_view.value_len(row)
-                    value_ptr = <const char*>false_view.value_ptr(row)
-                    builder.append_bytes(value_ptr if value_len > 0 else NULL, value_len)
+                slot      = &false_arena.slots[false_sel[row]]
+                value_len = <Py_ssize_t>str_length(slot)
+                value_ptr = <const char*>str_data(slot, false_arena.arena)
+                builder.append_bytes(value_ptr if value_len > 0 else NULL, value_len)
 
     return builder.finish()
 
@@ -346,7 +269,6 @@ cpdef Vector vector_iif(
         )
 
     cdef Py_ssize_t length = len(condition)
-    cdef DrakenVector* cond_uv
     cdef BoolVector cond_vec
     cdef int true_family
     cdef int false_family
@@ -364,23 +286,14 @@ cpdef Vector vector_iif(
             f"condition length {length}"
         )
 
-    # condition must be BoolVector or BOOL-typed constant Vector.
-    if isinstance(condition, BoolVector):
-        cond_vec = <BoolVector>condition
-    else:
-        cond_uv = condition.unified()
-        if cond_uv.data_length != 1 or cond_uv.type != DRAKEN_BOOL:
-            raise TypeError(
-                f"vector_iif: condition must be BoolVector, got "
-                f"{type(condition).__name__}"
-            )
-        # Const condition short-circuits — every row picks the same branch.
-        # Null condition is treated as FALSE (SQL three-valued logic).
-        if cond_uv.validity != NULL or (<uint8_t*>cond_uv.data)[0] == 0:
-            return when_false
-        return when_true
+    if not isinstance(condition, BoolVector):
+        raise TypeError(
+            f"vector_iif: condition must be BoolVector, got "
+            f"{type(condition).__name__}"
+        )
+    cond_vec = <BoolVector>condition
 
-    # Non-const condition: dispatch by branch type family.
+    # Dispatch by branch type family.
     true_family = _sel_bool_family(when_true)
     false_family = _sel_bool_family(when_false)
     if true_family == DRAKEN_BOOL and false_family == DRAKEN_BOOL:

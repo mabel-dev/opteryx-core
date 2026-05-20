@@ -195,14 +195,14 @@ cdef class DecimalVector(Vector):
 
     @property
     def length(self):
-        return buf_length(self.ptr)
+        return self.ptr.length
 
     def __len__(self):
-        return buf_length(self.ptr)
+        return self.ptr.length
 
     @property
     def itemsize(self):
-        return buf_itemsize(self.ptr)
+        return 8
 
     @property
     def dtype(self):

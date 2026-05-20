@@ -154,18 +154,18 @@ cdef class Date32Vector(Vector):
     # Python-friendly properties (backed by C getters for kernels)
     @property
     def length(self):
-        return buf_length(self.ptr)
+        return self.ptr.length
 
     def __len__(self):
-        return buf_length(self.ptr)
+        return self.ptr.length
 
     @property
     def itemsize(self):
-        return buf_itemsize(self.ptr)
+        return 4
 
     @property
     def dtype(self):
-        return buf_dtype(self.ptr)
+        return DRAKEN_DATE32
 
     def __getitem__(self, Py_ssize_t i):
         """Return the value at index i, or None if null."""
@@ -195,7 +195,7 @@ cdef class Date32Vector(Vector):
                 return pa.nulls(self.ptr.length, type=pa.date32())
             return pa.array([(<int32_t*>uv.data)[0]] * self.ptr.length, type=pa.date32())
 
-        cdef size_t nbytes = buf_length(self.ptr) * buf_itemsize(self.ptr)
+        cdef size_t nbytes = self.ptr.length * 4
         addr = <intptr_t> self.ptr.data
         data_buf = pa.foreign_buffer(addr, nbytes, base=self)
 
@@ -207,7 +207,7 @@ cdef class Date32Vector(Vector):
 
         buffers.append(data_buf)
 
-        return pa.Array.from_buffers(pa.date32(), buf_length(self.ptr), buffers)
+        return pa.Array.from_buffers(pa.date32(), self.ptr.length, buffers)
 
     # -------- Example op --------
     cpdef Date32Vector take(self, int32_t[::1] indices):
@@ -977,12 +977,12 @@ cdef class Date32Vector(Vector):
         cdef int32_t* data
         cdef DrakenVector* uv = self.unified()
         if uv.data_length == 1:
-            return f"<Date32Vector len={buf_length(self.ptr)} values={[None if uv.validity != NULL else (<int32_t*>uv.data)[0]] * min(<Py_ssize_t>buf_length(self.ptr), 10)}>"
-        k = min(<Py_ssize_t>buf_length(self.ptr), 10)
+            return f"<Date32Vector len={self.ptr.length} values={[None if uv.validity != NULL else (<int32_t*>uv.data)[0]] * min(<Py_ssize_t>self.ptr.length, 10)}>"
+        k = min(<Py_ssize_t>self.ptr.length, 10)
         data = <int32_t*> self.ptr.data
         for i in range(k):
             vals.append(data[i])
-        return f"<Date32Vector len={buf_length(self.ptr)} values={vals}>"
+        return f"<Date32Vector len={self.ptr.length} values={vals}>"
 
 
 cdef Date32Vector from_arrow(object array):

@@ -32,7 +32,6 @@ from draken.core.buffers cimport (
     DRAKEN_TIME32,
     DRAKEN_TIME64,
     DRAKEN_TIMESTAMP64,
-    DrakenConstantStringPayload,
     DrakenFixedBuffer,
     DrakenVector,
 )
@@ -72,22 +71,14 @@ cdef inline void _sel_set_true_bit(uint8_t* bits, Py_ssize_t index) noexcept nog
 # ---------------------------------------------------------------------------
 
 cdef inline int _sel_bool_family(Vector value) noexcept:
-    """Return DRAKEN_BOOL when value is a (possibly const-encoded) BOOL vector."""
-    cdef DrakenVector* uv
+    """Return DRAKEN_BOOL when value is a BOOL vector."""
     if isinstance(value, BoolVector):
-        return DRAKEN_BOOL
-    uv = value.unified()
-    if uv.data_length == 1 and uv.type == DRAKEN_BOOL:
         return DRAKEN_BOOL
     return -1
 
 
 cdef inline int _sel_string_family(Vector value) noexcept:
-    cdef DrakenVector* uv
     if isinstance(value, StringVector):
-        return DRAKEN_STRING
-    uv = value.unified()
-    if uv.data_length == 1 and uv.type == DRAKEN_STRING:
         return DRAKEN_STRING
     return -1
 
@@ -97,7 +88,6 @@ cdef inline int _sel_fixed_family(Vector value) noexcept:
 
     BOOL and STRING are excluded — they have dedicated kernels.
     """
-    cdef DrakenVector* uv
     if isinstance(value, Integer64Vector):
         return DRAKEN_INT64
     if isinstance(value, Float64Vector):
@@ -114,9 +104,6 @@ cdef inline int _sel_fixed_family(Vector value) noexcept:
         return (<TimeVector>value).ptr.type
     if isinstance(value, TimestampVector):
         return DRAKEN_TIMESTAMP64
-    uv = value.unified()
-    if uv.data_length == 1 and uv.type not in (DRAKEN_STRING, DRAKEN_BOOL):
-        return uv.type
     return -1
 
 
@@ -147,7 +134,6 @@ cdef inline DrakenFixedBuffer* _sel_fixed_ptr(Vector value) noexcept:
 cdef object _sel_const_scalar(Vector value):
     """Return the Python value of a const-encoded vector, or None if null."""
     cdef DrakenVector* uv = value.unified()
-    cdef DrakenConstantStringPayload* string_payload
     if uv.validity != NULL:
         return None
     if uv.type == DRAKEN_BOOL:
@@ -162,12 +148,6 @@ cdef object _sel_const_scalar(Vector value):
         return int((<int64_t*>uv.data)[0])
     if uv.type == DRAKEN_FLOAT64:
         return float((<double*>uv.data)[0])
-    if uv.type == DRAKEN_STRING:
-        string_payload = <DrakenConstantStringPayload*>uv.data
-        return PyBytes_FromStringAndSize(
-            <const char*>string_payload.data if string_payload.length > 0 else NULL,
-            string_payload.length,
-        )
     raise TypeError(
         f"_sel_const_scalar: unsupported constant value_type {uv.type}"
     )

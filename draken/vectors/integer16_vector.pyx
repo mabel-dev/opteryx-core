@@ -95,10 +95,10 @@ cdef class Integer16Vector(Vector):
 
     @property
     def length(self):
-        return buf_length(self.ptr)
+        return self.ptr.length
 
     def __len__(self):
-        return buf_length(self.ptr)
+        return self.ptr.length
 
     @property
     def itemsize(self):
@@ -551,10 +551,10 @@ cdef class Integer16Vector(Vector):
     def __str__(self):
         cdef list vals = []
         cdef Py_ssize_t i, k
-        k = min(<Py_ssize_t>buf_length(self.ptr), 10)
+        k = min(<Py_ssize_t>self.ptr.length, 10)
         for i in range(k):
             vals.append(self[i])
-        return f"<Integer16Vector len={buf_length(self.ptr)} values={vals}>"
+        return f"<Integer16Vector len={self.ptr.length} values={vals}>"
 
 
 cdef Integer16Vector integer16_from_arrow(object array):

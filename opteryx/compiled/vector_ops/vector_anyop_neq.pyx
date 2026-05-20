@@ -27,7 +27,7 @@ cpdef BoolVector vector_anyop_neq(object literal, ArrayVector column):
     Returns:
         BoolVector: True where the ANY condition holds, False otherwise.
     """
-    cdef Py_ssize_t i, n = column.ptr.length
+    cdef Py_ssize_t i, n = column._unified_view.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
     cdef BoolVector out = BoolVector(<size_t>n)
     cdef uint8_t* dst = <uint8_t*>out.ptr.data

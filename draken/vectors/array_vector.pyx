@@ -23,15 +23,17 @@ from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from cpython.memoryview cimport PyMemoryView_FromMemory
 
 from libc.stddef cimport size_t
-from libc.stdint cimport int32_t, int8_t, intptr_t, uint8_t, uint64_t
+from libc.stdint cimport int32_t, int8_t, intptr_t, uint8_t, uint32_t, uint64_t
 from libc.stdlib cimport free, malloc
 from libc.string cimport memcpy, memset
 
 from draken.core.buffers cimport (
     DrakenArrayBuffer,
+    DrakenVector,
     DRAKEN_ARRAY,
     DRAKEN_NON_NATIVE,
     DRAKEN_STRING,
+    draken_identity_sel,
 )
 from draken.vectors.string_vector cimport StringVector
 from draken.interop.arrow cimport arrow_type_to_draken, vector_from_arrow
@@ -79,6 +81,43 @@ cdef class ArrayVector(Vector):
         self._arrow_child_array = None
         self._child_arrow_type = None
         self._child_decode_utf8 = False
+        # _unified_view is zero-filled by Cython; the unified() override below
+        # syncs the view from self.ptr lazily so consumers reading
+        # _unified_view.* after unified() get correct values.
+        self._unified_view.data = NULL
+        self._unified_view.data_length = 0
+        self._unified_view.selection = NULL
+        self._unified_view.length = 0
+        self._unified_view.validity = NULL
+        self._unified_view.type = DRAKEN_ARRAY
+
+    cdef DrakenVector* unified(self) noexcept:
+        # ArrayVector is always dense; `selection` points at the global identity
+        # permutation so `data[selection[i]]` reads the i-th row uniformly with
+        # every other dense vector.
+        if self.ptr != NULL:
+            self._unified_view.data = <void*>self.ptr
+            self._unified_view.data_length = <uint32_t>self.ptr.length
+            self._unified_view.length = <uint32_t>self.ptr.length
+            self._unified_view.validity = self.ptr.null_bitmap
+            self._unified_view.selection = draken_identity_sel(<uint32_t>self.ptr.length)
+        return &self._unified_view
+
+    def _unified_selection_for_test(self):
+        """Test-only: return the unified view's selection as a Python list of ints.
+
+        Materializes ``selection[0..length)`` so tests can verify the dense
+        identity-permutation invariant without needing native code.
+        """
+        cdef DrakenVector* uv = self.unified()
+        cdef Py_ssize_t n = <Py_ssize_t> uv.length
+        cdef Py_ssize_t i
+        if uv.selection == NULL:
+            return None
+        cdef list out = [0] * n
+        for i in range(n):
+            out[i] = <Py_ssize_t> uv.selection[i]
+        return out
 
     def __dealloc__(self):
         if self.ptr != NULL:
@@ -88,6 +127,11 @@ cdef class ArrayVector(Vector):
                 free(self.ptr.null_bitmap)
             free(self.ptr)
             self.ptr = NULL
+        # Wipe the view so any stale reader doesn't dereference a freed ptr.
+        self._unified_view.data = NULL
+        self._unified_view.validity = NULL
+        self._unified_view.length = 0
+        self._unified_view.data_length = 0
 
     @property
     def length(self):

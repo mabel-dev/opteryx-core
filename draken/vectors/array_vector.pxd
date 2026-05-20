@@ -1,6 +1,6 @@
 from libc.stdint cimport int32_t, uint8_t, uint64_t
 
-from draken.core.buffers cimport DrakenArrayBuffer
+from draken.core.buffers cimport DrakenArrayBuffer, DrakenVector
 from draken.vectors.vector cimport Vector
 from draken.vectors.string_vector cimport StringVector
 
@@ -17,6 +17,7 @@ cdef class ArrayVector(Vector):
     cdef object _child_arrow_type
     cdef bint _child_decode_utf8
 
+    cdef DrakenVector* unified(self) noexcept
     cdef object _materialize_row(self, Py_ssize_t idx)
     cdef void hash_into(
         self,

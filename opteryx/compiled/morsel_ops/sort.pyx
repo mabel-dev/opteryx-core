@@ -42,13 +42,15 @@ from libc.stddef cimport size_t
 from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t
 from libc.string cimport memset, memcpy
 
+from libc.stdlib cimport malloc, free
+
 from draken.core.buffers cimport (
     DrakenVector,
     DrakenVarBuffer,
-    DrakenGermanArena,
-    GermanString,
-    gs_length,
-    gs_data,
+    DrakenStringArena,
+    DrakenStringSlot,
+    str_length,
+    str_data,
     DrakenType,
     DRAKEN_INT8,
     DRAKEN_INT16,
@@ -76,7 +78,7 @@ cdef extern from * nogil:
     #include <algorithm>
     #include <cstdint>
     #include <cstring>
-    #include "core/german_string.h"
+    #include "core/string_slot.h"
 
     static void _sort_strings(
         uint32_t* perm,
@@ -129,19 +131,19 @@ cdef extern from * nogil:
     }
 
     // O(D log D) sort for German-string dictionary remap building.
-    // Slots are 16-byte GermanString entries backed by an arena for extern strings.
+    // Slots are 16-byte DrakenStringSlot entries backed by an arena for extern strings.
     static void _sort_german_string_remap(
-        const GermanString* slots,
+        const DrakenStringSlot* slots,
         const uint8_t* arena,
         uint32_t D,
         uint32_t* order
     ) {
         std::sort(order, order + D,
             [slots, arena](uint32_t a, uint32_t b) {
-                uint32_t la = gs_length(&slots[a]);
-                uint32_t lb = gs_length(&slots[b]);
-                const uint8_t* pa = gs_data(&slots[a], arena);
-                const uint8_t* pb = gs_data(&slots[b], arena);
+                uint32_t la = str_length(&slots[a]);
+                uint32_t lb = str_length(&slots[b]);
+                const uint8_t* pa = str_data(&slots[a], arena);
+                const uint8_t* pb = str_data(&slots[b], arena);
                 uint32_t cm = (la < lb) ? la : lb;
                 int r = cm ? std::memcmp(pa, pb, (size_t)cm) : 0;
                 if (r == 0) r = (int)la - (int)lb;
@@ -171,7 +173,7 @@ cdef extern from * nogil:
     ) nogil
 
     void _sort_german_string_remap(
-        const GermanString* slots,
+        const DrakenStringSlot* slots,
         const uint8_t* arena,
         uint32_t D,
         uint32_t* order,
@@ -374,14 +376,14 @@ cdef uint32_t* _build_string_dict_remap(
     """
     Build a remap table for a string-valued dictionary column.
 
-    The dictionary backing store is DrakenGermanArena (German-string slots +
+    The dictionary backing store is DrakenStringArena (German-string slots +
     byte arena).  Sorts D slots lexicographically ascending; assigns rank 0 to
     the lexicographically smallest string.  The caller handles descending sort
     by XOR-ing keys with the all-ones mask for the code width.
 
     Returns a heap-allocated uint32[D] array, or NULL on malloc failure.
     """
-    cdef DrakenGermanArena* ga = <DrakenGermanArena*>uv.data
+    cdef DrakenStringArena* ga = <DrakenStringArena*>uv.data
     if ga == NULL:
         return NULL
 
@@ -459,12 +461,20 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
 
     cdef int64_t[::1] signed_mv
     cdef StringVector sv
-    cdef DrakenVarBuffer* sv_ptr
     cdef uint64_t key_xor
     cdef bint asc
     cdef uint32_t* remap = NULL
     cdef uint64_t flip
     cdef int[::1] rv
+    cdef DrakenVector* sort_uv
+    cdef DrakenStringArena* sort_arena
+    cdef uint32_t* sort_sel
+    cdef int64_t sort_total_bytes
+    cdef Py_ssize_t sort_di
+    cdef int32_t* sort_offsets
+    cdef uint8_t* sort_buf
+    cdef int64_t sort_fill
+    cdef int64_t sort_slen
 
     try:
         # LSD: iterate columns from least-significant to most-significant.
@@ -477,19 +487,40 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
 
             if isinstance(vec, StringVector):
                 sv = <StringVector>vec
-                if sv._german_dict_values != NULL:
-                    # ── Dict-encoded string: build semantic remap then radix-sort ──
-                    # Materialize to a dense StringVector so ptr.offsets is valid.
-                    sv = <StringVector>sv.materialize()
-                if sv.ptr.offsets != NULL:
-                    sv_ptr = sv.ptr
+                # Build a temporary contiguous buffer from arena slots via unified sel[i].
+                sort_uv = sv.unified()
+                sort_arena = <DrakenStringArena*>sort_uv.data
+                sort_sel = <uint32_t*>sort_uv.selection
+                sort_total_bytes = 0
+                for sort_di in range(n):
+                    sort_total_bytes += <int64_t>str_length(&sort_arena.slots[sort_sel[sort_di]])
+                sort_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
+                sort_buf = <uint8_t*>malloc(sort_total_bytes if sort_total_bytes > 0 else 1)
+                if sort_offsets == NULL or sort_buf == NULL:
+                    if sort_offsets != NULL:
+                        free(sort_offsets)
+                    if sort_buf != NULL:
+                        free(sort_buf)
+                    raise MemoryError()
+                sort_offsets[0] = 0
+                sort_fill = 0
+                for sort_di in range(n):
+                    sort_slen = <int64_t>str_length(&sort_arena.slots[sort_sel[sort_di]])
+                    if sort_slen > 0:
+                        memcpy(sort_buf + sort_fill, str_data(&sort_arena.slots[sort_sel[sort_di]], sort_arena.arena), sort_slen)
+                    sort_fill += sort_slen
+                    sort_offsets[sort_di + 1] = <int32_t>sort_fill
+                try:
                     with nogil:
                         _sort_strings(
                             perm_buf, <uint32_t>n,
-                            <const char*>sv_ptr.data,
-                            sv_ptr.offsets,
+                            <const char*>sort_buf,
+                            sort_offsets,
                             asc,
                         )
+                finally:
+                    free(sort_offsets)
+                    free(sort_buf)
             else:
                 # ── Numeric / timestamp / date / bool / other (includes dict-encoded) ──
                 # compress() returns a sortable signed int64 for all shapes.

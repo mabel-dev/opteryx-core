@@ -30,7 +30,7 @@ cpdef BoolVector vector_anyop_gt(object literal, ArrayVector vec):
     if isinstance(literal, str):
         literal = literal.encode('utf-8')
 
-    cdef Py_ssize_t i, n = vec.ptr.length
+    cdef Py_ssize_t i, n = vec._unified_view.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
     cdef BoolVector out = BoolVector(<size_t>n)
     cdef uint8_t* dst = <uint8_t*>out.ptr.data

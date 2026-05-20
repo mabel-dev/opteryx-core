@@ -17,7 +17,7 @@ Architectural contract (strict, no exceptions):
     * matching fixed-width types, OR
     * all BOOL, OR
     * all STRING.
-- Constant-encoded Vectors (e.g. via from_scalar) are accepted.
+- Vectors of any layout are accepted; access is uniform via the unified view.
 - Any contract violation raises TypeError or ValueError immediately.
 
 Semantics:
@@ -28,7 +28,7 @@ Semantics:
 
 The Python entry point validates inputs and pre-extracts raw buffer pointers
 into C arrays. The inner kernels are pure C: typed Vector returns, no
-Python lists, no Python scalar intermediates. Constant values are read
+Python lists, no Python scalar intermediates. Values are read
 directly from each argument's `DrakenVector.data` (via `unified()`) and
 copied into the output via `memcpy` — no boxing through Python
 `int`/`float`/`bytes`.
@@ -44,7 +44,6 @@ from libc.string cimport memcpy, memset
 from draken.core.buffers cimport (
     DRAKEN_BOOL,
     DRAKEN_STRING,
-    DrakenConstantStringPayload,
     DrakenFixedBuffer,
     DrakenVector,
 )
@@ -69,9 +68,8 @@ cdef Vector _coalesce_fixed_kernel(
     int output_type,
     Vector template,
 ):
-    """Pure C inner loop. unified_vecs[i].data_length == 1 iff arg i is constant-encoded;
-    src_ptrs[i] is non-NULL iff arg i is a regular fixed-width buffer.
-    Exactly one of (is_const, src_ptrs[i] != NULL) must hold per arg.
+    """Pure C inner loop. Reads each input through the unified view:
+    data[selection[row]] gives the row's payload regardless of layout.
     """
     cdef Vector result = _sel_new_fixed_vector(output_type, length, template)
     cdef DrakenFixedBuffer* out_ptr = _sel_fixed_ptr(result)
@@ -189,24 +187,19 @@ cdef Vector _coalesce_bool_kernel(
 # String inner kernel
 #
 # StringVector access goes through _StringVectorView (cdef class, C-level
-# method dispatch). Const-string payloads are read directly from
-# DrakenConstantStringPayload pointers.
+# method dispatch).
 # ---------------------------------------------------------------------------
 
 cdef Vector _coalesce_string_kernel(
-    DrakenVector** unified_vecs,
-    DrakenConstantStringPayload** const_payloads,
     tuple views,
     Py_ssize_t n_args,
     Py_ssize_t length,
 ):
     """Pure C inner loop for StringVector args.
 
-    unified_vecs[i].data_length == 1 iff arg i is constant-encoded;
-    const_payloads[i] is non-NULL for constant-encoded args;
-    views[i] holds a _StringVectorView for non-const args, None otherwise.
-    `views` is a tuple of cdef class instances — Cython generates C-level
-    dispatch for the .is_null/.value_len/.value_ptr method calls.
+    Each arg is accessed through its `_StringVectorView`, which resolves
+    `selection[row]` into the arena uniformly across every layout. The
+    tuple is typed so Cython issues C-level method calls.
     """
     cdef Py_ssize_t row
     cdef Py_ssize_t arg_idx
@@ -214,8 +207,6 @@ cdef Vector _coalesce_string_kernel(
     cdef Py_ssize_t value_len
     cdef const char* value_ptr
     cdef bint found
-    cdef DrakenVector* uv
-    cdef DrakenConstantStringPayload* payload
     cdef _StringVectorView view
     cdef StringVectorBuilder builder
 
@@ -223,15 +214,6 @@ cdef Vector _coalesce_string_kernel(
     for row in range(length):
         found = False
         for arg_idx in range(n_args):
-            uv = unified_vecs[arg_idx]
-            if const_payloads[arg_idx] != NULL:
-                if uv.validity != NULL:
-                    continue
-                payload = const_payloads[arg_idx]
-                total_bytes += payload.length
-                found = True
-                break
-
             view = <_StringVectorView>views[arg_idx]
             if view.is_null(row):
                 continue
@@ -246,18 +228,6 @@ cdef Vector _coalesce_string_kernel(
     for row in range(length):
         found = False
         for arg_idx in range(n_args):
-            uv = unified_vecs[arg_idx]
-            if const_payloads[arg_idx] != NULL:
-                if uv.validity != NULL:
-                    continue
-                payload = const_payloads[arg_idx]
-                builder.append_bytes(
-                    <const char*>payload.data if payload.length > 0 else NULL,
-                    payload.length,
-                )
-                found = True
-                break
-
             view = <_StringVectorView>views[arg_idx]
             if view.is_null(row):
                 continue
@@ -350,47 +320,15 @@ cdef Vector _coalesce_string_dispatch(
     Py_ssize_t n_args,
     Py_ssize_t length,
 ):
-    cdef DrakenVector** unified_vecs = <DrakenVector**>malloc(
-        n_args * sizeof(DrakenVector*)
-    )
-    cdef DrakenConstantStringPayload** const_payloads = (
-        <DrakenConstantStringPayload**>malloc(
-            n_args * sizeof(DrakenConstantStringPayload*)
-        )
-    )
-    if unified_vecs == NULL or const_payloads == NULL:
-        if unified_vecs != NULL:
-            free(unified_vecs)
-        if const_payloads != NULL:
-            free(const_payloads)
-        raise MemoryError()
-
     cdef Py_ssize_t arg_idx
-    cdef Vector vec
     cdef StringVector sv
     cdef list view_list = [None] * n_args
-    cdef Vector result
 
-    try:
-        for arg_idx in range(n_args):
-            sv = <StringVector>arrays[arg_idx]
-            unified_vecs[arg_idx] = sv.unified()
-            if sv.ptr.offsets == NULL and sv._german_dict_values == NULL:
-                const_payloads[arg_idx] = (
-                    <DrakenConstantStringPayload*>unified_vecs[arg_idx].data
-                )
-            else:
-                const_payloads[arg_idx] = NULL
-                view_list[arg_idx] = sv.view()
+    for arg_idx in range(n_args):
+        sv = <StringVector>arrays[arg_idx]
+        view_list[arg_idx] = sv.view()
 
-        result = _coalesce_string_kernel(
-            unified_vecs, const_payloads, tuple(view_list), n_args, length
-        )
-    finally:
-        free(unified_vecs)
-        free(const_payloads)
-
-    return result
+    return _coalesce_string_kernel(tuple(view_list), n_args, length)
 
 
 # ---------------------------------------------------------------------------

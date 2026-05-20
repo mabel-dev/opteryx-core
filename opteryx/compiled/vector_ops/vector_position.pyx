@@ -86,7 +86,7 @@ cpdef Integer64Vector vector_position(StringVector haystack, object needle):
     Integer64Vector
         1-based positions; 0 where not found; 0 for null rows.
     """
-    cdef Py_ssize_t n = haystack.ptr.length
+    cdef Py_ssize_t n = haystack._unified_view.length
     cdef Py_ssize_t i
     cdef StringRow hay_row, ned_row
     cdef bint needle_is_vec = isinstance(needle, StringVector)

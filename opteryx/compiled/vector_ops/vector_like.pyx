@@ -10,10 +10,11 @@
 
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.bool_vector cimport BoolVector
-from draken.core.buffers cimport DrakenVarBuffer, DrakenConstantStringPayload, DrakenVector, DrakenGermanArena, GermanString, gs_length, gs_data
+from draken.core.buffers cimport DrakenVector, DrakenStringArena, DrakenStringSlot, str_length, str_data
 from cpython.bytes cimport PyBytes_AS_STRING
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
+from libc.stdint cimport uint8_t, uint32_t
 
 
 cdef inline bint _sv_byte_equals(uint8_t left, uint8_t right, bint ignore_case) noexcept nogil:
@@ -80,49 +81,26 @@ cpdef BoolVector vector_like(
 ):
     """Return mask: 1 if element matches SQL LIKE pattern, else 0. Propagates NULLs.
 
-    Optimized for dictionary-encoded vectors: tests each unique value once.
-
     If `negate` is True, the result is the row-wise NotLike: True where the
     element does NOT match the pattern. Fuses what would otherwise be a
     second full-pass `.not_vector()`.
     """
     cdef DrakenVector* uv = vec.unified()
+    cdef DrakenStringArena* arena = <DrakenStringArena*>uv.data
+    cdef uint32_t* sel = <uint32_t*>uv.selection
+    cdef uint8_t* nb_ptr = uv.validity
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
-    cdef uint8_t* nb_ptr = uv.validity
     cdef BoolVector out = BoolVector(<size_t>n)
     cdef uint8_t* dst = <uint8_t*> out.ptr.data
     cdef uint8_t* out_null = NULL
     cdef uint8_t mask
     cdef char* pat_ptr = PyBytes_AS_STRING(pattern)
     cdef Py_ssize_t pat_len = len(pattern)
-    cdef int32_t str_len
-    cdef Py_ssize_t i, dict_idx, dict_size
-    cdef uint32_t code
-    cdef DrakenVarBuffer* vbuf
-    cdef const uint8_t* vdata
-    cdef uint8_t* dict_like_results = NULL
-    cdef DrakenConstantStringPayload* csp
-    cdef DrakenGermanArena* lk_gdict
-    cdef GermanString* lk_slot
-    cdef const uint8_t* lk_sdata
-    cdef uint32_t lk_slen
-
-    if vec.ptr.offsets == NULL and vec._german_dict_values == NULL:  # constant
-        if uv.validity != NULL:  # null constant
-            return _constant_bool_result(n, False, True)
-        csp = <DrakenConstantStringPayload*>uv.data
-        return _constant_bool_result(
-            n,
-            _sv_sql_like_match(
-                <const uint8_t*>csp.data,
-                csp.length,
-                <const uint8_t*>pat_ptr,
-                pat_len,
-                ignore_case,
-            ) != negate,
-            False,
-        )
+    cdef Py_ssize_t i
+    cdef DrakenStringSlot* slot
+    cdef const uint8_t* sdata
+    cdef uint32_t slen
 
     # Initial fill matches the wanted result for the "no match" rows so the
     # inner loop only touches bits at matches.
@@ -132,6 +110,7 @@ cpdef BoolVector vector_like(
             dst[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
     else:
         memset(dst, 0, nbytes)
+
     if nb_ptr != NULL and nbytes != 0:
         out_null = <uint8_t*> malloc(nbytes)
         if out_null == NULL:
@@ -144,76 +123,29 @@ cpdef BoolVector vector_like(
     else:
         out.ptr.null_bitmap = NULL
 
-    try:
-        if vec._german_dict_values != NULL:  # dictionary
-            lk_gdict = vec._german_dict_values
-            if lk_gdict == NULL:
-                return out
-
-            dict_size = <Py_ssize_t>lk_gdict.length
-            if dict_size == 0:
-                return out
-
-            dict_like_results = <uint8_t*>malloc(dict_size)
-            if dict_like_results == NULL:
-                raise MemoryError()
-
-            for dict_idx in range(dict_size):
-                lk_slot = &lk_gdict.slots[dict_idx]
-                lk_slen = gs_length(lk_slot)
-                lk_sdata = gs_data(lk_slot, lk_gdict.arena)
-                str_len = <int32_t>lk_slen
-                if _sv_sql_like_match(
-                    lk_sdata, <Py_ssize_t>str_len,
-                    <const uint8_t*>pat_ptr, pat_len, ignore_case,
-                ):
-                    dict_like_results[dict_idx] = 1
-                else:
-                    dict_like_results[dict_idx] = 0
-
-            if negate:
-                for i in range(n):
-                    if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
-                        continue
-                    code = uv.selection[i]
-                    if dict_like_results[code]:
-                        dst[i >> 3] &= ~(1 << (i & 7))
-            else:
-                for i in range(n):
-                    if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
-                        continue
-                    code = uv.selection[i]
-                    if dict_like_results[code]:
-                        dst[i >> 3] |= (1 << (i & 7))
-
-        else:  # dense
-            vbuf = <DrakenVarBuffer*>uv.data
-            if negate:
-                for i in range(n):
-                    if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
-                        continue
-                    start = vbuf.offsets[i]
-                    end = vbuf.offsets[i + 1]
-                    str_len = end - start
-                    if _sv_sql_like_match(
-                        <const uint8_t*>vbuf.data + start, <Py_ssize_t>str_len,
-                        <const uint8_t*>pat_ptr, pat_len, ignore_case,
-                    ):
-                        dst[i >> 3] &= ~(1 << (i & 7))
-            else:
-                for i in range(n):
-                    if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
-                        continue
-                    start = vbuf.offsets[i]
-                    end = vbuf.offsets[i + 1]
-                    str_len = end - start
-                    if _sv_sql_like_match(
-                        <const uint8_t*>vbuf.data + start, <Py_ssize_t>str_len,
-                        <const uint8_t*>pat_ptr, pat_len, ignore_case,
-                    ):
-                        dst[i >> 3] |= (1 << (i & 7))
-    finally:
-        if dict_like_results != NULL:
-            free(dict_like_results)
+    if negate:
+        for i in range(n):
+            if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                continue
+            slot = &arena.slots[sel[i]]
+            slen = str_length(slot)
+            sdata = str_data(slot, arena.arena)
+            if _sv_sql_like_match(
+                sdata, <Py_ssize_t>slen,
+                <const uint8_t*>pat_ptr, pat_len, ignore_case,
+            ):
+                dst[i >> 3] &= ~(1 << (i & 7))
+    else:
+        for i in range(n):
+            if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                continue
+            slot = &arena.slots[sel[i]]
+            slen = str_length(slot)
+            sdata = str_data(slot, arena.arena)
+            if _sv_sql_like_match(
+                sdata, <Py_ssize_t>slen,
+                <const uint8_t*>pat_ptr, pat_len, ignore_case,
+            ):
+                dst[i >> 3] |= (1 << (i & 7))
 
     return out

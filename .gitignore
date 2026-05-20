@@ -349,3 +349,4 @@ draken/vectors/integer32_vector.cpp
 draken/vectors/integer64_vector.cpp
 draken/vectors/integer8_vector.cpp
 draken/vectors/decimal_vector.cpp
+draken/vectors/string_arena_builder.cpp

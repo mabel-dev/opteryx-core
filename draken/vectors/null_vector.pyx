@@ -17,16 +17,33 @@ Used to represent "argument not supplied" in function kernels while
 preserving the contract that all arguments arrive as vectors.
 """
 
-from libc.stdint cimport int32_t, int64_t, uint64_t, uint8_t
+from libc.stdint cimport int32_t, int64_t, uint32_t, uint64_t, uint8_t
 from cpython.array cimport array, clone
 
 from draken.vectors.vector cimport Vector, NULL_HASH
+from draken.core.buffers cimport (
+    DrakenVector,
+    DRAKEN_NON_NATIVE,
+    draken_zero_sel,
+    draken_zero_validity,
+)
+
+cdef uint64_t _null_payload_slot = 0  # value irrelevant; validity marks every row null
 
 
 cdef class NullVector(Vector):
 
     def __cinit__(self, Py_ssize_t length):
         self._length = length
+
+    cdef DrakenVector* unified(self) noexcept:
+        self._unified_view.data        = <void*>&_null_payload_slot
+        self._unified_view.selection   = draken_zero_sel(<uint32_t>self._length)
+        self._unified_view.data_length = 1
+        self._unified_view.length      = <uint32_t>self._length
+        self._unified_view.validity    = <uint8_t*>draken_zero_validity(<uint32_t>self._length)
+        self._unified_view.type        = DRAKEN_NON_NATIVE
+        return &self._unified_view
 
     def __len__(self):
         return self._length
@@ -108,6 +125,17 @@ cdef class NullVector(Vector):
         cdef Py_ssize_t i
         for i in range(self._length):
             out_buf[offset + i] = <int64_t>0x8000000000000000ULL
+
+    cpdef tuple _unified_view_fields(self):
+        cdef DrakenVector* uv = self.unified()
+        return (
+            uv.data_length,
+            uv.length,
+            uv.selection != NULL,
+            uv.validity != NULL,
+            (<uint32_t*>uv.selection)[0] if uv.selection != NULL else -1,
+            (<uint8_t*>uv.validity)[0] if uv.validity != NULL else -1,
+        )
 
     def __repr__(self):
         return f"NullVector(length={self._length})"

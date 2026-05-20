@@ -9,11 +9,13 @@
 # cython: optimize.unpack_method_calls=True
 
 from libc.stdint cimport uint8_t, uint32_t, int8_t, int32_t
+from libc.stddef cimport size_t
 from libc.string cimport memset
 
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.bool_vector cimport BoolVector
-from draken.core.buffers cimport DrakenVarBuffer, DrakenVector, DrakenConstantStringPayload
+from draken.core.buffers cimport DrakenVarBuffer, DrakenVector
+from draken.core.buffers cimport DrakenStringArena, DrakenStringSlot, str_length, str_data
 from cpython.bytes cimport PyBytes_FromStringAndSize
 
 
@@ -73,15 +75,20 @@ cpdef BoolVector vector_ip_in_cidr(StringVector vec, StringVector cidr):
     from opteryx.exceptions import IncorrectTypeError
 
     cdef DrakenVector* _cidr_uv = cidr.unified()
-    cdef DrakenConstantStringPayload* _cidr_csp
+    cdef DrakenStringArena* cidr_arena
+    cdef DrakenStringSlot* cidr_slot
     cdef bytes cidr_bytes
 
-    if cidr.ptr.offsets != NULL or cidr._german_dict_values != NULL:  # constant iff both are NULL
+    if cidr.ptr.offsets != NULL:  # constant StringVector has offsets == NULL
         raise IncorrectTypeError("CIDR argument must be constant encoded StringVector")
     if _cidr_uv.validity != NULL:
         raise ValueError("CIDR argument must not be NULL")
-    _cidr_csp = <DrakenConstantStringPayload*>_cidr_uv.data
-    cidr_bytes = PyBytes_FromStringAndSize(<const char*>_cidr_csp.data, _cidr_csp.length)
+    cidr_arena = <DrakenStringArena*>_cidr_uv.data
+    cidr_slot = &cidr_arena.slots[0]
+    cidr_bytes = PyBytes_FromStringAndSize(
+        <const char*>str_data(cidr_slot, cidr_arena.arena),
+        str_length(cidr_slot),
+    )
 
     cdef int slash_idx = cidr_bytes.find(b'/')
     if slash_idx == -1:
@@ -98,33 +105,37 @@ cpdef BoolVector vector_ip_in_cidr(StringVector vec, StringVector cidr):
             f"Invalid CIDR base address: {base_ip_bytes.decode('ascii', 'replace')}"
         )
 
-    cdef DrakenVarBuffer* ptr = vec.ptr
-    cdef Py_ssize_t n = ptr.length
+    cdef DrakenVector* _vec_uv = vec.unified()
+    cdef DrakenStringArena* arena = <DrakenStringArena*>_vec_uv.data
+    cdef uint32_t* sel = <uint32_t*>_vec_uv.selection
+    cdef uint8_t* nulls = _vec_uv.validity
+    cdef Py_ssize_t n = <Py_ssize_t>_vec_uv.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
 
     cdef BoolVector out = BoolVector(<size_t>n)
     cdef uint8_t* dst = <uint8_t*>out.ptr.data
     memset(dst, 0, nbytes)
 
-    cdef uint8_t* null_bm = ptr.null_bitmap
     cdef Py_ssize_t i
-    cdef int32_t start, end
+    cdef DrakenStringSlot* slot
+    cdef uint32_t slen
+    cdef const uint8_t* sptr
     cdef uint32_t ip_int
 
     for i in range(n):
-        # Skip nulls
-        if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
+        if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
             continue
-        start = ptr.offsets[i]
-        end = ptr.offsets[i + 1]
-        if end <= start:
+        slot = &arena.slots[sel[i]]
+        slen = str_length(slot)
+        if slen == 0:
             continue
+        sptr = str_data(slot, arena.arena)
         if parse_ip_to_int(
-            <const char*>ptr.data + start, <size_t>(end - start), &ip_int
+            <const char*>sptr, <size_t>slen, &ip_int
         ) != 0:
             raise ValueError(
                 f"Invalid IP address: "
-                f"{(<char*>ptr.data + start)[:end - start].decode('ascii', 'replace')}"
+                f"{(<char*>sptr)[:slen].decode('ascii', 'replace')}"
             )
         if (ip_int & netmask) == base_ip:
             dst[i >> 3] |= (<uint8_t>1 << (i & 7))
