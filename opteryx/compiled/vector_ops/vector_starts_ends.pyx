@@ -102,20 +102,23 @@ cdef inline void _extract_const_needle(
     StringVector sv,
     const uint8_t** needle_out,
     Py_ssize_t* needle_len_out,
-    const char* fn_name,
 ) except *:
+    """Read the needle from row 0 of sv via the unified view.
+
+    Callers needing literal semantics should pass a single-row or
+    constant-layout vector. This routine does not validate that;
+    it reads whatever row 0 holds.
+    """
     cdef DrakenVector* uv = sv.unified()
     cdef DrakenStringArena* arena = <DrakenStringArena*>uv.data
-    # Constant: offsets == NULL (per CLAUDE.md discriminant rule)
-    if sv.ptr.offsets != NULL:
-        raise ValueError(f"{fn_name} does not support non-constant needle")
-    if uv.validity != NULL:  # null constant
+    cdef DrakenStringSlot* slot
+    if uv.length == 0 or (uv.validity != NULL and not ((uv.validity[0] >> 0) & 1)):
         needle_out[0] = NULL
         needle_len_out[0] = 0
         return
-    # Constant vector: single slot at index 0
-    needle_out[0] = <const uint8_t*>str_data(&arena.slots[0], arena.arena)
-    needle_len_out[0] = <Py_ssize_t>str_length(&arena.slots[0])
+    slot = &arena.slots[uv.selection[0]]
+    needle_out[0] = <const uint8_t*>str_data(slot, arena.arena)
+    needle_len_out[0] = <Py_ssize_t>str_length(slot)
 
 
 # ----------------------------------------------------------------------
@@ -211,26 +214,26 @@ cdef BoolVector _starts_ends_kernel(
 cpdef BoolVector vector_starts_with(StringVector vec, StringVector prefix):
     cdef Py_ssize_t needle_len
     cdef const uint8_t* needle
-    _extract_const_needle(prefix, &needle, &needle_len, b"vector_starts_with")
+    _extract_const_needle(prefix, &needle, &needle_len)
     return _starts_ends_kernel(vec, needle, needle_len, False, False, False)
 
 
 cpdef BoolVector vector_ci_starts_with(StringVector vec, StringVector prefix):
     cdef Py_ssize_t needle_len
     cdef const uint8_t* needle
-    _extract_const_needle(prefix, &needle, &needle_len, b"vector_ci_starts_with")
+    _extract_const_needle(prefix, &needle, &needle_len)
     return _starts_ends_kernel(vec, needle, needle_len, True, False, False)
 
 
 cpdef BoolVector vector_ends_with(StringVector vec, StringVector suffix):
     cdef Py_ssize_t needle_len
     cdef const uint8_t* needle
-    _extract_const_needle(suffix, &needle, &needle_len, b"vector_ends_with")
+    _extract_const_needle(suffix, &needle, &needle_len)
     return _starts_ends_kernel(vec, needle, needle_len, False, False, True)
 
 
 cpdef BoolVector vector_ci_ends_with(StringVector vec, StringVector suffix):
     cdef Py_ssize_t needle_len
     cdef const uint8_t* needle
-    _extract_const_needle(suffix, &needle, &needle_len, b"vector_ci_ends_with")
+    _extract_const_needle(suffix, &needle, &needle_len)
     return _starts_ends_kernel(vec, needle, needle_len, True, False, True)

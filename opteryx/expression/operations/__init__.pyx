@@ -40,11 +40,10 @@ from opteryx.types._datetime_conversion import (
 )
 
 # Leaf includes — order matters: telemetry has no intra-package dependencies,
-# fastpath_constant uses telemetry, fastpath_dictionary uses both, and the
-# operator wrappers (comparisons / list_ops / string_matching) rely on the
-# fastpath helpers. array_ops and special_ops are independent and follow.
+# fastpath_dictionary uses telemetry, and the operator wrappers
+# (comparisons / list_ops / string_matching) rely on the fastpath helpers.
+# array_ops and special_ops are independent and follow.
 include "fastpath_telemetry.pyx"
-include "fastpath_constant.pyx"
 include "fastpath_dictionary.pyx"
 include "comparisons.pyx"
 include "list_ops.pyx"
@@ -155,10 +154,6 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
     if len(left_arr) == 0 or len(right_arr) == 0:
         return BoolVector.from_scalar(None, 0)
 
-    # Fast path for constant-encoded vectors
-    if has_constant_candidate(left_arr):
-        return _inner_filter_operations(left_arr, operator, right_arr)
-
     # Type coercion: DECIMAL + INTEGER
     if left_type == OrsoTypes.DECIMAL and right_type == OrsoTypes.INTEGER:
         right_type = OrsoTypes.DOUBLE
@@ -234,20 +229,6 @@ def _inner_filter_operations(arr, operator, value):
             pass
 
     dict_candidate = has_dictionary_candidate(raw_arr)
-    constant_candidate = has_constant_candidate(raw_arr)
-
-    # Constant-encoded fastpath
-    if constant_candidate:
-        if not supports_constant_fastpath(operator):
-            raise NotImplementedError(
-                f"Constant motor path does not support operator `{operator}`."
-            )
-        fast = constant_fastpath(raw_arr, operator, value)
-        if fast is not None:
-            record_constant_fastpath_hit()
-            return fast
-        record_constant_fastpath_fallback()
-        raise RuntimeError(f"Constant fastpath failed for `{operator}`.")
 
     # InStr fast path
     if operator in ("InStr", "NotInStr", "IInStr", "NotIInStr"):

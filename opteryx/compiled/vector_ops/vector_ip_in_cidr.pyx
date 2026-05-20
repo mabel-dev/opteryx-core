@@ -67,24 +67,22 @@ cpdef BoolVector vector_ip_in_cidr(StringVector vec, StringVector cidr):
 
     Parameters:
         vec: StringVector of IP address strings.
-        cidr: CIDR notation as a constant-encoded StringVector.
+        cidr: CIDR notation; the value is read from row 0.
 
     Returns:
         BoolVector: True where the IP is inside the CIDR block.
     """
-    from opteryx.exceptions import IncorrectTypeError
-
     cdef DrakenVector* _cidr_uv = cidr.unified()
     cdef DrakenStringArena* cidr_arena
     cdef DrakenStringSlot* cidr_slot
     cdef bytes cidr_bytes
 
-    if cidr.ptr.offsets != NULL:  # constant StringVector has offsets == NULL
-        raise IncorrectTypeError("CIDR argument must be constant encoded StringVector")
-    if _cidr_uv.validity != NULL:
+    if _cidr_uv.length == 0:
+        raise ValueError("CIDR argument must not be empty")
+    if _cidr_uv.validity != NULL and not ((_cidr_uv.validity[0] >> 0) & 1):
         raise ValueError("CIDR argument must not be NULL")
     cidr_arena = <DrakenStringArena*>_cidr_uv.data
-    cidr_slot = &cidr_arena.slots[0]
+    cidr_slot = &cidr_arena.slots[_cidr_uv.selection[0]]
     cidr_bytes = PyBytes_FromStringAndSize(
         <const char*>str_data(cidr_slot, cidr_arena.arena),
         str_length(cidr_slot),

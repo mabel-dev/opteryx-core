@@ -19,11 +19,9 @@ from draken.vectors.string_vector import StringVector
 
 
 cpdef bytes _json_key_constant(key):
-    """Unwrap a constant-encoded StringVector to its raw key bytes."""
+    """Extract key bytes from a StringVector; value is taken from logical row 0."""
     if not isinstance(key, StringVector):
         raise IncorrectTypeError("JSON extraction key must be a StringVector")
-    if not key.is_constant_encoded():
-        raise IncorrectTypeError("JSON extraction key must be constant encoded")
     raw_key = key[0]
     if raw_key is None:
         raise IncorrectTypeError("JSON extraction key cannot be NULL")
@@ -63,9 +61,6 @@ def MapAccessOp(array, key):
 
     if not isinstance(key, Integer64Vector):
         raise IncorrectTypeError("Map/iterable subscript key must be an Integer64Vector")
-
-    if not key.is_constant_encoded():
-        raise IncorrectTypeError("Map/iterable subscript key must be constant encoded")
 
     if isinstance(array, StringVector):
         return vector_map_access_string(array, key)

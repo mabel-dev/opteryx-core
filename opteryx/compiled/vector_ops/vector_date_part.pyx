@@ -32,7 +32,7 @@ from libc.stdint cimport int64_t, uint8_t
 from libc.stddef cimport size_t
 from cpython.array cimport array, clone
 
-from draken.core.buffers cimport DrakenVector, DRAKEN_INT64, draken_zero_sel
+from draken.core.buffers cimport DrakenVector, DRAKEN_INT64
 from draken.vectors.timestamp_vector cimport TimestampVector
 from draken.vectors.integer64_vector cimport Integer64Vector, from_packed_dict as int64_from_packed_dict, from_sequence as int64_from_sequence
 from draken.vectors.scalar_constructors cimport from_scalar
@@ -144,22 +144,6 @@ cdef inline int64_t _find_seconds_divisor_int64(
             return sd
         i += 1
     return 1  # All zeros — default to seconds
-
-
-cdef inline bint _is_constant_encoded(object vec) noexcept:
-    """Check if vec is constant-encoded (selection == draken_zero_sel)."""
-    cdef DrakenVector* uv
-    if not isinstance(vec, Vector):
-        return False
-    uv = (<Vector>vec).unified()
-    return uv.selection == draken_zero_sel(uv.length)
-
-
-cdef inline int64_t _constant_scalar_value_i64(object vec):
-    """Extract scalar value from constant-encoded vector."""
-    if len(vec) == 0:
-        return 0
-    return vec[0]
 
 
 cdef Integer64Vector _datepart_i64_dict_subsecond(Integer64Vector int64_vec, int part_kind):
@@ -932,24 +916,6 @@ cpdef Integer64Vector vector_datepart_minute_i64(object int64_vec):
     cdef int64_t i
     cdef int64_t empty_sentinel = 0
 
-    if _is_constant_encoded(int64_vec):
-        val = _constant_scalar_value_i64(int64_vec)
-        if length == 0:
-            return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
-        sd = _detect_seconds_divisor(val)
-        if sd == 0:
-            sd = 1
-        if sd == 1:
-            divisor = SECONDS_PER_MINUTE
-        elif sd == MILLISECONDS_PER_SECOND:
-            divisor = MILLISECONDS_PER_MINUTE
-        elif sd == MICROSECONDS_PER_SECOND:
-            divisor = MICROSECONDS_PER_MINUTE
-        else:
-            divisor = NANOSECONDS_PER_MINUTE
-        result_val = (val // divisor) % 60
-        return from_scalar(result_val, length, dtype=DRAKEN_INT64)
-
     dict_result = _datepart_i64_dict_subsecond(<Integer64Vector>int64_vec, 0)
     if dict_result is not None:
         return dict_result
@@ -1005,24 +971,6 @@ cpdef Integer64Vector vector_datepart_hour_i64(object int64_vec):
     cdef int64_t i
     cdef int64_t empty_sentinel = 0
 
-    if _is_constant_encoded(int64_vec):
-        val = _constant_scalar_value_i64(int64_vec)
-        if length == 0:
-            return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
-        sd = _detect_seconds_divisor(val)
-        if sd == 0:
-            sd = 1
-        if sd == 1:
-            divisor = SECONDS_PER_HOUR
-        elif sd == MILLISECONDS_PER_SECOND:
-            divisor = MILLISECONDS_PER_HOUR
-        elif sd == MICROSECONDS_PER_SECOND:
-            divisor = MICROSECONDS_PER_HOUR
-        else:
-            divisor = NANOSECONDS_PER_HOUR
-        result_val = (val // divisor) % 24
-        return from_scalar(result_val, length, dtype=DRAKEN_INT64)
-
     dict_result = _datepart_i64_dict_subsecond(<Integer64Vector>int64_vec, 1)
     if dict_result is not None:
         return dict_result
@@ -1076,19 +1024,6 @@ cpdef Integer64Vector vector_datepart_second_i64(object int64_vec):
     cdef Integer64Vector result
     cdef int64_t i
     cdef int64_t empty_sentinel = 0
-
-    if _is_constant_encoded(int64_vec):
-        val = _constant_scalar_value_i64(int64_vec)
-        if length == 0:
-            return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
-        sd = _detect_seconds_divisor(val)
-        if sd == 0:
-            sd = 1
-        if sd == 1:
-            result_val = val % 60
-        else:
-            result_val = (val // sd) % 60
-        return from_scalar(result_val, length, dtype=DRAKEN_INT64)
 
     dict_result = _datepart_i64_dict_subsecond(<Integer64Vector>int64_vec, 2)
     if dict_result is not None:
@@ -1150,20 +1085,6 @@ cpdef Integer64Vector vector_datepart_year_i64(object int64_vec):
     cdef Integer64Vector result
     cdef int64_t empty_sentinel = 0
 
-    if _is_constant_encoded(int64_vec):
-        val = _constant_scalar_value_i64(int64_vec)
-        if length == 0:
-            return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
-        sd = _detect_seconds_divisor(val)
-        if sd == 0:
-            sd = 1
-        unit_code = _seconds_divisor_unit_code(sd)
-        template = array('l')
-        output_array = clone(template, 1, False)
-        output_ptr = <int64_t*>output_array.data.as_longs
-        simd_datepart_year(&val, output_ptr, 1, unit_code)
-        return from_scalar(output_ptr[0], length, dtype=DRAKEN_INT64)
-
     dict_result = _datepart_i64_dict_calendar(<Integer64Vector>int64_vec, 0)
     if dict_result is not None:
         return dict_result
@@ -1198,20 +1119,6 @@ cpdef Integer64Vector vector_datepart_month_i64(object int64_vec):
     cdef Integer64Vector result
     cdef int64_t empty_sentinel = 0
 
-    if _is_constant_encoded(int64_vec):
-        val = _constant_scalar_value_i64(int64_vec)
-        if length == 0:
-            return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
-        sd = _detect_seconds_divisor(val)
-        if sd == 0:
-            sd = 1
-        unit_code = _seconds_divisor_unit_code(sd)
-        template = array('l')
-        output_array = clone(template, 1, False)
-        output_ptr = <int64_t*>output_array.data.as_longs
-        simd_datepart_month(&val, output_ptr, 1, unit_code)
-        return from_scalar(output_ptr[0], length, dtype=DRAKEN_INT64)
-
     dict_result = _datepart_i64_dict_calendar(<Integer64Vector>int64_vec, 1)
     if dict_result is not None:
         return dict_result
@@ -1245,20 +1152,6 @@ cpdef Integer64Vector vector_datepart_day_i64(object int64_vec):
     cdef Integer64Vector dict_result
     cdef Integer64Vector result
     cdef int64_t empty_sentinel = 0
-
-    if _is_constant_encoded(int64_vec):
-        val = _constant_scalar_value_i64(int64_vec)
-        if length == 0:
-            return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
-        sd = _detect_seconds_divisor(val)
-        if sd == 0:
-            sd = 1
-        unit_code = _seconds_divisor_unit_code(sd)
-        template = array('l')
-        output_array = clone(template, 1, False)
-        output_ptr = <int64_t*>output_array.data.as_longs
-        simd_datepart_day(&val, output_ptr, 1, unit_code)
-        return from_scalar(output_ptr[0], length, dtype=DRAKEN_INT64)
 
     dict_result = _datepart_i64_dict_calendar(<Integer64Vector>int64_vec, 2)
     if dict_result is not None:
@@ -1295,26 +1188,6 @@ cpdef Integer64Vector vector_datepart_dayofweek_i64(object int64_vec):
     cdef Integer64Vector result
     cdef int64_t i
     cdef int64_t empty_sentinel = 0
-
-    if _is_constant_encoded(int64_vec):
-        val = _constant_scalar_value_i64(int64_vec)
-        if length == 0:
-            return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
-        sd = _detect_seconds_divisor(val)
-        if sd == 0:
-            sd = 1
-        if sd == 1:
-            day_divisor = SECONDS_PER_DAY
-        elif sd == MILLISECONDS_PER_SECOND:
-            day_divisor = MILLISECONDS_PER_DAY
-        elif sd == MICROSECONDS_PER_SECOND:
-            day_divisor = MICROSECONDS_PER_DAY
-        else:
-            day_divisor = NANOSECONDS_PER_DAY
-        d = (val // day_divisor + EPOCH_WEEKDAY) % 7
-        if d < 0:
-            d += 7
-        return from_scalar(d, length, dtype=DRAKEN_INT64)
 
     dict_result = _datepart_i64_dict_calendar(<Integer64Vector>int64_vec, 3)
     if dict_result is not None:
@@ -1363,20 +1236,6 @@ cpdef Integer64Vector vector_datepart_dayofyear_i64(object int64_vec):
     cdef Integer64Vector result
     cdef int64_t empty_sentinel = 0
 
-    if _is_constant_encoded(int64_vec):
-        val = _constant_scalar_value_i64(int64_vec)
-        if length == 0:
-            return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
-        sd = _detect_seconds_divisor(val)
-        if sd == 0:
-            sd = 1
-        unit_code = _seconds_divisor_unit_code(sd)
-        template = array('l')
-        output_array = clone(template, 1, False)
-        output_ptr = <int64_t*>output_array.data.as_longs
-        simd_datepart_dayofyear(&val, output_ptr, 1, unit_code)
-        return from_scalar(output_ptr[0], length, dtype=DRAKEN_INT64)
-
     dict_result = _datepart_i64_dict_calendar(<Integer64Vector>int64_vec, 4)
     if dict_result is not None:
         return dict_result
@@ -1409,20 +1268,6 @@ cpdef Integer64Vector vector_datepart_quarter_i64(object int64_vec):
     cdef Integer64Vector dict_result
     cdef Integer64Vector result
     cdef int64_t empty_sentinel = 0
-
-    if _is_constant_encoded(int64_vec):
-        val = _constant_scalar_value_i64(int64_vec)
-        if length == 0:
-            return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
-        sd = _detect_seconds_divisor(val)
-        if sd == 0:
-            sd = 1
-        unit_code = _seconds_divisor_unit_code(sd)
-        template = array('l')
-        output_array = clone(template, 1, False)
-        output_ptr = <int64_t*>output_array.data.as_longs
-        simd_datepart_quarter(&val, output_ptr, 1, unit_code)
-        return from_scalar(output_ptr[0], length, dtype=DRAKEN_INT64)
 
     dict_result = _datepart_i64_dict_calendar(<Integer64Vector>int64_vec, 5)
     if dict_result is not None:

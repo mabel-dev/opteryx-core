@@ -33,6 +33,7 @@ from draken.vectors.integer8_vector cimport Integer8Vector
 from draken.vectors.integer16_vector cimport Integer16Vector
 from draken.vectors.integer32_vector cimport Integer32Vector
 from draken.vectors.string_vector cimport StringVector
+from draken.vectors.vector cimport Vector
 from opteryx.expression import NodeType
 # evaluate_and_append_draken in scope from _operators evaluator includes
 from opteryx.models import QueryProperties
@@ -40,25 +41,15 @@ from opteryx.models import QueryProperties
 # BasePlanNode in scope via textual include from _operators.pyx.
 
 
-cdef inline bint _is_constant_vector(object vec) noexcept:
-    cdef DrakenVector* uv
-    if isinstance(vec, Float64Vector):
-        uv = (<Float64Vector>vec).unified()
-    elif isinstance(vec, Integer64Vector):
-        uv = (<Integer64Vector>vec).unified()
-    elif isinstance(vec, Integer8Vector):
-        uv = (<Integer8Vector>vec).unified()
-    elif isinstance(vec, Integer16Vector):
-        uv = (<Integer16Vector>vec).unified()
-    elif isinstance(vec, Integer32Vector):
-        uv = (<Integer32Vector>vec).unified()
-    elif isinstance(vec, BoolVector):
-        uv = (<BoolVector>vec).unified()
-    elif isinstance(vec, StringVector):
-        return (<StringVector>vec).ptr.offsets == NULL  # constant (offsets always allocated for dense/dict)
-    else:
+cdef inline bint _is_constant_vector(Vector vec) noexcept:
+    """Telemetry-only observation of constant layout. Do not use for dispatch.
+
+    Reads the unified view's data_length; constant layout means
+    data_length == 1 regardless of vector type.
+    """
+    if vec is None:
         return False
-    return uv.data_length == 1
+    return vec.unified().data_length == 1
 
 
 cdef class ProjectionNode(BasePlanNode):

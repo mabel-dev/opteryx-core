@@ -14,11 +14,8 @@ opteryx.expression.evaluator.evaluation (_eval_value and
 evaluate_and_append_draken).
 """
 
-from array import array
-
 from opteryx.compiled.vector_ops import (
     assemble_bool,
-    assemble_dict_string,
     assemble_fixed,
     assemble_flat_string,
     decide_one_branch,
@@ -37,12 +34,6 @@ from draken.vectors.bool_vector import BoolVector
 from draken.vectors.null_vector import NullVector
 from draken.vectors.string_vector import StringVector
 
-
-# Draken encoding ids — duplicated as compile-time DEFs so the comparisons
-# below fold to integer literals. Mirrors draken.encoding constants.
-DEF _ENC_FLAT = 0
-DEF _ENC_DICT = 1
-DEF _ENC_CONSTANT = 3
 
 # Compile-time NodeType.LITERAL value — kept in sync with the runtime enum by
 # the verification check in opteryx.expression.evaluator.__init__.
@@ -159,65 +150,6 @@ cdef _compute(node, morsel, rows_per_branch, unmatched):
 # ---------------------------------------------------------------------------
 
 
-cdef bint _is_dict_path(list parts, else_part):
-    """True iff every non-None part (and else_part) is a StringVector in either
-    dict or constant encoding, AND at least one is dict-encoded.
-
-    Constants are admissible because they collapse to a single dict entry in
-    the unified output. Pure constants alone don't justify the unified-dict
-    overhead — the flat path is simpler.
-    """
-    cdef list all_parts = [p for p in parts if p is not None]
-    if else_part is not None:
-        all_parts.append(else_part)
-    if not all_parts:
-        return False
-    cdef bint has_dict = False
-    cdef int enc
-    for p in all_parts:
-        if not isinstance(p, StringVector):
-            return False
-        enc = <int>p.encoding
-        if enc == _ENC_DICT:
-            has_dict = True
-        elif enc == _ENC_CONSTANT:
-            pass
-        else:
-            return False
-    return has_dict
-
-
-cdef _to_dict_or_none(sv):
-    """Convert a constant-encoded StringVector to a 1-entry dict-encoded vector.
-
-    None passthrough. Already-dict vectors passthrough. Null/empty constants
-    are materialised because a dict with no entries can't represent them.
-    """
-    if sv is None:
-        return None
-    if <int>sv.encoding != _ENC_CONSTANT:
-        return sv
-    cdef Py_ssize_t n = len(sv)
-    val = sv[0] if n > 0 else None
-    if val is None or val == b"" or val == "":
-        return sv.materialize()
-    codes = array("i", [0] * n)
-    return StringVector.from_dict(codes, [val])
-
-
-cdef _normalize_constants_for_dict_path(list parts, else_part):
-    """Convert constant-encoded StringVector parts to single-entry dict-encoded
-    vectors so assemble_dict_string can process them uniformly.
-
-    Null constants are materialized — the dict kernel reads the per-row null
-    bitmap from the dict accessor, and a synthesised 1-entry dict with all-null
-    codes is the simplest representation.
-    """
-    cdef list new_parts = [_to_dict_or_none(p) for p in parts]
-    new_else = _to_dict_or_none(else_part)
-    return new_parts, new_else
-
-
 cdef _assemble(
     node,
     list parts,
@@ -247,25 +179,8 @@ cdef _assemble(
     if isinstance(first, BoolVector):
         return assemble_bool(parts, else_part, branch_id, rows_per_branch, unmatched)
 
-    cdef bint all_dict
     if isinstance(first, StringVector):
-        if _is_dict_path(parts, else_part):
-            d_parts, d_else = _normalize_constants_for_dict_path(parts, else_part)
-            # Normalisation may have materialised some parts (e.g. empty string
-            # constants) to flat encoding. assemble_dict_string requires all
-            # inputs to be dict-encoded; otherwise fall back to flat.
-            all_dict = True
-            for p in d_parts:
-                if p is not None and <int>p.encoding != _ENC_DICT:
-                    all_dict = False
-                    break
-            if all_dict and (d_else is None or <int>d_else.encoding == _ENC_DICT):
-                return assemble_dict_string(
-                    d_parts, d_else, branch_id, pos_in_branch, n
-                )
-        return assemble_flat_string(
-            parts, else_part, branch_id, pos_in_branch, n
-        )
+        return assemble_flat_string(parts, else_part, branch_id, pos_in_branch, n)
 
     # Fixed-width (numeric, date, timestamp, …)
     return assemble_fixed(parts, else_part, branch_id, rows_per_branch, unmatched)

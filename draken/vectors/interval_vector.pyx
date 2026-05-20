@@ -697,15 +697,9 @@ cdef class IntervalVector(Vector):
                 if not _is_valid(ptr, interval_index):
                     continue
 
-                if uv_date.data_length == 1:
-                    # constant vector
-                    if uv_date.validity != NULL:
-                        continue
-                    epoch_days = <int64_t>(<int32_t*>uv_date.data)[0]
-                else:
-                    if uv_date.validity != NULL and not ((uv_date.validity[value_index >> 3] >> (value_index & 7)) & 1):
-                        continue
-                    epoch_days = <int64_t> date_data[value_index]
+                if uv_date.validity != NULL and not ((uv_date.validity[value_index >> 3] >> (value_index & 7)) & 1):
+                    continue
+                epoch_days = <int64_t>(<int32_t*>uv_date.data)[uv_date.selection[value_index]]
 
                 day_microseconds = 0
 
@@ -746,16 +740,9 @@ cdef class IntervalVector(Vector):
                 if not _is_valid(ptr, interval_index):
                     continue
 
-                if uv_ts.data_length == 1:
-                    # constant vector
-                    if uv_ts.validity != NULL:
-                        continue
-                    ts_raw = (<int64_t*>uv_ts.data)[0]
-                else:
-                    # dense vector
-                    if uv_ts.validity != NULL and not ((uv_ts.validity[value_index >> 3] >> (value_index & 7)) & 1):
-                        continue
-                    ts_raw = ts_data[value_index]
+                if uv_ts.validity != NULL and not ((uv_ts.validity[value_index >> 3] >> (value_index & 7)) & 1):
+                    continue
+                ts_raw = (<int64_t*>uv_ts.data)[uv_ts.selection[value_index]]
 
                 _divmod_microseconds(
                     _timestamp_raw_to_microseconds(ts_raw, ts_unit_code),

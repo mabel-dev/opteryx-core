@@ -78,6 +78,16 @@ cdef bint _dictionary_supports_numeric_fastpath(arr):
     )
 
 
+cpdef _coerce_in_list_values(value):
+    """Coerce `value` into the iterable form expected by `vector_in_list`."""
+    pylist_fn = getattr(value, "to_pylist", None)
+    if pylist_fn is not None:
+        value = pylist_fn()
+    if isinstance(value, (list, tuple, set)):
+        return value
+    return [value]
+
+
 cdef _normalize_dict_compare_value(value):
     """Normalise the right-hand value: unwrap numpy-scalars via .item(); encode
     Python str to bytes since dict vectors compare on byte literals.

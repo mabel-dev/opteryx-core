@@ -748,17 +748,20 @@ cdef inline void _extract_const_slice(
     const char** data_ptr,
     Py_ssize_t* data_len,
 ) except *:
+    """Read the compiled DFA program from row 0 via the unified view.
+
+    Callers needing literal semantics should pass a single-row or
+    constant-layout vector.
+    """
     cdef DrakenVector* uv = vec.unified()
     cdef DrakenStringArena* prog_arena
     cdef DrakenStringSlot* prog_slot
-    if vec.ptr.offsets != NULL:  # not constant
-        raise ValueError("vector_dfa_extract: compiled program must be constant encoded")
-    if uv.validity != NULL:  # null constant
+    if uv.length == 0:
+        raise ValueError("vector_dfa_extract: empty program vector")
+    if uv.validity != NULL and not ((uv.validity[0] >> 0) & 1):
         raise ValueError("vector_dfa_extract: compiled program must be non-null")
-
-    # Constant StringVector: single slot at index 0, no selection array.
     prog_arena = <DrakenStringArena*>uv.data
-    prog_slot = &prog_arena.slots[0]
+    prog_slot = &prog_arena.slots[uv.selection[0]]
     data_ptr[0] = <const char*>str_data(prog_slot, prog_arena.arena)
     data_len[0] = <Py_ssize_t>str_length(prog_slot)
 

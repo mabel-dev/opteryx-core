@@ -122,21 +122,6 @@ cdef class Vector:
             f"{cls.__name__}.from_arrow cannot wrap Arrow type {arrow_array.type} as {cls.__name__}"
         )
 
-    @property
-    def encoding(self):
-        """Return the storage encoding as an integer (0=dense, 1=dict, 3=constant).
-
-        Informational only — derived from data_length vs length. The data path
-        does NOT branch on this; all access is data[selection[i]]. Exposed for
-        Python-side introspection (tests, debug, the registrar UI).
-        """
-        cdef DrakenVector* uv = self.unified()
-        if uv.data_length == 1 and uv.length != 1:
-            return 3  # DRAKEN_ENCODING_CONSTANT
-        if uv.data_length < uv.length:
-            return 1  # DRAKEN_ENCODING_DICTIONARY
-        return 0      # DRAKEN_ENCODING_DENSE
-
     cpdef object null_bitmap(self):
         """Return the null bitmap for this vector, or ``None`` when the vector has no nulls."""
         return None
@@ -273,6 +258,3 @@ cdef class Vector:
         """
         return &self._unified_view
 
-    cpdef bint is_constant_encoded(self):
-        """True iff this vector is constant-encoded (data_length == 1)."""
-        return self.unified().data_length == 1

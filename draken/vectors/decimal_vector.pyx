@@ -181,8 +181,7 @@ cdef class DecimalVector(Vector):
     # ------------------------------------------------------------------
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        cdef DrakenVector* uv = self.unified()
-        if self.ptr == NULL or uv.data_length == 1:
+        if self.ptr == NULL:
             return NULL
         return self.ptr.null_bitmap
 
@@ -233,8 +232,6 @@ cdef class DecimalVector(Vector):
         """Return the number of null values in the vector."""
         cdef DrakenVector* uv = self.unified()
         cdef Py_ssize_t n = <Py_ssize_t>uv.length
-        if uv.data_length == 1:
-            return n if uv.validity != NULL else 0
         if uv.validity == NULL:
             return 0
         return n - <Py_ssize_t>simd_popcount(uv.validity, (<size_t>n + 7) >> 3)
@@ -247,24 +244,15 @@ cdef class DecimalVector(Vector):
         """Return the value at index i as a Python Decimal, or None if null."""
         import decimal
         cdef DrakenVector* uv = self.unified()
-        cdef int64_t* data
-        cdef object factor
 
         if i < 0 or <size_t>i >= uv.length:
             raise IndexError("Index out of bounds")
 
-        factor = decimal.Decimal(10) ** (-self._scale)
+        if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
+            return None
 
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                return None
-            return decimal.Decimal((<int64_t*>uv.data)[0]) * factor
-
-        data = <int64_t*>uv.data
-        if uv.validity != NULL:
-            if not _bitmap_is_valid(uv.validity, i):
-                return None
-        return decimal.Decimal(data[i]) * factor
+        cdef object factor = decimal.Decimal(10) ** (-self._scale)
+        return decimal.Decimal((<int64_t*>uv.data)[uv.selection[i]]) * factor
 
     # ------------------------------------------------------------------
     # Arrow interoperability
@@ -342,17 +330,12 @@ cdef class DecimalVector(Vector):
         factor = 10.0 ** (-self._scale)
         n = <Py_ssize_t>uv.length
 
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                return Float64Vector.from_constant(None, n, is_null=True)
-            return Float64Vector.from_constant(<double>(<int64_t*>uv.data)[0] * factor, n)
-
         out = Float64Vector(<size_t>n)
         src = <int64_t*>uv.data
         dst = <double*>(<void*>out.ptr.data)
 
         for i in range(n):
-            dst[i] = <double>src[i] * factor
+            dst[i] = <double>src[<Py_ssize_t>uv.selection[i]] * factor
 
         if uv.validity != NULL and n > 0:
             nb_bytes = (<size_t>n + 7) >> 3
@@ -379,26 +362,14 @@ cdef class DecimalVector(Vector):
         n = <Py_ssize_t>uv.length
         factor = decimal.Decimal(10) ** (-self._scale)
 
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                return [None] * n
-            val_py = decimal.Decimal((<int64_t*>uv.data)[0]) * factor
-            return [val_py] * n
-
         data = <int64_t*>uv.data
         out = []
 
-        if uv.validity == NULL:
-            for i in range(n):
-                out.append(decimal.Decimal(data[i]) * factor)
-        else:
-            for i in range(n):
-                byte = uv.validity[i >> 3]
-                bit = (byte >> (i & 7)) & 1
-                if bit:
-                    out.append(decimal.Decimal(data[i]) * factor)
-                else:
-                    out.append(None)
+        for i in range(n):
+            if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
+                out.append(None)
+            else:
+                out.append(decimal.Decimal(data[<Py_ssize_t>uv.selection[i]]) * factor)
         return out
 
     # ------------------------------------------------------------------
@@ -410,66 +381,35 @@ cdef class DecimalVector(Vector):
         cdef DrakenVector* uv = self.unified()
         cdef Py_ssize_t i, n, out_nbytes
         cdef DecimalVector out
-        cdef int64_t* src
+        cdef int64_t* data = <int64_t*>uv.data
         cdef int64_t* dst
-        cdef uint8_t* out_null
+        cdef uint8_t* src_null = uv.validity
+        cdef uint8_t* out_null = NULL
         cdef int32_t src_idx
-        cdef uint8_t byte
 
         n = indices.shape[0]
         out = DecimalVector(<size_t>n)
         out._precision = self._precision
         out._scale = self._scale
-        dst = <int64_t*> out.ptr.data
-        out_null = NULL
+        dst = <int64_t*>out.ptr.data
         out_nbytes = (n + 7) >> 3
 
-        # Constant-encoding: materialise the selected rows into dense storage.
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                if out_nbytes > 0:
-                    out_null = <uint8_t*> malloc(out_nbytes)
-                    if out_null == NULL:
-                        raise MemoryError()
-                    memset(out_null, 0, out_nbytes)
-                    out.ptr.null_bitmap = out_null
-                else:
-                    out.ptr.null_bitmap = NULL
-                if n > 0:
-                    memset(dst, 0, <size_t>(n * sizeof(int64_t)))
+        if src_null != NULL and n > 0:
+            out_null = <uint8_t*>malloc(<size_t>out_nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, <size_t>out_nbytes)
+
+        for i in range(n):
+            src_idx = indices[i]
+            if src_null != NULL and not ((src_null[src_idx >> 3] >> (src_idx & 7)) & 1):
+                dst[i] = 0
             else:
-                for i in range(n):
-                    dst[i] = (<int64_t*>uv.data)[0]
-                out.ptr.null_bitmap = NULL
-            out._unified_view = draken_vector_from_dense(
-                out.ptr.data, <uint32_t>n, DRAKEN_INT64, out.ptr.null_bitmap)
-            return out
+                dst[i] = data[<Py_ssize_t>uv.selection[<Py_ssize_t>src_idx]]
+                if out_null != NULL:
+                    out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
 
-        src = <int64_t*>uv.data
-
-        if uv.validity == NULL:
-            for i in range(n):
-                dst[i] = src[indices[i]]
-            out.ptr.null_bitmap = NULL
-        else:
-            if out_nbytes > 0:
-                out_null = <uint8_t*> malloc(out_nbytes)
-                if out_null == NULL:
-                    raise MemoryError()
-                memset(out_null, 0, out_nbytes)
-
-            for i in range(n):
-                src_idx = indices[i]
-                byte = uv.validity[src_idx >> 3]
-                if byte & (1 << (src_idx & 7)):
-                    dst[i] = src[src_idx]
-                    if out_null != NULL:
-                        out_null[i >> 3] |= (1 << (i & 7))
-                else:
-                    dst[i] = 0
-
-            out.ptr.null_bitmap = out_null
-
+        out.ptr.null_bitmap = out_null
         out._unified_view = draken_vector_from_dense(
             out.ptr.data, <uint32_t>n, DRAKEN_INT64, out.ptr.null_bitmap)
         return out
@@ -512,52 +452,23 @@ cdef class DecimalVector(Vector):
 
     cpdef BoolVector _compare_scalar(self, int op, int64_t rhs):
         cdef DrakenVector* uv = self.unified()
-        cdef int64_t* data
+        cdef int64_t* data = <int64_t*>uv.data
         cdef Py_ssize_t i, n, nbytes
         cdef BoolVector out
         cdef uint8_t* dst
-        cdef uint8_t* out_null
+        cdef uint8_t* out_null = NULL
         cdef uint8_t mask
-        cdef bint matched
-        cdef uint8_t v
-        cdef uint8_t m
-        cdef size_t valid_count
 
         n = <Py_ssize_t>uv.length
         nbytes = (n + 7) >> 3
         out = BoolVector(<size_t>n)
-        dst = <uint8_t*> out.ptr.data
-        out_null = NULL
+        dst = <uint8_t*>out.ptr.data
 
         if nbytes > 0:
             memset(dst, 0, nbytes)
 
-        # Constant-encoding fast path
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                if nbytes != 0:
-                    out_null = <uint8_t*> malloc(nbytes)
-                    if out_null == NULL:
-                        raise MemoryError()
-                    memset(out_null, 0, nbytes)
-                    out.ptr.null_bitmap = out_null
-                else:
-                    out.ptr.null_bitmap = NULL
-                return out
-            matched = self._compare_decimal_values((<int64_t*>uv.data)[0], rhs, op)
-            if matched and nbytes > 0:
-                memset(dst, 0xFF, nbytes)
-                if (n & 7) != 0:
-                    mask = <uint8_t>((1 << (n & 7)) - 1)
-                    dst[nbytes - 1] &= mask
-            out.ptr.null_bitmap = NULL
-            return out
-
-        # Dense path
-        data = <int64_t*>uv.data
-
         if uv.validity != NULL and nbytes != 0:
-            out_null = <uint8_t*> malloc(nbytes)
+            out_null = <uint8_t*>malloc(nbytes)
             if out_null == NULL:
                 raise MemoryError()
             memcpy(out_null, uv.validity, nbytes)
@@ -568,22 +479,10 @@ cdef class DecimalVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        if uv.validity == NULL:
-            for i in range(n):
-                m = 1 if self._compare_decimal_values(data[i], rhs, op) else 0
-                dst[i >> 3] |= <uint8_t>(m << (i & 7))
-        else:
-            valid_count = simd_popcount(uv.validity, <size_t>nbytes)
-            if n > 0 and (valid_count * 10) < (<size_t>n * 3):
-                for i in range(n):
-                    if (uv.validity[i >> 3] >> (i & 7)) & 1:
-                        if self._compare_decimal_values(data[i], rhs, op):
-                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
-            else:
-                for i in range(n):
-                    v = (uv.validity[i >> 3] >> (i & 7)) & 1
-                    m = 1 if self._compare_decimal_values(data[i], rhs, op) else 0
-                    dst[i >> 3] |= <uint8_t>((v & m) << (i & 7))
+        for i in range(n):
+            if uv.validity == NULL or ((uv.validity[i >> 3] >> (i & 7)) & 1):
+                if self._compare_decimal_values(data[uv.selection[i]], rhs, op):
+                    dst[i >> 3] |= <uint8_t>(1 << (i & 7))
         return out
 
     # ------------------------------------------------------------------
@@ -594,22 +493,16 @@ cdef class DecimalVector(Vector):
         """Element-wise comparison between two DecimalVectors of the same scale."""
         cdef DrakenVector* uv = self.unified()
         cdef DrakenVector* uv2 = other.unified()
-        cdef int64_t* data1
-        cdef int64_t* data2
-        cdef uint8_t* null1
-        cdef uint8_t* null2
+        cdef int64_t* data1 = <int64_t*>uv.data
+        cdef int64_t* data2 = <int64_t*>uv2.data
         cdef Py_ssize_t n, nbytes, i
         cdef BoolVector out
         cdef uint8_t* dst
-        cdef uint8_t* out_null
-        cdef uint8_t v1, v2, v, mres, any_nullable
-        cdef int64_t lval, rval
-        cdef size_t valid1_cnt, valid2_cnt, min_valid
-        cdef bint use_branching = False
+        cdef uint8_t* out_null = NULL
+        cdef bint null1, null2
 
         n = <Py_ssize_t>uv.length
         nbytes = (n + 7) >> 3
-        out_null = NULL
 
         if n != <Py_ssize_t>uv2.length:
             raise ValueError(
@@ -622,22 +515,13 @@ cdef class DecimalVector(Vector):
             )
 
         out = BoolVector(<size_t>n)
-        dst = <uint8_t*> out.ptr.data
+        dst = <uint8_t*>out.ptr.data
 
         if nbytes > 0:
             memset(dst, 0, nbytes)
 
-        null1 = uv.validity
-        null2 = uv2.validity
-        data1 = <int64_t*>uv.data
-        data2 = <int64_t*>uv2.data
-
-        any_nullable = (
-            (null1 != NULL or null2 != NULL or uv.data_length == 1 or uv2.data_length == 1)
-            and nbytes != 0
-        )
-        if any_nullable:
-            out_null = <uint8_t*> malloc(nbytes)
+        if (uv.validity != NULL or uv2.validity != NULL) and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
             if out_null == NULL:
                 raise MemoryError()
             memset(out_null, 0, nbytes)
@@ -645,56 +529,15 @@ cdef class DecimalVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        # Hoist loop-invariant const handling. If either side is a null constant,
-        # the result is all-null and we are done.
-        if (uv.data_length == 1 and uv.validity != NULL) or (uv2.data_length == 1 and uv2.validity != NULL):
-            return out
-
-        # Compute density gate (only meaningful in the dense vec/vec case).
-        if uv.data_length != 1 and uv2.data_length != 1 and n > 0 and (null1 != NULL or null2 != NULL):
-            valid1_cnt = simd_popcount(null1, <size_t>nbytes) if null1 != NULL else <size_t>n
-            valid2_cnt = simd_popcount(null2, <size_t>nbytes) if null2 != NULL else <size_t>n
-            min_valid = valid1_cnt if valid1_cnt < valid2_cnt else valid2_cnt
-            use_branching = (min_valid * 10) < (<size_t>n * 3)
-
-        if uv.data_length == 1:
-            lval = data1[0]
-            for i in range(n):
-                v2 = 1 if (uv2.data_length == 1 or null2 == NULL) else (null2[i >> 3] >> (i & 7)) & 1
-                rval = data2[0] if uv2.data_length == 1 else data2[i]
-                mres = 1 if self._compare_decimal_values(lval, rval, op) else 0
-                dst[i >> 3] |= <uint8_t>((v2 & mres) << (i & 7))
-                if out_null != NULL:
-                    out_null[i >> 3] |= <uint8_t>(v2 << (i & 7))
-        elif uv2.data_length == 1:
-            rval = data2[0]
-            for i in range(n):
-                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
-                lval = data1[i]
-                mres = 1 if self._compare_decimal_values(lval, rval, op) else 0
-                dst[i >> 3] |= <uint8_t>((v1 & mres) << (i & 7))
-                if out_null != NULL:
-                    out_null[i >> 3] |= <uint8_t>(v1 << (i & 7))
-        elif null1 == NULL and null2 == NULL:
-            for i in range(n):
-                mres = 1 if self._compare_decimal_values(data1[i], data2[i], op) else 0
-                dst[i >> 3] |= <uint8_t>(mres << (i & 7))
-        elif use_branching:
-            for i in range(n):
-                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
-                v2 = 1 if null2 == NULL else (null2[i >> 3] >> (i & 7)) & 1
-                if v1 & v2:
-                    out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
-                    if self._compare_decimal_values(data1[i], data2[i], op):
-                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
-        else:
-            for i in range(n):
-                v1 = 1 if null1 == NULL else (null1[i >> 3] >> (i & 7)) & 1
-                v2 = 1 if null2 == NULL else (null2[i >> 3] >> (i & 7)) & 1
-                v = v1 & v2
-                mres = 1 if self._compare_decimal_values(data1[i], data2[i], op) else 0
-                dst[i >> 3] |= <uint8_t>((v & mres) << (i & 7))
-                out_null[i >> 3] |= <uint8_t>(v << (i & 7))
+        for i in range(n):
+            null1 = uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1)
+            null2 = uv2.validity != NULL and not ((uv2.validity[i >> 3] >> (i & 7)) & 1)
+            if null1 or null2:
+                continue
+            if self._compare_decimal_values(data1[uv.selection[i]], data2[uv2.selection[i]], op):
+                dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            if out_null != NULL:
+                out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
 
         return out
 
@@ -775,27 +618,6 @@ cdef class DecimalVector(Vector):
         if nbytes > 0:
             memset(dst, 0, nbytes)
 
-        # Constant-encoding fast path
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                if nbytes != 0:
-                    out_null = <uint8_t*> malloc(nbytes)
-                    if out_null == NULL:
-                        raise MemoryError()
-                    memset(out_null, 0, nbytes)
-                    out.ptr.null_bitmap = out_null
-                else:
-                    out.ptr.null_bitmap = NULL
-                return out
-            if (<int64_t*>uv.data)[0] in coerced and nbytes > 0:
-                memset(dst, 0xFF, nbytes)
-                if (n & 7) != 0:
-                    mask = <uint8_t>((1 << (n & 7)) - 1)
-                    dst[nbytes - 1] &= mask
-            out.ptr.null_bitmap = NULL
-            return out
-
-        # Dense path
         data = <int64_t*>uv.data
 
         if uv.validity != NULL and nbytes != 0:
@@ -812,7 +634,7 @@ cdef class DecimalVector(Vector):
 
         for i in range(n):
             if uv.validity == NULL or ((uv.validity[i >> 3] >> (i & 7)) & 1):
-                if data[i] in coerced:
+                if data[<Py_ssize_t>uv.selection[i]] in coerced:
                     dst[i >> 3] |= (1 << (i & 7))
         return out
 
@@ -840,19 +662,12 @@ cdef class DecimalVector(Vector):
         if buf == NULL:
             raise MemoryError()
 
-        if uv.data_length == 1:
-            for i in range(n):
-                buf[i] = 1 if uv.validity != NULL else 0
-            return <int8_t[:n]> buf
-
         if uv.validity == NULL:
             for i in range(n):
                 buf[i] = 0
         else:
             for i in range(n):
-                byte = uv.validity[i >> 3]
-                bit = (byte >> (i & 7)) & 1
-                buf[i] = 0 if bit else 1
+                buf[i] = 0 if ((uv.validity[i >> 3] >> (i & 7)) & 1) else 1
         return <int8_t[:n]> buf
 
     # ------------------------------------------------------------------
@@ -863,103 +678,81 @@ cdef class DecimalVector(Vector):
         """Return sum as a Python Decimal, skipping nulls.  Returns Decimal(0) for all-null."""
         import decimal as _decimal
         cdef DrakenVector* uv = self.unified()
-        cdef int64_t* data
+        cdef int64_t* data = <int64_t*>uv.data
         cdef Py_ssize_t i, n
-        cdef int64_t total
+        cdef int64_t total = 0
         cdef object factor
 
         n = <Py_ssize_t>uv.length
-        total = 0
         factor = _decimal.Decimal(10) ** (-self._scale)
-
-        if uv.data_length == 1:
-            if uv.validity != NULL or n == 0:
-                return _decimal.Decimal(0)
-            return _decimal.Decimal((<int64_t*>uv.data)[0] * <int64_t>n) * factor
-
-        data = <int64_t*>uv.data
 
         for i in range(n):
             if uv.validity == NULL or ((uv.validity[i >> 3] >> (i & 7)) & 1):
-                total += data[i]
+                total += data[uv.selection[i]]
         return _decimal.Decimal(total) * factor
 
     cpdef object min(self):
         """Return minimum as a Python Decimal, excluding nulls."""
         import decimal as _decimal
         cdef DrakenVector* uv = self.unified()
-        cdef int64_t* data
-        cdef Py_ssize_t i, n
+        cdef int64_t* data = <int64_t*>uv.data
+        cdef Py_ssize_t i, n, start
         cdef int64_t m
-        cdef bint found
+        cdef bint found = False
         cdef object factor
 
         n = <Py_ssize_t>uv.length
-        found = False
         factor = _decimal.Decimal(10) ** (-self._scale)
 
         if n == 0:
             raise ValueError("Cannot compute min of empty DecimalVector")
 
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                raise ValueError("Cannot compute min of all-null DecimalVector")
-            return _decimal.Decimal((<int64_t*>uv.data)[0]) * factor
-
-        data = <int64_t*>uv.data
-
         for i in range(n):
             if uv.validity == NULL or ((uv.validity[i >> 3] >> (i & 7)) & 1):
-                m = data[i]
+                m = data[uv.selection[i]]
                 found = True
+                start = i + 1
                 break
 
         if not found:
             raise ValueError("Cannot compute min of all-null DecimalVector")
 
-        for i in range(i + 1, n):
+        for i in range(start, n):
             if uv.validity == NULL or ((uv.validity[i >> 3] >> (i & 7)) & 1):
-                if data[i] < m:
-                    m = data[i]
+                if data[uv.selection[i]] < m:
+                    m = data[uv.selection[i]]
         return _decimal.Decimal(m) * factor
 
     cpdef object max(self):
         """Return maximum as a Python Decimal, excluding nulls."""
         import decimal as _decimal
         cdef DrakenVector* uv = self.unified()
-        cdef int64_t* data
-        cdef Py_ssize_t i, n
+        cdef int64_t* data = <int64_t*>uv.data
+        cdef Py_ssize_t i, n, start
         cdef int64_t m
-        cdef bint found
+        cdef bint found = False
         cdef object factor
 
         n = <Py_ssize_t>uv.length
-        found = False
         factor = _decimal.Decimal(10) ** (-self._scale)
 
         if n == 0:
             raise ValueError("Cannot compute max of empty DecimalVector")
 
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                raise ValueError("Cannot compute max of all-null DecimalVector")
-            return _decimal.Decimal((<int64_t*>uv.data)[0]) * factor
-
-        data = <int64_t*>uv.data
-
         for i in range(n):
             if uv.validity == NULL or ((uv.validity[i >> 3] >> (i & 7)) & 1):
-                m = data[i]
+                m = data[uv.selection[i]]
                 found = True
+                start = i + 1
                 break
 
         if not found:
             raise ValueError("Cannot compute max of all-null DecimalVector")
 
-        for i in range(i + 1, n):
+        for i in range(start, n):
             if uv.validity == NULL or ((uv.validity[i >> 3] >> (i & 7)) & 1):
-                if data[i] > m:
-                    m = data[i]
+                if data[uv.selection[i]] > m:
+                    m = data[uv.selection[i]]
         return _decimal.Decimal(m) * factor
 
     # ------------------------------------------------------------------
@@ -972,16 +765,15 @@ cdef class DecimalVector(Vector):
         Py_ssize_t offset=0
     ) except *:
         cdef DrakenVector* uv = self.unified()
-        cdef int64_t* data
         cdef uint64_t* dst
-        cdef uint64_t* as_uint64
+        cdef uint64_t* as_uint64 = <uint64_t*>uv.data
         cdef Py_ssize_t n, i, j, block
-        cdef uint64_t is_valid, const_raw
+        cdef uint64_t is_valid
         cdef uint64_t[DECIMAL_HASH_CHUNK] scratch
         cdef uint64_t* scratch_ptr
 
         n = <Py_ssize_t>uv.length
-        scratch_ptr = <uint64_t*> scratch
+        scratch_ptr = <uint64_t*>scratch
 
         if n == 0:
             return
@@ -991,22 +783,6 @@ cdef class DecimalVector(Vector):
 
         dst = (&out_buf[0]) + offset
 
-        # Constant-encoding: all rows share the same hash
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                const_raw = NULL_HASH
-            else:
-                const_raw = <uint64_t>(<int64_t*>uv.data)[0]
-                simd_mix_hash(scratch_ptr, &const_raw, 1)
-                const_raw = scratch[0]
-            for i in range(n):
-                dst[i] = const_raw
-            return
-
-        # Dense path
-        data = <int64_t*>uv.data
-        as_uint64 = <uint64_t*>data
-
         if uv.validity != NULL:
             i = 0
             while i < n:
@@ -1015,11 +791,19 @@ cdef class DecimalVector(Vector):
                     block = DECIMAL_HASH_CHUNK
                 for j in range(block):
                     is_valid = (uv.validity[(i + j) >> 3] >> ((i + j) & 7)) & 1
-                    scratch[j] = (as_uint64[i + j] * is_valid) | (NULL_HASH * (1 - is_valid))
+                    scratch[j] = (as_uint64[<Py_ssize_t>uv.selection[i + j]] * is_valid) | (NULL_HASH * (1 - is_valid))
                 simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
                 i += block
         else:
-            simd_mix_hash(dst, as_uint64, <size_t>n)
+            i = 0
+            while i < n:
+                block = n - i
+                if block > DECIMAL_HASH_CHUNK:
+                    block = DECIMAL_HASH_CHUNK
+                for j in range(block):
+                    scratch[j] = as_uint64[<Py_ssize_t>uv.selection[i + j]]
+                simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
+                i += block
 
     # ------------------------------------------------------------------
     # Compression — unscaled int64 values pass through directly
@@ -1028,10 +812,9 @@ cdef class DecimalVector(Vector):
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Write unscaled int64 values into out_buf.  Null rows emit INT64_MIN."""
         cdef DrakenVector* uv = self.unified()
-        cdef int64_t* src
+        cdef int64_t* data = <int64_t*>uv.data
         cdef int64_t* dst
         cdef Py_ssize_t n, i
-        cdef int64_t fill
 
         n = <Py_ssize_t>uv.length
 
@@ -1043,26 +826,11 @@ cdef class DecimalVector(Vector):
 
         dst = &out_buf[offset]
 
-        # Constant-encoding path
-        if uv.data_length == 1:
-            fill = INT64_MIN_VALUE if uv.validity != NULL else (<int64_t*>uv.data)[0]
-            for i in range(n):
-                dst[i] = fill
-            return
-
-        # Dense path
-        src = <int64_t*>uv.data
-
-        if uv.validity == NULL:
-            # Fast path: bulk memcpy
-            memcpy(<void*>dst, <const void*>src, <size_t>(n * sizeof(int64_t)))
-            return
-
         for i in range(n):
-            if (uv.validity[i >> 3] >> (i & 7)) & 1:
-                dst[i] = src[i]
-            else:
+            if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
                 dst[i] = INT64_MIN_VALUE
+            else:
+                dst[i] = data[uv.selection[i]]
 
     # ------------------------------------------------------------------
     # Debug representation
@@ -1076,19 +844,14 @@ cdef class DecimalVector(Vector):
 
         n = <Py_ssize_t>uv.length
 
-        if uv.data_length == 1:
-            tag = "NULL" if uv.validity != NULL else str((<int64_t*>uv.data)[0])
-            return (
-                f"<DecimalVector[const] len={n} "
-                f"precision={self._precision} scale={self._scale} "
-                f"value={tag}>"
-            )
-
         vals = []
         k = min(n, 10)
         data = <int64_t*>uv.data
         for i in range(k):
-            vals.append(data[i])
+            if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
+                vals.append(None)
+            else:
+                vals.append(data[<Py_ssize_t>uv.selection[i]])
         return (
             f"<DecimalVector len={n} "
             f"precision={self._precision} scale={self._scale} "
@@ -1228,38 +991,27 @@ cpdef DecimalVector from_int64_vector(Integer64Vector source, int precision, int
     src_uv = source.unified()
     n = <Py_ssize_t>src_uv.length
 
-    # Constant-encoding fast path
-    if src_uv.data_length == 1:
-        const_val_i64 = 0 if src_uv.validity != NULL else (<int64_t*>src_uv.data)[0]
-        out = DecimalVector(1)
-        (<int64_t*>out.ptr.data)[0] = const_val_i64
-        out.ptr.length = <size_t>n
-        out.ptr.null_bitmap = NULL
-        out._precision = <int8_t>precision
-        out._scale = <int8_t>scale
-        out._unified_view = draken_vector_from_constant(
-            out.ptr.data, <uint32_t>n, DRAKEN_INT64,
-            &_CONST_NULL_BYTE if src_uv.validity != NULL else NULL)
-        return out
-
-    # Dense path: allocate new buffer and copy data
+    # Allocate output and copy data via uniform selection[i] access
     out = DecimalVector(<size_t>n)
     out._precision = <int8_t>precision
     out._scale = <int8_t>scale
 
     if n > 0:
-        src_data = <int64_t*>source.ptr.data
+        src_data = <int64_t*>src_uv.data
         dst_data = <int64_t*>out.ptr.data
-        memcpy(dst_data, src_data, <size_t>n * sizeof(int64_t))
+        for i in range(n):
+            if src_uv.validity != NULL and not ((src_uv.validity[i >> 3] >> (i & 7)) & 1):
+                dst_data[i] = 0
+            else:
+                dst_data[i] = src_data[<Py_ssize_t>src_uv.selection[i]]
 
     # Copy null bitmap
-    src_null = <uint8_t*>source.ptr.null_bitmap
-    if src_null != NULL and n > 0:
+    if src_uv.validity != NULL and n > 0:
         nb_bytes = (<size_t>n + 7) >> 3
         out_null = <uint8_t*>malloc(nb_bytes)
         if out_null == NULL:
             raise MemoryError()
-        memcpy(out_null, src_null, nb_bytes)
+        memcpy(out_null, src_uv.validity, nb_bytes)
         out.ptr.null_bitmap = out_null
     else:
         out.ptr.null_bitmap = NULL

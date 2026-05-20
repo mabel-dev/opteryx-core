@@ -263,28 +263,11 @@ cdef class Integer64Vector(Vector):
 
     cdef object item_at(self, Py_ssize_t i):
         cdef DrakenVector* uv = self.unified()
-        cdef uint8_t byte
-        cdef uint8_t bit
-        cdef int64_t* data
-        cdef uint32_t code
         if i < 0 or i >= <Py_ssize_t>uv.length:
             raise IndexError("Index out of bounds")
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                return None
-            return (<int64_t*>uv.data)[0]
-        if self._unified_view.data_length < self._unified_view.length:
-            if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
-                return None
-            code = uv.selection[i]
-            return (<int64_t*>uv.data)[<Py_ssize_t>code]
-        data = <int64_t*>uv.data
-        if uv.validity != NULL:
-            byte = uv.validity[i >> 3]
-            bit = (byte >> (i & 7)) & 1
-            if not bit:
-                return None
-        return data[i]
+        if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
+            return None
+        return (<int64_t*>uv.data)[uv.selection[i]]
 
     def __getitem__(self, Py_ssize_t i):
         """Return the value at index i, or None if null."""
@@ -329,75 +312,33 @@ cdef class Integer64Vector(Vector):
         cdef DrakenVector* uv = self.unified()
         cdef Py_ssize_t i, n = indices.shape[0]
         cdef int32_t src_idx
-        cdef Py_ssize_t code_idx
         cdef Integer64Vector out
         cdef int64_t* data = <int64_t*>uv.data
         cdef int64_t* dst
-        cdef uint8_t* src_null
-        cdef uint8_t* out_null
+        cdef uint8_t* src_null = uv.validity
+        cdef uint8_t* out_null = NULL
         cdef Py_ssize_t out_nbytes
-        cdef uint8_t byte
 
-        if self._unified_view.data_length < self._unified_view.length:
-            out = Integer64Vector(<size_t>n)
-            dst = <int64_t*>out.ptr.data
-            src_null = uv.validity
-            out_null = NULL
-            if src_null != NULL:
-                out_nbytes = (n + 7) >> 3
-                out_null = <uint8_t*>malloc(<size_t>out_nbytes)
-                if out_null == NULL:
-                    raise MemoryError()
-                memset(out_null, 0, <size_t>out_nbytes)
-            for i in range(n):
-                src_idx = indices[i]
-                if src_null != NULL and not ((src_null[src_idx >> 3] >> (src_idx & 7)) & 1):
-                    dst[i] = 0
-                else:
-                    dst[i] = data[<Py_ssize_t>uv.selection[<Py_ssize_t>src_idx]]
-                    if out_null != NULL:
-                        out_null[i >> 3] |= (1 << (i & 7))
-            out.ptr.null_bitmap = out_null
-            return out
-        if uv.data_length == 1:
-            return Integer64Vector.from_constant(
-                None if uv.validity != NULL else data[0],
-                n,
-                is_null=uv.validity != NULL,
-            )
         out = Integer64Vector(<size_t>n)
-        dst = <int64_t*> out.ptr.data
-        src_null = <uint8_t*> self.ptr.null_bitmap
-        out_null = NULL
-        out_nbytes = 0
+        dst = <int64_t*>out.ptr.data
 
-        # If source has no null bitmap, copy directly
-        if src_null == NULL:
-            for i in range(n):
-                src_idx = indices[i]
-                dst[i] = data[src_idx]
-            out.ptr.null_bitmap = NULL
-        else:
-            # Source has nulls - allocate a null bitmap for the output and preserve nulls
+        if src_null != NULL and n > 0:
             out_nbytes = (n + 7) >> 3
-            out_null = <uint8_t*> malloc(out_nbytes)
+            out_null = <uint8_t*>malloc(<size_t>out_nbytes)
             if out_null == NULL:
                 raise MemoryError()
-            # zero-initialize
-            for i in range(out_nbytes):
-                out_null[i] = 0
+            memset(out_null, 0, <size_t>out_nbytes)
 
-            for i in range(n):
-                src_idx = indices[i]
-                byte = src_null[src_idx >> 3]
-                if byte & (1 << (src_idx & 7)):
-                    dst[i] = data[src_idx]
-                    out_null[i >> 3] |= (1 << (i & 7))
-                else:
-                    dst[i] = 0
+        for i in range(n):
+            src_idx = indices[i]
+            if src_null != NULL and not ((src_null[src_idx >> 3] >> (src_idx & 7)) & 1):
+                dst[i] = 0
+            else:
+                dst[i] = data[<Py_ssize_t>uv.selection[<Py_ssize_t>src_idx]]
+                if out_null != NULL:
+                    out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
 
-            out.ptr.null_bitmap = out_null
-
+        out.ptr.null_bitmap = out_null
         out._unified_view = draken_vector_from_dense(
             out.ptr.data, <uint32_t>n, DRAKEN_INT64, out.ptr.null_bitmap)
         return out
@@ -426,27 +367,11 @@ cdef class Integer64Vector(Vector):
         cdef uint8_t* dst = <uint8_t*>out.ptr.data
         cdef uint8_t* out_null = NULL
         cdef uint8_t mask
-        cdef bint matched
         cdef int64_t* data = <int64_t*>uv.data
-        cdef Py_ssize_t dict_size
-        cdef uint8_t* match_table
-        cdef Py_ssize_t d, i
-        cdef uint8_t* src_null
-        cdef size_t valid_count
+        cdef Py_ssize_t i
 
         if nbytes > 0:
             memset(dst, 0, nbytes)
-
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                return self._make_all_null_bool(n)
-            matched = dispatch_compare_once(op, data[0], value)
-            if matched and nbytes > 0:
-                memset(dst, 0xFF, nbytes)
-                if (n & 7) != 0:
-                    dst[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
-            out.ptr.null_bitmap = NULL
-            return out
 
         if uv.validity != NULL and nbytes != 0:
             out_null = <uint8_t*>malloc(nbytes)
@@ -460,94 +385,35 @@ cdef class Integer64Vector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        if self._unified_view.data_length < self._unified_view.length:
-            dict_size = <Py_ssize_t>uv.data_length
-            match_table = <uint8_t*>malloc(<size_t>dict_size if dict_size > 0 else 1)
-            if match_table == NULL:
-                raise MemoryError()
-            for d in range(dict_size):
-                match_table[d] = 1 if dispatch_compare_once(op, data[d], value) else 0
-            for i in range(n):
-                if match_table[uv.selection[i]]:
+        for i in range(n):
+            if uv.validity == NULL or ((uv.validity[i >> 3] >> (i & 7)) & 1):
+                if dispatch_compare_once(op, data[uv.selection[i]], value):
                     dst[i >> 3] |= <uint8_t>(1 << (i & 7))
-            free(match_table)
-            if out_null != NULL:
-                simd_and_mask(dst, dst, out_null, <size_t>nbytes)
-            return out
-
-        src_null = uv.validity
-        if src_null == NULL:
-            dispatch_scalar_nonnull(op, data, value, dst, <size_t>n)
-        else:
-            valid_count = simd_popcount(src_null, <size_t>nbytes)
-            if n > 0 and (valid_count * 10) < (<size_t>n * 3):
-                dispatch_scalar_branching(op, data, value, src_null, dst, <size_t>n)
-            else:
-                dispatch_scalar_branchless(op, data, value, src_null, dst, <size_t>n)
         return out
 
     cpdef BoolVector _compare_vector(self, Integer64Vector other, int op):
         cdef DrakenVector* uv = self.unified()
         cdef DrakenVector* ouv = other.unified()
         cdef Py_ssize_t n = <Py_ssize_t>uv.length
-        cdef int reversed_op
-        cdef DrakenFixedBuffer* ptr1
-        cdef DrakenFixedBuffer* ptr2
-        cdef int64_t* data1
-        cdef int64_t* data2
-        cdef uint8_t* null1
-        cdef uint8_t* null2
-        cdef Py_ssize_t nbytes
+        cdef int64_t* data1 = <int64_t*>uv.data
+        cdef int64_t* data2 = <int64_t*>ouv.data
+        cdef Py_ssize_t i
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
         cdef BoolVector out
         cdef uint8_t* dst
         cdef uint8_t* out_null = NULL
-        cdef size_t valid1_cnt, valid2_cnt, min_valid
-        cdef bint use_branching = False
+        cdef bint null1, null2
 
-        # Const fast paths: avoid O(n) materialisation.
-        if uv.data_length == 1:
-            if n != <Py_ssize_t>ouv.length:
-                raise ValueError("Vectors must have the same length")
-            if uv.validity != NULL:
-                return self._make_all_null_bool(n)
-            # self[i] OP other[i] where self is const V = V OP other[i]
-            #   = other[i] reversed_op V, so flip directional ops.
-            if op == 2:   reversed_op = 4
-            elif op == 3: reversed_op = 5
-            elif op == 4: reversed_op = 2
-            elif op == 5: reversed_op = 3
-            else:         reversed_op = op
-            return other._compare_scalar((<int64_t*>uv.data)[0], reversed_op)
-
-        if ouv.data_length == 1:
-            if n != <Py_ssize_t>ouv.length:
-                raise ValueError("Vectors must have the same length")
-            if ouv.validity != NULL:
-                return self._make_all_null_bool(n)
-            return self._compare_scalar((<int64_t*>ouv.data)[0], op)
-
-        # For dict-encoded on either side: materialize then compare
-        if self._unified_view.data_length < self._unified_view.length:
-            return self.materialize()._compare_vector(other, op)
-        if other._unified_view.data_length < other._unified_view.length:
-            return self._compare_vector(other.materialize(), op)
-
-        ptr1 = self.ptr
-        ptr2 = other.ptr
-        data1 = <int64_t*> ptr1.data
-        data2 = <int64_t*> ptr2.data
-        null1 = ptr1.null_bitmap
-        null2 = ptr2.null_bitmap
-        nbytes = (n + 7) >> 3
-        if n != <Py_ssize_t>ptr2.length:
+        if n != <Py_ssize_t>ouv.length:
             raise ValueError("Vectors must have the same length")
 
         out = BoolVector(<size_t>n)
-        dst = <uint8_t*> out.ptr.data
-        memset(dst, 0, nbytes)
+        dst = <uint8_t*>out.ptr.data
+        if nbytes > 0:
+            memset(dst, 0, nbytes)
 
-        if (null1 != NULL or null2 != NULL) and nbytes != 0:
-            out_null = <uint8_t*> malloc(nbytes)
+        if (uv.validity != NULL or ouv.validity != NULL) and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
             if out_null == NULL:
                 raise MemoryError()
             memset(out_null, 0, nbytes)
@@ -555,29 +421,15 @@ cdef class Integer64Vector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        # op dispatch and null-pointer specialisation happen once here.
-        # Gate: >~70% nulls → branching kernel (skips work for null rows).
-        if n > 0 and (null1 != NULL or null2 != NULL):
-            valid1_cnt = simd_popcount(null1, <size_t>nbytes) if null1 != NULL else <size_t>n
-            valid2_cnt = simd_popcount(null2, <size_t>nbytes) if null2 != NULL else <size_t>n
-            min_valid = valid1_cnt if valid1_cnt < valid2_cnt else valid2_cnt
-            use_branching = (min_valid * 10) < (<size_t>n * 3)
-
-        if null1 == NULL and null2 == NULL:
-            dispatch_vector_nonnull(op, data1, data2, dst, <size_t>n)
-        elif use_branching:
-            if null1 != NULL and null2 != NULL:
-                dispatch_vector_both_null_branching(op, data1, data2, null1, null2, dst, out_null, <size_t>n)
-            elif null1 != NULL:
-                dispatch_vector_one_null_branching(op, data1, data2, null1, dst, out_null, <size_t>n)
-            else:
-                dispatch_vector_one_null_branching(op, data1, data2, null2, dst, out_null, <size_t>n)
-        elif null1 != NULL and null2 == NULL:
-            dispatch_vector_one_null_branchless(op, data1, data2, null1, dst, out_null, <size_t>n)
-        elif null1 == NULL and null2 != NULL:
-            dispatch_vector_one_null_branchless(op, data1, data2, null2, dst, out_null, <size_t>n)
-        else:
-            dispatch_vector_both_null_branchless(op, data1, data2, null1, null2, dst, out_null, <size_t>n)
+        for i in range(n):
+            null1 = uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1)
+            null2 = ouv.validity != NULL and not ((ouv.validity[i >> 3] >> (i & 7)) & 1)
+            if null1 or null2:
+                continue
+            if dispatch_compare_once(op, data1[uv.selection[i]], data2[ouv.selection[i]]):
+                dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            if out_null != NULL:
+                out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
         return out
 
     cpdef BoolVector _compare_float64_vector(self, object other, int op):
@@ -698,70 +550,10 @@ cdef class Integer64Vector(Vector):
         cdef int64_t* data
         cdef uint8_t* src_null
         cdef uint8_t* out_null = NULL
-        cdef Py_ssize_t i, dict_size, d
+        cdef Py_ssize_t i
         cdef uint8_t mask
-        cdef bint in_range
-        cdef uint8_t* match_table
-        cdef int64_t v
 
         memset(dst, 0, nbytes)
-
-        if self._unified_view.data_length < self._unified_view.length:
-            data = <int64_t*>uv.data
-            dict_size = <Py_ssize_t>uv.data_length
-            match_table = <uint8_t*>malloc(<size_t>dict_size if dict_size > 0 else 1)
-            if match_table == NULL:
-                raise MemoryError()
-            for d in range(dict_size):
-                v = data[d]
-                in_range = (v >= lower if lower_inclusive else v > lower)
-                if in_range:
-                    in_range = (v <= upper if upper_inclusive else v < upper)
-                match_table[d] = 1 if in_range else 0
-            if uv.validity != NULL and nbytes != 0:
-                out_null = <uint8_t*>malloc(nbytes)
-                if out_null == NULL:
-                    free(match_table)
-                    raise MemoryError()
-                memcpy(out_null, uv.validity, nbytes)
-                if (n & 7) != 0:
-                    out_null[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
-                out.ptr.null_bitmap = out_null
-            for i in range(n):
-                if match_table[uv.selection[i]]:
-                    dst[i >> 3] |= <uint8_t>(1 << (i & 7))
-            if out_null != NULL:
-                simd_and_mask(dst, dst, out_null, <size_t>nbytes)
-            free(match_table)
-            return out
-
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                if nbytes != 0:
-                    out_null = <uint8_t*>malloc(nbytes)
-                    if out_null == NULL:
-                        raise MemoryError()
-                    memset(out_null, 0, nbytes)
-                    out.ptr.null_bitmap = out_null
-                else:
-                    out.ptr.null_bitmap = NULL
-                return out
-            data = <int64_t*>uv.data
-            if lower_inclusive:
-                in_range = data[0] >= lower
-            else:
-                in_range = data[0] > lower
-            if in_range:
-                if upper_inclusive:
-                    in_range = data[0] <= upper
-                else:
-                    in_range = data[0] < upper
-            if in_range and nbytes > 0:
-                memset(dst, 0xFF, nbytes)
-                if (n & 7) != 0:
-                    dst[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
-            out.ptr.null_bitmap = NULL
-            return out
 
         data = <int64_t*>uv.data
         src_null = uv.validity
@@ -781,40 +573,40 @@ cdef class Integer64Vector(Vector):
         if src_null == NULL:
             if lower_inclusive and upper_inclusive:
                 for i in range(n):
-                    if lower <= data[i] <= upper:
+                    if lower <= data[uv.selection[i]] <= upper:
                         dst[i >> 3] |= <uint8_t>(1 << (i & 7))
             elif lower_inclusive:
                 for i in range(n):
-                    if lower <= data[i] < upper:
+                    if lower <= data[uv.selection[i]] < upper:
                         dst[i >> 3] |= <uint8_t>(1 << (i & 7))
             elif upper_inclusive:
                 for i in range(n):
-                    if lower < data[i] <= upper:
+                    if lower < data[uv.selection[i]] <= upper:
                         dst[i >> 3] |= <uint8_t>(1 << (i & 7))
             else:
                 for i in range(n):
-                    if lower < data[i] < upper:
+                    if lower < data[uv.selection[i]] < upper:
                         dst[i >> 3] |= <uint8_t>(1 << (i & 7))
         else:
             if lower_inclusive and upper_inclusive:
                 for i in range(n):
                     if (src_null[i >> 3] >> (i & 7)) & 1:
-                        if lower <= data[i] <= upper:
+                        if lower <= data[uv.selection[i]] <= upper:
                             dst[i >> 3] |= <uint8_t>(1 << (i & 7))
             elif lower_inclusive:
                 for i in range(n):
                     if (src_null[i >> 3] >> (i & 7)) & 1:
-                        if lower <= data[i] < upper:
+                        if lower <= data[uv.selection[i]] < upper:
                             dst[i >> 3] |= <uint8_t>(1 << (i & 7))
             elif upper_inclusive:
                 for i in range(n):
                     if (src_null[i >> 3] >> (i & 7)) & 1:
-                        if lower < data[i] <= upper:
+                        if lower < data[uv.selection[i]] <= upper:
                             dst[i >> 3] |= <uint8_t>(1 << (i & 7))
             else:
                 for i in range(n):
                     if (src_null[i >> 3] >> (i & 7)) & 1:
-                        if lower < data[i] < upper:
+                        if lower < data[uv.selection[i]] < upper:
                             dst[i >> 3] |= <uint8_t>(1 << (i & 7))
         return out
 
@@ -829,8 +621,7 @@ cdef class Integer64Vector(Vector):
         cdef uint8_t mask
         cdef int64_t* data
         cdef uint8_t* src_null
-        cdef Py_ssize_t i, dict_size, d
-        cdef uint8_t* match_table
+        cdef Py_ssize_t i
 
         if not isinstance(value_set, (set, frozenset)):
             value_set = set(value_set)
@@ -839,59 +630,6 @@ cdef class Integer64Vector(Vector):
         dst = <uint8_t*>out.ptr.data
         if nbytes > 0:
             memset(dst, 0, nbytes)
-
-        if self._unified_view.data_length < self._unified_view.length:
-            data = <int64_t*>uv.data
-            dict_size = <Py_ssize_t>uv.data_length
-            match_table = <uint8_t*>malloc(<size_t>dict_size if dict_size > 0 else 1)
-            if match_table == NULL:
-                raise MemoryError()
-            for d in range(dict_size):
-                match_table[d] = 1 if data[d] in value_set else 0
-            if uv.validity != NULL and nbytes != 0:
-                out_null = <uint8_t*>malloc(nbytes)
-                if out_null == NULL:
-                    free(match_table)
-                    raise MemoryError()
-                memcpy(out_null, uv.validity, nbytes)
-                if (n & 7) != 0:
-                    out_null[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
-                out.ptr.null_bitmap = out_null
-            for i in range(n):
-                if match_table[uv.selection[i]]:
-                    dst[i >> 3] |= <uint8_t>(1 << (i & 7))
-            if out_null != NULL:
-                simd_and_mask(dst, dst, out_null, <size_t>nbytes)
-            free(match_table)
-            return out
-
-        if not isinstance(value_set, (set, frozenset)):
-            value_set = set(value_set)
-
-        out = BoolVector(<size_t>n)
-        dst = <uint8_t*>out.ptr.data
-        if nbytes > 0:
-            memset(dst, 0, nbytes)
-
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                if nbytes != 0:
-                    out_null = <uint8_t*>malloc(nbytes)
-                    if out_null == NULL:
-                        raise MemoryError()
-                    memset(out_null, 0, nbytes)
-                    out.ptr.null_bitmap = out_null
-                else:
-                    out.ptr.null_bitmap = NULL
-                return out
-            data = <int64_t*>uv.data
-            if data[0] in value_set and nbytes > 0:
-                memset(dst, 0xFF, nbytes)
-                if (n & 7) != 0:
-                    mask = <uint8_t>((1 << (n & 7)) - 1)
-                    dst[nbytes - 1] &= mask
-            out.ptr.null_bitmap = NULL
-            return out
 
         data = <int64_t*>uv.data
         src_null = uv.validity
@@ -909,7 +647,7 @@ cdef class Integer64Vector(Vector):
 
         for i in range(n):
             if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
-                if data[i] in value_set:
+                if data[uv.selection[i]] in value_set:
                     dst[i >> 3] |= (1 << (i & 7))
         return out
 
@@ -920,163 +658,91 @@ cdef class Integer64Vector(Vector):
         cdef Py_ssize_t i
         cdef int64_t total = 0
 
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                return 0
-            return <int64_t>(n * data[0])
-
-        if self._unified_view.data_length < self._unified_view.length:
-            if uv.validity == NULL:
-                with nogil:
-                    for i in range(n):
-                        total += data[uv.selection[i]]
-            else:
-                with nogil:
-                    for i in range(n):
-                        if (uv.validity[i >> 3] >> (i & 7)) & 1:
-                            total += data[uv.selection[i]]
-            return total
-
-        if n == 0:
-            return 0
         if uv.validity == NULL:
-            return sum_nonnull(data, <size_t>n)
-        return sum_nullable_branchless(data, uv.validity, <size_t>n)
+            with nogil:
+                for i in range(n):
+                    total += data[uv.selection[i]]
+        else:
+            with nogil:
+                for i in range(n):
+                    if (uv.validity[i >> 3] >> (i & 7)) & 1:
+                        total += data[uv.selection[i]]
+        return total
 
     cpdef int64_t min(self):
         cdef DrakenVector* uv = self.unified()
         cdef int64_t* data = <int64_t*>uv.data
         cdef Py_ssize_t n = <Py_ssize_t>uv.length
-        cdef size_t valid_count
-        cdef int64_t out
         cdef Py_ssize_t i, start
         cdef int64_t m
-        cdef bint seen
-
-        if uv.data_length == 1:
-            if n == 0 or uv.validity != NULL:
-                raise ValueError("Cannot compute min of empty or all-null column")
-            return data[0]
-
-        if self._unified_view.data_length < self._unified_view.length:
-            if n == 0:
-                raise ValueError("Cannot compute min of empty column")
-            seen = False
-            if uv.validity == NULL:
-                m = data[uv.selection[0]]
-                seen = True
-                start = 1
-                with nogil:
-                    for i in range(start, n):
-                        if data[uv.selection[i]] < m:
-                            m = data[uv.selection[i]]
-            else:
-                start = 0
-                for i in range(n):
-                    if (uv.validity[i >> 3] >> (i & 7)) & 1:
-                        m = data[uv.selection[i]]
-                        seen = True
-                        start = i + 1
-                        break
-                if not seen:
-                    raise ValueError("Cannot compute min of all-null column")
-                with nogil:
-                    for i in range(start, n):
-                        if (uv.validity[i >> 3] >> (i & 7)) & 1:
-                            if data[uv.selection[i]] < m:
-                                m = data[uv.selection[i]]
-            return m
+        cdef bint seen = False
 
         if n == 0:
             raise ValueError("Cannot compute min of empty column")
+
         if uv.validity == NULL:
-            return min_nonnull(data, <size_t>n)
-        valid_count = min_nullable_branchless(data, uv.validity, <size_t>n, &out)
-        if valid_count == 0:
-            raise ValueError("Cannot compute min of all-null column")
-        return out
+            m = data[uv.selection[0]]
+            with nogil:
+                for i in range(1, n):
+                    if data[uv.selection[i]] < m:
+                        m = data[uv.selection[i]]
+            return m
+        else:
+            for i in range(n):
+                if (uv.validity[i >> 3] >> (i & 7)) & 1:
+                    m = data[uv.selection[i]]
+                    seen = True
+                    start = i + 1
+                    break
+            if not seen:
+                raise ValueError("Cannot compute min of all-null column")
+            with nogil:
+                for i in range(start, n):
+                    if (uv.validity[i >> 3] >> (i & 7)) & 1:
+                        if data[uv.selection[i]] < m:
+                            m = data[uv.selection[i]]
+            return m
 
     cpdef int64_t max(self):
         cdef DrakenVector* uv = self.unified()
         cdef int64_t* data = <int64_t*>uv.data
         cdef Py_ssize_t n = <Py_ssize_t>uv.length
-        cdef size_t valid_count
-        cdef int64_t out
         cdef Py_ssize_t i, start
         cdef int64_t m
-        cdef bint seen
-
-        if uv.data_length == 1:
-            if n == 0 or uv.validity != NULL:
-                raise ValueError("Cannot compute max of empty or all-null column")
-            return data[0]
-
-        if self._unified_view.data_length < self._unified_view.length:
-            if n == 0:
-                raise ValueError("Cannot compute max of empty column")
-            seen = False
-            if uv.validity == NULL:
-                m = data[uv.selection[0]]
-                seen = True
-                start = 1
-                with nogil:
-                    for i in range(start, n):
-                        if data[uv.selection[i]] > m:
-                            m = data[uv.selection[i]]
-            else:
-                start = 0
-                for i in range(n):
-                    if (uv.validity[i >> 3] >> (i & 7)) & 1:
-                        m = data[uv.selection[i]]
-                        seen = True
-                        start = i + 1
-                        break
-                if not seen:
-                    raise ValueError("Cannot compute max of all-null column")
-                with nogil:
-                    for i in range(start, n):
-                        if (uv.validity[i >> 3] >> (i & 7)) & 1:
-                            if data[uv.selection[i]] > m:
-                                m = data[uv.selection[i]]
-            return m
+        cdef bint seen = False
 
         if n == 0:
             raise ValueError("Cannot compute max of empty column")
+
         if uv.validity == NULL:
-            return max_nonnull(data, <size_t>n)
-        valid_count = max_nullable_branchless(data, uv.validity, <size_t>n, &out)
-        if valid_count == 0:
-            raise ValueError("Cannot compute max of all-null column")
-        return out
+            m = data[uv.selection[0]]
+            with nogil:
+                for i in range(1, n):
+                    if data[uv.selection[i]] > m:
+                        m = data[uv.selection[i]]
+            return m
+        else:
+            for i in range(n):
+                if (uv.validity[i >> 3] >> (i & 7)) & 1:
+                    m = data[uv.selection[i]]
+                    seen = True
+                    start = i + 1
+                    break
+            if not seen:
+                raise ValueError("Cannot compute max of all-null column")
+            with nogil:
+                for i in range(start, n):
+                    if (uv.validity[i >> 3] >> (i & 7)) & 1:
+                        if data[uv.selection[i]] > m:
+                            m = data[uv.selection[i]]
+            return m
 
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
         """Compare two values at given indices. Returns -1, 0, 1. Assumes non-null."""
         cdef DrakenVector* uv = self.unified()
         cdef int64_t* data = <int64_t*>uv.data
-        cdef int64_t left_val, right_val
-        cdef uint32_t lc, rc
-
-        if uv.data_length == 1:
-            return 0
-
-        if self._unified_view.data_length < self._unified_view.length:
-            # Dict-aware path: dereference codes into the dictionary's int64
-            # backing buffer and compare values directly. No O(N) materialization
-            # per call.
-            lc = uv.selection[left_idx]
-            rc = uv.selection[right_idx]
-            if lc == rc:
-                return 0
-            left_val = data[lc]
-            right_val = data[rc]
-            if left_val < right_val:
-                return -1
-            elif left_val > right_val:
-                return 1
-            return 0
-
-        left_val = data[left_idx]
-        right_val = data[right_idx]
+        cdef int64_t left_val = data[uv.selection[left_idx]]
+        cdef int64_t right_val = data[uv.selection[right_idx]]
 
         if left_val < right_val:
             return -1
@@ -1087,16 +753,9 @@ cdef class Integer64Vector(Vector):
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False:
         """Check if value at index is null."""
         cdef DrakenVector* uv = self.unified()
-        cdef uint8_t byte
-
-        if uv.data_length == 1:
-            return uv.validity != NULL
-
         if uv.validity == NULL:
             return False
-
-        byte = uv.validity[idx >> 3]
-        return ((byte >> (idx & 7)) & 1) == 0
+        return ((uv.validity[idx >> 3] >> (idx & 7)) & 1) == 0
 
     cpdef int8_t[::1] is_null(self):
         """
@@ -1111,22 +770,12 @@ cdef class Integer64Vector(Vector):
         if buf == NULL:
             raise MemoryError()
 
-        if uv.data_length == 1:
-            null_val = 1 if uv.validity != NULL else 0
-            for i in range(n):
-                buf[i] = null_val
-            return <int8_t[:n]> buf
-
         if uv.validity == NULL:
-            # No nulls — fill with 0
             for i in range(n):
                 buf[i] = 0
         else:
-            # Extract null bits — 1 means valid, so invert for null
             for i in range(n):
-                byte = uv.validity[i >> 3]
-                bit = (byte >> (i & 7)) & 1
-                buf[i] = 0 if bit else 1
+                buf[i] = 0 if ((uv.validity[i >> 3] >> (i & 7)) & 1) else 1
 
         return <int8_t[:n]> buf
 
@@ -1135,8 +784,6 @@ cdef class Integer64Vector(Vector):
         """Return the number of nulls in the vector."""
         cdef DrakenVector* uv = self.unified()
         cdef Py_ssize_t n = <Py_ssize_t>uv.length
-        if uv.data_length == 1:
-            return n if uv.validity != NULL else 0
         if uv.validity == NULL:
             return 0
         return n - <Py_ssize_t>simd_popcount(uv.validity, (<size_t>n + 7) >> 3)
@@ -1202,20 +849,11 @@ cdef class Integer64Vector(Vector):
         cdef uint8_t* out_null
         cdef size_t nb_bytes
 
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                return Float64Vector.from_constant(None, n, is_null=True)
-            return Float64Vector.from_constant(<double>src[0], n)
-
         out = Float64Vector(<size_t>n)
         dst = <double*>(<void*>out.ptr.data)
 
-        if self._unified_view.data_length < self._unified_view.length:
-            for i in range(n):
-                dst[i] = <double>src[<Py_ssize_t>uv.selection[i]]
-        else:
-            for i in range(n):
-                dst[i] = <double>src[i]
+        for i in range(n):
+            dst[i] = <double>src[<Py_ssize_t>uv.selection[i]]
 
         if uv.validity != NULL and n > 0:
             nb_bytes = (<size_t>n + 7) >> 3
@@ -1251,34 +889,13 @@ cdef class Integer64Vector(Vector):
         cdef Py_ssize_t n = <Py_ssize_t>uv.length
         cdef list out = []
         cdef int64_t* data = <int64_t*>uv.data
-        cdef uint8_t byte, bit
         cdef Py_ssize_t i
 
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                return [None] * n
-            return [data[0]] * n
-
-        if self._unified_view.data_length < self._unified_view.length:
-            for i in range(n):
-                if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
-                    out.append(None)
-                else:
-                    out.append(data[<Py_ssize_t>uv.selection[i]])
-            return out
-
-        if uv.validity == NULL:
-            for i in range(n):
-                out.append(data[i])
-        else:
-            for i in range(n):
-                byte = uv.validity[i >> 3]
-                bit = (byte >> (i & 7)) & 1
-                if bit:
-                    out.append(data[i])
-                else:
-                    out.append(None)
-
+        for i in range(n):
+            if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
+                out.append(None)
+            else:
+                out.append(data[<Py_ssize_t>uv.selection[i]])
         return out
 
     cdef inline void hash_into(
@@ -1290,17 +907,11 @@ cdef class Integer64Vector(Vector):
         cdef Py_ssize_t n = <Py_ssize_t>uv.length
         cdef uint64_t* dst_base
         cdef Py_ssize_t i, j, block
-        cdef uint64_t value, is_valid
-        cdef uint8_t byte
         cdef uint64_t* dst
         cdef uint64_t[1024] scratch
         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
-        cdef int64_t* data
-        cdef uint64_t* as_uint64
-        cdef uint8_t* null_bitmap
-        cdef bint has_nulls
-        cdef int64_t* _dict_data
-        cdef uint8_t* _dict_nb
+        cdef int64_t* data = <int64_t*>uv.data
+        cdef uint8_t* null_bitmap = uv.validity
 
         if n == 0:
             return
@@ -1308,104 +919,34 @@ cdef class Integer64Vector(Vector):
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("Integer64Vector.hash_into: output buffer too small")
         dst_base = &out_buf[0]
-
         dst = dst_base + offset
 
-        if self._unified_view.data_length < self._unified_view.length:
-            _dict_data  = <int64_t*>uv.data
-            _dict_nb    = uv.validity
-            i = 0
-            while i < n:
-                block = n - i
-                if block > 1024:
-                    block = 1024
-                for j in range(block):
-                    if _dict_nb != NULL and not ((_dict_nb[(i+j) >> 3] >> ((i+j) & 7)) & 1):
-                        scratch[j] = NULL_HASH
-                    else:
-                        scratch[j] = <uint64_t>_dict_data[<Py_ssize_t>uv.selection[i + j]]
-                simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
-                i += block
-            return
-
-        if uv.data_length == 1:
-            value = NULL_HASH if uv.validity != NULL else <uint64_t>(<int64_t*>uv.data)[0]
-            for j in range(1024):
-                scratch[j] = value
-            i = 0
-            while i < n:
-                block = n - i
-                if block > 1024:
-                    block = 1024
-                simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
-                i += block
-            return
-
-        data = <int64_t*>uv.data
-        as_uint64 = <uint64_t*>data
-        null_bitmap = uv.validity
-        has_nulls = null_bitmap != NULL
-
-        if has_nulls:
-            i = 0
-            while i < n:
-                block = n - i
-                if block > 1024:
-                    block = 1024
-                for j in range(block):
-                    is_valid = (null_bitmap[(i + j) >> 3] >> ((i + j) & 7)) & 1
-                    scratch[j] = (as_uint64[i + j] * is_valid) | (NULL_HASH * (1 - is_valid))
-                simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
-                i += block
-        else:
-            simd_mix_hash(dst, as_uint64, <size_t>n)
+        i = 0
+        while i < n:
+            block = n - i
+            if block > 1024:
+                block = 1024
+            for j in range(block):
+                if null_bitmap != NULL and not ((null_bitmap[(i+j) >> 3] >> ((i+j) & 7)) & 1):
+                    scratch[j] = NULL_HASH
+                else:
+                    scratch[j] = <uint64_t>data[<Py_ssize_t>uv.selection[i + j]]
+            simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
+            i += block
 
     cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
-        cdef DrakenFixedBuffer* ptr = self.ptr
         cdef DrakenVector* uv = &self._unified_view
         cdef Py_ssize_t i, j, block
-        cdef uint64_t value, is_valid
-        cdef uint8_t byte
         cdef uint64_t[1024] scratch
         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
-        cdef int64_t* _cd_dict_data
-        cdef uint8_t* _cd_null_bitmap
+        cdef int64_t* data = <int64_t*>uv.data
+        cdef uint8_t* null_bitmap = uv.validity
+        cdef uint64_t is_valid
 
         if n == 0:
             return 0
 
-        if uv.data_length == 1 and self._unified_view.data_length >= self._unified_view.length:
-            value = NULL_HASH if uv.validity != NULL else <uint64_t>(<int64_t*>uv.data)[0]
-            for j in range(1024):
-                scratch[j] = value
-            i = 0
-            while i < n:
-                block = n - i
-                if block > 1024:
-                    block = 1024
-                simd_mix_hash(out + i, scratch_ptr, <size_t>block)
-                i += block
-            return 0
-
-        # Dictionary-encoded path: always uint32 codes after migration.
-        if self._unified_view.data_length < self._unified_view.length:
-            _cd_dict_data  = <int64_t*>uv.data
-            _cd_null_bitmap = uv.validity
-            if _cd_null_bitmap != NULL:
-                simd_mix_hash_from_dict_nullable_cw4(
-                    out, <uint64_t*>_cd_dict_data, <uint32_t*>uv.selection,
-                    _cd_null_bitmap, 0, <size_t>n)
-            else:
-                simd_mix_hash_from_dict_cw4(
-                    out, <uint64_t*>_cd_dict_data, <uint32_t*>uv.selection, <size_t>n)
-            return 0
-
-        cdef int64_t* data = <int64_t*> ptr.data
-        cdef uint64_t* as_uint64 = <uint64_t*> data
-        cdef uint8_t* null_bitmap = ptr.null_bitmap
-        cdef bint has_nulls = null_bitmap != NULL
-
-        if has_nulls:
+        if null_bitmap != NULL:
             i = 0
             while i < n:
                 block = n - i
@@ -1413,81 +954,43 @@ cdef class Integer64Vector(Vector):
                     block = 1024
                 for j in range(block):
                     is_valid = (null_bitmap[(i + j) >> 3] >> ((i + j) & 7)) & 1
-                    scratch[j] = (as_uint64[i + j] * is_valid) | (NULL_HASH * (1 - is_valid))
+                    scratch[j] = (<uint64_t>data[<Py_ssize_t>uv.selection[i + j]] * is_valid) | (NULL_HASH * (1 - is_valid))
                 simd_mix_hash(out + i, scratch_ptr, <size_t>block)
                 i += block
         else:
-            simd_mix_hash(out, as_uint64, <size_t>n)
+            i = 0
+            while i < n:
+                block = n - i
+                if block > 1024:
+                    block = 1024
+                for j in range(block):
+                    scratch[j] = <uint64_t>data[<Py_ssize_t>uv.selection[i + j]]
+                simd_mix_hash(out + i, scratch_ptr, <size_t>block)
+                i += block
         return 0
 
     cdef bint c_hash_single(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
-        """Single-column hash for COUNT(DISTINCT): no prior dest state, no memset."""
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int64_t* data
-        cdef uint64_t* as_uint64
-        cdef uint8_t* null_bitmap
-        cdef Py_ssize_t i, j, block
-        cdef uint64_t is_valid, v
-        cdef uint64_t[1024] scratch
-        cdef uint64_t* scratch_ptr = <uint64_t*>scratch
-
+        """Single-column hash for COUNT(DISTINCT): delegates to c_hash_into with zeroed dest."""
         if n == 0:
             return 0
-
-        cdef DrakenVector* uv = &self._unified_view
-        if uv.data_length == 1 and self._unified_view.data_length >= self._unified_view.length:
-            if uv.validity != NULL:
-                v = NULL_HASH * MIX_HASH_CONSTANT + 1
-                v ^= v >> 32
-            else:
-                v = <uint64_t>(<int64_t*>uv.data)[0] * MIX_HASH_CONSTANT + 1
-                v ^= v >> 32
-            for i in range(n):
-                out[i] = v
-            return 0
-
-        # Dict-only path: simd_mix_hash_from_dict XORs into dest, so dest must
-        # be zero before calling c_hash_into.
-        if self._unified_view.data_length < self._unified_view.length:
-            memset(out, 0, <size_t>n * sizeof(uint64_t))
-            return self.c_hash_into(out, n)
-
-        data = <int64_t*>ptr.data
-        as_uint64 = <uint64_t*>data
-        null_bitmap = ptr.null_bitmap
-
-        if null_bitmap == NULL:
-            simd_hash_i64(as_uint64, out, <size_t>n)
-        else:
-            # Blocked approach: fill scratch with null-masked values, then
-            # SIMD-hash the block — matches c_hash_into performance on nullable cols.
-            i = 0
-            while i < n:
-                block = n - i
-                if block > 1024:
-                    block = 1024
-                for j in range(block):
-                    is_valid = (null_bitmap[(i + j) >> 3] >> ((i + j) & 7)) & 1
-                    scratch[j] = (as_uint64[i + j] * is_valid) | (NULL_HASH * (1 - is_valid))
-                simd_hash_i64(scratch_ptr, out + i, <size_t>block)
-                i += block
-        return 0
+        # c_hash_into uses uv.selection[i] uniform access; zero dest first so
+        # simd_mix_hash can XOR into a clean buffer.
+        memset(out, 0, <size_t>n * sizeof(uint64_t))
+        return self.c_hash_into(out, n)
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast per-element compress for Integer64Vector (no Python conversions).
 
-        Null values map to the NULL sentinel; non-null values are copied
-        directly into the output buffer.
+        Null values map to the NULL sentinel; non-null values are read via
+        uniform data[selection[i]] access.
         """
         cdef DrakenVector* uv = self.unified()
         cdef Py_ssize_t n = <Py_ssize_t>uv.length
         cdef int64_t* dst_base
         cdef int64_t* dst
         cdef Py_ssize_t i
-        cdef uint8_t* null_bitmap
-        cdef bint has_nulls
-        cdef int64_t* src
-        cdef int64_t* _ci_dict_data
+        cdef uint8_t* null_bitmap = uv.validity
+        cdef int64_t* data = <int64_t*>uv.data
 
         if n == 0:
             return
@@ -1498,47 +1001,23 @@ cdef class Integer64Vector(Vector):
         dst_base = &out_buf[0]
         dst = dst_base + offset
 
-        if self._unified_view.data_length < self._unified_view.length:
-            _ci_dict_data  = <int64_t*>uv.data
-            null_bitmap    = uv.validity
-            for i in range(n):
-                if null_bitmap != NULL and not ((null_bitmap[i >> 3] >> (i & 7)) & 1):
-                    dst[i] = INT64_MIN_VALUE
-                else:
-                    dst[i] = _ci_dict_data[<Py_ssize_t>uv.selection[i]]
-            return
-
-        if uv.data_length == 1:
-            for i in range(n):
-                dst[i] = INT64_MIN_VALUE if uv.validity != NULL else (<int64_t*>uv.data)[0]
-            return
-
-        null_bitmap = uv.validity
-        has_nulls = null_bitmap != NULL
-        src = <int64_t*>uv.data
-
-        if not has_nulls:
-            # Fast path: bulk copy
-            memcpy(<void*>dst, <const void*>src, <size_t>(n * sizeof(int64_t)))
-            return
-
         for i in range(n):
-            if (null_bitmap[i >> 3] >> (i & 7)) & 1:
-                dst[i] = src[i]
+            if null_bitmap != NULL and not ((null_bitmap[i >> 3] >> (i & 7)) & 1):
+                dst[i] = INT64_MIN_VALUE
             else:
-                dst[i] = <int64_t> -9223372036854775808
+                dst[i] = data[<Py_ssize_t>uv.selection[i]]
 
     def __str__(self):
-        cdef list vals = []
         cdef DrakenVector* uv = &self._unified_view
         cdef Py_ssize_t i, k = min(<Py_ssize_t>uv.length, 10)
-        if uv.data_length == 1:
-            vals = [None if uv.validity != NULL else (<int64_t*>uv.data)[0]] * k
-            return f"<Integer64Vector len={uv.length} values={vals}>"
-        cdef int64_t* data = <int64_t*> self.ptr.data
+        cdef list vals = []
+        cdef int64_t* data = <int64_t*>uv.data
         for i in range(k):
-            vals.append(data[i])
-        return f"<Integer64Vector len={self.ptr.length} values={vals}>"
+            if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
+                vals.append(None)
+            else:
+                vals.append(data[uv.selection[i]])
+        return f"<Integer64Vector len={uv.length} values={vals}>"
 
 
 cdef Integer64Vector _materialize_dict_int64(Integer64Vector vec):

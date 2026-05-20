@@ -144,9 +144,9 @@ cdef class Date32Vector(Vector):
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
         cdef DrakenVector* uv = self.unified()
-        if self.ptr == NULL or uv.data_length == 1:
+        if self.ptr == NULL:
             return NULL
-        return self.ptr.null_bitmap
+        return uv.validity
 
     cdef DrakenVector* unified(self) noexcept:
         return &self._unified_view
@@ -169,21 +169,12 @@ cdef class Date32Vector(Vector):
 
     def __getitem__(self, Py_ssize_t i):
         """Return the value at index i, or None if null."""
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int32_t* data = <int32_t*> ptr.data
         cdef DrakenVector* uv = self.unified()
-        if i < 0 or i >= <Py_ssize_t>ptr.length:
+        if i < 0 or i >= <Py_ssize_t>uv.length:
             raise IndexError("Index out of bounds")
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                return None
-            return (<int32_t*>uv.data)[0]
-        if ptr.null_bitmap != NULL:
-            byte = ptr.null_bitmap[i >> 3]
-            bit = (byte >> (i & 7)) & 1
-            if not bit:
-                return None
-        return data[i]
+        if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
+            return None
+        return (<int32_t*>uv.data)[uv.selection[i]]
 
     # -------- Interop (owned -> Arrow) --------
     def to_arrow(self):
@@ -212,20 +203,28 @@ cdef class Date32Vector(Vector):
     # -------- Example op --------
     cpdef Date32Vector take(self, int32_t[::1] indices):
         cdef DrakenVector* uv = self.unified()
-        cdef bint _c_is_null
-        if uv.data_length == 1:
-            _c_is_null = uv.validity != NULL
-            return Date32Vector.from_constant(
-                None if _c_is_null else (<int32_t*>uv.data)[0],
-                indices.shape[0],
-                is_null=_c_is_null,
-            )
         cdef Py_ssize_t i, n = indices.shape[0]
         cdef Date32Vector out = Date32Vector(<size_t>n)
-        cdef int32_t* src = <int32_t*> self.ptr.data
-        cdef int32_t* dst = <int32_t*> out.ptr.data
+        cdef int32_t* data = <int32_t*>uv.data
+        cdef int32_t* dst = <int32_t*>out.ptr.data
+        cdef int32_t src_idx
+        cdef Py_ssize_t nb_bytes
+
         for i in range(n):
-            dst[i] = src[indices[i]]
+            src_idx = indices[i]
+            dst[i] = data[uv.selection[src_idx]]
+
+        if uv.validity != NULL:
+            nb_bytes = (n + 7) >> 3
+            out.ptr.null_bitmap = <uint8_t*>malloc(<size_t>nb_bytes)
+            if out.ptr.null_bitmap == NULL:
+                raise MemoryError()
+            memset(out.ptr.null_bitmap, 0xFF, nb_bytes)
+            for i in range(n):
+                src_idx = indices[i]
+                if not ((uv.validity[src_idx >> 3] >> (src_idx & 7)) & 1):
+                    out.ptr.null_bitmap[i >> 3] &= ~(<uint8_t>1 << (i & 7))
+
         out._unified_view = draken_vector_from_dense(
             out.ptr.data, <uint32_t>n, DRAKEN_DATE32, out.ptr.null_bitmap)
         return out
@@ -248,46 +247,23 @@ cdef class Date32Vector(Vector):
 
     cpdef BoolVector _compare_scalar(self, int32_t value, int op):
         cdef DrakenVector* uv = self.unified()
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t n
-        cdef Py_ssize_t nbytes
-        cdef BoolVector out
-        cdef uint8_t* dst
+        cdef Py_ssize_t n = <Py_ssize_t>uv.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
         cdef uint8_t* out_null = NULL
         cdef uint8_t mask
-        cdef bint matched
+        cdef int32_t* data = <int32_t*>uv.data
+        cdef Py_ssize_t i
 
-        if uv.data_length == 1:
-            n = ptr.length
-            nbytes = (n + 7) >> 3
-            out = BoolVector(<size_t>n)
-            dst = <uint8_t*>out.ptr.data
-            if nbytes > 0:
-                memset(dst, 0, nbytes)
-            if uv.validity != NULL:
-                return self._make_all_null_bool(n)
-            matched = dispatch_compare_once(op, (<int32_t*>uv.data)[0], value)
-            if matched and nbytes > 0:
-                memset(dst, 0xFF, nbytes)
-                if (n & 7) != 0:
-                    mask = <uint8_t>((1 << (n & 7)) - 1)
-                    dst[nbytes - 1] &= mask
-            out.ptr.null_bitmap = NULL
-            return out
+        if nbytes > 0:
+            memset(dst, 0, nbytes)
 
-        cdef int32_t* data = <int32_t*> ptr.data
-        cdef uint8_t* src_null = ptr.null_bitmap
-        n = ptr.length
-        nbytes = (n + 7) >> 3
-        out = BoolVector(<size_t>n)
-        dst = <uint8_t*> out.ptr.data
-
-        memset(dst, 0, nbytes)
-        if src_null != NULL and nbytes != 0:
-            out_null = <uint8_t*> malloc(nbytes)
+        if uv.validity != NULL and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
             if out_null == NULL:
                 raise MemoryError()
-            memcpy(out_null, src_null, nbytes)
+            memcpy(out_null, uv.validity, nbytes)
             if (n & 7) != 0:
                 mask = <uint8_t>((1 << (n & 7)) - 1)
                 out_null[nbytes - 1] &= mask
@@ -295,67 +271,34 @@ cdef class Date32Vector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        cdef size_t valid_count
-        if src_null == NULL:
-            dispatch_scalar_nonnull(op, data, value, dst, <size_t>n)
-        else:
-            valid_count = simd_popcount(src_null, <size_t>nbytes)
-            if n > 0 and (valid_count * 10) < (<size_t>n * 3):
-                dispatch_scalar_branching(op, data, value, src_null, dst, <size_t>n)
-            else:
-                dispatch_scalar_branchless(op, data, value, src_null, dst, <size_t>n)
+        for i in range(n):
+            if uv.validity == NULL or ((uv.validity[i >> 3] >> (i & 7)) & 1):
+                if dispatch_compare_once(op, data[uv.selection[i]], value):
+                    dst[i >> 3] |= <uint8_t>(1 << (i & 7))
         return out
 
     cpdef BoolVector _compare_vector_op(self, Date32Vector other, int op):
-        # Consolidates the 6 *_vector comparison ops. Op dispatch and null-pointer
-        # specialisation happen once here; the C++ kernel runs a tight loop with
-        # no per-row branching. Const fast paths avoid O(n) materialisation.
-        # Const fast paths: avoid O(n) materialisation.
         cdef DrakenVector* uv = self.unified()
-        cdef DrakenVector* uv_other = other.unified()
-        cdef Py_ssize_t const_n
-        cdef int reversed_op
-        if uv.data_length == 1:
-            const_n = self.ptr.length
-            if const_n != other.ptr.length:
-                raise ValueError("Vectors must have the same length")
-            if uv.validity != NULL:
-                return self._make_all_null_bool(const_n)
-            # Reverse directional ops: gt(2)<->lt(4), ge(3)<->le(5)
-            if op == 2:   reversed_op = 4
-            elif op == 3: reversed_op = 5
-            elif op == 4: reversed_op = 2
-            elif op == 5: reversed_op = 3
-            else:         reversed_op = op
-            return other._compare_scalar((<int32_t*>uv.data)[0], reversed_op)
-        if uv_other.data_length == 1:
-            if self.ptr.length != other.ptr.length:
-                raise ValueError("Vectors must have the same length")
-            if uv_other.validity != NULL:
-                return self._make_all_null_bool(self.ptr.length)
-            return self._compare_scalar((<int32_t*>uv_other.data)[0], op)
-
-        cdef DrakenFixedBuffer* ptr1 = self.ptr
-        cdef DrakenFixedBuffer* ptr2 = other.ptr
-        cdef int32_t* data1 = <int32_t*> ptr1.data
-        cdef int32_t* data2 = <int32_t*> ptr2.data
-        cdef uint8_t* null1 = ptr1.null_bitmap
-        cdef uint8_t* null2 = ptr2.null_bitmap
-        cdef Py_ssize_t n = ptr1.length
+        cdef DrakenVector* ouv = other.unified()
+        cdef Py_ssize_t n = <Py_ssize_t>uv.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
         cdef BoolVector out
         cdef uint8_t* dst
         cdef uint8_t* out_null = NULL
+        cdef int32_t* data1 = <int32_t*>uv.data
+        cdef int32_t* data2 = <int32_t*>ouv.data
+        cdef bint null1, null2
+        cdef Py_ssize_t i
 
-        if n != ptr2.length:
+        if n != <Py_ssize_t>ouv.length:
             raise ValueError("Vectors must have the same length")
 
         out = BoolVector(<size_t>n)
-        dst = <uint8_t*> out.ptr.data
+        dst = <uint8_t*>out.ptr.data
         memset(dst, 0, nbytes)
 
-        if (null1 != NULL or null2 != NULL) and nbytes != 0:
-            out_null = <uint8_t*> malloc(nbytes)
+        if (uv.validity != NULL or ouv.validity != NULL) and nbytes != 0:
+            out_null = <uint8_t*>malloc(nbytes)
             if out_null == NULL:
                 raise MemoryError()
             memset(out_null, 0, nbytes)
@@ -363,29 +306,15 @@ cdef class Date32Vector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        cdef size_t valid1_cnt, valid2_cnt, min_valid
-        cdef bint use_branching = False
-        if n > 0 and (null1 != NULL or null2 != NULL):
-            valid1_cnt = simd_popcount(null1, <size_t>nbytes) if null1 != NULL else <size_t>n
-            valid2_cnt = simd_popcount(null2, <size_t>nbytes) if null2 != NULL else <size_t>n
-            min_valid = valid1_cnt if valid1_cnt < valid2_cnt else valid2_cnt
-            use_branching = (min_valid * 10) < (<size_t>n * 3)
-
-        if null1 == NULL and null2 == NULL:
-            dispatch_vector_nonnull(op, data1, data2, dst, <size_t>n)
-        elif use_branching:
-            if null1 != NULL and null2 != NULL:
-                dispatch_vector_both_null_branching(op, data1, data2, null1, null2, dst, out_null, <size_t>n)
-            elif null1 != NULL:
-                dispatch_vector_one_null_branching(op, data1, data2, null1, dst, out_null, <size_t>n)
-            else:
-                dispatch_vector_one_null_branching(op, data1, data2, null2, dst, out_null, <size_t>n)
-        elif null1 != NULL and null2 == NULL:
-            dispatch_vector_one_null_branchless(op, data1, data2, null1, dst, out_null, <size_t>n)
-        elif null1 == NULL and null2 != NULL:
-            dispatch_vector_one_null_branchless(op, data1, data2, null2, dst, out_null, <size_t>n)
-        else:
-            dispatch_vector_both_null_branchless(op, data1, data2, null1, null2, dst, out_null, <size_t>n)
+        for i in range(n):
+            null1 = uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1)
+            null2 = ouv.validity != NULL and not ((ouv.validity[i >> 3] >> (i & 7)) & 1)
+            if null1 or null2:
+                continue
+            if out_null != NULL:
+                out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
+            if dispatch_compare_once(op, data1[uv.selection[i]], data2[ouv.selection[i]]):
+                dst[i >> 3] |= <uint8_t>(1 << (i & 7))
         return out
 
     cpdef BoolVector equals(self, int32_t value):
@@ -410,19 +339,15 @@ cdef class Date32Vector(Vector):
                               bint lower_inclusive=True, bint upper_inclusive=True):
         """Single-pass range check: lower OP value OP upper. NULL in → NULL out."""
         cdef DrakenVector* uv = self.unified()
-        if uv.data_length == 1:
-            return _materialize_const_date32(self).between(lower, upper, lower_inclusive, upper_inclusive)
-
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int32_t* data = <int32_t*>ptr.data
-        cdef uint8_t* src_null = ptr.null_bitmap
-        cdef Py_ssize_t i, n = ptr.length
+        cdef int32_t* data = <int32_t*>uv.data
+        cdef uint8_t* src_null = uv.validity
+        cdef Py_ssize_t i, n = <Py_ssize_t>uv.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
         cdef BoolVector out = BoolVector(<size_t>n)
         cdef uint8_t* dst = <uint8_t*>out.ptr.data
         cdef uint8_t* out_null = NULL
         cdef uint8_t mask
-        cdef bint in_range
+        cdef int32_t v
 
         memset(dst, 0, nbytes)
 
@@ -438,44 +363,30 @@ cdef class Date32Vector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        if src_null == NULL:
-            if lower_inclusive and upper_inclusive:
-                for i in range(n):
-                    if lower <= data[i] <= upper:
+        if lower_inclusive and upper_inclusive:
+            for i in range(n):
+                if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
+                    v = data[uv.selection[i]]
+                    if lower <= v <= upper:
                         dst[i >> 3] |= <uint8_t>(1 << (i & 7))
-            elif lower_inclusive:
-                for i in range(n):
-                    if lower <= data[i] < upper:
+        elif lower_inclusive:
+            for i in range(n):
+                if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
+                    v = data[uv.selection[i]]
+                    if lower <= v < upper:
                         dst[i >> 3] |= <uint8_t>(1 << (i & 7))
-            elif upper_inclusive:
-                for i in range(n):
-                    if lower < data[i] <= upper:
-                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
-            else:
-                for i in range(n):
-                    if lower < data[i] < upper:
+        elif upper_inclusive:
+            for i in range(n):
+                if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
+                    v = data[uv.selection[i]]
+                    if lower < v <= upper:
                         dst[i >> 3] |= <uint8_t>(1 << (i & 7))
         else:
-            if lower_inclusive and upper_inclusive:
-                for i in range(n):
-                    if (src_null[i >> 3] >> (i & 7)) & 1:
-                        if lower <= data[i] <= upper:
-                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
-            elif lower_inclusive:
-                for i in range(n):
-                    if (src_null[i >> 3] >> (i & 7)) & 1:
-                        if lower <= data[i] < upper:
-                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
-            elif upper_inclusive:
-                for i in range(n):
-                    if (src_null[i >> 3] >> (i & 7)) & 1:
-                        if lower < data[i] <= upper:
-                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
-            else:
-                for i in range(n):
-                    if (src_null[i >> 3] >> (i & 7)) & 1:
-                        if lower < data[i] < upper:
-                            dst[i >> 3] |= <uint8_t>(1 << (i & 7))
+            for i in range(n):
+                if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
+                    v = data[uv.selection[i]]
+                    if lower < v < upper:
+                        dst[i >> 3] |= <uint8_t>(1 << (i & 7))
         return out
 
     cpdef BoolVector equals_vector(self, Date32Vector other):
@@ -498,13 +409,13 @@ cdef class Date32Vector(Vector):
 
     cpdef BoolVector in_list(self, object value_set):
         """Return mask: 1 if element is in value_set, else 0. Propagates NULLs."""
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int32_t* data = <int32_t*> ptr.data
-        cdef uint8_t* src_null = ptr.null_bitmap
-        cdef Py_ssize_t i, n = ptr.length
+        cdef DrakenVector* uv = self.unified()
+        cdef int32_t* data = <int32_t*>uv.data
+        cdef uint8_t* src_null = uv.validity
+        cdef Py_ssize_t i, n = <Py_ssize_t>uv.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
         cdef BoolVector out = BoolVector(<size_t>n)
-        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* dst = <uint8_t*>out.ptr.data
         cdef uint8_t* out_null = NULL
         cdef uint8_t mask
 
@@ -513,7 +424,7 @@ cdef class Date32Vector(Vector):
 
         memset(dst, 0, nbytes)
         if src_null != NULL and nbytes != 0:
-            out_null = <uint8_t*> malloc(nbytes)
+            out_null = <uint8_t*>malloc(nbytes)
             if out_null == NULL:
                 raise MemoryError()
             memcpy(out_null, src_null, nbytes)
@@ -526,66 +437,51 @@ cdef class Date32Vector(Vector):
 
         for i in range(n):
             if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
-                if data[i] in value_set:
+                if data[uv.selection[i]] in value_set:
                     dst[i >> 3] |= (1 << (i & 7))
         return out
 
     cpdef int32_t min(self):
         cdef DrakenVector* uv = self.unified()
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int32_t* data = <int32_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
+        cdef int32_t* data = <int32_t*>uv.data
+        cdef Py_ssize_t i, n = <Py_ssize_t>uv.length
         if n == 0:
             raise ValueError("Cannot compute min of empty column")
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                raise ValueError("Cannot compute min of all-null column")
-            return (<int32_t*>uv.data)[0]
 
         cdef int32_t m
         cdef bint found = False
 
-        # Find first non-null value
         for i in range(n):
-            if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):  # null
-                    continue
-            m = data[i]
+            if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
+                continue
+            m = data[uv.selection[i]]
             found = True
             break
 
         if not found:
             raise ValueError("Cannot compute min of all-null column")
 
-        # Find minimum among remaining values
         for i in range(i + 1, n):
-            if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):  # null
-                    continue
-            if data[i] < m:
-                m = data[i]
+            if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
+                continue
+            if data[uv.selection[i]] < m:
+                m = data[uv.selection[i]]
         return m
 
     cpdef int32_t max(self):
         cdef DrakenVector* uv = self.unified()
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int32_t* data = <int32_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
+        cdef int32_t* data = <int32_t*>uv.data
+        cdef Py_ssize_t i, n = <Py_ssize_t>uv.length
         if n == 0:
             raise ValueError("Cannot compute max of empty column")
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                raise ValueError("Cannot compute max of all-null column")
-            return (<int32_t*>uv.data)[0]
 
         cdef int32_t m
         cdef bint found = False
 
         for i in range(n):
-            if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):  # null
-                    continue
-            m = data[i]
+            if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
+                continue
+            m = data[uv.selection[i]]
             found = True
             break
 
@@ -593,28 +489,21 @@ cdef class Date32Vector(Vector):
             raise ValueError("Cannot compute max of all-null column")
 
         for i in range(i + 1, n):
-            if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):  # null
-                    continue
-            if data[i] > m:
-                m = data[i]
+            if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
+                continue
+            if data[uv.selection[i]] > m:
+                m = data[uv.selection[i]]
         return m
 
     cpdef int64_t sum(self):
         cdef DrakenVector* uv = self.unified()
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                return 0
-            return <int64_t>(self.ptr.length * (<int32_t*>uv.data)[0])
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int32_t* data = <int32_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
+        cdef int32_t* data = <int32_t*>uv.data
+        cdef Py_ssize_t i, n = <Py_ssize_t>uv.length
         cdef int64_t total = 0
         for i in range(n):
-            if ptr.null_bitmap != NULL:
-                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):  # null
-                    continue
-            total += data[i]
+            if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
+                continue
+            total += data[uv.selection[i]]
         return total
 
     cpdef Integer64Vector subtract_date32_vector(self, Date32Vector other):
@@ -707,44 +596,29 @@ cdef class Date32Vector(Vector):
         Return a memoryview of int8_t, where each element is 1 if the value is null, 0 otherwise.
         """
         cdef DrakenVector* uv = self.unified()
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t i, n
+        cdef Py_ssize_t i, n = <Py_ssize_t>uv.length
         cdef int8_t* buf
-        cdef uint8_t byte, bit
+        cdef uint8_t* null_bitmap = uv.validity
 
-        n = ptr.length
-        buf = <int8_t*> PyMem_Malloc(n)
+        buf = <int8_t*>PyMem_Malloc(n)
         if buf == NULL:
             raise MemoryError()
-        if uv.data_length == 1:
-            for i in range(n):
-                buf[i] = 1 if uv.validity != NULL else 0
-            return <int8_t[:n]> buf
-
-        if ptr.null_bitmap == NULL:
-            # No nulls — fill with 0
+        if null_bitmap == NULL:
             for i in range(n):
                 buf[i] = 0
         else:
-            # Extract null bits — 1 means valid, so invert for null
             for i in range(n):
-                byte = ptr.null_bitmap[i >> 3]
-                bit = (byte >> (i & 7)) & 1
-                buf[i] = 0 if bit else 1
-
+                buf[i] = 0 if ((null_bitmap[i >> 3] >> (i & 7)) & 1) else 1
         return <int8_t[:n]> buf
 
     @property
     def null_count(self):
         """Return the number of nulls in the vector."""
-        cdef DrakenFixedBuffer* ptr = self.ptr
         cdef DrakenVector* uv = self.unified()
-        cdef Py_ssize_t n = ptr.length
-        if uv.data_length == 1:
-            return n if uv.validity != NULL else 0
-        if ptr.null_bitmap == NULL:
+        cdef Py_ssize_t n = <Py_ssize_t>uv.length
+        if uv.validity == NULL:
             return 0
-        return n - <Py_ssize_t>simd_popcount(ptr.null_bitmap, (<size_t>n + 7) >> 3)
+        return n - <Py_ssize_t>simd_popcount(uv.validity, (<size_t>n + 7) >> 3)
 
     @property
     def nbytes(self):
@@ -761,65 +635,42 @@ cdef class Date32Vector(Vector):
 
     cpdef list to_pylist(self):
         cdef DrakenVector* uv = self.unified()
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int32_t* data = <int32_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
+        cdef int32_t* data = <int32_t*>uv.data
+        cdef uint8_t* null_bitmap = uv.validity
+        cdef Py_ssize_t i, n = <Py_ssize_t>uv.length
         cdef list out = []
-        cdef uint8_t byte, bit
         cdef object date_fromordinal = _dt.date.fromordinal
         cdef int ordinal
+        cdef int32_t v
 
-        cdef int32_t _c_val
-        if uv.data_length == 1:
-            if uv.validity != NULL:
-                for i in range(n):
-                    out.append(None)
-            else:
-                _c_val = (<int32_t*>uv.data)[0]
-                for i in range(n):
-                    ordinal = _DATE_EPOCH_ORDINAL + _c_val
-                    try:
-                        out.append(date_fromordinal(ordinal))
-                    except (OverflowError, ValueError):
-                        out.append(_c_val)
-            return out
-        if ptr.null_bitmap == NULL:
-            for i in range(n):
-                ordinal = _DATE_EPOCH_ORDINAL + data[i]
-                try:
-                    out.append(date_fromordinal(ordinal))
-                except (OverflowError, ValueError):
-                    out.append(data[i])
-        else:
-            for i in range(n):
-                byte = ptr.null_bitmap[i >> 3]
-                bit = (byte >> (i & 7)) & 1
-                if bit:
-                    ordinal = _DATE_EPOCH_ORDINAL + data[i]
-                    try:
-                        out.append(date_fromordinal(ordinal))
-                    except (OverflowError, ValueError):
-                        out.append(data[i])
-                else:
-                    out.append(None)
+        for i in range(n):
+            if null_bitmap != NULL and not ((null_bitmap[i >> 3] >> (i & 7)) & 1):
+                out.append(None)
+                continue
+            v = data[uv.selection[i]]
+            ordinal = _DATE_EPOCH_ORDINAL + v
+            try:
+                out.append(date_fromordinal(ordinal))
+            except (OverflowError, ValueError):
+                out.append(v)
 
         return out
 
     cpdef int compare_at(self, Py_ssize_t left_idx, Py_ssize_t right_idx) except? 0:
         """Compare date32 values at two indices. Returns -1, 0, or 1."""
-        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef DrakenVector* uv = self.unified()
+        cdef int32_t* data = <int32_t*>uv.data
         cdef int32_t left_val, right_val
         cdef bint left_is_null, right_is_null
 
-        # Check nulls
-        left_is_null = ptr.null_bitmap != NULL and not _bitmap_is_valid(ptr.null_bitmap, left_idx, 0)
-        right_is_null = ptr.null_bitmap != NULL and not _bitmap_is_valid(ptr.null_bitmap, right_idx, 0)
+        left_is_null = uv.validity != NULL and not ((uv.validity[left_idx >> 3] >> (left_idx & 7)) & 1)
+        right_is_null = uv.validity != NULL and not ((uv.validity[right_idx >> 3] >> (right_idx & 7)) & 1)
 
         if left_is_null or right_is_null:
             return 0  # Nulls are considered equal
 
-        left_val = (<int32_t*>ptr.data)[left_idx]
-        right_val = (<int32_t*>ptr.data)[right_idx]
+        left_val = data[uv.selection[left_idx]]
+        right_val = data[uv.selection[right_idx]]
 
         if left_val < right_val:
             return -1
@@ -830,10 +681,10 @@ cdef class Date32Vector(Vector):
 
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False:
         """Check if value at index is null."""
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        if ptr.null_bitmap == NULL:
+        cdef DrakenVector* uv = self.unified()
+        if uv.validity == NULL:
             return False
-        return not _bitmap_is_valid(ptr.null_bitmap, idx, 0)
+        return not ((uv.validity[idx >> 3] >> (idx & 7)) & 1)
 
     cdef void hash_into(
         self,
@@ -841,32 +692,12 @@ cdef class Date32Vector(Vector):
         Py_ssize_t offset=0
     ) except *:
         cdef DrakenVector* uv = self.unified()
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int32_t* data = <int32_t*> ptr.data
-        cdef Py_ssize_t n = ptr.length
-        cdef Py_ssize_t i
-        cdef Py_ssize_t block = 0
-        cdef Py_ssize_t j = 0
-        cdef uint8_t byte, bit
-        cdef uint64_t value
+        cdef int32_t* data = <int32_t*>uv.data
+        cdef Py_ssize_t n = <Py_ssize_t>uv.length
+        cdef Py_ssize_t i, j, block
         cdef uint64_t* dst = &out_buf[offset]
-        cdef uint8_t* null_bitmap = ptr.null_bitmap
-        cdef bint has_nulls = null_bitmap != NULL
         cdef uint64_t[DATE32_HASH_CHUNK] scratch
-        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
-
-        if uv.data_length == 1:
-            value = NULL_HASH if uv.validity != NULL else <uint64_t><int64_t>(<int32_t*>uv.data)[0]
-            for j in range(DATE32_HASH_CHUNK):
-                scratch[j] = value
-            i = 0
-            while i < n:
-                block = n - i
-                if block > DATE32_HASH_CHUNK:
-                    block = DATE32_HASH_CHUNK
-                simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
-                i += block
-            return
+        cdef uint64_t* scratch_ptr = <uint64_t*>scratch
 
         if n == 0:
             return
@@ -874,115 +705,83 @@ cdef class Date32Vector(Vector):
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("Date32Vector.hash_into: output buffer too small")
 
-        cdef uint64_t is_valid
         i = 0
         while i < n:
             block = n - i
             if block > DATE32_HASH_CHUNK:
                 block = DATE32_HASH_CHUNK
-            if has_nulls:
-                for j in range(block):
-                    is_valid = (null_bitmap[(i + j) >> 3] >> ((i + j) & 7)) & 1
-                    scratch[j] = (<uint64_t>(<int64_t> data[i + j]) * is_valid) | (NULL_HASH * (1 - is_valid))
-            else:
-                for j in range(block):
-                    scratch[j] = <uint64_t>(<int64_t> data[i + j])
-            simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
+            for j in range(block):
+                if uv.validity != NULL and not ((uv.validity[(i + j) >> 3] >> ((i + j) & 7)) & 1):
+                    scratch[j] = NULL_HASH
+                else:
+                    scratch[j] = <uint64_t>(<int64_t>data[uv.selection[i + j]])
+            simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
+            for j in range(block):
+                if uv.validity != NULL and not ((uv.validity[(i + j) >> 3] >> ((i + j) & 7)) & 1):
+                    dst[i + j] = NULL_HASH
             i += block
 
     cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int32_t* data = <int32_t*> ptr.data
-        cdef Py_ssize_t i
-        cdef Py_ssize_t block = 0
-        cdef Py_ssize_t j = 0
-        cdef uint64_t value
-        cdef uint8_t* null_bitmap = ptr.null_bitmap
-        cdef bint has_nulls = null_bitmap != NULL
+        cdef DrakenVector* uv = &self._unified_view
+        cdef int32_t* data = <int32_t*>uv.data
+        cdef Py_ssize_t i, j, block
         cdef uint64_t[DATE32_HASH_CHUNK] scratch
-        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
-
-        cdef DrakenVector* _cuv = &self._unified_view
-        if _cuv.data_length == 1:
-            value = NULL_HASH if _cuv.validity != NULL else <uint64_t><int64_t>(<int32_t*>_cuv.data)[0]
-            for j in range(DATE32_HASH_CHUNK):
-                scratch[j] = value
-            i = 0
-            while i < n:
-                block = n - i
-                if block > DATE32_HASH_CHUNK:
-                    block = DATE32_HASH_CHUNK
-                simd_mix_hash(out + i, scratch_ptr, <size_t>block)
-                i += block
-            return 0
+        cdef uint64_t* scratch_ptr = <uint64_t*>scratch
 
         if n == 0:
             return 0
 
-        cdef uint64_t is_valid
         i = 0
         while i < n:
             block = n - i
             if block > DATE32_HASH_CHUNK:
                 block = DATE32_HASH_CHUNK
-            if has_nulls:
-                for j in range(block):
-                    is_valid = (null_bitmap[(i + j) >> 3] >> ((i + j) & 7)) & 1
-                    scratch[j] = (<uint64_t>(<int64_t> data[i + j]) * is_valid) | (NULL_HASH * (1 - is_valid))
-            else:
-                for j in range(block):
-                    scratch[j] = <uint64_t>(<int64_t> data[i + j])
-            simd_mix_hash(out + i, scratch_ptr, <size_t> block)
+            for j in range(block):
+                if uv.validity != NULL and not ((uv.validity[(i + j) >> 3] >> ((i + j) & 7)) & 1):
+                    scratch[j] = NULL_HASH
+                else:
+                    scratch[j] = <uint64_t>(<int64_t>data[uv.selection[i + j]])
+            simd_mix_hash(out + i, scratch_ptr, <size_t>block)
+            for j in range(block):
+                if uv.validity != NULL and not ((uv.validity[(i + j) >> 3] >> ((i + j) & 7)) & 1):
+                    out[i + j] = NULL_HASH
             i += block
         return 0
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for Date32Vector: scale int32 days to int64 microseconds (to match datetimes)."""
         cdef DrakenVector* uv = self.unified()
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int32_t* data = <int32_t*> ptr.data
-        cdef Py_ssize_t n = ptr.length
+        cdef int32_t* data = <int32_t*>uv.data
+        cdef Py_ssize_t n = <Py_ssize_t>uv.length
         cdef int64_t NULL_FLAG = INT64_MIN_VALUE
-        cdef int64_t MICROSECONDS_PER_DAY = <int64_t>86400000000
+        cdef int64_t _MICROSECONDS_PER_DAY = <int64_t>86400000000
         cdef int64_t* dst = &out_buf[offset]
-        cdef uint8_t* null_bitmap = ptr.null_bitmap
-        cdef bint has_nulls = null_bitmap != NULL
         cdef Py_ssize_t i
-        cdef uint8_t byte, bit
 
-        if uv.data_length == 1:
-            for i in range(n):
-                dst[i] = <int64_t>(-(1 << 63)) if uv.validity != NULL else (<int64_t>(<int32_t*>uv.data)[0] * MICROSECONDS_PER_DAY)
-            return
         if n == 0:
             return
 
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("Date32Vector.compress: output buffer too small")
 
-        if has_nulls:
-            for i in range(n):
-                byte = null_bitmap[i >> 3]
-                bit = (byte >> (i & 7)) & 1
-                if bit:
-                    dst[i] = <int64_t> data[i] * MICROSECONDS_PER_DAY
-                else:
-                    dst[i] = NULL_FLAG
-        else:
-            simd_scale_date32(data, dst, <size_t>n)
+        for i in range(n):
+            if uv.validity != NULL and not ((uv.validity[i >> 3] >> (i & 7)) & 1):
+                dst[i] = NULL_FLAG
+            else:
+                dst[i] = <int64_t>data[uv.selection[i]] * _MICROSECONDS_PER_DAY
 
     def __str__(self):
-        cdef list vals = []
-        cdef Py_ssize_t i, k
-        cdef int32_t* data
         cdef DrakenVector* uv = self.unified()
-        if uv.data_length == 1:
-            return f"<Date32Vector len={self.ptr.length} values={[None if uv.validity != NULL else (<int32_t*>uv.data)[0]] * min(<Py_ssize_t>self.ptr.length, 10)}>"
-        k = min(<Py_ssize_t>self.ptr.length, 10)
-        data = <int32_t*> self.ptr.data
+        cdef Py_ssize_t i, k = min(<Py_ssize_t>uv.length, 10)
+        cdef int32_t* data = <int32_t*>uv.data
+        cdef uint8_t* null_bitmap = uv.validity
+        cdef list vals = []
         for i in range(k):
-            vals.append(data[i])
-        return f"<Date32Vector len={self.ptr.length} values={vals}>"
+            if null_bitmap != NULL and not ((null_bitmap[i >> 3] >> (i & 7)) & 1):
+                vals.append(None)
+            else:
+                vals.append(data[uv.selection[i]])
+        return f"<Date32Vector len={uv.length} values={vals}>"
 
 
 cdef Date32Vector from_arrow(object array):
@@ -1149,18 +948,10 @@ cpdef Date32Vector from_int64_vector(Integer64Vector source):
     cdef DrakenVector* src_uv = source.unified()
     cdef int64_t cv
 
-    if src_uv.data_length == 1:
-        if src_uv.validity != NULL:
-            return Date32Vector.from_constant(None, n, is_null=True)
-        cv = (<int64_t*>src_uv.data)[0]
-        if cv < int32_min or cv > int32_max:
-            raise OverflowError(f"date32 value out of range: {cv}")
-        return Date32Vector.from_constant(<int32_t>cv, n)
-
     out = Date32Vector(<size_t>n)
-    src_data = <int64_t*>source.ptr.data
+    src_data = <int64_t*>src_uv.data
     dst_data = <int32_t*>out.ptr.data
-    src_null = <uint8_t*>source.ptr.null_bitmap
+    src_null = src_uv.validity
 
     if src_null != NULL:
         nb_bytes = (<size_t>n + 7) >> 3
@@ -1173,13 +964,10 @@ cpdef Date32Vector from_int64_vector(Integer64Vector source):
         out.ptr.null_bitmap = NULL
 
     for i in range(n):
-        if src_null != NULL:
-            is_valid = ((src_null[i >> 3] >> (i & 7)) & 1) != 0
-            if not is_valid:
-                dst_data[i] = 0
-                continue
-
-        value64 = src_data[i]
+        if src_null != NULL and not ((src_null[i >> 3] >> (i & 7)) & 1):
+            dst_data[i] = 0
+            continue
+        value64 = src_data[<Py_ssize_t>src_uv.selection[i]]
         if value64 < int32_min or value64 > int32_max:
             raise OverflowError(f"date32 value out of range at row {i}: {value64}")
         dst_data[i] = <int32_t>value64

@@ -21,41 +21,21 @@ from typing import List
 from draken.vectors.vector import Vector
 
 
-cdef inline bint _is_constant_like(object value) noexcept:
-    if not isinstance(value, Vector):
-        return False
-    return value.is_constant_encoded()
-
-
-def _constant_scalar(value):
-    if _is_constant_like(value):
-        if len(value) == 0:
-            return None
-        return value[0]
-    return value
-
-
 def round1(values):
     """ROUND(values)"""
-    from opteryx.compiled.vector_ops import vector_round, vector_round_constant
+    from opteryx.compiled.vector_ops import vector_round
 
-    if _is_constant_like(values):
-        return vector_round_constant(values, 0)
     return vector_round(values)
 
 
 def round2(values, digits):
     """ROUND(values, digits)"""
-    from opteryx.compiled.vector_ops import vector_round_constant, vector_round_digits
+    from opteryx.compiled.vector_ops import vector_round_digits
 
-    if _is_constant_like(digits):
-        scalar = _constant_scalar(digits)
-        d = int(scalar) if scalar is not None else 0
+    if isinstance(digits, Vector) and len(digits) > 0:
+        d = int(digits[0]) if digits[0] is not None else 0
     else:
         d = int(digits)
-
-    if _is_constant_like(values):
-        return vector_round_constant(values, d)
 
     return vector_round_digits(values, d)
 
