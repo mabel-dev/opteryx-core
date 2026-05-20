@@ -127,7 +127,12 @@ cdef class Vector:
         return None
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        return NULL
+        """Return the per-row validity bitmap, or NULL if all rows valid.
+
+        Reads through the unified view so the answer is correct for every
+        layout. Equivalent to `self.unified().validity`.
+        """
+        return self.unified().validity
 
     def __str__(self):
         return f"<{self.__class__.__name__} len={len(self)}>"

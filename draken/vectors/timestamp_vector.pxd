@@ -21,7 +21,6 @@ cdef class TimestampVector(Vector):
     cdef bint _owns_dict_data
     cdef bint _owns_selection
 
-    cdef uint8_t* null_bitmap_ptr(self) noexcept
     cdef DrakenVector* unified(self) noexcept
 
     cpdef TimestampVector take(self, int32_t[::1] indices)

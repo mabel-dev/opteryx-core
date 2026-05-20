@@ -180,11 +180,6 @@ cdef class DecimalVector(Vector):
     # C-level accessor protocol (required by Vector base)
     # ------------------------------------------------------------------
 
-    cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL:
-            return NULL
-        return self.ptr.null_bitmap
-
     cdef DrakenVector* unified(self) noexcept:
         return &self._unified_view
 
@@ -212,16 +207,19 @@ cdef class DecimalVector(Vector):
         """DecimalVector has no dictionary ordering."""
         return False
 
+    # Producer-layer introspection only — not for dispatch.
     @property
     def code_width(self):
         """DecimalVector has no dictionary encoding."""
         return None
 
+    # Producer-layer introspection only — not for dispatch.
     @property
     def dictionary_size(self):
         """DecimalVector has no dictionary encoding."""
         return 0
 
+    # Producer-layer introspection only — not for dispatch.
     @property
     def dictionary_value_type(self):
         """DecimalVector has no dictionary encoding."""

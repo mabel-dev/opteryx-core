@@ -154,11 +154,6 @@ cdef class TimeVector(Vector):
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
 
-    cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        cdef DrakenVector* uv = self.unified()
-        if self.ptr == NULL or uv.data_length == 1:
-            return NULL
-        return self.ptr.null_bitmap
 
     cdef DrakenVector* unified(self) noexcept:
         return &self._unified_view

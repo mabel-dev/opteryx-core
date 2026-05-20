@@ -142,12 +142,6 @@ cdef class Date32Vector(Vector):
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
 
-    cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        cdef DrakenVector* uv = self.unified()
-        if self.ptr == NULL:
-            return NULL
-        return uv.validity
-
     cdef DrakenVector* unified(self) noexcept:
         return &self._unified_view
 

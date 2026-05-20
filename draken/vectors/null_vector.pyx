@@ -96,9 +96,6 @@ cdef class NullVector(Vector):
     cpdef object null_bitmap(self):
         return None
 
-    cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        return NULL
-
     cpdef NullVector take(self, int32_t[::1] indices):
         return NullVector(indices.shape[0])
 

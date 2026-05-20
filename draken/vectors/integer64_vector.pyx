@@ -214,14 +214,6 @@ cdef class Integer64Vector(Vector):
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
 
-    cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL:
-            return NULL
-        cdef DrakenVector* uv = &self._unified_view
-        if uv.data_length == 1 and uv.length != 1:
-            return NULL  # const (N > 1) - use unified().validity instead
-        return self.ptr.null_bitmap
-
     cdef DrakenVector* unified(self) noexcept:
         return &self._unified_view
 
@@ -241,18 +233,21 @@ cdef class Integer64Vector(Vector):
     def dtype(self):
         return DRAKEN_INT64
 
+    # Producer-layer introspection only — not for dispatch.
     @property
     def dictionary_value_type(self):
         if self._unified_view.data_length >= self._unified_view.length:
             return None
         return self._unified_view.type
 
+    # Producer-layer introspection only — not for dispatch.
     @property
     def dictionary_size(self):
         if self._unified_view.data_length >= self._unified_view.length:
             return 0
         return self._unified_view.data_length
 
+    # Producer-layer introspection only — not for dispatch.
     @property
     def code_width(self):
         return 4 if self._unified_view.data_length < self._unified_view.length else None

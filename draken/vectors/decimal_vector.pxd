@@ -33,7 +33,6 @@ cdef class DecimalVector(Vector):
     # C-level accessor protocol (Vector base interface)
     # ------------------------------------------------------------------
 
-    cdef uint8_t* null_bitmap_ptr(self) noexcept
     cdef DrakenVector* unified(self) noexcept
 
     # ------------------------------------------------------------------

@@ -218,9 +218,6 @@ cdef class VectorVector(Vector):
         cdef Py_ssize_t n = (self._length + 7) >> 3
         return PyBytes_FromStringAndSize(<char*> self._null_bitmap, n)
 
-    cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        return self._null_bitmap
-
     cpdef bint is_null_at(self, Py_ssize_t idx) except? False:
         if idx < 0 or idx >= self._length:
             raise IndexError(idx)

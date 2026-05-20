@@ -79,7 +79,6 @@ cdef class StringVector(Vector):
     cdef bint _min_max_all_null
     cdef bint _min_max_valid
 
-    cdef uint8_t* null_bitmap_ptr(self) noexcept
     cdef DrakenVector* unified(self) noexcept
 
     # Encoded-form accessors for dict/RLE-aware operators.

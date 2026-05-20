@@ -18,8 +18,6 @@ cdef class Integer64Vector(Vector):
     cdef bint _owns_dict_data
     cdef bint _owns_selection
 
-    cdef uint8_t* null_bitmap_ptr(self) noexcept
-
     cpdef Integer64Vector take(self, int32_t[::1] indices)
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
     cdef DrakenVector* unified(self) noexcept
