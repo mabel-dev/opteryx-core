@@ -8,7 +8,7 @@
 # AnyValueObjectCollector: fallback for non-numeric types (string, date, etc.)
 #   — Python list for values, but grow()/accumulate() stay in Cython.
 
-from libc.stdint cimport int64_t, uint8_t, uint64_t
+from libc.stdint cimport int64_t, uint8_t, uint32_t, uint64_t
 from libc.stdlib cimport malloc, free
 from libcpp.vector cimport vector
 
@@ -78,60 +78,17 @@ cdef class CountDistinctCollector(BaseCollector):
     ):
         cdef long long start_ns = _now_ns()
         cdef Morsel m = <Morsel>morsel
-        cdef StringVector svec
         cdef Vector raw
         cdef CarcharSet** sets = self._sets.data()
         cdef vector[uint64_t]* scratch
-        cdef Py_ssize_t i, g, dict_size, di
+        cdef Py_ssize_t i, g
         cdef vector[uint64_t]* per_group
         cdef uint64_t null_marker = mix_hash(0, NULL_HASH)
-        cdef uint64_t h
-        cdef uint64_t* dict_hashes
-        cdef const uint8_t* row_nulls
-        cdef uint32_t code
-        cdef DrakenVector* uv
 
         # Resolve column index on first call
         if self._col_idx < 0:
             self._col_idx = m._column_index_from_name(self.column_name)
         raw = <Vector>m._columns[self._col_idx]
-
-        # Dict-encoded StringVector fast path: precompute one hash per dict entry,
-        # then scatter via dict-code table lookup — no _scratch_buf write.
-        if isinstance(raw, StringVector):
-            svec = <StringVector>raw
-            uv = svec.unified()
-            if svec._unified_view.data_length < svec._unified_view.length:
-                dict_size = svec.c_dict_size()
-                dict_hashes = <uint64_t*>malloc(<size_t>dict_size * sizeof(uint64_t))
-                if dict_hashes == NULL:
-                    raise MemoryError()
-                with nogil:
-                    for di in range(dict_size):
-                        if svec.c_dict_value_is_null(di):
-                            dict_hashes[di] = null_marker
-                        else:
-                            dict_hashes[di] = svec.c_dict_value_hash(di)
-                row_nulls = svec.c_row_null_bitmap()
-                with nogil:
-                    for i in range(n_rows):
-                        if row_nulls != NULL and not ((row_nulls[i >> 3] >> (i & 7)) & 1):
-                            continue
-                        code = uv.selection[i]
-                        h = dict_hashes[code]
-                        if h == null_marker:
-                            continue
-                        scratch = &self._scratch_per_group[state_indices[i]]
-                        scratch.push_back(h)
-                free(dict_hashes)
-                # Bulk-insert per group
-                for g in range(self._sets.size()):
-                    per_group = &self._scratch_per_group[g]
-                    if per_group.size() > 0:
-                        sets[g].insert_many(per_group.data(), per_group.size())
-                        per_group.clear()
-                self._time_finalize_ns += _now_ns() - start_ns
-                return
 
         # Generic path: hash into scratch buffer, scatter non-null hashes.
         if n_rows > self._scratch_capacity:
@@ -199,19 +156,23 @@ cdef class AnyValueInt64Collector(BaseCollector):
     ):
         cdef Integer64Vector vec = <Integer64Vector>morsel.column(self.column_name)
         cdef int64_t* data
+        cdef const uint32_t* sel
         cdef uint8_t* nulls
         cdef int64_t* values = self._values.data()
         cdef uint8_t* seen = self._seen.data()
         cdef Py_ssize_t i
         cdef int64_t si
+        cdef DrakenVector* uv
 
-        data = <int64_t*>vec.ptr.data
-        nulls = vec.null_bitmap_ptr()
+        uv = vec.unified()
+        data = <int64_t*>uv.data
+        sel = uv.selection
+        nulls = uv.validity
         for i in range(n_rows):
             if _num_bitmap_valid(nulls, i):
                 si = state_indices[i]
                 if not seen[si]:
-                    values[si] = data[i]
+                    values[si] = data[sel[i]]
                     seen[si] = 1
 
     cpdef Vector finalize(self, int64_t num_groups):
@@ -259,19 +220,23 @@ cdef class AnyValueFloat64Collector(BaseCollector):
     ):
         cdef Float64Vector vec = <Float64Vector>morsel.column(self.column_name)
         cdef double* data
+        cdef const uint32_t* sel
         cdef uint8_t* nulls
         cdef double* values = self._values.data()
         cdef uint8_t* seen = self._seen.data()
         cdef Py_ssize_t i
         cdef int64_t si
+        cdef DrakenVector* uv
 
-        data = <double*>vec.ptr.data
-        nulls = vec.null_bitmap_ptr()
+        uv = vec.unified()
+        data = <double*>uv.data
+        sel = uv.selection
+        nulls = uv.validity
         for i in range(n_rows):
             if _num_bitmap_valid(nulls, i):
                 si = state_indices[i]
                 if not seen[si]:
-                    values[si] = data[i]
+                    values[si] = data[sel[i]]
                     seen[si] = 1
 
     cpdef Vector finalize(self, int64_t num_groups):

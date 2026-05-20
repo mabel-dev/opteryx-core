@@ -39,31 +39,6 @@ cdef class CountDistinctAggregate(UngroupedAggregate):
         cdef Vector raw = <Vector>typed._columns[self._col_idx]
 
         cdef CarcharSetWrapper the_set = self._set
-        cdef StringVector svec
-        cdef DrakenVector* uv
-        cdef Py_ssize_t dict_size, di
-        cdef const int64_t* counts
-        cdef uint64_t h
-
-        # For COUNT DISTINCT, hashing dict entries is always cheaper than
-        # hashing all rows: dict_size <= nrows always for dict-encoded columns,
-        # and we only insert dict_size unique hashes vs. nrows duplicate ones.
-        cdef Py_ssize_t run_count
-        if isinstance(raw, StringVector):
-            svec = <StringVector>raw
-            uv = svec.unified()
-            if svec._unified_view.data_length < svec._unified_view.length:
-                dict_size = svec.c_dict_size()
-                counts = svec.c_dict_code_counts_ptr()
-                with nogil:
-                    for di in range(dict_size):
-                        if counts[di] <= 0:
-                            continue
-                        if svec.c_dict_value_is_null(di):
-                            continue
-                        h = svec.c_dict_value_hash(di)
-                        the_set._insert_many_nogil(&h, 1)
-                return
 
         # Reuse scratch buffer if large enough
         if nrows > self._scratch_capacity:

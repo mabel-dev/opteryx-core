@@ -16,8 +16,8 @@ from libc.string cimport memcpy
 from libcpp.vector cimport vector
 
 from draken.vectors.vector cimport Vector
-from draken.vectors.integer64_vector cimport Integer64Vector, _materialize_dict_int64
-from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
+from draken.vectors.integer64_vector cimport Integer64Vector
+from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.decimal_vector cimport DecimalVector
 from draken.core.buffers cimport DrakenVector
 
@@ -90,30 +90,32 @@ cdef class MedianFloat64Collector(BaseCollector):
         cdef uint8_t* nulls
         cdef int64_t* idata
         cdef double* fdata
+        cdef const uint32_t* sel
+        cdef DrakenVector* uv
         cdef list pylist
 
         if isinstance(vec, Integer64Vector):
             iv = <Integer64Vector>vec
-            if iv._unified_view.data_length < iv._unified_view.length:
-                iv = _materialize_dict_int64(iv)
-            idata = <int64_t*>iv.ptr.data
-            nulls = iv.null_bitmap_ptr()
+            uv = iv.unified()
+            idata = <int64_t*>uv.data
+            sel = uv.selection
+            nulls = uv.validity
             for i in range(n_rows):
                 if nulls != NULL and not _num_bitmap_valid(nulls, i):
                     continue
-                self._append(state_indices[i], <double>idata[i])
+                self._append(state_indices[i], <double>idata[sel[i]])
             return
 
         if isinstance(vec, Float64Vector):
             fv = <Float64Vector>vec
-            if fv._unified_view.data_length < fv._unified_view.length:
-                fv = _materialize_dict_float64(fv)
-            fdata = <double*>fv.ptr.data
-            nulls = fv.null_bitmap_ptr()
+            uv = fv.unified()
+            fdata = <double*>uv.data
+            sel = uv.selection
+            nulls = uv.validity
             for i in range(n_rows):
                 if nulls != NULL and not _num_bitmap_valid(nulls, i):
                     continue
-                self._append(state_indices[i], fdata[i])
+                self._append(state_indices[i], fdata[sel[i]])
             return
 
         # Fallback: integer-narrow vectors and anything else go via to_pylist.

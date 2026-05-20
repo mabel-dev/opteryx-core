@@ -10,7 +10,7 @@
 
 from libc.stdint cimport int64_t, uint8_t, uint32_t, INT64_MAX, INT64_MIN
 from libc.math cimport HUGE_VAL
-from libc.string cimport memset, memcpy, memcmp
+from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
 
 from draken.core.buffers cimport DrakenFixedBuffer, DrakenVector
@@ -20,9 +20,8 @@ from draken.core.buffers cimport draken_vector_from_dense
 from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.fixed_vector cimport free_fixed_buffer
 from draken.vectors.vector cimport Vector
-from draken.vectors.integer64_vector cimport Integer64Vector, _materialize_dict_int64
-from draken.vectors.float64_vector cimport Float64Vector, _materialize_dict_float64
-from draken.vectors.string_vector cimport StringVector, _StringVectorCIterator, StringElement, _materialize_dict_string
+from draken.vectors.integer64_vector cimport Integer64Vector
+from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.decimal_vector cimport DecimalVector
 
 
@@ -279,27 +278,6 @@ cdef class CountValueCollector(BaseCollector):
         cdef int64_t* counts = <int64_t*>self._counts.data
         cdef Py_ssize_t i
         cdef uint8_t* nulls
-        cdef Integer64Vector iv
-        cdef Float64Vector fv
-        cdef DrakenVector* uv
-
-        # Constant-encoded vector: either all-null or all-non-null
-        if isinstance(vec, Integer64Vector):
-            iv = <Integer64Vector>vec
-            uv = iv.unified()
-            if uv.data_length == 1 and uv.length > 1:
-                if uv.validity == NULL:
-                    for i in range(n_rows):
-                        counts[state_indices[i]] += 1
-                return
-        elif isinstance(vec, Float64Vector):
-            fv = <Float64Vector>vec
-            uv = fv.unified()
-            if uv.data_length == 1 and uv.length > 1:
-                if uv.validity == NULL:
-                    for i in range(n_rows):
-                        counts[state_indices[i]] += 1
-                return
 
         nulls = vec.null_bitmap_ptr()
         for i in range(n_rows):
@@ -369,40 +347,20 @@ cdef class SumInt64Collector(BaseCollector):
         cdef int64_t* sums = <int64_t*>self._sums.data
         cdef uint8_t* seen = self._seen
         cdef int64_t* data
+        cdef const uint32_t* sel
         cdef uint8_t* nulls
         cdef Py_ssize_t i
-        cdef int64_t si, const_val
+        cdef int64_t si
         cdef DrakenVector* uv
-        cdef int64_t* dict_data
-        cdef uint32_t code
 
         uv = vec.unified()
-        if uv.data_length == 1 and uv.length > 1:
-            if uv.validity == NULL:
-                const_val = (<int64_t*>uv.data)[0]
-                for i in range(n_rows):
-                    si = state_indices[i]
-                    sums[si] += const_val
-                    _bitmap_set(seen, si)
-            return
-
-        if vec._unified_view.data_length < vec._unified_view.length:
-            dict_data = <int64_t*>uv.data
-            nulls = uv.validity
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    code = uv.selection[i]
-                    si = state_indices[i]
-                    sums[si] += dict_data[code]
-                    _bitmap_set(seen, si)
-            return
-
-        data = <int64_t*>vec.ptr.data
-        nulls = vec.null_bitmap_ptr()
+        data = <int64_t*>uv.data
+        sel = uv.selection
+        nulls = uv.validity
         for i in range(n_rows):
             if _num_bitmap_valid(nulls, i):
                 si = state_indices[i]
-                sums[si] += data[i]
+                sums[si] += data[sel[i]]
                 _bitmap_set(seen, si)
 
     cpdef Vector finalize(self, int64_t num_groups):
@@ -503,41 +461,20 @@ cdef class SumFloat64Collector(BaseCollector):
         cdef double* sums = <double*>self._sums.data
         cdef uint8_t* seen = self._seen
         cdef double* data
+        cdef const uint32_t* sel
         cdef uint8_t* nulls
         cdef Py_ssize_t i
         cdef int64_t si
-        cdef double const_val
         cdef DrakenVector* uv
-        cdef double* dict_data
-        cdef uint32_t code
 
         uv = vec.unified()
-        if uv.data_length == 1 and uv.length > 1:
-            if uv.validity == NULL:
-                const_val = (<double*>uv.data)[0]
-                for i in range(n_rows):
-                    si = state_indices[i]
-                    sums[si] += const_val
-                    _bitmap_set(seen, si)
-            return
-
-        if vec._unified_view.data_length < vec._unified_view.length:
-            dict_data = <double*>uv.data
-            nulls = uv.validity
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    code = uv.selection[i]
-                    si = state_indices[i]
-                    sums[si] += dict_data[code]
-                    _bitmap_set(seen, si)
-            return
-
-        data = <double*>vec.ptr.data
-        nulls = vec.null_bitmap_ptr()
+        data = <double*>uv.data
+        sel = uv.selection
+        nulls = uv.validity
         for i in range(n_rows):
             if _num_bitmap_valid(nulls, i):
                 si = state_indices[i]
-                sums[si] += data[i]
+                sums[si] += data[sel[i]]
                 _bitmap_set(seen, si)
 
     cpdef Vector finalize(self, int64_t num_groups):
@@ -642,61 +579,21 @@ cdef class MinMaxInt64Collector(BaseCollector):
         cdef int64_t* values = <int64_t*>self._values.data
         cdef uint8_t* seen = self._seen
         cdef int64_t* data
+        cdef const uint32_t* sel
         cdef uint8_t* nulls
         cdef Py_ssize_t i
         cdef int64_t si, v
         cdef DrakenVector* uv
-        cdef int64_t* dict_data
-        cdef uint32_t code
 
         uv = vec.unified()
-        if uv.data_length == 1 and uv.length > 1:
-            if uv.validity == NULL:
-                v = (<int64_t*>uv.data)[0]
-                if self._direction == 1:   # MIN
-                    for i in range(n_rows):
-                        si = state_indices[i]
-                        if not _num_bitmap_valid(seen, si) or v < values[si]:
-                            values[si] = v
-                        _bitmap_set(seen, si)
-                else:                      # MAX
-                    for i in range(n_rows):
-                        si = state_indices[i]
-                        if not _num_bitmap_valid(seen, si) or v > values[si]:
-                            values[si] = v
-                        _bitmap_set(seen, si)
-            return
-
-        if vec._unified_view.data_length < vec._unified_view.length:
-            dict_data = <int64_t*>uv.data
-            nulls = uv.validity
-            if self._direction == 1:   # MIN
-                for i in range(n_rows):
-                    if _num_bitmap_valid(nulls, i):
-                        code = uv.selection[i]
-                        si = state_indices[i]
-                        v = dict_data[code]
-                        if not _num_bitmap_valid(seen, si) or v < values[si]:
-                            values[si] = v
-                        _bitmap_set(seen, si)
-            else:                      # MAX
-                for i in range(n_rows):
-                    if _num_bitmap_valid(nulls, i):
-                        code = uv.selection[i]
-                        si = state_indices[i]
-                        v = dict_data[code]
-                        if not _num_bitmap_valid(seen, si) or v > values[si]:
-                            values[si] = v
-                        _bitmap_set(seen, si)
-            return
-
-        data = <int64_t*>vec.ptr.data
-        nulls = vec.null_bitmap_ptr()
+        data = <int64_t*>uv.data
+        sel = uv.selection
+        nulls = uv.validity
         if self._direction == 1:   # MIN
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
-                    v = data[i]
+                    v = data[sel[i]]
                     if not _num_bitmap_valid(seen, si) or v < values[si]:
                         values[si] = v
                     _bitmap_set(seen, si)
@@ -704,7 +601,7 @@ cdef class MinMaxInt64Collector(BaseCollector):
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
-                    v = data[i]
+                    v = data[sel[i]]
                     if not _num_bitmap_valid(seen, si) or v > values[si]:
                         values[si] = v
                     _bitmap_set(seen, si)
@@ -813,62 +710,22 @@ cdef class MinMaxFloat64Collector(BaseCollector):
         cdef double* values = <double*>self._values.data
         cdef uint8_t* seen = self._seen
         cdef double* data
+        cdef const uint32_t* sel
         cdef uint8_t* nulls
         cdef Py_ssize_t i
         cdef int64_t si
         cdef double v
         cdef DrakenVector* uv
-        cdef double* dict_data
-        cdef uint32_t code
 
         uv = vec.unified()
-        if uv.data_length == 1 and uv.length > 1:
-            if uv.validity == NULL:
-                v = (<double*>uv.data)[0]
-                if self._direction == 1:   # MIN
-                    for i in range(n_rows):
-                        si = state_indices[i]
-                        if not _num_bitmap_valid(seen, si) or v < values[si]:
-                            values[si] = v
-                        _bitmap_set(seen, si)
-                else:                      # MAX
-                    for i in range(n_rows):
-                        si = state_indices[i]
-                        if not _num_bitmap_valid(seen, si) or v > values[si]:
-                            values[si] = v
-                        _bitmap_set(seen, si)
-            return
-
-        if vec._unified_view.data_length < vec._unified_view.length:
-            dict_data = <double*>uv.data
-            nulls = uv.validity
-            if self._direction == 1:   # MIN
-                for i in range(n_rows):
-                    if _num_bitmap_valid(nulls, i):
-                        code = uv.selection[i]
-                        si = state_indices[i]
-                        v = dict_data[code]
-                        if not _num_bitmap_valid(seen, si) or v < values[si]:
-                            values[si] = v
-                        _bitmap_set(seen, si)
-            else:                      # MAX
-                for i in range(n_rows):
-                    if _num_bitmap_valid(nulls, i):
-                        code = uv.selection[i]
-                        si = state_indices[i]
-                        v = dict_data[code]
-                        if not _num_bitmap_valid(seen, si) or v > values[si]:
-                            values[si] = v
-                        _bitmap_set(seen, si)
-            return
-
-        data = <double*>vec.ptr.data
-        nulls = vec.null_bitmap_ptr()
+        data = <double*>uv.data
+        sel = uv.selection
+        nulls = uv.validity
         if self._direction == 1:   # MIN
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
-                    v = data[i]
+                    v = data[sel[i]]
                     if not _num_bitmap_valid(seen, si) or v < values[si]:
                         values[si] = v
                     _bitmap_set(seen, si)
@@ -876,7 +733,7 @@ cdef class MinMaxFloat64Collector(BaseCollector):
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
-                    v = data[i]
+                    v = data[sel[i]]
                     if not _num_bitmap_valid(seen, si) or v > values[si]:
                         values[si] = v
                     _bitmap_set(seen, si)
@@ -941,7 +798,7 @@ cdef class MinMaxFloat64Collector(BaseCollector):
 # ---------------------------------------------------------------------------
 
 cdef class MinMaxObjectCollector(BaseCollector):
-    """Native MIN/MAX using C-level buffers (no Python in accumulate loop)."""
+    """MIN/MAX for non-numeric types via Python comparison."""
     cdef vector[vector[uint8_t]] _values  # C-level string storage per group
     cdef vector[uint8_t] _seen
     cdef int8_t _direction    # +1 = MIN, -1 = MAX
@@ -967,93 +824,30 @@ cdef class MinMaxObjectCollector(BaseCollector):
         cdef bytes cur, v
         cdef object v_obj
         cdef list col
-        cdef StringVector sv_native
 
-        # Fast path: StringVector with C-level iteration (no Python materialization)
-        if isinstance(vec, StringVector):
-            sv_native = <StringVector>vec
-            if sv_native._unified_view.data_length < sv_native._unified_view.length:
-                sv_native = _materialize_dict_string(sv_native)
-            self._accumulate_string_vector_native(sv_native, state_indices, n_rows, seen)
-        else:
-            # Fallback for other types (dates, etc.)
-            col = vec.to_pylist()
-
-            if self._direction == 1:   # MIN
-                for i in range(n_rows):
-                    v_obj = col[i]
-                    if v_obj is None:
-                        continue
-                    v = v_obj if isinstance(v_obj, bytes) else str(v_obj).encode('utf-8')
-                    si = state_indices[i]
-                    cur = self._values[si]
-                    if not cur or v < cur:
-                        self._values[si] = v
-                    seen[si] = 1
-            else:                      # MAX
-                for i in range(n_rows):
-                    v_obj = col[i]
-                    if v_obj is None:
-                        continue
-                    v = v_obj if isinstance(v_obj, bytes) else str(v_obj).encode('utf-8')
-                    si = state_indices[i]
-                    cur = self._values[si]
-                    if not cur or v > cur:
-                        self._values[si] = v
-                    seen[si] = 1
-
-    cdef void _accumulate_string_vector_native(
-        self,
-        StringVector vec,
-        const int64_t* state_indices,
-        Py_ssize_t n_rows,
-        uint8_t* seen,
-    ):
-        cdef _StringVectorCIterator it = _StringVectorCIterator._from_ptr(vec.ptr)
-        cdef StringElement elem
-        cdef Py_ssize_t i
-        cdef int64_t si
-        cdef Py_ssize_t cur_len
-        cdef int cmp_result
-        cdef Py_ssize_t min_len
-        cdef vector[uint8_t]* cur_vec
-        cdef uint8_t* cur_ptr
+        col = vec.to_pylist()
 
         if self._direction == 1:   # MIN
             for i in range(n_rows):
-                if not it.next(&elem):
-                    break
-                if elem.is_null:
+                v_obj = col[i]
+                if v_obj is None:
                     continue
+                v = v_obj if isinstance(v_obj, bytes) else str(v_obj).encode('utf-8')
                 si = state_indices[i]
-                cur_vec = &self._values[si]
-                if cur_vec.empty():
-                    cur_vec.assign(elem.ptr, elem.ptr + elem.length)
-                else:
-                    cur_len = cur_vec.size()
-                    min_len = elem.length if elem.length < cur_len else cur_len
-                    cmp_result = memcmp(elem.ptr, cur_vec.data(), min_len)
-                    if cmp_result < 0 or (cmp_result == 0 and elem.length < cur_len):
-                        cur_vec.clear()
-                        cur_vec.assign(elem.ptr, elem.ptr + elem.length)
+                cur = self._values[si]
+                if not cur or v < cur:
+                    self._values[si] = v
                 seen[si] = 1
         else:                      # MAX
             for i in range(n_rows):
-                if not it.next(&elem):
-                    break
-                if elem.is_null:
+                v_obj = col[i]
+                if v_obj is None:
                     continue
+                v = v_obj if isinstance(v_obj, bytes) else str(v_obj).encode('utf-8')
                 si = state_indices[i]
-                cur_vec = &self._values[si]
-                if cur_vec.empty():
-                    cur_vec.assign(elem.ptr, elem.ptr + elem.length)
-                else:
-                    cur_len = cur_vec.size()
-                    min_len = elem.length if elem.length < cur_len else cur_len
-                    cmp_result = memcmp(elem.ptr, cur_vec.data(), min_len)
-                    if cmp_result > 0 or (cmp_result == 0 and elem.length > cur_len):
-                        cur_vec.clear()
-                        cur_vec.assign(elem.ptr, elem.ptr + elem.length)
+                cur = self._values[si]
+                if not cur or v > cur:
+                    self._values[si] = v
                 seen[si] = 1
 
     cpdef Vector finalize(self, int64_t num_groups):
@@ -1133,86 +927,43 @@ cdef class AvgCollector(BaseCollector):
         cdef int64_t* dec_data
         cdef double* f64
         cdef uint8_t* nulls
-        cdef double const_f64
         cdef double dec_factor
-        cdef int64_t const_i64
         cdef DrakenVector* uv
-        cdef uint32_t code
+        cdef const uint32_t* sel
 
         if isinstance(raw, Integer64Vector):
             iv = <Integer64Vector>raw
             uv = iv.unified()
-            if uv.data_length == 1 and uv.length > 1:
-                if uv.validity == NULL:
-                    const_i64 = (<int64_t*>uv.data)[0]
-                    for i in range(n_rows):
-                        si = state_indices[i]
-                        sums[si] += const_i64
-                        counts[si] += 1
-                return
-            if iv._unified_view.data_length < iv._unified_view.length:
-                nulls = uv.validity
-                i64 = <int64_t*>uv.data
-                for i in range(n_rows):
-                    if _num_bitmap_valid(nulls, i):
-                        code = uv.selection[i]
-                        si = state_indices[i]
-                        sums[si] += i64[code]
-                        counts[si] += 1
-                return
-            i64 = <int64_t*>iv.ptr.data
-            nulls = iv.null_bitmap_ptr()
+            i64 = <int64_t*>uv.data
+            sel = uv.selection
+            nulls = uv.validity
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
-                    sums[si] += i64[i]
+                    sums[si] += i64[sel[i]]
                     counts[si] += 1
         elif isinstance(raw, DecimalVector):
             dv = <DecimalVector>raw
             dec_factor = 10.0 ** (-dv._scale)
             uv = dv.unified()
-            if uv.data_length == 1 and uv.length > 1:
-                if uv.validity == NULL:
-                    const_f64 = <double>(<int64_t*>uv.data)[0] * dec_factor
-                    for i in range(n_rows):
-                        si = state_indices[i]
-                        sums[si] += const_f64
-                        counts[si] += 1
-                return
-            dec_data = <int64_t*>dv.ptr.data
-            nulls = dv.null_bitmap_ptr()
+            dec_data = <int64_t*>uv.data
+            sel = uv.selection
+            nulls = uv.validity
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
-                    sums[si] += <double>dec_data[i] * dec_factor
+                    sums[si] += <double>dec_data[sel[i]] * dec_factor
                     counts[si] += 1
         else:
             fv = <Float64Vector>raw
             uv = fv.unified()
-            if uv.data_length == 1 and uv.length > 1:
-                if uv.validity == NULL:
-                    const_f64 = (<double*>uv.data)[0]
-                    for i in range(n_rows):
-                        si = state_indices[i]
-                        sums[si] += const_f64
-                        counts[si] += 1
-                return
-            if fv._unified_view.data_length < fv._unified_view.length:
-                nulls = uv.validity
-                f64 = <double*>uv.data
-                for i in range(n_rows):
-                    if _num_bitmap_valid(nulls, i):
-                        code = uv.selection[i]
-                        si = state_indices[i]
-                        sums[si] += f64[code]
-                        counts[si] += 1
-                return
-            f64 = <double*>fv.ptr.data
-            nulls = fv.null_bitmap_ptr()
+            f64 = <double*>uv.data
+            sel = uv.selection
+            nulls = uv.validity
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
-                    sums[si] += f64[i]
+                    sums[si] += f64[sel[i]]
                     counts[si] += 1
 
     cpdef Vector finalize(self, int64_t num_groups):
@@ -1306,29 +1057,21 @@ cdef class SumDecimalCollector(BaseCollector):
         cdef double* sums = <double*>self._sums.data
         cdef uint8_t* seen = self._seen
         cdef int64_t* data
+        cdef const uint32_t* sel
         cdef uint8_t* nulls
         cdef Py_ssize_t i
         cdef int64_t si
-        cdef double const_val
         cdef double factor = self._factor
         cdef DrakenVector* uv
 
         uv = vec.unified()
-        if uv.data_length == 1 and uv.length > 1:
-            if uv.validity == NULL:
-                const_val = <double>(<int64_t*>uv.data)[0] * factor
-                for i in range(n_rows):
-                    si = state_indices[i]
-                    sums[si] += const_val
-                    _bitmap_set(seen, si)
-            return
-
-        data = <int64_t*>vec.ptr.data
-        nulls = vec.null_bitmap_ptr()
+        data = <int64_t*>uv.data
+        sel = uv.selection
+        nulls = uv.validity
         for i in range(n_rows):
             if _num_bitmap_valid(nulls, i):
                 si = state_indices[i]
-                sums[si] += <double>data[i] * factor
+                sums[si] += <double>data[sel[i]] * factor
                 _bitmap_set(seen, si)
 
     cpdef Vector finalize(self, int64_t num_groups):
@@ -1426,36 +1169,21 @@ cdef class MinMaxDecimalCollector(BaseCollector):
         cdef int64_t* values = <int64_t*>self._values.data
         cdef uint8_t* seen = self._seen
         cdef int64_t* data
+        cdef const uint32_t* sel
         cdef uint8_t* nulls
         cdef Py_ssize_t i
         cdef int64_t si, v
         cdef DrakenVector* uv
 
         uv = vec.unified()
-        if uv.data_length == 1 and uv.length > 1:
-            if uv.validity == NULL:
-                v = (<int64_t*>uv.data)[0]
-                if self._direction == 1:   # MIN
-                    for i in range(n_rows):
-                        si = state_indices[i]
-                        if not _num_bitmap_valid(seen, si) or v < values[si]:
-                            values[si] = v
-                        _bitmap_set(seen, si)
-                else:                      # MAX
-                    for i in range(n_rows):
-                        si = state_indices[i]
-                        if not _num_bitmap_valid(seen, si) or v > values[si]:
-                            values[si] = v
-                        _bitmap_set(seen, si)
-            return
-
-        data = <int64_t*>vec.ptr.data
-        nulls = vec.null_bitmap_ptr()
+        data = <int64_t*>uv.data
+        sel = uv.selection
+        nulls = uv.validity
         if self._direction == 1:   # MIN
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
-                    v = data[i]
+                    v = data[sel[i]]
                     if not _num_bitmap_valid(seen, si) or v < values[si]:
                         values[si] = v
                     _bitmap_set(seen, si)
@@ -1463,7 +1191,7 @@ cdef class MinMaxDecimalCollector(BaseCollector):
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
-                    v = data[i]
+                    v = data[sel[i]]
                     if not _num_bitmap_valid(seen, si) or v > values[si]:
                         values[si] = v
                     _bitmap_set(seen, si)
