@@ -12,7 +12,6 @@ cdef class ArrayVector(Vector):
     cdef bint owns_null_bitmap
     cdef object _arrow_parent
     cdef object _arrow_offsets_buf
-    cdef object _arrow_null_buf
     cdef object _arrow_child_array
     cdef object _child_arrow_type
     cdef bint _child_decode_utf8

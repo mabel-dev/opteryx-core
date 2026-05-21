@@ -46,6 +46,7 @@ cdef class IntBuffer:
     cpdef void append(self, int64_t value)
     cpdef void append_repeated(self, int64_t value, size_t count)
     cpdef void extend(self, iterable)
+    cpdef Integer64Vector into_int64_vector(self)
     cpdef Integer64Vector to_int64_vector(self)
     cpdef Int32Buffer to_int32_buffer(self)
     cpdef const int64_t[::1] get_buffer(self)

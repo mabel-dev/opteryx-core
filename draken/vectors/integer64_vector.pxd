@@ -11,8 +11,6 @@ from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.float64_vector cimport Float64Vector
 
 cdef class Integer64Vector(Vector):
-    cdef object _arrow_data_buf
-    cdef object _arrow_null_buf
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
     cdef bint _owns_dict_data
@@ -26,7 +24,7 @@ cdef class Integer64Vector(Vector):
     # them directly from Python and bypass the per-op named wrappers below.
     cpdef BoolVector _compare_scalar(self, int64_t value, int op)
     cpdef BoolVector _compare_vector(self, Integer64Vector other, int op)
-    cpdef BoolVector _compare_float64_vector(self, object other, int op)
+    cpdef BoolVector _compare_float64_vector(self, Float64Vector other, int op)
 
     cpdef BoolVector equals(self, int64_t value)
     cpdef BoolVector equals_vector(self, Integer64Vector other)
@@ -40,12 +38,12 @@ cdef class Integer64Vector(Vector):
     cpdef BoolVector less_than_vector(self, Integer64Vector other)
     cpdef BoolVector less_than_or_equals(self, int64_t value)
     cpdef BoolVector less_than_or_equals_vector(self, Integer64Vector other)
-    cpdef BoolVector equals_float64_vector(self, object other)
-    cpdef BoolVector not_equals_float64_vector(self, object other)
-    cpdef BoolVector greater_than_float64_vector(self, object other)
-    cpdef BoolVector greater_than_or_equals_float64_vector(self, object other)
-    cpdef BoolVector less_than_float64_vector(self, object other)
-    cpdef BoolVector less_than_or_equals_float64_vector(self, object other)
+    cpdef BoolVector equals_float64_vector(self, Float64Vector other)
+    cpdef BoolVector not_equals_float64_vector(self, Float64Vector other)
+    cpdef BoolVector greater_than_float64_vector(self, Float64Vector other)
+    cpdef BoolVector greater_than_or_equals_float64_vector(self, Float64Vector other)
+    cpdef BoolVector less_than_float64_vector(self, Float64Vector other)
+    cpdef BoolVector less_than_or_equals_float64_vector(self, Float64Vector other)
     cpdef BoolVector between(self, int64_t lower, int64_t upper,
                               bint lower_inclusive=*, bint upper_inclusive=*)
     cpdef BoolVector in_list(self, object value_set)

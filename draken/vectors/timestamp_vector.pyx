@@ -231,8 +231,6 @@ cdef class TimestampVector(Vector):
         wrap=True             -> do not allocate; caller will set ptr & metadata
         """
         self.null_bit_offset = 0
-        self._arrow_null_buf = None
-        self._arrow_data_buf = None
         self.timestamp_unit = 'us'  # Default to microseconds
         self._unit_code = UNIT_US
 

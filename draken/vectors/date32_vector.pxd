@@ -11,8 +11,6 @@ from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.timestamp_vector cimport TimestampVector
 
 cdef class Date32Vector(Vector):
-    cdef object _arrow_data_buf
-    cdef object _arrow_null_buf
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
     cdef DrakenVector* unified(self) noexcept

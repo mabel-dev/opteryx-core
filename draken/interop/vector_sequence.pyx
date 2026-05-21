@@ -45,6 +45,7 @@ from draken.vectors.integer64_vector cimport from_sequence as int64_from_sequenc
 from draken.vectors.decimal_vector cimport DecimalVector
 from draken.vectors.scalar_constructors cimport from_sequence as constant_from_sequence
 from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
+from draken.vectors.vector_vector cimport from_float_pylist
 
 
 # ---------------------------------------------------------------------------
@@ -203,63 +204,6 @@ cdef DecimalVector _decimal_from_pylist(list data):
 
 
 # ---------------------------------------------------------------------------
-# VectorVector (FP16 embeddings) from Python list-of-lists
-# ---------------------------------------------------------------------------
-
-cdef object _vector_vector_from_pylist(list data):
-    """
-    Build a VectorVector from a Python list of [list-of-floats | None].
-
-    All non-null rows must have the same length (the embedding dimension),
-    and must not contain element-level nulls. Empty input or all-None input
-    cannot determine a dimension — raises ValueError.
-    """
-    cdef Py_ssize_t n = len(data)
-    cdef Py_ssize_t i
-    cdef object item, first_present = None
-    cdef Py_ssize_t dim = -1
-    cdef Py_ssize_t row_len
-
-    for i in range(n):
-        item = data[i]
-        if item is None:
-            continue
-        if not isinstance(item, (list, tuple)):
-            raise TypeError(
-                f"VECTOR builder expects list/tuple per row, got "
-                f"{type(item).__name__} at index {i}"
-            )
-        row_len = len(item)
-        if dim < 0:
-            dim = row_len
-            first_present = item
-        elif row_len != dim:
-            raise ValueError(
-                f"VECTOR rows must all have the same length; row {i} has "
-                f"length {row_len}, expected {dim}"
-            )
-        for sub in item:
-            if sub is None:
-                raise ValueError(
-                    "VECTOR rows must not contain null elements; embedding "
-                    "rows are present-or-absent at the row level"
-                )
-
-    if dim < 0:
-        raise ValueError(
-            "Cannot build a VECTOR from an empty or all-None sequence "
-            "without an inferable dimension"
-        )
-
-    raise NotImplementedError(
-        "Building a VECTOR (fp16 embedding) column from a Python sequence is "
-        "not yet supported natively. The previous implementation routed through "
-        "PyArrow ingestion (from_arrow), which has been removed. A native "
-        "list-of-floats -> fp16 VectorVector builder is needed."
-    )
-
-
-# ---------------------------------------------------------------------------
 # dtype hint helpers
 # ---------------------------------------------------------------------------
 
@@ -386,7 +330,7 @@ cpdef object vector_from_sequence(object data, object dtype=None):
             return _decimal_from_pylist(data)
 
         if dtype_val == 'VECTOR':
-            return _vector_vector_from_pylist(data)
+            return from_float_pylist(data)
 
         # -- Sniff element type from first non-None value --
         import decimal as _decimal

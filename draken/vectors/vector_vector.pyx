@@ -45,6 +45,7 @@ from draken.vectors.vector cimport Vector
 
 cdef extern from "fp16.h" nogil:
     float draken_fp16_to_fp32(uint16_t h)
+    uint16_t draken_fp32_to_fp16(float f)
 
 
 # --- Helpers ---------------------------------------------------------------
@@ -75,8 +76,6 @@ cdef class VectorVector(Vector):
         self._null_bitmap = NULL
         self._owns_null_bitmap = False
         self._arrow_parent = None
-        self._arrow_data_buf = None
-        self._arrow_null_buf = None
 
     def __dealloc__(self):
         if self._owns_data and self._data != NULL:
@@ -393,4 +392,85 @@ cdef class VectorVector(Vector):
             children=[child],
         )
 
+
+cdef VectorVector from_float_pylist(object data):
+    """Build an owning VectorVector from a Python sequence of [list-of-floats | None].
+
+    All non-null rows must share the same length (the embedding dimension) and
+    must not contain element-level nulls. Empty or all-None input cannot infer a
+    dimension and raises ValueError. Floats are encoded to IEEE binary16; the
+    resulting fp16 buffer is owned by the vector (freed on __dealloc__).
+    """
+    cdef Py_ssize_t n = len(data)
+    cdef Py_ssize_t i, j, row_len
+    cdef object item, sub
+    cdef Py_ssize_t dim = -1
+    cdef bint has_nulls = False
+
+    # Validate + infer dimension.
+    for i in range(n):
+        item = data[i]
+        if item is None:
+            has_nulls = True
+            continue
+        if not isinstance(item, (list, tuple)):
+            raise TypeError(
+                f"VECTOR builder expects list/tuple per row, got "
+                f"{type(item).__name__} at index {i}"
+            )
+        row_len = len(item)
+        if dim < 0:
+            dim = row_len
+        elif row_len != dim:
+            raise ValueError(
+                f"VECTOR rows must all have the same length; row {i} has "
+                f"length {row_len}, expected {dim}"
+            )
+        for sub in item:
+            if sub is None:
+                raise ValueError(
+                    "VECTOR rows must not contain null elements; embedding "
+                    "rows are present-or-absent at the row level"
+                )
+
+    if dim < 0:
+        raise ValueError(
+            "Cannot build a VECTOR from an empty or all-None sequence "
+            "without an inferable dimension"
+        )
+
+    cdef Py_ssize_t row_bytes = dim * sizeof(uint16_t)
+    cdef uint16_t* new_data = <uint16_t*> PyMem_Malloc(<size_t>(n * row_bytes))
+    if new_data == NULL and n * row_bytes > 0:
+        raise MemoryError()
+
+    cdef Py_ssize_t nb_bytes = (n + 7) >> 3
+    cdef uint8_t* new_nulls = NULL
+    if has_nulls:
+        new_nulls = <uint8_t*> PyMem_Malloc(<size_t> nb_bytes)
+        if new_nulls == NULL:
+            PyMem_Free(new_data)
+            raise MemoryError()
+        memset(new_nulls, 0, nb_bytes)
+
+    cdef uint16_t* row_ptr
+    for i in range(n):
+        item = data[i]
+        row_ptr = <uint16_t*>(<intptr_t> new_data + i * row_bytes)
+        if item is None:
+            memset(<void*> row_ptr, 0, <size_t> row_bytes)
+            continue
+        for j in range(dim):
+            row_ptr[j] = draken_fp32_to_fp16(<float> item[j])
+        if new_nulls != NULL:
+            new_nulls[i >> 3] |= <uint8_t>(1 << (i & 7))
+
+    cdef VectorVector out = VectorVector.__new__(VectorVector)
+    out._data = new_data
+    out._length = n
+    out._dimensions = dim
+    out._owns_data = True
+    out._null_bitmap = new_nulls
+    out._owns_null_bitmap = new_nulls != NULL
+    return out
 

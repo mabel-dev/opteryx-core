@@ -244,7 +244,7 @@ cdef inline str _extract_truncate_op(StringVector truncate_to) except *:
     cdef DrakenStringSlot* slot
     cdef bytes raw
 
-    if uv.length != 1:
+    if uv.length < 1:
         raise ValueError("DATE_TRUNC unit must be a constant or single-value StringVector")
 
     if uv.validity != NULL and not ((uv.validity[0] >> 0) & 1):

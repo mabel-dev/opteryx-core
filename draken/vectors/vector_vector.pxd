@@ -19,8 +19,6 @@ cdef class VectorVector(Vector):
 
     # Arrow buffer keep-alives (zero-copy ingest).
     cdef object _arrow_parent
-    cdef object _arrow_data_buf
-    cdef object _arrow_null_buf
 
     cdef DrakenVector* unified(self) noexcept
     cdef Float32Vector _alloc_score_vector(self)
@@ -39,5 +37,8 @@ cdef class VectorVector(Vector):
     cpdef list to_pylist(self)
 
     cpdef VectorVector take(self, int32_t[::1] indices)
+
+
+cdef VectorVector from_float_pylist(object data)
 
 

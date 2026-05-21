@@ -488,15 +488,16 @@ cdef class Integer64Vector(Vector):
             free(b_gathered)
         return out
 
-    cpdef BoolVector _compare_float64_vector(self, object other, int op):
+    cpdef BoolVector _compare_float64_vector(self, Float64Vector other, int op):
         """Compare Integer64Vector with Float64Vector via the cross-type kernel.
 
         int64 values are widened to double inside the kernel. Result is NULL
         where either side is NULL.
         """
-        cdef Float64Vector fother = <Float64Vector>other
+        if other is None:
+            raise TypeError("Expected Float64Vector, got None")
         cdef DrakenVector* uv = self.unified()
-        cdef DrakenVector* ouv = fother.unified()
+        cdef DrakenVector* ouv = other.unified()
         cdef Py_ssize_t n = <Py_ssize_t>uv.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
         cdef int64_t* adata = <int64_t*>uv.data
@@ -612,40 +613,28 @@ cdef class Integer64Vector(Vector):
     cpdef BoolVector less_than_or_equals_vector(self, Integer64Vector other):
         return self._compare_vector(other, 5)
 
-    cpdef BoolVector equals_float64_vector(self, object other):
+    cpdef BoolVector equals_float64_vector(self, Float64Vector other):
         """Compare Integer64Vector with Float64Vector using native cross-type comparison."""
-        if other.__class__.__name__ != "Float64Vector":
-            raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
         return self._compare_float64_vector(other, 0)
 
-    cpdef BoolVector not_equals_float64_vector(self, object other):
+    cpdef BoolVector not_equals_float64_vector(self, Float64Vector other):
         """Compare Integer64Vector with Float64Vector using native cross-type comparison."""
-        if other.__class__.__name__ != "Float64Vector":
-            raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
         return self._compare_float64_vector(other, 1)
 
-    cpdef BoolVector greater_than_float64_vector(self, object other):
+    cpdef BoolVector greater_than_float64_vector(self, Float64Vector other):
         """Compare Integer64Vector with Float64Vector using native cross-type comparison."""
-        if other.__class__.__name__ != "Float64Vector":
-            raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
         return self._compare_float64_vector(other, 2)
 
-    cpdef BoolVector greater_than_or_equals_float64_vector(self, object other):
+    cpdef BoolVector greater_than_or_equals_float64_vector(self, Float64Vector other):
         """Compare Integer64Vector with Float64Vector using native cross-type comparison."""
-        if other.__class__.__name__ != "Float64Vector":
-            raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
         return self._compare_float64_vector(other, 3)
 
-    cpdef BoolVector less_than_float64_vector(self, object other):
+    cpdef BoolVector less_than_float64_vector(self, Float64Vector other):
         """Compare Integer64Vector with Float64Vector using native cross-type comparison."""
-        if other.__class__.__name__ != "Float64Vector":
-            raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
         return self._compare_float64_vector(other, 4)
 
-    cpdef BoolVector less_than_or_equals_float64_vector(self, object other):
+    cpdef BoolVector less_than_or_equals_float64_vector(self, Float64Vector other):
         """Compare Integer64Vector with Float64Vector using native cross-type comparison."""
-        if other.__class__.__name__ != "Float64Vector":
-            raise TypeError(f"Expected Float64Vector, got {other.__class__.__name__}")
         return self._compare_float64_vector(other, 5)
 
     cpdef BoolVector between(self, int64_t lower, int64_t upper,
@@ -1412,36 +1401,23 @@ cdef Integer64Vector from_packed_dict(
 
 cdef Integer64Vector from_sequence(const int64_t[::1] data):
     """
-    Create Integer64Vector from a typed int64 memoryview (zero-copy).
+    Create an owning Integer64Vector from a typed int64 memoryview.
+
+    The (transient) source memoryview is copied once into a malloc'd buffer at
+    the Python->native boundary; the vector then owns and frees that buffer.
 
     Args:
         data: const int64_t[::1] memoryview (C-contiguous)
 
     Returns:
-        Integer64Vector wrapping the memoryview data
+        Integer64Vector owning a copy of the data
     """
-    cdef Integer64Vector vec = Integer64Vector(0, True)   # wrap=True: no alloc
-    vec.ptr = <DrakenFixedBuffer*> malloc(sizeof(DrakenFixedBuffer))
-    if vec.ptr == NULL:
+    cdef size_t n = <size_t> data.shape[0]
+    cdef int64_t* buf
+    if n == 0:
+        return from_decoded(NULL, NULL, 0)
+    buf = <int64_t*>malloc(n * 8)
+    if buf == NULL:
         raise MemoryError()
-    vec.owns_data = False
-
-    # Keep reference to prevent GC
-    vec._arrow_data_buf = data.base if data.base is not None else data
-    vec._arrow_null_buf = None
-
-    vec.ptr.type = DRAKEN_INT64
-    vec.ptr.itemsize = 8
-    vec.ptr.length = <size_t> data.shape[0]
-    vec.ptr.null_bitmap = NULL
-
-    if data.shape[0] > 0:
-        vec._arrow_data_buf = data.base if data.base is not None else data
-        vec.ptr.data = <void*> &data[0]
-    else:
-        vec._arrow_data_buf = None
-        vec.ptr.data = NULL
-
-    vec._unified_view = draken_vector_from_dense(
-        vec.ptr.data, <uint32_t>data.shape[0], DRAKEN_INT64, NULL)
-    return vec
+    memcpy(buf, &data[0], n * 8)
+    return from_decoded(<void*>buf, NULL, n)

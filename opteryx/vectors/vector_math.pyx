@@ -50,8 +50,6 @@ cpdef VectorVector new_matrix(Py_ssize_t length, Py_ssize_t dimensions):
     vv._null_bitmap = NULL
     vv._owns_null_bitmap = False
     vv._arrow_parent = None
-    vv._arrow_data_buf = None
-    vv._arrow_null_buf = None
 
     cdef Py_ssize_t total = length * dimensions
     if total == 0:

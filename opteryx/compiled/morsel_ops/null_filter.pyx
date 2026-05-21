@@ -19,7 +19,6 @@ non-null, using Draken vector capabilities.
 
 
 from draken.vectors.integer64_vector cimport Integer64Vector
-from draken.vectors.integer64_vector cimport from_sequence as int64_from_sequence
 from opteryx.compiled.structures.buffers cimport IntBuffer
 
 from libc.stdint cimport int64_t, uint8_t, uintptr_t
@@ -44,8 +43,6 @@ cdef inline Integer64Vector non_null_row_indices(object relation, list column_na
         uint8_t bit
         Py_ssize_t bit_index, chunk_offset
         IntBuffer indices_buf
-        const int64_t[::1] mv
-        Integer64Vector vec
 
     if not combined_nulls:
         raise MemoryError()
@@ -90,13 +87,8 @@ cdef inline Integer64Vector non_null_row_indices(object relation, list column_na
             if combined_nulls[i]:
                 indices_buf.append(i)
 
-        # Convert to Integer64Vector
-        mv = indices_buf.get_buffer()
-        vec = int64_from_sequence(mv)
-        # Anchor the buffer object to ensure memory safety
-        vec._arrow_data_buf = indices_buf
-
-        return vec
+        # Convert to an owning Integer64Vector (copies at the allocator boundary).
+        return indices_buf.into_int64_vector()
 
     finally:
         free(combined_nulls)

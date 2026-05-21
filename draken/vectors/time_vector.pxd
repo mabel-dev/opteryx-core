@@ -8,8 +8,6 @@ from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
 
 cdef class TimeVector(Vector):
-    cdef object _arrow_data_buf
-    cdef object _arrow_null_buf
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
     cdef bint is_time64  # True if time64, False if time32

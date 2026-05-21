@@ -1155,29 +1155,23 @@ cdef Float32Vector from_packed_dict(
 
 cdef Float32Vector from_sequence(float[::1] data):
     """
-    Create Float32Vector from a typed float memoryview (zero-copy).
+    Create an owning Float32Vector from a typed float memoryview.
+
+    The (transient) source memoryview is copied once into a malloc'd buffer at
+    the Python->native boundary; the vector then owns and frees that buffer.
 
     Args:
         data: float[::1] memoryview (C-contiguous)
 
     Returns:
-        Float32Vector wrapping the memoryview data
+        Float32Vector owning a copy of the data
     """
-    cdef Float32Vector vec = Float32Vector(0, True)
-    vec.ptr = <DrakenFixedBuffer*> malloc(sizeof(DrakenFixedBuffer))
-    if vec.ptr == NULL:
+    cdef size_t n = <size_t> data.shape[0]
+    cdef float* buf
+    if n == 0:
+        return from_decoded(NULL, NULL, 0)
+    buf = <float*>malloc(n * 4)
+    if buf == NULL:
         raise MemoryError()
-    vec.owns_data = False
-
-    # Keep reference to prevent GC
-    vec._arrow_data_buf = data.base if data.base is not None else data
-    vec._arrow_null_buf = None
-
-    vec.ptr.type = DRAKEN_FLOAT32
-    vec.ptr.itemsize = 4
-    vec.ptr.length = <uint32_t> data.shape[0]
-    vec.ptr.data = <void*> &data[0]
-    vec.ptr.null_bitmap = NULL
-    cdef uint32_t _seq_len = <uint32_t>data.shape[0]
-    vec._unified_view = draken_vector_from_dense(vec.ptr.data, _seq_len, DRAKEN_FLOAT32, NULL)
-    return vec
+    memcpy(buf, &data[0], n * 4)
+    return from_decoded(<void*>buf, NULL, n)

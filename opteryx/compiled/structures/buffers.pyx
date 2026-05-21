@@ -12,10 +12,11 @@
 # distutils: sources = src/cpp/intbuffer.cpp
 from libc.stddef cimport size_t
 from libc.stdint cimport int64_t, int32_t
+from libc.stdlib cimport malloc
 from libcpp.vector cimport vector
 from libc.string cimport memcpy
 
-from draken.vectors.integer64_vector cimport Integer64Vector, from_sequence as int64_from_sequence
+from draken.vectors.integer64_vector cimport Integer64Vector, from_decoded as int64_from_decoded
 
 cdef extern from "intbuffer.h":
     cdef cppclass CIntBuffer:
@@ -113,11 +114,26 @@ cdef class IntBuffer:
             for item in iterable:
                 self.c_buffer.append(item)
 
+    cpdef Integer64Vector into_int64_vector(self):
+        """Convert to an owning Integer64Vector.
+
+        The buffer's storage is a std::vector and cannot be free()'d, so this
+        copies once into a malloc'd buffer at the allocator boundary and
+        transfers ownership to the vector.
+        """
+        cdef size_t n = self.c_buffer.size()
+        cdef int64_t* p
+        if n == 0:
+            return int64_from_decoded(NULL, NULL, 0)
+        p = <int64_t*>malloc(n * 8)
+        if p == NULL:
+            raise MemoryError()
+        memcpy(p, self.c_buffer.data(), n * 8)
+        return int64_from_decoded(<void*>p, NULL, n)
+
     cpdef Integer64Vector to_int64_vector(self):
         """Convert to Integer64Vector (Draken vector)."""
-        cdef size_t n = self.c_buffer.size()
-        cdef const int64_t[::1] data_view = <int64_t[:n]>self.c_buffer.data()
-        return int64_from_sequence(data_view)
+        return self.into_int64_vector()
 
     cpdef Int32Buffer to_int32_buffer(self):
         """Convert int64 buffer to int32 buffer with range validation.

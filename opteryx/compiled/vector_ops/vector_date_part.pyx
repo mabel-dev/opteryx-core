@@ -30,11 +30,12 @@ Phase 4 (Future):
 
 from libc.stdint cimport int64_t, uint8_t
 from libc.stddef cimport size_t
+from libc.stdlib cimport malloc
 from cpython.array cimport array, clone
 
 from draken.core.buffers cimport DrakenVector, DRAKEN_INT64
 from draken.vectors.timestamp_vector cimport TimestampVector
-from draken.vectors.integer64_vector cimport Integer64Vector, from_packed_dict as int64_from_packed_dict, from_sequence as int64_from_sequence
+from draken.vectors.integer64_vector cimport Integer64Vector, from_packed_dict as int64_from_packed_dict, from_decoded as int64_from_decoded
 from draken.vectors.scalar_constructors cimport from_scalar
 from draken.vectors.vector cimport Vector
 
@@ -477,9 +478,8 @@ cdef Integer64Vector _datepart_ts_dict_calendar(TimestampVector ts_vec, int part
 
 
 # ===========================================================================
-# MACRO: _mk_result(output_array, length) — build Integer64Vector from array
-#   result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-# Used inline in every kernel below.
+# Each kernel mallocs its int64 output buffer, fills it, and transfers
+# ownership to the result via int64_from_decoded(<void*>output_ptr, NULL, length).
 # ===========================================================================
 
 
@@ -514,7 +514,7 @@ cpdef Integer64Vector vector_datepart_minute(TimestampVector timestamps, Integer
         unit_code = 0
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     cdef int64_t* output_ptr
     cdef array template
@@ -526,17 +526,15 @@ cpdef Integer64Vector vector_datepart_minute(TimestampVector timestamps, Integer
             raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
-        template = array('l')
-        output_array = clone(template, length, False)
-        output_ptr = <int64_t*>output_array.data.as_longs
+        output_ptr = <int64_t*>malloc(length * 8)
+        if output_ptr == NULL:
+            raise MemoryError()
 
     simd_datepart_minute(data_ptr, output_ptr, <size_t>length, unit_code)
 
     if reuse_out:
         return out
-    cdef Integer64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    pass
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 cpdef Integer64Vector vector_datepart_hour(TimestampVector timestamps, Integer64Vector out=None):
@@ -561,7 +559,7 @@ cpdef Integer64Vector vector_datepart_hour(TimestampVector timestamps, Integer64
         unit_code = 0
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     cdef int64_t* output_ptr
     cdef array template
@@ -573,17 +571,15 @@ cpdef Integer64Vector vector_datepart_hour(TimestampVector timestamps, Integer64
             raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
-        template = array('l')
-        output_array = clone(template, length, False)
-        output_ptr = <int64_t*>output_array.data.as_longs
+        output_ptr = <int64_t*>malloc(length * 8)
+        if output_ptr == NULL:
+            raise MemoryError()
 
     simd_datepart_hour(data_ptr, output_ptr, <size_t>length, unit_code)
 
     if reuse_out:
         return out
-    cdef Integer64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    pass
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 cpdef Integer64Vector vector_datepart_second(TimestampVector timestamps, Integer64Vector out=None):
@@ -608,7 +604,7 @@ cpdef Integer64Vector vector_datepart_second(TimestampVector timestamps, Integer
         unit_code = 0
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     cdef int64_t* output_ptr
     cdef array template
@@ -620,17 +616,15 @@ cpdef Integer64Vector vector_datepart_second(TimestampVector timestamps, Integer
             raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
-        template = array('l')
-        output_array = clone(template, length, False)
-        output_ptr = <int64_t*>output_array.data.as_longs
+        output_ptr = <int64_t*>malloc(length * 8)
+        if output_ptr == NULL:
+            raise MemoryError()
 
     simd_datepart_second(data_ptr, output_ptr, <size_t>length, unit_code)
 
     if reuse_out:
         return out
-    cdef Integer64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    pass
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 # ---------------------------------------------------------------------------
@@ -652,7 +646,7 @@ cpdef Integer64Vector vector_datepart_year(TimestampVector timestamps, Integer64
         return dict_result
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     cdef int64_t* output_ptr
     cdef array template
@@ -664,16 +658,14 @@ cpdef Integer64Vector vector_datepart_year(TimestampVector timestamps, Integer64
             raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
-        template = array('l')
-        output_array = clone(template, length, False)
-        output_ptr = <int64_t*>output_array.data.as_longs
+        output_ptr = <int64_t*>malloc(length * 8)
+        if output_ptr == NULL:
+            raise MemoryError()
 
     simd_datepart_year(data_ptr, output_ptr, <size_t>length, unit_code)
     if reuse_out:
         return out
-    cdef Integer64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    pass
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 cpdef Integer64Vector vector_datepart_month(TimestampVector timestamps, Integer64Vector out=None):
@@ -689,7 +681,7 @@ cpdef Integer64Vector vector_datepart_month(TimestampVector timestamps, Integer6
         return dict_result
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     cdef int64_t* output_ptr
     cdef array template
@@ -701,16 +693,14 @@ cpdef Integer64Vector vector_datepart_month(TimestampVector timestamps, Integer6
             raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
-        template = array('l')
-        output_array = clone(template, length, False)
-        output_ptr = <int64_t*>output_array.data.as_longs
+        output_ptr = <int64_t*>malloc(length * 8)
+        if output_ptr == NULL:
+            raise MemoryError()
 
     simd_datepart_month(data_ptr, output_ptr, <size_t>length, unit_code)
     if reuse_out:
         return out
-    cdef Integer64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    pass
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 cpdef Integer64Vector vector_datepart_day(TimestampVector timestamps, Integer64Vector out=None):
@@ -726,7 +716,7 @@ cpdef Integer64Vector vector_datepart_day(TimestampVector timestamps, Integer64V
         return dict_result
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     cdef int64_t* output_ptr
     cdef array template
@@ -738,16 +728,14 @@ cpdef Integer64Vector vector_datepart_day(TimestampVector timestamps, Integer64V
             raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
-        template = array('l')
-        output_array = clone(template, length, False)
-        output_ptr = <int64_t*>output_array.data.as_longs
+        output_ptr = <int64_t*>malloc(length * 8)
+        if output_ptr == NULL:
+            raise MemoryError()
 
     simd_datepart_day(data_ptr, output_ptr, <size_t>length, unit_code)
     if reuse_out:
         return out
-    cdef Integer64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    pass
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 cpdef Integer64Vector vector_datepart_dayofweek(TimestampVector timestamps, Integer64Vector out=None):
@@ -776,7 +764,7 @@ cpdef Integer64Vector vector_datepart_dayofweek(TimestampVector timestamps, Inte
         day_divisor = SECONDS_PER_DAY
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     cdef int64_t* output_ptr
     cdef array template
@@ -789,9 +777,9 @@ cpdef Integer64Vector vector_datepart_dayofweek(TimestampVector timestamps, Inte
             raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
-        template = array('l')
-        output_array = clone(template, length, False)
-        output_ptr = <int64_t*>output_array.data.as_longs
+        output_ptr = <int64_t*>malloc(length * 8)
+        if output_ptr == NULL:
+            raise MemoryError()
 
     for i in range(length):
         d = (data_ptr[i] // day_divisor + EPOCH_WEEKDAY) % 7
@@ -801,9 +789,7 @@ cpdef Integer64Vector vector_datepart_dayofweek(TimestampVector timestamps, Inte
 
     if reuse_out:
         return out
-    cdef Integer64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    pass
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 cpdef Integer64Vector vector_datepart_dayofyear(TimestampVector timestamps, Integer64Vector out=None):
@@ -819,7 +805,7 @@ cpdef Integer64Vector vector_datepart_dayofyear(TimestampVector timestamps, Inte
         return dict_result
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     cdef int64_t* output_ptr
     cdef array template
@@ -831,16 +817,14 @@ cpdef Integer64Vector vector_datepart_dayofyear(TimestampVector timestamps, Inte
             raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
-        template = array('l')
-        output_array = clone(template, length, False)
-        output_ptr = <int64_t*>output_array.data.as_longs
+        output_ptr = <int64_t*>malloc(length * 8)
+        if output_ptr == NULL:
+            raise MemoryError()
 
     simd_datepart_dayofyear(data_ptr, output_ptr, <size_t>length, unit_code)
     if reuse_out:
         return out
-    cdef Integer64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 cpdef Integer64Vector vector_datepart_quarter(TimestampVector timestamps, Integer64Vector out=None):
@@ -856,7 +840,7 @@ cpdef Integer64Vector vector_datepart_quarter(TimestampVector timestamps, Intege
         return dict_result
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     cdef int64_t* output_ptr
     cdef array template
@@ -868,16 +852,14 @@ cpdef Integer64Vector vector_datepart_quarter(TimestampVector timestamps, Intege
             raise ValueError(f"out length {out._unified_view.length} != input length {length}")
         output_ptr = <int64_t*>out.ptr.data
     else:
-        template = array('l')
-        output_array = clone(template, length, False)
-        output_ptr = <int64_t*>output_array.data.as_longs
+        output_ptr = <int64_t*>malloc(length * 8)
+        if output_ptr == NULL:
+            raise MemoryError()
 
     simd_datepart_quarter(data_ptr, output_ptr, <size_t>length, unit_code)
     if reuse_out:
         return out
-    cdef Integer64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 # ===========================================================================
@@ -909,7 +891,7 @@ cpdef Integer64Vector vector_datepart_minute_i64(object int64_vec):
         return dict_result
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     data_ptr = <int64_t*>(<Integer64Vector>int64_vec).ptr.data
     sd = _find_seconds_divisor_int64(data_ptr, length)
@@ -923,9 +905,9 @@ cpdef Integer64Vector vector_datepart_minute_i64(object int64_vec):
     else:
         divisor = NANOSECONDS_PER_MINUTE
 
-    template = array('l')
-    output_array = clone(template, length, False)
-    output_ptr = <int64_t*>output_array.data.as_longs
+    output_ptr = <int64_t*>malloc(length * 8)
+    if output_ptr == NULL:
+        raise MemoryError()
     i = 0
 
     while i + 3 < length:
@@ -938,9 +920,7 @@ cpdef Integer64Vector vector_datepart_minute_i64(object int64_vec):
         output_ptr[i] = (data_ptr[i] // divisor) % 60
         i += 1
 
-    result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 cpdef Integer64Vector vector_datepart_hour_i64(object int64_vec):
@@ -964,7 +944,7 @@ cpdef Integer64Vector vector_datepart_hour_i64(object int64_vec):
         return dict_result
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     data_ptr = <int64_t*>(<Integer64Vector>int64_vec).ptr.data
     sd = _find_seconds_divisor_int64(data_ptr, length)
@@ -978,9 +958,9 @@ cpdef Integer64Vector vector_datepart_hour_i64(object int64_vec):
     else:
         divisor = NANOSECONDS_PER_HOUR
 
-    template = array('l')
-    output_array = clone(template, length, False)
-    output_ptr = <int64_t*>output_array.data.as_longs
+    output_ptr = <int64_t*>malloc(length * 8)
+    if output_ptr == NULL:
+        raise MemoryError()
     i = 0
 
     while i + 3 < length:
@@ -993,9 +973,7 @@ cpdef Integer64Vector vector_datepart_hour_i64(object int64_vec):
         output_ptr[i] = (data_ptr[i] // divisor) % 24
         i += 1
 
-    result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 cpdef Integer64Vector vector_datepart_second_i64(object int64_vec):
@@ -1018,14 +996,14 @@ cpdef Integer64Vector vector_datepart_second_i64(object int64_vec):
         return dict_result
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     data_ptr = <int64_t*>(<Integer64Vector>int64_vec).ptr.data
     sd = _find_seconds_divisor_int64(data_ptr, length)
 
-    template = array('l')
-    output_array = clone(template, length, False)
-    output_ptr = <int64_t*>output_array.data.as_longs
+    output_ptr = <int64_t*>malloc(length * 8)
+    if output_ptr == NULL:
+        raise MemoryError()
     i = 0
 
     if sd == 1:
@@ -1049,9 +1027,7 @@ cpdef Integer64Vector vector_datepart_second_i64(object int64_vec):
             output_ptr[i] = (data_ptr[i] // sd) % 60
             i += 1
 
-    result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 # ---------------------------------------------------------------------------
@@ -1078,18 +1054,16 @@ cpdef Integer64Vector vector_datepart_year_i64(object int64_vec):
         return dict_result
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     data_ptr = <int64_t*>(<Integer64Vector>int64_vec).ptr.data
     sd = _find_seconds_divisor_int64(data_ptr, length)
     unit_code = _seconds_divisor_unit_code(sd)
-    template = array('l')
-    output_array = clone(template, length, False)
-    output_ptr = <int64_t*>output_array.data.as_longs
+    output_ptr = <int64_t*>malloc(length * 8)
+    if output_ptr == NULL:
+        raise MemoryError()
     simd_datepart_year(data_ptr, output_ptr, <size_t>length, unit_code)
-    result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 cpdef Integer64Vector vector_datepart_month_i64(object int64_vec):
@@ -1112,18 +1086,16 @@ cpdef Integer64Vector vector_datepart_month_i64(object int64_vec):
         return dict_result
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     data_ptr = <int64_t*>(<Integer64Vector>int64_vec).ptr.data
     sd = _find_seconds_divisor_int64(data_ptr, length)
     unit_code = _seconds_divisor_unit_code(sd)
-    template = array('l')
-    output_array = clone(template, length, False)
-    output_ptr = <int64_t*>output_array.data.as_longs
+    output_ptr = <int64_t*>malloc(length * 8)
+    if output_ptr == NULL:
+        raise MemoryError()
     simd_datepart_month(data_ptr, output_ptr, <size_t>length, unit_code)
-    result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 cpdef Integer64Vector vector_datepart_day_i64(object int64_vec):
@@ -1146,18 +1118,16 @@ cpdef Integer64Vector vector_datepart_day_i64(object int64_vec):
         return dict_result
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     data_ptr = <int64_t*>(<Integer64Vector>int64_vec).ptr.data
     sd = _find_seconds_divisor_int64(data_ptr, length)
     unit_code = _seconds_divisor_unit_code(sd)
-    template = array('l')
-    output_array = clone(template, length, False)
-    output_ptr = <int64_t*>output_array.data.as_longs
+    output_ptr = <int64_t*>malloc(length * 8)
+    if output_ptr == NULL:
+        raise MemoryError()
     simd_datepart_day(data_ptr, output_ptr, <size_t>length, unit_code)
-    result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 cpdef Integer64Vector vector_datepart_dayofweek_i64(object int64_vec):
@@ -1182,7 +1152,7 @@ cpdef Integer64Vector vector_datepart_dayofweek_i64(object int64_vec):
         return dict_result
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     data_ptr = <int64_t*>(<Integer64Vector>int64_vec).ptr.data
     sd = _find_seconds_divisor_int64(data_ptr, length)
@@ -1195,9 +1165,9 @@ cpdef Integer64Vector vector_datepart_dayofweek_i64(object int64_vec):
     else:
         day_divisor = NANOSECONDS_PER_DAY
 
-    template = array('l')
-    output_array = clone(template, length, False)
-    output_ptr = <int64_t*>output_array.data.as_longs
+    output_ptr = <int64_t*>malloc(length * 8)
+    if output_ptr == NULL:
+        raise MemoryError()
 
     for i in range(length):
         d = (data_ptr[i] // day_divisor + EPOCH_WEEKDAY) % 7
@@ -1205,9 +1175,7 @@ cpdef Integer64Vector vector_datepart_dayofweek_i64(object int64_vec):
             d += 7
         output_ptr[i] = d
 
-    result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 cpdef Integer64Vector vector_datepart_dayofyear_i64(object int64_vec):
@@ -1229,18 +1197,16 @@ cpdef Integer64Vector vector_datepart_dayofyear_i64(object int64_vec):
         return dict_result
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     data_ptr = <int64_t*>(<Integer64Vector>int64_vec).ptr.data
     sd = _find_seconds_divisor_int64(data_ptr, length)
     unit_code = _seconds_divisor_unit_code(sd)
-    template = array('l')
-    output_array = clone(template, length, False)
-    output_ptr = <int64_t*>output_array.data.as_longs
+    output_ptr = <int64_t*>malloc(length * 8)
+    if output_ptr == NULL:
+        raise MemoryError()
     simd_datepart_dayofyear(data_ptr, output_ptr, <size_t>length, unit_code)
-    result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)
 
 
 cpdef Integer64Vector vector_datepart_quarter_i64(object int64_vec):
@@ -1262,15 +1228,13 @@ cpdef Integer64Vector vector_datepart_quarter_i64(object int64_vec):
         return dict_result
 
     if length == 0:
-        return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
+        return int64_from_decoded(NULL, NULL, 0)
 
     data_ptr = <int64_t*>(<Integer64Vector>int64_vec).ptr.data
     sd = _find_seconds_divisor_int64(data_ptr, length)
     unit_code = _seconds_divisor_unit_code(sd)
-    template = array('l')
-    output_array = clone(template, length, False)
-    output_ptr = <int64_t*>output_array.data.as_longs
+    output_ptr = <int64_t*>malloc(length * 8)
+    if output_ptr == NULL:
+        raise MemoryError()
     simd_datepart_quarter(data_ptr, output_ptr, <size_t>length, unit_code)
-    result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
-    return result
+    return int64_from_decoded(<void*>output_ptr, NULL, length)

@@ -49,9 +49,7 @@ cdef inline _ConstView _const_view(DrakenStringArena* arena) noexcept nogil:
 
 
 cdef class StringVector(Vector):
-    cdef object _arrow_data_buf
     cdef object _arrow_offs_buf
-    cdef object _arrow_null_buf
 
     cdef DrakenVarBuffer* ptr
     cdef bint owns_data

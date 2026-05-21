@@ -7,8 +7,6 @@ from draken.core.buffers cimport DrakenFixedBuffer, DrakenVector
 from draken.vectors.vector cimport Vector
 
 cdef class BoolVector(Vector):
-    cdef object _arrow_data_buf
-    cdef object _arrow_null_buf
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
     cdef DrakenVector* unified(self) noexcept

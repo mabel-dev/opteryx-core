@@ -28,7 +28,7 @@ from cpython.object cimport PyObject_Hash
 from draken.core.buffers cimport DrakenArrayBuffer
 from draken.vectors.vector cimport Vector
 from draken.vectors.array_vector cimport ArrayVector
-from draken.vectors.integer64_vector cimport from_sequence as int64_from_sequence
+from draken.vectors.integer64_vector cimport from_decoded as int64_from_decoded
 
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, QueryProperties
@@ -74,7 +74,7 @@ cpdef tuple build_rows_indices_and_column_draken(ArrayVector column_vector):
         total_size += <Py_ssize_t>(offsets[i + 1] - offsets[i])
 
     if total_size == 0:
-        return (int64_from_sequence(None), vector_from_sequence([]))
+        return (int64_from_decoded(NULL, NULL, 0), vector_from_sequence([]))
 
     indices_buf = IntBuffer(<size_t>total_size)
     child_idx_vec.reserve(<size_t>total_size)
@@ -91,9 +91,7 @@ cpdef tuple build_rows_indices_and_column_draken(ArrayVector column_vector):
         for k in range(start, end):
             child_idx_vec.push_back(k)
 
-    cdef const int64_t[::1] mv = indices_buf.get_buffer()
-    cdef Integer64Vector vec = int64_from_sequence(mv)
-    vec._arrow_data_buf = indices_buf
+    cdef Integer64Vector vec = indices_buf.into_int64_vector()
 
     cdef const int32_t[::1] child_idx_view = <const int32_t[:total_size]>child_idx_vec.data()
     flat = child.take(child_idx_view)
@@ -131,11 +129,9 @@ cpdef tuple build_filtered_rows_indices_and_column_draken(ArrayVector column_vec
 
     cdef Py_ssize_t total_matched = <Py_ssize_t>child_idx_vec.size()
     if total_matched == 0:
-        return (int64_from_sequence(None), vector_from_sequence([]))
+        return (int64_from_decoded(NULL, NULL, 0), vector_from_sequence([]))
 
-    cdef const int64_t[::1] mv = indices_buf.get_buffer()
-    cdef Integer64Vector vec = int64_from_sequence(mv)
-    vec._arrow_data_buf = indices_buf
+    cdef Integer64Vector vec = indices_buf.into_int64_vector()
 
     cdef const int32_t[::1] child_idx_view = <const int32_t[:total_matched]>child_idx_vec.data()
     flat = child.take(child_idx_view)

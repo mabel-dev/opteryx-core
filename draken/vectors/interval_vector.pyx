@@ -214,8 +214,6 @@ cdef inline bint _is_valid_with_offset(uint8_t* bitmap, Py_ssize_t idx, Py_ssize
 cdef class IntervalVector(Vector):
 
     def __cinit__(self, size_t length=0, bint wrap=False):
-        self._arrow_data_buf = None
-        self._arrow_null_buf = None
         if wrap:
             self.ptr = NULL
             self.owns_data = False

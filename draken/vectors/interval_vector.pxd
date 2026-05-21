@@ -10,8 +10,6 @@ from draken.vectors.timestamp_vector cimport TimestampVector
 from draken.vectors.vector cimport Vector
 
 cdef class IntervalVector(Vector):
-    cdef object _arrow_data_buf
-    cdef object _arrow_null_buf
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
 

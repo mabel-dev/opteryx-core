@@ -28,12 +28,11 @@ REFACTORED (Session 46): Draken-native Cartesian product
 """
 
 from typing import Generator, Optional
-from array import array
 
 from libc.stdint cimport int64_t, uint32_t
 from libc.stdlib cimport malloc, free
 
-from draken.vectors.integer64_vector cimport from_sequence as int64_from_sequence
+from draken.vectors.integer64_vector cimport from_decoded as int64_from_decoded
 from draken.vectors.integer64_vector cimport make_int64_dict_only
 
 from opteryx.models import QueryProperties
@@ -58,8 +57,7 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
     cdef Integer64Vector left_vec, right_vec
     cdef uint32_t* codes = NULL
     cdef int64_t* dict_vals = NULL
-    cdef int64_t* rvals
-    cdef int64_t[::1] right_mv
+    cdef int64_t* rvals = NULL
 
     if total_rows == 0:
         return (Integer64Vector(0), Integer64Vector(0))
@@ -75,10 +73,12 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
         free(dict_vals)
         raise MemoryError()
 
-    # Right side: int64_from_sequence is zero-copy — pin the backing array.
-    right_arr = array('q', [0]) * total_rows
-    right_mv = right_arr
-    rvals = &right_mv[0]
+    # Right side: draken-allocated buffer, ownership transferred via from_decoded.
+    rvals = <int64_t*>malloc(<size_t>total_rows * sizeof(int64_t))
+    if rvals == NULL:
+        free(codes)
+        free(dict_vals)
+        raise MemoryError()
 
     with nogil:
         for i in range(left_rows):
@@ -92,6 +92,10 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
             for j in range(right_rows):
                 rvals[i * right_rows + j] = j
 
+    # Transfer ownership of rvals before the fallible left-side construction;
+    # if make_int64_dict_only raises, right_vec frees rvals on dealloc.
+    right_vec = int64_from_decoded(<void*>rvals, NULL, <size_t>total_rows)
+
     # make_int64_dict_only copies both codes and dict_vals internally.
     left_vec = make_int64_dict_only(
         codes, <Py_ssize_t>total_rows,
@@ -99,9 +103,6 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
     )
     free(codes)
     free(dict_vals)
-
-    right_vec = int64_from_sequence(right_mv)
-    right_vec._arrow_data_buf = right_arr
 
     return (left_vec, right_vec)
 
@@ -121,10 +122,10 @@ def _cross_join(left_morsel: Morsel, right_morsel: Morsel) -> Generator[Morsel, 
         left_count = left_morsel.column(encoded_count_identity)[0]
         right_count = right_morsel.column(encoded_count_identity)[0]
 
-        from draken.vectors.integer64_vector import from_sequence
+        from draken.interop.vector_sequence import vector_from_sequence
         res = Morsel.from_vectors(
             [encoded_count_identity],
-            [from_sequence([left_count * right_count])]
+            [vector_from_sequence([left_count * right_count])]
         )
         yield res
         return

@@ -10,8 +10,6 @@ from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
 
 cdef class Float32Vector(Vector):
-    cdef object _arrow_data_buf
-    cdef object _arrow_null_buf
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
     cdef bint _owns_dict_data

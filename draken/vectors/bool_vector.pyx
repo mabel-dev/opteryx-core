@@ -1127,37 +1127,30 @@ cdef BoolVector from_decoded(
 
 cdef BoolVector from_sequence(uint8_t[::1] data):
     """
-    Create BoolVector from a typed uint8 memoryview (zero-copy, bit-packed).
+    Create an owning BoolVector from a typed uint8 memoryview (bit-packed).
+
+    The (transient) bit-packed source is copied once into a malloc'd buffer at
+    the Python->native boundary; the vector then owns and frees that buffer.
 
     Args:
         data: uint8_t[::1] memoryview (C-contiguous, bit-packed: 8 bools per byte)
 
     Returns:
-        BoolVector wrapping the memoryview data
+        BoolVector owning a copy of the data
 
     Note:
         Input data should be bit-packed (8 boolean values per byte).
-        The length will be inferred as data.shape[0] * 8.
+        The logical length is inferred as data.shape[0] * 8.
     """
-    cdef BoolVector vec = BoolVector(0, True)
-    vec.ptr = <DrakenFixedBuffer*> malloc(sizeof(DrakenFixedBuffer))
-    if vec.ptr == NULL:
+    cdef size_t n_bytes = <size_t> data.shape[0]
+    cdef uint8_t* buf
+    if n_bytes == 0:
+        return from_decoded(NULL, NULL, 0)
+    buf = <uint8_t*>malloc(n_bytes)
+    if buf == NULL:
         raise MemoryError()
-    vec.owns_data = False
-
-    # Keep reference to prevent GC
-    vec._arrow_data_buf = data.base if data.base is not None else data
-    vec._arrow_null_buf = None
-
-    vec.ptr.type = DRAKEN_BOOL
-    vec.ptr.itemsize = 1
-    # Bit-packed: 8 booleans per byte
-    vec.ptr.length = <size_t> (data.shape[0] * 8)
-    vec.ptr.data = <void*> &data[0]
-    vec.ptr.null_bitmap = NULL
-    vec._unified_view = draken_vector_from_dense(
-        vec.ptr.data, <uint32_t>(data.shape[0] * 8), DRAKEN_BOOL, NULL)
-    return vec
+    memcpy(buf, &data[0], n_bytes)
+    return from_decoded(<void*>buf, NULL, n_bytes * 8)
 
 
 cdef BoolVector bool_vector_from_bits(

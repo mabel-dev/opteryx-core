@@ -11,9 +11,9 @@
 # distutils: language = c++
 from cpython.bytes cimport PyBytes_AS_STRING, PyBytes_GET_SIZE
 from cpython.unicode cimport PyUnicode_AsUTF8String
-from cpython.mem cimport PyMem_Malloc, PyMem_Free
+from libc.stdlib cimport malloc
 
-from draken.vectors.float64_vector cimport Float64Vector, from_sequence
+from draken.vectors.float64_vector cimport Float64Vector, from_decoded as float64_from_decoded
 
 
 cdef extern from "fast_float.h" namespace "fast_float":
@@ -53,16 +53,18 @@ cpdef Float64Vector parse_ascii_array_to_double(object arr):
         Float64Vector of parsed double values (NaN for unparseable or None inputs)
     """
     cdef Py_ssize_t i, n = len(arr)
-    cdef double* out = <double*>PyMem_Malloc(n * sizeof(double))
+    cdef double* out
     cdef bytes encoded
     cdef const char* c_str
     cdef Py_ssize_t length
     cdef double val = 0.0
     cdef from_chars_result res
     cdef object item
-    cdef double[::1] view
-    cdef Float64Vector result
 
+    if n == 0:
+        return float64_from_decoded(NULL, NULL, 0)
+
+    out = <double*>malloc(n * sizeof(double))
     if out == NULL:
         raise MemoryError(f"Cannot allocate buffer for {n} doubles")
 
@@ -83,13 +85,8 @@ cpdef Float64Vector parse_ascii_array_to_double(object arr):
         else:
             out[i] = float('nan')
 
-    # Create a typed memoryview and wrap it in Float64Vector
-    # CRITICAL: from_sequence() stores a reference to the memoryview in result._arrow_data_buf,
-    # which keeps the malloc'd buffer alive for the lifetime of the Float64Vector.
-    # We do NOT free the buffer - it is owned by the Float64Vector via the memoryview reference.
-    view = <double[:n]>out
-    result = from_sequence(view)
-    return result
+    # Transfer ownership of the malloc'd buffer to the Float64Vector.
+    return float64_from_decoded(<void*>out, NULL, n)
 
 
 cpdef Float64Vector parse_byte_array_to_double(object arr):
@@ -103,15 +100,17 @@ cpdef Float64Vector parse_byte_array_to_double(object arr):
         Float64Vector of parsed double values (NaN for unparseable or None inputs)
     """
     cdef Py_ssize_t i, n = len(arr)
-    cdef double* out = <double*>PyMem_Malloc(n * sizeof(double))
+    cdef double* out
     cdef const char* c_str
     cdef Py_ssize_t length
     cdef double val = 0.0
     cdef from_chars_result res
     cdef object item
-    cdef double[::1] view
-    cdef Float64Vector result
 
+    if n == 0:
+        return float64_from_decoded(NULL, NULL, 0)
+
+    out = <double*>malloc(n * sizeof(double))
     if out == NULL:
         raise MemoryError(f"Cannot allocate buffer for {n} doubles")
 
@@ -130,10 +129,5 @@ cpdef Float64Vector parse_byte_array_to_double(object arr):
         else:
             out[i] = float('nan')
 
-    # Create a typed memoryview and wrap it in Float64Vector
-    # CRITICAL: from_sequence() stores a reference to the memoryview in result._arrow_data_buf,
-    # which keeps the malloc'd buffer alive for the lifetime of the Float64Vector.
-    # We do NOT free the buffer - it is owned by the Float64Vector via the memoryview reference.
-    view = <double[:n]>out
-    result = from_sequence(view)
-    return result
+    # Transfer ownership of the malloc'd buffer to the Float64Vector.
+    return float64_from_decoded(<void*>out, NULL, n)

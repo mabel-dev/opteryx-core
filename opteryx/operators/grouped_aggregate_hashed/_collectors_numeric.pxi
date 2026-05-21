@@ -824,6 +824,7 @@ cdef class MinMaxObjectCollector(BaseCollector):
         cdef bytes cur, v
         cdef object v_obj
         cdef list col
+        cdef vector[uint8_t]* cur_vec
 
         col = vec.to_pylist()
 
@@ -834,9 +835,13 @@ cdef class MinMaxObjectCollector(BaseCollector):
                     continue
                 v = v_obj if isinstance(v_obj, bytes) else str(v_obj).encode('utf-8')
                 si = state_indices[i]
-                cur = self._values[si]
-                if not cur or v < cur:
+                cur_vec = &self._values[si]
+                if cur_vec.empty():
                     self._values[si] = v
+                else:
+                    cur = bytes(cur_vec.data()[:cur_vec.size()])
+                    if v < cur:
+                        self._values[si] = v
                 seen[si] = 1
         else:                      # MAX
             for i in range(n_rows):
@@ -845,9 +850,13 @@ cdef class MinMaxObjectCollector(BaseCollector):
                     continue
                 v = v_obj if isinstance(v_obj, bytes) else str(v_obj).encode('utf-8')
                 si = state_indices[i]
-                cur = self._values[si]
-                if not cur or v > cur:
+                cur_vec = &self._values[si]
+                if cur_vec.empty():
                     self._values[si] = v
+                else:
+                    cur = bytes(cur_vec.data()[:cur_vec.size()])
+                    if v > cur:
+                        self._values[si] = v
                 seen[si] = 1
 
     cpdef Vector finalize(self, int64_t num_groups):

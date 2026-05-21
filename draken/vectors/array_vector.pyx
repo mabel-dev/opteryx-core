@@ -76,7 +76,6 @@ cdef class ArrayVector(Vector):
         self.owns_null_bitmap = False
         self._arrow_parent = None
         self._arrow_offsets_buf = None
-        self._arrow_null_buf = None
         self._arrow_child_array = None
         self._child_arrow_type = None
         self._child_decode_utf8 = False
