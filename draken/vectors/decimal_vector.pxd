@@ -109,6 +109,5 @@ cdef class DecimalVector(Vector):
 
 
 # Module-level factories exposed for cimport by other consumers
-cdef DecimalVector from_arrow(object array)
 cpdef DecimalVector from_int64_vector(Integer64Vector source, int precision, int scale)
 

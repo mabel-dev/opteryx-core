@@ -36,7 +36,6 @@ from draken.core.buffers cimport (
     draken_identity_sel,
 )
 from draken.vectors.string_vector cimport StringVector
-from draken.interop.arrow cimport arrow_type_to_draken, vector_from_arrow
 from draken.interop.vector_sequence cimport vector_from_sequence
 from draken.vectors.vector cimport (
     MIX_HASH_CONSTANT,
@@ -468,83 +467,6 @@ cdef class ArrayVector(Vector):
         preview = self.to_pylist()[:10]
         return f"<ArrayVector len={self.length} values={preview}>"
 
-
-cdef ArrayVector from_arrow(object array):
-    cdef ArrayVector vec = ArrayVector()
-    cdef intptr_t offsets_addr
-    cdef intptr_t null_addr = 0
-    vec.ptr = _alloc_array_buffer()
-    vec.ptr.length = <size_t> len(array)
-
-    bufs = array.buffers()
-    vec._arrow_parent = array
-    vec._arrow_null_buf = bufs[0]
-    vec._arrow_offsets_buf = bufs[1]
-
-    if bufs[1] is None:
-        raise ValueError("List arrays require an offsets buffer")
-
-    # Detect LargeList (64-bit offsets) and fail fast. We only support ListType (32-bit).
-    array_type = array.type
-    type_name = str(array_type)
-    if type_name.startswith("large_list"):
-        raise NotImplementedError(
-            f"LargeList arrays (64-bit offsets) are not supported. "
-            f"Got type: {type_name}. Use list_ (32-bit offsets) instead."
-        )
-
-    # Handle offsets with array.offset
-    # This assumes ListType (int32 offsets) - LargeList check above prevents silent data corruption.
-    cdef Py_ssize_t offset = array.offset
-    offsets_addr = <intptr_t> bufs[1].address + offset * 4
-    vec.ptr.offsets = <int32_t*> offsets_addr
-
-    # Variables for null bitmap handling
-    cdef Py_ssize_t n_bytes
-    cdef bytes new_bitmap
-    cdef uint8_t* dst_bitmap
-    cdef uint8_t* src_bitmap
-    cdef int bit_offset
-    cdef Py_ssize_t byte_offset
-    cdef int shift_down
-    cdef int shift_up
-    cdef uint8_t val
-    cdef Py_ssize_t i
-
-    if bufs[0] is not None:
-        null_addr = <intptr_t> bufs[0].address
-        if offset % 8 == 0:
-            vec.ptr.null_bitmap = <uint8_t*> (null_addr + (offset >> 3))
-        else:
-            # Unaligned offset: copy and shift
-            n_bytes = (vec.ptr.length + 7) // 8
-            new_bitmap = PyBytes_FromStringAndSize(NULL, n_bytes)
-            dst_bitmap = <uint8_t*> PyBytes_AS_STRING(new_bitmap)
-
-            byte_offset = offset >> 3
-            bit_offset = offset & 7
-            src_bitmap = <uint8_t*> null_addr + byte_offset
-
-            shift_down = bit_offset
-            shift_up = 8 - bit_offset
-
-            for i in range(n_bytes):
-                val = src_bitmap[i] >> shift_down
-                val |= (src_bitmap[i+1] << shift_up)
-                dst_bitmap[i] = val
-
-            vec.ptr.null_bitmap = dst_bitmap
-            vec._arrow_null_buf = new_bitmap # Keep alive
-    else:
-        vec.ptr.null_bitmap = NULL
-
-    child_array = array.values
-    vec._arrow_child_array = child_array
-    vec._child_arrow_type = array.type.value_type
-    vec._child = vector_from_arrow(child_array)
-    vec.ptr.value_type = arrow_type_to_draken(array.type.value_type)
-
-    return vec
 
 cdef ArrayVector from_sequence(object data):
     """

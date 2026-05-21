@@ -45,5 +45,3 @@ cdef class IntervalVector(Vector):
     cpdef uint64_t[::1] hash(self)
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 
-cdef IntervalVector from_arrow_interval(object array)
-cdef IntervalVector from_arrow_binary(object array)

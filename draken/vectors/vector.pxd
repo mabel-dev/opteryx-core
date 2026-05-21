@@ -11,7 +11,6 @@ from libc.stdint cimport uint64_t, int64_t, uint8_t, uint16_t, uint32_t
 
 from draken.core.buffers cimport DrakenVector
 
-from draken.interop.arrow import vector_from_arrow
 from draken.interop.vector_sequence import vector_from_sequence
 
 cdef const uint64_t MIX_HASH_CONSTANT

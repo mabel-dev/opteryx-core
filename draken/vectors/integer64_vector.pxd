@@ -19,9 +19,9 @@ cdef class Integer64Vector(Vector):
     cdef bint _owns_selection
 
     cpdef Integer64Vector take(self, int32_t[::1] indices)
-    cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
     cdef DrakenVector* unified(self) noexcept
     cdef void _set_null_bitmap(self, uint8_t* bm) noexcept
+    cdef int64_t* _gather_logical(self, int64_t** owned) except? NULL
     # Integer-dispatched kernels. cpdef so the expression evaluator can call
     # them directly from Python and bypass the per-op named wrappers below.
     cpdef BoolVector _compare_scalar(self, int64_t value, int op)
@@ -70,7 +70,6 @@ cdef Integer64Vector from_decoded(
     uint8_t* null_bitmap,
     size_t length,
 )
-cdef Integer64Vector from_arrow(object array)
 cdef Integer64Vector from_dict(const int32_t[::1] codes, const int64_t[::1] dictionary)
 cdef Integer64Vector from_dict_nullable(
     const int32_t[::1] codes,

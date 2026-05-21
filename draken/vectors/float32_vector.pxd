@@ -75,7 +75,6 @@ cdef Float32Vector from_decoded(
     uint8_t* null_bitmap,
     size_t length,
 )
-cdef Float32Vector from_arrow(object array)
 cdef Float32Vector _materialize_dict_float32(Float32Vector vec)
 cdef Float32Vector make_float32_dict_only(
     const uint32_t* codes,

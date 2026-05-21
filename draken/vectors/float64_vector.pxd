@@ -63,7 +63,6 @@ cdef Float64Vector from_decoded(
     uint8_t* null_bitmap,
     size_t length,
 )
-cdef Float64Vector from_arrow(object array)
 cdef Float64Vector from_dict(const int32_t[::1] codes, const double[::1] dictionary)
 cdef Float64Vector from_dict_nullable(
     const int32_t[::1] codes,

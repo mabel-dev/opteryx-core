@@ -212,7 +212,6 @@ cdef DrakenStringArena* _varbuffer_to_string_arena(
     Py_ssize_t n_rows,
 )
 
-cdef StringVector from_arrow(object array)
 
 cdef StringVector _materialize_dict_string(StringVector vec)
 cdef StringVector make_string_dict_only(
@@ -256,7 +255,6 @@ cdef StringVector from_packed_dict(
     bint ordered=*,
     const uint8_t* dict_entry_null_bitmap=*,
 )
-cdef StringVector from_arrow_struct(object array)
 
 cpdef StringVector uppercase(StringVector input)
 cpdef StringVector lowercase(StringVector input)

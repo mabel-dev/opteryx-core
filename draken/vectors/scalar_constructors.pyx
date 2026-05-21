@@ -258,35 +258,3 @@ cpdef object integer_from_constant(object value, size_t length, bint is_null=Fal
     return Integer32Vector.from_constant(value, length, is_null=is_null)
 
 
-cpdef object integer_from_dict(object codes, object dictionary, object row_validity=None):
-    """Decode a dictionary-encoded narrow integer column into the narrowest fitting type."""
-    from array import array as pyarray
-    if not isinstance(codes, memoryview):
-        codes = pyarray("i", codes)
-    if not isinstance(dictionary, memoryview):
-        dictionary = pyarray("q", dictionary)
-
-    dict_list = list(dictionary)
-    if not dict_list:
-        raise ValueError("integer_from_dict requires a non-empty dictionary")
-
-    min_val = min(dict_list)
-    max_val = max(dict_list)
-    codes_list = list(codes)
-
-    if row_validity is not None:
-        validity = list(row_validity)
-        values = [dict_list[codes_list[i]] if validity[i] else None for i in range(len(codes_list))]
-    else:
-        values = [dict_list[c] for c in codes_list]
-
-    import pyarrow as pa
-    if min_val >= -128 and max_val <= 127:
-        pa_arr = pa.array(values, type=pa.int8())
-    elif min_val >= -32768 and max_val <= 32767:
-        pa_arr = pa.array(values, type=pa.int16())
-    else:
-        pa_arr = pa.array(values, type=pa.int32())
-
-    from draken.interop.arrow import vector_from_arrow
-    return vector_from_arrow(pa_arr)

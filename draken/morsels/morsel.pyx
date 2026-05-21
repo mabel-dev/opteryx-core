@@ -71,7 +71,6 @@ from draken.vectors.string_vector cimport StringVector
 from draken.vectors.string_vector cimport StringVectorBuilder
 from draken.vectors.time_vector cimport TimeVector
 from draken.vectors.timestamp_vector cimport TimestampVector
-from draken.interop.arrow cimport vector_from_arrow
 from draken.interop.vector_sequence cimport vector_from_sequence
 from draken.core.buffers cimport DrakenStringArena
 from draken.core.buffers cimport DrakenStringSlot
@@ -380,41 +379,6 @@ cdef class Morsel:
         if idx is None:
             raise KeyError(f"Column '{column}' not found")
         return <Py_ssize_t>idx
-
-    @staticmethod
-    def from_arrow(object table):
-        cdef int i, n = table.num_columns
-        cdef Morsel self = Morsel()
-        cdef Vector vec
-        cdef bytes encoded_name
-
-        self._columns = [None] * n
-        self._encoded_names = [None] * n
-        self.ptr = <DrakenMorsel*> PyMem_Malloc(sizeof(DrakenMorsel))
-        self.ptr.num_columns = n
-        self.ptr.num_rows = table.num_rows
-        self.ptr.columns = <void**> PyMem_Malloc(sizeof(void*) * n)
-        self.ptr.column_names = <const char**> PyMem_Malloc(sizeof(const char*) * n)
-        self.ptr.column_types = <DrakenType*> PyMem_Malloc(sizeof(DrakenType) * n)
-
-        for i in range(n):
-            col = table.column(i)
-            # if hasattr(col, "num_chunks") and col.num_chunks > 1:
-            #     col = col.combine_chunks()
-            vec = Vector.from_arrow(col)
-            self._columns[i] = vec
-
-            name = table.schema.field(i).name
-            encoded_name = name.encode("utf-8")
-            self._encoded_names[i] = encoded_name
-
-            self.ptr.columns[i] = <void*>vec
-            self.ptr.column_types[i] = vec.dtype
-            self.ptr.column_names[i] = <const char*>encoded_name
-
-        self._rebuild_name_to_index()
-
-        return self
 
     @staticmethod
     def from_vectors(list names, list vectors):
@@ -806,68 +770,6 @@ cdef class Morsel:
 
         self._rebuild_name_to_index()
         return self
-
-    @staticmethod
-    def iter_from_arrow(object table, batch_size=None):
-        """Yield ``Morsel`` instances from an Arrow table without forcing ``combine_chunks``."""
-        import pyarrow as pa
-        cdef Py_ssize_t start
-        cdef Py_ssize_t length
-
-        if not isinstance(table, pa.Table):
-            raise TypeError("iter_from_arrow expects a pyarrow.Table")
-
-        if table.num_rows == 0:
-            return
-
-        if batch_size is not None:
-            if not isinstance(batch_size, int):
-                raise TypeError("batch_size must be an integer or None")
-            if batch_size <= 0:
-                raise ValueError("batch_size must be a positive integer when provided")
-
-            start = 0
-            while start < table.num_rows:
-                length = table.num_rows - start
-                if length > batch_size:
-                    length = batch_size
-                slice = table.slice(start, length)
-                yield Morsel.from_arrow(slice)
-                start += length
-            return
-
-        # Build chunk boundaries from all columns so we never split an Arrow chunk.
-        cdef Py_ssize_t total_rows = table.num_rows
-        cdef Py_ssize_t previous = 0
-        cdef Py_ssize_t boundary
-        cdef set breakpoints = set()
-        cdef object column
-        cdef object chunk
-        cdef Py_ssize_t chunk_length
-        cdef Py_ssize_t slice_length
-
-        for column in table.columns:
-            boundary = 0
-            for chunk in column.chunks:
-                chunk_length = len(chunk)
-                boundary += chunk_length
-                breakpoints.add(boundary)
-
-        if not breakpoints:
-            breakpoints.add(total_rows)
-
-        chunk_count = 0
-        for boundary in sorted(breakpoints):
-            if boundary <= previous:
-                continue
-            if boundary > total_rows:
-                boundary = total_rows
-            slice_length = boundary - previous
-            if slice_length <= 0:
-                previous = boundary
-                continue
-            yield Morsel.from_arrow(table.slice(previous, slice_length))
-            previous = boundary
 
     cpdef Vector column(self, bytes identity, bytes column_name=b''):
         cdef dict mapping = self._ensure_name_map()

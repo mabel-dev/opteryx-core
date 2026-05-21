@@ -31,7 +31,6 @@ cdef class ArrayVector(Vector):
     cpdef object sum(self)
 
 
-cdef ArrayVector from_arrow(object array)
 cdef ArrayVector from_sequence(object data)
 cdef ArrayVector array_vector_from_parts(
     StringVector flat_child,

@@ -41,4 +41,3 @@ cdef class VectorVector(Vector):
     cpdef VectorVector take(self, int32_t[::1] indices)
 
 
-cdef VectorVector from_arrow(object array)

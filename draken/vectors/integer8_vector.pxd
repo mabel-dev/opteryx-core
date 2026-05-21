@@ -38,5 +38,3 @@ cdef class Integer8Vector(Vector):
     cpdef BoolVector less_than_or_equals_vector(self, Integer8Vector other)
     cpdef BoolVector between(self, int64_t lower, int64_t upper,
                               bint lower_inclusive=*, bint upper_inclusive=*)
-
-cdef Integer8Vector integer8_from_arrow(object array)

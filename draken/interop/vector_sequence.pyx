@@ -212,13 +212,8 @@ cdef object _vector_vector_from_pylist(list data):
 
     All non-null rows must have the same length (the embedding dimension),
     and must not contain element-level nulls. Empty input or all-None input
-    cannot determine a dimension — raises ValueError. PyArrow handles the
-    fp32/fp64 -> fp16 narrowing on construction; the resulting Arrow array
-    is then routed through the standard FixedSizeList<float16> ingestion
-    path so the same validation and zero-copy rules apply.
+    cannot determine a dimension — raises ValueError.
     """
-    import pyarrow as pa
-
     cdef Py_ssize_t n = len(data)
     cdef Py_ssize_t i
     cdef object item, first_present = None
@@ -256,9 +251,12 @@ cdef object _vector_vector_from_pylist(list data):
             "without an inferable dimension"
         )
 
-    arrow_array = pa.array(data, type=pa.list_(pa.float16(), dim))
-    from draken.interop.arrow import vector_from_arrow
-    return vector_from_arrow(arrow_array)
+    raise NotImplementedError(
+        "Building a VECTOR (fp16 embedding) column from a Python sequence is "
+        "not yet supported natively. The previous implementation routed through "
+        "PyArrow ingestion (from_arrow), which has been removed. A native "
+        "list-of-floats -> fp16 VectorVector builder is needed."
+    )
 
 
 # ---------------------------------------------------------------------------

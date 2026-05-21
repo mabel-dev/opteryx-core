@@ -267,4 +267,63 @@ static inline void cmp_float64_vector_branching(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Per-call dispatchers for the int64-vs-float64 vector kernels. Select the op
+// once, then run the templated loop. op codes match the .pyx convention:
+//   0=eq  1=ne  2=gt  3=ge  4=lt  5=le
+// ---------------------------------------------------------------------------
+
+static inline void dispatch_i64_f64_vector_nonnull(
+    int op,
+    const int64_t* __restrict__ data_int,
+    const double* __restrict__ data_float,
+    uint8_t* __restrict__ dst,
+    size_t n)
+{
+    switch (op) {
+        case 0: cmp_int64_vector_nonnull<Eq>(data_int, data_float, dst, n); break;
+        case 1: cmp_int64_vector_nonnull<Ne>(data_int, data_float, dst, n); break;
+        case 2: cmp_int64_vector_nonnull<Gt>(data_int, data_float, dst, n); break;
+        case 3: cmp_int64_vector_nonnull<Ge>(data_int, data_float, dst, n); break;
+        case 4: cmp_int64_vector_nonnull<Lt>(data_int, data_float, dst, n); break;
+        default: cmp_int64_vector_nonnull<Le>(data_int, data_float, dst, n); break;
+    }
+}
+
+static inline void dispatch_i64_f64_vector_branchless(
+    int op,
+    const int64_t* __restrict__ data_int,
+    const double* __restrict__ data_float,
+    const uint8_t* __restrict__ src_null,
+    uint8_t* __restrict__ dst,
+    size_t n)
+{
+    switch (op) {
+        case 0: cmp_int64_vector_branchless<Eq>(data_int, data_float, src_null, dst, n); break;
+        case 1: cmp_int64_vector_branchless<Ne>(data_int, data_float, src_null, dst, n); break;
+        case 2: cmp_int64_vector_branchless<Gt>(data_int, data_float, src_null, dst, n); break;
+        case 3: cmp_int64_vector_branchless<Ge>(data_int, data_float, src_null, dst, n); break;
+        case 4: cmp_int64_vector_branchless<Lt>(data_int, data_float, src_null, dst, n); break;
+        default: cmp_int64_vector_branchless<Le>(data_int, data_float, src_null, dst, n); break;
+    }
+}
+
+static inline void dispatch_i64_f64_vector_branching(
+    int op,
+    const int64_t* __restrict__ data_int,
+    const double* __restrict__ data_float,
+    const uint8_t* __restrict__ src_null,
+    uint8_t* __restrict__ dst,
+    size_t n)
+{
+    switch (op) {
+        case 0: cmp_int64_vector_branching<Eq>(data_int, data_float, src_null, dst, n); break;
+        case 1: cmp_int64_vector_branching<Ne>(data_int, data_float, src_null, dst, n); break;
+        case 2: cmp_int64_vector_branching<Gt>(data_int, data_float, src_null, dst, n); break;
+        case 3: cmp_int64_vector_branching<Ge>(data_int, data_float, src_null, dst, n); break;
+        case 4: cmp_int64_vector_branching<Lt>(data_int, data_float, src_null, dst, n); break;
+        default: cmp_int64_vector_branching<Le>(data_int, data_float, src_null, dst, n); break;
+    }
+}
+
 }} // namespace draken::int64_float64_cmp

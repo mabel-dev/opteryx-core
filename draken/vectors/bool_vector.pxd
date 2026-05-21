@@ -42,7 +42,6 @@ cdef BoolVector from_decoded(
     uint8_t* null_bitmap,
     size_t length,
 )
-cdef BoolVector from_arrow(object array)
 cdef BoolVector from_sequence(uint8_t[::1] data)
 cdef BoolVector bool_vector_from_bits(uint8_t* value_bits, uint8_t* valid_bits, Py_ssize_t n)
 
