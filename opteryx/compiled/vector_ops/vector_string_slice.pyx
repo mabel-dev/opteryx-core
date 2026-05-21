@@ -16,7 +16,7 @@ from cpython.array cimport array, clone
 
 from draken.vectors.vector cimport Vector
 from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
-from draken.vectors.integer64_vector cimport Integer64Vector, from_sequence as int64_from_sequence, _materialize_dict_int64
+from draken.vectors.integer64_vector cimport Integer64Vector, from_sequence as int64_from_sequence
 from draken.vectors.null_vector cimport NullVector
 from draken.core.buffers cimport DrakenVector, DrakenVarBuffer, DrakenStringArena, DrakenStringSlot, str_length, str_data
 
@@ -40,10 +40,7 @@ cdef inline Integer64Vector _prepare_int_arg(object arg, Py_ssize_t row_count):
         return Integer64Vector.from_constant(<int64_t>arg, row_count)
     if not isinstance(arg, Integer64Vector):
         raise TypeError(f"integer argument must be an Integer64Vector, NullVector or int, got {type(arg).__name__}")
-    iv = <Integer64Vector>arg
-    if iv._unified_view.data_length < iv._unified_view.length:
-        return _materialize_dict_int64(iv)
-    return iv
+    return <Integer64Vector>arg
 
 
 cdef inline int64_t _read_int_arg(Integer64Vector iv, Py_ssize_t row, bint* is_null) noexcept:

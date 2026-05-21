@@ -103,6 +103,10 @@ cdef class BoolVector(Vector):
     cdef DrakenVector* unified(self) noexcept:
         return &self._unified_view
 
+    cdef void _set_null_bitmap(self, uint8_t* bm) noexcept:
+        self.ptr.null_bitmap = bm
+        self._unified_view.validity = bm
+
     # Properties
     @property
     def length(self):

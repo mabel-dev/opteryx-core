@@ -182,10 +182,12 @@ from draken.core.buffers cimport (
     DrakenVarBuffer,
     DrakenStringArena,
     DrakenStringSlot,
+    DRAKEN_STRING,
+    draken_vector_from_dense,
     str_length,
     str_data,
 )
-from draken.vectors.string_vector cimport StringVector
+from draken.vectors.string_vector cimport StringVector, _varbuffer_to_string_arena
 
 
 cdef enum DfaOpType:
@@ -955,5 +957,14 @@ cpdef StringVector vector_dfa_extract(
 
     free(cap_ptrs)
     free(cap_lens)
+
+    cdef DrakenStringArena* out_arena = _varbuffer_to_string_arena(
+        <const uint8_t*>out_ptr_buf.data,
+        out_ptr_buf.offsets,
+        out_ptr_buf.null_bitmap,
+        <Py_ssize_t>n,
+    )
+    out_vec._unified_view = draken_vector_from_dense(
+        <void*>out_arena, <uint32_t>n, DRAKEN_STRING, out_ptr_buf.null_bitmap)
 
     return out_vec

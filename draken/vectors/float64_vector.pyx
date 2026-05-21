@@ -188,6 +188,10 @@ cdef class Float64Vector(Vector):
     cdef DrakenVector* unified(self) noexcept:
         return &self._unified_view
 
+    cdef void _set_null_bitmap(self, uint8_t* bm) noexcept:
+        self.ptr.null_bitmap = bm
+        self._unified_view.validity = bm
+
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n):
         cdef Py_ssize_t nbytes = (n + 7) >> 3
         cdef BoolVector out = BoolVector(<size_t>n)

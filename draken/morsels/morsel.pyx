@@ -67,14 +67,12 @@ from draken.vectors.integer8_vector cimport Integer8Vector
 from draken.vectors.integer16_vector cimport Integer16Vector
 from draken.vectors.integer32_vector cimport Integer32Vector
 from draken.vectors.interval_vector cimport IntervalVector
-from draken.vectors.string_vector cimport StringVector, _materialize_dict_string
+from draken.vectors.string_vector cimport StringVector
 from draken.vectors.string_vector cimport StringVectorBuilder
 from draken.vectors.time_vector cimport TimeVector
 from draken.vectors.timestamp_vector cimport TimestampVector
 from draken.interop.arrow cimport vector_from_arrow
 from draken.interop.vector_sequence cimport vector_from_sequence
-from draken.vectors.string_vector cimport _ConstView
-from draken.vectors.string_vector cimport _const_view
 from draken.core.buffers cimport DrakenStringArena
 from draken.core.buffers cimport DrakenStringSlot
 from draken.core.buffers cimport str_length, str_data
@@ -259,68 +257,37 @@ cdef StringVector _concat_string_buffers(
     cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(left_rows + right_rows, 12)
     cdef DrakenStringArena* arena
     cdef DrakenStringSlot* slot
-    cdef _ConstView csp
+    cdef const uint32_t* sel
     cdef uint8_t* nulls
     cdef Py_ssize_t i
-    cdef Py_ssize_t n_rows
 
-    # Append left_vec rows
-    n_rows = left_rows
-    if left_vec._unified_view.data_length == 1:  # constant
-        if left_vec._unified_view.validity != NULL:  # null constant
-            for i in range(n_rows):
-                builder.append_null()
+    # Append left_vec rows — uniform arena.slots[selection[i]] access
+    arena = <DrakenStringArena*>left_vec._unified_view.data
+    sel = left_vec._unified_view.selection
+    nulls = left_vec._unified_view.validity
+    for i in range(left_rows):
+        if nulls != NULL and not _bitmap_get(nulls, i):
+            builder.append_null()
         else:
-            csp = _const_view(<DrakenStringArena*>left_vec._unified_view.data)
-            nulls = left_vec.ptr.null_bitmap if left_vec.ptr != NULL else NULL
-            for i in range(n_rows):
-                if nulls != NULL and not _bitmap_get(nulls, i):
-                    builder.append_null()
-                else:
-                    builder.append_bytes(<const char*>csp.data, csp.length)
-    elif left_vec._unified_view.data_length < left_vec._unified_view.length:
-        raise RuntimeError("_concat_string_buffers received un-materialized dict vector")
-    else:  # dense arena
-        arena = <DrakenStringArena*>left_vec._unified_view.data
-        nulls = left_vec.ptr.null_bitmap if left_vec.ptr != NULL else NULL
-        for i in range(n_rows):
-            if nulls != NULL and not _bitmap_get(nulls, i):
-                builder.append_null()
-            else:
-                slot = &arena.slots[i]
-                builder.append_bytes(
-                    <const char*>str_data(slot, arena.arena),
-                    <Py_ssize_t>str_length(slot),
-                )
+            slot = &arena.slots[sel[i]]
+            builder.append_bytes(
+                <const char*>str_data(slot, arena.arena),
+                <Py_ssize_t>str_length(slot),
+            )
 
-    # Append right_vec rows
-    n_rows = right_rows
-    if right_vec._unified_view.data_length == 1:  # constant
-        if right_vec._unified_view.validity != NULL:  # null constant
-            for i in range(n_rows):
-                builder.append_null()
+    # Append right_vec rows — uniform arena.slots[selection[i]] access
+    arena = <DrakenStringArena*>right_vec._unified_view.data
+    sel = right_vec._unified_view.selection
+    nulls = right_vec._unified_view.validity
+    for i in range(right_rows):
+        if nulls != NULL and not _bitmap_get(nulls, i):
+            builder.append_null()
         else:
-            csp = _const_view(<DrakenStringArena*>right_vec._unified_view.data)
-            nulls = right_vec.ptr.null_bitmap if right_vec.ptr != NULL else NULL
-            for i in range(n_rows):
-                if nulls != NULL and not _bitmap_get(nulls, i):
-                    builder.append_null()
-                else:
-                    builder.append_bytes(<const char*>csp.data, csp.length)
-    elif right_vec._unified_view.data_length < right_vec._unified_view.length:
-        raise RuntimeError("_concat_string_buffers received un-materialized dict vector")
-    else:  # dense arena
-        arena = <DrakenStringArena*>right_vec._unified_view.data
-        nulls = right_vec.ptr.null_bitmap if right_vec.ptr != NULL else NULL
-        for i in range(n_rows):
-            if nulls != NULL and not _bitmap_get(nulls, i):
-                builder.append_null()
-            else:
-                slot = &arena.slots[i]
-                builder.append_bytes(
-                    <const char*>str_data(slot, arena.arena),
-                    <Py_ssize_t>str_length(slot),
-                )
+            slot = &arena.slots[sel[i]]
+            builder.append_bytes(
+                <const char*>str_data(slot, arena.arena),
+                <Py_ssize_t>str_length(slot),
+            )
 
     return builder.finish()
 
@@ -541,10 +508,10 @@ cdef class Morsel:
         cdef TimestampVector src_ts
         cdef IntervalVector src_interval
         cdef StringVector src_str
-        cdef _ConstView _scp
         cdef StringVectorBuilder str_builder
         cdef DrakenStringArena* str_arena
         cdef DrakenStringSlot* str_slot
+        cdef const uint32_t* str_sel
         cdef uint8_t* str_nulls
         cdef Py_ssize_t k
 
@@ -811,33 +778,19 @@ cdef class Morsel:
                 str_builder = StringVectorBuilder.with_estimate(total_rows, 16)
                 for j in range(n_morsels):
                     src_str = <StringVector> (<Morsel> morsels[j]).ptr.columns[i]
-                    # Materialize dict encoding
-                    if src_str._unified_view.data_length < src_str._unified_view.length:
-                        src_str = _materialize_dict_string(src_str)
                     current_rows = (<Morsel> morsels[j]).ptr.num_rows
-                    str_nulls = src_str.ptr.null_bitmap if src_str.ptr != NULL else NULL
-                    if src_str._unified_view.data_length == 1:  # constant
-                        if src_str._unified_view.validity != NULL:  # null constant
-                            for k in range(current_rows):
-                                str_builder.append_null()
+                    str_arena = <DrakenStringArena*>src_str._unified_view.data
+                    str_sel = src_str._unified_view.selection
+                    str_nulls = src_str._unified_view.validity
+                    for k in range(current_rows):
+                        if str_nulls != NULL and not _bitmap_get(str_nulls, k):
+                            str_builder.append_null()
                         else:
-                            _scp = _const_view(<DrakenStringArena*>src_str._unified_view.data)
-                            for k in range(current_rows):
-                                if str_nulls != NULL and not _bitmap_get(str_nulls, k):
-                                    str_builder.append_null()
-                                else:
-                                    str_builder.append_bytes(<const char*>_scp.data, _scp.length)
-                    else:  # dense arena
-                        str_arena = <DrakenStringArena*>src_str._unified_view.data
-                        for k in range(current_rows):
-                            if str_nulls != NULL and not _bitmap_get(str_nulls, k):
-                                str_builder.append_null()
-                            else:
-                                str_slot = &str_arena.slots[k]
-                                str_builder.append_bytes(
-                                    <const char*>str_data(str_slot, str_arena.arena),
-                                    <Py_ssize_t>str_length(str_slot),
-                                )
+                            str_slot = &str_arena.slots[str_sel[k]]
+                            str_builder.append_bytes(
+                                <const char*>str_data(str_slot, str_arena.arena),
+                                <Py_ssize_t>str_length(str_slot),
+                            )
                 out_str = str_builder.finish()
                 new_vec = <Vector> out_str
 
@@ -1253,8 +1206,6 @@ cdef class Morsel:
         cdef TimestampVector out_ts
         cdef IntervalVector out_interval
         cdef StringVector out_str
-        cdef StringVector left_str
-        cdef StringVector right_str
 
         if other is None:
             return
@@ -1406,16 +1357,9 @@ cdef class Morsel:
                 new_vec = <Vector>out_interval
 
             elif isinstance(left_vec, StringVector) and isinstance(right_vec, StringVector):
-                left_str = <StringVector>left_vec
-                right_str = <StringVector>right_vec
-                # Materialize dict encoding before concat
-                if left_str._unified_view.data_length < left_str._unified_view.length:
-                    left_str = _materialize_dict_string(left_str)
-                if right_str._unified_view.data_length < right_str._unified_view.length:
-                    right_str = _materialize_dict_string(right_str)
                 new_vec = <Vector>_concat_string_buffers(
-                    left_str,
-                    right_str,
+                    <StringVector>left_vec,
+                    <StringVector>right_vec,
                     left_rows,
                     right_rows,
                 )
@@ -1570,15 +1514,12 @@ cdef class Morsel:
         cdef int32_t[::1] input_view_32
         cdef bint free_indices = False
         cdef bint indices_ready = False
-        cdef Integer64Vector idx_vec
-        cdef int64_t* dict_int_ptr
         cdef DrakenVector* _iv_uv
 
-        # Fast path: dictionary-encoded Integer64Vector (e.g. from build_cartesian_indices).
-        # Gathers dict values via codes directly into int32 — no intermediate dense vector.
-        if isinstance(indices, Integer64Vector) and (<Integer64Vector>indices)._unified_view.data_length < (<Integer64Vector>indices)._unified_view.length:
-            idx_vec = <Integer64Vector>indices
-            _iv_uv = idx_vec.unified()
+        # Uniform path: Integer64Vector — all layouts (dense, constant, dict) read via
+        # data[selection[i]], which is correct for every encoding shape.
+        if isinstance(indices, Integer64Vector):
+            _iv_uv = (<Integer64Vector>indices).unified()
             n_indices = <int>_iv_uv.length
             if n_indices == 0:
                 self._empty_inplace()
@@ -1589,9 +1530,8 @@ cdef class Morsel:
                 raise MemoryError()
             free_indices = True
 
-            dict_int_ptr = <int64_t*>_iv_uv.data
             for i in range(n_indices):
-                indices_ptr[i] = <int32_t>dict_int_ptr[_iv_uv.selection[i]]
+                indices_ptr[i] = <int32_t>(<int64_t*>_iv_uv.data)[_iv_uv.selection[i]]
 
             indices_view = <int32_t[:n_indices]>indices_ptr
             indices_ready = True

@@ -135,7 +135,6 @@ cdef void _apply_constant_replacements(Morsel morsel, list replacements) except 
     cdef Vector new_vec
     cdef dict mapping
     cdef object py_idx
-    cdef DrakenVector* uv
 
     if length == 0 or not replacements:
         return
@@ -149,9 +148,6 @@ cdef void _apply_constant_replacements(Morsel morsel, list replacements) except 
         idx = <Py_ssize_t>py_idx
         cur = <Vector>morsel._columns[idx]
         if cur is None:
-            continue
-        uv = cur.unified()
-        if uv.data_length == 1 and uv.length > 1:
             continue
         new_vec = _build_constant_vector(cur, value, length)
         if new_vec is None:

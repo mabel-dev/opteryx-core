@@ -131,11 +131,11 @@ cpdef dictionary_fastpath(arr, str operator, value):
             operator == "NotInList",
         )
     if operator == "Like" or operator == "NotLike":
-        return vector_like(vec, normalized_value, False, operator == "NotLike")
+        return vector_like(vec, StringVector.from_constant(normalized_value, 1), False, operator == "NotLike")
     if operator == "ILike" or operator == "NotILike":
-        return vector_like(vec, normalized_value, True, operator == "NotILike")
+        return vector_like(vec, StringVector.from_constant(normalized_value, 1), True, operator == "NotILike")
     if operator == "RLike" or operator == "NotRLike":
-        return vector_rlike(vec, normalized_value, operator == "NotRLike")
+        return vector_rlike(vec, StringVector.from_constant(normalized_value, 1), operator == "NotRLike")
     if operator == "Lt":
         return vec.less_than(normalized_value)
     if operator == "Gt":

@@ -50,6 +50,7 @@ from draken.core.buffers cimport DrakenConstantStringPayload
 from draken.core.buffers cimport DrakenType
 from draken.core.buffers cimport DrakenVarBuffer
 from draken.core.buffers cimport DrakenVector
+from draken.core.buffers cimport draken_vector_from_dense
 from draken.core.buffers cimport DRAKEN_BOOL
 from draken.core.buffers cimport DRAKEN_DATE32
 from draken.core.buffers cimport DRAKEN_DICTIONARY
@@ -1398,6 +1399,9 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
         uv = vec.unified()
         segments = []
 
+        # Serialization is a sanctioned layout-aware boundary: the on-disk format
+        # differs by physical representation. This is not execution-path dispatch;
+        # the unified-read contract does not apply to persistence.
         if uv.data_length == 1 and (
                 uv.type != DRAKEN_STRING or (
                     isinstance(vec, StringVector) and (<StringVector>vec).ptr.offsets == NULL)):
@@ -1727,6 +1731,7 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
     cdef Vector vec
     cdef DrakenFixedBuffer* fixed_ptr
     cdef DrakenVarBuffer* var_ptr
+    cdef DrakenStringArena* read_arena
     cdef DrakenDictionaryBuffer* dict_ptr
     cdef DrakenConstantBuffer* const_ptr
     cdef uint8_t* bitmap
@@ -1925,6 +1930,10 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                         fixed_ptr.null_bitmap = NULL
                 else:
                     fixed_ptr.null_bitmap = NULL
+                # Sync the unified view: consumers read nulls from
+                # unified().validity, not ptr.null_bitmap. Poking only the
+                # buffer pointer left validity NULL and dropped nulls on read.
+                vec._unified_view.validity = fixed_ptr.null_bitmap
             elif encoding == ENCODING_CONST:
                 seg_info = seg_map.get(SEG_CONST_VALUE, None)
                 if seg_info is None:
@@ -2338,10 +2347,15 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                         f"offset tail mismatch in column {i}: expected {values_payload[1]}, got {var_ptr.offsets[row_count]}"
                     )
 
-                # Convert to arena-backed so arena-aware readers work correctly
-                (<StringVector>vec)._unified_view.data = <void*>_varbuffer_to_string_arena(
+                # Convert to arena-backed so arena-aware readers work correctly.
+                # Build the full unified view (data, selection, data_length,
+                # length, validity, type) via the canonical dense constructor —
+                # poking only data/data_length left validity NULL and silently
+                # dropped the null state on read.
+                read_arena = _varbuffer_to_string_arena(
                     var_ptr.data, var_ptr.offsets, var_ptr.null_bitmap, row_count)
-                (<StringVector>vec)._unified_view.data_length = row_count
+                (<StringVector>vec)._unified_view = draken_vector_from_dense(
+                    <void*>read_arena, <uint32_t>row_count, DRAKEN_STRING, var_ptr.null_bitmap)
             else:
                 raise DrakenMorselCorruptionError(f"invalid encoding kind {encoding} for column {i}")
 

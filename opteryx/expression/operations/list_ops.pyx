@@ -7,26 +7,19 @@ bug, not a fallback to mask.
 """
 
 from opteryx.compiled import vector_ops
-from opteryx.expression.evaluator.type_coercion import (
-    _constant_scalar_value,
-    _is_constant_vector_like,
-)
+from draken.vectors.vector import Vector
 
 
 cdef set _coerce_value_set(value):
     """Convert `value` into a `set` of comparison candidates.
 
-    Constant-encoded vectors collapse to a 1-element set; everything else
-    goes through `to_pylist` if available, otherwise straight `set(...)`.
+    Vectors materialize through `to_pylist`; non-Vector iterables go through
+    `set(...)` directly.
     """
-    if _is_constant_vector_like(value):
-        val = _constant_scalar_value(value)
-        if val is None:
-            return set()
-        return {val}
-    pylist_fn = getattr(value, "to_pylist", None)
-    if pylist_fn is not None:
-        return set(pylist_fn())
+    if isinstance(value, Vector):
+        pylist_fn = getattr(value, "to_pylist", None)
+        if pylist_fn is not None:
+            return set(pylist_fn())
     return set(value)
 
 

@@ -17,6 +17,7 @@ cdef class Float64Vector(Vector):
     cdef bint _owns_dict_data
     cdef bint _owns_selection
     cdef DrakenVector* unified(self) noexcept
+    cdef void _set_null_bitmap(self, uint8_t* bm) noexcept
     cdef BoolVector _make_all_null_bool(self, Py_ssize_t n)
 
     cpdef Float64Vector take(self, int32_t[::1] indices)

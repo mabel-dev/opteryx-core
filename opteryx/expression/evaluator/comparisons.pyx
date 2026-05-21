@@ -97,14 +97,9 @@ cdef _int64_compare(int op_code, vec, right):
 
     right_type = get_vector_type(right)
     if right_type in (VectorType.INT64, VectorType.INTEGER):
-        if _is_constant_vector_like(right):
-            right = _constant_scalar_value(right)
-        else:
-            return vec._compare_vector(right, draken_op)
+        return vec._compare_vector(right, draken_op)
 
-    if get_vector_type(right) == VectorType.FLOAT64:
-        if _is_constant_vector_like(right):
-            return _float64_compare(op_code, vec, right)
+    if right_type == VectorType.FLOAT64:
         return vec._compare_float64_vector(right, draken_op)
 
     value = _coerce_int64(right)
@@ -139,17 +134,11 @@ cdef _float64_compare(int op_code, vec, right):
     right_type = get_vector_type(right)
 
     if right_type in (VectorType.INT64,):
-        if _is_constant_vector_like(right):
-            right = _constant_scalar_value(right)
-        else:
-            # Float64 OP Int64  ≡  Int64 (flipped-OP) Float64.
-            draken_op_flipped = _DRAKEN_CMP_OP_FLIPPED[op_code]
-            return right._compare_float64_vector(vec, draken_op_flipped)
-    elif right_type == VectorType.FLOAT64:
-        if _is_constant_vector_like(right):
-            right = _constant_scalar_value(right)
-        else:
-            return vec._compare_vector(right, draken_op)
+        # Float64 OP Int64  ≡  Int64 (flipped-OP) Float64.
+        draken_op_flipped = _DRAKEN_CMP_OP_FLIPPED[op_code]
+        return right._compare_float64_vector(vec, draken_op_flipped)
+    if right_type == VectorType.FLOAT64:
+        return vec._compare_vector(right, draken_op)
 
     value = _coerce_float(right)
     return vec._compare_scalar(value, draken_op)
@@ -166,12 +155,9 @@ cdef _decimal_compare(int op_code, vec, right):
     if isinstance(right, DecimalVector):
         return vec._compare_vector(right, decimal_op)
 
-    if get_vector_type(right) == VectorType.FLOAT64 and not _is_constant_vector_like(right):
+    if get_vector_type(right) == VectorType.FLOAT64:
         vec_float = vec.to_float64_vector()
         return _float64_compare(op_code, vec_float, right)
-
-    if _is_constant_vector_like(right):
-        right = _constant_scalar_value(right)
 
     if is_scalar(right):
         return vec._compare_scalar(decimal_op, vec._coerce_scalar(right))

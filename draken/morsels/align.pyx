@@ -26,7 +26,7 @@ Key optimizations:
 
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from libc.stdint cimport int32_t, int64_t, uint64_t, uint8_t
-from libc.stdlib cimport malloc
+from libc.stdlib cimport malloc, free
 from libc.string cimport strlen, memcpy, memset
 
 from draken.vectors.vector cimport Vector
@@ -84,116 +84,50 @@ cdef inline bint _has_negative_indices(int32_t[::1] indices) nogil:
 
 
 cdef inline uint8_t* _source_null_bitmap(Vector vec, DrakenType dtype):
-    cdef uint8_t* null_bitmap = vec.null_bitmap_ptr()
-    if null_bitmap != NULL:
-        return null_bitmap
-    if dtype == DrakenType.DRAKEN_INT64:
-        return (<Integer64Vector>vec).ptr.null_bitmap
-    elif dtype == DrakenType.DRAKEN_FLOAT64:
-        return (<Float64Vector>vec).ptr.null_bitmap
-    elif dtype == DrakenType.DRAKEN_BOOL:
-        return (<BoolVector>vec).ptr.null_bitmap
-    elif dtype == DrakenType.DRAKEN_STRING:
-        return (<StringVector>vec).ptr.null_bitmap
-    elif dtype == DrakenType.DRAKEN_DATE32:
-        return (<Date32Vector>vec).ptr.null_bitmap
-    elif dtype == DrakenType.DRAKEN_TIMESTAMP64:
-        return (<TimestampVector>vec).ptr.null_bitmap
-    elif dtype == DrakenType.DRAKEN_INTERVAL:
-        return (<IntervalVector>vec).ptr.null_bitmap
-    elif dtype == DrakenType.DRAKEN_TIME32 or dtype == DrakenType.DRAKEN_TIME64:
-        return (<TimeVector>vec).ptr.null_bitmap
-    elif dtype == DrakenType.DRAKEN_ARRAY:
-        return (<ArrayVector>vec).ptr.null_bitmap
-    return NULL
+    return vec.null_bitmap_ptr()
 
 
 cdef inline uint8_t* _ensure_output_null_bitmap(Vector vec, DrakenType dtype, Py_ssize_t length) except NULL:
     cdef Py_ssize_t nb_size = (length + 7) >> 3
-    cdef uint8_t* out_null = NULL
+    cdef uint8_t* out_null
 
     if nb_size == 0:
         return NULL
 
+    out_null = vec.null_bitmap_ptr()
+    if out_null != NULL:
+        return out_null
+
+    if dtype == DrakenType.DRAKEN_DICTIONARY:
+        raise MemoryError()
+
+    out_null = <uint8_t*>malloc(nb_size)
+    if out_null == NULL:
+        raise MemoryError()
+
     if dtype == DrakenType.DRAKEN_INT64:
-        out_null = (<Integer64Vector>vec).ptr.null_bitmap
-        if out_null == NULL:
-            out_null = <uint8_t*>malloc(nb_size)
-            if out_null == NULL:
-                raise MemoryError()
-            (<Integer64Vector>vec).ptr.null_bitmap = out_null
-        return out_null
+        (<Integer64Vector>vec)._set_null_bitmap(out_null)
     elif dtype == DrakenType.DRAKEN_FLOAT64:
-        out_null = (<Float64Vector>vec).ptr.null_bitmap
-        if out_null == NULL:
-            out_null = <uint8_t*>malloc(nb_size)
-            if out_null == NULL:
-                raise MemoryError()
-            (<Float64Vector>vec).ptr.null_bitmap = out_null
-        return out_null
+        (<Float64Vector>vec)._set_null_bitmap(out_null)
     elif dtype == DrakenType.DRAKEN_BOOL:
-        out_null = (<BoolVector>vec).ptr.null_bitmap
-        if out_null == NULL:
-            out_null = <uint8_t*>malloc(nb_size)
-            if out_null == NULL:
-                raise MemoryError()
-            (<BoolVector>vec).ptr.null_bitmap = out_null
-        return out_null
+        (<BoolVector>vec)._set_null_bitmap(out_null)
     elif dtype == DrakenType.DRAKEN_STRING:
-        out_null = (<StringVector>vec).ptr.null_bitmap
-        if out_null == NULL:
-            out_null = <uint8_t*>malloc(nb_size)
-            if out_null == NULL:
-                raise MemoryError()
-            (<StringVector>vec).ptr.null_bitmap = out_null
-        return out_null
+        (<StringVector>vec)._set_null_bitmap(out_null)
     elif dtype == DrakenType.DRAKEN_DATE32:
-        out_null = (<Date32Vector>vec).ptr.null_bitmap
-        if out_null == NULL:
-            out_null = <uint8_t*>malloc(nb_size)
-            if out_null == NULL:
-                raise MemoryError()
-            (<Date32Vector>vec).ptr.null_bitmap = out_null
-        return out_null
+        (<Date32Vector>vec)._set_null_bitmap(out_null)
     elif dtype == DrakenType.DRAKEN_TIMESTAMP64:
-        out_null = (<TimestampVector>vec).ptr.null_bitmap
-        if out_null == NULL:
-            out_null = <uint8_t*>malloc(nb_size)
-            if out_null == NULL:
-                raise MemoryError()
-            (<TimestampVector>vec).ptr.null_bitmap = out_null
-        return out_null
+        (<TimestampVector>vec)._set_null_bitmap(out_null)
     elif dtype == DrakenType.DRAKEN_INTERVAL:
-        out_null = (<IntervalVector>vec).ptr.null_bitmap
-        if out_null == NULL:
-            out_null = <uint8_t*>malloc(nb_size)
-            if out_null == NULL:
-                raise MemoryError()
-            (<IntervalVector>vec).ptr.null_bitmap = out_null
-        return out_null
+        (<IntervalVector>vec)._set_null_bitmap(out_null)
     elif dtype == DrakenType.DRAKEN_TIME32 or dtype == DrakenType.DRAKEN_TIME64:
-        out_null = (<TimeVector>vec).ptr.null_bitmap
-        if out_null == NULL:
-            out_null = <uint8_t*>malloc(nb_size)
-            if out_null == NULL:
-                raise MemoryError()
-            (<TimeVector>vec).ptr.null_bitmap = out_null
-        return out_null
+        (<TimeVector>vec)._set_null_bitmap(out_null)
     elif dtype == DrakenType.DRAKEN_ARRAY:
-        out_null = (<ArrayVector>vec).ptr.null_bitmap
-        if out_null == NULL:
-            out_null = <uint8_t*>malloc(nb_size)
-            if out_null == NULL:
-                raise MemoryError()
-            (<ArrayVector>vec).ptr.null_bitmap = out_null
-            (<ArrayVector>vec).owns_null_bitmap = True
-        return out_null
-    elif dtype == DrakenType.DRAKEN_DICTIONARY:
-        out_null = vec.null_bitmap_ptr()
-        if out_null == NULL:
-            raise MemoryError()
-        return out_null
-    return NULL
+        (<ArrayVector>vec)._set_null_bitmap(out_null)
+    else:
+        free(out_null)
+        return NULL
+
+    return out_null
 
 
 cdef inline void _apply_take_validity(
@@ -409,11 +343,6 @@ cpdef Morsel align_tables(
         # Process source columns first
         for i in range(num_src_cols):
             vec = <Vector>source_morsel.ptr.columns[i]
-            # Constant vectors have ptr.data=NULL; _ensure_output_null_bitmap would
-            # allocate ptr.null_bitmap on them, leaving an inconsistent state that
-            # crashes downstream dense-buffer access.  Materialize to dense first.
-            if source_has_negative and vec.unified().data_length == 1:
-                vec = vec.materialize()
             taken_vec = _take_vector_fast(vec, source_take_indices)
             if source_has_negative or _source_null_bitmap(vec, vec.dtype) != NULL:
                 _apply_take_validity(vec, taken_vec, vec.dtype, source_indices)
@@ -429,8 +358,6 @@ cpdef Morsel align_tables(
                 continue
 
             vec = <Vector>append_morsel.ptr.columns[i]
-            if append_has_negative and vec.unified().data_length == 1:
-                vec = vec.materialize()
             taken_vec = _take_vector_fast(vec, append_take_indices)
             if append_has_negative or _source_null_bitmap(vec, vec.dtype) != NULL:
                 _apply_take_validity(vec, taken_vec, vec.dtype, append_indices)

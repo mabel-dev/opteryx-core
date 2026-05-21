@@ -70,122 +70,73 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
             self._col_type = _classify_vector(raw)
 
         cdef const double*      fdata
-        cdef const int64_t*     idata
+        cdef const int64_t*     idata64
+        cdef const int32_t*     idata32
+        cdef const int16_t*     idata16
+        cdef const int8_t*      idata8
         cdef const uint8_t*     nulls
-        cdef DrakenFixedBuffer* ibuf
+        cdef const uint32_t*    sel
         cdef DrakenVector*      uv
         cdef Py_ssize_t i
-        cdef double v
 
         if self._col_type == _VTYPE_FLOAT64:
-            vec_f = <Float64Vector>raw
-            uv = vec_f.unified()
-            if uv.data_length == 1 and uv.length > 1:
-                if uv.validity == NULL:
-                    for i in range(nrows):
-                        if not self._state.append((<double*>uv.data)[0]):
-                            self._raise_append_failure()
-                return
-            fdata = <const double*>vec_f.ptr.data
-            nulls = vec_f.null_bitmap_ptr()
-            if nulls == NULL:
-                for i in range(nrows):
-                    if not self._state.append(fdata[i]):
-                        self._raise_append_failure()
-                return
+            uv = (<Float64Vector>raw).unified()
+            fdata = <const double*>uv.data
+            sel   = uv.selection
+            nulls = uv.validity
             for i in range(nrows):
-                if _bitmap_is_valid(nulls, i):
-                    if not self._state.append(fdata[i]):
-                        self._raise_append_failure()
+                if nulls != NULL and not _bitmap_is_valid(nulls, i):
+                    continue
+                if not self._state.append(fdata[sel[i]]):
+                    self._raise_append_failure()
             return
 
         if self._col_type == _VTYPE_INT64:
-            vec_i = <Integer64Vector>raw
-            uv = vec_i.unified()
-            if uv.data_length == 1 and uv.length > 1:
-                if uv.validity == NULL:
-                    v = <double>(<int64_t*>uv.data)[0]
-                    for i in range(nrows):
-                        if not self._state.append(v):
-                            self._raise_append_failure()
-                return
-            idata = <const int64_t*>vec_i.ptr.data
-            nulls = vec_i.null_bitmap_ptr()
-            if nulls == NULL:
-                for i in range(nrows):
-                    if not self._state.append(<double>idata[i]):
-                        self._raise_append_failure()
-                return
+            uv = (<Integer64Vector>raw).unified()
+            idata64 = <const int64_t*>uv.data
+            sel     = uv.selection
+            nulls   = uv.validity
             for i in range(nrows):
-                if _bitmap_is_valid(nulls, i):
-                    if not self._state.append(<double>idata[i]):
-                        self._raise_append_failure()
+                if nulls != NULL and not _bitmap_is_valid(nulls, i):
+                    continue
+                if not self._state.append(<double>idata64[sel[i]]):
+                    self._raise_append_failure()
             return
 
         if self._col_type == _VTYPE_INT8:
-            ibuf  = (<Integer8Vector>raw).ptr
             uv = (<Integer8Vector>raw).unified()
-            if uv.data_length == 1 and uv.length > 1:
-                if uv.validity == NULL:
-                    v = <double>(<int64_t*>uv.data)[0]
-                    for i in range(nrows):
-                        if not self._state.append(v):
-                            self._raise_append_failure()
-                return
-            nulls = <const uint8_t*>ibuf.null_bitmap
-            if nulls == NULL:
-                for i in range(nrows):
-                    if not self._state.append(<double>_read_integer_value(ibuf, i)):
-                        self._raise_append_failure()
-                return
+            idata8 = <const int8_t*>uv.data
+            sel    = uv.selection
+            nulls  = uv.validity
             for i in range(nrows):
-                if _bitmap_is_valid(nulls, i):
-                    if not self._state.append(<double>_read_integer_value(ibuf, i)):
-                        self._raise_append_failure()
+                if nulls != NULL and not _bitmap_is_valid(nulls, i):
+                    continue
+                if not self._state.append(<double>idata8[sel[i]]):
+                    self._raise_append_failure()
             return
 
         if self._col_type == _VTYPE_INT16:
-            ibuf  = (<Integer16Vector>raw).ptr
             uv = (<Integer16Vector>raw).unified()
-            if uv.data_length == 1 and uv.length > 1:
-                if uv.validity == NULL:
-                    v = <double>(<int64_t*>uv.data)[0]
-                    for i in range(nrows):
-                        if not self._state.append(v):
-                            self._raise_append_failure()
-                return
-            nulls = <const uint8_t*>ibuf.null_bitmap
-            if nulls == NULL:
-                for i in range(nrows):
-                    if not self._state.append(<double>_read_integer_value(ibuf, i)):
-                        self._raise_append_failure()
-                return
+            idata16 = <const int16_t*>uv.data
+            sel     = uv.selection
+            nulls   = uv.validity
             for i in range(nrows):
-                if _bitmap_is_valid(nulls, i):
-                    if not self._state.append(<double>_read_integer_value(ibuf, i)):
-                        self._raise_append_failure()
+                if nulls != NULL and not _bitmap_is_valid(nulls, i):
+                    continue
+                if not self._state.append(<double>idata16[sel[i]]):
+                    self._raise_append_failure()
             return
 
         if self._col_type == _VTYPE_INT32:
-            ibuf  = (<Integer32Vector>raw).ptr
             uv = (<Integer32Vector>raw).unified()
-            if uv.data_length == 1 and uv.length > 1:
-                if uv.validity == NULL:
-                    v = <double>(<int64_t*>uv.data)[0]
-                    for i in range(nrows):
-                        if not self._state.append(v):
-                            self._raise_append_failure()
-                return
-            nulls = <const uint8_t*>ibuf.null_bitmap
-            if nulls == NULL:
-                for i in range(nrows):
-                    if not self._state.append(<double>_read_integer_value(ibuf, i)):
-                        self._raise_append_failure()
-                return
+            idata32 = <const int32_t*>uv.data
+            sel     = uv.selection
+            nulls   = uv.validity
             for i in range(nrows):
-                if _bitmap_is_valid(nulls, i):
-                    if not self._state.append(<double>_read_integer_value(ibuf, i)):
-                        self._raise_append_failure()
+                if nulls != NULL and not _bitmap_is_valid(nulls, i):
+                    continue
+                if not self._state.append(<double>idata32[sel[i]]):
+                    self._raise_append_failure()
             return
 
         raise TypeError(

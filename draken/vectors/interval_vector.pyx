@@ -264,6 +264,10 @@ cdef class IntervalVector(Vector):
     cdef DrakenVector* unified(self) noexcept:
         return &self._unified_view
 
+    cdef void _set_null_bitmap(self, uint8_t* bm) noexcept:
+        self.ptr.null_bitmap = bm
+        self._unified_view.validity = bm
+
     @property
     def length(self):
         return self.ptr.length
@@ -772,26 +776,37 @@ cdef class IntervalVector(Vector):
         return result
 
     cpdef IntervalVector take(self, int32_t[::1] indices):
+        cdef DrakenVector* uv = self.unified()
         cdef Py_ssize_t n = indices.shape[0]
         cdef Py_ssize_t i
         cdef IntervalVector out = IntervalVector(<size_t> n)
-        cdef IntervalValue* src = <IntervalValue*> self.ptr.data
+        cdef IntervalValue* data = <IntervalValue*>uv.data
         cdef IntervalValue* dst = <IntervalValue*> out.ptr.data
+        cdef uint8_t* src_null = uv.validity
+        cdef uint8_t* out_null = NULL
+        cdef int32_t src_idx
         cdef size_t nbytes = 0
-        for i in range(n):
-            dst[i] = src[indices[i]]
 
-        if self.ptr.null_bitmap != NULL:
-            nbytes = (n + 7) >> 3
-            if nbytes:
-                out.ptr.null_bitmap = <uint8_t*> malloc(nbytes)
-                if out.ptr.null_bitmap == NULL:
-                    raise MemoryError()
-                memset(out.ptr.null_bitmap, 0, nbytes)
-                for i in range(n):
-                    if _is_valid(self.ptr, indices[i]):
-                        out.ptr.null_bitmap[i >> 3] |= (1 << (i & 7))
-        _refresh_unified_Interval(out)
+        if src_null != NULL and n > 0:
+            nbytes = (<size_t>n + 7) >> 3
+            out_null = <uint8_t*>malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+
+        for i in range(n):
+            src_idx = indices[i]
+            if src_null != NULL and not ((src_null[src_idx >> 3] >> (src_idx & 7)) & 1):
+                dst[i].months = 0
+                dst[i].microseconds = 0
+            else:
+                dst[i] = data[<Py_ssize_t>uv.selection[<Py_ssize_t>src_idx]]
+                if out_null != NULL:
+                    out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
+
+        out.ptr.null_bitmap = out_null
+        out._unified_view = draken_vector_from_dense(
+            out.ptr.data, <uint32_t>n, DRAKEN_INTERVAL, out.ptr.null_bitmap)
         return out
 
     cpdef int8_t[::1] is_null(self):

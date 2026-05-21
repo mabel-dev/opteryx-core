@@ -22,46 +22,53 @@ from draken.vectors.string_vector import StringVector
 
 
 cdef _string_compare(int op_code, vec, right):
-    cdef bytes value_bytes
-    cdef object value_set = None
-
     if right is None:
         return BoolVector(len(vec))
 
-    if isinstance(right, (list, tuple, set, frozenset)):
-        value_set = _coerce_str_set(right)
-    elif isinstance(right, StringVector):
-        if _is_constant_vector_like(right):
-            value_bytes = _coerce_str(right)
-        else:
-            raise NotImplementedError(
-                "StringVector column-column comparisons not yet supported"
-            )
-    else:
-        value_bytes = _coerce_str(right)
-
-    if op_code <= OP_GT_EQ:
-        return vec._compare_scalar(value_bytes, _DRAKEN_CMP_OP[op_code])
+    # InList: `right` is a Python collection of literals (the only legitimate
+    # non-vector RHS — it predates the carchar/perfect-hash set wrappers that
+    # draken_compare builds upstream).
     if op_code == OP_IN_LIST:
-        return vector_in_list(vec, build_in_list_carchar(value_set))
+        return vector_in_list(vec, build_in_list_carchar(_coerce_str_set(right)))
+
+    # Eq / NotEq / Lt / Gt / LtEq / GtEq: vector-to-vector. `right` is a wrapped
+    # literal (or a column); the *_vector kernels walk both operands together
+    # and handle every layout (constant/dict/dense) internally.
+    if op_code <= OP_GT_EQ:
+        if op_code == OP_EQ:
+            return vec.equals_vector(right)
+        if op_code == OP_NOT_EQ:
+            return vec.not_equals_vector(right)
+        if op_code == OP_LT:
+            return vec.less_than_vector(right)
+        if op_code == OP_GT:
+            return vec.greater_than_vector(right)
+        if op_code == OP_LT_EQ:
+            return vec.less_than_or_equals_vector(right)
+        if op_code == OP_GT_EQ:
+            return vec.greater_than_or_equals_vector(right)
+
+    # LIKE / RLIKE / InStr family: vector-to-scalar. The pattern arrives wrapped
+    # as a StringVector; the kernels enforce the single-pattern shape rule
+    # (data_length == 1) and read the pattern bytes from the arena.
     if op_code == OP_LIKE:
-        return vector_like(vec, value_bytes, False)
+        return vector_like(vec, right, False)
     if op_code == OP_ILIKE:
-        return vector_like(vec, value_bytes, True)
+        return vector_like(vec, right, True)
     if op_code == OP_RLIKE:
-        return vector_rlike(vec, value_bytes)
+        return vector_rlike(vec, right)
     if op_code == OP_IN_STR:
-        return vector_contains(vec, value_bytes, False)
+        return vector_contains(vec, right, False)
     if op_code == OP_I_IN_STR:
-        return vector_contains(vec, value_bytes, True)
+        return vector_contains(vec, right, True)
     raise NotImplementedError(f"StringVector: unsupported op (code {op_code})")
 
 
 cpdef _string_anyop_like(vec, patterns, bint ignore_case):
     cdef list pat_list
-    cdef bytes pat_bytes
     cdef object result = None
     cdef object mask
+    cdef object needle
 
     if isinstance(patterns, (list, tuple)):
         pat_list = list(patterns)
@@ -71,11 +78,10 @@ cpdef _string_anyop_like(vec, patterns, bint ignore_case):
     for p in pat_list:
         if p is None:
             continue
-        if isinstance(p, bytes):
-            pat_bytes = p
-        else:
-            pat_bytes = str(p).encode()
-        mask = vector_like(vec, pat_bytes, ignore_case)
+        # AnyOp iterates individual patterns; wrap each as a 1-row constant
+        # StringVector so the single-pattern kernel can read it.
+        needle = StringVector.from_constant(p, 1)
+        mask = vector_like(vec, needle, ignore_case)
         if result is None:
             result = mask
         else:

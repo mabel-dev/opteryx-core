@@ -54,12 +54,6 @@ def _column_bytes(identity):
 
 
 
-def _constant_scalar_value(vector):
-    if len(vector) == 0:
-        return None
-    return vector[0]
-
-
 def _count_null_bitmap(const uint8_t* bitmap, Py_ssize_t nrows) -> int:
     cdef Py_ssize_t i
     cdef Py_ssize_t count = 0
@@ -98,12 +92,6 @@ def _vector_sum(vector):
     if valid_count == 0:
         return None
 
-    if _is_constant_vector_like(vector):
-        scalar = _constant_scalar_value(vector)
-        if scalar is None:
-            return None
-        return scalar * valid_count
-
     # Try to use native sum() method if available (fast path for numeric types)
     if hasattr(vector, 'sum'):
         try:
@@ -121,10 +109,6 @@ def _vector_min(vector):
     valid_count = len(vector) - _vector_null_count(vector)
     if valid_count == 0:
         return None
-
-    if _is_constant_vector_like(vector):
-        scalar = _constant_scalar_value(vector)
-        return scalar if scalar is not None else None
 
     # Try to use native min() method if available
     if hasattr(vector, 'min'):
@@ -144,10 +128,6 @@ def _vector_max(vector):
     valid_count = len(vector) - _vector_null_count(vector)
     if valid_count == 0:
         return None
-
-    if _is_constant_vector_like(vector):
-        scalar = _constant_scalar_value(vector)
-        return scalar if scalar is not None else None
 
     # Try to use native max() method if available
     if hasattr(vector, 'max'):

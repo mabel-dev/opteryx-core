@@ -22,11 +22,11 @@ See: vector_bitwise_or.pyx, vector_bitwise_and.pyx, vector_bitwise_xor.pyx,
      vector_bitwise_shift_left.pyx, vector_bitwise_shift_right.pyx
 """
 
+from cpython.array cimport array, clone
 from libc.stdint cimport int64_t, uint8_t
 
-from draken.vectors.integer64_vector cimport Integer64Vector
-from draken.core.buffers cimport DrakenVector, DrakenFixedBuffer
-from draken.interop.vector_sequence cimport vector_from_sequence
+from draken.vectors.integer64_vector cimport Integer64Vector, from_packed_dict as int64_from_packed_dict
+from draken.core.buffers cimport DrakenVector
 
 
 cpdef object vector_bitwise_not(Integer64Vector operand):
@@ -51,24 +51,23 @@ cpdef object vector_bitwise_not(Integer64Vector operand):
     """
     cdef DrakenVector* uv = operand.unified()
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
-
-    # Handle constant-encoded vector
-    if uv.data_length == 1:  # constant
-        if uv.validity != NULL:  # null constant
-            return Integer64Vector.from_constant(None, n, is_null=True)
-        return Integer64Vector.from_constant(~(<int64_t*>uv.data)[0], n)
-
-    cdef DrakenFixedBuffer* op = operand.ptr
-    cdef int64_t* op_data = <int64_t*>op.data
-    cdef uint8_t* op_null = op.null_bitmap
-
-    cdef list result = []
+    cdef Py_ssize_t slot_count = <Py_ssize_t>uv.data_length
+    cdef int64_t* data = <int64_t*>uv.data
     cdef Py_ssize_t i
 
-    for i in range(n):
-        if _is_null(op_null, i):
-            result.append(None)
-        else:
-            result.append(~op_data[i])
+    cdef array template = array('l')
+    cdef array output_array = clone(template, slot_count, False)
+    cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
 
-    return vector_from_sequence(result)
+    for i in range(slot_count):
+        output_ptr[i] = ~data[i]
+
+    return int64_from_packed_dict(
+        <uint8_t*>uv.selection,
+        4,
+        n,
+        <const int64_t*>output_ptr,
+        slot_count,
+        uv.validity,
+        False,
+    )

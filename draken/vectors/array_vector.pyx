@@ -103,6 +103,10 @@ cdef class ArrayVector(Vector):
             self._unified_view.selection = draken_identity_sel(<uint32_t>self.ptr.length)
         return &self._unified_view
 
+    cdef void _set_null_bitmap(self, uint8_t* bm) noexcept:
+        self.ptr.null_bitmap = bm
+        self.owns_null_bitmap = bm != NULL
+
     def _unified_selection_for_test(self):
         """Test-only: return the unified view's selection as a Python list of ints.
 

@@ -276,3 +276,72 @@ def test_morsel_io_memoryview_target_too_small():
     target = bytearray(max(1, len(payload) - 1))
     with pytest.raises(ValueError, match="too small"):
         write_morsel(memoryview(target), original, {"codec_default": "none", "checksum_enabled": True})
+
+
+# --- Null round-trip via the unified view (Chunk 5) -------------------------
+# Every consumer reads nulls from unified().validity, not ptr.null_bitmap.
+# A read path that populates only ptr.null_bitmap silently loses nulls. These
+# tests assert specifically on the unified view so the gap cannot regress.
+
+
+def test_morsel_io_round_trip_dense_string_nulls_unified_validity(tmp_path):
+    original = Morsel.from_arrow(
+        pa.table({"s": pa.array([b"one", None, b"three", b""], type=pa.binary())})
+    )
+    path = tmp_path / "dense_string_nulls.drkm"
+    write_morsel(path, original, {"codec_default": "none", "checksum_enabled": True})
+    restored = read_morsel(path, {"checksum_enabled": True})
+
+    col = restored.column(b"s")
+    assert col._unified_validity_is_set_for_test()
+    assert col.to_pylist() == [b"one", None, b"three", b""]
+
+
+def test_morsel_io_round_trip_constant_string_null_unified_validity(tmp_path):
+    original = Morsel.from_vectors(["n"], [StringVector.from_constant(None, 4, is_null=True)])
+    path = tmp_path / "const_string_null.drkm"
+    write_morsel(path, original, {"codec_default": "none", "checksum_enabled": True})
+    restored = read_morsel(path, {"checksum_enabled": True})
+
+    col = restored.column(b"n")
+    assert col._unified_validity_is_set_for_test()
+    assert col.to_pylist() == [None, None, None, None]
+
+
+def test_morsel_io_round_trip_dict_string_unified_validity(tmp_path):
+    # Dictionary string without nulls: the unified view must report all-valid
+    # (validity == NULL). Row-level nulls on dictionary strings are persisted
+    # as dictionary-entry nulls and rejected on read (a separate, explicit
+    # limitation), so cannot be exercised here.
+    di = pa.array([0, 1, 2, 1], type=pa.int8())
+    dd = pa.array([b"one", b"two", b"three"], type=pa.binary())
+    original = Morsel.from_arrow(pa.table({"k": pa.DictionaryArray.from_arrays(di, dd)}))
+    path = tmp_path / "dict_string.drkm"
+    write_morsel(path, original, {"codec_default": "none", "checksum_enabled": True})
+    restored = read_morsel(path, {"checksum_enabled": True})
+
+    col = restored.column(b"k")
+    assert col.__class__.__name__ == "StringVector"
+    assert not col._unified_validity_is_set_for_test()
+    assert col.to_pylist() == [b"one", b"two", b"three", b"two"]
+
+
+def test_morsel_io_round_trip_numeric_dense_nulls(tmp_path):
+    original = Morsel.from_arrow(
+        pa.table(
+            {
+                "i": pa.array([1, None, 3, -4], type=pa.int64()),
+                "f": pa.array([1.5, None, -2.0, 9.25], type=pa.float64()),
+            }
+        )
+    )
+    path = tmp_path / "numeric_dense_nulls.drkm"
+    write_morsel(path, original, {"codec_default": "none", "checksum_enabled": True})
+    restored = read_morsel(path, {"checksum_enabled": True})
+
+    # null_count reads unified().validity, so this asserts the unified view
+    # carries the null state, not just ptr.null_bitmap.
+    assert restored.column(b"i").null_count == 1
+    assert restored.column(b"f").null_count == 1
+    assert restored.column(b"i").to_pylist() == [1, None, 3, -4]
+    assert restored.column(b"f").to_pylist() == [1.5, None, -2.0, 9.25]

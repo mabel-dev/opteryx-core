@@ -91,9 +91,6 @@ cdef class GroupHashEngine:
     cdef list _group_columns                  # list[bytes] — init only
     cdef bint _resolved                       # True after first morsel type resolution
     cdef bint _telemetry_enabled
-    cdef bint _use_partial_agg                # True when all keys are dict/RLE and cardinality is low
-    cdef bint _allow_partial_agg              # False for local engines to prevent recursion
-    cdef list _original_collectors            # resolved collector instances before merge-swap
     cdef long long _time_resolve_ns
     cdef long long _time_hash_ns
     cdef long long _time_lookup_ns
@@ -114,7 +111,6 @@ cdef class GroupHashEngine:
         list collectors,
         bint telemetry_enabled=False,
         bint use_parvi=False,
-        bint allow_partial_agg=True,
     ):
         self._group_columns = group_columns
         self._collectors = collectors
@@ -125,9 +121,6 @@ cdef class GroupHashEngine:
         self._promoted_from_parvi = False
         self._parvi_final_size = 0
         self._parvi = NULL
-        self._use_partial_agg = False
-        self._allow_partial_agg = allow_partial_agg
-        self._original_collectors = None
         self._time_resolve_ns = 0
         self._time_hash_ns = 0
         self._time_lookup_ns = 0
@@ -192,250 +185,8 @@ cdef class GroupHashEngine:
             self._index = new CarcharIndex(_INITIAL_INDEX_CAPACITY, _CARCHAR_LOAD_FACTOR)
         self._resolved = True
 
-        if self._allow_partial_agg:
-            self._try_enable_partial_agg(morsel)
-
         if self._telemetry_enabled:
             self._time_resolve_ns += _now_ns() - start_ns
-
-    cdef void _try_enable_partial_agg(self, object morsel):
-        """Gate: enable partial aggregation when all group keys are dict/RLE encoded
-        and the estimated group count is ≤ 50% of morsel row count.
-
-        When enabled, swaps _collectors for merge-mode collectors (reading from
-        result_name) and stores the originals in _original_collectors for local
-        engine construction each morsel.
-
-        Design intent: for low-cardinality dict/RLE-encoded string group keys, a
-        per-morsel local aggregate collapses N rows to K groups (K << N), so the
-        global hash table sees K probes per morsel instead of N.  Both the local
-        table (bounded by dict/RLE cardinality) and the global table (bounded by K
-        total distinct groups) stay cache-resident, eliminating the DRAM-speed
-        probes that dominate high-cardinality aggregation.
-
-        This gate does NOT fire on integer group keys (KEY_MULTI_FIXED_INT) because:
-          - ClickBench-style queries group on dense integers (UserID, WatchID, RegionID)
-            where every row is a near-unique group and partial agg gives no fold.
-          - Integer-keyed GROUP BY hits the irreducible cache-miss floor regardless
-            of strategy; the right fix there is radix partitioning (out of scope here).
-
-        The optimization targets real-world GROUP BY country/category/status patterns
-        where a handful of dict entries appear millions of times per morsel.
-        AVG and non-mergeable aggregates (COUNT DISTINCT, MEDIAN) are excluded;
-        see _clone_as_merge() on each collector for the merge semantics.
-        """
-        # All group key columns must be encoded strings.
-        for k in self._key_kinds:
-            if k != KEY_MULTI_ENCODED_STRING:
-                return
-
-        # All collectors must be mergeable (non-None _clone_as_merge).
-        cdef list merge_collectors = []
-        cdef BaseCollector c, mc
-        cdef StringVector svec
-        for c in self._collectors:
-            mc = (<BaseCollector>c)._clone_as_merge()
-            if mc is None:
-                return
-            merge_collectors.append(mc)
-
-        # Estimate combined group cardinality using dampened product of dict/RLE sizes.
-        cdef double estimated = 1.0
-        cdef bint first_col = True
-        cdef Py_ssize_t card
-        for col_name in self._group_columns:
-            vec = morsel.column(col_name)
-            if not isinstance(vec, StringVector):
-                return
-            svec = <StringVector>vec
-            if svec._unified_view.data_length < svec._unified_view.length:
-                card = svec.c_dict_size()
-            else:
-                return
-            if first_col:
-                estimated = <double>card
-                first_col = False
-            else:
-                estimated *= <double>card * 0.6
-
-        if estimated > <double>morsel.num_rows * 0.5:
-            return
-
-        # Gate passed: store originals, swap in merge collectors.
-        self._original_collectors = self._collectors
-        self._collectors = merge_collectors
-        self._use_partial_agg = True
-
-    cdef void _ingest_with_partial_agg(self, object morsel) except *:
-        """Route one raw morsel through a fresh local engine, then merge the
-        partial result (one row per local group) into the global hash table."""
-        cdef list local_collectors = []
-        cdef BaseCollector c
-        for c in self._original_collectors:
-            local_collectors.append((<BaseCollector>c)._clone_empty())
-
-        local_engine = GroupHashEngine(
-            self._group_columns,
-            local_collectors,
-            False,   # no telemetry on local engines
-            False,   # start with carchar; parvi (16 slots) would immediately overflow
-            False,   # allow_partial_agg=False — prevent recursion
-        )
-        local_engine.ingest(morsel)
-        for partial_morsel in local_engine.finalize_morsels():
-            self._ingest_direct(partial_morsel)
-
-    cdef void _ingest_direct(self, object morsel) except *:
-        """Ingest a partial morsel directly into the global hash table,
-        bypassing the partial-agg routing check."""
-        self._do_ingest(morsel)
-
-    cdef void _ingest_dict_single_string_fast(
-        self, object morsel, StringVector svec, Py_ssize_t n_rows
-    ) except *:
-        """Fast ingest path for a single dict-encoded string GROUP BY key.
-
-        Computes the K dict-value hashes once, looks them up in the index to
-        build a code→state mapping, then walks the N codes filling the
-        state-indices buffer.  Avoids the per-row hash-and-probe loop
-        entirely.  Assumes carchar (non-parvi) mode and a non-NULL index.
-        """
-        cdef Py_ssize_t dict_size = svec.c_dict_size()
-        cdef DrakenVector* _suv = svec.unified()
-        cdef const uint32_t* codes = _suv.selection
-        cdef const uint8_t* row_nulls = _suv.validity
-        cdef const int64_t* counts = svec.c_dict_code_counts_ptr()
-        cdef int64_t* si_buf = self._state_indices_buf.data()
-        cdef int64_t num_groups = self._num_groups
-        cdef int64_t state_idx
-        cdef uint64_t h
-        cdef Py_ssize_t i, di
-        cdef uint32_t code
-        cdef int64_t null_state_idx = -1
-        cdef Py_ssize_t first_null_row = -1
-        cdef uint64_t null_marker = mix_hash(0, NULL_HASH)
-        cdef int64_t* code_to_state = NULL
-        cdef uint8_t* dict_is_new = NULL
-        cdef Py_ssize_t* first_row_per_dict = NULL
-        cdef Py_ssize_t alloc_k = dict_size if dict_size > 0 else 1
-        cdef bint _is_new
-
-        code_to_state = <int64_t*>malloc(<size_t>alloc_k * sizeof(int64_t))
-        dict_is_new = <uint8_t*>malloc(<size_t>alloc_k * sizeof(uint8_t))
-        first_row_per_dict = <Py_ssize_t*>malloc(<size_t>alloc_k * sizeof(Py_ssize_t))
-        if code_to_state == NULL or dict_is_new == NULL or first_row_per_dict == NULL:
-            if code_to_state != NULL: free(code_to_state)
-            if dict_is_new != NULL: free(dict_is_new)
-            if first_row_per_dict != NULL: free(first_row_per_dict)
-            raise MemoryError()
-
-        try:
-            # Phase 1: per dict entry — compute hash, insert/lookup, build map.
-            # Skip entries that are unreferenced (count == 0) to avoid
-            # allocating empty groups.  Sentinel state_idx = -2 means
-            # "this dict entry is itself null; rows pointing here go to
-            # the global null group".  Sentinel state_idx = -3 means
-            # "this dict entry has zero references; should never be looked
-            # up via si_buf".
-            for di in range(dict_size):
-                first_row_per_dict[di] = -1
-                dict_is_new[di] = 0
-                if counts[di] <= 0:
-                    code_to_state[di] = -3
-                    continue
-                if svec.c_dict_value_is_null(di):
-                    code_to_state[di] = -2
-                    continue
-                h = svec.c_dict_value_hash(di)
-                _is_new = self._index.find_or_insert_id(h, num_groups, state_idx)
-                if _is_new:
-                    num_groups += 1
-                    dict_is_new[di] = 1
-                code_to_state[di] = state_idx
-
-            # Phase 2: walk N rows, fill si_buf, lazily allocate the null group.
-            for i in range(n_rows):
-                if row_nulls != NULL and not (
-                    (row_nulls[i >> 3] >> (i & 7)) & 1
-                ):
-                    if null_state_idx < 0:
-                        _is_new = self._index.find_or_insert_id(null_marker, num_groups, null_state_idx)
-                        if _is_new:
-                            num_groups += 1
-                            first_null_row = i
-                    si_buf[i] = null_state_idx
-                    continue
-
-                code = codes[i]
-
-                if <Py_ssize_t>code >= dict_size:
-                    raise ValueError(
-                        f"dictionary index out of bounds at row {i}: {code}"
-                    )
-
-                state_idx = code_to_state[<Py_ssize_t>code]
-                if state_idx == -3:
-                    # Should be unreachable: a valid row referencing a code
-                    # implies count[code] > 0.  Fail fast if violated.
-                    raise ValueError(
-                        f"dict-fast-path invariant violated at row {i}: "
-                        f"code {code} was unreferenced but a valid row uses it"
-                    )
-                if state_idx == -2:
-                    # Dict entry is null → goes to the global null group.
-                    if null_state_idx < 0:
-                        _is_new = self._index.find_or_insert_id(null_marker, num_groups, null_state_idx)
-                        if _is_new:
-                            num_groups += 1
-                            first_null_row = i
-                    si_buf[i] = null_state_idx
-                    continue
-
-                si_buf[i] = state_idx
-                if dict_is_new[<Py_ssize_t>code] and first_row_per_dict[<Py_ssize_t>code] < 0:
-                    first_row_per_dict[<Py_ssize_t>code] = i
-
-            # Phase 3: collect first-row indices for newly-allocated states so
-            # KeyStore.store_new_rows can read each new group's key value.
-            for di in range(dict_size):
-                if dict_is_new[di] and first_row_per_dict[di] >= 0:
-                    self._new_row_scratch.push_back(first_row_per_dict[di])
-            if first_null_row >= 0:
-                self._new_row_scratch.push_back(first_null_row)
-        finally:
-            free(code_to_state)
-            free(dict_is_new)
-            free(first_row_per_dict)
-
-        self._num_groups = num_groups
-
-        # Mirror the post-loop work the regular ingest path does.
-        cdef Py_ssize_t n_new = <Py_ssize_t>self._new_row_scratch.size()
-        cdef long long phase_start
-        if n_new > 0:
-            if self._telemetry_enabled:
-                phase_start = _now_ns()
-            self._key_store.store_new_rows(
-                morsel,
-                self._new_row_scratch.data(),
-                n_new,
-            )
-            if self._telemetry_enabled:
-                self._time_store_keys_ns += _now_ns() - phase_start
-
-            if self._telemetry_enabled:
-                phase_start = _now_ns()
-            for collector in self._collectors:
-                (<BaseCollector>collector).grow(num_groups)
-            if self._telemetry_enabled:
-                self._time_grow_ns += _now_ns() - phase_start
-
-        if self._telemetry_enabled:
-            phase_start = _now_ns()
-        for collector in self._collectors:
-            (<BaseCollector>collector).accumulate(morsel, si_buf, n_rows)
-        if self._telemetry_enabled:
-            self._time_accumulate_ns += _now_ns() - phase_start
 
     cpdef void ingest(self, object morsel):
         """Route one input Morsel to the appropriate ingest path."""
@@ -444,10 +195,7 @@ cdef class GroupHashEngine:
             return
         if not self._resolved:
             self._resolve_on_first_morsel(morsel)
-        if self._use_partial_agg:
-            self._ingest_with_partial_agg(morsel)
-        else:
-            self._do_ingest(morsel)
+        self._do_ingest(morsel)
 
     cdef void _do_ingest(self, object morsel) except *:
         """
@@ -470,36 +218,6 @@ cdef class GroupHashEngine:
         if <Py_ssize_t>self._state_indices_buf.size() < n_rows:
             self._state_indices_buf.resize(n_rows)
         self._new_row_scratch.clear()
-
-        # Single dict-encoded string-key fast path: skip morsel.hash entirely
-        # and use the dict codes as group ids.  K hash-table lookups instead
-        # of N.  Only viable in carchar mode (parvi has its own small-map
-        # invariants we don't replicate here).
-        cdef Vector raw_vec
-        cdef StringVector svec_key
-        if (
-            not self._use_parvi
-            and self._index != NULL
-            and len(self._group_columns) == 1
-            and self._key_kinds[0] == KEY_MULTI_ENCODED_STRING
-        ):
-            raw_vec = <Vector>morsel.column(self._group_columns[0])
-            if isinstance(raw_vec, StringVector):
-                svec_key = <StringVector>raw_vec
-                # Cardinality gate: at K ~ N the existing path's batched
-                # hash + cached lookups beat our K-independent path.  Only
-                # take the fast path when K is meaningfully smaller than N.
-                if (
-                    svec_key._unified_view.data_length < svec_key._unified_view.length
-                    and svec_key.c_dict_size() <= (n_rows >> 2)
-                ):
-                    if self._telemetry_enabled:
-                        phase_start = _now_ns()
-                    self._ingest_dict_single_string_fast(morsel, svec_key, n_rows)
-                    if self._telemetry_enabled:
-                        self._time_lookup_ns += _now_ns() - phase_start
-                        self._time_resolve_ns += _now_ns() - start_ns
-                    return
 
         if self._telemetry_enabled:
             phase_start = _now_ns()

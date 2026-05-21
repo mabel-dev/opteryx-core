@@ -80,6 +80,7 @@ cdef class StringVector(Vector):
     cdef bint _min_max_valid
 
     cdef DrakenVector* unified(self) noexcept
+    cdef void _set_null_bitmap(self, uint8_t* bm) noexcept
 
     # Encoded-form accessors for dict/RLE-aware operators.
     # Each method assumes the caller has already verified the encoding.

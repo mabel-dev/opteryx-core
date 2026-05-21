@@ -13,7 +13,7 @@ from libc.stdint cimport uint8_t, uint32_t, int64_t
 from libc.string cimport memset
 from cpython.array cimport array, clone
 
-from draken.core.buffers cimport DrakenVarBuffer, DrakenVector, DrakenStringArena, DrakenStringSlot, str_length, str_data
+from draken.core.buffers cimport DrakenVector, DrakenStringArena, DrakenStringSlot, str_length, str_data
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.float32_vector cimport Float32Vector
 from draken.vectors.string_vector cimport StringVector
@@ -248,8 +248,6 @@ cpdef BoolVector vector_match_against(
     if isinstance(values, Vector):
         uv = (<Vector>values).unified()
 
-    if uv != NULL and isinstance(values, StringVector) and (<StringVector>values)._unified_view.data_length < (<StringVector>values)._unified_view.length:
+    if uv != NULL and isinstance(values, StringVector):
         return _vector_match_against_dictionary_accessor(values, uv, provider, query_text, min_score)
-    if isinstance(values, StringVector):
-        return _vector_match_against_string_vector(values, provider, query_text, min_score)
     raise TypeError(f"vector_match_against requires StringVector, dictionary-encoded Vector, or VectorVector, got {type(values)}")

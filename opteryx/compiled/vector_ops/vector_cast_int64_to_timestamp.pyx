@@ -20,7 +20,7 @@ from libc.string cimport memcpy
 
 from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.timestamp_vector cimport TimestampVector, timestamp_dict_from_raw
-from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenVector, DRAKEN_TIMESTAMP64
+from draken.core.buffers cimport DrakenVector, DrakenVarBuffer, DRAKEN_TIMESTAMP64
 from draken.core.var_vector cimport alloc_var_buffer
 
 # C++ SIMD dispatch functions
@@ -60,37 +60,7 @@ cpdef TimestampVector vector_cast_int64_to_timestamp(Integer64Vector int_vec, st
         raise ValueError(f"Unsupported timestamp unit: {unit!r}")
 
     cdef DrakenVector* uv = int_vec.unified()
-
-    # Check if vector is dictionary-encoded
-    if int_vec._unified_view.data_length < int_vec._unified_view.length:  # dictionary
-        return _cast_dict_encoded(int_vec, uv, factor, use_divide)
-    else:
-        return _cast_dense(int_vec, factor, use_divide)
-
-
-cdef TimestampVector _cast_dense(Integer64Vector int_vec, int64_t factor, bint use_divide):
-    """Transform dense Integer64Vector to TimestampVector."""
-    cdef DrakenFixedBuffer* ptr = int_vec.ptr
-    cdef int64_t length = ptr.length
-    cdef int64_t* int_data = <int64_t*>ptr.data
-    cdef uint8_t* null_bitmap = ptr.null_bitmap
-
-    cdef TimestampVector result = TimestampVector(length)
-    cdef int64_t* ts_data = <int64_t*>result.ptr.data
-    cdef uint8_t* result_null = result.ptr.null_bitmap
-
-    if null_bitmap != NULL and result_null != NULL:
-        memcpy(result_null, null_bitmap, (length + 7) >> 3)
-
-    if factor == 1:
-        memcpy(ts_data, int_data, length * sizeof(int64_t))
-    elif use_divide:
-        divide_int64_simd(int_data, ts_data, factor, length)
-    else:
-        multiply_int64_simd(int_data, ts_data, factor, length)
-
-    result.timestamp_unit = "us"
-    return result
+    return _cast_dict_encoded(int_vec, uv, factor, use_divide)
 
 
 cdef TimestampVector _cast_dict_encoded(Integer64Vector int_vec, DrakenVector* uv, int64_t factor, bint use_divide):

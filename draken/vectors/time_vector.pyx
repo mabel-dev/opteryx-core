@@ -158,6 +158,10 @@ cdef class TimeVector(Vector):
     cdef DrakenVector* unified(self) noexcept:
         return &self._unified_view
 
+    cdef void _set_null_bitmap(self, uint8_t* bm) noexcept:
+        self.ptr.null_bitmap = bm
+        self._unified_view.validity = bm
+
     # Python-friendly properties (backed by C getters for kernels)
     @property
     def length(self):
@@ -230,48 +234,42 @@ cdef class TimeVector(Vector):
     # -------- Example op --------
     cpdef TimeVector take(self, int32_t[::1] indices):
         cdef DrakenVector* uv = self.unified()
-        if uv.data_length == 1:
-            return TimeVector.from_constant(
-                None if uv.validity != NULL else (<int64_t*>uv.data)[0],
-                indices.shape[0],
-                is_null=uv.validity != NULL,
-                is_time64=self.is_time64,
-            )
         cdef Py_ssize_t i, n = indices.shape[0]
         cdef TimeVector out = TimeVector(<size_t>n, self.is_time64)
-        cdef int64_t* src64
-        cdef int64_t* dst64
-        cdef int32_t* src32
-        cdef int32_t* dst32
-        cdef uint8_t* src_null = self.ptr.null_bitmap
-        cdef uint8_t* dst_null
+        cdef uint8_t* src_null = uv.validity
+        cdef uint8_t* dst_null = NULL
         cdef Py_ssize_t nbytes = (n + 7) >> 3
         cdef int32_t idx
-
-        if self.is_time64:
-            src64 = <int64_t*> self.ptr.data
-            dst64 = <int64_t*> out.ptr.data
-            for i in range(n):
-                dst64[i] = src64[indices[i]]
-        else:
-            src32 = <int32_t*> self.ptr.data
-            dst32 = <int32_t*> out.ptr.data
-            for i in range(n):
-                dst32[i] = src32[indices[i]]
+        cdef DrakenType time_type = DRAKEN_TIME64 if self.is_time64 else DRAKEN_TIME32
 
         if src_null != NULL and nbytes != 0:
             dst_null = <uint8_t*>malloc(nbytes)
             if dst_null == NULL:
                 raise MemoryError()
             memset(dst_null, 0, nbytes)
+
+        if self.is_time64:
             for i in range(n):
                 idx = indices[i]
-                if (src_null[idx >> 3] >> (idx & 7)) & 1:
-                    dst_null[i >> 3] |= (1 << (i & 7))
-            out.ptr.null_bitmap = dst_null
-        cdef DrakenType _time_type2 = DRAKEN_TIME64 if self.is_time64 else DRAKEN_TIME32
+                if src_null != NULL and not ((src_null[idx >> 3] >> (idx & 7)) & 1):
+                    (<int64_t*>out.ptr.data)[i] = 0
+                else:
+                    (<int64_t*>out.ptr.data)[i] = (<int64_t*>uv.data)[uv.selection[idx]]
+                    if dst_null != NULL:
+                        dst_null[i >> 3] |= <uint8_t>(1 << (i & 7))
+        else:
+            for i in range(n):
+                idx = indices[i]
+                if src_null != NULL and not ((src_null[idx >> 3] >> (idx & 7)) & 1):
+                    (<int32_t*>out.ptr.data)[i] = 0
+                else:
+                    (<int32_t*>out.ptr.data)[i] = (<int32_t*>uv.data)[uv.selection[idx]]
+                    if dst_null != NULL:
+                        dst_null[i >> 3] |= <uint8_t>(1 << (i & 7))
+
+        out.ptr.null_bitmap = dst_null
         out._unified_view = draken_vector_from_dense(
-            out.ptr.data, <uint32_t>n, _time_type2, out.ptr.null_bitmap)
+            out.ptr.data, <uint32_t>n, time_type, out.ptr.null_bitmap)
         return out
 
     cpdef int8_t[::1] is_null(self):

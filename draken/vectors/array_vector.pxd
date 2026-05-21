@@ -18,6 +18,7 @@ cdef class ArrayVector(Vector):
     cdef bint _child_decode_utf8
 
     cdef DrakenVector* unified(self) noexcept
+    cdef void _set_null_bitmap(self, uint8_t* bm) noexcept
     cdef object _materialize_row(self, Py_ssize_t idx)
     cdef void hash_into(
         self,

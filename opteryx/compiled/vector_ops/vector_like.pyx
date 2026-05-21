@@ -11,7 +11,6 @@
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.core.buffers cimport DrakenVector, DrakenStringArena, DrakenStringSlot, str_length, str_data
-from cpython.bytes cimport PyBytes_AS_STRING
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
 from libc.stdint cimport uint8_t, uint32_t
@@ -75,16 +74,33 @@ cdef bint _sv_sql_like_match(
 
 cpdef BoolVector vector_like(
     StringVector vec,
-    bytes pattern,
+    StringVector pattern,
     bint ignore_case=False,
     bint negate=False,
 ):
     """Return mask: 1 if element matches SQL LIKE pattern, else 0. Propagates NULLs.
 
+    `pattern` is the wrapped pattern literal. SQL LIKE takes a single pattern,
+    so the shape rule (one unique value) is enforced here: `data_length != 1`
+    fails. The pattern bytes are read straight from the arena — no Python
+    bytes object crosses into the engine. The check runs with the GIL held,
+    before the hot loop, so the raise is Python-free where it matters.
+
     If `negate` is True, the result is the row-wise NotLike: True where the
     element does NOT match the pattern. Fuses what would otherwise be a
     second full-pass `.not_vector()`.
     """
+    cdef DrakenVector* puv = pattern.unified()
+    if puv.data_length != 1:
+        raise ValueError(
+            "vector_like: pattern must be a single value (data_length == 1)"
+        )
+    cdef DrakenStringArena* parena = <DrakenStringArena*>puv.data
+    cdef uint32_t* psel = <uint32_t*>puv.selection
+    cdef DrakenStringSlot* pslot = &parena.slots[psel[0]]
+    cdef const uint8_t* pat_ptr = str_data(pslot, parena.arena)
+    cdef Py_ssize_t pat_len = <Py_ssize_t>str_length(pslot)
+
     cdef DrakenVector* uv = vec.unified()
     cdef DrakenStringArena* arena = <DrakenStringArena*>uv.data
     cdef uint32_t* sel = <uint32_t*>uv.selection
@@ -95,12 +111,14 @@ cpdef BoolVector vector_like(
     cdef uint8_t* dst = <uint8_t*> out.ptr.data
     cdef uint8_t* out_null = NULL
     cdef uint8_t mask
-    cdef char* pat_ptr = PyBytes_AS_STRING(pattern)
-    cdef Py_ssize_t pat_len = len(pattern)
     cdef Py_ssize_t i
     cdef DrakenStringSlot* slot
     cdef const uint8_t* sdata
     cdef uint32_t slen
+
+    # A NULL pattern makes every row NULL (SQL: x LIKE NULL is NULL).
+    if puv.validity != NULL and (puv.validity[0] & 1) == 0:
+        return _all_null_bool(n)
 
     # Initial fill matches the wanted result for the "no match" rows so the
     # inner loop only touches bits at matches.
@@ -132,7 +150,7 @@ cpdef BoolVector vector_like(
             sdata = str_data(slot, arena.arena)
             if _sv_sql_like_match(
                 sdata, <Py_ssize_t>slen,
-                <const uint8_t*>pat_ptr, pat_len, ignore_case,
+                pat_ptr, pat_len, ignore_case,
             ):
                 dst[i >> 3] &= ~(1 << (i & 7))
     else:
@@ -144,7 +162,7 @@ cpdef BoolVector vector_like(
             sdata = str_data(slot, arena.arena)
             if _sv_sql_like_match(
                 sdata, <Py_ssize_t>slen,
-                <const uint8_t*>pat_ptr, pat_len, ignore_case,
+                pat_ptr, pat_len, ignore_case,
             ):
                 dst[i >> 3] |= (1 << (i & 7))
 

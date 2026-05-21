@@ -12,7 +12,6 @@ from draken.vectors.string_vector cimport StringVector, DrakenVarBuffer
 from draken.vectors.bool_vector cimport BoolVector
 from draken.core.buffers cimport DrakenVector, DrakenStringArena, DrakenStringSlot
 from draken.core.buffers cimport str_length, str_data
-from cpython.bytes cimport PyBytes_AS_STRING
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
 from libc.stddef cimport size_t
@@ -56,8 +55,25 @@ cdef bint _sv_contains_ci(
     return volnitsky_contains_ci(haystack, <size_t>hay_len, needle_lower, <size_t>ndl_len, tbl)
 
 
-cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_case=False):
-    """Return mask: 1 if element contains substr, else 0. Propagates NULLs."""
+cpdef BoolVector vector_contains(StringVector vec, StringVector substr, bint ignore_case=False):
+    """Return mask: 1 if element contains substr, else 0. Propagates NULLs.
+
+    `substr` is the wrapped needle literal; substring search takes a single
+    needle, so the shape rule (one unique value) is enforced here via
+    `data_length`. The needle bytes are read straight from the arena — no
+    Python bytes object crosses into the engine.
+    """
+    cdef DrakenVector* nuv = substr.unified()
+    if nuv.data_length != 1:
+        raise ValueError(
+            "vector_contains: substr must be a single value (data_length == 1)"
+        )
+    cdef DrakenStringArena* narena = <DrakenStringArena*>nuv.data
+    cdef uint32_t* nsel = <uint32_t*>nuv.selection
+    cdef DrakenStringSlot* nslot = &narena.slots[nsel[0]]
+    cdef const uint8_t* ndl_ptr = str_data(nslot, narena.arena)
+    cdef Py_ssize_t ndl_len = <Py_ssize_t>str_length(nslot)
+
     cdef DrakenVector* uv = vec.unified()
     cdef DrakenStringArena* arena = <DrakenStringArena*>uv.data
     cdef uint32_t* sel = <uint32_t*>uv.selection
@@ -70,8 +86,6 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
     cdef uint8_t* out_null = NULL
     cdef uint8_t mask
 
-    cdef char* ndl_ptr_char = PyBytes_AS_STRING(substr)
-    cdef Py_ssize_t ndl_len = len(substr)
     cdef uint8_t* ndl_lower = NULL
 
     cdef Py_ssize_t i, j
@@ -80,6 +94,10 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
     cdef const uint8_t* sdata
     cdef uint32_t slen
     cdef VolnitskyTable* tbl = NULL
+
+    # A NULL needle makes every row NULL (SQL: x InStr NULL is NULL).
+    if nuv.validity != NULL and (nuv.validity[0] & 1) == 0:
+        return _all_null_bool(n)
 
     memset(dst, 0, nbytes)
 
@@ -102,7 +120,7 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
         if ndl_lower == NULL:
             raise MemoryError()
         for j in range(ndl_len):
-            ndl_lower[j] = _sv_ascii_lower(<uint8_t>ndl_ptr_char[j])
+            ndl_lower[j] = _sv_ascii_lower(ndl_ptr[j])
 
     # Build Volnitsky table once for all elements in this morsel
     tbl = volnitsky_alloc()
@@ -113,7 +131,7 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
     if ignore_case and ndl_lower != NULL:
         volnitsky_build(tbl, ndl_lower, <size_t>ndl_len)
     else:
-        volnitsky_build(tbl, <const uint8_t*>ndl_ptr_char, <size_t>ndl_len)
+        volnitsky_build(tbl, ndl_ptr, <size_t>ndl_len)
 
     try:
         for i in range(n):
@@ -125,7 +143,7 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
             if ignore_case:
                 if _sv_contains_ci(
                     sdata, <Py_ssize_t>slen,
-                    ndl_lower if ndl_lower != NULL else <uint8_t*>ndl_ptr_char,
+                    ndl_lower if ndl_lower != NULL else <uint8_t*>ndl_ptr,
                     ndl_len,
                     tbl,
                 ):
@@ -133,7 +151,7 @@ cpdef BoolVector vector_contains(StringVector vec, bytes substr, bint ignore_cas
             else:
                 if _sv_contains_cs(
                     sdata, <Py_ssize_t>slen,
-                    <const uint8_t*>ndl_ptr_char, ndl_len,
+                    ndl_ptr, ndl_len,
                     tbl,
                 ):
                     dst[i >> 3] |= (1 << (i & 7))

@@ -686,7 +686,9 @@ from opteryx.compiled.expression.compiled_expression cimport (
     BytecodeInstr,
     CompiledBytecode,
 )
-from libc.stdint cimport uint8_t, int8_t, uintptr_t
+from libc.stdint cimport uint8_t, int8_t, uintptr_t, uint32_t
+
+from draken.core.buffers cimport DrakenVector
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy, memset
 from libc.stddef cimport size_t
@@ -743,9 +745,10 @@ cdef extern from "bytecode_worker.h" nogil:
 # ---------------------------------------------------------------------------
 
 ctypedef struct ColCache:
-    uint8_t* data       # ptr to dense BoolVector bitmap data
-    uint8_t* null_bm    # ptr to null bitmap (NULL = no nulls)
-    bint     is_bool    # True if the column resolved to a BoolVector
+    uint8_t*        data       # ptr to BoolVector bitmap data (unified view)
+    uint8_t*        null_bm    # ptr to validity bitmap (NULL = no nulls)
+    const uint32_t* sel        # per-logical-row selection into `data`
+    bint            is_bool    # True if the column resolved to a BoolVector
 
 
 cdef int _execute_bytecode_prepass(
@@ -770,6 +773,7 @@ cdef int _execute_bytecode_prepass(
     cdef Vector v
     cdef BoolVector bv
     cdef uint8_t* p
+    cdef DrakenVector* uv
 
     # Allocate n_slots + 2 bitmap buffers:
     #   [0 .. n_slots-1] = stack slots
@@ -802,12 +806,12 @@ cdef int _execute_bytecode_prepass(
             return -1  # not a BoolVector — caller must fall back
 
         bv = <BoolVector>v
-        if bv.unified().data_length == 1:
-            bv = <BoolVector>bv.materialize()
         anchors.append(bv)  # keep alive during inner loop
+        uv = bv.unified()
         col_cache[k].is_bool = True
-        col_cache[k].data = <uint8_t*>bv.ptr.data
-        col_cache[k].null_bm = bv.ptr.null_bitmap
+        col_cache[k].data = <uint8_t*>uv.data
+        col_cache[k].null_bm = uv.validity
+        col_cache[k].sel = uv.selection
 
     return 0
 
@@ -865,7 +869,11 @@ cdef int c_execute_bytecode_inner(
         if opcode == BC_LOAD_COL:
             if not col_cache[i].is_bool:
                 return 1  # unexpected non-bool column
-            memcpy(bitmaps[sp], col_cache[i].data, nbytes)
+            memset(bitmaps[sp], 0, nbytes)
+            for j in range(num_rows):
+                base = col_cache[i].sel[j]
+                if (col_cache[i].data[base >> 3] >> (base & 7)) & 1:
+                    bitmaps[sp][j >> 3] |= <uint8_t>(1 << (j & 7))
             if col_cache[i].null_bm != NULL:
                 memcpy(null_bitmaps[sp], col_cache[i].null_bm, nbytes)
                 slot_has_null[sp] = 1

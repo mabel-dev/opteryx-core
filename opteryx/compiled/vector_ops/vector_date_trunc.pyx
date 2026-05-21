@@ -25,17 +25,11 @@ cdef inline int64_t* _ts_materialize_dense(
     """Return a dense int64_t* of `length` values for a TimestampVector's unified view.
 
     Gathers values via uv.data[uv.selection[i]] — uniform access for dense,
-    constant, and dict-encoded vectors. Caller must free when owned[0] is True.
+    constant, and dict-encoded vectors. Caller must free the returned pointer.
     """
     cdef int64_t* src = <int64_t*>uv.data
     cdef int64_t* dst
     cdef int64_t i
-
-    owned[0] = False
-
-    if uv.data_length == <uint32_t>length:
-        # Dense (identity selection) — alias the existing buffer.
-        return src
 
     dst = <int64_t*>malloc(<size_t>length * sizeof(int64_t))
     if dst == NULL:

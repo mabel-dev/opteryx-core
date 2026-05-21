@@ -822,7 +822,17 @@ cdef class StringVector(Vector):
             self.ptr = NULL
 
     cdef DrakenVector* unified(self) noexcept:
+        # Arena invariant: _unified_view.data is always a non-NULL DrakenStringArena*
+        # for any StringVector that has escaped a producer (finish(), from_arrow(),
+        # from_constant(), from_dict*(), _attach_dictionary_storage_from_buffers()).
+        # _unified_view.validity == ptr.null_bitmap for all current producers.
+        # Exception: morsel_io.pyx legacy reader sets .data/.data_length but not .validity;
+        # that site is tracked for Chunk 5 correction.
         return &self._unified_view
+
+    cdef void _set_null_bitmap(self, uint8_t* bm) noexcept:
+        self.ptr.null_bitmap = bm
+        self._unified_view.validity = bm
 
     # ------------------------------------------------------------------
     # Encoded-form accessors (dict and RLE) for aggregation kernels.
@@ -1208,6 +1218,10 @@ cdef class StringVector(Vector):
                 byte_val >>= 1
 
         return n - valid_count
+
+    def _unified_validity_is_set_for_test(self):
+        """Test-only: True if the unified view carries a non-NULL validity bitmap."""
+        return self._unified_view.validity != NULL
 
     cpdef Vector materialize(self):
         """Return a dense StringVector, expanding dict/const/RLE encodings if needed."""
@@ -3006,174 +3020,32 @@ cdef class StringVector(Vector):
 
     cpdef StringVector take(self, int32_t[::1] indices):
         cdef DrakenVector* uv = self.unified()
-        cdef Py_ssize_t out_n
-        cdef Py_ssize_t out_i
-        cdef int32_t out_src_idx
-        cdef uint32_t gathered_code
-        cdef Py_ssize_t code_bytes
-        cdef uint32_t* src_codes
-        cdef uint32_t* dst_codes = NULL
-        cdef DrakenStringArena* src_german_dict
-        cdef DrakenStringArena* dst_german_dict
-        cdef Py_ssize_t take_dict_size
-        cdef Py_ssize_t dict_arena_size
-        cdef Py_ssize_t nb_bytes_dict
-        cdef bint src_has_row_nulls
-        cdef uint8_t* src_row_nulls
-        cdef uint8_t* dst_row_nulls
-        cdef uint8_t src_bit_local
-        cdef Py_ssize_t src_len_check
-        cdef StringVector dict_result
-
-        if self._unified_view.data_length < self._unified_view.length:
-            # Dict-in → dict-out: gather codes for the requested rows, share the
-            # dictionary verbatim. Avoids materializing ~N decoded strings just
-            # to throw most away. The dictionary is typically tiny relative to
-            # the row count, so the per-row work drops to a packed-code copy.
-            out_n = indices.shape[0]
-            src_codes = <uint32_t*>uv.selection
-            src_german_dict = _string_arena(self)
-            src_row_nulls = self.ptr.null_bitmap
-            src_has_row_nulls = src_row_nulls != NULL
-            src_len_check = <Py_ssize_t>self.ptr.length
-
-            if src_german_dict == NULL:
-                raise ValueError("dict-encoded vector has no dictionary values")
-
-            take_dict_size = <Py_ssize_t>src_german_dict.length
-            dict_arena_size = <Py_ssize_t>src_german_dict.arena_used
-
-            # Bounds-check indices up front (matches the dense path's behavior).
-            for out_i in range(out_n):
-                out_src_idx = indices[out_i]
-                if out_src_idx < 0 or out_src_idx >= src_len_check:
-                    raise IndexError(
-                        f"Index {out_src_idx} out of bounds for length {src_len_check}"
-                    )
-
-            dict_result = StringVector(0, 0, True)
-            dict_result.ptr = <DrakenVarBuffer*>malloc(sizeof(DrakenVarBuffer))
-            if dict_result.ptr == NULL:
-                raise MemoryError()
-            dict_result.owns_data = False
-            dict_result.ptr.data = NULL
-            dict_result.ptr.offsets = NULL
-            dict_result.ptr.null_bitmap = NULL
-            dict_result.ptr.length = <size_t>out_n
-            dict_result.ptr.type = DRAKEN_STRING
-
-            # Gather uint32 codes.
-            code_bytes = out_n * sizeof(uint32_t)
-            if code_bytes > 0:
-                dst_codes = <uint32_t*>malloc(<size_t>code_bytes)
-                if dst_codes == NULL:
-                    raise MemoryError()
-                for out_i in range(out_n):
-                    dst_codes[out_i] = src_codes[indices[out_i]]
-
-            # Gather row null bitmap if present.
-            if src_has_row_nulls and out_n > 0:
-                nb_bytes_dict = (out_n + 7) >> 3
-                dst_row_nulls = <uint8_t*>malloc(<size_t>nb_bytes_dict)
-                if dst_row_nulls == NULL:
-                    raise MemoryError()
-                memset(dst_row_nulls, 0, <size_t>nb_bytes_dict)
-                for out_i in range(out_n):
-                    out_src_idx = indices[out_i]
-                    src_bit_local = (
-                        (src_row_nulls[out_src_idx >> 3] >> (out_src_idx & 7)) & 1
-                    )
-                    if src_bit_local:
-                        dst_row_nulls[out_i >> 3] |= (1 << (out_i & 7))
-                dict_result.ptr.null_bitmap = dst_row_nulls
-
-            # Copy the dictionary verbatim. The dictionary is typically small
-            # relative to N, and copying keeps ownership simple (each vector
-            # owns its dict storage; freeing one doesn't dangle the other).
-            dst_german_dict = alloc_string_arena(
-                DRAKEN_STRING, <size_t>take_dict_size, <size_t>dict_arena_size
-            )
-            if dst_german_dict == NULL:
-                raise MemoryError()
-            # Copy DrakenStringSlot slots verbatim (inline strings are self-contained;
-            # extern strings carry arena_offset which remains valid in the copied arena).
-            memcpy(
-                dst_german_dict.slots,
-                <const void*>src_german_dict.slots,
-                <size_t>take_dict_size * sizeof(DrakenStringSlot),
-            )
-            if dict_arena_size > 0:
-                memcpy(
-                    dst_german_dict.arena,
-                    <const void*>src_german_dict.arena,
-                    <size_t>dict_arena_size,
-                )
-            dst_german_dict.arena_used = <size_t>dict_arena_size
-            dst_german_dict.length = <size_t>take_dict_size
-            # Copy dict-entry null bitmap if any.
-            if src_german_dict.null_bitmap != NULL and take_dict_size > 0:
-                nb_bytes_dict = (take_dict_size + 7) >> 3
-                dst_german_dict.null_bitmap = <uint8_t*>malloc(<size_t>nb_bytes_dict)
-                if dst_german_dict.null_bitmap == NULL:
-                    raise MemoryError()
-                memcpy(
-                    dst_german_dict.null_bitmap,
-                    <const void*>src_german_dict.null_bitmap,
-                    <size_t>nb_bytes_dict,
-                )
-            dict_result._owns_codes = (dst_codes != NULL)
-
-            dict_result._unified_view = draken_vector_from_dict(
-                <void*>dst_german_dict, <uint32_t>take_dict_size,
-                dst_codes, <uint32_t>out_n,
-                DRAKEN_STRING, dict_result.ptr.null_bitmap,
-            )
-            return dict_result
-        cdef DrakenVarBuffer* src_ptr = self.ptr
         cdef Py_ssize_t n = indices.shape[0]
         cdef Py_ssize_t i
         cdef int32_t src_idx
-
-        cdef _ConstView _cp
-
-        # Constant: ptr.offsets == NULL AND data_length >= length.
-        if (self.ptr.offsets == NULL
-                and self._unified_view.data_length >= self._unified_view.length):
-            if uv.validity != NULL or uv.data == NULL:
-                return StringVector.from_constant(None, n, is_null=True)
-            else:
-                _cp = _const_view(<DrakenStringArena*>uv.data)
-                return StringVector.from_constant(
-                    PyBytes_FromStringAndSize(<char*>_cp.data, _cp.length),
-                    n,
-                    is_null=False,
-                )
-
-        # Dense path — arena-backed
-        cdef DrakenStringArena* tk_arena = <DrakenStringArena*>self._unified_view.data
+        cdef DrakenStringArena* tk_arena = <DrakenStringArena*>uv.data
         cdef DrakenStringSlot* tk_slot
         cdef const uint8_t* tk_sdata
         cdef Py_ssize_t tk_len
-        cdef bint has_nulls = src_ptr.null_bitmap != NULL
+        cdef bint has_nulls = uv.validity != NULL
         cdef uint8_t src_bit
 
-        # Bounds-check up front
         for i in range(n):
             src_idx = indices[i]
-            if src_idx < 0 or src_idx >= <Py_ssize_t> src_ptr.length:
+            if src_idx < 0 or src_idx >= <Py_ssize_t>uv.length:
                 raise IndexError(
-                    f"Index {src_idx} out of bounds for length {src_ptr.length}"
+                    f"Index {src_idx} out of bounds for length {uv.length}"
                 )
 
         cdef StringVectorBuilder tk_builder = StringVectorBuilder(n, 0, True, False)
         for i in range(n):
             src_idx = indices[i]
             if has_nulls:
-                src_bit = (src_ptr.null_bitmap[src_idx >> 3] >> (src_idx & 7)) & 1
+                src_bit = (uv.validity[src_idx >> 3] >> (src_idx & 7)) & 1
                 if not src_bit:
                     tk_builder.append_null()
                     continue
-            tk_slot = &tk_arena.slots[src_idx]
+            tk_slot = &tk_arena.slots[<Py_ssize_t>uv.selection[<Py_ssize_t>src_idx]]
             tk_sdata = str_data(tk_slot, tk_arena.arena)
             tk_len = <Py_ssize_t>str_length(tk_slot)
             tk_builder.append_bytes(<const char*>tk_sdata, tk_len)

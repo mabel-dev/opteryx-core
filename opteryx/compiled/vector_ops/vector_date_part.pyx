@@ -159,9 +159,6 @@ cdef Integer64Vector _datepart_i64_dict_subsecond(Integer64Vector int64_vec, int
     cdef int64_t* output_ptr
     cdef Integer64Vector result
 
-    if int64_vec._unified_view.data_length >= int64_vec._unified_view.length:
-        return None
-
     row_count = <Py_ssize_t>uv.length
     dict_size = <Py_ssize_t>uv.data_length
     dictionary_ptr = <int64_t*>uv.data
@@ -242,9 +239,6 @@ cdef Integer64Vector _datepart_i64_dict_calendar(Integer64Vector int64_vec, int 
     cdef array output_array
     cdef int64_t* output_ptr
     cdef Integer64Vector result
-
-    if int64_vec._unified_view.data_length >= int64_vec._unified_view.length:
-        return None
 
     row_count = <Py_ssize_t>uv.length
     dict_size = <Py_ssize_t>uv.data_length
@@ -330,9 +324,6 @@ cdef Integer64Vector _datepart_ts_dict_subsecond(TimestampVector ts_vec, int par
     cdef array output_array
     cdef int64_t* output_ptr
     cdef Integer64Vector result
-
-    if ts_vec._unified_view.data_length >= ts_vec._unified_view.length:
-        return None
 
     row_count = <Py_ssize_t>uv.length
     dict_size = <Py_ssize_t>uv.data_length
@@ -423,9 +414,6 @@ cdef Integer64Vector _datepart_ts_dict_calendar(TimestampVector ts_vec, int part
     cdef array output_array
     cdef int64_t* output_ptr
     cdef Integer64Vector result
-
-    if ts_vec._unified_view.data_length >= ts_vec._unified_view.length:
-        return None
 
     row_count = <Py_ssize_t>uv.length
     dict_size = <Py_ssize_t>uv.data_length

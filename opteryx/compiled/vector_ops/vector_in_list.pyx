@@ -14,17 +14,12 @@
 # free are used in this file but resolved via the earlier-included
 # leaves' cimport — declaring them here triggers "ambiguous overloaded
 # method" in the consolidated build.
-from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint64_t
+from libc.stdint cimport int32_t, int64_t, uint8_t, uint64_t
 from libc.string cimport memset
 
 from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.integer64_vector cimport Integer64Vector
-from draken.vectors.integer8_vector cimport Integer8Vector
-from draken.vectors.integer16_vector cimport Integer16Vector
-from draken.vectors.date32_vector cimport Date32Vector
-from draken.vectors.timestamp_vector cimport TimestampVector
-from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 from opteryx.compiled.structures.perfect_hash_set cimport PerfectHashSet
 
@@ -83,115 +78,14 @@ def build_in_list_carchar(values):
     return result
 
 
-cdef BoolVector _vector_in_list_phash(
-    Vector arr,
-    PerfectHashSet phs,
-    bint negate,
-):
-    """PerfectHashSet probe — raw integer values, no hashing.
-
-    Returns None if the vector encoding is unsupported (caller falls back).
-    """
-    cdef Py_ssize_t n = len(arr)
-    cdef Py_ssize_t nbytes = (n + 7) >> 3
-    cdef BoolVector out = BoolVector(<size_t>n)
-    cdef uint8_t* dst = <uint8_t*>out.ptr.data
-    cdef int32_t* idx_buf = <int32_t*>malloc(n * sizeof(int32_t))
-    if idx_buf == NULL:
-        raise MemoryError()
-
-    cdef Py_ssize_t count = 0
-    cdef Py_ssize_t i
-    cdef void* dp
-    cdef Integer64Vector ivec64
-    cdef Date32Vector ivec_d32
-    cdef TimestampVector ivec_ts
-
-    # Narrow integers (Int8 / Int16): type-safe, no-null guaranteed path
-    if isinstance(arr, Integer8Vector):
-        if (<Integer8Vector>arr).null_bitmap_ptr() != NULL:
-            free(idx_buf)
-            return None  # has nulls → fall back
-        dp = (<Integer8Vector>arr).ptr.data
-        with nogil:
-            count = phs.probe_found_32_i8(<const int8_t*>dp, idx_buf, n)
-
-    elif isinstance(arr, Integer16Vector):
-        if (<Integer16Vector>arr).null_bitmap_ptr() != NULL:
-            free(idx_buf)
-            return None  # has nulls → fall back
-        dp = (<Integer16Vector>arr).ptr.data
-        # probe_found gives us matched row indices; probe_not_found gives unmatched.
-        # For negate we want bits SET for unmatched rows. Compute probe_found and invert.
-        with nogil:
-            count = phs.probe_found_32_i16(<const int16_t*>dp, idx_buf, n)
-
-    elif isinstance(arr, Integer64Vector):
-        ivec64 = <Integer64Vector>arr
-        if ivec64.null_bitmap_ptr() != NULL:
-            free(idx_buf)
-            return None  # has nulls → fall back
-        if ivec64._unified_view.data_length < ivec64._unified_view.length:
-            free(idx_buf)
-            return None  # dict-encoded → fall back
-        dp = ivec64.ptr.data
-        with nogil:
-            count = phs.probe_found_32_i64(<const int64_t*>dp, idx_buf, n)
-
-    elif isinstance(arr, Date32Vector):
-        ivec_d32 = <Date32Vector>arr
-        if ivec_d32.null_bitmap_ptr() != NULL:
-            free(idx_buf)
-            return None
-        dp = ivec_d32.ptr.data
-        with nogil:
-            count = phs.probe_found_32_i32(<const int32_t*>dp, idx_buf, n)
-
-    elif isinstance(arr, TimestampVector):
-        ivec_ts = <TimestampVector>arr
-        if ivec_ts.null_bitmap_ptr() != NULL:
-            free(idx_buf)
-            return None
-        if ivec_ts._unified_view.data_length < ivec_ts._unified_view.length:
-            free(idx_buf)
-            return None  # dict-encoded → fall back
-        dp = ivec_ts.ptr.data
-        with nogil:
-            count = phs.probe_found_32_i64(<const int64_t*>dp, idx_buf, n)
-
-    else:
-        free(idx_buf)
-        return None  # unsupported vector type
-
-    # Materialise the result bitmap from probe_found indices
-    if negate:
-        # All-1 except where found
-        memset(dst, 0xFF, nbytes)
-        if n & 7:
-            dst[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
-        for i in range(count):
-            dst[idx_buf[i] >> 3] &= ~(<uint8_t>(1 << (idx_buf[i] & 7)))
-    else:
-        memset(dst, 0, nbytes)
-        for i in range(count):
-            dst[idx_buf[i] >> 3] |= <uint8_t>(1 << (idx_buf[i] & 7))
-
-    free(idx_buf)
-    return out
-
-
 cpdef BoolVector vector_in_list(Vector arr, object set_obj, bint negate=False):
     """Row-wise IN-list membership test using a pre-built set.
 
-    Dispatches to PerfectHashSet (direct-address, no hashing) when the set was
-    built with PerfectHashSet and the column has a supported dense encoding.
-    Falls back to CarcharSetWrapper (hash) path otherwise.
+    Always uses CarcharSetWrapper (hash) path. PerfectHashSet inputs are
+    converted to CarcharSetWrapper via _phash_to_carchar.
 
     If `negate` is True, the result is the row-wise NotInList.
     """
-    cdef BoolVector result
-    cdef PerfectHashSet phs
-    cdef CarcharSetWrapper fallback
     cdef CarcharSetWrapper carchar
     cdef Py_ssize_t i, n
     cdef Py_ssize_t nbytes
@@ -200,15 +94,7 @@ cpdef BoolVector vector_in_list(Vector arr, object set_obj, bint negate=False):
     cdef uint64_t[::1] hashes
 
     if isinstance(set_obj, PerfectHashSet):
-        result = _vector_in_list_phash(arr, <PerfectHashSet>set_obj, negate)
-        if result is not None:
-            return result
-        # Fallback: PerfectHashSet path couldn't handle this column encoding.
-        # Rehash the set into a CarcharSetWrapper and use the hash path.
-        # This should be rare (nullable or non-dense column with a PerfectHashSet).
-        phs = <PerfectHashSet>set_obj
-        fallback = _phash_to_carchar(phs)
-        set_obj = fallback
+        set_obj = _phash_to_carchar(<PerfectHashSet>set_obj)
 
     carchar = <CarcharSetWrapper>set_obj
     n = len(arr)

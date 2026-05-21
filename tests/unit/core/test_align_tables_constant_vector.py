@@ -138,6 +138,31 @@ def test_align_multiple_constant_columns_with_negatives():
     assert b[1] == pytest.approx(2.0)
 
 
+# ---------------------------------------------------------------------------
+# Focused regression: constant + negative indices without materialization
+# This exercises the path that used to require vec.materialize() before take.
+# After the fix, _set_null_bitmap keeps ptr.null_bitmap and _unified_view.validity
+# in sync so downstream reads through unified().validity are correct.
+# ---------------------------------------------------------------------------
+
+def test_constant_int64_null_bitmap_set_after_take():
+    """Null semantics must be correct for constant input + negative indices.
+
+    This exercises the path that previously required vec.materialize() before take.
+    After the fix, _set_null_bitmap keeps ptr.null_bitmap and _unified_view.validity
+    in sync so that null rows read as None and valid rows read as their value.
+    """
+    left = _make_left(4)
+    right = _make_right_int64_const(7, 4)
+    result = _align(left, right, [0, 1, 2, 3], [0, -1, 2, -1])
+    assert result.num_rows == 4
+    marker = result.column(b"marker")
+    assert marker[0] == 7,    "row 0 matched: must have value"
+    assert marker[1] is None, "row 1 unmatched: must be null"
+    assert marker[2] == 7,    "row 2 matched: must have value"
+    assert marker[3] is None, "row 3 unmatched: must be null"
+
+
 if __name__ == "__main__":
     test_align_int64_constant_no_negative_does_not_crash()
     print("no_negative passed")
@@ -155,4 +180,6 @@ if __name__ == "__main__":
     print("float64 null semantics passed")
     test_align_multiple_constant_columns_with_negatives()
     print("multiple constant columns passed")
+    test_constant_int64_null_bitmap_set_after_take()
+    print("null bitmap set after take passed")
     print("All tests passed!")

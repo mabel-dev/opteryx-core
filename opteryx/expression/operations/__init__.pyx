@@ -19,6 +19,7 @@ import datetime
 
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.vectors.bool_vector import BoolVector
+from draken.vectors.string_vector import StringVector
 from opteryx.compiled.vector_ops import (
     vector_contains,
     vector_in_list,
@@ -26,10 +27,6 @@ from opteryx.compiled.vector_ops import (
     vector_rlike,
 )
 from opteryx.expression.evaluator.comparisons import draken_compare
-from opteryx.expression.evaluator.type_coercion import (
-    _constant_scalar_value,
-    _is_constant_vector_like,
-)
 from opteryx.third_party import yyjson
 from opteryx.types import OrsoTypes
 from opteryx.types._datetime_conversion import (
@@ -275,7 +272,7 @@ def _inner_filter_operations(arr, operator, value):
     elif operator.startswith("RLike"):
         return rlike_match(raw_arr, value, operator)
     elif operator.startswith("ArrayContains"):
-        return vector_contains(raw_arr, value)
+        return vector_contains(raw_arr, StringVector.from_constant(value, 1))
     else:
         # AnyOp* / AllOp* / AtArrow are dispatched via
         # evaluator.comparisons.draken_compare before they can reach here.

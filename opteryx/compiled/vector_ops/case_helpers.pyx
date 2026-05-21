@@ -23,10 +23,7 @@ from libc.stdint cimport int16_t, int32_t, uint8_t, uint16_t, uint32_t
 from libc.stdlib cimport free, malloc
 from libc.string cimport memcpy, memset
 
-from draken.core.buffers cimport (
-    DrakenVector,
-    DrakenFixedBuffer,
-)
+from draken.core.buffers cimport DrakenVector, DrakenFixedBuffer
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
 from draken.vectors.vector cimport Vector
@@ -82,32 +79,23 @@ def decide_one_branch(
     Returns a new array of live row indices where bv[i] was False or NULL.
     """
     cdef Py_ssize_t n = live.shape[0]
-    cdef uint8_t* bits
-    cdef uint8_t* null_bm
     cdef Py_ssize_t i, ii
     cdef Py_ssize_t not_won_count = 0
     cdef DrakenVector* bv_uv
+    cdef uint32_t slot
 
-    # Constant-encoded BoolVector (e.g. from BoolVector.from_constant or a LITERAL node)
     bv_uv = bv.unified()
-    if bv_uv.data_length == 1:  # const-encoded
-        if bv_uv.validity != NULL or not (<uint8_t*>bv_uv.data)[0]:
-            # False or NULL condition — no rows won, all remain live
-            return live
-        # True condition — every live row wins this branch
-        for ii in range(n):
-            branch_id[live[ii]] = branch_idx
-        return _clone(_TEMPLATE_INT32, 0, False)
-
-    bits = <uint8_t*>bv.ptr.data
-    null_bm = bv.ptr.null_bitmap
+    cdef uint8_t* bv_data = <uint8_t*>bv_uv.data
+    cdef uint8_t* bv_nulls = bv_uv.validity
 
     # Pass 1: count not-won rows
     for i in range(n):
-        if null_bm != NULL and not _sel_is_valid(null_bm, i):
+        if not _sel_is_valid(bv_nulls, i):
             not_won_count += 1
-        elif not _sel_bit_is_set(bits, i):
-            not_won_count += 1
+        else:
+            slot = bv_uv.selection[i]
+            if not ((bv_data[slot >> 3] >> (slot & 7)) & 1):
+                not_won_count += 1
 
     cdef _cparr not_won_arr = _clone(_TEMPLATE_INT32, not_won_count, False)
     cdef int32_t* nw = <int32_t*>not_won_arr.data.as_ints
@@ -117,10 +105,11 @@ def decide_one_branch(
     # Pass 2: scatter won into branch_id, collect not-won
     for i in range(n):
         row_r = live[i]
-        if null_bm != NULL and not _sel_is_valid(null_bm, i):
+        slot = bv_uv.selection[i]
+        if not _sel_is_valid(bv_nulls, i):
             nw[nw_idx] = row_r
             nw_idx += 1
-        elif _sel_bit_is_set(bits, i):
+        elif (bv_data[slot >> 3] >> (slot & 7)) & 1:
             branch_id[row_r] = branch_idx
         else:
             nw[nw_idx] = row_r
@@ -347,58 +336,38 @@ def assemble_bool(
     cdef Py_ssize_t bid_py, j
     cdef int32_t row_r
     cdef BoolVector bv
-    cdef DrakenFixedBuffer* src_ptr
     cdef int32_t[::1] rows_i
     cdef DrakenVector* bv_uv
+    cdef uint32_t slot
 
     for bid_py in range(len(parts)):
         if parts[bid_py] is None:
             continue
         bv = <BoolVector>parts[bid_py]
-        src_ptr = bv.ptr
         rows_i = rows_per_branch[bid_py]
         bv_uv = bv.unified()
-        if bv_uv.data_length == 1:  # const-encoded
-            if bv_uv.validity == NULL:  # const non-null
-                for j in range(rows_i.shape[0]):
-                    row_r = rows_i[j]
-                    if (<uint8_t*>bv_uv.data)[0]:
-                        _sel_set_true_bit(out_bits, row_r)
-                    _sel_set_true_bit(out_null, row_r)
-            else:
+        for j in range(rows_i.shape[0]):
+            row_r = rows_i[j]
+            if not _sel_is_valid(bv_uv.validity, j):
                 any_null = True
-        else:
-            for j in range(rows_i.shape[0]):
-                row_r = rows_i[j]
-                if not _sel_is_valid(src_ptr.null_bitmap, j):
-                    any_null = True
-                else:
-                    if _sel_bit_is_set(<uint8_t*>src_ptr.data, j):
-                        _sel_set_true_bit(out_bits, row_r)
-                    _sel_set_true_bit(out_null, row_r)
+            else:
+                slot = bv_uv.selection[j]
+                if (<uint8_t*>bv_uv.data)[slot >> 3] >> (slot & 7) & 1:
+                    _sel_set_true_bit(out_bits, row_r)
+                _sel_set_true_bit(out_null, row_r)
 
     if else_part is not None:
         bv = <BoolVector>else_part
-        src_ptr = bv.ptr
         bv_uv = bv.unified()
-        if bv_uv.data_length == 1:  # const-encoded
-            if bv_uv.validity == NULL:  # const non-null
-                for j in range(unmatched.shape[0]):
-                    row_r = unmatched[j]
-                    if (<uint8_t*>bv_uv.data)[0]:
-                        _sel_set_true_bit(out_bits, row_r)
-                    _sel_set_true_bit(out_null, row_r)
-            else:
+        for j in range(unmatched.shape[0]):
+            row_r = unmatched[j]
+            if not _sel_is_valid(bv_uv.validity, j):
                 any_null = True
-        else:
-            for j in range(unmatched.shape[0]):
-                row_r = unmatched[j]
-                if not _sel_is_valid(src_ptr.null_bitmap, j):
-                    any_null = True
-                else:
-                    if _sel_bit_is_set(<uint8_t*>src_ptr.data, j):
-                        _sel_set_true_bit(out_bits, row_r)
-                    _sel_set_true_bit(out_null, row_r)
+            else:
+                slot = bv_uv.selection[j]
+                if (<uint8_t*>bv_uv.data)[slot >> 3] >> (slot & 7) & 1:
+                    _sel_set_true_bit(out_bits, row_r)
+                _sel_set_true_bit(out_null, row_r)
     elif unmatched.shape[0] > 0:
         any_null = True
 

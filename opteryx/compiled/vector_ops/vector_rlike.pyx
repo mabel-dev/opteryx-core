@@ -12,7 +12,6 @@ from draken.vectors.string_vector cimport StringVector, DrakenVarBuffer
 from draken.vectors.bool_vector cimport BoolVector
 from draken.core.buffers cimport DrakenVector, DrakenStringArena, DrakenStringSlot
 from draken.core.buffers cimport str_length, str_data
-from cpython.bytes cimport PyBytes_AsStringAndSize
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
 from libcpp.string cimport string
@@ -38,8 +37,13 @@ cdef extern from "re2/re2.h":
         bint PartialMatch(const StringPieceRL& text, const RE2RL& re)
 
 
-cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False):
+cpdef BoolVector vector_rlike(StringVector vec, StringVector pattern, bint negate=False):
     """Return mask: 1 if element matches regex pattern, else 0. Propagates NULLs.
+
+    `pattern` is the wrapped pattern literal; REGEXP takes a single pattern,
+    so the shape rule (one unique value) is enforced here via `data_length`.
+    The pattern bytes are read straight from the arena — no Python bytes
+    object crosses into the engine.
 
     If `negate` is True, returns the row-wise NotRLike: True where the
     element does NOT match the pattern. Fuses what would otherwise be a
@@ -49,6 +53,17 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
     no lookaround. Matches the engine used by vector_anyop_like and the same
     engine ClickHouse, BigQuery, and DuckDB use for REGEXP_LIKE.
     """
+    cdef DrakenVector* puv = pattern.unified()
+    if puv.data_length != 1:
+        raise ValueError(
+            "vector_rlike: pattern must be a single value (data_length == 1)"
+        )
+    cdef DrakenStringArena* parena = <DrakenStringArena*>puv.data
+    cdef uint32_t* psel = <uint32_t*>puv.selection
+    cdef DrakenStringSlot* pslot = &parena.slots[psel[0]]
+    cdef const uint8_t* pat_ptr = str_data(pslot, parena.arena)
+    cdef Py_ssize_t pat_len = <Py_ssize_t>str_length(pslot)
+
     cdef DrakenVector* uv = vec.unified()
     cdef DrakenStringArena* arena = <DrakenStringArena*>uv.data
     cdef uint32_t* sel = <uint32_t*>uv.selection
@@ -63,17 +78,18 @@ cpdef BoolVector vector_rlike(StringVector vec, bytes pattern, bint negate=False
     cdef DrakenStringSlot* slot
     cdef const uint8_t* sdata
     cdef uint32_t slen
-    cdef char* pat_buf = <char*>0
-    cdef Py_ssize_t pat_len = 0
     cdef RE2OptionsRL options
     cdef RE2RL* regex = NULL
     cdef StringPieceRL text_piece
 
+    # A NULL pattern makes every row NULL (SQL: x RLIKE NULL is NULL).
+    if puv.validity != NULL and (puv.validity[0] & 1) == 0:
+        return _all_null_bool(n)
+
     options = RE2OptionsRL()
     options.set_case_sensitive(True)
     options.set_log_errors(False)
-    PyBytes_AsStringAndSize(pattern, &pat_buf, &pat_len)
-    regex = new RE2RL(string(pat_buf, <size_t>pat_len), options)
+    regex = new RE2RL(string(<const char*>pat_ptr, <size_t>pat_len), options)
 
     try:
         if not regex.ok():

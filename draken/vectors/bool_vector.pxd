@@ -12,6 +12,7 @@ cdef class BoolVector(Vector):
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
     cdef DrakenVector* unified(self) noexcept
+    cdef void _set_null_bitmap(self, uint8_t* bm) noexcept
 
     # Ops
     cpdef BoolVector take(self, int32_t[::1] indices)
