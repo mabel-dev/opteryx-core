@@ -1,0 +1,5 @@
+boost-tag: boost-1.86.0
+modules: math, config, core, assert, throw_exception, type_traits, static_assert, preprocessor, integer, predef, mp11, container_hash, describe, variant2
+source: https://github.com/boostorg/{module}/archive/refs/tags/{tag}.tar.gz
+purpose: boost::math::round (half-to-even) for draken/ops/float_math.h
+include-path: third_party/boost_math
