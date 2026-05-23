@@ -1,7 +1,18 @@
+# Hand-written declarations mirroring draken/core/buffers.h — the frozen ABI
+# surface for the ~95 compiled `cimport draken.core.buffers` sites (07).
+#
+# nanobind emits no cimportable .pxd, so the C++-defined struct is bound here by
+# `cdef extern from "core/buffers.h"`. This file MUST stay byte-for-byte
+# consistent with the header: a stale .pxd is silent ABI drift. The header's
+# static_asserts pin the C side; this pxd is the Cython side of the same
+# contract and is verified by eye against the header (consumers are not rebuilt
+# in this milestone).
+
 from libc.stdint cimport int32_t
 from libc.stdint cimport uint8_t
 from libc.stdint cimport uint32_t
 from libc.stdint cimport uint64_t
+from libc.stdlib cimport free, malloc
 
 cdef extern from "core/buffers.h":
 
@@ -22,8 +33,11 @@ cdef extern from "core/buffers.h":
         DRAKEN_DICTIONARY
         DRAKEN_CONSTANT
         DRAKEN_ARRAY
-
         DRAKEN_NON_NATIVE
+
+    # Category-A layout hint bits (informational; 0 = "don't know").
+    unsigned int DRAKEN_SEL_IDENTITY
+    unsigned int DRAKEN_SEL_PERMUTATION
 
     # Fixed-width column
     ctypedef struct DrakenFixedBuffer:
@@ -41,15 +55,6 @@ cdef extern from "core/buffers.h":
         size_t length
         DrakenType type
 
-    ctypedef struct DrakenDictionaryBuffer:
-        uint8_t* codes
-        uint8_t code_width
-        uint8_t* null_bitmap
-        size_t length
-        uint8_t ordered
-        DrakenVarBuffer* dictionary_values
-        DrakenType type
-
     ctypedef struct DrakenConstantStringPayload:
         uint8_t* data
         int32_t length
@@ -57,10 +62,10 @@ cdef extern from "core/buffers.h":
 # German string (a.k.a. Umbra string). 16-byte slot:
 #   inline (len <= 12):  uint32_t length + 12 inline bytes
 #   extern (len  > 12):  uint32_t length + 4-byte prefix + uint64_t arena_offset
-# Defined in draken/src/core/string_slot.h. Treated as opaque on the Cython
-# side; production code accesses fields exclusively through the C inline
-# helpers (str_equals, str_compare, str_data, str_prefix4, gs_lp_word) which
-# inline cleanly via cdef extern.
+# Defined in draken/core/string_slot.h. Treated as opaque on the Cython side;
+# production code accesses fields exclusively through the C inline helpers
+# (str_equals, str_compare, str_data, str_prefix4, gs_lp_word) which inline
+# cleanly via cdef extern.
 cdef extern from "core/string_slot.h":
     int STR_INLINE_MAX
 
@@ -85,7 +90,7 @@ cdef extern from "core/string_slot.h":
 cdef extern from "core/buffers.h":
 
     # German-string storage. Used as the `data` payload of a string
-    # DrakenVector under the unified format (Track B).
+    # DrakenVector under the unified format.
     ctypedef struct DrakenStringArena:
         DrakenStringSlot* slots
         uint8_t*      arena
@@ -96,13 +101,6 @@ cdef extern from "core/buffers.h":
         uint8_t       owns_buffers
         DrakenType    type
 
-    ctypedef struct DrakenConstantBuffer:
-        DrakenType type
-        DrakenType value_type
-        void* value
-        size_t length
-        uint8_t* null_bitmap
-
     # Array column (list<T>)
     ctypedef struct DrakenArrayBuffer:
         int32_t* offsets           # [length + 1] entries
@@ -111,17 +109,11 @@ cdef extern from "core/buffers.h":
         size_t length              # number of array entries (rows)
         DrakenType value_type      # type of the child values
 
-    ctypedef struct DrakenMorsel:
-        const char** column_names
-        DrakenType* column_types
-        void** columns
-        size_t num_columns
-        size_t num_rows
-
     # Unified vector view — one shape, one access pattern.
     # Access is always: data[selection[i]] for i in [0, length).
     # `selection` is never NULL; it points at the global identity (former dense),
     # global zero (former constant), or owned uint32 codes (former dict).
+    # `flags` carries Category-A layout hints (0 = "don't know").
     # See buffers.h for full semantics and vector_alloc.h for constructors.
     ctypedef struct DrakenVector:
         void*           data
@@ -130,6 +122,7 @@ cdef extern from "core/buffers.h":
         uint32_t        length
         uint8_t*        validity
         DrakenType      type
+        uint8_t         flags
 
 cdef extern from "core/vector_alloc.h":
     const uint32_t* draken_identity_sel(uint32_t length) nogil
@@ -147,20 +140,33 @@ cdef extern from "core/vector_alloc.h":
         const uint32_t* codes, uint32_t length,
         DrakenType type, uint8_t* validity) nogil
 
-# Lightweight view struct returned by DictionaryVector.dict_accessor().
-# All fields are shortcuts into the underlying DrakenDictionaryBuffer so
-# callers never need raw ptr arithmetic.  Phase 1 — no C struct changes yet;
-# dict_values remains DrakenVarBuffer* for both string and numeric backing.
-cdef struct DictAccessor:
-    uint8_t*         codes       # raw code array (code_width bytes per code index)
-    uint8_t          code_width  # 1, 2, or 4 bytes per code
-    uint8_t*         row_nulls   # row-level null bitmap (NULL means all rows valid)
-    size_t           length      # number of rows
-    DrakenVarBuffer* dict_values # backing dictionary buffer
-    DrakenType       value_type  # element type of the dictionary entries
 
-cdef struct ConstAccessor:
-    size_t      length
-    DrakenType  value_type
-    void*       value_ptr
-    uint8_t     is_null
+# Variable-width buffer allocator (07: var_vector is "real but internalize, and
+# rename" — its one external caller is re-homed in a later milestone). Kept on
+# the frozen ABI surface here so the listed consumers continue to bind it via
+# `cimport draken.core.buffers`. Inline so it links into each extension.
+cdef inline DrakenVarBuffer* alloc_var_buffer(DrakenType dtype, size_t length, size_t bytes_cap):
+    cdef DrakenVarBuffer* buf = <DrakenVarBuffer*> malloc(sizeof(DrakenVarBuffer))
+    if buf == NULL:
+        raise MemoryError()
+
+    # allocate offsets: length + 1
+    buf.offsets = <int32_t*> malloc((length + 1) * sizeof(int32_t))
+    if buf.offsets == NULL:
+        free(buf)
+        raise MemoryError()
+
+    # allocate data buffer
+    if bytes_cap > 0:
+        buf.data = <uint8_t*> malloc(bytes_cap)
+        if buf.data == NULL:
+            free(buf.offsets)
+            free(buf)
+            raise MemoryError()
+    else:
+        buf.data = NULL
+
+    buf.null_bitmap = NULL
+    buf.length = length
+    buf.type = dtype
+    return buf

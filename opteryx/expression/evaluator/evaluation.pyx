@@ -16,8 +16,8 @@ import sys as _sys
 
 from opteryx.compiled.structures.carchar_set import CarcharSetWrapper as _CarcharSetWrapper
 from opteryx.compiled.structures.perfect_hash_set import PerfectHashSet as _PerfectHashSet
-from opteryx.compiled.vector_ops import (
-    vector_bitwise_not as _vector_bitwise_not,
+from opteryx.compiled.vector_ops import vector_bitwise_not as _vector_bitwise_not
+from opteryx.compiled.nanobind.vector_accessors import (
     vector_string_is_empty as _vector_string_is_empty,
     vector_string_is_not_empty as _vector_string_is_not_empty,
 )

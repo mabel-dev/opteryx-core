@@ -13,11 +13,13 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
     """Hash, encoding, and random-generation functions."""
 
     # Local imports to avoid top-level import cycles and to keep costs lazy.
-    from opteryx.compiled.vector_ops import (
+    from opteryx.compiled.nanobind.vector_codec import (
         vector_base64_decode,
         vector_base64_encode,
         vector_base85_decode,
         vector_base85_encode,
+    )
+    from opteryx.compiled.vector_ops import (
         vector_hex_decode,
         vector_hex_encode,
         vector_md5,

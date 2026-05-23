@@ -23,7 +23,7 @@ from draken.vectors.timestamp_vector import TimestampVector
 
 from draken.vectors.vector cimport Vector
 
-from opteryx.compiled.vector_ops import (
+from opteryx.compiled.nanobind.vector_bool_ops import (
     bool_vector_from_int8_mask,
     bool_vector_from_inverted_null_bitmap,
 )

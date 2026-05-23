@@ -20,7 +20,6 @@ from opteryx.compiled.vector_ops import (
     vector_ci_starts_with,
     vector_ends_with,
     vector_initcap,
-    vector_length,
     vector_levenshtein,
     vector_md5,
     vector_position,
@@ -34,6 +33,9 @@ from opteryx.compiled.vector_ops import (
     vector_string_slice_left,
     vector_string_slice_right,
     vector_string_substring,
+)
+from opteryx.compiled.nanobind.vector_accessors import (
+    vector_length,
     vector_string_length,
 )
 from draken.vectors.null_vector import NullVector

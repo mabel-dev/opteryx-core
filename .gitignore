@@ -350,3 +350,6 @@ draken/vectors/integer64_vector.cpp
 draken/vectors/integer8_vector.cpp
 draken/vectors/decimal_vector.cpp
 draken/vectors/string_arena_builder.cpp
+draken/poc/binding_poc.cpp
+draken/poc/poc_e1_kernel.cpp
+draken/poc/poc_e1_kernel.h

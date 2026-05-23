@@ -96,6 +96,41 @@ class build_ext(build_ext_orig):
             else:
                 print(f"Successfully compiled yyjson to {yyjson_obj}")
 
+        # Pre-compile mimalloc (single TU via src/static.c) as C11. It is linked
+        # into draken extensions only (see make_draken_extension and the
+        # _mimalloc_smoke extension). Release/secure-off for perf (-DNDEBUG, no
+        # MI_SECURE); the process-wide malloc override is left OFF (no
+        # MI_OVERRIDE / MI_MALLOC_OVERRIDE / MI_OSX_ZONE) — the rest of the
+        # engine keeps the system allocator; we call mi_* explicitly.
+        mimalloc_obj = MIMALLOC_OBJ
+        mimalloc_src = "third_party/mimalloc/src/static.c"
+        if not os.path.exists(mimalloc_obj) or os.path.getmtime(mimalloc_src) > os.path.getmtime(
+            mimalloc_obj
+        ):
+            print(f"Pre-compiling {mimalloc_src} to {mimalloc_obj} using compiler: {compiler}")
+            result = subprocess.run(
+                [
+                    compiler,
+                    "-O3",
+                    "-std=c11",
+                    "-DNDEBUG",
+                    "-Wno-unused-function",
+                    f"-I{MIMALLOC_INCLUDE}",
+                    "-c",
+                    mimalloc_src,
+                    "-o",
+                    mimalloc_obj,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                raise SystemExit(
+                    f"Failed to pre-compile mimalloc with {compiler}:\n{result.stderr}"
+                )
+            print(f"Successfully compiled mimalloc to {mimalloc_obj}")
+
         # libcurl is already built at module initialization time
         super().build_extensions()
 
@@ -437,9 +472,8 @@ include_dirs = [
     ".",  # repo root for Cython cimport (draken.core.buffers etc.)
     "src/cpp",
     "src/c",
-    "draken/src",  # draken C++ headers (e.g. <core/buffers.h>)
-    "draken/src/core",  # draken C++ headers, quote-include form
-    "draken/src/interop",  # draken arrow_c_data_interface.h
+    "draken",       # new draken C++-first headers (quote-include "core/buffers.h")
+    "draken/core",  # draken C++ headers, quote-include form (e.g. #include "buffers.h")
     "third_party/mabel/carchar",
     "third_party/mabel/parvi",
     "third_party/fastfloat",
@@ -454,7 +488,15 @@ include_dirs = [
     "third_party/crypto",
     "third_party/bshoshany",
     "third_party/moodycamel",
+    "third_party/boost_math",  # E.3: vendored boost::math headers (round via 2^52 trick)
 ]
+
+# mimalloc — allocator for draken extensions only.
+# The header path and the pre-built single-TU object are added exclusively to
+# draken extensions (make_draken_extension + the smoke target); opteryx/rugo
+# extensions never see them.
+MIMALLOC_INCLUDE = "third_party/mimalloc/include"
+MIMALLOC_OBJ = "build/temp.mimalloc.o"
 
 # Common SIMD / environment C++ sources used by multiple extensions
 COMMON_SIMD_SOURCES = [
@@ -478,7 +520,7 @@ with open("README.md", "r", encoding="UTF8") as f:
 
 def make_draken_extension(module_path, source_file, language="c++", depends=None):
     if depends is None:
-        depends = ["draken/src/core/buffers.h", "draken/src/core/vector_alloc.h"]
+        depends = ["draken/core/buffers.h", "draken/core/vector_alloc.h"]
 
     sources = [f"draken/{source_file}"]
     # Include SIMD implementations for all draken vector modules so
@@ -490,23 +532,27 @@ def make_draken_extension(module_path, source_file, language="c++", depends=None
     # Unified DrakenVector constructors (one copy per extension; globals are
     # extension-local — owned-vs-shared discrimination lives in the Cython
     # typed wrapper, never in cross-extension pointer comparison).
-    if "draken/src/core/vector_alloc.cpp" not in sources:
-        sources.append("draken/src/core/vector_alloc.cpp")
+    if "draken/core/vector_alloc.cpp" not in sources:
+        sources.append("draken/core/vector_alloc.cpp")
 
     # Common SIMD/environment sources - CPU features and SIMDs
     for s in ("src/cpp/simd_env.cpp", "src/cpp/cpu_features.cpp", "src/cpp/simd_search.cpp"):
         if s not in sources:
             sources.append(s)
 
+    # New draken links the vendored mimalloc (single-TU object pre-built in
+    # build_extensions, before any extension is linked).
     return Extension(
         name=f"draken.{module_path}",
         sources=sources,
-        include_dirs=include_dirs,
+        include_dirs=include_dirs + [MIMALLOC_INCLUDE],
         extra_compile_args=CPP_FLAGS if language == "c++" else C_FLAGS,
         extra_link_args=LD_EXTRA if language == "c++" else [],
+        extra_objects=[MIMALLOC_OBJ],
         language=language,
         depends=depends,
     )
+
 
 
 def get_zstd_vendor_sources():
@@ -570,6 +616,66 @@ if not is_mac():
 
 # Define all extensions
 extensions = [
+    # Draken ABI guard (Milestone A.1). Compiling this forces the frozen
+    # buffers.h static_asserts (sizeof==40, per-field offsets, DrakenType tag
+    # pins) to run on the dev platform — silent ABI drift becomes a build break.
+    Extension(
+        "draken.core._abi_guard",
+        sources=["draken/core/_abi_guard.cpp"],
+        include_dirs=include_dirs,
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+        language="c++",
+        depends=["draken/core/buffers.h", "draken/core/string_slot.h"],
+    ),
+    # mimalloc link/liveness smoke test (Milestone A.3). Links the vendored
+    # mimalloc into a NEW draken target and exposes run() so we can prove on the
+    # dev platform that mi_* is the live allocator (mi_version + alloc/aligned/
+    # free, no crash). mimalloc include + pre-built object are scoped here.
+    Extension(
+        "draken.core._mimalloc_smoke",
+        sources=["draken/core/_mimalloc_smoke.cpp"],
+        include_dirs=include_dirs + [MIMALLOC_INCLUDE],
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+        depends=["draken/core/alloc.h"],
+    ),
+    # Draken nanobind binding (Milestone B.1): Vector handle + Morsel + int64 ingestion.
+    # Single module; links mimalloc (all owned buffers) + nanobind + vector_alloc globals.
+    Extension(
+        "draken.draken_native",
+        sources=[
+            "draken/draken_native.cpp",
+            "draken/core/vector_alloc.cpp",
+            # Milestone C.1: hash op depends on simd_hash_i64 / simd_mix_hash.
+            "src/cpp/simd_hash.cpp",
+            "src/cpp/simd_env.cpp",
+            "src/cpp/cpu_features.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            "draken/core",   # quote-include "buffers.h" from within draken/
+            "src/cpp",       # simd_hash.h, simd_dispatch.h, cpu_features.h
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+            "third_party/usearch/fp16/include",  # fp16 IEEE half-precision conversion (D.11)
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+        depends=[
+            "draken/core/buffers.h",
+            "draken/core/alloc.h",
+            "draken/core/vector_alloc.h",
+            "draken/ops/hash.h",
+            "src/cpp/simd_hash.h",
+        ],
+    ),
     # Third-party libraries
     Extension(
         "opteryx.third_party.mabel.base64",
@@ -694,7 +800,7 @@ extensions = [
                 "rugo/src/parquet/compression.cpp",
                 "rugo/src/parquet/bloom_filter.cpp",
                 "src/cpp/cpu_features.cpp",
-                "draken/src/core/vector_alloc.cpp",
+                "draken/core/vector_alloc.cpp",
             ]
             + get_parquet_vendor_sources()
         ),
@@ -721,7 +827,7 @@ extensions = [
             "src/cpp/simd_env.cpp",
             "src/cpp/cpu_features.cpp",
             "src/cpp/simd_search.cpp",
-            "draken/src/core/vector_alloc.cpp",
+            "draken/core/vector_alloc.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",
@@ -741,156 +847,9 @@ extensions = [
             "src/cpp/simd_env.cpp",
             "src/cpp/cpu_features.cpp",
             "src/cpp/simd_search.cpp",
-            "draken/src/core/vector_alloc.cpp",
+            "draken/core/vector_alloc.cpp",
         ],
         include_dirs=include_dirs + ["rugo/src/_jsonl/core"],
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    # Draken core components
-    make_draken_extension("interop.arrow", "interop/arrow.pyx"),
-    make_draken_extension("interop.vector_sequence", "interop/vector_sequence.pyx"),
-    make_draken_extension("vectors.vector", "vectors/vector.pyx"),
-    make_draken_extension("vectors.bool_vector", "vectors/bool_vector.pyx"),
-    make_draken_extension("vectors.null_vector", "vectors/null_vector.pyx"),
-    make_draken_extension(
-        "vectors.float64_vector",
-        "vectors/float64_vector.pyx",
-        language="c++",
-        depends=["draken/src/core/buffers.h", "draken/vectors/_float64_compare.hpp"],
-    ),
-    make_draken_extension(
-        "vectors.float32_vector",
-        "vectors/float32_vector.pyx",
-        language="c++",
-        depends=["draken/src/core/buffers.h", "draken/vectors/_float32_compare.hpp"],
-    ),
-    make_draken_extension("vectors.array_vector", "vectors/array_vector.pyx"),
-    make_draken_extension("vectors.vector_vector", "vectors/vector_vector.pyx"),
-    make_draken_extension("vectors.time_vector", "vectors/time_vector.pyx"),
-    make_draken_extension("vectors.interval_vector", "vectors/interval_vector.pyx"),
-    make_draken_extension("vectors.scalar_constructors", "vectors/scalar_constructors.pyx"),
-    Extension(
-        "draken.vectors.arithmetic_kernels",
-        sources=["draken/vectors/arithmetic_kernels.pyx"],
-        include_dirs=include_dirs,
-        language="c",
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "draken.vectors._arithmetic_int64_int64",
-        sources=["draken/vectors/_arithmetic_int64_int64.pyx"],
-        include_dirs=include_dirs,
-        language="c",
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "draken.vectors._arithmetic_float64_float64",
-        sources=["draken/vectors/_arithmetic_float64_float64.pyx"],
-        include_dirs=include_dirs,
-        language="c",
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "draken.vectors._arithmetic_int64_float64",
-        sources=["draken/vectors/_arithmetic_int64_float64.pyx"],
-        include_dirs=include_dirs,
-        language="c",
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "draken.vectors._arithmetic_float64_int64",
-        sources=["draken/vectors/_arithmetic_float64_int64.pyx"],
-        include_dirs=include_dirs,
-        language="c",
-        extra_compile_args=C_FLAGS,
-    ),
-    make_draken_extension(
-        "vectors.integer64_vector",
-        "vectors/integer64_vector.pyx",
-        language="c++",
-        depends=["draken/src/core/buffers.h", "draken/vectors/_int64_compare.hpp"],
-    ),
-    make_draken_extension(
-        "vectors.integer8_vector",
-        "vectors/integer8_vector.pyx",
-        language="c++",
-        depends=["draken/src/core/buffers.h", "draken/vectors/_integer_compare.hpp"],
-    ),
-    make_draken_extension(
-        "vectors.integer16_vector",
-        "vectors/integer16_vector.pyx",
-        language="c++",
-        depends=["draken/src/core/buffers.h", "draken/vectors/_integer_compare.hpp"],
-    ),
-    make_draken_extension(
-        "vectors.integer32_vector",
-        "vectors/integer32_vector.pyx",
-        language="c++",
-        depends=["draken/src/core/buffers.h", "draken/vectors/_integer_compare.hpp"],
-    ),
-    Extension(
-        "draken.vectors.string_vector",
-        sources=[
-            "draken/vectors/string_vector.pyx",
-            "src/cpp/simd_hash.cpp",
-            "src/cpp/simd_bitops.cpp",
-            "src/cpp/simd_env.cpp",
-            "src/cpp/simd_search.cpp",
-            "src/cpp/simd_string_ops.cpp",
-            "src/cpp/cpu_features.cpp",
-        ],
-        include_dirs=include_dirs,
-        define_macros=[("XXH_INLINE_ALL", "1")],
-        extra_compile_args=CPP_FLAGS,
-        language="c++",
-    ),
-    make_draken_extension(
-        "vectors.string_arena_builder",
-        "vectors/string_arena_builder.pyx",
-        language="c++",
-        depends=[
-            "draken/src/core/buffers.h",
-            "draken/src/core/string_slot.h",
-            "draken/core/string_arena.pxd",
-        ],
-    ),
-    make_draken_extension(
-        "vectors.date32_vector",
-        "vectors/date32_vector.pyx",
-        language="c++",
-        depends=["draken/src/core/buffers.h", "draken/vectors/_date32_compare.hpp"],
-    ),
-    make_draken_extension("vectors.decimal_vector", "vectors/decimal_vector.pyx"),
-    make_draken_extension(
-        "vectors.timestamp_vector",
-        "vectors/timestamp_vector.pyx",
-        depends=[
-            "draken/src/core/buffers.h",
-            "draken/vectors/_timestamp_compare.hpp",
-            "draken/vectors/_int64_compare.hpp",
-        ],
-    ),
-    make_draken_extension("morsels.morsel", "morsels/morsel.pyx"),
-    make_draken_extension("storage.morsel_io", "storage/morsel_io.pyx"),
-    # Pre-generated C module for morsels.align (Cython-generated C source)
-    Extension(
-        "draken.morsels.align",
-        sources=["draken/morsels/align.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-        language="c",
-    ),
-    # Hash API shim used by a few draken helpers (Cython wrapper)
-    Extension(
-        "draken.vectors._hash_api",
-        sources=[
-            "draken/vectors/_hash_api.pyx",
-            "src/cpp/simd_hash.cpp",
-            "src/cpp/simd_bitops.cpp",
-            "src/cpp/cpu_features.cpp",
-        ],
-        include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
@@ -1375,6 +1334,179 @@ extensions.append(
     )
 )
 
+# E.2 — C′ pattern pilot: 6 bitwise ops as pure nanobind C++.
+# draken_vector_unwrap / draken_vector_own_raw are implemented in draken_native.so
+# and resolved at import time (draken/__init__.py loads draken_native with
+# RTLD_GLOBAL before any consumer extension is imported).
+_bitwise_bridge_link_args = (
+    ["-undefined", "dynamic_lookup"] if is_mac()
+    else ["-Wl,--allow-shlib-undefined"]
+)
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_bitwise",
+        sources=[
+            "opteryx/compiled/nanobind/vector_bitwise.cpp",
+            "draken/core/vector_alloc.cpp",   # draken_identity_sel, draken_zero_sel
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+# E.3 — C′ pattern: abs / sign / sqrt / round as pure nanobind C++.
+# Uses the same RTLD_GLOBAL bridge pattern as E.2 (vector_bitwise).
+# boost::math vendored in third_party/boost_math/ but NOT used for round
+# (boost::math::round is half-away-from-zero; round uses 2^52 trick instead).
+# boost stays vendored for future log/exp/trig/special phases.
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_math",
+        sources=[
+            "opteryx/compiled/nanobind/vector_math.cpp",
+            "draken/core/vector_alloc.cpp",   # draken_identity_sel, draken_zero_sel
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+# E.4 — C′ pattern: base64/85 codec + bool utility ops as pure nanobind C++.
+# Uses the same RTLD_GLOBAL bridge pattern as E.2/E.3 (vector_bitwise/vector_math).
+#
+# vector_codec: 4 functions (b64_encode/decode, b85_encode/decode).
+#   Links vendored mabel C sources directly.  No new draken op layer (mabel is
+#   already vendored C++; adding a draken wrapper op would be vestigial).
+#   Output is always DENSE; dict-preserving output deferred (needs Part A bridge).
+#
+# vector_bool_ops: 4 functions (from_int8_mask, from_inverted_bitmap, all_true,
+#   and_chain).  Kernel logic lives in draken/ops/bool_logical.h (already built
+#   in D.5).  No new draken-side work needed.
+#
+# Replaces: bool_vector_ops.pyx, vector_base64.pyx, vector_base85.pyx (deleted).
+
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_codec",
+        sources=[
+            "opteryx/compiled/nanobind/vector_codec.cpp",
+            "draken/core/vector_alloc.cpp",
+            # Mabel vendored C sources (base64 + base85).
+            "opteryx/third_party/mabel/base64/_base64.c",
+            "opteryx/third_party/mabel/base64/_base64_dispatch.c",
+            "opteryx/third_party/mabel/base64/_base64_neon.c",
+            "opteryx/third_party/mabel/base64/_base64_avx2.c",
+            "opteryx/third_party/mabel/base85/_base85.c",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "opteryx/third_party/mabel/base64",   # _base64.h
+            "opteryx/third_party/mabel/base85",   # _base85.h
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_bool_ops",
+        sources=[
+            "opteryx/compiled/nanobind/vector_bool_ops.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+# E.5 — C′ pattern: array element-reduction ops (ANY/ALL over array columns).
+# Uses draken_array_child_unwrap (new bridge function) + array_reductions.h.
+# Replaces: vector_anyop_{eq,neq,gt,gte,lt,lte}.pyx + vector_allop_{eq,neq}.pyx (8 files deleted).
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_array_reduce",
+        sources=[
+            "opteryx/compiled/nanobind/vector_array_reduce.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+# E.6 — C′ batch: string length/emptiness + array element count (4 consumer functions).
+# Replaces: vector_string_length.pyx, vector_string_emptiness.pyx, vector_length.pyx (3 deleted).
+# vector_get_element.pyx split into vector_json_extract.pyx + vector_map_access.pyx (Cython).
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_accessors",
+        sources=[
+            "opteryx/compiled/nanobind/vector_accessors.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
 extensions.append(
     Extension(
         "opteryx.compiled.io.disk_reader",
@@ -1660,7 +1792,13 @@ setup(
     python_requires=">=3.13",
     url="https://github.com/mabel-dev/opteryx/",
     ext_modules=cythonize(
-        extensions,
+        # DRAKEN_BUILD=1 restricts the build to draken.* targets only —
+        # lets them build in isolation while the engine is red.
+        (
+            [e for e in extensions if e.name.startswith("draken.")]
+            if os.environ.get("DRAKEN_BUILD")
+            else extensions
+        ),
         compiler_directives={
             "language_level": "3",
             "linetrace": "a" in __version__ or "b" in __version__,

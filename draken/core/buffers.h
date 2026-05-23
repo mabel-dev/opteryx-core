@@ -1,0 +1,174 @@
+#pragma once
+#include <stdint.h>
+#include <stddef.h>
+#include "string_slot.h"
+
+// =============================================================================
+// Draken unified ABI — single source of truth (CLAUDE.md §11).
+//
+// This header is FROZEN for the duration of the C++-first rebuild. ~95 compiled
+// `cimport draken.core.buffers` sites bind `DrakenVector`'s layout at compile
+// time, and the new `draken` must stay byte-identical to `draken_old` (40 bytes
+// on LP64) so the two can coexist as the rebuild proceeds. ABI drift (a silent
+// field reorder or enum renumber) segfaults consumers instead of failing the
+// build, so the layout is pinned by the static_asserts at the bottom of this
+// file (mirrored in draken_old/src/core/buffers.h).
+//
+// Logical-type descriptor (06) and value statistics (05) are deliberately
+// out-of-band, keyed by column — NOT fields on these structs. Adding either
+// breaks the 40-byte freeze and the cimport ABI. Do not add them here.
+// =============================================================================
+
+// Portable compile-time assertion (C11 / C++11 / older-toolchain fallback).
+#if defined(__cplusplus)
+  #define DRAKEN_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+  #define DRAKEN_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#else
+  #define DRAKEN_STATIC_ASSERT_CAT_(a, b) a##b
+  #define DRAKEN_STATIC_ASSERT_CAT(a, b) DRAKEN_STATIC_ASSERT_CAT_(a, b)
+  #define DRAKEN_STATIC_ASSERT(cond, msg) \
+      typedef char DRAKEN_STATIC_ASSERT_CAT(draken_static_assert_, __LINE__)[(cond) ? 1 : -1]
+#endif
+
+typedef enum {
+    // Integer types: 1–19
+    DRAKEN_INT8           = 1,
+    DRAKEN_INT16          = 2,
+    DRAKEN_INT32          = 3,
+    DRAKEN_INT64          = 4,
+    DRAKEN_DECIMAL        = 5,  // logical DECIMAL(p≤18,s); physical int64 unscaled value
+
+    // Floating-point types: 20–29
+    DRAKEN_FLOAT32        = 20,
+    DRAKEN_FLOAT64        = 21,
+
+    // Temporal types: 30–49
+    DRAKEN_DATE32         = 30,
+    DRAKEN_TIMESTAMP64    = 40,
+    DRAKEN_TIME32         = 41,
+    DRAKEN_TIME64         = 42,
+    DRAKEN_INTERVAL       = 43,
+
+    // Boolean: 50
+    DRAKEN_BOOL           = 50,
+
+    // String-like: 60–79
+    DRAKEN_STRING         = 60,
+    DRAKEN_DICTIONARY     = 61,
+    DRAKEN_CONSTANT       = 62,
+
+    // Complex types: 80–99
+    DRAKEN_ARRAY          = 80,
+
+    // Catch-all
+    DRAKEN_NON_NATIVE     = 100,  // Unoptimized or fallback-wrapped Arrow types
+
+    // D.11 — new types (added at the end; do NOT renumber anything above)
+    DRAKEN_NULL           = 101,  // Self-describing null: type==NULL ⟹ every row null; no data, no validity.
+    DRAKEN_VECTOR_FP16    = 102,  // fp16 embedding vector; dimension via mandatory logical descriptor.
+} DrakenType;
+
+typedef struct {
+    void* data;               // int64_t*, double*, etc.
+    uint8_t* null_bitmap;     // optional, 1 bit per row
+    size_t length;
+    size_t itemsize;
+    DrakenType type;
+} DrakenFixedBuffer;
+
+typedef struct {
+    uint8_t* data;            // UTF-8 bytes
+    int32_t* offsets;         // [N+1] entries
+    uint8_t* null_bitmap;     // optional
+    size_t length;
+    DrakenType type;
+} DrakenVarBuffer;
+
+typedef struct {
+    uint8_t* data;
+    int32_t length;
+} DrakenConstantStringPayload;
+
+// German-string storage. Replaces DrakenVarBuffer for string values: an array
+// of 16-byte DrakenStringSlot slots (length + inline-12 OR length + prefix + arena
+// offset) plus a byte arena for long-form payloads (> 12 bytes). Used as the
+// `data` payload of a string DrakenVector under the unified format.
+//
+// Lifetime: slots and arena are both owned by this struct when owns_buffers
+// is non-zero. arena_used tracks bytes consumed during construction; arena_cap
+// is the allocation size. Slots whose length <= 12 do not reference the arena.
+typedef struct {
+    DrakenStringSlot* slots;       // [length] slot array
+    uint8_t*      arena;       // long-form byte arena (may be NULL when all rows inline)
+    size_t        length;      // number of slots
+    size_t        arena_used;  // bytes consumed in arena
+    size_t        arena_cap;   // arena allocation size
+    uint8_t*      null_bitmap; // optional, 1 bit per row
+    uint8_t       owns_buffers;// free slots/arena/null_bitmap on free?
+    DrakenType    type;        // DRAKEN_STRING (or DRAKEN_NON_NATIVE for binary)
+} DrakenStringArena;
+
+typedef struct {
+    int32_t* offsets;         // [length + 1] entries
+    void* values;             // pointer to another column's data (DrakenFixedColumn*, DrakenVarColumn*, etc.)
+    uint8_t* null_bitmap;     // optional, 1 bit per row
+    size_t length;            // number of array entries (rows)
+    DrakenType value_type;    // type of the child values
+} DrakenArrayBuffer;
+
+// Unified vector view — one shape, one access pattern.
+//
+// Access is always: data[selection[i]]  for i in [0, length).
+//
+// `selection` is never NULL. For dense vectors it points at the lazy-grown
+// global identity permutation; for constant vectors at the lazy-grown global
+// zero vector; for dict-encoded vectors at owned uint32 codes. The choice of
+// pointer is owned by the C constructors in vector_alloc.h. No operator,
+// kernel, or wrapper may specialize on encoding shape — there is no
+// "dense fast-path", no `data_length == 1` shortcut, no NULL check.
+//
+// Memory-layout hints (informational only — never used in hot loops):
+//   former-dense    => selection points at draken_identity_sel,  data_length == length
+//   former-constant => selection points at draken_zero_sel,      data_length == 1
+//   former-dict     => selection is owned codes,                 data_length <  length
+typedef struct {
+    void*             data;        // typed payload (cast at Cython typed-wrapper level)
+    const uint32_t*   selection;   // always valid; indices into data
+    uint32_t          data_length; // number of unique values in data
+    uint32_t          length;      // logical row count
+    uint8_t*          validity;    // 1-bit-per-logical-row null mask; NULL = all valid
+    DrakenType        type;
+    uint8_t           flags;       // Category-A layout hints (below); 0 = "don't know". Lands in tail padding → sizeof unchanged.
+} DrakenVector;
+
+// Category-A layout hint bits (00_data_model.md). Default 0 = conservative
+// "don't know" → uniform data[selection[i]] path. A bit may be set ONLY when
+// certain; a missed update loses a fast-path (slower, still correct), never
+// changes the answer. Containment: IDENTITY ⟹ PERMUTATION ⟹ data_length==length.
+#define DRAKEN_SEL_IDENTITY     (1u << 0)  // selection[i] == i (true dense)
+#define DRAKEN_SEL_PERMUTATION  (1u << 1)  // bijection, data_length == length
+// bits 2..7 reserved for future layout hints
+
+// =============================================================================
+// ABI guard — frozen layout (CLAUDE.md §11, 09_delivery.md risk #1).
+// sizeof alone won't catch a field reorder, and a renumbered enum is as fatal
+// as a layout shift, so every shared field offset and a few tag values are
+// pinned here. These asserts must stay identical in draken_old/src/core/buffers.h.
+// =============================================================================
+DRAKEN_STATIC_ASSERT(sizeof(DrakenVector) == 40, "DrakenVector must be 40 bytes on LP64");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, data)        == 0,  "DrakenVector.data offset drift");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, selection)   == 8,  "DrakenVector.selection offset drift");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, data_length) == 16, "DrakenVector.data_length offset drift");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, length)      == 20, "DrakenVector.length offset drift");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, validity)    == 24, "DrakenVector.validity offset drift");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, type)        == 32, "DrakenVector.type offset drift");
+DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, flags)       == 36, "DrakenVector.flags must land in tail padding at offset 36");
+
+// Pin the DrakenType underlying integer width and representative tag values.
+// A renumber silently breaks the runtime dispatch key for every cimport site.
+DRAKEN_STATIC_ASSERT(sizeof(DrakenType) == 4, "DrakenType underlying type must be 4 bytes");
+DRAKEN_STATIC_ASSERT(DRAKEN_INT64  == 4,   "DrakenType tag renumbered: DRAKEN_INT64");
+DRAKEN_STATIC_ASSERT(DRAKEN_BOOL   == 50,  "DrakenType tag renumbered: DRAKEN_BOOL");
+DRAKEN_STATIC_ASSERT(DRAKEN_STRING == 60,  "DrakenType tag renumbered: DRAKEN_STRING");
+DRAKEN_STATIC_ASSERT(DRAKEN_NON_NATIVE == 100, "DrakenType tag renumbered: DRAKEN_NON_NATIVE");

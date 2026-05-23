@@ -31,7 +31,7 @@ def if_null(values, replacements):
     IIF(IS_NULL(values), replacements, values)
     """
     from opteryx.compiled.vector_ops import vector_iif
-    from opteryx.compiled.vector_ops import bool_vector_from_int8_mask
+    from opteryx.compiled.nanobind.vector_bool_ops import bool_vector_from_int8_mask
 
     if not values.__class__.__module__.startswith("draken.vectors."):
         raise TypeError(f"IFNULL expects Draken vector input, got {type(values).__name__}.")
@@ -57,7 +57,7 @@ def if_not_null(values, replacements):
     from array import array as _array
 
     from opteryx.compiled.vector_ops import vector_iif
-    from opteryx.compiled.vector_ops import bool_vector_from_int8_mask
+    from opteryx.compiled.nanobind.vector_bool_ops import bool_vector_from_int8_mask
 
     if not values.__class__.__module__.startswith("draken.vectors."):
         raise TypeError(f"IFNOTNULL expects Draken vector input, got {type(values).__name__}.")
