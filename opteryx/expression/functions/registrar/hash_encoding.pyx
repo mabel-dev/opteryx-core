@@ -19,7 +19,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         vector_base85_decode,
         vector_base85_encode,
     )
-    from opteryx.compiled.vector_ops import (
+    from opteryx.compiled.nanobind.vector_hash_codec import (
         vector_hex_decode,
         vector_hex_encode,
         vector_md5,

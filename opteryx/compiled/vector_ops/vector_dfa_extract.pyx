@@ -182,7 +182,7 @@ from draken.core.buffers cimport (
     DrakenVarBuffer,
     DrakenStringArena,
     DrakenStringSlot,
-    DRAKEN_STRING,
+    DRAKEN_VARCHAR,
     draken_vector_from_dense,
     str_length,
     str_data,
@@ -965,6 +965,6 @@ cpdef StringVector vector_dfa_extract(
         <Py_ssize_t>n,
     )
     out_vec._unified_view = draken_vector_from_dense(
-        <void*>out_arena, <uint32_t>n, DRAKEN_STRING, out_ptr_buf.null_bitmap)
+        <void*>out_arena, <uint32_t>n, DRAKEN_VARCHAR, out_ptr_buf.null_bitmap)
 
     return out_vec

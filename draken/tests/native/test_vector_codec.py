@@ -12,13 +12,13 @@ Coverage:
     empty string → empty string (not null)
     multibyte UTF-8 round-trip
     all-null vector, mixed-null vector
-    TypeError on non-DRAKEN_STRING input
+    TypeError on non-DRAKEN_VARCHAR input
 
   base85 encode / decode:
     round-trip
     known fixtures matching stdlib base64.b85encode / b85decode
     null TVL, empty string, multibyte UTF-8
-    TypeError on non-DRAKEN_STRING input
+    TypeError on non-DRAKEN_VARCHAR input
 """
 
 import base64 as stdlib_base64
@@ -58,12 +58,12 @@ vc = _load_vector_codec()
 # ---------------------------------------------------------------------------
 
 def make_string_vec(values):
-    """Build a DRAKEN_STRING Vector from a list[str | None]."""
+    """Build a DRAKEN_VARCHAR Vector from a list[str | None]."""
     return dn.vector_from_string_sequence(values)
 
 
 def extract_string_vec(vec):
-    """Extract list[str | None] from a DRAKEN_STRING Vector."""
+    """Extract list[str | None] from a DRAKEN_VARCHAR Vector."""
     return [vec[i] for i in range(len(vec))]
 
 

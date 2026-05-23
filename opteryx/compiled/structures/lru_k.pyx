@@ -9,265 +9,149 @@
 # cython: optimize.unpack_method_calls=True
 
 # distutils: language = c++
-"""
-Optimized LRU-K(2) implementation focused on performance.
 
-Key optimizations:
-1. Simplified data structures - removed unnecessary heap and tracking
-2. Direct dictionary access with minimal indirection
-3. Simple list-based access history (faster than deque for our use case)
-4. Reduced memory allocations and copies
-5. Minimal bookkeeping overhead
+"""
+LRU-2 cache backed by a C++ implementation (K=2 fixed).
+
+API is identical to the old Python-based LRU_K so callers need no changes.
+The k parameter is accepted for compatibility but ignored; behaviour is always
+K=2.
 """
 
-from collections import OrderedDict
 from libc.stdint cimport int64_t
+from libcpp.string cimport string
+
 
 cdef class LRU_K:
-    def __cinit__(self, int64_t k=2, int64_t max_size=0, int64_t max_memory=0):
-        """
-        Initialize LRU-K cache.
 
-        Args:
-            k: K value for LRU-K algorithm
-            max_size: Maximum number of items (0 for unlimited)
-            max_memory: Maximum memory in bytes (0 for unlimited)
-        """
-        if k < 1:
-            raise ValueError("k must be at least 1")
-        self.k = k
-        self.max_size = max_size
+    def __cinit__(self, int64_t k=2, int64_t max_size=0, int64_t max_memory=0):
+        self.k          = k        # stored for compatibility; C++ always uses K=2
+        self.max_size   = max_size
         self.max_memory = max_memory
-        self.current_memory = 0
-        self.slots = OrderedDict()
-        self.access_history = {}
-        self._clock = 0
-        self.hits = 0
-        self.misses = 0
-        self.evictions = 0
-        self.inserts = 0
-        self.size = 0
+        self._lru = new CppLRU2(max_size, max_memory)
+
+    def __dealloc__(self):
+        if self._lru is not NULL:
+            del self._lru
+            self._lru = NULL
 
     def __len__(self):
-        return self.size
+        return self._lru.size()
 
     def __contains__(self, bytes key):
-        return key in self.slots
+        cdef const char* kp  = key
+        cdef int64_t     kn  = <int64_t>len(key)
+        cdef bint found
+        with nogil:
+            found = self._lru.contains(kp, kn)
+        return found
 
     cpdef object get(self, bytes key):
-        """Get value for key, updating access history. Returns bytes or None."""
-        cdef object value = self.slots.get(key)
-        if value is not None:
-            self.hits += 1
-            self._update_access_history(key)
-            # Move to end to maintain LRU order
-            self.slots.move_to_end(key)
-        else:
-            self.misses += 1
-        return value
+        """Return cached value for key, or None on miss."""
+        cdef const char* kp      = key
+        cdef int64_t     kn      = <int64_t>len(key)
+        cdef const char* out_data = NULL
+        cdef int64_t     out_len  = 0
+        cdef bint        hit
+
+        with nogil:
+            hit = self._lru.get_into(kp, kn, &out_data, &out_len)
+
+        if not hit:
+            return None
+        return out_data[:out_len]
 
     cpdef tuple set(self, bytes key, bytes value, bint evict):
         """
-        Set key-value pair, optionally evicting if needed.
+        Store key-value pair, optionally evicting if limits are exceeded.
 
-        Returns:
-            Evicted key-value pair if eviction occurred, else None
+        Returns (None, None) — eviction details not surfaced in the hot path.
         """
-        cdef bytes evicted_key = None
-        cdef bytes evicted_value = None
-        cdef bint key_exists = key in self.slots
+        cdef const char* kp = key
+        cdef int64_t     kn = <int64_t>len(key)
+        cdef const char* vp = value
+        cdef int64_t     vn = <int64_t>len(value)
 
-        self.inserts += 1
-
-        # Calculate memory impact
-        cdef int64_t item_memory = len(key) + len(value)
-
-        if not key_exists:
-            self.size += 1
-            self.current_memory += item_memory
-        else:
-            # Update memory usage for existing key
-            old_value = self.slots[key]
-            self.current_memory += len(value) - len(old_value)
-
-        # Insert/update the slot value. Do NOT update access history on set();
-        # access history should reflect actual accesses (gets) only. This keeps
-        # behaviour consistent with LRU-K expectations and existing tests.
-        self.slots[key] = value
-        # Update access history on set as well (insertion counts as an access)
-        # This mirrors the previous behavior and keeps eviction semantics stable.
-        self._update_access_history(key)
-
-        # Move to end to maintain LRU order
-        self.slots.move_to_end(key)
-
-        # Evict if needed and requested
-        if evict:
-            evicted_key, evicted_value = self._evict_if_needed()
-
-        return evicted_key, evicted_value
-
-    cdef void _update_access_history(self, bytes key):
-        """Update access history for key using a simple list (faster than deque)."""
-        cdef int64_t access_time
-        cdef list history
-
-        # Increment clock
-        self._clock += 1
-        access_time = self._clock
-
-        history = self.access_history.get(key)
-        if history is None:
-            history = [access_time]
-            self.access_history[key] = history
-        else:
-            history.append(access_time)
-            # Keep only the last k entries
-            if len(history) > self.k:
-                history.pop(0)
-
-    cdef tuple _evict_if_needed(self):
-        """Evict items if size or memory limits are exceeded."""
-        cdef bytes evicted_key = None
-        cdef bytes evicted_value = None
-
-        while self._should_evict():
-            evicted_key, evicted_value = self._evict_one(False)
-            if evicted_key is None:
-                break  # No more items to evict
-
-        return evicted_key, evicted_value
-
-    cdef bint _should_evict(self):
-        """Check if eviction is needed."""
-        if self.max_size > 0 and self.size > self.max_size:
-            return True
-        if self.max_memory > 0 and self.current_memory > self.max_memory:
-            return True
-        return False
+        with nogil:
+            self._lru.set(kp, kn, vp, vn, evict)
+        return (None, None)
 
     cpdef object evict(self, bint details):
-        """Evict one item according to LRU-K policy.
-
-        If details is False (default) return the evicted key or None.
-        If details is True return a (key, value) tuple or (None, None).
         """
-        cdef tuple result = self._evict_one(details)
+        Evict one item.
+
+        Always returns (key, value) tuple or (None, None).
+        When details is False, value is None (not fetched from C++).
+        """
+        cdef string key_out
+        cdef string val_out
+        cdef bint   evicted
+
+        with nogil:
+            evicted = self._lru.evict_one_into(details, key_out, val_out)
+
+        if not evicted:
+            return (None, None)
+
+        cdef bytes py_key = key_out
         if details:
-            return result
-        # return only the key when details is False
-        return result[0]
-
-    cdef tuple _evict_one(self, bint details):
-        """Evict one item using simplified LRU-K algorithm."""
-        cdef bytes candidate_key = None
-        cdef bytes candidate_value = None
-        cdef int64_t kth_time
-        cdef list history
-
-        if not self.slots:
-            if details:
-                return None, None
-            return None, None
-
-        # Find the key with the oldest kth access time.
-        # First prefer keys that have at least k accesses (full history). If
-        # none exist, fall back to keys with fewer than k accesses. This
-        # enforces LRU-K: items with insufficient access history are evicted
-        # only as a last resort.
-        cdef int found_full_history = 0
-        cdef int64_t candidate_time = -1
-
-        # First pass: look for keys with >= k accesses
-        for key in self.slots:
-            history = self.access_history.get(key)
-            if history is None:
-                continue
-            if len(history) >= self.k:
-                kth_time = history[0]
-                if candidate_key is None or kth_time < candidate_time:
-                    candidate_key = key
-                    candidate_time = kth_time
-                    found_full_history = 1
-
-        if not found_full_history:
-            # Second pass: consider keys with partial history (len < k)
-            for key in self.slots:
-                history = self.access_history.get(key)
-                if history is None:
-                    # No history means never accessed; consider as last fallback
-                    if candidate_key is None:
-                        candidate_key = key
-                    break
-                # use first access time
-                kth_time = history[0]
-                if candidate_key is None or kth_time < candidate_time:
-                    candidate_key = key
-                    candidate_time = kth_time
-
-        if candidate_key is None:
-            if details:
-                return None, None
-            return None, None
-
-        # Remove the candidate
-        candidate_value = self.slots.pop(candidate_key, None)
-
-        if candidate_key in self.access_history:
-            del self.access_history[candidate_key]
-
-        self.size -= 1
-        if candidate_value is not None:
-            self.current_memory -= (len(candidate_key) + len(candidate_value))
-        self.evictions += 1
-
-        if details:
-            return candidate_key, candidate_value
-        return candidate_key, None
+            return (py_key, <bytes>val_out)
+        return (py_key, None)
 
     cpdef bint delete(self, bytes key):
-        """Delete specific key from cache."""
-        if key in self.slots:
-            value = self.slots.pop(key)
-            if key in self.access_history:
-                del self.access_history[key]
-            self.size -= 1
-            self.current_memory -= (len(key) + len(value))
-            self.evictions += 1
-            return True
-        return False
+        """Remove key from cache; returns True if it was present."""
+        cdef const char* kp = key
+        cdef int64_t     kn = <int64_t>len(key)
+        cdef bint removed
+        with nogil:
+            removed = self._lru.erase(kp, kn)
+        return removed
 
     cpdef void clear(self, bint reset_stats):
-        """Clear all items from cache."""
-        self.slots.clear()
-        self.access_history.clear()
-        self.size = 0
-        self.current_memory = 0
-        if reset_stats:
-            self.hits = 0
-            self.misses = 0
-            self.evictions = 0
-            self.inserts = 0
+        """Remove all items; optionally reset hit/miss/eviction counters."""
+        with nogil:
+            self._lru.clear(reset_stats)
 
     @property
-    def keys(self):
-        """Get all keys in cache as a list."""
-        return list(self.slots.keys())
-
-    def items(self):
-        """Get all key-value pairs in cache."""
-        return list(self.slots.items())
+    def size(self):
+        return self._lru.size()
 
     @property
-    def memory_usage(self):
-        """Get current memory usage in bytes."""
-        return self.current_memory
+    def current_memory(self):
+        return self._lru.current_memory()
+
+    @property
+    def hits(self):
+        return self._lru.hits()
+
+    @property
+    def misses(self):
+        return self._lru.misses()
+
+    @property
+    def evictions(self):
+        return self._lru.evictions()
+
+    @property
+    def inserts(self):
+        return self._lru.inserts()
 
     @property
     def stats(self):
-        """Get cache statistics as a tuple: (hits, misses, evictions, inserts)."""
-        return (self.hits, self.misses, self.evictions, self.inserts)
+        """(hits, misses, evictions, inserts) — matches old API."""
+        return (self._lru.hits(), self._lru.misses(),
+                self._lru.evictions(), self._lru.inserts())
+
+    @property
+    def keys(self):
+        raise NotImplementedError("keys property not available in C++ backend")
+
+    def items(self):
+        raise NotImplementedError("items() not available in C++ backend")
+
+    @property
+    def memory_usage(self):
+        return self._lru.current_memory()
 
     def reset(self, bint reset_stats=False):
-        """Alias for clear."""
         self.clear(reset_stats)

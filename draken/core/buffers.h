@@ -54,9 +54,11 @@ typedef enum {
     DRAKEN_BOOL           = 50,
 
     // String-like: 60–79
-    DRAKEN_STRING         = 60,
+    DRAKEN_VARCHAR        = 60,  // default; ASCII semantics; byte-length ops
     DRAKEN_DICTIONARY     = 61,
     DRAKEN_CONSTANT       = 62,
+    DRAKEN_NVARCHAR       = 63,  // opt-in UTF-8; codepoint-length ops; Unicode-aware ops (future)
+    DRAKEN_VARBINARY      = 64,  // opaque bytes; byte-length ops; character ops throw
 
     // Complex types: 80–99
     DRAKEN_ARRAY          = 80,
@@ -106,7 +108,7 @@ typedef struct {
     size_t        arena_cap;   // arena allocation size
     uint8_t*      null_bitmap; // optional, 1 bit per row
     uint8_t       owns_buffers;// free slots/arena/null_bitmap on free?
-    DrakenType    type;        // DRAKEN_STRING (or DRAKEN_NON_NATIVE for binary)
+    DrakenType    type;        // DRAKEN_VARCHAR | DRAKEN_NVARCHAR | DRAKEN_VARBINARY
 } DrakenStringArena;
 
 typedef struct {
@@ -170,5 +172,5 @@ DRAKEN_STATIC_ASSERT(offsetof(DrakenVector, flags)       == 36, "DrakenVector.fl
 DRAKEN_STATIC_ASSERT(sizeof(DrakenType) == 4, "DrakenType underlying type must be 4 bytes");
 DRAKEN_STATIC_ASSERT(DRAKEN_INT64  == 4,   "DrakenType tag renumbered: DRAKEN_INT64");
 DRAKEN_STATIC_ASSERT(DRAKEN_BOOL   == 50,  "DrakenType tag renumbered: DRAKEN_BOOL");
-DRAKEN_STATIC_ASSERT(DRAKEN_STRING == 60,  "DrakenType tag renumbered: DRAKEN_STRING");
+DRAKEN_STATIC_ASSERT(DRAKEN_VARCHAR == 60, "DrakenType tag renumbered: DRAKEN_VARCHAR");
 DRAKEN_STATIC_ASSERT(DRAKEN_NON_NATIVE == 100, "DrakenType tag renumbered: DRAKEN_NON_NATIVE");

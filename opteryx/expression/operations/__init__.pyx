@@ -21,11 +21,11 @@ from draken.interop.vector_sequence import vector_from_sequence
 from draken.vectors.bool_vector import BoolVector
 from draken.vectors.string_vector import StringVector
 from opteryx.compiled.vector_ops import (
-    vector_contains,
-    vector_in_list,
     vector_like,
     vector_rlike,
 )
+from opteryx.compiled.nanobind.vector_misc import vector_in_list
+from opteryx.compiled.nanobind.vector_string_search import vector_contains
 from opteryx.expression.evaluator.comparisons import draken_compare
 from opteryx.third_party import yyjson
 from opteryx.types import OrsoTypes
@@ -272,7 +272,8 @@ def _inner_filter_operations(arr, operator, value):
     elif operator.startswith("RLike"):
         return rlike_match(raw_arr, value, operator)
     elif operator.startswith("ArrayContains"):
-        return vector_contains(raw_arr, StringVector.from_constant(value, 1))
+        from draken.draken_native import vector_from_string_sequence as _vfss
+        return vector_contains(raw_arr, _vfss([str(value)]))
     else:
         # AnyOp* / AllOp* / AtArrow are dispatched via
         # evaluator.comparisons.draken_compare before they can reach here.

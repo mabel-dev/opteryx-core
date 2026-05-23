@@ -1,9 +1,10 @@
 #pragma once
 // draken/core/draken_bridge.h — Cython ↔ nanobind bridge surface.
 //
-// Three functions bridging .pyx consumers to the nanobind VectorOwner handle.
-// These are the ONLY bridge surface — do not grow it. Per-op specifics live
-// in ops/*.h.
+// Functions bridging .pyx consumers to the nanobind VectorOwner handle.
+// This is the only bridge surface.  Per-op specifics live in ops/*.h.
+// Extension history: draken_vector_own_array added for E.16b (DRAKEN_ARRAY
+// construction from raw C buffers; no Python intermediate).
 //
 // Lifetime contract for draken_vector_unwrap:
 //   The returned pointer is BORROWED — it points inside the VectorOwner owned
@@ -61,7 +62,7 @@ const DrakenVector* draken_array_child_unwrap(PyObject* obj);
 PyObject* draken_vector_own_raw(
     void* data, uint8_t* validity, uint32_t length, DrakenType type);
 
-// draken_vector_own_string — wrap hand-allocated string buffers in a new DRAKEN_STRING Vector.
+// draken_vector_own_string — wrap hand-allocated string buffers in a new string-family Vector.
 //
 // Canonical exit-point for C++ consumers that produce a new string column.
 // All three buffers MUST have been allocated with draken_malloc. Ownership of all three
@@ -82,12 +83,18 @@ PyObject* draken_vector_own_raw(
 //   validity  — 1-bit-per-logical-row null bitmap (Arrow convention: bit set = valid).
 //               May be NULL if all rows are valid (normalization invariant).
 //   length    — logical row count.
+//   type      — must be DRAKEN_VARCHAR, DRAKEN_NVARCHAR, or DRAKEN_VARBINARY.
+//               Raises ValueError if any other type is passed.
 //
 // Slot format note: consumers MUST use draken_build_string_slot (or str_init_inline /
 // str_init_extern) to populate slots. The prefix must be big-endian, hash32 must be
 // XXH3-lower-32. Malformed slots produce incorrect equality/hash results downstream.
 //
-// Creates a dense (identity-selection) Vector with type=DRAKEN_STRING.
+// Storage is identical across VARCHAR/NVARCHAR/VARBINARY (slot+arena layout). The type
+// tag drives op semantics (e.g. LENGTH returns codepoints for NVARCHAR, bytes for the
+// other two). No per-type storage specialisation.
+//
+// Creates a dense (identity-selection) Vector with the given type.
 // flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION.
 //
 // Returns a NEW reference to a Python Vector on success.
@@ -97,7 +104,63 @@ PyObject* draken_vector_own_string(
     uint8_t*          arena,
     size_t            arena_len,
     uint8_t*          validity,
+    uint32_t          length,
+    DrakenType        type);   // DRAKEN_VARCHAR | DRAKEN_NVARCHAR | DRAKEN_VARBINARY
+
+// draken_vector_own_array — wrap hand-allocated buffers in a new DRAKEN_ARRAY[string] Vector.
+//
+// Constructs a DRAKEN_ARRAY whose child is a string-family Vector (VARCHAR, NVARCHAR,
+// or VARBINARY).  Ownership of ALL five caller buffers is transferred unconditionally
+// on call entry — the caller MUST NOT free them after calling this function.
+//
+// Parameters:
+//   parent_offsets   — int32_t[length+1]: child index range for each parent row.
+//                      parent_offsets[0] must be 0.  Allocated with draken_malloc.
+//   child_slots      — DrakenStringSlot[child_length]: one slot per child element.
+//                      Each slot populated with draken_build_string_slot (or zeroed for null).
+//                      May be NULL only when child_length == 0.
+//   child_arena      — arena bytes backing long-form child slots.  May be NULL when
+//                      child_arena_len == 0 (all child strings are inline).
+//   child_arena_len  — number of valid bytes in child_arena (may be 0).
+//   child_length     — total number of child elements across all parent rows.
+//   child_type       — DRAKEN_VARCHAR, DRAKEN_NVARCHAR, or DRAKEN_VARBINARY; ValueError otherwise.
+//   parent_validity  — 1-bit-per-row null bitmap for the parent (Arrow convention: bit set = valid).
+//                      May be NULL if all parent rows are valid.
+//   length           — parent logical row count.
+//
+// Child elements are assumed fully valid (no per-element null bitmap).
+// Parent null rows must have parent_offsets[i] == parent_offsets[i+1] (zero-length slice).
+//
+// Returns a NEW reference to a Python Vector on success.
+// Returns NULL with a Python exception set on failure.
+PyObject* draken_vector_own_array(
+    int32_t*          parent_offsets,
+    DrakenStringSlot* child_slots,
+    uint8_t*          child_arena,
+    size_t            child_arena_len,
+    uint32_t          child_length,
+    DrakenType        child_type,
+    uint8_t*          parent_validity,
     uint32_t          length);
+
+// draken_vector_own_timestamp — wrap a hand-allocated int64 buffer as a DRAKEN_TIMESTAMP64 Vector.
+//
+// Mandatory LogicalType descriptor is constructed from unit_str:
+//   "s"    → SECONDS,  "ms"   → MILLISECONDS,
+//   "us"   → MICROSECONDS (the common default),
+//   "ns"   → NANOSECONDS,
+//   "days" → data is scaled to MICROSECONDS (×86_400_000_000) before wrapping;
+//            descriptor is set to MICROSECONDS.
+// Any other unit_str raises ValueError.
+//
+// data must be a draken_malloc'd int64_t[length] buffer; validity may be NULL (all-valid).
+// Ownership of both buffers is transferred unconditionally on call entry.
+// For "days" inputs a new data buffer is allocated; the original is freed on success or failure.
+//
+// Returns a NEW reference to a Python Vector on success.
+// Returns NULL with a Python exception set on failure.
+PyObject* draken_vector_own_timestamp(
+    void* data, uint8_t* validity, uint32_t length, const char* unit_str);
 
 #ifdef __cplusplus
 }  // extern "C"

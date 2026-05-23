@@ -62,7 +62,7 @@ def random_strings(items):
     else:
         return []
 
-    from opteryx.compiled.vector_ops import vector_random_strings
+    from opteryx.compiled.nanobind.vector_string_misc import vector_random_strings
 
     return vector_random_strings(row_count, width)
 
@@ -86,7 +86,7 @@ def safe_power(base_array, exponent_array):
 
 
 def log(values, bases):
-    from opteryx.compiled.vector_ops import vector_log
+    from opteryx.compiled.nanobind.vector_misc import vector_log
 
     return vector_log(values, bases)
 

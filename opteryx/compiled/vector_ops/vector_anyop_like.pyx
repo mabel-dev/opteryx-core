@@ -16,7 +16,7 @@ from cpython.bytes cimport PyBytes_AsStringAndSize, PyBytes_FromStringAndSize
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
-from draken.core.buffers cimport DRAKEN_STRING, DrakenArrayBuffer, DrakenVarBuffer
+from draken.core.buffers cimport DRAKEN_VARCHAR, DrakenArrayBuffer, DrakenVarBuffer
 from draken.core.buffers cimport DrakenStringArena, DrakenStringSlot, str_length, str_data, DrakenVector
 from draken.vectors.array_vector cimport ArrayVector
 from draken.vectors.bool_vector cimport BoolVector
@@ -87,7 +87,7 @@ cdef BoolVector _regex_match_any_literal(ArrayVector arr, object patterns, int f
 
     if aptr == NULL:
         raise ValueError("ArrayVector is not initialized")
-    if aptr.value_type != DRAKEN_STRING or not isinstance(arr._child, StringVector):
+    if aptr.value_type != DRAKEN_VARCHAR or not isinstance(arr._child, StringVector):
         raise TypeError("regex_match_any expects ArrayVector with StringVector child")
     child = <StringVector>arr._child
     child_uv = child.unified()
@@ -225,9 +225,9 @@ cdef BoolVector _regex_match_any_array_array(ArrayVector arr, ArrayVector patter
         raise ValueError("ArrayVector is not initialized")
     if aptr.length != p_aptr.length:
         raise ValueError("array and pattern vectors must have the same length")
-    if aptr.value_type != DRAKEN_STRING or not isinstance(arr._child, StringVector):
+    if aptr.value_type != DRAKEN_VARCHAR or not isinstance(arr._child, StringVector):
         raise TypeError("_regex_match_any_array_array expects array ArrayVector with StringVector child")
-    if p_aptr.value_type != DRAKEN_STRING or not isinstance(patterns._child, StringVector):
+    if p_aptr.value_type != DRAKEN_VARCHAR or not isinstance(patterns._child, StringVector):
         raise TypeError("_regex_match_any_array_array expects patterns ArrayVector with StringVector child")
 
     child = <StringVector>arr._child
@@ -366,7 +366,7 @@ cpdef BoolVector regex_match_any(StringVector arr, ArrayVector patterns, int fla
         raise ValueError("vector is not initialized")
     if arr_uv.length != p_aptr.length:
         raise ValueError("array and pattern vectors must have the same length")
-    if p_aptr.value_type != DRAKEN_STRING or not isinstance(patterns._child, StringVector):
+    if p_aptr.value_type != DRAKEN_VARCHAR or not isinstance(patterns._child, StringVector):
         raise TypeError("regex_match_any expects patterns ArrayVector with StringVector child")
 
     p_child = <StringVector>patterns._child

@@ -151,7 +151,7 @@ def cast_to_double(arr, *args):
 def cast_to_int(arr, *args):
     """Cast `arr` to INT64."""
     from draken.vectors.integer64_vector import from_sequence
-    from opteryx.compiled.vector_ops import vector_cast_ascii_to_int
+    from opteryx.compiled.nanobind.vector_casts import vector_cast_string_to_int as vector_cast_ascii_to_int
     from opteryx.expression.evaluator.type_coercion import (
         _coerce_date32,
         _coerce_timestamp,
@@ -353,14 +353,14 @@ def cast(arr, _type, args=(), unit=None):
             if is_draken_vector_fn(arr) and unit is not None:
                 v_type = get_vector_type(arr)
                 if v_type == VectorType.INT64:
-                    from opteryx.compiled.vector_ops import (
+                    from opteryx.compiled.nanobind.vector_casts import (
                         vector_cast_int64_to_timestamp,
                     )
                     return vector_cast_int64_to_timestamp(arr, unit=unit)
                 if v_type == VectorType.TIMESTAMP:
                     return arr
                 if v_type == VectorType.DATE32:
-                    from opteryx.compiled.vector_ops import (
+                    from opteryx.compiled.nanobind.vector_temporal_convert import (
                         vector_date32_to_timestamp,
                     )
                     return vector_date32_to_timestamp(arr)
@@ -381,7 +381,7 @@ def cast(arr, _type, args=(), unit=None):
                 if v_type == VectorType.DATE32:
                     return arr
                 if v_type == VectorType.TIMESTAMP:
-                    from opteryx.compiled.vector_ops import vector_timestamp_to_date32
+                    from opteryx.compiled.nanobind.vector_temporal_convert import vector_timestamp_to_date32
                     return vector_timestamp_to_date32(arr)
 
         if _type == "ARRAY":

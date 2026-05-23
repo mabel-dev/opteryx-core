@@ -5,7 +5,7 @@ Loads vector_array_reduce without triggering opteryx/__init__.py (same
 spec_from_file_location pattern as test_bitwise_parity.py).
 
 Coverage:
-  child types:    DRAKEN_INT64, DRAKEN_STRING
+  child types:    DRAKEN_INT64, DRAKEN_VARCHAR
   ops:            anyop_eq, anyop_neq, anyop_gt, anyop_gte, anyop_lt, anyop_lte,
                   allop_eq, allop_neq
   null semantics: null literal → all-False

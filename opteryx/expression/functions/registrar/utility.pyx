@@ -200,7 +200,10 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
     These functions are grouped with utility functions per the requested merge.
     """
     # Local imports to keep startup lightweight
-    from opteryx.compiled.vector_ops import vector_contains_all, vector_contains_any
+    from opteryx.compiled.nanobind.vector_string_search import (
+        vector_contains_all,
+        vector_contains_any,
+    )
     from opteryx.expression.functions.implementations.logical import if_null as _of_if_null
     from opteryx.expression.functions.implementations.logical import null_if as _of_null_if
     from opteryx.expression.functions.implementations.utility import (

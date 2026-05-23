@@ -127,7 +127,7 @@ from draken.core.buffers cimport (
     DRAKEN_FLOAT64,
     DRAKEN_INT32,
     DRAKEN_INT64,
-    DRAKEN_STRING,
+    DRAKEN_VARCHAR,
     DrakenVarBuffer,
 )
 from draken.vectors.array_vector cimport ArrayVector, array_vector_from_parts

@@ -2,6 +2,7 @@
 Native + parity tests for E.6: string length/emptiness + array element count
 via the vector_accessors nanobind consumer.
 Updated E.7: vector_string_length now propagates nulls (null input → None output).
+NVARCHAR codepoint-length and VARBINARY byte-length dispatch verified.
 
 Loads the extension without triggering opteryx/__init__.py, following the
 spec_from_file_location pattern established in E.2–E.5.
@@ -63,6 +64,14 @@ va = _load_vector_accessors()
 
 def make_str(values):
     return dn.vector_from_string_sequence(values)
+
+
+def make_nvarchar(values):
+    return dn.vector_from_nvarchar_sequence(values)
+
+
+def make_bytes(values):
+    return dn.vector_from_bytes_sequence(values)
 
 
 def make_arr(values):
@@ -331,3 +340,86 @@ class TestVectorLength:
         vec = make_arr([])
         out = va.vector_length(vec)
         assert len(out) == 0
+
+
+# ---------------------------------------------------------------------------
+# E.7 — NVARCHAR: codepoint-length dispatch
+# ---------------------------------------------------------------------------
+
+class TestVectorStringLengthNvarchar:
+
+    def test_ascii_codepoints_equal_bytes(self):
+        # ASCII: codepoint count == byte count.
+        vec = make_nvarchar(["hello", "a", ""])
+        out = va.vector_string_length(vec)
+        assert extract_int64(out) == [5, 1, 0]
+
+    def test_cafe_codepoints(self):
+        # "café" = 4 codepoints (c, a, f, é); 5 UTF-8 bytes.
+        vec = make_nvarchar(["café"])
+        out = va.vector_string_length(vec)
+        assert out[0] == 4
+
+    def test_japanese_codepoints(self):
+        # "日本" = 2 codepoints; 6 UTF-8 bytes.
+        vec = make_nvarchar(["日本"])
+        out = va.vector_string_length(vec)
+        assert out[0] == 2
+
+    def test_emoji_codepoints(self):
+        # "🎉" = 1 codepoint; 4 UTF-8 bytes.
+        vec = make_nvarchar(["🎉"])
+        out = va.vector_string_length(vec)
+        assert out[0] == 1
+
+    def test_mixed_codepoint_counts(self):
+        # "café" → 4 cp, "日本" → 2 cp, "hello" → 5 cp.
+        vec = make_nvarchar(["café", "日本", "hello"])
+        out = va.vector_string_length(vec)
+        assert extract_int64(out) == [4, 2, 5]
+
+    def test_null_propagates(self):
+        vec = make_nvarchar([None, "café", None])
+        out = va.vector_string_length(vec)
+        assert out[0] is None
+        assert out[1] == 4
+        assert out[2] is None
+
+    def test_type_tag_is_nvarchar(self):
+        vec = make_nvarchar(["hello"])
+        assert vec.type == dn.DrakenType.NVARCHAR
+
+
+# ---------------------------------------------------------------------------
+# E.7 — VARBINARY: byte-length dispatch, bytes objects returned
+# ---------------------------------------------------------------------------
+
+class TestVectorStringLengthVarbinary:
+
+    def test_byte_length_basic(self):
+        # b"hello" = 5 bytes, b"\x00\x01\x02" = 3 bytes.
+        vec = make_bytes([b"hello", b"\x00\x01\x02", b""])
+        out = va.vector_string_length(vec)
+        assert extract_int64(out) == [5, 3, 0]
+
+    def test_multibyte_utf8_is_byte_length_not_codepoints(self):
+        # b"café" as raw UTF-8 = 5 bytes (not 4 codepoints).
+        vec = make_bytes([b"caf\xc3\xa9"])
+        out = va.vector_string_length(vec)
+        assert out[0] == 5
+
+    def test_null_propagates(self):
+        vec = make_bytes([None, b"abc", None])
+        out = va.vector_string_length(vec)
+        assert out[0] is None
+        assert out[1] == 3
+        assert out[2] is None
+
+    def test_type_tag_is_varbinary(self):
+        vec = make_bytes([b"hello"])
+        assert vec.type == dn.DrakenType.VARBINARY
+
+    def test_to_pylist_returns_bytes(self):
+        vals = [b"hello", b"\x00\x01", None, b""]
+        vec = make_bytes(vals)
+        assert vec.to_pylist() == vals

@@ -14,10 +14,7 @@ from draken.vectors.bool_vector import BoolVector
 from draken.vectors.float64_vector import Float64Vector
 from draken.vectors.integer64_vector import Integer64Vector
 from draken.vectors.string_vector import StringVector
-from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
-from opteryx.compiled.structures.perfect_hash_set import PerfectHashSet
 from opteryx.compiled.vector_ops import (
-    build_in_list_carchar,
     vector_allop_eq,
     vector_allop_neq,
     vector_anyop_eq,
@@ -29,10 +26,10 @@ from opteryx.compiled.vector_ops import (
     vector_anyop_gte,
     vector_anyop_lte,
     vector_contains,
-    vector_in_list,
     vector_like,
     vector_rlike,
 )
+from opteryx.compiled.nanobind.vector_misc import vector_in_list
 from opteryx.types import OrsoTypes
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 # Note: _json_at_arrow, _json_array_contains_all, _json_at_question,
@@ -84,9 +81,8 @@ cdef _int64_compare(int op_code, vec, right):
         return BoolVector(len(vec))
 
     if isinstance(right, (list, tuple, set, frozenset)):
-        value_set = _coerce_int64_set(right)
         if op_code == OP_IN_LIST:
-            return vector_in_list(vec, build_in_list_carchar(value_set))
+            return vector_in_list(vec, right)
         raise NotImplementedError(f"Integer64Vector: set op (code {op_code}) not supported")
 
     draken_op = _DRAKEN_CMP_OP[op_code]
@@ -120,9 +116,8 @@ cdef _float64_compare(int op_code, vec, right):
         return BoolVector(len(vec))
 
     if isinstance(right, (list, tuple, set, frozenset)):
-        value_set = _coerce_float_set(right)
         if op_code == OP_IN_LIST:
-            return vector_in_list(vec, build_in_list_carchar(value_set))
+            return vector_in_list(vec, right)
         raise NotImplementedError(f"Float64Vector: set op (code {op_code}) not supported")
 
     draken_op = _DRAKEN_CMP_OP[op_code]
@@ -169,8 +164,7 @@ cdef _decimal_compare(int op_code, vec, right):
 
 cdef _bool_compare(int op_code, left, right):
     if op_code == OP_IN_LIST:
-        bool_set = {bool(v) for v in right if v is not None}
-        return vector_in_list(left, build_in_list_carchar(bool_set))
+        return vector_in_list(left, right)
     return left._compare_scalar(bool(right), _DRAKEN_CMP_OP[op_code])
 
 
@@ -205,7 +199,7 @@ cdef draken_compare_int(int op_code, left, right, left_schema_type=None, right_s
         op_code = OP_I_IN_STR; negate = True
 
     if op_code == OP_IN_LIST:
-        if isinstance(right, (CarcharSetWrapper, PerfectHashSet)):
+        if isinstance(right, (list, tuple, set, frozenset)):
             result = vector_in_list(left, right, negate)
             return result
 
@@ -297,7 +291,7 @@ cpdef draken_compare(str op, left, right, left_schema_type=None, right_schema_ty
         op = _NEGATED_OPS[op]
 
     if op == "InList":
-        if isinstance(right, (CarcharSetWrapper, PerfectHashSet)):
+        if isinstance(right, (list, tuple, set, frozenset)):
             return vector_in_list(left, right, negate)
 
     if is_scalar(left) and is_draken_vector(right):

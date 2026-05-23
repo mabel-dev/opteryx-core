@@ -17,8 +17,7 @@ cdef extern from "memory_pool.hpp" namespace "opteryx":
         int64_t failed_commits
         int64_t reads
         int64_t releases
-        int64_t l1_compactions
-        int64_t l2_compactions
+        int64_t compactions
         int64_t resizes
 
     cdef struct ReadResult:
@@ -54,8 +53,7 @@ cdef extern from "memory_pool.hpp" namespace "opteryx":
         int64_t available_space() except + nogil
         int64_t get_fragmentation() except + nogil
         PoolStats get_stats() except + nogil
-        void level1_compaction() except + nogil
-        void level2_compaction() except + nogil
+        void compaction() except + nogil
         vector[MetadataSnapshot] snapshot_metadata() except + nogil
         vector[FreeSegmentSnapshot] snapshot_free_segments() except + nogil
 
@@ -74,8 +72,7 @@ cdef class MemoryPool:
     cdef void           clear(self)                                                  except + nogil
     cdef int64_t        available_space(self)                                        except + nogil
     cdef int64_t        get_fragmentation(self)                                      except + nogil
-    cdef void           level1_compaction(self)                                      except + nogil
-    cdef void           level2_compaction(self)                                      except + nogil
+    cdef void           compaction(self)                                             except + nogil
     cdef vector[MetadataSnapshot]    snapshot_metadata(self)                         except + nogil
     cdef vector[FreeSegmentSnapshot] snapshot_free_segments(self)                    except + nogil
 
@@ -92,5 +89,4 @@ cdef class MemoryPool:
     cpdef int64_t  py_get_fragmentation(self)
     cpdef dict     py_get_stats(self)
     cpdef list     py_get_free_segments(self)
-    cpdef void     _py_level1_compaction(self)
-    cpdef void     _py_level2_compaction(self)
+    cpdef void     py_compaction(self)

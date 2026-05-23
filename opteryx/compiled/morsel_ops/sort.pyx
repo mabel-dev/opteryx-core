@@ -59,7 +59,7 @@ from draken.core.buffers cimport (
     DRAKEN_FLOAT32,
     DRAKEN_FLOAT64,
     DRAKEN_BOOL,
-    DRAKEN_STRING,
+    DRAKEN_VARCHAR,
     DRAKEN_DATE32,
     DRAKEN_TIMESTAMP64,
     DRAKEN_TIME32,
@@ -280,7 +280,7 @@ cdef inline int64_t _dict_value_as_int64(
     """
     Read the dictionary value at position 'code' as a sortable int64.
     Returns INT64_MIN for null entries.  Handles fixed-width numeric types.
-    For DRAKEN_STRING, the caller must handle string comparison separately.
+    For DRAKEN_VARCHAR, the caller must handle string comparison separately.
     """
     cdef uint8_t* nulls = <uint8_t*>dv.null_bitmap
     cdef int64_t bits

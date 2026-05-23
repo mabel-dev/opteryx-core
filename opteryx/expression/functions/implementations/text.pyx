@@ -41,7 +41,7 @@ def split(arr, delimiter=",", limit=None):
             raise InvalidFunctionParameterError("SPLIT limit must be a greater than 0")
 
     if len(delimiter) == 1 and limit is None:
-        from opteryx.compiled.vector_ops import vector_split
+        from opteryx.compiled.nanobind.vector_split_native import vector_split
 
         return vector_split(arr, ord(delimiter))
 

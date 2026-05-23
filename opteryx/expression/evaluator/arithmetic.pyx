@@ -7,10 +7,15 @@ from opteryx.utils.vector_types import VectorType, get_vector_type
 
 
 
-cdef _str_to_bytes(v):
+cdef _to_string_vec(v, n):
+    """Ensure v is a StringVector of length n for vector_concat."""
+    from draken.vectors.string_vector import StringVector
+    if isinstance(v, StringVector):
+        return v
+    # Scalar str/bytes/None — broadcast to constant StringVector.
     if isinstance(v, str):
-        return v.encode("utf-8")
-    return v
+        v = v.encode("utf-8")
+    return StringVector.from_constant(v, n)
 
 
 cpdef _eval_binary_op_draken(node, morsel):
@@ -60,8 +65,10 @@ cpdef _eval_binary_op_draken(node, morsel):
             return _date_interval_op_draken(right, left, op)
 
     if op == "StringConcat":
-        from opteryx.compiled.vector_ops import vector_string_concat_binary
-        return vector_string_concat_binary(_str_to_bytes(left), _str_to_bytes(right))
+        from opteryx.compiled.nanobind.vector_selection_concat import vector_concat as _vc
+        from draken.vectors.string_vector import StringVector as _SVT
+        n = len(left) if isinstance(left, _SVT) else (len(right) if isinstance(right, _SVT) else 1)
+        return _vc(_to_string_vec(left, n), _to_string_vec(right, n))
 
     from opteryx.expression.binary_operators import BINARY_OPERATORS
 
@@ -147,8 +154,10 @@ cpdef _binary_op_from_vecs(str op, left, right, left_orso_type, right_orso_type,
             return _date_interval_op_draken(right, left, op)
 
     if op == "StringConcat":
-        from opteryx.compiled.vector_ops import vector_string_concat_binary
-        return vector_string_concat_binary(_str_to_bytes(left), _str_to_bytes(right))
+        from opteryx.compiled.nanobind.vector_selection_concat import vector_concat as _vc
+        from draken.vectors.string_vector import StringVector as _SVT
+        n = len(left) if isinstance(left, _SVT) else (len(right) if isinstance(right, _SVT) else 1)
+        return _vc(_to_string_vec(left, n), _to_string_vec(right, n))
 
     from opteryx.expression.binary_operators import BINARY_OPERATORS
 

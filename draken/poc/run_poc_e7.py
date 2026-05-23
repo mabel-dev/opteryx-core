@@ -1,10 +1,10 @@
 """
-run_poc_e7.py — Milestone E.7 end-to-end POC runner.
+run_poc_e7.py — Milestone E.7 end-to-end POC runner (type-family revision).
 
-Proves draken_vector_own_string:
-  - to_pylist() round-trip matches expected values.
-  - _slot_fields() determinism: matches vector_from_string_sequence on the same input.
-  - Construct/destroy stress: no crash → RAII frees all three buffers correctly.
+Proves draken_vector_own_string with type parameter:
+  - VARCHAR: to_pylist() round-trip + _slot_fields() determinism + RAII stress.
+  - NVARCHAR: to_pylist() round-trip; same storage; type tag differs.
+  - VARBINARY: to_pylist() returns bytes objects; round-trip correct.
 
 Prerequisites:
   1. make compile          (builds draken_native.so)
@@ -106,6 +106,40 @@ def run():
     stress_values = ["hello", "world!", "café_over_twelve!", None, ""]
     iters = poc_e7.stress_construct_destroy(stress_values, 500)
     ok &= _check("stress iterations", iters, 500)
+
+    print("\n--- E.7 POC: NVARCHAR round-trip ---")
+
+    # Verify NVARCHAR stores str, returns str, and type tag is correct.
+    nv_vals = ["café", "日本", None, "hello"]
+    v_nv = poc_e7.make_nvarchar_vec(nv_vals)
+    ok &= _check("nvarchar to_pylist", v_nv.to_pylist(), nv_vals)
+
+    import draken.draken_native as dn2
+    ok &= _check("nvarchar type tag", v_nv.type, dn2.DrakenType.NVARCHAR)
+
+    # _slot_fields determinism: same bytes → same slot regardless of VARCHAR vs NVARCHAR.
+    v_nv_ref = dn.vector_from_nvarchar_sequence(nv_vals)
+    ok &= _check("nvarchar type via factory", v_nv_ref.type, dn2.DrakenType.NVARCHAR)
+    for i, val in enumerate(nv_vals):
+        if val is not None:
+            ok &= _check(f"  nvarchar slot[{i}] {val!r}",
+                         v_nv._slot_fields(i), v_nv_ref._slot_fields(i))
+
+    print("\n--- E.7 POC: VARBINARY round-trip ---")
+
+    # Verify VARBINARY stores bytes, returns bytes, and type tag is correct.
+    bv_vals = [b"hello", b"\x00\x01\x02", None, b"caf\xc3\xa9", b""]
+    v_bv = poc_e7.make_bytes_vec(bv_vals)
+    ok &= _check("varbinary to_pylist", v_bv.to_pylist(), bv_vals)
+    ok &= _check("varbinary type tag", v_bv.type, dn2.DrakenType.VARBINARY)
+
+    v_bv_ref = dn.vector_from_bytes_sequence(bv_vals)
+    ok &= _check("varbinary type via factory", v_bv_ref.type, dn2.DrakenType.VARBINARY)
+    ok &= _check("varbinary factory to_pylist", v_bv_ref.to_pylist(), bv_vals)
+
+    # Null handling.
+    v_bv_null = poc_e7.make_bytes_vec([None, None])
+    ok &= _check("varbinary all-null", v_bv_null.to_pylist(), [None, None])
 
     print()
     if ok:

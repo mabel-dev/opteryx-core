@@ -54,7 +54,7 @@ static inline uint64_t str_hash_seed(const DrakenStringSlot* s) noexcept {
 }
 
 // ---------------------------------------------------------------------------
-// hash_string — dispatch-table hash kernel for DRAKEN_STRING.
+// hash_string — dispatch-table hash kernel for DRAKEN_VARCHAR.
 //
 // Fills out[0..n) with one uint64_t per logical row.
 // Builds seeds in ≤1024-row chunks, then calls simd_hash_i64 for mixing —

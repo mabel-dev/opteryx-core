@@ -9,12 +9,11 @@ operand into the byte form the kernels expect and dispatches by op name.
 """
 
 from opteryx.compiled.vector_ops import (
-    build_in_list_carchar,
-    vector_contains,
-    vector_in_list,
     vector_like,
     vector_rlike,
 )
+from opteryx.compiled.nanobind.vector_misc import vector_in_list
+from opteryx.compiled.nanobind.vector_string_search import vector_contains
 
 from draken.vectors.bool_vector import BoolVector
 from draken.vectors.string_vector import StringVector
@@ -29,7 +28,7 @@ cdef _string_compare(int op_code, vec, right):
     # non-vector RHS — it predates the carchar/perfect-hash set wrappers that
     # draken_compare builds upstream).
     if op_code == OP_IN_LIST:
-        return vector_in_list(vec, build_in_list_carchar(_coerce_str_set(right)))
+        return vector_in_list(vec, _coerce_str_set(right))
 
     # Eq / NotEq / Lt / Gt / LtEq / GtEq: vector-to-vector. `right` is a wrapped
     # literal (or a column); the *_vector kernels walk both operands together

@@ -3,13 +3,13 @@
 
 #include <cstdint>
 #include <cstring>
-#include <cstdlib>
+#include <map>
 #include <mutex>
-#include <vector>
 #include <unordered_map>
 #include <string>
 #include <stdexcept>
 #include <algorithm>
+#include "mimalloc.h"
 
 namespace opteryx {
 
@@ -25,8 +25,7 @@ struct PoolStats {
     int64_t failed_commits;
     int64_t reads;
     int64_t releases;
-    int64_t l1_compactions;
-    int64_t l2_compactions;
+    int64_t compactions;
     int64_t resizes;
 };
 
@@ -80,17 +79,18 @@ public:
     int64_t get_fragmentation();
     PoolStats get_stats();
 
-    void level1_compaction();
-    void level2_compaction();
+    void compaction();
 
     std::vector<MetadataSnapshot> snapshot_metadata();
     std::vector<FreeSegmentSnapshot> snapshot_free_segments();
 
 private:
+    // Segment tracks only address-space layout: start, length, free flag.
+    // Latch counts live in Metadata (keyed by ref_id) so hot-path operations
+    // (read, latch, unlatch, finalize_commit) never need to touch segments_.
     struct Segment {
         int64_t start;
         int64_t length;
-        int64_t latches;
         bool is_free;
     };
 
@@ -110,23 +110,25 @@ private:
     std::string name_;
     int64_t next_ref_id_;
 
-    std::vector<Segment> segments_;
+    // Keyed by start offset — O(log n) lookup, iterator-based neighbour access.
+    std::map<int64_t, Segment> segments_;
     std::unordered_map<int64_t, Metadata> metadata_;
 
     int64_t commits_;
     int64_t failed_commits_;
     int64_t reads_;
     int64_t read_locks_;
-    int64_t l1_compactions_;
-    int64_t l2_compactions_;
+    int64_t compactions_;
     int64_t releases_;
     int64_t resizes_;
 
+    static constexpr int64_t kLargeAllocThreshold = 1 << 20; // 1 MiB
+    static constexpr int64_t kMinSplitRemainder   = 256;
+
     int64_t find_best_fit_no_lock(int64_t size);
-    void merge_adjacent_free_no_lock();
-    void defragment_no_lock();
+    int64_t find_best_fit_large_no_lock(int64_t size);
+    void compaction_no_lock();
     bool resize_pool_no_lock(int64_t new_size);
-    int64_t find_segment_index_no_lock(int64_t start);
     int64_t get_fragmentation_no_lock();
     PoolStats get_stats_no_lock();
     int64_t align_size(int64_t size);

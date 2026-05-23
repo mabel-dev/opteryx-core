@@ -7,12 +7,12 @@
 //
 // Each entry point takes:
 //   arr   — DRAKEN_ARRAY vector; vec.data = int32_t offsets[length+1].
-//   child — flat child vector (DRAKEN_INT64 or DRAKEN_STRING; from draken_array_child_unwrap).
+//   child — flat child vector (DRAKEN_INT64 or DRAKEN_VARCHAR; from draken_array_child_unwrap).
 //   scalar — ArrScalar union holding the comparison value (caller builds from Python literal).
 //
 // Scalar building (consumer responsibility):
 //   int64 child:  scalar.type = DRAKEN_INT64, scalar.i64 = nb::cast<int64_t>(lit)
-//   string child: scalar.type = DRAKEN_STRING,
+//   string child: scalar.type = DRAKEN_VARCHAR,
 //                 str_init_inline / str_init_extern → scalar.str.slot,
 //                 scalar.str.bytes = ptr to UTF-8 bytes (kept alive by caller)
 //
@@ -30,7 +30,7 @@
 //     any → False (no match possible).
 //     all → True  (vacuous truth — standard SQL; old .pyx emitted False).
 //
-// SUPPORTED CHILD TYPES: DRAKEN_INT64, DRAKEN_STRING.
+// SUPPORTED CHILD TYPES: DRAKEN_INT64, DRAKEN_VARCHAR.
 //   Unsupported child type → std::invalid_argument thrown loud.
 //
 // ACCESS PATTERN: data[selection[i]] uniform — no shape discrimination (CLAUDE.md §11).
@@ -54,10 +54,10 @@ namespace draken { namespace ops {
 // Scalar carrier — consumer builds one before calling an entry point.
 // ---------------------------------------------------------------------------
 struct ArrScalar {
-    DrakenType type;  // DRAKEN_INT64, DRAKEN_STRING, or DRAKEN_NULL (null literal)
+    DrakenType type;  // DRAKEN_INT64, DRAKEN_VARCHAR, or DRAKEN_NULL (null literal)
     int64_t    i64;   // valid when type == DRAKEN_INT64
     struct {
-        const DrakenStringSlot* slot;   // valid when type == DRAKEN_STRING
+        const DrakenStringSlot* slot;   // valid when type == DRAKEN_VARCHAR
         const uint8_t*          bytes;  // UTF-8 bytes behind long slots (arena_offset==0)
     } str;
 };
@@ -307,7 +307,7 @@ static inline VecResult arr_all_false(uint32_t n) {
     if (child.type == DRAKEN_INT64) {                                               \
         return arr_reduce_int64<cmp_i64, reduce_all_flag>(arr, child, scalar.i64);  \
     }                                                                               \
-    if (child.type == DRAKEN_STRING) {                                              \
+    if (child.type == DRAKEN_VARCHAR) {                                              \
         return arr_reduce_string<cmp_str, reduce_all_flag>(                         \
             arr, child, scalar.str.slot, scalar.str.bytes);                         \
     }                                                                               \

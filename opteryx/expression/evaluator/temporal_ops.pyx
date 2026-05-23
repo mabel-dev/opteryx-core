@@ -9,7 +9,7 @@ this layer is dispatch: pick the right kernel based on the right-hand
 operand's class and the requested op string.
 """
 
-from opteryx.compiled.vector_ops import build_in_list_carchar, vector_in_list
+from opteryx.compiled.nanobind.vector_misc import vector_in_list
 from opteryx.types import OrsoTypes
 
 from draken.vectors.bool_vector import BoolVector
@@ -66,7 +66,7 @@ cdef _int64_temporal_compare(int op_code, vec, right, temporal_type):
             value = _coerce_date32(right)
 
     if op_code == OP_IN_LIST:
-        return vector_in_list(vec, build_in_list_carchar(value_set))
+        return vector_in_list(vec, value_set)
     return vec._compare_scalar(value, _DRAKEN_CMP_OP[op_code])
 
 
@@ -86,7 +86,7 @@ cdef _timestamp_compare(int op_code, vec, right):
             return BoolVector(len(vec))
 
     if op_code == OP_IN_LIST:
-        return vector_in_list(vec, build_in_list_carchar(value_set))
+        return vector_in_list(vec, value_set)
     return vec._compare_scalar(value, _DRAKEN_CMP_OP[op_code])
 
 
@@ -104,7 +104,7 @@ cdef _date32_compare(int op_code, vec, right):
         value = _coerce_date32(right)
 
     if op_code == OP_IN_LIST:
-        return vector_in_list(vec, build_in_list_carchar(value_set))
+        return vector_in_list(vec, value_set)
     return vec._compare_scalar(value, _DRAKEN_CMP_OP[op_code])
 
 

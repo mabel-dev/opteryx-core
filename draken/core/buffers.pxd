@@ -29,9 +29,11 @@ cdef extern from "core/buffers.h":
         DRAKEN_TIME64
         DRAKEN_INTERVAL
         DRAKEN_BOOL
-        DRAKEN_STRING
+        DRAKEN_VARCHAR
         DRAKEN_DICTIONARY
         DRAKEN_CONSTANT
+        DRAKEN_NVARCHAR
+        DRAKEN_VARBINARY
         DRAKEN_ARRAY
         DRAKEN_NON_NATIVE
 

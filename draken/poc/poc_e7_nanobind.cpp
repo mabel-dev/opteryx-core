@@ -25,14 +25,15 @@
 namespace nb = nanobind;
 
 // ---------------------------------------------------------------------------
-// Helper: build a DRAKEN_STRING Vector via draken_vector_own_string from a
-// C++ std::vector of (bytes, len) pairs. Null rows are indicated by len == UINT32_MAX.
+// Helper: build a string-family Vector via draken_vector_own_string from a
+// C++ std::vector of (bytes, len) pairs. Null rows are indicated by is_null[i].
 // ---------------------------------------------------------------------------
 
 static nb::object build_via_own(
     const std::vector<const char*>& strs,
     const std::vector<uint32_t>& lens,
-    const std::vector<bool>& is_null)
+    const std::vector<bool>& is_null,
+    DrakenType type = DRAKEN_VARCHAR)
 {
     const uint32_t n = static_cast<uint32_t>(strs.size());
 
@@ -92,7 +93,7 @@ static nb::object build_via_own(
     }
 
     // Hand off all three buffers to draken_vector_own_string (ownership transfers).
-    PyObject* out = draken_vector_own_string(slots, arena, total_extern, validity, n);
+    PyObject* out = draken_vector_own_string(slots, arena, total_extern, validity, n, type);
     if (!out) throw nb::python_error();
     return nb::steal<nb::object>(out);
 }
@@ -101,49 +102,118 @@ static nb::object build_via_own(
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
+// Helper: collect str list into ptrs/lens/is_null for build_via_own.
+static void collect_str_seq(nb::list seq,
+    std::vector<const char*>& strs,
+    std::vector<uint32_t>& lens,
+    std::vector<bool>& is_null,
+    const char* caller)
+{
+    const uint32_t n = static_cast<uint32_t>(seq.size());
+    strs.resize(n, nullptr);
+    lens.resize(n, 0u);
+    is_null.resize(n, false);
+    for (uint32_t i = 0u; i < n; ++i) {
+        nb::object obj = seq[static_cast<Py_ssize_t>(i)];
+        if (obj.is_none()) {
+            is_null[i] = true;
+        } else {
+            PyObject* s = obj.ptr();
+            if (!PyUnicode_Check(s))
+                throw std::invalid_argument(
+                    std::string(caller) + ": element is not str or None");
+            Py_ssize_t slen = 0;
+            const char* utf8 = PyUnicode_AsUTF8AndSize(s, &slen);
+            if (!utf8) throw nb::python_error();
+            strs[i]    = utf8;
+            lens[i]    = static_cast<uint32_t>(slen);
+        }
+    }
+}
+
+// Helper: collect bytes list into ptrs/lens/is_null for build_via_own.
+static void collect_bytes_seq(nb::list seq,
+    std::vector<const char*>& ptrs,
+    std::vector<uint32_t>& lens,
+    std::vector<bool>& is_null)
+{
+    const uint32_t n = static_cast<uint32_t>(seq.size());
+    ptrs.resize(n, nullptr);
+    lens.resize(n, 0u);
+    is_null.resize(n, false);
+    for (uint32_t i = 0u; i < n; ++i) {
+        nb::object obj = seq[static_cast<Py_ssize_t>(i)];
+        if (obj.is_none()) {
+            is_null[i] = true;
+        } else {
+            PyObject* b = obj.ptr();
+            if (!PyBytes_Check(b))
+                throw std::invalid_argument(
+                    "make_bytes_vec: element is not bytes or None");
+            char* buf = nullptr;
+            Py_ssize_t slen = 0;
+            if (PyBytes_AsStringAndSize(b, &buf, &slen) < 0)
+                throw nb::python_error();
+            ptrs[i] = buf;
+            lens[i] = static_cast<uint32_t>(slen);
+        }
+    }
+}
+
 NB_MODULE(poc_e7, m) {
     m.attr("__doc__") = (
-        "Milestone E.7 POC — draken_vector_own_string bridge.\n"
+        "Milestone E.7 POC — draken_vector_own_string bridge (type-family revision).\n"
         "\n"
         "Proves: C++ consumer allocates DrakenStringSlot[] + arena via draken_malloc,\n"
         "populates slots with draken_build_string_slot, transfers all three buffers to\n"
-        "draken_vector_own_string, and gets back a Vector whose to_pylist() and\n"
-        "_slot_fields() match vector_from_string_sequence on the same input.\n"
+        "draken_vector_own_string (with type=VARCHAR|NVARCHAR|VARBINARY), and gets back\n"
+        "a Vector whose to_pylist() and _slot_fields() agree with direct ingestion.\n"
     );
 
-    // make_string_vec: build a string Vector via draken_vector_own_string.
+    // make_string_vec: build a VARCHAR Vector via draken_vector_own_string.
     // values: list[str | None]
     m.def("make_string_vec",
         [](nb::list seq) -> nb::object {
-            const uint32_t n = static_cast<uint32_t>(seq.size());
-
-            std::vector<const char*> strs(n, nullptr);
-            std::vector<uint32_t>    lens(n, 0u);
-            std::vector<bool>        is_null(n, false);
-
-            for (uint32_t i = 0u; i < n; ++i) {
-                nb::object obj = seq[static_cast<Py_ssize_t>(i)];
-                if (obj.is_none()) {
-                    is_null[i] = true;
-                } else {
-                    PyObject* s = obj.ptr();
-                    if (!PyUnicode_Check(s))
-                        throw std::invalid_argument(
-                            "make_string_vec: element is not str or None");
-                    Py_ssize_t slen = 0;
-                    const char* utf8 = PyUnicode_AsUTF8AndSize(s, &slen);
-                    if (!utf8) throw nb::python_error();
-                    strs[i]    = utf8;
-                    lens[i]    = static_cast<uint32_t>(slen);
-                    is_null[i] = false;
-                }
-            }
-            return build_via_own(strs, lens, is_null);
+            std::vector<const char*> strs;
+            std::vector<uint32_t>    lens;
+            std::vector<bool>        is_null;
+            collect_str_seq(seq, strs, lens, is_null, "make_string_vec");
+            return build_via_own(strs, lens, is_null, DRAKEN_VARCHAR);
         },
         nb::arg("values"),
-        "Build a DRAKEN_STRING Vector via draken_vector_own_string.\n"
+        "Build a DRAKEN_VARCHAR Vector via draken_vector_own_string.\n"
         "values: list[str | None]. Proves the bridge ownership path.\n"
         "to_pylist() and _slot_fields() must agree with vector_from_string_sequence."
+    );
+
+    // make_nvarchar_vec: build a NVARCHAR Vector via draken_vector_own_string.
+    // Same storage as VARCHAR; type tag drives codepoint-length ops.
+    m.def("make_nvarchar_vec",
+        [](nb::list seq) -> nb::object {
+            std::vector<const char*> strs;
+            std::vector<uint32_t>    lens;
+            std::vector<bool>        is_null;
+            collect_str_seq(seq, strs, lens, is_null, "make_nvarchar_vec");
+            return build_via_own(strs, lens, is_null, DRAKEN_NVARCHAR);
+        },
+        nb::arg("values"),
+        "Build a DRAKEN_NVARCHAR Vector via draken_vector_own_string.\n"
+        "values: list[str | None]. Same storage as VARCHAR; LENGTH returns codepoints."
+    );
+
+    // make_bytes_vec: build a VARBINARY Vector via draken_vector_own_string.
+    // values: list[bytes | None]
+    m.def("make_bytes_vec",
+        [](nb::list seq) -> nb::object {
+            std::vector<const char*> ptrs;
+            std::vector<uint32_t>    lens;
+            std::vector<bool>        is_null;
+            collect_bytes_seq(seq, ptrs, lens, is_null);
+            return build_via_own(ptrs, lens, is_null, DRAKEN_VARBINARY);
+        },
+        nb::arg("values"),
+        "Build a DRAKEN_VARBINARY Vector via draken_vector_own_string.\n"
+        "values: list[bytes | None]. to_pylist() returns Python bytes objects."
     );
 
     // stress_construct_destroy: build and immediately destroy n Vectors.
@@ -151,40 +221,22 @@ NB_MODULE(poc_e7, m) {
     // then lets Python GC free the Vector (no reference kept). Tests RAII correctness.
     m.def("stress_construct_destroy",
         [](nb::list values, uint32_t iterations) -> uint32_t {
-            const uint32_t n = static_cast<uint32_t>(values.size());
-
-            std::vector<const char*> strs(n, nullptr);
-            std::vector<uint32_t>    lens(n, 0u);
-            std::vector<bool>        is_null(n, false);
-
-            for (uint32_t i = 0u; i < n; ++i) {
-                nb::object obj = values[static_cast<Py_ssize_t>(i)];
-                if (obj.is_none()) {
-                    is_null[i] = true;
-                } else {
-                    PyObject* s = obj.ptr();
-                    if (!PyUnicode_Check(s))
-                        throw std::invalid_argument(
-                            "stress_construct_destroy: element is not str or None");
-                    Py_ssize_t slen = 0;
-                    const char* utf8 = PyUnicode_AsUTF8AndSize(s, &slen);
-                    if (!utf8) throw nb::python_error();
-                    strs[i]    = utf8;
-                    lens[i]    = static_cast<uint32_t>(slen);
-                }
-            }
+            std::vector<const char*> strs;
+            std::vector<uint32_t>    lens;
+            std::vector<bool>        is_null;
+            collect_str_seq(values, strs, lens, is_null, "stress_construct_destroy");
 
             for (uint32_t k = 0u; k < iterations; ++k) {
                 // build_via_own returns a nb::object; when it goes out of scope,
                 // the Python refcount drops to 0 and VectorOwner's RAII destructor
                 // calls draken_free on all three buffers.
-                nb::object vec = build_via_own(strs, lens, is_null);
+                nb::object vec = build_via_own(strs, lens, is_null, DRAKEN_VARCHAR);
                 (void)vec;  // destructor frees on scope exit
             }
             return iterations;
         },
         nb::arg("values"), nb::arg("iterations"),
-        "Construct and destroy `iterations` string Vectors via draken_vector_own_string.\n"
+        "Construct and destroy `iterations` VARCHAR Vectors via draken_vector_own_string.\n"
         "Each Vector is immediately released (refcount → 0) to exercise RAII teardown.\n"
         "Returns the iteration count on success; raises on any alloc failure."
     );

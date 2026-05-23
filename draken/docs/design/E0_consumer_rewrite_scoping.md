@@ -1,12 +1,25 @@
 # Milestone E.0 — Consumer Rewrite Scoping
 
-> Status: LIVING DOCUMENT. Last updated 2026-05-23 (E.5).
+> Status: LIVING DOCUMENT. Last updated 2026-05-23 (E.16b).
 > E.0: Inventory + sequenced plan (research-only).
 > E.1: §2 revised — `cdef public` + nanobind C++ wrapper pattern.
 > E.2: §2 revised again — C′ canonical (pure nanobind C++, no .pyx layer). §3 updated.
 > E.3: Phase 1 cost datapoint added (math ops: abs/sign/sqrt/round).
 > E.4: Phase 1 cost datapoint added (codec + bool ops, pure C′ no Part A).
 > E.5: Phase 1 cost datapoint added (array reductions ANY/ALL, with Part A).
+> E.6: Phase 1 cost datapoint added (string length/emptiness + array element count, pure C′).
+> E.7 REVISED: §2 updated — draken_vector_own_string gets DrakenType type parameter;
+>   string type family (VARCHAR/NVARCHAR/VARBINARY) introduced. Phase 1 (E.7) datapoint added.
+> E.8: Phase 1 cost datapoint added (hex encode/decode + MD5/SHA digest, first own_string consumers).
+> E.9: Phase 1 cost datapoint added (cast cluster: int↔string + string→int + int→timestamp). draken_vector_own_timestamp added to bridge.
+> E.10: Phase 1 cost datapoint added (Part A + Part B; bytewise — no UTF-8 decisions). 4 .pyx deleted (vector_starts_ends, vector_contains, vector_contains_all, vector_contains_any). CI variants (ASCII fold only) ported as in-scope since live in production. Array membership ops (contains_any/all on DRAKEN_ARRAY) ported duck-typed via to_pylist(). Callers updated: string_ops, text, json_ops, utility, operations/__init__.
+> E.11: Phase 1 cost datapoint added (multi-arg shapes + concat — bytewise, no UTF-8). 3 .pyx deleted (vector_coalesce, vector_iif, vector_concat; vector_concat_array/concat_ws_array were dead code). New shape: variadic nb::args for coalesce + concat; fixed-itemsize derived from DrakenType tag. iif null-in-mask follows SQL: treated as FALSE (→ false branch). concat VARBINARY mixing: VARBINARY wins. Type promotion applied uniformly across all three ops. Callers updated: registrar/logical.pyx, implementations/logical.pyx, binary_operators.pyx, arithmetic.pyx (scalar inputs wrapped via StringVector.from_constant). 39 new tests, 2369/2369 draken native tests green.
+> E.12: Phase 1 cost datapoint added (temporal conversion cluster — numeric unit math, no strings). 4 .pyx deleted (vector_date32_to_timestamp, vector_timestamp_to_date32, vector_unixtime, vector_floor_temporal). Unit read via PyObject_GetAttrString("logical_type_unit") — function-level, not per-row. floor_div corrects C++ truncation-toward-zero for pre-epoch timestamps. floor_temporal supports second/minute/hour/day (singular+plural, case-insensitive); month/year deferred. Callers updated: casts.pyx (2 sites), temporal.pyx (3 sites). 64 new tests, 2433/2433 draken native tests green.
+> E.13: Phase 1 cost datapoint added (temporal arithmetic cluster — calendar-aware date_diff/date_part/date_trunc/date_format). 4 .pyx deleted (vector_date_diff, vector_date_format, vector_date_part, vector_date_trunc). New Part A: draken/ops/temporal_arith.h (Howard Hinnant proleptic Gregorian + floor_div + date_trunc_batch + date_diff_batch). dayofweek uses +3 offset (0=Monday, epoch=Thursday=3); week trunc uses ((days-4)%7+7)%7 (days-to-Monday). Callers updated: temporal.pyx (4 functions fully replaced). 96 new tests, 2529/2529 draken native tests green.
+> E.14: Phase 1 cost datapoint added (mixed-shape cluster — LOG, IN LIST, IP IN CIDR). 3 .pyx deleted (vector_log, vector_in_list, vector_ip_in_cidr). New Part A: draken/ops/float_log.h (IEEE std::log, change-of-base, broadcast). vector_in_list accepts raw Python sequence — CarcharSet built internally from vector type (avoids pre-build at plan time); negate via bm_negate_inplace. boost::math has no log; std::log used instead (IEEE 754 compliant, equivalent). binder.py + predicate_rewriter.py now store raw lists (deferred set-build to execution). 7 callers updated across comparisons/string_ops/temporal_ops/list_ops/fastpath_dictionary/operations/__init__/binary_operators/arithmetic. 27 new tests, 2556/2556 draken native tests green.
+> E.15: Phase 1 cost datapoint added (bytewise string misc — levenshtein + position + random_strings). 3 .pyx deleted (vector_levenshtein, vector_position, vector_random_string). Pure C′, no Part A (algo inlined in consumer). levenshtein: two-row rolling DP, O(min(m,n)) space, null TVL. position: BMH, SQL 1-based, 0=not-found, null TVL (upgrade from old sentinel-0 behaviour). random_strings: inline PCG32 seeded non-deterministically, 64-char ASCII alphabet (matches old .pyx). Bytewise on NVARCHAR is approximate (codepoint variants deferred). Callers updated: registrar/text.pyx (levenshtein + position), implementations/arithmetic.pyx (random_strings). 35 new tests, 2591/2591 draken native tests green.
+> E.16: Phase 1 cost datapoint added (mixed string/fp16 — replace + cosine_similarity + cosine_distance). 2 .pyx deleted (vector_replace, vector_cosine). New Part A: draken/ops/vector_cosine.h (fp16→float64 widening; dot product + L2 norms; zero-norm→NaN; lazy validity bitmap). replace: left-to-right bytewise scan; empty needle = no-op (PostgreSQL convention; avoids infinite-loop hazard). cosine: logical_type_dimension read via PyObject_GetAttrString (D.8 path, function-level not per-row). distance: 1 - clip(sim, -1, 1) with NaN passthrough. vector_split split out → Phase 15b (requires draken_vector_own_array bridge not yet in draken_bridge.h). Callers updated: registrar/text.pyx (replace), implementations/utility.pyx (cosine_similarity + cosine_distance). 46 new tests, 2637/2637 draken native tests green.
+> E.16b: Phase 15b complete — draken_vector_own_array bridge added to draken_bridge.h + draken_native.cpp; vector_split_native.cpp consumer ported; vector_split.pyx deleted. Bridge wraps raw C buffers (parent_offsets + child string slots + child arena + parent validity) with RAII; builds child consolidated block [DrakenStringArena|slots|arena] matching draken_vector_own_string layout; child elements always valid (no per-element null bitmap). Consumer: two-pass bytewise scan (pass 1 counts segments + arena upper bound; pass 2 emits draken_build_string_slot with inline/extern dispatch). All buffer cleanup manual (OwnedBuffer internal to draken_native.cpp, not visible to consumers). Caller updated: implementations/text.pyx redirects single-char-delimiter fast path to new nanobind module. 29 new tests, all green.
 > Refer to `07_consumer_contract.md` and `09_delivery.md` for context.
 
 ---
@@ -161,7 +174,7 @@ dance from E.1 is gone. Zero Cython in each consumer. Zero Cython compile step.
 **Constructing output vectors:**
 
 - Op returns a `VecResult` → call `draken_vector_own_raw(res.data, res.validity, res.length, res.type)`.
-- Op produces a **string column** (new slots + arena) → call `draken_vector_own_string(slots, arena, arena_len, validity, length)`. This is the canonical exit-point for all string-producing C++ consumers. Populate slots with `draken_build_string_slot` (in `core/string_slot.h`). All three buffers must be draken_malloc'd; ownership transfers unconditionally on call entry.
+- Op produces a **string column** (new slots + arena) → call `draken_vector_own_string(slots, arena, arena_len, validity, length, type)`. The `type` parameter must be `DRAKEN_VARCHAR`, `DRAKEN_NVARCHAR`, or `DRAKEN_VARBINARY`; any other value raises `ValueError`. This is the canonical exit-point for all string-producing C++ consumers. Populate slots with `draken_build_string_slot` (in `core/string_slot.h`). All three buffers must be draken_malloc'd; ownership transfers unconditionally on call entry. Storage layout is identical across all three types; the type tag drives op semantics (LENGTH returns codepoints for NVARCHAR, bytes for the others).
 - For `draken_vector_own(VecResult)` (C++ RAII, no raw-pointer hand-off): available but
   only from code that can include `draken_native`-internal headers. Prefer `draken_vector_own_raw`
   in consumer extensions.
@@ -381,41 +394,155 @@ No `.pyx` file. No Cython compile step. No `cdef public` / forward-declare dance
 
 **Per-consumer unit (pure C′, no Part A):** ~40 LOC per function in consumer including error handling and result wrapping. Total batch lower than E.4 due to simpler access pattern (no arena building).
 
-#### Phase 1 (E.7) — Foundation fix: `draken_vector_own_string` + null-TVL regression fix ✅ DONE
+#### Phase 1 (E.7 REVISED) — String type family + `draken_vector_own_string` type param + null-TVL fix ✅ DONE
 
-**Cost datapoint (actual, 2026-05-23) — foundation-fix phase, not a consumer-batch:**
+**Scope revision (2026-05-23):** E.7 was revised from a bridge-only fix to incorporate the
+"Unicode is opt-in" architectural decision. Full scope: mechanical rename of the old string
+tag to DRAKEN_VARCHAR, two new type tags (NVARCHAR=63, VARBINARY=64),
+new ingestion factories, per-type LENGTH dispatch, bridge type param, and POC coverage.
+
+**Cost datapoint (actual, 2026-05-23) — type-family revision + foundation fix:**
 
 | Item | LOC | Notes |
 |---|---|---|
-| Part A: `draken/core/string_slot.h` — `draken_build_string_slot` helper | ~20 | Static inline; computes XXH3 hash + delegates to str_init_inline/extern |
-| Part A: `draken/core/draken_bridge.h` — `draken_vector_own_string` declaration | ~45 | Full ownership contract documented at API; slot-format obligations spelled out |
-| Part A: `draken/draken_native.cpp` — `draken_vector_own_string` implementation | ~75 | RAII-safe; consolidated-block layout matches make_string_from_sequence for determinism |
-| Part B: `draken/poc/poc_e7_nanobind.cpp` + `setup_poc_e7.py` + `run_poc_e7.py` | ~220 | Pure C′ POC; to_pylist + _slot_fields determinism + 500-iteration construct/destroy stress |
-| Part C: `opteryx/compiled/nanobind/vector_accessors.cpp` — null-TVL fix | ~15 | vector_string_length: null input → null output (SQL 3VL); out_validity copy + tail-mask |
-| Part C: `draken/tests/native/test_vector_accessors.py` — updated + new tests | ~25 | 3 tests updated/added; null propagation + mixed null/valid + all-valid no-alloc |
+| Part A: mechanical rename of old string tag to DRAKEN_VARCHAR (buffers.h, buffers.pxd, all consumers, all generated .cpp/.c) | ~bulk sed | 0 grep hits in draken/ opteryx/compiled/ rugo/ |
+| Part B: new tags DRAKEN_NVARCHAR=63, DRAKEN_VARBINARY=64 in buffers.h + buffers.pxd + ABI guard label | ~10 | ABI integer unchanged (60 stays DRAKEN_VARCHAR) |
+| Part C: ingestion — `vector_from_nvarchar_sequence` + `vector_from_bytes_sequence` in draken_native.cpp | ~80 | NVARCHAR: patch type tag; VARBINARY: full PyBytes_AsStringAndSize path |
+| Part C: readback — `row_bytes()`, updated `__getitem__`/`to_pylist`/`child_elem_to_py` for VARBINARY | ~40 | Returns Python `bytes` objects for VARBINARY rows |
+| Part D: `vector_accessors.cpp` — NVARCHAR codepoint dispatch + null-TVL fix | ~30 | count_utf8_codepoints; out_validity copy + tail-mask; is_varchar_family check |
+| Part D: tests — `test_vector_accessors.py` NVARCHAR + VARBINARY coverage | ~75 | café→4 cp, 日本→2 cp, VARBINARY byte-length, null propagation |
+| Part E: `draken_vector_own_string` — add DrakenType type param + validate | ~15 | Raises ValueError on non-string type; sa->type set from param |
+| Part E: `draken/ops/hash.h` — NVARCHAR + VARBINARY OpsTable entries (identical to VARCHAR) | ~20 | Identical storage → same op ptrs |
+| Part E: `draken/poc/poc_e7_nanobind.cpp` + `run_poc_e7.py` — NVARCHAR + VARBINARY POC tests | ~100 | make_nvarchar_vec, make_bytes_vec, stress_construct_destroy, all three type tags |
+| Part A foundation: `draken/core/string_slot.h` — `draken_build_string_slot` helper | ~20 | Static inline; XXH3 hash + delegates to str_init_inline/extern |
+| Part A foundation: `draken/core/draken_bridge.h` — `draken_vector_own_string` declaration | ~45 | Full ownership contract; slot-format obligations |
+| Part A foundation: `draken/draken_native.cpp` — `draken_vector_own_string` implementation | ~75 | RAII-safe; single consolidated-block layout |
 
 **`draken_vector_own_string` is the canonical exit-point for string-producing C++ consumers.**
 
-All future C++ consumers that produce a new string column (cast-to-string, hex, MD5/SHA,
-concat, replace, regex_replace, encode_utf8, case ops) MUST use this function to package
-their output. The ownership contract is total: pass draken_malloc'd slots + arena +
-validity, call once, never free. The bridge consolidates slots+arena into a single block
-(DrakenStringArena header || slots[] || arena_bytes) so _slot_fields determinism with
-vector_from_string_sequence is automatic. The optional `draken_build_string_slot` helper
-in `core/string_slot.h` populates a slot (hash computed internally) from raw bytes.
+All future C++ consumers that produce a new string column MUST use `draken_vector_own_string`
+with the appropriate type tag. Call `draken_vector_own_string(slots, arena, arena_len, validity, length, type)`
+where `type` is one of `DRAKEN_VARCHAR`, `DRAKEN_NVARCHAR`, or `DRAKEN_VARBINARY`.
+Storage is identical across all three; the tag drives op semantics. Ownership is total.
+
+**String type family summary (E.7 REVISED):**
+- `DRAKEN_VARCHAR = 60` — default; ASCII semantics; byte-length ops. `vector_from_string_sequence` produces VARCHAR.
+- `DRAKEN_NVARCHAR = 63` — opt-in UTF-8; codepoint-length ops (LENGTH counts non-continuation bytes). `vector_from_nvarchar_sequence`.
+- `DRAKEN_VARBINARY = 64` — opaque bytes; byte-length ops; to_pylist returns Python `bytes`. `vector_from_bytes_sequence`.
 
 **Surprises / flags for subsequent string-producing consumers:**
-- **UTF-8 semantic decisions are deferred** (ticket scope: packaging only). Consumers
-  that need codepoint-length vs byte-length, or case folding, must surface those decisions
-  before implementation.
-- **`draken_build_string_slot` helper** is in `core/string_slot.h` (not the bridge header)
-  since it depends on XXH3 which is already included there.
+- **`draken_vector_own_string` type param**: all callers that pass `type` must use one of the three
+  string family constants. Passing e.g. `DRAKEN_INT64` raises `ValueError` at runtime.
+- **NVARCHAR and VARBINARY OpsTable entries** are identical to VARCHAR (same storage, same hash/compare/gather ops). `LENGTH` dispatch differs only in `vector_accessors.cpp`, not in the OpsTable.
 - **Validity tail-mask is required** when copying input validity to output: set bits beyond
-  logical row count `n` to 0 in the last byte. Missing this causes phantom-valid bits in
-  consumers that inspect the bitmap beyond the logical length.
+  logical row count `n` to 0 in the last byte. Missing this causes phantom-valid bits.
 - **`vector_string_length` null-TVL**: the old behaviour (null → 0, no validity) was a
   regression from SQL standard. E.7 fixes it. Any code that depended on
   `LENGTH(null_col) == 0` (rather than `IS NULL`) will see behavioural change.
+- **`draken_build_string_slot` helper** is in `core/string_slot.h` (not the bridge header)
+  since it depends on XXH3 which is already included there.
+
+#### Phase 1 (E.8) — C′ with `own_string` bridge: hex encode/decode + MD5/SHA digest ✅ DONE
+
+**Cost datapoint (actual, 2026-05-23) — first real consumers using `draken_vector_own_string`:**
+
+| Item | LOC | Notes |
+|---|---|---|
+| `vector_hash_codec.cpp` — one NB_MODULE, 6 functions (hex_encode, hex_decode, md5, sha1, sha256, sha512) | ~280 | Two applier templates: `digest_apply` (fixed-length) + `vhex_apply` (variable-length); shared validity copy + null check helpers |
+| `test_vector_hash_codec.py` — 49 tests covering all 6 functions | ~260 | Known fixtures (MD5 RFC 1321, SHA-1 test vectors), stdlib parity, null TVL, determinism, TypeError |
+| `setup.py` — new Extension block (E.8), single mabel unity-build source | ~40 | |
+| Deleted: `vector_hex.pyx`, `vector_md5.pyx`, `vector_sha.pyx`, `_hash_helpers.pyx` | ~200 removed | |
+| `vector_ops.pyx` — 4 include lines removed (auto-generated; updated manually) | 4 removed | |
+| `hash_encoding.pyx` — import redirected from `vector_ops` to `vector_hash_codec` | 1 | |
+| `third_party/crypto/md5.cpp` — bug fix: truncated implementation (missing 4 HH ops, all 16 II ops, state update) | +24 | Pre-existing bug; produced initial-state output for all inputs |
+
+**Surprises / flags for subsequent string-producing consumers:**
+
+- **`_base16.h` uses C99 `restrict` keyword** — invalid in C++. Worked around by defining
+  `restrict __restrict__` before the `extern "C"` include block. The `#define restrict` must
+  be guarded and undefined after the include to avoid polluting subsequent C++ headers.
+- **`_base16.c` is a unity build** — it `#include`s `_base16_dispatch.c`, `_base16_neon.c`,
+  `_base16_avx2.c` internally. Only `_base16.c` should appear in the `sources` list;
+  adding the sub-files separately causes duplicate symbol link errors.
+- **`digest_apply` uses `n * hex_len` arena** — pre-allocated for worst case (all rows
+  non-null). Null rows don't write to arena, so `arena_used < n * hex_len` when nulls
+  are present. `draken_vector_own_string` receives `arena_used` (actual), not the cap.
+- **`draken_build_string_slot` computes XXH3 from the bytes pointer passed** — for
+  hash outputs, bytes are written to `arena + off` first, then `draken_build_string_slot`
+  is called with that same pointer. This ensures slot.hash32 matches what direct ingestion
+  would produce for the same hex string, satisfying the slot-determinism acceptance criterion.
+- **md5.cpp was truncated** — the vendored implementation was missing Round 3 items 13–16,
+  all of Round 4 (II), and the final `state[n] += x` accumulation. The function was returning
+  the MD5 initial-state encoding (`0123456789abcdeffedcba9876543210`) for all inputs.
+  The existing Cython `vector_md5` call was presumably shadowed by the system libcrypto at
+  runtime (macOS `-undefined dynamic_lookup`), masking the bug. Fixed in this milestone.
+
+#### Phase 1 (E.9) — C′ cast cluster: int↔string + string→int + int→timestamp ✅ DONE
+
+**Cost datapoint (actual, 2026-05-23) — mixed in/out direction, ASCII only, no UTF-8 decisions:**
+
+| Item | LOC | Notes |
+|---|---|---|
+| `vector_casts.cpp` — one NB_MODULE, 4 functions | ~220 | Two-pass int→string (arena sizing); hand-rolled ASCII loops; zero-transform int→timestamp |
+| `test_vector_casts.py` — 43 tests covering all 4 functions | ~225 | Round-trip, boundary values (INT64_MIN/MAX, UINT64_MAX), all units, null TVL, fail-loud |
+| `setup.py` — new Extension block | ~30 | |
+| Deleted: 4 `.pyx` files | ~230 removed | |
+| `casts.pyx` — 2 import lines redirected | 2 | |
+| `draken_bridge.h` — new `draken_vector_own_timestamp` declaration | ~25 | Third producer bridge function alongside `own_raw` + `own_string` |
+| `draken_native.cpp` — `draken_vector_own_timestamp` implementation | ~55 | Parses unit string → TimestampUnit; "days" scales ×86_400_000_000 → MICROSECONDS; sets mandatory LogicalType via `logical_type_intern` |
+
+**Surprises / flags for subsequent consumers:**
+
+- **`draken_vector_own_raw` cannot produce TIMESTAMP64** — the mandatory `LogicalType` descriptor
+  is left null, which is a hard error at readback. Required adding `draken_vector_own_timestamp`
+  to the bridge. The "do not grow it" comment means per-op functions, not producer-type functions.
+- **int→timestamp is zero-transformation in the new model** — the old `.pyx` multiplied/divided
+  to normalize to microseconds. The new draken stores in whatever unit the descriptor says, so
+  the int64 values are already the correct physical representation. Only the descriptor needs attaching.
+- **Empty string parses to 0** — old `.pyx` `parse_int64` loop never executes on length=0; returns
+  `sign * 0 = 0`. Matched in new implementation. Document: `CAST('' AS INT) = 0`.
+
+#### Phase 1 (E.12) — C′ temporal conversion cluster: date32↔timestamp + unixtime + floor ✅ DONE
+
+**Cost datapoint (actual, 2026-05-23) — numeric unit math, no strings, pre-epoch floor correction:**
+
+| Item | LOC | Notes |
+|---|---|---|
+| `vector_temporal_convert.cpp` — one NB_MODULE, 4 functions | ~260 | floor_div for pre-epoch correctness; PyObject_GetAttrString for unit read; ticks_per_day/second helpers; ci_eq for case-insensitive floor unit names |
+| `test_vector_temporal_convert.py` — 64 tests covering all 4 functions | ~370 | Epoch/pre-epoch/null TVL/round-trip/leap-year/cross-unit; ValueError/TypeError fail-loud |
+| `setup.py` — new Extension block | ~28 | |
+| Deleted: 4 `.pyx` files | ~220 removed | |
+| `casts.pyx` — 2 import lines redirected | 2 | |
+| `temporal.pyx` — 3 import lines redirected | 3 | |
+
+**Surprises / flags for subsequent consumers:**
+
+- **Unit read via Python attribute, not bridge**: `draken_vector_unwrap` returns `DrakenVector*` with no `logical_type` field. Reading the unit from `TIMESTAMP64` input requires `PyObject_GetAttrString(obj.ptr(), "logical_type_unit")` — one Python API call per function invocation (hoisted before the loop, not per-row). The "do not grow it" constraint on `draken_bridge.h` was respected; no new bridge function was needed.
+- **C++ `/` is truncation-toward-zero; Python `//` is floor-toward-−∞**: corrected for pre-epoch (negative) timestamps via `floor_div(a, b) = a/b - (((a^b)<0) & (q*b != a))`. All integer-divide ops (timestamp→date32, unixtime, floor_temporal) use this.
+- **`draken_vector_own_raw` works for DATE32** (no mandatory LogicalType, unlike TIMESTAMP64). The `timestamp_to_date32` output wraps via `own_raw` correctly.
+- **`floor_temporal` month/year excluded**: non-uniform calendar math; would warrant a new draken op if needed. Only second/minute/hour/day (integer-divisible) are in scope and supported here.
+- **`vector_unixtime` OLD code had a null-handling bug**: null rows wrote `0` to data but didn't properly propagate the validity bitmap for `Date32Vector` (the old code called `int64_from_sequence` on a view of raw bytes including the 0-null placeholders, relying on the caller to ignore them). New code copies the validity bitmap directly.
+
+#### Phase 1 (E.13) — C′ temporal arithmetic cluster: date_diff + date_part + date_trunc + date_format ✅ DONE
+
+**Cost datapoint (actual, 2026-05-23) — calendar-aware kernels, first Howard Hinnant consumer, first arena-string temporal producer:**
+
+| Item | LOC | Notes |
+|---|---|---|
+| `draken/ops/temporal_arith.h` — Part A: Howard Hinnant helpers, floor_div, date_trunc_batch, date_diff_batch | ~225 | Proleptic Gregorian for calendar kinds; integer alignment for sub-day kinds; floor_div for pre-epoch semantics; diff_batch normalises both inputs to microseconds before dispatch |
+| `vector_temporal_arith.cpp` — one NB_MODULE, 4 functions | ~640 | Largest consumer so far: complex string output (date_format arena), dual-input null TVL (date_diff), unit-hoisting, ci_eq dispatch, format-string validation whitelist |
+| `test_vector_temporal_arith.py` — 96 tests covering all 4 functions | ~650 | Leap-year, pre-epoch, quarter boundaries, week truncation (Monday floor), dayofweek 0=Monday epoch=Thursday=3, null TVL propagation, D.8 unit descriptor, all error paths |
+| `setup.py` — new Extension block | ~12 | |
+| Deleted: 4 `.pyx` files | ~400 removed | |
+| `temporal.pyx` — 4 function bodies replaced | ~30 changed | |
+
+**Surprises / flags for subsequent consumers:**
+
+- **dayofweek offset is +3 not +4**: 0=Monday scheme maps Thursday (epoch) to 3. Formula `(((days+3)%7+7)%7)`. EPOCH_WEEKDAY=4 comment in old code was wrong. Week-trunc formula `((days-4)%7+7)%7` is correct (it computes "days back to Monday" not the weekday index).
+- **date_format is the first arena-string temporal producer**: validate format string once at entry (whitelist), then `gmtime_r` per row into a 256-byte stack buffer; inline if ≤12 bytes, else dynamic arena with realloc-on-overflow. Large consumers will follow this arena pattern.
+- **date_diff normalises inputs to microseconds**: both inputs may have different timestamp units (start=ms, end=us). Normalisation in date_diff_batch via per-unit multiply/divide avoids overflow for realistic date ranges.
+- **date_trunc DATE32→TIMESTAMP64**: DATE32 input is promoted to microsecond ticks before the batch kernel; output is always TIMESTAMP64 in microseconds. Matches old vector_date_trunc.pyx behaviour.
+- **format string bytes accepted at the Python edge**: `vector_date_format` NB_MODULE binding accepts both `str` and `bytes` format argument via `PyBytes_Check`, consistent with how callers pass format patterns.
 
 #### Phase 2 — `integer64_vector` (45 sites) + pilot type gate ← **next**
 

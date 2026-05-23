@@ -67,7 +67,7 @@ class TestHashBasics:
         assert v.hash() == []
 
     def test_type_is_string(self):
-        assert make(["a"]).type == DrakenType.STRING
+        assert make(["a"]).type == DrakenType.VARCHAR
 
 
 class TestHashDeterminism:

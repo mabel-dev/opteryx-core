@@ -1,5 +1,5 @@
 """
-Native correctness tests for DRAKEN_STRING ingestion and readback (Milestone D.1).
+Native correctness tests for DRAKEN_VARCHAR ingestion and readback (Milestone D.1).
 
 These tests assert the CORRECT answer independently.  They are the primary
 correctness signal for the string pilot.
@@ -49,7 +49,7 @@ class TestEmpty:
         assert len(make([])) == 0
 
     def test_empty_type(self):
-        assert make([]).type == dn.DrakenType.STRING
+        assert make([]).type == dn.DrakenType.VARCHAR
 
 
 class TestSingleElement:
@@ -266,17 +266,17 @@ class TestGetItem:
 
 class TestTypeTag:
     def test_type_tag_no_nulls(self):
-        assert make(["a"]).type == dn.DrakenType.STRING
+        assert make(["a"]).type == dn.DrakenType.VARCHAR
 
     def test_type_tag_with_nulls(self):
-        assert make(["a", None]).type == dn.DrakenType.STRING
+        assert make(["a", None]).type == dn.DrakenType.VARCHAR
 
     def test_type_tag_all_nulls(self):
-        assert make([None]).type == dn.DrakenType.STRING
+        assert make([None]).type == dn.DrakenType.VARCHAR
 
     def test_string_tag_frozen_value(self):
-        # DRAKEN_STRING ABI value must be 60 (frozen per buffers.h).
-        assert dn.DrakenType.STRING.value == 60
+        # DRAKEN_VARCHAR ABI value must be 60 (frozen per buffers.h).
+        assert dn.DrakenType.VARCHAR.value == 60
 
 
 # ---------------------------------------------------------------------------

@@ -6,11 +6,10 @@ to a flat vector.
 """
 
 from opteryx.compiled.vector_ops import (
-    build_in_list_carchar,
-    vector_in_list,
     vector_like,
     vector_rlike,
 )
+from opteryx.compiled.nanobind.vector_misc import vector_in_list
 
 
 # Methods a dictionary-capable vector must implement for the fastpath to kick
@@ -127,7 +126,7 @@ cpdef dictionary_fastpath(arr, str operator, value):
     if operator == "InList" or operator == "NotInList":
         return vector_in_list(
             vec,
-            build_in_list_carchar(_coerce_in_list_values(value)),
+            _coerce_in_list_values(value),
             operator == "NotInList",
         )
     if operator == "Like" or operator == "NotLike":

@@ -149,6 +149,33 @@ class build_ext(build_ext_orig):
             if subdir:
                 os.makedirs(subdir, exist_ok=True)
 
+        # Mixed C/C++ extension fix: pre-compile .c sources with C_FLAGS so they
+        # never receive -std=c++20, which clang rejects for C compilation units.
+        # Only triggered when a C++ extension (language="c++") contains .c sources.
+        c_sources = [s for s in ext.sources if s.lower().endswith(".c")]
+        if c_sources and getattr(ext, "language", "") == "c++":
+            # Build C-compatible compile args: start from C_FLAGS, then append
+            # any extension-specific args that are not C++-standard flags.
+            c_extra = [
+                a for a in (ext.extra_compile_args or [])
+                if not a.startswith("-std=") and not a.startswith("/std:")
+            ]
+            c_compile_args = list(C_FLAGS) + c_extra
+            include_dirs = list(ext.include_dirs or []) + list(self.include_dirs or [])
+            macros = list(ext.define_macros or [])
+            # compile() returns the list of object file paths it created.
+            c_objs = self.compiler.compile(
+                c_sources,
+                output_dir=per_ext_build_temp,
+                macros=macros,
+                include_dirs=include_dirs,
+                extra_postargs=c_compile_args,
+            )
+            # Fold the pre-compiled objects into extra_objects so the linker sees
+            # them, and remove the .c sources so they are not compiled again.
+            ext.extra_objects = list(ext.extra_objects or []) + list(c_objs)
+            ext.sources = [s for s in ext.sources if not s.lower().endswith(".c")]
+
         # Point this thread's build_temp at the per-extension directory.
         # Other threads each maintain their own value and are unaffected.
         prev = getattr(_build_temp_local, "value", None)
@@ -491,10 +518,9 @@ include_dirs = [
     "third_party/boost_math",  # E.3: vendored boost::math headers (round via 2^52 trick)
 ]
 
-# mimalloc — allocator for draken extensions only.
-# The header path and the pre-built single-TU object are added exclusively to
-# draken extensions (make_draken_extension + the smoke target); opteryx/rugo
-# extensions never see them.
+# mimalloc — allocator for draken extensions and any opteryx extension that
+# links memory_pool.cpp (column_deserializer, memory_pool).
+# The header path and pre-built single-TU object are added to those targets.
 MIMALLOC_INCLUDE = "third_party/mimalloc/include"
 MIMALLOC_OBJ = "build/temp.mimalloc.o"
 
@@ -1053,9 +1079,10 @@ extensions = [
         ],
         # column_deserializer.pyx does `cdef extern from "ipc_deserialize.hpp"`;
         # add src/cpp to the include path so Cython can resolve the header.
-        include_dirs=include_dirs + ["src/cpp"],
+        include_dirs=include_dirs + ["src/cpp", MIMALLOC_INCLUDE],
         language="c++",
         extra_compile_args=CPP_FLAGS,
+        extra_objects=[MIMALLOC_OBJ],
     ),
     # MemoryViewStream: high-performance memoryview-backed stream (Cython)
     Extension(
@@ -1071,9 +1098,10 @@ extensions = [
             "opteryx/compiled/structures/memory_pool.pyx",
             "src/cpp/memory_pool.cpp",
         ],
-        include_dirs=include_dirs + ["src/cpp"],
+        include_dirs=include_dirs + ["src/cpp", MIMALLOC_INCLUDE],
         language="c++",
         extra_compile_args=CPP_FLAGS,
+        extra_objects=[MIMALLOC_OBJ],
     ),
     Extension(
         "opteryx.compiled.structures.lru_k",
@@ -1507,6 +1535,325 @@ extensions.append(
     )
 )
 
+# E.8 — C′ pattern: hex encode/decode + MD5/SHA digest as pure nanobind C++.
+# First consumers to use draken_vector_own_string (Phase-6 bridge) directly.
+# Replaces: vector_hex.pyx, vector_md5.pyx, vector_sha.pyx (deleted from vector_ops/).
+#
+# Links vendored crypto (MD5, SHA-1, SHA-256, SHA-512) and mabel base16 C sources.
+# Output is always DENSE (identity selection); all hash outputs are long-form (>12 chars).
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_hash_codec",
+        sources=[
+            "opteryx/compiled/nanobind/vector_hash_codec.cpp",
+            "draken/core/vector_alloc.cpp",
+            # Vendored crypto digest implementations.
+            "third_party/crypto/md5.cpp",
+            "third_party/crypto/sha1.cpp",
+            "third_party/crypto/sha2.cpp",
+            "third_party/crypto/sha512.cpp",
+            # Mabel vendored C source (base16 hex encode/decode).
+            # _base16.c is a unity build — it #includes _dispatch/_neon/_avx2 internally.
+            # Do NOT add the sub-files separately; they would produce duplicate symbols.
+            "opteryx/third_party/mabel/base16/_base16.c",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "opteryx/third_party/mabel/base16",   # _base16.h
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+# E.9 Phase 8 C′: cast cluster — int↔string + string→int + int→timestamp.
+#
+# Replaces: vector_cast_int64_to_string.pyx, vector_cast_uint64_to_string.pyx,
+#           vector_cast_string_to_int.pyx, vector_cast_int64_to_timestamp.pyx.
+# Uses the same RTLD_GLOBAL bridge pattern as E.8 (vector_hash_codec).
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_casts",
+        sources=[
+            "opteryx/compiled/nanobind/vector_casts.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+# E.10 C′: bytewise string-search + array membership consumers.
+#
+# Replaces: vector_starts_ends.pyx, vector_contains.pyx,
+#           vector_contains_all.pyx, vector_contains_any.pyx.
+# Contains: vector_{starts_with,ci_starts_with,ends_with,ci_ends_with,
+#                    contains,contains_any,contains_all}.
+# Uses the same RTLD_GLOBAL bridge pattern as E.9 (vector_casts).
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_string_search",
+        sources=[
+            "opteryx/compiled/nanobind/vector_string_search.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+# E.11 C′: coalesce + iif + concat — multi-arg selection + bytewise string concat.
+#
+# Replaces: vector_coalesce.pyx, vector_iif.pyx, vector_concat.pyx
+#           (vector_concat_array / vector_concat_ws_array had no callers; deleted).
+# Contains: vector_coalesce, vector_iif, vector_concat.
+# Uses the same RTLD_GLOBAL bridge pattern as E.10 (vector_string_search).
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_selection_concat",
+        sources=[
+            "opteryx/compiled/nanobind/vector_selection_concat.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+# E.12 C′: temporal conversion cluster — DATE32↔TIMESTAMP64, unix seconds, floor.
+#
+# Replaces: vector_date32_to_timestamp.pyx, vector_timestamp_to_date32.pyx,
+#           vector_unixtime.pyx, vector_floor_temporal.pyx.
+# Contains: vector_date32_to_timestamp, vector_timestamp_to_date32,
+#           vector_unixtime, vector_floor_temporal.
+# Uses the same RTLD_GLOBAL bridge pattern as E.11 (vector_selection_concat).
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_temporal_convert",
+        sources=[
+            "opteryx/compiled/nanobind/vector_temporal_convert.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+# E.13 C′: temporal arithmetic cluster — date_part, date_diff, date_trunc, date_format.
+#
+# Replaces: vector_date_part.pyx, vector_date_diff.pyx,
+#           vector_date_trunc.pyx, vector_date_format.pyx.
+# Contains: vector_date_part, vector_date_diff, vector_date_trunc, vector_date_format.
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_temporal_arith",
+        sources=[
+            "opteryx/compiled/nanobind/vector_temporal_arith.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+# E.15 C′: levenshtein + position + random_strings — bytewise + ASCII output.
+#
+# Replaces: vector_levenshtein.pyx, vector_position.pyx, vector_random_string.pyx (deleted).
+# Contains: vector_levenshtein, vector_position, vector_random_strings.
+# Uses the same RTLD_GLOBAL bridge pattern as E.14 (vector_misc).
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_string_misc",
+        sources=[
+            "opteryx/compiled/nanobind/vector_string_misc.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+# E.16 C′: replace + cosine_similarity + cosine_distance — mixed string/fp16 ops.
+#
+# Part A: draken/ops/vector_cosine.h (fp16 cosine kernel; widened to float64).
+# Replaces: vector_replace.pyx, vector_cosine.pyx (deleted).
+# Contains: vector_replace, vector_cosine_similarity, vector_cosine_distance.
+# vector_split split out to Phase 15b (requires draken_vector_own_array bridge).
+# Uses the same RTLD_GLOBAL bridge pattern as E.15 (vector_string_misc).
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_string_misc2",
+        sources=[
+            "opteryx/compiled/nanobind/vector_string_misc2.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/usearch/fp16/include",  # fp16_ieee_to_fp32_value (D.11)
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+# E.17 C′: Soundex — dead-helper cleanup + ASCII phonetic encoding.
+#
+# Replaces: vector_soundex.pyx, vector_encode_utf8.pyx (deleted; encode_utf8 was
+#   identity-only with no callers).  Dead helpers deleted: _helper_const,
+#   _helper_select, _helper_string, _helper_trim, _helper_vector_conversion,
+#   _string_vec_iter, case_helpers (all confirmed no-cimport consumers).
+# Contains: vector_soundex.
+# Uses the same RTLD_GLOBAL bridge pattern as E.16 (vector_string_misc2).
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_string_misc3",
+        sources=[
+            "opteryx/compiled/nanobind/vector_string_misc3.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+# E.16b C′: vector_split — bytewise single-byte string split → DRAKEN_ARRAY[VARCHAR].
+#
+# Requires draken_vector_own_array bridge (added in draken_native.cpp for E.16b).
+# Replaces: vector_split.pyx (deleted).
+# Contains: vector_split.
+# Uses the same RTLD_GLOBAL bridge pattern as E.15/E.16.
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_split_native",
+        sources=[
+            "opteryx/compiled/nanobind/vector_split_native.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+# E.14 C′: log / in_list / ip_in_cidr as pure nanobind C++.
+#
+# Replaces: vector_log.pyx, vector_in_list.pyx, vector_ip_in_cidr.pyx (deleted).
+# Contains: vector_log, vector_in_list, vector_ip_in_cidr.
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_misc",
+        sources=[
+            "opteryx/compiled/nanobind/vector_misc.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
 extensions.append(
     Extension(
         "opteryx.compiled.io.disk_reader",
@@ -1792,10 +2139,12 @@ setup(
     python_requires=">=3.13",
     url="https://github.com/mabel-dev/opteryx/",
     ext_modules=cythonize(
-        # DRAKEN_BUILD=1 restricts the build to draken.* targets only —
-        # lets them build in isolation while the engine is red.
+        # DRAKEN_BUILD=1 restricts to draken.* + opteryx.compiled.nanobind.* targets —
+        # all are pure C++ (or mixed C/C++ with the per-source flag fix below)
+        # and build cleanly while the engine Cython layer is red.
         (
-            [e for e in extensions if e.name.startswith("draken.")]
+            [e for e in extensions if e.name.startswith("draken.")
+             or e.name.startswith("opteryx.compiled.nanobind.")]
             if os.environ.get("DRAKEN_BUILD")
             else extensions
         ),
@@ -1804,7 +2153,7 @@ setup(
             "linetrace": "a" in __version__ or "b" in __version__,
         },
     ),
-    rust_extensions=[RustExtension("opteryx.compute", "Cargo.toml", debug=False)],  # Add Rust here
+    rust_extensions=[RustExtension("opteryx.compute", "Cargo.toml", debug=False)],
     package_data={"": ["*.pyx", "*.pxd", "*.h"]},
     cmdclass={"build_ext": build_ext},
     zip_safe=False,

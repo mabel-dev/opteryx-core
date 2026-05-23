@@ -1,5 +1,5 @@
 #pragma once
-// draken/ops/string_gather.h — take / materialize / compress for DRAKEN_STRING.
+// draken/ops/string_gather.h — take / materialize / compress for DRAKEN_VARCHAR.
 //
 // All three ops produce owned, self-contained string vectors.
 //
@@ -171,7 +171,7 @@ static inline VecResult sg_finalize(const StrBlock& sb,
     sb.sa->arena_cap    = arena_used;
     sb.sa->null_bitmap  = validity;  // for consistency; C++ ops use v.validity
     sb.sa->owns_buffers = 0;
-    sb.sa->type         = DRAKEN_STRING;
+    sb.sa->type         = DRAKEN_VARCHAR;
 
     VecResult r;
     r.data           = sb.block;
@@ -180,7 +180,7 @@ static inline VecResult sg_finalize(const StrBlock& sb,
     r.owns_selection = owns_sel;
     r.data_length    = data_length;
     r.length         = length;
-    r.type           = DRAKEN_STRING;
+    r.type           = DRAKEN_VARCHAR;
     r.flags          = flags;
     return r;
 }

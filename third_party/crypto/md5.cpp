@@ -169,6 +169,33 @@ static void MD5Transform(uint32_t state[4], const unsigned char block[64]) {
     HH (d, a, b, c, x[ 0], S32, 0xeaa127fa);
     HH (c, d, a, b, x[ 3], S33, 0xd4ef3085);
     HH (b, c, d, a, x[ 6], S34,  0x4881d05);
+    HH (a, b, c, d, x[ 9], S31, 0xd9d4d039);
+    HH (d, a, b, c, x[12], S32, 0xe6db99e5);
+    HH (c, d, a, b, x[15], S33, 0x1fa27cf8);
+    HH (b, c, d, a, x[ 2], S34, 0xc4ac5665);
+
+    /* Round 4 */
+    II (a, b, c, d, x[ 0], S41, 0xf4292244);
+    II (d, a, b, c, x[ 7], S42, 0x432aff97);
+    II (c, d, a, b, x[14], S43, 0xab9423a7);
+    II (b, c, d, a, x[ 5], S44, 0xfc93a039);
+    II (a, b, c, d, x[12], S41, 0x655b59c3);
+    II (d, a, b, c, x[ 3], S42, 0x8f0ccc92);
+    II (c, d, a, b, x[10], S43, 0xffeff47d);
+    II (b, c, d, a, x[ 1], S44, 0x85845dd1);
+    II (a, b, c, d, x[ 8], S41, 0x6fa87e4f);
+    II (d, a, b, c, x[15], S42, 0xfe2ce6e0);
+    II (c, d, a, b, x[ 6], S43, 0xa3014314);
+    II (b, c, d, a, x[13], S44, 0x4e0811a1);
+    II (a, b, c, d, x[ 4], S41, 0xf7537e82);
+    II (d, a, b, c, x[11], S42, 0xbd3af235);
+    II (c, d, a, b, x[ 2], S43, 0x2ad7d2bb);
+    II (b, c, d, a, x[ 9], S44, 0xeb86d391);
+
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
 }
 
 /* Helper: encode/decode between uint32_t arrays and byte arrays */

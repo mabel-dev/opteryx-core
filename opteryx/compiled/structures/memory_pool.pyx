@@ -77,11 +77,8 @@ cdef class MemoryPool:
     cdef int64_t get_fragmentation(self) except + nogil:
         return self._pool.get_fragmentation()
 
-    cdef void level1_compaction(self) except + nogil:
-        self._pool.level1_compaction()
-
-    cdef void level2_compaction(self) except + nogil:
-        self._pool.level2_compaction()
+    cdef void compaction(self) except + nogil:
+        self._pool.compaction()
 
     cdef vector[MetadataSnapshot] snapshot_metadata(self) except + nogil:
         return self._pool.snapshot_metadata()
@@ -162,13 +159,9 @@ cdef class MemoryPool:
             result = self._pool.get_fragmentation()
         return result
 
-    cpdef void _py_level1_compaction(self):
+    cpdef void py_compaction(self):
         with nogil:
-            self._pool.level1_compaction()
-
-    cpdef void _py_level2_compaction(self):
-        with nogil:
-            self._pool.level2_compaction()
+            self._pool.compaction()
 
     cpdef dict py_get_stats(self):
         cdef PoolStats s
@@ -186,9 +179,7 @@ cdef class MemoryPool:
             'failed_commits': s.failed_commits,
             'reads': s.reads,
             'releases': s.releases,
-            'l1_compactions': s.l1_compactions,
-            'l2_compactions': s.l2_compactions,
-            'compactions': s.l1_compactions + s.l2_compactions,
+            'compactions': s.compactions,
             'resizes': s.resizes,
         }
 

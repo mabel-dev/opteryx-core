@@ -1,5 +1,5 @@
 """
-Native correctness tests for DRAKEN_STRING dict-encoded vectors (Milestone D.3).
+Native correctness tests for DRAKEN_VARCHAR dict-encoded vectors (Milestone D.3).
 
 Coverage:
   dict_ingest   : dedup, codes, data_length, round-trip via to_pylist

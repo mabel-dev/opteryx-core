@@ -60,7 +60,7 @@ class TestArrayTypeTag:
 
     def test_child_type_string(self):
         v = arr([["hello", "world"]])
-        assert v.array_child_type == dn.DrakenType.STRING
+        assert v.array_child_type == dn.DrakenType.VARCHAR
 
     def test_child_type_array(self):
         v = arr([[[1, 2], [3]]])

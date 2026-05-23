@@ -6,7 +6,7 @@ AttributeError surfaces from the downstream kernel — that's an upstream
 bug, not a fallback to mask.
 """
 
-from opteryx.compiled import vector_ops
+from opteryx.compiled.nanobind.vector_misc import vector_in_list as _vector_in_list
 from draken.vectors.vector import Vector
 
 
@@ -33,7 +33,7 @@ cpdef in_list(arr, value, bint dict_candidate=False):
         raise RuntimeError("Dictionary fastpath failed for `InList`.")
 
     cdef set values = _coerce_value_set(value)
-    return vector_ops.vector_in_list(arr, vector_ops.build_in_list_carchar(values))
+    return _vector_in_list(arr, values)
 
 
 cpdef not_in_list(arr, value, bint dict_candidate=False):
@@ -46,8 +46,4 @@ cpdef not_in_list(arr, value, bint dict_candidate=False):
         raise RuntimeError("Dictionary fastpath failed for `NotInList`.")
 
     cdef set values = _coerce_value_set(value)
-    # Fused negation: kernel writes the inverted result directly, no second
-    # full-vector pass.
-    return vector_ops.vector_in_list(
-        arr, vector_ops.build_in_list_carchar(values), True
-    )
+    return _vector_in_list(arr, values, True)

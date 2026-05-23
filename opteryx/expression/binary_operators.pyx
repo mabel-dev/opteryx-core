@@ -29,30 +29,19 @@ cpdef bytes _json_key_constant(key):
 
 
 def ArrowOp(documents, elements):
-    """JSON selector returning a Draken vector. Maps to `->` SQL operator."""
-    from opteryx.compiled.vector_ops import vector_json_extract_variant
+    """JSON selector returning a VARCHAR DrakenVector. Maps to `->` SQL operator."""
+    from opteryx.compiled.nanobind.vector_json import vector_json_extract
 
     element = _json_key_constant(elements)
-    extracted_values = vector_json_extract_variant(documents, element)
-
-    try:
-        result = vector_from_sequence(extracted_values)
-    except Exception as err:
-        raise IncorrectTypeError(
-            "The `->` operator produced complex/mixed values."
-        ) from err
-
-    if isinstance(result, list):
-        raise IncorrectTypeError("The `->` operator produced complex/mixed values.")
-    return result
+    return vector_json_extract(documents, element)
 
 
 def LongArrowOp(documents, elements):
-    """JSON selector returning text as a StringVector of bytes. SQL `->>`."""
-    from opteryx.compiled.vector_ops import vector_json_extract_text
+    """JSON selector returning text as a VARCHAR DrakenVector. SQL `->>`."""
+    from opteryx.compiled.nanobind.vector_json import vector_json_extract
 
     element = _json_key_constant(elements)
-    return vector_json_extract_text(documents, element)
+    return vector_json_extract(documents, element)
 
 
 def MapAccessOp(array, key):
@@ -125,14 +114,15 @@ def binary_operations(left, left_type, str operator, right, right_type):
     if operator == "BitwiseOr" and (
         OrsoTypes.VARCHAR == left_type or OrsoTypes.VARCHAR == right_type
     ):
-        from opteryx.compiled.vector_ops import vector_ip_in_cidr
+        from opteryx.compiled.nanobind.vector_misc import vector_ip_in_cidr
         return vector_ip_in_cidr(left, right)
 
     if operator == "StringConcat":
-        from opteryx.compiled.vector_ops import vector_string_concat_binary
-        return vector_string_concat_binary(
-            _to_bytes_or_vec(left), _to_bytes_or_vec(right)
-        )
+        from opteryx.compiled.nanobind.vector_selection_concat import vector_concat as _vc
+        n = len(left) if isinstance(left, StringVector) else (len(right) if isinstance(right, StringVector) else 1)
+        left_v  = left  if isinstance(left, StringVector)  else StringVector.from_constant(left.encode("utf-8") if isinstance(left, str) else left, n)
+        right_v = right if isinstance(right, StringVector) else StringVector.from_constant(right.encode("utf-8") if isinstance(right, str) else right, n)
+        return _vc(left_v, right_v)
 
     return operation(left, right)
 

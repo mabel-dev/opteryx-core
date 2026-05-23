@@ -342,8 +342,6 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry):
 
     for data in groups.values():
         if len(data["values"]) > 1:
-            from opteryx.compiled.vector_ops import build_in_list_carchar
-
             node = data["node"]
             left_type = getattr(getattr(node.left, "schema_column", None), "type", None)
             _COERCE = {
@@ -357,9 +355,9 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry):
             values = sorted(str(v) for v in set(data["values"]))
             node.value = "InList"
             node.right.display_values = values
-            node.right.value = build_in_list_carchar(
-                [None if v is None else coerce(v) for v in values]
-            )
+            node.right.value = [
+                None if v is None else coerce(v) for v in values
+            ]
             node.right.element_type = node.right.type
             node.right.type = OrsoTypes.ARRAY
             node.right.schema_column = ConstantColumn(

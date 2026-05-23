@@ -30,7 +30,7 @@ from draken.core.buffers cimport DRAKEN_INT8
 from draken.core.buffers cimport DRAKEN_INT16
 from draken.core.buffers cimport DRAKEN_INT32
 from draken.core.buffers cimport DRAKEN_INT64
-from draken.core.buffers cimport DRAKEN_STRING
+from draken.core.buffers cimport DRAKEN_VARCHAR
 from draken.core.buffers cimport DrakenVector
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.bool_vector cimport BoolVector

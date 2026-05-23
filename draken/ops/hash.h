@@ -389,16 +389,34 @@ struct OpsTable {
         entries[DRAKEN_INTERVAL].materialize      = draken::ops::interval_materialize;
         entries[DRAKEN_INTERVAL].compress         = draken::ops::interval_compress;
 
-        // D.2 — STRING: hash + compare
-        entries[DRAKEN_STRING].hash               = draken::ops::hash_string;
-        entries[DRAKEN_STRING].compare_vector     = draken::ops::str_compare_vector;
-        entries[DRAKEN_STRING].str_compare_scalar = draken::ops::str_compare_scalar;
-        // D.3 — STRING: gather / reshape
-        entries[DRAKEN_STRING].take               = draken::ops::str_take;
-        entries[DRAKEN_STRING].materialize        = draken::ops::str_materialize;
-        entries[DRAKEN_STRING].compress           = draken::ops::str_compress;
-        // D.4 — STRING: in_list (hash-only; §1 exception same as str eq/hash)
-        entries[DRAKEN_STRING].in_list            = draken::ops::str_in_list;
+        // D.2 — VARCHAR: hash + compare
+        entries[DRAKEN_VARCHAR].hash               = draken::ops::hash_string;
+        entries[DRAKEN_VARCHAR].compare_vector     = draken::ops::str_compare_vector;
+        entries[DRAKEN_VARCHAR].str_compare_scalar = draken::ops::str_compare_scalar;
+        // D.3 — VARCHAR: gather / reshape
+        entries[DRAKEN_VARCHAR].take               = draken::ops::str_take;
+        entries[DRAKEN_VARCHAR].materialize        = draken::ops::str_materialize;
+        entries[DRAKEN_VARCHAR].compress           = draken::ops::str_compress;
+        // D.4 — VARCHAR: in_list (hash-only; §1 exception same as str eq/hash)
+        entries[DRAKEN_VARCHAR].in_list            = draken::ops::str_in_list;
+
+        // E.7 — NVARCHAR: identical storage; same ops as VARCHAR
+        entries[DRAKEN_NVARCHAR].hash               = draken::ops::hash_string;
+        entries[DRAKEN_NVARCHAR].compare_vector     = draken::ops::str_compare_vector;
+        entries[DRAKEN_NVARCHAR].str_compare_scalar = draken::ops::str_compare_scalar;
+        entries[DRAKEN_NVARCHAR].take               = draken::ops::str_take;
+        entries[DRAKEN_NVARCHAR].materialize        = draken::ops::str_materialize;
+        entries[DRAKEN_NVARCHAR].compress           = draken::ops::str_compress;
+        entries[DRAKEN_NVARCHAR].in_list            = draken::ops::str_in_list;
+
+        // E.7 — VARBINARY: identical storage; same ops as VARCHAR
+        entries[DRAKEN_VARBINARY].hash               = draken::ops::hash_string;
+        entries[DRAKEN_VARBINARY].compare_vector     = draken::ops::str_compare_vector;
+        entries[DRAKEN_VARBINARY].str_compare_scalar = draken::ops::str_compare_scalar;
+        entries[DRAKEN_VARBINARY].take               = draken::ops::str_take;
+        entries[DRAKEN_VARBINARY].materialize        = draken::ops::str_materialize;
+        entries[DRAKEN_VARBINARY].compress           = draken::ops::str_compress;
+        entries[DRAKEN_VARBINARY].in_list            = draken::ops::str_in_list;
 
         // E.2 — INT8 bitwise
         entries[DRAKEN_INT8].bitwise_and = draken::ops::i8_bitwise_and;

@@ -5,8 +5,12 @@
 
 using namespace opteryx;
 
+// Pool size used by most tests — large enough that a 10-byte commit always
+// leaves a remainder >= kMinSplitRemainder so segments split as expected.
+static const int64_t TEST_POOL = 2048;
+
 void test_basic_commit_read_release() {
-    MemoryPool pool(100);
+    MemoryPool pool(TEST_POOL);
 
     unsigned char data[10];
     for (int i = 0; i < 10; i++) {
@@ -33,7 +37,7 @@ void test_basic_commit_read_release() {
 }
 
 void test_invalid_ref_throws() {
-    MemoryPool pool(100);
+    MemoryPool pool(TEST_POOL);
 
     unsigned char data[10] = {'X'};
     int64_t ref = pool.commit(data, 10);
@@ -67,7 +71,7 @@ void test_invalid_ref_throws() {
 }
 
 void test_zero_length_commit() {
-    MemoryPool pool(100);
+    MemoryPool pool(TEST_POOL);
 
     int64_t ref = pool.commit(nullptr, 0);
     assert(ref >= 1);
@@ -89,37 +93,60 @@ void test_zero_length_commit() {
     printf("test_zero_length_commit: PASS\n");
 }
 
-void test_l1_compaction() {
-    MemoryPool pool(100);
+void test_min_split_threshold() {
+    // A remainder below kMinSplitRemainder (256) absorbs into the allocation
+    // rather than creating a tiny free fragment.
+    MemoryPool pool(TEST_POOL);
 
-    unsigned char data_a[10];
-    unsigned char data_b[10];
-    unsigned char data_c[10];
-    std::memset(data_a, 'A', 10);
-    std::memset(data_b, 'B', 10);
-    std::memset(data_c, 'C', 10);
+    // Commit TEST_POOL - 100 bytes: leaves a 100-byte remainder, below threshold.
+    // The full TEST_POOL bytes should be given; no free fragment created.
+    int64_t large_size = TEST_POOL - 100;
+    unsigned char* data = new unsigned char[large_size];
+    std::memset(data, 'X', large_size);
 
-    int64_t r1 = pool.commit(data_a, 10);
-    int64_t r2 = pool.commit(data_b, 10);
-    int64_t r3 = pool.commit(data_c, 10);
+    int64_t ref = pool.commit(data, large_size);
+    assert(ref >= 1);
 
-    pool.release(r1);
-    pool.release(r2);
+    PoolStats stats = pool.get_stats();
+    assert(stats.used_size == TEST_POOL);   // whole pool absorbed
+    assert(stats.free_blocks == 0);
 
-    PoolStats before = pool.get_stats();
-    pool.level1_compaction();
-    PoolStats after = pool.get_stats();
+    pool.release(ref);
+    delete[] data;
 
-    assert(after.l1_compactions >= 1);
-    assert(after.free_blocks < before.free_blocks || after.free_blocks == 1);
-
-    pool.release(r3);
-
-    printf("test_l1_compaction: PASS\n");
+    printf("test_min_split_threshold: PASS\n");
 }
 
-void test_l2_compaction_moves_unlatched() {
-    MemoryPool pool(50);
+void test_coalesce_on_release() {
+    // Adjacent frees coalesce immediately during release, without explicit compaction.
+    MemoryPool pool(TEST_POOL);
+
+    unsigned char data_a[10];
+    unsigned char data_b[10];
+    unsigned char data_c[10];
+    std::memset(data_a, 'A', 10);
+    std::memset(data_b, 'B', 10);
+    std::memset(data_c, 'C', 10);
+
+    int64_t r1 = pool.commit(data_a, 10);
+    int64_t r2 = pool.commit(data_b, 10);
+    int64_t r3 = pool.commit(data_c, 10);
+
+    pool.release(r1);
+    // r2 still in use — no coalesce yet, 2 free blocks (r1's slot + trailing)
+    assert(pool.get_stats().free_blocks == 2);
+
+    pool.release(r2);
+    // r1+r2 coalesce immediately: still 2 free blocks (merged r1+r2, plus trailing)
+    assert(pool.get_stats().free_blocks == 2);
+
+    pool.release(r3);
+
+    printf("test_coalesce_on_release: PASS\n");
+}
+
+void test_compaction_moves_unlatched() {
+    MemoryPool pool(TEST_POOL);
 
     unsigned char data_a[10];
     unsigned char data_b[10];
@@ -135,9 +162,9 @@ void test_l2_compaction_moves_unlatched() {
     pool.release(r1);
     pool.release(r3);
 
-    pool.level2_compaction();
+    pool.compaction();
     PoolStats stats = pool.get_stats();
-    assert(stats.l2_compactions >= 1);
+    assert(stats.compactions >= 1);
 
     ReadResult result = pool.read(r2, false);
     assert(result.length == 10);
@@ -145,11 +172,11 @@ void test_l2_compaction_moves_unlatched() {
 
     pool.release(r2);
 
-    printf("test_l2_compaction_moves_unlatched: PASS\n");
+    printf("test_compaction_moves_unlatched: PASS\n");
 }
 
-void test_latched_segment_not_moved_by_l2() {
-    MemoryPool pool(50);
+void test_latched_segment_not_moved_by_compaction() {
+    MemoryPool pool(TEST_POOL);
 
     unsigned char data_a[10];
     unsigned char data_b[10];
@@ -170,7 +197,7 @@ void test_latched_segment_not_moved_by_l2() {
     pool.release(r1);
     pool.release(r3);
 
-    pool.level2_compaction();
+    pool.compaction();
 
     ReadResult after = pool.read(r2, false);
     const void* ptr_after = after.ptr;
@@ -182,11 +209,11 @@ void test_latched_segment_not_moved_by_l2() {
     pool.unlatch(r2);
     pool.release(r2);
 
-    printf("test_latched_segment_not_moved_by_l2: PASS\n");
+    printf("test_latched_segment_not_moved_by_compaction: PASS\n");
 }
 
 void test_reserve_and_finalize() {
-    MemoryPool pool(100);
+    MemoryPool pool(TEST_POOL);
 
     ReserveResult reserve = pool.reserve_for_write(20);
     assert(reserve.ref_id >= 1);
@@ -210,7 +237,7 @@ void test_reserve_and_finalize() {
 }
 
 void test_clear_resets_pool() {
-    MemoryPool pool(100);
+    MemoryPool pool(TEST_POOL);
 
     unsigned char data_x[10] = {'X'};
     unsigned char data_y[15] = {'Y'};
@@ -224,13 +251,13 @@ void test_clear_resets_pool() {
     assert(stats.used_size == 0);
     assert(stats.commits == 0);
     assert(stats.free_blocks == 1);
-    assert(stats.largest_free_block == 100);
+    assert(stats.largest_free_block == TEST_POOL);
 
     printf("test_clear_resets_pool: PASS\n");
 }
 
 void test_release_clears_latches() {
-    MemoryPool pool(100);
+    MemoryPool pool(TEST_POOL);
 
     unsigned char data[10] = {'X'};
     int64_t ref = pool.commit(data, 10);
@@ -282,9 +309,10 @@ int main() {
     test_basic_commit_read_release();
     test_invalid_ref_throws();
     test_zero_length_commit();
-    test_l1_compaction();
-    test_l2_compaction_moves_unlatched();
-    test_latched_segment_not_moved_by_l2();
+    test_min_split_threshold();
+    test_coalesce_on_release();
+    test_compaction_moves_unlatched();
+    test_latched_segment_not_moved_by_compaction();
     test_reserve_and_finalize();
     test_clear_resets_pool();
     test_release_clears_latches();

@@ -5,7 +5,10 @@ for the @>, @?, AtArrow and AtQuestion operators on ArrayVector /
 StringVector-of-JSON columns.
 """
 
-from opteryx.compiled.vector_ops import vector_contains_all, vector_contains_any
+from opteryx.compiled.nanobind.vector_string_search import (
+    vector_contains_all,
+    vector_contains_any,
+)
 from opteryx.third_party import yyjson
 
 from draken.interop.vector_sequence import vector_from_sequence

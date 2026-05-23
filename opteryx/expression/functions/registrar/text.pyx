@@ -16,23 +16,27 @@ from opteryx.compiled import vector_ops as compiled_vector_ops
 from draken.vectors.string_vector import lowercase as vector_lowercase
 from draken.vectors.string_vector import uppercase as vector_uppercase
 from opteryx.compiled.vector_ops import (
-    vector_ci_ends_with,
-    vector_ci_starts_with,
-    vector_ends_with,
     vector_initcap,
-    vector_levenshtein,
     vector_md5,
-    vector_position,
-    vector_replace,
     vector_reverse,
     vector_sha1,
     vector_sha256,
     vector_sha512,
-    vector_soundex,
-    vector_starts_with,
     vector_string_slice_left,
     vector_string_slice_right,
     vector_string_substring,
+)
+from opteryx.compiled.nanobind.vector_string_misc3 import vector_soundex
+from opteryx.compiled.nanobind.vector_string_misc import (
+    vector_levenshtein,
+    vector_position,
+)
+from opteryx.compiled.nanobind.vector_string_misc2 import vector_replace
+from opteryx.compiled.nanobind.vector_string_search import (
+    vector_ci_ends_with,
+    vector_ci_starts_with,
+    vector_ends_with,
+    vector_starts_with,
 )
 from opteryx.compiled.nanobind.vector_accessors import (
     vector_length,
