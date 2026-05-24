@@ -217,6 +217,84 @@ static inline VecResult fm_sqrt_float_tmpl(const DrakenVector& a) {
 }
 
 // ---------------------------------------------------------------------------
+// Scaling helpers for CEIL / FLOOR / TRUNC  (scale argument matches SQL ROUND)
+// ---------------------------------------------------------------------------
+
+static inline double fm_ceil_scaled(double x, int scale) noexcept {
+    if (scale == 0) return std::ceil(x);
+    double sf = std::pow(10.0, static_cast<double>(std::abs(scale)));
+    return (scale > 0) ? std::ceil(x * sf) / sf : std::ceil(x / sf) * sf;
+}
+
+static inline double fm_floor_scaled(double x, int scale) noexcept {
+    if (scale == 0) return std::floor(x);
+    double sf = std::pow(10.0, static_cast<double>(std::abs(scale)));
+    return (scale > 0) ? std::floor(x * sf) / sf : std::floor(x / sf) * sf;
+}
+
+static inline double fm_trunc_scaled(double x, int scale) noexcept {
+    if (scale == 0) return std::trunc(x);
+    double sf = std::pow(10.0, static_cast<double>(std::abs(scale)));
+    return (scale > 0) ? std::trunc(x * sf) / sf : std::trunc(x / sf) * sf;
+}
+
+// ---------------------------------------------------------------------------
+// CEIL / FLOOR / TRUNC kernels  (all numeric types → FLOAT64)
+// ---------------------------------------------------------------------------
+
+template<typename T>
+static inline VecResult fm_ceil_tmpl(const DrakenVector& a, int scale) {
+    const uint32_t n = a.length;
+    const T* src = static_cast<const T*>(a.data);
+    double* dst = fm_alloc<double>(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!fm_row_valid(a.validity, i)) { dst[i] = 0.0; continue; }
+        dst[i] = fm_ceil_scaled(static_cast<double>(src[a.selection[i]]), scale);
+    }
+    return fm_make_result(dst, fm_copy_validity(a.validity, n), n, DRAKEN_FLOAT64);
+}
+
+template<typename T>
+static inline VecResult fm_floor_tmpl(const DrakenVector& a, int scale) {
+    const uint32_t n = a.length;
+    const T* src = static_cast<const T*>(a.data);
+    double* dst = fm_alloc<double>(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!fm_row_valid(a.validity, i)) { dst[i] = 0.0; continue; }
+        dst[i] = fm_floor_scaled(static_cast<double>(src[a.selection[i]]), scale);
+    }
+    return fm_make_result(dst, fm_copy_validity(a.validity, n), n, DRAKEN_FLOAT64);
+}
+
+template<typename T>
+static inline VecResult fm_trunc_tmpl(const DrakenVector& a, int scale) {
+    const uint32_t n = a.length;
+    const T* src = static_cast<const T*>(a.data);
+    double* dst = fm_alloc<double>(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!fm_row_valid(a.validity, i)) { dst[i] = 0.0; continue; }
+        dst[i] = fm_trunc_scaled(static_cast<double>(src[a.selection[i]]), scale);
+    }
+    return fm_make_result(dst, fm_copy_validity(a.validity, n), n, DRAKEN_FLOAT64);
+}
+
+// ---------------------------------------------------------------------------
+// POWER kernel  (all numeric types → FLOAT64)
+// ---------------------------------------------------------------------------
+
+template<typename T>
+static inline VecResult fm_power_tmpl(const DrakenVector& a, double exponent) {
+    const uint32_t n = a.length;
+    const T* src = static_cast<const T*>(a.data);
+    double* dst = fm_alloc<double>(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!fm_row_valid(a.validity, i)) { dst[i] = 0.0; continue; }
+        dst[i] = std::pow(static_cast<double>(src[a.selection[i]]), exponent);
+    }
+    return fm_make_result(dst, fm_copy_validity(a.validity, n), n, DRAKEN_FLOAT64);
+}
+
+// ---------------------------------------------------------------------------
 // ROUND kernels
 // ---------------------------------------------------------------------------
 
@@ -291,6 +369,54 @@ static inline VecResult float_round(const DrakenVector& a, int digits = 0) {
         case DRAKEN_FLOAT32: return fm_round_float_tmpl<float>(a, digits);
         case DRAKEN_FLOAT64: return fm_round_float_tmpl<double>(a, digits);
         default: throw std::invalid_argument("float_round: unsupported type");
+    }
+}
+
+static inline VecResult float_ceil(const DrakenVector& a, int scale = 0) {
+    switch (a.type) {
+        case DRAKEN_INT8:    return fm_ceil_tmpl<int8_t>(a, scale);
+        case DRAKEN_INT16:   return fm_ceil_tmpl<int16_t>(a, scale);
+        case DRAKEN_INT32:   return fm_ceil_tmpl<int32_t>(a, scale);
+        case DRAKEN_INT64:   return fm_ceil_tmpl<int64_t>(a, scale);
+        case DRAKEN_FLOAT32: return fm_ceil_tmpl<float>(a, scale);
+        case DRAKEN_FLOAT64: return fm_ceil_tmpl<double>(a, scale);
+        default: throw std::invalid_argument("float_ceil: unsupported type");
+    }
+}
+
+static inline VecResult float_floor(const DrakenVector& a, int scale = 0) {
+    switch (a.type) {
+        case DRAKEN_INT8:    return fm_floor_tmpl<int8_t>(a, scale);
+        case DRAKEN_INT16:   return fm_floor_tmpl<int16_t>(a, scale);
+        case DRAKEN_INT32:   return fm_floor_tmpl<int32_t>(a, scale);
+        case DRAKEN_INT64:   return fm_floor_tmpl<int64_t>(a, scale);
+        case DRAKEN_FLOAT32: return fm_floor_tmpl<float>(a, scale);
+        case DRAKEN_FLOAT64: return fm_floor_tmpl<double>(a, scale);
+        default: throw std::invalid_argument("float_floor: unsupported type");
+    }
+}
+
+static inline VecResult float_trunc(const DrakenVector& a, int scale = 0) {
+    switch (a.type) {
+        case DRAKEN_INT8:    return fm_trunc_tmpl<int8_t>(a, scale);
+        case DRAKEN_INT16:   return fm_trunc_tmpl<int16_t>(a, scale);
+        case DRAKEN_INT32:   return fm_trunc_tmpl<int32_t>(a, scale);
+        case DRAKEN_INT64:   return fm_trunc_tmpl<int64_t>(a, scale);
+        case DRAKEN_FLOAT32: return fm_trunc_tmpl<float>(a, scale);
+        case DRAKEN_FLOAT64: return fm_trunc_tmpl<double>(a, scale);
+        default: throw std::invalid_argument("float_trunc: unsupported type");
+    }
+}
+
+static inline VecResult float_power(const DrakenVector& a, double exponent) {
+    switch (a.type) {
+        case DRAKEN_INT8:    return fm_power_tmpl<int8_t>(a, exponent);
+        case DRAKEN_INT16:   return fm_power_tmpl<int16_t>(a, exponent);
+        case DRAKEN_INT32:   return fm_power_tmpl<int32_t>(a, exponent);
+        case DRAKEN_INT64:   return fm_power_tmpl<int64_t>(a, exponent);
+        case DRAKEN_FLOAT32: return fm_power_tmpl<float>(a, exponent);
+        case DRAKEN_FLOAT64: return fm_power_tmpl<double>(a, exponent);
+        default: throw std::invalid_argument("float_power: unsupported type");
     }
 }
 

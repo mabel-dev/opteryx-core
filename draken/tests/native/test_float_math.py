@@ -346,3 +346,133 @@ def test_round_large():
 def test_round_integer_float_identity(vals):
     result = py(vm.vector_round(f64([float(v) for v in vals])))
     assert result == [float(v) for v in vals]
+
+
+# ===========================================================================
+# CEIL / FLOOR / TRUNC  (E.19)
+# ===========================================================================
+
+def test_ceil_float64_basic():
+    assert py(vm.vector_ceil(f64([1.1, 1.9, -1.1, -1.9]))) == [2.0, 2.0, -1.0, -1.0]
+
+def test_ceil_int64():
+    assert py(vm.vector_ceil(i64([3, -2, 0]))) == [3.0, -2.0, 0.0]
+
+def test_ceil_scale_positive():
+    # CEILING(1.234, 2) → ceil to 2 decimal places → 1.24
+    result = py(vm.vector_ceil(f64([1.234]), 2))
+    assert abs(result[0] - 1.24) < 1e-10
+
+def test_ceil_scale_negative():
+    # CEILING(123.4, -1) → ceil to nearest 10 → 130.0
+    result = py(vm.vector_ceil(f64([123.4]), -1))
+    assert abs(result[0] - 130.0) < 1e-10
+
+def test_ceil_null_propagates():
+    assert py(vm.vector_ceil(f64([None, 1.5]))) == [None, 2.0]
+
+def test_floor_float64_basic():
+    assert py(vm.vector_floor(f64([1.1, 1.9, -1.1, -1.9]))) == [1.0, 1.0, -2.0, -2.0]
+
+def test_floor_int64():
+    assert py(vm.vector_floor(i64([3, -2, 0]))) == [3.0, -2.0, 0.0]
+
+def test_floor_scale_positive():
+    result = py(vm.vector_floor(f64([1.239]), 2))
+    assert abs(result[0] - 1.23) < 1e-10
+
+def test_floor_null_propagates():
+    assert py(vm.vector_floor(f64([None, 1.5]))) == [None, 1.0]
+
+def test_trunc_float64_positive():
+    assert py(vm.vector_trunc(f64([1.7, 2.9, 3.0]))) == [1.0, 2.0, 3.0]
+
+def test_trunc_float64_negative():
+    assert py(vm.vector_trunc(f64([-1.7, -2.9, -3.0]))) == [-1.0, -2.0, -3.0]
+
+def test_trunc_int64():
+    assert py(vm.vector_trunc(i64([5, -3, 0]))) == [5.0, -3.0, 0.0]
+
+def test_trunc_null_propagates():
+    assert py(vm.vector_trunc(f64([None, 2.9]))) == [None, 2.0]
+
+def test_ceil_type_error():
+    with pytest.raises((TypeError, Exception)):
+        vm.vector_ceil("not a vector")
+
+def test_floor_type_error():
+    with pytest.raises((TypeError, Exception)):
+        vm.vector_floor("not a vector")
+
+def test_trunc_type_error():
+    with pytest.raises((TypeError, Exception)):
+        vm.vector_trunc("not a vector")
+
+
+# ===========================================================================
+# POWER  (E.19)
+# ===========================================================================
+
+def test_power_float64_square():
+    result = py(vm.vector_power(f64([2.0, 3.0, 4.0]), 2.0))
+    assert result == [4.0, 9.0, 16.0]
+
+def test_power_int64():
+    result = py(vm.vector_power(i64([2, 3, 4]), 2.0))
+    assert result == [4.0, 9.0, 16.0]
+
+def test_power_null_propagates():
+    result = py(vm.vector_power(f64([None, 2.0]), 2.0))
+    assert result[0] is None
+    assert result[1] == 4.0
+
+def test_power_exponent_zero():
+    result = py(vm.vector_power(f64([5.0, -3.0, 0.0]), 0.0))
+    assert result == [1.0, 1.0, 1.0]
+
+def test_power_type_error():
+    with pytest.raises((TypeError, Exception)):
+        vm.vector_power("not a vector", 2.0)
+
+
+# ===========================================================================
+# RANDOM / RANDOM_NORMAL  (E.19)
+# ===========================================================================
+
+def test_random_returns_float64_vector():
+    result = vm.vector_random(10)
+    vals = result.to_pylist()
+    assert len(vals) == 10
+    assert all(0.0 <= v < 1.0 for v in vals)
+
+def test_random_no_nulls():
+    result = vm.vector_random(50)
+    assert all(v is not None for v in result.to_pylist())
+
+def test_random_zero_count():
+    result = vm.vector_random(0)
+    assert result.to_pylist() == []
+
+def test_random_different_per_call():
+    r1 = vm.vector_random(100).to_pylist()
+    r2 = vm.vector_random(100).to_pylist()
+    # Statistically overwhelmingly unlikely to be identical
+    assert r1 != r2
+
+def test_random_normal_returns_floats():
+    result = vm.vector_random_normal(20)
+    vals = result.to_pylist()
+    assert len(vals) == 20
+    assert all(isinstance(v, float) for v in vals)
+
+def test_random_normal_no_nulls():
+    result = vm.vector_random_normal(50)
+    assert all(v is not None for v in result.to_pylist())
+
+def test_random_normal_odd_count():
+    result = vm.vector_random_normal(7)
+    assert len(result.to_pylist()) == 7
+
+def test_random_normal_zero_count():
+    result = vm.vector_random_normal(0)
+    assert result.to_pylist() == []

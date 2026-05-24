@@ -1419,6 +1419,35 @@ extensions.append(
     )
 )
 
+# E.19 — C′ pattern: subscript + math remainders as pure nanobind C++.
+#
+# vector_special: 2 functions (map_access_string, map_access_array).
+#   Replaces: vector_subscript.pyx (deleted; vector_get_element was dead code).
+#
+# (ceil/floor/trunc/power/random/random_normal extended vector_math.cpp — same E.19.)
+
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_special",
+        sources=[
+            "opteryx/compiled/nanobind/vector_special.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
 # E.4 — C′ pattern: base64/85 codec + bool utility ops as pure nanobind C++.
 # Uses the same RTLD_GLOBAL bridge pattern as E.2/E.3 (vector_bitwise/vector_math).
 #
@@ -1817,6 +1846,37 @@ extensions.append(
         include_dirs=include_dirs
         + [
             MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+# E.18 C′: vector_json_extract + vector_map_access — JSON field extraction via yyjson.
+#
+# Replaces: vector_json_extract.pyx, vector_map_access.pyx (deleted).
+#           Non-JSON subscript functions moved to vector_subscript.pyx.
+# Contains: vector_json_extract (full JSONPath), vector_map_access (top-level key).
+# Uses the same RTLD_GLOBAL bridge pattern as E.17 (vector_string_misc3).
+# Links yyjson.o (pre-compiled C library) for JSON parsing + serialisation.
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_json",
+        sources=[
+            "opteryx/compiled/nanobind/vector_json.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/yyjson/src/yyjson.c",   # compiled as C11; no pre-built .o dep
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/yyjson/src",
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",

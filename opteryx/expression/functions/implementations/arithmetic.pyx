@@ -41,13 +41,13 @@ def round2(values, digits):
 
 
 def random_number(size):
-    from opteryx.compiled.vector_ops import vector_random
+    from opteryx.compiled.nanobind.vector_math import vector_random
 
     return vector_random(size)
 
 
 def random_normal(size):
-    from opteryx.compiled.vector_ops import vector_random_normal
+    from opteryx.compiled.nanobind.vector_math import vector_random_normal
 
     return vector_random_normal(size)
 
@@ -73,7 +73,7 @@ def safe_power(base_array, exponent_array):
     The exponent must be a constant (all identical values); the scalar
     exponent is extracted and passed directly to the C kernel.
     """
-    from opteryx.compiled.vector_ops import vector_power
+    from opteryx.compiled.nanobind.vector_math import vector_power
 
     # Validate: all exponents must be the same scalar value.
     exp_values = exponent_array.to_pylist()
@@ -93,7 +93,7 @@ def log(values, bases):
 
 def ceiling(values, scales=None) -> List:
     """Performs a 'ceiling' with a scale factor."""
-    from opteryx.compiled.vector_ops import vector_ceil
+    from opteryx.compiled.nanobind.vector_math import vector_ceil
 
     if scales is None or len(scales) == 0:
         scale = 0
@@ -105,7 +105,7 @@ def ceiling(values, scales=None) -> List:
 
 def floor(values, scales=None) -> List:
     """Performs a 'floor' with a scale factor."""
-    from opteryx.compiled.vector_ops import vector_floor
+    from opteryx.compiled.nanobind.vector_math import vector_floor
 
     if scales is None or len(scales) == 0:
         scale = 0
@@ -117,7 +117,7 @@ def floor(values, scales=None) -> List:
 
 def trunc(values, scales=None) -> List:
     """Performs a 'trunc' (truncate towards zero) with a scale factor."""
-    from opteryx.compiled.vector_ops import vector_trunc
+    from opteryx.compiled.nanobind.vector_math import vector_trunc
 
     if scales is None or len(scales) == 0:
         scale = 0

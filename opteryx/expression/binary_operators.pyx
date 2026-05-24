@@ -46,7 +46,7 @@ def LongArrowOp(documents, elements):
 
 def MapAccessOp(array, key):
     """Map / iterable subscript over Draken vectors."""
-    from opteryx.compiled.vector_ops import vector_map_access_array, vector_map_access_string
+    from opteryx.compiled.nanobind.vector_special import vector_map_access_array, vector_map_access_string
 
     if not isinstance(key, Integer64Vector):
         raise IncorrectTypeError("Map/iterable subscript key must be an Integer64Vector")
