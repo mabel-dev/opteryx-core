@@ -13,6 +13,84 @@
 #include <arm_neon.h>
 #endif
 
+#if defined(__riscv) && defined(__riscv_vector)
+#include <riscv_vector.h>
+
+// ============================================================================
+// RVV implementations — all five bitwise / select operations.
+//
+// Use LMUL=m8 for maximum throughput: each iteration processes VLEN bytes
+// (e.g. 256 on VLEN=256, 512 on VLEN=512).  m8 = full register file width.
+// ============================================================================
+
+static void simd_and_mask_rvv(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        size_t vl = __riscv_vsetvl_e8m8(n - i);
+        __riscv_vse8_v_u8m8(dest + i,
+            __riscv_vand_vv_u8m8(
+                __riscv_vle8_v_u8m8(a + i, vl),
+                __riscv_vle8_v_u8m8(b + i, vl), vl), vl);
+        i += vl;
+    }
+}
+
+static void simd_or_mask_rvv(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        size_t vl = __riscv_vsetvl_e8m8(n - i);
+        __riscv_vse8_v_u8m8(dest + i,
+            __riscv_vor_vv_u8m8(
+                __riscv_vle8_v_u8m8(a + i, vl),
+                __riscv_vle8_v_u8m8(b + i, vl), vl), vl);
+        i += vl;
+    }
+}
+
+static void simd_xor_mask_rvv(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        size_t vl = __riscv_vsetvl_e8m8(n - i);
+        __riscv_vse8_v_u8m8(dest + i,
+            __riscv_vxor_vv_u8m8(
+                __riscv_vle8_v_u8m8(a + i, vl),
+                __riscv_vle8_v_u8m8(b + i, vl), vl), vl);
+        i += vl;
+    }
+}
+
+static void simd_not_mask_rvv(uint8_t* dest, const uint8_t* src, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        size_t vl = __riscv_vsetvl_e8m8(n - i);
+        // vnot pseudo: XOR with 0xFF
+        __riscv_vse8_v_u8m8(dest + i,
+            __riscv_vxor_vx_u8m8(__riscv_vle8_v_u8m8(src + i, vl), (uint8_t)0xFF, vl), vl);
+        i += vl;
+    }
+}
+
+// dest[i] = mask[i] ? a[i] : b[i]
+// With e8m8 the boolean type is vbool1_t (1 bit per 8-bit element at LMUL=8).
+static void simd_select_bytes_rvv(uint8_t* dest, const uint8_t* mask,
+                                   const uint8_t* a, const uint8_t* b, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        size_t vl = __riscv_vsetvl_e8m8(n - i);
+        vuint8m8_t vmsk = __riscv_vle8_v_u8m8(mask + i, vl);
+        vuint8m8_t va   = __riscv_vle8_v_u8m8(a + i, vl);
+        vuint8m8_t vb   = __riscv_vle8_v_u8m8(b + i, vl);
+        // sel is true where mask[i] != 0 → pick a; false → pick b
+        vbool1_t sel = __riscv_vmsne_vx_u8m8_b1(vmsk, 0, vl);
+        // vmerge(vs2, vs1, v0, vl): v0 true → vs1, false → vs2
+        __riscv_vse8_v_u8m8(dest + i,
+            __riscv_vmerge_vvm_u8m8(vb, va, sel, vl), vl);
+        i += vl;
+    }
+}
+
+#endif  // __riscv_vector
+
 // ============================================================================
 // Bitwise AND
 // ============================================================================
@@ -60,6 +138,9 @@ void simd_and_mask(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n) 
 #endif
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
         { &cpu_supports_neon, simd_and_mask_neon },
+#endif
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, simd_and_mask_rvv },
 #endif
     }, simd_and_mask_scalar);
 
@@ -112,6 +193,9 @@ void simd_or_mask(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n) {
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
         { &cpu_supports_neon, simd_or_mask_neon },
 #endif
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, simd_or_mask_rvv },
+#endif
     }, simd_or_mask_scalar);
 
     return fn(dest, a, b, n);
@@ -163,6 +247,9 @@ void simd_xor_mask(uint8_t* dest, const uint8_t* a, const uint8_t* b, size_t n) 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
         { &cpu_supports_neon, simd_xor_mask_neon },
 #endif
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, simd_xor_mask_rvv },
+#endif
     }, simd_xor_mask_scalar);
 
     return fn(dest, a, b, n);
@@ -212,6 +299,9 @@ void simd_not_mask(uint8_t* dest, const uint8_t* src, size_t n) {
 #endif
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
         { &cpu_supports_neon, simd_not_mask_neon },
+#endif
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, simd_not_mask_rvv },
 #endif
     }, simd_not_mask_scalar);
 
@@ -295,6 +385,9 @@ void simd_select_bytes(uint8_t* dest, const uint8_t* mask,
 #endif
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
         { &cpu_supports_neon, simd_select_bytes_scalar },
+#endif
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, simd_select_bytes_rvv },
 #endif
     }, simd_select_bytes_scalar);
 

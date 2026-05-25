@@ -51,7 +51,7 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
 
     cdef void apply(self, Morsel morsel) except *:
         cdef Morsel typed     = <Morsel>morsel
-        cdef Py_ssize_t nrows = <Py_ssize_t>typed.ptr.num_rows
+        cdef Py_ssize_t nrows = <Py_ssize_t>typed.num_rows
 
         if nrows == 0:
             return

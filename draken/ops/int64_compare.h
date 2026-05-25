@@ -40,6 +40,16 @@
 #include "core/vector_alloc.h"
 #include "ops/vec_result.h"
 
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
+#if defined(__riscv) && defined(__riscv_vector)
+#include <riscv_vector.h>
+#endif
+
 namespace draken { namespace ops {
 
 // ---------------------------------------------------------------------------
@@ -87,6 +97,10 @@ static inline uint8_t* cmp_copy_validity(const uint8_t* src, uint32_t n) {
 // Compute the bitwise AND of two validity bitmaps (output row is valid iff both
 // inputs are valid). Returns nullptr when both inputs are nullptr (no nulls).
 // Normalises: if the AND is all-valid, frees and returns nullptr.
+//
+// SIMD: AND full bytes in wide SIMD registers; track min-byte to detect any
+// byte < 0xFF (non-all-valid) without a per-byte branch.  The partial last
+// byte (when n is not a multiple of 8) is handled scalar afterward.
 static inline uint8_t* cmp_and_validity(
     const uint8_t* va, const uint8_t* vb, uint32_t n)
 {
@@ -96,14 +110,75 @@ static inline uint8_t* cmp_and_validity(
 
     const uint32_t nb = (n + 7u) >> 3;
     uint8_t* dst = cmp_alloc_bool_buf(n);
+
+    // Separate full bytes (all expected to be 0xFF) from the partial tail byte.
+    const uint32_t nb_full = (n & 7u) ? nb - 1u : nb;
     bool all_valid = true;
-    for (uint32_t k = 0; k < nb; ++k) {
-        uint8_t expected = 0xFFu;
-        if (k == nb - 1u && (n & 7u) != 0)
-            expected = static_cast<uint8_t>((1u << (n & 7u)) - 1u);
-        dst[k] = static_cast<uint8_t>(va[k] & vb[k]);
-        if (dst[k] != expected) all_valid = false;
+    uint32_t k = 0;
+
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    {
+        // Process 16 bytes per iteration; accumulate min to detect any < 0xFF.
+        uint8x16_t min_acc = vdupq_n_u8(0xFFu);
+        for (; k + 16u <= nb_full; k += 16u) {
+            uint8x16_t r = vandq_u8(vld1q_u8(va + k), vld1q_u8(vb + k));
+            vst1q_u8(dst + k, r);
+            min_acc = vminq_u8(min_acc, r);
+        }
+        if (vminvq_u8(min_acc) < 0xFFu) all_valid = false;
     }
+
+#elif defined(__AVX2__)
+    {
+        // Process 32 bytes per iteration; OR together any non-0xFF bytes to
+        // detect invalidity: if OR(~r, 0) != 0 then some byte < 0xFF.
+        __m256i not_acc = _mm256_setzero_si256();
+        const __m256i ones = _mm256_set1_epi8(-1);
+        for (; k + 32u <= nb_full; k += 32u) {
+            __m256i r = _mm256_and_si256(
+                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(va + k)),
+                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(vb + k)));
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + k), r);
+            // Accumulate NOT(r): any non-zero bit after this loop means some byte < 0xFF
+            not_acc = _mm256_or_si256(not_acc, _mm256_xor_si256(r, ones));
+        }
+        if (!_mm256_testz_si256(not_acc, not_acc)) all_valid = false;
+    }
+
+#elif defined(__riscv) && defined(__riscv_vector)
+    {
+        // Use vcpop on ~result to count non-0xFF bytes
+        bool simd_all_valid = true;
+        size_t sk = 0;
+        while (sk < nb_full) {
+            size_t vl = __riscv_vsetvl_e8m8(nb_full - sk);
+            vuint8m8_t r = __riscv_vand_vv_u8m8(
+                __riscv_vle8_v_u8m8(va + sk, vl),
+                __riscv_vle8_v_u8m8(vb + sk, vl), vl);
+            __riscv_vse8_v_u8m8(dst + sk, r, vl);
+            // Any byte != 0xFF means not-all-valid
+            vbool1_t bad = __riscv_vmsne_vx_u8m8_b1(r, (uint8_t)0xFFu, vl);
+            if (__riscv_vcpop_m_b1(bad, vl) > 0) simd_all_valid = false;
+            sk += vl;
+        }
+        k = (uint32_t)nb_full;  // skip the scalar loop below for full bytes
+        if (!simd_all_valid) all_valid = false;
+    }
+#endif
+
+    // Scalar tail: remaining full bytes the SIMD loop didn't reach
+    for (; k < nb_full; ++k) {
+        dst[k] = static_cast<uint8_t>(va[k] & vb[k]);
+        if (dst[k] != 0xFFu) all_valid = false;
+    }
+
+    // Partial last byte (when n % 8 != 0): expected value is not 0xFF
+    if (n & 7u) {
+        const uint8_t exp = static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+        dst[nb - 1u] = static_cast<uint8_t>(va[nb - 1u] & vb[nb - 1u]);
+        if (dst[nb - 1u] != exp) all_valid = false;
+    }
+
     if (all_valid) {
         draken_free(dst);
         return nullptr;

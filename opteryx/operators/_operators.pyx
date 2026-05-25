@@ -22,7 +22,7 @@ from draken.vectors.string_vector cimport StringVector
 from draken.vectors.integer8_vector cimport Integer8Vector
 from draken.vectors.integer16_vector cimport Integer16Vector
 from draken.vectors.integer32_vector cimport Integer32Vector
-from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16
+from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DrakenVector
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 from opteryx.compiled.structures.perfect_hash_set cimport PerfectHashSet
 from opteryx.compiled.structures.buffers cimport IntBuffer, Int32Buffer

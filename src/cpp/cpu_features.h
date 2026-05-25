@@ -42,6 +42,14 @@ static inline bool cpu_supports_neon(void) {
 #endif
 }
 
+static inline bool cpu_supports_rvv(void) {
+#if defined(__riscv) && defined(__riscv_vector)
+    return true;
+#else
+    return false;
+#endif
+}
+
 #ifdef __cplusplus
 }
 #endif

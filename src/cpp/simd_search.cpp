@@ -15,6 +15,10 @@ static const size_t EXPECTED_MATCH_RATIO = 100;
 #include <immintrin.h>
 #endif
 
+#if defined(__riscv) && defined(__riscv_vector)
+#include <riscv_vector.h>
+#endif
+
 // SIMD substring search (up to 16 bytes pattern)
 // Returns index of first occurrence or -1 if not found
 // We'll provide a scalar implementation always and SIMD implementations
@@ -128,6 +132,48 @@ static int simd_search_substring_neon(const char* data, size_t length, const cha
 }
 #endif
 
+#if defined(__riscv) && defined(__riscv_vector)
+// ============================================================================
+// RVV substring search.
+//
+// Fast-path: scan (length - i) bytes per iteration for the first byte of
+// pattern using vmseq + vfirst.  Most iterations have no candidate (vfirst
+// returns -1) and advance by vl bytes at O(1) cost.  When a candidate is
+// found we confirm from that position with scalar memcmp up to the end of the
+// loaded chunk.  Pattern matches are rare enough that the scalar tail does not
+// dominate.
+//
+// LMUL=m8 maximises bytes scanned per vsetvl/vle cycle.
+// ============================================================================
+static int simd_search_substring_rvv(const char* data, size_t length,
+                                     const char* pattern, size_t pattern_len) {
+    if (pattern_len == 0 || pattern_len > 16) return -1;
+
+    const uint8_t first = static_cast<uint8_t>(pattern[0]);
+    size_t i = 0;
+
+    while (i + pattern_len <= length) {
+        size_t vl = __riscv_vsetvl_e8m8(length - i);
+        vuint8m8_t chunk = __riscv_vle8_v_u8m8((const uint8_t*)(data + i), vl);
+        vbool1_t   cmp   = __riscv_vmseq_vx_u8m8_b1(chunk, first, vl);
+        long hit = __riscv_vfirst_m_b1(cmp, vl);
+
+        if (hit >= 0) {
+            // Scalar confirmation: scan from hit to end of this chunk.
+            // j + pattern_len <= length ensures we don't read past the buffer.
+            size_t end = i + vl;
+            for (size_t j = i + (size_t)hit; j < end && j + pattern_len <= length; j++) {
+                if (memcmp(data + j, pattern, pattern_len) == 0)
+                    return static_cast<int>(j);
+            }
+        }
+
+        i += vl;
+    }
+    return -1;
+}
+#endif  // __riscv_vector
+
 using search_sub_fn_t = int (*)(const char*, size_t, const char*, size_t);
 
 #include "simd_dispatch.h"
@@ -142,6 +188,9 @@ int simd_search_substring(const char* data, size_t length, const char* pattern, 
 #endif
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
             { &cpu_supports_neon, simd_search_substring_neon },
+#endif
+#if defined(__riscv) && defined(__riscv_vector)
+            { &cpu_supports_rvv, simd_search_substring_rvv },
 #endif
         },
         simd_search_substring_scalar
@@ -178,6 +227,20 @@ int neon_search(const char* data, size_t length, char target) {
     }
     return -1;
 }
+#elif defined(__riscv) && defined(__riscv_vector)
+int neon_search(const char* data, size_t length, char target) {
+    const uint8_t t = static_cast<uint8_t>(target);
+    size_t i = 0;
+    while (i < length) {
+        size_t vl = __riscv_vsetvl_e8m8(length - i);
+        vuint8m8_t chunk = __riscv_vle8_v_u8m8((const uint8_t*)(data + i), vl);
+        vbool1_t cmp = __riscv_vmseq_vx_u8m8_b1(chunk, t, vl);
+        long hit = __riscv_vfirst_m_b1(cmp, vl);
+        if (hit >= 0) return static_cast<int>(i + (size_t)hit);
+        i += vl;
+    }
+    return -1;
+}
 #else
 // Fallback scalar implementation if NEON is not available.
 int neon_search(const char* data, size_t length, char target) {
@@ -194,11 +257,11 @@ int neon_search(const char* data, size_t length, char target) {
 std::vector<size_t> neon_find_all(const char* data, size_t length, char target) {
     std::vector<size_t> results;
     results.reserve(length / EXPECTED_MATCH_RATIO);  // Reserve space for ~1% matches as a reasonable estimate
-    
+
     size_t i = 0;
     // Create a vector with the target repeated.
     uint8x16_t target_vec = vdupq_n_u8(static_cast<uint8_t>(target));
-    
+
     for (; i + 16 <= length; i += 16) {
         // Load 16 bytes.
         uint8x16_t chunk = vld1q_u8(reinterpret_cast<const uint8_t*>(data + i));
@@ -213,14 +276,35 @@ std::vector<size_t> neon_find_all(const char* data, size_t length, char target) 
             }
         }
     }
-    
+
     // Process any leftover bytes.
     for (; i < length; i++) {
         if (data[i] == target) {
             results.push_back(i);
         }
     }
-    
+
+    return results;
+}
+#elif defined(__riscv) && defined(__riscv_vector)
+// RVV: skip chunks with no matches via vcpop; extract positions with scalar scan.
+// Fast-path eliminates push_back overhead for the common no-match case.
+std::vector<size_t> neon_find_all(const char* data, size_t length, char target) {
+    std::vector<size_t> results;
+    results.reserve(length / EXPECTED_MATCH_RATIO);
+    const uint8_t t = static_cast<uint8_t>(target);
+    size_t i = 0;
+    while (i < length) {
+        size_t vl = __riscv_vsetvl_e8m8(length - i);
+        vuint8m8_t chunk = __riscv_vle8_v_u8m8((const uint8_t*)(data + i), vl);
+        vbool1_t cmp = __riscv_vmseq_vx_u8m8_b1(chunk, t, vl);
+        if (__riscv_vcpop_m_b1(cmp, vl) > 0) {
+            for (size_t j = 0; j < vl; j++) {
+                if ((uint8_t)data[i + j] == t) results.push_back(i + j);
+            }
+        }
+        i += vl;
+    }
     return results;
 }
 #else
@@ -243,7 +327,7 @@ size_t neon_count(const char* data, size_t length, char target) {
     size_t i = 0;
     // Create a vector with the target repeated.
     uint8x16_t target_vec = vdupq_n_u8(static_cast<uint8_t>(target));
-    
+
     for (; i + 16 <= length; i += 16) {
         // Load 16 bytes.
         uint8x16_t chunk = vld1q_u8(reinterpret_cast<const uint8_t*>(data + i));
@@ -258,14 +342,28 @@ size_t neon_count(const char* data, size_t length, char target) {
             }
         }
     }
-    
+
     // Process any leftover bytes.
     for (; i < length; i++) {
         if (data[i] == target) {
             count++;
         }
     }
-    
+
+    return count;
+}
+#elif defined(__riscv) && defined(__riscv_vector)
+// RVV: vcpop counts matching bits per iteration — no per-element branch.
+size_t neon_count(const char* data, size_t length, char target) {
+    const uint8_t t = static_cast<uint8_t>(target);
+    size_t count = 0, i = 0;
+    while (i < length) {
+        size_t vl = __riscv_vsetvl_e8m8(length - i);
+        vuint8m8_t chunk = __riscv_vle8_v_u8m8((const uint8_t*)(data + i), vl);
+        vbool1_t cmp = __riscv_vmseq_vx_u8m8_b1(chunk, t, vl);
+        count += __riscv_vcpop_m_b1(cmp, vl);
+        i += vl;
+    }
     return count;
 }
 #else
@@ -280,6 +378,80 @@ size_t neon_count(const char* data, size_t length, char target) {
     return count;
 }
 #endif
+
+#if defined(__riscv) && defined(__riscv_vector)
+// ============================================================================
+// RVV implementations for the dispatched search/count/find_all/delimiter
+// functions.  All use LMUL=m8 for maximum byte throughput per iteration.
+// ============================================================================
+
+static int avx_search_rvv(const char* data, size_t length, char target) {
+    const uint8_t t = static_cast<uint8_t>(target);
+    size_t i = 0;
+    while (i < length) {
+        size_t vl = __riscv_vsetvl_e8m8(length - i);
+        vuint8m8_t chunk = __riscv_vle8_v_u8m8((const uint8_t*)(data + i), vl);
+        vbool1_t cmp = __riscv_vmseq_vx_u8m8_b1(chunk, t, vl);
+        long hit = __riscv_vfirst_m_b1(cmp, vl);
+        if (hit >= 0) return static_cast<int>(i + (size_t)hit);
+        i += vl;
+    }
+    return -1;
+}
+
+static size_t avx_count_rvv(const char* data, size_t length, char target) {
+    const uint8_t t = static_cast<uint8_t>(target);
+    size_t count = 0, i = 0;
+    while (i < length) {
+        size_t vl = __riscv_vsetvl_e8m8(length - i);
+        vuint8m8_t chunk = __riscv_vle8_v_u8m8((const uint8_t*)(data + i), vl);
+        vbool1_t cmp = __riscv_vmseq_vx_u8m8_b1(chunk, t, vl);
+        count += __riscv_vcpop_m_b1(cmp, vl);
+        i += vl;
+    }
+    return count;
+}
+
+static std::vector<size_t> simd_find_all_rvv(const char* data, size_t length, char target) {
+    std::vector<size_t> results;
+    results.reserve(length / EXPECTED_MATCH_RATIO);
+    const uint8_t t = static_cast<uint8_t>(target);
+    size_t i = 0;
+    while (i < length) {
+        size_t vl = __riscv_vsetvl_e8m8(length - i);
+        vuint8m8_t chunk = __riscv_vle8_v_u8m8((const uint8_t*)(data + i), vl);
+        vbool1_t cmp = __riscv_vmseq_vx_u8m8_b1(chunk, t, vl);
+        // Skip chunks with no matches — eliminates push_back for the common case.
+        if (__riscv_vcpop_m_b1(cmp, vl) > 0) {
+            for (size_t j = 0; j < vl; j++) {
+                if ((uint8_t)data[i + j] == t) results.push_back(i + j);
+            }
+        }
+        i += vl;
+    }
+    return results;
+}
+
+// Delimiters: space (32), comma (44), '}' (125), tab (9)
+static int avx_find_delimiter_rvv(const char* data, size_t length) {
+    size_t i = 0;
+    while (i < length) {
+        size_t vl = __riscv_vsetvl_e8m8(length - i);
+        vuint8m8_t chunk = __riscv_vle8_v_u8m8((const uint8_t*)(data + i), vl);
+        vbool1_t m1 = __riscv_vmseq_vx_u8m8_b1(chunk,  32, vl);  // ' '
+        vbool1_t m2 = __riscv_vmseq_vx_u8m8_b1(chunk,  44, vl);  // ','
+        vbool1_t m3 = __riscv_vmseq_vx_u8m8_b1(chunk, 125, vl);  // '}'
+        vbool1_t m4 = __riscv_vmseq_vx_u8m8_b1(chunk,   9, vl);  // '\t'
+        vbool1_t any = __riscv_vmor_mm_b1(
+            __riscv_vmor_mm_b1(m1, m2, vl),
+            __riscv_vmor_mm_b1(m3, m4, vl), vl);
+        long hit = __riscv_vfirst_m_b1(any, vl);
+        if (hit >= 0) return static_cast<int>(i + (size_t)hit);
+        i += vl;
+    }
+    return -1;
+}
+#endif  // __riscv_vector
 
 // AVX2 implementation for x86 (if available)
 // Always provide a scalar fallback implementation for avx_search so we can
@@ -328,6 +500,9 @@ int avx_search(const char* data, size_t length, char target) {
         {
 #if defined(__AVX2__)
             { &cpu_supports_avx2, avx_search_avx2 },
+#endif
+#if defined(__riscv) && defined(__riscv_vector)
+            { &cpu_supports_rvv, avx_search_rvv },
 #endif
         },
         avx_search_scalar
@@ -397,6 +572,9 @@ std::vector<size_t> simd_find_all(const char* data, size_t length, char target) 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
             { &cpu_supports_neon, neon_find_all },
 #endif
+#if defined(__riscv) && defined(__riscv_vector)
+            { &cpu_supports_rvv, simd_find_all_rvv },
+#endif
         },
         avx_find_all_scalar
     );
@@ -455,6 +633,9 @@ size_t avx_count(const char* data, size_t length, char target) {
 #if defined(__AVX2__)
             { &cpu_supports_avx2, avx_count_avx2 },
 #endif
+#if defined(__riscv) && defined(__riscv_vector)
+            { &cpu_supports_rvv, avx_count_rvv },
+#endif
         },
         avx_count_scalar
     );
@@ -467,28 +648,28 @@ size_t avx_count(const char* data, size_t length, char target) {
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 int neon_find_delimiter(const char* data, size_t length) {
     size_t i = 0;
-    
+
     // Create comparison vectors for all delimiters
     uint8x16_t space_vec = vdupq_n_u8(32);   // ' '
     uint8x16_t comma_vec = vdupq_n_u8(44);   // ','
     uint8x16_t brace_vec = vdupq_n_u8(125);  // '}'
     uint8x16_t tab_vec = vdupq_n_u8(9);      // '\t'
-    
+
     for (; i + 16 <= length; i += 16) {
         // Load 16 bytes
         uint8x16_t chunk = vld1q_u8(reinterpret_cast<const uint8_t*>(data + i));
-        
+
         // Compare with all delimiters
         uint8x16_t cmp_space = vceqq_u8(chunk, space_vec);
         uint8x16_t cmp_comma = vceqq_u8(chunk, comma_vec);
         uint8x16_t cmp_brace = vceqq_u8(chunk, brace_vec);
         uint8x16_t cmp_tab = vceqq_u8(chunk, tab_vec);
-        
+
         // OR all comparisons together
         uint8x16_t result = vorrq_u8(cmp_space, cmp_comma);
         result = vorrq_u8(result, cmp_brace);
         result = vorrq_u8(result, cmp_tab);
-        
+
         // Check if any match found
         uint8_t mask[16];
         vst1q_u8(mask, result);
@@ -498,7 +679,7 @@ int neon_find_delimiter(const char* data, size_t length) {
             }
         }
     }
-    
+
     // Process any leftover bytes
     for (; i < length; i++) {
         char c = data[i];
@@ -506,7 +687,26 @@ int neon_find_delimiter(const char* data, size_t length) {
             return static_cast<int>(i);
         }
     }
-    
+
+    return -1;
+}
+#elif defined(__riscv) && defined(__riscv_vector)
+int neon_find_delimiter(const char* data, size_t length) {
+    size_t i = 0;
+    while (i < length) {
+        size_t vl = __riscv_vsetvl_e8m8(length - i);
+        vuint8m8_t chunk = __riscv_vle8_v_u8m8((const uint8_t*)(data + i), vl);
+        vbool1_t m1 = __riscv_vmseq_vx_u8m8_b1(chunk,  32, vl);
+        vbool1_t m2 = __riscv_vmseq_vx_u8m8_b1(chunk,  44, vl);
+        vbool1_t m3 = __riscv_vmseq_vx_u8m8_b1(chunk, 125, vl);
+        vbool1_t m4 = __riscv_vmseq_vx_u8m8_b1(chunk,   9, vl);
+        vbool1_t any = __riscv_vmor_mm_b1(
+            __riscv_vmor_mm_b1(m1, m2, vl),
+            __riscv_vmor_mm_b1(m3, m4, vl), vl);
+        long hit = __riscv_vfirst_m_b1(any, vl);
+        if (hit >= 0) return static_cast<int>(i + (size_t)hit);
+        i += vl;
+    }
     return -1;
 }
 #else
@@ -591,6 +791,9 @@ int avx_find_delimiter(const char* data, size_t length) {
         {
 #if defined(__AVX2__)
             { &cpu_supports_avx2, avx_find_delimiter_avx2 },
+#endif
+#if defined(__riscv) && defined(__riscv_vector)
+            { &cpu_supports_rvv, avx_find_delimiter_rvv },
 #endif
         },
         avx_find_delimiter_scalar

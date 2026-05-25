@@ -25,7 +25,7 @@ from libc.stdint cimport int32_t, int64_t, uint8_t, uint64_t
 from libcpp.vector cimport vector as cppvector
 from cpython.object cimport PyObject_Hash
 
-from draken.core.buffers cimport DrakenArrayBuffer
+from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
 from draken.vectors.array_vector cimport ArrayVector
 from draken.vectors.integer64_vector cimport from_decoded as int64_from_decoded
@@ -41,11 +41,11 @@ from opteryx.types.schema import FlatColumn
 INTERNAL_BATCH_SIZE: int = 10000
 
 
-cdef inline bint _array_row_is_null(DrakenArrayBuffer* ptr, Py_ssize_t idx) nogil:
+cdef inline bint _array_row_is_null(const uint8_t* nulls, Py_ssize_t idx) noexcept nogil:
     """Per-row null check on an ArrayVector buffer."""
-    if ptr.null_bitmap == NULL:
+    if nulls == NULL:
         return False
-    return ((ptr.null_bitmap[idx >> 3] >> (idx & 7)) & 1) == 0
+    return ((nulls[idx >> 3] >> (idx & 7)) & 1) == 0
 
 
 cpdef tuple build_rows_indices_and_column_draken(ArrayVector column_vector):
@@ -57,19 +57,20 @@ cpdef tuple build_rows_indices_and_column_draken(ArrayVector column_vector):
     Returns:
         tuple of (Integer64Vector, Draken vector) — row indices and flattened typed data
     """
-    cdef DrakenArrayBuffer* ptr = column_vector.ptr
+    cdef DrakenVector* arr_uv = column_vector.unified()
+    cdef int32_t* offsets = <int32_t*>arr_uv.data
+    cdef Py_ssize_t row_count = <Py_ssize_t>arr_uv.length
+    cdef uint8_t* row_nulls = arr_uv.validity
     cdef Vector child = <Vector>column_vector._child
-    cdef Py_ssize_t row_count = <Py_ssize_t>ptr.length
     cdef Py_ssize_t i
     cdef int32_t start, end, run_len, k
-    cdef const int32_t* offsets = ptr.offsets
     cdef IntBuffer indices_buf
     cdef cppvector[int32_t] child_idx_vec
 
     # First pass: reserve once based on the total non-null span.
     cdef Py_ssize_t total_size = 0
     for i in range(row_count):
-        if _array_row_is_null(ptr, i):
+        if _array_row_is_null(row_nulls, i):
             continue
         total_size += <Py_ssize_t>(offsets[i + 1] - offsets[i])
 
@@ -80,7 +81,7 @@ cpdef tuple build_rows_indices_and_column_draken(ArrayVector column_vector):
     child_idx_vec.reserve(<size_t>total_size)
 
     for i in range(row_count):
-        if _array_row_is_null(ptr, i):
+        if _array_row_is_null(row_nulls, i):
             continue
         start = offsets[i]
         end = offsets[i + 1]
@@ -106,18 +107,19 @@ cpdef tuple build_filtered_rows_indices_and_column_draken(ArrayVector column_vec
     time only to test membership in `valid_values`. The output flat vector is
     built via `child.take(...)` — no intermediate Python list.
     """
-    cdef DrakenArrayBuffer* ptr = column_vector.ptr
+    cdef DrakenVector* arr_uv = column_vector.unified()
+    cdef int32_t* offsets = <int32_t*>arr_uv.data
+    cdef Py_ssize_t row_count = <Py_ssize_t>arr_uv.length
+    cdef uint8_t* row_nulls = arr_uv.validity
     cdef Vector child = <Vector>column_vector._child
-    cdef Py_ssize_t row_count = <Py_ssize_t>ptr.length
     cdef Py_ssize_t i
     cdef int32_t start, end, k
-    cdef const int32_t* offsets = ptr.offsets
     cdef IntBuffer indices_buf = IntBuffer(<size_t>row_count)
     cdef cppvector[int32_t] child_idx_vec
     cdef object val
 
     for i in range(row_count):
-        if _array_row_is_null(ptr, i):
+        if _array_row_is_null(row_nulls, i):
             continue
         start = offsets[i]
         end = offsets[i + 1]

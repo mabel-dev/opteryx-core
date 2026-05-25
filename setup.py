@@ -413,6 +413,8 @@ def detect_architecture():
         return "arm"
     if "x86" in machine or "amd64" in machine:
         return "x86_64"
+    if "riscv64" in machine or "riscv" in machine:
+        return "riscv64"
     return machine
 
 
@@ -483,6 +485,11 @@ if arch == "x86_64":
 elif arch == "arm" and not is_mac():
     # 32-bit ARM needs explicit NEON; AArch64 already guarantees it.
     CPP_FLAGS.append("-mfpu=neon")
+elif arch == "riscv64":
+    # rv64gcv: G (IMAFD+Zicsr+Zifencei) + C (compressed) + V (vector).
+    # Enables __riscv_vector and the RVV intrinsic headers.
+    CPP_FLAGS.extend(["-march=rv64gcv"])
+    C_FLAGS.extend(["-march=rv64gcv"])
 
 # Common warning suppressions
 WARNING_FLAGS = [
@@ -516,6 +523,7 @@ include_dirs = [
     "third_party/bshoshany",
     "third_party/moodycamel",
     "third_party/boost_math",  # E.3: vendored boost::math headers (round via 2^52 trick)
+    "third_party/mimalloc/include",  # draken/core/alloc.h requires mimalloc globally
 ]
 
 # mimalloc — allocator for draken extensions and any opteryx extension that
@@ -640,6 +648,43 @@ if not is_mac():
     # object even if no symbols are referenced (CI asserts its presence).
     parquet_link_args.extend(["-Wl,--no-as-needed", "-lcrypto", "-Wl,--as-needed"])
 
+# E.24 — Cython shim layer: real Cython extensions at each draken vector/morsel
+# import path, providing __pyx_vtable__ so cimport consumers can load them.
+# Each shim links draken_native.so via RTLD_GLOBAL (loaded in draken/__init__.py)
+# and uses -undefined dynamic_lookup / --allow-shlib-undefined to resolve
+# draken_vector_unwrap / draken_vector_own_raw at runtime.
+_shim_bridge_link_args = (
+    ["-undefined", "dynamic_lookup"] if is_mac()
+    else ["-Wl,--allow-shlib-undefined"]
+)
+
+_shim_extensions = [
+    make_draken_extension("vectors.vector",        "vectors/_vector_shim.pyx"),
+    make_draken_extension("vectors.bool_vector",   "vectors/_bool_vector_shim.pyx"),
+    make_draken_extension("vectors.integer64_vector", "vectors/_integer64_vector_shim.pyx"),
+    make_draken_extension("vectors.float64_vector",   "vectors/_float64_vector_shim.pyx"),
+    make_draken_extension("vectors.float32_vector",   "vectors/_float32_vector_shim.pyx"),
+    make_draken_extension("vectors.integer8_vector",  "vectors/_integer8_vector_shim.pyx"),
+    make_draken_extension("vectors.integer16_vector", "vectors/_integer16_vector_shim.pyx"),
+    make_draken_extension("vectors.integer32_vector", "vectors/_integer32_vector_shim.pyx"),
+    make_draken_extension("vectors.string_vector",    "vectors/_string_vector_shim.pyx"),
+    make_draken_extension("vectors.array_vector",     "vectors/_array_vector_shim.pyx"),
+    make_draken_extension("vectors.decimal_vector",   "vectors/_decimal_vector_shim.pyx"),
+    make_draken_extension("vectors.date32_vector",    "vectors/_date32_vector_shim.pyx"),
+    make_draken_extension("vectors.timestamp_vector", "vectors/_timestamp_vector_shim.pyx"),
+    make_draken_extension("vectors.time_vector",      "vectors/_time_vector_shim.pyx"),
+    make_draken_extension("vectors.interval_vector",  "vectors/_interval_vector_shim.pyx"),
+    make_draken_extension("vectors.arithmetic_kernels", "vectors/_arithmetic_kernels_shim.pyx"),
+    make_draken_extension("vectors.null_vector",      "vectors/_null_vector_shim.pyx"),
+    make_draken_extension("vectors.vector_vector",    "vectors/_vector_vector_shim.pyx"),
+    make_draken_extension("morsels.morsel",           "morsels/_morsel_shim.pyx"),
+    make_draken_extension("morsels.align",            "morsels/_align_shim.pyx"),
+    make_draken_extension("interop.vector_sequence",  "interop/_vector_sequence_shim.pyx"),
+]
+# Append shim bridge link args to each shim extension
+for _ext in _shim_extensions:
+    _ext.extra_link_args = list(_ext.extra_link_args) + _shim_bridge_link_args
+
 # Define all extensions
 extensions = [
     # Draken ABI guard (Milestone A.1). Compiling this forces the frozen
@@ -675,6 +720,7 @@ extensions = [
         sources=[
             "draken/draken_native.cpp",
             "draken/core/vector_alloc.cpp",
+            "draken/core/bitmap_ops.cpp",  # E.21: bitmap operations for bytecode VM
             # Milestone C.1: hash op depends on simd_hash_i64 / simd_mix_hash.
             "src/cpp/simd_hash.cpp",
             "src/cpp/simd_env.cpp",
@@ -702,6 +748,8 @@ extensions = [
             "src/cpp/simd_hash.h",
         ],
     ),
+    # E.24 Cython shims — real compiled extensions providing __pyx_vtable__
+    *_shim_extensions,
     # Third-party libraries
     Extension(
         "opteryx.third_party.mabel.base64",
@@ -711,6 +759,7 @@ extensions = [
             "opteryx/third_party/mabel/base64/_base64_dispatch.c",
             "opteryx/third_party/mabel/base64/_base64_neon.c",
             "opteryx/third_party/mabel/base64/_base64_avx2.c",
+            "opteryx/third_party/mabel/base64/_base64_rvv.c",
         ],
         include_dirs=include_dirs + ["opteryx/third_party/mabel"],
         extra_compile_args=C_FLAGS + ["-std=c99", "-DBASE64_IMPLEMENTATION"],
@@ -1139,6 +1188,21 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
+    # Expression evaluator — consolidated .so for all evaluator leaf modules.
+    # Leaf .pyx files are textually included by _impl.pyx.
+    Extension(
+        "opteryx.expression.evaluator._impl",
+        sources=[
+            "opteryx/expression/evaluator/_impl.pyx",
+            "opteryx/expression/evaluator/bytecode_worker.cpp",
+        ],
+        include_dirs=include_dirs + [
+            "opteryx/expression/evaluator",  # bytecode_worker.h, bitmap_worker_pool.h
+        ],
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+    ),
     # All operator plan nodes — single consolidated .so
     Extension(
         "opteryx.operators._operators",
@@ -1172,20 +1236,17 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
+    # E.21a: morsel_ops.distinct disabled — requires Morsel cdef method dispatch
+    # (c_hash, _resolve_columns_to_indices) that is deferred to E.21b.
+    # Full implementation:
+    # Extension("opteryx.compiled.morsel_ops.distinct", sources=[...]),
+    # E.24 stub: importable, raises NotImplementedError when called.
     Extension(
         "opteryx.compiled.morsel_ops.distinct",
-        sources=[
-            "opteryx/compiled/morsel_ops/distinct.pyx",
-            "src/cpp/cpu_features.cpp",
-        ],
+        sources=["opteryx/compiled/morsel_ops/distinct_stub.pyx"],
         include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-        depends=[
-            "third_party/mabel/carchar/carchar_set.hpp",
-            "third_party/mabel/carchar/carchar_common.hpp",
-            "third_party/mabel/carchar/carchar_simd.hpp",
-        ],
+        language="c",
+        extra_compile_args=C_FLAGS,
     ),
     Extension(
         "opteryx.compiled.morsel_ops.sort",
@@ -1227,13 +1288,15 @@ extensions = [
 
 # Resolve libcurl - REQUIRED for http_client extension
 # Skip for sdist (source distribution packaging) and clean - no compilation needed
+# Skip when DRAKEN_BUILD=1 — draken-only builds don't need libcurl.
+_DRAKEN_BUILD = bool(os.environ.get("DRAKEN_BUILD"))
 _build_commands = {"build", "build_ext", "install", "bdist_wheel", "bdist", "develop"}
 _skip_build = not any(
     arg.lower() in _build_commands for arg in sys.argv[1:] if arg and not arg.startswith("-")
 )
 _curl_include_dirs: list[str] = []
 _curl_link_args: list[str] = []
-if not _skip_build:
+if not _skip_build and not _DRAKEN_BUILD:
     _curl_include_dirs, _curl_link_args = resolve_libcurl()
 
     for ext in extensions:
@@ -1301,6 +1364,8 @@ vector_ops_link_args = []
 
 if not is_win():
     vector_ops_link_args.append("-pthread")
+if is_mac():
+    vector_ops_link_args.extend(["-undefined", "dynamic_lookup"])
 
 extensions.extend(
     [
@@ -1473,6 +1538,7 @@ extensions.append(
             "opteryx/third_party/mabel/base64/_base64_dispatch.c",
             "opteryx/third_party/mabel/base64/_base64_neon.c",
             "opteryx/third_party/mabel/base64/_base64_avx2.c",
+            "opteryx/third_party/mabel/base64/_base64_rvv.c",
             "opteryx/third_party/mabel/base85/_base85.c",
             "third_party/nanobind/src/nb_combined.cpp",
         ],
@@ -1939,7 +2005,7 @@ extensions.append(
     Extension(
         "opteryx.vectors.vector_math",
         sources=["opteryx/vectors/vector_math.pyx"],
-        include_dirs=include_dirs,
+        include_dirs=include_dirs + ["third_party/usearch/fp16/include"],
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA,
         language="c++",
@@ -2173,12 +2239,13 @@ setup(
     python_requires=">=3.13",
     url="https://github.com/mabel-dev/opteryx/",
     ext_modules=cythonize(
-        # DRAKEN_BUILD=1 restricts to draken.* + opteryx.compiled.nanobind.* targets —
-        # all are pure C++ (or mixed C/C++ with the per-source flag fix below)
-        # and build cleanly while the engine Cython layer is red.
+        # DRAKEN_BUILD=1 restricts to draken.* + opteryx.compiled.nanobind.*
+        # + opteryx.expression.evaluator.* — targets that build cleanly while
+        # operator consumer files remain red (pre-E.24 rewrite debt).
         (
             [e for e in extensions if e.name.startswith("draken.")
-             or e.name.startswith("opteryx.compiled.nanobind.")]
+             or e.name.startswith("opteryx.compiled.nanobind.")
+             or e.name.startswith("opteryx.expression.evaluator.")]
             if os.environ.get("DRAKEN_BUILD")
             else extensions
         ),
@@ -2187,7 +2254,7 @@ setup(
             "linetrace": "a" in __version__ or "b" in __version__,
         },
     ),
-    rust_extensions=[RustExtension("opteryx.compute", "Cargo.toml", debug=False)],
+    rust_extensions=[] if _DRAKEN_BUILD else [RustExtension("opteryx.compute", "Cargo.toml", debug=False)],
     package_data={"": ["*.pyx", "*.pxd", "*.h"]},
     cmdclass={"build_ext": build_ext},
     zip_safe=False,

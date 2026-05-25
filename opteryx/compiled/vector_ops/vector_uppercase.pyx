@@ -8,7 +8,7 @@
 # cython: optimize.use_switch=True
 # cython: optimize.unpack_method_calls=True
 
-from draken.vectors.string_vector cimport StringVector
+from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
 from draken.vectors import string_vector as string_vector_module
 from draken.core.buffers cimport DrakenVector, DrakenStringArena, DrakenStringSlot, str_length, str_data
 from libc.string cimport memcpy
@@ -41,7 +41,7 @@ cpdef StringVector vector_uppercase(object input):
     cdef uint32_t slen
     cdef const uint8_t* sdata
     cdef char* tmp_buf
-    cdef object builder = string_vector_module.StringVectorBuilder.with_estimate(n, 16)
+    cdef StringVectorBuilder builder = string_vector_module.StringVectorBuilder.with_estimate(n, 16)
 
     for i in range(n):
         if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):

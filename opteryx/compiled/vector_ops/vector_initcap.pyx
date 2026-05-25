@@ -10,7 +10,7 @@
 
 from libc.stdint cimport uint8_t, uint32_t
 
-from draken.vectors.string_vector cimport StringVector
+from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
 from draken.vectors import string_vector as string_vector_module
 from draken.core.buffers cimport DrakenVector, DrakenStringArena, DrakenStringSlot, str_length, str_data
 
@@ -49,7 +49,7 @@ cpdef StringVector vector_initcap(StringVector vec):
     cdef const uint8_t* sdata
     cdef bytes raw
     cdef str text, transformed
-    cdef object builder = string_vector_module.StringVectorBuilder.with_estimate(n, 16)
+    cdef StringVectorBuilder builder = string_vector_module.StringVectorBuilder.with_estimate(n, 16)
 
     for i in range(n):
         if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):

@@ -33,7 +33,7 @@ cdef class AnyValueAggregate(UngroupedAggregate):
             return  # already have a value — skip the whole morsel
 
         cdef Morsel typed    = <Morsel>morsel
-        cdef Py_ssize_t nrows = <Py_ssize_t>typed.ptr.num_rows
+        cdef Py_ssize_t nrows = <Py_ssize_t>typed.num_rows
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)

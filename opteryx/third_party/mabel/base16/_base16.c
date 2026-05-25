@@ -69,3 +69,4 @@ void* b16tobin_scalar(void* restrict dest, const char* restrict src, size_t len)
 #if defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(__aarch64__)
 #include "_base16_neon.c"
 #endif
+#include "_base16_rvv.c"

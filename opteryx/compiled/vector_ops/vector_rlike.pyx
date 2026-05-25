@@ -8,13 +8,17 @@
 # cython: optimize.use_switch=True
 # cython: optimize.unpack_method_calls=True
 
-from draken.vectors.string_vector cimport StringVector, DrakenVarBuffer
-from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.string_vector cimport StringVector
+from draken.vectors.bool_vector cimport BoolVector, from_decoded
 from draken.core.buffers cimport DrakenVector, DrakenStringArena, DrakenStringSlot
 from draken.core.buffers cimport str_length, str_data
 from libc.string cimport memset, memcpy
-from libc.stdlib cimport malloc, free
+from libc.stddef cimport size_t
 from libcpp.string cimport string
+
+cdef extern from "core/alloc.h":
+    void* draken_malloc(size_t size) nogil
+    void draken_free(void* ptr) nogil
 
 
 cdef extern from "re2/stringpiece.h":
@@ -70,8 +74,7 @@ cpdef BoolVector vector_rlike(StringVector vec, StringVector pattern, bint negat
     cdef uint8_t* nulls = uv.validity
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
-    cdef BoolVector out = BoolVector(<size_t>n)
-    cdef uint8_t* dst = <uint8_t*>out.ptr.data
+    cdef uint8_t* dst = NULL
     cdef uint8_t* out_null = NULL
     cdef uint8_t mask
     cdef Py_ssize_t i
@@ -85,6 +88,10 @@ cpdef BoolVector vector_rlike(StringVector vec, StringVector pattern, bint negat
     # A NULL pattern makes every row NULL (SQL: x RLIKE NULL is NULL).
     if puv.validity != NULL and (puv.validity[0] & 1) == 0:
         return _all_null_bool(n)
+
+    dst = <uint8_t*>draken_malloc(<size_t>(nbytes if nbytes > 0 else 1))
+    if dst == NULL:
+        raise MemoryError()
 
     options = RE2OptionsRL()
     options.set_case_sensitive(True)
@@ -103,16 +110,13 @@ cpdef BoolVector vector_rlike(StringVector vec, StringVector pattern, bint negat
             memset(dst, 0, nbytes)
 
         if nulls != NULL and nbytes != 0:
-            out_null = <uint8_t*>malloc(nbytes)
+            out_null = <uint8_t*>draken_malloc(<size_t>nbytes)
             if out_null == NULL:
                 raise MemoryError()
             memcpy(out_null, nulls, nbytes)
             if (n & 7) != 0:
                 mask = <uint8_t>((1 << (n & 7)) - 1)
                 out_null[nbytes - 1] &= mask
-            out.ptr.null_bitmap = out_null
-        else:
-            out.ptr.null_bitmap = NULL
 
         if negate:
             for i in range(n):
@@ -135,7 +139,7 @@ cpdef BoolVector vector_rlike(StringVector vec, StringVector pattern, bint negat
                 if RE2RL.PartialMatch(text_piece, regex[0]):
                     dst[i >> 3] |= (1 << (i & 7))
 
-        return out
+        return from_decoded(<void*>dst, out_null, <size_t>n)
     finally:
         if regex != NULL:
             del regex

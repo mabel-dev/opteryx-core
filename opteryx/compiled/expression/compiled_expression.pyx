@@ -207,7 +207,7 @@ cdef Py_ssize_t _linearize(
             slot.bool_value = 1 if value_obj else 0
         else:
             _ensure_set_types()
-            if isinstance(value_obj, _CarcharSetWrapper_t) or isinstance(value_obj, _PerfectHashSet_t):
+            if isinstance(value_obj, _CarcharSetWrapper_t) or isinstance(value_obj, _PerfectHashSet_t) or isinstance(value_obj, (list, tuple, set, frozenset)):
                 slot.opcode = BC_LOAD_LIT_SET
             else:
                 slot.opcode = BC_LOAD_LIT_SCALAR

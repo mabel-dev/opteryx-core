@@ -110,14 +110,17 @@ cdef object _try_build_phash(Morsel morsel, list columns, object current_set):
     # null rows are skipped (not inserted) into PerfectHashSet.
     cdef void* dp
     cdef uint8_t* nulls
+    cdef DrakenVector* _fj_uv
     if is_int8:
-        dp = (<Integer8Vector>col).ptr.data
+        _fj_uv = (<Integer8Vector>col).unified()
+        dp = _fj_uv.data
         nulls = (<Integer8Vector>col).null_bitmap_ptr()
     else:
-        dp = (<Integer16Vector>col).ptr.data
+        _fj_uv = (<Integer16Vector>col).unified()
+        dp = _fj_uv.data
         nulls = (<Integer16Vector>col).null_bitmap_ptr()
-    if dp == NULL:
-        return None  # non-dense encoding (RLE/const) → fall back
+    if dp == NULL or _fj_uv.data_length != _fj_uv.length:
+        return None  # non-dense encoding → fall back
 
     cdef PerfectHashSet phs
     if current_set is None:
@@ -320,13 +323,16 @@ cdef Morsel _phash_probe(
         return None
     cdef void* dp
     cdef uint8_t* nulls
+    cdef DrakenVector* _fj2_uv
     if is_int8:
-        dp = (<Integer8Vector>col).ptr.data
+        _fj2_uv = (<Integer8Vector>col).unified()
+        dp = _fj2_uv.data
         nulls = (<Integer8Vector>col).null_bitmap_ptr()
     else:
-        dp = (<Integer16Vector>col).ptr.data
+        _fj2_uv = (<Integer16Vector>col).unified()
+        dp = _fj2_uv.data
         nulls = (<Integer16Vector>col).null_bitmap_ptr()
-    if dp == NULL:
+    if dp == NULL or _fj2_uv.data_length != _fj2_uv.length:
         return None
 
     cdef Py_ssize_t n = relation.num_rows

@@ -3197,6 +3197,47 @@ static VectorOwner make_bytes_from_sequence(nb::list seq) {
     return VectorOwner(v, std::move(data_buf), OwnedBuffer<uint8_t>(nullptr));
 }
 
+// bool_vector_from_bits — create a BoolVector from raw bitmap buffers.
+//
+// Called from the bytecode VM's postpass to wrap result bitmaps into BoolVector.
+// Consumes ownership of bitmap and null_bitmap (caller must not free).
+// Returns a new Python Vector (bound as BoolVector in draken.vectors.bool_vector) on success.
+// Returns NULL with a Python exception set on failure.
+extern "C" PyObject* bool_vector_from_bits(uint8_t* bitmap, uint8_t* null_bitmap, uint32_t num_rows) {
+    // Take ownership immediately so buffers are freed even on exception.
+    OwnedBuffer<void>    bitmap_guard(bitmap);
+    OwnedBuffer<uint8_t> null_guard(null_bitmap);
+
+    try {
+        // Create a dense DRAKEN_BOOL vector from the bitmap.
+        // The bitmap is stored as one bit per row (LSB convention, per Arrow).
+        // Allocate nbytes = (num_rows + 7) >> 3, but we've already received it.
+        DrakenVector v = draken_vector_from_dense(
+            bitmap_guard.get(),
+            num_rows,
+            DRAKEN_BOOL,
+            null_guard.get());
+
+        // Build VectorOwner: ownership of bitmap and null_bitmap transfers here.
+        VectorOwner owner(v, std::move(bitmap_guard), std::move(null_guard));
+
+        // Convert to Python Vector via nanobind. Cast to nb::object to increment refcount.
+        nb::object obj = nb::cast(std::move(owner));
+        PyObject* result = obj.ptr();
+        Py_INCREF(result);
+        return result;
+    } catch (nb::python_error& e) {
+        e.restore();
+        return nullptr;
+    } catch (std::bad_alloc&) {
+        PyErr_NoMemory();
+        return nullptr;
+    } catch (std::exception& e) {
+        PyErr_SetString(PyExc_RuntimeError, e.what());
+        return nullptr;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // nanobind module
 // ---------------------------------------------------------------------------

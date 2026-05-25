@@ -37,6 +37,11 @@ cdef extern from "core/buffers.h":
         DRAKEN_ARRAY
         DRAKEN_NON_NATIVE
 
+# DRAKEN_STRING is the old name for DRAKEN_VARCHAR; alias for consumer compatibility.
+cdef extern from *:
+    """static const DrakenType DRAKEN_STRING = DRAKEN_VARCHAR;"""
+    const DrakenType DRAKEN_STRING
+
     # Category-A layout hint bits (informational; 0 = "don't know").
     unsigned int DRAKEN_SEL_IDENTITY
     unsigned int DRAKEN_SEL_PERMUTATION
@@ -87,7 +92,11 @@ cdef extern from "core/string_slot.h":
     void     str_init_null(DrakenStringSlot* s) nogil
     void     str_init_inline(DrakenStringSlot* s, const uint8_t* src, uint32_t length) nogil
     void     str_init_extern(DrakenStringSlot* s, const uint8_t* src,
-                            uint32_t length, uint64_t arena_offset) nogil
+                            uint32_t length, uint32_t hash32, uint32_t arena_offset) nogil
+
+cdef extern from "core/string_slot.h" nogil:
+    void draken_build_string_slot(DrakenStringSlot* slot, const uint8_t* bytes,
+                                  uint32_t length, uint32_t arena_offset) nogil
 
 cdef extern from "core/buffers.h":
 
@@ -125,6 +134,24 @@ cdef extern from "core/buffers.h":
         uint8_t*        validity
         DrakenType      type
         uint8_t         flags
+
+# DrakenMorsel — old-draken compatibility shim for consumer .pyx files that
+# access morsel.ptr.num_rows / .columns / .column_types directly.
+# The struct exists only in old-draken; declared here via verbatim C so
+# consumer files compile. Runtime correctness is a separate concern.
+cdef extern from *:
+    """
+    #include "core/buffers.h"
+    typedef struct _DrakenMorselCompat {
+        Py_ssize_t   num_rows;
+        void**       columns;
+        DrakenType*  column_types;
+    } DrakenMorsel;
+    """
+    ctypedef struct DrakenMorsel:
+        Py_ssize_t  num_rows
+        void**      columns
+        DrakenType* column_types
 
 cdef extern from "core/vector_alloc.h":
     const uint32_t* draken_identity_sel(uint32_t length) nogil

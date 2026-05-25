@@ -46,7 +46,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-quick test-battery coverage mypy compile compile-quick clean distclean update dev-install all check-python dt
+.PHONY: help lint format check test test-quick test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt
 
 # Default target
 .DEFAULT_GOAL := help
@@ -235,6 +235,12 @@ compile-quick: check-python ## Incremental compilation (alias: c)
 	$(call print_blue,Incremental build...)
 	@$(PYTHON) setup.py build_ext --inplace -j $(JOBS)
 	$(call print_green,Incremental build complete.)
+
+draken: check-python ## Build draken extensions only — isolated from opteryx Cython breakage
+	$(call print_blue,Building Draken extensions \(DRAKEN_BUILD=1\)...)
+	@$(PYTHON) -m pip install --quiet --upgrade setuptools wheel cython
+	@DRAKEN_BUILD=1 $(PYTHON) setup.py build_ext --inplace -j $(JOBS)
+	$(call print_green,Draken build complete.)
 
 # Alias for backward compatibility
 c: compile-quick

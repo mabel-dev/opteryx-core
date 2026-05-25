@@ -12,6 +12,12 @@
   #define B16_HAVE_NEON 0
 #endif
 
+#if defined(__riscv) && defined(__riscv_vector)
+  #define B16_HAVE_RVV 1
+#else
+  #define B16_HAVE_RVV 0
+#endif
+
 #ifdef __x86_64__
 #include <cpuid.h>
 
@@ -44,6 +50,9 @@ void* b16tobin_len(void* restrict dest, const char* restrict src, size_t len) {
 #if B16_HAVE_NEON
     if (len >= 32) return b16tobin_neon(dest, src, len);
 #endif
+#if B16_HAVE_RVV
+    if (len >= 32) return b16tobin_rvv(dest, src, len);
+#endif
     return b16tobin_scalar(dest, src, len);
 }
 
@@ -58,6 +67,9 @@ char* bintob16(char* restrict dest, const void* restrict src, size_t size) {
 #endif
 #if B16_HAVE_NEON
     if (size >= 16) return bintob16_neon(dest, src, size);
+#endif
+#if B16_HAVE_RVV
+    if (size >= 16) return bintob16_rvv(dest, src, size);
 #endif
     return bintob16_scalar(dest, src, size);
 }

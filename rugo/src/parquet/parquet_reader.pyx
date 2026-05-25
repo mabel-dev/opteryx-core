@@ -104,17 +104,23 @@ cdef extern from "type_widening_wrappers.hpp":
 # Import Draken vector types and components
 from draken.vectors.integer64_vector cimport (
     Integer64Vector,
+    from_decoded as int64_from_decoded,
     from_dict as int64_from_dict,
     from_dict_nullable as int64_from_dict_nullable,
     from_packed_dict as int64_from_packed_dict,
 )
 from draken.vectors.float64_vector cimport (
     Float64Vector,
+    from_decoded as float64_from_decoded,
     from_dict as float64_from_dict,
     from_dict_nullable as float64_from_dict_nullable,
     from_packed_dict as float64_from_packed_dict,
     make_float64_dict_only,
 )
+
+cdef extern from "core/alloc.h" nogil:
+    void* draken_malloc(size_t n)
+    void  draken_free(void* ptr)
 from draken.vectors.string_vector cimport (
     StringVector,
     StringVectorBuilder,
@@ -414,18 +420,20 @@ cdef Integer64Vector _make_int64_from_int32_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
     """Build an Integer64Vector from a DecodedColumn with int32_t values (upcasting)."""
-    cdef Integer64Vector vec = Integer64Vector(num_rows)
-    cdef int64_t* dst = <int64_t*> vec.ptr.data
+    cdef void* raw_data = draken_malloc(<size_t>num_rows * sizeof(int64_t) if num_rows > 0 else 1)
+    if raw_data == NULL:
+        raise MemoryError()
+    cdef int64_t* dst = <int64_t*>raw_data
     cdef Py_ssize_t i, val_idx = 0
     cdef Py_ssize_t nb_bytes
-    cdef uint8_t* nb
+    cdef uint8_t* nb = NULL
     cdef int32_t code
     # RLE skip-dense path: int32 widened to int64 in C++; expand runs.
     if (decoded_col.rle_run_lengths.size() > 0
             and decoded_col.rle_int64_values.size() > 0
             and decoded_col.rle_total_length == <size_t>num_rows):
         _expand_rle_int64_into(dst, decoded_col, num_rows)
-        return vec
+        return int64_from_decoded(raw_data, NULL, <size_t>num_rows)
     cdef bint dict_mode = (
         decoded_col.dict_indices.size() > 0
         and decoded_col.dict_int32_values.size() > 0
@@ -437,9 +445,11 @@ cdef Integer64Vector _make_int64_from_int32_vector(
             if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
                 if dict_mode:
                     if val_idx >= decoded_col.dict_indices.size():
+                        draken_free(raw_data)
                         raise ValueError("dictionary index stream shorter than number of valid rows")
                     code = decoded_col.dict_indices[val_idx]
                     if code < 0 or code >= decoded_col.dict_int32_values.size():
+                        draken_free(raw_data)
                         raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
                     dst[i] = <int64_t>decoded_col.dict_int32_values[code]
                 else:
@@ -448,22 +458,23 @@ cdef Integer64Vector _make_int64_from_int32_vector(
             else:
                 dst[i] = 0
         nb_bytes = (num_rows + 7) >> 3
-        nb = <uint8_t*> malloc(nb_bytes)
+        nb = <uint8_t*>draken_malloc(<size_t>nb_bytes if nb_bytes > 0 else 1)
         if nb == NULL:
+            draken_free(raw_data)
             raise MemoryError()
         memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
-        vec.ptr.null_bitmap = nb
     else:
         for i in range(num_rows):
             if dict_mode:
                 code = decoded_col.dict_indices[i]
                 if code < 0 or code >= decoded_col.dict_int32_values.size():
+                    draken_free(raw_data)
                     raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
                 dst[i] = <int64_t>decoded_col.dict_int32_values[code]
             else:
                 dst[i] = <int64_t>decoded_col.int32_values[i]
 
-    return vec
+    return int64_from_decoded(raw_data, nb, <size_t>num_rows)
 
 
 cdef Integer64Vector _make_int64_vector(
@@ -471,19 +482,21 @@ cdef Integer64Vector _make_int64_vector(
         int32_t num_rows):
     """Build an Integer64Vector from a DecodedColumn with int64_t values."""
     if num_rows == 0:
-        return Integer64Vector(0)
-    cdef Integer64Vector vec = Integer64Vector(num_rows)
-    cdef int64_t* dst = <int64_t*> vec.ptr.data
+        return int64_from_decoded(NULL, NULL, 0)
+    cdef void* raw_data = draken_malloc(<size_t>num_rows * sizeof(int64_t))
+    if raw_data == NULL:
+        raise MemoryError()
+    cdef int64_t* dst = <int64_t*>raw_data
     cdef Py_ssize_t i, val_idx = 0
     cdef Py_ssize_t nb_bytes
-    cdef uint8_t* nb
+    cdef uint8_t* nb = NULL
     cdef int32_t code
     # RLE skip-dense path: expand runs into dense.
     if (decoded_col.rle_run_lengths.size() > 0
             and decoded_col.rle_int64_values.size() > 0
             and decoded_col.rle_total_length == <size_t>num_rows):
         _expand_rle_int64_into(dst, decoded_col, num_rows)
-        return vec
+        return int64_from_decoded(raw_data, NULL, <size_t>num_rows)
     cdef bint dict_mode = (
         decoded_col.dict_indices.size() > 0
         and decoded_col.dict_int64_values.size() > 0
@@ -496,9 +509,11 @@ cdef Integer64Vector _make_int64_vector(
             if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
                 if dict_mode:
                     if val_idx >= decoded_col.dict_indices.size():
+                        draken_free(raw_data)
                         raise ValueError("dictionary index stream shorter than number of valid rows")
                     code = decoded_col.dict_indices[val_idx]
                     if code < 0 or code >= decoded_col.dict_int64_values.size():
+                        draken_free(raw_data)
                         raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
                     dst[i] = decoded_col.dict_int64_values[code]
                 else:
@@ -508,16 +523,17 @@ cdef Integer64Vector _make_int64_vector(
                 dst[i] = 0
         # Copy null bitmap
         nb_bytes = (num_rows + 7) >> 3
-        nb = <uint8_t*> malloc(nb_bytes)
+        nb = <uint8_t*>draken_malloc(<size_t>nb_bytes if nb_bytes > 0 else 1)
         if nb == NULL:
+            draken_free(raw_data)
             raise MemoryError()
         memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
-        vec.ptr.null_bitmap = nb
     else:
         if dict_mode:
             for i in range(num_rows):
                 code = decoded_col.dict_indices[i]
                 if code < 0 or code >= decoded_col.dict_int64_values.size():
+                    draken_free(raw_data)
                     raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
                 dst[i] = decoded_col.dict_int64_values[code]
         else:
@@ -525,7 +541,7 @@ cdef Integer64Vector _make_int64_vector(
             if num_rows > 0:
                 memcpy(dst, decoded_col.int64_values.data(), <size_t>num_rows * sizeof(int64_t))
 
-    return vec
+    return int64_from_decoded(raw_data, nb, <size_t>num_rows)
 
 
 cdef Float64Vector _make_float64_from_float32_vector(
@@ -533,19 +549,21 @@ cdef Float64Vector _make_float64_from_float32_vector(
         int32_t num_rows):
     """Build a Float64Vector from float32 values (upcasting), including dict-mode."""
     if num_rows == 0:
-        return Float64Vector(0)
-    cdef Float64Vector vec = Float64Vector(num_rows)
-    cdef double* dst = <double*> vec.ptr.data
+        return float64_from_decoded(NULL, NULL, 0)
+    cdef void* raw_data = draken_malloc(<size_t>num_rows * sizeof(double))
+    if raw_data == NULL:
+        raise MemoryError()
+    cdef double* dst = <double*>raw_data
     cdef Py_ssize_t i, val_idx = 0
     cdef Py_ssize_t nb_bytes
-    cdef uint8_t* nb
+    cdef uint8_t* nb = NULL
     cdef int32_t code
     # RLE skip-dense path: float32 widened to float64 in C++; expand runs.
     if (decoded_col.rle_run_lengths.size() > 0
             and decoded_col.rle_float64_values.size() > 0
             and decoded_col.rle_total_length == <size_t>num_rows):
         _expand_rle_float64_into(dst, decoded_col, num_rows)
-        return vec
+        return float64_from_decoded(raw_data, NULL, <size_t>num_rows)
     cdef bint dict_mode = (
         decoded_col.dict_indices.size() > 0
         and decoded_col.dict_float32_values.size() > 0
@@ -557,9 +575,11 @@ cdef Float64Vector _make_float64_from_float32_vector(
             if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
                 if dict_mode:
                     if val_idx >= decoded_col.dict_indices.size():
+                        draken_free(raw_data)
                         raise ValueError("dictionary index stream shorter than number of valid rows")
                     code = decoded_col.dict_indices[val_idx]
                     if code < 0 or code >= decoded_col.dict_float32_values.size():
+                        draken_free(raw_data)
                         raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
                     dst[i] = <double>decoded_col.dict_float32_values[code]
                 else:
@@ -568,17 +588,18 @@ cdef Float64Vector _make_float64_from_float32_vector(
             else:
                 dst[i] = 0.0
         nb_bytes = (num_rows + 7) >> 3
-        nb = <uint8_t*> malloc(nb_bytes)
+        nb = <uint8_t*>draken_malloc(<size_t>nb_bytes if nb_bytes > 0 else 1)
         if nb == NULL:
+            draken_free(raw_data)
             raise MemoryError()
         memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
-        vec.ptr.null_bitmap = nb
     else:
         if dict_mode:
             # Dictionary mode: need to gather dict values (not SIMD-friendly, use scalar)
             for i in range(num_rows):
                 code = decoded_col.dict_indices[i]
                 if code < 0 or code >= decoded_col.dict_float32_values.size():
+                    draken_free(raw_data)
                     raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
                 dst[i] = <double>decoded_col.dict_float32_values[code]
         else:
@@ -586,7 +607,7 @@ cdef Float64Vector _make_float64_from_float32_vector(
             # rugo_widen_float32_to_float64 uses AVX2 instructions when available
             if num_rows > 0:
                 rugo_widen_float32_to_float64(decoded_col.float32_values.data(), dst, <size_t>num_rows)
-    return vec
+    return float64_from_decoded(raw_data, nb, <size_t>num_rows)
 
 
 cdef Integer64Vector _make_int32_as_int64_vector(
@@ -594,19 +615,21 @@ cdef Integer64Vector _make_int32_as_int64_vector(
         int32_t num_rows):
     """Build an Integer64Vector from a DecodedColumn with int32 values (upcasts int32→int64)."""
     if num_rows == 0:
-        return Integer64Vector(0)
-    cdef Integer64Vector vec = Integer64Vector(num_rows)
-    cdef int64_t* dst = <int64_t*> vec.ptr.data
+        return int64_from_decoded(NULL, NULL, 0)
+    cdef void* raw_data = draken_malloc(<size_t>num_rows * sizeof(int64_t))
+    if raw_data == NULL:
+        raise MemoryError()
+    cdef int64_t* dst = <int64_t*>raw_data
     cdef Py_ssize_t i, val_idx = 0
     cdef Py_ssize_t nb_bytes
-    cdef uint8_t* nb
+    cdef uint8_t* nb = NULL
 
     # RLE skip-dense path: int32 widened to int64 in C++; expand runs.
     if (decoded_col.rle_run_lengths.size() > 0
             and decoded_col.rle_int64_values.size() > 0
             and decoded_col.rle_total_length == <size_t>num_rows):
         _expand_rle_int64_into(dst, decoded_col, num_rows)
-        return vec
+        return int64_from_decoded(raw_data, NULL, <size_t>num_rows)
 
     if decoded_col.valid_bits.size() > 0:
         # Sparse case: iterate valid_bits and widen selected values
@@ -617,18 +640,18 @@ cdef Integer64Vector _make_int32_as_int64_vector(
             else:
                 dst[i] = 0
         nb_bytes = (num_rows + 7) >> 3
-        nb = <uint8_t*> malloc(nb_bytes)
+        nb = <uint8_t*>draken_malloc(<size_t>nb_bytes if nb_bytes > 0 else 1)
         if nb == NULL:
+            draken_free(raw_data)
             raise MemoryError()
         memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
-        vec.ptr.null_bitmap = nb
     else:
         # Dense case: use SIMD-accelerated type widening (Tier 2C)
         # rugo_widen_int32_to_int64 uses AVX2 instructions when available
         if num_rows > 0:
             rugo_widen_int32_to_int64(decoded_col.int32_values.data(), dst, <size_t>num_rows)
 
-    return vec
+    return int64_from_decoded(raw_data, nb, <size_t>num_rows)
 
 
 cdef Float64Vector _make_float64_vector(
@@ -636,19 +659,21 @@ cdef Float64Vector _make_float64_vector(
         int32_t num_rows):
     """Build a Float64Vector from a DecodedColumn with float64 values."""
     if num_rows == 0:
-        return Float64Vector(0)
-    cdef Float64Vector vec = Float64Vector(num_rows)
-    cdef double* dst = <double*> vec.ptr.data
+        return float64_from_decoded(NULL, NULL, 0)
+    cdef void* raw_data = draken_malloc(<size_t>num_rows * sizeof(double))
+    if raw_data == NULL:
+        raise MemoryError()
+    cdef double* dst = <double*>raw_data
     cdef Py_ssize_t i, val_idx = 0
     cdef Py_ssize_t nb_bytes
-    cdef uint8_t* nb
+    cdef uint8_t* nb = NULL
     cdef int32_t code
     # RLE skip-dense path: expand runs into dense.
     if (decoded_col.rle_run_lengths.size() > 0
             and decoded_col.rle_float64_values.size() > 0
             and decoded_col.rle_total_length == <size_t>num_rows):
         _expand_rle_float64_into(dst, decoded_col, num_rows)
-        return vec
+        return float64_from_decoded(raw_data, NULL, <size_t>num_rows)
     cdef bint dict_mode = (
         decoded_col.dict_indices.size() > 0
         and decoded_col.dict_float64_values.size() > 0
@@ -660,9 +685,11 @@ cdef Float64Vector _make_float64_vector(
             if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
                 if dict_mode:
                     if val_idx >= decoded_col.dict_indices.size():
+                        draken_free(raw_data)
                         raise ValueError("dictionary index stream shorter than number of valid rows")
                     code = decoded_col.dict_indices[val_idx]
                     if code < 0 or code >= decoded_col.dict_float64_values.size():
+                        draken_free(raw_data)
                         raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
                     dst[i] = decoded_col.dict_float64_values[code]
                 else:
@@ -671,16 +698,17 @@ cdef Float64Vector _make_float64_vector(
             else:
                 dst[i] = 0.0
         nb_bytes = (num_rows + 7) >> 3
-        nb = <uint8_t*> malloc(nb_bytes)
+        nb = <uint8_t*>draken_malloc(<size_t>nb_bytes if nb_bytes > 0 else 1)
         if nb == NULL:
+            draken_free(raw_data)
             raise MemoryError()
         memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
-        vec.ptr.null_bitmap = nb
     else:
         if dict_mode:
             for i in range(num_rows):
                 code = decoded_col.dict_indices[i]
                 if code < 0 or code >= decoded_col.dict_float64_values.size():
+                    draken_free(raw_data)
                     raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
                 dst[i] = decoded_col.dict_float64_values[code]
         else:
@@ -688,7 +716,7 @@ cdef Float64Vector _make_float64_vector(
             if num_rows > 0:
                 memcpy(dst, decoded_col.float64_values.data(), <size_t>num_rows * sizeof(double))
 
-    return vec
+    return float64_from_decoded(raw_data, nb, <size_t>num_rows)
 
 
 cdef StringVector _make_string_vector(

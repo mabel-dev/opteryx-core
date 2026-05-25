@@ -13,8 +13,10 @@ set of compiled vector ops when available.
 from typing import List
 
 from opteryx.compiled import vector_ops as compiled_vector_ops
-from draken.vectors.string_vector import lowercase as vector_lowercase
-from draken.vectors.string_vector import uppercase as vector_uppercase
+from opteryx.compiled.vector_ops import (
+    vector_lowercase,
+    vector_uppercase,
+)
 from opteryx.compiled.vector_ops import (
     vector_initcap,
     vector_md5,
@@ -33,11 +35,37 @@ from opteryx.compiled.nanobind.vector_string_misc import (
 )
 from opteryx.compiled.nanobind.vector_string_misc2 import vector_replace
 from opteryx.compiled.nanobind.vector_string_search import (
-    vector_ci_ends_with,
-    vector_ci_starts_with,
-    vector_ends_with,
-    vector_starts_with,
+    vector_ci_ends_with as _raw_ci_ends_with,
+    vector_ci_starts_with as _raw_ci_starts_with,
+    vector_ends_with as _raw_ends_with,
+    vector_starts_with as _raw_starts_with,
 )
+from draken.vectors.vector import Vector as _DrakenVectorBase
+from draken.vectors.bool_vector import BoolVector as _BoolVectorCls
+
+
+def _nb_unwrap(v):
+    return v._nb if isinstance(v, _DrakenVectorBase) else v
+
+
+def vector_starts_with(haystack, needle):
+    from draken.vectors.bool_vector import BoolVector
+    return BoolVector(_raw_starts_with(_nb_unwrap(haystack), _nb_unwrap(needle)))
+
+
+def vector_ci_starts_with(haystack, needle):
+    from draken.vectors.bool_vector import BoolVector
+    return BoolVector(_raw_ci_starts_with(_nb_unwrap(haystack), _nb_unwrap(needle)))
+
+
+def vector_ends_with(haystack, needle):
+    from draken.vectors.bool_vector import BoolVector
+    return BoolVector(_raw_ends_with(_nb_unwrap(haystack), _nb_unwrap(needle)))
+
+
+def vector_ci_ends_with(haystack, needle):
+    from draken.vectors.bool_vector import BoolVector
+    return BoolVector(_raw_ci_ends_with(_nb_unwrap(haystack), _nb_unwrap(needle)))
 from opteryx.compiled.nanobind.vector_accessors import (
     vector_length,
     vector_string_length,

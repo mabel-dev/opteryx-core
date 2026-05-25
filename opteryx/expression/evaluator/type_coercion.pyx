@@ -204,28 +204,28 @@ cpdef _is_null_as_boolvector(vec):
             return is_null_bv()
         is_null_nan = getattr(vec, "is_null_with_nan", None)
         if is_null_nan is not None:
-            return bool_vector_from_int8_mask(is_null_nan(), n)
+            return BoolVector(bool_vector_from_int8_mask(is_null_nan(), n))
         is_null = getattr(vec, "is_null", None)
         if is_null is not None:
-            return bool_vector_from_int8_mask(is_null(), n)
+            return BoolVector(bool_vector_from_int8_mask(is_null(), n))
         return BoolVector(n)
 
     if isinstance(vec, Float64Vector):
-        return bool_vector_from_int8_mask(vec.is_null_with_nan(), n)
+        return BoolVector(bool_vector_from_int8_mask(vec.is_null_with_nan(), n))
 
     if isinstance(vec, _FIXED_BUFFER_VECTORS):
-        return bool_vector_from_int8_mask(vec.is_null(), n)
+        return BoolVector(bool_vector_from_int8_mask(vec.is_null(), n))
 
     nb = vec.null_bitmap()
     if nb is not None:
-        return bool_vector_from_inverted_null_bitmap(nb, n)
+        return BoolVector(bool_vector_from_inverted_null_bitmap(nb, n))
     if getattr(vec, "null_count", 0) == 0:
         return BoolVector(n)
 
     if isinstance(vec, StringVector):
         is_null = getattr(vec, "is_null", None)
         if is_null is not None:
-            return bool_vector_from_int8_mask(is_null(), n)
+            return BoolVector(bool_vector_from_int8_mask(is_null(), n))
 
     raise TypeError(
         "Null-mask evaluation requires native Draken vector null APIs; "

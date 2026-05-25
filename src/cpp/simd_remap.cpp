@@ -13,6 +13,10 @@
 #include <arm_neon.h>
 #endif
 
+#if defined(__riscv) && defined(__riscv_vector)
+#include <riscv_vector.h>
+#endif
+
 // ── uint8 ────────────────────────────────────────────────────────────────────
 //
 // AVX2: 16-pass vpshufb over 32 codes at a time.
@@ -104,6 +108,23 @@ static void remap_u8_neon(uint8_t* codes, size_t n, const uint8_t* tbl) {
 }
 #endif  // __ARM_NEON
 
+#if defined(__riscv) && defined(__riscv_vector)
+// RVV: vloxei8 indexed gather — code values are byte offsets into the 256-entry
+// table directly.  One pass, no multi-pass OR accumulation needed.
+// LMUL=m4: 4× register width per iteration.
+static void remap_u8_rvv(uint8_t* codes, size_t n, const uint8_t* tbl) {
+    size_t i = 0;
+    while (i < n) {
+        size_t vl = __riscv_vsetvl_e8m4(n - i);
+        vuint8m4_t c = __riscv_vle8_v_u8m4(codes + i, vl);
+        // vloxei8: result[j] = tbl[ c[j] ]  (c values are byte offsets; tbl is uint8)
+        vuint8m4_t r = __riscv_vloxei8_v_u8m4(tbl, c, vl);
+        __riscv_vse8_v_u8m4(codes + i, r, vl);
+        i += vl;
+    }
+}
+#endif  // __riscv_vector
+
 }  // namespace
 
 void simd_remap_u8(uint8_t* codes, size_t n, const uint8_t* remap_table) {
@@ -115,6 +136,9 @@ void simd_remap_u8(uint8_t* codes, size_t n, const uint8_t* remap_table) {
 #endif
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
         { &cpu_supports_neon, remap_u8_neon },
+#endif
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, remap_u8_rvv },
 #endif
     }, remap_u8_scalar);
     fn(codes, n, remap_table);
@@ -166,6 +190,29 @@ static void remap_u16_avx2(uint16_t* codes, size_t n, const uint16_t* tbl) {
 }
 #endif  // __AVX2__
 
+#if defined(__riscv) && defined(__riscv_vector)
+// RVV: vloxei32 indexed gather for u16 values.
+//
+// Byte offset = code * 2.  For codes near 65535, byte offset approaches 131070
+// which overflows u16; we widen to u32 before scaling.
+//
+// EMUL constraint for vloxei32_v_u16m2: data LMUL=m2, index EEW=32,
+// so index LMUL = m2 * (32/16) = m4 → vuint32m4_t.
+static void remap_u16_rvv(uint16_t* codes, size_t n, const uint16_t* tbl) {
+    size_t i = 0;
+    while (i < n) {
+        size_t vl = __riscv_vsetvl_e16m2(n - i);
+        vuint16m2_t c = __riscv_vle16_v_u16m2(codes + i, vl);
+        // Zero-extend u16→u32, then shift left by 1 to get byte offsets
+        vuint32m4_t boff = __riscv_vsll_vx_u32m4(
+            __riscv_vzext_vf2_u32m4(c, vl), 1, vl);
+        vuint16m2_t r = __riscv_vloxei32_v_u16m2(tbl, boff, vl);
+        __riscv_vse16_v_u16m2(codes + i, r, vl);
+        i += vl;
+    }
+}
+#endif  // __riscv_vector
+
 }  // namespace
 
 void simd_remap_u16(uint16_t* codes, size_t n, const uint16_t* remap_table) {
@@ -176,6 +223,9 @@ void simd_remap_u16(uint16_t* codes, size_t n, const uint16_t* remap_table) {
         { &cpu_supports_avx2, remap_u16_avx2 },
 #endif
         // NEON: no efficient 16-bit gather; scalar is fast enough (L2-resident table).
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, remap_u16_rvv },
+#endif
     }, remap_u16_scalar);
     fn(codes, n, remap_table);
 }

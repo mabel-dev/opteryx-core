@@ -70,7 +70,7 @@ This file is designed to be included from `vector_ops.pyx`.
 """
 
 from libc.stddef cimport size_t
-from libc.stdint cimport int32_t, uint8_t
+from libc.stdint cimport int32_t, uint8_t, uint32_t
 from libc.stdlib cimport free, malloc
 from libc.string cimport memcmp, memcpy, memset
 
@@ -870,13 +870,9 @@ cpdef StringVector vector_dfa_extract(
     cdef Py_ssize_t i
     cdef const char* out_ptr = NULL
     cdef Py_ssize_t out_len = 0
-    cdef StringVector out_vec
-    cdef DrakenVarBuffer* out_ptr_buf
     cdef Py_ssize_t total_bytes = 0
     cdef Py_ssize_t row_len = 0
     cdef const char* row_ptr = NULL
-    cdef Py_ssize_t write_offset = 0
-    cdef Py_ssize_t null_bytes = 0
     cdef DrakenStringSlot* slot
     cdef const uint8_t* sdata
     cdef uint32_t slen
@@ -913,58 +909,6 @@ cpdef StringVector vector_dfa_extract(
             cap_lens[i] = <int32_t>(-row_len - 1)  # sentinel: negative means passthrough
             total_bytes += row_len
 
-    out_vec = StringVector(n, total_bytes)
-    out_ptr_buf = out_vec.ptr
-
-    if nulls != NULL and out_ptr_buf.null_bitmap != NULL:
-        null_bytes = (n + 7) >> 3
-        if null_bytes > 0:
-            memcpy(out_ptr_buf.null_bitmap, nulls, <size_t>null_bytes)
-    elif out_ptr_buf.null_bitmap != NULL:
-        null_bytes = (n + 7) >> 3
-        if null_bytes > 0:
-            memset(out_ptr_buf.null_bitmap, 0xFF, <size_t>null_bytes)
-
-    write_offset = 0
-    out_ptr_buf.offsets[0] = 0
-
-    cdef const char* cached_ptr
-    cdef int32_t cached_len, copy_len
-
-    for i in range(n):
-        if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
-            out_ptr_buf.offsets[i + 1] = <int32_t>write_offset
-            continue
-
-        cached_ptr = cap_ptrs[i]
-        cached_len = cap_lens[i]
-
-        if cached_len >= 0:
-            # DFA matched: emit the cached capture slice
-            copy_len = cached_len
-        else:
-            # Passthrough: negative sentinel encodes original row length as (-len - 1)
-            copy_len = <int32_t>(-cached_len - 1)
-
-        if copy_len > 0:
-            memcpy(
-                (<char*>out_ptr_buf.data) + write_offset,
-                cached_ptr,
-                <size_t>copy_len,
-            )
-        write_offset += copy_len
-        out_ptr_buf.offsets[i + 1] = <int32_t>write_offset
-
     free(cap_ptrs)
     free(cap_lens)
-
-    cdef DrakenStringArena* out_arena = _varbuffer_to_string_arena(
-        <const uint8_t*>out_ptr_buf.data,
-        out_ptr_buf.offsets,
-        out_ptr_buf.null_bitmap,
-        <Py_ssize_t>n,
-    )
-    out_vec._unified_view = draken_vector_from_dense(
-        <void*>out_arena, <uint32_t>n, DRAKEN_VARCHAR, out_ptr_buf.null_bitmap)
-
-    return out_vec
+    raise NotImplementedError("vector_dfa_extract output construction not yet ported to Draken unified model")

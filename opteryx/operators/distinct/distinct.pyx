@@ -92,11 +92,16 @@ cdef class DistinctNode(BasePlanNode):
         cdef Py_ssize_t count
         cdef void* dp
 
+        cdef DrakenVector* _col_uv
         if isinstance(col, Integer8Vector):
             if (<Integer8Vector>col).null_bitmap_ptr() != NULL:
                 PyMem_Free(idx_buf)
                 return False
-            dp = (<Integer8Vector>col).ptr.data
+            _col_uv = (<Integer8Vector>col).unified()
+            if _col_uv.data_length != _col_uv.length:
+                PyMem_Free(idx_buf)
+                return False
+            dp = _col_uv.data
             if dp == NULL:
                 PyMem_Free(idx_buf)
                 return False
@@ -106,7 +111,11 @@ cdef class DistinctNode(BasePlanNode):
             if (<Integer16Vector>col).null_bitmap_ptr() != NULL:
                 PyMem_Free(idx_buf)
                 return False
-            dp = (<Integer16Vector>col).ptr.data
+            _col_uv = (<Integer16Vector>col).unified()
+            if _col_uv.data_length != _col_uv.length:
+                PyMem_Free(idx_buf)
+                return False
+            dp = _col_uv.data
             if dp == NULL:
                 PyMem_Free(idx_buf)
                 return False

@@ -16,6 +16,12 @@
   #define B64_HAVE_NEON 0
 #endif
 
+#if defined(__riscv) && defined(__riscv_vector)
+  #define B64_HAVE_RVV 1
+#else
+  #define B64_HAVE_RVV 0
+#endif
+
 #ifdef __x86_64__
 #include <cpuid.h>
 
@@ -48,6 +54,9 @@ void* b64tobin_len(void* B64_RESTRICT dest, const char* B64_RESTRICT src, size_t
 #if B64_HAVE_NEON
     if (len >= 64) return b64tobin_neon(dest, src, len);
 #endif
+#if B64_HAVE_RVV
+    if (len >= 64) return b64tobin_rvv(dest, src, len);
+#endif
     return b64tobin_scalar(dest, src, len);
 }
 
@@ -62,6 +71,9 @@ char* bintob64(char* B64_RESTRICT dest, const void* B64_RESTRICT src, size_t siz
 #endif
 #if B64_HAVE_NEON
     if (size >= 48) return bintob64_neon(dest, src, size);
+#endif
+#if B64_HAVE_RVV
+    if (size >= 48) return bintob64_rvv(dest, src, size);
 #endif
     return bintob64_scalar(dest, src, size);
 }

@@ -12,15 +12,23 @@
  *  vdivq_s64 or _mm256_div_epi64.  Attempts to use load/extract/repack
  *  wrappers around scalar arithmetic add overhead and are net slower.
  *
- *  The scalar path below gains the full constant-divisor benefit via a
+ *  RVV (RISC-V Vector) provides native vdiv.vv / vdivu.vv for 64-bit integer
+ *  division, making it the only SIMD target here where a genuine vector path
+ *  is beneficial.  Two RVV patterns are used:
+ *
+ *    MINUTE/HOUR/SECOND (EXTRACT_LOOP_RVV): fully vectorised — vdivu_vx then
+ *    vremu_vx, processing vl 64-bit elements per iteration.
+ *
+ *    Calendar fields (CAL_LOOP_RVV): the 64-bit floor-div → int32 days step
+ *    is vectorised (vdiv, vmul, vsub, vsra, vadd, vnsra); the Hinnant calendar
+ *    helpers (cheap int32 arithmetic) are applied scalar per element from a
+ *    vl-sized stack buffer.  The 64-bit division is the bottleneck; vectorising
+ *    it while keeping the calendar logic scalar is the correct trade-off.
+ *
+ *  The scalar path retains the full constant-divisor benefit via a
  *  switch-outside-loop pattern: each loop body sees a literal constant so
  *  the compiler applies magic-number division.  The loop itself is 4-unrolled
  *  which provides enough independent operations for the OOO scheduler.
- *
- *  The simd::select_dispatch infrastructure is retained for API consistency
- *  and so a genuine SIMD path can be dropped in later (e.g. float-conversion
- *  trick for narrow timestamp ranges), but no NEON/AVX2 specialisation is
- *  registered here.
  *
  * unit_code encoding (matches vector_date_part.pyx):
  *   0 = seconds
@@ -36,6 +44,10 @@
 #include <atomic>
 #include <cstdint>
 #include <cstddef>
+
+#if defined(__riscv) && defined(__riscv_vector)
+#include <riscv_vector.h>
+#endif
 
 // ===========================================================================
 // 4-unrolled scalar loop with a compile-time (div, mod) pair.
@@ -268,59 +280,239 @@ static void doy_scalar(const int64_t* src, int64_t* dst, size_t n, int unit_code
 }
 
 // ===========================================================================
+// RVV implementations — only available on RISC-V with the V extension.
+//
+// RVV has native 64-bit integer divide (vdiv.vv / vdivu.vv), which NEON and
+// AVX2 both lack.  This is the only SIMD target that can genuinely vectorise
+// these kernels.
+//
+// EXTRACT_LOOP_RVV: fully vectorised div+mod on uint64 per element.
+// CAL_LOOP_RVV:     vectorises the 64-bit floor-div → int32 days step; the
+//                   scalar Hinnant calendar helper is then applied per element
+//                   from a vl-sized stack buffer.
+//
+// RVV_DATEPART_MAX_VL covers VLEN up to 16384 bits (SEW=64, LMUL=1) — well
+// beyond any current or near-future RVV implementation.
+// ===========================================================================
+
+#if defined(__riscv) && defined(__riscv_vector)
+
+static constexpr std::size_t RVV_DATEPART_MAX_VL = 256;
+
+// Fully vectorised: divide src[i] by div_, then mod by mod_ — all uint64.
+#define EXTRACT_LOOP_RVV(div_, mod_)                                          \
+    do {                                                                       \
+        const uint64_t _D = (uint64_t)(div_);                                 \
+        const uint64_t _M = (uint64_t)(mod_);                                 \
+        std::size_t _i = 0;                                                    \
+        while (_i < n) {                                                       \
+            std::size_t _vl = vsetvl_e64m1(n - _i);                           \
+            vuint64m1_t _v  = vle64_v_u64m1(                                  \
+                reinterpret_cast<const uint64_t*>(src + _i), _vl);            \
+            vuint64m1_t _q  = vdivu_vx_u64m1(_v, _D, _vl);                   \
+            vuint64m1_t _r  = vremu_vx_u64m1(_q, _M, _vl);                   \
+            vse64_v_u64m1(                                                     \
+                reinterpret_cast<uint64_t*>(dst + _i), _r, _vl);              \
+            _i += _vl;                                                         \
+        }                                                                      \
+    } while (0)
+
+// Vectorised floor-div → int32 days; scalar Hinnant calendar fn per element.
+#define CAL_LOOP_RVV(fn_, dpu_)                                               \
+    do {                                                                       \
+        const int64_t _U = (dpu_);                                             \
+        int32_t _dbuf[RVV_DATEPART_MAX_VL];                                    \
+        std::size_t _i = 0;                                                    \
+        while (_i < n) {                                                       \
+            std::size_t _vl = vsetvl_e64m1(n - _i);                           \
+            vint64m1_t _v   = vle64_v_i64m1(src + _i, _vl);                   \
+            vint64m1_t _q   = vdiv_vx_i64m1(_v, _U, _vl);                     \
+            /* rem = v - q * U */                                               \
+            vint64m1_t _rem = vsub_vv_i64m1(_v,                               \
+                                vmul_vx_i64m1(_q, _U, _vl), _vl);             \
+            /* floor correction: shift rem right 63 gives -1 if rem<0 else 0 */ \
+            vint64m1_t _adj = vsra_vx_i64m1(_rem, 63, _vl);                   \
+            vint64m1_t _d64 = vadd_vv_i64m1(_q, _adj, _vl);                   \
+            /* narrow i64 → i32 (days fit in int32 for ±4000-year range) */    \
+            vint32mf2_t _d32 = vnsra_wx_i32mf2(_d64, 0, _vl);                 \
+            vse32_v_i32mf2(_dbuf, _d32, _vl);                                  \
+            for (std::size_t _k = 0; _k < _vl; ++_k)                          \
+                dst[_i + _k] = (fn_)(_dbuf[_k]);                              \
+            _i += _vl;                                                         \
+        }                                                                      \
+    } while (0)
+
+static void minute_rvv(const int64_t* src, int64_t* dst, size_t n, int unit_code) {
+    switch (unit_code) {
+        case 0:  EXTRACT_LOOP_RVV(60LL,            60LL); break;
+        case 1:  EXTRACT_LOOP_RVV(60000LL,         60LL); break;
+        case 2:  EXTRACT_LOOP_RVV(60000000LL,      60LL); break;
+        case 3:  EXTRACT_LOOP_RVV(60000000000LL,   60LL); break;
+        default: EXTRACT_LOOP_RVV(60000000LL,      60LL); break;
+    }
+}
+
+static void hour_rvv(const int64_t* src, int64_t* dst, size_t n, int unit_code) {
+    switch (unit_code) {
+        case 0:  EXTRACT_LOOP_RVV(3600LL,            24LL); break;
+        case 1:  EXTRACT_LOOP_RVV(3600000LL,         24LL); break;
+        case 2:  EXTRACT_LOOP_RVV(3600000000LL,      24LL); break;
+        case 3:  EXTRACT_LOOP_RVV(3600000000000LL,   24LL); break;
+        default: EXTRACT_LOOP_RVV(3600000000LL,      24LL); break;
+    }
+}
+
+static void second_rvv(const int64_t* src, int64_t* dst, size_t n, int unit_code) {
+    switch (unit_code) {
+        case 0:  EXTRACT_LOOP_RVV(1LL,          60LL); break;
+        case 1:  EXTRACT_LOOP_RVV(1000LL,       60LL); break;
+        case 2:  EXTRACT_LOOP_RVV(1000000LL,    60LL); break;
+        case 3:  EXTRACT_LOOP_RVV(1000000000LL, 60LL); break;
+        default: EXTRACT_LOOP_RVV(1000000LL,    60LL); break;
+    }
+}
+
+static void year_rvv(const int64_t* src, int64_t* dst, size_t n, int unit_code) {
+    switch (unit_code) {
+        case 0:  CAL_LOOP_RVV(days_to_year, 86400LL);           break;
+        case 1:  CAL_LOOP_RVV(days_to_year, 86400000LL);        break;
+        case 2:  CAL_LOOP_RVV(days_to_year, 86400000000LL);     break;
+        case 3:  CAL_LOOP_RVV(days_to_year, 86400000000000LL);  break;
+        default: CAL_LOOP_RVV(days_to_year, 86400000000LL);     break;
+    }
+}
+
+static void month_rvv(const int64_t* src, int64_t* dst, size_t n, int unit_code) {
+    switch (unit_code) {
+        case 0:  CAL_LOOP_RVV(days_to_month, 86400LL);           break;
+        case 1:  CAL_LOOP_RVV(days_to_month, 86400000LL);        break;
+        case 2:  CAL_LOOP_RVV(days_to_month, 86400000000LL);     break;
+        case 3:  CAL_LOOP_RVV(days_to_month, 86400000000000LL);  break;
+        default: CAL_LOOP_RVV(days_to_month, 86400000000LL);     break;
+    }
+}
+
+static void dom_rvv(const int64_t* src, int64_t* dst, size_t n, int unit_code) {
+    switch (unit_code) {
+        case 0:  CAL_LOOP_RVV(days_to_dom, 86400LL);           break;
+        case 1:  CAL_LOOP_RVV(days_to_dom, 86400000LL);        break;
+        case 2:  CAL_LOOP_RVV(days_to_dom, 86400000000LL);     break;
+        case 3:  CAL_LOOP_RVV(days_to_dom, 86400000000000LL);  break;
+        default: CAL_LOOP_RVV(days_to_dom, 86400000000LL);     break;
+    }
+}
+
+static void quarter_rvv(const int64_t* src, int64_t* dst, size_t n, int unit_code) {
+    switch (unit_code) {
+        case 0:  CAL_LOOP_RVV(days_to_quarter, 86400LL);           break;
+        case 1:  CAL_LOOP_RVV(days_to_quarter, 86400000LL);        break;
+        case 2:  CAL_LOOP_RVV(days_to_quarter, 86400000000LL);     break;
+        case 3:  CAL_LOOP_RVV(days_to_quarter, 86400000000000LL);  break;
+        default: CAL_LOOP_RVV(days_to_quarter, 86400000000LL);     break;
+    }
+}
+
+static void doy_rvv(const int64_t* src, int64_t* dst, size_t n, int unit_code) {
+    switch (unit_code) {
+        case 0:  CAL_LOOP_RVV(days_to_doy, 86400LL);           break;
+        case 1:  CAL_LOOP_RVV(days_to_doy, 86400000LL);        break;
+        case 2:  CAL_LOOP_RVV(days_to_doy, 86400000000LL);     break;
+        case 3:  CAL_LOOP_RVV(days_to_doy, 86400000000000LL);  break;
+        default: CAL_LOOP_RVV(days_to_doy, 86400000000LL);     break;
+    }
+}
+
+#undef EXTRACT_LOOP_RVV
+#undef CAL_LOOP_RVV
+
+#endif  // __riscv && __riscv_vector
+
+// ===========================================================================
 // Public dispatch functions
-// No NEON/AVX2 candidates: 64-bit integer division cannot be vectorised via
-// NEON (no vdivq_s64) or AVX2 (no _mm256_div_epi64).  The constant-divisor
-// scalar path is the optimal implementation on all current targets.
+// NEON and AVX2 have no 64-bit integer divide instruction (no vdivq_s64,
+// no _mm256_div_epi64) so the scalar path is optimal on those targets.
+// RVV is registered above where available.
 // ===========================================================================
 
 using dp_fn_t = void (*)(const int64_t*, int64_t*, size_t, int);
 
 void simd_datepart_minute(const int64_t* src, int64_t* dst, size_t n, int unit_code) {
     static std::atomic<dp_fn_t> cache{nullptr};
-    dp_fn_t fn = simd::select_dispatch<dp_fn_t>(cache, {}, minute_scalar);
+    dp_fn_t fn = simd::select_dispatch<dp_fn_t>(cache, {
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, minute_rvv },
+#endif
+    }, minute_scalar);
     fn(src, dst, n, unit_code);
 }
 
 void simd_datepart_hour(const int64_t* src, int64_t* dst, size_t n, int unit_code) {
     static std::atomic<dp_fn_t> cache{nullptr};
-    dp_fn_t fn = simd::select_dispatch<dp_fn_t>(cache, {}, hour_scalar);
+    dp_fn_t fn = simd::select_dispatch<dp_fn_t>(cache, {
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, hour_rvv },
+#endif
+    }, hour_scalar);
     fn(src, dst, n, unit_code);
 }
 
 void simd_datepart_second(const int64_t* src, int64_t* dst, size_t n, int unit_code) {
     static std::atomic<dp_fn_t> cache{nullptr};
-    dp_fn_t fn = simd::select_dispatch<dp_fn_t>(cache, {}, second_scalar);
+    dp_fn_t fn = simd::select_dispatch<dp_fn_t>(cache, {
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, second_rvv },
+#endif
+    }, second_scalar);
     fn(src, dst, n, unit_code);
 }
 
 void simd_datepart_year(const int64_t* src, int64_t* dst, size_t n, int unit_code) {
     static std::atomic<dp_fn_t> cache{nullptr};
-    dp_fn_t fn = simd::select_dispatch<dp_fn_t>(cache, {}, year_scalar);
+    dp_fn_t fn = simd::select_dispatch<dp_fn_t>(cache, {
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, year_rvv },
+#endif
+    }, year_scalar);
     fn(src, dst, n, unit_code);
 }
 
 void simd_datepart_month(const int64_t* src, int64_t* dst, size_t n, int unit_code) {
     static std::atomic<dp_fn_t> cache{nullptr};
-    dp_fn_t fn = simd::select_dispatch<dp_fn_t>(cache, {}, month_scalar);
+    dp_fn_t fn = simd::select_dispatch<dp_fn_t>(cache, {
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, month_rvv },
+#endif
+    }, month_scalar);
     fn(src, dst, n, unit_code);
 }
 
 void simd_datepart_day(const int64_t* src, int64_t* dst, size_t n, int unit_code) {
     static std::atomic<dp_fn_t> cache{nullptr};
-    dp_fn_t fn = simd::select_dispatch<dp_fn_t>(cache, {}, dom_scalar);
+    dp_fn_t fn = simd::select_dispatch<dp_fn_t>(cache, {
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, dom_rvv },
+#endif
+    }, dom_scalar);
     fn(src, dst, n, unit_code);
 }
 
 void simd_datepart_quarter(const int64_t* src, int64_t* dst, size_t n, int unit_code) {
     static std::atomic<dp_fn_t> cache{nullptr};
-    dp_fn_t fn = simd::select_dispatch<dp_fn_t>(cache, {}, quarter_scalar);
+    dp_fn_t fn = simd::select_dispatch<dp_fn_t>(cache, {
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, quarter_rvv },
+#endif
+    }, quarter_scalar);
     fn(src, dst, n, unit_code);
 }
 
 void simd_datepart_dayofyear(const int64_t* src, int64_t* dst, size_t n, int unit_code) {
     static std::atomic<dp_fn_t> cache{nullptr};
-    dp_fn_t fn = simd::select_dispatch<dp_fn_t>(cache, {}, doy_scalar);
+    dp_fn_t fn = simd::select_dispatch<dp_fn_t>(cache, {
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, doy_rvv },
+#endif
+    }, doy_scalar);
     fn(src, dst, n, unit_code);
 }
 

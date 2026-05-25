@@ -40,15 +40,36 @@ clean, and the discipline of "clean enough to release the GIL across the
 pipeline" is what justifies finishing the Cython migration. This spec
 addresses them together.
 
-Scope explicitly **excluded** from this document:
+Scope explicitly **included**:
+- `opteryx/operators/` — every operator in the catalog, push-pipeline and
+  off-pipeline alike (per the /JJ/ note in §1.3, off-pipeline DDL/DML ops
+  also Cython-ise, even if "mostly Python in Cython").
+- `opteryx/expression/evaluator/` — the residual evaluator surface and the
+  `vector_ops/*.pyx` files imported by it. These migrate in-place per
+  operator, **not as a separate sweep** (handover doc §9).
+- The scheduler / executor (`opteryx/managers/execution/`).
+
+Scope explicitly **excluded**:
 - Intra-operator parallelism (partitioned hash-joins, parallel sort merge,
   parallel group-by). Out of scope for v1; revisit after inter-op ships and
   measurements identify the operators that still dominate.
 - Distributed / multi-machine execution.
 - Planner changes beyond what the scheduler contract requires.
 - Replacing the morsel abstraction.
+- Draken-side work (UTF-8 cluster, regex cluster, heavy specials, decimal
+  pt2, NVARCHAR ops). These are listed in the handover doc §4.2 and
+  remain draken-team responsibility. **If an operator hits a missing op,
+  surface a draken-side ticket — do not paper over with a `.pyx` loop
+  (handover doc §7 landmine #4).**
 
 ## 1. Current state (as of 2026-05-24)
+
+> **Handover input.** The draken rebuild's hand-off record lives at
+> [`01_draken_state_at_handover.md`](01_draken_state_at_handover.md). That
+> document is the operator rewrite's starting line and is binding. Read it
+> before Phase 0 begins. The post-E.24 `make q` baseline is captured in
+> `02_make_q_baseline_at_handover.md` (sibling, produced when E.24 lands) —
+> that is where the operator rewrite picks up.
 
 ### 1.1 Pipeline shape
 Push pipeline, compiled at plan time:
@@ -78,7 +99,7 @@ Mixed. Survey (counts approximate, to be re-taken at Phase 0):
 - `hashed_inner_join/hashed_inner_join.pyx` — 845 lines, typed.
 - `aggregate/` — multiple `.pyx` per aggregation kernel, typed.
 - Several operators (`explain`, `set_variable`, `show_*`, DDL/DML, view/table
-  management) are off the push pipeline by design and stay Python.
+  management) are off the push pipeline by design and stay Python. /JJ/ these should be cythonized, even if they are mostly python in cython.
 
 A full audit of which operators have `object` parameters, Python attribute
 writes per morsel, or Python helper calls inside `_push_impl` is **Phase 0
@@ -86,15 +107,54 @@ gate work** (see §9). Do not assume cleanliness; verify.
 
 ### 1.4 Morsel & vector contract
 Established by draken (CLAUDE.md §11 + `draken/src/core/buffers.h`):
-- `DrakenVector` is 40 bytes, ABI-frozen, accessed uniformly as
-  `data[selection[i]]`.
-- Encoding shape (dense/constant/dict) is a layout hint, not a dispatch signal.
+- `DrakenVector` is 40 bytes, ABI-frozen (guarded at build time by
+  `draken/core/_abi_guard`), accessed uniformly as `data[selection[i]]`.
 - `Morsel` owns a set of vectors plus column metadata.
 
 This contract is the **only** data contract between operators. Operators see
 morsels of `DrakenVector`s; they do not see PyArrow, numpy, or Python
-sequences on the hot path. This is non-negotiable and is enforced by the
-existing build-time PyArrow check.
+sequences on the hot path. This is non-negotiable.
+
+### 1.5 The bridge & the shim (what operators call into)
+
+Per handover doc §3:
+
+- **`draken/core/draken_bridge.h`** — the C-callable surface. Hot path uses
+  `draken_vector_unwrap(PyObject*) -> const DrakenVector*` (type-checked,
+  fail-fast). Wrap newly built vectors with `draken_vector_own*`. This is
+  the **strategic** consumer pattern for the operator rewrite.
+- **Cython shim** (`draken/vectors/vector.pxd`, `bool_vector.pxd`,
+  `morsels/morsel.pxd`) — wraps a nanobind handle plus its unwrapped
+  `DrakenVector*` as a `cdef class`. Lets a `.pyx` `cimport` the type and
+  call typed methods. **Transitional.** The architect's "A then B" call
+  (handover §3.4) is: operator-side callers move to `draken_vector_unwrap`
+  directly, and the shim eventually goes away.
+
+For the operator rewrite this means: a new `.pyx` operator on the hot path
+SHOULD prefer the bridge over the shim where it has a choice. Existing
+operators on the shim are not blocked from running; the migration is
+opportunistic, per operator. **Do not re-wrap inside per-morsel loops** —
+the wrap cost is per-morsel, not per-row, and re-wrapping inside `_push_impl`
+re-introduces Python work the lift was meant to eliminate.
+
+### 1.6 Binding decisions inherited from the draken rebuild
+
+The handover doc §2.2 enumerates architect calls captured in user-memory
+that bind this rewrite. The operationally relevant ones:
+
+- **`feedback-no-false-green-clean-break`** — no shim/bridging in the
+  rewrite work itself; broken-until-rewritten is acceptable. Never fake
+  green.
+- **`draken-consumer-edge-pattern`** — Python edge lives in nanobind C++;
+  `.pyx` is **typed-only, zero `object` params/returns**. The two-layer
+  `.pyx` cdef-kernel + nanobind glue pattern was dropped; pattern is pure
+  nanobind C++. This is the rule for every operator hot path.
+- **`draken-german-string-format`** + **`draken-float-nan-semantics`** +
+  **`draken-string-type-family`** — value semantics operators must honour.
+- **`feedback-hash-no-parity`** — hash values are disposable across
+  versions; operators must not assume hash stability.
+
+These are **not** open for relitigation by the operator rewrite.
 
 ## 2. Target architecture (high-level)
 
@@ -132,6 +192,16 @@ gated.
 - `_push_impl(Morsel)` must be `nogil`-clean: no Python object access, no
   Python attribute writes, no calls into pure-Python helpers. Per-morsel
   state lives in typed `cdef` fields.
+- **Zero `object` params or returns on hot-path `cdef` functions**
+  (consumer-edge-pattern, §1.6). The only sanctioned `<object>` cast is at
+  the `def` boundary to box a final result — the CLAUDE.md §02 exception.
+  Operator-rewrite tickets must call this out explicitly; it was the
+  single biggest cause of failed tickets in the draken rebuild (handover
+  §7 landmine #1).
+- **No `.pyx` loops to fill draken op gaps** (handover §7 landmine #4).
+  Math, comparison, hash, string-search etc. belong in `draken/ops/*.h`
+  dispatched by `DrakenType`. If an op is missing, surface a draken-side
+  ticket — do not inline a Cython loop.
 - `emit(result)` is the only legal way to forward downstream. It MUST NOT be
   called with `EMPTY` or `None`. EOS is passed through `emit(EOS)` exactly
   once per pipeline.
@@ -376,7 +446,7 @@ every operator must meet; this section calls out where each operator
 | Parquet Read              | per-worker           | no       | Scan-side, see Reader |
 | Null Reader               | shared-stateless     | no       | |
 | Function Dataset          | shared-stateless     | no       | |
-| Explain / Show* / DDL     | off-pipeline         | n/a      | Stay Python; no change |
+| Explain / Show* / DDL     | off-pipeline, Cython | n/a      | Off the push pipeline by design, but still ported to `cdef class` per /JJ/ §1.3. Hot path is irrelevant here; the Cython lift is for consistency and to keep the build-time `object`-ban check meaningful across the whole catalog |
 | Insert                    | sink, single-instance| yes      | Stays as today |
 
 **Ungrouped aggregate** is the cheapest big parallel win: every worker keeps
@@ -422,17 +492,26 @@ gated by `make q` green plus a behavioural check.
 ### Phase 0 — Audit & instrument (no behaviour change)
 Goal: know exactly which operators meet the §3 contract today and which
 don't, so the migration is finite and visible.
+- **Start with Filter as a worked example** (handover doc §8). Filter is
+  small, stateless, hot-path on essentially every query, and exercises the
+  Cython↔nanobind seam against a real operator. The Filter audit is the
+  template; generalise only after it is reviewed and accepted.
 - Static audit of every `.pyx` operator: list `object`-typed parameters,
   Python attribute accesses inside `_push_impl`, calls to non-`nogil`
-  helpers. Produce a per-operator report in
+  helpers, and selection-vector handling (the latter only if §6 resolves
+  to option C). Produce a per-operator report in
   `opteryx/operators/docs/audits/`.
 - Add a build-time check (analogous to the PyArrow check) that flags
   `object` parameters on `_push_impl` and forbids new ones. Existing
   violations are whitelisted, not silently passed.
 - Add per-operator telemetry — already partly there. Make sure every
   operator increments `records_in`/`records_out`.
-- **Gate:** report exists, build-time check passes on current code,
-  whitelist is exhaustive.
+- **Starting line:** `02_make_q_baseline_at_handover.md` (the post-E.24
+  `make q` state). Per-failure categorisation comes from that document;
+  this phase does not try to *close* failures, only to record what they
+  cost the parallel rewrite.
+- **Gate:** Filter audit reviewed; report exists for every other operator;
+  build-time check passes on current code; whitelist is exhaustive.
 
 ### Phase 1 — Operator cleanup (still single-threaded)
 Goal: every operator in the catalog (excluding the off-pipeline DDL/DML set)
@@ -512,6 +591,14 @@ is lifted.
 - **No `try/except` for flow control on the hot path** (CLAUDE.md §9).
 - **Selection vectors are honoured by every operator** (CLAUDE.md §11). The
   scheduler's correctness assumes this.
+- **No `.pyx` loops to fill draken op gaps.** Missing ops are draken-side
+  tickets, never operator-side workarounds (handover §7 landmine #4).
+- **`object` params/returns are banned on `cdef` hot-path functions.** The
+  only sanctioned `<object>` cast is at the `def` boundary to box a final
+  result. The build-time check (Phase 0) enforces this.
+- **Prefer the bridge over the shim.** New hot-path code goes through
+  `draken_vector_unwrap` / `draken_vector_own*`. Existing shim consumers
+  are migrated opportunistically per operator, not in a separate sweep.
 
 ## 11. Risks
 
@@ -525,6 +612,9 @@ is lifted.
 | 6 | Per-session pool starves under concurrent queries                    | Defer fair scheduling to v2; document the limit; offer per-query pool flag as escape hatch |
 | 7 | Coalescing decision (§6 UNRESOLVED) made wrong way → wasted lift     | Resolve before Phase 1 — operator audits depend on it |
 | 8 | `_push_impl` `nogil` decision (§3.1 UNRESOLVED) made wrong way       | Resolve before Phase 1 — every operator lift depends on it |
+| 9 | Cython↔nanobind seam surprises during operator audits (handover §7 landmine #6 — every late-rebuild surprise came from this seam; not every operator has exercised it yet) | Filter as worked-example audit (Phase 0); seam issues surfaced there before generalising; expect 1–2 discoveries |
+| 10 | A ticket grows past its STOP condition (handover §7 landmine #3 — Phase-20a-style drift, 57 files in one ticket → agents pick stubs over migration) | Every operator-rewrite ticket carries an explicit STOP condition (file count + scope) like the E.24 ticket |
+| 11 | An operator quietly inlines a `.pyx` loop to work around a missing draken op (landmine #4) | §3.1 + §10 invariant + reviewer discipline; reviewer rejects the loop and the gap becomes a draken-side ticket |
 
 ## 12. Open questions for architect review (consolidated)
 

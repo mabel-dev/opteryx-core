@@ -21,10 +21,12 @@ char* bintob64(char* B64_RESTRICT dest, const void* B64_RESTRICT src, size_t siz
 void* b64tobin_scalar(void* B64_RESTRICT dest, const char* B64_RESTRICT src, size_t len);
 void* b64tobin_neon(void* B64_RESTRICT dest, const char* B64_RESTRICT src, size_t len);
 void* b64tobin_avx2(void* B64_RESTRICT dest, const char* B64_RESTRICT src, size_t len);
+void* b64tobin_rvv(void* B64_RESTRICT dest, const char* B64_RESTRICT src, size_t len);
 
 char* bintob64_scalar(char* B64_RESTRICT dest, const void* B64_RESTRICT src, size_t size);
 char* bintob64_neon(char* B64_RESTRICT dest, const void* B64_RESTRICT src, size_t size);
 char* bintob64_avx2(char* B64_RESTRICT dest, const void* B64_RESTRICT src, size_t size);
+char* bintob64_rvv(char* B64_RESTRICT dest, const void* B64_RESTRICT src, size_t size);
 
 size_t b64_encoded_size(size_t bin_size);
 size_t b64_decoded_size(size_t b64_len);

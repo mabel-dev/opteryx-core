@@ -12,6 +12,8 @@
 #include <immintrin.h>
 #elif defined(__ARM_NEON) || defined(__ARM_NEON__)
 #include <arm_neon.h>
+#elif defined(__riscv) && defined(__riscv_vector)
+#include <riscv_vector.h>
 #endif
 
 #if defined(_MSC_VER)
@@ -66,6 +68,57 @@ inline uint64x2_t mullo_u64(uint64x2_t a, uint64x2_t b) {
 #endif
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// RVV implementations
+//
+// RVV provides a native 64×64→64 integer multiply (vmul), so no mullo_u64
+// emulation is required.  All loops use vsetvl_e64m1 and advance by vl,
+// which automatically adapts to any hardware VLEN.
+// ---------------------------------------------------------------------------
+
+#if defined(__riscv) && defined(__riscv_vector)
+
+static void simd_mix_hash_rvv(uint64_t* dest, const uint64_t* values, std::size_t count) {
+    std::size_t i = 0;
+    while (i < count) {
+        std::size_t vl   = vsetvl_e64m1(count - i);
+        vuint64m1_t d    = vle64_v_u64m1(dest   + i, vl);
+        vuint64m1_t v    = vle64_v_u64m1(values + i, vl);
+        vuint64m1_t mix  = vxor_vv_u64m1(d, v, vl);
+        vuint64m1_t prod = vadd_vx_u64m1(vmul_vx_u64m1(mix, MIX_HASH_CONSTANT, vl), 1, vl);
+        vuint64m1_t res  = vxor_vv_u64m1(prod, vsrl_vx_u64m1(prod, 32, vl), vl);
+        vse64_v_u64m1(dest + i, res, vl);
+        i += vl;
+    }
+}
+
+static void simd_hash_i64_rvv(const uint64_t* src, uint64_t* dst, std::size_t count) {
+    std::size_t i = 0;
+    while (i < count) {
+        std::size_t vl   = vsetvl_e64m1(count - i);
+        vuint64m1_t v    = vle64_v_u64m1(src + i, vl);
+        vuint64m1_t prod = vadd_vx_u64m1(vmul_vx_u64m1(v, MIX_HASH_CONSTANT, vl), 1, vl);
+        vuint64m1_t res  = vxor_vv_u64m1(prod, vsrl_vx_u64m1(prod, 32, vl), vl);
+        vse64_v_u64m1(dst + i, res, vl);
+        i += vl;
+    }
+}
+
+static void simd_scale_date32_rvv(const int32_t* src, int64_t* dest, std::size_t count) {
+    std::size_t i = 0;
+    while (i < count) {
+        // vsetvl_e64m1 and vsetvl_e32mf2 yield the same vl (VLEN_bytes/8).
+        std::size_t vl      = vsetvl_e64m1(count - i);
+        vint32mf2_t narrow  = vle32_v_i32mf2(src + i, vl);
+        vint64m1_t  widened = vsext_vf2_i64m1(narrow, vl);
+        vint64m1_t  scaled  = vmul_vx_i64m1(widened, static_cast<int64_t>(DATE32_SCALE), vl);
+        vse64_v_i64m1(dest + i, scaled, vl);
+        i += vl;
+    }
+}
+
+#endif  // __riscv && __riscv_vector
 
 static void simd_mix_hash_scalar(uint64_t* dest, const uint64_t* values, std::size_t count) {
     if (dest == nullptr || values == nullptr || count == 0) {
@@ -147,10 +200,13 @@ void simd_mix_hash(uint64_t* dest, const uint64_t* values, std::size_t count) {
 #endif
     fn_t fn = simd::select_dispatch<fn_t>(cache, {
 #if defined(__AVX2__)
-    { &cpu_supports_avx2, simd_mix_hash_avx2 },
+        { &cpu_supports_avx2, simd_mix_hash_avx2 },
 #endif
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
         { &cpu_supports_neon, simd_mix_hash_neon },
+#endif
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, simd_mix_hash_rvv },
 #endif
     }, simd_mix_hash_scalar);
 
@@ -223,6 +279,9 @@ void simd_hash_i64(const uint64_t* src, uint64_t* dst, std::size_t count) {
 #endif
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
         { &cpu_supports_neon, simd_hash_i64_neon },
+#endif
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, simd_hash_i64_rvv },
 #endif
     }, simd_hash_i64_scalar);
     fn(src, dst, count);
@@ -398,6 +457,72 @@ void simd_mix_hash_from_dict_neon_tpl(
 }
 #endif  // __ARM_NEON
 
+#if defined(__riscv) && defined(__riscv_vector)
+// RVV dict gather+mix.
+//
+// Non-nullable path: vloxei64 (byte-indexed gather) replaces the two-pass
+// scatter+simd_mix_hash pattern.  Code widths are handled with fractional
+// LMUL zero-extends (vzext_vfN) so element counts always match vl from
+// vsetvl_e64m1.
+//
+// Nullable path: mirrors the NEON approach — scalar null-guarded gather into
+// a fixed-size stack buffer, then vector mixing.  The buffer is capped at
+// RVV_MAX_VL_E64M1 (covers VLEN up to 4096 bits at LMUL=1).
+static constexpr std::size_t RVV_MAX_VL_E64M1 = 64;
+
+template <typename CodeT, bool Nullable>
+void simd_mix_hash_from_dict_rvv_tpl(
+        uint64_t* dest, const uint64_t* dict_lookup,
+        const CodeT* codes, const uint8_t* null_bitmap,
+        std::size_t start_row, std::size_t count) {
+    std::size_t i = 0;
+    while (i < count) {
+        const std::size_t batch =
+            Nullable ? std::min(count - i, RVV_MAX_VL_E64M1) : (count - i);
+        std::size_t vl = vsetvl_e64m1(batch);
+
+        vuint64m1_t val_vec;
+
+        if constexpr (Nullable) {
+            // Scalar null-guarded gather into a stack buffer of known size.
+            uint64_t v[RVV_MAX_VL_E64M1];
+            const std::size_t base = start_row + i;
+            for (std::size_t k = 0; k < vl; ++k) {
+                v[k] = bitmap_is_set(null_bitmap, base + k)
+                           ? dict_lookup[codes[i + k]]
+                           : NULL_HASH;
+            }
+            val_vec = vle64_v_u64m1(v, vl);
+        } else {
+            // Fully vectorized: widen codes to byte offsets, indexed gather.
+            vuint64m1_t offsets;
+            if constexpr (std::is_same_v<CodeT, uint8_t>) {
+                // u8 → u64: vzext_vf8 (LMUL u8mf8 → u64m1, same vl)
+                offsets = vsll_vx_u64m1(
+                    vzext_vf8_u64m1(vle8_v_u8mf8(codes + i, vl), vl), 3, vl);
+            } else if constexpr (std::is_same_v<CodeT, uint16_t>) {
+                // u16 → u64: vzext_vf4 (LMUL u16mf4 → u64m1, same vl)
+                offsets = vsll_vx_u64m1(
+                    vzext_vf4_u64m1(vle16_v_u16mf4(codes + i, vl), vl), 3, vl);
+            } else {
+                // u32 → u64: vzext_vf2 (LMUL u32mf2 → u64m1, same vl)
+                offsets = vsll_vx_u64m1(
+                    vzext_vf2_u64m1(vle32_v_u32mf2(codes + i, vl), vl), 3, vl);
+            }
+            // Byte-indexed gather: dict_lookup[code] = *(dict_lookup + offset)
+            val_vec = vloxei64_v_u64m1(dict_lookup, offsets, vl);
+        }
+
+        vuint64m1_t d    = vle64_v_u64m1(dest + i, vl);
+        vuint64m1_t mix  = vxor_vv_u64m1(d, val_vec, vl);
+        vuint64m1_t prod = vadd_vx_u64m1(vmul_vx_u64m1(mix, MIX_HASH_CONSTANT, vl), 1, vl);
+        vuint64m1_t res  = vxor_vv_u64m1(prod, vsrl_vx_u64m1(prod, 32, vl), vl);
+        vse64_v_u64m1(dest + i, res, vl);
+        i += vl;
+    }
+}
+#endif  // __riscv && __riscv_vector
+
 // Dispatcher per (CodeT, Nullable) pair. Each template instantiation owns its
 // own atomic cache, so the CPU probe runs once per kernel variant.
 template <typename CodeT, bool Nullable>
@@ -415,6 +540,9 @@ void simd_mix_hash_from_dict_dispatch(
 #endif
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
         { &cpu_supports_neon, simd_mix_hash_from_dict_neon_tpl<CodeT, Nullable> },
+#endif
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, simd_mix_hash_from_dict_rvv_tpl<CodeT, Nullable> },
 #endif
     }, simd_mix_hash_from_dict_scalar_tpl<CodeT, Nullable>);
 
@@ -562,6 +690,9 @@ void simd_scale_date32(const int32_t* src, int64_t* dest, std::size_t count) {
 #endif
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
         { &cpu_supports_neon, simd_scale_date32_neon },
+#endif
+#if defined(__riscv) && defined(__riscv_vector)
+        { &cpu_supports_rvv, simd_scale_date32_rvv },
 #endif
     }, simd_scale_date32_scalar);
 

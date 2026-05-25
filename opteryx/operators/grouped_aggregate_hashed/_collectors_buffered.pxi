@@ -18,6 +18,7 @@ from libcpp.vector cimport vector
 from draken.vectors.vector cimport Vector
 from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.vectors.float64_vector cimport Float64Vector
+from draken.vectors.float64_vector cimport from_decoded as float64_from_decoded
 from draken.vectors.decimal_vector cimport DecimalVector
 from draken.core.buffers cimport DrakenVector
 
@@ -147,20 +148,26 @@ cdef class MedianFloat64Collector(BaseCollector):
                 "Use APPROX_PERCENTILE for larger inputs."
             )
 
-        out = Float64Vector(<size_t>length)
-        out_data = <double*>out.ptr.data
-
         if length <= 0:
-            return out
+            return float64_from_decoded(NULL, NULL, 0)
 
-        out.ptr.null_bitmap = _alloc_all_valid_bitmap(length)
+        cdef void* out_raw = draken_malloc(<size_t>length * sizeof(double))
+        if out_raw == NULL:
+            raise MemoryError()
+        cdef Py_ssize_t nbytes = (length + 7) >> 3
+        cdef uint8_t* out_nulls = <uint8_t*>draken_malloc(<size_t>nbytes)
+        if out_nulls == NULL:
+            draken_free(out_raw)
+            raise MemoryError()
+        memset(out_nulls, 0xFF, <size_t>nbytes)
+        out_data = <double*>out_raw
 
         for i in range(length):
             st_ptr = &(self._states[0][<size_t>(start + i)])
             if st_ptr.size == 0:
                 out_data[i] = 0.0
-                _bitmap_clear(out.ptr.null_bitmap, i)
+                _bitmap_clear(out_nulls, i)
             else:
                 out_data[i] = st_ptr.finalize_median()
 
-        return out
+        return float64_from_decoded(out_raw, out_nulls, <size_t>length)

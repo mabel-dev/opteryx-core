@@ -21,7 +21,9 @@ from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.fixed_vector cimport free_fixed_buffer
 from draken.vectors.vector cimport Vector
 from draken.vectors.integer64_vector cimport Integer64Vector
+from draken.vectors.integer64_vector cimport from_decoded as int64_from_decoded
 from draken.vectors.float64_vector cimport Float64Vector
+from draken.vectors.float64_vector cimport from_decoded as float64_from_decoded
 from draken.vectors.decimal_vector cimport DecimalVector
 
 
@@ -120,19 +122,47 @@ cdef inline void _grow_bitmap(uint8_t** bitmap_ref, int64_t old_count, int64_t n
 
 
 cdef inline Integer64Vector _wrap_int64_buffer(DrakenFixedBuffer* buf) except *:
-    cdef Integer64Vector vec = Integer64Vector(0, True)
-    vec.ptr = buf
-    vec.owns_data = True
-    vec._unified_view = draken_vector_from_dense(buf.data, <uint32_t>buf.length, DRAKEN_INT64, buf.null_bitmap)
-    return vec
+    cdef Py_ssize_t n = <Py_ssize_t>buf.length
+    cdef void* new_data
+    cdef uint8_t* new_nulls = NULL
+    cdef Py_ssize_t nbytes
+
+    new_data = draken_malloc(<size_t>n * sizeof(int64_t) if n > 0 else 1)
+    if new_data == NULL:
+        raise MemoryError()
+    if n > 0:
+        memcpy(new_data, buf.data, <size_t>n * sizeof(int64_t))
+    if buf.null_bitmap != NULL:
+        nbytes = (n + 7) >> 3
+        new_nulls = <uint8_t*>draken_malloc(<size_t>nbytes if nbytes > 0 else 1)
+        if new_nulls == NULL:
+            draken_free(new_data)
+            raise MemoryError()
+        if nbytes > 0:
+            memcpy(new_nulls, buf.null_bitmap, <size_t>nbytes)
+    return int64_from_decoded(new_data, new_nulls, <size_t>n)
 
 
 cdef inline Float64Vector _wrap_float64_buffer(DrakenFixedBuffer* buf) except *:
-    cdef Float64Vector vec = Float64Vector(0, True)
-    vec.ptr = buf
-    vec.owns_data = True
-    vec._unified_view = draken_vector_from_dense(buf.data, <uint32_t>buf.length, DRAKEN_FLOAT64, buf.null_bitmap)
-    return vec
+    cdef Py_ssize_t n = <Py_ssize_t>buf.length
+    cdef void* new_data
+    cdef uint8_t* new_nulls = NULL
+    cdef Py_ssize_t nbytes
+
+    new_data = draken_malloc(<size_t>n * sizeof(double) if n > 0 else 1)
+    if new_data == NULL:
+        raise MemoryError()
+    if n > 0:
+        memcpy(new_data, buf.data, <size_t>n * sizeof(double))
+    if buf.null_bitmap != NULL:
+        nbytes = (n + 7) >> 3
+        new_nulls = <uint8_t*>draken_malloc(<size_t>nbytes if nbytes > 0 else 1)
+        if new_nulls == NULL:
+            draken_free(new_data)
+            raise MemoryError()
+        if nbytes > 0:
+            memcpy(new_nulls, buf.null_bitmap, <size_t>nbytes)
+    return float64_from_decoded(new_data, new_nulls, <size_t>n)
 
 
 cdef inline Integer64Vector _slice_int64_buffer(
@@ -141,23 +171,31 @@ cdef inline Integer64Vector _slice_int64_buffer(
     int64_t stop,
 ) except *:
     cdef Py_ssize_t length = <Py_ssize_t>(stop - start)
-    cdef Integer64Vector out = Integer64Vector(<size_t>length)
     cdef int64_t* src_data = <int64_t*>src.data
-    cdef int64_t* out_data = <int64_t*>out.ptr.data
-    cdef Py_ssize_t i
+    cdef void* new_data
+    cdef uint8_t* new_nulls = NULL
+    cdef Py_ssize_t i, nbytes
 
     if length <= 0:
-        return out
+        return int64_from_decoded(NULL, NULL, 0)
 
-    memcpy(out_data, src_data + start, length * sizeof(int64_t))
+    new_data = draken_malloc(<size_t>length * sizeof(int64_t))
+    if new_data == NULL:
+        raise MemoryError()
+    memcpy(new_data, src_data + start, <size_t>length * sizeof(int64_t))
 
     if src.null_bitmap != NULL:
-        out.ptr.null_bitmap = _alloc_all_valid_bitmap(length)
+        nbytes = (length + 7) >> 3
+        new_nulls = <uint8_t*>draken_malloc(<size_t>nbytes)
+        if new_nulls == NULL:
+            draken_free(new_data)
+            raise MemoryError()
+        memset(new_nulls, 0xFF, <size_t>nbytes)
         for i in range(length):
             if not _num_bitmap_valid(src.null_bitmap, start + i):
-                _bitmap_clear(out.ptr.null_bitmap, i)
+                _bitmap_clear(new_nulls, i)
 
-    return out
+    return int64_from_decoded(new_data, new_nulls, <size_t>length)
 
 
 cdef inline Float64Vector _slice_float64_buffer(
@@ -166,23 +204,31 @@ cdef inline Float64Vector _slice_float64_buffer(
     int64_t stop,
 ) except *:
     cdef Py_ssize_t length = <Py_ssize_t>(stop - start)
-    cdef Float64Vector out = Float64Vector(<size_t>length)
     cdef double* src_data = <double*>src.data
-    cdef double* out_data = <double*>out.ptr.data
-    cdef Py_ssize_t i
+    cdef void* new_data
+    cdef uint8_t* new_nulls = NULL
+    cdef Py_ssize_t i, nbytes
 
     if length <= 0:
-        return out
+        return float64_from_decoded(NULL, NULL, 0)
 
-    memcpy(out_data, src_data + start, length * sizeof(double))
+    new_data = draken_malloc(<size_t>length * sizeof(double))
+    if new_data == NULL:
+        raise MemoryError()
+    memcpy(new_data, src_data + start, <size_t>length * sizeof(double))
 
     if src.null_bitmap != NULL:
-        out.ptr.null_bitmap = _alloc_all_valid_bitmap(length)
+        nbytes = (length + 7) >> 3
+        new_nulls = <uint8_t*>draken_malloc(<size_t>nbytes)
+        if new_nulls == NULL:
+            draken_free(new_data)
+            raise MemoryError()
+        memset(new_nulls, 0xFF, <size_t>nbytes)
         for i in range(length):
             if not _num_bitmap_valid(src.null_bitmap, start + i):
-                _bitmap_clear(out.ptr.null_bitmap, i)
+                _bitmap_clear(new_nulls, i)
 
-    return out
+    return float64_from_decoded(new_data, new_nulls, <size_t>length)
 
 
 # ---------------------------------------------------------------------------

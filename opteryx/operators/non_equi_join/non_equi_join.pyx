@@ -35,7 +35,7 @@ from array import array
 from draken.morsels.morsel cimport Morsel
 from draken.morsels.align cimport align_tables
 from draken.vectors.bool_vector cimport BoolVector
-from draken.core.buffers cimport DrakenFixedBuffer
+from draken.core.buffers cimport DrakenVector
 
 from opteryx.models import QueryProperties
 
@@ -149,7 +149,7 @@ cdef Morsel _non_equi_nested_loop_join_kernel(
     cdef int32_t i32
     cdef object left_val
     cdef BoolVector mask
-    cdef DrakenFixedBuffer* mask_ptr
+    cdef DrakenVector* mask_ptr
     cdef uint8_t* data_bits
     cdef uint8_t* null_bits
     cdef size_t right_rows_sz = <size_t>right_rows
@@ -161,9 +161,9 @@ cdef Morsel _non_equi_nested_loop_join_kernel(
 
         # One vectorized call covering all right_rows — SIMD-eligible inside Draken.
         mask = _compare_right_vec_with_scalar(right_vec, left_val, comparison_op, swapped)
-        mask_ptr  = mask.ptr
+        mask_ptr  = mask.unified()
         data_bits = <uint8_t*> mask_ptr.data
-        null_bits = mask_ptr.null_bitmap  # NULL means all rows are valid
+        null_bits = mask_ptr.validity  # NULL means all rows are valid
         i32 = <int32_t>i
 
         # Inner loop: bit-extraction in C++ (popcount-driven scan, nogil).

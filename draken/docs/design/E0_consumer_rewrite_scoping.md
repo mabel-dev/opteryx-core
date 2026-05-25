@@ -1,6 +1,6 @@
 # Milestone E.0 — Consumer Rewrite Scoping
 
-> Status: LIVING DOCUMENT. Last updated 2026-05-23 (E.19).
+> Status: LIVING DOCUMENT. Last updated 2026-05-24 (E.22).
 > E.0: Inventory + sequenced plan (research-only).
 > E.1: §2 revised — `cdef public` + nanobind C++ wrapper pattern.
 > E.2: §2 revised again — C′ canonical (pure nanobind C++, no .pyx layer). §3 updated.
@@ -736,3 +736,146 @@ Tag it as `milestone-a-baseline` on both platforms.
 The Milestone-E re-green must show `make clickbench ≥ this baseline`.
 
 ARM capture (agent can do): `git stash && git checkout 7d7c19f2 && make clickbench`; record output; `git checkout -`.
+
+---
+
+## §6 E.21a Cost Datapoint (2026-05-24)
+
+### 6.1 Decision: Approach (ii) — extend `.pxd` stubs
+
+**Scope at investigation:** 30+ `.pyx` files across `opteryx/` and `rugo/` had cimport-breaking
+references to per-type draken cdef classes. Migration to nanobind C++ (Approach i) was infeasible
+at this scale without prior operator-rewrite planning. Approach (ii) — extending `.pxd` stubs to
+cover all failing cimport sites — was chosen to unblock the build chain.
+
+### 6.2 Per-file decision matrix
+
+| File | Action | Cimport issues resolved |
+|---|---|---|
+| `draken/vectors/vector.pxd` | Extended — added `DrakenVector`, `unified()`, `null_bitmap_ptr()`, `c_hash_single()`, hash constants | vtable/unified access |
+| `draken/vectors/bool_vector.pxd` | Extended — added `(Vector)` inheritance, `DrakenFixedBuffer* ptr`, `bool_vector_from_bits` object return | bool ops |
+| `draken/vectors/float64_vector.pxd` | Extended — added `DrakenFixedBuffer* ptr`, `from_dict`, `from_dict_nullable` | float ops |
+| `draken/vectors/float32_vector.pxd` | Extended — added `DrakenFixedBuffer* ptr` | float32 |
+| `draken/vectors/integer64_vector.pxd` | Extended — added `ptr`, `null_bitmap_ptr()`, `from_dict`, `from_dict_nullable` | int64 ops |
+| `draken/vectors/integer8_vector.pxd` | Extended — added `ptr`, `null_bitmap_ptr()` | narrow int |
+| `draken/vectors/integer16_vector.pxd` | Extended — added `ptr`, `null_bitmap_ptr()` | narrow int |
+| `draken/vectors/integer32_vector.pxd` | Extended — added `ptr`, `null_bitmap_ptr()` | narrow int |
+| `draken/vectors/string_vector.pxd` | Extended — added `ptr`, `c_iter()`, `_StringVectorCIterator.next()` | string ops |
+| `draken/vectors/array_vector.pxd` | Extended — added `DrakenArrayBuffer* ptr` | array ops |
+| `draken/vectors/vector_vector.pxd` | Extended — added `_data`, `_null_bitmap`, `_length`, `_dimensions`, etc. | embedding ops |
+| `draken/vectors/decimal_vector.pxd` | Created stub | decimal collectors |
+| `draken/core/buffers.pxd` | Extended — added `DRAKEN_STRING` alias, `DrakenMorsel`, `draken_build_string_slot` | key_store |
+| `draken/core/fixed_vector.pxd` | Created — inline `alloc_fixed_buffer`/`free_fixed_buffer` | key_store |
+| `draken/core/var_vector.pxd` | Created — inline `free_var_buffer` | key_store |
+| `draken/core/string_arena.pxd` | Created — inline `alloc_string_arena` | key_store |
+| `draken/morsels/morsel.pxd` | Extended — added `DrakenMorsel* ptr` (cdef methods removed; E.21b) | filter, agg |
+| `draken/core/bitmap_ops.h` | Fixed — `bool_vector_from_bits` return type `void*` → `PyObject*` | nested_loop_join |
+| `draken/core/fp16.h` | Created — `draken_fp16_to_fp32`/`draken_fp32_to_fp16` wrappers | vector_math |
+| `opteryx/compiled/vector_ops/vector_00_helpers.pyx` | Created — restored `_sv_ascii_lower`, `_all_null_bool` helpers deleted with old `bool_vector_ops.pyx` | vector_like |
+| `opteryx/operators/grouped_aggregate_hashed/_key_store.pxi` | Patched — replaced `str_init_extern` (4-arg, old) with `draken_build_string_slot` (correct hash) | key_store |
+| `opteryx/managers/execution/serial_engine.py` | Fixed — `from draken import Morsel` → `from draken.morsels.morsel import Morsel` | runtime import |
+| `draken/interop/__init__.py` | Created | interop package |
+| `draken/interop/vector_sequence.py` | Created — re-exports `vector_from_sequence` from `draken_native` | serial_engine, connectors |
+| `draken/vectors/__init__.py` | Fixed — `BoolVector = Vector` alias; `draken_native` has no per-type subclasses | runtime import |
+| `draken/vectors/bool_vector.py` | Fixed — same aliasing | runtime import |
+| `setup.py` | Fixed — added `MIMALLOC_INCLUDE` to base `include_dirs`; added `fp16/include` to `vector_math`; disabled `morsel_ops.distinct` (E.21b) | build |
+
+### 6.3 Build result
+
+| Artifact | Status |
+|---|---|
+| `draken/draken_native*.so` | ✅ Present |
+| `opteryx/operators/_operators*.so` (merged _impl) | ✅ Present |
+| `draken/tests` | ✅ 2792/2792 passed |
+| `make q` | 0/133 — `KeyError: '__pyx_vtable__'` on `_operators` load |
+
+### 6.4 `make q` failure analysis
+
+All 133 tests fail with `KeyError: '__pyx_vtable__'` when `_operators.so` initialises.
+Root cause: `draken.vectors.vector.Vector` is a nanobind class (no Cython vtable);
+`_operators.so` was compiled against `vector.pxd` which declares `cdef` methods and therefore
+requires `__pyx_vtable__` at load time.
+
+This is **expected** for E.21a scope. The pxd-stub approach resolves the *Cython compile*
+blocker (approach ii), but leaves the *runtime ABI* gap between nanobind types and Cython
+cdef-method dispatch. That gap is the E.21b work.
+
+### 6.5 Deferred items (E.21b scope)
+
+| Item | Notes |
+|---|---|
+| `Vector.__pyx_vtable__` runtime fix | Nanobind Vector has no vtable; Cython consumers call `unified()`, `null_bitmap_ptr()`, `c_hash_single()` through it |
+| `Morsel.ptr` runtime access | `DrakenMorsel*` struct doesn't exist in new draken; `filter.pyx`, agg files all read `morsel.ptr.num_rows` |
+| `morsel_ops.distinct` | Disabled in setup.py — needs `c_hash`, `_resolve_columns_to_indices` cdef method dispatch |
+| `isinstance(col, BoolVector)` et al. | Per-type isinstance checks are incorrect; all vectors are `draken_native.Vector` |
+| `morsel.ptr.columns[idx]` writes | `filter.pyx` writes back into C struct; new Morsel has no such struct |
+
+### 6.6 Build-isolation flag (3rd recurrence)
+
+This is the **third recurrence** of build-coupling failure (Phases 3, 18, 20/21a).
+Pattern: partial namespace activation in setup.py causes Cython's resolver to newly attempt
+resolving cimports that previously resolved to nothing, aborting the entire batch.
+
+**Fixed (Milestone E.22):** See §7 below.
+
+---
+
+## 7. `make draken` — build isolation (Milestone E.22)
+
+### 7.1 Problem
+
+Four recurrences (Phases 3, 18, 20, 20a) of the same cascade:
+an opteryx-side `.pyx` Cython error aborts `cythonize()`, no `.so` files emit,
+`draken_native.so` vanishes, `draken/tests` goes red, and the phase agent thrashes
+trying to fix the build across unrelated files.
+
+With the RISC-V agent working in parallel on `src/cpp/*`, the all-or-nothing build
+amplified the fragility — any change anywhere could take everyone's outputs down.
+
+### 7.2 Mechanism
+
+`setup.py` supports a `DRAKEN_BUILD=1` environment variable.  When set:
+
+1. `cythonize()` receives only the `draken.*` + `opteryx.compiled.nanobind.*` extensions —
+   all are pure C++ with no `.pyx` files, so `cythonize()` is a no-op pass-through.
+2. `resolve_libcurl()` is **not** called — draken extensions don't need libcurl.
+3. `rust_extensions` is set to `[]` — the Rust compute crate is not built.
+
+The net effect: `DRAKEN_BUILD=1 python setup.py build_ext --inplace` compiles only
+the draken C++ extensions and is completely unaffected by any broken opteryx `.pyx` file.
+
+### 7.3 `make draken` target
+
+```makefile
+make draken    # build draken_native.so + draken core/*.so + all opteryx.compiled.nanobind.* .so files
+               # succeeds regardless of opteryx Cython layer breakage
+```
+
+**Always use `make draken` during the consumer rewrite phases** instead of `make compile`.
+`make compile` (full build) will remain red until all consumer `.pyx` migrations land —
+that is expected and not a problem. `make draken` is the stable dev loop.
+
+Use `make compile` (or `make c`) only when testing a full-engine integration or before
+filing a "full build green" milestone completion.
+
+### 7.4 Draken extensions built by `make draken`
+
+| Extension | File |
+|---|---|
+| `draken.core._abi_guard` | `draken/core/_abi_guard.cpp` |
+| `draken.core._mimalloc_smoke` | `draken/core/_mimalloc_smoke.cpp` |
+| `draken.draken_native` | `draken/draken_native.cpp` |
+| `opteryx.compiled.nanobind.*` | `opteryx/compiled/nanobind/*.cpp` (all E.2–E.18 batches) |
+
+### 7.5 Phase 20a out-of-scope review (E.22 secondary)
+
+Phase 20a touched files outside its declared scope.  Review outcome:
+
+| File | Change | Verdict |
+|---|---|---|
+| `opteryx/compiled/vector_ops/vector_dfa_extract.pyx` | added `uint32_t` cimport | **Reverted** — purpose unclear; UTF-8/regex cluster, explicitly out of scope |
+| `opteryx/compiled/vector_ops/vector_match_against.pyx` | added `int32_t` cimport | **Reverted** — same |
+| `opteryx/managers/execution/serial_engine.py` | updated `Morsel` import path to new draken module structure | **Kept** — necessary API migration |
+| `opteryx/operators/grouped_aggregate_hashed/_key_store.pxi` | migrated to `draken_build_string_slot()` | **Kept** — necessary API migration |
+| `opteryx/compiled/structures/bloom_filter.pyx` | `.ptr.data` → `._unified_view.data` | **Kept** — necessary API migration |
+

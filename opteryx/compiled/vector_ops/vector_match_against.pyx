@@ -14,7 +14,7 @@ from libc.string cimport memset
 from cpython.array cimport array, clone
 
 from draken.core.buffers cimport DrakenVector, DrakenStringArena, DrakenStringSlot, str_length, str_data
-from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.bool_vector cimport BoolVector, from_decoded
 from draken.vectors.float32_vector cimport Float32Vector
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.string_vector cimport _StringVectorCIterator
@@ -22,6 +22,10 @@ from draken.vectors.string_vector cimport StringElement
 from draken.vectors.string_vector cimport StringVectorBuilder
 from draken.vectors.vector cimport Vector
 from draken.vectors.vector_vector cimport VectorVector
+
+cdef extern from "core/alloc.h":
+    void* draken_malloc(size_t size) nogil
+    void draken_free(void* ptr) nogil
 
 from cpython.unicode cimport PyUnicode_DecodeUTF8
 
@@ -32,7 +36,7 @@ cdef inline bint _is_ascii_whitespace(unsigned char ch) noexcept nogil:
 
 cdef StringVector _materialize_german_dict_entries(StringVector vec):
     """Build a dense StringVector containing only the dict entries (not full expansion)."""
-    cdef DrakenStringArena* gdv = <DrakenStringArena*>vec._unified_view.data
+    cdef DrakenStringArena* gdv = <DrakenStringArena*>vec.unified().data
     cdef Py_ssize_t dict_size = <Py_ssize_t>gdv.length
     cdef DrakenStringSlot* slot
     cdef const uint8_t* sdata
@@ -63,14 +67,15 @@ cdef BoolVector _vector_match_against_string_vector(
     cdef int32_t[::1] take_view
     cdef float[::1] query_view
     cdef Py_ssize_t i
-    cdef Py_ssize_t n = values._unified_view.length
+    cdef Py_ssize_t n = <Py_ssize_t>values.unified().length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
     cdef Py_ssize_t row_index
     cdef Py_ssize_t text_len
     cdef const char* text_ptr
     cdef unsigned char* unsigned_ptr
-    cdef BoolVector out = BoolVector(<size_t>n)
-    cdef uint8_t* dst = <uint8_t*>out.ptr.data
+    cdef uint8_t* dst = <uint8_t*>draken_malloc(<size_t>(nbytes if nbytes > 0 else 1))
+    if dst == NULL:
+        raise MemoryError()
     cdef _StringVectorCIterator it
     cdef StringElement elem
     cdef list active_positions
@@ -116,7 +121,7 @@ cdef BoolVector _vector_match_against_string_vector(
         current_index += 1
 
     if not active_texts:
-        return out
+        return from_decoded(<void*>dst, NULL, <size_t>n)
 
     embedded = embed_text_matrix([query_text, *active_texts])
     query_vector = embedded[0]
@@ -144,7 +149,7 @@ cdef BoolVector _vector_match_against_string_vector(
             continue
         dst[row_index >> 3] |= (1 << (row_index & 7))
 
-    return out
+    return from_decoded(<void*>dst, NULL, <size_t>n)
 
 
 cdef BoolVector _vector_match_against_dictionary_accessor(
@@ -156,10 +161,12 @@ cdef BoolVector _vector_match_against_dictionary_accessor(
 ):
     cdef Py_ssize_t n = uv.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
-    cdef BoolVector out = BoolVector(<size_t>n)
-    cdef uint8_t* dst = <uint8_t*>out.ptr.data
+    cdef uint8_t* dst = <uint8_t*>draken_malloc(<size_t>(nbytes if nbytes > 0 else 1))
+    if dst == NULL:
+        raise MemoryError()
     cdef uint8_t* row_nulls = uv.validity
     cdef BoolVector dict_matches
+    cdef DrakenVector* dict_dv
     cdef uint8_t* dict_bits
     cdef Py_ssize_t i
     cdef uint32_t code
@@ -167,7 +174,7 @@ cdef BoolVector _vector_match_against_dictionary_accessor(
     memset(dst, 0, nbytes)
 
     if uv.data == NULL or uv.data_length == 0:
-        return out
+        return from_decoded(<void*>dst, NULL, <size_t>n)
 
     dict_matches = _vector_match_against_string_vector(
         _materialize_german_dict_entries(<StringVector>owner),
@@ -175,7 +182,8 @@ cdef BoolVector _vector_match_against_dictionary_accessor(
         query_text,
         min_score,
     )
-    dict_bits = <uint8_t*>dict_matches.ptr.data
+    dict_dv = dict_matches.unified()
+    dict_bits = <uint8_t*>dict_dv.data
 
     for i in range(n):
         if row_nulls != NULL and ((row_nulls[i >> 3] >> (i & 7)) & 1) == 0:
@@ -184,7 +192,7 @@ cdef BoolVector _vector_match_against_dictionary_accessor(
         if (dict_bits[code >> 3] >> (code & 7)) & 1:
             dst[i >> 3] |= <uint8_t>(1 << (i & 7))
 
-    return out
+    return from_decoded(<void*>dst, NULL, <size_t>n)
 
 
 cdef BoolVector _vector_match_against_vector_vector(
@@ -203,23 +211,25 @@ cdef BoolVector _vector_match_against_vector_vector(
 
     cdef Py_ssize_t n = len(values)
     cdef Py_ssize_t nbytes = (n + 7) >> 3
-    cdef BoolVector out = BoolVector(<size_t>n)
-    cdef uint8_t* dst = <uint8_t*>out.ptr.data
+    cdef uint8_t* dst = <uint8_t*>draken_malloc(<size_t>(nbytes if nbytes > 0 else 1))
+    if dst == NULL:
+        raise MemoryError()
     memset(dst, 0, nbytes)
 
     cdef str text = (query_text or "").strip()
     if not text:
-        return out
+        return from_decoded(<void*>dst, NULL, <size_t>n)
 
     cdef VectorVector embedded = embed_text_matrix([text])
     if len(embedded) == 0 or embedded.dimensions != values.dimensions:
-        return out
+        return from_decoded(<void*>dst, NULL, <size_t>n)
 
     cdef object query_fp32 = vector_math.row_as_fp32_array(embedded, 0)
     cdef float[::1] query_view = query_fp32
     cdef Float32Vector scores = values.cosine_similarity(query_view)
-    cdef float* score_ptr = <float*> scores.ptr.data
-    cdef uint8_t* score_nulls = scores.ptr.null_bitmap
+    cdef DrakenVector* scores_dv = scores.unified()
+    cdef float* score_ptr = <float*>scores_dv.data
+    cdef uint8_t* score_nulls = scores_dv.validity
     cdef Py_ssize_t i
     cdef bint row_valid
 
@@ -231,7 +241,7 @@ cdef BoolVector _vector_match_against_vector_vector(
         if score_ptr[i] >= min_score:
             dst[i >> 3] |= <uint8_t>(1 << (i & 7))
 
-    return out
+    return from_decoded(<void*>dst, NULL, <size_t>n)
 
 
 cpdef BoolVector vector_match_against(
