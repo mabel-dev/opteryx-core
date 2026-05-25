@@ -128,8 +128,9 @@ class TestNullCompareOps:
             result = bool_pylist(v.compare_scalar(42, op))
             assert result == [None, None, None, None], f"op={op}"
 
-    def test_compare_scalar_none_scalar_all_null(self):
-        result = bool_pylist(null_vec(3).compare_scalar(None, self.EQ))
+    def test_compare_scalar_any_scalar_all_null(self):
+        # DRAKEN_NULL returns all-null regardless of scalar value (3VL: NULL OP x = NULL).
+        result = bool_pylist(null_vec(3).compare_scalar(42, self.EQ))
         assert result == [None, None, None]
 
     def test_compare_vector_null_null(self):

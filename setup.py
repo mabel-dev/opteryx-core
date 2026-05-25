@@ -660,9 +660,9 @@ _shim_bridge_link_args = (
 )
 
 _shim_extensions = [
-    make_draken_extension("vectors.vector",      "vectors/_vector_shim.pyx"),
-    make_draken_extension("vectors.bool_vector", "vectors/_bool_vector_shim.pyx"),
-    make_draken_extension("morsels.morsel",      "morsels/_morsel_shim.pyx"),
+    make_draken_extension("vectors.vector",         "vectors/_vector_shim.pyx"),
+    make_draken_extension("vectors.bool_vector",    "vectors/_bool_vector_shim.pyx"),
+    make_draken_extension("morsels.morsel",         "morsels/_morsel_shim.pyx"),
 ]
 # Append shim bridge link args to each shim extension
 for _ext in _shim_extensions:
@@ -1822,11 +1822,20 @@ extensions.append(
 extensions.append(
     Extension(
         "opteryx.compiled.nanobind.vector_string_misc2",
-        sources=[
-            "opteryx/compiled/nanobind/vector_string_misc2.cpp",
-            "draken/core/vector_alloc.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
+        sources=(
+            [
+                "opteryx/compiled/nanobind/vector_string_misc2.cpp",
+                "draken/core/vector_alloc.cpp",
+                "third_party/nanobind/src/nb_combined.cpp",
+            ]
+            + sorted(
+                glob.glob("third_party/re2/re2/*.cc")
+                + [
+                    "third_party/re2/util/strutil.cc",
+                    "third_party/re2/util/rune.cc",
+                ]
+            )
+        ),
         include_dirs=include_dirs
         + [
             MIMALLOC_INCLUDE,
@@ -1971,6 +1980,30 @@ extensions.append(
             "opteryx/compiled/nanobind/vector_string_case.cpp",
             "src/cpp/simd_string_ops.cpp",
             "src/cpp/cpu_features.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
+# E.26 C′: string slice / substring operations — slice_left, slice_right, substring.
+# Replaces: vector_string_slice.pyx (deleted).
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_string_slice",
+        sources=[
+            "opteryx/compiled/nanobind/vector_string_slice.cpp",
             "draken/core/vector_alloc.cpp",
             "third_party/nanobind/src/nb_combined.cpp",
         ],

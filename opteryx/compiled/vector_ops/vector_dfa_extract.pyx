@@ -75,6 +75,7 @@ from libc.stdlib cimport free, malloc
 from libc.string cimport memcmp, memcpy, memset
 
 from cpython.bytes cimport PyBytes_AsStringAndSize
+from cpython.object cimport PyObject
 from libcpp.string cimport string
 
 cdef extern from "simd_search.h":
@@ -179,15 +180,28 @@ else:
 
 from draken.core.buffers cimport (
     DrakenVector,
-    DrakenVarBuffer,
     DrakenStringArena,
     DrakenStringSlot,
+    DrakenType,
     DRAKEN_VARCHAR,
-    draken_vector_from_dense,
     str_length,
     str_data,
+    str_init_null,
+    STR_INLINE_MAX,
 )
-from draken.vectors.string_vector cimport StringVector, _varbuffer_to_string_arena
+from draken.vectors.vector cimport Vector
+
+cdef extern from "core/alloc.h":
+    void* draken_malloc(size_t n) nogil
+    void  draken_free(void* p) nogil
+
+cdef extern from "core/string_slot.h":
+    void draken_build_string_slot(DrakenStringSlot* slot, const uint8_t* data, uint32_t length, uint32_t arena_offset) noexcept nogil
+
+cdef extern from "core/draken_bridge.h":
+    object draken_vector_own_string(
+        DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
+        uint8_t* validity, uint32_t length, DrakenType type)
 
 
 cdef enum DfaOpType:
@@ -746,7 +760,7 @@ cdef inline bint _slice_equals(
 
 
 cdef inline void _extract_const_slice(
-    StringVector vec,
+    Vector vec,
     const char** data_ptr,
     Py_ssize_t* data_len,
 ) except *:
@@ -845,12 +859,12 @@ cdef inline bint _execute_procedure(
     return False
 
 
-cpdef StringVector vector_dfa_extract(
-    StringVector data,
-    StringVector compiled_program,
+cpdef object vector_dfa_extract(
+    Vector data,
+    Vector compiled_program,
 ):
     """
-    Execute an optimizer-compiled DFA replacement over a StringVector.
+    Execute an optimizer-compiled DFA replacement over a string Vector.
 
     The execution kernel consumes a constant-encoded compiled program blob,
     decodes it once, and interprets the decoded procedure over the input data.
@@ -863,27 +877,25 @@ cpdef StringVector vector_dfa_extract(
     _decode_procedure(program_ptr, program_len, &proc)
 
     cdef DrakenVector* uv = data.unified()
-    cdef DrakenStringArena* arena = <DrakenStringArena*>uv.data
+    cdef DrakenStringArena* src_arena = <DrakenStringArena*>uv.data
     cdef uint32_t* sel = <uint32_t*>uv.selection
     cdef uint8_t* nulls = uv.validity
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t i
     cdef const char* out_ptr = NULL
     cdef Py_ssize_t out_len = 0
-    cdef StringVector out_vec
-    cdef DrakenVarBuffer* out_ptr_buf
     cdef Py_ssize_t total_bytes = 0
     cdef Py_ssize_t row_len = 0
     cdef const char* row_ptr = NULL
-    cdef Py_ssize_t write_offset = 0
     cdef Py_ssize_t null_bytes = 0
     cdef DrakenStringSlot* slot
     cdef const uint8_t* sdata
     cdef uint32_t slen
 
-    # Cache (captured_ptr, captured_len) per row; captured_ptr==NULL means null row,
-    # captured_len < 0 means "no match; passthrough the original bytes".
-    # We store pointers directly (arena slots are stable for the vector's lifetime).
+    # First pass: cache (ptr, len) per row.
+    # cap_ptrs[i] == NULL → null row.
+    # cap_lens[i] >= 0   → DFA matched; length of capture.
+    # cap_lens[i] < 0    → no match; passthrough; actual length = -cap_lens[i] - 1.
     cdef const char** cap_ptrs = <const char**>malloc(<size_t>n * sizeof(const char*))
     cdef int32_t* cap_lens = <int32_t*>malloc(<size_t>n * sizeof(int32_t))
 
@@ -898,9 +910,9 @@ cpdef StringVector vector_dfa_extract(
             cap_lens[i] = 0
             continue
 
-        slot = &arena.slots[sel[i]]
+        slot = &src_arena.slots[sel[i]]
         slen = str_length(slot)
-        sdata = str_data(slot, arena.arena)
+        sdata = str_data(slot, src_arena.arena)
         row_ptr = <const char*>sdata
         row_len = <Py_ssize_t>slen
 
@@ -910,61 +922,61 @@ cpdef StringVector vector_dfa_extract(
             total_bytes += out_len
         else:
             cap_ptrs[i] = row_ptr
-            cap_lens[i] = <int32_t>(-row_len - 1)  # sentinel: negative means passthrough
+            cap_lens[i] = <int32_t>(-row_len - 1)
             total_bytes += row_len
 
-    out_vec = StringVector(n, total_bytes)
-    out_ptr_buf = out_vec.ptr
+    # Allocate output slots and arena.
+    cdef size_t slots_sz = <size_t>n * sizeof(DrakenStringSlot) if n > 0 else sizeof(DrakenStringSlot)
+    cdef size_t arena_sz = <size_t>total_bytes if total_bytes > 0 else 1
+    cdef DrakenStringSlot* out_slots = <DrakenStringSlot*>draken_malloc(slots_sz)
+    cdef uint8_t* out_arena = <uint8_t*>draken_malloc(arena_sz)
+    cdef uint8_t* out_null = NULL
 
-    if nulls != NULL and out_ptr_buf.null_bitmap != NULL:
+    if out_slots == NULL or out_arena == NULL:
+        free(cap_ptrs)
+        free(cap_lens)
+        draken_free(out_slots)
+        draken_free(out_arena)
+        raise MemoryError("vector_dfa_extract: output allocation failed")
+
+    if nulls != NULL:
         null_bytes = (n + 7) >> 3
-        if null_bytes > 0:
-            memcpy(out_ptr_buf.null_bitmap, nulls, <size_t>null_bytes)
-    elif out_ptr_buf.null_bitmap != NULL:
-        null_bytes = (n + 7) >> 3
-        if null_bytes > 0:
-            memset(out_ptr_buf.null_bitmap, 0xFF, <size_t>null_bytes)
+        out_null = <uint8_t*>draken_malloc(<size_t>null_bytes if null_bytes > 0 else 1)
+        if out_null == NULL:
+            free(cap_ptrs)
+            free(cap_lens)
+            draken_free(out_slots)
+            draken_free(out_arena)
+            raise MemoryError("vector_dfa_extract: validity allocation failed")
+        memcpy(out_null, nulls, <size_t>null_bytes)
 
-    write_offset = 0
-    out_ptr_buf.offsets[0] = 0
-
+    # Second pass: fill slots and arena.
     cdef const char* cached_ptr
-    cdef int32_t cached_len, copy_len
+    cdef int32_t cached_len
+    cdef uint32_t copy_len
+    cdef size_t arena_used = 0
 
     for i in range(n):
-        if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
-            out_ptr_buf.offsets[i + 1] = <int32_t>write_offset
-            continue
-
         cached_ptr = cap_ptrs[i]
         cached_len = cap_lens[i]
 
-        if cached_len >= 0:
-            # DFA matched: emit the cached capture slice
-            copy_len = cached_len
-        else:
-            # Passthrough: negative sentinel encodes original row length as (-len - 1)
-            copy_len = <int32_t>(-cached_len - 1)
+        if cached_ptr == NULL:
+            str_init_null(&out_slots[i])
+            continue
 
-        if copy_len > 0:
-            memcpy(
-                (<char*>out_ptr_buf.data) + write_offset,
-                cached_ptr,
-                <size_t>copy_len,
-            )
-        write_offset += copy_len
-        out_ptr_buf.offsets[i + 1] = <int32_t>write_offset
+        if cached_len >= 0:
+            copy_len = <uint32_t>cached_len
+        else:
+            copy_len = <uint32_t>(-cached_len - 1)
+
+        if copy_len > <uint32_t>STR_INLINE_MAX:
+            memcpy(out_arena + arena_used, cached_ptr, <size_t>copy_len)
+            draken_build_string_slot(&out_slots[i], <const uint8_t*>cached_ptr, copy_len, <uint32_t>arena_used)
+            arena_used += <size_t>copy_len
+        else:
+            draken_build_string_slot(&out_slots[i], <const uint8_t*>cached_ptr, copy_len, 0)
 
     free(cap_ptrs)
     free(cap_lens)
 
-    cdef DrakenStringArena* out_arena = _varbuffer_to_string_arena(
-        <const uint8_t*>out_ptr_buf.data,
-        out_ptr_buf.offsets,
-        out_ptr_buf.null_bitmap,
-        <Py_ssize_t>n,
-    )
-    out_vec._unified_view = draken_vector_from_dense(
-        <void*>out_arena, <uint32_t>n, DRAKEN_VARCHAR, out_ptr_buf.null_bitmap)
-
-    return out_vec
+    return draken_vector_own_string(out_slots, out_arena, arena_used, out_null, <uint32_t>n, DRAKEN_VARCHAR)

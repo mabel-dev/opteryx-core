@@ -219,10 +219,10 @@ class TestFp16UnsupportedOps:
         with pytest.raises((ValueError, Exception)):
             v.compare_scalar(0, self.EQ)
 
-    def test_compare_scalar_none_returns_all_null_bool(self):
+    def test_compare_scalar_none_raises(self):
         v = fp16([[1.0, 2.0], [3.0, 4.0]])
-        result = v.compare_scalar(None, self.EQ)
-        assert result.to_pylist() == [None, None]
+        with pytest.raises(TypeError):
+            v.compare_scalar(None, self.EQ)
 
     def test_compare_vector_raises(self):
         v = fp16([[1.0, 2.0]])

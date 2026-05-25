@@ -333,10 +333,10 @@ class TestCompareScalar:
         t_trunc = time(12, 0, 0)  # seconds boundary
         assert cmp_s(v, t_trunc, EQ) == [False, True, False]
 
-    def test_null_scalar_all_null(self):
+    def test_null_scalar_raises(self):
         v = t64([T_NOON, T_LATE])
-        result = cmp_s(v, None, EQ)
-        assert all(x is None for x in result)
+        with pytest.raises(TypeError):
+            cmp_s(v, None, EQ)
 
     def test_null_row_null_output(self):
         v = t64([T_NOON, None, T_LATE])

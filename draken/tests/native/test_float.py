@@ -342,12 +342,10 @@ class TestCompareScalar:
         assert mask[0] is None
         assert mask[1] is True
 
-    def test_none_scalar(self):
-        # None scalar → all-null output (3VL).
+    def test_none_scalar_raises(self):
         v = f64([1.0, 2.0])
-        mask = v.compare_scalar(None, 0)
-        assert mask[0] is None
-        assert mask[1] is None
+        with pytest.raises(TypeError):
+            v.compare_scalar(None, 0)
 
 
 # ---------------------------------------------------------------------------

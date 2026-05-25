@@ -8,16 +8,40 @@
 # cython: optimize.use_switch=True
 # cython: optimize.unpack_method_calls=True
 
-from draken.vectors.string_vector cimport StringVector
-from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.vector cimport Vector
+from draken.vectors.bool_vector cimport BoolVector, from_decoded
 from draken.core.buffers cimport DrakenVector, DrakenStringArena, DrakenStringSlot, str_length, str_data
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
 from libc.stdint cimport uint8_t, uint32_t
 
+cdef extern from "core/alloc.h":
+    void* draken_malloc(size_t n) nogil
+    void  draken_free(void* p) nogil
+
+
+cdef BoolVector _all_null_bool(Py_ssize_t n):
+    """Create an all-null BoolVector of length n."""
+    cdef Py_ssize_t nbytes = (n + 7) >> 3
+    cdef size_t sz = <size_t>nbytes if nbytes > 0 else 1
+    cdef uint8_t* data = <uint8_t*>draken_malloc(sz)
+    cdef uint8_t* validity = <uint8_t*>draken_malloc(sz)
+    if data == NULL or validity == NULL:
+        draken_free(data)
+        draken_free(validity)
+        return None
+    memset(data, 0, sz)
+    memset(validity, 0, sz)  # bit 0 = null
+    return from_decoded(<void*>data, validity, <size_t>n)
+
+
+cdef inline bint _sv_ascii_lower(uint8_t c) noexcept nogil:
+    if c >= 65 and c <= 90:
+        return c + 32
+    return c
+
 
 cdef inline bint _sv_byte_equals(uint8_t left, uint8_t right, bint ignore_case) noexcept nogil:
-    """Compare two bytes, optionally case-insensitive."""
     if ignore_case:
         return _sv_ascii_lower(left) == _sv_ascii_lower(right)
     return left == right
@@ -73,23 +97,12 @@ cdef bint _sv_sql_like_match(
 
 
 cpdef BoolVector vector_like(
-    StringVector vec,
-    StringVector pattern,
+    Vector vec,
+    Vector pattern,
     bint ignore_case=False,
     bint negate=False,
 ):
-    """Return mask: 1 if element matches SQL LIKE pattern, else 0. Propagates NULLs.
-
-    `pattern` is the wrapped pattern literal. SQL LIKE takes a single pattern,
-    so the shape rule (one unique value) is enforced here: `data_length != 1`
-    fails. The pattern bytes are read straight from the arena — no Python
-    bytes object crosses into the engine. The check runs with the GIL held,
-    before the hot loop, so the raise is Python-free where it matters.
-
-    If `negate` is True, the result is the row-wise NotLike: True where the
-    element does NOT match the pattern. Fuses what would otherwise be a
-    second full-pass `.not_vector()`.
-    """
+    """Return mask: 1 if element matches SQL LIKE pattern, else 0. Propagates NULLs."""
     cdef DrakenVector* puv = pattern.unified()
     if puv.data_length != 1:
         raise ValueError(
@@ -107,8 +120,12 @@ cpdef BoolVector vector_like(
     cdef uint8_t* nb_ptr = uv.validity
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
-    cdef BoolVector out = BoolVector(<size_t>n)
-    cdef uint8_t* dst = <uint8_t*> out.ptr.data
+    cdef size_t sz = <size_t>nbytes if nbytes > 0 else 1
+
+    cdef uint8_t* dst = <uint8_t*>draken_malloc(sz)
+    if dst == NULL:
+        raise MemoryError()
+
     cdef uint8_t* out_null = NULL
     cdef uint8_t mask
     cdef Py_ssize_t i
@@ -116,30 +133,27 @@ cpdef BoolVector vector_like(
     cdef const uint8_t* sdata
     cdef uint32_t slen
 
-    # A NULL pattern makes every row NULL (SQL: x LIKE NULL is NULL).
+    # A NULL pattern makes every row NULL.
     if puv.validity != NULL and (puv.validity[0] & 1) == 0:
+        draken_free(dst)
         return _all_null_bool(n)
 
-    # Initial fill matches the wanted result for the "no match" rows so the
-    # inner loop only touches bits at matches.
     if negate:
-        memset(dst, 0xFF, nbytes)
+        memset(dst, 0xFF, sz)
         if (n & 7) != 0:
             dst[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
     else:
-        memset(dst, 0, nbytes)
+        memset(dst, 0, sz)
 
     if nb_ptr != NULL and nbytes != 0:
-        out_null = <uint8_t*> malloc(nbytes)
+        out_null = <uint8_t*>draken_malloc(<size_t>nbytes)
         if out_null == NULL:
+            draken_free(dst)
             raise MemoryError()
         memcpy(out_null, nb_ptr, nbytes)
         if (n & 7) != 0:
             mask = <uint8_t>((1 << (n & 7)) - 1)
             out_null[nbytes - 1] &= mask
-        out.ptr.null_bitmap = out_null
-    else:
-        out.ptr.null_bitmap = NULL
 
     if negate:
         for i in range(n):
@@ -166,4 +180,4 @@ cpdef BoolVector vector_like(
             ):
                 dst[i >> 3] |= (1 << (i & 7))
 
-    return out
+    return from_decoded(<void*>dst, out_null, <size_t>n)

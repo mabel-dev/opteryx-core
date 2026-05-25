@@ -261,10 +261,10 @@ class TestCompareScalar:
         expected = [x < D_2024 for x in self.DATA]
         assert cmp_s(v, D_2024, LT) == expected
 
-    def test_null_scalar_all_null(self):
+    def test_null_scalar_raises(self):
         v = seq([D_2024, D_2025])
-        result = cmp_s(v, None, EQ)
-        assert all(x is None for x in result)
+        with pytest.raises(TypeError):
+            cmp_s(v, None, EQ)
 
     def test_null_row_null_output(self):
         v = seq([D_2024, None, D_2025])

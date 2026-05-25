@@ -257,10 +257,10 @@ class TestCompareScalar:
         result = cmp_s(v, (2, 0), EQ)
         assert result == [False, None, False]
 
-    def test_null_scalar_all_null(self):
+    def test_null_scalar_raises(self):
         v = iv([(1, 0), (2, 0)])
-        result = cmp_s(v, None, EQ)
-        assert result == [None, None]
+        with pytest.raises(TypeError):
+            cmp_s(v, None, EQ)
 
     def test_normalized_comparison(self):
         # (1, 0) and (0, MONTH_MS) normalize to the same value

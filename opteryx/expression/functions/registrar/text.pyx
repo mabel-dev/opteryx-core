@@ -13,25 +13,32 @@ set of compiled vector ops when available.
 from typing import List
 
 from opteryx.compiled import vector_ops as compiled_vector_ops
-from opteryx.compiled.nanobind.vector_string_case import vector_lowercase
-from draken.vectors.string_vector import uppercase as vector_uppercase
-from opteryx.compiled.vector_ops import (
+from opteryx.compiled.nanobind.vector_string_case import (
+    vector_lowercase,
+    vector_uppercase,
     vector_initcap,
-    vector_md5,
     vector_reverse,
-    vector_sha1,
-    vector_sha256,
-    vector_sha512,
+)
+from opteryx.compiled.nanobind.vector_string_slice import (
     vector_string_slice_left,
     vector_string_slice_right,
     vector_string_substring,
+)
+from opteryx.compiled.nanobind.vector_hash_codec import (
+    vector_md5,
+    vector_sha1,
+    vector_sha256,
+    vector_sha512,
 )
 from opteryx.compiled.nanobind.vector_string_misc3 import vector_soundex
 from opteryx.compiled.nanobind.vector_string_misc import (
     vector_levenshtein,
     vector_position,
 )
-from opteryx.compiled.nanobind.vector_string_misc2 import vector_replace
+from opteryx.compiled.nanobind.vector_string_misc2 import (
+    vector_replace,
+    vector_regex_replace,
+)
 from opteryx.compiled.nanobind.vector_string_search import (
     vector_ci_ends_with,
     vector_ci_starts_with,

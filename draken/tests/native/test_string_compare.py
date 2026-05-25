@@ -268,13 +268,13 @@ class TestCmpScalarNulls:
         result = cmp_s([None, None], "x", EQ)
         assert result == [None, None]
 
-    def test_null_scalar_all_null_output(self):
-        result = cmp_s(["hello", "world"], None, EQ)
-        assert result == [None, None]
+    def test_null_scalar_raises(self):
+        with pytest.raises(TypeError):
+            cmp_s(["hello", "world"], None, EQ)
 
-    def test_null_scalar_ne_all_null(self):
-        result = cmp_s(["a", "b"], None, NE)
-        assert result == [None, None]
+    def test_null_scalar_ne_raises(self):
+        with pytest.raises(TypeError):
+            cmp_s(["a", "b"], None, NE)
 
     def test_mixed_null_non_null(self):
         result = cmp_s(["apple", None, "cherry"], "banana", LT)

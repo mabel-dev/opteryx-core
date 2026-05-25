@@ -3,11 +3,5 @@
 
 include "vector_anyop_like.pyx"
 include "vector_dfa_extract.pyx"
-include "vector_initcap.pyx"
 include "vector_like.pyx"
-include "vector_lowercase.pyx"
-include "vector_regex_replace.pyx"
-include "vector_reverse.pyx"
 include "vector_rlike.pyx"
-include "vector_string_slice.pyx"
-include "vector_uppercase.pyx"

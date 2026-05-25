@@ -319,11 +319,10 @@ class TestCompare:
         result = cmp_s(v, Decimal('2.00'), EQ)
         assert result == [False, None, False]
 
-    def test_compare_scalar_null_scalar(self):
-        # null scalar → all rows null (3VL)
+    def test_compare_scalar_null_scalar_raises(self):
         v = dec([Decimal('1.00'), Decimal('2.00')])
-        result = cmp_s(v, None, EQ)
-        assert result == [None, None]
+        with pytest.raises(TypeError):
+            cmp_s(v, None, EQ)
 
     def test_compare_scalar_promotes_less_precise(self):
         # Decimal('2') at scale 2 → unscaled 200, same as Decimal('2.00')

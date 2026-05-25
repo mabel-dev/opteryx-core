@@ -8,13 +8,18 @@
 # cython: optimize.use_switch=True
 # cython: optimize.unpack_method_calls=True
 
-from draken.vectors.string_vector cimport StringVector, DrakenVarBuffer
-from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.vector cimport Vector
+from draken.vectors.bool_vector cimport BoolVector, from_decoded
 from draken.core.buffers cimport DrakenVector, DrakenStringArena, DrakenStringSlot
 from draken.core.buffers cimport str_length, str_data
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
+from libc.stdint cimport uint8_t, uint32_t
 from libcpp.string cimport string
+
+cdef extern from "core/alloc.h":
+    void* draken_malloc(size_t n) nogil
+    void  draken_free(void* p) nogil
 
 
 cdef extern from "re2/stringpiece.h":
@@ -37,22 +42,8 @@ cdef extern from "re2/re2.h":
         bint PartialMatch(const StringPieceRL& text, const RE2RL& re)
 
 
-cpdef BoolVector vector_rlike(StringVector vec, StringVector pattern, bint negate=False):
-    """Return mask: 1 if element matches regex pattern, else 0. Propagates NULLs.
-
-    `pattern` is the wrapped pattern literal; REGEXP takes a single pattern,
-    so the shape rule (one unique value) is enforced here via `data_length`.
-    The pattern bytes are read straight from the arena — no Python bytes
-    object crosses into the engine.
-
-    If `negate` is True, returns the row-wise NotRLike: True where the
-    element does NOT match the pattern. Fuses what would otherwise be a
-    second full-pass `.not_vector()`.
-
-    Regex engine: RE2 (C++). RE2 is a subset of PCRE — no backreferences and
-    no lookaround. Matches the engine used by vector_anyop_like and the same
-    engine ClickHouse, BigQuery, and DuckDB use for REGEXP_LIKE.
-    """
+cpdef BoolVector vector_rlike(Vector vec, Vector pattern, bint negate=False):
+    """Return mask: 1 if element matches regex pattern, else 0. Propagates NULLs."""
     cdef DrakenVector* puv = pattern.unified()
     if puv.data_length != 1:
         raise ValueError(
@@ -70,8 +61,12 @@ cpdef BoolVector vector_rlike(StringVector vec, StringVector pattern, bint negat
     cdef uint8_t* nulls = uv.validity
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
-    cdef BoolVector out = BoolVector(<size_t>n)
-    cdef uint8_t* dst = <uint8_t*>out.ptr.data
+    cdef size_t sz = <size_t>nbytes if nbytes > 0 else 1
+
+    cdef uint8_t* dst = <uint8_t*>draken_malloc(sz)
+    if dst == NULL:
+        raise MemoryError()
+
     cdef uint8_t* out_null = NULL
     cdef uint8_t mask
     cdef Py_ssize_t i
@@ -82,8 +77,9 @@ cpdef BoolVector vector_rlike(StringVector vec, StringVector pattern, bint negat
     cdef RE2RL* regex = NULL
     cdef StringPieceRL text_piece
 
-    # A NULL pattern makes every row NULL (SQL: x RLIKE NULL is NULL).
+    # A NULL pattern makes every row NULL.
     if puv.validity != NULL and (puv.validity[0] & 1) == 0:
+        draken_free(dst)
         return _all_null_bool(n)
 
     options = RE2OptionsRL()
@@ -96,23 +92,20 @@ cpdef BoolVector vector_rlike(StringVector vec, StringVector pattern, bint negat
             raise ValueError("Invalid REGEXP pattern")
 
         if negate:
-            memset(dst, 0xFF, nbytes)
+            memset(dst, 0xFF, sz)
             if (n & 7) != 0:
                 dst[nbytes - 1] &= <uint8_t>((1 << (n & 7)) - 1)
         else:
-            memset(dst, 0, nbytes)
+            memset(dst, 0, sz)
 
         if nulls != NULL and nbytes != 0:
-            out_null = <uint8_t*>malloc(nbytes)
+            out_null = <uint8_t*>draken_malloc(<size_t>nbytes)
             if out_null == NULL:
                 raise MemoryError()
             memcpy(out_null, nulls, nbytes)
             if (n & 7) != 0:
                 mask = <uint8_t>((1 << (n & 7)) - 1)
                 out_null[nbytes - 1] &= mask
-            out.ptr.null_bitmap = out_null
-        else:
-            out.ptr.null_bitmap = NULL
 
         if negate:
             for i in range(n):
@@ -135,7 +128,7 @@ cpdef BoolVector vector_rlike(StringVector vec, StringVector pattern, bint negat
                 if RE2RL.PartialMatch(text_piece, regex[0]):
                     dst[i >> 3] |= (1 << (i & 7))
 
-        return out
+        return from_decoded(<void*>dst, out_null, <size_t>n)
     finally:
         if regex != NULL:
             del regex
