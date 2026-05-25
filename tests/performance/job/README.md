@@ -14,7 +14,8 @@ This harness mirrors the structure of `tests/performance/clickbench/` and
 ```
 tests/performance/job/
 ├── fetch_data.py     # one-time downloader (data + queries)
-├── run.py            # runner — invoked by `make job`
+├── runner.py         # benchmark + comparison front-end invoked by `make job`
+├── run.py            # lower-level Opteryx runner
 ├── queries/          # 113 .sql files (1a..33c) — populated by fetch_data.py
 └── results/          # per-run CSV: <git-sha>-<timestamp>.csv
 ```
@@ -35,9 +36,8 @@ python tests/performance/job/fetch_data.py
 
 Downloads:
 
-  1. `imdb.tgz` (~1.3GB compressed) from `event.cwi.nl/da/job/imdb.tgz`,
-     extracted to `testdata/_downloads/job/csv/`.
-  2. The 113 query files from `gregrahn/join-order-benchmark`.
+1. `imdb.tgz` (~1.3GB compressed) from `event.cwi.nl/da/job/imdb.tgz`, extracted to `testdata/_downloads/job/csv/`.
+2. The 113 query files from `gregrahn/join-order-benchmark`.
 
 Each CSV is converted to a single SNAPPY-compressed Parquet file using the
 official JOB schema. The conversion uses **PyArrow as a one-shot dev tool**
@@ -68,7 +68,7 @@ make job
 Or directly:
 
 ```bash
-python tests/performance/job/run.py [--timeout 300] [--filter '^1[abc]$']
+python tests/performance/job/runner.py [--timeout 300] [--filter '^1[abc]$'] [--iterations 2]
 ```
 
 The runner walks all 113 queries in canonical order (1a, 1b, 1c, 2a, …, 33c),
@@ -103,11 +103,9 @@ The simple queries (1a, 2a, 3a) should return non-timeout results.
 
 ## Interpreting results
 
-  - `ok` count, total wall, median/p95: top-line numbers to track over commits.
-  - Per-query `elapsed_ms`: regressions show up here first.
-  - `error_msg` for `error` rows: groups failures by class — missing function,
-    planner crash, exec crash. Triage and file separately, do not fix as
-    part of the benchmark setup.
+- `ok` count, total wall, median/p95: top-line numbers to track over commits.
+- Per-query `elapsed_ms`: regressions show up here first.
+- `error_msg` for `error` rows: groups failures by class: missing function, planner crash, exec crash. Triage and file separately; do not fix as part of the benchmark setup.
 
 `run.py` rewrites bare IMDB table names to `testdata.job.<table>` at
 runtime, scoped to the FROM clause so identical names used as column
@@ -118,14 +116,8 @@ The `.sql` files in `queries/` are committed verbatim from upstream.
 
 Two reasons:
 
-  1. The parquet root-schema name. Rugo's parquet→orso converter only
-     strips the `arrow_schema.` prefix from column names. PyArrow writes
-     parquets with that root, so columns come through as `id`, `country_code`,
-     etc. DuckDB (the obvious alternative, already a dev dep elsewhere)
-     writes `duckdb_schema.<col>` and the columns are unresolvable.
-  2. Streaming write. PyArrow's `ParquetWriter` lets us batch row-by-row
-     out of the Python `csv` reader, keeping memory bounded on the larger
-     tables (cast_info ~36M rows).
+1. The parquet root-schema name. Rugo's parquet-to-orso converter only strips the `arrow_schema.` prefix from column names. PyArrow writes parquets with that root, so columns come through as `id`, `country_code`, etc. DuckDB writes `duckdb_schema.<col>` and the columns are unresolvable.
+2. Streaming write. PyArrow's `ParquetWriter` lets us batch row-by-row out of the Python `csv` reader, keeping memory bounded on the larger tables (`cast_info` is about 36M rows).
 
 PyArrow here is dev tooling — same status as DuckDB in the ClickBench/
 TPC-H calibration runners. It is **not** used by `run.py` and **not**

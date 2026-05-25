@@ -1,12 +1,11 @@
-# Opteryx external-engine driver
+# Opteryx Sqllogictest Driver
 
-Run sqllogictest `.slt` files against [Opteryx](https://github.com/mabel-dev/opteryx)
-via the `external` engine bridge.
+Run sqllogictest `.slt` files against Opteryx Core via the `external` engine bridge.
 
 ## How it works
 
 `opteryx_driver.py` is a stdin/stdout subprocess that speaks the JSON protocol
-defined in [`sqllogictest-engines/src/external.rs`](../../sqllogictest-engines/src/external.rs):
+used by sqllogictest's external engine:
 
 - in : `{"sql": "..."}`
 - out: `{"result": [["c1","c2"], ...]}` or `{"err": "..."}`
@@ -17,9 +16,7 @@ within a `.slt` file.
 
 ## Running
 
-Set `PYTHONPATH` so `import opteryx` works, and `OPTERYX_HOME` so relative
-connector paths like `testdata/satellites` resolve. Then point sqllogictest
-at one or more `.slt` files:
+Set `PYTHONPATH` so `import opteryx` works, and `OPTERYX_HOME` so relative connector paths like `testdata/satellites` resolve. Then point sqllogictest at one or more `.slt` files:
 
 ```sh
 export OPTERYX_HOME=/path/to/opteryx-core
@@ -27,8 +24,8 @@ export PYTHONPATH=$OPTERYX_HOME
 
 cargo run --release -p sqllogictest-bin -- \
   --engine external \
-  --external-engine-command-template "python3 examples/opteryx/opteryx_driver.py" \
-  'examples/opteryx/tests/results/*.slt'
+  --external-engine-command-template "python3 tests/tools/sqllogictest/opteryx_driver.py" \
+  'tests/tools/sqllogictest/tests/results/*.slt'
 ```
 
 ## Converting Opteryx's `.results_tests` fixtures
@@ -41,9 +38,9 @@ matching `.slt` files:
 
 ```sh
 PYTHONPATH=$OPTERYX_HOME OPTERYX_HOME=$OPTERYX_HOME \
-  python3 examples/opteryx/convert_results_tests.py \
+  python3 tests/tools/sqllogictest/convert_results_tests.py \
     --src "$OPTERYX_HOME/tests/integration/sql_battery/test_data/tests/results" \
-    --dest examples/opteryx/tests/results
+    --dest tests/tools/sqllogictest/tests/results
 ```
 
 Tests that error in Opteryx, fail to parse, or whose values disagree with
@@ -67,9 +64,9 @@ emitted as a comment.
 
 ```sh
 PYTHONPATH=$OPTERYX_HOME OPTERYX_HOME=$OPTERYX_HOME \
-  python3 examples/opteryx/convert_run_tests.py \
+  python3 tests/tools/sqllogictest/convert_run_tests.py \
     --src "$OPTERYX_HOME/tests/integration/sql_battery/test_data/tests" \
-    --dest examples/opteryx/tests/run_only \
+    --dest tests/tools/sqllogictest/tests/run_only \
     --exclude clickbench --exclude tpch_data
 ```
 
@@ -80,7 +77,7 @@ opteryx-core (driven by `make tpch` and the dedicated benchmark harnesses).
 
 For queries where the *dimensions* matter but the values are too large or
 volatile to pin literally, use `query shape <rows> [<cols>]` (added to
-sqllogictest by this project — see the top-level README). [tests/shape.slt](tests/shape.slt)
+sqllogictest by this project). [tests/shape.slt](tests/shape.slt)
 exercises it against `$planets`.
 
 ```text
@@ -105,9 +102,9 @@ runs in seconds:
 
 ```sh
 PYTHONPATH=$OPTERYX_HOME \
-  python3 examples/opteryx/convert_shape_tests.py \
+  python3 tests/tools/sqllogictest/convert_shape_tests.py \
     --src-dir "$OPTERYX_HOME/tests/integration/sql_battery" \
-    --dest examples/opteryx/tests/shapes
+    --dest tests/tools/sqllogictest/tests/shapes
 ```
 
 Validation happens at slt-run time. When current Opteryx behavior diverges
@@ -116,8 +113,8 @@ file to snapshot the new behavior:
 
 ```sh
 ./target/release/sqllogictest --engine external \
-  --external-engine-command-template "python3 examples/opteryx/opteryx_driver.py" \
-  --override examples/opteryx/tests/shapes/<file>.slt
+  --external-engine-command-template "python3 tests/tools/sqllogictest/opteryx_driver.py" \
+  --override tests/tools/sqllogictest/tests/shapes/<file>.slt
 ```
 
 Volatile bits in error messages (UUIDs in `(QID:...)`, embedded timestamps,
@@ -127,13 +124,10 @@ already normalized in place.
 
 ## Running the suite
 
-The Makefile targets at the repo root wrap everything:
+Use the repository-specific workflow or invoke the sqllogictest binary directly. If you use Makefile targets, confirm them with `make help`; this repository's target names have changed over time.
 
 ```sh
-make opteryx-tests            # run the full suite
-make opteryx-tests-results    # only result-checking tests
-make opteryx-tests-run-only   # only run-only tests
-make opteryx-build            # (re)build the binary
+make help
 ```
 
 Override `OPTERYX_HOME=/path/to/opteryx-core` if the checkout isn't a

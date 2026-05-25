@@ -16,7 +16,9 @@ included to provide zero-dependency builds of rugo.
 See individual library directories for full license texts.
 
 ## Integration
+
 These libraries are compiled directly into rugo for:
+
 - Zero runtime dependencies
 - Consistent cross-platform behavior  
 - Simplified deployment

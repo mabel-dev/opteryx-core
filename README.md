@@ -1,10 +1,16 @@
-# Opteryx-Core
+# Opteryx Core
 
-Opteryx-Core is the SQL execution engine behind [opteryx.app](https://opteryx.app). It is a fork of [Opteryx](https://github.com/mabel-dev/opteryx) with a smaller, more opinionated API and configuration surface, shaped around the workloads we run in the hosted service.
+Opteryx Core is the SQL execution engine behind [opteryx.app](https://opteryx.app). It is a fork of [Opteryx](https://github.com/mabel-dev/opteryx) with a smaller, more opinionated API and configuration surface, shaped around the workloads used by the hosted service.
 
 This library is designed for fast, read-heavy analytical queries over Parquet-backed data. It handles SQL parsing, planning, predicate pushdown, projection pruning, and execution so you can query datasets from Python without standing up a separate warehouse.
 
-It is fair to say this project is opinionated toward the needs of `opteryx.app`. That said, it is still useful as a standalone library, especially if you want to query local Parquet-backed datasets via registered workspaces, embed SQL into a Python service or notebook, or experiment with the engine directly.
+This project is opinionated toward the needs of `opteryx.app`. It is still useful as a standalone library if you want to query local Parquet-backed datasets via registered workspaces, embed SQL into a Python service or notebook, or experiment with engine internals directly.
+
+## Requirements
+
+- Python 3.13
+- A C/C++ toolchain for local source builds
+- Rust/Cargo for the Rust extension in `src/`
 
 ## Install
 
@@ -20,7 +26,7 @@ import opteryx
 
 ## Quick Start: Query Local Files
 
-If your current working directory contains local Parquet data, the simplest way to use Opteryx-Core is to register a local workspace and query it with dot-separated names.
+If your current working directory contains local Parquet data, the simplest way to use Opteryx Core is to register a local workspace and query it with dot-separated names.
 
 ```python
 import opteryx
@@ -36,7 +42,7 @@ result = session.execute_to_arrow(
 print(result)
 ```
 
-In this model, dataset names are resolved relative to the current working directory. For example, `data.planets` resolves to `./data/planets`, and Opteryx-Core will read the Parquet files it finds there.
+In this model, dataset names are resolved relative to the current working directory. For example, `data.planets` resolves to `./data/planets`, and Opteryx Core reads the Parquet files it finds there.
 
 ## What It Is For
 
@@ -45,9 +51,46 @@ In this model, dataset names are resolved relative to the current working direct
 - Embedding a query engine inside Python applications, scripts, notebooks, and services
 - Working on engine internals such as planning, execution, and Parquet performance
 
+## Local Development
+
+The supported local build path is the repository Makefile:
+
+```bash
+make dev-install
+make compile
+make q
+```
+
+Useful targets:
+
+| Target | Purpose |
+|--------|---------|
+| `make compile` | Clean in-place build of Cython, C++, and Rust extensions |
+| `make c` | Incremental extension build |
+| `make q` | Fast SQL shape smoke test |
+| `make test` | Full pytest suite after compiling |
+| `make dt` | Draken native unit tests |
+| `make check` | Ruff and import-order checks without modifying files |
+
+Do not use `pip install .` as the primary development build path; `make compile` matches the layout expected by this repository.
+
+## Repository Layout
+
+| Path | Purpose |
+|------|---------|
+| `opteryx/` | Python package, planner, operators, connectors, expression evaluation, and Cython modules |
+| `draken/` | Native columnar vector substrate used by the execution engine |
+| `rugo/` | Internal Parquet and JSONL reader used by scans and metadata paths |
+| `src/` | Rust extension code, currently including the SQL dialect integration |
+| `tests/` | Unit, integration, fuzzing, sqllogictest, and benchmark harnesses |
+| `testdata/` | Local datasets and benchmark fixtures |
+| `dev/` | Development, release, vendoring, and analysis scripts |
+| `scratch/` | Experimental prototypes and one-off investigations |
+| `third_party/` | Vendored native dependencies |
+
 ## Best With Opteryx Catalog
 
-Opteryx-Core works best when paired with the `opteryx_catalog` library. That is the intended model for named datasets, catalog-backed tables, and the general experience used in `opteryx.app`.
+Opteryx Core works best when paired with the `opteryx_catalog` library. That is the intended model for named datasets, catalog-backed tables, and the general experience used in `opteryx.app`.
 
 Typical setup:
 
@@ -71,11 +114,11 @@ set_default_connector(
 
 Once configured, you can query catalog-backed datasets using dot-separated names such as `public.space.planets` or `opteryx.ops.billing`.
 
-For local data, Opteryx-Core is typically used through registered workspaces such as `testdata`, `scratch`, or `data`. Queries refer to datasets by dot-separated names relative to the workspace root, for example `testdata.planets`, `testdata.satellites`, or `scratch.signals`.
+For local data, Opteryx Core is typically used through registered workspaces such as `testdata`, `scratch`, or `data`. Queries refer to datasets by dot-separated names relative to the workspace root, for example `testdata.planets`, `testdata.satellites`, or `scratch.signals`.
 
 ## Where It Fits
 
-Opteryx-Core is best thought of as an embedded analytical engine rather than a full end-user platform. If you want a hosted experience, multi-tenant service features, and the broader product workflow, use [opteryx.app](https://opteryx.app). If you want the core engine in your own environment, this package gives you that engine directly. If you want the intended table-resolution model, pair it with `opteryx_catalog`.
+Opteryx Core is best thought of as an embedded analytical engine rather than a full end-user platform. If you want a hosted experience, multi-tenant service features, and the broader product workflow, use [opteryx.app](https://opteryx.app). If you want the core engine in your own environment, this package gives you that engine directly. If you want the intended table-resolution model, pair it with `opteryx_catalog`.
 
 ## Contributing
 

@@ -1,4 +1,4 @@
-# rugo: Current strengths and limitations
+# Rugo Current Strengths and Limitations
 
 This is an internal, performance-focused reader used by Opteryx.
 Today, rugo is strongest as a **Parquet metadata reader** with a

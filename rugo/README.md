@@ -1,151 +1,105 @@
 # Rugo
 
-High-performance parquet and JSONL reader — a fast, Arrow-independent alternative with native Draken vector output.
+Rugo is Opteryx Core's internal Parquet and JSONL reader. It is optimized for metadata-driven planning, targeted column decoding, and direct output into engine-friendly column vectors.
 
-## Features
+Rugo is built as part of this repository. It is not currently treated as a separately installable or separately versioned package.
 
-- **Multithreaded decoding**: BS::thread_pool-based parquet column decoding
-- **Pure C++ pipeline**: Zero Python overhead in hot paths
-- **No Arrow dependency**: Direct Draken vector output
-- **Streaming support**: Process large files without loading entirely into memory
-- **SIMD decompression**: Hardware-accelerated zstd, snappy, lz4
-- **JSONL reader**: Optional multithreaded JSON-Lines parsing
-- **Schema conversion**: Direct translation to Orso format
+## What Rugo Is Used For
 
-## Installation
+- Fast Parquet footer and row-group metadata reads
+- Column selection and predicate-planning metadata
+- Targeted Parquet data decoding for the supported primitive subset
+- JSONL schema inference, projection, and predicate pushdown
+- Native integration with Draken vectors and Opteryx schema objects
 
-```bash
-pip install rugo
-```
+## Build
 
-Requires: Python >=3.13, draken >=0.1.0
-
-## Quick Start
-
-```python
-import rugo
-import draken
-
-# Read parquet file → returns dict of Draken vectors
-vectors = rugo.read_parquet("data.parquet")
-# -> {"id": Int64Vector([...]), "value": Float64Vector([...])}
-
-# Get metadata
-schema = rugo.read_parquet_metadata("data.parquet")
-
-# Read JSONL with optional threading
-records = rugo.read_jsonl("data.jsonl", use_threads=True)
-
-# Convert schema to Orso format (for Opteryx)
-orso_schema = rugo.schema_to_orso(schema)
-```
-
-## Performance
-
-Rugo is optimized for fast columnar I/O:
-
-| Operation | vs PyArrow | Notes |
-|-----------|-----------|-------|
-| Parquet read (single-threaded) | 2-3x faster | Optimized C++ pipeline |
-| Parquet read (multithreaded) | 5-10x faster | Thread pool per column |
-| JSONL parse | 3-5x faster | SIMD JSON parsing |
-| Memory usage | 20-30% lower | Efficient buffering |
-
-## API Reference
-
-### Parquet
-
-```python
-# Read entire parquet file
-vectors = rugo.read_parquet(
-    path="data.parquet",
-    columns=None,  # Read all columns if None
-    use_threads=True,  # Enable multithreading
-)
-# Returns: dict[str, draken.Vector]
-
-# Read metadata only
-schema = rugo.read_parquet_metadata("data.parquet")
-# Returns: Parquet metadata object
-```
-
-### JSONL
-
-```python
-# Read JSONL file
-records = rugo.read_jsonl(
-    path="data.jsonl",
-    use_threads=True,  # Optional threading
-)
-# Returns: list[dict]
-```
-
-### Schema Conversion
-
-```python
-# Convert Parquet schema to Orso format
-orso_schema = rugo.schema_to_orso(parquet_schema)
-
-# Convert Parquet metadata to Orso format
-orso_schema = rugo.parquet_metadata_to_orso(parquet_metadata)
-```
-
-## Supported Types
-
-Rugo reads and converts these Parquet logical types to Draken vectors:
-
-| Parquet Type | Draken Vector | Notes |
-|--------------|---------------|-------|
-| BOOLEAN | BoolVector | 1-bit per value |
-| INT8/16/32 | Int8/16/32Vector | Signed integers |
-| INT64 | Int64Vector | 64-bit signed |
-| FLOAT | Float32Vector | IEEE 754 single |
-| DOUBLE | Float64Vector | IEEE 754 double |
-| BYTE_ARRAY (UTF8) | StringVector | Var-length strings |
-| DATE | Date32Vector | Days since epoch |
-| TIMESTAMP (microseconds) | TimestampVector | Microsecond precision |
-| INTERVAL | IntervalVector | Year-month-day |
-| LIST | ArrayVector | Homogeneous arrays |
-| STRUCT | VectorVector | Heterogeneous nested |
-
-## Building from Source
-
-Rugo is part of the opteryx-core repo and is built via the parent project — it is not separately publishable.
+Use the top-level build:
 
 ```bash
-git clone https://github.com/joocer/opteryx.git
-cd opteryx
 make compile
-make q
 ```
 
-## Architecture
+For a faster incremental rebuild:
 
-Rugo is organized in layers:
+```bash
+make c
+```
+
+The repository requires Python 3.13 for supported local builds.
+
+## Python Entry Points
+
+The low-level modules are exposed through `rugo.parquet_reader` and `rugo._jsonl`.
+
+```python
+from rugo.parquet_reader import read_metadata
+from rugo.parquet_reader import read_parquet
+
+metadata = read_metadata("testdata/planets/planets.parquet")
+columns = read_parquet(open("testdata/planets/planets.parquet", "rb").read())
+```
+
+JSONL:
+
+```python
+from rugo._jsonl import read_jsonl
+
+result = read_jsonl(
+    "testdata/example.jsonl",
+    columns=["id", "name"],
+    use_threads=True,
+)
+```
+
+`read_jsonl(...)` returns a result dictionary containing success state, column names, row count, vectors, and inferred schema.
+
+## Parquet API Surface
+
+Current public functions in `rugo.parquet_reader` include:
+
+| Function | Purpose |
+|----------|---------|
+| `read_metadata(path)` | Read Parquet metadata from a file path |
+| `read_metadata_from_bytes(data)` | Read metadata from a bytes object |
+| `read_metadata_from_memoryview(mv)` | Read metadata from a memoryview |
+| `can_decode(path)` | Quick compatibility check for the current decoder |
+| `can_decode_from_memory(data)` | Compatibility check for an in-memory buffer |
+| `test_bloom_filter(path, bloom_offset, bloom_length, value)` | Evaluate a column bloom filter |
+| `read_parquet(data, column_names=None)` | Decode selected columns from an in-memory Parquet buffer |
+
+See `rugo/src/README.md` for the current supported subset and limitations.
+
+## Supported Parquet Decode Subset
+
+The active decode path targets flat primitive columns:
+
+| Area | Current support |
+|------|-----------------|
+| Physical types | `int32`, `int64`, `float32`, `float64`, `boolean`, `byte_array` |
+| Compression | `UNCOMPRESSED`, `SNAPPY`, `ZSTD` |
+| Encodings | `PLAIN`, dictionary pages, `DELTA_BINARY_PACKED`, `DELTA_BYTE_ARRAY` |
+| Input | In-memory `bytes`/`memoryview`, with column selection |
+
+This is intentionally narrower than the Parquet metadata reader.
+
+## Source Layout
 
 ```
 rugo/
-├── parquet/          - Parquet metadata + column decoder
-│   ├── decode.cpp    - Column decoding logic
-│   ├── metadata.cpp  - Metadata extraction
-│   └── vendor/       - zstd, lz4, snappy
-├── jsonl/            - JSONL reader (C++ wrapper)
-├── _jsonl/           - Pure C++ JSONL implementation
-└── converters/       - Schema conversion (Parquet → Orso)
+├── __init__.py
+├── _jsonl/                  # Import package for the compiled JSONL extension
+├── converters/              # Schema and format conversion helpers
+└── src/
+    ├── parquet/             # Parquet metadata, decoding, compression, bloom filters
+    ├── jsonl/               # JSONL reader bindings
+    ├── _jsonl/              # C++ JSONL implementation
+    ├── parquet/vendor/      # Vendored compression dependencies
+    └── parquet_spec/        # Vendored Apache Parquet format specification
 ```
 
-**Key design:** Pure C++ hot path, minimal Python involvement
+## Notes
 
-## Compatibility
-
-- **Parquet format**: Fully compatible with Parquet 1.0+
-- **Interoperability**: Output is native Draken vectors (Arrow C Data Interface available)
-- **Platforms**: Linux (x86_64, ARM64), macOS (ARM64), Windows
-
-## License
-
-Apache License 2.0 — See LICENSE file
-
-## Contributing
-
-Contributions welcome! Please see CONTRIBUTING.md
+- Rugo is internal engine infrastructure; prefer querying through `opteryx.session()` unless you are working on scan, metadata, or I/O internals.
+- `can_decode(...)` is a quick compatibility signal, not a guarantee that every selected column will decode successfully.
+- On partial decode failure, a selected column may be returned as `None`.

@@ -1,11 +1,30 @@
 # Draken
 
-Draken is a zero-dependency columnar vector library. It is the execution substrate for Opteryx — all
-columnar data in the query engine is represented as `DrakenVector`.
+Draken is the native columnar vector substrate for Opteryx Core. Columnar data in the query engine is represented as `DrakenVector` across Python, Cython, and C++ boundaries.
 
 The native implementation lives in `draken_native.cpp` (nanobind) and the core C++ structs in
 `core/buffers.h`. This document covers the Python-facing interface. If there is any conflict between
 this file and `core/buffers.h`, the header is authoritative.
+
+## Build
+
+Draken is built as part of the top-level extension build:
+
+```bash
+make compile
+```
+
+To build only Draken extensions while isolating from broader Opteryx Cython breakage:
+
+```bash
+make draken
+```
+
+Run Draken tests with:
+
+```bash
+make dt
+```
 
 ---
 

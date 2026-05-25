@@ -18,7 +18,8 @@ It mirrors the structure of `tests/performance/job/`.
 ```
 tests/performance/h2o/
 ├── generate_data.py   # one-time synthetic data generator (no R required)
-├── run.py             # runner — invoked by `make h2o`
+├── runner.py          # benchmark + comparison front-end invoked by `make h2o`
+├── run.py             # lower-level Opteryx runner
 ├── queries/           # 10 groupby (g1..g10) + 5 join (j1..j5) .sql files
 └── results/           # per-run CSV: <git-sha>-<timestamp>.csv
 ```
@@ -82,10 +83,10 @@ big     : id1..id3 INT,   id4..id6 VARCHAR, v2 DOUBLE   (N rows)
 
 ```bash
 make h2o                                    # both workloads, small size, 2 runs each
-python tests/performance/h2o/run.py \
+python tests/performance/h2o/runner.py \
     --workload groupby --size medium        # just groupby, on the 5GB fixture
-python tests/performance/h2o/run.py \
-    --filter '^g1$' --runs 5                # iterate on g1
+python tests/performance/h2o/runner.py \
+    --filter '^g1$' --iterations 5          # iterate on g1
 ```
 
 Each query runs **twice** by default (cold + warm), per the upstream H2O

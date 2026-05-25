@@ -1,6 +1,6 @@
 # Expression Module
 
-The `expression` module handles all aspects of SQL expression evaluation in Opteryx, from parsing and binding to execution and optimization.
+The `expression` module handles SQL expression evaluation after parsing and binding. It contains the dispatch layer for literals, column references, functions, operators, casts, predicates, and Draken-vector execution.
 
 ## Overview
 
@@ -38,10 +38,19 @@ expression/
 │   │   └── type_coercion.py        # Type conversion utilities
 │   └── ops.py                      # (LEGACY - to be deprecated)
 │
-├── Evaluation Engines
+├── Evaluation Engine
 │   └── evaluator/
-│       ├── draken.py               # Draken vector evaluation engine
-│       └── function_execution.py   # Function kernel dispatch
+│       ├── _impl.pyx               # Compiled evaluator entry points
+│       ├── evaluation.pyx          # Bytecode/evaluation orchestration
+│       ├── arithmetic.pyx          # Arithmetic kernels
+│       ├── arithmetic_dispatch.pyx # Arithmetic dispatch helpers
+│       ├── comparisons.pyx         # Comparison kernels
+│       ├── string_ops.pyx          # String expression kernels
+│       ├── temporal_ops.pyx        # Temporal expression kernels
+│       ├── json_ops.pyx            # JSON expression kernels
+│       ├── case_eval.pyx           # CASE expression handling
+│       ├── type_coercion.pyx       # Coercion helpers
+│       └── function_execution.pyx  # Function kernel dispatch
 │
 ├── Metadata & Catalogs
 │   ├── operator_catalog.py         # Operator definitions and metadata
@@ -103,10 +112,10 @@ Returns a boolean array for filtering rows, with proper null semantics (tri-stat
 
 ### Evaluation Engines
 
-**Draken Engine** (`evaluator/draken.py`)
-- Evaluates expressions using Draken vectors (compiled vector types)
-- ~1415 lines; candidates for further modularization by operation type
-- 39 functions handling all operation types
+**Compiled Evaluator** (`evaluator/`)
+- Evaluates expressions using compiled Cython/C++ paths and Draken vectors
+- Splits arithmetic, comparison, string, temporal, JSON, CASE, coercion, and function execution into separate modules
+- Uses bytecode/evaluation helpers for the hot path rather than a Python tree walk
 
 **Function Execution** (`evaluator/function_execution.py`)
 - Kernel dispatch: maps FunctionDefinition to callable
@@ -156,7 +165,7 @@ FunctionCatalog.resolve(name, arg_nodes, context)
     ↓
 Evaluator.apply_bounded_function()
     ├─ Get kernel from KernelSpec
-    ├─ Coerce parameters for kernel engine (arrow/draken/numpy)
+    ├─ Coerce parameters for the selected kernel engine
     ├─ Call kernel
     └─ Apply null policy
     ↓
@@ -194,7 +203,7 @@ Result vector
 1. **Constant Encoding** - All-same-value vectors skip comparisons
 2. **Dictionary Encoding** - String vectors use dictionary indices instead of full strings
 3. **Null Compression** - Remove nulls before operation, restore after (for non-null-sensitive ops)
-4. **Draken Vectors** - Native vector types avoid PyArrow overhead
+4. **Draken Vectors** - Native vector types keep hot paths out of PyArrow/Python object loops
 
 ### Telemetry
 
@@ -210,7 +219,7 @@ To add a new filter operation (e.g., `NewOp`):
 
 1. **Choose category** - Create in appropriate module or new one
 2. **Implement handler** - Add function in that module
-3. **Add dispatcher** - Add case in `_inner_filter_operations()`
+3. **Add dispatcher** - Add the case in the operations dispatcher
 4. **Update metadata** - Add to `_SKIP_COMPRESSION_OPS` if needed
 5. **Test** - Add test in appropriate test file
 
@@ -226,25 +235,11 @@ if operator == "MyNewOp":
     return comparisons.my_new_operation(arr, value, dict_candidate)
 ```
 
-## Known Issues & TODOs
+## Current Maintenance Notes
 
-### Debt to Address
-
-1. **`ops.py`** - Legacy file, superseded by `operations/` package. Can be deprecated once all imports updated.
-
-2. **`evaluator/draken.py`** (1415 lines) - Can be split by operation category similar to operations package:
-   - `arithmetic.py` - +, -, *, /, %, etc.
-   - `comparisons.py` - ==, !=, <, >, etc.
-   - `string_ops.py` - concat, substring, regex
-   - `temporal_ops.py` - date_add, extract
-   - `array_ops.py` - array element access, aggregates
-
-3. **`__init__.py`** (845 lines) - Extract:
-   - `node_types.py` - NodeType enum
-   - `evaluator.py` - Main evaluate() dispatch
-   - `evaluation_strategies.py` - Constant vector, type coercion logic
-
-4. **Null Handling** - Duplicated logic across fastpath modules. Consider unified `null_semantics.py` module.
+1. **`ops.py`** - Legacy import paths may still exist in older code or generated artefacts; new predicate work should use `operations/`.
+2. **Null handling** - Fastpath modules still carry some duplicated null semantics; keep behavior aligned with SQL tri-state logic.
+3. **Generated C/C++ files** - Many `.c`/`.cpp` files are Cython outputs. Edit the `.pyx` sources unless you are intentionally inspecting generated code.
 
 ## Related Modules
 
@@ -252,4 +247,4 @@ if operator == "MyNewOp":
 - **`planner/binder/`** - Binds columns to schema types
 - **`operators/`** - Physical operators that use evaluated expressions
 - **`models/`** - LogicalColumn, Node, and schema types
-- **`compiled/draken/`** - Draken vector engine (used by evaluator)
+- **`draken/`** - Native vector substrate used by the evaluator
