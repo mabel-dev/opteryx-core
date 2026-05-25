@@ -34,10 +34,6 @@ from libcpp.vector cimport vector
 from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenType, DrakenVector
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.vector cimport Vector, NULL_HASH, mix_hash
-
-cdef extern from "core/alloc.h" nogil:
-    void* draken_malloc(size_t n)
-    void  draken_free(void* ptr)
 include "_key_store.pxi"
 include "_collectors_base.pxi"
 include "_collectors_numeric.pxi"

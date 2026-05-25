@@ -523,6 +523,7 @@ include_dirs = [
     "third_party/bshoshany",
     "third_party/moodycamel",
     "third_party/boost_math",  # E.3: vendored boost::math headers (round via 2^52 trick)
+    "third_party/utf8h",       # E.26: sheredom/utf8.h single-header UTF-8 library
     "third_party/mimalloc/include",  # draken/core/alloc.h requires mimalloc globally
 ]
 
@@ -659,27 +660,9 @@ _shim_bridge_link_args = (
 )
 
 _shim_extensions = [
-    make_draken_extension("vectors.vector",        "vectors/_vector_shim.pyx"),
-    make_draken_extension("vectors.bool_vector",   "vectors/_bool_vector_shim.pyx"),
-    make_draken_extension("vectors.integer64_vector", "vectors/_integer64_vector_shim.pyx"),
-    make_draken_extension("vectors.float64_vector",   "vectors/_float64_vector_shim.pyx"),
-    make_draken_extension("vectors.float32_vector",   "vectors/_float32_vector_shim.pyx"),
-    make_draken_extension("vectors.integer8_vector",  "vectors/_integer8_vector_shim.pyx"),
-    make_draken_extension("vectors.integer16_vector", "vectors/_integer16_vector_shim.pyx"),
-    make_draken_extension("vectors.integer32_vector", "vectors/_integer32_vector_shim.pyx"),
-    make_draken_extension("vectors.string_vector",    "vectors/_string_vector_shim.pyx"),
-    make_draken_extension("vectors.array_vector",     "vectors/_array_vector_shim.pyx"),
-    make_draken_extension("vectors.decimal_vector",   "vectors/_decimal_vector_shim.pyx"),
-    make_draken_extension("vectors.date32_vector",    "vectors/_date32_vector_shim.pyx"),
-    make_draken_extension("vectors.timestamp_vector", "vectors/_timestamp_vector_shim.pyx"),
-    make_draken_extension("vectors.time_vector",      "vectors/_time_vector_shim.pyx"),
-    make_draken_extension("vectors.interval_vector",  "vectors/_interval_vector_shim.pyx"),
-    make_draken_extension("vectors.arithmetic_kernels", "vectors/_arithmetic_kernels_shim.pyx"),
-    make_draken_extension("vectors.null_vector",      "vectors/_null_vector_shim.pyx"),
-    make_draken_extension("vectors.vector_vector",    "vectors/_vector_vector_shim.pyx"),
-    make_draken_extension("morsels.morsel",           "morsels/_morsel_shim.pyx"),
-    make_draken_extension("morsels.align",            "morsels/_align_shim.pyx"),
-    make_draken_extension("interop.vector_sequence",  "interop/_vector_sequence_shim.pyx"),
+    make_draken_extension("vectors.vector",      "vectors/_vector_shim.pyx"),
+    make_draken_extension("vectors.bool_vector", "vectors/_bool_vector_shim.pyx"),
+    make_draken_extension("morsels.morsel",      "morsels/_morsel_shim.pyx"),
 ]
 # Append shim bridge link args to each shim extension
 for _ext in _shim_extensions:
@@ -892,6 +875,7 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=parquet_link_args + LD_EXTRA,
+        extra_objects=[MIMALLOC_OBJ],
     ),
     Extension(
         "rugo.jsonl",
@@ -1240,14 +1224,6 @@ extensions = [
     # (c_hash, _resolve_columns_to_indices) that is deferred to E.21b.
     # Full implementation:
     # Extension("opteryx.compiled.morsel_ops.distinct", sources=[...]),
-    # E.24 stub: importable, raises NotImplementedError when called.
-    Extension(
-        "opteryx.compiled.morsel_ops.distinct",
-        sources=["opteryx/compiled/morsel_ops/distinct_stub.pyx"],
-        include_dirs=include_dirs,
-        language="c",
-        extra_compile_args=C_FLAGS,
-    ),
     Extension(
         "opteryx.compiled.morsel_ops.sort",
         sources=[
@@ -1980,6 +1956,37 @@ extensions.append(
     )
 )
 
+# E.26 C′: UTF-8 cluster pilot — vector_lowercase with per-type dispatch.
+#
+# VARCHAR: ASCII-only fold via simd_to_lower (non-ASCII bytes unchanged).
+# NVARCHAR: Unicode codepoint fold via utf8.h utf8lwr (length-preserving).
+# VARBINARY: raises ValueError (case ops on opaque bytes unsupported).
+# Replaces (partially): vector_lowercase.pyx — old .pyx kept until all five
+# cluster files are ported; see cleanup ticket.
+extensions.append(
+    Extension(
+        "opteryx.compiled.nanobind.vector_string_case",
+        sources=[
+            "opteryx/compiled/nanobind/vector_string_case.cpp",
+            "src/cpp/simd_string_ops.cpp",
+            "src/cpp/cpu_features.cpp",
+            "draken/core/vector_alloc.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs
+        + [
+            MIMALLOC_INCLUDE,
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+    )
+)
+
 extensions.append(
     Extension(
         "opteryx.compiled.io.disk_reader",
@@ -2244,6 +2251,7 @@ setup(
         # operator consumer files remain red (pre-E.24 rewrite debt).
         (
             [e for e in extensions if e.name.startswith("draken.")
+             or e.name == "rugo.parquet_reader"
              or e.name.startswith("opteryx.compiled.nanobind.")
              or e.name.startswith("opteryx.expression.evaluator.")]
             if os.environ.get("DRAKEN_BUILD")

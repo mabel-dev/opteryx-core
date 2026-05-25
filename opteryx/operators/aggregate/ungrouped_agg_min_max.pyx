@@ -30,7 +30,7 @@ cdef class MinInt64Aggregate(UngroupedAggregate):
         # Delegates to Vector.min() which dispatches by encoding (dense via
         # C++ kernel, dict / RLE / const via dedicated helpers).
         cdef Morsel typed = <Morsel>morsel
-        if typed is None or typed.num_rows == 0:
+        if typed.ptr is NULL or typed.ptr.num_rows == 0:
             return
 
         if self._col_idx < 0:
@@ -101,7 +101,7 @@ cdef class MaxInt64Aggregate(UngroupedAggregate):
 
     cdef void apply(self, Morsel morsel) except *:
         cdef Morsel typed = <Morsel>morsel
-        if typed is None or typed.num_rows == 0:
+        if typed.ptr is NULL or typed.ptr.num_rows == 0:
             return
 
         if self._col_idx < 0:
@@ -171,7 +171,7 @@ cdef class MinFloat64Aggregate(UngroupedAggregate):
 
     cdef void apply(self, Morsel morsel) except *:
         cdef Morsel typed = <Morsel>morsel
-        if typed is None or typed.num_rows == 0:
+        if typed.ptr is NULL or typed.ptr.num_rows == 0:
             return
 
         if self._col_idx < 0:
@@ -235,7 +235,7 @@ cdef class MaxFloat64Aggregate(UngroupedAggregate):
 
     cdef void apply(self, Morsel morsel) except *:
         cdef Morsel typed = <Morsel>morsel
-        if typed is None or typed.num_rows == 0:
+        if typed.ptr is NULL or typed.ptr.num_rows == 0:
             return
 
         if self._col_idx < 0:
@@ -297,7 +297,7 @@ cdef class MinBytesAggregate(UngroupedAggregate):
 
     cdef void apply(self, Morsel morsel) except *:
         cdef Morsel typed    = <Morsel>morsel
-        cdef Py_ssize_t nrows = <Py_ssize_t>typed.num_rows
+        cdef Py_ssize_t nrows = <Py_ssize_t>typed.ptr.num_rows
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
@@ -372,7 +372,7 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
 
     cdef void apply(self, Morsel morsel) except *:
         cdef Morsel typed    = <Morsel>morsel
-        cdef Py_ssize_t nrows = <Py_ssize_t>typed.num_rows
+        cdef Py_ssize_t nrows = <Py_ssize_t>typed.ptr.num_rows
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)

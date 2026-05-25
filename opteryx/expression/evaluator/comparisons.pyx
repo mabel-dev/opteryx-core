@@ -29,16 +29,7 @@ from opteryx.compiled.vector_ops import (
     vector_like,
     vector_rlike,
 )
-from opteryx.compiled.nanobind.vector_misc import vector_in_list as _raw_vector_in_list
-from draken.vectors.vector import Vector as _DrakenVectorBase
-from draken.vectors.bool_vector import BoolVector as _BoolVectorShimCls
-
-def _vector_in_list(vec, literals, negate=False):
-    nb_vec = vec._nb if isinstance(vec, _DrakenVectorBase) else vec
-    result = _raw_vector_in_list(nb_vec, literals, negate)
-    if not isinstance(result, _BoolVectorShimCls):
-        result = _BoolVectorShimCls(result)
-    return result
+from opteryx.compiled.nanobind.vector_misc import vector_in_list
 from opteryx.types import OrsoTypes
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 # Note: _json_at_arrow, _json_array_contains_all, _json_at_question,
@@ -91,7 +82,7 @@ cdef _int64_compare(int op_code, vec, right):
 
     if isinstance(right, (list, tuple, set, frozenset)):
         if op_code == OP_IN_LIST:
-            return _vector_in_list(vec, right)
+            return vector_in_list(vec, right)
         raise NotImplementedError(f"Integer64Vector: set op (code {op_code}) not supported")
 
     draken_op = _DRAKEN_CMP_OP[op_code]
@@ -126,7 +117,7 @@ cdef _float64_compare(int op_code, vec, right):
 
     if isinstance(right, (list, tuple, set, frozenset)):
         if op_code == OP_IN_LIST:
-            return _vector_in_list(vec, right)
+            return vector_in_list(vec, right)
         raise NotImplementedError(f"Float64Vector: set op (code {op_code}) not supported")
 
     draken_op = _DRAKEN_CMP_OP[op_code]
@@ -173,7 +164,7 @@ cdef _decimal_compare(int op_code, vec, right):
 
 cdef _bool_compare(int op_code, left, right):
     if op_code == OP_IN_LIST:
-        return _vector_in_list(left, right)
+        return vector_in_list(left, right)
     return left._compare_scalar(bool(right), _DRAKEN_CMP_OP[op_code])
 
 
@@ -209,7 +200,7 @@ cdef draken_compare_int(int op_code, left, right, left_schema_type=None, right_s
 
     if op_code == OP_IN_LIST:
         if isinstance(right, (list, tuple, set, frozenset)):
-            result = _vector_in_list(left, right, negate)
+            result = vector_in_list(left, right, negate)
             return result
 
     if is_scalar(left) and is_draken_vector(right):
@@ -301,7 +292,7 @@ cpdef draken_compare(str op, left, right, left_schema_type=None, right_schema_ty
 
     if op == "InList":
         if isinstance(right, (list, tuple, set, frozenset)):
-            return _vector_in_list(left, right, negate)
+            return vector_in_list(left, right, negate)
 
     if is_scalar(left) and is_draken_vector(right):
         flip_ops = {"Gt": "Lt", "Lt": "Gt", "GtEq": "LtEq", "LtEq": "GtEq"}

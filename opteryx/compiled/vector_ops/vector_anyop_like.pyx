@@ -9,25 +9,18 @@
 # cython: optimize.unpack_method_calls=True
 
 from libc.stddef cimport size_t
-from libc.stdint cimport int32_t, uint8_t
+from libc.stdint cimport uint8_t
 from libc.string cimport memset, memcpy
+from libc.stdlib cimport malloc
 from cpython.bytes cimport PyBytes_AsStringAndSize, PyBytes_FromStringAndSize
-from cpython.object cimport PyObject
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
-from draken.core.buffers cimport DRAKEN_VARCHAR, DrakenVector
-from draken.core.buffers cimport DrakenStringArena, DrakenStringSlot, str_length, str_data
+from draken.core.buffers cimport DRAKEN_VARCHAR, DrakenArrayBuffer, DrakenVarBuffer
+from draken.core.buffers cimport DrakenStringArena, DrakenStringSlot, str_length, str_data, DrakenVector
 from draken.vectors.array_vector cimport ArrayVector
-from draken.vectors.bool_vector cimport BoolVector, from_decoded
+from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.string_vector cimport StringVector
-
-cdef extern from "core/draken_bridge.h":
-    const DrakenVector* draken_array_child_unwrap(PyObject* obj)
-
-cdef extern from "core/alloc.h":
-    void* draken_malloc(size_t size) nogil
-    void draken_free(void* ptr) nogil
 
 
 cdef extern from "re2/stringpiece.h":
@@ -68,14 +61,15 @@ cdef BoolVector _regex_match_any_literal(ArrayVector arr, object patterns, int f
     """
     from opteryx.utils.sql import sql_like_to_regex
 
-    cdef DrakenVector* arr_uv = arr.unified()
-    cdef int32_t* arr_offsets = <int32_t*>arr_uv.data
-    cdef const DrakenVector* child_dv = draken_array_child_unwrap(<PyObject*>arr._nb)
+    cdef StringVector child
+    cdef DrakenArrayBuffer* aptr = arr.ptr
+    cdef DrakenVector* child_uv
     cdef DrakenStringArena* child_arena
     cdef object pattern_src, p, p_str, regex_text
     cdef Py_ssize_t i, j, k, n, nbytes, row_start, row_end, text_len
     cdef uint32_t slen
     cdef const uint8_t* sptr
+    cdef BoolVector out
     cdef uint8_t* dst
     cdef uint8_t* out_null = NULL
     cdef uint8_t* row_nulls
@@ -91,9 +85,15 @@ cdef BoolVector _regex_match_any_literal(ArrayVector arr, object patterns, int f
     cdef RE2OptionsAny options
     cdef vector[RE2Any*] compiled_patterns
 
-    if child_dv == NULL or child_dv.type != DRAKEN_VARCHAR:
-        raise TypeError("regex_match_any expects ArrayVector with string child")
-    child_arena = <DrakenStringArena*>child_dv.data
+    if aptr == NULL:
+        raise ValueError("ArrayVector is not initialized")
+    if aptr.value_type != DRAKEN_VARCHAR or not isinstance(arr._child, StringVector):
+        raise TypeError("regex_match_any expects ArrayVector with StringVector child")
+    child = <StringVector>arr._child
+    child_uv = child.unified()
+    if child_uv == NULL:
+        raise ValueError("ArrayVector child StringVector is not initialized")
+    child_arena = <DrakenStringArena*>child_uv.data
 
     options = RE2OptionsAny()
     options.set_case_sensitive(not ignore_case)
@@ -101,14 +101,13 @@ cdef BoolVector _regex_match_any_literal(ArrayVector arr, object patterns, int f
 
     try:
         if patterns is None:
-            n = <Py_ssize_t>arr_uv.length
+            n = <Py_ssize_t>aptr.length
             nbytes = (n + 7) >> 3
-            dst = <uint8_t*>draken_malloc(<size_t>(nbytes if nbytes > 0 else 1))
-            if dst == NULL:
-                raise MemoryError()
+            out = BoolVector(<size_t>n)
+            dst = <uint8_t*>out.ptr.data
             if nbytes != 0:
                 memset(dst, 0, nbytes)
-            return from_decoded(<void*>dst, NULL, <size_t>n)
+            return out
 
         if isinstance(patterns, (str, bytes)):
             patterns = [patterns]
@@ -126,33 +125,35 @@ cdef BoolVector _regex_match_any_literal(ArrayVector arr, object patterns, int f
                 raise ValueError("Invalid LIKE pattern")
             compiled_patterns.push_back(regex)
 
-        n = <Py_ssize_t>arr_uv.length
+        n = <Py_ssize_t>aptr.length
         nbytes = (n + 7) >> 3
-        dst = <uint8_t*>draken_malloc(<size_t>(nbytes if nbytes > 0 else 1))
-        if dst == NULL:
-            raise MemoryError()
+        out = BoolVector(<size_t>n)
+        dst = <uint8_t*>out.ptr.data
         if nbytes != 0:
             memset(dst, 0, nbytes)
 
-        row_nulls = arr_uv.validity
-        child_nulls = child_dv.validity
+        row_nulls = aptr.null_bitmap
+        child_nulls = child_uv.validity
 
         if row_nulls != NULL and nbytes != 0:
-            out_null = <uint8_t*>draken_malloc(<size_t>nbytes)
+            out_null = <uint8_t*>malloc(nbytes)
             if out_null == NULL:
                 raise MemoryError()
             memcpy(out_null, row_nulls, nbytes)
             if (n & 7) != 0:
                 mask = <uint8_t>((1 << (n & 7)) - 1)
                 out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
 
         for i in range(n):
             if row_nulls != NULL and ((row_nulls[i >> 3] >> (i & 7)) & 1) == 0:
                 continue
 
             matched = False
-            row_start = arr_offsets[i]
-            row_end = arr_offsets[i + 1]
+            row_start = aptr.offsets[i]
+            row_end = aptr.offsets[i + 1]
 
             for j in range(row_start, row_end):
                 if child_nulls != NULL and ((child_nulls[j >> 3] >> (j & 7)) & 1) == 0:
@@ -174,7 +175,7 @@ cdef BoolVector _regex_match_any_literal(ArrayVector arr, object patterns, int f
                 matched = not matched
             if matched:
                 dst[i >> 3] |= (<uint8_t>1 << (i & 7))
-        return from_decoded(<void*>dst, out_null, <size_t>n)
+        return out
     finally:
         _release_regex_vector(compiled_patterns)
 
@@ -186,12 +187,12 @@ cdef BoolVector _regex_match_any_array_array(ArrayVector arr, ArrayVector patter
     """
     from opteryx.utils.sql import sql_like_to_regex
 
-    cdef DrakenVector* arr_uv = arr.unified()
-    cdef int32_t* arr_offsets = <int32_t*>arr_uv.data
-    cdef const DrakenVector* child_dv = draken_array_child_unwrap(<PyObject*>arr._nb)
-    cdef DrakenVector* pat_uv = patterns.unified()
-    cdef int32_t* pat_offsets = <int32_t*>pat_uv.data
-    cdef const DrakenVector* p_child_dv = draken_array_child_unwrap(<PyObject*>patterns._nb)
+    cdef DrakenArrayBuffer* aptr = arr.ptr
+    cdef DrakenArrayBuffer* p_aptr = patterns.ptr
+    cdef StringVector child
+    cdef StringVector p_child
+    cdef DrakenVector* child_uv
+    cdef DrakenVector* p_child_uv
     cdef DrakenStringArena* child_arena
     cdef DrakenStringArena* p_child_arena
     cdef Py_ssize_t i, j, pj, k, n, nbytes
@@ -200,6 +201,7 @@ cdef BoolVector _regex_match_any_array_array(ArrayVector arr, ArrayVector patter
     cdef const uint8_t* sptr
     cdef const uint8_t* p_sptr
     cdef Py_ssize_t text_len, pat_text_len
+    cdef BoolVector out
     cdef uint8_t* dst
     cdef uint8_t* out_null = NULL
     cdef uint8_t* row_nulls
@@ -219,38 +221,48 @@ cdef BoolVector _regex_match_any_array_array(ArrayVector arr, ArrayVector patter
     cdef StringPieceAny text_piece
     cdef vector[RE2Any*] row_patterns
 
-    if child_dv == NULL or child_dv.type != DRAKEN_VARCHAR:
-        raise TypeError("_regex_match_any_array_array expects arr ArrayVector with string child")
-    if p_child_dv == NULL or p_child_dv.type != DRAKEN_VARCHAR:
-        raise TypeError("_regex_match_any_array_array expects patterns ArrayVector with string child")
-    if arr_uv.length != pat_uv.length:
+    if aptr == NULL or p_aptr == NULL:
+        raise ValueError("ArrayVector is not initialized")
+    if aptr.length != p_aptr.length:
         raise ValueError("array and pattern vectors must have the same length")
+    if aptr.value_type != DRAKEN_VARCHAR or not isinstance(arr._child, StringVector):
+        raise TypeError("_regex_match_any_array_array expects array ArrayVector with StringVector child")
+    if p_aptr.value_type != DRAKEN_VARCHAR or not isinstance(patterns._child, StringVector):
+        raise TypeError("_regex_match_any_array_array expects patterns ArrayVector with StringVector child")
 
-    child_arena = <DrakenStringArena*>child_dv.data
-    p_child_arena = <DrakenStringArena*>p_child_dv.data
+    child = <StringVector>arr._child
+    p_child = <StringVector>patterns._child
+    child_uv = child.unified()
+    p_child_uv = p_child.unified()
+    if child_uv == NULL or p_child_uv == NULL:
+        raise ValueError("ArrayVector child StringVector is not initialized")
+    child_arena = <DrakenStringArena*>child_uv.data
+    p_child_arena = <DrakenStringArena*>p_child_uv.data
+
+    n = <Py_ssize_t>aptr.length
+    nbytes = (n + 7) >> 3
+    out = BoolVector(<size_t>n)
+    dst = <uint8_t*>out.ptr.data
+    if nbytes != 0:
+        memset(dst, 0, nbytes)
+
+    row_nulls = aptr.null_bitmap
+    pattern_row_nulls = p_aptr.null_bitmap
+    child_nulls = child_uv.validity
+    p_child_nulls = p_child_uv.validity
+
+    if (row_nulls != NULL or pattern_row_nulls != NULL) and nbytes != 0:
+        out_null = <uint8_t*>malloc(nbytes)
+        if out_null == NULL:
+            raise MemoryError()
+        memset(out_null, 0, nbytes)
+        out.ptr.null_bitmap = out_null
+    else:
+        out.ptr.null_bitmap = NULL
 
     options = RE2OptionsAny()
     options.set_case_sensitive(not ignore_case)
     options.set_log_errors(False)
-
-    n = <Py_ssize_t>arr_uv.length
-    nbytes = (n + 7) >> 3
-    dst = <uint8_t*>draken_malloc(<size_t>(nbytes if nbytes > 0 else 1))
-    if dst == NULL:
-        raise MemoryError()
-    if nbytes != 0:
-        memset(dst, 0, nbytes)
-
-    row_nulls = arr_uv.validity
-    pattern_row_nulls = pat_uv.validity
-    child_nulls = child_dv.validity
-    p_child_nulls = p_child_dv.validity
-
-    if (row_nulls != NULL or pattern_row_nulls != NULL) and nbytes != 0:
-        out_null = <uint8_t*>draken_malloc(<size_t>nbytes)
-        if out_null == NULL:
-            raise MemoryError()
-        memset(out_null, 0, nbytes)
 
     try:
         for i in range(n):
@@ -261,8 +273,8 @@ cdef BoolVector _regex_match_any_array_array(ArrayVector arr, ArrayVector patter
                 out_null[i >> 3] |= (<uint8_t>1 << (i & 7))
 
             matched = False
-            p_row_start = pat_offsets[i]
-            p_row_end = pat_offsets[i + 1]
+            p_row_start = p_aptr.offsets[i]
+            p_row_end = p_aptr.offsets[i + 1]
             _release_regex_vector(row_patterns)
 
             for pj in range(p_row_start, p_row_end):
@@ -283,8 +295,8 @@ cdef BoolVector _regex_match_any_array_array(ArrayVector arr, ArrayVector patter
                     raise ValueError("Invalid LIKE pattern")
                 row_patterns.push_back(regex)
 
-            row_start = arr_offsets[i]
-            row_end = arr_offsets[i + 1]
+            row_start = aptr.offsets[i]
+            row_end = aptr.offsets[i + 1]
             for j in range(row_start, row_end):
                 if not _bit_is_set(child_nulls, j):
                     continue
@@ -307,7 +319,7 @@ cdef BoolVector _regex_match_any_array_array(ArrayVector arr, ArrayVector patter
         if out_null != NULL and (n & 7) != 0:
             mask = <uint8_t>((1 << (n & 7)) - 1)
             out_null[nbytes - 1] &= mask
-        return from_decoded(<void*>dst, out_null, <size_t>n)
+        return out
     finally:
         _release_regex_vector(row_patterns)
 
@@ -321,9 +333,9 @@ cpdef BoolVector regex_match_any(StringVector arr, ArrayVector patterns, int fla
 
     cdef DrakenVector* arr_uv = arr.unified()
     cdef DrakenStringArena* arr_arena = <DrakenStringArena*>arr_uv.data
-    cdef DrakenVector* pat_uv = patterns.unified()
-    cdef int32_t* pat_offsets = <int32_t*>pat_uv.data
-    cdef const DrakenVector* p_child_dv = draken_array_child_unwrap(<PyObject*>patterns._nb)
+    cdef DrakenArrayBuffer* p_aptr = patterns.ptr
+    cdef StringVector p_child
+    cdef DrakenVector* p_child_uv
     cdef DrakenStringArena* p_child_arena
     cdef Py_ssize_t i, pj, k, n, nbytes
     cdef Py_ssize_t p_row_start, p_row_end
@@ -331,6 +343,7 @@ cpdef BoolVector regex_match_any(StringVector arr, ArrayVector patterns, int fla
     cdef const uint8_t* sptr
     cdef const uint8_t* p_sptr
     cdef Py_ssize_t text_len, pat_text_len
+    cdef BoolVector out
     cdef uint8_t* dst
     cdef uint8_t* out_null = NULL
     cdef uint8_t* row_nulls
@@ -349,30 +362,38 @@ cpdef BoolVector regex_match_any(StringVector arr, ArrayVector patterns, int fla
     cdef StringPieceAny text_piece
     cdef vector[RE2Any*] row_patterns
 
-    if p_child_dv == NULL or p_child_dv.type != DRAKEN_VARCHAR:
-        raise TypeError("regex_match_any expects patterns ArrayVector with StringVector child")
-    if arr_uv.length != pat_uv.length:
+    if arr_uv == NULL or p_aptr == NULL:
+        raise ValueError("vector is not initialized")
+    if arr_uv.length != p_aptr.length:
         raise ValueError("array and pattern vectors must have the same length")
+    if p_aptr.value_type != DRAKEN_VARCHAR or not isinstance(patterns._child, StringVector):
+        raise TypeError("regex_match_any expects patterns ArrayVector with StringVector child")
 
-    p_child_arena = <DrakenStringArena*>p_child_dv.data
+    p_child = <StringVector>patterns._child
+    p_child_uv = p_child.unified()
+    if p_child_uv == NULL:
+        raise ValueError("patterns ArrayVector child StringVector is not initialized")
+    p_child_arena = <DrakenStringArena*>p_child_uv.data
 
     n = <Py_ssize_t>arr_uv.length
     nbytes = (n + 7) >> 3
-    dst = <uint8_t*>draken_malloc(<size_t>(nbytes if nbytes > 0 else 1))
-    if dst == NULL:
-        raise MemoryError()
+    out = BoolVector(<size_t>n)
+    dst = <uint8_t*>out.ptr.data
     if nbytes != 0:
         memset(dst, 0, nbytes)
 
     row_nulls = arr_uv.validity
-    pattern_row_nulls = pat_uv.validity
-    p_child_nulls = p_child_dv.validity
+    pattern_row_nulls = p_aptr.null_bitmap
+    p_child_nulls = p_child_uv.validity
 
     if (row_nulls != NULL or pattern_row_nulls != NULL) and nbytes != 0:
-        out_null = <uint8_t*>draken_malloc(<size_t>nbytes)
+        out_null = <uint8_t*>malloc(nbytes)
         if out_null == NULL:
             raise MemoryError()
         memset(out_null, 0, nbytes)
+        out.ptr.null_bitmap = out_null
+    else:
+        out.ptr.null_bitmap = NULL
 
     options = RE2OptionsAny()
     options.set_case_sensitive(not ignore_case)
@@ -387,8 +408,8 @@ cpdef BoolVector regex_match_any(StringVector arr, ArrayVector patterns, int fla
                 out_null[i >> 3] |= (<uint8_t>1 << (i & 7))
 
             matched = False
-            p_row_start = pat_offsets[i]
-            p_row_end = pat_offsets[i + 1]
+            p_row_start = p_aptr.offsets[i]
+            p_row_end = p_aptr.offsets[i + 1]
             _release_regex_vector(row_patterns)
 
             for pj in range(p_row_start, p_row_end):
@@ -409,8 +430,8 @@ cpdef BoolVector regex_match_any(StringVector arr, ArrayVector patterns, int fla
                     raise ValueError("Invalid LIKE pattern")
                 row_patterns.push_back(regex)
 
-            slen = str_length(&arr_arena.slots[arr_uv.selection[i]])
-            sptr = str_data(&arr_arena.slots[arr_uv.selection[i]], arr_arena.arena)
+            slen = str_length(&arr_arena.slots[i])
+            sptr = str_data(&arr_arena.slots[i], arr_arena.arena)
             text_len = <Py_ssize_t>slen
             text_piece = StringPieceAny(<const char*>sptr, <size_t>slen)
             for k in range(<Py_ssize_t>row_patterns.size()):
@@ -426,7 +447,7 @@ cpdef BoolVector regex_match_any(StringVector arr, ArrayVector patterns, int fla
         if out_null != NULL and (n & 7) != 0:
             mask = <uint8_t>((1 << (n & 7)) - 1)
             out_null[nbytes - 1] &= mask
-        return from_decoded(<void*>dst, out_null, <size_t>n)
+        return out
     finally:
         _release_regex_vector(row_patterns)
 

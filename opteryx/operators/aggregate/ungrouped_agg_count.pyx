@@ -22,7 +22,7 @@ cdef class CountStarAggregate(UngroupedAggregate):
         self._count      = 0
 
     cdef void apply(self, Morsel morsel) except *:
-        self._count += <int64_t>(<Morsel>morsel).num_rows
+        self._count += <int64_t>(<Morsel>morsel).ptr.num_rows
 
     cdef int64_t get_result_i64(self) noexcept:
         return self._count
@@ -52,7 +52,7 @@ cdef class CountAggregate(UngroupedAggregate):
 
     cdef void apply(self, Morsel morsel) except *:
         cdef Morsel typed    = <Morsel>morsel
-        cdef Py_ssize_t nrows = <Py_ssize_t>typed.num_rows
+        cdef Py_ssize_t nrows = <Py_ssize_t>typed.ptr.num_rows
 
         # Cached column index — list[i] on subsequent morsels, no dict hash
         if self._col_idx < 0:

@@ -21,35 +21,18 @@ from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenType,
 from draken.core.buffers cimport DrakenStringArena, DrakenStringSlot
 from draken.core.buffers cimport str_length, str_data
 from draken.core.buffers cimport STR_INLINE_MAX
-from draken.core.buffers cimport str_init_null, str_init_inline, str_init_extern, draken_build_string_slot
+from draken.core.buffers cimport str_init_null, str_init_inline, str_init_extern
 from draken.core.buffers cimport DRAKEN_INT64
 from draken.core.buffers cimport DRAKEN_STRING
 from draken.core.buffers cimport draken_vector_from_dense
 from draken.core.fixed_vector cimport alloc_fixed_buffer, free_fixed_buffer
 from draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
+from draken.core.string_arena cimport alloc_string_arena
 from draken.vectors.vector cimport Vector
 from draken.vectors.integer64_vector cimport Integer64Vector
-from draken.vectors.integer64_vector cimport from_decoded as int64_from_decoded
 from draken.vectors.float64_vector cimport Float64Vector
 from draken.vectors.string_vector cimport StringVector
 from draken.vectors.bool_vector cimport BoolVector
-
-from cpython.object cimport PyObject
-
-cdef extern from "core/draken_bridge.h":
-    const DrakenVector* draken_vector_unwrap(PyObject* obj) nogil
-    PyObject* draken_vector_own_string(
-        DrakenStringSlot* slots,
-        uint8_t*          arena_bytes,
-        size_t            arena_len,
-        uint8_t*          validity,
-        uint32_t          length,
-        DrakenType        dtype,
-    )
-
-cdef extern from *:
-    """static inline void _ks_shim_decref(PyObject* op) { Py_DECREF(op); }"""
-    void _ks_shim_decref(PyObject* op)
 
 
 # ---------------------------------------------------------------------------
@@ -88,46 +71,29 @@ cdef inline bint _ks_bitmap_is_valid(uint8_t* bitmap, Py_ssize_t index) noexcept
 # ---------------------------------------------------------------------------
 
 cdef StringVector _wrap_string_buffer(DrakenVarBuffer* buf) except *:
+    cdef StringVector vec = StringVector(0, 0, True)
+    cdef DrakenStringArena* arena
     cdef Py_ssize_t i, off, slen, total_extern_bytes = 0
     cdef Py_ssize_t row_count = <Py_ssize_t>buf.length
     cdef const uint8_t* src_data = <const uint8_t*>buf.data
     cdef const int32_t* src_offsets = buf.offsets
     cdef uint8_t* src_nulls = buf.null_bitmap
     cdef DrakenStringSlot* slots
-    cdef uint8_t* arena_bytes = NULL
-    cdef uint8_t* validity = NULL
+    cdef uint8_t* arena_bytes
     cdef size_t arena_used = 0
     cdef bint row_is_null
-    cdef Py_ssize_t nbytes
-    cdef PyObject* raw
 
     for i in range(row_count):
         slen = src_offsets[i + 1] - src_offsets[i]
         if slen > STR_INLINE_MAX:
             total_extern_bytes += slen
 
-    slots = <DrakenStringSlot*>draken_malloc(
-        <size_t>row_count * sizeof(DrakenStringSlot) if row_count > 0 else 1)
-    if slots == NULL:
+    arena = alloc_string_arena(DRAKEN_STRING, <size_t>row_count, <size_t>total_extern_bytes)
+    if arena == NULL:
         raise MemoryError()
-    memset(slots, 0, <size_t>row_count * sizeof(DrakenStringSlot))
 
-    if total_extern_bytes > 0:
-        arena_bytes = <uint8_t*>draken_malloc(<size_t>total_extern_bytes)
-        if arena_bytes == NULL:
-            draken_free(slots)
-            raise MemoryError()
-
-    if src_nulls != NULL:
-        nbytes = (row_count + 7) >> 3
-        validity = <uint8_t*>draken_malloc(<size_t>nbytes if nbytes > 0 else 1)
-        if validity == NULL:
-            draken_free(slots)
-            if arena_bytes != NULL:
-                draken_free(arena_bytes)
-            raise MemoryError()
-        if nbytes > 0:
-            memcpy(validity, src_nulls, <size_t>nbytes)
+    slots = arena.slots
+    arena_bytes = arena.arena
 
     for i in range(row_count):
         off = src_offsets[i]
@@ -135,22 +101,21 @@ cdef StringVector _wrap_string_buffer(DrakenVarBuffer* buf) except *:
         row_is_null = (src_nulls != NULL and ((src_nulls[i >> 3] >> (i & 7)) & 1) == 0)
         if row_is_null:
             str_init_null(&slots[i])
+        elif slen <= STR_INLINE_MAX:
+            str_init_inline(&slots[i], src_data + off, <uint32_t>slen)
         else:
-            if slen > STR_INLINE_MAX:
-                memcpy(arena_bytes + arena_used, src_data + off, <size_t>slen)
-            draken_build_string_slot(&slots[i], src_data + off, <uint32_t>slen, <uint32_t>arena_used)
-            if slen > STR_INLINE_MAX:
-                arena_used += <size_t>slen
+            memcpy(arena_bytes + arena_used, src_data + off, <size_t>slen)
+            str_init_extern(&slots[i], src_data + off, <uint32_t>slen, <uint64_t>arena_used)
+            arena_used += <size_t>slen
 
-    raw = draken_vector_own_string(slots, arena_bytes, arena_used, validity, <uint32_t>row_count, DRAKEN_STRING)
-    if raw == NULL:
-        raise MemoryError("draken_vector_own_string failed in _wrap_string_buffer")
+    arena.arena_used = arena_used
+    arena.length = <size_t>row_count
 
-    cdef StringVector result = StringVector.__new__(StringVector)
-    result._nb = <object>raw
-    _ks_shim_decref(raw)
-    result._dv = draken_vector_unwrap(raw)
-    return result
+    vec.ptr = buf
+    vec.owns_data = True
+    vec._unified_view = draken_vector_from_dense(
+        <void*>arena, <uint32_t>row_count, DRAKEN_STRING, src_nulls)
+    return vec
 
 
 cdef inline Py_ssize_t _ks_bitmap_nbytes(Py_ssize_t length) noexcept nogil:
@@ -175,28 +140,6 @@ cdef inline void _ks_bitmap_clear(uint8_t* bitmap, Py_ssize_t index) noexcept no
 
 cdef inline void _ks_bitmap_set(uint8_t* bitmap, Py_ssize_t index) noexcept nogil:
     bitmap[index >> 3] |= (1 << (index & 7))
-
-
-cdef inline Integer64Vector _ks_wrap_int64_buffer(DrakenFixedBuffer* buf) except *:
-    cdef Py_ssize_t n = <Py_ssize_t>buf.length
-    cdef void* new_data
-    cdef uint8_t* new_nulls = NULL
-    cdef Py_ssize_t nbytes
-
-    new_data = draken_malloc(<size_t>n * sizeof(int64_t) if n > 0 else 1)
-    if new_data == NULL:
-        raise MemoryError()
-    if n > 0:
-        memcpy(new_data, buf.data, <size_t>n * sizeof(int64_t))
-    if buf.null_bitmap != NULL:
-        nbytes = (n + 7) >> 3
-        new_nulls = <uint8_t*>draken_malloc(<size_t>nbytes if nbytes > 0 else 1)
-        if new_nulls == NULL:
-            draken_free(new_data)
-            raise MemoryError()
-        if nbytes > 0:
-            memcpy(new_nulls, buf.null_bitmap, <size_t>nbytes)
-    return int64_from_decoded(new_data, new_nulls, <size_t>n)
 
 
 cdef inline Py_ssize_t _ks_growth_target(Py_ssize_t current_size, Py_ssize_t required_size, Py_ssize_t minimum_size) noexcept nogil:
@@ -1002,7 +945,10 @@ cdef class KeyStore:
                     _fixed_buf.length = <size_t>self._single_fixed_rows
                     _fixed_buf.null_bitmap = self._single_fixed_nulls
 
-                    _fixed_iv = _ks_wrap_int64_buffer(_fixed_buf)
+                    _fixed_iv = Integer64Vector(0, True)
+                    _fixed_iv.ptr = _fixed_buf
+                    _fixed_iv.owns_data = True
+                    _fixed_iv._unified_view = draken_vector_from_dense(_fixed_buf.data, <uint32_t>_fixed_buf.length, DRAKEN_INT64, _fixed_buf.null_bitmap)
                     out_vecs.append(_fixed_iv)
 
                     self._single_fixed_buf = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
@@ -1036,7 +982,10 @@ cdef class KeyStore:
                     _fixed_buf.length = <size_t>self._multi_fixed_rows[storage_slot]
                     _fixed_buf.null_bitmap = self._multi_fixed_nulls[storage_slot]
 
-                    _fixed_iv = _ks_wrap_int64_buffer(_fixed_buf)
+                    _fixed_iv = Integer64Vector(0, True)
+                    _fixed_iv.ptr = _fixed_buf
+                    _fixed_iv.owns_data = True
+                    _fixed_iv._unified_view = draken_vector_from_dense(_fixed_buf.data, <uint32_t>_fixed_buf.length, DRAKEN_INT64, _fixed_buf.null_bitmap)
                     out_vecs.append(_fixed_iv)
 
                     self._multi_fixed_bufs[storage_slot] = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)

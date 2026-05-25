@@ -28,7 +28,7 @@ cdef class SumInt64Aggregate(UngroupedAggregate):
         # kernel for dense paths and encoding-specific helpers for
         # dict/RLE/const. No encoding handling duplicated here.
         cdef Morsel typed = <Morsel>morsel
-        if typed is None or typed.num_rows == 0:
+        if typed.ptr is NULL or typed.ptr.num_rows == 0:
             return
 
         if self._col_idx < 0:
@@ -94,7 +94,7 @@ cdef class SumFloat64Aggregate(UngroupedAggregate):
 
     cdef void apply(self, Morsel morsel) except *:
         cdef Morsel typed = <Morsel>morsel
-        if typed is None or typed.num_rows == 0:
+        if typed.ptr is NULL or typed.ptr.num_rows == 0:
             return
 
         if self._col_idx < 0:

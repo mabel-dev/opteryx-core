@@ -19,17 +19,10 @@ from cpython.ref cimport PyObject
 from cpython.exc cimport PyErr_Occurred, PyErr_Clear
 
 from draken.vectors.integer64_vector cimport Integer64Vector
-from draken.vectors.integer64_vector cimport from_decoded as int64_from_decoded
 from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.float64_vector cimport from_decoded as float64_from_decoded
 from draken.vectors.bool_vector cimport BoolVector
-from draken.vectors.bool_vector cimport from_decoded as bool_from_decoded
 from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
 from draken.vectors.array_vector cimport ArrayVector, from_sequence as array_from_sequence
-
-cdef extern from "core/alloc.h" nogil:
-    void* draken_malloc(size_t n)
-    void  draken_free(void* ptr)
 
 
 
@@ -358,72 +351,66 @@ cdef object _infer_array_elem_type(object first_value):
 
 
 cdef Integer64Vector _build_int64_vector(JsonlColumn* col, size_t n):
-    cdef void* raw_data = draken_malloc(n * sizeof(int64_t) if n > 0 else 1)
-    if raw_data == NULL:
-        raise MemoryError()
-    cdef int64_t* dst = <int64_t*>raw_data
+    cdef Integer64Vector vec = Integer64Vector(n)
+    cdef int64_t* dst = <int64_t*> vec.ptr.data
     cdef uint8_t* nulls = NULL
     cdef size_t j, null_bytes
     for j in range(n):
         if col.null_mask[j]:
             if nulls == NULL:
                 null_bytes = (n + 7) >> 3
-                nulls = <uint8_t*>draken_malloc(null_bytes if null_bytes > 0 else 1)
+                nulls = <uint8_t*> malloc(null_bytes)
                 if nulls == NULL:
-                    draken_free(raw_data)
                     raise MemoryError()
                 memset(nulls, 0xFF, null_bytes)
+                vec.ptr.null_bitmap = nulls
             nulls[j >> 3] &= ~(<uint8_t>1 << (j & 7))
         else:
             dst[j] = col.int_values[j]
-    return int64_from_decoded(raw_data, nulls, n)
+    return vec
 
 
 cdef Float64Vector _build_float64_vector(JsonlColumn* col, size_t n):
-    cdef void* raw_data = draken_malloc(n * sizeof(double) if n > 0 else 1)
-    if raw_data == NULL:
-        raise MemoryError()
-    cdef double* dst = <double*>raw_data
+    cdef Float64Vector vec = Float64Vector(n)
+    cdef double* dst = <double*> vec.ptr.data
     cdef uint8_t* nulls = NULL
     cdef size_t j, null_bytes
     for j in range(n):
         if col.null_mask[j]:
             if nulls == NULL:
                 null_bytes = (n + 7) >> 3
-                nulls = <uint8_t*>draken_malloc(null_bytes if null_bytes > 0 else 1)
+                nulls = <uint8_t*> malloc(null_bytes)
                 if nulls == NULL:
-                    draken_free(raw_data)
                     raise MemoryError()
                 memset(nulls, 0xFF, null_bytes)
+                vec.ptr.null_bitmap = nulls
             nulls[j >> 3] &= ~(<uint8_t>1 << (j & 7))
         else:
             dst[j] = col.double_values[j]
-    return float64_from_decoded(raw_data, nulls, n)
+    return vec
 
 
 cdef BoolVector _build_bool_vector(JsonlColumn* col, size_t n):
-    cdef size_t data_bytes = (n + 7) >> 3
-    cdef void* raw_data = draken_malloc(data_bytes if data_bytes > 0 else 1)
-    if raw_data == NULL:
-        raise MemoryError()
-    cdef uint8_t* dst = <uint8_t*>raw_data
+    cdef BoolVector vec = BoolVector(n)
+    cdef uint8_t* dst = <uint8_t*> vec.ptr.data
     cdef uint8_t* nulls = NULL
     cdef size_t j, null_bytes
-    if data_bytes > 0:
+    cdef size_t data_bytes = (n + 7) >> 3
+    if dst != NULL and data_bytes > 0:
         memset(dst, 0, data_bytes)
     for j in range(n):
         if col.null_mask[j]:
             if nulls == NULL:
                 null_bytes = data_bytes
-                nulls = <uint8_t*>draken_malloc(null_bytes if null_bytes > 0 else 1)
+                nulls = <uint8_t*> malloc(null_bytes)
                 if nulls == NULL:
-                    draken_free(raw_data)
                     raise MemoryError()
                 memset(nulls, 0xFF, null_bytes)
+                vec.ptr.null_bitmap = nulls
             nulls[j >> 3] &= ~(<uint8_t>1 << (j & 7))
         elif col.boolean_values[j]:
             dst[j >> 3] |= (<uint8_t>1 << (j & 7))
-    return bool_from_decoded(raw_data, nulls, n)
+    return vec
 
 
 cdef StringVector _build_string_vector(JsonlColumn* col, size_t n):

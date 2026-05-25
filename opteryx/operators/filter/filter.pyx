@@ -129,7 +129,7 @@ cdef Vector _build_constant_vector(Vector cur, object value, Py_ssize_t length):
 
 
 cdef void _apply_constant_replacements(Morsel morsel, list replacements) except *:
-    cdef Py_ssize_t length = morsel.num_rows
+    cdef Py_ssize_t length = morsel.ptr.num_rows
     cdef Py_ssize_t idx
     cdef Vector cur
     cdef Vector new_vec
@@ -153,6 +153,8 @@ cdef void _apply_constant_replacements(Morsel morsel, list replacements) except 
         if new_vec is None:
             continue
         morsel._columns[idx] = new_vec
+        morsel.ptr.columns[idx] = <void*>new_vec
+        morsel.ptr.column_types[idx] = new_vec.dtype
 
 
 cdef class FilterNode(BasePlanNode):

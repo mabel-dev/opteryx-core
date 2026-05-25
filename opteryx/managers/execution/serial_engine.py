@@ -25,7 +25,7 @@ pipeline — they're invoked directly via their `__call__` interface.
 from typing import Any, Generator, Tuple
 
 from opteryx import EOS
-from draken.morsels.morsel import Morsel
+from draken import Morsel
 from draken.interop.vector_sequence import vector_from_sequence
 from opteryx.constants import ResultType
 from opteryx.exceptions import InvalidInternalStateError

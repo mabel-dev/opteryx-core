@@ -9,8 +9,6 @@ this layer is dispatch: pick the right kernel based on the right-hand
 operand's class and the requested op string.
 """
 
-import datetime
-
 from opteryx.compiled.nanobind.vector_misc import vector_in_list
 from opteryx.types import OrsoTypes
 
@@ -19,6 +17,7 @@ from draken.vectors.date32_vector import Date32Vector
 from draken.vectors.integer64_vector import Integer64Vector
 from draken.vectors.timestamp_vector import TimestampVector
 from draken.interop.vector_sequence import vector_from_sequence
+
 
 
 # Microseconds per day — used to convert Date32 (days since epoch) into
@@ -82,10 +81,9 @@ cdef _timestamp_compare(int op_code, vec, right):
     elif isinstance(right, Date32Vector):
         return _compare_timestamp_date32_vectors(op_code, vec, right)
     else:
-        raw = _coerce_timestamp(right)
-        if raw is None:
+        value = _coerce_timestamp(right)
+        if value is None:
             return BoolVector(len(vec))
-        value = _EPOCH_DATETIME + datetime.timedelta(microseconds=<long long>raw)
 
     if op_code == OP_IN_LIST:
         return vector_in_list(vec, value_set)
@@ -103,8 +101,7 @@ cdef _date32_compare(int op_code, vec, right):
     elif isinstance(right, TimestampVector):
         return _compare_timestamp_date32_vectors(op_code, right, vec)
     else:
-        raw = _coerce_date32(right)
-        value = _EPOCH_DATE + datetime.timedelta(days=<long long>raw)
+        value = _coerce_date32(right)
 
     if op_code == OP_IN_LIST:
         return vector_in_list(vec, value_set)

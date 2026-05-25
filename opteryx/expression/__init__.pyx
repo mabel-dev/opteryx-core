@@ -20,6 +20,40 @@ import datetime
 from enum import Enum
 from typing import Callable, Dict, List
 
+from opteryx.exceptions import (
+    ColumnReferencedBeforeEvaluationError,
+    IncorrectTypeError,
+    UnsupportedSyntaxError,
+)
+from opteryx.expression.evaluator import apply_bounded_function
+from opteryx.expression.operations import filter_operations
+from opteryx.models import LogicalColumn, Node
+from opteryx.types import OrsoTypes
+from opteryx.types._datetime_conversion import date_to_int64_days, timestamp_to_int64_us
+from opteryx.utils import random_string
+
+# These are bit-masks
+LOGICAL_TYPE: int = int("00010000", 2)
+INTERNAL_TYPE: int = int("00100000", 2)
+MAX_COLUMN_BYTE_SIZE: int = 50000000
+
+# ---------------------------------------------------------------------------
+# Top-level expression leaves — textually included so the package compiles
+# to a single .so. intervals must come before formatter (formatter references
+# MICROSECONDS_PER_SECOND). operator_catalog has a lazy `from . import
+# NodeType` inside one function, which the umbrella defines below — safe
+# because that import only fires at call time, after this module finishes
+# initialising.
+# ---------------------------------------------------------------------------
+include "intervals.pyx"
+include "casts.pyx"
+include "formatter.pyx"
+include "binary_operators.pyx"
+include "unary_operations.pyx"
+include "operator_catalog.pyx"
+
+__all__ = ("NodeType", "evaluate", "evaluate_and_append", "get_all_nodes_of_type")
+
 
 class NodeType(int, Enum):
     """
@@ -63,92 +97,6 @@ class NodeType(int, Enum):
     CAST = 45  # 0010 1101 - type casting
     EXTRACTION_OPERATOR = 46  # 0010 1110 - value extraction: ->, ->>, []
     BETWEEN = 47  # 0010 1111 - range comparison: lower <= col <= upper (optimizer-created)
-
-
-from opteryx.models import LogicalColumn, Node
-
-
-def get_all_nodes_of_type(root, select_nodes: tuple) -> list:
-    """
-    Walk an expression tree collecting all nodes of a specified type.
-    """
-    if root is None:
-        return []
-    if not isinstance(root, (set, tuple, list)):
-        root = [root]
-
-    collect_all = "*" in select_nodes
-    select_nodes_set = set(select_nodes) if not collect_all else set()
-
-    identifiers = []
-    stack = list(root)
-    appender = stack.append
-
-    while stack:
-        node = stack.pop()
-
-        if collect_all or node.node_type in select_nodes_set:
-            identifiers.append(node)
-
-        if node.parameters:
-            stack.extend(
-                [param for param in node.parameters if isinstance(param, (Node, LogicalColumn))]
-            )
-
-        if node.node_type == NodeType.CASE:
-            if node.conditions:
-                stack.extend(c for c in node.conditions if isinstance(c, (Node, LogicalColumn)))
-            if node.results:
-                stack.extend(r for r in node.results if isinstance(r, (Node, LogicalColumn)))
-            if node.else_result is not None and isinstance(node.else_result, (Node, LogicalColumn)):
-                appender(node.else_result)
-
-        child = node.right
-        if child:
-            appender(child)
-        child = node.centre
-        if child:
-            appender(child)
-        child = node.left
-        if child:
-            appender(child)
-
-    return identifiers
-
-
-from opteryx.exceptions import (
-    ColumnReferencedBeforeEvaluationError,
-    IncorrectTypeError,
-    UnsupportedSyntaxError,
-)
-from opteryx.expression.operations import filter_operations
-from opteryx.types import OrsoTypes
-from opteryx.types._datetime_conversion import date_to_int64_days, timestamp_to_int64_us
-from opteryx.utils import random_string
-
-# These are bit-masks
-LOGICAL_TYPE: int = int("00010000", 2)
-INTERNAL_TYPE: int = int("00100000", 2)
-MAX_COLUMN_BYTE_SIZE: int = 50000000
-
-# ---------------------------------------------------------------------------
-# Top-level expression leaves — textually included so the package compiles
-# to a single .so. intervals must come before formatter (formatter references
-# MICROSECONDS_PER_SECOND).
-# ---------------------------------------------------------------------------
-include "intervals.pyx"
-include "casts.pyx"
-include "formatter.pyx"
-include "binary_operators.pyx"
-include "unary_operations.pyx"
-include "operator_catalog.pyx"
-
-# Evaluator import comes after includes: operators included by _operators.pyx
-# do module-level `from opteryx.expression import <name>` (e.g. format_expression),
-# so all symbols must be in __dict__ before this triggers that chain.
-from opteryx.expression.evaluator import apply_bounded_function
-
-__all__ = ("NodeType", "evaluate", "evaluate_and_append", "get_all_nodes_of_type")
 
 
 def _typed_constant_vector(value, length: int, schema_column):
@@ -817,6 +765,59 @@ def evaluate(expression: Node, table):
     if is_draken_vector(result):
         return result
     return result
+
+
+def get_all_nodes_of_type(root, select_nodes: tuple) -> list:
+    """
+    Walk an expression tree collecting all nodes of a specified type.
+    """
+    if root is None:
+        return []
+    if not isinstance(root, (set, tuple, list)):
+        root = [root]
+
+    # Prepare to collect all nodes if select_nodes is ('*',), else convert to a set
+    collect_all = "*" in select_nodes
+    select_nodes_set = set(select_nodes) if not collect_all else set()
+
+    identifiers = []
+    stack = list(root)
+    appender = stack.append
+
+    while stack:
+        node = stack.pop()
+
+        # Check whether to collect the node
+        if collect_all or node.node_type in select_nodes_set:
+            identifiers.append(node)
+
+        # Append parameters if they are valid nodes
+        if node.parameters:
+            stack.extend(
+                [param for param in node.parameters if isinstance(param, (Node, LogicalColumn))]
+            )
+
+        # NodeType.CASE uses conditions/results/else_result instead of parameters
+        if node.node_type == NodeType.CASE:
+            if node.conditions:
+                stack.extend(c for c in node.conditions if isinstance(c, (Node, LogicalColumn)))
+            if node.results:
+                stack.extend(r for r in node.results if isinstance(r, (Node, LogicalColumn)))
+            if node.else_result is not None and isinstance(node.else_result, (Node, LogicalColumn)):
+                appender(node.else_result)
+
+        # Append child nodes
+        child = node.right
+        if child:
+            appender(child)
+        child = node.centre
+        if child:
+            appender(child)
+        child = node.left
+        if child:
+            appender(child)
+
+    return identifiers
 
 
 def should_evaluate(statement):

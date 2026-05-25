@@ -116,24 +116,21 @@ cdef class ApproxPercentileCollector(BaseCollector):
         cdef Float64Vector fv
         cdef int64_t* i64
         cdef double* f64
-        cdef DrakenVector* _uv
 
         if isinstance(raw, Integer64Vector):
             iv = <Integer64Vector>raw
-            _uv = iv.unified()
-            i64 = <int64_t*>_uv.data
+            i64 = <int64_t*>iv.ptr.data
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
-                    td_add(hists[si], <double>i64[_uv.selection[i]], 1)
+                    td_add(hists[si], <double>i64[i], 1)
         else:
             fv = <Float64Vector>raw
-            _uv = fv.unified()
-            f64 = <double*>_uv.data
+            f64 = <double*>fv.ptr.data
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
-                    td_add(hists[si], f64[_uv.selection[i]], 1)
+                    td_add(hists[si], f64[i], 1)
 
     cpdef Vector finalize(self, int64_t num_groups):
         from draken.interop.arrow import vector_from_sequence

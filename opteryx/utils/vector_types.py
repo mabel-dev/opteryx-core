@@ -78,31 +78,6 @@ def get_vector_type(obj) -> VectorType:
     if cls_name in TYPE_MAP:
         return TYPE_MAP[cls_name]
 
-    # E.24 shim: unified Vector class — discriminate via underlying DrakenType
-    if cls_name == "Vector":
-        draken_type = obj.type
-        _DRAKEN_TYPE_MAP = {
-            "INT8": VectorType.INTEGER,
-            "INT16": VectorType.INTEGER,
-            "INT32": VectorType.INTEGER,
-            "INT64": VectorType.INT64,
-            "FLOAT32": VectorType.FLOAT64,
-            "FLOAT64": VectorType.FLOAT64,
-            "BOOL": VectorType.BOOL,
-            "VARCHAR": VectorType.STRING,
-            "NVARCHAR": VectorType.STRING,
-            "VARBINARY": VectorType.STRING,
-            "DICTIONARY": VectorType.STRING,
-            "TIMESTAMP64": VectorType.TIMESTAMP,
-            "DATE32": VectorType.DATE32,
-            "TIME32": VectorType.DATE32,
-            "TIME64": VectorType.DATE32,
-            "INTERVAL": VectorType.INTERVAL,
-            "DECIMAL": VectorType.DECIMAL,
-            "ARRAY": VectorType.ARRAY,
-        }
-        return _DRAKEN_TYPE_MAP.get(draken_type.name, VectorType.UNKNOWN)
-
     return VectorType.UNKNOWN
 
 

@@ -7,9 +7,7 @@ from typing import List
 
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.vectors.string_vector import StringVector
-from opteryx.compiled.vector_ops import vector_match_against
 from opteryx.exceptions import InvalidFunctionParameterError
-from opteryx.vectors.embeddings import get_embedding_provider
 
 """Text and encoding function kernels.
 
@@ -26,8 +24,6 @@ Includes:
 # ---------------------------------------------------------------------------
 # Utility functions and fallbacks
 # ---------------------------------------------------------------------------
-
-_MATCH_AGAINST_MIN_SCORE = 0.6
 
 
 def split(arr, delimiter=",", limit=None):
@@ -117,31 +113,7 @@ def right_pad(arr, width, fill):
 
 
 def match_against(arr, val):
-    """
-    Semantic text match using cosine similarity over embedded text.
-    """
-    # Extract scalar from constant vector
-    if isinstance(val, (str, bytes)):
-        literal = val
-    else:
-        literal = val[0]
-
-    if isinstance(literal, bytes):
-        literal = literal.decode("utf8")
-
-    query_text = str(literal).strip()
-    if not query_text:
-        return vector_from_sequence([False] * len(arr))
-
-    provider = get_embedding_provider()
-    if provider is None:
-        return vector_from_sequence([False] * len(arr))
-    return vector_match_against(
-        arr,
-        provider,
-        query_text,
-        _MATCH_AGAINST_MIN_SCORE,
-    )
+    raise NotImplementedError("MATCH AGAINST is not currently supported.")
 
 
 def _normalise_replacement(repl: bytes) -> bytes:

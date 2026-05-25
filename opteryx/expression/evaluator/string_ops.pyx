@@ -12,27 +12,11 @@ from opteryx.compiled.vector_ops import (
     vector_like,
     vector_rlike,
 )
-from opteryx.compiled.nanobind.vector_misc import vector_in_list as _raw_string_in_list
-from opteryx.compiled.nanobind.vector_string_search import vector_contains as _raw_string_contains
+from opteryx.compiled.nanobind.vector_misc import vector_in_list
+from opteryx.compiled.nanobind.vector_string_search import vector_contains
 
 from draken.vectors.bool_vector import BoolVector
 from draken.vectors.string_vector import StringVector
-from draken.vectors.vector import Vector as _DrakenVectorBase
-
-def _string_in_list(vec, literals, negate=False):
-    nb_vec = vec._nb if isinstance(vec, _DrakenVectorBase) else vec
-    result = _raw_string_in_list(nb_vec, literals, negate)
-    if not isinstance(result, BoolVector):
-        result = BoolVector(result)
-    return result
-
-def _string_contains(haystack, needle, ignore_case=False):
-    nb_h = haystack._nb if isinstance(haystack, _DrakenVectorBase) else haystack
-    nb_n = needle._nb if isinstance(needle, _DrakenVectorBase) else needle
-    result = _raw_string_contains(nb_h, nb_n, ignore_case)
-    if not isinstance(result, BoolVector):
-        result = BoolVector(result)
-    return result
 
 
 
@@ -44,7 +28,7 @@ cdef _string_compare(int op_code, vec, right):
     # non-vector RHS — it predates the carchar/perfect-hash set wrappers that
     # draken_compare builds upstream).
     if op_code == OP_IN_LIST:
-        return _string_in_list(vec, _coerce_str_set(right))
+        return vector_in_list(vec, _coerce_str_set(right))
 
     # Eq / NotEq / Lt / Gt / LtEq / GtEq: vector-to-vector. `right` is a wrapped
     # literal (or a column); the *_vector kernels walk both operands together
@@ -73,9 +57,9 @@ cdef _string_compare(int op_code, vec, right):
     if op_code == OP_RLIKE:
         return vector_rlike(vec, right)
     if op_code == OP_IN_STR:
-        return _string_contains(vec, right, False)
+        return vector_contains(vec, right, False)
     if op_code == OP_I_IN_STR:
-        return _string_contains(vec, right, True)
+        return vector_contains(vec, right, True)
     raise NotImplementedError(f"StringVector: unsupported op (code {op_code})")
 
 

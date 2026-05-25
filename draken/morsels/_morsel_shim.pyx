@@ -13,43 +13,9 @@ cdef inline object _unwrap(object v):
 
 
 cdef inline Vector _wrap(object v):
-    """Wrap a raw nanobind VectorOwner in the appropriate typed subclass."""
     if isinstance(v, Vector):
         return <Vector>v
-    return _wrap_typed(v)
-
-
-cdef Vector _wrap_typed(object nb_vec):
-    """Return the appropriate typed Vector subclass based on DrakenType."""
-    type_name = nb_vec.type.name
-    if type_name in ("VARCHAR", "NVARCHAR", "VARBINARY", "DICTIONARY"):
-        from draken.vectors.string_vector import StringVector
-        return StringVector(nb_vec)
-    if type_name == "BOOL":
-        from draken.vectors.bool_vector import BoolVector
-        return BoolVector(nb_vec)
-    if type_name in ("INT64", "INT8", "INT16", "INT32"):
-        from draken.vectors.integer64_vector import Integer64Vector
-        return Integer64Vector(nb_vec)
-    if type_name in ("FLOAT32", "FLOAT64"):
-        from draken.vectors.float64_vector import Float64Vector
-        return Float64Vector(nb_vec)
-    if type_name == "DECIMAL":
-        from draken.vectors.decimal_vector import DecimalVector
-        return DecimalVector(nb_vec)
-    if type_name == "TIMESTAMP64":
-        from draken.vectors.timestamp_vector import TimestampVector
-        return TimestampVector(nb_vec)
-    if type_name == "DATE32":
-        from draken.vectors.date32_vector import Date32Vector
-        return Date32Vector(nb_vec)
-    if type_name == "INTERVAL":
-        from draken.vectors.interval_vector import IntervalVector
-        return IntervalVector(nb_vec)
-    if type_name == "ARRAY":
-        from draken.vectors.array_vector import ArrayVector
-        return ArrayVector(nb_vec)
-    return Vector(nb_vec)
+    return Vector(v)
 
 
 cdef Morsel _make_morsel():
@@ -201,7 +167,7 @@ cdef class Morsel:
         for i in range(n):
             nb_taken = (<Vector>self._columns[i])._nb.take(idx_list)
             result._nb.append(nb_taken)
-            result._columns.append(_wrap_typed(nb_taken))
+            result._columns.append(Vector(nb_taken))
         return result
 
     def slice(self, Py_ssize_t offset=0, Py_ssize_t length=0, Py_ssize_t start=-1):
@@ -222,7 +188,7 @@ cdef class Morsel:
                     if mask is not None:
                         nb_v = (<Vector>self._columns[i])._nb.take(mask)
                         result._nb.append(nb_v)
-                        result._columns.append(_wrap_typed(nb_v))
+                        result._columns.append(Vector(nb_v))
                     else:
                         result._nb.append((<Vector>self._columns[i])._nb)
                         result._columns.append(self._columns[i])
@@ -232,7 +198,7 @@ cdef class Morsel:
             for i in range(n):
                 nb_v = (<Vector>self._columns[i])._nb.take(mask)
                 result._nb.append(nb_v)
-                result._columns.append(_wrap_typed(nb_v))
+                result._columns.append(Vector(nb_v))
         else:
             result._col_names = list(self._col_names)
             for i in range(n):
@@ -280,7 +246,7 @@ cdef class Morsel:
             else:
                 nb_v = factory(combined_data)
             result._nb.append(nb_v)
-            result._columns.append(_wrap_typed(nb_v))
+            result._columns.append(Vector(nb_v))
         return result
 
     @classmethod

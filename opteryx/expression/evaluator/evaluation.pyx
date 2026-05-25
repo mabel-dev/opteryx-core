@@ -16,7 +16,7 @@ import sys as _sys
 
 from opteryx.compiled.structures.carchar_set import CarcharSetWrapper as _CarcharSetWrapper
 from opteryx.compiled.structures.perfect_hash_set import PerfectHashSet as _PerfectHashSet
-from opteryx.compiled.vector_ops import vector_bitwise_not as _raw_vector_bitwise_not
+from opteryx.compiled.vector_ops import vector_bitwise_not as _vector_bitwise_not
 from opteryx.compiled.nanobind.vector_accessors import (
     vector_string_is_empty as _vector_string_is_empty,
     vector_string_is_not_empty as _vector_string_is_not_empty,
@@ -30,19 +30,12 @@ from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_ve
 from draken.vectors.bool_vector import BoolVector as _BoolVector
 from draken.vectors.integer64_vector import Integer64Vector as _Integer64Vector
 from draken.vectors.string_vector import StringVector as _StringVector
-from draken.vectors.vector import Vector as _ShimVectorBase
-from draken.draken_native import Vector as _NbVectorBase
-from draken.vectors.scalar_constructors import from_scalar as _const_scalar, wrap_nb_vector as _wrap_nb_vector
+from draken.vectors.scalar_constructors import from_scalar as _const_scalar
 from draken.morsels.morsel import Morsel as _Morsel
-from draken.interop.vector_sequence import vector_from_sequence as _vector_from_sequence
-
-
-def _vector_bitwise_not(vec):
-    nb = vec._nb if isinstance(vec, _ShimVectorBase) else vec
-    result = _raw_vector_bitwise_not(nb)
-    if isinstance(result, _NbVectorBase):
-        return _wrap_nb_vector(result)
-    return result
+from draken.interop.vector_sequence import (
+    bool_vector_from_uint64_eq as _bool_vector_from_uint64_eq,
+    vector_from_sequence as _vector_from_sequence,
+)
 
 
 # NodeType integer values — keep in sync with NodeType in opteryx/expression/__init__.py.
@@ -310,6 +303,11 @@ cdef _get_legacy_helpers():
     return _legacy_helpers
 
 
+cdef _compute_target_hash(target_names, target_vecs):
+    target_morsel = _Morsel.from_vectors(target_names, target_vecs)
+    target_hash_view = target_morsel.hash(target_names)
+    return int(target_hash_view[0])
+
 
 def _try_collect_numeric_eq_predicates(node):
     """Walk an AND-only subtree and collect IDENTIFIER = LITERAL predicates on
@@ -394,8 +392,16 @@ cdef _evaluate_numeric_eq_via_hash(preds, morsel):
                 target_vecs.append(cls.from_constant(val, 1))
             except (TypeError, ValueError, OverflowError):
                 return None
-        # E.24: hash-dispatch path disabled pending Morsel.hash() implementation
-        return None
+        try:
+            target_hash = _compute_target_hash(target_names, target_vecs)
+        except Exception:
+            return None
+        if len(_TARGET_HASH_CACHE) >= _TARGET_HASH_CACHE_MAX:
+            _TARGET_HASH_CACHE.clear()
+        _TARGET_HASH_CACHE[cache_key] = target_hash
+
+    row_hashes_view = morsel.hash(hash_keys)
+    return _bool_vector_from_uint64_eq(row_hashes_view, target_hash)
 
 
 def evaluate_draken(node, morsel):
@@ -1207,7 +1213,6 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
     cdef object legacy_result
     cdef object left_type
     cdef object right_type
-    cdef object right_raw
     cdef object func_args
     cdef Py_ssize_t func_base
     cdef object extr_key
@@ -1344,32 +1349,25 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
         # ----------------------------------------------------------
         if opcode == BC_COMPARE:
             sp -= 1
-            right_raw = stack[sp]
+            v_right = <Vector>stack[sp]
             sp -= 1
             v_left = <Vector>stack[sp]
             flags = slot.flags
             left_type = <object>slot.left_orso_type if slot.left_orso_type != NULL else None
             right_type = <object>slot.right_orso_type if slot.right_orso_type != NULL else None
-            if slot.op_code == OP_IN_LIST or slot.op_code == OP_NOT_IN_LIST:
-                if flags != 0:
-                    if (flags & BC_CMP_LEFT_TEMPORAL) and _is_scalar_value(v_left):
-                        v_left = _coerce_temporal_scalar_for_arrow(v_left, left_type)
-                compare_result = draken_compare_int(slot.op_code, v_left, right_raw, left_type, right_type)
+            if flags != 0:
+                if (flags & BC_CMP_LEFT_TEMPORAL) and _is_scalar_value(v_left):
+                    v_left = _coerce_temporal_scalar_for_arrow(v_left, left_type)
+                if (flags & BC_CMP_RIGHT_TEMPORAL) and _is_scalar_value(v_right):
+                    v_right = _coerce_temporal_scalar_for_arrow(v_right, right_type)
+            if slot.op_code != OP_UNKNOWN:
+                compare_result = draken_compare_int(
+                    slot.op_code, v_left, v_right, left_type, right_type
+                )
             else:
-                v_right = <Vector>right_raw
-                if flags != 0:
-                    if (flags & BC_CMP_LEFT_TEMPORAL) and _is_scalar_value(v_left):
-                        v_left = _coerce_temporal_scalar_for_arrow(v_left, left_type)
-                    if (flags & BC_CMP_RIGHT_TEMPORAL) and _is_scalar_value(v_right):
-                        v_right = _coerce_temporal_scalar_for_arrow(v_right, right_type)
-                if slot.op_code != OP_UNKNOWN:
-                    compare_result = draken_compare_int(
-                        slot.op_code, v_left, v_right, left_type, right_type
-                    )
-                else:
-                    compare_result = draken_compare(
-                        <str>slot.compare_op_str, v_left, v_right, left_type, right_type
-                    )
+                compare_result = draken_compare(
+                    <str>slot.compare_op_str, v_left, v_right, left_type, right_type
+                )
             stack[sp] = compare_result
             sp += 1
             continue

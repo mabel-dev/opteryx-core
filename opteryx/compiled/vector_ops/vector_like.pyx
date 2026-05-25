@@ -9,15 +9,11 @@
 # cython: optimize.unpack_method_calls=True
 
 from draken.vectors.string_vector cimport StringVector
-from draken.vectors.bool_vector cimport BoolVector, from_decoded
+from draken.vectors.bool_vector cimport BoolVector
 from draken.core.buffers cimport DrakenVector, DrakenStringArena, DrakenStringSlot, str_length, str_data
 from libc.string cimport memset, memcpy
+from libc.stdlib cimport malloc, free
 from libc.stdint cimport uint8_t, uint32_t
-from libc.stddef cimport size_t
-
-cdef extern from "core/alloc.h":
-    void* draken_malloc(size_t size) nogil
-    void draken_free(void* ptr) nogil
 
 
 cdef inline bint _sv_byte_equals(uint8_t left, uint8_t right, bint ignore_case) noexcept nogil:
@@ -111,6 +107,8 @@ cpdef BoolVector vector_like(
     cdef uint8_t* nb_ptr = uv.validity
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
+    cdef BoolVector out = BoolVector(<size_t>n)
+    cdef uint8_t* dst = <uint8_t*> out.ptr.data
     cdef uint8_t* out_null = NULL
     cdef uint8_t mask
     cdef Py_ssize_t i
@@ -122,10 +120,6 @@ cpdef BoolVector vector_like(
     if puv.validity != NULL and (puv.validity[0] & 1) == 0:
         return _all_null_bool(n)
 
-    cdef uint8_t* dst = <uint8_t*>draken_malloc(<size_t>(nbytes if nbytes > 0 else 1))
-    if dst == NULL:
-        raise MemoryError()
-
     # Initial fill matches the wanted result for the "no match" rows so the
     # inner loop only touches bits at matches.
     if negate:
@@ -136,13 +130,16 @@ cpdef BoolVector vector_like(
         memset(dst, 0, nbytes)
 
     if nb_ptr != NULL and nbytes != 0:
-        out_null = <uint8_t*>draken_malloc(<size_t>nbytes)
+        out_null = <uint8_t*> malloc(nbytes)
         if out_null == NULL:
             raise MemoryError()
         memcpy(out_null, nb_ptr, nbytes)
         if (n & 7) != 0:
             mask = <uint8_t>((1 << (n & 7)) - 1)
             out_null[nbytes - 1] &= mask
+        out.ptr.null_bitmap = out_null
+    else:
+        out.ptr.null_bitmap = NULL
 
     if negate:
         for i in range(n):
@@ -169,4 +166,4 @@ cpdef BoolVector vector_like(
             ):
                 dst[i >> 3] |= (1 << (i & 7))
 
-    return from_decoded(<void*>dst, out_null, <size_t>n)
+    return out

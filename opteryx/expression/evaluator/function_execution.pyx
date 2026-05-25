@@ -10,10 +10,6 @@ from opteryx.exceptions import FunctionExecutionError
 # Re-exported for callers that historically imported it from this module.
 from opteryx.utils.vector_types import is_draken_vector
 
-from draken.vectors.vector import Vector as _ShimVectorBase
-from draken.draken_native import Vector as _NbVectorBase
-from draken.vectors.scalar_constructors import wrap_nb_vector as _wrap_nb_vector
-
 
 def apply_bounded_function(node, *parameters):
     """Apply a bound FUNCTION node to its already-evaluated parameters.
@@ -30,11 +26,7 @@ def apply_bounded_function(node, *parameters):
         )
 
     kernel = func_ref.selected_overload.kernel
-    unwrapped = tuple(p._nb if isinstance(p, _ShimVectorBase) else p for p in parameters)
-    result = kernel.callable_ref(*unwrapped)
-    if isinstance(result, _NbVectorBase):
-        return _wrap_nb_vector(result)
-    return result
+    return kernel.callable_ref(*parameters)
 
 
 __all__ = ["apply_bounded_function", "is_draken_vector"]
