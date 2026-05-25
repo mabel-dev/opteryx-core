@@ -11,7 +11,7 @@ from opteryx.compiled.nanobind.vector_string_search import (
 )
 from opteryx.third_party import yyjson
 
-from draken.interop.vector_sequence import vector_from_sequence
+from draken.draken_native import vector_from_sequence
 
 
 cpdef _json_at_question(left, str right):

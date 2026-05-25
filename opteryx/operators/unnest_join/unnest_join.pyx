@@ -25,10 +25,8 @@ from libc.stdint cimport int32_t, int64_t, uint8_t, uint64_t
 from libcpp.vector cimport vector as cppvector
 from cpython.object cimport PyObject_Hash
 
-from draken.core.buffers cimport DrakenArrayBuffer
+from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
-from draken.vectors.array_vector cimport ArrayVector
-from draken.vectors.integer64_vector cimport from_decoded as int64_from_decoded
 
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, QueryProperties
@@ -41,46 +39,47 @@ from opteryx.types.schema import FlatColumn
 INTERNAL_BATCH_SIZE: int = 10000
 
 
-cdef inline bint _array_row_is_null(DrakenArrayBuffer* ptr, Py_ssize_t idx) nogil:
-    """Per-row null check on an ArrayVector buffer."""
-    if ptr.null_bitmap == NULL:
+cdef inline bint _array_row_is_null(uint8_t* validity, Py_ssize_t idx) nogil:
+    """Per-row null check using the DrakenVector validity bitmap."""
+    if validity == NULL:
         return False
-    return ((ptr.null_bitmap[idx >> 3] >> (idx & 7)) & 1) == 0
+    return ((validity[idx >> 3] >> (idx & 7)) & 1) == 0
 
 
-cpdef tuple build_rows_indices_and_column_draken(ArrayVector column_vector):
+cpdef tuple build_rows_indices_and_column_draken(Vector column_vector):
     """Build row indices and flattened column data from ARRAY column (Draken-native).
 
     Walks the array offsets directly: no per-row Python list materialization,
     no intermediate Python list for the flat data.
 
     Returns:
-        tuple of (Integer64Vector, Draken vector) — row indices and flattened typed data
+        tuple of (Vector int64, Draken vector) — row indices and flattened typed data
     """
-    cdef DrakenArrayBuffer* ptr = column_vector.ptr
-    cdef Vector child = <Vector>column_vector._child
-    cdef Py_ssize_t row_count = <Py_ssize_t>ptr.length
+    cdef DrakenVector* uv = column_vector.unified()
+    cdef const int32_t* offsets = <const int32_t*>uv.data
+    cdef uint8_t* validity = uv.validity
+    cdef Py_ssize_t row_count = <Py_ssize_t>uv.length
+    cdef Vector child = <Vector>column_vector.array_child
     cdef Py_ssize_t i
     cdef int32_t start, end, run_len, k
-    cdef const int32_t* offsets = ptr.offsets
     cdef IntBuffer indices_buf
     cdef cppvector[int32_t] child_idx_vec
 
     # First pass: reserve once based on the total non-null span.
     cdef Py_ssize_t total_size = 0
     for i in range(row_count):
-        if _array_row_is_null(ptr, i):
+        if _array_row_is_null(validity, i):
             continue
         total_size += <Py_ssize_t>(offsets[i + 1] - offsets[i])
 
     if total_size == 0:
-        return (int64_from_decoded(NULL, NULL, 0), vector_from_sequence([]))
+        return (_draken_native.vector_from_sequence([]), _draken_native.vector_from_sequence([]))
 
     indices_buf = IntBuffer(<size_t>total_size)
     child_idx_vec.reserve(<size_t>total_size)
 
     for i in range(row_count):
-        if _array_row_is_null(ptr, i):
+        if _array_row_is_null(validity, i):
             continue
         start = offsets[i]
         end = offsets[i + 1]
@@ -91,7 +90,7 @@ cpdef tuple build_rows_indices_and_column_draken(ArrayVector column_vector):
         for k in range(start, end):
             child_idx_vec.push_back(k)
 
-    cdef Integer64Vector vec = indices_buf.into_int64_vector()
+    cdef Vector vec = indices_buf.into_int64_vector()
 
     cdef const int32_t[::1] child_idx_view = <const int32_t[:total_size]>child_idx_vec.data()
     flat = child.take(child_idx_view)
@@ -99,25 +98,26 @@ cpdef tuple build_rows_indices_and_column_draken(ArrayVector column_vector):
     return (vec, flat)
 
 
-cpdef tuple build_filtered_rows_indices_and_column_draken(ArrayVector column_vector, set valid_values):
+cpdef tuple build_filtered_rows_indices_and_column_draken(Vector column_vector, set valid_values):
     """Build row indices and flattened column data for filtered ARRAY column (Draken-native).
 
     Walks the array offsets directly; child elements are materialized one at a
     time only to test membership in `valid_values`. The output flat vector is
     built via `child.take(...)` — no intermediate Python list.
     """
-    cdef DrakenArrayBuffer* ptr = column_vector.ptr
-    cdef Vector child = <Vector>column_vector._child
-    cdef Py_ssize_t row_count = <Py_ssize_t>ptr.length
+    cdef DrakenVector* uv = column_vector.unified()
+    cdef const int32_t* offsets = <const int32_t*>uv.data
+    cdef uint8_t* validity = uv.validity
+    cdef Py_ssize_t row_count = <Py_ssize_t>uv.length
+    cdef Vector child = <Vector>column_vector.array_child
     cdef Py_ssize_t i
     cdef int32_t start, end, k
-    cdef const int32_t* offsets = ptr.offsets
     cdef IntBuffer indices_buf = IntBuffer(<size_t>row_count)
     cdef cppvector[int32_t] child_idx_vec
     cdef object val
 
     for i in range(row_count):
-        if _array_row_is_null(ptr, i):
+        if _array_row_is_null(validity, i):
             continue
         start = offsets[i]
         end = offsets[i + 1]
@@ -129,9 +129,9 @@ cpdef tuple build_filtered_rows_indices_and_column_draken(ArrayVector column_vec
 
     cdef Py_ssize_t total_matched = <Py_ssize_t>child_idx_vec.size()
     if total_matched == 0:
-        return (int64_from_decoded(NULL, NULL, 0), vector_from_sequence([]))
+        return (_draken_native.vector_from_sequence([]), _draken_native.vector_from_sequence([]))
 
-    cdef Integer64Vector vec = indices_buf.into_int64_vector()
+    cdef Vector vec = indices_buf.into_int64_vector()
 
     cdef const int32_t[::1] child_idx_view = <const int32_t[:total_matched]>child_idx_vec.data()
     flat = child.take(child_idx_view)
@@ -139,13 +139,13 @@ cpdef tuple build_filtered_rows_indices_and_column_draken(ArrayVector column_vec
     return (vec, flat)
 
 
-cpdef tuple list_distinct(Vector values, Integer64Vector indices, CarcharSetWrapper seen_hashes=None):
+cpdef tuple list_distinct(Vector values, Vector indices, CarcharSetWrapper seen_hashes=None):
     """
     Filter duplicates from values using hash-based deduplication (Draken-native).
 
     Args:
         values:       Draken Vector of values
-        indices:      Integer64Vector of row indices
+        indices:      Vector of row indices (int64)
         seen_hashes:  CarcharSetWrapper to track seen hash values (shared across calls)
 
     Returns:
@@ -168,7 +168,7 @@ cpdef tuple list_distinct(Vector values, Integer64Vector indices, CarcharSetWrap
             new_values_list.append(v)
             new_indices_list.append(indices[i])
 
-    return vector_from_sequence(new_values_list), vector_from_sequence(new_indices_list), seen_hashes
+    return _draken_native.vector_from_sequence(new_values_list), _draken_native.vector_from_sequence(new_indices_list), seen_hashes
 
 
 def _cross_join_unnest_column(
@@ -245,8 +245,6 @@ def _cross_join_unnest_literal(
     Yields:
         Morsel objects with unnested literal values repeated.
     """
-    from draken.interop.vector_sequence import vector_from_sequence
-
     if morsel.num_rows == 0:
         return
 
@@ -268,7 +266,7 @@ def _cross_join_unnest_literal(
         tiled_source.extend(source)
 
     # Convert to typed Draken vector
-    unnest_vector = vector_from_sequence(tiled_source)
+    unnest_vector = _draken_native.vector_from_sequence(tiled_source)
 
     # Append the unnested column
     expanded_morsel.append_vector(target_column.identity, unnest_vector)

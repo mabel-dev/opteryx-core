@@ -16,18 +16,19 @@
 
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.bool_vector cimport BoolVector
-from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.integer64_vector cimport Integer64Vector
-from draken.vectors.string_vector cimport StringVector
-from draken.vectors.integer8_vector cimport Integer8Vector
-from draken.vectors.integer16_vector cimport Integer16Vector
-from draken.vectors.integer32_vector cimport Integer32Vector
-from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16
+from draken.vectors.vector cimport Vector
+from draken.core.buffers cimport (
+    DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64,
+    DRAKEN_FLOAT32, DRAKEN_FLOAT64,
+    DRAKEN_VARCHAR, DRAKEN_NVARCHAR,
+    DRAKEN_BOOL, DRAKEN_DATE32, DRAKEN_TIMESTAMP64, DRAKEN_INTERVAL,
+    DrakenType, DrakenVector,
+)
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 from opteryx.compiled.structures.perfect_hash_set cimport PerfectHashSet
 from opteryx.compiled.structures.buffers cimport IntBuffer, Int32Buffer
-from draken.interop.vector_sequence cimport vector_from_sequence
 from cpython.array cimport array
+import draken.draken_native as _draken_native
 
 from libc.stdint cimport int8_t, int16_t, int64_t, uint64_t
 from libc.stdlib cimport malloc, realloc, free
@@ -674,44 +675,6 @@ _DRAKEN_CMP_OP_FLIPPED[15] = -1
 _DRAKEN_CMP_OP_FLIPPED[16] = -1
 _DRAKEN_CMP_OP_FLIPPED[17] = -1
 _DRAKEN_CMP_OP_FLIPPED[18] = -1
-
-include "../expression/evaluator/type_coercion.pyx"
-include "../expression/evaluator/function_execution.pyx"
-include "../expression/evaluator/arithmetic_dispatch.pyx"
-include "../expression/evaluator/temporal_ops.pyx"
-include "../expression/evaluator/string_ops.pyx"
-include "../expression/evaluator/json_ops.pyx"
-include "../expression/evaluator/case_eval.pyx"
-include "../expression/evaluator/arithmetic.pyx"
-include "../expression/evaluator/comparisons.pyx"
-include "../expression/evaluator/evaluation.pyx"
-
-
-def _verify_node_type_constants():
-    """Fail-fast: the compile-time DEF constants in evaluation must mirror the
-    runtime NodeType enum. If this assertion fires, update the DEFs in
-    evaluator/evaluation.pyx and rebuild.
-    """
-    from opteryx.expression import NodeType
-
-    expected = {
-        "UNKNOWN": 0,
-        "AND": 17, "OR": 18, "XOR": 19, "NOT": 20, "DNF": 21, "CNF": 22,
-        "CASE": 32, "WILDCARD": 33, "COMPARISON_OPERATOR": 34,
-        "BINARY_OPERATOR": 35, "UNARY_OPERATOR": 36, "FUNCTION": 37,
-        "IDENTIFIER": 38, "SUBQUERY": 39, "NESTED": 40, "AGGREGATOR": 41,
-        "LITERAL": 42, "EXPRESSION_LIST": 43, "EVALUATED": 44, "CAST": 45,
-        "EXTRACTION_OPERATOR": 46, "BETWEEN": 47,
-    }
-    for name, value in expected.items():
-        actual = int(getattr(NodeType, name))
-        if actual != value:
-            raise AssertionError(
-                f"NodeType.{name} = {actual}, but evaluation.pyx DEF expects {value}. "
-                f"Update the DEF constants at the top of "
-                f"opteryx/expression/evaluator/evaluation.pyx and rebuild."
-            )
-
 
 # -----------------------------------------------------------------------------
 # Include order: base classes / shared types before their consumers.

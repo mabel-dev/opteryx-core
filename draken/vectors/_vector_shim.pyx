@@ -3,12 +3,20 @@
 # E.24: _nb holds the nanobind handle; _dv is a borrowed pointer into it.
 
 from cpython.object cimport PyObject
-from libc.stdint cimport int32_t, uint8_t, uint64_t
+from libc.stdint cimport int32_t, uint8_t, uint32_t, uint64_t
 
-from draken.core.buffers cimport DrakenVector
+from draken.core.buffers cimport DrakenVector, DrakenType
 
 cdef extern from "core/draken_bridge.h":
     const DrakenVector* draken_vector_unwrap(PyObject* obj)
+    PyObject* draken_vector_own_raw(void* data, uint8_t* validity, uint32_t length, DrakenType dtype)
+    PyObject* draken_vector_own_dict_i64(void* data, uint32_t data_length,
+                                          uint32_t* codes, uint32_t length,
+                                          uint8_t* validity)
+
+cdef extern from *:
+    """static inline void _vec_shim_decref(PyObject* op) { Py_DECREF(op); }"""
+    void _vec_shim_decref(PyObject* op)
 
 
 cdef class Vector:
@@ -166,3 +174,49 @@ cdef class Vector:
             for i in range(n):
                 out[i] = <uint64_t>hashes[i]
         return 0
+
+    @property
+    def array_child(self):
+        """Return the child Vector of a DRAKEN_ARRAY vector as a Python Vector."""
+        from draken.vectors.vector import Vector as _V
+        return _V(self._nb.array_child)
+
+
+cdef Vector dict_int64_from_decoded(void* dict_vals, uint32_t data_length,
+                                     uint32_t* codes, uint32_t length,
+                                     uint8_t* validity):
+    """Create a dict-encoded int64 Vector from hand-allocated (draken_malloc) buffers.
+
+    dict_vals:    draken_malloc'd int64_t[data_length] unique values (dictionary).
+    data_length:  number of unique values.
+    codes:        draken_malloc'd uint32_t[length] per-row codes.
+    length:       logical row count.
+    validity:     draken_malloc'd null bitmap (1-bit-per-row), or NULL.
+    All non-NULL buffers MUST be draken_malloc'd; ownership is transferred on call.
+    """
+    cdef PyObject* raw = draken_vector_own_dict_i64(dict_vals, data_length, codes, length, validity)
+    if raw == NULL:
+        raise MemoryError("draken_vector_own_dict_i64 failed")
+    cdef Vector result = Vector.__new__(Vector)
+    result._nb = <object>raw
+    _vec_shim_decref(raw)
+    result._dv = draken_vector_unwrap(raw)
+    return result
+
+
+cdef Vector from_decoded(void* data, uint8_t* validity, uint32_t length, DrakenType dtype):
+    """Create a dense Vector wrapping hand-allocated (draken_malloc) buffers.
+
+    data and validity MUST have been allocated with draken_malloc; ownership
+    is transferred to the new Vector on success (draken_free'd on GC).
+    validity may be NULL (all-valid normalization invariant).
+    Analogous to from_decoded in _bool_vector_shim.pyx.
+    """
+    cdef PyObject* raw = draken_vector_own_raw(data, validity, length, dtype)
+    if raw == NULL:
+        raise MemoryError("draken_vector_own_raw failed")
+    cdef Vector result = Vector.__new__(Vector)
+    result._nb = <object>raw   # Cython incref → refcount = 2
+    _vec_shim_decref(raw)      # balance the NEW ref → refcount = 1
+    result._dv = draken_vector_unwrap(raw)
+    return result

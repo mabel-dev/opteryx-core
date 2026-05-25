@@ -10,7 +10,7 @@ from libc.stdint cimport int64_t, int32_t
 from libc.stddef cimport size_t
 from libcpp.vector cimport vector
 
-from draken.vectors.integer64_vector cimport Integer64Vector
+from draken.vectors.vector cimport Vector
 
 cdef extern from "intbuffer.h" namespace "" nogil:
     cdef cppclass CIntBuffer:
@@ -46,8 +46,8 @@ cdef class IntBuffer:
     cpdef void append(self, int64_t value)
     cpdef void append_repeated(self, int64_t value, size_t count)
     cpdef void extend(self, iterable)
-    cpdef Integer64Vector into_int64_vector(self)
-    cpdef Integer64Vector to_int64_vector(self)
+    cpdef Vector into_int64_vector(self)
+    cpdef Vector to_int64_vector(self)
     cpdef Int32Buffer to_int32_buffer(self)
     cpdef const int64_t[::1] get_buffer(self)
     cpdef size_t size(self)

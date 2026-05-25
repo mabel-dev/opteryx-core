@@ -30,10 +30,6 @@ _logger = logging.getLogger(__name__)
 from collections import defaultdict
 from typing import Generator
 
-from draken.vectors.date32_vector import Date32Vector
-from draken.vectors.timestamp_vector import TimestampVector
-from draken.vectors.time_vector import TimeVector
-from draken.vectors.interval_vector import IntervalVector
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryProperties
 from opteryx.types.schema import RelationSchema
@@ -43,35 +39,42 @@ from opteryx.types import OrsoTypes
 
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
 
-# Static dispatch table for null-vector construction. Built once at module import
-# instead of an if/elif chain per call. Unmapped types fall through to StringVector.
-# Names that do not exist on OrsoTypes are skipped (legacy dead-code branches).
+# Null vector factory: maps OrsoType → draken_native constructor for null constants.
+# Built once at module import. All constructors accept (value=None, length).
 cdef dict _NULL_CONSTRUCTORS = {}
 
 def _build_null_constructors():
+    """Build null vector constructor table: OrsoType → callable(n) → Vector."""
+    from draken.draken_native import (
+        vector_from_constant,
+        vector_float64_from_constant,
+        vector_varchar_from_constant,
+        vector_from_bool_constant,
+        vector_null_from_length,
+    )
+    # All lambdas take (n: int) and return a null vector of appropriate type
     table = [
-        ("INTEGER", Integer64Vector),
-        ("INT8", Integer64Vector),
-        ("INT16", Integer64Vector),
-        ("INT32", Integer64Vector),
-        ("INT64", Integer64Vector),
-        ("DOUBLE", Float64Vector),
-        ("FLOAT32", Float64Vector),
-        ("FLOAT64", Float64Vector),
-        ("VARCHAR", StringVector),
-        ("TEXT", StringVector),
-        ("BLOB", StringVector),
-        ("BOOLEAN", BoolVector),
-        ("DATE", Date32Vector),
-        ("TIMESTAMP", TimestampVector),
-        ("TIME", TimeVector),
-        ("INTERVAL", IntervalVector),
+        ("INTEGER",   lambda n: vector_from_constant(None, n)),
+        ("INT8",      lambda n: vector_from_constant(None, n)),
+        ("INT16",     lambda n: vector_from_constant(None, n)),
+        ("INT32",     lambda n: vector_from_constant(None, n)),
+        ("INT64",     lambda n: vector_from_constant(None, n)),
+        ("DOUBLE",    lambda n: vector_float64_from_constant(None, n)),
+        ("FLOAT32",   lambda n: vector_float64_from_constant(None, n)),
+        ("FLOAT64",   lambda n: vector_float64_from_constant(None, n)),
+        ("VARCHAR",   lambda n: vector_varchar_from_constant(None, n)),
+        ("TEXT",      lambda n: vector_varchar_from_constant(None, n)),
+        ("BLOB",      lambda n: vector_varchar_from_constant(None, n)),
+        ("BOOLEAN",   lambda n: vector_from_bool_constant(None, n)),
+        ("DATE",      lambda n: vector_null_from_length(n)),
+        ("TIMESTAMP", lambda n: vector_null_from_length(n)),
+        ("TIME",      lambda n: vector_null_from_length(n)),
+        ("INTERVAL",  lambda n: vector_null_from_length(n)),
     ]
     out = {}
-    for name, cls in table:
+    for name, ctor in table:
         member = getattr(OrsoTypes, name, None)
-        ctor = getattr(cls, "from_constant", None)
-        if member is not None and ctor is not None:
+        if member is not None:
             out[member] = ctor
     return out
 
@@ -82,8 +85,8 @@ cdef inline object _create_null_vector(object column, Py_ssize_t num_rows):
     """Create a null vector of the correct type for a schema column."""
     ctor = _NULL_CONSTRUCTORS.get(column.type)
     if ctor is None:
-        return StringVector.from_constant(None, num_rows)
-    return ctor(None, num_rows)
+        return _draken_native.vector_null_from_length(<uint32_t>num_rows)
+    return ctor(<uint32_t>num_rows)
 
 
 cdef Morsel normalize_morsel(object schema, Morsel morsel):
@@ -101,7 +104,7 @@ cdef Morsel normalize_morsel(object schema, Morsel morsel):
 
     if len(schema.columns) == 0:
         if morsel.column_names != [b"*"]:
-            all_true = BoolVector.from_constant(True, num_rows)
+            all_true = _draken_native.vector_from_bool_constant(True, <uint32_t>num_rows)
             morsel.append_vector(b"*", all_true)
         return morsel.select([b"*"])
 

@@ -15,16 +15,24 @@ from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
 from draken.vectors.vector cimport Vector, NULL_HASH, mix_hash
-from draken.vectors.integer8_vector cimport Integer8Vector
-from draken.vectors.integer16_vector cimport Integer16Vector
-from draken.vectors.integer32_vector cimport Integer32Vector
 from draken.core.buffers cimport (
     DrakenFixedBuffer, DrakenVarBuffer,
     DrakenConstantStringPayload, DrakenVector,
     DrakenStringArena, DrakenStringSlot, str_length, str_data,
+    DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64,
+    DRAKEN_FLOAT64, DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DrakenType,
 )
 cdef extern from "_agg_kernels.hpp" namespace "opteryx::ungrouped":
     int compare_bytes(const char* a, size_t la, const char* b, size_t lb) noexcept
+
+cdef extern from "core/bitmap_ops.h" nogil:
+    size_t simd_popcount(const uint8_t* data, size_t nbytes) nogil
+
+cdef inline int64_t _count_nulls(const uint8_t* validity, Py_ssize_t length) noexcept nogil:
+    """Count null (unset) bits in a validity bitmap. Returns 0 if validity is NULL."""
+    if validity == NULL:
+        return 0
+    return <int64_t>length - <int64_t>simd_popcount(validity, (<size_t>length + 7) >> 3)
 
 
 # ---------------------------------------------------------------------------
@@ -69,17 +77,18 @@ cdef int _VTYPE_STRING   = 6
 cdef int _VTYPE_GENERIC  = 7
 
 cdef inline int _classify_vector(Vector v) noexcept:
-    if isinstance(v, Integer64Vector):
+    cdef DrakenType t = v.unified().type
+    if t == DRAKEN_INT64:
         return _VTYPE_INT64
-    if isinstance(v, Integer8Vector):
+    if t == DRAKEN_INT8:
         return _VTYPE_INT8
-    if isinstance(v, Integer16Vector):
+    if t == DRAKEN_INT16:
         return _VTYPE_INT16
-    if isinstance(v, Integer32Vector):
+    if t == DRAKEN_INT32:
         return _VTYPE_INT32
-    if isinstance(v, Float64Vector):
+    if t == DRAKEN_FLOAT64:
         return _VTYPE_FLOAT64
-    if isinstance(v, StringVector):
+    if t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR:
         return _VTYPE_STRING
     return _VTYPE_GENERIC
 

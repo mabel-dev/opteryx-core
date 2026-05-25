@@ -23,15 +23,8 @@ from draken.core.buffers cimport str_length, str_data
 from draken.core.buffers cimport STR_INLINE_MAX
 from draken.core.buffers cimport str_init_null, str_init_inline, str_init_extern
 from draken.core.buffers cimport DRAKEN_INT64
-from draken.core.buffers cimport DRAKEN_STRING
-from draken.core.buffers cimport draken_vector_from_dense
 from draken.core.fixed_vector cimport alloc_fixed_buffer, free_fixed_buffer
 from draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
-from draken.core.string_arena cimport alloc_string_arena
-from draken.vectors.vector cimport Vector
-from draken.vectors.integer64_vector cimport Integer64Vector
-from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.string_vector cimport StringVector
 from draken.vectors.bool_vector cimport BoolVector
 
 
@@ -70,52 +63,28 @@ cdef inline bint _ks_bitmap_is_valid(uint8_t* bitmap, Py_ssize_t index) noexcept
 # Buffer wrapping helpers
 # ---------------------------------------------------------------------------
 
-cdef StringVector _wrap_string_buffer(DrakenVarBuffer* buf) except *:
-    cdef StringVector vec = StringVector(0, 0, True)
-    cdef DrakenStringArena* arena
-    cdef Py_ssize_t i, off, slen, total_extern_bytes = 0
+cdef Vector _wrap_string_buffer(DrakenVarBuffer* buf) except *:
+    """Convert accumulated DrakenVarBuffer bytes to a Draken VARCHAR Vector.
+
+    Called once from the finalize path (reconstruct_vectors); Python list
+    conversion cost is acceptable here.
+    """
     cdef Py_ssize_t row_count = <Py_ssize_t>buf.length
     cdef const uint8_t* src_data = <const uint8_t*>buf.data
     cdef const int32_t* src_offsets = buf.offsets
     cdef uint8_t* src_nulls = buf.null_bitmap
-    cdef DrakenStringSlot* slots
-    cdef uint8_t* arena_bytes
-    cdef size_t arena_used = 0
-    cdef bint row_is_null
-
-    for i in range(row_count):
-        slen = src_offsets[i + 1] - src_offsets[i]
-        if slen > STR_INLINE_MAX:
-            total_extern_bytes += slen
-
-    arena = alloc_string_arena(DRAKEN_STRING, <size_t>row_count, <size_t>total_extern_bytes)
-    if arena == NULL:
-        raise MemoryError()
-
-    slots = arena.slots
-    arena_bytes = arena.arena
+    cdef list result = []
+    cdef Py_ssize_t i, off, slen
 
     for i in range(row_count):
         off = src_offsets[i]
         slen = src_offsets[i + 1] - off
-        row_is_null = (src_nulls != NULL and ((src_nulls[i >> 3] >> (i & 7)) & 1) == 0)
-        if row_is_null:
-            str_init_null(&slots[i])
-        elif slen <= STR_INLINE_MAX:
-            str_init_inline(&slots[i], src_data + off, <uint32_t>slen)
+        if src_nulls != NULL and not ((src_nulls[i >> 3] >> (i & 7)) & 1):
+            result.append(None)
         else:
-            memcpy(arena_bytes + arena_used, src_data + off, <size_t>slen)
-            str_init_extern(&slots[i], src_data + off, <uint32_t>slen, <uint64_t>arena_used)
-            arena_used += <size_t>slen
+            result.append((<char*>src_data)[off:off + slen].decode('utf-8'))
 
-    arena.arena_used = arena_used
-    arena.length = <size_t>row_count
-
-    vec.ptr = buf
-    vec.owns_data = True
-    vec._unified_view = draken_vector_from_dense(
-        <void*>arena, <uint32_t>row_count, DRAKEN_STRING, src_nulls)
-    return vec
+    return Vector(_draken_native.vector_from_string_sequence(result))
 
 
 cdef inline Py_ssize_t _ks_bitmap_nbytes(Py_ssize_t length) noexcept nogil:
@@ -701,9 +670,8 @@ cdef class KeyStore:
         cdef int64_t key_kind
         cdef list vecs
         cdef Vector vec
-        cdef Integer64Vector iv
-        cdef Float64Vector fv
-        cdef StringVector sv
+        cdef Vector iv
+        cdef Vector fv
         cdef BoolVector bv
 
         # Multi-column pre-computed dispatch
@@ -723,9 +691,9 @@ cdef class KeyStore:
             key_kind = self._key_kinds[0]
             vec = morsel.column(self._group_columns[0])
 
+            uv = (<Vector>vec).unified()
+
             if key_kind == KEY_MULTI_ENCODED_STRING:
-                sv = <StringVector>vec
-                uv = sv.unified()
                 if self._single_string_direct:
                     _ks_store_string_bulk_dict(
                         self._single_string_buf,
@@ -741,9 +709,7 @@ cdef class KeyStore:
                 else:
                     raise RuntimeError("single string codec path removed")
 
-            elif isinstance(vec, Integer64Vector):
-                iv = <Integer64Vector>vec
-                uv = iv.unified()
+            elif uv.type == DRAKEN_INT64 or uv.type == DRAKEN_INT32 or uv.type == DRAKEN_INT16 or uv.type == DRAKEN_INT8:
                 if self._single_fixed_direct:
                     _ks_store_fixed_bulk_dict(
                         self._single_fixed_buf,
@@ -758,9 +724,7 @@ cdef class KeyStore:
                 else:
                     raise RuntimeError("single fixed key codec path removed")
 
-            elif isinstance(vec, BoolVector):
-                bv = <BoolVector>vec
-                uv = bv.unified()
+            elif uv.type == DRAKEN_BOOL:
                 if self._single_fixed_direct:
                     _ks_store_single_fixed_bulk_bool(
                         self._single_fixed_buf,
@@ -776,9 +740,7 @@ cdef class KeyStore:
                     raise RuntimeError("single fixed key codec path removed")
 
             else:
-                # Float64Vector and other fixed-width types — store as raw int64 bits
-                fv = <Float64Vector>vec
-                uv = fv.unified()
+                # Float64 and other fixed-width types — store raw bits as int64
                 if self._single_fixed_direct:
                     _ks_store_fixed_bulk_dict(
                         self._single_fixed_buf,
@@ -812,24 +774,21 @@ cdef class KeyStore:
             for col_idx in range(self._n_cols):
                 key_kind = self._key_kinds[col_idx]
                 vec = vecs[col_idx]
+                uv = (<Vector>vec).unified()
 
                 if key_kind == KEY_MULTI_ENCODED_STRING:
-                    sv = <StringVector>vec
-                    uv = sv.unified()
                     col_dispatch[col_idx]       = _DISPATCH_STRING
                     col_null_ptrs[col_idx]      = <size_t>uv.validity
                     col_arena_ptrs[col_idx]     = <size_t>uv.data
                     col_dict_code_ptrs[col_idx] = <size_t>uv.selection
 
-                elif isinstance(vec, Integer64Vector):
-                    iv = <Integer64Vector>vec
-                    uv = iv.unified()
+                elif uv.type == DRAKEN_INT64 or uv.type == DRAKEN_INT32 or uv.type == DRAKEN_INT16 or uv.type == DRAKEN_INT8:
                     col_dispatch[col_idx]       = _DISPATCH_INT64
                     col_null_ptrs[col_idx]      = <size_t>uv.validity
                     col_dense_ptrs[col_idx]     = <size_t>uv.data
                     col_dict_code_ptrs[col_idx] = <size_t>uv.selection
 
-                elif isinstance(vec, BoolVector):
+                elif uv.type == DRAKEN_BOOL:
                     bv = <BoolVector>vec
                     uv = bv.unified()
                     col_dispatch[col_idx]       = _DISPATCH_BOOL
@@ -838,9 +797,7 @@ cdef class KeyStore:
                     col_dict_code_ptrs[col_idx] = <size_t>uv.selection
 
                 else:
-                    # Float64Vector and other fixed-width types
-                    fv = <Float64Vector>vec
-                    uv = fv.unified()
+                    # Float64 and other fixed-width types — stored as raw int64 bits
                     col_dispatch[col_idx]       = _DISPATCH_FLOAT64
                     col_null_ptrs[col_idx]      = <size_t>uv.validity
                     col_dense_ptrs[col_idx]     = <size_t>uv.data
@@ -917,9 +874,13 @@ cdef class KeyStore:
         cdef Py_ssize_t col_idx
         cdef int64_t key_kind
         cdef object col_name
-        cdef Integer64Vector _fixed_iv
         cdef DrakenFixedBuffer* _fixed_buf
         cdef DrakenVarBuffer* _string_buf
+        cdef uint32_t fixed_length
+        cdef Py_ssize_t nbytes, vbytes
+        cdef void* new_data
+        cdef uint8_t* new_validity
+        cdef Vector fixed_iv
 
         # ---- Single-column fast paths ----
         if self._n_cols == 1:
@@ -942,14 +903,27 @@ cdef class KeyStore:
             else:
                 if self._single_fixed_direct:
                     _fixed_buf = self._single_fixed_buf
-                    _fixed_buf.length = <size_t>self._single_fixed_rows
+                    fixed_length = <uint32_t>self._single_fixed_rows
+                    nbytes = <Py_ssize_t>fixed_length * 8
+                    new_data = draken_malloc(<size_t>nbytes) if nbytes > 0 else NULL
+                    if nbytes > 0 and new_data == NULL:
+                        raise MemoryError()
+                    if nbytes > 0:
+                        memcpy(new_data, _fixed_buf.data, <size_t>nbytes)
+                    new_validity = NULL
+                    if self._single_fixed_nulls != NULL:
+                        vbytes = _ks_bitmap_nbytes(<Py_ssize_t>fixed_length)
+                        if vbytes > 0:
+                            new_validity = <uint8_t*>draken_malloc(<size_t>vbytes)
+                            if new_validity == NULL:
+                                draken_free(new_data)
+                                raise MemoryError()
+                            memcpy(new_validity, self._single_fixed_nulls, <size_t>vbytes)
                     _fixed_buf.null_bitmap = self._single_fixed_nulls
-
-                    _fixed_iv = Integer64Vector(0, True)
-                    _fixed_iv.ptr = _fixed_buf
-                    _fixed_iv.owns_data = True
-                    _fixed_iv._unified_view = draken_vector_from_dense(_fixed_buf.data, <uint32_t>_fixed_buf.length, DRAKEN_INT64, _fixed_buf.null_bitmap)
-                    out_vecs.append(_fixed_iv)
+                    free_fixed_buffer(_fixed_buf, True)
+                    self._single_fixed_buf = NULL
+                    fixed_iv = _from_decoded(new_data, new_validity, fixed_length, DRAKEN_INT64)
+                    out_vecs.append(fixed_iv)
 
                     self._single_fixed_buf = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
                     self._single_fixed_nulls = NULL

@@ -27,7 +27,7 @@ from libc.stdint cimport uint8_t, int32_t, uint64_t
 from libc.string cimport memcpy
 from libcpp.vector cimport vector
 from draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
-from draken.morsels.align cimport align_tables
+from draken.morsels.morsel cimport align_tables
 from opteryx.models import QueryProperties
 
 

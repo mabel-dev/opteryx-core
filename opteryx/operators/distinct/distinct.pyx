@@ -68,12 +68,12 @@ cdef class DistinctNode(BasePlanNode):
         if cols is None or len(cols) != 1:
             return None
         col = morsel.column(cols[0])
-        if isinstance(col, Integer8Vector):
-            if (<Integer8Vector>col).null_bitmap_ptr() != NULL:
+        if getattr(col, "type", None) == _draken_native.INT8:
+            if (<Vector>col).null_bitmap_ptr() != NULL:
                 return None  # has nulls — fall back
             return PerfectHashSet(-128, 127)
-        if isinstance(col, Integer16Vector):
-            if (<Integer16Vector>col).null_bitmap_ptr() != NULL:
+        if getattr(col, "type", None) == _draken_native.INT16:
+            if (<Vector>col).null_bitmap_ptr() != NULL:
                 return None  # has nulls — fall back
             return PerfectHashSet(-32768, 32767)
         return None
@@ -92,24 +92,24 @@ cdef class DistinctNode(BasePlanNode):
         cdef Py_ssize_t count
         cdef void* dp
 
-        if isinstance(col, Integer8Vector):
-            if (<Integer8Vector>col).null_bitmap_ptr() != NULL:
+        if getattr(col, "type", None) == _draken_native.INT8:
+            if (<Vector>col).null_bitmap_ptr() != NULL:
                 PyMem_Free(idx_buf)
                 return False
-            dp = (<Integer8Vector>col).ptr.data
-            if dp == NULL:
+            dp = (<Vector>col).unified().data
+            if (<Vector>col).unified().data_length != (<Vector>col).unified().length:
                 PyMem_Free(idx_buf)
-                return False
+                return False  # non-dense encoding — fall back
             with nogil:
                 count = phs.find_new_indices_out_32_i8(<const int8_t*>dp, idx_buf, n)
-        elif isinstance(col, Integer16Vector):
-            if (<Integer16Vector>col).null_bitmap_ptr() != NULL:
+        elif getattr(col, "type", None) == _draken_native.INT16:
+            if (<Vector>col).null_bitmap_ptr() != NULL:
                 PyMem_Free(idx_buf)
                 return False
-            dp = (<Integer16Vector>col).ptr.data
-            if dp == NULL:
+            dp = (<Vector>col).unified().data
+            if (<Vector>col).unified().data_length != (<Vector>col).unified().length:
                 PyMem_Free(idx_buf)
-                return False
+                return False  # non-dense encoding — fall back
             with nogil:
                 count = phs.find_new_indices_out_32_i16(<const int16_t*>dp, idx_buf, n)
         else:

@@ -30,10 +30,14 @@ REFACTORED (Session 46): Draken-native Cartesian product
 from typing import Generator, Optional
 
 from libc.stdint cimport int64_t, uint32_t
-from libc.stdlib cimport malloc, free
+from libc.stddef cimport size_t
 
-from draken.vectors.integer64_vector cimport from_decoded as int64_from_decoded
-from draken.vectors.integer64_vector cimport make_int64_dict_only
+from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded, dict_int64_from_decoded as _dict_int64_from_decoded
+from draken.core.buffers cimport DRAKEN_INT64
+
+cdef extern from "core/alloc.h" nogil:
+    void* draken_malloc(size_t n) nogil
+    void  draken_free(void* p) nogil
 
 from opteryx.models import QueryProperties
 
@@ -50,34 +54,34 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
     Right index is dense ([0..right_rows-1] repeated left_rows times).
 
     Returns:
-        tuple of (Integer64Vector dict-encoded, Integer64Vector dense) — left and right row indices
+        tuple of (Vector dict-encoded, Vector dense) — left and right row indices
     """
     cdef int64_t total_rows = left_rows * right_rows
     cdef int64_t i, j
-    cdef Integer64Vector left_vec, right_vec
+    cdef Vector left_vec, right_vec
     cdef uint32_t* codes = NULL
     cdef int64_t* dict_vals = NULL
     cdef int64_t* rvals = NULL
 
     if total_rows == 0:
-        return (Integer64Vector(0), Integer64Vector(0))
+        return (_draken_native.vector_from_sequence([]), _draken_native.vector_from_sequence([]))
 
-    # dict values: [0, 1, ..., left_rows-1]
-    dict_vals = <int64_t*>malloc(<size_t>left_rows * sizeof(int64_t))
+    # dict values: [0, 1, ..., left_rows-1] — draken_malloc'd, ownership transferred to left_vec.
+    dict_vals = <int64_t*>draken_malloc(<size_t>left_rows * sizeof(int64_t))
     if dict_vals == NULL:
         raise MemoryError()
 
     # codes[i * right_rows + j] = i  (same run value repeated right_rows times)
-    codes = <uint32_t*>malloc(<size_t>total_rows * sizeof(uint32_t))
+    codes = <uint32_t*>draken_malloc(<size_t>total_rows * sizeof(uint32_t))
     if codes == NULL:
-        free(dict_vals)
+        draken_free(dict_vals)
         raise MemoryError()
 
-    # Right side: draken-allocated buffer, ownership transferred via from_decoded.
-    rvals = <int64_t*>malloc(<size_t>total_rows * sizeof(int64_t))
+    # Right side: draken_malloc'd, ownership transferred via _vector_from_decoded.
+    rvals = <int64_t*>draken_malloc(<size_t>total_rows * sizeof(int64_t))
     if rvals == NULL:
-        free(codes)
-        free(dict_vals)
+        draken_free(codes)
+        draken_free(dict_vals)
         raise MemoryError()
 
     with nogil:
@@ -92,17 +96,15 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
             for j in range(right_rows):
                 rvals[i * right_rows + j] = j
 
-    # Transfer ownership of rvals before the fallible left-side construction;
-    # if make_int64_dict_only raises, right_vec frees rvals on dealloc.
-    right_vec = int64_from_decoded(<void*>rvals, NULL, <size_t>total_rows)
+    # Transfer ownership of rvals to right_vec (dense int64 vector).
+    right_vec = _vector_from_decoded(<void*>rvals, NULL, <uint32_t>total_rows, DRAKEN_INT64)
 
-    # make_int64_dict_only copies both codes and dict_vals internally.
-    left_vec = make_int64_dict_only(
-        codes, <Py_ssize_t>total_rows,
-        dict_vals, <Py_ssize_t>left_rows, NULL
+    # Transfer ownership of dict_vals and codes to left_vec (dict-encoded int64 vector).
+    # After this call, dict_vals and codes MUST NOT be freed — ownership is transferred.
+    left_vec = _dict_int64_from_decoded(
+        <void*>dict_vals, <uint32_t>left_rows,
+        codes, <uint32_t>total_rows, NULL
     )
-    free(codes)
-    free(dict_vals)
 
     return (left_vec, right_vec)
 
@@ -122,10 +124,9 @@ def _cross_join(left_morsel: Morsel, right_morsel: Morsel) -> Generator[Morsel, 
         left_count = left_morsel.column(encoded_count_identity)[0]
         right_count = right_morsel.column(encoded_count_identity)[0]
 
-        from draken.interop.vector_sequence import vector_from_sequence
         res = Morsel.from_vectors(
             [encoded_count_identity],
-            [vector_from_sequence([left_count * right_count])]
+            [_draken_native.vector_from_sequence([left_count * right_count])]
         )
         yield res
         return

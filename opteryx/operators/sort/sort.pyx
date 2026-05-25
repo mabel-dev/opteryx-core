@@ -28,7 +28,7 @@ from typing import Generator, Optional
 from opteryx.compiled.morsel_ops.sort import morsel_sort
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
-# evaluate_and_append_draken in scope from _operators evaluator includes
+from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 
 # BasePlanNode in scope via textual include from _operators.pyx.

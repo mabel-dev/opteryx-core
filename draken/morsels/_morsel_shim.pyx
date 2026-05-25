@@ -1,6 +1,8 @@
 # cython: language_level=3
 # Cython shim for draken.morsels.morsel — E.24 vtable bridge.
 
+from libc.stdint cimport int32_t
+
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.vector cimport Vector
 
@@ -251,6 +253,7 @@ cdef class Morsel:
 
     @classmethod
     def from_vectors(cls, col_names, col_vecs):
+
         from draken.draken_native import Morsel as NbMorsel
         cdef Morsel result = cls.__new__(cls)
         cdef Vector wrapped
@@ -265,3 +268,68 @@ cdef class Morsel:
             result._col_names.append(name)
             result._columns.append(wrapped)
         return result
+
+
+cpdef Morsel align_tables(Morsel left_morsel, Morsel right_morsel,
+                           int32_t[::1] left_view, int32_t[::1] right_view):
+    """Materialise a join result by taking rows from left and right at the given indices.
+
+    left_view:  int32 indices into left_morsel — always non-negative.
+    right_view: int32 indices into right_morsel — negative values produce null rows
+                (used by outer-join callers for unmatched left rows).
+
+    Returns a new Morsel with all left_morsel columns followed by all right_morsel
+    columns. Number of rows equals len(left_view).
+    """
+    cdef Py_ssize_t n = left_view.shape[0]
+    cdef Morsel result = _make_morsel()
+    cdef Py_ssize_t i, j
+    cdef int ncols_left, ncols_right
+    cdef object nb_taken, nb_new
+    cdef bint has_neg
+
+    # Left columns: indices are always valid — use take directly.
+    left_idx = [left_view[i] for i in range(n)]
+    ncols_left = len(left_morsel._columns)
+    for j in range(ncols_left):
+        nb_taken = (<Vector>left_morsel._columns[j])._nb.take(left_idx)
+        result._nb.append(nb_taken)
+        result._col_names.append(left_morsel._col_names[j])
+        result._columns.append(Vector(nb_taken))
+
+    # Right columns: may contain -1 for unmatched outer-join rows.
+    has_neg = False
+    for i in range(n):
+        if right_view[i] < 0:
+            has_neg = True
+            break
+
+    ncols_right = len(right_morsel._columns)
+
+    if not has_neg:
+        # Fast path: no null rows — take directly.
+        right_idx = [right_view[i] for i in range(n)]
+        for j in range(ncols_right):
+            nb_taken = (<Vector>right_morsel._columns[j])._nb.take(right_idx)
+            result._nb.append(nb_taken)
+            result._col_names.append(right_morsel._col_names[j])
+            result._columns.append(Vector(nb_taken))
+    else:
+        # Slow path: replace -1 with 0, take, then null out unmatched rows.
+        # Using to_pylist + vector_from_sequence preserves column type via
+        # type inference from the non-None values in the list.
+        from draken.draken_native import vector_from_sequence as _nb_vfs
+        safe_right = [right_view[i] if right_view[i] >= 0 else 0 for i in range(n)]
+        null_mask  = [right_view[i] < 0 for i in range(n)]
+        for j in range(ncols_right):
+            nb_taken = (<Vector>right_morsel._columns[j])._nb.take(safe_right)
+            taken_list = Vector(nb_taken)._nb.to_pylist()
+            for i in range(n):
+                if null_mask[i]:
+                    taken_list[i] = None
+            nb_new = _nb_vfs(taken_list)
+            result._nb.append(nb_new)
+            result._col_names.append(right_morsel._col_names[j])
+            result._columns.append(Vector(nb_new))
+
+    return result

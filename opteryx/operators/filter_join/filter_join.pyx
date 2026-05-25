@@ -101,8 +101,8 @@ cdef object _try_build_phash(Morsel morsel, list columns, object current_set):
     if len(columns) != 1:
         return None
     col = morsel.column(columns[0])
-    cdef bint is_int8 = isinstance(col, Integer8Vector)
-    cdef bint is_int16 = isinstance(col, Integer16Vector)
+    cdef bint is_int8 = getattr(col, "type", None) == _draken_native.INT8
+    cdef bint is_int16 = getattr(col, "type", None) == _draken_native.INT16
     if not (is_int8 or is_int16):
         return None  # Int32/Int64 — no type bound in Phase 1
 
@@ -110,14 +110,10 @@ cdef object _try_build_phash(Morsel morsel, list columns, object current_set):
     # null rows are skipped (not inserted) into PerfectHashSet.
     cdef void* dp
     cdef uint8_t* nulls
-    if is_int8:
-        dp = (<Integer8Vector>col).ptr.data
-        nulls = (<Integer8Vector>col).null_bitmap_ptr()
-    else:
-        dp = (<Integer16Vector>col).ptr.data
-        nulls = (<Integer16Vector>col).null_bitmap_ptr()
-    if dp == NULL:
-        return None  # non-dense encoding (RLE/const) → fall back
+    dp = (<Vector>col).unified().data
+    nulls = (<Vector>col).null_bitmap_ptr()
+    if (<Vector>col).unified().data_length != (<Vector>col).unified().length:
+        return None  # non-dense encoding (dict/const) → fall back
 
     cdef PerfectHashSet phs
     if current_set is None:
@@ -167,7 +163,6 @@ cdef CarcharSetWrapper _rebuild_carchar_from_phash(PerfectHashSet phs):
     PerfectHashSet path can't handle (e.g. nullable or non-dense). Iterates
     the bit-array and hashes each stored value via Draken's scalar hash machinery.
     """
-    from draken.vectors.scalar_constructors import from_scalar as _build_scalar
     cdef CarcharSetWrapper result = CarcharSetWrapper(<size_t>phs._range * 2 + 8)
     cdef uint64_t[::1] hash_buf
     cdef Py_ssize_t w, bit
@@ -182,7 +177,7 @@ cdef CarcharSetWrapper _rebuild_carchar_from_phash(PerfectHashSet phs):
             if word & mask:
                 slot = <int64_t>w * 64 + <int64_t>bit
                 val = phs._min_val + slot
-                scalar_vec = _build_scalar(val, 1)
+                scalar_vec = _draken_native.vector_int64_from_constant(val, 1)
                 hash_buf = (<Vector>scalar_vec).hash()
                 result.insert(hash_buf[0])
     return result
@@ -314,20 +309,16 @@ cdef Morsel _phash_probe(
     if len(join_columns) != 1:
         return None
     col = relation.column(join_columns[0])
-    cdef bint is_int8 = isinstance(col, Integer8Vector)
-    cdef bint is_int16 = isinstance(col, Integer16Vector)
+    _col_type_probe = getattr(col, "type", None)
+    cdef bint is_int8 = (_col_type_probe == _draken_native.INT8)
+    cdef bint is_int16 = (_col_type_probe == _draken_native.INT16)
     if not (is_int8 or is_int16):
         return None
-    cdef void* dp
-    cdef uint8_t* nulls
-    if is_int8:
-        dp = (<Integer8Vector>col).ptr.data
-        nulls = (<Integer8Vector>col).null_bitmap_ptr()
-    else:
-        dp = (<Integer16Vector>col).ptr.data
-        nulls = (<Integer16Vector>col).null_bitmap_ptr()
-    if dp == NULL:
-        return None
+    cdef DrakenVector* probe_uv = (<Vector>col).unified()
+    cdef void* dp = probe_uv.data
+    cdef uint8_t* nulls = (<Vector>col).null_bitmap_ptr()
+    if probe_uv.data_length != probe_uv.length:
+        return None  # non-dense encoding — fall back
 
     cdef Py_ssize_t n = relation.num_rows
     cdef int32_t* out_buf = <int32_t*>PyMem_Malloc(n * sizeof(int32_t))
@@ -443,9 +434,9 @@ cdef class FilterJoinNode(JoinNode):
                 # Check for nulls in this morsel
                 if len(self.right_columns) == 1:
                     col = morsel.column(self.right_columns[0])
-                    if isinstance(col, (Integer8Vector, Integer16Vector)):
-                        if (isinstance(col, Integer8Vector) and (<Integer8Vector>col).null_bitmap_ptr() != NULL) or \
-                           (isinstance(col, Integer16Vector) and (<Integer16Vector>col).null_bitmap_ptr() != NULL):
+                    _col_type_a = getattr(col, "type", None)
+                if _col_type_a == _draken_native.INT8 or _col_type_a == _draken_native.INT16:
+                        if (<Vector>col).null_bitmap_ptr() != NULL:
                             self._right_has_null = True
                 self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
                 return
@@ -462,9 +453,9 @@ cdef class FilterJoinNode(JoinNode):
             # Track nulls
             if len(self.right_columns) == 1:
                 col = morsel.column(self.right_columns[0])
-                if isinstance(col, (Integer8Vector, Integer16Vector)):
-                    if (isinstance(col, Integer8Vector) and (<Integer8Vector>col).null_bitmap_ptr() != NULL) or \
-                       (isinstance(col, Integer16Vector) and (<Integer16Vector>col).null_bitmap_ptr() != NULL):
+                _col_type_b = getattr(col, "type", None)
+                if _col_type_b == _draken_native.INT8 or _col_type_b == _draken_native.INT16:
+                    if (<Vector>col).null_bitmap_ptr() != NULL:
                         self._right_has_null = True
             self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
             return

@@ -2,20 +2,30 @@
 
 import datetime
 
+import draken.draken_native as _draken_native
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 from opteryx.utils.vector_types import VectorType, get_vector_type
 
 
-
 cdef _to_string_vec(v, n):
-    """Ensure v is a StringVector of length n for vector_concat."""
-    from draken.vectors.string_vector import StringVector
-    if isinstance(v, StringVector):
-        return v
-    # Scalar str/bytes/None — broadcast to constant StringVector.
-    if isinstance(v, str):
-        v = v.encode("utf-8")
-    return StringVector.from_constant(v, n)
+    """Ensure v is a string Vector of length n for vector_concat.
+
+    For scalar inputs produces a constant-shape Vector (O(1) allocation,
+    data_length==1) via vector_varchar_from_constant.
+    """
+    _str_types = (_draken_native.VARCHAR, _draken_native.NVARCHAR)
+    if getattr(v, "type", None) in _str_types:
+        return v  # already a string Vector
+    # Normalize scalar to str or None.
+    if isinstance(v, bytes):
+        v = v.decode("utf-8")
+    elif isinstance(v, str):
+        pass
+    elif v is None:
+        pass
+    else:
+        v = str(v)
+    return _draken_native.vector_varchar_from_constant(v, n)
 
 
 cpdef _eval_binary_op_draken(node, morsel):
@@ -30,22 +40,18 @@ cpdef _eval_binary_op_draken(node, morsel):
         OrsoTypes.TIMESTAMP,
     ):
         if node.left.schema_column.type == OrsoTypes.DATE:
-            from draken.vectors.date32_vector import Date32Vector
-            left = Date32Vector.from_constant(_coerce_date32(left), morsel.num_rows)
+            left = _draken_native.vector_date32_from_constant(_coerce_date32(left), morsel.num_rows)
         else:
-            from draken.vectors.timestamp_vector import TimestampVector
-            left = TimestampVector.from_constant(_coerce_timestamp(left), morsel.num_rows)
+            left = _draken_native.vector_timestamp_from_constant(_coerce_timestamp(left), morsel.num_rows)
 
     if get_vector_type(right) == VectorType.UNKNOWN and node.right.schema_column.type in (
         OrsoTypes.DATE,
         OrsoTypes.TIMESTAMP,
     ):
         if node.right.schema_column.type == OrsoTypes.DATE:
-            from draken.vectors.date32_vector import Date32Vector
-            right = Date32Vector.from_constant(_coerce_date32(right), morsel.num_rows)
+            right = _draken_native.vector_date32_from_constant(_coerce_date32(right), morsel.num_rows)
         else:
-            from draken.vectors.timestamp_vector import TimestampVector
-            right = TimestampVector.from_constant(_coerce_timestamp(right), morsel.num_rows)
+            right = _draken_native.vector_timestamp_from_constant(_coerce_timestamp(right), morsel.num_rows)
 
     left_type = get_vector_type(left)
     right_type = get_vector_type(right)
@@ -66,8 +72,10 @@ cpdef _eval_binary_op_draken(node, morsel):
 
     if op == "StringConcat":
         from opteryx.compiled.nanobind.vector_selection_concat import vector_concat as _vc
-        from draken.vectors.string_vector import StringVector as _SVT
-        n = len(left) if isinstance(left, _SVT) else (len(right) if isinstance(right, _SVT) else 1)
+        _str_types = (_draken_native.VARCHAR, _draken_native.NVARCHAR)
+        n = len(left) if getattr(left, "type", None) in _str_types else (
+            len(right) if getattr(right, "type", None) in _str_types else 1
+        )
         return _vc(_to_string_vec(left, n), _to_string_vec(right, n))
 
     from opteryx.expression.binary_operators import BINARY_OPERATORS
@@ -119,22 +127,18 @@ cpdef _binary_op_from_vecs(str op, left, right, left_orso_type, right_orso_type,
         OrsoTypes.TIMESTAMP,
     ):
         if left_orso_type == OrsoTypes.DATE:
-            from draken.vectors.date32_vector import Date32Vector
-            left = Date32Vector.from_constant(_coerce_date32(left), num_rows)
+            left = _draken_native.vector_date32_from_constant(_coerce_date32(left), num_rows)
         else:
-            from draken.vectors.timestamp_vector import TimestampVector
-            left = TimestampVector.from_constant(_coerce_timestamp(left), num_rows)
+            left = _draken_native.vector_timestamp_from_constant(_coerce_timestamp(left), num_rows)
 
     if get_vector_type(right) == VectorType.UNKNOWN and right_orso_type in (
         OrsoTypes.DATE,
         OrsoTypes.TIMESTAMP,
     ):
         if right_orso_type == OrsoTypes.DATE:
-            from draken.vectors.date32_vector import Date32Vector
-            right = Date32Vector.from_constant(_coerce_date32(right), num_rows)
+            right = _draken_native.vector_date32_from_constant(_coerce_date32(right), num_rows)
         else:
-            from draken.vectors.timestamp_vector import TimestampVector
-            right = TimestampVector.from_constant(_coerce_timestamp(right), num_rows)
+            right = _draken_native.vector_timestamp_from_constant(_coerce_timestamp(right), num_rows)
 
     left_type = get_vector_type(left)
     right_type = get_vector_type(right)
@@ -155,8 +159,10 @@ cpdef _binary_op_from_vecs(str op, left, right, left_orso_type, right_orso_type,
 
     if op == "StringConcat":
         from opteryx.compiled.nanobind.vector_selection_concat import vector_concat as _vc
-        from draken.vectors.string_vector import StringVector as _SVT
-        n = len(left) if isinstance(left, _SVT) else (len(right) if isinstance(right, _SVT) else 1)
+        _str_types = (_draken_native.VARCHAR, _draken_native.NVARCHAR)
+        n = len(left) if getattr(left, "type", None) in _str_types else (
+            len(right) if getattr(right, "type", None) in _str_types else 1
+        )
         return _vc(_to_string_vec(left, n), _to_string_vec(right, n))
 
     from opteryx.expression.binary_operators import BINARY_OPERATORS

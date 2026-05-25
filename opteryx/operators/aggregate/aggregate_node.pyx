@@ -30,7 +30,7 @@ from libc.stdint cimport uint8_t, int64_t
 
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
-# evaluate_and_append_draken in scope from _operators evaluator includes
+from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 from opteryx.operators.aggregate.helpers import extract_evaluations
 from opteryx.types import OrsoTypes

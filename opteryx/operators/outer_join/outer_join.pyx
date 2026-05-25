@@ -32,7 +32,7 @@ from cpython.mem cimport PyMem_Malloc, PyMem_Free
 
 from draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
 from draken.morsels.morsel cimport Morsel
-from draken.morsels.align cimport align_tables
+from draken.morsels.morsel cimport align_tables
 
 from opteryx.compiled.structures.bloom_filter import create_bloom_filter_morsel
 from opteryx.compiled.structures.bloom_filter import bloom_filter_check_morsel

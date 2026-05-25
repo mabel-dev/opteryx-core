@@ -28,7 +28,7 @@ import logging
 from typing import Generator
 
 
-from draken.vectors.scalar_constructors import from_scalar
+from draken.draken_native import vector_from_sequence as _vector_from_sequence
 from opteryx.types.schema import RelationSchema
 
 # EOS sentinel in scope as _EOS_SENTINEL via the umbrella unit.
@@ -54,32 +54,12 @@ class NullReaderNode(BasePlanNode):  # pragma: no cover
 
     def read_morsels(self):
         """Source-side iterator: yields a single empty morsel with the correct schema."""
-        # Try to build empty Morsel with correct schema
-        # First try: use schema property if available
-        if self.schema:
-            try:
-                empty_morsel = Morsel()
-                for column in self.schema.columns:
-                    # Create empty vector with correct type
-                    vector = from_scalar(None, 0, dtype=column.arrow_field.type)
-                    empty_morsel.append_vector(column.identity, vector)
-                yield empty_morsel
-                return
-            except Exception as err:  # pragma: no cover - defensive fallback
-                logger.debug(f"Unable to build schema-aware empty morsel: {err}")
-
-        # Second try: use columns property if available
+        # Build empty Morsel with correct schema from columns property
         if self.columns:
             empty_morsel = Morsel()
             for col in self.columns:
-                col_name = col
-                if hasattr(col, "identity"):
-                    col_name = col.identity
-                elif hasattr(col, "name"):
-                    col_name = col.name
-
-                # Default to null type for unknown columns
-                vector = from_scalar(None, 0)
+                col_name = getattr(col, "identity", None) or getattr(col, "name", None) or col
+                vector = _vector_from_sequence([])
                 empty_morsel.append_vector(col_name if isinstance(col_name, bytes) else str(col_name).encode(), vector)
             yield empty_morsel
             return

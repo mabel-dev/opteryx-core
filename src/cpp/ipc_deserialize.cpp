@@ -2,9 +2,9 @@
 
 #include "ipc_deserialize.hpp"
 #include "memory_pool.hpp"
+#include "core/alloc.h"
 
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 
 namespace opteryx {
@@ -28,7 +28,7 @@ static inline const uint8_t* read_u32(const uint8_t* p, uint32_t& out) noexcept 
 // interpreted as "non-nullable").
 static inline uint8_t* malloc_copy(const uint8_t* src, size_t nbytes) noexcept {
     if (nbytes == 0) return nullptr;
-    uint8_t* dst = static_cast<uint8_t*>(std::malloc(nbytes));
+    uint8_t* dst = static_cast<uint8_t*>(draken_malloc(nbytes));
     if (dst == nullptr) return nullptr;
     std::memcpy(dst, src, nbytes);
     return dst;
@@ -49,7 +49,7 @@ static inline bool copy_nulls(const uint8_t* null_bitmap, uint32_t null_bitmap_l
     }
     out.null_bitmap = malloc_copy(null_bitmap, null_bitmap_len);
     if (out.null_bitmap == nullptr) {
-        std::free(out.data);
+        draken_free(out.data);
         out.data = nullptr;
         out.status = kStatusOom;
         return false;
@@ -71,7 +71,7 @@ static bool copy_contig(const uint8_t* p, const uint8_t* end,
     // nullptr in that case; the destination Vector's Cython constructor
     // accepts a NULL data pointer for zero-length buffers.
     if (data_len > 0) {
-        out.data = std::malloc(data_len);
+        out.data = draken_malloc(data_len);
         if (out.data == nullptr) { out.status = kStatusOom; return false; }
         std::memcpy(out.data, p, data_len);
     }
@@ -94,7 +94,7 @@ static bool widen_int32_to_int64(const uint8_t* p, const uint8_t* end,
     const size_t dst_bytes = static_cast<size_t>(n) * sizeof(int64_t);
 
     if (dst_bytes > 0) {
-        out.data = std::malloc(dst_bytes);
+        out.data = draken_malloc(dst_bytes);
         if (out.data == nullptr) { out.status = kStatusOom; return false; }
 
         int64_t* dst = static_cast<int64_t*>(out.data);

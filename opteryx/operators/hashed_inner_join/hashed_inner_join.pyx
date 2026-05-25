@@ -46,7 +46,7 @@ from draken.vectors.vector cimport NULL_HASH
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
-# evaluate_and_append_draken in scope from _operators evaluator includes
+from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 
 # EOS sentinel available as _EOS_SENTINEL via the umbrella unit.

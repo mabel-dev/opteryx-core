@@ -52,18 +52,16 @@ from opteryx.types import OrsoTypes
 
 # Hoisted out of the per-row-group hot path. Previously these imports happened
 # 3× per row group via `from ... import ...` inside the loop body.
-from draken.vectors.decimal_vector import from_int64_vector as _int64_to_decimal
-from draken.vectors.date32_vector import from_int64_vector as _int64_to_date32
-from draken.vectors.timestamp_vector import from_int64_vector as _int64_to_timestamp
-# Integer64Vector is already cimported by the umbrella unit (_operators.pyx).
+import draken.draken_native as _draken_native_parquet
+_int64_to_decimal  = _draken_native_parquet.vector_reinterpret_as_decimal
+_int64_to_date32   = _draken_native_parquet.vector_reinterpret_as_date32
+_int64_to_timestamp = _draken_native_parquet.vector_reinterpret_as_timestamp64
 
 # Predicate evaluation is the bytecode VM only — no alternative paths. The
 # compiler lowers the predicate AST to a typed CompiledBytecode at bind time;
 # the executor iterates a C struct array with stack-based dispatch.
 #
-# execute_bytecode is included into this compilation unit via the umbrella
-# include of evaluator/evaluation.pyx in _operators.pyx. It is cpdef, so the
-# call site below dispatches at C level with no Python function boundary.
+from opteryx.expression.evaluator import execute_bytecode
 from opteryx.compiled.expression.compiled_expression import build_bytecode as _build_bytecode
 from opteryx.compiled.expression.compiled_expression import lower as _lower_expr
 from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode
@@ -369,20 +367,20 @@ cdef inline void _coerce_logical_types(
     if decimal_col_map:
         for col_name, dec in decimal_col_map.items():
             v = row_group.get(col_name)
-            if v is not None and isinstance(v, Integer64Vector):
+            if v is not None and getattr(v, "type", None) == _draken_native_parquet.INT64:
                 precision = dec[0]
                 scale = dec[1]
                 row_group[col_name] = _int64_to_decimal(v, precision, scale)
     if date_col_set:
         for col_name in date_col_set:
             v = row_group.get(col_name)
-            if v is not None and isinstance(v, Integer64Vector):
+            if v is not None and getattr(v, "type", None) == _draken_native_parquet.INT64:
                 row_group[col_name] = _int64_to_date32(v)
     if timestamp_col_set:
         for col_name in timestamp_col_set:
             v = row_group.get(col_name)
-            if v is not None and isinstance(v, Integer64Vector):
-                row_group[col_name] = _int64_to_timestamp(v, "us")
+            if v is not None and getattr(v, "type", None) == _draken_native_parquet.INT64:
+                row_group[col_name] = _int64_to_timestamp(v)
 
 
 cdef class _Pass1Result:
@@ -954,7 +952,7 @@ cdef class ParquetReadNode(ReaderNode):
                             continue
                         result_morsel = Morsel.from_vectors(
                             [b'*'],
-                            [BoolVector.from_constant(True, surviving_rows)],
+                            [_draken_native_parquet.vector_from_bool_constant(True, <uint32_t>surviving_rows)],
                         )
 
                     num_rows = result_morsel.num_rows

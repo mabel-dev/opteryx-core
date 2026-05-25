@@ -11,12 +11,17 @@
 # distutils: language = c++
 # distutils: sources = src/cpp/intbuffer.cpp
 from libc.stddef cimport size_t
-from libc.stdint cimport int64_t, int32_t
+from libc.stdint cimport int64_t, int32_t, uint32_t
 from libc.stdlib cimport malloc
 from libcpp.vector cimport vector
 from libc.string cimport memcpy
 
-from draken.vectors.integer64_vector cimport Integer64Vector, from_decoded as int64_from_decoded
+cdef extern from "core/alloc.h" nogil:
+    void* draken_malloc(size_t n) nogil
+    void  draken_free(void* p) nogil
+
+from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
+from draken.core.buffers cimport DRAKEN_INT64
 
 cdef extern from "intbuffer.h":
     cdef cppclass CIntBuffer:
@@ -114,25 +119,25 @@ cdef class IntBuffer:
             for item in iterable:
                 self.c_buffer.append(item)
 
-    cpdef Integer64Vector into_int64_vector(self):
-        """Convert to an owning Integer64Vector.
+    cpdef Vector into_int64_vector(self):
+        """Convert to an owning Vector (INT64 type).
 
         The buffer's storage is a std::vector and cannot be free()'d, so this
-        copies once into a malloc'd buffer at the allocator boundary and
-        transfers ownership to the vector.
+        copies once into a draken_malloc'd buffer at the allocator boundary and
+        transfers ownership to the vector via from_decoded.
         """
         cdef size_t n = self.c_buffer.size()
         cdef int64_t* p
         if n == 0:
-            return int64_from_decoded(NULL, NULL, 0)
-        p = <int64_t*>malloc(n * 8)
+            return _vector_from_decoded(NULL, NULL, <uint32_t>0, DRAKEN_INT64)
+        p = <int64_t*>draken_malloc(n * 8)
         if p == NULL:
             raise MemoryError()
         memcpy(p, self.c_buffer.data(), n * 8)
-        return int64_from_decoded(<void*>p, NULL, n)
+        return _vector_from_decoded(<void*>p, NULL, <uint32_t>n, DRAKEN_INT64)
 
-    cpdef Integer64Vector to_int64_vector(self):
-        """Convert to Integer64Vector (Draken vector)."""
+    cpdef Vector to_int64_vector(self):
+        """Convert to Vector (INT64 Draken vector)."""
         return self.into_int64_vector()
 
     cpdef Int32Buffer to_int32_buffer(self):

@@ -85,8 +85,7 @@ cdef class ExitNode(BasePlanNode):
     cdef void _dispatch_push(self, Morsel morsel) except *:
         if morsel is _EOS_SENTINEL:
             if not self.at_least_one:
-                from draken.interop.vector_sequence import vector_from_sequence
-                vectors = [vector_from_sequence([]) for _ in self.columns]
+                vectors = [_draken_native.vector_from_sequence([]) for _ in self.columns]
                 empty = Morsel.from_vectors(self.final_names, vectors)
                 self._pending.append(empty)
             return

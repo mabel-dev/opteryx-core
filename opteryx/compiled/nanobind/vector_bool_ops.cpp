@@ -155,6 +155,46 @@ NB_MODULE(vector_bool_ops, m) {
         "Build a DRAKEN_BOOL Vector of length n with every bit = 1 (all IS NULL = true). "
         "Used when a column is entirely SQL NULL (constant-null encoding).");
 
+    m.def("vector_uint64_eq_scalar",
+        [](nb::object buffer_obj, int64_t length_signed, uint64_t target) -> nb::object {
+            // Element-wise scalar equality on a contiguous uint64 buffer.
+            // For each row i in [0, length): out[i] = (buffer[i] == target).
+            // Returns a DRAKEN_BOOL Vector (dense, all-valid).
+            //
+            // Use case: morsel.hash(col_names) returns a uint64 buffer (one hash per
+            // row); the join/group-by fast path needs a BoolVector of "rows whose hash
+            // matches target_hash."  Replaces old-draken `_bool_vector_from_uint64_eq`.
+            //
+            // No Python loops; buffer accessed zero-copy via the buffer protocol.
+            if (length_signed < 0)
+                throw std::invalid_argument("vector_uint64_eq_scalar: length must be >= 0");
+            const uint32_t n = static_cast<uint32_t>(length_signed);
+
+            Py_buffer view;
+            if (PyObject_GetBuffer(buffer_obj.ptr(), &view, PyBUF_SIMPLE) < 0)
+                throw nb::python_error();
+            // Caller is responsible for ensuring buffer holds >= length uint64s.
+            // PyBUF_SIMPLE doesn't validate element type; size check is a sanity guard.
+            if (static_cast<uint32_t>(view.len) < n * sizeof(uint64_t)) {
+                PyBuffer_Release(&view);
+                throw std::invalid_argument(
+                    "vector_uint64_eq_scalar: buffer smaller than length * 8 bytes");
+            }
+
+            uint8_t* data = alloc_bitmap(n);
+            const uint64_t* buf = static_cast<const uint64_t*>(view.buf);
+            for (uint32_t i = 0u; i < n; ++i)
+                if (buf[i] == target)
+                    data[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+
+            PyBuffer_Release(&view);
+            return wrap_bool(data, n);
+        },
+        nb::arg("buffer"), nb::arg("length"), nb::arg("target"),
+        "Element-wise equality of a uint64 buffer against a scalar target. "
+        "Returns a DRAKEN_BOOL Vector of length `length`, bit i = (buffer[i] == target). "
+        "Accepts any buffer-protocol object (array.array('Q'), bytes, memoryview).");
+
     m.def("bool_vector_and_chain",
         [](nb::object masks_obj) -> nb::object {
             if (!PyList_Check(masks_obj.ptr()))

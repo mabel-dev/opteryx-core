@@ -40,7 +40,7 @@ Supported MATCH_CONDITION operators: <, <=, >, >=
 from array import array as _pyarray
 from bisect import bisect_left, bisect_right
 
-from draken.morsels.align cimport align_tables
+from draken.morsels.morsel cimport align_tables
 from draken.morsels.morsel cimport Morsel
 
 

@@ -13,10 +13,9 @@ from opteryx.compiled.nanobind.vector_misc import vector_in_list
 from opteryx.types import OrsoTypes
 
 from draken.vectors.bool_vector import BoolVector
-from draken.vectors.date32_vector import Date32Vector
-from draken.vectors.integer64_vector import Integer64Vector
-from draken.vectors.timestamp_vector import TimestampVector
-from draken.interop.vector_sequence import vector_from_sequence
+from draken.vectors.vector import Vector as _TemporalVector
+import draken.draken_native as _draken_native
+from draken.draken_native import vector_from_sequence
 
 
 
@@ -57,7 +56,7 @@ cdef _int64_temporal_compare(int op_code, vec, right, temporal_type):
             value_set = _coerce_timestamp_set(right)
         else:
             value_set = _coerce_date32_set(right)
-    elif isinstance(right, (Integer64Vector, TimestampVector, Date32Vector)):
+    elif isinstance(right, _TemporalVector):
         return vec._compare_vector(right, _DRAKEN_CMP_OP[op_code])
     else:
         if is_timestamp:
@@ -76,9 +75,9 @@ cdef _timestamp_compare(int op_code, vec, right):
 
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = _coerce_timestamp_set(right)
-    elif isinstance(right, TimestampVector):
+    elif isinstance(right, _TemporalVector) and right.type == _draken_native.TIMESTAMP64:
         return vec._compare_vector(right, _DRAKEN_CMP_OP[op_code])
-    elif isinstance(right, Date32Vector):
+    elif isinstance(right, _TemporalVector) and right.type == _draken_native.DATE32:
         return _compare_timestamp_date32_vectors(op_code, vec, right)
     else:
         value = _coerce_timestamp(right)
@@ -96,9 +95,9 @@ cdef _date32_compare(int op_code, vec, right):
 
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = _coerce_date32_set(right)
-    elif isinstance(right, Date32Vector):
+    elif isinstance(right, _TemporalVector) and right.type == _draken_native.DATE32:
         return vec._compare_vector_op(right, _DRAKEN_CMP_OP[op_code])
-    elif isinstance(right, TimestampVector):
+    elif isinstance(right, _TemporalVector) and right.type == _draken_native.TIMESTAMP64:
         return _compare_timestamp_date32_vectors(op_code, right, vec)
     else:
         value = _coerce_date32(right)

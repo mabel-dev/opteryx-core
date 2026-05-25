@@ -31,8 +31,7 @@ from opteryx.compiled.vector_ops.vector_ops import _make_const_int16, _make_rang
 
 from draken.morsels.morsel import Morsel
 from draken.vectors.bool_vector import BoolVector
-from draken.vectors.null_vector import NullVector
-from draken.vectors.string_vector import StringVector
+import draken.draken_native as _draken_native
 
 
 # Compile-time NodeType.LITERAL value — kept in sync with the runtime enum by
@@ -174,12 +173,13 @@ cdef _assemble(
     if first is None:
         first = else_part
     if first is None:
-        return NullVector(n)
+        return _draken_native.vector_null_from_length(n)
 
     if isinstance(first, BoolVector):
         return assemble_bool(parts, else_part, branch_id, rows_per_branch, unmatched)
 
-    if isinstance(first, StringVector):
+    first_type = getattr(first, "type", None)
+    if first_type in (_draken_native.VARCHAR, _draken_native.NVARCHAR):
         return assemble_flat_string(parts, else_part, branch_id, pos_in_branch, n)
 
     # Fixed-width (numeric, date, timestamp, …)

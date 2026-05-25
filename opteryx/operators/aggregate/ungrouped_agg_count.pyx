@@ -68,80 +68,72 @@ cdef class CountAggregate(UngroupedAggregate):
         cdef DrakenVector* uv
 
         if self._col_type == _VTYPE_INT64:
-            vec_i = <Integer64Vector>raw
-            uv = vec_i.unified()
+            uv = (<Vector>raw).unified()
             if uv.data_length == 1 and uv.length > 1:  # constant
                 if uv.validity == NULL:  # not null constant
                     self._count += nrows
                 return
-            nulls = uv.validity
-            if nulls == NULL:
+            if uv.validity == NULL:
                 self._count += nrows
                 return
-            self._count += <int64_t>nrows - <int64_t>vec_i.null_count
+            self._count += <int64_t>nrows - _count_nulls(uv.validity, nrows)
             return
 
         if self._col_type == _VTYPE_STRING:
-            vec_s = <StringVector>raw
-            uv = vec_s.unified()
+            uv = (<Vector>raw).unified()
             if uv.data_length == 1 and uv.length > 1:  # constant
                 if uv.validity == NULL:  # not null constant
                     self._count += nrows
                 return
-            self._count += <int64_t>nrows - <int64_t>vec_s.null_count
+            self._count += <int64_t>nrows - _count_nulls(uv.validity, nrows)
             return
 
         if self._col_type == _VTYPE_FLOAT64:
-            vec_f = <Float64Vector>raw
-            uv = vec_f.unified()
+            uv = (<Vector>raw).unified()
             if uv.data_length == 1 and uv.length > 1:  # constant
                 if uv.validity == NULL:
                     self._count += nrows
                 return
-            nulls = uv.validity
-            if nulls == NULL:
+            if uv.validity == NULL:
                 self._count += nrows
                 return
-            self._count += <int64_t>nrows - <int64_t>vec_f.null_count
+            self._count += <int64_t>nrows - _count_nulls(uv.validity, nrows)
             return
 
         if self._col_type == _VTYPE_INT8:
-            uv = (<Integer8Vector>raw).unified()
+            uv = (<Vector>raw).unified()
             if uv.data_length == 1 and uv.length > 1:  # constant
                 if uv.validity == NULL:
                     self._count += nrows
                 return
-            nulls = uv.validity
-            if nulls == NULL:
+            if uv.validity == NULL:
                 self._count += nrows
                 return
-            self._count += <int64_t>nrows - <int64_t>(<Integer8Vector>raw).null_count
+            self._count += <int64_t>nrows - _count_nulls(uv.validity, nrows)
             return
 
         if self._col_type == _VTYPE_INT16:
-            uv = (<Integer16Vector>raw).unified()
+            uv = (<Vector>raw).unified()
             if uv.data_length == 1 and uv.length > 1:  # constant
                 if uv.validity == NULL:
                     self._count += nrows
                 return
-            nulls = uv.validity
-            if nulls == NULL:
+            if uv.validity == NULL:
                 self._count += nrows
                 return
-            self._count += <int64_t>nrows - <int64_t>(<Integer16Vector>raw).null_count
+            self._count += <int64_t>nrows - _count_nulls(uv.validity, nrows)
             return
 
         if self._col_type == _VTYPE_INT32:
-            uv = (<Integer32Vector>raw).unified()
+            uv = (<Vector>raw).unified()
             if uv.data_length == 1 and uv.length > 1:  # constant
                 if uv.validity == NULL:
                     self._count += nrows
                 return
-            nulls = uv.validity
-            if nulls == NULL:
+            if uv.validity == NULL:
                 self._count += nrows
                 return
-            self._count += <int64_t>nrows - <int64_t>(<Integer32Vector>raw).null_count
+            self._count += <int64_t>nrows - _count_nulls(uv.validity, nrows)
             return
 
         # Generic fallback — pay per-row only for unknown vector types
@@ -149,7 +141,7 @@ cdef class CountAggregate(UngroupedAggregate):
         if nulls == NULL:
             self._count += nrows
             return
-        self._count += <int64_t>nrows - <int64_t>raw.null_count
+        self._count += <int64_t>nrows - _count_nulls(nulls, nrows)
 
     cdef int64_t get_result_i64(self) noexcept:
         return self._count

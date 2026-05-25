@@ -60,13 +60,13 @@ from draken.core.buffers cimport (
     DRAKEN_FLOAT64,
     DRAKEN_BOOL,
     DRAKEN_VARCHAR,
+    DRAKEN_NVARCHAR,
     DRAKEN_DATE32,
     DRAKEN_TIMESTAMP64,
     DRAKEN_TIME32,
     DRAKEN_TIME64,
 )
 from draken.morsels.morsel cimport Morsel
-from draken.vectors.string_vector cimport StringVector
 from draken.vectors.vector cimport Vector
 
 
@@ -460,7 +460,7 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
         perm_buf[i] = <uint32_t>i
 
     cdef int64_t[::1] signed_mv
-    cdef StringVector sv
+    cdef Vector sv
     cdef uint64_t key_xor
     cdef bint asc
     cdef uint32_t* remap = NULL
@@ -485,8 +485,8 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
 
             vec = morsel.column(col_name)
 
-            if isinstance(vec, StringVector):
-                sv = <StringVector>vec
+            if (<Vector>vec).unified().type == DRAKEN_VARCHAR or (<Vector>vec).unified().type == DRAKEN_NVARCHAR:
+                sv = <Vector>vec
                 # Build a temporary contiguous buffer from arena slots via unified sel[i].
                 sort_uv = sv.unified()
                 sort_arena = <DrakenStringArena*>sort_uv.data

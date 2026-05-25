@@ -17,37 +17,58 @@ arithmetic — no struct module, no json, no Python objects in the hot path.
 Fixed-width tags (1..5) are dispatched into the C++ deserialiser in
 ``src/cpp/ipc_deserialize.cpp`` so the malloc + memcpy of the destination
 buffer happens with the GIL released. Dict/string tags (6..10) stay on the
-existing Cython path because their Vector internals (codes, packed-dict
-DrakenVarBuffer, string arena) need bespoke ownership-transfer factories
-to move off the GIL safely; that's deliberately scoped out of this change.
+existing Cython path because their construction requires building slot arrays
+and arenas; that work stays in Cython.
 
-All vectors end up with owned memory (Cython or C++ allocated, freed by the
-Vector's dealloc) so there are no lifetime dependencies on the MemoryPool
-read buffer after this function returns.
+All vectors end up with owned memory (draken_malloc-allocated, freed by the
+Vector's dealloc via mimalloc) so there are no lifetime dependencies on the
+MemoryPool read buffer after this function returns.
+
+Note: draken_vector_own_array does not support per-element child nullability.
+Child null bitmaps in the IPC stream are read and discarded; child elements
+are treated as fully valid.
 """
 
-from libc.stdint cimport uint8_t, int32_t, int64_t, uint32_t, uint64_t
+from libc.stdint cimport uint8_t, uint16_t, int32_t, int64_t, uint32_t, uint64_t
 from libc.stddef cimport size_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy
 from libcpp.vector cimport vector
+from cpython.object cimport PyObject
 
 from opteryx.compiled.structures.memory_pool cimport MemoryPool, ReadResult, CppMemoryPool
 
-from draken.vectors.integer64_vector cimport Integer64Vector
-from draken.vectors.integer64_vector cimport from_decoded as int64_from_decoded
-from draken.vectors.integer64_vector cimport from_packed_dict as int64_from_packed_dict
-from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.float64_vector cimport from_decoded as float64_from_decoded
-from draken.vectors.float64_vector cimport from_packed_dict as float64_from_packed_dict
-from draken.vectors.float64_vector cimport make_float64_dict_only
-from draken.vectors.float32_vector cimport Float32Vector
-from draken.vectors.float32_vector cimport from_decoded as float32_from_decoded
-from draken.vectors.float32_vector cimport from_packed_dict as float32_from_packed_dict
-from draken.vectors.bool_vector cimport BoolVector
-from draken.vectors.bool_vector cimport from_decoded as bool_from_decoded
-from draken.vectors.string_vector cimport StringVector, from_packed_dict, from_dict_buffers, make_string_dict_only
-from draken.vectors.array_vector cimport ArrayVector, array_vector_from_parts
+from draken.core.buffers cimport DrakenVector, DrakenType
+from draken.core.buffers cimport DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_BOOL, DRAKEN_VARCHAR
+from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
+from draken.vectors.vector cimport dict_int64_from_decoded as _dict_i64_from_decoded
+
+cdef extern from "core/alloc.h" nogil:
+    void* draken_malloc(size_t n) nogil
+    void  draken_free(void* p) nogil
+
+cdef extern from "core/string_slot.h" nogil:
+    ctypedef struct DrakenStringSlot:
+        pass   # opaque 16-byte slot
+    void draken_build_string_slot(DrakenStringSlot* slot, const uint8_t* bytes,
+                                  uint32_t length, uint32_t arena_offset) nogil
+    void str_init_null(DrakenStringSlot* slot) nogil
+
+# Inline Py_DECREF helper — mirrors _vec_shim_decref in _vector_shim.pyx.
+cdef extern from *:
+    """static inline void _cd_decref(PyObject* op) { Py_DECREF(op); }"""
+    void _cd_decref(PyObject* op)
+
+cdef extern from "core/draken_bridge.h":
+    const DrakenVector* draken_vector_unwrap(PyObject* obj)
+    PyObject* draken_vector_own_string(
+        DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
+        uint8_t* validity, uint32_t length, DrakenType vec_type)
+    PyObject* draken_vector_own_array(
+        int32_t* parent_offsets, DrakenStringSlot* child_slots,
+        uint8_t* child_arena, size_t child_arena_len,
+        uint32_t child_length, DrakenType child_type,
+        uint8_t* parent_validity, uint32_t length)
 
 
 cdef extern from "ipc_deserialize.hpp" namespace "opteryx":
@@ -95,6 +116,9 @@ DEF TAG_FLOAT32_DICT = 9
 DEF TAG_FLOAT64_DICT = 10
 DEF TAG_ARRAY       = 11
 
+# sizeof(DrakenStringSlot) == 16 always (16-byte fixed-width slot, documented in string_slot.h).
+DEF SLOT_BYTES = 16
+
 
 cdef inline const uint8_t* _read_u32(const uint8_t* p, uint32_t* out) noexcept nogil:
     out[0] = ((<uint32_t>p[0])       |
@@ -104,26 +128,57 @@ cdef inline const uint8_t* _read_u32(const uint8_t* p, uint32_t* out) noexcept n
     return p + 4
 
 
-cdef inline uint8_t* _copy_null_bitmap(const uint8_t* src, uint32_t nbytes) except NULL:
-    """Allocate and memcpy the null bitmap. Caller must guarantee nbytes > 0
-    (because Cython's `except NULL` reserves NULL as the exception sentinel,
-    so this function may not legitimately return NULL on success)."""
-    cdef uint8_t* dst = <uint8_t*>malloc(nbytes)
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+cdef inline uint8_t* _copy_validity(const uint8_t* src, uint32_t nbytes) except NULL:
+    """draken_malloc + memcpy a null-bitmap. nbytes must be > 0."""
+    cdef uint8_t* dst = <uint8_t*>draken_malloc(nbytes)
     if dst == NULL:
         raise MemoryError()
     memcpy(dst, src, nbytes)
     return dst
 
 
-# Fixed-width column builders (_build_int64, _build_int32, _build_float32,
-# _build_float64, _build_bool) used to live here. They have been replaced by
-# the C++ implementation in src/cpp/ipc_deserialize.cpp, which performs the
-# same malloc + memcpy with the GIL released. The dispatch happens in
-# deserialize_column below.
+cdef inline Vector _wrap_raw_pyobj(PyObject* raw):
+    """Transfer a NEW PyObject* reference into a Vector shim."""
+    cdef Vector result = Vector.__new__(Vector)
+    result._nb = <object>raw   # Cython incref → refcount = 2
+    _cd_decref(raw)            # balance the NEW ref   → refcount = 1
+    result._dv = draken_vector_unwrap(raw)
+    return result
 
+
+# ─── Fixed-column wrapper ─────────────────────────────────────────────────────
+
+cdef inline Vector _wrap_decoded_fixed(DecodedFixedColumn& dc):
+    """Transfer ownership of draken_malloc'd buffers in dc into a new Vector.
+
+    dc.data and dc.null_bitmap are draken_malloc'd by ipc_deserialize.cpp.
+    _vector_from_decoded transfers their ownership on success.
+    On failure the MemoryError propagates to the caller; the buffers are leaked
+    (acceptable — OOM path, system is already distressed).
+    """
+    cdef DrakenType dtype
+    if dc.kind == IpcKind_Int64:
+        dtype = DRAKEN_INT64
+    elif dc.kind == IpcKind_Float64:
+        dtype = DRAKEN_FLOAT64
+    elif dc.kind == IpcKind_Float32:
+        dtype = DRAKEN_FLOAT32
+    elif dc.kind == IpcKind_Bool:
+        dtype = DRAKEN_BOOL
+    else:
+        draken_free(dc.data)
+        draken_free(dc.null_bitmap)
+        raise ValueError(f"Unexpected IpcKind from C++ deserialiser: {<int>dc.kind}")
+    return _vector_from_decoded(dc.data, dc.null_bitmap, dc.num_rows, dtype)
+
+
+# ─── Numeric dict builders ────────────────────────────────────────────────────
 
 cdef object _build_numeric_dict_int64(const uint8_t* p, uint32_t num_rows,
                                        const uint8_t* null_bitmap, uint32_t null_bitmap_len):
+    """Deserialize TAG_INT64_DICT preserving dict encoding via dict_int64_from_decoded."""
     cdef uint32_t dict_size
     p = _read_u32(p, &dict_size)
     cdef uint8_t code_width = p[0]
@@ -134,16 +189,48 @@ cdef object _build_numeric_dict_int64(const uint8_t* p, uint32_t num_rows,
     p += codes_len
     cdef uint32_t values_len
     p = _read_u32(p, &values_len)
-    cdef const int64_t* dict_ptr = <const int64_t*>p
-    return int64_from_packed_dict(
-        codes_ptr, code_width, <Py_ssize_t>num_rows,
-        dict_ptr, <Py_ssize_t>dict_size,
-        null_bitmap if null_bitmap_len > 0 else NULL,
-    )
+    cdef const int64_t* dict_src = <const int64_t*>p
+
+    # draken_malloc dict values — transferred to _dict_i64_from_decoded
+    cdef void* dict_vals = draken_malloc(<size_t>dict_size * sizeof(int64_t))
+    if dict_vals == NULL:
+        raise MemoryError()
+    memcpy(dict_vals, dict_src, <size_t>dict_size * sizeof(int64_t))
+
+    # draken_malloc uint32_t codes (expand from variable-width packed) — transferred
+    cdef uint32_t* codes_buf = <uint32_t*>draken_malloc(<size_t>num_rows * sizeof(uint32_t))
+    if codes_buf == NULL:
+        draken_free(dict_vals)
+        raise MemoryError()
+
+    cdef uint32_t i
+    if code_width == 1:
+        for i in range(num_rows):
+            codes_buf[i] = <uint32_t>codes_ptr[i]
+    elif code_width == 2:
+        for i in range(num_rows):
+            codes_buf[i] = <uint32_t>(<const uint16_t*>codes_ptr)[i]
+    else:  # code_width == 4
+        for i in range(num_rows):
+            codes_buf[i] = (<const uint32_t*>codes_ptr)[i]
+
+    # draken_malloc validity — transferred to _dict_i64_from_decoded
+    cdef uint8_t* validity_buf = NULL
+    if null_bitmap_len > 0:
+        validity_buf = <uint8_t*>draken_malloc(null_bitmap_len)
+        if validity_buf == NULL:
+            draken_free(codes_buf)
+            draken_free(dict_vals)
+            raise MemoryError()
+        memcpy(validity_buf, null_bitmap, null_bitmap_len)
+
+    # All three buffers are now draken_malloc'd; ownership transferred on call.
+    return _dict_i64_from_decoded(dict_vals, dict_size, codes_buf, num_rows, validity_buf)
 
 
 cdef object _build_numeric_dict_float32(const uint8_t* p, uint32_t num_rows,
                                          const uint8_t* null_bitmap, uint32_t null_bitmap_len):
+    """Deserialize TAG_FLOAT32_DICT — expand to dense (no float dict bridge exists)."""
     cdef uint32_t dict_size
     p = _read_u32(p, &dict_size)
     cdef uint8_t code_width = p[0]
@@ -154,16 +241,37 @@ cdef object _build_numeric_dict_float32(const uint8_t* p, uint32_t num_rows,
     p += codes_len
     cdef uint32_t values_len
     p = _read_u32(p, &values_len)
-    cdef const float* dict_ptr = <const float*>p
-    return float32_from_packed_dict(
-        codes_ptr, code_width, <Py_ssize_t>num_rows,
-        dict_ptr, <Py_ssize_t>dict_size,
-        null_bitmap if null_bitmap_len > 0 else NULL,
-    )
+    cdef const float* dict_src = <const float*>p
+
+    cdef void* expanded = draken_malloc(<size_t>num_rows * sizeof(float))
+    if expanded == NULL:
+        raise MemoryError()
+    cdef float* dst = <float*>expanded
+    cdef uint32_t i
+    if code_width == 1:
+        for i in range(num_rows):
+            dst[i] = dict_src[<uint32_t>codes_ptr[i]]
+    elif code_width == 2:
+        for i in range(num_rows):
+            dst[i] = dict_src[<uint32_t>(<const uint16_t*>codes_ptr)[i]]
+    else:
+        for i in range(num_rows):
+            dst[i] = dict_src[(<const uint32_t*>codes_ptr)[i]]
+
+    cdef uint8_t* validity_buf = NULL
+    if null_bitmap_len > 0:
+        validity_buf = <uint8_t*>draken_malloc(null_bitmap_len)
+        if validity_buf == NULL:
+            draken_free(expanded)
+            raise MemoryError()
+        memcpy(validity_buf, null_bitmap, null_bitmap_len)
+
+    return _vector_from_decoded(expanded, validity_buf, num_rows, DRAKEN_FLOAT32)
 
 
 cdef object _build_numeric_dict_float64(const uint8_t* p, uint32_t num_rows,
                                          const uint8_t* null_bitmap, uint32_t null_bitmap_len):
+    """Deserialize TAG_FLOAT64_DICT — expand to dense (no float dict bridge exists)."""
     cdef uint32_t dict_size
     p = _read_u32(p, &dict_size)
     cdef uint8_t code_width = p[0]
@@ -174,16 +282,39 @@ cdef object _build_numeric_dict_float64(const uint8_t* p, uint32_t num_rows,
     p += codes_len
     cdef uint32_t values_len
     p = _read_u32(p, &values_len)
-    cdef const double* dict_ptr = <const double*>p
-    return float64_from_packed_dict(
-        codes_ptr, code_width, <Py_ssize_t>num_rows,
-        dict_ptr, <Py_ssize_t>dict_size,
-        null_bitmap if null_bitmap_len > 0 else NULL,
-    )
+    cdef const double* dict_src = <const double*>p
 
+    cdef void* expanded = draken_malloc(<size_t>num_rows * sizeof(double))
+    if expanded == NULL:
+        raise MemoryError()
+    cdef double* dst = <double*>expanded
+    cdef uint32_t i
+    if code_width == 1:
+        for i in range(num_rows):
+            dst[i] = dict_src[<uint32_t>codes_ptr[i]]
+    elif code_width == 2:
+        for i in range(num_rows):
+            dst[i] = dict_src[<uint32_t>(<const uint16_t*>codes_ptr)[i]]
+    else:
+        for i in range(num_rows):
+            dst[i] = dict_src[(<const uint32_t*>codes_ptr)[i]]
+
+    cdef uint8_t* validity_buf = NULL
+    if null_bitmap_len > 0:
+        validity_buf = <uint8_t*>draken_malloc(null_bitmap_len)
+        if validity_buf == NULL:
+            draken_free(expanded)
+            raise MemoryError()
+        memcpy(validity_buf, null_bitmap, null_bitmap_len)
+
+    return _vector_from_decoded(expanded, validity_buf, num_rows, DRAKEN_FLOAT64)
+
+
+# ─── String builders ──────────────────────────────────────────────────────────
 
 cdef object _build_string_dict(const uint8_t* p, uint32_t num_rows,
                                 const uint8_t* null_bitmap, uint32_t null_bitmap_len):
+    """Deserialize TAG_STR_DICT into a VARCHAR Vector using DrakenStringSlot."""
     cdef uint32_t dict_size
     p = _read_u32(p, &dict_size)
 
@@ -198,222 +329,251 @@ cdef object _build_string_dict(const uint8_t* p, uint32_t num_rows,
     cdef uint32_t offsets_count
     p = _read_u32(p, &offsets_count)
 
-    # On ARM, direct pointer cast to int32_t* from unaligned IPC bytes causes SIGBUS.
-    # Copy to an aligned buffer before any int32 reads.
+    # Copy offsets to aligned temp buffer (ARM SIGBUS if unaligned access).
+    # This is a temporary buffer — free with stdlib free after use.
     cdef uint32_t* offsets_buf = <uint32_t*>malloc(offsets_count * sizeof(uint32_t))
     if offsets_buf == NULL:
         raise MemoryError()
     memcpy(offsets_buf, p, offsets_count * sizeof(uint32_t))
     p += offsets_count * 4
 
-    cdef int32_t arena_len = <int32_t>offsets_buf[dict_size]  # sentinel value
+    cdef uint32_t arena_len = offsets_buf[dict_size]   # sentinel value = total arena bytes
+    cdef const uint8_t* arena_src = p                  # points into IPC buffer (not owned)
 
-    try:
-        return make_string_dict_only(
-            codes_ptr,
-            code_width,
-            <Py_ssize_t>num_rows,
-            offsets_buf,
-            p,                    # arena_ptr
-            <Py_ssize_t>dict_size,
-            <Py_ssize_t>arena_len,
-            null_bitmap if null_bitmap_len > 0 else NULL,
-        )
-    finally:
+    # Allocate draken_malloc'd slot array — transferred to draken_vector_own_string.
+    cdef uint8_t* slots_buf = <uint8_t*>draken_malloc(<size_t>num_rows * SLOT_BYTES)
+    if slots_buf == NULL:
         free(offsets_buf)
+        raise MemoryError()
+
+    # Allocate draken_malloc'd arena copy — transferred to draken_vector_own_string.
+    cdef size_t arena_alloc = <size_t>arena_len if arena_len > 0 else 1
+    cdef uint8_t* arena_buf = <uint8_t*>draken_malloc(arena_alloc)
+    if arena_buf == NULL:
+        draken_free(slots_buf)
+        free(offsets_buf)
+        raise MemoryError()
+    if arena_len > 0:
+        memcpy(arena_buf, arena_src, arena_len)
+
+    # Allocate draken_malloc'd validity — transferred to draken_vector_own_string.
+    cdef uint8_t* validity_buf = NULL
+    if null_bitmap_len > 0:
+        validity_buf = <uint8_t*>draken_malloc(null_bitmap_len)
+        if validity_buf == NULL:
+            draken_free(arena_buf)
+            draken_free(slots_buf)
+            free(offsets_buf)
+            raise MemoryError()
+        memcpy(validity_buf, null_bitmap, null_bitmap_len)
+
+    # Build per-row slots.
+    cdef uint32_t row, code, s_off, s_off_end, slen
+    cdef DrakenStringSlot* slot_ptr
+    for row in range(num_rows):
+        slot_ptr = <DrakenStringSlot*>(slots_buf + <size_t>row * SLOT_BYTES)
+        # Arrow validity: bit set = valid row.
+        if null_bitmap_len > 0 and not ((null_bitmap[row >> 3] >> (row & 7)) & 1):
+            str_init_null(slot_ptr)
+        else:
+            if code_width == 1:
+                code = <uint32_t>codes_ptr[row]
+            elif code_width == 2:
+                code = <uint32_t>(<const uint16_t*>codes_ptr)[row]
+            else:
+                code = (<const uint32_t*>codes_ptr)[row]
+            s_off     = offsets_buf[code]
+            s_off_end = offsets_buf[code + 1]
+            slen      = s_off_end - s_off
+            draken_build_string_slot(slot_ptr, arena_src + s_off, slen, s_off)
+
+    free(offsets_buf)
+
+    # All three draken_malloc'd buffers are transferred on call (even on failure).
+    cdef PyObject* raw = draken_vector_own_string(
+        <DrakenStringSlot*>slots_buf,
+        arena_buf, <size_t>arena_len,
+        validity_buf, num_rows, DRAKEN_VARCHAR)
+    if raw == NULL:
+        raise MemoryError("draken_vector_own_string failed")
+    return _wrap_raw_pyobj(raw)
 
 
 cdef object _build_string_plain(const uint8_t* p, uint32_t num_rows,
                                  const uint8_t* null_bitmap, uint32_t null_bitmap_len):
-    """Build StringVector from plain length-prefixed string list via from_dict_buffers."""
+    """Deserialize TAG_STR_PLAIN (one length-prefixed string per row) into a VARCHAR Vector."""
     cdef uint32_t n
+    cdef PyObject* raw
     p = _read_u32(p, &n)
 
     if n == 0:
-        return StringVector(0, 0)
+        # Return empty string vector — no slots needed.
+        raw = draken_vector_own_string(NULL, NULL, 0, NULL, 0, DRAKEN_VARCHAR)
+        if raw == NULL:
+            raise MemoryError("draken_vector_own_string failed (empty)")
+        return _wrap_raw_pyobj(raw)
 
-    # Two-pass: first compute arena size, then build
+    # First pass: compute total arena size.
     cdef const uint8_t* scan = p
-    cdef uint32_t slen, total_arena = 0, i
+    cdef uint32_t slen, i, total_arena = 0
     for i in range(n):
         scan = _read_u32(scan, &slen)
         total_arena += slen
         scan += slen
 
-    cdef int32_t* offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
-    cdef int32_t* lengths = <int32_t*>malloc(n * sizeof(int32_t))
-    cdef uint8_t* arena   = <uint8_t*>malloc(total_arena + 1)  # +1 so ptr is never NULL
-    cdef int32_t* codes   = <int32_t*>malloc(n * sizeof(int32_t))
-    if offsets == NULL or lengths == NULL or arena == NULL or codes == NULL:
-        free(offsets); free(lengths); free(arena); free(codes)
+    # Allocate draken_malloc'd buffers — all transferred to draken_vector_own_string.
+    cdef uint8_t* slots_buf = <uint8_t*>draken_malloc(<size_t>n * SLOT_BYTES)
+    if slots_buf == NULL:
         raise MemoryError()
 
+    cdef size_t arena_alloc = <size_t>total_arena if total_arena > 0 else 1
+    cdef uint8_t* arena_buf = <uint8_t*>draken_malloc(arena_alloc)
+    if arena_buf == NULL:
+        draken_free(slots_buf)
+        raise MemoryError()
+
+    cdef uint8_t* validity_buf = NULL
+    if null_bitmap_len > 0:
+        validity_buf = <uint8_t*>draken_malloc(null_bitmap_len)
+        if validity_buf == NULL:
+            draken_free(arena_buf)
+            draken_free(slots_buf)
+            raise MemoryError()
+        memcpy(validity_buf, null_bitmap, null_bitmap_len)
+
+    # Second pass: fill arena and build slots.
     cdef uint32_t arena_pos = 0
+    cdef DrakenStringSlot* slot_ptr
     for i in range(n):
         p = _read_u32(p, &slen)
-        offsets[i] = <int32_t>arena_pos
-        lengths[i] = <int32_t>slen
-        if slen > 0:
-            memcpy(arena + arena_pos, p, slen)
-        p += slen
-        arena_pos += slen
-        codes[i] = <int32_t>i
-    offsets[n] = <int32_t>arena_pos
-
-    cdef int32_t[::1] codes_v   = <int32_t[:n]>codes
-    cdef int32_t[::1] offsets_v = <int32_t[:n]>offsets
-    cdef int32_t[::1] lengths_v = <int32_t[:n]>lengths
-    cdef uint32_t arena_view_len = arena_pos if arena_pos > 0 else 1
-    cdef uint8_t[::1] arena_v   = <uint8_t[:arena_view_len]>arena
-
-    cdef StringVector vec
-    try:
-        if null_bitmap_len > 0:
-            validity_v = <uint8_t[:null_bitmap_len]>null_bitmap
-            vec = from_dict_buffers(codes_v, offsets_v, lengths_v, arena_v, validity_v)
+        slot_ptr = <DrakenStringSlot*>(slots_buf + <size_t>i * SLOT_BYTES)
+        if null_bitmap_len > 0 and not ((null_bitmap[i >> 3] >> (i & 7)) & 1):
+            # Null row: init null slot, still skip the string bytes in the stream.
+            str_init_null(slot_ptr)
+            p += slen
         else:
-            vec = from_dict_buffers(codes_v, offsets_v, lengths_v, arena_v)
-    finally:
-        free(offsets)
-        free(lengths)
-        free(arena)
-        free(codes)
-    return vec
+            if slen > 0:
+                memcpy(arena_buf + arena_pos, p, slen)
+            # draken_build_string_slot reads bytes from p (IPC buffer), sets slot.
+            # For inline (slen <= 12): stored inline, arena_pos unused but harmless.
+            # For long  (slen  > 12): hash computed from p; arena_pos is the offset.
+            draken_build_string_slot(slot_ptr, p, slen, arena_pos)
+            p += slen
+            arena_pos += slen
 
+    # All three draken_malloc'd buffers transferred on call (even on failure).
+    raw = draken_vector_own_string(
+        <DrakenStringSlot*>slots_buf,
+        arena_buf, <size_t>arena_pos,
+        validity_buf, n, DRAKEN_VARCHAR)
+    if raw == NULL:
+        raise MemoryError("draken_vector_own_string failed")
+    return _wrap_raw_pyobj(raw)
+
+
+# ─── Array builder ────────────────────────────────────────────────────────────
 
 cdef object _build_array_vector(const uint8_t* p, uint32_t num_rows,
                                 const uint8_t* list_null_bmap, uint32_t list_null_bmap_len):
-    """Deserialize TAG_ARRAY (11) into an ArrayVector.
+    """Deserialize TAG_ARRAY (11) into a DRAKEN_ARRAY[VARCHAR] Vector.
 
-    p points to the byte immediately after the common IPC header
-    (tag + num_rows + null_bitmap_len + null_bitmap).
-
-    Wire layout after the header:
+    Wire layout after the common IPC header:
       uint32_t  child_count
       int32_t[(num_rows+1)]  offsets
       uint32_t  child_null_bmap_len
-      uint8_t[child_null_bmap_len]  child_null_bmap
+      uint8_t[child_null_bmap_len]  child_null_bmap  (consumed but not passed to draken)
       for i in 0..child_count-1:
         uint32_t len
         uint8_t[len] bytes
+
+    Note: draken_vector_own_array does not support per-child-element nullability.
+    The child_null_bmap is read from the stream (to advance p correctly) and discarded.
     """
     cdef uint32_t child_count
     p = _read_u32(p, &child_count)
 
-    # Copy offsets — array_vector_from_parts takes ownership (frees them), so
-    # we give it a malloc'd buffer it can free.
+    # parent_offsets — draken_malloc'd; transferred to draken_vector_own_array.
     cdef uint32_t offsets_bytes = (num_rows + 1) * sizeof(int32_t)
-    cdef int32_t* offsets = <int32_t*>malloc(offsets_bytes)
-    if offsets == NULL:
+    cdef int32_t* parent_offsets = <int32_t*>draken_malloc(offsets_bytes)
+    if parent_offsets == NULL:
         raise MemoryError()
-    memcpy(offsets, p, offsets_bytes)
+    memcpy(parent_offsets, p, offsets_bytes)
     p += offsets_bytes
 
-    # Child null bitmap (may be absent).
+    # Child null bitmap: read (advance p) and discard — bridge doesn't support it.
     cdef uint32_t child_null_bmap_len
     p = _read_u32(p, &child_null_bmap_len)
-    cdef const uint8_t* child_null_bmap = p
-    p += child_null_bmap_len
+    p += child_null_bmap_len   # skip child null bitmap bytes
 
-    # Two-pass child string scan: first pass computes total arena bytes.
+    # First pass: compute total child arena size.
     cdef const uint8_t* scan = p
-    cdef uint32_t slen, i, total_arena = 0
+    cdef uint32_t slen, i, total_child_arena = 0
     for i in range(child_count):
         scan = _read_u32(scan, &slen)
-        total_arena += slen
+        total_child_arena += slen
         scan += slen
 
-    # Allocate StringVector internals (from_dict_buffers owns nothing; we free after).
-    cdef int32_t* codes   = <int32_t*>malloc(child_count * sizeof(int32_t))
-    cdef int32_t* c_offs  = <int32_t*>malloc((child_count + 1) * sizeof(int32_t))
-    cdef int32_t* c_lens  = <int32_t*>malloc(child_count * sizeof(int32_t))
-    cdef uint32_t arena_alloc = total_arena if total_arena > 0 else 1
-    cdef uint8_t* arena   = <uint8_t*>malloc(arena_alloc)
-    if codes == NULL or c_offs == NULL or c_lens == NULL or arena == NULL:
-        free(codes); free(c_offs); free(c_lens); free(arena); free(offsets)
-        raise MemoryError()
+    # child_slots_buf — draken_malloc'd; transferred to draken_vector_own_array.
+    cdef uint8_t* child_slots_buf = NULL
+    if child_count > 0:
+        child_slots_buf = <uint8_t*>draken_malloc(<size_t>child_count * SLOT_BYTES)
+        if child_slots_buf == NULL:
+            draken_free(parent_offsets)
+            raise MemoryError()
 
-    # Second pass: fill buffers.
+    # child_arena — draken_malloc'd; transferred to draken_vector_own_array.
+    cdef uint8_t* child_arena = NULL
+    cdef size_t child_arena_len = <size_t>total_child_arena
+    if total_child_arena > 0:
+        child_arena = <uint8_t*>draken_malloc(child_arena_len)
+        if child_arena == NULL:
+            if child_slots_buf != NULL:
+                draken_free(child_slots_buf)
+            draken_free(parent_offsets)
+            raise MemoryError()
+
+    # parent_validity — draken_malloc'd; transferred to draken_vector_own_array.
+    cdef uint8_t* parent_validity = NULL
+    if list_null_bmap_len > 0:
+        parent_validity = <uint8_t*>draken_malloc(list_null_bmap_len)
+        if parent_validity == NULL:
+            if child_arena != NULL:
+                draken_free(child_arena)
+            if child_slots_buf != NULL:
+                draken_free(child_slots_buf)
+            draken_free(parent_offsets)
+            raise MemoryError()
+        memcpy(parent_validity, list_null_bmap, list_null_bmap_len)
+
+    # Second pass: fill child arena and build child slots.
     cdef uint32_t arena_pos = 0
+    cdef DrakenStringSlot* slot_ptr
     for i in range(child_count):
+        slot_ptr = <DrakenStringSlot*>(child_slots_buf + <size_t>i * SLOT_BYTES)
         p = _read_u32(p, &slen)
-        codes[i]  = <int32_t>i
-        c_offs[i] = <int32_t>arena_pos
-        c_lens[i] = <int32_t>slen
-        if slen > 0:
-            memcpy(arena + arena_pos, p, slen)
+        if slen > 0 and child_arena != NULL:
+            memcpy(child_arena + arena_pos, p, slen)
+        # draken_build_string_slot reads from p (IPC buffer) for hash/inline bytes.
+        # For inline strings (slen <= 12): stored inline, arena_pos harmless.
+        # For long strings (slen > 12): hash from p, arena_offset = arena_pos.
+        draken_build_string_slot(slot_ptr, p, slen, arena_pos)
         p += slen
         arena_pos += slen
-    c_offs[child_count] = <int32_t>arena_pos
 
-    # Copy list null bitmap so array_vector_from_parts can free it.
-    cdef uint8_t* bmap_copy = NULL
-    if list_null_bmap_len > 0:
-        bmap_copy = <uint8_t*>malloc(list_null_bmap_len)
-        if bmap_copy == NULL:
-            free(codes); free(c_offs); free(c_lens); free(arena); free(offsets)
-            raise MemoryError()
-        memcpy(bmap_copy, list_null_bmap, list_null_bmap_len)
-
-    # Build typed memoryviews for from_dict_buffers.
-    cdef int32_t[::1]  codes_v  = <int32_t[:child_count]>codes
-    cdef int32_t[::1]  offs_v   = <int32_t[:child_count]>c_offs
-    cdef int32_t[::1]  lens_v   = <int32_t[:child_count]>c_lens
-    cdef uint32_t view_len = arena_pos if arena_pos > 0 else 1
-    cdef uint8_t[::1]  arena_v  = <uint8_t[:view_len]>arena
-
-    cdef StringVector child_sv
-    cdef ArrayVector  result
-    try:
-        if child_null_bmap_len > 0:
-            validity_v = <uint8_t[:child_null_bmap_len]>_copy_null_bitmap(child_null_bmap, child_null_bmap_len)
-            child_sv = from_dict_buffers(codes_v, offs_v, lens_v, arena_v, validity_v)
-        else:
-            child_sv = from_dict_buffers(codes_v, offs_v, lens_v, arena_v)
-        # array_vector_from_parts copies offsets and bmap_copy; we free them after.
-        result = array_vector_from_parts(child_sv, offsets, bmap_copy, <Py_ssize_t>num_rows)
-    finally:
-        free(codes); free(c_offs); free(c_lens); free(arena)
-        free(offsets)
-        if bmap_copy != NULL:
-            free(bmap_copy)
-
-    result._child_decode_utf8 = True
-    return result
+    # All non-NULL buffers are draken_malloc'd and ownership is transferred
+    # to draken_vector_own_array unconditionally on call entry (even on failure).
+    cdef PyObject* raw = draken_vector_own_array(
+        parent_offsets,
+        <DrakenStringSlot*>child_slots_buf,
+        child_arena, child_arena_len,
+        child_count, DRAKEN_VARCHAR,
+        parent_validity, num_rows)
+    if raw == NULL:
+        raise MemoryError("draken_vector_own_array failed")
+    return _wrap_raw_pyobj(raw)
 
 
-cdef inline object _wrap_decoded_fixed(DecodedFixedColumn& dc):
-    """Transfer ownership of the malloc'd buffers in `dc` into a Draken Vector.
-
-    Called with the GIL held, after the nogil C++ deserialiser has populated
-    `dc`. On any failure between buffer transfer and Vector construction the
-    caller's responsibility is to free dc.data/dc.null_bitmap — but
-    `from_decoded` only raises on the small `malloc(sizeof(DrakenFixedBuffer))`
-    inside, and in that case the Vector has not yet taken ownership, so we
-    must release the buffers ourselves.
-    """
-    cdef object vec
-    try:
-        if dc.kind == IpcKind_Int64:
-            vec = int64_from_decoded(dc.data, dc.null_bitmap, <size_t>dc.num_rows)
-        elif dc.kind == IpcKind_Float64:
-            vec = float64_from_decoded(dc.data, dc.null_bitmap, <size_t>dc.num_rows)
-        elif dc.kind == IpcKind_Float32:
-            vec = float32_from_decoded(dc.data, dc.null_bitmap, <size_t>dc.num_rows)
-        elif dc.kind == IpcKind_Bool:
-            vec = bool_from_decoded(dc.data, dc.null_bitmap, <size_t>dc.num_rows)
-        else:
-            # Unreachable under normal flow — the C++ side only sets these four kinds.
-            free(dc.data)
-            free(dc.null_bitmap)
-            raise ValueError(f"Unexpected IpcKind from C++ deserialiser: {<int>dc.kind}")
-    except:
-        # from_decoded raised before taking ownership; release the malloc'd buffers.
-        free(dc.data)
-        free(dc.null_bitmap)
-        raise
-    return vec
-
+# ─── Public deserialization entry points ──────────────────────────────────────
 
 cpdef object deserialize_column(int64_t ref_id, MemoryPool pool):
     """Deserialize one IPC blob from MemoryPool into a Draken vector.
@@ -428,9 +588,7 @@ cpdef object deserialize_column(int64_t ref_id, MemoryPool pool):
     malloc + memcpy with the GIL released and returns owned buffers that
     `_wrap_decoded_fixed` slots into a Draken Vector.
 
-    Dict/string tags (6..10) still parse in this Cython function — porting
-    them requires ownership-transfer factories for codes/dict_values/arena,
-    which is the natural follow-on to this change.
+    Dict/string tags (6..10) still parse in this Cython function.
     """
     cdef ReadResult r
     cdef const uint8_t* p
@@ -461,7 +619,7 @@ cpdef object deserialize_column(int64_t ref_id, MemoryPool pool):
                 or tag == TAG_FLOAT64 or tag == TAG_BOOL):
             # Fixed-width: full IPC parse + malloc + memcpy happens in C++
             # with the GIL released. The destination buffers come back already
-            # owned-by-malloc; we transfer them into a Vector under the GIL.
+            # owned-by-draken_malloc; we transfer them into a Vector under the GIL.
             with nogil:
                 deserialize_fixed_column(<const uint8_t*>r.ptr, r.length, dc)
 
@@ -469,8 +627,8 @@ cpdef object deserialize_column(int64_t ref_id, MemoryPool pool):
                 # All non-OK statuses on a fixed-width tag are hard errors —
                 # the kStatusNotHandled path is unreachable here because we
                 # only call C++ for tags in the fixed-width range.
-                free(dc.data)
-                free(dc.null_bitmap)
+                draken_free(dc.data)
+                draken_free(dc.null_bitmap)
                 if dc.status == STATUS_OOM:
                     raise MemoryError()
                 raise ValueError(

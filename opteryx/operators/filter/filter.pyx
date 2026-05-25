@@ -27,7 +27,7 @@ from opteryx.compiled.expression.compiled_expression import lower as _lower_expr
 from opteryx.expression import NodeType
 from opteryx.expression import format_expression
 from opteryx.expression import get_all_nodes_of_type
-_execute_bytecode = execute_bytecode  # in scope from _operators evaluator includes
+from opteryx.expression.evaluator import execute_bytecode as _execute_bytecode
 from opteryx.models import QueryProperties
 
 from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode
@@ -104,27 +104,24 @@ cdef Vector _build_constant_vector(Vector cur, object value, Py_ssize_t length):
     Returns None for vector types we don't yet handle (temporal, decimal, etc.)
     or when the literal's Python type can't safely map onto the column dtype.
     """
-    from draken.vectors.integer64_vector import Integer64Vector
-    from draken.vectors.float64_vector import Float64Vector
-    from draken.vectors.bool_vector import BoolVector
-    from draken.vectors.string_vector import StringVector
-
-    if isinstance(cur, BoolVector):
+    cdef DrakenType t = cur.unified().type
+    if t == DRAKEN_BOOL:
         if not isinstance(value, bool):
             return None
-        return BoolVector.from_constant(value, length)
-    if isinstance(cur, Integer64Vector):
+        return _draken_native.vector_from_bool_constant(value, length)
+    if t == DRAKEN_INT64:
         if isinstance(value, bool) or not isinstance(value, int):
             return None
-        return Integer64Vector.from_constant(value, length)
-    if isinstance(cur, Float64Vector):
+        return _draken_native.vector_int64_from_constant(value, length)
+    if t == DRAKEN_FLOAT64:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
-        return Float64Vector.from_constant(float(value), length)
-    if isinstance(cur, StringVector):
+        return _draken_native.vector_float64_from_constant(float(value), length)
+    if t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR:
         if not isinstance(value, (str, bytes)):
             return None
-        return StringVector.from_constant(value, length)
+        return _draken_native.vector_varchar_from_constant(
+            value if isinstance(value, str) else (<bytes>value).decode("utf-8"), length)
     return None
 
 
@@ -153,8 +150,6 @@ cdef void _apply_constant_replacements(Morsel morsel, list replacements) except 
         if new_vec is None:
             continue
         morsel._columns[idx] = new_vec
-        morsel.ptr.columns[idx] = <void*>new_vec
-        morsel.ptr.column_types[idx] = new_vec.dtype
 
 
 cdef class FilterNode(BasePlanNode):

@@ -9,11 +9,7 @@ via the unified DrakenVector view.
 
 import datetime
 
-from draken.vectors.decimal_vector import DecimalVector
 from draken.vectors.bool_vector import BoolVector
-from draken.vectors.float64_vector import Float64Vector
-from draken.vectors.integer64_vector import Integer64Vector
-from draken.vectors.string_vector import StringVector
 from opteryx.compiled.vector_ops import (
     vector_allop_eq,
     vector_allop_neq,
@@ -149,7 +145,7 @@ cdef _decimal_compare(int op_code, vec, right):
 
     cdef int decimal_op = _DECIMAL_CMP_OP[op_code]
 
-    if isinstance(right, DecimalVector):
+    if get_vector_type(right) == VectorType.DECIMAL:
         return vec._compare_vector(right, decimal_op)
 
     if get_vector_type(right) == VectorType.FLOAT64:
@@ -268,19 +264,19 @@ cpdef draken_compare(str op, left, right, left_schema_type=None, right_schema_ty
     if op == "ArrayContainsAll":
         return _json_array_contains_all(left, right)
     if op == "AnyOpLike":
-        if isinstance(left, StringVector):
+        if get_vector_type(left) == VectorType.STRING:
             return _string_anyop_like(left, right, ignore_case=False)
         return vector_anyop_like(left, right)
     if op == "AnyOpNotLike":
-        if isinstance(left, StringVector):
+        if get_vector_type(left) == VectorType.STRING:
             return _string_anyop_like(left, right, ignore_case=False).not_vector()
         return vector_anyop_like(left, right, True)
     if op == "AnyOpILike":
-        if isinstance(left, StringVector):
+        if get_vector_type(left) == VectorType.STRING:
             return _string_anyop_like(left, right, ignore_case=True)
         return vector_anyop_ilike(left, right)
     if op == "AnyOpNotILike":
-        if isinstance(left, StringVector):
+        if get_vector_type(left) == VectorType.STRING:
             return _string_anyop_like(left, right, ignore_case=True).not_vector()
         return vector_anyop_ilike(left, right, True)
     if op == "AtQuestion":

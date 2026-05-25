@@ -27,13 +27,18 @@ included before it.  The include order below is topologically sorted.
 from libc.stdint cimport int8_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t, INT64_MAX, INT64_MIN
 from libc.math cimport HUGE_VAL
 from libc.stdlib cimport malloc, free
-from libc.string cimport memset
+from libc.string cimport memset, memcpy
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
 from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenType, DrakenVector
 from draken.morsels.morsel cimport Morsel
-from draken.vectors.vector cimport Vector, NULL_HASH, mix_hash
+from draken.vectors.vector cimport Vector, NULL_HASH, mix_hash, from_decoded as _from_decoded
+from libc.stddef cimport size_t
+
+cdef extern from "core/alloc.h" nogil:
+    void* draken_malloc(size_t n) nogil
+    void  draken_free(void* p) nogil
 include "_key_store.pxi"
 include "_collectors_base.pxi"
 include "_collectors_numeric.pxi"

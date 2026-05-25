@@ -80,7 +80,7 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
         cdef Py_ssize_t i
 
         if self._col_type == _VTYPE_FLOAT64:
-            uv = (<Float64Vector>raw).unified()
+            uv = (<Vector>raw).unified()
             fdata = <const double*>uv.data
             sel   = uv.selection
             nulls = uv.validity
@@ -92,7 +92,7 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
             return
 
         if self._col_type == _VTYPE_INT64:
-            uv = (<Integer64Vector>raw).unified()
+            uv = (<Vector>raw).unified()
             idata64 = <const int64_t*>uv.data
             sel     = uv.selection
             nulls   = uv.validity
@@ -104,7 +104,7 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
             return
 
         if self._col_type == _VTYPE_INT8:
-            uv = (<Integer8Vector>raw).unified()
+            uv = (<Vector>raw).unified()
             idata8 = <const int8_t*>uv.data
             sel    = uv.selection
             nulls  = uv.validity
@@ -116,7 +116,7 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
             return
 
         if self._col_type == _VTYPE_INT16:
-            uv = (<Integer16Vector>raw).unified()
+            uv = (<Vector>raw).unified()
             idata16 = <const int16_t*>uv.data
             sel     = uv.selection
             nulls   = uv.validity
@@ -128,7 +128,7 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
             return
 
         if self._col_type == _VTYPE_INT32:
-            uv = (<Integer32Vector>raw).unified()
+            uv = (<Vector>raw).unified()
             idata32 = <const int32_t*>uv.data
             sel     = uv.selection
             nulls   = uv.validity

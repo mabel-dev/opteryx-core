@@ -1,15 +1,16 @@
 """Expression evaluation engine — package marker.
 
-The evaluator implementation is compiled into opteryx.operators._operators
-(textually included alongside all operator plan nodes so they can call
-bytecode VM functions directly at C level with no .so-boundary overhead).
+The evaluator implementation is compiled into _impl.so (this package).
+Leaf .pyx files (type_coercion / function_execution / arithmetic_dispatch /
+temporal_ops / string_ops / json_ops / case_eval / arithmetic / comparisons /
+evaluation) are textually included by _impl.pyx into a single extension module.
 
 This file re-exports the public API and registers legacy submodule aliases
 (`opteryx.expression.evaluator.case_eval`, `.evaluation`, etc.) so callers
 doing `from opteryx.expression.evaluator.LEAF import name` keep working.
 """
 
-from opteryx.operators._operators import (
+from opteryx.expression.evaluator._impl import (
     apply_bounded_function,
     draken_compare,
     evaluate_and_append_draken,
@@ -18,12 +19,12 @@ from opteryx.operators._operators import (
     execute_bytecode,
     get_bytecode_worker_fn_ptr,
 )
-from opteryx.operators._operators import _OP_CODE, _verify_node_type_constants
+from opteryx.expression.evaluator._impl import _OP_CODE, _verify_node_type_constants
 
 # Legacy submodule aliases — every evaluator leaf .pyx is textually included
-# in _operators, so all their names live in _operators's namespace.
+# in _impl, so all their names live in _impl's namespace.
 import sys as _sys
-from opteryx.operators import _operators as _operators_module
+import opteryx.expression.evaluator._impl as _impl_module
 
 for _leaf in (
     "arithmetic",
@@ -37,8 +38,7 @@ for _leaf in (
     "temporal_ops",
     "type_coercion",
 ):
-    _sys.modules[f"{__name__}.{_leaf}"] = _operators_module
-    _sys.modules[f"{__name__}._impl"] = _operators_module  # backward compat
+    _sys.modules[f"{__name__}.{_leaf}"] = _impl_module
 del _leaf
 
 

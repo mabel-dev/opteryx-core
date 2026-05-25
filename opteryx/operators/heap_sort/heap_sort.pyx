@@ -14,7 +14,7 @@ from collections.abc import Iterable
 from opteryx.vectors.vector_ranking import vector_exact_search_top_k
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
-# evaluate_and_append_draken in scope from _operators evaluator includes
+from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -382,10 +382,7 @@ cdef void _sift_down_single_vector(
 # ── Node ──────────────────────────────────────────────────────────────────────
 
 _EXACT_COMPRESS_VECTOR_TYPES = frozenset({
-    "BoolVector", "Date32Vector", "Float64Vector",
-    "Int8Vector", "Int16Vector", "Int32Vector", "Integer64Vector",
-    "StringVector", "TimeVector", "TimestampVector",
-    "UInt8Vector", "UInt16Vector", "UInt32Vector", "UInteger64Vector",
+    "Vector", "BoolVector",
 })
 
 

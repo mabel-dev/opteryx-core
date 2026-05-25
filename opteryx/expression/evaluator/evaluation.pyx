@@ -28,14 +28,9 @@ from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_ve
 
 # Imports from draken are safe at module level — draken does not import opteryx.expression.
 from draken.vectors.bool_vector import BoolVector as _BoolVector
-from draken.vectors.integer64_vector import Integer64Vector as _Integer64Vector
-from draken.vectors.string_vector import StringVector as _StringVector
-from draken.vectors.scalar_constructors import from_scalar as _const_scalar
 from draken.morsels.morsel import Morsel as _Morsel
-from draken.interop.vector_sequence import (
-    bool_vector_from_uint64_eq as _bool_vector_from_uint64_eq,
-    vector_from_sequence as _vector_from_sequence,
-)
+import draken.draken_native as _draken_native
+from opteryx.compiled.nanobind.vector_bool_ops import vector_uint64_eq_scalar as _vector_uint64_eq_scalar
 
 
 # NodeType integer values — keep in sync with NodeType in opteryx/expression/__init__.py.
@@ -93,7 +88,7 @@ def _eval_value(node, morsel):
         if isinstance(node.value, (_CarcharSetWrapper, _PerfectHashSet)):
             return node.value
 
-        vec = _const_scalar(node.value, morsel.num_rows)
+        vec = _draken_native.vector_from_constant(node.value, morsel.num_rows)
         if vec is None:
             raise TypeError(
                 f"_eval_value: cannot construct Draken vector for literal "
@@ -131,7 +126,7 @@ def _eval_value(node, morsel):
             from opteryx.expression.binary_operators import MapAccessOp
             # Keep MapAccess in native vector space where possible to avoid
             # costly Arrow <-> Draken round-trips.
-            key_vec = _Integer64Vector.from_constant(int(right_val), 1)
+            key_vec = _draken_native.vector_int64_from_constant(int(right_val), 1)
             result = MapAccessOp(left_vec, key_vec)
             if is_draken_vector(result):
                 return result
@@ -141,7 +136,9 @@ def _eval_value(node, morsel):
 
         if op == "Arrow" or op == "LongArrow":
             from opteryx.expression.binary_operators import ArrowOp, LongArrowOp
-            key_vec = _StringVector.from_constant(right_val, 1)
+            key_vec = _draken_native.vector_from_string_sequence(
+                [right_val if isinstance(right_val, bytes) else right_val.encode("utf-8")]
+            )
             return ArrowOp(left_vec, key_vec) if op == "Arrow" else LongArrowOp(left_vec, key_vec)
 
         raise NotImplementedError(
@@ -401,7 +398,7 @@ cdef _evaluate_numeric_eq_via_hash(preds, morsel):
         _TARGET_HASH_CACHE[cache_key] = target_hash
 
     row_hashes_view = morsel.hash(hash_keys)
-    return _bool_vector_from_uint64_eq(row_hashes_view, target_hash)
+    return _vector_uint64_eq_scalar(row_hashes_view, len(row_hashes_view), target_hash)
 
 
 def evaluate_draken(node, morsel):
@@ -516,7 +513,7 @@ def evaluate_draken(node, morsel):
             parameters = [morsel.num_rows]
         result = apply_bounded_function(node, *parameters)
         if isinstance(result, list):
-            result = _vector_from_sequence(result)
+            result = _draken_native.vector_from_sequence(result)
         if get_vector_type(result) != VectorType.BOOL:
             raise TypeError(
                 f"evaluate_draken: FUNCTION node returned {result.__class__.__name__!r}, expected BoolVector"
@@ -587,8 +584,8 @@ def evaluate_and_append_draken(nodes, morsel):
             literal_vec = typed_constant_vector(node.value, morsel.num_rows, node.schema_column)
             if literal_vec is None:
                 # Schema type not covered by the typed constant path; fall back to
-                # the generic from_scalar that drives shape from the Python value.
-                literal_vec = _const_scalar(node.value, morsel.num_rows)
+                # the generic from_constant that drives shape from the Python value.
+                literal_vec = _draken_native.vector_from_constant(node.value, morsel.num_rows)
             if literal_vec is None:
                 raise TypeError(
                     f"evaluate_and_append_draken: cannot construct constant vector for "
@@ -688,15 +685,19 @@ from opteryx.compiled.expression.compiled_expression cimport (
 )
 from libc.stdint cimport uint8_t, int8_t, uintptr_t, uint32_t
 
-from draken.core.buffers cimport DrakenVector
+from draken.core.buffers cimport DrakenVector, DRAKEN_BOOL
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy, memset
 from libc.stddef cimport size_t
 
+cdef extern from "core/alloc.h":
+    void* draken_malloc(size_t n) nogil
+    void  draken_free(void* p) nogil
+
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.bool_vector cimport (
     BoolVector,
-    bool_vector_from_bits,
+    from_decoded,
     c_and_bitmap,
     c_not_bitmap,
     c_or_bitmap,
@@ -779,14 +780,24 @@ cdef int _execute_bytecode_prepass(
     #   [0 .. n_slots-1] = stack slots
     #   [n_slots]        = primary scratch for binary ops
     #   [n_slots+1]      = secondary scratch for DNF/CNF fold
+    #
+    # Slot 0 is the result slot: allocated with draken_malloc so ownership can
+    # be transferred to draken_vector_own_raw (via from_decoded) in the postpass.
+    # All other slots are scratch and stay on libc malloc.
     for j in range(n_slots + 2):
-        p = <uint8_t*>malloc(nbytes)
+        if j == 0:
+            p = <uint8_t*>draken_malloc(nbytes)
+        else:
+            p = <uint8_t*>malloc(nbytes)
         if p == NULL:
             raise MemoryError("evaluate_bitmap: failed to allocate bitmap buffer")
         memset(p, 0, nbytes)
         bitmaps[j] = p
 
-        p = <uint8_t*>malloc(nbytes)
+        if j == 0:
+            p = <uint8_t*>draken_malloc(nbytes)
+        else:
+            p = <uint8_t*>malloc(nbytes)
         if p == NULL:
             raise MemoryError("evaluate_bitmap: failed to allocate null bitmap buffer")
         memset(p, 0, nbytes)
@@ -1103,11 +1114,17 @@ cdef BoolVector _execute_bytecode_postpass(
     bint has_null,
     Py_ssize_t num_rows,
 ):
-    """Wrap a raw bitmap into a BoolVector. GIL held."""
-    return bool_vector_from_bits(
-        result_bitmap,
+    """Wrap a draken_malloc'd result bitmap into a BoolVector.
+
+    Ownership of result_bitmap and (if has_null) result_null is transferred
+    to the returned BoolVector via from_decoded → draken_vector_own_raw.
+    The caller must null out those pointers after this call so the finally
+    block does not double-free them.
+    """
+    return from_decoded(
+        <void*>result_bitmap,
         result_null if has_null else NULL,
-        num_rows,
+        <size_t>num_rows,
     )
 
 
@@ -1162,14 +1179,26 @@ cpdef BoolVector evaluate_bitmap(CompiledBytecode bc, Morsel morsel):
             # Unexpected opcode — fall back (shouldn't happen if is_pure_bitmap is correct)
             return execute_bytecode(bc, morsel)
 
-        return _execute_bytecode_postpass(
+        result = _execute_bytecode_postpass(
             bitmaps[0],
             null_bitmaps[0],
             slot_has_null[0] != 0,
             num_rows,
         )
+        # Postpass transferred ownership of slot-0 buffers to the BoolVector.
+        # Null them out so the finally block does not double-free.
+        bitmaps[0] = NULL
+        if slot_has_null[0]:
+            null_bitmaps[0] = NULL
+        return result
     finally:
-        for j in range(n_slots + 2):
+        # Slot 0 was draken_malloc'd; use draken_free (NULL-safe if transferred).
+        # Slots 1..n_slots+1 are libc malloc'd.
+        if bitmaps[0] != NULL:
+            draken_free(bitmaps[0])
+        if null_bitmaps[0] != NULL:
+            draken_free(null_bitmaps[0])
+        for j in range(1, n_slots + 2):
             free(bitmaps[j])
             free(null_bitmaps[j])
         free(col_cache)
@@ -1258,11 +1287,11 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
             continue
 
         # ----------------------------------------------------------
-        # BC_LOAD_LIT_SCALAR — typed call into draken.from_scalar
+        # BC_LOAD_LIT_SCALAR — typed call into draken.vector_from_constant
         # ----------------------------------------------------------
         if opcode == BC_LOAD_LIT_SCALAR:
             scalar_obj = <object>slot.literal_obj
-            v_result = _const_scalar(scalar_obj, num_rows)
+            v_result = _draken_native.vector_from_constant(scalar_obj, num_rows)
             if v_result is None:
                 raise TypeError(
                     f"execute_bytecode: cannot construct vector for literal "
@@ -1446,15 +1475,19 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
             extr_op = <str>slot.compare_op_str
             if extr_op == "MapAccess":
                 from opteryx.expression.binary_operators import MapAccessOp
-                key_vec = _Integer64Vector.from_constant(int(extr_key), 1)
+                key_vec = _draken_native.vector_int64_from_constant(int(extr_key), 1)
                 legacy_result = MapAccessOp(v_left, key_vec)
             elif extr_op == "Arrow":
                 from opteryx.expression.binary_operators import ArrowOp
-                key_vec = _StringVector.from_constant(extr_key, 1)
+                key_vec = _draken_native.vector_from_string_sequence(
+                    [extr_key if isinstance(extr_key, bytes) else extr_key.encode("utf-8")]
+                )
                 legacy_result = ArrowOp(v_left, key_vec)
             else:
                 from opteryx.expression.binary_operators import LongArrowOp
-                key_vec = _StringVector.from_constant(extr_key, 1)
+                key_vec = _draken_native.vector_from_string_sequence(
+                    [extr_key if isinstance(extr_key, bytes) else extr_key.encode("utf-8")]
+                )
                 legacy_result = LongArrowOp(v_left, key_vec)
             stack[sp] = legacy_result
             sp += 1

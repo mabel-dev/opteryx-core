@@ -27,15 +27,9 @@ from collections.abc import Iterable
 
 from draken.core.buffers cimport DrakenVector
 from draken.vectors.bool_vector cimport BoolVector
-from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.integer64_vector cimport Integer64Vector
-from draken.vectors.integer8_vector cimport Integer8Vector
-from draken.vectors.integer16_vector cimport Integer16Vector
-from draken.vectors.integer32_vector cimport Integer32Vector
-from draken.vectors.string_vector cimport StringVector
 from draken.vectors.vector cimport Vector
 from opteryx.expression import NodeType
-# evaluate_and_append_draken in scope from _operators evaluator includes
+from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 
 # BasePlanNode in scope via textual include from _operators.pyx.

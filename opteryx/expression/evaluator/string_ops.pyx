@@ -16,7 +16,7 @@ from opteryx.compiled.nanobind.vector_misc import vector_in_list
 from opteryx.compiled.nanobind.vector_string_search import vector_contains
 
 from draken.vectors.bool_vector import BoolVector
-from draken.vectors.string_vector import StringVector
+import draken.draken_native as _draken_native
 
 
 
@@ -79,7 +79,9 @@ cpdef _string_anyop_like(vec, patterns, bint ignore_case):
             continue
         # AnyOp iterates individual patterns; wrap each as a 1-row constant
         # StringVector so the single-pattern kernel can read it.
-        needle = StringVector.from_constant(p, 1)
+        needle = _draken_native.vector_from_string_sequence(
+            [p if isinstance(p, bytes) else p.encode("utf-8")]
+        )
         mask = vector_like(vec, needle, ignore_case)
         if result is None:
             result = mask

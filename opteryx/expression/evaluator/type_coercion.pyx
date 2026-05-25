@@ -13,13 +13,6 @@ import datetime
 import decimal
 
 from draken.vectors.bool_vector import BoolVector
-from draken.vectors.date32_vector import Date32Vector
-from draken.vectors.float64_vector import Float64Vector
-from draken.vectors.integer64_vector import Integer64Vector
-from draken.vectors.interval_vector import IntervalVector
-from draken.vectors.string_vector import StringVector
-from draken.vectors.time_vector import TimeVector
-from draken.vectors.timestamp_vector import TimestampVector
 
 from draken.vectors.vector cimport Vector
 
@@ -173,28 +166,22 @@ cpdef object _coerce_temporal_scalar_for_arrow(value, target_type):
     return value
 
 
-# Vector classes whose null layout is a plain int8 mask (fixed-width buffer).
-# StringVector and IntervalVector are intentionally excluded — their null
-# layouts are handled by different branches in _is_null_as_boolvector.
-cdef tuple _FIXED_BUFFER_VECTORS = (
-    BoolVector,
-    Integer64Vector,
-    Date32Vector,
-    IntervalVector,
-    TimestampVector,
-    TimeVector,
-)
+# Vector classes whose null layout is exposed via is_null() → int8 mask.
+# After the draken rewrite, only BoolVector retains the old typed-class surface;
+# all other vector types are unified Vector instances handled by the
+# null_bitmap() fallback path below.
+cdef tuple _FIXED_BUFFER_VECTORS = (BoolVector,)
 
 
 cpdef _is_null_as_boolvector(vec):
     """Produce a BoolVector flagging null entries of `vec`.
 
-    Branches:
-      - DICTIONARY-encoded: dispatch through whichever native is_null* method
-        the vector implementation exposes.
-      - Fixed-width buffer vectors: native int8 null mask.
-      - Float64Vector: native is_null_with_nan() so NaN counts as null.
-      - StringVector / fallback: native null_bitmap or is_null().
+    Dispatch order:
+      1. DICTIONARY-encoded (old-draken compat): dispatch via is_null_boolvector /
+         is_null_with_nan / is_null if present.
+      2. BoolVector: native int8 null mask via is_null().
+      3. Unified Vector fallback: null_bitmap() returns the validity bitmap
+         (1=valid, 0=null) as bytes, or None when all rows are valid.
     """
     cdef Py_ssize_t n = len(vec)
 
@@ -210,24 +197,12 @@ cpdef _is_null_as_boolvector(vec):
             return bool_vector_from_int8_mask(is_null(), n)
         return BoolVector(n)
 
-    if isinstance(vec, Float64Vector):
-        return bool_vector_from_int8_mask(vec.is_null_with_nan(), n)
-
     if isinstance(vec, _FIXED_BUFFER_VECTORS):
         return bool_vector_from_int8_mask(vec.is_null(), n)
 
     nb = vec.null_bitmap()
     if nb is not None:
         return bool_vector_from_inverted_null_bitmap(nb, n)
-    if getattr(vec, "null_count", 0) == 0:
-        return BoolVector(n)
 
-    if isinstance(vec, StringVector):
-        is_null = getattr(vec, "is_null", None)
-        if is_null is not None:
-            return bool_vector_from_int8_mask(is_null(), n)
-
-    raise TypeError(
-        "Null-mask evaluation requires native Draken vector null APIs; "
-        f"unsupported vector type {type(vec).__name__!r}."
-    )
+    # null_bitmap() returns None → validity is NULL → all rows valid.
+    return BoolVector(n)

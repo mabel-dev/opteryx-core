@@ -1193,13 +1193,11 @@ extensions = [
         "opteryx.operators._operators",
         sources=[
             "opteryx/operators/_operators.pyx",
-            "opteryx/expression/evaluator/bytecode_worker.cpp",
             "src/cpp/hllpp.cpp",
             "third_party/tdigest-c/src/tdigest_cpp.cpp",
         ],
         include_dirs=include_dirs + [
             "opteryx/operators/aggregate",
-            "opteryx/expression/evaluator",  # bytecode_worker.h, bitmap_worker_pool.h
         ],
         language="c++",
         extra_compile_args=CPP_FLAGS,
@@ -2280,14 +2278,17 @@ setup(
     python_requires=">=3.13",
     url="https://github.com/mabel-dev/opteryx/",
     ext_modules=cythonize(
-        # DRAKEN_BUILD=1 restricts to draken.* + opteryx.compiled.nanobind.*
-        # + opteryx.expression.evaluator.* — targets that build cleanly while
-        # operator consumer files remain red (pre-E.24 rewrite debt).
+        # DRAKEN_BUILD=1 builds everything except extensions that still
+        # reference old-draken typed-vector cimports (Gap 2):
+        #   - opteryx.operators._operators (whole operators bundle)
+        #   - opteryx.compiled.morsel_ops.sort (cimports StringVector)
         (
-            [e for e in extensions if e.name.startswith("draken.")
-             or e.name.startswith("rugo.")
-             or e.name.startswith("opteryx.compiled.nanobind.")
-             or e.name.startswith("opteryx.expression.evaluator.")]
+            [e for e in extensions if e.name not in {
+                "opteryx.operators._operators",
+                "opteryx.compiled.morsel_ops.sort",
+                "opteryx.compiled.structures.column_deserializer",
+                "opteryx.compiled.structures.bloom_filter",
+            }]
             if os.environ.get("DRAKEN_BUILD")
             else extensions
         ),

@@ -28,7 +28,7 @@ cdef class SumInt64Aggregate(UngroupedAggregate):
         # kernel for dense paths and encoding-specific helpers for
         # dict/RLE/const. No encoding handling duplicated here.
         cdef Morsel typed = <Morsel>morsel
-        if typed.ptr is NULL or typed.ptr.num_rows == 0:
+        if typed.num_rows == 0:
             return
 
         if self._col_idx < 0:
@@ -44,19 +44,19 @@ cdef class SumInt64Aggregate(UngroupedAggregate):
             self._col_type = _classify_vector(raw)
 
         if self._col_type == _VTYPE_INT64:
-            self._total += (<Integer64Vector>raw).sum()
+            self._total += (<Vector>raw).sum()
             self._seen = True
             return
         if self._col_type == _VTYPE_INT8:
-            self._total += (<Integer8Vector>raw).sum()
+            self._total += (<Vector>raw).sum()
             self._seen = True
             return
         if self._col_type == _VTYPE_INT16:
-            self._total += (<Integer16Vector>raw).sum()
+            self._total += (<Vector>raw).sum()
             self._seen = True
             return
         if self._col_type == _VTYPE_INT32:
-            self._total += (<Integer32Vector>raw).sum()
+            self._total += (<Vector>raw).sum()
             self._seen = True
             return
 
@@ -94,7 +94,7 @@ cdef class SumFloat64Aggregate(UngroupedAggregate):
 
     cdef void apply(self, Morsel morsel) except *:
         cdef Morsel typed = <Morsel>morsel
-        if typed.ptr is NULL or typed.ptr.num_rows == 0:
+        if typed.num_rows == 0:
             return
 
         if self._col_idx < 0:
@@ -110,23 +110,23 @@ cdef class SumFloat64Aggregate(UngroupedAggregate):
             self._col_type = _classify_vector(raw)
 
         if self._col_type == _VTYPE_FLOAT64:
-            self._total += (<Float64Vector>raw).sum()
+            self._total += (<Vector>raw).sum()
             self._seen = True
             return
         if self._col_type == _VTYPE_INT64:
-            self._total += <double>((<Integer64Vector>raw).sum())
+            self._total += <double>((<Vector>raw).sum())
             self._seen = True
             return
         if self._col_type == _VTYPE_INT8:
-            self._total += <double>((<Integer8Vector>raw).sum())
+            self._total += <double>((<Vector>raw).sum())
             self._seen = True
             return
         if self._col_type == _VTYPE_INT16:
-            self._total += <double>((<Integer16Vector>raw).sum())
+            self._total += <double>((<Vector>raw).sum())
             self._seen = True
             return
         if self._col_type == _VTYPE_INT32:
-            self._total += <double>((<Integer32Vector>raw).sum())
+            self._total += <double>((<Vector>raw).sum())
             self._seen = True
             return
 

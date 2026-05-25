@@ -30,7 +30,7 @@ cdef class MinInt64Aggregate(UngroupedAggregate):
         # Delegates to Vector.min() which dispatches by encoding (dense via
         # C++ kernel, dict / RLE / const via dedicated helpers).
         cdef Morsel typed = <Morsel>morsel
-        if typed.ptr is NULL or typed.ptr.num_rows == 0:
+        if typed.num_rows == 0:
             return
 
         if self._col_idx < 0:
@@ -48,13 +48,13 @@ cdef class MinInt64Aggregate(UngroupedAggregate):
         cdef int64_t val
         try:
             if self._col_type == _VTYPE_INT64:
-                val = (<Integer64Vector>raw).min()
+                val = (<Vector>raw).min()
             elif self._col_type == _VTYPE_INT8:
-                val = (<Integer8Vector>raw).min()
+                val = (<Vector>raw).min()
             elif self._col_type == _VTYPE_INT16:
-                val = (<Integer16Vector>raw).min()
+                val = (<Vector>raw).min()
             elif self._col_type == _VTYPE_INT32:
-                val = (<Integer32Vector>raw).min()
+                val = (<Vector>raw).min()
             else:
                 raise TypeError(
                     f"MinInt64Aggregate cannot scan column {self.column_name!r}: "
@@ -101,7 +101,7 @@ cdef class MaxInt64Aggregate(UngroupedAggregate):
 
     cdef void apply(self, Morsel morsel) except *:
         cdef Morsel typed = <Morsel>morsel
-        if typed.ptr is NULL or typed.ptr.num_rows == 0:
+        if typed.num_rows == 0:
             return
 
         if self._col_idx < 0:
@@ -119,13 +119,13 @@ cdef class MaxInt64Aggregate(UngroupedAggregate):
         cdef int64_t val
         try:
             if self._col_type == _VTYPE_INT64:
-                val = (<Integer64Vector>raw).max()
+                val = (<Vector>raw).max()
             elif self._col_type == _VTYPE_INT8:
-                val = (<Integer8Vector>raw).max()
+                val = (<Vector>raw).max()
             elif self._col_type == _VTYPE_INT16:
-                val = (<Integer16Vector>raw).max()
+                val = (<Vector>raw).max()
             elif self._col_type == _VTYPE_INT32:
-                val = (<Integer32Vector>raw).max()
+                val = (<Vector>raw).max()
             else:
                 raise TypeError(
                     f"MaxInt64Aggregate cannot scan column {self.column_name!r}: "
@@ -171,7 +171,7 @@ cdef class MinFloat64Aggregate(UngroupedAggregate):
 
     cdef void apply(self, Morsel morsel) except *:
         cdef Morsel typed = <Morsel>morsel
-        if typed.ptr is NULL or typed.ptr.num_rows == 0:
+        if typed.num_rows == 0:
             return
 
         if self._col_idx < 0:
@@ -189,7 +189,7 @@ cdef class MinFloat64Aggregate(UngroupedAggregate):
         cdef double val
         try:
             if self._col_type == _VTYPE_FLOAT64:
-                val = (<Float64Vector>raw).min()
+                val = (<Vector>raw).min()
             else:
                 raise TypeError(
                     f"MinFloat64Aggregate cannot scan column {self.column_name!r}: "
@@ -235,7 +235,7 @@ cdef class MaxFloat64Aggregate(UngroupedAggregate):
 
     cdef void apply(self, Morsel morsel) except *:
         cdef Morsel typed = <Morsel>morsel
-        if typed.ptr is NULL or typed.ptr.num_rows == 0:
+        if typed.num_rows == 0:
             return
 
         if self._col_idx < 0:
@@ -253,7 +253,7 @@ cdef class MaxFloat64Aggregate(UngroupedAggregate):
         cdef double val
         try:
             if self._col_type == _VTYPE_FLOAT64:
-                val = (<Float64Vector>raw).max()
+                val = (<Vector>raw).max()
             else:
                 raise TypeError(
                     f"MaxFloat64Aggregate cannot scan column {self.column_name!r}: "
@@ -317,7 +317,7 @@ cdef class MinBytesAggregate(UngroupedAggregate):
         cdef size_t      len_a, len_b
 
         if self._col_type == _VTYPE_STRING:
-            svec = <StringVector>raw
+            svec = <Vector>raw
             uv    = svec.unified()
             arena = <DrakenStringArena*>uv.data
             sel   = <const uint32_t*>uv.selection
@@ -392,7 +392,7 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
         cdef size_t      len_a, len_b
 
         if self._col_type == _VTYPE_STRING:
-            svec = <StringVector>raw
+            svec = <Vector>raw
             uv    = svec.unified()
             arena = <DrakenStringArena*>uv.data
             sel   = <const uint32_t*>uv.selection

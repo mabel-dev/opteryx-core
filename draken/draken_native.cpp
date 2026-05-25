@@ -374,6 +374,92 @@ static VectorOwner make_string_from_sequence(nb::list seq) {
 }
 
 // ---------------------------------------------------------------------------
+// D.1c: constant-shape VARCHAR vector (data_length == 1, length rows).
+//
+// value_obj may be None → all-null constant (data_length=1, all rows null).
+// Non-null: one slot in the arena, selection = global zero vector.
+//
+// Ownership model mirrors make_string_from_sequence: all storage lives in one
+// mimalloc block [DrakenStringArena | DrakenStringSlot[1] | arena_bytes | validity].
+// data_buf owns the block; validity is embedded in the block.
+// ---------------------------------------------------------------------------
+
+static VectorOwner make_varchar_constant(nb::object value_obj, uint32_t length) {
+    const bool is_null = value_obj.is_none();
+
+    // Gather UTF-8 bytes for the one unique value (if not null).
+    const char*  utf8_ptr  = nullptr;
+    Py_ssize_t   utf8_len  = 0;
+    size_t       arena_ext = 0u;  // bytes needed in arena (> 0 only if long form)
+
+    if (!is_null) {
+        PyObject* pystr = value_obj.ptr();
+        if (!PyUnicode_Check(pystr))
+            throw std::invalid_argument(
+                "vector_varchar_from_constant: value must be str or None");
+        utf8_ptr = PyUnicode_AsUTF8AndSize(pystr, &utf8_len);
+        if (!utf8_ptr) throw nb::python_error();
+        if (utf8_len > STR_INLINE_MAX)
+            arena_ext = static_cast<size_t>(utf8_len);
+    }
+
+    // Single-block layout: [DrakenStringArena | DrakenStringSlot[1] | arena_bytes | validity]
+    constexpr size_t kSlotAlign = alignof(DrakenStringSlot);
+    const size_t struct_end =
+        (sizeof(DrakenStringArena) + kSlotAlign - 1u) & ~(kSlotAlign - 1u);
+    const size_t slots_bytes    = sizeof(DrakenStringSlot);   // exactly 1 slot
+    const size_t arena_start    = struct_end + slots_bytes;
+    const size_t validity_start = arena_start + arena_ext;
+
+    size_t validity_bytes = 0u;
+    if (is_null) {
+        // All rows null: need a validity bitmap (all bits 0).
+        const uint32_t bm     = (length + 7u) / 8u;
+        const uint32_t padded = ((bm + 7u) & ~7u);
+        validity_bytes = (padded > 0u) ? padded : 8u;
+    }
+
+    const size_t total_alloc = validity_start + validity_bytes;
+    uint8_t* block = static_cast<uint8_t*>(
+        draken_malloc(total_alloc > 0u ? total_alloc : sizeof(DrakenStringArena)));
+    if (!block) throw std::bad_alloc();
+    std::memset(block, 0, total_alloc > 0u ? total_alloc : sizeof(DrakenStringArena));
+    OwnedBuffer<void> data_buf(block);
+
+    DrakenStringArena* sa    = reinterpret_cast<DrakenStringArena*>(block);
+    DrakenStringSlot*  slot  = reinterpret_cast<DrakenStringSlot*>(block + struct_end);
+    uint8_t*           arena = (arena_ext > 0u) ? (block + arena_start) : nullptr;
+    uint8_t*           bitmap = is_null ? (block + validity_start) : nullptr;
+
+    sa->slots        = slot;
+    sa->arena        = arena;
+    sa->length       = 1u;             // one unique value in the dict
+    sa->arena_used   = arena_ext;
+    sa->arena_cap    = arena_ext;
+    sa->null_bitmap  = nullptr;        // validity is on the DrakenVector, not the arena
+    sa->owns_buffers = 0;
+    sa->type         = DRAKEN_VARCHAR;
+
+    if (!is_null) {
+        const uint8_t* src  = reinterpret_cast<const uint8_t*>(utf8_ptr);
+        const uint32_t slen = static_cast<uint32_t>(utf8_len);
+        if (slen <= STR_INLINE_MAX) {
+            str_init_inline(slot, src, slen);
+        } else {
+            // Write bytes to arena at offset 0 (this is the only slot).
+            std::memcpy(arena, src, slen);
+            str_init_extern(slot, src, slen,
+                            static_cast<uint32_t>(XXH3_64bits(src, slen)), 0u);
+        }
+    }
+    // is_null: slot is already zeroed (null sentinel: length == 0, all bytes zero).
+
+    // Constant shape: one data slot broadcast over `length` rows.
+    DrakenVector v = draken_vector_from_constant(sa, length, DRAKEN_VARCHAR, bitmap);
+    return VectorOwner(v, std::move(data_buf), OwnedBuffer<uint8_t>(nullptr));
+}
+
+// ---------------------------------------------------------------------------
 // D.3: string dict ingestion — Python list[str | None] → dict DRAKEN_VARCHAR vector.
 //
 // Deduplicates the input sequence into unique slots (in first-appearance order).
@@ -1889,6 +1975,40 @@ extern "C" PyObject* draken_vector_own_raw(
         Py_INCREF(result);
         return result;
         // obj destructor Py_DECREF's; net effect: one new reference returned.
+    } catch (nb::python_error& e) {
+        e.restore();
+        return nullptr;
+    } catch (std::bad_alloc&) {
+        PyErr_NoMemory();
+        return nullptr;
+    } catch (std::exception& e) {
+        PyErr_SetString(PyExc_RuntimeError, e.what());
+        return nullptr;
+    }
+}
+
+// draken_vector_own_dict_i64 — wrap hand-allocated dict-encoded int64 buffers in a new Vector.
+//
+// data: draken_malloc'd int64_t[data_length] unique values (dictionary).
+// codes: draken_malloc'd uint32_t[length] per-row selection codes.
+// Ownership of all non-NULL buffers is transferred.
+extern "C" PyObject* draken_vector_own_dict_i64(
+    void* data, uint32_t data_length,
+    uint32_t* codes, uint32_t length,
+    uint8_t* validity)
+{
+    try {
+        DrakenVector v = draken_vector_from_dict(data, data_length,
+                                                  codes, length,
+                                                  DRAKEN_INT64, validity);
+        OwnedBuffer<void>    data_buf(data);
+        OwnedBuffer<uint8_t> val_buf(validity);
+        OwnedBuffer<void>    codes_buf(static_cast<void*>(codes));
+        VectorOwner owner(v, std::move(data_buf), std::move(val_buf), std::move(codes_buf));
+        nb::object obj = nb::cast(std::move(owner));
+        PyObject* result = obj.ptr();
+        Py_INCREF(result);
+        return result;
     } catch (nb::python_error& e) {
         e.restore();
         return nullptr;
@@ -4301,6 +4421,17 @@ NB_MODULE(draken_native, m) {
             if (v.vec.type != DRAKEN_ARRAY || !v.child_owner) return nb::none();
             return nb::cast(v.child_owner->vec.type);
         },  "DrakenType of the child vector, or None for non-array or empty vectors.")
+        .def_prop_ro("array_child", [](const VectorOwner& v) -> nb::object {
+            if (v.vec.type != DRAKEN_ARRAY)
+                throw std::invalid_argument("array_child: vector is not DRAKEN_ARRAY type");
+            if (!v.child_owner)
+                throw std::runtime_error("array_child: DRAKEN_ARRAY vector has no child");
+            // Return an independently-owned copy of the child via identity take.
+            const uint32_t cn = v.child_owner->vec.length;
+            std::vector<int32_t> all_idx(cn);
+            for (uint32_t i = 0; i < cn; ++i) all_idx[i] = static_cast<int32_t>(i);
+            return nb::cast(take_child(*v.child_owner, all_idx.data(), cn));
+        }, "Child Vector of a DRAKEN_ARRAY vector as a new independently-owned Vector. Raises for non-array vectors.")
         // ----------------------------------------------------------------
         // is_dict / is_constant / is_dense — layout introspection for tests only.
         .def_prop_ro("is_dict", [](const VectorOwner& v) {
@@ -4430,6 +4561,16 @@ NB_MODULE(draken_native, m) {
         "None elements become null rows.\n"
         "All-valid input leaves validity==NULL (normalization invariant).\n"
         "Raises OverflowError if total arena bytes exceed 4 GB.");
+
+    // D.1c — constant-shape VARCHAR vector.
+    m.def("vector_varchar_from_constant",
+        [](nb::object value, uint32_t length) {
+            return make_varchar_constant(value, length);
+        },
+        nb::arg("value").none(true), nb::arg("length"),
+        "Build a constant-shape VARCHAR Vector (data_length==1, selection=zero-vector).\n"
+        "value may be None (→ all-null constant).\n"
+        "Raises TypeError if value is not str or None.");
 
     // E.7 — NVARCHAR ingestion (opt-in UTF-8; codepoint-length ops).
     m.def("vector_from_nvarchar_sequence",
@@ -4988,6 +5129,118 @@ NB_MODULE(draken_native, m) {
         },
         nb::arg("values"),
         "Bridge test: allocate int64 buffer via draken_malloc, wrap via draken_vector_own_raw.");
+
+    // -------------------------------------------------------------------------
+    // Type coercion helpers — reinterpret physical INT64 data as TIMESTAMP64
+    // or DATE32. Used by the parquet reader to fix up logical types after IPC
+    // deserialization (which tags DATE/TIMESTAMP as INT64).
+    // -------------------------------------------------------------------------
+
+    // vector_reinterpret_as_timestamp64 — reinterpret an INT64 vector's data as TIMESTAMP64.
+    // The underlying int64 values are treated as microseconds-since-epoch unchanged.
+    m.def("vector_reinterpret_as_timestamp64",
+        [](nb::object obj) -> VectorOwner {
+            const DrakenVector* src = draken_vector_unwrap(obj.ptr());
+            if (!src)
+                throw nb::python_error();
+            if (src->type != DRAKEN_INT64)
+                throw std::invalid_argument("vector_reinterpret_as_timestamp64: requires INT64 vector");
+            // Identity take with type override: materialize all rows into a new owned TIMESTAMP64.
+            const uint32_t n = src->length;
+            int64_t* dst = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1u) * sizeof(int64_t)));
+            if (!dst) throw std::bad_alloc();
+            OwnedBuffer<void> data_buf(dst);
+            OwnedBuffer<uint8_t> val_buf(nullptr);
+            for (uint32_t i = 0; i < n; ++i)
+                dst[i] = static_cast<const int64_t*>(src->data)[src->selection[i]];
+            uint8_t* validity = nullptr;
+            if (src->validity) {
+                const uint32_t nbytes = (n + 7u) / 8u;
+                const uint32_t padded = ((nbytes + 7u) & ~7u);
+                validity = static_cast<uint8_t*>(draken_malloc(padded > 0 ? padded : 8u));
+                if (!validity) throw std::bad_alloc();
+                val_buf.reset(validity);
+                std::memcpy(validity, src->validity, nbytes);
+            }
+            DrakenVector v = draken_vector_from_dense(dst, n, DRAKEN_TIMESTAMP64, validity);
+            return VectorOwner(v, std::move(data_buf), std::move(val_buf));
+        },
+        nb::arg("vec"),
+        "Reinterpret INT64 vector data as TIMESTAMP64 (microseconds-since-epoch). Returns new Vector.");
+
+    // vector_reinterpret_as_date32 — reinterpret an INT64 vector's data as DATE32.
+    // INT64 values are cast to int32 (days-since-epoch); values outside int32 range raise.
+    m.def("vector_reinterpret_as_date32",
+        [](nb::object obj) -> VectorOwner {
+            const DrakenVector* src = draken_vector_unwrap(obj.ptr());
+            if (!src)
+                throw nb::python_error();
+            if (src->type != DRAKEN_INT64)
+                throw std::invalid_argument("vector_reinterpret_as_date32: requires INT64 vector");
+            const uint32_t n = src->length;
+            int32_t* dst = static_cast<int32_t*>(draken_malloc((n > 0 ? n : 1u) * sizeof(int32_t)));
+            if (!dst) throw std::bad_alloc();
+            OwnedBuffer<void> data_buf(dst);
+            OwnedBuffer<uint8_t> val_buf(nullptr);
+            const int64_t* src_data = static_cast<const int64_t*>(src->data);
+            for (uint32_t i = 0; i < n; ++i)
+                dst[i] = static_cast<int32_t>(src_data[src->selection[i]]);
+            uint8_t* validity = nullptr;
+            if (src->validity) {
+                const uint32_t nbytes = (n + 7u) / 8u;
+                const uint32_t padded = ((nbytes + 7u) & ~7u);
+                validity = static_cast<uint8_t*>(draken_malloc(padded > 0 ? padded : 8u));
+                if (!validity) throw std::bad_alloc();
+                val_buf.reset(validity);
+                std::memcpy(validity, src->validity, nbytes);
+            }
+            DrakenVector v = draken_vector_from_dense(dst, n, DRAKEN_DATE32, validity);
+            return VectorOwner(v, std::move(data_buf), std::move(val_buf));
+        },
+        nb::arg("vec"),
+        "Reinterpret INT64 vector data as DATE32 (days-since-epoch, cast to int32). Returns new Vector.");
+
+    // vector_reinterpret_as_decimal — reinterpret INT64 vector as DECIMAL with given precision/scale.
+    // Used by parquet reader to fix up logical type post-IPC deserialization.
+    m.def("vector_reinterpret_as_decimal",
+        [](nb::object obj, int precision, int scale) -> VectorOwner {
+            const DrakenVector* src = draken_vector_unwrap(obj.ptr());
+            if (!src)
+                throw nb::python_error();
+            if (src->type != DRAKEN_INT64)
+                throw std::invalid_argument("vector_reinterpret_as_decimal: requires INT64 vector");
+            if (precision < 1 || precision > 18)
+                throw std::invalid_argument("DECIMAL precision must be in [1, 18]");
+            if (scale < 0 || scale > precision)
+                throw std::invalid_argument("DECIMAL scale must be in [0, precision]");
+            const uint32_t n = src->length;
+            int64_t* dst = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1u) * sizeof(int64_t)));
+            if (!dst) throw std::bad_alloc();
+            OwnedBuffer<void> data_buf(dst);
+            OwnedBuffer<uint8_t> val_buf(nullptr);
+            const int64_t* src_data = static_cast<const int64_t*>(src->data);
+            for (uint32_t i = 0; i < n; ++i)
+                dst[i] = src_data[src->selection[i]];
+            uint8_t* validity = nullptr;
+            if (src->validity) {
+                const uint32_t nbytes = (n + 7u) / 8u;
+                const uint32_t padded = ((nbytes + 7u) & ~7u);
+                validity = static_cast<uint8_t*>(draken_malloc(padded > 0 ? padded : 8u));
+                if (!validity) throw std::bad_alloc();
+                val_buf.reset(validity);
+                std::memcpy(validity, src->validity, nbytes);
+            }
+            DrakenVector v = draken_vector_from_dense(dst, n, DRAKEN_DECIMAL, validity);
+            VectorOwner owner(v, std::move(data_buf), std::move(val_buf));
+            LogicalType lt;
+            lt.kind      = LogicalKind::DECIMAL;
+            lt.precision = static_cast<uint8_t>(precision);
+            lt.scale     = static_cast<uint8_t>(scale);
+            owner.logical_type = logical_type_intern(lt);
+            return owner;
+        },
+        nb::arg("vec"), nb::arg("precision"), nb::arg("scale"),
+        "Reinterpret INT64 vector data as DECIMAL with given precision/scale. Returns new Vector.");
 
     // _bridge_test_type_error() — verify draken_vector_unwrap raises TypeError on non-Vector.
     m.def("_bridge_test_type_error",

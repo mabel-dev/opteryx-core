@@ -62,6 +62,21 @@ const DrakenVector* draken_array_child_unwrap(PyObject* obj);
 PyObject* draken_vector_own_raw(
     void* data, uint8_t* validity, uint32_t length, DrakenType type);
 
+// draken_vector_own_dict_i64 — wrap hand-allocated dict-encoded int64 buffers in a new Vector.
+//
+// Creates a dict-encoded (selection = owned codes) int64 Vector.
+// data:        draken_malloc'd int64_t[data_length] unique values (the dictionary).
+// codes:       draken_malloc'd uint32_t[length] per-row codes.
+// data_length: number of unique values.
+// length:      logical row count.
+// validity:    draken_malloc'd null bitmap (1-bit-per-row, Arrow convention), or NULL.
+// All non-NULL buffers MUST be draken_malloc'd; ownership is transferred on call.
+// Returns a NEW reference on success; NULL + exception on failure.
+PyObject* draken_vector_own_dict_i64(
+    void* data, uint32_t data_length,
+    uint32_t* codes, uint32_t length,
+    uint8_t* validity);
+
 // draken_vector_own_string — wrap hand-allocated string buffers in a new string-family Vector.
 //
 // Canonical exit-point for C++ consumers that produce a new string column.

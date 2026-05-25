@@ -68,9 +68,9 @@ def _build_morsel_from_columns(column_names, column_types, column_values):
         dtype = column_types[index] if index < len(column_types) else None
         values = column_values[index] if index < len(column_values) else []
         if dtype is None:
-            vectors.append(vector_from_sequence(values))
+            vectors.append(_draken_native.vector_from_sequence(values))
         else:
-            vectors.append(vector_from_sequence(values, dtype=dtype))
+            vectors.append(_draken_native.vector_from_sequence(values, dtype=dtype))
     return Morsel.from_vectors(column_names, vectors)
 
 
