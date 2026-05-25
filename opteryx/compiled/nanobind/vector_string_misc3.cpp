@@ -130,13 +130,11 @@ static nb::object impl_soundex(nb::object vec_obj) {
     const bool is_str =
         dv->type == DRAKEN_VARCHAR  ||
         dv->type == DRAKEN_NVARCHAR ||
-        dv->type == DRAKEN_VARBINARY ||
-        dv->type == DRAKEN_DICTIONARY ||
-        dv->type == DRAKEN_CONSTANT;
+        dv->type == DRAKEN_VARBINARY;
     if (!is_str)
         throw nb::type_error(
             "vector_soundex: expected a string-family Vector "
-            "(VARCHAR, NVARCHAR, VARBINARY, DICTIONARY, or CONSTANT)");
+            "(VARCHAR, NVARCHAR, or VARBINARY)");
 
     const uint32_t n = dv->length;
 

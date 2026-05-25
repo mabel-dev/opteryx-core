@@ -5,6 +5,15 @@
 // loud build break (09_delivery.md risk #1).
 #include "core/buffers.h"
 
+// E.30c: DRAKEN_DICTIONARY (61) and DRAKEN_CONSTANT (62) are permanently retired.
+// Encoding shape is layout, not type. Read CLAUDE.md §11.
+#ifdef DRAKEN_DICTIONARY
+#error "DRAKEN_DICTIONARY was deleted by E.30c. Encoding shape is layout, not type. Read CLAUDE.md §11."
+#endif
+#ifdef DRAKEN_CONSTANT
+#error "DRAKEN_CONSTANT was deleted by E.30c. Encoding shape is layout, not type. Read CLAUDE.md §11."
+#endif
+
 extern "C" int draken_abi_guard(void) {
     return (int)sizeof(DrakenVector);  // 40 on LP64; asserts above pin the rest.
 }

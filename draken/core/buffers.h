@@ -55,8 +55,8 @@ typedef enum {
 
     // String-like: 60–79
     DRAKEN_VARCHAR        = 60,  // default; ASCII semantics; byte-length ops
-    DRAKEN_DICTIONARY     = 61,
-    DRAKEN_CONSTANT       = 62,
+    // 61: reserved — permanently retired by E.30c (was DRAKEN_DICTIONARY, a shape-as-type violation; see CLAUDE.md §11)
+    // 62: reserved — permanently retired by E.30c (was DRAKEN_CONSTANT,   a shape-as-type violation; see CLAUDE.md §11)
     DRAKEN_NVARCHAR       = 63,  // opt-in UTF-8; codepoint-length ops; Unicode-aware ops (future)
     DRAKEN_VARBINARY      = 64,  // opaque bytes; byte-length ops; character ops throw
 

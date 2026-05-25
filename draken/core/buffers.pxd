@@ -30,8 +30,6 @@ cdef extern from "core/buffers.h":
         DRAKEN_INTERVAL
         DRAKEN_BOOL
         DRAKEN_VARCHAR
-        DRAKEN_DICTIONARY
-        DRAKEN_CONSTANT
         DRAKEN_NVARCHAR
         DRAKEN_VARBINARY
         DRAKEN_ARRAY
@@ -87,7 +85,7 @@ cdef extern from "core/string_slot.h":
     void     str_init_null(DrakenStringSlot* s) nogil
     void     str_init_inline(DrakenStringSlot* s, const uint8_t* src, uint32_t length) nogil
     void     str_init_extern(DrakenStringSlot* s, const uint8_t* src,
-                            uint32_t length, uint64_t arena_offset) nogil
+                            uint32_t length, uint32_t hash32, uint32_t arena_offset) nogil
 
 cdef extern from "core/buffers.h":
 

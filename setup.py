@@ -878,7 +878,7 @@ extensions = [
         extra_objects=[MIMALLOC_OBJ],
     ),
     Extension(
-        "rugo.jsonl",
+        "rugo.jsonl_reader",
         sources=[
             "rugo/src/jsonl/jsonl_reader.pyx",
             "rugo/src/jsonl/decode.cpp",
@@ -891,10 +891,10 @@ extensions = [
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
-        extra_objects=["build/temp.yyjson.o"] if os.path.exists("build/temp.yyjson.o") else [],
+        extra_objects=(["build/temp.yyjson.o"] if os.path.exists("build/temp.yyjson.o") else []) + [MIMALLOC_OBJ],
     ),
     Extension(
-        "rugo._jsonl",
+        "rugo._jsonl._jsonl_reader",
         sources=[
             "rugo/src/_jsonl/_jsonl_reader.pyx",
             "rugo/src/_jsonl/core/structural_scan.cpp",
@@ -911,6 +911,7 @@ extensions = [
         include_dirs=include_dirs + ["rugo/src/_jsonl/core"],
         language="c++",
         extra_compile_args=CPP_FLAGS,
+        extra_objects=[MIMALLOC_OBJ],
     ),
     # Core compiled components
     Extension(
@@ -2251,7 +2252,7 @@ setup(
         # operator consumer files remain red (pre-E.24 rewrite debt).
         (
             [e for e in extensions if e.name.startswith("draken.")
-             or e.name == "rugo.parquet_reader"
+             or e.name.startswith("rugo.")
              or e.name.startswith("opteryx.compiled.nanobind.")
              or e.name.startswith("opteryx.expression.evaluator.")]
             if os.environ.get("DRAKEN_BUILD")

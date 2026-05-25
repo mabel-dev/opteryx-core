@@ -58,12 +58,10 @@ static inline uint8_t _ss_lower(uint8_t b) noexcept {
 static inline void _ss_require_string(const DrakenVector& v, const char* op) {
     if (v.type != DRAKEN_VARCHAR  &&
         v.type != DRAKEN_NVARCHAR &&
-        v.type != DRAKEN_VARBINARY &&
-        v.type != DRAKEN_DICTIONARY &&
-        v.type != DRAKEN_CONSTANT) {
+        v.type != DRAKEN_VARBINARY) {
         throw std::invalid_argument(
             std::string(op) + ": expected a string Vector "
-            "(VARCHAR, NVARCHAR, VARBINARY, DICTIONARY, or CONSTANT)");
+            "(VARCHAR, NVARCHAR, or VARBINARY)");
     }
 }
 

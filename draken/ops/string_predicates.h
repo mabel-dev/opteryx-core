@@ -5,14 +5,11 @@
 //
 // Set membership via hash-only CarcharSet probe.
 //
-// §1 EXCEPTION (design doc 02, architect sign-off; SAME exception as string
-// eq and string hash — not a new decision):
-//   SHORT strings (len ≤ 12): full content is in the hash seed → effectively
-//     collision-free within any realistic data set.
-//   LONG strings (len > 12): hash seed derived from (length, prefix, hash32)
-//     only; no arena fetch. Two distinct long strings sharing all three fields
-//     produce the same row hash → false match. Probability ≈ 2⁻³² per pair
-//     sharing length + prefix. Accepted trade-off; documented here, not silent.
+// HASH SEMANTICS:
+//   SHORT strings (len ≤ 12): full content is in the slot-derived hash seed.
+//   LONG strings (len > 12): hash seed is XXH3_64bits(full arena payload).
+//   Membership remains hash-only because CarcharSet stores uint64 hashes, not
+//   keys; this is a 64-bit hash identity check, not exact value verification.
 //
 // HASH PATH: str_hash_seed → simd_hash_i64 — identical to the hash_string
 // kernel and to the nanobind binding's set-building loop. Any path divergence
@@ -47,7 +44,7 @@ namespace draken { namespace ops {
 // ---------------------------------------------------------------------------
 // str_in_list — hash-only membership via CarcharSet bulk probe.
 //
-// §1 EXCEPTION (see file header): hash-only; no key verification.
+// Hash-only; no key verification.
 // The hash path (str_hash_seed → simd_hash_i64) MUST be the same path used
 // by hash_string and by the binding's set-building loop. Any deviation causes
 // present long values to silently miss.
@@ -85,7 +82,7 @@ static inline VecResult str_in_list(
         const uint32_t block = (n - i < 1024u) ? (n - i) : 1024u;
 
         for (uint32_t j = 0; j < block; ++j)
-            seeds[j] = str_hash_seed(&slots[v.selection[i + j]]);
+            seeds[j] = str_hash_seed(&slots[v.selection[i + j]], sa->arena);
 
         simd_hash_i64(seeds, hashes, block);
 

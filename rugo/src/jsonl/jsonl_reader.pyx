@@ -18,11 +18,14 @@ from cpython.buffer cimport PyBUF_CONTIG_RO, PyObject_GetBuffer, PyBuffer_Releas
 from cpython.ref cimport PyObject
 from cpython.exc cimport PyErr_Occurred, PyErr_Clear
 
-from draken.vectors.integer64_vector cimport Integer64Vector
-from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.bool_vector cimport BoolVector
-from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
-from draken.vectors.array_vector cimport ArrayVector, from_sequence as array_from_sequence
+# Typed-vector cimports removed as part of E.31 migration (same gap registry as E.28):
+#   E.28-gap-1: Integer64Vector dense constructor + ptr.data write access
+#   E.28-gap-2: Float64Vector dense constructor + ptr.data write access
+#   E.28-gap-3: StringVectorBuilder (constructors, append_bytes, append_null, finish)
+#   E.31-gap-1: BoolVector dense constructor + ptr.data write access
+#   E.31-gap-2: array_from_sequence — Python-list-to-ArrayVector helper; no new-draken equivalent
+from draken.vectors.vector cimport Vector
+from draken.morsels.morsel cimport Morsel
 
 
 
@@ -74,11 +77,7 @@ def _parse_array_from_bytes(bytes b):
                         # unicode escape \uXXXX
                         if i + 4 <= n:
                             hex_s = b[i:i+4].decode('ascii')
-                            try:
-                                cp = int(hex_s, 16)
-                                chars.append(chr(cp))
-                            except Exception:
-                                chars.append('\\u' + hex_s)
+                            chars.append(chr(int(hex_s, 16)))
                             i += 4
                         else:
                             raise ValueError('invalid unicode escape')
@@ -130,11 +129,7 @@ def _parse_array_from_bytes(bytes b):
             s = b[start:i].decode('ascii')
             if '.' in s or 'e' in s or 'E' in s:
                 return float(s)
-            else:
-                try:
-                    return int(s)
-                except Exception:
-                    return float(s)
+            return int(s)
 
         # array
         if c == 91:  # '['
@@ -219,9 +214,9 @@ cdef extern from "decode.hpp":
         vector[string] column_names
         size_t num_rows
         bint success
-    vector[ColumnSchema] GetJsonlSchema(const uint8_t* data, size_t size, size_t sample_size) except +
-    JsonlTable ReadJsonl(const uint8_t* data, size_t size, const vector[string]& column_names) except +
-    JsonlTable ReadJsonl(const uint8_t* data, size_t size) except +
+    vector[ColumnSchema] GetJsonlSchema(const uint8_t* data, size_t size, size_t sample_size) nogil except +
+    JsonlTable ReadJsonl(const uint8_t* data, size_t size, const vector[string]& column_names) nogil except +
+    JsonlTable ReadJsonl(const uint8_t* data, size_t size) nogil except +
     PyObject* ParseJsonSliceToPyObject(const uint8_t* data, size_t len, bint parse_objects)
 
 def get_jsonl_schema(data, sample_size=25):
@@ -268,7 +263,10 @@ def get_jsonl_schema(data, sample_size=25):
         have_view = True
         data_ptr = <const uint8_t*>view.buf
         data_size = <size_t>view.len
-    cdef vector[ColumnSchema] schema = GetJsonlSchema(data_ptr, data_size, sample_size)
+    cdef size_t sample_size_c = <size_t>sample_size
+    cdef vector[ColumnSchema] schema
+    with nogil:
+        schema = GetJsonlSchema(data_ptr, data_size, sample_size_c)
     if have_view:
         PyBuffer_Release(&view)
     result = []
@@ -331,174 +329,42 @@ def _convert_str_leaves_to_bytes(obj):
                 _convert_str_leaves_to_bytes(v)
 
 
-cdef object _infer_array_elem_type(object first_value):
-    """Infer element type from first parsed array (None if mixed/strings)."""
-    if not isinstance(first_value, list):
-        return None
-    if len(first_value) == 0:
-        return 'unknown'
-    # Check first element to infer type
-    first_elem = first_value[0]
-    if isinstance(first_elem, str):
-        return 'string'
-    if isinstance(first_elem, (int, float)):
-        return 'numeric'
-    if isinstance(first_elem, bool):
-        return 'bool'
-    if isinstance(first_elem, list):
-        return 'nested'
-    return None
+
+cdef Vector _build_int64_vector(JsonlColumn* col, size_t n):
+    raise NotImplementedError(
+        "rugo migration gap: Integer64Vector dense constructor + ptr.data write access "
+        "has no new-draken equivalent; tracked as E.28-gap-1."
+    )
 
 
-cdef Integer64Vector _build_int64_vector(JsonlColumn* col, size_t n):
-    cdef Integer64Vector vec = Integer64Vector(n)
-    cdef int64_t* dst = <int64_t*> vec.ptr.data
-    cdef uint8_t* nulls = NULL
-    cdef size_t j, null_bytes
-    for j in range(n):
-        if col.null_mask[j]:
-            if nulls == NULL:
-                null_bytes = (n + 7) >> 3
-                nulls = <uint8_t*> malloc(null_bytes)
-                if nulls == NULL:
-                    raise MemoryError()
-                memset(nulls, 0xFF, null_bytes)
-                vec.ptr.null_bitmap = nulls
-            nulls[j >> 3] &= ~(<uint8_t>1 << (j & 7))
-        else:
-            dst[j] = col.int_values[j]
-    return vec
+cdef Vector _build_float64_vector(JsonlColumn* col, size_t n):
+    raise NotImplementedError(
+        "rugo migration gap: Float64Vector dense constructor + ptr.data write access "
+        "has no new-draken equivalent; tracked as E.28-gap-2."
+    )
 
 
-cdef Float64Vector _build_float64_vector(JsonlColumn* col, size_t n):
-    cdef Float64Vector vec = Float64Vector(n)
-    cdef double* dst = <double*> vec.ptr.data
-    cdef uint8_t* nulls = NULL
-    cdef size_t j, null_bytes
-    for j in range(n):
-        if col.null_mask[j]:
-            if nulls == NULL:
-                null_bytes = (n + 7) >> 3
-                nulls = <uint8_t*> malloc(null_bytes)
-                if nulls == NULL:
-                    raise MemoryError()
-                memset(nulls, 0xFF, null_bytes)
-                vec.ptr.null_bitmap = nulls
-            nulls[j >> 3] &= ~(<uint8_t>1 << (j & 7))
-        else:
-            dst[j] = col.double_values[j]
-    return vec
+cdef Vector _build_bool_vector(JsonlColumn* col, size_t n):
+    raise NotImplementedError(
+        "rugo migration gap: BoolVector dense constructor + ptr.data write access "
+        "has no new-draken equivalent; tracked as E.31-gap-1."
+    )
 
 
-cdef BoolVector _build_bool_vector(JsonlColumn* col, size_t n):
-    cdef BoolVector vec = BoolVector(n)
-    cdef uint8_t* dst = <uint8_t*> vec.ptr.data
-    cdef uint8_t* nulls = NULL
-    cdef size_t j, null_bytes
-    cdef size_t data_bytes = (n + 7) >> 3
-    if dst != NULL and data_bytes > 0:
-        memset(dst, 0, data_bytes)
-    for j in range(n):
-        if col.null_mask[j]:
-            if nulls == NULL:
-                null_bytes = data_bytes
-                nulls = <uint8_t*> malloc(null_bytes)
-                if nulls == NULL:
-                    raise MemoryError()
-                memset(nulls, 0xFF, null_bytes)
-                vec.ptr.null_bitmap = nulls
-            nulls[j >> 3] &= ~(<uint8_t>1 << (j & 7))
-        elif col.boolean_values[j]:
-            dst[j >> 3] |= (<uint8_t>1 << (j & 7))
-    return vec
+cdef Vector _build_string_vector(JsonlColumn* col, size_t n):
+    raise NotImplementedError(
+        "rugo migration gap: StringVectorBuilder has no new-draken equivalent; "
+        "tracked as E.28-gap-3."
+    )
 
 
-cdef StringVector _build_string_vector(JsonlColumn* col, size_t n):
-    cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(n, 16)
-    cdef size_t j
-    for j in range(n):
-        if col.null_mask[j]:
-            builder.append_null()
-        else:
-            raw = col.string_values[j]
-            builder.append_bytes(<const char*>raw.data(), <Py_ssize_t>raw.size())
-    return builder.finish()
-
-
-cdef ArrayVector _build_array_vector(
-        JsonlColumn* col, size_t n, object col_type,
+cdef Vector _build_array_vector(
+        JsonlColumn* col, size_t n, string col_type,
         bint parse_objects):
-    """Build ArrayVector from JSONL column.
-
-    Infers element type from first non-null row to avoid isinstance() in hot loop.
-    """
-    cdef size_t j
-    cdef PyObject* o_ptr
-    cdef object o
-
-    elem_type = None
-    if col_type.startswith('array<') and col_type.endswith('>'):
-        elem_type = col_type[6:-1]
-
-    py_list = []
-    inferred_type = None
-    type_detection_done = False
-
-    for j in range(n):
-        if col.null_mask[j]:
-            py_list.append(None)
-            continue
-
-        raw = col.string_values[j]
-        if raw.size() == 0:
-            py_list.append([])
-            continue
-
-        # Try fast C JSON parser first
-        o_ptr = ParseJsonSliceToPyObject(
-            <const uint8_t*>raw.data(), raw.size(), parse_objects)
-
-        if o_ptr != NULL:
-            o = <object>o_ptr
-            # Infer element type from first successful parse (outside hot path)
-            if not type_detection_done:
-                inferred_type = _infer_array_elem_type(o)
-                type_detection_done = True
-
-            # Apply conversions based on detected type (no isinstance in loop)
-            if elem_type == 'bytes' or inferred_type == 'string':
-                _convert_str_leaves_to_bytes(o)
-            elif elem_type is None and inferred_type is None:
-                # Mixed/unknown type detected; scan this one element
-                if _has_string_leaf(o):
-                    _convert_str_leaves_to_bytes(o)
-
-            py_list.append(o)
-        else:
-            # C parser failed; clear error and try Python fallback
-            if PyErr_Occurred():
-                PyErr_Clear()
-
-            # Parse fallback (no exception handling in hot path; just succeed or append raw)
-            parsed = None
-            try:
-                parsed = _parse_array_from_bytes(raw)
-            except Exception:
-                parsed = None
-
-            if parsed is not None:
-                # Apply type-based conversions (no isinstance in loop)
-                if elem_type == 'bytes' or inferred_type == 'string':
-                    _convert_str_leaves_to_bytes(parsed)
-                elif elem_type is None and inferred_type is None:
-                    if _has_string_leaf(parsed):
-                        _convert_str_leaves_to_bytes(parsed)
-                py_list.append(parsed)
-            else:
-                # Fallback: append raw bytes as string
-                py_list.append(raw.decode('utf-8'))
-
-    return array_from_sequence(py_list)
+    raise NotImplementedError(
+        "rugo migration gap: array_from_sequence (Python-list-to-ArrayVector) "
+        "has no new-draken equivalent; tracked as E.31-gap-2."
+    )
 
 
 def read_jsonl(data, columns=None, parse_arrays=True, parse_objects=True):
@@ -539,11 +405,13 @@ def read_jsonl(data, columns=None, parse_arrays=True, parse_objects=True):
     cdef vector[string] column_names_vec
     cdef JsonlTable table
     if columns is None:
-        table = ReadJsonl(data_ptr, data_size)
+        with nogil:
+            table = ReadJsonl(data_ptr, data_size)
     else:
         for col_name in columns:
             column_names_vec.push_back(col_name.encode('utf-8'))
-        table = ReadJsonl(data_ptr, data_size, column_names_vec)
+        with nogil:
+            table = ReadJsonl(data_ptr, data_size, column_names_vec)
     if have_view:
         PyBuffer_Release(&view)
     if not table.success:
@@ -565,18 +433,17 @@ def read_jsonl(data, columns=None, parse_arrays=True, parse_objects=True):
         if not col.success:
             draken_columns.append(None)
             continue
-        col_type = col.type.decode('utf-8')
-        if col_type == 'int64':
+        if col.type == b'int64':
             draken_columns.append(_build_int64_vector(col, n))
-        elif col_type == 'double':
+        elif col.type == b'double':
             draken_columns.append(_build_float64_vector(col, n))
-        elif col_type == 'string' or col_type == 'bytes' or col_type == 'object':
+        elif col.type == b'string' or col.type == b'bytes' or col.type == b'object':
             draken_columns.append(_build_string_vector(col, n))
-        elif col_type == 'boolean':
+        elif col.type == b'boolean':
             draken_columns.append(_build_bool_vector(col, n))
-        elif col_type.startswith('array'):
+        elif col.type.size() >= 5 and col.type.substr(0, 5) == b'array':
             if parse_arrays:
-                draken_columns.append(_build_array_vector(col, n, col_type, parse_objects))
+                draken_columns.append(_build_array_vector(col, n, col.type, parse_objects))
             else:
                 draken_columns.append(_build_string_vector(col, n))
         else:

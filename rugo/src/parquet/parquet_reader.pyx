@@ -129,21 +129,11 @@ cdef inline bint _text_is_printable(str text):
 
 
 cdef inline str _safe_decode_utf8(string raw_bytes):
-    """Safely decode bytes to UTF-8 string, handling invalid sequences."""
     cdef bytes b = raw_bytes
-    try:
-        return b.decode("utf-8")
-    except UnicodeDecodeError:
-        # Fall back to latin-1 (which can decode any byte sequence)
-        # or use error handling to replace invalid characters
-        try:
-            return b.decode("utf-8", errors="replace")
-        except Exception:
-            # Ultimate fallback: decode as latin-1 which never fails
-            return b.decode("latin-1")
+    return b.decode("utf-8")
 
 
-cpdef object decode_value(
+def decode_value(
         string physical_type,
         string logical_type,
         string raw,
@@ -152,7 +142,6 @@ cpdef object decode_value(
     if b is None:
         return None
 
-    # Decode the C++ string to Python string for comparison
     cdef str type_str = physical_type.decode("utf-8")
     cdef str logical_str = logical_type.decode("utf-8") if logical_type.size() > 0 else ""
     cdef bint is_string_logical = (
@@ -166,54 +155,38 @@ cpdef object decode_value(
         if type_str in ("byte_array", "fixed_len_byte_array"):
             if is_string_logical or prefer_text:
                 return ""
-        return b""   # treat empty binary as bytes for non-string types
+        return b""
 
-    try:
-        if type_str == "int32":
-            return struct.unpack("<i", b)[0]
-        elif type_str == "int64":
-            return struct.unpack("<q", b)[0]
-        elif type_str == "float32":
-            return struct.unpack("<f", b)[0]
-        elif type_str == "float64":
-            return struct.unpack("<d", b)[0]
-        elif type_str in ("byte_array", "fixed_len_byte_array"):
-            # If logical type indicates UTF-8 string, decode it
-            # Handle "varchar" (new format) and legacy "UTF8" format
-            # Also handle array<string> and array<varchar> - the elements are UTF-8 strings
-            if is_string_logical:
-                try:
-                    return b.decode("utf-8")
-                except UnicodeDecodeError:
-                    # If UTF-8 decoding fails, return as bytes
-                    return b
-            elif prefer_text and type_str == "byte_array":
-                try:
-                    candidate = b.decode("utf-8")
-                except UnicodeDecodeError:
-                    return b
-                if _text_is_printable(candidate) and "\ufffd" not in candidate:
-                    return candidate
-            # Otherwise, return raw bytes (binary data)
-            return b
-        elif type_str == "int96":
-            if len(b) == 12:
-                lo, hi = struct.unpack("<qI", b)
-                julian_day = hi
-                nanos = lo
-                # convert Julian day
-                days = julian_day - 2440588
-                date = datetime.date(1970, 1, 1) + datetime.timedelta(days=days)
-                seconds = nanos // 1_000_000_000
-                micros = (nanos % 1_000_000_000) // 1000
-                return f"{date.isoformat()} {seconds:02d}:{(micros/1e6):.6f}"
-            return b.hex()
-        elif type_str == "boolean":
-            # Parquet encodes boolean as 1 bit, usually in a byte
-            return b[0] != 0
-        else:
-            return b.hex()
-    except Exception:
+    if type_str == "int32":
+        return struct.unpack("<i", b)[0]
+    elif type_str == "int64":
+        return struct.unpack("<q", b)[0]
+    elif type_str == "float32":
+        return struct.unpack("<f", b)[0]
+    elif type_str == "float64":
+        return struct.unpack("<d", b)[0]
+    elif type_str in ("byte_array", "fixed_len_byte_array"):
+        if is_string_logical:
+            return b.decode("utf-8")
+        elif prefer_text and type_str == "byte_array":
+            candidate = b.decode("utf-8", errors="replace")
+            if _text_is_printable(candidate) and "\ufffd" not in candidate:
+                return candidate
+        return b
+    elif type_str == "int96":
+        if len(b) == 12:
+            lo, hi = struct.unpack("<qI", b)
+            julian_day = hi
+            nanos = lo
+            days = julian_day - 2440588
+            date = datetime.date(1970, 1, 1) + datetime.timedelta(days=days)
+            seconds = nanos // 1_000_000_000
+            micros = (nanos % 1_000_000_000) // 1000
+            return f"{date.isoformat()} {seconds:02d}:{(micros/1e6):.6f}"
+        return b.hex()
+    elif type_str == "boolean":
+        return b[0] != 0
+    else:
         return b.hex()
 
 
@@ -784,10 +757,9 @@ def read_parquet(data, column_names=None):
             if not column.success:
                 continue
 
-            col_type = column.type.decode("utf-8")
             _t0 = _time.perf_counter()
 
-            if col_type == "int64":
+            if column.type == b"int64":
                 if _should_emit_constant_vector(column, num_rows):
                     vec = _make_typed_constant_vector(column, num_rows)
                 elif _should_emit_dictionary_vector(column, num_rows):
@@ -797,7 +769,7 @@ def read_parquet(data, column_names=None):
                         _TEL["parquet_dict_materialize_fallbacks"] += 1
                     vec = _make_int64_vector(column, num_rows)
                 _TEL["cython_int64_s"] += _time.perf_counter() - _t0
-            elif col_type == "int32":
+            elif column.type == b"int32":
                 if _should_emit_constant_vector(column, num_rows):
                     vec = _make_typed_constant_vector(column, num_rows)
                 elif _should_emit_dictionary_vector(column, num_rows):
@@ -807,12 +779,12 @@ def read_parquet(data, column_names=None):
                         _TEL["parquet_dict_materialize_fallbacks"] += 1
                     vec = _make_int64_from_int32_vector(column, num_rows)
                 _TEL["cython_int64_s"] += _time.perf_counter() - _t0
-            elif col_type == "byte_array" and column.rep_levels.size() > 0:
+            elif column.type == b"byte_array" and column.rep_levels.size() > 0:
                 vec = _make_array_vector(column)
                 if column.string_dict_lens.size() > 0:
                     _TEL["parquet_dict_materialize_fallbacks"] += 1
                 _TEL["cython_str_s"] += _time.perf_counter() - _t0
-            elif col_type == "byte_array":
+            elif column.type == b"byte_array":
                 if _should_emit_constant_vector(column, num_rows):
                     vec = _make_typed_constant_vector(column, num_rows)
                 elif _should_emit_dictionary_vector(column, num_rows):
@@ -822,10 +794,10 @@ def read_parquet(data, column_names=None):
                         _TEL["parquet_dict_materialize_fallbacks"] += 1
                     vec = _make_string_vector(column, num_rows)
                 _TEL["cython_str_s"] += _time.perf_counter() - _t0
-            elif col_type == "boolean":
+            elif column.type == b"boolean":
                 vec = _make_bool_vector(column, num_rows)
                 _TEL["cython_bool_s"] += _time.perf_counter() - _t0
-            elif col_type == "float32":
+            elif column.type == b"float32":
                 if _should_emit_constant_vector(column, num_rows):
                     vec = _make_typed_constant_vector(column, num_rows)
                 elif _should_emit_dictionary_vector(column, num_rows):
@@ -835,7 +807,7 @@ def read_parquet(data, column_names=None):
                         _TEL["parquet_dict_materialize_fallbacks"] += 1
                     vec = _make_float64_from_float32_vector(column, num_rows)
                 _TEL["cython_float_s"] += _time.perf_counter() - _t0
-            elif col_type == "float64":
+            elif column.type == b"float64":
                 if _should_emit_constant_vector(column, num_rows):
                     vec = _make_typed_constant_vector(column, num_rows)
                 elif _should_emit_dictionary_vector(column, num_rows):
@@ -973,16 +945,9 @@ def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
     if not result.success:
         return None
 
-    cdef str col_type = result.type.decode("utf-8")
-    cdef str col_logical = col_stats.get('logical_type') or ''
     cdef int32_t num_rows = <int32_t>result.num_rows
 
-    # Handle uint64: physical_type is "int64" but logical_type is "UINT_64"
-    # Treat as int64 (reinterpret the bits for aggregation)
-    if col_type == "int64" and col_logical.upper() == "UINT_64":
-        col_type = "int64"  # Reinterpret 64-bit unsigned as signed
-
-    if col_type == "int32":
+    if result.type == b"int32":
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, <int32_t>result.num_rows).to_pylist()
         if _should_emit_dictionary_vector(result, num_rows):
@@ -990,7 +955,7 @@ def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
         if _decoded_has_dictionary(result):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_int64_from_int32_vector(result, num_rows).to_pylist()
-    elif col_type == "int64":
+    elif result.type == b"int64":
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, <int32_t>result.num_rows).to_pylist()
         if _should_emit_dictionary_vector(result, num_rows):
@@ -998,7 +963,7 @@ def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
         if _decoded_has_dictionary(result):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_int64_vector(result, num_rows).to_pylist()
-    elif col_type == "byte_array":
+    elif result.type == b"byte_array":
         if _should_emit_constant_vector(result, num_rows):
             return [
                 _safe_decode_utf8(v) if v is not None else None
@@ -1015,9 +980,9 @@ def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
             _safe_decode_utf8(v) if v is not None else None
             for v in _make_string_vector(result, <int32_t>result.num_rows).to_pylist()
         ]
-    elif col_type == "boolean":
+    elif result.type == b"boolean":
         return [bool(val) for val in result.boolean_values]
-    elif col_type == "float32":
+    elif result.type == b"float32":
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, <int32_t>result.num_rows).to_pylist()
         if _should_emit_dictionary_vector(result, num_rows):
@@ -1025,7 +990,7 @@ def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
         if _decoded_has_dictionary(result):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_float64_from_float32_vector(result, num_rows).to_pylist()
-    elif col_type == "float64":
+    elif result.type == b"float64":
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, <int32_t>result.num_rows).to_pylist()
         if _should_emit_dictionary_vector(result, num_rows):
@@ -1153,17 +1118,10 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
     if not result.success:
         return None
 
-    col_type = result.type.decode("utf-8")
-    col_logical = col_stats.get('logical_type') or ''
     num_rows = <int32_t>result.num_rows
 
-    # Handle uint64: physical_type is "int64" but logical_type is "UINT_64"
-    # Treat as int64 (reinterpret the bits for aggregation)
-    if col_type == "int64" and col_logical.upper() == "UINT_64":
-        col_type = "int64"  # Reinterpret 64-bit unsigned as signed
-
     # Convert C++ DecodedColumn to Draken Vector using the same logic as read_parquet()
-    if col_type == "int32":
+    if result.type == b"int32":
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, num_rows)
         if _should_emit_dictionary_vector(result, num_rows):
@@ -1172,7 +1130,7 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_int64_from_int32_vector(result, num_rows)
 
-    elif col_type == "int64":
+    elif result.type == b"int64":
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, num_rows)
         if _should_emit_dictionary_vector(result, num_rows):
@@ -1181,11 +1139,11 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_int64_vector(result, num_rows)
 
-    elif col_type == "byte_array" and result.rep_levels.size() > 0:
+    elif result.type == b"byte_array" and result.rep_levels.size() > 0:
         # LIST / repeated column — mirror the dispatch in read_parquet()
         return _make_array_vector(result)
 
-    elif col_type == "byte_array":
+    elif result.type == b"byte_array":
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, num_rows)
         if _should_emit_dictionary_vector(result, num_rows):
@@ -1194,10 +1152,10 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_string_vector(result, num_rows)
 
-    elif col_type == "boolean":
+    elif result.type == b"boolean":
         return _make_bool_vector(result, num_rows)
 
-    elif col_type == "float32":
+    elif result.type == b"float32":
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, num_rows)
         if _should_emit_dictionary_vector(result, num_rows):
@@ -1206,7 +1164,7 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_float64_from_float32_vector(result, num_rows)
 
-    elif col_type == "float64":
+    elif result.type == b"float64":
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, num_rows)
         if _should_emit_dictionary_vector(result, num_rows):

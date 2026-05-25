@@ -14,9 +14,6 @@
 //                      expanded; utf8.h performs only in-range codepoint substitution.
 //   DRAKEN_VARBINARY:  throws std::invalid_argument → Python ValueError.
 //                      Case operations on opaque bytes are unsupported by design.
-//   DRAKEN_DICTIONARY,
-//   DRAKEN_CONSTANT:   treated as VARCHAR (ASCII fold).  Dict/constant are encoding
-//                      shapes, not a distinct base type; lowercase output is dense.
 //   Other types:       throws nb::type_error.
 //
 // Null TVL: null input row → null output row.  Validity bitmap allocated lazily
@@ -80,11 +77,9 @@ static nb::object impl_lowercase(nb::object in_obj) {
             "vector_lowercase: VARBINARY does not support case operations");
     const bool is_nvarchar = (dv->type == DRAKEN_NVARCHAR);
     if (dv->type != DRAKEN_VARCHAR &&
-        dv->type != DRAKEN_NVARCHAR &&
-        dv->type != DRAKEN_DICTIONARY &&
-        dv->type != DRAKEN_CONSTANT)
+        dv->type != DRAKEN_NVARCHAR)
         throw nb::type_error(
-            "vector_lowercase: expected VARCHAR, NVARCHAR, DICTIONARY, or CONSTANT Vector");
+            "vector_lowercase: expected VARCHAR or NVARCHAR Vector");
 
     const uint32_t n  = dv->length;
     const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);

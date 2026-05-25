@@ -6,6 +6,8 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-from draken.vectors.integer64_vector cimport Integer64Vector
+from libcpp.vector cimport vector
+from libc.stdint cimport int64_t
+from draken.morsels.morsel cimport Morsel
 
-cdef Integer64Vector non_null_row_indices(object relation, list column_names)
+cdef vector[int64_t] non_null_row_indices(Morsel morsel, list column_names)

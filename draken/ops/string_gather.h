@@ -30,8 +30,8 @@
 //
 // COMPRESS(v):
 //   Dict-encode a string vector.  Unique non-null values found via sg_eq_slots
-//   (§1: exact for short strings, hash-only for long — same fidelity as runtime
-//   ops in D.2, so dedup and equality agree).  Unique slots stored in
+//   (exact equality; length/prefix/hash32 fast-reject before arena compare).
+//   Unique slots stored in
 //   first-appearance order; owned codes[length] map logical rows to unique slots.
 //   All-null / empty: constant-shape result (data_length=1).
 //   The stored hash32 in every unique slot is the XXH3 content hash (lower 32 bits
@@ -186,19 +186,23 @@ static inline VecResult sg_finalize(const StrBlock& sb,
 }
 
 // ---------------------------------------------------------------------------
-// sg_eq_slots — §1-compliant equality for two slots.
+// sg_eq_slots — exact equality for two slots.
 //
 // Duplicated inline from string_compare.h to avoid the large include.
 // Short (≤12): exact — raw.lo and raw.hi cover all content.
-// Long  (>12) — §1 EXCEPTION: length + prefix + hash32 only; no arena fetch.
+// Long  (>12): length + prefix + hash32 fast-reject, then arena byte compare.
 // Must match str_eq_slots semantics exactly (runtime equality uses the same rule).
 // ---------------------------------------------------------------------------
 static inline int sg_eq_slots(const DrakenStringSlot* a,
-                               const DrakenStringSlot* b) noexcept {
+                              const uint8_t* arena_a,
+                              const DrakenStringSlot* b,
+                              const uint8_t* arena_b) noexcept {
     if (a->raw.lo != b->raw.lo) return 0;
     if (str_is_inline(a)) return a->raw.hi == b->raw.hi;
-    // Long — §1: hash-only, no arena.
-    return a->ext.hash32 == b->ext.hash32;
+    if (a->ext.hash32 != b->ext.hash32) return 0;
+    return std::memcmp(arena_a + a->ext.arena_offset,
+                       arena_b + b->ext.arena_offset,
+                       a->ext.length) == 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -357,7 +361,7 @@ static inline VecResult str_take(const DrakenVector& v,
 // ---------------------------------------------------------------------------
 // COMPRESS — dict-encode a string vector.
 //
-// Dedup: sg_eq_slots (§1 exception for long strings — matches runtime ops).
+// Dedup: sg_eq_slots exact equality — matches runtime ops.
 // Null rows: code=0, validity marks them null; data slot[0] is the first unique
 // non-null value.  All-null / empty: constant-shape (data_length=1).
 //
@@ -382,7 +386,7 @@ static inline VecResult str_compress(const DrakenVector& v) {
     }
 
     // Phase 1: scan all non-null rows; collect unique slots in first-appearance order.
-    // Key = str_hash_seed (same hash used at runtime by hash_string and sg_eq_slots).
+    // Key = str_hash_seed. sg_eq_slots resolves same-hash candidates exactly.
     // Value = vector of unique-slot indices sharing this seed (for collision chains).
     std::unordered_map<uint64_t, std::vector<uint32_t>> dedup;
     std::vector<uint32_t> unique_src_codes;  // source data[] index for each unique entry
@@ -394,13 +398,13 @@ static inline VecResult str_compress(const DrakenVector& v) {
         has_nonnull = true;
         const uint32_t         src_code = v.selection[i];
         const DrakenStringSlot* slot    = &src_s[src_code];
-        const uint64_t          hseed   = str_hash_seed(slot);
+        const uint64_t          hseed   = str_hash_seed(slot, src_a);
 
         bool found = false;
         auto it = dedup.find(hseed);
         if (it != dedup.end()) {
             for (uint32_t uidx : it->second) {
-                if (sg_eq_slots(&src_s[unique_src_codes[uidx]], slot)) {
+                if (sg_eq_slots(&src_s[unique_src_codes[uidx]], src_a, slot, src_a)) {
                     codes[i] = uidx;
                     found = true;
                     break;

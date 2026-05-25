@@ -140,6 +140,8 @@ cdef _float64_compare(int op_code, vec, right):
 
 
 cdef _decimal_compare(int op_code, vec, right):
+    if right is None:
+        return BoolVector(len(vec))
     if op_code == OP_IN_LIST:
         if isinstance(right, (list, tuple, set, frozenset)):
             return vec.in_list(right)

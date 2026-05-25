@@ -60,8 +60,7 @@ namespace nb = nanobind;
 static const DrakenVector* unwrap_string_vec(nb::object obj) {
     const DrakenVector* dv = draken_vector_unwrap(obj.ptr());
     if (!dv) throw nb::python_error();  // TypeError already set by unwrap
-    if (dv->type != DRAKEN_VARCHAR  && dv->type != DRAKEN_DICTIONARY &&
-        dv->type != DRAKEN_CONSTANT && dv->type != DRAKEN_NVARCHAR  &&
+    if (dv->type != DRAKEN_VARCHAR && dv->type != DRAKEN_NVARCHAR &&
         dv->type != DRAKEN_VARBINARY)
         throw nb::type_error("expected a string-family Vector (VARCHAR/NVARCHAR/VARBINARY)");
     return dv;

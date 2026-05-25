@@ -15,9 +15,14 @@
 #include <arm_neon.h>
 #endif
 
+#if defined(__riscv) && defined(__riscv_vector)
+#include <riscv_vector.h>
+#endif
+
 namespace opteryx::carchar::detail {
 
-#if defined(__AVX2__) || defined(__ARM_NEON) || defined(__ARM_NEON__)
+#if defined(__AVX2__) || defined(__ARM_NEON) || defined(__ARM_NEON__) || \
+    (defined(__riscv) && defined(__riscv_vector))
 constexpr std::size_t kProbeGroupWidth = 16;
 #else
 constexpr std::size_t kProbeGroupWidth = 8;
@@ -87,7 +92,8 @@ inline ProbeResult probe_find_slot_scalar(
             return {(slot + stop) & mask, false, probes + stop + 1U};
         }
 
-#if defined(__AVX2__) || defined(__ARM_NEON) || defined(__ARM_NEON__)
+#if defined(__AVX2__) || defined(__ARM_NEON) || defined(__ARM_NEON__) || \
+    (defined(__riscv) && defined(__riscv_vector))
         const std::uint64_t group_hi = load_u64(control + slot + 8U);
         std::uint64_t matches_hi = match_mask64(group_hi, tag);
         const std::uint64_t empties_hi = group_hi & kByteHighBits64;
@@ -152,7 +158,8 @@ inline ProbeResult probe_find_bucket_scalar(
             return {slot + stop, false, probes + stop + 1U};
         }
 
-#if defined(__AVX2__) || defined(__ARM_NEON) || defined(__ARM_NEON__)
+#if defined(__AVX2__) || defined(__ARM_NEON) || defined(__ARM_NEON__) || \
+    (defined(__riscv) && defined(__riscv_vector))
         const std::uint64_t group_hi = load_u64(control + slot + 8U);
         std::uint64_t matches_hi = match_mask64(group_hi, tag);
         const std::uint64_t empties_hi = group_hi & kByteHighBits64;
@@ -442,6 +449,159 @@ inline ProbeResult probe_find_bucket_neon(
 }
 #endif
 
+#if defined(__riscv) && defined(__riscv_vector)
+inline bool group_has_tag_or_empty_rvv(const std::uint8_t* control, std::uint8_t tag) noexcept {
+    const std::size_t vl = __riscv_vsetvl_e8m4(16U);
+    if (vl < 16U) {
+        const std::uint64_t group_lo = load_u64(control);
+        const std::uint64_t group_hi = load_u64(control + 8U);
+        return ((match_mask64(group_lo, tag) | (group_lo & kByteHighBits64)) |
+                (match_mask64(group_hi, tag) | (group_hi & kByteHighBits64))) != 0U;
+    }
+    const vuint8m4_t group = __riscv_vle8_v_u8m4(control, vl);
+    const vbool2_t tag_matches = __riscv_vmseq_vx_u8m4_b2(group, tag, vl);
+    const vbool2_t empty_matches = __riscv_vmseq_vx_u8m4_b2(group, 0x80U, vl);
+    const vbool2_t interesting = __riscv_vmor_mm_b2(tag_matches, empty_matches, vl);
+    return __riscv_vfirst_m_b2(interesting, vl) >= 0;
+}
+
+inline ProbeResult probe_find_slot_rvv(
+    const std::uint8_t* control,
+    const std::uint64_t* hashes,
+    std::size_t capacity,
+    std::uint64_t key,
+    std::uint8_t tag
+) noexcept {
+    const std::size_t mask = capacity - 1U;
+    std::size_t slot = static_cast<std::size_t>(key & mask);
+    std::size_t probes = 0;
+
+    while (probes < capacity) {
+        if (!group_has_tag_or_empty_rvv(control + slot, tag)) {
+            slot = (slot + 16U) & mask;
+            probes += 16U;
+            continue;
+        }
+
+        const std::uint64_t group_lo = load_u64(control + slot);
+        std::uint64_t matches_lo = match_mask64(group_lo, tag);
+        const std::uint64_t empties_lo = group_lo & kByteHighBits64;
+
+        while (matches_lo != 0U) {
+            const std::size_t index = first_group_index64(matches_lo);
+            if (empties_lo != 0U && index >= first_group_index64(empties_lo)) {
+                break;
+            }
+            const std::size_t candidate = (slot + index) & mask;
+            if (hashes[candidate] == key) {
+                return {candidate, true, probes + index + 1U};
+            }
+            matches_lo &= (matches_lo - 1U);
+        }
+
+        if (empties_lo != 0U) {
+            const std::size_t stop = first_group_index64(empties_lo);
+            return {(slot + stop) & mask, false, probes + stop + 1U};
+        }
+
+        const std::uint64_t group_hi = load_u64(control + slot + 8U);
+        std::uint64_t matches_hi = match_mask64(group_hi, tag);
+        const std::uint64_t empties_hi = group_hi & kByteHighBits64;
+
+        while (matches_hi != 0U) {
+            const std::size_t index = first_group_index64(matches_hi);
+            if (empties_hi != 0U && index >= first_group_index64(empties_hi)) {
+                break;
+            }
+            const std::size_t candidate = (slot + 8U + index) & mask;
+            if (hashes[candidate] == key) {
+                return {candidate, true, probes + 8U + index + 1U};
+            }
+            matches_hi &= (matches_hi - 1U);
+        }
+
+        if (empties_hi != 0U) {
+            const std::size_t stop = 8U + first_group_index64(empties_hi);
+            return {(slot + stop) & mask, false, probes + stop + 1U};
+        }
+
+        slot = (slot + 16U) & mask;
+        probes += 16U;
+    }
+
+    return {0, false, capacity};
+}
+
+inline ProbeResult probe_find_bucket_rvv(
+    const std::uint8_t* control,
+    const std::uint64_t* hashes,
+    std::size_t capacity,
+    std::uint64_t key,
+    std::uint8_t tag
+) noexcept {
+    const std::size_t bucket_count = capacity / 16U;
+    const std::size_t bucket_mask = bucket_count - 1U;
+    std::size_t bucket_index = static_cast<std::size_t>(key) & bucket_mask;
+    std::size_t probes = 0;
+
+    while (probes < capacity) {
+        const std::size_t slot = bucket_index * 16U;
+        if (!group_has_tag_or_empty_rvv(control + slot, tag)) {
+            bucket_index = (bucket_index + 1U) & bucket_mask;
+            probes += 16U;
+            continue;
+        }
+
+        const std::uint64_t group_lo = load_u64(control + slot);
+        std::uint64_t matches_lo = match_mask64(group_lo, tag);
+        const std::uint64_t empties_lo = group_lo & kByteHighBits64;
+
+        while (matches_lo != 0U) {
+            const std::size_t index = first_group_index64(matches_lo);
+            if (empties_lo != 0U && index >= first_group_index64(empties_lo)) {
+                break;
+            }
+            const std::size_t candidate = slot + index;
+            if (hashes[candidate] == key) {
+                return {candidate, true, probes + index + 1U};
+            }
+            matches_lo &= (matches_lo - 1U);
+        }
+
+        if (empties_lo != 0U) {
+            const std::size_t stop = first_group_index64(empties_lo);
+            return {slot + stop, false, probes + stop + 1U};
+        }
+
+        const std::uint64_t group_hi = load_u64(control + slot + 8U);
+        std::uint64_t matches_hi = match_mask64(group_hi, tag);
+        const std::uint64_t empties_hi = group_hi & kByteHighBits64;
+
+        while (matches_hi != 0U) {
+            const std::size_t index = first_group_index64(matches_hi);
+            if (empties_hi != 0U && index >= first_group_index64(empties_hi)) {
+                break;
+            }
+            const std::size_t candidate = slot + 8U + index;
+            if (hashes[candidate] == key) {
+                return {candidate, true, probes + 8U + index + 1U};
+            }
+            matches_hi &= (matches_hi - 1U);
+        }
+
+        if (empties_hi != 0U) {
+            const std::size_t stop = 8U + first_group_index64(empties_hi);
+            return {slot + stop, false, probes + stop + 1U};
+        }
+
+        bucket_index = (bucket_index + 1U) & bucket_mask;
+        probes += 16U;
+    }
+
+    return {0, false, capacity};
+}
+#endif
+
 inline ProbeFn select_probe_finder() noexcept {
     using fn_t = ProbeFn;
     static std::atomic<fn_t> cache{nullptr};
@@ -453,6 +613,9 @@ inline ProbeFn select_probe_finder() noexcept {
 #endif
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
             {&cpu_supports_neon, probe_find_slot_neon},
+#endif
+#if defined(__riscv) && defined(__riscv_vector)
+            {&cpu_supports_rvv, probe_find_slot_rvv},
 #endif
         },
         probe_find_slot_scalar
@@ -470,6 +633,9 @@ inline ProbeFn select_bucket_probe_finder() noexcept {
 #endif
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
             {&cpu_supports_neon, probe_find_bucket_neon},
+#endif
+#if defined(__riscv) && defined(__riscv_vector)
+            {&cpu_supports_rvv, probe_find_bucket_rvv},
 #endif
         },
         probe_find_bucket_scalar

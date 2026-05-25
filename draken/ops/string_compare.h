@@ -5,13 +5,11 @@
 //
 // OP CODES (matching draken convention): 0=eq  1=ne  2=gt  3=ge  4=lt  5=le
 //
-// EQ / NE — §1 EXCEPTION (design doc 02, architect sign-off):
+// EQ / NE:
 //   Short (len ≤ 12): EXACT comparison using raw slot words (raw.lo + raw.hi).
 //     Zero-padding is guaranteed by str_init_inline, so byte-identity is correct.
-//   Long  (len > 12): HASH-ONLY — compares length + prefix + hash32 only.
-//     No arena fetch. Two distinct long strings sharing length + prefix + hash32
-//     are declared equal; collision probability ≈ 2⁻³² per pair sharing
-//     length + prefix.  Accepted trade-off.  Every call site documents §1.
+//   Long  (len > 12): length/prefix/hash32 are fast negative filters. If all
+//     three match, arena bytes are fetched and compared exactly.
 //
 // GT / GE / LT / LE — NOT hash-only:
 //   Uses str_compare (string_slot.h) which calls memcmp on actual bytes.
@@ -100,140 +98,112 @@ static inline uint8_t* str_and_validity(
 }
 
 // ---------------------------------------------------------------------------
-// str_eq_slots — §1-compliant equality for two slots.
+// str_eq_slots — exact equality for two slots.
 //
 // SHORT (≤12): exact — raw.lo (length||first4) and raw.hi (bytes 4-11, zero-
 //   padded) cover all content; no arena needed.
-// LONG (>12)  — §1 EXCEPTION: compares length + prefix + hash32 only; no
-//   arena fetch.  raw.hi for long = [hash32 || arena_offset]; comparing
-//   raw.hi directly would introduce arena_offset into the equality check,
-//   which is wrong (arena_offset is NOT part of value identity).
+// LONG (>12): fast-reject on length/prefix/hash32, then verify the candidate by
+//   comparing arena bytes. raw.hi for long is [hash32 || arena_offset], so do
+//   not compare raw.hi directly: arena_offset is not part of value identity.
 // ---------------------------------------------------------------------------
 static inline int str_eq_slots(const DrakenStringSlot* a,
-                               const DrakenStringSlot* b) noexcept {
+                               const uint8_t* arena_a,
+                               const DrakenStringSlot* b,
+                               const uint8_t* arena_b) noexcept {
     if (a->raw.lo != b->raw.lo) return 0;  // length or first-4-bytes differ
     if (str_is_inline(a)) {
         // Short: full inline content in raw.hi (zero-padded beyond length).
         return a->raw.hi == b->raw.hi;
     }
-    // Long — §1 EXCEPTION: hash-only eq; no arena fetch.
-    // Equal values are guaranteed to have identical hash32 (XXH3 determinism,
-    // D.1 invariant).  Collision probability ≈ 2⁻³² per pair sharing length+prefix.
-    return a->ext.hash32 == b->ext.hash32;
+    if (a->ext.hash32 != b->ext.hash32) return 0;
+    return std::memcmp(arena_a + a->ext.arena_offset,
+                       arena_b + b->ext.arena_offset,
+                       a->ext.length) == 0;
 }
 
 // ---------------------------------------------------------------------------
 // compare_scalar inner kernels.
 //
 // Two specializations selected at call-site (no per-row branch on path):
-//   EQ / NE path: hash-only for long; exact for short.  No arena access.
+//   EQ / NE path: exact; hash32 is a fast negative filter before arena compare.
 //   ORDERING path: delegates to str_compare (reads arena on prefix tie for long).
 //
-// Both use the 8-way byte-pack technique from int64_compare.h: 8 comparison
-// results packed into one output byte, no RAW dependency on the output buffer.
-// dst must be pre-zeroed (str_alloc_bool_buf guarantees this).
+// Equality results are packed 8 rows per output byte. dst must be pre-zeroed
+// (str_alloc_bool_buf guarantees this).
 // ---------------------------------------------------------------------------
 
-// EQ scalar kernel (§1 exception applies for long strings).
+// EQ scalar kernel.
 static inline void str_cmp_scalar_eq(
     const DrakenStringSlot* slots,
     const uint32_t*         selection,
+    const uint8_t*          arena,
     const DrakenStringSlot* scalar_slot,
+    const uint8_t*          scalar_bytes,
     const uint8_t*          src_null,
     uint8_t*                dst,
     uint32_t                n)
 {
     const uint32_t whole_bytes = n >> 3;
+#define DRAKEN_STR_SCALAR_EQ_BIT(BASE, BIT) \
+    (static_cast<unsigned>(str_eq_slots(&slots[selection[(BASE) + (BIT)]], arena, scalar_slot, scalar_bytes)) << (BIT))
 
-    if (src_null == nullptr) {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
-            const uint32_t base = b << 3;
-            dst[b] = static_cast<uint8_t>(
-                (static_cast<unsigned>(str_eq_slots(&slots[selection[base+0]], scalar_slot)) << 0) |
-                (static_cast<unsigned>(str_eq_slots(&slots[selection[base+1]], scalar_slot)) << 1) |
-                (static_cast<unsigned>(str_eq_slots(&slots[selection[base+2]], scalar_slot)) << 2) |
-                (static_cast<unsigned>(str_eq_slots(&slots[selection[base+3]], scalar_slot)) << 3) |
-                (static_cast<unsigned>(str_eq_slots(&slots[selection[base+4]], scalar_slot)) << 4) |
-                (static_cast<unsigned>(str_eq_slots(&slots[selection[base+5]], scalar_slot)) << 5) |
-                (static_cast<unsigned>(str_eq_slots(&slots[selection[base+6]], scalar_slot)) << 6) |
-                (static_cast<unsigned>(str_eq_slots(&slots[selection[base+7]], scalar_slot)) << 7));
-        }
-        for (uint32_t i = whole_bytes << 3; i < n; ++i) {
-            if (str_eq_slots(&slots[selection[i]], scalar_slot))
-                dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-        }
-    } else {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
-            const uint32_t base = b << 3;
-            const uint8_t m = static_cast<uint8_t>(
-                (static_cast<unsigned>(str_eq_slots(&slots[selection[base+0]], scalar_slot)) << 0) |
-                (static_cast<unsigned>(str_eq_slots(&slots[selection[base+1]], scalar_slot)) << 1) |
-                (static_cast<unsigned>(str_eq_slots(&slots[selection[base+2]], scalar_slot)) << 2) |
-                (static_cast<unsigned>(str_eq_slots(&slots[selection[base+3]], scalar_slot)) << 3) |
-                (static_cast<unsigned>(str_eq_slots(&slots[selection[base+4]], scalar_slot)) << 4) |
-                (static_cast<unsigned>(str_eq_slots(&slots[selection[base+5]], scalar_slot)) << 5) |
-                (static_cast<unsigned>(str_eq_slots(&slots[selection[base+6]], scalar_slot)) << 6) |
-                (static_cast<unsigned>(str_eq_slots(&slots[selection[base+7]], scalar_slot)) << 7));
-            dst[b] = static_cast<uint8_t>(m & src_null[b]);
-        }
-        for (uint32_t i = whole_bytes << 3; i < n; ++i) {
-            if ((src_null[i >> 3] >> (i & 7)) & 1u) {
-                if (str_eq_slots(&slots[selection[i]], scalar_slot))
-                    dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-            }
-        }
+    for (uint32_t b = 0; b < whole_bytes; ++b) {
+        const uint32_t base = b << 3;
+        const uint8_t m = static_cast<uint8_t>(
+            DRAKEN_STR_SCALAR_EQ_BIT(base, 0) |
+            DRAKEN_STR_SCALAR_EQ_BIT(base, 1) |
+            DRAKEN_STR_SCALAR_EQ_BIT(base, 2) |
+            DRAKEN_STR_SCALAR_EQ_BIT(base, 3) |
+            DRAKEN_STR_SCALAR_EQ_BIT(base, 4) |
+            DRAKEN_STR_SCALAR_EQ_BIT(base, 5) |
+            DRAKEN_STR_SCALAR_EQ_BIT(base, 6) |
+            DRAKEN_STR_SCALAR_EQ_BIT(base, 7));
+        dst[b] = (src_null == nullptr) ? m : static_cast<uint8_t>(m & src_null[b]);
     }
+    for (uint32_t i = whole_bytes << 3; i < n; ++i) {
+        if (src_null != nullptr && (((src_null[i >> 3] >> (i & 7)) & 1u) == 0u))
+            continue;
+        if (str_eq_slots(&slots[selection[i]], arena, scalar_slot, scalar_bytes))
+            dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    }
+#undef DRAKEN_STR_SCALAR_EQ_BIT
 }
 
-// NE scalar kernel (§1 exception applies for long strings — same as eq, negated).
+// NE scalar kernel.
 static inline void str_cmp_scalar_ne(
     const DrakenStringSlot* slots,
     const uint32_t*         selection,
+    const uint8_t*          arena,
     const DrakenStringSlot* scalar_slot,
+    const uint8_t*          scalar_bytes,
     const uint8_t*          src_null,
     uint8_t*                dst,
     uint32_t                n)
 {
     const uint32_t whole_bytes = n >> 3;
+#define DRAKEN_STR_SCALAR_NE_BIT(BASE, BIT) \
+    (static_cast<unsigned>(!str_eq_slots(&slots[selection[(BASE) + (BIT)]], arena, scalar_slot, scalar_bytes)) << (BIT))
 
-    if (src_null == nullptr) {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
-            const uint32_t base = b << 3;
-            dst[b] = static_cast<uint8_t>(
-                (static_cast<unsigned>(!str_eq_slots(&slots[selection[base+0]], scalar_slot)) << 0) |
-                (static_cast<unsigned>(!str_eq_slots(&slots[selection[base+1]], scalar_slot)) << 1) |
-                (static_cast<unsigned>(!str_eq_slots(&slots[selection[base+2]], scalar_slot)) << 2) |
-                (static_cast<unsigned>(!str_eq_slots(&slots[selection[base+3]], scalar_slot)) << 3) |
-                (static_cast<unsigned>(!str_eq_slots(&slots[selection[base+4]], scalar_slot)) << 4) |
-                (static_cast<unsigned>(!str_eq_slots(&slots[selection[base+5]], scalar_slot)) << 5) |
-                (static_cast<unsigned>(!str_eq_slots(&slots[selection[base+6]], scalar_slot)) << 6) |
-                (static_cast<unsigned>(!str_eq_slots(&slots[selection[base+7]], scalar_slot)) << 7));
-        }
-        for (uint32_t i = whole_bytes << 3; i < n; ++i) {
-            if (!str_eq_slots(&slots[selection[i]], scalar_slot))
-                dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-        }
-    } else {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
-            const uint32_t base = b << 3;
-            const uint8_t m = static_cast<uint8_t>(
-                (static_cast<unsigned>(!str_eq_slots(&slots[selection[base+0]], scalar_slot)) << 0) |
-                (static_cast<unsigned>(!str_eq_slots(&slots[selection[base+1]], scalar_slot)) << 1) |
-                (static_cast<unsigned>(!str_eq_slots(&slots[selection[base+2]], scalar_slot)) << 2) |
-                (static_cast<unsigned>(!str_eq_slots(&slots[selection[base+3]], scalar_slot)) << 3) |
-                (static_cast<unsigned>(!str_eq_slots(&slots[selection[base+4]], scalar_slot)) << 4) |
-                (static_cast<unsigned>(!str_eq_slots(&slots[selection[base+5]], scalar_slot)) << 5) |
-                (static_cast<unsigned>(!str_eq_slots(&slots[selection[base+6]], scalar_slot)) << 6) |
-                (static_cast<unsigned>(!str_eq_slots(&slots[selection[base+7]], scalar_slot)) << 7));
-            dst[b] = static_cast<uint8_t>(m & src_null[b]);
-        }
-        for (uint32_t i = whole_bytes << 3; i < n; ++i) {
-            if ((src_null[i >> 3] >> (i & 7)) & 1u) {
-                if (!str_eq_slots(&slots[selection[i]], scalar_slot))
-                    dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-            }
-        }
+    for (uint32_t b = 0; b < whole_bytes; ++b) {
+        const uint32_t base = b << 3;
+        const uint8_t m = static_cast<uint8_t>(
+            DRAKEN_STR_SCALAR_NE_BIT(base, 0) |
+            DRAKEN_STR_SCALAR_NE_BIT(base, 1) |
+            DRAKEN_STR_SCALAR_NE_BIT(base, 2) |
+            DRAKEN_STR_SCALAR_NE_BIT(base, 3) |
+            DRAKEN_STR_SCALAR_NE_BIT(base, 4) |
+            DRAKEN_STR_SCALAR_NE_BIT(base, 5) |
+            DRAKEN_STR_SCALAR_NE_BIT(base, 6) |
+            DRAKEN_STR_SCALAR_NE_BIT(base, 7));
+        dst[b] = (src_null == nullptr) ? m : static_cast<uint8_t>(m & src_null[b]);
     }
+    for (uint32_t i = whole_bytes << 3; i < n; ++i) {
+        if (src_null != nullptr && (((src_null[i >> 3] >> (i & 7)) & 1u) == 0u))
+            continue;
+        if (!str_eq_slots(&slots[selection[i]], arena, scalar_slot, scalar_bytes))
+            dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    }
+#undef DRAKEN_STR_SCALAR_NE_BIT
 }
 
 // Ordering scalar kernel (gt/ge/lt/le). Uses str_compare — fetches arena bytes
@@ -334,12 +304,10 @@ static inline VecResult str_compare_scalar(
 
     switch (op) {
         case 0:
-            // eq — §1 exception for long strings (documented in str_eq_slots).
-            str_cmp_scalar_eq(slots, v.selection, &scalar_slot, src_null, dst, n);
+            str_cmp_scalar_eq(slots, v.selection, arena, &scalar_slot, scalar_bytes, src_null, dst, n);
             break;
         case 1:
-            // ne — §1 exception for long strings (negation of eq).
-            str_cmp_scalar_ne(slots, v.selection, &scalar_slot, src_null, dst, n);
+            str_cmp_scalar_ne(slots, v.selection, arena, &scalar_slot, scalar_bytes, src_null, dst, n);
             break;
         case 2:
             str_cmp_scalar_ord<StrOrdGt>(slots, v.selection, arena, &scalar_slot, scalar_bytes, src_null, dst, n);
@@ -369,106 +337,74 @@ static inline VecResult str_compare_scalar(
 
 // ---------------------------------------------------------------------------
 // compare_vector inner kernels (string × string).
-// EQ/NE: §1 exception for long strings (same str_eq_slots as scalar path).
+// EQ/NE: exact equality; length/prefix/hash32 fast-reject before arena compare.
 // Ordering: str_compare with each vector's own arena.
 // ---------------------------------------------------------------------------
 
 static inline void str_cmp_vec_eq(
-    const DrakenStringSlot* a_slots, const uint32_t* a_sel,
-    const DrakenStringSlot* b_slots, const uint32_t* b_sel,
+    const DrakenStringSlot* a_slots, const uint32_t* a_sel, const uint8_t* a_arena,
+    const DrakenStringSlot* b_slots, const uint32_t* b_sel, const uint8_t* b_arena,
     const uint8_t*          comb_null,
     uint8_t*                dst,
     uint32_t                n)
 {
     const uint32_t whole_bytes = n >> 3;
+#define DRAKEN_STR_VEC_EQ_BIT(BASE, BIT) \
+    (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[(BASE) + (BIT)]], a_arena, &b_slots[b_sel[(BASE) + (BIT)]], b_arena)) << (BIT))
 
-    if (comb_null == nullptr) {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
-            const uint32_t base = b << 3;
-            dst[b] = static_cast<uint8_t>(
-                (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[base+0]], &b_slots[b_sel[base+0]])) << 0) |
-                (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[base+1]], &b_slots[b_sel[base+1]])) << 1) |
-                (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[base+2]], &b_slots[b_sel[base+2]])) << 2) |
-                (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[base+3]], &b_slots[b_sel[base+3]])) << 3) |
-                (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[base+4]], &b_slots[b_sel[base+4]])) << 4) |
-                (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[base+5]], &b_slots[b_sel[base+5]])) << 5) |
-                (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[base+6]], &b_slots[b_sel[base+6]])) << 6) |
-                (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[base+7]], &b_slots[b_sel[base+7]])) << 7));
-        }
-        for (uint32_t i = whole_bytes << 3; i < n; ++i) {
-            if (str_eq_slots(&a_slots[a_sel[i]], &b_slots[b_sel[i]]))
-                dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-        }
-    } else {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
-            const uint32_t base = b << 3;
-            const uint8_t m = static_cast<uint8_t>(
-                (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[base+0]], &b_slots[b_sel[base+0]])) << 0) |
-                (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[base+1]], &b_slots[b_sel[base+1]])) << 1) |
-                (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[base+2]], &b_slots[b_sel[base+2]])) << 2) |
-                (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[base+3]], &b_slots[b_sel[base+3]])) << 3) |
-                (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[base+4]], &b_slots[b_sel[base+4]])) << 4) |
-                (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[base+5]], &b_slots[b_sel[base+5]])) << 5) |
-                (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[base+6]], &b_slots[b_sel[base+6]])) << 6) |
-                (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[base+7]], &b_slots[b_sel[base+7]])) << 7));
-            dst[b] = static_cast<uint8_t>(m & comb_null[b]);
-        }
-        for (uint32_t i = whole_bytes << 3; i < n; ++i) {
-            if ((comb_null[i >> 3] >> (i & 7)) & 1u) {
-                if (str_eq_slots(&a_slots[a_sel[i]], &b_slots[b_sel[i]]))
-                    dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-            }
-        }
+    for (uint32_t b = 0; b < whole_bytes; ++b) {
+        const uint32_t base = b << 3;
+        const uint8_t m = static_cast<uint8_t>(
+            DRAKEN_STR_VEC_EQ_BIT(base, 0) |
+            DRAKEN_STR_VEC_EQ_BIT(base, 1) |
+            DRAKEN_STR_VEC_EQ_BIT(base, 2) |
+            DRAKEN_STR_VEC_EQ_BIT(base, 3) |
+            DRAKEN_STR_VEC_EQ_BIT(base, 4) |
+            DRAKEN_STR_VEC_EQ_BIT(base, 5) |
+            DRAKEN_STR_VEC_EQ_BIT(base, 6) |
+            DRAKEN_STR_VEC_EQ_BIT(base, 7));
+        dst[b] = (comb_null == nullptr) ? m : static_cast<uint8_t>(m & comb_null[b]);
     }
+    for (uint32_t i = whole_bytes << 3; i < n; ++i) {
+        if (comb_null != nullptr && (((comb_null[i >> 3] >> (i & 7)) & 1u) == 0u))
+            continue;
+        if (str_eq_slots(&a_slots[a_sel[i]], a_arena, &b_slots[b_sel[i]], b_arena))
+            dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    }
+#undef DRAKEN_STR_VEC_EQ_BIT
 }
 
 static inline void str_cmp_vec_ne(
-    const DrakenStringSlot* a_slots, const uint32_t* a_sel,
-    const DrakenStringSlot* b_slots, const uint32_t* b_sel,
+    const DrakenStringSlot* a_slots, const uint32_t* a_sel, const uint8_t* a_arena,
+    const DrakenStringSlot* b_slots, const uint32_t* b_sel, const uint8_t* b_arena,
     const uint8_t*          comb_null,
     uint8_t*                dst,
     uint32_t                n)
 {
     const uint32_t whole_bytes = n >> 3;
+#define DRAKEN_STR_VEC_NE_BIT(BASE, BIT) \
+    (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[(BASE) + (BIT)]], a_arena, &b_slots[b_sel[(BASE) + (BIT)]], b_arena)) << (BIT))
 
-    if (comb_null == nullptr) {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
-            const uint32_t base = b << 3;
-            dst[b] = static_cast<uint8_t>(
-                (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[base+0]], &b_slots[b_sel[base+0]])) << 0) |
-                (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[base+1]], &b_slots[b_sel[base+1]])) << 1) |
-                (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[base+2]], &b_slots[b_sel[base+2]])) << 2) |
-                (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[base+3]], &b_slots[b_sel[base+3]])) << 3) |
-                (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[base+4]], &b_slots[b_sel[base+4]])) << 4) |
-                (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[base+5]], &b_slots[b_sel[base+5]])) << 5) |
-                (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[base+6]], &b_slots[b_sel[base+6]])) << 6) |
-                (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[base+7]], &b_slots[b_sel[base+7]])) << 7));
-        }
-        for (uint32_t i = whole_bytes << 3; i < n; ++i) {
-            if (!str_eq_slots(&a_slots[a_sel[i]], &b_slots[b_sel[i]]))
-                dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-        }
-    } else {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
-            const uint32_t base = b << 3;
-            const uint8_t m = static_cast<uint8_t>(
-                (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[base+0]], &b_slots[b_sel[base+0]])) << 0) |
-                (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[base+1]], &b_slots[b_sel[base+1]])) << 1) |
-                (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[base+2]], &b_slots[b_sel[base+2]])) << 2) |
-                (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[base+3]], &b_slots[b_sel[base+3]])) << 3) |
-                (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[base+4]], &b_slots[b_sel[base+4]])) << 4) |
-                (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[base+5]], &b_slots[b_sel[base+5]])) << 5) |
-                (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[base+6]], &b_slots[b_sel[base+6]])) << 6) |
-                (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[base+7]], &b_slots[b_sel[base+7]])) << 7));
-            dst[b] = static_cast<uint8_t>(m & comb_null[b]);
-        }
-        for (uint32_t i = whole_bytes << 3; i < n; ++i) {
-            if ((comb_null[i >> 3] >> (i & 7)) & 1u) {
-                if (!str_eq_slots(&a_slots[a_sel[i]], &b_slots[b_sel[i]]))
-                    dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-            }
-        }
+    for (uint32_t b = 0; b < whole_bytes; ++b) {
+        const uint32_t base = b << 3;
+        const uint8_t m = static_cast<uint8_t>(
+            DRAKEN_STR_VEC_NE_BIT(base, 0) |
+            DRAKEN_STR_VEC_NE_BIT(base, 1) |
+            DRAKEN_STR_VEC_NE_BIT(base, 2) |
+            DRAKEN_STR_VEC_NE_BIT(base, 3) |
+            DRAKEN_STR_VEC_NE_BIT(base, 4) |
+            DRAKEN_STR_VEC_NE_BIT(base, 5) |
+            DRAKEN_STR_VEC_NE_BIT(base, 6) |
+            DRAKEN_STR_VEC_NE_BIT(base, 7));
+        dst[b] = (comb_null == nullptr) ? m : static_cast<uint8_t>(m & comb_null[b]);
     }
+    for (uint32_t i = whole_bytes << 3; i < n; ++i) {
+        if (comb_null != nullptr && (((comb_null[i >> 3] >> (i & 7)) & 1u) == 0u))
+            continue;
+        if (!str_eq_slots(&a_slots[a_sel[i]], a_arena, &b_slots[b_sel[i]], b_arena))
+            dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    }
+#undef DRAKEN_STR_VEC_NE_BIT
 }
 
 template<typename ApplyOrd>
@@ -551,12 +487,10 @@ static inline VecResult str_compare_vector(
 
     switch (op) {
         case 0:
-            // eq — §1 exception for long strings (documented in str_eq_slots).
-            str_cmp_vec_eq(a_slots, a.selection, b_slots, b.selection, out_null, dst, n);
+            str_cmp_vec_eq(a_slots, a.selection, a_arena, b_slots, b.selection, b_arena, out_null, dst, n);
             break;
         case 1:
-            // ne — §1 exception for long strings (negation of eq).
-            str_cmp_vec_ne(a_slots, a.selection, b_slots, b.selection, out_null, dst, n);
+            str_cmp_vec_ne(a_slots, a.selection, a_arena, b_slots, b.selection, b_arena, out_null, dst, n);
             break;
         case 2:
             str_cmp_vec_ord<StrOrdGt>(a_slots, a.selection, a_arena, b_slots, b.selection, b_arena, out_null, dst, n);

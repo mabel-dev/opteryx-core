@@ -34,7 +34,7 @@
 #include "fp16/fp16.h"   // fp16_ieee_from_fp32_value / fp16_ieee_to_fp32_value (D.11)
 #include "ops/bool_logical.h"
 #include "ops/bool_reductions.h"
-#include "ops/hash.h"
+#include "ops/hash.h"               // includes decimal_arith.h transitively (E.32)
 #include "ops/int64_arithmetic.h"   // i64_neg (used by bridge round-trip test)
 #include "ops/int64_reductions.h"   // i64_sum (used by bridge round-trip test)
 #include "ops/string_gather.h"  // sg_eq_slots, str_hash_seed (for dict ingestion)
@@ -377,8 +377,8 @@ static VectorOwner make_string_from_sequence(nb::list seq) {
 // D.3: string dict ingestion — Python list[str | None] → dict DRAKEN_VARCHAR vector.
 //
 // Deduplicates the input sequence into unique slots (in first-appearance order).
-// Equal values share one slot; dedup uses sg_eq_slots semantics (§1: exact for
-// short strings, hash-only for long — same fidelity as runtime ops).
+// Equal values share one slot; dedup uses exact sg_eq_slots semantics, with
+// length/prefix/hash32 as fast negative filters before arena-byte verification.
 //
 // Ownership:
 //   data_buf   = single block [DrakenStringArena | unique_slots | arena_bytes].
@@ -421,7 +421,7 @@ static VectorOwner make_string_dict_from_sequence(nb::list seq) {
 
     // --- Pass 2: dedup non-null values using sg_eq_slots semantics ----------
     // Build temporary slots for dedup (arena_offset=0 for long; same as D.1).
-    // Hash key = str_hash_seed; equality = sg_eq_slots (§1 for long strings).
+    // Hash key = str_hash_seed; equality = sg_eq_slots exact verification.
     std::unordered_map<uint64_t, std::vector<uint32_t>> dedup_map;
     std::vector<DrakenStringSlot> uniq_slots;   // unique slot for each group
     std::vector<const char*>      uniq_ptrs;    // source UTF-8 pointer per unique
@@ -443,14 +443,19 @@ static VectorOwner make_string_dict_from_sequence(nb::list seq) {
                             (uint32_t)XXH3_64bits(ubytes, ulen), 0u);
         }
 
-        const uint64_t hseed = draken::ops::str_hash_seed(&tmp_slot);
+        const uint64_t hseed = draken::ops::str_hash_seed(&tmp_slot, ubytes);
 
         bool found = false;
         auto it = dedup_map.find(hseed);
         if (it != dedup_map.end()) {
             for (uint32_t uidx : it->second) {
-                // sg_eq_slots from string_gather.h (§1 for long strings).
-                if (draken::ops::sg_eq_slots(&uniq_slots[uidx], &tmp_slot)) {
+                // Long temporary slots use arena_offset=0; their source UTF-8
+                // pointers are the arena bases for exact candidate verification.
+                if (draken::ops::sg_eq_slots(
+                        &uniq_slots[uidx],
+                        reinterpret_cast<const uint8_t*>(uniq_ptrs[uidx]),
+                        &tmp_slot,
+                        ubytes)) {
                     codes[i] = uidx;
                     found = true;
                     break;
@@ -3198,6 +3203,116 @@ static VectorOwner make_bytes_from_sequence(nb::list seq) {
 }
 
 // ---------------------------------------------------------------------------
+// E.32 — DECIMAL arithmetic nanobind dispatch helpers.
+//
+// These intercept DECIMAL × DECIMAL arithmetic before it reaches the OpsTable
+// (whose arithmetic slots for DECIMAL are null; see hash.h D.10/E.32 comment).
+// Each helper:
+//   1. Validates both operands are DECIMAL with valid logical-type descriptors.
+//   2. Extracts scales from the descriptors.
+//   3. Calls the scale-aware kernel from decimal_arith.h.
+//   4. Computes result precision/scale per PostgreSQL rules.
+//   5. Interns and attaches the result LogicalType to the returned VectorOwner.
+// ---------------------------------------------------------------------------
+
+static VectorOwner decimal_add_dispatch(const VectorOwner& a, const VectorOwner& b) {
+    if (a.vec.type != DRAKEN_DECIMAL || b.vec.type != DRAKEN_DECIMAL)
+        throw std::invalid_argument("dec_add: both operands must be DRAKEN_DECIMAL");
+    if (!a.logical_type || !b.logical_type)
+        throw std::invalid_argument("dec_add: missing logical-type descriptor");
+    const uint8_t sa = a.logical_type->scale,  pa = a.logical_type->precision;
+    const uint8_t sb = b.logical_type->scale,  pb = b.logical_type->precision;
+    // result_scale = max(sa, sb)
+    // result_prec  = max(pa-sa, pb-sb) + max(sa,sb) + 1, capped at 18
+    const uint8_t rs = (sa >= sb) ? sa : sb;
+    const int int_a = (int)pa - (int)sa, int_b = (int)pb - (int)sb;
+    const int rp_raw = (int_a >= int_b ? int_a : int_b) + (int)rs + 1;
+    const uint8_t rp = (rp_raw <= 18) ? (uint8_t)rp_raw : 18u;
+    VecResult vr = draken::ops::dec_add(a.vec, sa, b.vec, sb);
+    VectorOwner owner = vecresult_to_owner(vr);
+    owner.vec.type = DRAKEN_DECIMAL;
+    LogicalType lt{}; lt.kind = LogicalKind::DECIMAL; lt.precision = rp; lt.scale = rs;
+    owner.logical_type = logical_type_intern(lt);
+    return owner;
+}
+
+static VectorOwner decimal_sub_dispatch(const VectorOwner& a, const VectorOwner& b) {
+    if (a.vec.type != DRAKEN_DECIMAL || b.vec.type != DRAKEN_DECIMAL)
+        throw std::invalid_argument("dec_sub: both operands must be DRAKEN_DECIMAL");
+    if (!a.logical_type || !b.logical_type)
+        throw std::invalid_argument("dec_sub: missing logical-type descriptor");
+    const uint8_t sa = a.logical_type->scale,  pa = a.logical_type->precision;
+    const uint8_t sb = b.logical_type->scale,  pb = b.logical_type->precision;
+    const uint8_t rs = (sa >= sb) ? sa : sb;
+    const int int_a = (int)pa - (int)sa, int_b = (int)pb - (int)sb;
+    const int rp_raw = (int_a >= int_b ? int_a : int_b) + (int)rs + 1;
+    const uint8_t rp = (rp_raw <= 18) ? (uint8_t)rp_raw : 18u;
+    VecResult vr = draken::ops::dec_sub(a.vec, sa, b.vec, sb);
+    VectorOwner owner = vecresult_to_owner(vr);
+    owner.vec.type = DRAKEN_DECIMAL;
+    LogicalType lt{}; lt.kind = LogicalKind::DECIMAL; lt.precision = rp; lt.scale = rs;
+    owner.logical_type = logical_type_intern(lt);
+    return owner;
+}
+
+static VectorOwner decimal_mul_dispatch(const VectorOwner& a, const VectorOwner& b) {
+    if (a.vec.type != DRAKEN_DECIMAL || b.vec.type != DRAKEN_DECIMAL)
+        throw std::invalid_argument("dec_mul: both operands must be DRAKEN_DECIMAL");
+    if (!a.logical_type || !b.logical_type)
+        throw std::invalid_argument("dec_mul: missing logical-type descriptor");
+    const uint8_t sa = a.logical_type->scale,  pa = a.logical_type->precision;
+    const uint8_t sb = b.logical_type->scale,  pb = b.logical_type->precision;
+    // result_scale = sa + sb (kernel raises if > 18)
+    // result_prec  = pa + pb, capped at 18
+    const int rs_raw = (int)sa + (int)sb;
+    const uint8_t rs = (rs_raw <= 18) ? (uint8_t)rs_raw : 18u;
+    const int rp_raw = (int)pa + (int)pb;
+    const uint8_t rp = (rp_raw <= 18) ? (uint8_t)rp_raw : 18u;
+    VecResult vr = draken::ops::dec_mul(a.vec, sa, b.vec, sb);
+    VectorOwner owner = vecresult_to_owner(vr);
+    owner.vec.type = DRAKEN_DECIMAL;
+    LogicalType lt{}; lt.kind = LogicalKind::DECIMAL; lt.precision = rp; lt.scale = rs;
+    owner.logical_type = logical_type_intern(lt);
+    return owner;
+}
+
+static VectorOwner decimal_div_dispatch(const VectorOwner& a, const VectorOwner& b) {
+    if (a.vec.type != DRAKEN_DECIMAL || b.vec.type != DRAKEN_DECIMAL)
+        throw std::invalid_argument("dec_div: both operands must be DRAKEN_DECIMAL");
+    if (!a.logical_type || !b.logical_type)
+        throw std::invalid_argument("dec_div: missing logical-type descriptor");
+    const uint8_t sa = a.logical_type->scale,  pa = a.logical_type->precision;
+    const uint8_t sb = b.logical_type->scale;
+    // result_scale = max(sa + 6, 6), capped at 18
+    const int rs_raw = ((int)sa + 6 >= 6) ? (int)sa + 6 : 6;
+    const uint8_t rs = (rs_raw <= 18) ? (uint8_t)rs_raw : 18u;
+    // result_prec: approximated as pa + 6, capped at 18
+    const int rp_raw = (int)pa + 6;
+    const uint8_t rp = (rp_raw <= 18) ? (uint8_t)rp_raw : 18u;
+    VecResult vr = draken::ops::dec_div(a.vec, sa, b.vec, sb, rs);
+    VectorOwner owner = vecresult_to_owner(vr);
+    owner.vec.type = DRAKEN_DECIMAL;
+    LogicalType lt{}; lt.kind = LogicalKind::DECIMAL; lt.precision = rp; lt.scale = rs;
+    owner.logical_type = logical_type_intern(lt);
+    return owner;
+}
+
+static VectorOwner decimal_mod_dispatch(const VectorOwner& a, const VectorOwner& b) {
+    if (a.vec.type != DRAKEN_DECIMAL || b.vec.type != DRAKEN_DECIMAL)
+        throw std::invalid_argument("dec_mod: both operands must be DRAKEN_DECIMAL");
+    if (!a.logical_type || !b.logical_type)
+        throw std::invalid_argument("dec_mod: missing logical-type descriptor");
+    const uint8_t sa = a.logical_type->scale,  pa = a.logical_type->precision;
+    const uint8_t sb = b.logical_type->scale;
+    // result_scale = sa, result_prec = pa
+    VecResult vr = draken::ops::dec_mod(a.vec, sa, b.vec, sb);
+    VectorOwner owner = vecresult_to_owner(vr);
+    owner.vec.type = DRAKEN_DECIMAL;
+    owner.logical_type = a.logical_type;  // same scale/prec as dividend
+    return owner;
+}
+
+// ---------------------------------------------------------------------------
 // nanobind module
 // ---------------------------------------------------------------------------
 
@@ -3229,8 +3344,6 @@ NB_MODULE(draken_native, m) {
         .value("VARCHAR",      DRAKEN_VARCHAR)
         .value("NVARCHAR",     DRAKEN_NVARCHAR)
         .value("VARBINARY",    DRAKEN_VARBINARY)
-        .value("DICTIONARY",   DRAKEN_DICTIONARY)
-        .value("CONSTANT",     DRAKEN_CONSTANT)
         .value("ARRAY",        DRAKEN_ARRAY)
         .value("NON_NATIVE",   DRAKEN_NON_NATIVE)
         .value("NULL",         DRAKEN_NULL)
@@ -3562,7 +3675,7 @@ NB_MODULE(draken_native, m) {
         // add / sub / mul / div / mod: dispatch on arg type at Python edge.
         // Cross-width promotion macro (D.6): if a and b are integer types but differ,
         // promote the narrower to match the wider before calling the kernel.
-#define DRAKEN_BINOP_CROSS(fn, draken_fn, draken_fn_s, draken_float_fn_s)     \
+#define DRAKEN_BINOP_CROSS(fn, draken_fn, draken_fn_s, draken_float_fn_s, decimal_fn) \
         .def(#fn, [](const VectorOwner& self, nb::object other) -> VectorOwner {\
             if (self.vec.type == DRAKEN_ARRAY)                                 \
                 throw std::invalid_argument(                                   \
@@ -3571,6 +3684,9 @@ NB_MODULE(draken_native, m) {
                 const VectorOwner& bo = nb::cast<const VectorOwner&>(other);   \
                 const DrakenVector& a = self.vec;                              \
                 const DrakenVector& b = bo.vec;                                \
+                /* E.32: DECIMAL arithmetic intercepted before OpsTable. */    \
+                if (a.type == DRAKEN_DECIMAL || b.type == DRAKEN_DECIMAL)     \
+                    return decimal_fn(self, bo);                               \
                 if (is_integer_type(a.type) && is_integer_type(b.type)        \
                         && a.type != b.type) {                                 \
                     DrakenType wt = wider_int_type(a.type, b.type);            \
@@ -3584,22 +3700,39 @@ NB_MODULE(draken_native, m) {
                         "cross-type vector arithmetic not supported");         \
                 return vecresult_to_owner(draken_fn(a, b));                    \
             }                                                                  \
+            /* E.32: decimal × scalar not supported; promote scalar first. */  \
+            if (self.vec.type == DRAKEN_DECIMAL)                               \
+                throw std::invalid_argument(                                   \
+                    std::string(#fn) + ": DECIMAL × scalar not supported; "   \
+                    "promote scalar to DECIMAL first");                         \
             if (is_float_type(self.vec.type))                                  \
                 return vecresult_to_owner(draken_float_fn_s(self.vec, nb::cast<double>(other))); \
             return vecresult_to_owner(draken_fn_s(self.vec, nb::cast<int64_t>(other))); \
         })
-        DRAKEN_BINOP_CROSS(add, draken_add, draken_add_scalar, draken_float_add_scalar)
-        DRAKEN_BINOP_CROSS(sub, draken_sub, draken_sub_scalar, draken_float_sub_scalar)
-        DRAKEN_BINOP_CROSS(mul, draken_mul, draken_mul_scalar, draken_float_mul_scalar)
+        DRAKEN_BINOP_CROSS(add, draken_add, draken_add_scalar, draken_float_add_scalar, decimal_add_dispatch)
+        DRAKEN_BINOP_CROSS(sub, draken_sub, draken_sub_scalar, draken_float_sub_scalar, decimal_sub_dispatch)
+        DRAKEN_BINOP_CROSS(mul, draken_mul, draken_mul_scalar, draken_float_mul_scalar, decimal_mul_dispatch)
         // div: integer truncation toward zero (div-by-zero → 0) for integers.
         // Float division is IEEE: 1.0/0.0 → +inf; 0.0/0.0 → NaN.
-        DRAKEN_BINOP_CROSS(div, draken_div, draken_div_scalar, draken_float_div_scalar)
-        DRAKEN_BINOP_CROSS(mod, draken_mod, draken_mod_scalar, draken_float_mod_scalar)
+        // Decimal division: half-even rounding, div-by-zero raises (E.32).
+        DRAKEN_BINOP_CROSS(div, draken_div, draken_div_scalar, draken_float_div_scalar, decimal_div_dispatch)
+        DRAKEN_BINOP_CROSS(mod, draken_mod, draken_mod_scalar, draken_float_mod_scalar, decimal_mod_dispatch)
 #undef DRAKEN_BINOP_CROSS
-        // neg: unary negation; neg(INT64_MIN) wraps (matches draken_old cdivision=True).
+        // neg: unary negation; neg(INT64_MIN) wraps for integers (matches draken_old).
+        // E.32: DECIMAL neg raises on INT64_MIN (financial data; no silent wrap).
         .def("neg", [](const VectorOwner& v) -> VectorOwner {
             if (v.vec.type == DRAKEN_ARRAY)
                 throw std::invalid_argument("neg: not supported for DRAKEN_ARRAY");
+            if (v.vec.type == DRAKEN_DECIMAL) {
+                if (!v.logical_type)
+                    throw std::invalid_argument(
+                        "neg: DECIMAL requires a logical-type descriptor");
+                VecResult vr = draken::ops::dec_neg(v.vec);
+                VectorOwner owner = vecresult_to_owner(vr);
+                owner.vec.type    = DRAKEN_DECIMAL;
+                owner.logical_type = v.logical_type;  // scale/prec unchanged
+                return owner;
+            }
             return vecresult_to_owner(draken_neg(v.vec));
         })
         // ----------------------------------------------------------------
@@ -3714,9 +3847,10 @@ NB_MODULE(draken_native, m) {
         //   STRING vectors: scalar is str (Python unicode).
         //     The literal's slot is built at the edge using the same D.1 path
         //     (str_init_inline / str_init_extern + XXH3_64bits) so that
-        //     eq against a stored long string matches — determinism honored.
+        //     equality can fast-reject on length/prefix/hash32 before exact
+        //     arena-byte verification.
         //     For long literals arena_offset is set to 0; str_data(slot, bytes)
-        //     returns bytes directly (§1 exception documented in string_compare.h).
+        //     returns bytes directly.
         //
         // compare_vector: vector OP vector (same type, same length) → bool mask.
         // Unsupported types throw std::invalid_argument.
@@ -3728,30 +3862,12 @@ NB_MODULE(draken_native, m) {
             // D.11: null — every row is null, so NULL OP anything = NULL (3VL).
             if (v.vec.type == DRAKEN_NULL)
                 return make_all_null_bool(v.vec.length);
-            // D.11: fp16 — ordering/equality not supported; None scalar → all-null (3VL).
-            if (v.vec.type == DRAKEN_VECTOR_FP16) {
-                if (scalar.is_none()) return make_all_null_bool(v.vec.length);
+            // D.11: fp16 — ordering/equality not supported.
+            if (v.vec.type == DRAKEN_VECTOR_FP16)
                 throw std::invalid_argument(
                     "compare_scalar: ordering not supported for VECTOR_FP16");
-            }
             if (v.vec.type == DRAKEN_DECIMAL) {
                 require_decimal_descriptor(v, "compare_scalar");
-                if (scalar.is_none()) {
-                    const uint32_t n = v.vec.length;
-                    const uint32_t bm = (n + 7u) >> 3;
-                    const uint32_t padded = ((bm + 7u) & ~7u);
-                    const size_t vbytes = padded > 0u ? padded : 8u;
-                    uint8_t* db = static_cast<uint8_t*>(draken_malloc(8u));
-                    if (!db) throw std::bad_alloc(); std::memset(db, 0, 8u);
-                    uint8_t* vld = static_cast<uint8_t*>(draken_malloc(vbytes));
-                    if (!vld) { draken_free(db); throw std::bad_alloc(); }
-                    std::memset(vld, 0x00, vbytes);
-                    VecResult vr; vr.data = db; vr.validity = vld;
-                    vr.selection = draken_identity_sel(n); vr.owns_selection = false;
-                    vr.data_length = n; vr.length = n; vr.type = DRAKEN_BOOL;
-                    vr.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
-                    return vecresult_to_owner(vr);
-                }
                 const int64_t unscaled = decimal_to_unscaled(
                     scalar.ptr(), v.logical_type->precision, v.logical_type->scale);
                 return vecresult_to_owner(draken_compare_scalar(v.vec, unscaled, op));
@@ -3760,44 +3876,10 @@ NB_MODULE(draken_native, m) {
                 if (!v.logical_type)
                     throw std::invalid_argument(
                         "compare_scalar: TIMESTAMP64 requires a logical-type descriptor");
-                if (scalar.is_none()) {
-                    // null scalar → all-null output (3VL)
-                    const uint32_t n = v.vec.length;
-                    const uint32_t bm = (n + 7u) >> 3;
-                    const uint32_t padded = ((bm + 7u) & ~7u);
-                    const size_t vbytes = padded > 0u ? padded : 8u;
-                    uint8_t* data_b = static_cast<uint8_t*>(draken_malloc(8u));
-                    if (!data_b) throw std::bad_alloc();
-                    memset(data_b, 0, 8u);
-                    uint8_t* validity = static_cast<uint8_t*>(draken_malloc(vbytes));
-                    if (!validity) { draken_free(data_b); throw std::bad_alloc(); }
-                    memset(validity, 0x00, vbytes);
-                    VecResult vr;
-                    vr.data = data_b; vr.validity = validity;
-                    vr.selection = draken_identity_sel(n); vr.owns_selection = false;
-                    vr.data_length = n; vr.length = n; vr.type = DRAKEN_BOOL;
-                    vr.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
-                    return vecresult_to_owner(vr);
-                }
                 const int64_t ts = py_datetime_to_instant(scalar, v.logical_type->unit);
                 return vecresult_to_owner(draken_compare_scalar(v.vec, ts, op));
             }
             if (v.vec.type == DRAKEN_DATE32) {
-                if (scalar.is_none()) {
-                    const uint32_t n = v.vec.length;
-                    const uint32_t bm = (n + 7u) >> 3; const uint32_t padded = ((bm + 7u) & ~7u);
-                    const size_t vbytes = padded > 0u ? padded : 8u;
-                    uint8_t* db = static_cast<uint8_t*>(draken_malloc(8u));
-                    if (!db) throw std::bad_alloc(); memset(db, 0, 8u);
-                    uint8_t* vld = static_cast<uint8_t*>(draken_malloc(vbytes));
-                    if (!vld) { draken_free(db); throw std::bad_alloc(); }
-                    memset(vld, 0x00, vbytes);
-                    VecResult vr; vr.data = db; vr.validity = vld;
-                    vr.selection = draken_identity_sel(n); vr.owns_selection = false;
-                    vr.data_length = n; vr.length = n; vr.type = DRAKEN_BOOL;
-                    vr.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
-                    return vecresult_to_owner(vr);
-                }
                 const int64_t days = static_cast<int64_t>(py_date_to_days(scalar.ptr()));
                 return vecresult_to_owner(draken_compare_scalar(v.vec, days, op));
             }
@@ -3805,27 +3887,11 @@ NB_MODULE(draken_native, m) {
                 if (!v.logical_type)
                     throw std::invalid_argument(
                         "compare_scalar: TIME vector requires a logical-type descriptor");
-                if (scalar.is_none()) {
-                    const uint32_t n = v.vec.length;
-                    const uint32_t bm = (n + 7u) >> 3; const uint32_t padded = ((bm + 7u) & ~7u);
-                    const size_t vbytes = padded > 0u ? padded : 8u;
-                    uint8_t* db = static_cast<uint8_t*>(draken_malloc(8u));
-                    if (!db) throw std::bad_alloc(); memset(db, 0, 8u);
-                    uint8_t* vld = static_cast<uint8_t*>(draken_malloc(vbytes));
-                    if (!vld) { draken_free(db); throw std::bad_alloc(); }
-                    memset(vld, 0x00, vbytes);
-                    VecResult vr; vr.data = db; vr.validity = vld;
-                    vr.selection = draken_identity_sel(n); vr.owns_selection = false;
-                    vr.data_length = n; vr.length = n; vr.type = DRAKEN_BOOL;
-                    vr.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
-                    return vecresult_to_owner(vr);
-                }
                 const int64_t raw = py_time_to_raw(scalar.ptr(), v.logical_type->unit);
                 return vecresult_to_owner(draken_compare_scalar(v.vec, raw, op));
             }
             // D.12: INTERVAL — scalar is (months, ms) tuple; normalize then dispatch.
             if (v.vec.type == DRAKEN_INTERVAL) {
-                if (scalar.is_none()) return make_all_null_bool(v.vec.length);
                 const DrakenIntervalSlot slot = py_to_interval_slot(scalar);
                 const int64_t norm = draken::ops::interval_normalize_checked(
                     slot.months, slot.ms);
@@ -3834,41 +3900,10 @@ NB_MODULE(draken_native, m) {
             if (v.vec.type == DRAKEN_VARCHAR) {
                 // Build literal slot at the Python edge using the same ingestion
                 // path as D.1 so equality against stored long strings is correct.
-                if (scalar.is_none()) {
-                    // null scalar: all output rows are null (TVL).
-                    uint8_t* data = static_cast<uint8_t*>(draken_malloc(8u));
-                    if (!data) throw std::bad_alloc();
-                    memset(data, 0, 8u);
-                    const uint32_t n = v.vec.length;
-                    const uint32_t bm = (n + 7u) >> 3;
-                    const uint32_t padded = ((bm + 7u) & ~7u);
-                    const size_t alloc_bytes = (padded > 0u) ? padded : 8u;
-                    uint8_t* validity = static_cast<uint8_t*>(draken_malloc(alloc_bytes));
-                    if (!validity) { draken_free(data); throw std::bad_alloc(); }
-                    memset(validity, 0x00, alloc_bytes);
-                    DrakenVector r;
-                    r.data        = data;
-                    r.selection   = draken_identity_sel(n);
-                    r.data_length = n;
-                    r.length      = n;
-                    r.validity    = validity;
-                    r.type        = DRAKEN_BOOL;
-                    r.flags       = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
-                    VecResult vr;
-                    vr.data           = data;
-                    vr.validity       = validity;
-                    vr.selection      = draken_identity_sel(n);
-                    vr.owns_selection = false;
-                    vr.data_length    = n;
-                    vr.length         = n;
-                    vr.type           = DRAKEN_BOOL;
-                    vr.flags          = r.flags;
-                    return vecresult_to_owner(vr);
-                }
                 PyObject* pystr = scalar.ptr();
                 if (!PyUnicode_Check(pystr))
                     throw std::invalid_argument(
-                        "compare_scalar: STRING vector requires str or None scalar");
+                        "compare_scalar: STRING vector requires str scalar");
                 Py_ssize_t slen = 0;
                 const char* utf8 = PyUnicode_AsUTF8AndSize(pystr, &slen);
                 if (!utf8) throw nb::python_error();
@@ -3886,34 +3921,14 @@ NB_MODULE(draken_native, m) {
                     draken_str_compare_scalar(v.vec, scalar_slot, ubytes, op));
             }
             // FLOAT32/64: scalar is Python float (or int coerced to double).
-            // None scalar → all-null output (3VL).
-            if (is_float_type(v.vec.type)) {
-                if (scalar.is_none()) {
-                    const uint32_t n = v.vec.length;
-                    const uint32_t bm = (n + 7u) >> 3;
-                    const uint32_t padded = ((bm + 7u) & ~7u);
-                    const size_t vbytes = padded > 0u ? padded : 8u;
-                    uint8_t* data_b = static_cast<uint8_t*>(draken_malloc(8u));
-                    if (!data_b) throw std::bad_alloc();
-                    memset(data_b, 0, 8u);
-                    uint8_t* validity = static_cast<uint8_t*>(draken_malloc(vbytes));
-                    if (!validity) { draken_free(data_b); throw std::bad_alloc(); }
-                    memset(validity, 0x00, vbytes);
-                    VecResult vr;
-                    vr.data = data_b; vr.validity = validity;
-                    vr.selection = draken_identity_sel(n); vr.owns_selection = false;
-                    vr.data_length = n; vr.length = n; vr.type = DRAKEN_BOOL;
-                    vr.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
-                    return vecresult_to_owner(vr);
-                }
+            if (is_float_type(v.vec.type))
                 return vecresult_to_owner(
                     draken_float_compare_scalar(v.vec, nb::cast<double>(scalar), op));
-            }
             // INT64 (and other types): expect int scalar.
             return vecresult_to_owner(draken_compare_scalar(v.vec, nb::cast<int64_t>(scalar), op));
-        }, nb::arg("scalar").none(true), nb::arg("op"),
+        }, nb::arg("scalar"), nb::arg("op"),
             "Compare each row against scalar. op: 0=eq 1=ne 2=gt 3=ge 4=lt 5=le.\n"
-            "INT64: scalar is int. STRING: scalar is str or None.\n"
+            "INT64: scalar is int. STRING: scalar is str.\n"
             "Returns a DRAKEN_BOOL vector (bit-packed, 1 bit/row, LSB-first).")
         .def("compare_vector", [](const VectorOwner& self, const VectorOwner& other, int op) -> VectorOwner {
             const DrakenVector& a = self.vec;
@@ -4078,9 +4093,8 @@ NB_MODULE(draken_native, m) {
             "Null input row → null output row. Returns a DRAKEN_BOOL vector.")
         // in_list: hash-only membership via CarcharSet.
         //
-        // §1 EXCEPTION (design docs 02 / 07): CarcharSet stores 64-bit hashes
-        // only — no key verification.  A hash collision can admit a wrong row.
-        // Accepted at our data volumes; documented here, not silent.
+        // CarcharSet stores 64-bit hashes only — no key verification. A hash
+        // collision can admit a wrong row.
         //
         // Hash path: simd_hash_i64 on raw uint64 cast of each int64 value.
         // This is the SINGLE SHARED HASH PATH used by the hash op and joins;
@@ -4174,12 +4188,9 @@ NB_MODULE(draken_native, m) {
                     return vecresult_to_owner(draken_in_list(v.vec, set));
                 }
                 if (v.vec.type == DRAKEN_VARCHAR) {
-                    // §1 EXCEPTION: hash-only; same str_hash_seed → simd_hash_i64
-                    // path as the str_in_list kernel and hash_string.  Any deviation
-                    // here causes present values to miss — use no other path.
-                    // Short strings (≤12 B): effectively collision-free.
-                    // Long strings (>12 B): ~2⁻³² false-match per pair sharing
-                    // length+prefix+hash32 — accepted architect decision.
+                    // Hash-only membership via CarcharSet; same str_hash_seed →
+                    // simd_hash_i64 path as str_in_list and hash_string.  Any
+                    // deviation here causes present values to miss.
                     for (size_t k = 0; k < n; ++k) {
                         PyObject* pystr = values[static_cast<Py_ssize_t>(k)].ptr();
                         if (!PyUnicode_Check(pystr))
@@ -4194,12 +4205,10 @@ NB_MODULE(draken_native, m) {
                         if (ulen <= STR_INLINE_MAX) {
                             str_init_inline(&slot, ubytes, ulen);
                         } else {
-                            // arena_offset=0 — str_hash_seed uses only length,
-                            // prefix, hash32 for long strings; offset is irrelevant.
                             str_init_extern(&slot, ubytes, ulen,
                                             (uint32_t)XXH3_64bits(ubytes, ulen), 0u);
                         }
-                        uint64_t seed = draken::ops::str_hash_seed(&slot);
+                        uint64_t seed = draken::ops::str_hash_seed(&slot, ubytes);
                         uint64_t h;
                         simd_hash_i64(&seed, &h, 1u);
                         set.insert_or_ignore(h);
@@ -4445,8 +4454,8 @@ NB_MODULE(draken_native, m) {
         [](nb::list seq) { return make_string_dict_from_sequence(seq); },
         nb::arg("sequence"),
         "Build a dict-encoded STRING Vector from a Python list[str | None].\n"
-        "Deduplicates values: equal strings share one slot; dedup uses §1 fidelity\n"
-        "(exact for short strings ≤12B, hash-only for long — matches runtime ops).\n"
+        "Deduplicates values: equal strings share one slot; long strings use\n"
+        "length/prefix/hash32 fast-reject before exact byte verification.\n"
         "None elements become null rows.\n"
         "is_dict == True; data_length == # unique non-null values.\n"
         "All-null input returns a constant-shape vector (data_length=1).");

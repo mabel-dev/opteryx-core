@@ -83,13 +83,11 @@ static nb::object impl_vector_string_length(nb::object v) {
     const bool is_varchar_family =
         dv->type == DRAKEN_VARCHAR  ||
         dv->type == DRAKEN_NVARCHAR ||
-        dv->type == DRAKEN_VARBINARY ||
-        dv->type == DRAKEN_DICTIONARY ||
-        dv->type == DRAKEN_CONSTANT;
+        dv->type == DRAKEN_VARBINARY;
     if (!is_varchar_family) {
         throw nb::type_error(
             "vector_string_length: expected a string Vector "
-            "(VARCHAR, NVARCHAR, VARBINARY, DICTIONARY, or CONSTANT)");
+            "(VARCHAR, NVARCHAR, or VARBINARY)");
     }
 
     const DrakenStringArena* sa  = static_cast<const DrakenStringArena*>(dv->data);
@@ -144,13 +142,11 @@ static nb::object impl_string_emptiness(nb::object v, bool emit_when_empty) {
     const bool is_varchar_family =
         dv->type == DRAKEN_VARCHAR  ||
         dv->type == DRAKEN_NVARCHAR ||
-        dv->type == DRAKEN_VARBINARY ||
-        dv->type == DRAKEN_DICTIONARY ||
-        dv->type == DRAKEN_CONSTANT;
+        dv->type == DRAKEN_VARBINARY;
     if (!is_varchar_family) {
         throw nb::type_error(
             "vector_string_is_empty: expected a string Vector "
-            "(VARCHAR, NVARCHAR, VARBINARY, DICTIONARY, or CONSTANT)");
+            "(VARCHAR, NVARCHAR, or VARBINARY)");
     }
 
     const DrakenStringArena* arena = static_cast<const DrakenStringArena*>(dv->data);

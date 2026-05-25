@@ -118,13 +118,17 @@ Consequences (your answers):
 Variable-length, but made fixed-width-per-row so it fits `data[selection[i]]`:
 
 - `data` is an array of **16-byte slots** (`DrakenStringSlot`,
-  `draken_old/src/core/string_slot.h`):
+  `draken/core/string_slot.h`):
   - short (≤ 12 bytes): `[uint32 length][12 inline bytes]`
-  - long  (> 12 bytes): `[uint32 length][4-byte prefix][uint64 arena_offset]`
+  - long  (> 12 bytes): `[uint32 length][uint32 prefix][uint32 hash32][uint32 arena_offset]`
+    - `prefix` is the first four payload bytes encoded big-endian for unsigned lexicographic prefix comparison.
+    - `hash32` is the lower 32 bits of `XXH3_64bits(payload, length)`.
+    - `arena_offset` is a byte offset into the vector's arena; offsets are capped at 4 GB per vector.
 - An owned **byte arena** (`DrakenStringArena`) holds long-form payloads; short
   strings touch no arena.
-- A single 8-byte `length || prefix` load short-circuits most equality/ordering
-  compares without touching the arena — SIMD/compare friendly.
+- A single 8-byte `length || prefix` load short-circuits many comparisons without
+  touching the arena. Equality and hashing for long strings may also use `hash32`
+  on the no-arena path; ordering still compares payload bytes when prefixes tie.
 
 So for strings: `data` = slots, `selection` = identity/codes (dict strings = unique
 slots + codes), arena = a side buffer **owned by the vector** (per `01_ownership.md`).

@@ -61,9 +61,8 @@ namespace nb = nanobind;
 static inline bool is_bool_type(DrakenType t)   { return t == DRAKEN_BOOL; }
 
 static inline bool is_string_type(DrakenType t) {
-    return t == DRAKEN_VARCHAR   || t == DRAKEN_NVARCHAR  ||
-           t == DRAKEN_VARBINARY || t == DRAKEN_DICTIONARY ||
-           t == DRAKEN_CONSTANT;
+    return t == DRAKEN_VARCHAR  || t == DRAKEN_NVARCHAR ||
+           t == DRAKEN_VARBINARY;
 }
 
 static inline bool is_fixed_type(DrakenType t) {

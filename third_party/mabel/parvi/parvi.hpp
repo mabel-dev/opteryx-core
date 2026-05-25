@@ -46,6 +46,9 @@
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #include <arm_neon.h>
 #endif
+#if defined(__riscv) && defined(__riscv_vector)
+#include <riscv_vector.h>
+#endif
 
 namespace opteryx::parvi {
 
@@ -71,6 +74,40 @@ inline std::uint32_t group_match_mask(const std::uint8_t* control, std::uint8_t 
     const __m128i group    = _mm_loadu_si128(reinterpret_cast<const __m128i*>(control));
     const __m128i needle_v = _mm_set1_epi8(static_cast<char>(needle));
     return static_cast<std::uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(group, needle_v)));
+#elif defined(__riscv) && defined(__riscv_vector)
+    static constexpr std::uint8_t kPowersArr[16] = {1, 2, 4, 8, 16, 32, 64, 128,
+                                                    1, 2, 4, 8, 16, 32, 64, 128};
+    alignas(16) std::uint8_t masked_bytes[16] = {};
+    const std::size_t vl = __riscv_vsetvl_e8m4(kCapacity);
+    if (vl < kCapacity) {
+        using ::opteryx::carchar::detail::kByteHighBits64;
+        using ::opteryx::carchar::detail::load_u64;
+        using ::opteryx::carchar::detail::match_mask64;
+        const std::uint64_t lo = load_u64(control);
+        const std::uint64_t hi = load_u64(control + 8U);
+        const std::uint64_t m_lo = needle == kEmpty ? (lo & kByteHighBits64) : match_mask64(lo, needle);
+        const std::uint64_t m_hi = needle == kEmpty ? (hi & kByteHighBits64) : match_mask64(hi, needle);
+        constexpr std::uint64_t kHighBitMask = 0x8080808080808080ULL;
+        constexpr std::uint64_t kGather = 0x8040201008040201ULL;
+        const auto to_mask = [](std::uint64_t bits) -> std::uint8_t {
+            return static_cast<std::uint8_t>(((bits & kHighBitMask) * kGather) >> 56);
+        };
+        return static_cast<std::uint32_t>(to_mask(m_lo)) |
+               (static_cast<std::uint32_t>(to_mask(m_hi)) << 8U);
+    }
+    const vuint8m4_t group = __riscv_vle8_v_u8m4(control, vl);
+    const vuint8m4_t powers = __riscv_vle8_v_u8m4(kPowersArr, vl);
+    const vuint8m4_t zero = __riscv_vmv_v_x_u8m4(0U, vl);
+    const vbool2_t eq = __riscv_vmseq_vx_u8m4_b2(group, needle, vl);
+    const vuint8m4_t masked = __riscv_vmerge_vvm_u8m4(zero, powers, eq, vl);
+    __riscv_vse8_v_u8m4(masked_bytes, masked, vl);
+    return static_cast<std::uint32_t>(masked_bytes[0] | masked_bytes[1] | masked_bytes[2] |
+                                      masked_bytes[3] | masked_bytes[4] | masked_bytes[5] |
+                                      masked_bytes[6] | masked_bytes[7]) |
+           (static_cast<std::uint32_t>(masked_bytes[8] | masked_bytes[9] | masked_bytes[10] |
+                                       masked_bytes[11] | masked_bytes[12] | masked_bytes[13] |
+                                       masked_bytes[14] | masked_bytes[15])
+            << 8U);
 #elif defined(__ARM_NEON) || defined(__ARM_NEON__)
     // Performance improvement #2: static constexpr table avoids re‑initializing
     // the power‑of‑two array on every call.
@@ -243,6 +280,8 @@ private:
         const uint32_t tag_mask = static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(ctrl, tag_v)));
         const uint32_t empty_mask = static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(ctrl, empty_v)));
         return {tag_mask, empty_mask};
+#elif defined(__riscv) && defined(__riscv_vector)
+        return {group_match_mask(control_.data(), tag), group_match_mask(control_.data(), kEmpty)};
 #elif defined(__ARM_NEON) || defined(__ARM_NEON__)
         const uint8x16_t ctrl = vld1q_u8(control_.data());
         const uint8x16_t tag_eq = vceqq_u8(ctrl, vdupq_n_u8(tag));
@@ -419,6 +458,8 @@ private:
         const uint32_t tag_mask = static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(ctrl, tag_v)));
         const uint32_t empty_mask = static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(ctrl, empty_v)));
         return {tag_mask, empty_mask};
+#elif defined(__riscv) && defined(__riscv_vector)
+        return {group_match_mask(control_.data(), tag), group_match_mask(control_.data(), kEmpty)};
 #elif defined(__ARM_NEON) || defined(__ARM_NEON__)
         const uint8x16_t ctrl = vld1q_u8(control_.data());
         const uint8x16_t tag_eq = vceqq_u8(ctrl, vdupq_n_u8(tag));

@@ -15,10 +15,13 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.map cimport map as cmap
 
-from draken.vectors.integer64_vector cimport Integer64Vector
-from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.bool_vector cimport BoolVector
-from draken.vectors.string_vector cimport StringVector, StringVectorBuilder
+# Typed-vector cimports removed as part of E.31 migration (same gap registry as E.28):
+#   E.28-gap-1: Integer64Vector dense constructor + ptr.data write access
+#   E.28-gap-2: Float64Vector dense constructor + ptr.data write access
+#   E.28-gap-3: StringVectorBuilder (constructors, append_bytes, append_null, finish)
+#   E.31-gap-1: BoolVector dense constructor + ptr.data write access
+from draken.vectors.vector cimport Vector
+from draken.morsels.morsel cimport Morsel
 
 
 cdef extern from "core/parse_context.hpp" namespace "rugo::_jsonl":
@@ -67,7 +70,7 @@ cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
         const vector[MarkerPosition]& markers,
         const ParseContext& context,
         OrdinalPredictor& predictor
-    )
+    ) nogil
 
     InterpreterResult interpret_jsonl_parallel(
         const uint8_t* buffer_data,
@@ -76,14 +79,14 @@ cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
         const ParseContext& context,
         OrdinalPredictor& predictor,
         size_t min_rows_per_thread
-    )
+    ) nogil
 
 
 cdef extern from "core/structural_scan.hpp" namespace "rugo::_jsonl":
     vector[MarkerPosition] scan_structural_markers(
         const uint8_t* buffer,
         size_t length
-    )
+    ) nogil
 
 
 cdef extern from "core/jsonl_reader.hpp" namespace "rugo::_jsonl":
@@ -182,17 +185,21 @@ def read_jsonl(
     cdef JsonlReader* reader = NULL
     cdef Predicate pred
     cdef ReadResult chunk_result
-    cdef list column_names = []
+    cdef vector[string] column_names_cpp
     cdef list chunk_buffers = []
-    cdef list chunk_records = []   # list of C++ vector[vector[FieldSpan]]
+    cdef vector[vector[vector[FieldSpan]]] chunk_records
     cdef size_t total_rows = 0
-    cdef dict schema = {}
+    cdef cmap[string, string] schema_cpp
     cdef const uint8_t* buf_data
     cdef size_t buf_len
     cdef vector[MarkerPosition] markers
     cdef InterpreterResult interp_result
     cdef OrdinalPredictor predictor
     cdef bint threaded_succeeded = False
+    cdef string col_name_cpp
+    cdef vector[FieldSpan] first_record_cpp
+    cdef FieldSpan field
+    cdef size_t min_rows
     cdef dict result = {
         'success': False,
         'column_names': [],
@@ -235,35 +242,38 @@ def read_jsonl(
             if len(threaded_data) > 0:
                 buf_data = <const uint8_t*>threaded_data
                 buf_len = len(threaded_data)
+                min_rows = <size_t>min_rows_per_thread
 
                 # Scan for markers once
-                markers = scan_structural_markers(buf_data, buf_len)
+                with nogil:
+                    markers = scan_structural_markers(buf_data, buf_len)
 
                 # Process in parallel
-                interp_result = interpret_jsonl_parallel(
-                    buf_data,
-                    buf_len,
-                    markers,
-                    context,
-                    predictor,
-                    <size_t>min_rows_per_thread
-                )
+                with nogil:
+                    interp_result = interpret_jsonl_parallel(
+                        buf_data,
+                        buf_len,
+                        markers,
+                        context,
+                        predictor,
+                        min_rows
+                    )
 
                 # Store result as single "chunk" if successful
                 if interp_result.all_records.size() > 0:
                     chunk_buffers.append(threaded_data)
-                    chunk_records.append(interp_result.all_records)
+                    chunk_records.push_back(interp_result.all_records)
                     total_rows = interp_result.num_records_passed
 
                     # Extract column names from first record (no projection = all columns)
-                    if not column_names and interp_result.all_records.size() > 0:
-                        first_record = interp_result.all_records[0]
-                        for field in first_record:
-                            # Decode key from buffer
-                            key_bytes = threaded_data[field.key_start:field.key_start + field.key_width]
-                            col_name = key_bytes.decode('utf-8', errors='ignore')
-                            if col_name not in column_names:
-                                column_names.append(col_name)
+                    if column_names_cpp.empty():
+                        first_record_cpp = interp_result.all_records[0]
+                        for field in first_record_cpp:
+                            col_name_cpp = string(
+                                <const char*>(buf_data + field.key_start),
+                                <size_t>field.key_width
+                            )
+                            column_names_cpp.push_back(col_name_cpp)
 
                     threaded_succeeded = True
 
@@ -289,31 +299,31 @@ def read_jsonl(
                     break
 
                 if chunk_result.num_records > 0:
-                    if not column_names:
+                    if column_names_cpp.empty():
                         for col in chunk_result.column_names:
-                            column_names.append(col.decode('utf-8'))
+                            column_names_cpp.push_back(col)
 
                     # Keep buffer as bytes (owns the memory) and records as C++ object
                     chunk_buffers.append(bytes(chunk_result.buffer_data))
-                    chunk_records.append(chunk_result.records)
+                    chunk_records.push_back(chunk_result.records)
                     total_rows += chunk_result.num_records
 
                     if chunk_result.inferred_schema.size() > 0:
                         for key, value in chunk_result.inferred_schema:
-                            schema[key.decode('utf-8')] = value.decode('utf-8')
+                            schema_cpp[key] = value
 
                 if reader.is_eof():
                     break
 
         # Build Draken vectors — one C++ call per column per chunk
-        if total_rows > 0 and column_names:
+        if total_rows > 0 and not column_names_cpp.empty():
             vectors = _build_vectors_from_chunks(
-                chunk_buffers, chunk_records, column_names, total_rows
+                chunk_buffers, chunk_records, column_names_cpp, total_rows
             )
             result['columns'] = vectors
-            result['column_names'] = column_names
+            result['column_names'] = [col.decode('utf-8') for col in column_names_cpp]
             result['num_rows'] = total_rows
-            result['schema'] = schema
+            result['schema'] = {k.decode('utf-8'): v.decode('utf-8') for k, v in schema_cpp}
             result['success'] = True
 
         return result
@@ -352,12 +362,14 @@ def benchmark_document_map(
 
     # Step 1: Structural scan
     scan_start = time.perf_counter()
-    markers = scan_structural_markers(buf_data, buf_len)
+    with nogil:
+        markers = scan_structural_markers(buf_data, buf_len)
     scan_ms = (time.perf_counter() - scan_start) * 1000
 
     # Step 2: Document map interpretation
     interp_start = time.perf_counter()
-    interp_result = interpret_jsonl(buf_data, buf_len, markers, context, predictor)
+    with nogil:
+        interp_result = interpret_jsonl(buf_data, buf_len, markers, context, predictor)
     interp_ms = (time.perf_counter() - interp_start) * 1000
 
     # Convert first record to Python for inspection
@@ -500,8 +512,8 @@ cdef uint8_t _parse_op(str op):
 
 cdef list _build_vectors_from_chunks(
     list chunk_buffers,
-    list chunk_records,
-    list column_names,
+    vector[vector[vector[FieldSpan]]]& chunk_records,
+    vector[string]& column_names,
     size_t total_rows
 ):
     """
@@ -516,9 +528,7 @@ cdef list _build_vectors_from_chunks(
     cdef size_t i
     cdef OrdinalPredictor predictor
 
-    for col_name in column_names:
-        col_name_cpp = col_name.encode('utf-8')
-
+    for col_name_cpp in column_names:
         # Extract first chunk to get type hint
         if len(chunk_buffers) == 0:
             continue
@@ -527,7 +537,7 @@ cdef list _build_vectors_from_chunks(
         buf_ptr = <const uint8_t*>buf_bytes
         chunk_col = extract_column(
             buf_ptr,
-            <const vector[vector[FieldSpan]]&>chunk_records[0],
+            chunk_records[0],
             col_name_cpp,
             predictor
         )
@@ -542,122 +552,19 @@ cdef list _build_vectors_from_chunks(
     return vectors
 
 
-cdef _string_vector_from_result(StringColumnResult& scr):
-    """Build StringVector from StringColumnResult and apply type casting."""
-    cdef size_t num_rows = scr.num_rows
-    cdef size_t bitmap_bytes = (num_rows + 7) >> 3
-    cdef uint8_t* owned_bitmap = NULL
-    cdef size_t i
-    cdef StringVectorBuilder builder
-    cdef StringVector string_vec
-    cdef Integer64Vector int_vec
-    cdef Float64Vector float_vec
-    cdef BoolVector bool_vec
-
-    if num_rows == 0:
-        return None
-
-    # Copy null bitmap to owned memory
-    if scr.null_bitmap.size() > 0:
-        owned_bitmap = <uint8_t*>malloc(bitmap_bytes)
-        if owned_bitmap == NULL:
-            raise MemoryError()
-        memcpy(owned_bitmap, scr.null_bitmap.data(), bitmap_bytes)
-
-    # Build StringVector from offsets and lengths
-    builder = StringVectorBuilder.with_estimate(num_rows, 16)
-    for i in range(num_rows):
-        if i < scr.lengths.size():
-            if scr.lengths[i] == 0:
-                builder.append_null()
-            else:
-                builder.append_bytes(
-                    <const char*>(scr.data.data() + scr.offsets[i]),
-                    scr.lengths[i]
-                )
-        else:
-            builder.append_null()
-
-    string_vec = builder.finish()
-    if owned_bitmap != NULL:
-        string_vec.ptr.null_bitmap = owned_bitmap
-
-    # For now, return string vector; type casting deferred to caller
-    return string_vec
+cdef Vector _string_vector_from_result(StringColumnResult& scr):
+    raise NotImplementedError(
+        "rugo migration gap: StringVectorBuilder has no new-draken equivalent; "
+        "tracked as E.28-gap-3."
+    )
 
 
-cdef _draken_from_column_result(ColumnResult& cr):
-    """Wrap ColumnResult into Draken vector."""
-    cdef size_t num_rows = cr.num_rows
-    cdef size_t bitmap_bytes = (num_rows + 7) >> 3
-    cdef uint8_t* owned_bitmap = NULL
-    cdef uint8_t* bdata = NULL
-    cdef size_t i
-    cdef Integer64Vector vec_i64
-    cdef Float64Vector vec_f64
-    cdef BoolVector vec_bool
-    cdef StringVectorBuilder builder
-
-    if num_rows == 0:
-        return None
-
-    # If null bitmap exists, copy it to owned heap memory (vectors require ownership)
-    if cr.null_bitmap.size() > 0:
-        owned_bitmap = <uint8_t*>malloc(bitmap_bytes)
-        if owned_bitmap == NULL:
-            raise MemoryError()
-        memcpy(owned_bitmap, cr.null_bitmap.data(), bitmap_bytes)
-
-    if cr.col_type == ColumnType.Int64:
-        vec_i64 = Integer64Vector(num_rows)
-        if cr.data.size() >= num_rows * 8:
-            memcpy(<void*>vec_i64.ptr.data, cr.data.data(), num_rows * 8)
-        if owned_bitmap != NULL:
-            vec_i64.ptr.null_bitmap = owned_bitmap
-        return vec_i64
-
-    elif cr.col_type == ColumnType.Float64:
-        vec_f64 = Float64Vector(num_rows)
-        if cr.data.size() >= num_rows * 8:
-            memcpy(<void*>vec_f64.ptr.data, cr.data.data(), num_rows * 8)
-        if owned_bitmap != NULL:
-            vec_f64.ptr.null_bitmap = owned_bitmap
-        return vec_f64
-
-    elif cr.col_type == ColumnType.Bool:
-        vec_bool = BoolVector(num_rows)
-        bdata = <uint8_t*>vec_bool.ptr.data
-        if cr.data.size() > 0 and bdata != NULL:
-            memcpy(bdata, cr.data.data(), (num_rows + 7) >> 3)
-        if owned_bitmap != NULL:
-            vec_bool.ptr.null_bitmap = owned_bitmap
-        return vec_bool
-
-    elif cr.col_type == ColumnType.String:
-        if owned_bitmap != NULL:
-            free(owned_bitmap)
-        # String vector: build from spans
-        builder = StringVectorBuilder.with_estimate(num_rows, 16)
-        for i in range(num_rows):
-            if i < cr.str_lengths.size() and cr.str_lengths[i] == 0:
-                builder.append_null()
-            elif i < cr.str_lengths.size() and cr.str_data.size() > 0:
-                builder.append_bytes(
-                    <const char*>(cr.str_data.data() + cr.str_offsets[i]),
-                    cr.str_lengths[i]
-                )
-            else:
-                builder.append_null()
-        return builder.finish()
-
-    else:
-        # Null column
-        if owned_bitmap != NULL:
-            free(owned_bitmap)
-        builder = StringVectorBuilder.with_estimate(num_rows, 0)
-        for i in range(num_rows):
-            builder.append_null()
-        return builder.finish()
+cdef Vector _draken_from_column_result(ColumnResult& cr):
+    raise NotImplementedError(
+        "rugo migration gap: Integer64Vector / Float64Vector / BoolVector dense constructors "
+        "and StringVectorBuilder have no new-draken equivalents; "
+        "tracked as E.28-gap-1, E.28-gap-2, E.31-gap-1, E.28-gap-3."
+    )
 
 
 def get_jsonl_schema(data, sample_size=5):

@@ -179,7 +179,8 @@ static inline int str_compare(const DrakenStringSlot* a, const uint8_t* arena_a,
         const int c = memcmp(pa, pb, mn);
         if (c != 0) return c;
     }
-    return (int32_t)la - (int32_t)lb;
+    if (la == lb) return 0;
+    return la < lb ? -1 : 1;
 }
 
 #ifdef __cplusplus

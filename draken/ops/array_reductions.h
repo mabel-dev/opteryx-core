@@ -45,7 +45,7 @@
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "core/string_slot.h"
-#include "ops/string_compare.h"  // str_eq_slots (§1 EXCEPTION — hash-only for long strings)
+#include "ops/string_compare.h"  // str_eq_slots exact equality
 #include "ops/vec_result.h"
 
 namespace draken { namespace ops {
@@ -116,15 +116,15 @@ struct ArrI64Le  { static bool cmp(int64_t a, int64_t b) noexcept { return a <= 
 // String comparison tags
 // ---------------------------------------------------------------------------
 struct ArrStrEq {
-    static bool cmp(const DrakenStringSlot* a, const uint8_t* /*arena_a*/,
-                    const DrakenStringSlot* b, const uint8_t* /*arena_b*/) noexcept {
-        return str_eq_slots(a, b) != 0;
+    static bool cmp(const DrakenStringSlot* a, const uint8_t* arena_a,
+                    const DrakenStringSlot* b, const uint8_t* arena_b) noexcept {
+        return str_eq_slots(a, arena_a, b, arena_b) != 0;
     }
 };
 struct ArrStrNe {
-    static bool cmp(const DrakenStringSlot* a, const uint8_t* /*arena_a*/,
-                    const DrakenStringSlot* b, const uint8_t* /*arena_b*/) noexcept {
-        return str_eq_slots(a, b) == 0;
+    static bool cmp(const DrakenStringSlot* a, const uint8_t* arena_a,
+                    const DrakenStringSlot* b, const uint8_t* arena_b) noexcept {
+        return str_eq_slots(a, arena_a, b, arena_b) == 0;
     }
 };
 struct ArrStrGt {

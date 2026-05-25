@@ -31,7 +31,6 @@ from libcpp.vector cimport vector
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 
 from draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
-from draken.vectors.integer64_vector cimport Integer64Vector
 from draken.morsels.morsel cimport Morsel
 from draken.morsels.align cimport align_tables
 
@@ -100,9 +99,9 @@ cdef class _JoinFlags:
 
 cpdef CarcharJoinIndexWrapper _build_probe_hash_map(Morsel morsel, list join_columns):
     cdef CarcharJoinIndexWrapper ht = CarcharJoinIndexWrapper()
-    cdef Integer64Vector non_null_indices_vec = non_null_row_indices(morsel, join_columns)
-    cdef const int64_t* non_null_ptr = <const int64_t*>non_null_indices_vec.ptr.data
-    cdef Py_ssize_t n_non_null = len(non_null_indices_vec)
+    cdef vector[int64_t] non_null_indices_vec = non_null_row_indices(morsel, join_columns)
+    cdef const int64_t* non_null_ptr = non_null_indices_vec.data()
+    cdef Py_ssize_t n_non_null = <Py_ssize_t>non_null_indices_vec.size()
     cdef uint64_t[::1] row_hashes = morsel.hash(join_columns)
     cdef Py_ssize_t i
 
@@ -114,9 +113,9 @@ cpdef CarcharJoinIndexWrapper _build_probe_hash_map(Morsel morsel, list join_col
 
 cpdef CarcharJoinIndexWrapper _build_side_hash_map(Morsel morsel, list join_columns):
     cdef CarcharJoinIndexWrapper ht = CarcharJoinIndexWrapper()
-    cdef Integer64Vector non_null_indices_vec = non_null_row_indices(morsel, join_columns)
-    cdef const int64_t* non_null_ptr = <const int64_t*>non_null_indices_vec.ptr.data
-    cdef Py_ssize_t n_non_null = len(non_null_indices_vec)
+    cdef vector[int64_t] non_null_indices_vec = non_null_row_indices(morsel, join_columns)
+    cdef const int64_t* non_null_ptr = non_null_indices_vec.data()
+    cdef Py_ssize_t n_non_null = <Py_ssize_t>non_null_indices_vec.size()
     cdef uint64_t[::1] row_hashes = morsel.hash(join_columns)
     cdef int64_t i, row_idx
 

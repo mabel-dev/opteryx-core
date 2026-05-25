@@ -44,6 +44,7 @@
 #include "ops/string_predicates.h"  // str_in_list
 #include "ops/interval_ops.h"       // D.12 — DRAKEN_INTERVAL kernels
 #include "ops/int_bitwise.h"        // E.2 — AND/OR/XOR/NOT/SHL/SHR across int8/16/32/64
+#include "ops/decimal_arith.h"     // E.32 — scale-aware DECIMAL arithmetic kernels
 
 // ---------------------------------------------------------------------------
 // TypeOps: one entry per DrakenType in the dispatch table.
@@ -350,11 +351,23 @@ struct OpsTable {
         entries[DRAKEN_FLOAT64].float_between     = draken::ops::f64_between;
         entries[DRAKEN_FLOAT64].in_list           = draken::ops::f64_in_list;
 
-        // D.10 — DECIMAL: physical dispatch reuses INT64 kernels.
-        // Logical DECIMAL(p,s) stores int64 unscaled values; all compare/hash/
-        // reduction/gather ops are identical to INT64. Scale is handled at
-        // ingestion and readback edges only; the hot path never reads it.
+        // D.10 / E.32 — DECIMAL: hash/compare/gather/reduction are identical to INT64
+        // (scale is transparent to these ops). Arithmetic is scale-aware and intercepted
+        // at the nanobind boundary in draken_native.cpp BEFORE OpsTable dispatch; the
+        // arithmetic slots are explicitly cleared here to prevent wrong-scale dispatch if
+        // reached through OpsTable directly. See decimal_arith.h for the kernels.
         entries[DRAKEN_DECIMAL] = entries[DRAKEN_INT64];
+        entries[DRAKEN_DECIMAL].add   = nullptr;
+        entries[DRAKEN_DECIMAL].sub   = nullptr;
+        entries[DRAKEN_DECIMAL].mul   = nullptr;
+        entries[DRAKEN_DECIMAL].div   = nullptr;
+        entries[DRAKEN_DECIMAL].mod   = nullptr;
+        entries[DRAKEN_DECIMAL].add_s = nullptr;
+        entries[DRAKEN_DECIMAL].sub_s = nullptr;
+        entries[DRAKEN_DECIMAL].mul_s = nullptr;
+        entries[DRAKEN_DECIMAL].div_s = nullptr;
+        entries[DRAKEN_DECIMAL].mod_s = nullptr;
+        entries[DRAKEN_DECIMAL].neg   = nullptr;
 
         // D.8 — TIMESTAMP64: physical dispatch reuses INT64 kernels.
         // Hot path dispatches on DRAKEN_TIMESTAMP64 and never reads the logical

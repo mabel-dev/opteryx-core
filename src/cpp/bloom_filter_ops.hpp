@@ -1,0 +1,128 @@
+#pragma once
+#include <cstdint>
+#include <cstddef>
+
+// Second-hash mixing constant (golden ratio, Fibonacci hashing)
+static constexpr uint64_t BLOOM_GOLDEN_RATIO = 0x9E3779B97F4A7C15ULL;
+
+// Insert n hashes into the 64-bit-chunk bit array.
+// Caller owns bit_array (calloc-zeroed). Thread-unsafe for concurrent writes.
+static inline void bloom_insert_many(
+    uint64_t* __restrict__ bit_array,
+    const uint64_t* __restrict__ hashes,
+    const size_t n,
+    const uint64_t bit_mask
+) noexcept {
+    for (size_t i = 0; i < n; ++i) {
+        const uint64_t h = hashes[i];
+        const uint64_t a = h & bit_mask;
+        const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
+        bit_array[a >> 6] |= uint64_t(1) << (a & 63u);
+        bit_array[b >> 6] |= uint64_t(1) << (b & 63u);
+    }
+}
+
+// Probe n hashes against the bit array. Writes a bit-packed result into
+// result[] (LSB-first, one bit per hash). Caller must zero result before
+// calling; this function only sets bits, never clears them.
+//
+// Platform dispatch: NEON (ARM64) or SSE2 (x86-64), else scalar.
+// No prefetch — scatter access pattern makes it counter-productive.
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+
+static inline void bloom_query_packed(
+    const uint64_t* __restrict__ bit_array,
+    const uint64_t* __restrict__ hashes,
+    const size_t n,
+    const uint64_t bit_mask,
+    uint8_t* __restrict__ result
+) noexcept {
+    static const uint8_t BIT_WEIGHTS_ARR[8] = {1, 2, 4, 8, 16, 32, 64, 128};
+    const uint8x8_t BIT_WEIGHTS = vld1_u8(BIT_WEIGHTS_ARR);
+
+    size_t i = 0;
+    // Process 8 hashes at a time: compute 8 booleans, pack into 1 byte with NEON.
+    for (; i + 8 <= n; i += 8) {
+        uint8_t hits[8];
+        for (int j = 0; j < 8; ++j) {
+            const uint64_t h = hashes[i + j];
+            const uint64_t a = h & bit_mask;
+            const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
+            hits[j] = (uint8_t)(
+                ((bit_array[a >> 6] >> (a & 63u)) & 1u) &
+                ((bit_array[b >> 6] >> (b & 63u)) & 1u)
+            );
+        }
+        // hits[j] is 0 or 1; multiply by bit weight, horizontal-add → packed byte.
+        result[i >> 3] = vaddv_u8(vmul_u8(vld1_u8(hits), BIT_WEIGHTS));
+    }
+    // Scalar tail for the remainder.
+    for (; i < n; ++i) {
+        const uint64_t h = hashes[i];
+        const uint64_t a = h & bit_mask;
+        const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
+        if (((bit_array[a >> 6] >> (a & 63u)) & 1u) &
+            ((bit_array[b >> 6] >> (b & 63u)) & 1u))
+            result[i >> 3] |= uint8_t(1) << (i & 7u);
+    }
+}
+
+#elif defined(__SSE2__)
+#include <emmintrin.h>
+
+static inline void bloom_query_packed(
+    const uint64_t* __restrict__ bit_array,
+    const uint64_t* __restrict__ hashes,
+    const size_t n,
+    const uint64_t bit_mask,
+    uint8_t* __restrict__ result
+) noexcept {
+    size_t i = 0;
+    // 8 hashes → 8 bytes (0x00 or 0xFF) → movemask → 1 packed byte.
+    for (; i + 8 <= n; i += 8) {
+        alignas(8) int8_t hits[8];
+        for (int j = 0; j < 8; ++j) {
+            const uint64_t h = hashes[i + j];
+            const uint64_t a = h & bit_mask;
+            const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
+            hits[j] = (
+                ((bit_array[a >> 6] >> (a & 63u)) & 1u) &
+                ((bit_array[b >> 6] >> (b & 63u)) & 1u)
+            ) ? -1 : 0; // 0xFF (MSB set) or 0x00 for _mm_movemask_epi8
+        }
+        // _mm_loadl_epi64: load 64-bit, zero-extend to 128-bit (high bytes = 0).
+        // movemask picks MSB of all 16 bytes; low 8 are our hits, high 8 are 0.
+        __m128i v = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(hits));
+        result[i >> 3] = (uint8_t)_mm_movemask_epi8(v);
+    }
+    for (; i < n; ++i) {
+        const uint64_t h = hashes[i];
+        const uint64_t a = h & bit_mask;
+        const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
+        if (((bit_array[a >> 6] >> (a & 63u)) & 1u) &
+            ((bit_array[b >> 6] >> (b & 63u)) & 1u))
+            result[i >> 3] |= uint8_t(1) << (i & 7u);
+    }
+}
+
+#else
+// Scalar fallback for unsupported targets.
+static inline void bloom_query_packed(
+    const uint64_t* __restrict__ bit_array,
+    const uint64_t* __restrict__ hashes,
+    const size_t n,
+    const uint64_t bit_mask,
+    uint8_t* __restrict__ result
+) noexcept {
+    for (size_t i = 0; i < n; ++i) {
+        const uint64_t h = hashes[i];
+        const uint64_t a = h & bit_mask;
+        const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
+        if (((bit_array[a >> 6] >> (a & 63u)) & 1u) &
+            ((bit_array[b >> 6] >> (b & 63u)) & 1u))
+            result[i >> 3] |= uint8_t(1) << (i & 7u);
+    }
+}
+#endif

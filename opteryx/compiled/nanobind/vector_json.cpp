@@ -60,15 +60,12 @@ static const DrakenVector* unwrap_str_vec(nb::object obj, const char* fn) {
     const DrakenVector* dv = draken_vector_unwrap(obj.ptr());
     if (!dv) throw nb::python_error();
     const bool ok =
-        dv->type == DRAKEN_VARCHAR    ||
-        dv->type == DRAKEN_NVARCHAR   ||
-        dv->type == DRAKEN_VARBINARY  ||
-        dv->type == DRAKEN_DICTIONARY ||
-        dv->type == DRAKEN_CONSTANT;
+        dv->type == DRAKEN_VARCHAR   ||
+        dv->type == DRAKEN_NVARCHAR  ||
+        dv->type == DRAKEN_VARBINARY;
     if (!ok)
         throw nb::type_error(
-            (std::string(fn) + ": expected a VARCHAR/NVARCHAR/VARBINARY/DICTIONARY/"
-             "CONSTANT DrakenVector").c_str());
+            (std::string(fn) + ": expected a VARCHAR/NVARCHAR/VARBINARY DrakenVector").c_str());
     return dv;
 }
 

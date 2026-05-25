@@ -14,8 +14,8 @@
 // simd_hash_i64, draken_vector_unwrap, draken_vector_own_raw are resolved
 // at import time via RTLD_GLOBAL set in draken/__init__.py.
 //
-// §1 EXCEPTION (design docs 02, 07): CarcharSet is hash-only; no key
-//   verification. In_list inherits this exception, documented here.
+// CarcharSet is hash-only; no key verification. String literals use the same
+// full-content long-string hash path as draken/ops/string_hash.h.
 //
 // Replaces: opteryx/compiled/vector_ops/vector_{log,in_list,ip_in_cidr}.pyx
 //           (deleted as part of E.14).
@@ -176,7 +176,7 @@ static inline void bm_negate_inplace(
 // Build a CarcharSet from a Python sequence of literals.
 //
 // The hash path is determined by `vtype` (the probe vector type) so that
-// set-building and probe-side hashes are identical — §1 exception inherited.
+// set-building and probe-side hashes are identical.
 //
 // Python literal types expected per vtype family:
 //   INT family   : int, bool (bool is subclass of int in Python)
@@ -266,7 +266,7 @@ static CarcharSet build_carchar_from_list(nb::object literals, DrakenType vtype)
 
             DrakenStringSlot slot;
             draken_build_string_slot(&slot, bytes, len, 0u);
-            scratch = draken::ops::str_hash_seed(&slot);
+            scratch = draken::ops::str_hash_seed(&slot, bytes);
             simd_hash_i64(&scratch, &hash_out, 1);
             set.insert_or_ignore(hash_out);
         }
@@ -421,7 +421,7 @@ NB_MODULE(vector_misc, m) {
         nb::arg("v"), nb::arg("literals"), nb::arg("negate") = false,
         "v IN literals: hash-only membership test → BOOL. "
         "literals is a Python sequence of scalars (bytes/int/float/bool/None). "
-        "§1 EXCEPTION: hash-only, no key verification. NULL propagates (TVL). "
+        "Hash-only, no key verification. NULL propagates (TVL). "
         "Set negate=True for NOT IN LIST.");
 
     m.def("vector_ip_in_cidr",

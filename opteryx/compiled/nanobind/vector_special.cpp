@@ -64,11 +64,9 @@ static nb::object impl_map_access_string(nb::object vec_obj, nb::object key_obj)
     const DrakenVector* dv = draken_vector_unwrap(vec_obj.ptr());
     if (!dv) throw nb::python_error();
     const bool is_str =
-        dv->type == DRAKEN_VARCHAR   ||
-        dv->type == DRAKEN_NVARCHAR  ||
-        dv->type == DRAKEN_VARBINARY ||
-        dv->type == DRAKEN_DICTIONARY||
-        dv->type == DRAKEN_CONSTANT;
+        dv->type == DRAKEN_VARCHAR  ||
+        dv->type == DRAKEN_NVARCHAR ||
+        dv->type == DRAKEN_VARBINARY;
     if (!is_str)
         throw nb::type_error(
             "vector_map_access_string: expected a string-family DrakenVector");
