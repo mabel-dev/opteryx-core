@@ -384,11 +384,18 @@ static void serialize_string_dict(std::vector<uint8_t>& out, const DecodedColumn
     write_u32(out, offsets_count);
     size_t pos = out.size();
     out.resize(pos + offsets_count * 4);
-    int32_t* dst_off = reinterpret_cast<int32_t*>(out.data() + pos);
+    // Use memcpy for each 4-byte write: the byte-vector buffer is not
+    // guaranteed to be 4-byte aligned, and reinterpret_cast<int32_t*> would
+    // trigger UBSAN "store to misaligned address".
+    uint8_t* dst_off = out.data() + pos;
     for (uint32_t i = 0; i < dict_size; ++i) {
-        dst_off[i] = static_cast<int32_t>(col.string_dict_offsets[i]);
+        int32_t tmp = static_cast<int32_t>(col.string_dict_offsets[i]);
+        std::memcpy(dst_off + i * 4, &tmp, sizeof(int32_t));
     }
-    dst_off[dict_size] = static_cast<int32_t>(col.string_dict_arena.size());
+    {
+        int32_t tmp = static_cast<int32_t>(col.string_dict_arena.size());
+        std::memcpy(dst_off + dict_size * 4, &tmp, sizeof(int32_t));
+    }
 
     // Arena
     write_bytes(out, col.string_dict_arena.data(), col.string_dict_arena.size());

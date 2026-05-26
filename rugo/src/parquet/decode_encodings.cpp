@@ -46,15 +46,17 @@ static inline void unpack_group_8_scalar(const uint8_t* __restrict__ src,
         for (int i = 0; i < 8; i++)
             dst[i] = (int32_t)((word >> (i * bit_width)) & mask);
     } else {
-        const uint32_t mask = (1U << bit_width) - 1;
+        // bit_width is 9-32 in this branch; use uint64_t to avoid shift-by-32 UB
+        // when bit_width==32 the mask (1ULL<<32)-1 = 0xFFFFFFFF is correct.
+        const uint64_t mask = (bit_width == 32) ? 0xFFFFFFFFULL : ((1ULL << bit_width) - 1ULL);
         const int bytes = (8 * bit_width + 7) / 8;
         for (int i = 0; i < 8; i++) {
             const int bit_pos  = i * bit_width;
             const int byte_pos = bit_pos / 8;
             const int bit_off  = bit_pos % 8;
-            uint32_t val = 0;
+            uint64_t val = 0;
             for (int b = 0; b < 5 && byte_pos + b < bytes; b++)
-                val |= ((uint32_t)src[byte_pos + b]) << (b * 8);
+                val |= ((uint64_t)src[byte_pos + b]) << (b * 8);
             dst[i] = (int32_t)((val >> bit_off) & mask);
         }
     }

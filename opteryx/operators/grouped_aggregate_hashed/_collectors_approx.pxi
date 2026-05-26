@@ -12,6 +12,9 @@ from libc.stddef cimport size_t
 from libc.stdint cimport int64_t, uint64_t, uint8_t
 from libcpp.vector cimport vector
 
+# Hoist the shim Vector import to module level to avoid hot-path inline imports (E.30a)
+from draken.vectors.vector import Vector as _V
+
 
 # ---------------------------------------------------------------------------
 # HyperLogLog declarations (from src/cpp/hllpp.h)
@@ -76,7 +79,8 @@ cdef class ApproxCountDistinctCollector(BaseCollector):
         cdef Py_ssize_t i
         for i in range(num_groups):
             vals.append(<int64_t>self._sketches[i].estimate())
-        return vector_from_sequence(vals)
+        nb = vector_from_sequence(vals)
+        return _V(nb)
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +148,8 @@ cdef class ApproxPercentileCollector(BaseCollector):
                 vals.append(None)
             else:
                 vals.append(td_quantile(h, self._percentile))
-        return vector_from_sequence(vals)
+        nb = vector_from_sequence(vals)
+        return _V(nb)
 
 
 # ---------------------------------------------------------------------------
@@ -209,4 +214,5 @@ cdef class ArrayAggCollector(BaseCollector):
             if limit is not None:
                 vals = vals[:limit]
             result.append(vals)
-        return vector_from_sequence(result)
+        nb = vector_from_sequence(result)
+        return _V(nb)

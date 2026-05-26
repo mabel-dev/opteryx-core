@@ -44,39 +44,38 @@ directly — this dispatcher chooses defaults for the common path only.
 
 from draken import draken_native as _draken_native
 
-
 # Each entry maps a logical type name → constructor function from
 # draken_native. Names are stored uppercase; lookup normalises input.
 _DTYPE_DISPATCH = {
     # Integers — INT64 is the no-suffix constructor (matches
     # `vector_from_sequence` semantics in the bare-no-dtype form).
-    "INT64":     _draken_native.vector_from_sequence,
-    "INTEGER":   _draken_native.vector_from_sequence,
-    "INT":       _draken_native.vector_from_sequence,
-    "INT32":     _draken_native.vector_int32_from_sequence,
-    "INT16":     _draken_native.vector_int16_from_sequence,
-    "INT8":      _draken_native.vector_int8_from_sequence,
+    "INT64": _draken_native.vector_from_sequence,
+    "INTEGER": _draken_native.vector_from_sequence,
+    "INT": _draken_native.vector_from_sequence,
+    "INT32": _draken_native.vector_int32_from_sequence,
+    "INT16": _draken_native.vector_int16_from_sequence,
+    "INT8": _draken_native.vector_int8_from_sequence,
     # Floats
-    "FLOAT64":   _draken_native.vector_float64_from_sequence,
-    "DOUBLE":    _draken_native.vector_float64_from_sequence,
-    "FLOAT32":   _draken_native.vector_float32_from_sequence,
-    "FLOAT":     _draken_native.vector_float32_from_sequence,
+    "FLOAT64": _draken_native.vector_float64_from_sequence,
+    "DOUBLE": _draken_native.vector_float64_from_sequence,
+    "FLOAT32": _draken_native.vector_float32_from_sequence,
+    "FLOAT": _draken_native.vector_float32_from_sequence,
     # Strings
-    "VARCHAR":   _draken_native.vector_from_string_sequence,
-    "STRING":    _draken_native.vector_from_string_sequence,
+    "VARCHAR": _draken_native.vector_from_string_sequence,
+    "STRING": _draken_native.vector_from_string_sequence,
     # Booleans
-    "BOOLEAN":   _draken_native.vector_from_bool_sequence,
-    "BOOL":      _draken_native.vector_from_bool_sequence,
+    "BOOLEAN": _draken_native.vector_from_bool_sequence,
+    "BOOL": _draken_native.vector_from_bool_sequence,
     # Temporals
-    "DATE":      _draken_native.vector_date32_from_sequence,
-    "DATE32":    _draken_native.vector_date32_from_sequence,
-    "TIMESTAMP":   _draken_native.vector_timestamp_from_sequence,
+    "DATE": _draken_native.vector_date32_from_sequence,
+    "DATE32": _draken_native.vector_date32_from_sequence,
+    "TIMESTAMP": _draken_native.vector_timestamp_from_sequence,
     "TIMESTAMP64": _draken_native.vector_timestamp_from_sequence,
-    "TIME":      _draken_native.vector_time32_from_sequence,
-    "TIME32":    _draken_native.vector_time32_from_sequence,
-    "INTERVAL":  _draken_native.vector_interval_from_sequence,
+    "TIME": _draken_native.vector_time32_from_sequence,
+    "TIME32": _draken_native.vector_time32_from_sequence,
+    "INTERVAL": _draken_native.vector_interval_from_sequence,
     # Containers
-    "ARRAY":     _draken_native.vector_array_from_sequence,
+    "ARRAY": _draken_native.vector_array_from_sequence,
 }
 
 

@@ -189,7 +189,10 @@ cdef object _build_numeric_dict_int64(const uint8_t* p, uint32_t num_rows,
     p += codes_len
     cdef uint32_t values_len
     p = _read_u32(p, &values_len)
-    cdef const int64_t* dict_src = <const int64_t*>p
+    # Keep dict_src as uint8_t* — the buffer is byte-stream data with no
+    # guaranteed 8-byte alignment.  Casting to int64_t* triggers UBSAN
+    # "misaligned load"; memcpy handles alignment correctly regardless.
+    cdef const uint8_t* dict_src = p
 
     # draken_malloc dict values — transferred to _dict_i64_from_decoded
     cdef void* dict_vals = draken_malloc(<size_t>dict_size * sizeof(int64_t))
@@ -203,16 +206,22 @@ cdef object _build_numeric_dict_int64(const uint8_t* p, uint32_t num_rows,
         draken_free(dict_vals)
         raise MemoryError()
 
+    # Codes are packed bytes with no alignment guarantee — use memcpy to read
+    # each code to avoid UBSAN "misaligned load" on the uint16/uint32 casts.
     cdef uint32_t i
+    cdef uint16_t tmp16
+    cdef uint32_t tmp32
     if code_width == 1:
         for i in range(num_rows):
             codes_buf[i] = <uint32_t>codes_ptr[i]
     elif code_width == 2:
         for i in range(num_rows):
-            codes_buf[i] = <uint32_t>(<const uint16_t*>codes_ptr)[i]
+            memcpy(&tmp16, codes_ptr + i * 2, 2)
+            codes_buf[i] = <uint32_t>tmp16
     else:  # code_width == 4
         for i in range(num_rows):
-            codes_buf[i] = (<const uint32_t*>codes_ptr)[i]
+            memcpy(&tmp32, codes_ptr + i * 4, 4)
+            codes_buf[i] = tmp32
 
     # draken_malloc validity — transferred to _dict_i64_from_decoded
     cdef uint8_t* validity_buf = NULL
@@ -241,22 +250,32 @@ cdef object _build_numeric_dict_float32(const uint8_t* p, uint32_t num_rows,
     p += codes_len
     cdef uint32_t values_len
     p = _read_u32(p, &values_len)
-    cdef const float* dict_src = <const float*>p
+    # Keep dict_src as uint8_t* — byte-stream with no guaranteed 4-byte alignment.
+    # Use memcpy to extract each float value to avoid UBSAN misaligned load.
+    cdef const uint8_t* dict_src = p
 
     cdef void* expanded = draken_malloc(<size_t>num_rows * sizeof(float))
     if expanded == NULL:
         raise MemoryError()
     cdef float* dst = <float*>expanded
     cdef uint32_t i
+    cdef uint16_t tmp16
+    cdef uint32_t tmp32
+    cdef float ftmp
     if code_width == 1:
         for i in range(num_rows):
-            dst[i] = dict_src[<uint32_t>codes_ptr[i]]
+            memcpy(&ftmp, dict_src + <size_t>codes_ptr[i] * 4, 4)
+            dst[i] = ftmp
     elif code_width == 2:
         for i in range(num_rows):
-            dst[i] = dict_src[<uint32_t>(<const uint16_t*>codes_ptr)[i]]
+            memcpy(&tmp16, codes_ptr + i * 2, 2)
+            memcpy(&ftmp, dict_src + <size_t>tmp16 * 4, 4)
+            dst[i] = ftmp
     else:
         for i in range(num_rows):
-            dst[i] = dict_src[(<const uint32_t*>codes_ptr)[i]]
+            memcpy(&tmp32, codes_ptr + i * 4, 4)
+            memcpy(&ftmp, dict_src + <size_t>tmp32 * 4, 4)
+            dst[i] = ftmp
 
     cdef uint8_t* validity_buf = NULL
     if null_bitmap_len > 0:
@@ -282,22 +301,32 @@ cdef object _build_numeric_dict_float64(const uint8_t* p, uint32_t num_rows,
     p += codes_len
     cdef uint32_t values_len
     p = _read_u32(p, &values_len)
-    cdef const double* dict_src = <const double*>p
+    # Keep dict_src as uint8_t* — byte-stream with no guaranteed 8-byte alignment.
+    # Use memcpy to extract each double value to avoid UBSAN misaligned load.
+    cdef const uint8_t* dict_src = p
 
     cdef void* expanded = draken_malloc(<size_t>num_rows * sizeof(double))
     if expanded == NULL:
         raise MemoryError()
     cdef double* dst = <double*>expanded
     cdef uint32_t i
+    cdef uint16_t tmp16
+    cdef uint32_t tmp32
+    cdef double dtmp
     if code_width == 1:
         for i in range(num_rows):
-            dst[i] = dict_src[<uint32_t>codes_ptr[i]]
+            memcpy(&dtmp, dict_src + <size_t>codes_ptr[i] * 8, 8)
+            dst[i] = dtmp
     elif code_width == 2:
         for i in range(num_rows):
-            dst[i] = dict_src[<uint32_t>(<const uint16_t*>codes_ptr)[i]]
+            memcpy(&tmp16, codes_ptr + i * 2, 2)
+            memcpy(&dtmp, dict_src + <size_t>tmp16 * 8, 8)
+            dst[i] = dtmp
     else:
         for i in range(num_rows):
-            dst[i] = dict_src[(<const uint32_t*>codes_ptr)[i]]
+            memcpy(&tmp32, codes_ptr + i * 4, 4)
+            memcpy(&dtmp, dict_src + <size_t>tmp32 * 8, 8)
+            dst[i] = dtmp
 
     cdef uint8_t* validity_buf = NULL
     if null_bitmap_len > 0:
@@ -369,6 +398,8 @@ cdef object _build_string_dict(const uint8_t* p, uint32_t num_rows,
 
     # Build per-row slots.
     cdef uint32_t row, code, s_off, s_off_end, slen
+    cdef uint16_t tmp16
+    cdef uint32_t tmp32
     cdef DrakenStringSlot* slot_ptr
     for row in range(num_rows):
         slot_ptr = <DrakenStringSlot*>(slots_buf + <size_t>row * SLOT_BYTES)
@@ -379,9 +410,11 @@ cdef object _build_string_dict(const uint8_t* p, uint32_t num_rows,
             if code_width == 1:
                 code = <uint32_t>codes_ptr[row]
             elif code_width == 2:
-                code = <uint32_t>(<const uint16_t*>codes_ptr)[row]
+                memcpy(&tmp16, codes_ptr + row * 2, 2)
+                code = <uint32_t>tmp16
             else:
-                code = (<const uint32_t*>codes_ptr)[row]
+                memcpy(&tmp32, codes_ptr + row * 4, 4)
+                code = tmp32
             s_off     = offsets_buf[code]
             s_off_end = offsets_buf[code + 1]
             slen      = s_off_end - s_off

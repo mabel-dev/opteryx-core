@@ -23,6 +23,9 @@ from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.fixed_vector cimport free_fixed_buffer
 from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
 
+# Hoist the shim Vector import to module level to avoid hot-path inline imports (E.30a)
+from draken.vectors.vector import Vector as _V
+
 cdef extern from "core/alloc.h" nogil:
     void* draken_malloc(size_t n) nogil
     void  draken_free(void* p) nogil
@@ -893,7 +896,8 @@ cdef class MinMaxObjectCollector(BaseCollector):
                 result.append(None)
             else:
                 result.append(bytes(vec.data()[:vec.size()]).decode('utf-8'))
-        return vector_from_sequence(result)
+        nb = vector_from_sequence(result)
+        return _V(nb)
 
     cpdef BaseCollector _clone_empty(self):
         cdef MinMaxObjectCollector c = MinMaxObjectCollector()

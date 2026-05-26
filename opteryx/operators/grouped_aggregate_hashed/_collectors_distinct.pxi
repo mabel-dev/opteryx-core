@@ -16,6 +16,9 @@ from draken.vectors.vector cimport Vector
 from draken.core.buffers cimport DrakenVarBuffer, DrakenVector
 from draken.interop.vector_sequence import vector_from_sequence
 
+# Hoist the shim Vector import to module level to avoid hot-path inline imports (E.30a)
+from draken.vectors.vector import Vector as _V
+
 
 cdef extern from "carchar_set.hpp" namespace "opteryx::carchar":
     cdef cppclass CarcharSet:
@@ -128,7 +131,10 @@ cdef class CountDistinctCollector(BaseCollector):
             self._sets[i].tighten()
             vals.append(<int64_t>self._sets[i].size())
 
-        return vector_from_sequence(vals)
+        # Wrap the nanobind Vector returned by vector_from_sequence in the
+        # Cython Vector shim so C-level consumers receive the expected type.
+        nb = vector_from_sequence(vals)
+        return _V(nb)
 
 
 # ---------------------------------------------------------------------------

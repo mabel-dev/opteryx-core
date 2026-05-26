@@ -9,7 +9,7 @@
 # cython: optimize.unpack_method_calls=True
 
 # distutils: language = c++
-from libc.stdint cimport uint8_t, int64_t, uint64_t
+from libc.stdint cimport uint8_t, int64_t, uint64_t, INT64_MIN, INT64_MAX
 from libc.math cimport isnan
 from libcpp.unordered_map cimport unordered_map
 from cython.operator cimport dereference, preincrement
@@ -18,12 +18,22 @@ from libc.string cimport memcpy, memset
 from cpython.bytes cimport PyBytes_AsStringAndSize
 from cpython.unicode cimport PyUnicode_AsUTF8AndSize, PyUnicode_Check
 
+# Safe absolute value macro that handles INT64_MIN (prevents undefined behavior on negation)
+cdef extern from *:
+    """
+    #undef __Pyx_sst_abs
+    #define __Pyx_sst_abs(value) (((value) < 0 && (value) != INT64_MIN) ? -(value) : (value))
+    """
+    pass
+
 import datetime
 from decimal import Decimal
 from cython cimport cast
 
 cdef uint64_t _INT64_HIGH_BIT = (<uint64_t>1) << 63
-cdef int64_t NULL_FLAG = -cast(int64_t, _INT64_HIGH_BIT)              # -9223372036854775808
+# Cast 2^63 (uint64) directly to int64 to get INT64_MIN (-9223372036854775808).
+# Do NOT negate: -cast(int64_t, 2^63) is negation of INT64_MIN which is UB.
+cdef int64_t NULL_FLAG = cast(int64_t, _INT64_HIGH_BIT)               # -9223372036854775808
 cdef int64_t MIN_SIGNED_64BIT = NULL_FLAG + 1               # -9223372036854775807
 cdef int64_t MAX_SIGNED_64BIT = cast(int64_t, _INT64_HIGH_BIT - 1)    # 9223372036854775807
 
