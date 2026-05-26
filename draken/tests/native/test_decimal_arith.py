@@ -506,23 +506,24 @@ class TestDecimalNeg:
         assert pylist(r) == [Decimal('5.00')]
 
     def test_int64_min_raises(self):
-        # INT64_MIN as a DECIMAL value: unscaled = -9223372036854775808
-        # This requires scale=0 to store as unscaled int64
-        # Create by storing a large negative value just at the edge
-        # We need to approach INT64_MIN: -(2^63) = -9223372036854775808
-        # But ingestion rejects values outside DECIMAL(p≤18, s) range,
-        # so we create it via subtraction overflow if needed, or just
-        # test with a value that would produce INT64_MIN after negation.
-        # The nearest we can get with DECIMAL(18,0): -9223372036854775807
-        # neg(-9223372036854775807) = +9223372036854775807 — fine
-        # We can't easily construct INT64_MIN via ingestion (it would overflow
-        # DECIMAL(18,0) since it's 19 digits). Skip the exact INT64_MIN case
-        # and document this in the test — it's a theoretical corner.
-        # INT64_MIN = -9223372036854775808 which is NOT storable in DECIMAL(18,0)
-        # (max unscaled magnitude for DECIMAL(18,0) = 999999999999999999).
-        # So the neg(INT64_MIN) path is unreachable from well-formed DECIMAL inputs.
-        pytest.skip(
-            "INT64_MIN unscaled is unreachable in well-formed DECIMAL(≤18) vectors")
+        # The dec_neg() kernel guards against negating INT64_MIN because -INT64_MIN
+        # is undefined behaviour in signed arithmetic. Ingestion via
+        # vector_decimal_from_sequence rejects 19-digit values, so INT64_MIN cannot
+        # arrive through the well-formed-input path. The guard exists as
+        # defence-in-depth against corrupted buffer state (bug elsewhere, or test
+        # corruption planted deliberately as below).
+        #
+        # We plant the corrupted state via vector_reinterpret_as_decimal, which
+        # bypasses per-value precision validation by design — it takes an INT64
+        # vector and re-tags it as DECIMAL with the supplied (precision, scale).
+        # This is the same primitive shape as vector_reinterpret_as_timestamp64.
+        INT64_MIN = -9_223_372_036_854_775_808
+        int_vec = dn.vector_from_sequence([INT64_MIN])
+        dec_vec = dn.vector_reinterpret_as_decimal(int_vec, precision=18, scale=0)
+        # Confirm the planted state: the DECIMAL vector now holds INT64_MIN unscaled.
+        assert dec_vec.type == dn.DrakenType.DECIMAL
+        with pytest.raises(OverflowError):
+            dec_vec.neg()
 
     def test_result_type_is_decimal(self):
         a = dec([Decimal('1.00')])

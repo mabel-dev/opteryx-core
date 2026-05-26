@@ -33,6 +33,9 @@ def f64(vals):
 def f32(vals):
     return dn.vector_float32_from_sequence(vals)
 
+def sv(vals):
+    return dn.vector_from_string_sequence(vals)
+
 NAN = float("nan")
 INF = float("inf")
 
@@ -95,6 +98,44 @@ class TestRoundTrip:
     def test_f64_all_null(self):
         v = f64([None, None, None])
         assert v.to_pylist() == [None, None, None]
+
+
+class TestStringToFloat64:
+    def test_parse_string_vector(self):
+        v = dn.vector_cast_string_to_float64(sv(["1.5", "-2", "1e3"]))
+        assert v.to_pylist() == [1.5, -2.0, 1000.0]
+
+    def test_parse_trims_ascii_space_and_plus(self):
+        v = dn.vector_cast_string_to_float64(sv(["  123.45  ", "+Infinity"]))
+        out = v.to_pylist()
+        assert out[0] == pytest.approx(123.45)
+        assert math.isinf(out[1]) and out[1] > 0
+
+    def test_invalid_and_null_become_null(self):
+        v = dn.vector_cast_string_to_float64(sv(["not a double", "", None, "4.25"]))
+        assert v.to_pylist() == [None, None, None, 4.25]
+
+    def test_rejects_non_string_vector(self):
+        with pytest.raises(Exception):
+            dn.vector_cast_string_to_float64(f64([1.0]))
+
+
+class TestFloat64ToString:
+    def test_formats_float64_with_ryu_fixed_default_precision(self):
+        v = dn.vector_cast_float64_to_string(f64([1.5, -2.0, 1.2345678]))
+        assert v.to_pylist() == ["1.5", "-2.0", "1.234568"]
+
+    def test_null_and_special_values(self):
+        v = dn.vector_cast_float64_to_string(f64([None, float("nan"), INF, -INF]))
+        assert v.to_pylist() == [None, "NaN", "Infinity", "-Infinity"]
+
+    def test_precision_argument(self):
+        v = dn.vector_cast_float64_to_string(f64([1.2345]), precision=2)
+        assert v.to_pylist() == ["1.23"]
+
+    def test_rejects_non_float_vector(self):
+        with pytest.raises(Exception):
+            dn.vector_cast_float64_to_string(sv(["1.0"]))
 
 
 # ---------------------------------------------------------------------------

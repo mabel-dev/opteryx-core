@@ -286,11 +286,7 @@ STATEMENTS = [
 # fmt:on
 
 
-@pytest.mark.parametrize("statement, rows, columns, exception", STATEMENTS)
-def test_sql_battery(statement: str, rows: int, columns: int, exception: Optional[Exception]):
-    """
-    Test a battery of statements
-    """
+def _assert_sql_battery_shape(statement: str, rows: int, columns: int, exception: Optional[Exception]):
     from opteryx.connectors import DiskConnector
 
     opteryx.register_workspace("testdata", DiskConnector)
@@ -320,6 +316,23 @@ def test_sql_battery(statement: str, rows: int, columns: int, exception: Optiona
             raise ValueError(
                 f"{format_sql(statement)}\nQuery failed with error {type(error)} but error {exception} was expected"
             ) from error
+
+
+@pytest.mark.parametrize("statement, rows, columns, exception", STATEMENTS)
+def test_sql_battery(statement: str, rows: int, columns: int, exception: Optional[Exception]):
+    """
+    Test a battery of statements
+    """
+    _assert_sql_battery_shape(statement, rows, columns, exception)
+
+
+def test_sql_battery_pass2_sequence_regression():
+    """
+    Replay the early shapes sequence with fresh sessions to guard the
+    masked parquet pass-2 path against sequence-sensitive crashes.
+    """
+    for statement, rows, columns, exception in STATEMENTS[:20]:
+        _assert_sql_battery_shape(statement, rows, columns, exception)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -177,7 +177,10 @@ cdef class UngroupedAggregateEngine:
             else:
                 value = s / c
             names.append(afin.output_alias)
-            vectors.append(vector_from_sequence([value]))
+            # AVG always produces a float result (or None). Dispatch through the
+            # float64 constructor explicitly — the int64-default path errors on
+            # the float value.
+            vectors.append(vector_from_sequence([value], dtype="DOUBLE"))
 
         return Morsel.from_vectors(names, vectors)
 

@@ -708,6 +708,7 @@ extensions = [
             "src/cpp/simd_hash.cpp",
             "src/cpp/simd_env.cpp",
             "src/cpp/cpu_features.cpp",
+            "third_party/ulfjack/ryu/d2fixed.c",
             "third_party/nanobind/src/nb_combined.cpp",
         ],
         include_dirs=include_dirs
@@ -783,14 +784,6 @@ extensions = [
         extra_compile_args=C_FLAGS,
     ),
     Extension(
-        "opteryx.third_party.fastfloat.fast_float",
-        sources=["opteryx/third_party/fastfloat/fast_float.pyx"],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-        extra_link_args=LD_EXTRA,
-    ),
-    Extension(
         "opteryx.third_party.yyjson.cyyjson",
         sources=[
             "opteryx/third_party/yyjson/cyyjson.pyx",
@@ -798,33 +791,6 @@ extensions = [
         ],
         include_dirs=include_dirs + ["third_party/yyjson/src"],
         language="c",
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.third_party.facebook.zstd",
-        sources=["opteryx/third_party/facebook/zstd.pyx"] + get_zstd_vendor_sources(),
-        include_dirs=include_dirs
-        + [
-            "rugo/src/parquet/vendor/zstd",
-            "rugo/src/parquet/vendor/zstd/common",
-            "rugo/src/parquet/vendor/zstd/decompress",
-        ],
-        define_macros=[("ZSTD_STATIC_LINKING_ONLY", "1")],
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-        extra_link_args=LD_EXTRA,
-    ),
-    Extension(
-        "opteryx.third_party.lz4.lz4",
-        sources=["opteryx/third_party/lz4/lz4.pyx"] + get_lz4_vendor_sources(),
-        include_dirs=include_dirs + ["rugo/src/parquet/vendor/lz4"],
-        extra_compile_args=C_FLAGS,
-        language="c",
-    ),
-    Extension(
-        "opteryx.third_party.ulfjack.ryu",
-        sources=["opteryx/third_party/ulfjack/ryu.pyx", "third_party/ulfjack/ryu/d2fixed.c"],
-        include_dirs=include_dirs,
         extra_compile_args=C_FLAGS,
     ),
     Extension(

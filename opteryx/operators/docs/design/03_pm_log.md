@@ -221,8 +221,10 @@ Grep result (typed-Vector subclass cimports), ~10 production files:
 - `opteryx/expression/evaluator/comparisons.pyx`
 - `opteryx/expression/evaluator/arithmetic_dispatch.pyx`
 - `opteryx/expression/functions/implementations/utility.pyx`
-- `opteryx/third_party/ulfjack/ryu.pyx`
-- `opteryx/third_party/fastfloat/fast_float.pyx`
+- `opteryx/third_party/ulfjack/ryu.pyx` (removed; Draken now formats FLOAT64/FLOAT32
+  vectors to VARCHAR directly via vendored `third_party/ulfjack/ryu`)
+- `opteryx/third_party/fastfloat/fast_float.pyx` (removed; Draken now parses
+  string-family vectors to FLOAT64 directly via vendored `third_party/fastfloat`)
 
 The expression-side files may already be handled by eval-PM's recent
 migration — needs verification. The third_party files are surprising
@@ -550,3 +552,226 @@ shim-aware is the smaller, isolated change.
   fixes applied.
 - `make c` clean; `make q` at 16+/133 (vs 0/133 starting line).
 - D-D resolved; **awaiting D-E** for the shim/nb seam.
+
+## 2026-05-26 — D-E taken (operator-side); intermittent crash exposed; STOP
+
+### D-E owned and partly closed
+After clarification: D-E is operator-PM lane. The bridge isn't shim-aware
+by design — operator code unwraps `_nb` before nb calls.
+
+- **parquet_read.pyx `_coerce_logical_types`**: added
+  `from draken.vectors.vector cimport Vector as _DrakenShimVector`,
+  added `v_nb = (<_DrakenShimVector>v)._nb if isinstance(v, _DrakenShimVector) else v`
+  at the three nanobind reinterpret call sites. testdata.astronauts now
+  reads cleanly.
+- **filter.pyx `_build_constant_vector`**: was returning the nb Vector
+  from `vector_*_from_constant`; callers declare `cdef Vector new_vec`
+  and Cython rejects the cast. Wrapped the returns in
+  `Vector(_draken_native.vector_*_from_constant(...))` so callers see
+  the shim type. Compiles and runs.
+
+### `make q` rose to 119/133 (89%) — when it doesn't crash
+That matches the pre-rebuild stale-`.so` baseline. The 14 remaining
+failures are now clean categories: 22 `NotImplementedError` lines (real
+feature gaps — UTF-8/regex cluster, EXCEPT/INTERSECT/UNION dedup), 2
+`RuntimeError`. No more import-cascade or shim/nb-seam noise.
+
+### Intermittent crash — characterised, not diagnosed
+**The blocker.** `make q` crashes ~60% of runs (6/10 over a clean
+10-iteration sample). Pattern:
+
+- Same query in isolation: never crashes.
+- Same query 20× repeated: never crashes.
+- Full 20-query sequence in a fresh-session-per-query script:
+  crashes ~50% with `MallocScribble=1`.
+- `MallocScribble=1` env (macOS — writes 0xAA to freed, 0x55 to fresh
+  malloc) raises the crash rate to ~100%, confirming **read of
+  uninitialised or freed memory** (per architect intuition: race or
+  uninit).
+- `PYTHONFAULTHANDLER=1` changes timing enough that the crash
+  sometimes doesn't fire. No useful Python traceback from it.
+- `lldb` attempts to capture a native backtrace failed locally
+  (rebuild storms from touched timestamps; can be retried).
+
+### Where the bug almost certainly lives
+Three suspects, ordered:
+
+1. **My new producer helpers** —
+   `_materialize_fixed_buffer` / `_consume_int64_buffer` /
+   `_consume_float64_buffer` in `_collectors_numeric.pxi`, the inline
+   median producer in `_collectors_buffered.pxi`, and
+   `_ks_consume_int64_buffer` in `_key_store.pxi`. I reviewed them on
+   paper; the copy-from-libc-into-draken_malloc pattern looks correct.
+   But the intermittency tracks the GROUP BY paths (queries that touch
+   collectors crash later queries with `MallocScribble`), so the bug is
+   most likely here despite my review.
+
+2. **Cross-allocator ownership transfer.** Collectors keep state in
+   libc `malloc` (via `alloc_fixed_buffer`); results are in
+   mimalloc-allocated buffers transferred to Vectors via
+   `_vector_from_decoded` → `draken_vector_own_raw`. Vectors then free
+   via `draken_free` (mi_free). The collector's `__dealloc__` calls
+   `free_fixed_buffer(self._values, True)` which uses libc `free`. If
+   any path accidentally hands a libc buffer to a Vector or vice versa,
+   the wrong allocator gets called on free.
+
+3. **Process-wide caches.** `parquet_read._FOOTER_CACHE` is
+   module-level; thread pools (`opteryx/connectors/parquet_io/thread_pool_manager.py`)
+   are process-wide. If a Vector handle leaks into one of these,
+   later queries can dereference freed memory.
+
+### What I can't do from here
+- Get a useful native backtrace without LLDB working in this shell.
+- Bisect further by tweaking my helpers — every "fix" without a
+  backtrace is a guess.
+- Run AddressSanitizer (would need a rebuild with `-fsanitize=address`,
+  which I haven't done before in this tree).
+
+### Pre-existing issues observed in passing (NOT mine to fix)
+- `_wrap_string_buffer` in `_key_store.pxi` (lines 940-945, 991-997)
+  never frees the input `DrakenVarBuffer*`. The new buffer is allocated
+  to replace it, but the old one is orphaned. Memory leak, not a
+  crash — confirms my read of the original ownership semantics.
+- `getattr(v, "type", None)` pattern in `parquet_read.pyx` violates
+  CLAUDE.md §9 "hasattr is banned"; pre-existing.
+- `_apply_constant_replacements` in `filter.pyx` mutates
+  `morsel._columns[idx]` directly without going through the morsel's
+  C++ sync (`self._nb.append(...)` pattern from `_morsel_shim.pyx`).
+  May explain two new row-count regressions
+  (`WHERE planetId = 3` returns all rows instead of filtered) — the
+  Python-side replacement now succeeds but the C++ side still has the
+  original column. Pre-existing in shape; my Vector wrap may have
+  exposed it.
+
+### STOP and ask
+I'm pattern-matching against intermittent crashes without a backtrace.
+The honest call is **stop here and ask for help with the diagnosis**.
+Options:
+
+- **A. Get a backtrace.** Either someone runs LLDB locally on a known
+  reproducer, or we build an ASAN variant. ASAN would catch
+  use-after-free / heap-buffer-overflow with precise file:line. Worth
+  the build cost.
+- **B. Disable mimalloc temporarily** (use system malloc via env or
+  build flag) to test the cross-allocator hypothesis. If crashes
+  disappear, the bug is in transfer between allocators.
+- **C. Revert my collector migration and see if `make q` becomes
+  deterministic** (at the cost of losing the build).
+
+Recommendation: **A**. The crash is reproducible enough that a
+backtrace will point at the exact line. Without it, every change I
+make is a guess.
+
+### State left on disk (final)
+- `make c` clean.
+- `make q` ~119/133 when it completes; ~60% crash rate.
+- All migrations + D-E partials committed-equivalent.
+- No git operations performed (CLAUDE.md §1).
+
+## 2026-05-26 — Picking up remaining failures while crash investigation runs
+
+### AVG(int) RuntimeError — fixed (+2 tests)
+`opteryx/operators/aggregate/ungrouped_agg_engine.pyx:180` was calling
+`vector_from_sequence([value])` with a Python `float` value (AVG always
+produces a float). The dispatcher defaults to the int64 constructor
+which `std::bad_cast`s on the float. Fixed by passing
+`dtype="DOUBLE"` explicitly. `make q` rises from 119 → 121.
+
+### parquet_read pass-1/pass-2 merge — DIAGNOSED, very likely crash root cause
+
+The briefing flagged this as a known IndexError in §3.4. I dug in and
+found something concrete that **strongly correlates with the crash**.
+
+**Reproducer** (the multi-predicate astronauts query from the suite):
+```python
+SELECT * FROM testdata.astronauts
+WHERE name LIKE '%o%' AND `year` > 1900 AND gender ILIKE '%ale%'
+      AND group IN(1, 2, 3, 4, 5, 6)
+```
+
+**Diagnostic** (per-column lengths in the emitted morsel):
+```
+morsel: num_rows=41, num_columns=19
+  col[0] name                length=41    ← pass-1 (filter) col, filtered
+  col[1] year                length=41    ← pass-1, filtered
+  col[2] group               length=41    ← pass-1, filtered
+  col[3] status              length=4441  ← pass-2, UNFILTERED row-group size
+  col[4] birth_date          length=3409  ← pass-2, different RG?
+  col[5] birth_place         length=3409
+  col[6] gender              length=41    ← pass-1
+  col[7] alma_mater          length=46    ← pass-2, ???
+  col[8] undergraduate_major length=3409
+  ... (all over the map)
+  col[15] space_walks_hours  length=4531
+  col[18] death_mission      length=4531
+```
+
+**Pass-1 columns are correctly 41 rows. Pass-2 columns are
+unfiltered — and worse, they have different lengths even from each
+other.** That last part is bizarre: columns from the same row group
+should have the same row count.
+
+**The merge site** is
+`opteryx/operators/parquet_read/parquet_read.pyx:884-908`:
+
+```cython
+p1_filtered, p1_identity_names = p1_cache.pop((path, rg_idx))
+
+p1_vectors_by_identity = {n: p1_filtered.column(n) for n in p1_identity_names}
+p2_vectors_by_identity = {
+    pass2_name_to_identity[col]: vec
+    for col, vec in row_group.items()
+}
+# combined_vectors mixes p1 (filtered) with p2 (whatever row_group gives)
+# Morsel.from_vectors() doesn't validate equal lengths.
+```
+
+**The mask is being passed to the C++ pipeline** (via
+`pool_reader.pyx:715` `submit_work_native_masked` with `mask_bytes`).
+So either:
+- The C++ pipeline is receiving the mask but **not applying it** to
+  the returned vectors — bug in
+  `opteryx/connectors/parquet_io/pool_reader.cpp` or the rugo pipeline
+  behind it.
+- The C++ pipeline IS applying the mask but vectors are coming back
+  through the wrong code path / merged from multiple row groups.
+
+**Why this is almost certainly the intermittent crash too.** Once a
+morsel has columns of different lengths, downstream consumers iterate
+by one column's length and access another's data — that's
+classic out-of-bounds read = `MallocScribble` SIGV. The bug is
+present any time a query exercises pass-1/pass-2 with surviving rows,
+which happens often in the test suite once it reaches astronauts /
+missions queries with filters.
+
+**The astronauts LIKE/IN query is the exact one that segfaults in
+`MallocScribble=1 make q` reproducers.** That's a tight correlation
+worth following.
+
+**Surfacing draken/rugo-PM ticket D-F:** the C++ pipeline's
+pass-2-with-mask path returns row-group-original vectors instead of
+mask-filtered ones (or returns inconsistent column lengths). Trace
+from `pool_reader.pyx:submit_work_native_masked` → CppIOPipeline →
+rugo decode. Either the mask isn't being applied or the row-group
+merge logic in the pipeline mixes rows across groups.
+
+**Operator-side workaround available** (not applied yet): in the merge
+block at parquet_read.pyx:884-908, store mask_bytes in `p1_cache`
+alongside `p1_filtered`, then `take(surviving_indices)` on each p2
+vector before merging. Cost: defeats late-materialisation entirely
+(we decode everything then filter post-hoc). Worth it as a temporary
+unblock if D-F doesn't land quickly, but better to fix the C++ side.
+
+### Next steps
+- Hand the parquet_read diagnosis to the crash-investigation agent
+  (`04_ticket_crash_investigation.md`) — they should test whether
+  fixing the column-length inconsistency eliminates the SIGSEGV.
+- If yes, D-F is the real fix and D-F belongs to draken/rugo-PM.
+- If no, there's an additional bug (possibly in my producer helpers
+  per the existing ticket).
+
+### State left on disk
+- `make c` clean.
+- `make q`: 121/133 when it completes; crash rate unchanged (~60%).
+- AVG fix in `ungrouped_agg_engine.pyx`.
+- No edits to parquet_read.pyx (only the diagnosis).

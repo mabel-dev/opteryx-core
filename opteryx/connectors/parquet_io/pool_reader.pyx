@@ -123,8 +123,9 @@ cdef class CppIOPipeline:
         cdef vector[uint8_t] mask_vec
         cdef string path_str = cpp_path.encode('utf-8')
         cdef string cpp_col_name
-        cdef size_t i
-        cdef size_t mask_len = len(row_mask)
+        cdef Py_ssize_t i
+        cdef Py_ssize_t num_rows = <Py_ssize_t>rg.num_rows
+        cdef Py_ssize_t packed_len = (num_rows + 7) >> 3
         cdef const uint8_t* mask_ptr = <const uint8_t*>row_mask
 
         for col_name in column_names:
@@ -135,7 +136,18 @@ cdef class CppIOPipeline:
                     col_stats_vec.push_back(rg.columns[i])
                     break
 
-        mask_vec.assign(mask_ptr, mask_ptr + mask_len)
+        if num_rows > 0 and len(row_mask) < packed_len:
+            raise ValueError(
+                f"row mask for row group {rg_idx} is too short: "
+                f"expected at least {packed_len} packed bytes for {num_rows} rows, "
+                f"got {len(row_mask)}"
+            )
+
+        # Pass-1 stores a bit-packed bitmap; the native parquet decoder expects
+        # one byte per logical row, so expand it here before handing off.
+        mask_vec.resize(num_rows)
+        for i in range(num_rows):
+            mask_vec[i] = (mask_ptr[i >> 3] >> (i & 7)) & 1
 
         with nogil:
             self.pipeline.submit_row_group(path_str, rg_idx, col_names_vec, col_stats_vec, mask_vec)

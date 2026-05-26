@@ -119,26 +119,21 @@ def _parse_array_value(value, element_type, bint safe_cast=False):
 def cast_to_double(arr, *args):
     """Cast `arr` to FLOAT64.
 
-    Primary: Draken vectors (Float64Vector / Integer64Vector / StringVector).
+    Primary: Draken vectors (FLOAT64 / INT64 / string-family).
     Fallback: Python scalar or list.
     Fails on PyArrow/NumPy arrays per the architectural contract.
     """
-    from draken.vectors.float64_vector import from_sequence
-    from opteryx.third_party.fastfloat.fast_float import (
-        parse_ascii_array_to_double,
-    )
-
     cdef object v_type
     if is_draken_vector_fn(arr):
         v_type = get_vector_type(arr)
         if v_type == VectorType.FLOAT64:
             return arr
         if v_type == VectorType.INT64:
-            return from_sequence(
+            return _draken_native_casts.vector_float64_from_sequence(
                 [float(v) if v is not None else None for v in arr.to_pylist()]
             )
         if v_type == VectorType.STRING:
-            return parse_ascii_array_to_double(arr.to_pylist())
+            return _draken_native_casts.vector_cast_string_to_float64(arr)
 
     if isinstance(arr, (list, tuple)):
         caster = OrsoTypes.DOUBLE.parse
@@ -215,6 +210,8 @@ def cast_to_varchar(arr, *args):
         v_type = get_vector_type(arr)
         if v_type == VectorType.STRING:
             return arr
+        if v_type == VectorType.FLOAT64:
+            return _draken_native_casts.vector_cast_float64_to_string(arr)
         rows = arr.to_pylist()
         if v_type == VectorType.ARRAY:
             result = [_array_row_to_json(row) if row is not None else None for row in rows]

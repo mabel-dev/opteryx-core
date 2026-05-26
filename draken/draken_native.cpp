@@ -18,13 +18,19 @@
 #include <nanobind/stl/vector.h>
 
 #include <climits>
+#include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <string>
+#include <system_error>
 #include <vector>
 
+#include "fast_float.h"
+#include "ryu.h"
 #include "core/buffers.h"
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
@@ -2507,6 +2513,198 @@ static inline nb::object row_bytes(const DrakenVector& v, uint32_t i) {
     return nb::steal<nb::object>(pyb);
 }
 
+static inline bool is_ascii_space(uint8_t c) noexcept {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+static VectorOwner make_float64_from_string_vector(const VectorOwner& src) {
+    if (!is_varchar_family(src.vec.type))
+        throw std::invalid_argument(
+            "vector_cast_string_to_float64: expected a string-family Vector");
+
+    const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(src.vec.data);
+    const uint32_t n = src.vec.length;
+    const size_t data_bytes = (n > 0u ? n : 1u) * sizeof(double);
+    double* out = static_cast<double*>(draken_malloc(data_bytes));
+    if (!out) throw std::bad_alloc();
+    OwnedBuffer<void> data_buf(out);
+
+    std::vector<uint8_t> valid(n, 1u);
+    bool has_nulls = false;
+
+    for (uint32_t i = 0u; i < n; ++i) {
+        if (!row_is_valid(src.vec, i)) {
+            out[i] = 0.0;
+            valid[i] = 0u;
+            has_nulls = true;
+            continue;
+        }
+
+        const DrakenStringSlot* slot = &sa->slots[src.vec.selection[i]];
+        const uint8_t* bytes = str_data(slot, sa->arena);
+        uint32_t len = str_length(slot);
+        uint32_t start = 0u;
+        uint32_t end = len;
+        while (start < end && is_ascii_space(bytes[start])) ++start;
+        while (end > start && is_ascii_space(bytes[end - 1u])) --end;
+        if (start < end && bytes[start] == '+') ++start;
+
+        double value = 0.0;
+        const char* first = reinterpret_cast<const char*>(bytes + start);
+        const char* last = reinterpret_cast<const char*>(bytes + end);
+        fast_float::from_chars_result res = fast_float::from_chars(first, last, value);
+        if (first == last || res.ec != std::errc() || res.ptr != last) {
+            out[i] = 0.0;
+            valid[i] = 0u;
+            has_nulls = true;
+        } else {
+            out[i] = draken::ops::fp_canon(value);
+        }
+    }
+
+    OwnedBuffer<uint8_t> validity_buf;
+    uint8_t* validity = nullptr;
+    if (has_nulls) {
+        const uint32_t bm = (n + 7u) / 8u;
+        const uint32_t padded = (bm + 7u) & ~7u;
+        const size_t vbytes = padded > 0u ? padded : 8u;
+        validity = static_cast<uint8_t*>(draken_malloc(vbytes));
+        if (!validity) throw std::bad_alloc();
+        validity_buf.reset(validity);
+        std::memset(validity, 0xFF, vbytes);
+        for (uint32_t i = 0u; i < n; ++i) {
+            if (!valid[i])
+                validity[i / 8u] &= static_cast<uint8_t>(~(1u << (i % 8u)));
+        }
+    }
+
+    DrakenVector v = draken_vector_from_dense(out, n, DRAKEN_FLOAT64, validity);
+    return VectorOwner(v, std::move(data_buf), std::move(validity_buf));
+}
+
+static inline size_t ryu_format_double(char* buf, double d, uint32_t precision) {
+    if (!std::isfinite(d)) {
+        if (std::isnan(d)) {
+            std::memcpy(buf, "NaN", 3u);
+            return 3u;
+        }
+        if (d > 0.0) {
+            std::memcpy(buf, "Infinity", 8u);
+            return 8u;
+        }
+        std::memcpy(buf, "-Infinity", 9u);
+        return 9u;
+    }
+
+    if (d >= 9.9e24 || d <= -9.9e24) {
+        const int n = std::snprintf(buf, 32u, "%.17g", d);
+        if (n < 0) throw std::runtime_error("vector_cast_float64_to_string: snprintf failed");
+        return static_cast<size_t>(n);
+    }
+
+    int len = d2fixed_buffered_n(d, precision, buf);
+    while (len > 0 && buf[len - 1] == '0') --len;
+    if (len > 0 && buf[len - 1] == '.') {
+        buf[len++] = '0';
+    }
+    return static_cast<size_t>(len);
+}
+
+static VectorOwner make_string_from_float_vector(const VectorOwner& src, uint32_t precision) {
+    if (src.vec.type != DRAKEN_FLOAT64 && src.vec.type != DRAKEN_FLOAT32)
+        throw std::invalid_argument(
+            "vector_cast_float64_to_string: expected a FLOAT64/FLOAT32 Vector");
+
+    const uint32_t n = src.vec.length;
+    std::vector<std::string> formatted(n);
+    size_t total_extern = 0u;
+    bool has_nulls = false;
+
+    for (uint32_t i = 0u; i < n; ++i) {
+        if (!row_is_valid(src.vec, i)) {
+            has_nulls = true;
+            continue;
+        }
+        char buf[32];
+        const double value = row_float(src.vec, i);
+        const size_t len = ryu_format_double(buf, value, precision);
+        formatted[i].assign(buf, len);
+        if (len > STR_INLINE_MAX)
+            total_extern += len;
+    }
+
+    if (total_extern > static_cast<size_t>(UINT32_MAX))
+        throw std::overflow_error(
+            "vector_cast_float64_to_string: total arena bytes exceed 4 GB limit");
+
+    constexpr size_t kSlotAlign = alignof(DrakenStringSlot);
+    const size_t struct_end =
+        (sizeof(DrakenStringArena) + kSlotAlign - 1u) & ~(kSlotAlign - 1u);
+    const size_t slots_bytes = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
+    const size_t arena_start = struct_end + slots_bytes;
+
+    size_t validity_start = arena_start + total_extern;
+    size_t validity_bytes = 0u;
+    if (has_nulls) {
+        const uint32_t bm = (n + 7u) / 8u;
+        const uint32_t padded = (bm + 7u) & ~7u;
+        validity_bytes = padded > 0u ? padded : 8u;
+    }
+    const size_t total_alloc = validity_start + validity_bytes;
+
+    uint8_t* block = static_cast<uint8_t*>(
+        draken_malloc(total_alloc > 0u ? total_alloc : sizeof(DrakenStringArena)));
+    if (!block) throw std::bad_alloc();
+    std::memset(block, 0, total_alloc > 0u ? total_alloc : sizeof(DrakenStringArena));
+    OwnedBuffer<void> data_buf(block);
+
+    DrakenStringArena* sa = reinterpret_cast<DrakenStringArena*>(block);
+    DrakenStringSlot* slots = reinterpret_cast<DrakenStringSlot*>(block + struct_end);
+    uint8_t* arena = (total_extern > 0u) ? (block + arena_start) : nullptr;
+    uint8_t* bitmap = has_nulls ? (block + validity_start) : nullptr;
+
+    sa->slots = slots;
+    sa->arena = arena;
+    sa->length = n;
+    sa->arena_used = 0u;
+    sa->arena_cap = total_extern;
+    sa->null_bitmap = nullptr;
+    sa->owns_buffers = 0;
+    sa->type = DRAKEN_VARCHAR;
+
+    if (has_nulls) {
+        std::memset(bitmap, 0xFF, validity_bytes);
+        sa->null_bitmap = bitmap;
+    }
+
+    for (uint32_t i = 0u; i < n; ++i) {
+        if (!row_is_valid(src.vec, i)) {
+            if (bitmap)
+                bitmap[i / 8u] &= static_cast<uint8_t>(~(1u << (i % 8u)));
+            continue;
+        }
+
+        const std::string& s = formatted[i];
+        const uint32_t len = static_cast<uint32_t>(s.size());
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(s.data());
+        if (len <= STR_INLINE_MAX) {
+            str_init_inline(&slots[i], bytes, len);
+        } else {
+            if (sa->arena_used > static_cast<size_t>(UINT32_MAX))
+                throw std::overflow_error(
+                    "vector_cast_float64_to_string: arena offset overflow");
+            const uint32_t off = static_cast<uint32_t>(sa->arena_used);
+            std::memcpy(arena + off, bytes, len);
+            str_init_extern(&slots[i], bytes, len,
+                            static_cast<uint32_t>(XXH3_64bits(bytes, len)), off);
+            sa->arena_used += len;
+        }
+    }
+
+    DrakenVector v = draken_vector_from_dense(sa, n, DRAKEN_VARCHAR, bitmap);
+    return VectorOwner(v, std::move(data_buf), OwnedBuffer<uint8_t>(nullptr));
+}
+
 // ---------------------------------------------------------------------------
 // D.10 — decimal helpers (edge only; no Python objects in kernels)
 // ---------------------------------------------------------------------------
@@ -4802,6 +5000,20 @@ NB_MODULE(draken_native, m) {
         },
         nb::arg("values"), nb::arg("codes"), nb::arg("nullable") = nb::none(),
         "Build a dict-encoded FLOAT64 Vector.");
+    m.def("vector_cast_string_to_float64",
+        [](const VectorOwner& v) {
+            return make_float64_from_string_vector(v);
+        },
+        nb::arg("v"),
+        "CAST(v AS FLOAT64): element-wise string-family Vector parse using fast_float. "
+        "Invalid or null rows become null output rows.");
+    m.def("vector_cast_float64_to_string",
+        [](const VectorOwner& v, uint32_t precision) {
+            return make_string_from_float_vector(v, precision);
+        },
+        nb::arg("v"), nb::arg("precision") = 6u,
+        "CAST(v AS VARCHAR): element-wise FLOAT64/FLOAT32 formatting using Ryu d2fixed. "
+        "Null rows remain null.");
 
     // D.8 — TIMESTAMP64 ingestion.
     //

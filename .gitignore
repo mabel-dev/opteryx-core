@@ -249,3 +249,5 @@ draken/poc/*.h
 rugo/src/**/*.c*
 draken/morsels/_morsel_shim.cpp
 **.so
+opteryx/vectors/vector_math.cpp
+opteryx/operators/_operators.cpp
