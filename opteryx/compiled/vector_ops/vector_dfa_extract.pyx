@@ -71,7 +71,7 @@ This file is designed to be included from `vector_ops.pyx`.
 
 from libc.stddef cimport size_t
 from libc.stdint cimport int32_t, uint8_t, uint32_t
-from libc.stdlib cimport free, malloc
+from libc.stdlib cimport free, malloc, getenv
 from libc.string cimport memcmp, memcpy, memset
 
 from cpython.bytes cimport PyBytes_AsStringAndSize
@@ -978,5 +978,10 @@ cpdef object vector_dfa_extract(
 
     free(cap_ptrs)
     free(cap_lens)
+
+    # NOTE: removed an OPTERYX_DEBUG_VALIDATE_SLOTS debug-validation block here
+    # that referenced str_is_inline (no longer in draken's exposed surface).
+    # If debug arena-bounds validation is wanted again, expose str_is_inline
+    # via buffers.pxd or write the slot inspection in C++.
 
     return draken_vector_own_string(out_slots, out_arena, arena_used, out_null, <uint32_t>n, DRAKEN_VARCHAR)

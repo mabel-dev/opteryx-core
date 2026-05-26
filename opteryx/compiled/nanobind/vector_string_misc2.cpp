@@ -42,6 +42,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <cstdlib>
 
 #include "core/buffers.h"
 #include "core/alloc.h"
@@ -428,6 +429,29 @@ static nb::object impl_regex_replace(
     }
 
     if (!any_null && validity) { draken_free(validity); validity = nullptr; }
+
+    // Debug validation: when OPTERYX_DEBUG_VALIDATE_SLOTS is set, verify that
+    // every extern slot's arena_offset + length fits within the produced arena.
+    // This is strictly diagnostic and only enabled by environment to avoid
+    // impacting normal runtime performance.
+    const char* dbg_env = std::getenv("OPTERYX_DEBUG_VALIDATE_SLOTS");
+    if (dbg_env) {
+        for (uint32_t idx = 0u; idx < n; ++idx) {
+            const DrakenStringSlot* s = &out_slots[idx];
+            const uint32_t len = str_length(s);
+            if (!str_is_inline(s)) {
+                const uint32_t off = s->ext.arena_offset;
+                if ((size_t)off + (size_t)len > arena_used) {
+                    // Clean up allocated buffers before throwing so Python traceback
+                    // is visible and ownership isn't leaked.
+                    if (validity) draken_free(validity);
+                    draken_free(out_arena);
+                    draken_free(out_slots);
+                    throw std::runtime_error("vector_regex_replace: slot references beyond arena bounds");
+                }
+            }
+        }
+    }
 
     PyObject* out = draken_vector_own_string(
         out_slots, out_arena, arena_used, validity, n, dv->type);

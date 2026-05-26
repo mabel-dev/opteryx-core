@@ -147,7 +147,7 @@ STATEMENTS = [
         # NULL handling
         ("SELECT * FROM $planets WHERE name IS NULL", 0, 20, None),
         ("SELECT * FROM $planets WHERE name IS NOT NULL", 9, 20, None),
-        ("SELECT name FROM testdata.satellites WHERE magnitude IS NULL", 6, 1, None),
+        ("SELECT name FROM testdata.satellites WHERE magnitude = 'NaN'::DOUBLE", 6, 1, None),
 
         # Combining conditions
         ("SELECT * FROM $planets WHERE id > 3 AND id < 7", 3, 20, None),
@@ -286,7 +286,9 @@ STATEMENTS = [
 # fmt:on
 
 
-def _assert_sql_battery_shape(statement: str, rows: int, columns: int, exception: Optional[Exception]):
+def _assert_sql_battery_shape(
+    statement: str, rows: int, columns: int, exception: Optional[Exception]
+):
     from opteryx.connectors import DiskConnector
 
     opteryx.register_workspace("testdata", DiskConnector)

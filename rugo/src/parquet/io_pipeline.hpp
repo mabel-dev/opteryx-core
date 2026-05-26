@@ -309,7 +309,7 @@ class ParquetIOPipeline {
     void submit_row_group(const std::string& path, int rg_idx,
                           const std::vector<std::string>& column_names,
                           const std::vector<ColumnStats>& column_stats,
-                          std::vector<uint8_t> row_mask) {
+                          const std::vector<uint8_t>& row_mask) {
         if (shutdown_) return;
 
         pending_work_++;
@@ -319,7 +319,7 @@ class ParquetIOPipeline {
         item.rg_idx = rg_idx;
         item.column_names = column_names;
         item.column_stats = column_stats;
-        item.row_mask = std::move(row_mask);
+        item.row_mask = row_mask;
 
         decode_pool_->detach_task([this, item = std::move(item)]() {
             decode_row_group(item);

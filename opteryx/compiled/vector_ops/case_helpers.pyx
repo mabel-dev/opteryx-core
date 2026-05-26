@@ -37,6 +37,7 @@ from draken.core.buffers cimport (
 )
 from draken.vectors.bool_vector cimport BoolVector, from_decoded as _bool_from_decoded
 from draken.vectors.vector cimport Vector, from_decoded as _vec_from_decoded
+import draken.draken_native as _draken_native_ch
 
 from array import array as _pyarr
 
@@ -403,7 +404,7 @@ def assemble_bool(
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 — assemble_flat_string  [STUB — E.29 gap: StringVectorBuilder]
+# Phase 3 — assemble_flat_string
 # ---------------------------------------------------------------------------
 
 def assemble_flat_string(
@@ -415,13 +416,34 @@ def assemble_flat_string(
 ):
     """Build a flat string Vector in row order.
 
-    Stubbed pending E.29 StringVectorBuilder port. CASE WHEN expressions
-    returning VARCHAR will raise NotImplementedError until this is implemented.
+    For each output row r: pick from parts[branch_id[r]] at index
+    pos_in_branch[r], or from else_part at pos_in_branch[r] when bid == -1.
+
+    Uses the draken producer surface: build a Python list and hand off to
+    `vector_from_string_sequence`. The per-row Python attribute access /
+    list build is acceptable here because this is invoked once per CASE WHEN
+    expression evaluation per morsel, not per row from a hot loop — and the
+    string-builder path that would let us go fully nogil isn't ported yet.
     """
-    raise NotImplementedError(
-        "assemble_flat_string: StringVectorBuilder not yet ported (E.29 gap). "
-        "CASE WHEN with VARCHAR result is not yet supported."
-    )
+    cdef list result_list = [None] * n
+    cdef Py_ssize_t r
+    cdef int16_t bid
+    cdef int32_t pos
+    cdef object source
+
+    for r in range(n):
+        bid = branch_id[r]
+        pos = pos_in_branch[r]
+        if bid >= 0:
+            source = parts[bid]
+            if source is None:
+                continue
+            result_list[r] = source[pos]
+        elif else_part is not None:
+            result_list[r] = else_part[pos]
+        # else: None (already in result_list)
+
+    return Vector(_draken_native_ch.vector_from_string_sequence(result_list))
 
 
 # ---------------------------------------------------------------------------

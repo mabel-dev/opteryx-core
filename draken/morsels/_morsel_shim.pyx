@@ -1,10 +1,21 @@
 # cython: language_level=3
 # Cython shim for draken.morsels.morsel — E.24 vtable bridge.
 
-from libc.stdint cimport int32_t
+from libc.stdint cimport int32_t, uint32_t, uint64_t
+from libc.stdlib cimport malloc, free
 
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.vector cimport Vector
+from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_ARRAY
+
+# C++ hash functions for the cdef c_hash method. draken_hash dispatches per
+# DrakenType; simd_mix_hash mixes per-column hashes into a running buffer.
+# draken_hash lives in the global namespace (static inline in ops/hash.h).
+cdef extern from "ops/hash.h" nogil:
+    void draken_hash(const DrakenVector& v, uint64_t* out, uint32_t n)
+
+cdef extern from "simd_hash.h" nogil:
+    void simd_mix_hash(uint64_t* dest, const uint64_t* values, size_t count)
 
 
 cdef inline object _unwrap(object v):
@@ -106,10 +117,135 @@ cdef class Morsel:
     def _ensure_name_map(self):
         return {name: i for i, name in enumerate(self._col_names)}
 
+    cdef int32_t* _resolve_columns_to_indices(self, object columns,
+                                              int32_t* n_cols_out) except NULL:
+        """Resolve column names → freshly-malloc'd int32 index array.
+
+        columns=None → indices [0, len(self._columns)).
+        Caller owns the returned buffer (free()). Raises KeyError on missing
+        name; MemoryError on alloc failure.
+        """
+        cdef Py_ssize_t avail = len(self._columns)
+        cdef Py_ssize_t i, j
+        cdef int32_t n_cols
+        cdef int32_t* result
+        cdef bytes name_bytes
+        cdef bint found
+
+        if columns is None:
+            n_cols = <int32_t>avail
+            result = <int32_t*>malloc((<size_t>n_cols if n_cols > 0 else 1) * sizeof(int32_t))
+            if result == NULL:
+                raise MemoryError()
+            for i in range(n_cols):
+                result[i] = <int32_t>i
+        else:
+            n_cols = <int32_t>len(columns)
+            result = <int32_t*>malloc((<size_t>n_cols if n_cols > 0 else 1) * sizeof(int32_t))
+            if result == NULL:
+                raise MemoryError()
+            for i in range(n_cols):
+                name = columns[i]
+                if isinstance(name, str):
+                    name_bytes = (<str>name).encode("utf-8")
+                elif isinstance(name, bytes):
+                    name_bytes = name
+                else:
+                    free(result)
+                    raise TypeError(
+                        "Morsel._resolve_columns_to_indices: column name must be "
+                        "str or bytes; got %s" % type(name).__name__
+                    )
+                found = False
+                for j in range(avail):
+                    if self._col_names[j] == name_bytes:
+                        result[i] = <int32_t>j
+                        found = True
+                        break
+                if not found:
+                    free(result)
+                    raise KeyError(
+                        "Morsel._resolve_columns_to_indices: column not found: %r"
+                        % name_bytes
+                    )
+        n_cols_out[0] = n_cols
+        return result
+
+    cdef bint c_hash(self, uint64_t* hashes_ptr, int32_t* col_indices,
+                     int32_t n_cols, Py_ssize_t n) nogil:
+        """Hash + mix specified columns into hashes_ptr.
+
+        hashes_ptr: caller-allocated n uint64s, pre-zeroed.
+        col_indices: caller's int32 array of column indices (n_cols entries).
+
+        Single-column shortcut: writes column hash directly into hashes_ptr,
+        no mix (saves one allocation + one pass).
+        Multi-column: hashes each column into tmp, then simd_mix_hash into
+        hashes_ptr.
+
+        Returns 0 on success, 1 if any column needs GIL fallback (e.g.
+        DRAKEN_ARRAY, which can't hash nogil).
+        """
+        if n == 0 or n_cols == 0:
+            return 0
+
+        cdef Py_ssize_t c
+        cdef int32_t col_idx
+        cdef const DrakenVector* dv
+        cdef uint64_t* tmp = NULL
+        cdef bint needs_gil = 0
+
+        # Single-column shortcut: hash directly into the output, no mix.
+        if n_cols == 1:
+            col_idx = col_indices[0]
+            with gil:
+                dv = (<Vector>self._columns[col_idx]).unified()
+            if dv.type == DRAKEN_ARRAY:
+                return 1
+            draken_hash(dv[0], hashes_ptr, <uint32_t>n)
+            return 0
+
+        # Multi-column: allocate temp buffer for per-column hashes.
+        with gil:
+            tmp = <uint64_t*>malloc(<size_t>n * sizeof(uint64_t))
+        if tmp == NULL:
+            return 1
+
+        for c in range(n_cols):
+            col_idx = col_indices[c]
+            with gil:
+                dv = (<Vector>self._columns[col_idx]).unified()
+            if dv.type == DRAKEN_ARRAY:
+                needs_gil = 1
+                break
+            draken_hash(dv[0], tmp, <uint32_t>n)
+            simd_mix_hash(hashes_ptr, tmp, <size_t>n)
+
+        with gil:
+            free(tmp)
+        return needs_gil
+
     def append(self, vec):
         cdef Vector wrapped = _wrap(vec)
         self._nb.append(wrapped._nb)
         self._columns.append(wrapped)
+
+    cdef void _empty_inplace(self):
+        """Zero all columns to 0 rows, in place."""
+        cdef int n = len(self._columns)
+        cdef int i
+        for i in range(n):
+            nb_empty = (<Vector>self._columns[i])._nb.take([])
+            self._columns[i] = Vector(nb_empty)
+
+    cdef void _take_inplace(self, int32_t[::1] indices):
+        """Filter all columns to the given row indices, in place."""
+        cdef int n = len(self._columns)
+        cdef int i
+        idx_list = [indices[i] for i in range(indices.shape[0])]
+        for i in range(n):
+            nb_taken = (<Vector>self._columns[i])._nb.take(idx_list)
+            self._columns[i] = Vector(nb_taken)
 
     def append_vector(self, name, vec):
         if isinstance(name, str):

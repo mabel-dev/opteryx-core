@@ -24,6 +24,7 @@
 #include <string.h>
 #include <stdexcept>
 #include <unordered_map>
+#include <vector>
 #include "core/buffers.h"
 #include "core/alloc.h"
 #include "core/vector_alloc.h"

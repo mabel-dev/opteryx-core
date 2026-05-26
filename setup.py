@@ -157,7 +157,8 @@ class build_ext(build_ext_orig):
             # Build C-compatible compile args: start from C_FLAGS, then append
             # any extension-specific args that are not C++-standard flags.
             c_extra = [
-                a for a in (ext.extra_compile_args or [])
+                a
+                for a in (ext.extra_compile_args or [])
                 if not a.startswith("-std=") and not a.startswith("/std:")
             ]
             c_compile_args = list(C_FLAGS) + c_extra
@@ -506,7 +507,7 @@ include_dirs = [
     ".",  # repo root for Cython cimport (draken.core.buffers etc.)
     "src/cpp",
     "src/c",
-    "draken",       # new draken C++-first headers (quote-include "core/buffers.h")
+    "draken",  # new draken C++-first headers (quote-include "core/buffers.h")
     "draken/core",  # draken C++ headers, quote-include form (e.g. #include "buffers.h")
     "third_party/mabel/carchar",
     "third_party/mabel/parvi",
@@ -523,7 +524,7 @@ include_dirs = [
     "third_party/bshoshany",
     "third_party/moodycamel",
     "third_party/boost_math",  # E.3: vendored boost::math headers (round via 2^52 trick)
-    "third_party/utf8h",       # E.26: sheredom/utf8.h single-header UTF-8 library
+    "third_party/utf8h",  # E.26: sheredom/utf8.h single-header UTF-8 library
     "third_party/mimalloc/include",  # draken/core/alloc.h requires mimalloc globally
 ]
 
@@ -587,7 +588,6 @@ def make_draken_extension(module_path, source_file, language="c++", depends=None
         language=language,
         depends=depends,
     )
-
 
 
 def get_zstd_vendor_sources():
@@ -655,14 +655,13 @@ if not is_mac():
 # and uses -undefined dynamic_lookup / --allow-shlib-undefined to resolve
 # draken_vector_unwrap / draken_vector_own_raw at runtime.
 _shim_bridge_link_args = (
-    ["-undefined", "dynamic_lookup"] if is_mac()
-    else ["-Wl,--allow-shlib-undefined"]
+    ["-undefined", "dynamic_lookup"] if is_mac() else ["-Wl,--allow-shlib-undefined"]
 )
 
 _shim_extensions = [
-    make_draken_extension("vectors.vector",         "vectors/_vector_shim.pyx"),
-    make_draken_extension("vectors.bool_vector",    "vectors/_bool_vector_shim.pyx"),
-    make_draken_extension("morsels.morsel",         "morsels/_morsel_shim.pyx"),
+    make_draken_extension("vectors.vector", "vectors/_vector_shim.pyx"),
+    make_draken_extension("vectors.bool_vector", "vectors/_bool_vector_shim.pyx"),
+    make_draken_extension("morsels.morsel", "morsels/_morsel_shim.pyx"),
 ]
 # Append shim bridge link args to each shim extension
 for _ext in _shim_extensions:
@@ -713,8 +712,8 @@ extensions = [
         ],
         include_dirs=include_dirs
         + [
-            "draken/core",   # quote-include "buffers.h" from within draken/
-            "src/cpp",       # simd_hash.h, simd_dispatch.h, cpu_features.h
+            "draken/core",  # quote-include "buffers.h" from within draken/
+            "src/cpp",  # simd_hash.h, simd_dispatch.h, cpu_features.h
             MIMALLOC_INCLUDE,
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
@@ -861,7 +860,8 @@ extensions = [
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
-        extra_objects=(["build/temp.yyjson.o"] if os.path.exists("build/temp.yyjson.o") else []) + [MIMALLOC_OBJ],
+        extra_objects=(["build/temp.yyjson.o"] if os.path.exists("build/temp.yyjson.o") else [])
+        + [MIMALLOC_OBJ],
     ),
     Extension(
         "rugo._jsonl._jsonl_reader",
@@ -1152,7 +1152,8 @@ extensions = [
             "opteryx/expression/evaluator/_impl.pyx",
             "opteryx/expression/evaluator/bytecode_worker.cpp",
         ],
-        include_dirs=include_dirs + [
+        include_dirs=include_dirs
+        + [
             "opteryx/expression/evaluator",  # bytecode_worker.h, bitmap_worker_pool.h
         ],
         language="c++",
@@ -1167,7 +1168,8 @@ extensions = [
             "src/cpp/hllpp.cpp",
             "third_party/tdigest-c/src/tdigest_cpp.cpp",
         ],
-        include_dirs=include_dirs + [
+        include_dirs=include_dirs
+        + [
             "opteryx/operators/aggregate",
         ],
         language="c++",
@@ -1190,13 +1192,13 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
-    # E.21a: morsel_ops.distinct — stub only; full implementation deferred to E.21b.
-    # The stub raises NotImplementedError at runtime but allows import to succeed.
+    # E.21b: morsel_ops.distinct — full implementation (Morsel.c_hash + _resolve_columns_to_indices now live).
     Extension(
         "opteryx.compiled.morsel_ops.distinct",
-        sources=["opteryx/compiled/morsel_ops/distinct_stub.c"],
+        sources=["opteryx/compiled/morsel_ops/distinct.pyx"],
         include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
     ),
     Extension(
         "opteryx.compiled.morsel_ops.sort",
@@ -1382,15 +1384,14 @@ extensions.append(
 # and resolved at import time (draken/__init__.py loads draken_native with
 # RTLD_GLOBAL before any consumer extension is imported).
 _bitwise_bridge_link_args = (
-    ["-undefined", "dynamic_lookup"] if is_mac()
-    else ["-Wl,--allow-shlib-undefined"]
+    ["-undefined", "dynamic_lookup"] if is_mac() else ["-Wl,--allow-shlib-undefined"]
 )
 extensions.append(
     Extension(
         "opteryx.compiled.nanobind.vector_bitwise",
         sources=[
             "opteryx/compiled/nanobind/vector_bitwise.cpp",
-            "draken/core/vector_alloc.cpp",   # draken_identity_sel, draken_zero_sel
+            "draken/core/vector_alloc.cpp",  # draken_identity_sel, draken_zero_sel
             "third_party/nanobind/src/nb_combined.cpp",
         ],
         include_dirs=include_dirs
@@ -1417,7 +1418,7 @@ extensions.append(
         "opteryx.compiled.nanobind.vector_math",
         sources=[
             "opteryx/compiled/nanobind/vector_math.cpp",
-            "draken/core/vector_alloc.cpp",   # draken_identity_sel, draken_zero_sel
+            "draken/core/vector_alloc.cpp",  # draken_identity_sel, draken_zero_sel
             "third_party/nanobind/src/nb_combined.cpp",
         ],
         include_dirs=include_dirs
@@ -1495,8 +1496,8 @@ extensions.append(
         include_dirs=include_dirs
         + [
             MIMALLOC_INCLUDE,
-            "opteryx/third_party/mabel/base64",   # _base64.h
-            "opteryx/third_party/mabel/base85",   # _base85.h
+            "opteryx/third_party/mabel/base64",  # _base64.h
+            "opteryx/third_party/mabel/base85",  # _base85.h
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
@@ -1606,7 +1607,7 @@ extensions.append(
         include_dirs=include_dirs
         + [
             MIMALLOC_INCLUDE,
-            "opteryx/third_party/mabel/base16",   # _base16.h
+            "opteryx/third_party/mabel/base16",  # _base16.h
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
@@ -1895,7 +1896,7 @@ extensions.append(
         sources=[
             "opteryx/compiled/nanobind/vector_json.cpp",
             "draken/core/vector_alloc.cpp",
-            "third_party/yyjson/src/yyjson.c",   # compiled as C11; no pre-built .o dep
+            "third_party/yyjson/src/yyjson.c",  # compiled as C11; no pre-built .o dep
             "third_party/nanobind/src/nb_combined.cpp",
         ],
         include_dirs=include_dirs
@@ -2258,12 +2259,17 @@ setup(
         #   - opteryx.operators._operators (whole operators bundle)
         #   - opteryx.compiled.morsel_ops.sort (cimports StringVector)
         (
-            [e for e in extensions if e.name not in {
-                "opteryx.operators._operators",
-                "opteryx.compiled.morsel_ops.sort",
-                "opteryx.compiled.structures.column_deserializer",
-                "opteryx.compiled.structures.bloom_filter",
-            }]
+            [
+                e
+                for e in extensions
+                if e.name
+                not in {
+                    "opteryx.operators._operators",
+                    "opteryx.compiled.morsel_ops.sort",
+                    "opteryx.compiled.structures.column_deserializer",
+                    "opteryx.compiled.structures.bloom_filter",
+                }
+            ]
             if os.environ.get("DRAKEN_BUILD")
             else extensions
         ),
@@ -2272,7 +2278,9 @@ setup(
             "linetrace": "a" in __version__ or "b" in __version__,
         },
     ),
-    rust_extensions=[] if _DRAKEN_BUILD else [RustExtension("opteryx.compute", "Cargo.toml", debug=False)],
+    rust_extensions=[]
+    if _DRAKEN_BUILD
+    else [RustExtension("opteryx.compute", "Cargo.toml", debug=False)],
     package_data={"": ["*.pyx", "*.pxd", "*.h"]},
     cmdclass={"build_ext": build_ext},
     zip_safe=False,

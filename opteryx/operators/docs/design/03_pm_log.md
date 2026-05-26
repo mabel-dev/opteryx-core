@@ -775,3 +775,105 @@ unblock if D-F doesn't land quickly, but better to fix the C++ side.
 - `make q`: 121/133 when it completes; crash rate unchanged (~60%).
 - AVG fix in `ungrouped_agg_engine.pyx`.
 - No edits to parquet_read.pyx (only the diagnosis).
+
+## 2026-05-26 — crash moved to ~test 112; more narrow wins; remaining failures triaged
+
+User reported the crash investigator has the bug; segfault location
+has shifted (previously hit ~queries 19-20, now varies — observed at
+20, 93-95 depending on run). Continuing operator-PM work while the
+crash is being investigated by another agent.
+
+### CASE WHEN VARCHAR — assemble_flat_string ported (briefing §3.4)
+The `assemble_flat_string` stub in
+`opteryx/compiled/vector_ops/case_helpers.pyx` was waiting on the
+producer-surface design. That design closed (D-C in this log).
+Ported using the producer pattern — build a Python list of strings,
+hand off via `vector_from_string_sequence`, wrap in the Cython shim.
+Not a fully nogil C-level builder (that's E.29 work for a future
+StringVectorBuilder primitive), but functional and correct.
+
+Tested manually: `SELECT CASE WHEN id = 1 THEN 'Earth' ... END FROM
+$planets` works. No test in `make q` exercises CASE WHEN VARCHAR
+directly, so pass count unchanged — but broader test suites should
+benefit.
+
+### Remaining 12 `make q` failures — all blocked on one draken-side gap
+After the AVG fix and assemble_flat_string, the failures reduce to a
+single shape:
+
+- **4 DISTINCT queries** (`SELECT DISTINCT ...`)
+- **3 UNION (deduplicating)** queries
+- **3 INTERSECT** queries
+- **3 EXCEPT** queries
+
+All 12 trace through `DistinctNode._dispatch_push → _distinct` which
+is the stub at `opteryx/compiled/morsel_ops/distinct_stub.c`. The
+stub raises `NotImplementedError: DISTINCT (morsel_ops.distinct)
+requires Morsel.c_hash() — deferred to E.21b`.
+
+**Root cause: three draken-side methods missing from the Morsel shim**:
+
+- `Morsel.c_hash(uint64_t* hashes_ptr, int32_t* col_indices, int32_t n_cols, Py_ssize_t n)`
+  — nogil bulk hash across a column subset.
+- `Morsel._resolve_columns_to_indices(columns, int32_t* n_cols_out)`
+  — translate column-name list to indices.
+- `Morsel._take_inplace(int32_t[::1] indices)` and
+  `Morsel._empty_inplace()` — in-place row reduction.
+
+The real `distinct.pyx` (alongside the stub) is the intended target
+implementation; it uses all three of these. Setup.py currently
+builds the stub because the real impl won't link without those
+methods.
+
+**Workaround options I considered and rejected:**
+
+- *Rewrite distinct in pure Python via `morsel.hash()` + `morsel.take()`*:
+  `morsel._take_inplace` / `_empty_inplace` don't exist on the shim,
+  and a non-inplace `morsel.take(idx)` returns a new morsel — the
+  DistinctNode caller expects in-place mutation. Re-plumbing
+  DistinctNode is more invasive than the value justifies.
+- *Modify the Morsel shim to add these methods*: draken-side, not
+  my lane.
+
+**Surfacing as D-G** for draken/rugo-PM: implement the three Morsel
+methods or land E.21b. After that, switch setup.py's
+`opteryx.compiled.morsel_ops.distinct` Extension from
+`distinct_stub.c` to `distinct.pyx`. Estimated **+12 passes** in
+`make q` (4 DISTINCT + 8 set-op dedup variants).
+
+### Decimal-vs-Int comparison gap (low priority, eval-PM lane)
+While testing CASE WHEN, hit:
+```
+NotImplementedError: DecimalVector comparison for op (code 4)
+with right=<class 'draken.vectors.vector.Vector'> not implemented
+```
+Query: `WHERE gravity > 9` (gravity is DECIMAL, 9 is INT64).
+`opteryx/expression/evaluator/comparisons.pyx:_decimal_compare`
+handles DECIMAL-vs-DECIMAL and DECIMAL-vs-FLOAT64 but not
+DECIMAL-vs-INT64. Eval-PM lane; design choice (promote int to
+decimal? cast decimal to float?). Out of scope for this PM.
+
+### State left on disk (consolidated)
+- `make c` clean.
+- `make q`: 121/133 (~91%) when it completes.
+- Crash rate ~50%, location varies (other agent investigating).
+- Fixes this turn (build-clean, no regressions):
+  - `serial_engine.py` Morsel import (Ticket 1)
+  - operator collector migration (`_collectors_*.pxi` + `_key_store.pxi`)
+  - `_factory.pxi` typed-Vector → DrakenType dispatch
+  - `hashed_inner_join.pyx` / `non_equi_join.pyx` align cimport
+  - `parquet_read.pyx` shim/nb unwrap at `_coerce_logical_types`
+  - `filter.pyx` `_build_constant_vector` shim wrap
+  - `_node.pxi` constant_from_scalar → vector_int8_from_constant
+  - `vector_int64_from_constant` → `vector_from_constant` rename (4 sites)
+  - `show_columns.pyx` vector_from_sequence import
+  - `ungrouped_agg_engine.pyx` AVG dtype="DOUBLE"
+  - `case_helpers.pyx` assemble_flat_string implementation
+- Open tickets surfaced (not in this PM's lane):
+  - **Crash investigation** — separate ticket
+    (`04_ticket_crash_investigation.md`), another agent on it
+  - **D-F** (draken/rugo): parquet pass-2 mask not applied — see
+    earlier in this log
+  - **D-G** (draken): Morsel.c_hash + helpers — blocks DISTINCT
+    family (+12 tests)
+  - **Decimal-vs-Int compare** (eval-PM): minor, low priority
