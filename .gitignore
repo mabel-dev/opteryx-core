@@ -251,3 +251,4 @@ draken/morsels/_morsel_shim.cpp
 **.so
 opteryx/vectors/vector_math.cpp
 opteryx/operators/_operators.cpp
+opteryx/connectors/parquet_io/pool_reader.cpp
