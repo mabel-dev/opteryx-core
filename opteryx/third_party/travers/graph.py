@@ -72,7 +72,7 @@ class Graph(object):
 
     """
 
-    __slots__ = ("_nodes", "_edges", "_cached_edges")
+    __slots__ = ("_nodes", "_edges", "_cached_edges", "_cached_ingoing_edges")
 
     def __init__(self):
         """
@@ -81,6 +81,11 @@ class Graph(object):
         self._nodes = {}
         self._edges = {}
         self._cached_edges = None
+        self._cached_ingoing_edges = None
+
+    def _invalidate_caches(self):
+        self._cached_edges = None
+        self._cached_ingoing_edges = None
 
     def __bool__(self) -> bool:
         return len(self._nodes) != 0 or len(self._edges) != 0
@@ -139,7 +144,7 @@ class Graph(object):
             existing_edges.append((target, relationship))
 
         self._edges[source] = tuple(existing_edges)
-        self._cached_edges = None
+        self._invalidate_caches()
         return True
 
     def add_node(self, nid: str, node):
@@ -184,6 +189,17 @@ class Graph(object):
                 for target, relationship in records
             ]
         return self._cached_edges
+
+    def _ingoing_edges(self):
+        if self._cached_ingoing_edges is None:
+            ingoing_edges = {}
+            for source, records in self._edges.items():
+                for target, relationship in records:
+                    if target not in ingoing_edges:
+                        ingoing_edges[target] = []
+                    ingoing_edges[target].append((source, target, relationship))
+            self._cached_ingoing_edges = ingoing_edges
+        return self._cached_ingoing_edges
 
     def breadth_first_search(
         self, source: str, depth: int = 100, reverse: bool = False
@@ -282,34 +298,42 @@ class Graph(object):
         Returns:
             Set of Tuples (Source, Target, Relationship)
         """
-        return [(s, t, r) for s, t, r in self.edges() if t == target]
+        return list(self._ingoing_edges().get(target, ()))
 
     def is_acyclic(self):
         """
         Test if the Graph is acyclic
         """
-        # cycle over the graph removing a layer of exits each cycle
-        # if we have nodes but no exists, we're cyclic
+        edges = self.edges()
+        if not edges:
+            return True
 
-        # rebuild the edge information
-        my_edges = list(self.edges())
+        indegree = {}
+        outgoing = {}
+        nodes = set()
 
-        while len(my_edges) > 0:
-            # find all of the exits
-            sources = {source for source, target, direction in my_edges}
-            exits = {target for source, target, direction in my_edges if target not in sources}
+        for source, target, _ in edges:
+            nodes.add(source)
+            nodes.add(target)
+            if source not in outgoing:
+                outgoing[source] = []
+            outgoing[source].append(target)
+            if source not in indegree:
+                indegree[source] = 0
+            indegree[target] = indegree.get(target, 0) + 1
 
-            if len(exits) == 0:
-                return False
+        queue = [node for node in nodes if indegree.get(node, 0) == 0]
+        visited = 0
 
-            # remove the exits
-            new_edges = [
-                (source, target, direction)
-                for source, target, direction in my_edges
-                if target not in exits
-            ]
-            my_edges = new_edges
-        return True
+        while queue:
+            node = queue.pop()
+            visited += 1
+            for target in outgoing.get(node, ()):
+                indegree[target] -= 1
+                if indegree[target] == 0:
+                    queue.append(target)
+
+        return visited == len(nodes)
 
     def shortest_path(self, start: str, end: str) -> List[str]:
         """
@@ -328,26 +352,30 @@ class Graph(object):
 
         from collections import deque
 
-        visited = set()
-        queue = deque([(start, [start])])  # Each item in the queue is a tuple (node, path_so_far)
+        if start == end:
+            return [start]
+
+        visited = {start}
+        parent = {start: None}
+        queue = deque([start])
 
         while queue:
-            node, path = queue.popleft()
+            node = queue.popleft()
 
-            if node == end:
-                return path  # Found a path to the end node
+            for _, neighbor, _ in self.outgoing_edges(node):
+                if neighbor in visited:
+                    continue
 
-            if node not in visited:
-                visited.add(node)
+                parent[neighbor] = node
+                if neighbor == end:
+                    path = [end]
+                    while parent[path[-1]] is not None:
+                        path.append(parent[path[-1]])
+                    path.reverse()
+                    return path
 
-                for _, neighbor, _ in self.outgoing_edges(node):
-                    if neighbor == end:
-                        path.append(neighbor)
-                        return path
-                    if neighbor not in visited:
-                        new_path = list(path)
-                        new_path.append(neighbor)
-                        queue.append((neighbor, new_path))
+                visited.add(neighbor)
+                queue.append(neighbor)
 
         return []  # No path found
 
@@ -409,7 +437,7 @@ class Graph(object):
                 for in_nid in in_coming:
                     self.add_edge(in_nid[0], out_nid[1], in_nid[2])  # type: ignore
 
-            self._cached_edges = None
+            self._invalidate_caches()
 
     def remove_edge(self, source, target, relationship):
         """
@@ -429,7 +457,7 @@ class Graph(object):
             if not self._edges[source]:  # If no edges left for the source
                 del self._edges[source]
 
-        self._cached_edges = None
+        self._invalidate_caches()
 
     def insert_node_before(self, nid, node, before_nid):
         """rewrite the plan putting the new node before a given node"""
@@ -517,6 +545,7 @@ class Graph(object):
     def __add__(self, other):
         self._edges.update(other._edges)
         self._nodes.update(other._nodes)
+        self._invalidate_caches()
         return self
 
     def __contains__(self, nid: str) -> bool:
@@ -557,6 +586,7 @@ class Graph(object):
         graph._nodes = _inner_copy(self._nodes)
         graph._edges = self.copy_edges()
         graph._cached_edges = None
+        graph._cached_ingoing_edges = None
 
         return graph
 

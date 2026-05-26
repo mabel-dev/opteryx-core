@@ -496,7 +496,7 @@ class Session(DataFrame):
         def _schema_from_morsel(morsel: Morsel):
             columns = []
             for name, dtype in zip(morsel.column_names, morsel.column_types):
-                dtype_int = int(dtype)
+                dtype_int = dtype.value
                 orso_type = _DRAKEN_TO_ORSO.get(dtype_int, OrsoTypes.VARCHAR)
                 col_name = name.decode("utf-8") if isinstance(name, bytes) else name
                 columns.append(FlatColumn(name=col_name, type=orso_type))

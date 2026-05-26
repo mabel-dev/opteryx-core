@@ -78,6 +78,32 @@ def get_vector_type(obj) -> VectorType:
     if cls_name in TYPE_MAP:
         return TYPE_MAP[cls_name]
 
+    # New draken: all vectors are "Vector" or "BoolVector" (Cython shim).
+    # Discriminate via the DrakenType tag on the object itself.
+    if cls_name in ("Vector", "BoolVector"):
+        draken_type = getattr(obj, "type", None)
+        if draken_type is None:
+            return VectorType.UNKNOWN
+        type_name = draken_type.name
+        _DRAKEN_TYPE_MAP = {
+            "INT64": VectorType.INT64,
+            "INT32": VectorType.INTEGER,
+            "INT16": VectorType.INTEGER,
+            "INT8": VectorType.INTEGER,
+            "FLOAT64": VectorType.FLOAT64,
+            "FLOAT32": VectorType.FLOAT64,
+            "BOOL": VectorType.BOOL,
+            "VARCHAR": VectorType.STRING,
+            "NVARCHAR": VectorType.STRING,
+            "VARBINARY": VectorType.STRING,
+            "TIMESTAMP64": VectorType.TIMESTAMP,
+            "DATE32": VectorType.DATE32,
+            "INTERVAL": VectorType.INTERVAL,
+            "ARRAY": VectorType.ARRAY,
+            "DECIMAL": VectorType.DECIMAL,
+        }
+        return _DRAKEN_TYPE_MAP.get(type_name, VectorType.UNKNOWN)
+
     return VectorType.UNKNOWN
 
 

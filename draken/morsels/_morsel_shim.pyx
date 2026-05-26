@@ -316,18 +316,39 @@ cpdef Morsel align_tables(Morsel left_morsel, Morsel right_morsel,
             result._columns.append(Vector(nb_taken))
     else:
         # Slow path: replace -1 with 0, take, then null out unmatched rows.
-        # Using to_pylist + vector_from_sequence preserves column type via
-        # type inference from the non-None values in the list.
-        from draken.draken_native import vector_from_sequence as _nb_vfs
+        import draken.draken_native as _nb_dn
+        from draken.draken_native import DrakenType as _DrakenType
         safe_right = [right_view[i] if right_view[i] >= 0 else 0 for i in range(n)]
         null_mask  = [right_view[i] < 0 for i in range(n)]
         for j in range(ncols_right):
             nb_taken = (<Vector>right_morsel._columns[j])._nb.take(safe_right)
-            taken_list = Vector(nb_taken)._nb.to_pylist()
+            taken_list = nb_taken.to_pylist()
             for i in range(n):
                 if null_mask[i]:
                     taken_list[i] = None
-            nb_new = _nb_vfs(taken_list)
+            # Dispatch to the type-appropriate constructor based on source column type
+            vec_type = nb_taken.type
+            if vec_type in (_DrakenType.INT64, _DrakenType.INT32, _DrakenType.INT16, _DrakenType.INT8):
+                nb_new = _nb_dn.vector_from_sequence(taken_list)
+            elif vec_type == _DrakenType.FLOAT64:
+                nb_new = _nb_dn.vector_float64_from_sequence(taken_list)
+            elif vec_type in (_DrakenType.VARCHAR, _DrakenType.NVARCHAR):
+                nb_new = _nb_dn.vector_from_string_sequence(taken_list)
+            elif vec_type == _DrakenType.BOOL:
+                from draken.vectors.bool_vector import BoolVector as _BoolVec
+                nb_new = _BoolVec.from_list(taken_list)._nb
+            elif vec_type == _DrakenType.DATE32:
+                nb_new = _nb_dn.vector_date32_from_sequence(taken_list)
+            elif vec_type == _DrakenType.TIMESTAMP64:
+                nb_new = _nb_dn.vector_timestamp_from_sequence(taken_list)
+            elif vec_type == _DrakenType.DECIMAL:
+                prec = nb_taken.logical_type_precision
+                scale = nb_taken.logical_type_scale
+                nb_new = _nb_dn.vector_decimal_from_sequence(taken_list, prec, scale)
+            else:
+                raise TypeError(
+                    f"align_tables: outer-join null path unsupported for vector type {vec_type!r}"
+                )
             result._nb.append(nb_new)
             result._col_names.append(right_morsel._col_names[j])
             result._columns.append(Vector(nb_new))

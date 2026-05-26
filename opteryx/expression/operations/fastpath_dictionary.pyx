@@ -130,11 +130,14 @@ cpdef dictionary_fastpath(arr, str operator, value):
             operator == "NotInList",
         )
     if operator == "Like" or operator == "NotLike":
-        return vector_like(vec, StringVector.from_constant(normalized_value, 1), False, operator == "NotLike")
+        _pat = normalized_value.decode("utf-8") if isinstance(normalized_value, bytes) else normalized_value
+        return vector_like(vec, _draken_native.vector_varchar_from_constant(_pat, 1), False, operator == "NotLike")
     if operator == "ILike" or operator == "NotILike":
-        return vector_like(vec, StringVector.from_constant(normalized_value, 1), True, operator == "NotILike")
+        _pat = normalized_value.decode("utf-8") if isinstance(normalized_value, bytes) else normalized_value
+        return vector_like(vec, _draken_native.vector_varchar_from_constant(_pat, 1), True, operator == "NotILike")
     if operator == "RLike" or operator == "NotRLike":
-        return vector_rlike(vec, StringVector.from_constant(normalized_value, 1), operator == "NotRLike")
+        _pat = normalized_value.decode("utf-8") if isinstance(normalized_value, bytes) else normalized_value
+        return vector_rlike(vec, _draken_native.vector_varchar_from_constant(_pat, 1), operator == "NotRLike")
     if operator == "Lt":
         return vec.less_than(normalized_value)
     if operator == "Gt":

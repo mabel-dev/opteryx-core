@@ -8,7 +8,7 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
 
-from draken.vectors.vector_vector import VectorVector
+from draken.vectors.vector import Vector as VectorVector
 
 from opteryx.exceptions import InvalidConfigurationError
 from opteryx.third_party.cyan4973.xxhash import hash_bytes
@@ -608,7 +608,7 @@ def _embed_via_provider(provider, texts: list[str]) -> VectorVector:
             for r in single_rows:
                 if not isinstance(r, VectorVector) or len(r) != 1:
                     _raise_invalid_provider(provider, "a consistent provider return type.")
-            dims = single_rows[0].dimensions
+            dims = single_rows[0]._nb.logical_type_dimension
             vv = vector_math.new_matrix(len(texts), dims)
             for i, single in enumerate(single_rows):
                 vector_math.write_row_bytes(vv, i, vector_math.row_bytes(single, 0))
@@ -717,7 +717,7 @@ def embed_text_matrix(texts: list[str]) -> VectorVector:
 
     # Determine dimensions from whichever source actually produced rows.
     if new_rows is not None:
-        dimensions = new_rows.dimensions
+        dimensions = new_rows._nb.logical_type_dimension
     else:
         dimensions = next(iter(cached_rows.values()))[0]
 
@@ -731,10 +731,10 @@ def embed_text_matrix(texts: list[str]) -> VectorVector:
                 missing_unique.append(text)
                 seen_missing.add(text)
 
-    if missing_positions and (new_rows is None or new_rows.dimensions != dimensions):
+    if missing_positions and (new_rows is None or new_rows._nb.logical_type_dimension != dimensions):
         # Re-embed any rows we just invalidated.
         new_rows = _embed_via_provider(provider, missing_unique)
-        dimensions = new_rows.dimensions
+        dimensions = new_rows._nb.logical_type_dimension
 
     out = vector_math.new_matrix(len(texts), dimensions)
 

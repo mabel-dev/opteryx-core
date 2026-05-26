@@ -40,7 +40,7 @@ from libcpp.vector cimport vector
 from time import perf_counter_ns
 
 from opteryx.compiled.structures.bloom_filter cimport BloomFilter, create_bloom_filter_from_hashes
-from draken.morsels.align cimport align_tables
+from draken.morsels.morsel cimport align_tables
 from draken.vectors.vector cimport NULL_HASH
 
 from opteryx.exceptions import UnsupportedSyntaxError

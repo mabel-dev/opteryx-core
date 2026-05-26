@@ -5,8 +5,6 @@
 
 from typing import List
 
-from draken.interop.vector_sequence import vector_from_sequence
-from draken.vectors.string_vector import StringVector
 from opteryx.exceptions import InvalidFunctionParameterError
 
 """Text and encoding function kernels.
@@ -140,9 +138,10 @@ def _normalise_replacement(repl: bytes) -> bytes:
 
 def regex_replace(array, pattern, replacement):
     """Regex replacement using the vendored RE2 engine."""
-    from opteryx.compiled import vector_ops as compiled_vector_ops
+    from opteryx.compiled.nanobind.vector_string_misc2 import vector_regex_replace
 
-    vector_regex_replace = getattr(compiled_vector_ops, "vector_regex_replace")
+    # Unwrap Cython Vector shim to nanobind Vector if needed
+    nb_array = getattr(array, "_nb", array)
 
     pat = pattern[0]
     repl = replacement[0]
@@ -166,7 +165,7 @@ def regex_replace(array, pattern, replacement):
     replacement_bytes = _normalise_replacement(repl_bytes)
 
     try:
-        result = vector_regex_replace(array, pattern_bytes, replacement_bytes)
+        result = vector_regex_replace(nb_array, pattern_bytes, replacement_bytes)
         return result
     except ValueError as exc:
         raise InvalidFunctionParameterError(str(exc)) from exc

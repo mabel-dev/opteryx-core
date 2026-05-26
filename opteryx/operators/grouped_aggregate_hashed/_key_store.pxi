@@ -14,6 +14,7 @@
 from libc.string cimport memset, memcpy
 from libc.stdint cimport int32_t, int64_t, uint8_t, uint32_t
 from libc.stdlib cimport realloc, free
+from libc.stddef cimport size_t
 
 from libcpp.vector cimport vector
 
@@ -22,10 +23,15 @@ from draken.core.buffers cimport DrakenStringArena, DrakenStringSlot
 from draken.core.buffers cimport str_length, str_data
 from draken.core.buffers cimport STR_INLINE_MAX
 from draken.core.buffers cimport str_init_null, str_init_inline, str_init_extern
-from draken.core.buffers cimport DRAKEN_INT64
+from draken.core.buffers cimport DRAKEN_INT64, DRAKEN_VARCHAR
 from draken.core.fixed_vector cimport alloc_fixed_buffer, free_fixed_buffer
 from draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
 from draken.vectors.bool_vector cimport BoolVector
+from draken.vectors.vector cimport from_decoded as _ks_vector_from_decoded
+
+cdef extern from "core/alloc.h" nogil:
+    void* draken_malloc(size_t n) nogil
+    void  draken_free(void* p) nogil
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +68,45 @@ cdef inline bint _ks_bitmap_is_valid(uint8_t* bitmap, Py_ssize_t index) noexcept
 # ---------------------------------------------------------------------------
 # Buffer wrapping helpers
 # ---------------------------------------------------------------------------
+
+cdef Vector _ks_consume_int64_buffer(DrakenFixedBuffer* buf) except *:
+    """Copy a libc-malloc'd int64 DrakenFixedBuffer into a fresh
+    draken_malloc'd Vector and free the source. Used in the finalize
+    path (reconstruct_vectors) where the collector hands the buffer off
+    and immediately swaps in a fresh one.
+
+    Cross-allocator copy is required: collector state uses libc malloc
+    (alloc_fixed_buffer); Vectors require draken_malloc (mimalloc).
+    """
+    cdef Py_ssize_t length = <Py_ssize_t>buf.length
+    cdef size_t nbytes
+    cdef int64_t* out_data
+    cdef uint8_t* validity = NULL
+    cdef Py_ssize_t bitmap_bytes
+
+    if length <= 0:
+        free_fixed_buffer(buf, True)
+        return _ks_vector_from_decoded(NULL, NULL, 0, DRAKEN_INT64)
+
+    nbytes = <size_t>length * sizeof(int64_t)
+    out_data = <int64_t*>draken_malloc(nbytes)
+    if out_data == NULL:
+        free_fixed_buffer(buf, True)
+        raise MemoryError()
+    memcpy(out_data, buf.data, nbytes)
+
+    if buf.null_bitmap != NULL:
+        bitmap_bytes = (length + 7) >> 3
+        validity = <uint8_t*>draken_malloc(<size_t>bitmap_bytes)
+        if validity == NULL:
+            draken_free(out_data)
+            free_fixed_buffer(buf, True)
+            raise MemoryError()
+        memcpy(validity, buf.null_bitmap, bitmap_bytes)
+
+    free_fixed_buffer(buf, True)
+    return _ks_vector_from_decoded(<void*>out_data, validity, <uint32_t>length, DRAKEN_INT64)
+
 
 cdef Vector _wrap_string_buffer(DrakenVarBuffer* buf) except *:
     """Convert accumulated DrakenVarBuffer bytes to a Draken VARCHAR Vector.
@@ -587,7 +632,7 @@ cdef class KeyStore:
 
         if self._n_cols == 1 and len(key_kinds) == 1:
             if key_kinds[0] == KEY_MULTI_ENCODED_STRING:
-                self._single_string_buf = alloc_var_buffer(DRAKEN_STRING, 0, 0)
+                self._single_string_buf = alloc_var_buffer(DRAKEN_VARCHAR, 0, 0)
                 self._single_string_buf.offsets[0] = 0
                 self._single_string_direct = True
             else:
@@ -602,7 +647,7 @@ cdef class KeyStore:
                 if key_kinds[i] == KEY_MULTI_ENCODED_STRING:
                     self._multi_storage_kind[i] = _DISPATCH_STRING
                     self._multi_storage_slot[i] = string_slot
-                    self._multi_string_bufs.push_back(alloc_var_buffer(DRAKEN_STRING, 0, 0))
+                    self._multi_string_bufs.push_back(alloc_var_buffer(DRAKEN_VARCHAR, 0, 0))
                     self._multi_string_bufs[string_slot].offsets[0] = 0
                     self._multi_string_nulls.push_back(NULL)
                     self._multi_string_rows.push_back(0)
@@ -893,7 +938,7 @@ cdef class KeyStore:
                     self._single_string_buf.length = <size_t>self._single_string_rows
                     self._single_string_buf.null_bitmap = self._single_string_nulls
                     out_vecs.append(_wrap_string_buffer(self._single_string_buf))
-                    self._single_string_buf = alloc_var_buffer(DRAKEN_STRING, 0, 0)
+                    self._single_string_buf = alloc_var_buffer(DRAKEN_VARCHAR, 0, 0)
                     self._single_string_buf.offsets[0] = 0
                     self._single_string_nulls = NULL
                     self._single_string_rows = 0
@@ -945,7 +990,7 @@ cdef class KeyStore:
                     _string_buf.null_bitmap = self._multi_string_nulls[storage_slot]
                     out_vecs.append(_wrap_string_buffer(_string_buf))
 
-                    self._multi_string_bufs[storage_slot] = alloc_var_buffer(DRAKEN_STRING, 0, 0)
+                    self._multi_string_bufs[storage_slot] = alloc_var_buffer(DRAKEN_VARCHAR, 0, 0)
                     self._multi_string_bufs[storage_slot].offsets[0] = 0
                     self._multi_string_nulls[storage_slot] = NULL
                     self._multi_string_rows[storage_slot] = 0
@@ -956,11 +1001,10 @@ cdef class KeyStore:
                     _fixed_buf.length = <size_t>self._multi_fixed_rows[storage_slot]
                     _fixed_buf.null_bitmap = self._multi_fixed_nulls[storage_slot]
 
-                    _fixed_iv = Integer64Vector(0, True)
-                    _fixed_iv.ptr = _fixed_buf
-                    _fixed_iv.owns_data = True
-                    _fixed_iv._unified_view = draken_vector_from_dense(_fixed_buf.data, <uint32_t>_fixed_buf.length, DRAKEN_INT64, _fixed_buf.null_bitmap)
-                    out_vecs.append(_fixed_iv)
+                    # _ks_consume_int64_buffer copies + frees _fixed_buf and
+                    # returns ownership transferred to a fresh draken_malloc'd
+                    # Vector. Allocate a fresh slot buffer below.
+                    out_vecs.append(_ks_consume_int64_buffer(_fixed_buf))
 
                     self._multi_fixed_bufs[storage_slot] = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
                     self._multi_fixed_nulls[storage_slot] = NULL

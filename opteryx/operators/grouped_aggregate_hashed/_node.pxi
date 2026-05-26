@@ -6,7 +6,7 @@ import time
 # Expression pre-evaluation and HAVING logic moved from draken_aggregate_and_group_node.pyx.
 
 from draken.morsels.morsel cimport Morsel
-from draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
+from draken.draken_native import vector_int8_from_constant
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
@@ -208,7 +208,7 @@ class GroupedAggregateHashedNode(BasePlanNode):
         if self.all_identifiers:
             chunk = chunk.select(self.all_identifiers)
         if b"*" not in chunk.column_names and "*" not in chunk.column_names:
-            star_vector = constant_from_scalar(1, chunk.num_rows, dtype="int8")
+            star_vector = vector_int8_from_constant(1, chunk.num_rows)
             chunk.append_vector("*", star_vector)
         eval_start = time.monotonic_ns()
         try:

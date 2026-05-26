@@ -5,6 +5,25 @@
 > Cython-isation of the operator layer so every hot path is typed and
 > `nogil`-clean; (2) turn on inter-operator pipeline parallelism on that
 > substrate. This document is design, sequence, and gates — not code.
+>
+> **Scope-of-document vs scope-of-initiative.** Per `02_pm_briefing.md` §7.5,
+> this document describes two distinct initiatives that share a substrate:
+>
+> - **Initiative 1 (Phase 0–1 here, the *operator migration*):** every
+>   operator and the residual `vector_ops/*.pyx` files migrate to uniform
+>   `Vector` + `DrakenType` dispatch, §3.1-compliant hot paths, no
+>   typed-Vector cimports, no `cdef object` returns on the producer surface.
+>   This is the current operator-PM's initiative. Acceptance criterion is
+>   "compile-clean and `make q` materially above zero," not "parallel."
+> - **Initiative 2 (Phase 2–6 here, the *scheduler/parallelism work*):**
+>   the morsel-driven scheduler, the parallel substrate, the §12 design
+>   forks that depend on a working operator layer. This is its own
+>   multi-week project; per the briefing, "probably becomes the next PM
+>   initiative after the migration is clean."
+>
+> Both initiatives are documented here so the design is coherent across the
+> handover. Do not conflate them in tickets. The current PM closes
+> Initiative 1; the next PM (or a re-conched current PM) takes Initiative 2.
 
 <!--
 Authoring notes
@@ -419,20 +438,56 @@ The planner's only obligation is to keep the catalog accurate
 Phased like the draken rebuild: each phase is shippable on its own and
 gated by `make q` green plus a behavioural check.
 
-### Phase 0 — Audit & instrument (no behaviour change)
+### Phase 0a — Unblock the build (mechanical, urgent)
+Goal: get `make q` off zero so the rest of the work is observable.
+**Substantially complete as of 2026-05-26** — see `03_pm_log.md`.
+
+- ✅ Briefing's Ticket 1 (`serial_engine.py:28` Morsel import) — landed.
+- ✅ `draken.interop.vector_sequence` cascade — resolved **upstream** by
+  draken-PM adding a thin dispatcher module; no operator-PM work needed.
+  Known dispatcher limitations (DECIMAL defaults to (18,6); FP16
+  excluded) recorded in `03_pm_log.md` for awareness.
+- ⏳ Compile blockers — **corrected scope** (see `03_pm_log.md`
+  2026-05-26 Ticket-2 entry):
+  - `bloom_filter.pyx` does NOT cimport typed-Vector subclasses; not a
+    blocker. Remove from briefing §3.3 list.
+  - Real typed-cimport blockers in scope: `_factory.pxi` +
+    `_collectors_numeric.pxi` + `_collectors_buffered.pxi` +
+    `_collectors_distinct.pxi`.
+  - `_key_store.pxi` is a separate fix shape (`DRAKEN_STRING` rename +
+    `str_init_extern` 5-arg signature).
+- ⏳ **Two draken-PM-side prerequisites surfaced** before collector
+  migration can proceed cleanly:
+  - **D-A:** `draken/core/buffers.pxd`'s `DrakenType` enum is stale vs
+    the header (missing DECIMAL, NULL, VECTOR_FP16).
+  - **D-B:** Canonical pattern for typed C-level buffer access from a
+    uniform `Vector` in `nogil` Cython, including decimal scale.
+    Eval-PM's `arithmetic.pyx` is not a worked example for this
+    (different shape — per-morsel dispatch vs per-row inner loop).
+- **Gate:** `make q` at 119/133 (89%) post-cascade; full closure of
+  compile-blocker list in `02_pm_briefing.md` §3.3 still pending. The 14
+  remaining failures are real operator-rewrite gaps, not import noise.
+
+### Phase 0b — Audit & instrument (no behaviour change)
 Goal: know exactly which operators meet the §3 contract today and which
 don't, so the migration is finite and visible.
+- **Start with Filter as a worked example** (briefing §8). Filter is
+  small, stateless, hot-path on essentially every query, and exercises
+  the Cython↔nanobind seam against a real operator. The Filter audit is
+  the template; generalise only after it is reviewed and accepted.
 - Static audit of every `.pyx` operator: list `object`-typed parameters,
   Python attribute accesses inside `_push_impl`, calls to non-`nogil`
-  helpers. Produce a per-operator report in
+  helpers, and selection-vector handling (the latter only if §6 resolves
+  to option C). Produce a per-operator report in
   `opteryx/operators/docs/audits/`.
 - Add a build-time check (analogous to the PyArrow check) that flags
   `object` parameters on `_push_impl` and forbids new ones. Existing
   violations are whitelisted, not silently passed.
 - Add per-operator telemetry — already partly there. Make sure every
   operator increments `records_in`/`records_out`.
-- **Gate:** report exists, build-time check passes on current code,
-  whitelist is exhaustive.
+- **Gate:** Filter audit reviewed; report exists for every other
+  operator; build-time check passes on current code; whitelist is
+  exhaustive.
 
 ### Phase 1 — Operator cleanup (still single-threaded)
 Goal: every operator in the catalog (excluding the off-pipeline DDL/DML set)

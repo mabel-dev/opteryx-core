@@ -11,26 +11,41 @@ import datetime
 
 from draken.vectors.bool_vector import BoolVector
 from opteryx.compiled.vector_ops import (
+    vector_anyop_ilike,
+    vector_anyop_like,
+    vector_like,
+    vector_rlike,
+)
+from opteryx.compiled.nanobind.vector_array_reduce import (
     vector_allop_eq,
     vector_allop_neq,
     vector_anyop_eq,
-    vector_anyop_ilike,
-    vector_anyop_like,
     vector_anyop_neq,
     vector_anyop_gt,
     vector_anyop_lt,
     vector_anyop_gte,
     vector_anyop_lte,
-    vector_contains,
-    vector_like,
-    vector_rlike,
 )
+from opteryx.compiled.nanobind.vector_string_search import vector_contains
 from opteryx.compiled.nanobind.vector_misc import vector_in_list
 from opteryx.types import OrsoTypes
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 # Note: _json_at_arrow, _json_array_contains_all, _json_at_question,
 # _coerce_date32, _coerce_float, _coerce_int64, _coerce_timestamp are textually
 # included via __init__.pyx (json_ops.pyx, type_coercion.pyx) before this file.
+
+
+cdef inline object _nb_vec_unwrap(object v):
+    """Unwrap Cython Vector shim → raw nanobind Vector, or return as-is."""
+    nb = getattr(v, "_nb", None)
+    return nb if nb is not None else v
+
+
+cdef inline object _wrap_nb_bool_result(object result):
+    """Wrap a nanobind BOOL Vector in BoolVector; pass through BoolVector unchanged."""
+    if isinstance(result, BoolVector):
+        return result
+    return BoolVector(result)
 
 
 _NEGATED_OPS = {
@@ -78,7 +93,7 @@ cdef _int64_compare(int op_code, vec, right):
 
     if isinstance(right, (list, tuple, set, frozenset)):
         if op_code == OP_IN_LIST:
-            return vector_in_list(vec, right)
+            return _wrap_nb_bool_result(vector_in_list(_nb_vec_unwrap(vec), right))
         raise NotImplementedError(f"Integer64Vector: set op (code {op_code}) not supported")
 
     draken_op = _DRAKEN_CMP_OP[op_code]
@@ -113,7 +128,7 @@ cdef _float64_compare(int op_code, vec, right):
 
     if isinstance(right, (list, tuple, set, frozenset)):
         if op_code == OP_IN_LIST:
-            return vector_in_list(vec, right)
+            return _wrap_nb_bool_result(vector_in_list(_nb_vec_unwrap(vec), right))
         raise NotImplementedError(f"Float64Vector: set op (code {op_code}) not supported")
 
     draken_op = _DRAKEN_CMP_OP[op_code]
@@ -162,7 +177,7 @@ cdef _decimal_compare(int op_code, vec, right):
 
 cdef _bool_compare(int op_code, left, right):
     if op_code == OP_IN_LIST:
-        return vector_in_list(left, right)
+        return _wrap_nb_bool_result(vector_in_list(_nb_vec_unwrap(left), right))
     return left._compare_scalar(bool(right), _DRAKEN_CMP_OP[op_code])
 
 
@@ -198,8 +213,7 @@ cdef draken_compare_int(int op_code, left, right, left_schema_type=None, right_s
 
     if op_code == OP_IN_LIST:
         if isinstance(right, (list, tuple, set, frozenset)):
-            result = vector_in_list(left, right, negate)
-            return result
+            return _wrap_nb_bool_result(vector_in_list(_nb_vec_unwrap(left), right, negate))
 
     if is_scalar(left) and is_draken_vector(right):
         flip_ops = {OP_GT: OP_LT, OP_LT: OP_GT, OP_GT_EQ: OP_LT_EQ, OP_LT_EQ: OP_GT_EQ}
@@ -242,23 +256,23 @@ cdef draken_compare_int(int op_code, left, right, left_schema_type=None, right_s
 
 
 cpdef draken_compare(str op, left, right, left_schema_type=None, right_schema_type=None):
-    # Array / set operations
+    # Array / set operations — all are nanobind functions; unwrap shims and wrap results.
     if op == "AnyOpEq":
-        return vector_anyop_eq(literal=left, column=right)
+        return _wrap_nb_bool_result(vector_anyop_eq(literal=_nb_vec_unwrap(left), column=_nb_vec_unwrap(right)))
     if op == "AnyOpNotEq":
-        return vector_anyop_neq(literal=left, column=right)
+        return _wrap_nb_bool_result(vector_anyop_neq(literal=_nb_vec_unwrap(left), column=_nb_vec_unwrap(right)))
     if op == "AnyOpGt":
-        return vector_anyop_gt(left, right)
+        return _wrap_nb_bool_result(vector_anyop_gt(_nb_vec_unwrap(left), _nb_vec_unwrap(right)))
     if op == "AnyOpLt":
-        return vector_anyop_lt(left, right)
+        return _wrap_nb_bool_result(vector_anyop_lt(_nb_vec_unwrap(left), _nb_vec_unwrap(right)))
     if op == "AnyOpGtEq":
-        return vector_anyop_gte(left, right)
+        return _wrap_nb_bool_result(vector_anyop_gte(_nb_vec_unwrap(left), _nb_vec_unwrap(right)))
     if op == "AnyOpLtEq":
-        return vector_anyop_lte(left, right)
+        return _wrap_nb_bool_result(vector_anyop_lte(_nb_vec_unwrap(left), _nb_vec_unwrap(right)))
     if op == "AllOpEq":
-        return vector_allop_eq(left, right)
+        return _wrap_nb_bool_result(vector_allop_eq(_nb_vec_unwrap(left), _nb_vec_unwrap(right)))
     if op == "AllOpNotEq":
-        return vector_allop_neq(left, right)
+        return _wrap_nb_bool_result(vector_allop_neq(_nb_vec_unwrap(left), _nb_vec_unwrap(right)))
     if op == "AtArrow":
         return _json_at_arrow(left, right)
     if op == "ArrayContainsAll":
@@ -290,7 +304,7 @@ cpdef draken_compare(str op, left, right, left_schema_type=None, right_schema_ty
 
     if op == "InList":
         if isinstance(right, (list, tuple, set, frozenset)):
-            return vector_in_list(left, right, negate)
+            return _wrap_nb_bool_result(vector_in_list(_nb_vec_unwrap(left), right, negate))
 
     if is_scalar(left) and is_draken_vector(right):
         flip_ops = {"Gt": "Lt", "Lt": "Gt", "GtEq": "LtEq", "LtEq": "GtEq"}

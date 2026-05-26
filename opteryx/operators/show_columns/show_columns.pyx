@@ -24,6 +24,7 @@ Gives information about a dataset's columns
 from typing import Generator, Optional
 from opteryx.models import QueryProperties
 from opteryx.types import OrsoTypes
+from draken.interop.vector_sequence import vector_from_sequence
 
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
 

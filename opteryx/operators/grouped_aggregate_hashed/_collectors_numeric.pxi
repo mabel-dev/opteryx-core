@@ -9,20 +9,23 @@
 #
 
 from libc.stdint cimport int64_t, uint8_t, uint32_t, INT64_MAX, INT64_MIN
+from libc.stddef cimport size_t
 from libc.math cimport HUGE_VAL
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
 
-from draken.core.buffers cimport DrakenFixedBuffer, DrakenVector
+from draken.core.buffers cimport DrakenFixedBuffer, DrakenVector, DrakenType
 from draken.core.buffers cimport DRAKEN_INT64
 from draken.core.buffers cimport DRAKEN_FLOAT64
+from draken.core.buffers cimport DRAKEN_DECIMAL
 from draken.core.buffers cimport draken_vector_from_dense
 from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.fixed_vector cimport free_fixed_buffer
-from draken.vectors.vector cimport Vector
-from draken.vectors.integer64_vector cimport Integer64Vector
-from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.decimal_vector cimport DecimalVector
+from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
+
+cdef extern from "core/alloc.h" nogil:
+    void* draken_malloc(size_t n) nogil
+    void  draken_free(void* p) nogil
 
 
 cdef inline bint _num_bitmap_valid(uint8_t* bm, Py_ssize_t i) noexcept nogil:
@@ -119,70 +122,89 @@ cdef inline void _grow_bitmap(uint8_t** bitmap_ref, int64_t old_count, int64_t n
     bitmap_ref[0] = new_bitmap
 
 
-cdef inline Integer64Vector _wrap_int64_buffer(DrakenFixedBuffer* buf) except *:
-    cdef Integer64Vector vec = Integer64Vector(0, True)
-    vec.ptr = buf
-    vec.owns_data = True
-    vec._unified_view = draken_vector_from_dense(buf.data, <uint32_t>buf.length, DRAKEN_INT64, buf.null_bitmap)
-    return vec
+cdef inline Vector _materialize_fixed_buffer(
+    DrakenFixedBuffer* src,
+    int64_t start,
+    int64_t stop,
+    DrakenType dtype,
+    size_t itemsize,
+) except *:
+    """Copy a range of a libc-malloc'd DrakenFixedBuffer into a fresh
+    draken_malloc'd Vector. The source buffer is NOT consumed — the
+    caller retains it.
+
+    This is the producer-side primitive for collector finalize paths.
+    The collector's internal state lives in libc malloc (alloc_fixed_buffer);
+    Vectors require buffers in draken_malloc (mimalloc). Cross-allocator
+    ownership transfer is impossible, so we copy.
+    """
+    cdef Py_ssize_t length = <Py_ssize_t>(stop - start)
+    cdef void* out_data
+    cdef uint8_t* validity = NULL
+    cdef Py_ssize_t i
+    cdef Py_ssize_t bitmap_bytes
+    cdef size_t nbytes
+
+    if length <= 0:
+        return _vector_from_decoded(NULL, NULL, 0, dtype)
+
+    nbytes = <size_t>length * itemsize
+    out_data = draken_malloc(nbytes)
+    if out_data == NULL:
+        raise MemoryError()
+    memcpy(out_data, <uint8_t*>src.data + <size_t>start * itemsize, nbytes)
+
+    if src.null_bitmap != NULL:
+        bitmap_bytes = (length + 7) >> 3
+        validity = <uint8_t*>draken_malloc(<size_t>bitmap_bytes)
+        if validity == NULL:
+            draken_free(out_data)
+            raise MemoryError()
+        memset(validity, 0xFF, bitmap_bytes)
+        for i in range(length):
+            if not _num_bitmap_valid(src.null_bitmap, start + i):
+                validity[i >> 3] &= ~(1 << (i & 7))
+
+    return _vector_from_decoded(out_data, validity, <uint32_t>length, dtype)
 
 
-cdef inline Float64Vector _wrap_float64_buffer(DrakenFixedBuffer* buf) except *:
-    cdef Float64Vector vec = Float64Vector(0, True)
-    vec.ptr = buf
-    vec.owns_data = True
-    vec._unified_view = draken_vector_from_dense(buf.data, <uint32_t>buf.length, DRAKEN_FLOAT64, buf.null_bitmap)
-    return vec
+cdef inline Vector _consume_int64_buffer(DrakenFixedBuffer* buf) except *:
+    """Copy the full buffer into a Vector and free the source. Used by
+    finalize() where the collector has already swapped in a fresh state
+    buffer and is handing the old one off.
+    """
+    cdef Vector out = _materialize_fixed_buffer(
+        buf, 0, <int64_t>buf.length, DRAKEN_INT64, sizeof(int64_t)
+    )
+    free_fixed_buffer(buf, True)
+    return out
 
 
-cdef inline Integer64Vector _slice_int64_buffer(
+cdef inline Vector _consume_float64_buffer(DrakenFixedBuffer* buf) except *:
+    """Copy the full buffer into a Vector and free the source. Used by
+    finalize() where the collector has already swapped in a fresh state.
+    """
+    cdef Vector out = _materialize_fixed_buffer(
+        buf, 0, <int64_t>buf.length, DRAKEN_FLOAT64, sizeof(double)
+    )
+    free_fixed_buffer(buf, True)
+    return out
+
+
+cdef inline Vector _slice_int64_buffer(
     DrakenFixedBuffer* src,
     int64_t start,
     int64_t stop,
 ) except *:
-    cdef Py_ssize_t length = <Py_ssize_t>(stop - start)
-    cdef Integer64Vector out = Integer64Vector(<size_t>length)
-    cdef int64_t* src_data = <int64_t*>src.data
-    cdef int64_t* out_data = <int64_t*>out.ptr.data
-    cdef Py_ssize_t i
-
-    if length <= 0:
-        return out
-
-    memcpy(out_data, src_data + start, length * sizeof(int64_t))
-
-    if src.null_bitmap != NULL:
-        out.ptr.null_bitmap = _alloc_all_valid_bitmap(length)
-        for i in range(length):
-            if not _num_bitmap_valid(src.null_bitmap, start + i):
-                _bitmap_clear(out.ptr.null_bitmap, i)
-
-    return out
+    return _materialize_fixed_buffer(src, start, stop, DRAKEN_INT64, sizeof(int64_t))
 
 
-cdef inline Float64Vector _slice_float64_buffer(
+cdef inline Vector _slice_float64_buffer(
     DrakenFixedBuffer* src,
     int64_t start,
     int64_t stop,
 ) except *:
-    cdef Py_ssize_t length = <Py_ssize_t>(stop - start)
-    cdef Float64Vector out = Float64Vector(<size_t>length)
-    cdef double* src_data = <double*>src.data
-    cdef double* out_data = <double*>out.ptr.data
-    cdef Py_ssize_t i
-
-    if length <= 0:
-        return out
-
-    memcpy(out_data, src_data + start, length * sizeof(double))
-
-    if src.null_bitmap != NULL:
-        out.ptr.null_bitmap = _alloc_all_valid_bitmap(length)
-        for i in range(length):
-            if not _num_bitmap_valid(src.null_bitmap, start + i):
-                _bitmap_clear(out.ptr.null_bitmap, i)
-
-    return out
+    return _materialize_fixed_buffer(src, start, stop, DRAKEN_FLOAT64, sizeof(double))
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +365,7 @@ cdef class SumInt64Collector(BaseCollector):
         const int64_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Integer64Vector vec = <Integer64Vector>morsel.column(self.column_name)
+        cdef Vector vec = morsel.column(self.column_name)
         cdef int64_t* sums = <int64_t*>self._sums.data
         cdef uint8_t* seen = self._seen
         cdef int64_t* data
@@ -385,7 +407,7 @@ cdef class SumInt64Collector(BaseCollector):
             free(seen)
 
         self._time_finalize_ns += _now_ns() - start_ns
-        return _wrap_int64_buffer(out)
+        return _consume_int64_buffer(out)
 
     cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
         cdef long long start_ns = _now_ns()
@@ -457,7 +479,7 @@ cdef class SumFloat64Collector(BaseCollector):
         const int64_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Float64Vector vec = <Float64Vector>morsel.column(self.column_name)
+        cdef Vector vec = morsel.column(self.column_name)
         cdef double* sums = <double*>self._sums.data
         cdef uint8_t* seen = self._seen
         cdef double* data
@@ -497,7 +519,7 @@ cdef class SumFloat64Collector(BaseCollector):
         if seen != NULL:
             free(seen)
 
-        return _wrap_float64_buffer(out)
+        return _consume_float64_buffer(out)
 
     cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
         cdef DrakenFixedBuffer* out = self._sums
@@ -575,7 +597,7 @@ cdef class MinMaxInt64Collector(BaseCollector):
         const int64_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Integer64Vector vec = <Integer64Vector>morsel.column(self.column_name)
+        cdef Vector vec = morsel.column(self.column_name)
         cdef int64_t* values = <int64_t*>self._values.data
         cdef uint8_t* seen = self._seen
         cdef int64_t* data
@@ -626,7 +648,7 @@ cdef class MinMaxInt64Collector(BaseCollector):
         if seen != NULL:
             free(seen)
 
-        return _wrap_int64_buffer(out)
+        return _consume_int64_buffer(out)
 
     cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
         cdef DrakenFixedBuffer* out = self._values
@@ -706,7 +728,7 @@ cdef class MinMaxFloat64Collector(BaseCollector):
         const int64_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Float64Vector vec = <Float64Vector>morsel.column(self.column_name)
+        cdef Vector vec = morsel.column(self.column_name)
         cdef double* values = <double*>self._values.data
         cdef uint8_t* seen = self._seen
         cdef double* data
@@ -758,7 +780,7 @@ cdef class MinMaxFloat64Collector(BaseCollector):
         if seen != NULL:
             free(seen)
 
-        return _wrap_float64_buffer(out)
+        return _consume_float64_buffer(out)
 
     cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
         cdef DrakenFixedBuffer* out = self._values
@@ -924,51 +946,40 @@ cdef class AvgCollector(BaseCollector):
         const int64_t* state_indices,
         Py_ssize_t n_rows,
     ):
+        # Per-row template: one type-dispatch per morsel, typed pointers
+        # cached from vec.unified(), pure-C inner loop.
         cdef Vector raw = morsel.column(self.column_name)
+        cdef DrakenVector* uv = raw.unified()
+        cdef DrakenType t = uv.type
         cdef double* sums = <double*>self._sums.data
         cdef int64_t* counts = <int64_t*>self._counts.data
         cdef Py_ssize_t i
         cdef int64_t si
-        cdef Integer64Vector iv
-        cdef Float64Vector fv
-        cdef DecimalVector dv
         cdef int64_t* i64
         cdef int64_t* dec_data
         cdef double* f64
-        cdef uint8_t* nulls
+        cdef uint8_t* nulls = uv.validity
         cdef double dec_factor
-        cdef DrakenVector* uv
-        cdef const uint32_t* sel
+        cdef const uint32_t* sel = uv.selection
 
-        if isinstance(raw, Integer64Vector):
-            iv = <Integer64Vector>raw
-            uv = iv.unified()
+        if t == DRAKEN_INT64:
             i64 = <int64_t*>uv.data
-            sel = uv.selection
-            nulls = uv.validity
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
                     sums[si] += i64[sel[i]]
                     counts[si] += 1
-        elif isinstance(raw, DecimalVector):
-            dv = <DecimalVector>raw
-            dec_factor = 10.0 ** (-dv._scale)
-            uv = dv.unified()
+        elif t == DRAKEN_DECIMAL:
+            dec_factor = 10.0 ** (-raw._nb.logical_type_scale)
             dec_data = <int64_t*>uv.data
-            sel = uv.selection
-            nulls = uv.validity
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
                     sums[si] += <double>dec_data[sel[i]] * dec_factor
                     counts[si] += 1
         else:
-            fv = <Float64Vector>raw
-            uv = fv.unified()
+            # Default to FLOAT64 (also handles other numerics via reinterpret).
             f64 = <double*>uv.data
-            sel = uv.selection
-            nulls = uv.validity
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
@@ -995,7 +1006,7 @@ cdef class AvgCollector(BaseCollector):
         self._capacity = 0
 
         free_fixed_buffer(counts, True)
-        return _wrap_float64_buffer(out)
+        return _consume_float64_buffer(out)
 
     cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
         cdef DrakenFixedBuffer* out = self._sums
@@ -1062,7 +1073,7 @@ cdef class SumDecimalCollector(BaseCollector):
         const int64_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef DecimalVector vec = <DecimalVector>morsel.column(self.column_name)
+        cdef Vector vec = morsel.column(self.column_name)
         cdef double* sums = <double*>self._sums.data
         cdef uint8_t* seen = self._seen
         cdef int64_t* data
@@ -1103,7 +1114,7 @@ cdef class SumDecimalCollector(BaseCollector):
         if seen != NULL:
             free(seen)
 
-        return _wrap_float64_buffer(out)
+        return _consume_float64_buffer(out)
 
     cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
         cdef DrakenFixedBuffer* out = self._sums
@@ -1174,7 +1185,7 @@ cdef class MinMaxDecimalCollector(BaseCollector):
         const int64_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef DecimalVector vec = <DecimalVector>morsel.column(self.column_name)
+        cdef Vector vec = morsel.column(self.column_name)
         cdef int64_t* values = <int64_t*>self._values.data
         cdef uint8_t* seen = self._seen
         cdef int64_t* data
@@ -1234,7 +1245,7 @@ cdef class MinMaxDecimalCollector(BaseCollector):
         self._seen = NULL
         self._capacity = 0
 
-        return _wrap_float64_buffer(out)
+        return _consume_float64_buffer(out)
 
     cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
         """Apply scale factor and return slice as Float64Vector."""
@@ -1259,4 +1270,4 @@ cdef class MinMaxDecimalCollector(BaseCollector):
                 if not _num_bitmap_valid(src.null_bitmap, start + i):
                     _bitmap_clear(out.null_bitmap, i)
 
-        return _wrap_float64_buffer(out)
+        return _consume_float64_buffer(out)

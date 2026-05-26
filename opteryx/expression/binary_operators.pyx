@@ -8,20 +8,25 @@ kernels.
 """
 
 from opteryx.compiled import vector_ops
+from opteryx.compiled.nanobind.vector_bitwise import (
+    vector_bitwise_or as _vector_bitwise_or,
+    vector_bitwise_and as _vector_bitwise_and,
+    vector_bitwise_xor as _vector_bitwise_xor,
+    vector_bitwise_shift_left as _vector_bitwise_shift_left,
+    vector_bitwise_shift_right as _vector_bitwise_shift_right,
+)
 from opteryx.exceptions import IncorrectTypeError, UnsupportedTypeError
 from opteryx.expression.evaluator.arithmetic_dispatch import call_arithmetic_op
 from opteryx.types import OrsoTypes
 
-from draken.interop.vector_sequence import vector_from_sequence
-from draken.vectors.array_vector import ArrayVector
-from draken.vectors.integer64_vector import Integer64Vector
-from draken.vectors.string_vector import StringVector
+import draken.draken_native as _draken_native
 
 
 cpdef bytes _json_key_constant(key):
-    """Extract key bytes from a StringVector; value is taken from logical row 0."""
-    if not isinstance(key, StringVector):
-        raise IncorrectTypeError("JSON extraction key must be a StringVector")
+    """Extract key bytes from a string Vector; value is taken from logical row 0."""
+    key_type = getattr(key, "type", None)
+    if key_type is None or key_type.name not in ("VARCHAR", "NVARCHAR", "VARBINARY"):
+        raise IncorrectTypeError("JSON extraction key must be a string Vector")
     raw_key = key[0]
     if raw_key is None:
         raise IncorrectTypeError("JSON extraction key cannot be NULL")
@@ -48,15 +53,17 @@ def MapAccessOp(array, key):
     """Map / iterable subscript over Draken vectors."""
     from opteryx.compiled.nanobind.vector_special import vector_map_access_array, vector_map_access_string
 
-    if not isinstance(key, Integer64Vector):
-        raise IncorrectTypeError("Map/iterable subscript key must be an Integer64Vector")
+    key_type = getattr(key, "type", None)
+    if key_type is None or key_type.name not in ("INT64", "INT32", "INT16", "INT8"):
+        raise IncorrectTypeError("Map/iterable subscript key must be an integer Vector")
 
-    if isinstance(array, StringVector):
+    array_type = getattr(array, "type", None)
+    if array_type is not None and array_type.name in ("VARCHAR", "NVARCHAR", "VARBINARY"):
         return vector_map_access_string(array, key)
-    if isinstance(array, ArrayVector):
-        return vector_from_sequence(vector_map_access_array(array, key))
+    if array_type is not None and array_type.name == "ARRAY":
+        return _draken_native.vector_from_sequence(vector_map_access_array(array, key))
     raise IncorrectTypeError(
-        f"Map access is only supported for ArrayVector/StringVector, "
+        f"Map access is only supported for Array/String vectors, "
         f"not {type(array).__name__}"
     )
 
@@ -119,10 +126,19 @@ def binary_operations(left, left_type, str operator, right, right_type):
 
     if operator == "StringConcat":
         from opteryx.compiled.nanobind.vector_selection_concat import vector_concat as _vc
-        n = len(left) if isinstance(left, StringVector) else (len(right) if isinstance(right, StringVector) else 1)
-        left_v  = left  if isinstance(left, StringVector)  else StringVector.from_constant(left.encode("utf-8") if isinstance(left, str) else left, n)
-        right_v = right if isinstance(right, StringVector) else StringVector.from_constant(right.encode("utf-8") if isinstance(right, str) else right, n)
-        return _vc(left_v, right_v)
+        _str_types = (_draken_native.VARCHAR, _draken_native.NVARCHAR)
+        left_is_str = getattr(left, "type", None) in _str_types
+        right_is_str = getattr(right, "type", None) in _str_types
+        n = len(left) if left_is_str else (len(right) if right_is_str else 1)
+        def _to_str_vec(v):
+            if getattr(v, "type", None) in _str_types:
+                return v
+            if isinstance(v, bytes):
+                v = v.decode("utf-8")
+            elif not isinstance(v, str):
+                v = str(v) if v is not None else None
+            return _draken_native.vector_varchar_from_constant(v, n)
+        return _vc(_to_str_vec(left), _to_str_vec(right))
 
     return operation(left, right)
 
@@ -155,11 +171,11 @@ OPERATOR_FUNCTION_MAP = {
     "MyIntegerDivide": _unsupported_bitwise_op("MyIntegerDivide"),
     "StringConcat":    _unsupported_bitwise_op("StringConcat"),
     # Bitwise: native vector ops.
-    "BitwiseOr":  vector_ops.vector_bitwise_or,
-    "BitwiseAnd": vector_ops.vector_bitwise_and,
-    "BitwiseXor": vector_ops.vector_bitwise_xor,
-    "ShiftLeft":  vector_ops.vector_bitwise_shift_left,
-    "ShiftRight": vector_ops.vector_bitwise_shift_right,
+    "BitwiseOr":  _vector_bitwise_or,
+    "BitwiseAnd": _vector_bitwise_and,
+    "BitwiseXor": _vector_bitwise_xor,
+    "ShiftLeft":  _vector_bitwise_shift_left,
+    "ShiftRight": _vector_bitwise_shift_right,
     # Extraction operators.
     "Arrow":     ArrowOp,
     "LongArrow": LongArrowOp,

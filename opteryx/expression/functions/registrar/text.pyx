@@ -49,7 +49,7 @@ from opteryx.compiled.nanobind.vector_accessors import (
     vector_length,
     vector_string_length,
 )
-from draken.vectors.null_vector import NullVector
+import draken.draken_native as _draken_native_text_reg
 from opteryx.expression.functions import (
     FunctionDefinition,
     FunctionOverload,
@@ -210,7 +210,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                         engine="draken",
                         id="default",
                         callable_ref=lambda s, f: vector_string_substring(
-                            s, f, NullVector(len(s))
+                            s, f, _draken_native_text_reg.vector_null_from_length(len(s))
                         ),
                         cost_us_per_million=378.0,
                     ),
@@ -313,6 +313,11 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
     Combined with the core group in one module for maintainability.
     """
     from opteryx.compiled import vector_ops as compiled_vector_ops
+    from opteryx.compiled.nanobind.vector_string_case import (
+        vector_ltrim,
+        vector_rtrim,
+        vector_trim,
+    )
     from opteryx.expression.functions.implementations import text as string_functions
 
     # Parameter shortcuts
@@ -333,9 +338,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
         return sep.join(str(a) for a in args if a is not None)
 
     vector_dfa_extract = getattr(compiled_vector_ops, "vector_dfa_extract")
-    vector_ltrim = getattr(compiled_vector_ops, "vector_ltrim")
-    vector_rtrim = getattr(compiled_vector_ops, "vector_rtrim")
-    vector_trim = getattr(compiled_vector_ops, "vector_trim")
 
     return [
         FunctionDefinition(

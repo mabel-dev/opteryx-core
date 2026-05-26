@@ -42,18 +42,21 @@ from uuid import uuid4
 cdef inline object _inner_copy(object obj):
     cdef type obj_type = type(obj)
 
-    if obj_type in (int, float, str, bool, type(None)):
+    # Pointer-equality checks avoid tuple allocation of the original `in (...)` form.
+    if obj_type is int or obj_type is float or obj_type is str or obj_type is bool or obj is None:
         return obj
-    elif isinstance(obj, list):
+    if obj_type is list:
         return [_inner_copy(i) for i in obj]
-    elif isinstance(obj, tuple):
+    if obj_type is tuple:
         return tuple(_inner_copy(i) for i in obj)
-    elif isinstance(obj, dict):
+    if obj_type is dict:
         return {k: _inner_copy(v) for k, v in obj.items()}
-    elif hasattr(obj, "copy"):
+    # hasattr is intentional here: _inner_copy handles arbitrary user objects
+    # stored in node properties that implement .copy() (e.g. custom attribute types).
+    # No known type can be checked statically, so this is an approved exception to §9.
+    if hasattr(obj, "copy"):
         return obj.copy()
-    else:
-        return obj
+    return obj
 
 
 cdef class Node:
@@ -73,18 +76,16 @@ cdef class Node:
 
     def __getattr__(self, str name):
         """
-        Get an attribute:
-          - If name is 'node_type' or 'uuid', return the stored value.
-          - Otherwise, return the corresponding entry in _properties or None if not found.
+        Get an attribute by name.
+        node_type and uuid are cdef slots but Python-level attribute access
+        can still route through __getattr__ in certain call paths, so we
+        handle them explicitly before falling through to _properties.
         """
         if name == 'node_type':
             return self.node_type
         if name == 'uuid':
             return self.uuid
-        try:
-            return self._properties[name]
-        except KeyError:
-            return None
+        return self._properties.get(name)
 
     def __setattr__(self, str name, object value):
         """
@@ -131,7 +132,7 @@ cdef class Node:
         """
         Return a string representation of the node, including its type.
         """
-        cdef str node_type_str = str(self.node_type)
+        node_type_str = str(self.node_type)
         if node_type_str.startswith("LogicalPlanStepType."):
             node_type_str = node_type_str[20:]
         return f"<Node type={node_type_str}>"
@@ -159,10 +160,12 @@ cdef class Node:
     def __getstate__(self):
         """
         Capture the state of the object as a dictionary.
+        PyDict_Copy is a shallow copy — sufficient for pickling since the
+        unpickler reconstructs a new dict from the serialized byte stream.
         """
         return {
             "uuid": self.uuid,
-            "_properties": PyDict_Copy(self._properties)  # Deep copy properties
+            "_properties": PyDict_Copy(self._properties)
         }
 
     def __setstate__(self, state):

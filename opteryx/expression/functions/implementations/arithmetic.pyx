@@ -23,14 +23,14 @@ from draken.vectors.vector import Vector
 
 def round1(values):
     """ROUND(values)"""
-    from opteryx.compiled.vector_ops import vector_round
+    from opteryx.compiled.nanobind.vector_math import vector_round
 
     return vector_round(values)
 
 
 def round2(values, digits):
     """ROUND(values, digits)"""
-    from opteryx.compiled.vector_ops import vector_round_digits
+    from opteryx.compiled.nanobind.vector_math import vector_round_digits
 
     if isinstance(digits, Vector) and len(digits) > 0:
         d = int(digits[0]) if digits[0] is not None else 0
@@ -129,17 +129,17 @@ def trunc(values, scales=None) -> List:
 
 def abs_value(values):
     """ABS(values): element-wise absolute value."""
-    from opteryx.compiled.vector_ops import vector_abs
+    from opteryx.compiled.nanobind.vector_math import vector_abs
     return vector_abs(values)
 
 
 def sqrt_value(values):
     """SQRT(values): element-wise square root."""
-    from opteryx.compiled.vector_ops import vector_sqrt
+    from opteryx.compiled.nanobind.vector_math import vector_sqrt
     return vector_sqrt(values)
 
 
 def sign_value(values):
     """SIGN(values): sign of value (-1, 0, 1)."""
-    from opteryx.compiled.vector_ops import vector_sign
+    from opteryx.compiled.nanobind.vector_math import vector_sign
     return vector_sign(values)

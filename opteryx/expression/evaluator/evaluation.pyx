@@ -12,17 +12,19 @@ a runtime check in opteryx/expression/evaluator/__init__.py verifies this.
 """
 
 import datetime
+import decimal as _decimal_eval
 import sys as _sys
 
 from opteryx.compiled.structures.carchar_set import CarcharSetWrapper as _CarcharSetWrapper
 from opteryx.compiled.structures.perfect_hash_set import PerfectHashSet as _PerfectHashSet
-from opteryx.compiled.vector_ops import vector_bitwise_not as _vector_bitwise_not
+from opteryx.compiled.nanobind.vector_bitwise import vector_bitwise_not as _vector_bitwise_not
 from opteryx.compiled.nanobind.vector_accessors import (
     vector_string_is_empty as _vector_string_is_empty,
     vector_string_is_not_empty as _vector_string_is_not_empty,
 )
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError, IncompatibleTypesError
 from opteryx.types import OrsoTypes as _OrsoTypes
+from opteryx.types._datetime_conversion import timestamp_to_int64_us as _ts_to_us
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 
 
@@ -78,6 +80,41 @@ def _is_scalar_value(obj):
     return is_scalar(obj)
 
 
+cdef Vector _scalar_to_draken_constant(object value, Py_ssize_t n):
+    """Convert a Python scalar literal to a Draken constant Vector of length n.
+
+    Dispatches to the appropriate draken_native typed constructor. Raises
+    TypeError for unrecognised types. Booleans must be handled by the caller
+    before reaching this function (use BoolVector.from_constant instead).
+    """
+    cdef long long ordinal, us
+    if value is None:
+        return Vector(_draken_native.vector_null_from_length(n))
+    if isinstance(value, int):
+        return Vector(_draken_native.vector_from_constant(value, n))
+    if isinstance(value, float):
+        return Vector(_draken_native.vector_float64_from_constant(value, n))
+    if isinstance(value, str):
+        return Vector(_draken_native.vector_varchar_from_constant(value, n))
+    if isinstance(value, bytes):
+        return Vector(_draken_native.vector_varchar_from_constant(value.decode("utf-8", "replace"), n))
+    if isinstance(value, _decimal_eval.Decimal):
+        sign, digits, exponent = value.as_tuple()
+        scale = max(0, -int(exponent))
+        precision = max(len(digits), scale + 1)
+        return Vector(_draken_native.vector_decimal_from_constant(value, n, precision, scale))
+    if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+        ordinal = (value - _EPOCH_DATE).days
+        return Vector(_draken_native.vector_date32_from_constant(ordinal, n))
+    if isinstance(value, datetime.datetime):
+        us = _ts_to_us(value)
+        return Vector(_draken_native.vector_timestamp_from_constant(us, n))
+    raise TypeError(
+        f"_scalar_to_draken_constant: cannot construct Draken vector for literal "
+        f"{value!r} (type {type(value).__name__})"
+    )
+
+
 def _eval_value(node, morsel):
     cdef int node_type = <int>node.node_type
 
@@ -88,13 +125,7 @@ def _eval_value(node, morsel):
         if isinstance(node.value, (_CarcharSetWrapper, _PerfectHashSet)):
             return node.value
 
-        vec = _draken_native.vector_from_constant(node.value, morsel.num_rows)
-        if vec is None:
-            raise TypeError(
-                f"_eval_value: cannot construct Draken vector for literal "
-                f"{node.value!r} (type {type(node.value).__name__})"
-            )
-        return vec
+        return _scalar_to_draken_constant(node.value, morsel.num_rows)
 
     if node_type == NT_IDENTIFIER:
         return morsel.column(node.schema_column.identity, node.schema_column.name.encode())
@@ -126,7 +157,7 @@ def _eval_value(node, morsel):
             from opteryx.expression.binary_operators import MapAccessOp
             # Keep MapAccess in native vector space where possible to avoid
             # costly Arrow <-> Draken round-trips.
-            key_vec = _draken_native.vector_int64_from_constant(int(right_val), 1)
+            key_vec = _draken_native.vector_from_constant(int(right_val), 1)
             result = MapAccessOp(left_vec, key_vec)
             if is_draken_vector(result):
                 return result
@@ -185,7 +216,7 @@ cdef _unary_draken(str op, centre_node, morsel):
     if op == "IsNotEmpty":
         return _vector_string_is_not_empty(vec)
     if op == "BitwiseNot":
-        return _vector_bitwise_not(vec)
+        return Vector(_vector_bitwise_not(_nb_vec_unwrap(vec)))
     if op == "IsTrue" or op == "IsNotFalse" or op == "IsFalse" or op == "IsNotTrue":
         bv = vec if get_vector_type(vec) == VectorType.BOOL else None
         if bv is None:
@@ -214,7 +245,7 @@ cdef _unary_op_kernel(str op, vec):
     if op == "IsNotEmpty":
         return _vector_string_is_not_empty(vec)
     if op == "BitwiseNot":
-        return _vector_bitwise_not(vec)
+        return Vector(_vector_bitwise_not(_nb_vec_unwrap(vec)))
     if op == "IsTrue" or op == "IsNotFalse" or op == "IsFalse" or op == "IsNotTrue":
         bv = vec if get_vector_type(vec) == VectorType.BOOL else None
         if bv is None:
@@ -615,6 +646,10 @@ def evaluate_and_append_draken(nodes, morsel):
             for param in node.parameters:
                 value = _eval_value(param, morsel)
                 if is_draken_vector(value):
+                    # Wrap nanobind Vector in Cython shim so all callables
+                    # (typed Cython cpdef) receive consistent Vector objects.
+                    if getattr(value, "_nb", None) is None:
+                        value = Vector(value)
                     parameters.append(value)
                     continue
                 if isinstance(value, list) and all(is_draken_vector(v) for v in value):
@@ -1291,12 +1326,21 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
         # ----------------------------------------------------------
         if opcode == BC_LOAD_LIT_SCALAR:
             scalar_obj = <object>slot.literal_obj
-            v_result = _draken_native.vector_from_constant(scalar_obj, num_rows)
-            if v_result is None:
-                raise TypeError(
-                    f"execute_bytecode: cannot construct vector for literal "
-                    f"{scalar_obj!r} (type {type(scalar_obj).__name__})"
-                )
+            if isinstance(scalar_obj, bool):
+                stack[sp] = BoolVector.from_constant(scalar_obj != 0, num_rows)
+                sp += 1
+                continue
+            if isinstance(scalar_obj, (_CarcharSetWrapper, _PerfectHashSet)):
+                stack[sp] = scalar_obj
+                sp += 1
+                continue
+            # Lists/sets/tuples are IN-list literals: push directly so BC_COMPARE
+            # can handle them as collection operands (see draken_compare_int OP_IN_LIST).
+            if isinstance(scalar_obj, (list, tuple, set, frozenset)):
+                stack[sp] = scalar_obj
+                sp += 1
+                continue
+            v_result = _scalar_to_draken_constant(scalar_obj, num_rows)
             stack[sp] = v_result
             sp += 1
             continue
@@ -1452,15 +1496,31 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
         # ----------------------------------------------------------
         if opcode == BC_FUNCTION:
             arity = slot.arity
+            callable_obj = <object>slot.callable_ref
+            is_nb_callable = type(callable_obj).__name__ == "nb_func"
             if arity == 0:
-                legacy_result = (<object>slot.callable_ref)(num_rows)
+                legacy_result = callable_obj(num_rows)
             else:
                 func_base = sp - arity
+                # Nanobind functions (type name "nb_func") expect raw nanobind
+                # Vectors; Cython/Python callables expect Cython Vector shims.
+                # Unwrap Cython shims to nanobind only for nb_func callables.
                 func_args = []
                 for j in range(arity):
-                    func_args.append(stack[func_base + j])
+                    item = stack[func_base + j]
+                    if is_nb_callable:
+                        nb = getattr(item, "_nb", None)
+                        func_args.append(nb if nb is not None else item)
+                    else:
+                        func_args.append(item)
                 sp = func_base
-                legacy_result = (<object>slot.callable_ref)(*func_args)
+                legacy_result = callable_obj(*func_args)
+            # Nanobind callables return raw nanobind Vectors — wrap in Cython shim.
+            if is_nb_callable and type(legacy_result).__name__ == "Vector":
+                if legacy_result.type == _draken_native.DrakenType.BOOL:
+                    legacy_result = BoolVector(legacy_result)
+                else:
+                    legacy_result = Vector(legacy_result)
             stack[sp] = legacy_result
             sp += 1
             continue
@@ -1475,7 +1535,7 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
             extr_op = <str>slot.compare_op_str
             if extr_op == "MapAccess":
                 from opteryx.expression.binary_operators import MapAccessOp
-                key_vec = _draken_native.vector_int64_from_constant(int(extr_key), 1)
+                key_vec = _draken_native.vector_from_constant(int(extr_key), 1)
                 legacy_result = MapAccessOp(v_left, key_vec)
             elif extr_op == "Arrow":
                 from opteryx.expression.binary_operators import ArrowOp

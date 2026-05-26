@@ -155,59 +155,124 @@ a draken-side ticket. (See §7 landmine #4.)
 
 ## 4. State of the rebuild at handover
 
+> **Updated 2026-05-25 evening** after zombie sweep, DICTIONARY/CONSTANT
+> deletion, eval-engine migration, and several primitive additions.
+> Previous version of this section described state as of E.24's
+> aftermath; current state below supersedes it.
+
 Per `09_delivery.md` plus the post-rebuild deltas:
 
 ### 4.1 Done
 
 - Milestone A (scaffolding).
-- Type matrix: int64, string (VARCHAR), bool, int8/16/32 + cross-width,
-  float32/64, temporals (date32, time, timestamp + logical-type descriptor),
-  decimal pt1, null, fp16, interval, array.
-- ABI guard at build time; freezing `DrakenVector` to 40 bytes.
-- Bridge surface (`draken_vector_unwrap`, `_own`, `_own_raw`, `_own_string`).
-- Consumer C′ extensions in `opteryx/compiled/nanobind/`: ~24 modules
-  covering bitwise, math, codec, bool_ops, accessors, array_reduce, casts,
-  hash_codec, json, misc, selection_concat, special, split_native,
-  string_misc{1,2,3}, string_search, temporal_arith, temporal_convert, etc.
-- Build isolation (`make draken` / `DRAKEN_BUILD=1`) — draken side builds
-  cleanly regardless of opteryx-side Cython breakage (E.22).
-- Cython shim layer for `Vector`/`BoolVector`/`Morsel` (E.24).
-- Native draken test suite (`make dt`): 2792+ tests, all green.
+- Type matrix: int8/16/32/64, float32/64, bool, string family
+  (VARCHAR/NVARCHAR/VARBINARY), date32, time, timestamp (with
+  logical-type descriptor), decimal (int64-storage; arithmetic kernels
+  via E.32), null, fp16, interval, array.
+- ABI guard at build time; `DrakenVector` frozen at 40 bytes.
+  `DRAKEN_DICTIONARY` and `DRAKEN_CONSTANT` permanently deleted with
+  `#error` sentinels in `_abi_guard.cpp` preventing reintroduction
+  (E.30c). `str_init_extern` pxd aligned to .h (5-arg signature).
+- Bridge surface (`draken_vector_unwrap`, `_own`, `_own_raw`,
+  `_own_string`).
+- Consumer C′ extensions in `opteryx/compiled/nanobind/`: ~24+ modules
+  including bitwise, math, codec, bool_ops (with the recent
+  `vector_uint64_eq_scalar` primitive), accessors, array_reduce,
+  casts, hash_codec, json, misc, selection_concat, special,
+  split_native, string_misc{1,2,3}, string_search, string_case (E.26
+  UTF-8 pilot), temporal_arith, temporal_convert.
+- Build isolation (`make draken` / `DRAKEN_BUILD=1`) — draken side
+  builds cleanly regardless of opteryx-side Cython breakage (E.22).
+- Cython shim layer for `Vector`/`BoolVector`/`Morsel` (E.24, refined
+  post-E.25). Provides `__pyx_vtable__` for cimport-using consumers.
+- **Zombie sweep complete:** only 6 sanctioned `.so` files in
+  `draken/`. No more orphaned binaries.
+- New producer-side primitives in `draken_native.cpp`:
+  `vector_fp16_zeros(length, dim)`, `vector_fp16_with_nulls(length,
+  dim)`. Plus the typed sequence/scalar constructors that already
+  existed (see PM briefing §3.2 for full list).
+- `case_helpers.pyx` (CASE WHEN hot-loop helpers) restored from git
+  after being mistakenly deleted in E.25; 4 of 5 functions
+  immediately usable, the 5th depends on `StringVectorBuilder`
+  producer surface.
+- **Eval-engine migration complete** (per the eval-PM 02_guidance
+  doc). The 10 evaluator `.pyx` files migrated off typed-Vector
+  subclass cimports to uniform `Vector` + `DrakenType` dispatch. Three
+  small draken-side fixes were accepted during this work (TIMESTAMP64
+  logical-type attachment, `compare_scalar` int/datetime acceptance,
+  `take_child` signature fix). Plus an outer-join type-dispatch fix in
+  `_morsel_shim.pyx`.
+- Native draken test suite (`make dt`): **2816+ tests passing.**
 
-### 4.2 Not done (and explicitly NOT operator-rewrite prerequisites)
+### 4.2 Not done (and may bite operator-rewrite work)
 
-- **UTF-8 cluster** (5 files: `vector_initcap`, `vector_lowercase`,
-  `vector_uppercase`, `vector_reverse`, `vector_string_slice`) — pending an
-  architect decision on the case-folding library (boost::locale vs ICU vs
-  bespoke).
+- **UTF-8 cluster** — `vector_lowercase` is ported to nanobind C′ as
+  the pilot (E.26). The other four (`vector_uppercase`,
+  `vector_initcap`, `vector_reverse`, `vector_string_slice`) follow
+  the pilot's pattern, not yet ported. Architect chose
+  `sheredom/utf8.h` as the library; that decision is closed.
 - **Regex cluster** (4 files: `vector_like`, `vector_rlike`,
-  `vector_regex_replace`, `anyop_like`) — needs a re2 integration design.
-- **Heavy specials:** `vector_match_against`, `vector_dfa_extract`.
-- **`rugo/` tree** (3 files) — minor cleanup.
-- **Decimal phase 2**, deeper temporal arithmetic, NVARCHAR ops once Unicode
-  library is chosen.
+  `vector_regex_replace`, `anyop_like`) — re2 is already integrated
+  (vendored, linked into multiple extensions). The migration of these
+  4 files off typed-Vector cimports is the remaining work. `vector_string_misc2` had a re2-link gap (E.33) — check if it's been resolved.
+- **Heavy specials:** `vector_match_against` was stubbed as
+  `NotImplementedError` per architect call (don't chase ML).
+  `vector_dfa_extract` has a complete existing design; needs the
+  typed-Vector migration like other consumers.
+- **`rugo/` tree** — parquet_reader migrated as audit pilot (E.28
+  surfaced 9 producer-side gaps with `NotImplementedError` stubs).
+  jsonl_reader + _jsonl_reader migration in flight (E.31).
+- **Decimal arithmetic** — `decimal_arith.h` kernels added (E.32) but
+  comparison kernels, aggregation kernels, and decimal × non-decimal
+  promotion are follow-ups. None block operator-rewrite work; surface
+  when a query needs them.
 
-These are draken-team work, not operator-team work. They are listed here so
-the operator-rewrite PM knows they exist and does NOT try to absorb them.
-When the operator rewrite calls into one of these and finds a gap, the
-correct response is to **surface the gap, not paper over it with a `.pyx`
-loop** (CLAUDE.md §11 + the `draken-consumer-edge-pattern` memory).
+These are draken-team work, not operator-team work. When operator
+work calls into one of these and finds a gap, **surface to draken-PM
+— do not paper over with a `.pyx` loop, a `cdef object` smuggling, or
+a compatibility shim.** The recent agent-correction pattern (eval-PM
+agent surfaced the producer-surface gap honestly; draken-PM added
+primitives directly) is the model.
 
-### 4.3 In an intermediate state
+### 4.3 In an intermediate state — operator-PM's starting punch list
 
-- **`make q`** — was 0/133 pre-E.24; post-E.24 the baseline is captured in
-  the handover record (see §6). Failures are primarily operator-rewrite
-  gaps, not draken-side issues. The operator rewrite is what closes them.
-- **`make clickbench`** — Milestone E re-green is the destination; no
-  pre-handover baseline exists because the engine has not been able to run
-  end-to-end since the rebuild started. The clickbench baseline is the
-  operator rewrite's responsibility (its Phase 3 gate per the parallelism
-  doc, §9).
-- **Operator-side `.pyx` files** — the 21 files in `opteryx/operators/` and
-  the residual `vector_ops/*.pyx` files imported by the evaluator have NOT
-  been C′-ported. Some `.pyx` still use the old Cython-cimport style against
-  the draken shim. The shim makes this work today; the operator rewrite
-  moves them to `draken_vector_unwrap` natively over time.
+- **`make q` = 0/133** as of handover. The blocker is one line:
+  `opteryx/managers/execution/serial_engine.py:28`'s `from draken
+  import Morsel` — Morsel isn't exported from the package root. Fix
+  is `from draken.morsels.morsel import Morsel`. After that line is
+  fixed, the eval-engine substrate is reachable through `make q` and
+  the pass-count rises. **This is the highest-leverage single ticket
+  available.**
+- **Known compile blockers** (each a small targeted fix — see PM
+  briefing §3.3):
+  - `opteryx/compiled/structures/bloom_filter.pyx` — typed-Vector
+    cimport
+  - `opteryx/operators/_operators.pyx` via `_factory.pxi` — typed-Vector
+    cimports
+  - `opteryx/operators/grouped_aggregate_hashed/_key_store.pxi` —
+    `DRAKEN_STRING` cimport (deleted alias) + 4-arg `str_init_extern`
+    call (now 5-arg)
+- **`make clickbench`** — Milestone E re-green is the destination. No
+  baseline exists because the engine hasn't been able to run
+  end-to-end since the rebuild started. Becomes meaningful after the
+  blockers above are cleared.
+- **Operator-side `.pyx` files** — the 21 files in `opteryx/operators/`
+  and the four `vector_ops/*.pyx` files imported by the evaluator
+  (`vector_like`, `vector_rlike`, `vector_bitwise_not`, `case_helpers`)
+  still use typed-Vector cimports. Migration is mechanical: change
+  cimports to uniform `Vector` from the shim, dispatch on
+  `vec.type == DRAKEN_INT64` etc. The shim's `unified()` returns a
+  non-const `DrakenVector*` so mutation patterns survive.
+- **38 hot-path Python imports** inside `cdef`/`cpdef` bodies
+  (E.30a audit). Most die naturally during typed-Vector migration;
+  remaining ~13 are pure-hoist work.
+- **`parquet_read.pyx` ILIKE IndexError** surfaced by eval-PM in
+  pass-1/pass-2 merge logic, never investigated. Operator-PM's to
+  triage.
+- **`case_helpers.pyx`'s `assemble_flat_string`** is stubbed with
+  `NotImplementedError` pending `StringVectorBuilder` producer-surface
+  design. May be operator-PM-blocking depending on which queries you
+  exercise.
 
 ## 5. The §12 design decisions (operators-and-parallelism)
 

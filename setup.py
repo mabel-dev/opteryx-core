@@ -828,11 +828,7 @@ extensions = [
         extra_compile_args=C_FLAGS,
     ),
     Extension(
-        name="opteryx.third_party.fuzzy",
-        sources=["opteryx/third_party/fuzzy/soundex.pyx"],
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
+        # Opteryx-owned rewrite; do not revendor from the original Python package.
         name="opteryx.third_party.mbleven",
         sources=["opteryx/third_party/mbleven.pyx"],
         extra_compile_args=C_FLAGS,
@@ -840,8 +836,16 @@ extensions = [
     # High-performance distogram for cost-based optimization
     Extension(
         name="opteryx.third_party.maki_nage.distogram",
-        sources=["opteryx/third_party/maki_nage/distogram.pyx"],
-        extra_compile_args=C_FLAGS,
+        sources=[
+            "opteryx/third_party/maki_nage/distogram.pyx",
+            "opteryx/third_party/maki_nage/_distogram_core.cpp",
+            "opteryx/third_party/maki_nage/_distogram_avx2.cpp",
+            "opteryx/third_party/maki_nage/_distogram_neon.cpp",
+            "opteryx/third_party/maki_nage/_distogram_rvv.cpp",
+        ],
+        include_dirs=include_dirs,
+        extra_compile_args=CPP_FLAGS,
+        language="c++",
     ),
     # File format readers
     Extension(
@@ -1101,8 +1105,9 @@ extensions = [
     Extension(
         "opteryx.compiled.structures.bloom_filter",
         sources=["opteryx/compiled/structures/bloom_filter.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
+        include_dirs=include_dirs + ["src/cpp"],
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
     ),
     Extension(
         "opteryx.compiled.structures.column_deserializer",
@@ -1219,10 +1224,14 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
-    # E.21a: morsel_ops.distinct disabled — requires Morsel cdef method dispatch
-    # (c_hash, _resolve_columns_to_indices) that is deferred to E.21b.
-    # Full implementation:
-    # Extension("opteryx.compiled.morsel_ops.distinct", sources=[...]),
+    # E.21a: morsel_ops.distinct — stub only; full implementation deferred to E.21b.
+    # The stub raises NotImplementedError at runtime but allows import to succeed.
+    Extension(
+        "opteryx.compiled.morsel_ops.distinct",
+        sources=["opteryx/compiled/morsel_ops/distinct_stub.c"],
+        include_dirs=include_dirs,
+        extra_compile_args=C_FLAGS,
+    ),
     Extension(
         "opteryx.compiled.morsel_ops.sort",
         sources=[

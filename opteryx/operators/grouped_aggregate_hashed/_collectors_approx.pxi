@@ -107,30 +107,31 @@ cdef class ApproxPercentileCollector(BaseCollector):
         const int64_t* state_indices,
         Py_ssize_t n_rows,
     ):
+        # Per-row template: type-dispatch once per morsel via the unified
+        # DrakenVector, typed pointers cached for the inner loop.
         cdef Vector raw = morsel.column(self.column_name)
-        cdef uint8_t* nulls = raw.null_bitmap_ptr()
+        cdef DrakenVector* uv = raw.unified()
+        cdef DrakenType t = uv.type
+        cdef uint8_t* nulls = uv.validity
+        cdef const uint32_t* sel = uv.selection
         cdef td_histogram_t** hists = self._hists.data()
         cdef Py_ssize_t i
         cdef int64_t si
-        cdef Integer64Vector iv
-        cdef Float64Vector fv
         cdef int64_t* i64
         cdef double* f64
 
-        if isinstance(raw, Integer64Vector):
-            iv = <Integer64Vector>raw
-            i64 = <int64_t*>iv.ptr.data
+        if t == DRAKEN_INT64:
+            i64 = <int64_t*>uv.data
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
-                    td_add(hists[si], <double>i64[i], 1)
+                    td_add(hists[si], <double>i64[sel[i]], 1)
         else:
-            fv = <Float64Vector>raw
-            f64 = <double*>fv.ptr.data
+            f64 = <double*>uv.data
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
-                    td_add(hists[si], f64[i], 1)
+                    td_add(hists[si], f64[sel[i]], 1)
 
     cpdef Vector finalize(self, int64_t num_groups):
         from draken.interop.arrow import vector_from_sequence

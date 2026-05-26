@@ -17,9 +17,8 @@ helpers from those files live in this module's namespace.
 
 import datetime
 
-from draken.interop.vector_sequence import vector_from_sequence
 from draken.vectors.bool_vector import BoolVector
-from draken.vectors.string_vector import StringVector
+import draken.draken_native as _draken_native
 from opteryx.compiled.vector_ops import (
     vector_like,
     vector_rlike,
@@ -126,17 +125,11 @@ def to_temporal_array(values, source_type, target_type):
         for value in values
     ]
 
-    source_vec = vector_from_sequence(coerced, dtype=OrsoTypes.INTEGER)
+    source_vec = _draken_native.vector_from_sequence(coerced)
     if target_type == OrsoTypes.DATE:
-        from draken.vectors.date32_vector import from_int64_vector as _from_int64
-
-        return _from_int64(source_vec)
+        return _draken_native.vector_reinterpret_as_date32(source_vec)
     if target_type == OrsoTypes.TIMESTAMP:
-        from draken.vectors.timestamp_vector import (
-            from_int64_vector as _from_int64,
-        )
-
-        return _from_int64(source_vec, timestamp_unit="us")
+        return _draken_native.vector_reinterpret_as_timestamp64(source_vec)
     return source_vec
 
 

@@ -3,6 +3,20 @@
 import re as _re
 
 from opteryx.compiled import vector_ops
+from opteryx.compiled.nanobind.vector_array_reduce import (
+    vector_anyop_eq as _anyop_eq,
+    vector_anyop_neq as _anyop_neq,
+    vector_anyop_gt as _anyop_gt,
+    vector_anyop_lt as _anyop_lt,
+    vector_anyop_gte as _anyop_gte,
+    vector_anyop_lte as _anyop_lte,
+    vector_allop_eq as _allop_eq,
+    vector_allop_neq as _allop_neq,
+)
+from opteryx.compiled.nanobind.vector_string_search import (
+    vector_contains_any as _vector_contains_any,
+    vector_contains_all as _vector_contains_all,
+)
 
 from draken.vectors.bool_vector import BoolVector
 
@@ -11,27 +25,27 @@ cdef int _RE_IGNORECASE = _re.IGNORECASE
 
 
 cpdef anyop_eq(literal, column):
-    return vector_ops.vector_anyop_eq(literal=literal, column=column)
+    return _anyop_eq(literal=literal, column=column)
 
 
 cpdef anyop_not_eq(literal, column):
-    return vector_ops.vector_anyop_neq(literal=literal, column=column)
+    return _anyop_neq(literal=literal, column=column)
 
 
 cpdef anyop_greater_than(literal, column):
-    return vector_ops.vector_anyop_gt(literal, column)
+    return _anyop_gt(literal, column)
 
 
 cpdef anyop_less_than(literal, column):
-    return vector_ops.vector_anyop_lt(literal, column)
+    return _anyop_lt(literal, column)
 
 
 cpdef anyop_greater_than_or_equal(literal, column):
-    return vector_ops.vector_anyop_gte(literal, column)
+    return _anyop_gte(literal, column)
 
 
 cpdef anyop_less_than_or_equal(literal, column):
-    return vector_ops.vector_anyop_lte(literal, column)
+    return _anyop_lte(literal, column)
 
 
 cpdef anyop_like(arr, value, int flags=0):
@@ -51,11 +65,11 @@ cpdef anyop_not_ilike(arr, value):
 
 
 cpdef allop_eq(literal, column):
-    return vector_ops.vector_allop_eq(literal, column)
+    return _allop_eq(literal, column)
 
 
 cpdef allop_not_eq(literal, column):
-    return vector_ops.vector_allop_neq(literal, column)
+    return _allop_neq(literal, column)
 
 
 cpdef array_contains_any(arr, value):
@@ -83,7 +97,7 @@ cpdef array_contains_any(arr, value):
     if to_pylist is not None:
         value = to_pylist()
 
-    return vector_ops.vector_contains_any(arr, set(value))
+    return _vector_contains_any(arr, set(value))
 
 
 cpdef array_contains_all(arr, value):
@@ -97,4 +111,4 @@ cpdef array_contains_all(arr, value):
             "Unable to execute @>>, check form matches `column @>> (values)`."
         )
 
-    return vector_ops.vector_contains_all(arr, set(value))
+    return _vector_contains_all(arr, set(value))

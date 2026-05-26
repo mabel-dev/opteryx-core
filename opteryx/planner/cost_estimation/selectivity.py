@@ -22,6 +22,7 @@ from typing import Optional
 
 from opteryx.expression import NodeType
 from opteryx.planner.optimizer.statistics import RelationStatistics
+from opteryx.third_party.maki_nage.distogram import count_up_to
 
 
 _SWAPPED_OP = {
@@ -281,7 +282,6 @@ def _to_float(value) -> Optional[float]:
 
 
 def _count_up_to(dgram, value: float) -> float:
-    from opteryx.third_party.maki_nage.distogram import count_up_to
     return count_up_to(dgram, value)
 
 

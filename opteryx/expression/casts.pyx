@@ -16,6 +16,8 @@ import decimal as _decimal_mod
 import logging
 import math
 
+import draken.draken_native as _draken_native_casts
+
 from opteryx.types import OrsoTypes
 from opteryx.types._datetime_conversion import timestamp_to_int64_us
 from opteryx.utils.vector_types import (
@@ -207,8 +209,6 @@ cdef str _array_row_to_json(object row):
 
 def cast_to_varchar(arr, *args):
     """Cast `arr` to VARCHAR / StringVector."""
-    from draken.interop.vector_sequence import vector_from_sequence
-
     cdef object v_type
     cdef object row
     if is_draken_vector_fn(arr):
@@ -220,11 +220,11 @@ def cast_to_varchar(arr, *args):
             result = [_array_row_to_json(row) if row is not None else None for row in rows]
         else:
             result = [v.decode("utf-8") if isinstance(v, bytes) else (str(v) if v is not None else None) for v in rows]
-        return vector_from_sequence(result, dtype=OrsoTypes.VARCHAR)
+        return _draken_native_casts.vector_from_string_sequence(result)
 
     if isinstance(arr, (list, tuple)):
         result = [v.decode("utf-8") if isinstance(v, bytes) else (str(v) if v is not None else None) for v in arr]
-        return vector_from_sequence(result, dtype=OrsoTypes.VARCHAR)
+        return _draken_native_casts.vector_from_string_sequence(result)
 
     if isinstance(arr, str):
         return arr
@@ -302,6 +302,49 @@ def _to_int_arg(a):
     return int(a)
 
 
+def _cast_result_to_draken(result, resolved_type, args=()):
+    """Dispatch a Python list `result` to the appropriate Draken vector constructor.
+
+    `resolved_type` is an OrsoTypes name string (e.g. "INTEGER", "DOUBLE").
+    `args` is the original CAST argument tuple (used for DECIMAL precision/scale).
+    Raises TypeError for unrecognised types — fail fast.
+    """
+    from draken.vectors.bool_vector import BoolVector as _BoolVector_casts
+    if resolved_type in ("VARCHAR", "BLOB", "VARBINARY"):
+        return _draken_native_casts.vector_from_string_sequence(
+            [v.decode("utf-8") if isinstance(v, bytes) else (str(v) if v is not None else None) for v in result]
+        )
+    if resolved_type in ("INTEGER", "BIGINT"):
+        return _draken_native_casts.vector_from_sequence(result)
+    if resolved_type == "DOUBLE":
+        return _draken_native_casts.vector_float64_from_sequence(result)
+    if resolved_type == "BOOLEAN":
+        return _BoolVector_casts.from_list(result)
+    if resolved_type == "DATE":
+        import datetime as _dt
+        int_vals = [
+            (v - _dt.date(1970, 1, 1)).days if v is not None else None
+            for v in result
+        ]
+        int_vec = _draken_native_casts.vector_from_sequence(int_vals)
+        return _draken_native_casts.vector_reinterpret_as_date32(int_vec)
+    if resolved_type == "TIMESTAMP":
+        from opteryx.types._datetime_conversion import timestamp_to_int64_us as _ts_to_int
+        int_vals = [_ts_to_int(v) if v is not None else None for v in result]
+        int_vec = _draken_native_casts.vector_from_sequence(int_vals)
+        return _draken_native_casts.vector_reinterpret_as_timestamp64(int_vec)
+    if resolved_type == "DECIMAL":
+        # Infer scale from args if available; default to 6 precision 38 if not.
+        precision = int(_to_int_arg(args[0])) if len(args) >= 1 else 38
+        scale = int(_to_int_arg(args[1])) if len(args) >= 2 else 6
+        return _draken_native_casts.vector_decimal_from_sequence(result, precision, scale)
+    if resolved_type == "INTERVAL":
+        return _draken_native_casts.vector_interval_from_sequence(result)
+    raise TypeError(
+        f"_cast_result_to_draken: no Draken constructor for resolved type {resolved_type!r}"
+    )
+
+
 def cast(arr, _type, args=(), unit=None):
     """Factory: return a callable that casts a vector to the requested type.
 
@@ -312,8 +355,6 @@ def cast(arr, _type, args=(), unit=None):
     """
 
     def _inner(arr):
-        from draken.interop.vector_sequence import vector_from_sequence
-
         kwargs = {}
 
         # VARBINARY isn't a canonical OrsoType — map to BLOB.
@@ -369,11 +410,8 @@ def cast(arr, _type, args=(), unit=None):
             int64_values = [
                 timestamp_to_int64_us(dt) if dt is not None else None for dt in result
             ]
-            int_vec = vector_from_sequence(int64_values, dtype=OrsoTypes.INTEGER)
-            from draken.vectors.timestamp_vector import (
-                from_int64_vector as _from_int64,
-            )
-            return _from_int64(int_vec, timestamp_unit="us")
+            int_vec = _draken_native_casts.vector_from_sequence(int64_values)
+            return _draken_native_casts.vector_reinterpret_as_timestamp64(int_vec)
 
         if _type == "DATE":
             if is_draken_vector_fn(arr):
@@ -386,11 +424,11 @@ def cast(arr, _type, args=(), unit=None):
 
         if _type == "ARRAY":
             result = [_parse_array_value(i, args[0], safe_cast=False) for i in arr]
-            return vector_from_sequence(result, dtype=OrsoTypes.ARRAY)
+            return _draken_native_casts.vector_array_from_sequence(result)
 
         if _type == "VECTOR":
             result = [caster(i, **kwargs) for i in arr]
-            return vector_from_sequence(result, dtype=OrsoTypes.VECTOR)
+            return _draken_native_casts.vector_fp16_from_sequence(result)
 
         if _type == "VARCHAR" and is_draken_vector_fn(arr):
             return cast_to_varchar(arr)
@@ -399,6 +437,6 @@ def cast(arr, _type, args=(), unit=None):
         if decimal_quantizer is not None:
             result = [decimal_quantizer(d) for d in result]
         resolved = "BLOB" if _type == "VARBINARY" else _type
-        return vector_from_sequence(result, dtype=OrsoTypes[resolved])
+        return _cast_result_to_draken(result, resolved, args)
 
     return _inner

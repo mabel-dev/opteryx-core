@@ -5,8 +5,7 @@
 //   vector_soundex(vec)  — VARCHAR → VARCHAR (4-char Soundex codes, e.g. "R163").
 //
 // Soundex algorithm:
-//   American Soundex, matching the vendored opteryx/third_party/fuzzy/soundex.pyx
-//   exactly.  Map: "01230120022455012623010202" for A-Z.
+//   American Soundex. Map: "01230120022455012623010202" for A-Z.
 //   First char: uppercased letter.
 //   Subsequent chars: map to digit code; skip '0' entries except:
 //     - vowels (A/E/I/O/U/Y) reset prev_code to '0'
@@ -38,9 +37,6 @@ namespace nb = nanobind;
 // ---------------------------------------------------------------------------
 // Soundex algorithm
 // ---------------------------------------------------------------------------
-//
-// Map matches opteryx/third_party/fuzzy/soundex.pyx:
-//   cdef char* soundex_map = "01230120022455012623010202"
 //
 // Indices 0-25 correspond to A-Z.  Digit chars '0'..'6'.
 
@@ -202,6 +198,5 @@ NB_MODULE(vector_string_misc3, m) {
         nb::arg("vec"),
         "Compute American Soundex codes for each string row.\n"
         "Output: DRAKEN_VARCHAR.  All codes are exactly 4 bytes (e.g. 'R163').\n"
-        "Null TVL: null or empty/non-alpha input row → null output.\n"
-        "Algorithm matches opteryx/third_party/fuzzy/soundex.pyx exactly.");
+        "Null TVL: null or empty/non-alpha input row → null output.");
 }

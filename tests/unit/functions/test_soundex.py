@@ -6,8 +6,8 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import pytest
 import jellyfish
 
-from opteryx.third_party.fuzzy import soundex
-from draken.vectors import string_vector as _svm
+import draken.draken_native as dn
+from opteryx.compiled.nanobind.vector_string_misc3 import vector_soundex
 
 # Test cases for soundex algorithm - these are just the input names
 # We'll compare against jellyfish (reference implementation) rather than hardcoded values
@@ -155,21 +155,17 @@ TEST_NAMES = [
 
 @pytest.mark.parametrize("input_name", TEST_NAMES)
 def test_soundex_against_reference(input_name):
-    """Test that our soundex implementation matches the jellyfish reference implementation."""
-    expected = jellyfish.soundex(input_name)
-    actual = soundex(input_name)
+    """Test that native vector_soundex matches the jellyfish reference implementation."""
+    expected = None if input_name == "" else jellyfish.soundex(input_name)
+    actual = vector_soundex(_build_sv(input_name)).to_pylist()[0]
     assert actual == expected, f"for '{input_name}' - expected: '{expected}', got: '{actual}'"
 
 
 def _build_sv(*values):
-    """Build a StringVector from bytes/None values using StringVectorBuilder."""
-    b = _svm.StringVectorBuilder.with_estimate(len(values), 8)
-    for v in values:
-        if v is None:
-            b.append_null()
-        else:
-            b.append(v if isinstance(v, bytes) else v.encode())
-    return b.finish()
+    """Build a Draken string vector from Python strings/bytes/None."""
+    return dn.vector_from_string_sequence(
+        [v.decode() if isinstance(v, bytes) else v for v in values]
+    )
 
 
 def _null_mask(sv):
@@ -179,17 +175,13 @@ def _null_mask(sv):
 
 def test_soundex_vector_all_nonempty_no_nulls():
     """All non-empty inputs → output null_count must be zero."""
-    from opteryx.compiled.vector_ops.vector_ops import vector_soundex
-
     sv = _build_sv(b"Smith", b"Johnson", b"Williams")
     result = vector_soundex(sv)
-    assert result.null_count == 0, "expected zero nulls when all inputs non-empty and non-null"
+    assert result.to_pylist() == ["S530", "J525", "W452"]
 
 
 def test_soundex_vector_empty_input_produces_null():
     """A row with empty-bytes input among non-empty rows → that row null, others non-null."""
-    from opteryx.compiled.vector_ops.vector_ops import vector_soundex
-
     sv = _build_sv(b"Smith", b"", b"Williams")
     result = vector_soundex(sv)
     mask = _null_mask(result)
@@ -200,8 +192,6 @@ def test_soundex_vector_empty_input_produces_null():
 
 def test_soundex_vector_null_input_stays_null():
     """A row that was already null in the input → output row is null."""
-    from opteryx.compiled.vector_ops.vector_ops import vector_soundex
-
     sv = _build_sv(b"Smith", None, b"Williams")
     result = vector_soundex(sv)
     mask = _null_mask(result)
@@ -212,8 +202,6 @@ def test_soundex_vector_null_input_stays_null():
 
 def test_soundex_vector_mixed_null_empty_nonempty():
     """Mixed: null-in-input, empty-input, non-empty-input → first two null, last non-null."""
-    from opteryx.compiled.vector_ops.vector_ops import vector_soundex
-
     sv = _build_sv(None, b"", b"Jones")
     result = vector_soundex(sv)
     mask = _null_mask(result)

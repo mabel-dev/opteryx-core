@@ -230,6 +230,7 @@ opteryx/third_party/mabel/base85/*.c*
 opteryx/third_party/ulfjack/*.c*
 opteryx/third_party/yyjson/*.c*
 opteryx/third_party/mbleven.c
+!**/_*.c*
 
 # Claude Code temporary files and worktrees
 .claude/
@@ -246,3 +247,5 @@ draken/vectors/*.c*
 draken/poc/*.c*
 draken/poc/*.h
 rugo/src/**/*.c*
+draken/morsels/_morsel_shim.cpp
+**.so

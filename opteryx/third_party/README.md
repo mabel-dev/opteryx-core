@@ -23,9 +23,9 @@ The third-party code is organized into two locations:
 
 - **cyan4973** - xxHash fast hashing
 - **fastfloat** - Fast float parsing
-- **fuzzy** - Soundex phonetic algorithm
 - **lz4** - LZ4 compression wrappers
 - **mabel** - Base encoding helpers
+- **mbleven** - Owned Cython implementation of modified Levenshtein distance
 - **tdigest-c** - t-digest quantile sketch
 - **ulfjack** - Ryu floating point to string conversion
 - **yyjson** - JSON parsing wrappers
@@ -33,9 +33,8 @@ The third-party code is organized into two locations:
 ### Pure Python Libraries
 
 - **maki_nage** - Distogram (approximate histogram)
-- **mbleven** - Modified Levenshtein distance
 - **sqloxide** - SQL parser
-- **travers** - Graph algorithms
+- **travers** - Owned graph algorithms package by @joocer
 
 ## Building
 
@@ -60,3 +59,14 @@ Before consolidation, there were three locations:
 
 The `.pyx` files have been moved from `/opteryx/compiled/third_party/` to `/opteryx/third_party/` 
 to consolidate all Python/Cython wrappers in one location.
+
+## Owned Forks
+
+Some code in this directory is intentionally kept under `opteryx/third_party/`
+because it started from external work or carries third-party license notices,
+but it is now an Opteryx-owned implementation. Do not blindly revendor or
+replace these files from upstream sources.
+
+- **`travers/`** is maintained by @joocer for Opteryx graph planning use cases.
+- **`mbleven.pyx`** is a significantly rewritten Cython implementation and must
+  not be replaced with the original Python implementation.

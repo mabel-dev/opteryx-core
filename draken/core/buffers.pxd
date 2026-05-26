@@ -21,6 +21,7 @@ cdef extern from "core/buffers.h":
         DRAKEN_INT16
         DRAKEN_INT32
         DRAKEN_INT64
+        DRAKEN_DECIMAL
         DRAKEN_FLOAT32
         DRAKEN_FLOAT64
         DRAKEN_DATE32
@@ -34,6 +35,8 @@ cdef extern from "core/buffers.h":
         DRAKEN_VARBINARY
         DRAKEN_ARRAY
         DRAKEN_NON_NATIVE
+        DRAKEN_NULL
+        DRAKEN_VECTOR_FP16
 
     # Category-A layout hint bits (informational; 0 = "don't know").
     unsigned int DRAKEN_SEL_IDENTITY

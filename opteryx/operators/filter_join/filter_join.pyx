@@ -177,7 +177,7 @@ cdef CarcharSetWrapper _rebuild_carchar_from_phash(PerfectHashSet phs):
             if word & mask:
                 slot = <int64_t>w * 64 + <int64_t>bit
                 val = phs._min_val + slot
-                scalar_vec = _draken_native.vector_int64_from_constant(val, 1)
+                scalar_vec = _draken_native.vector_from_constant(val, 1)
                 hash_buf = (<Vector>scalar_vec).hash()
                 result.insert(hash_buf[0])
     return result

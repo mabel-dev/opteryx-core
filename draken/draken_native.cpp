@@ -1741,6 +1741,67 @@ static VectorOwner make_fp16_from_sequence(nb::list seq, uint32_t dimension) {
     return owner;
 }
 
+// D.11: fp16 zeros — allocate a fresh dense VECTOR_FP16 Vector of (length, dimension)
+// with all values zero and no nulls. Used by callers that build embedding matrices
+// row-by-row (e.g. opteryx/vectors/vector_math.pyx new_matrix). The returned Vector's
+// data buffer is mutable through the unified() pointer, so callers can write rows
+// in place after construction.
+static VectorOwner make_fp16_zeros(uint32_t length, uint32_t dimension) {
+    if (dimension == 0u)
+        throw std::invalid_argument("vector_fp16_zeros: dimension must be >= 1");
+
+    const size_t data_bytes = static_cast<size_t>(length > 0u ? length : 1u)
+                              * dimension * sizeof(uint16_t);
+    uint16_t* data = static_cast<uint16_t*>(draken_malloc(data_bytes));
+    if (!data) throw std::bad_alloc();
+    std::memset(data, 0, data_bytes);
+    OwnedBuffer<void> data_buf(data);
+
+    DrakenVector v = draken_vector_from_dense(data, length, DRAKEN_VECTOR_FP16, nullptr);
+    VectorOwner owner(v, std::move(data_buf), OwnedBuffer<uint8_t>(nullptr));
+
+    LogicalType lt;
+    lt.kind      = LogicalKind::VECTOR;
+    lt.dimension = dimension;
+    owner.logical_type = logical_type_intern(lt);
+    return owner;
+}
+
+// D.11: fp16 with-nulls — allocate a fresh dense VECTOR_FP16 Vector of (length, dimension)
+// with all rows initially null. Arrow validity convention: bit=1 = valid, bit=0 = null.
+// Initial validity bitmap is memset to 0 (all null); callers SET bits in
+// vec.unified()->validity to mark rows present, then write into vec.unified()->data.
+// Companion to make_fp16_zeros.
+static VectorOwner make_fp16_with_nulls(uint32_t length, uint32_t dimension) {
+    if (dimension == 0u)
+        throw std::invalid_argument("vector_fp16_with_nulls: dimension must be >= 1");
+
+    const size_t data_bytes = static_cast<size_t>(length > 0u ? length : 1u)
+                              * dimension * sizeof(uint16_t);
+    uint16_t* data = static_cast<uint16_t*>(draken_malloc(data_bytes));
+    if (!data) throw std::bad_alloc();
+    std::memset(data, 0, data_bytes);
+    OwnedBuffer<void> data_buf(data);
+
+    // All-null validity bitmap: bit=0 means null per Arrow/Draken convention.
+    const uint32_t bm     = (length + 7u) / 8u;
+    const uint32_t padded = ((bm + 7u) & ~7u);
+    const size_t   vbytes = padded > 0u ? padded : 8u;
+    uint8_t* validity = static_cast<uint8_t*>(draken_malloc(vbytes));
+    if (!validity) throw std::bad_alloc();
+    std::memset(validity, 0, vbytes);
+    OwnedBuffer<uint8_t> validity_buf(validity);
+
+    DrakenVector v = draken_vector_from_dense(data, length, DRAKEN_VECTOR_FP16, validity);
+    VectorOwner owner(v, std::move(data_buf), std::move(validity_buf));
+
+    LogicalType lt;
+    lt.kind      = LogicalKind::VECTOR;
+    lt.dimension = dimension;
+    owner.logical_type = logical_type_intern(lt);
+    return owner;
+}
+
 // D.11: fp16 take — gather rows by index list, producing a dense output vector.
 static VectorOwner make_fp16_take(const VectorOwner& v,
                                   const int32_t* indices, uint32_t n) {
@@ -3996,7 +4057,13 @@ NB_MODULE(draken_native, m) {
                 if (!v.logical_type)
                     throw std::invalid_argument(
                         "compare_scalar: TIMESTAMP64 requires a logical-type descriptor");
-                const int64_t ts = py_datetime_to_instant(scalar, v.logical_type->unit);
+                // Accept either a Python int (already-coerced microseconds-since-epoch)
+                // or a datetime.datetime (converted via py_datetime_to_instant).
+                int64_t ts;
+                if (PyLong_Check(scalar.ptr()))
+                    ts = nb::cast<int64_t>(scalar);
+                else
+                    ts = py_datetime_to_instant(scalar, v.logical_type->unit);
                 return vecresult_to_owner(draken_compare_scalar(v.vec, ts, op));
             }
             if (v.vec.type == DRAKEN_DATE32) {
@@ -4430,7 +4497,7 @@ NB_MODULE(draken_native, m) {
             const uint32_t cn = v.child_owner->vec.length;
             std::vector<int32_t> all_idx(cn);
             for (uint32_t i = 0; i < cn; ++i) all_idx[i] = static_cast<int32_t>(i);
-            return nb::cast(take_child(*v.child_owner, all_idx.data(), cn));
+            return nb::cast(take_child(*v.child_owner, all_idx));
         }, "Child Vector of a DRAKEN_ARRAY vector as a new independently-owned Vector. Raises for non-array vectors.")
         // ----------------------------------------------------------------
         // is_dict / is_constant / is_dense — layout introspection for tests only.
@@ -4985,6 +5052,37 @@ NB_MODULE(draken_native, m) {
         "Conversion: float -> fp16 via IEEE 754 round-to-nearest (lossy).\n"
         "Unsupported ops: ordering, arithmetic, similarity (throw).");
 
+    m.def("vector_fp16_zeros",
+        [](int64_t length, int dimension) {
+            if (length < 0)
+                throw std::invalid_argument("vector_fp16_zeros: length must be >= 0");
+            if (dimension < 1)
+                throw std::invalid_argument(
+                    "vector_fp16_zeros: dimension must be >= 1");
+            return make_fp16_zeros(static_cast<uint32_t>(length),
+                                   static_cast<uint32_t>(dimension));
+        },
+        nb::arg("length"), nb::arg("dimension"),
+        "Allocate a fresh VECTOR_FP16 Vector of shape (length, dimension) with all\n"
+        "values zero and no nulls. The data buffer is mutable through unified().data\n"
+        "so callers can write rows in place after construction.");
+
+    m.def("vector_fp16_with_nulls",
+        [](int64_t length, int dimension) {
+            if (length < 0)
+                throw std::invalid_argument("vector_fp16_with_nulls: length must be >= 0");
+            if (dimension < 1)
+                throw std::invalid_argument(
+                    "vector_fp16_with_nulls: dimension must be >= 1");
+            return make_fp16_with_nulls(static_cast<uint32_t>(length),
+                                        static_cast<uint32_t>(dimension));
+        },
+        nb::arg("length"), nb::arg("dimension"),
+        "Allocate a fresh VECTOR_FP16 Vector of shape (length, dimension) with all\n"
+        "rows initially null. Arrow validity convention: bit=1 = valid, bit=0 = null.\n"
+        "Callers SET bits in unified().validity to mark rows present, then write into\n"
+        "unified().data. Companion to vector_fp16_zeros.");
+
     // D.12 — INTERVAL ingestion.
     m.def("vector_interval_from_sequence",
         [](nb::list seq) {
@@ -5163,7 +5261,14 @@ NB_MODULE(draken_native, m) {
                 std::memcpy(validity, src->validity, nbytes);
             }
             DrakenVector v = draken_vector_from_dense(dst, n, DRAKEN_TIMESTAMP64, validity);
-            return VectorOwner(v, std::move(data_buf), std::move(val_buf));
+            VectorOwner owner(v, std::move(data_buf), std::move(val_buf));
+            // Attach microseconds/UTC logical type so compare_scalar etc. work.
+            LogicalType lt;
+            lt.kind = LogicalKind::TIMESTAMP;
+            lt.unit = TimestampUnit::MICROSECONDS;
+            lt.offset_minutes = 0;
+            owner.logical_type = logical_type_intern(lt);
+            return owner;
         },
         nb::arg("vec"),
         "Reinterpret INT64 vector data as TIMESTAMP64 (microseconds-since-epoch). Returns new Vector.");

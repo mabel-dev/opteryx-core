@@ -26,7 +26,26 @@ def apply_bounded_function(node, *parameters):
         )
 
     kernel = func_ref.selected_overload.kernel
-    return kernel.callable_ref(*parameters)
+    callable_obj = kernel.callable_ref
+    if type(callable_obj).__name__ != "nb_func":
+        return callable_obj(*parameters)
+
+    # Nanobind callable: unwrap any Cython Vector shims → raw nanobind Vectors.
+    unwrapped = []
+    for p in parameters:
+        nb = getattr(p, "_nb", None)
+        unwrapped.append(nb if nb is not None else p)
+    result = callable_obj(*unwrapped)
+
+    # Nanobind callables return raw nanobind Vectors — wrap in Cython shim.
+    if type(result).__name__ == "Vector":
+        import draken.draken_native as _dn
+        if result.type == _dn.DrakenType.BOOL:
+            from draken.vectors.bool_vector import BoolVector
+            return BoolVector(result)
+        from draken.vectors.vector import Vector
+        return Vector(result)
+    return result
 
 
 __all__ = ["apply_bounded_function", "is_draken_vector"]

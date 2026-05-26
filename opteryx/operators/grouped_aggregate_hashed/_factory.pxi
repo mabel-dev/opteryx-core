@@ -12,10 +12,14 @@
 from libc.stdint cimport int64_t
 
 from draken.vectors.vector cimport Vector
-from draken.vectors.integer64_vector cimport Integer64Vector
-from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.string_vector cimport StringVector
-from draken.vectors.decimal_vector cimport DecimalVector
+from draken.core.buffers cimport (
+    DrakenType,
+    DRAKEN_INT64,
+    DRAKEN_FLOAT64,
+    DRAKEN_VARCHAR,
+    DRAKEN_NVARCHAR,
+    DRAKEN_DECIMAL,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +135,7 @@ cpdef void resolve_deferred_collectors(
     cdef Py_ssize_t i
     cdef BaseCollector c, typed_c
     cdef Vector vec
+    cdef DrakenType t
     cdef str fn_tag
 
     for i in range(len(collectors)):
@@ -138,11 +143,12 @@ cpdef void resolve_deferred_collectors(
 
         if isinstance(c, _DeferredSumCollector):
             vec = morsel.column(c.column_name)
-            if isinstance(vec, Integer64Vector):
+            t = vec.unified().type
+            if t == DRAKEN_INT64:
                 typed_c = SumInt64Collector()
-            elif isinstance(vec, DecimalVector):
+            elif t == DRAKEN_DECIMAL:
                 typed_c = SumDecimalCollector()
-                (<SumDecimalCollector>typed_c)._factor = 10.0 ** (-(<DecimalVector>vec)._scale)
+                (<SumDecimalCollector>typed_c)._factor = 10.0 ** (-vec._nb.logical_type_scale)
             else:
                 typed_c = SumFloat64Collector()
             typed_c.column_name = c.column_name
@@ -151,16 +157,17 @@ cpdef void resolve_deferred_collectors(
 
         elif isinstance(c, _DeferredMinCollector):
             vec = morsel.column(c.column_name)
-            if isinstance(vec, Integer64Vector):
+            t = vec.unified().type
+            if t == DRAKEN_INT64:
                 typed_c = MinMaxInt64Collector()
                 (<MinMaxInt64Collector>typed_c)._direction = 1
-            elif isinstance(vec, Float64Vector):
+            elif t == DRAKEN_FLOAT64:
                 typed_c = MinMaxFloat64Collector()
                 (<MinMaxFloat64Collector>typed_c)._direction = 1
-            elif isinstance(vec, DecimalVector):
+            elif t == DRAKEN_DECIMAL:
                 typed_c = MinMaxDecimalCollector()
                 (<MinMaxDecimalCollector>typed_c)._direction = 1
-                (<MinMaxDecimalCollector>typed_c)._factor = 10.0 ** (-(<DecimalVector>vec)._scale)
+                (<MinMaxDecimalCollector>typed_c)._factor = 10.0 ** (-vec._nb.logical_type_scale)
             else:
                 typed_c = MinMaxObjectCollector()
                 (<MinMaxObjectCollector>typed_c)._direction = 1
@@ -170,16 +177,17 @@ cpdef void resolve_deferred_collectors(
 
         elif isinstance(c, _DeferredMaxCollector):
             vec = morsel.column(c.column_name)
-            if isinstance(vec, Integer64Vector):
+            t = vec.unified().type
+            if t == DRAKEN_INT64:
                 typed_c = MinMaxInt64Collector()
                 (<MinMaxInt64Collector>typed_c)._direction = -1
-            elif isinstance(vec, Float64Vector):
+            elif t == DRAKEN_FLOAT64:
                 typed_c = MinMaxFloat64Collector()
                 (<MinMaxFloat64Collector>typed_c)._direction = -1
-            elif isinstance(vec, DecimalVector):
+            elif t == DRAKEN_DECIMAL:
                 typed_c = MinMaxDecimalCollector()
                 (<MinMaxDecimalCollector>typed_c)._direction = -1
-                (<MinMaxDecimalCollector>typed_c)._factor = 10.0 ** (-(<DecimalVector>vec)._scale)
+                (<MinMaxDecimalCollector>typed_c)._factor = 10.0 ** (-vec._nb.logical_type_scale)
             else:
                 typed_c = MinMaxObjectCollector()
                 (<MinMaxObjectCollector>typed_c)._direction = -1
@@ -189,9 +197,10 @@ cpdef void resolve_deferred_collectors(
 
         elif isinstance(c, _DeferredAnyValueCollector):
             vec = morsel.column(c.column_name)
-            if isinstance(vec, Integer64Vector):
+            t = vec.unified().type
+            if t == DRAKEN_INT64:
                 typed_c = AnyValueInt64Collector()
-            elif isinstance(vec, Float64Vector):
+            elif t == DRAKEN_FLOAT64:
                 typed_c = AnyValueFloat64Collector()
             else:
                 typed_c = AnyValueObjectCollector()
@@ -201,15 +210,14 @@ cpdef void resolve_deferred_collectors(
 
         elif isinstance(c, _DeferredMedianCollector):
             vec = morsel.column(c.column_name)
-            if isinstance(vec, DecimalVector):
+            t = vec.unified().type
+            if t == DRAKEN_DECIMAL:
                 raise NotImplementedError(
                     "MEDIAN does not support DECIMAL inputs; CAST the column "
                     "to DOUBLE first (e.g. MEDIAN(CAST(col AS DOUBLE)))."
                 )
-            if not isinstance(vec, (Integer64Vector, Float64Vector)):
-                # Allow integer-narrow vectors through — MedianFloat64Collector
-                # has a to_pylist fallback for them. Reject obvious non-numerics.
-                pass
+            # Narrow-int vectors fall through to MedianFloat64Collector,
+            # which has a to_pylist fallback for them.
             typed_c = MedianFloat64Collector()
             typed_c.column_name = c.column_name
             typed_c.result_name = c.result_name
@@ -220,7 +228,8 @@ cpdef void resolve_deferred_collectors(
     for ki in range(len(group_columns)):
         col_name = group_columns[ki]
         vec = morsel.column(col_name)
-        if isinstance(vec, StringVector):
+        t = vec.unified().type
+        if t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR:
             key_kinds[ki] = KEY_MULTI_ENCODED_STRING
         else:
             key_kinds[ki] = KEY_MULTI_FIXED_INT

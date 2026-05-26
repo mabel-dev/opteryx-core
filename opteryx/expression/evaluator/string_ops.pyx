@@ -28,7 +28,7 @@ cdef _string_compare(int op_code, vec, right):
     # non-vector RHS — it predates the carchar/perfect-hash set wrappers that
     # draken_compare builds upstream).
     if op_code == OP_IN_LIST:
-        return vector_in_list(vec, _coerce_str_set(right))
+        return _wrap_nb_bool_result(vector_in_list(_nb_vec_unwrap(vec), _coerce_str_set(right)))
 
     # Eq / NotEq / Lt / Gt / LtEq / GtEq: vector-to-vector. `right` is a wrapped
     # literal (or a column); the *_vector kernels walk both operands together
@@ -57,9 +57,9 @@ cdef _string_compare(int op_code, vec, right):
     if op_code == OP_RLIKE:
         return vector_rlike(vec, right)
     if op_code == OP_IN_STR:
-        return vector_contains(vec, right, False)
+        return _wrap_nb_bool_result(vector_contains(_nb_vec_unwrap(vec), _nb_vec_unwrap(right), False))
     if op_code == OP_I_IN_STR:
-        return vector_contains(vec, right, True)
+        return _wrap_nb_bool_result(vector_contains(_nb_vec_unwrap(vec), _nb_vec_unwrap(right), True))
     raise NotImplementedError(f"StringVector: unsupported op (code {op_code})")
 
 

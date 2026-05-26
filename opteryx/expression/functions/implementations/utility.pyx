@@ -221,10 +221,9 @@ def _cosine_similarity_text(arr, val):
 
     embedded = embed_text_matrix([query_text, *active_texts])
     n_active = len(active_texts)
-    docs = embedded.take(array("i", range(1, n_active + 1)))
     query_fp32 = vector_math.row_as_fp32_array(embedded, 0)
-    score_vec = docs.cosine_similarity(memoryview(query_fp32))
-    scores = score_vec.to_pylist()
+    # Rows [1, 1+n_active) are the document embeddings; row 0 is the query.
+    scores = vector_math.cosine_similarity_rows(embedded, 1, n_active, query_fp32)
 
     for index, score in zip(active_positions, scores, strict=True):
         if score is None:
@@ -313,7 +312,7 @@ def embed(arr):
         return vector_math.new_matrix_with_nulls(n, dims or 0)
 
     embedded = embed_text_matrix(texts)
-    out = vector_math.new_matrix_with_nulls(n, embedded.dimensions)
+    out = vector_math.new_matrix_with_nulls(n, embedded._nb.logical_type_dimension)
     for new_idx, output_idx in enumerate(row_positions):
         vector_math.write_row_bytes(out, output_idx, vector_math.row_bytes(embedded, new_idx))
         vector_math.mark_present(out, output_idx)

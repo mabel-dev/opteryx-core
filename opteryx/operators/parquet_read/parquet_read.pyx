@@ -65,6 +65,7 @@ from opteryx.expression.evaluator import execute_bytecode
 from opteryx.compiled.expression.compiled_expression import build_bytecode as _build_bytecode
 from opteryx.compiled.expression.compiled_expression import lower as _lower_expr
 from opteryx.compiled.expression.compiled_expression cimport CompiledBytecode
+from draken.vectors.vector cimport Vector as _DrakenShimVector
 
 # EOS sentinel in scope as _EOS_SENTINEL via the umbrella unit.
 from opteryx import config
@@ -364,23 +365,36 @@ cdef inline void _coerce_logical_types(
     cdef int precision
     cdef int scale
 
+    # Unwrap Cython-shim Vectors to their nanobind handle before passing to
+    # the nanobind-side reinterpret functions, which require the raw nb type.
+    # The shim's `_nb` field is the public access point per E.24's shim
+    # design. Pass-through if `v` is already a nanobind Vector.
     if decimal_col_map:
         for col_name, dec in decimal_col_map.items():
             v = row_group.get(col_name)
-            if v is not None and getattr(v, "type", None) == _draken_native_parquet.INT64:
+            if v is None:
+                continue
+            v_nb = (<_DrakenShimVector>v)._nb if isinstance(v, _DrakenShimVector) else v
+            if v_nb.type == _draken_native_parquet.INT64:
                 precision = dec[0]
                 scale = dec[1]
-                row_group[col_name] = _int64_to_decimal(v, precision, scale)
+                row_group[col_name] = _int64_to_decimal(v_nb, precision, scale)
     if date_col_set:
         for col_name in date_col_set:
             v = row_group.get(col_name)
-            if v is not None and getattr(v, "type", None) == _draken_native_parquet.INT64:
-                row_group[col_name] = _int64_to_date32(v)
+            if v is None:
+                continue
+            v_nb = (<_DrakenShimVector>v)._nb if isinstance(v, _DrakenShimVector) else v
+            if v_nb.type == _draken_native_parquet.INT64:
+                row_group[col_name] = _int64_to_date32(v_nb)
     if timestamp_col_set:
         for col_name in timestamp_col_set:
             v = row_group.get(col_name)
-            if v is not None and getattr(v, "type", None) == _draken_native_parquet.INT64:
-                row_group[col_name] = _int64_to_timestamp(v)
+            if v is None:
+                continue
+            v_nb = (<_DrakenShimVector>v)._nb if isinstance(v, _DrakenShimVector) else v
+            if v_nb.type == _draken_native_parquet.INT64:
+                row_group[col_name] = _int64_to_timestamp(v_nb)
 
 
 cdef class _Pass1Result:

@@ -13,10 +13,8 @@ from libc.stdlib cimport malloc, free
 from libcpp.vector cimport vector
 
 from draken.vectors.vector cimport Vector
-from draken.vectors.integer64_vector cimport Integer64Vector
-from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.string_vector cimport StringVector
 from draken.core.buffers cimport DrakenVarBuffer, DrakenVector
+from draken.interop.vector_sequence import vector_from_sequence
 
 
 cdef extern from "carchar_set.hpp" namespace "opteryx::carchar":
@@ -123,7 +121,6 @@ cdef class CountDistinctCollector(BaseCollector):
         self._time_finalize_ns += _now_ns() - start_ns
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from draken.interop.arrow import vector_from_sequence
         cdef list vals = []
         cdef Py_ssize_t i
 
@@ -154,7 +151,7 @@ cdef class AnyValueInt64Collector(BaseCollector):
         const int64_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Integer64Vector vec = <Integer64Vector>morsel.column(self.column_name)
+        cdef Vector vec = morsel.column(self.column_name)
         cdef int64_t* data
         cdef const uint32_t* sel
         cdef uint8_t* nulls
@@ -176,7 +173,6 @@ cdef class AnyValueInt64Collector(BaseCollector):
                     seen[si] = 1
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from draken.interop.arrow import vector_from_sequence
         cdef long long start_ns = _now_ns()
         cdef list vals = []
         cdef Py_ssize_t i
@@ -218,7 +214,7 @@ cdef class AnyValueFloat64Collector(BaseCollector):
         const int64_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Float64Vector vec = <Float64Vector>morsel.column(self.column_name)
+        cdef Vector vec = morsel.column(self.column_name)
         cdef double* data
         cdef const uint32_t* sel
         cdef uint8_t* nulls
@@ -240,7 +236,6 @@ cdef class AnyValueFloat64Collector(BaseCollector):
                     seen[si] = 1
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from draken.interop.arrow import vector_from_sequence
         cdef long long start_ns = _now_ns()
         cdef list vals = []
         cdef Py_ssize_t i
@@ -302,7 +297,6 @@ cdef class AnyValueObjectCollector(BaseCollector):
                     seen[si] = 1
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from draken.interop.arrow import vector_from_sequence
         cdef long long start_ns = _now_ns()
         result = vector_from_sequence(self._values[:num_groups])
         self._time_finalize_ns += _now_ns() - start_ns

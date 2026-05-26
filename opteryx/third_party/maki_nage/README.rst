@@ -27,6 +27,11 @@ distributed environments. The implementation follows the algorithms described in
 Ben-Haim's `Streaming Parallel Decision Trees
 <http://jmlr.org/papers/volume11/ben-haim10a/ben-haim10a.pdf>`__
 
+.. note::
+
+    This is the upstream project README retained for provenance. The implementation
+    used by Opteryx in this folder is documented in ``README.md``.
+
 Get Started
 ============
 

@@ -1,0 +1,13 @@
+{
+  "n": 1000000,
+  "bin_count": 64,
+  "query_count": 500000,
+  "merge_inputs": 4096,
+  "kind": "normal",
+  "seed": 42,
+  "scalar_update_time": 0.04186483396915719,
+  "bulkload_time": 0.36020833399379626,
+  "merge_time": 0.006391250004526228,
+  "count_up_to_time": 0.048385332978796214,
+  "quantile_time": 0.6847780829994008
+}

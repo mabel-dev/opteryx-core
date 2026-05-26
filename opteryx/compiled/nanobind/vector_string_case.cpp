@@ -591,6 +591,112 @@ static nb::object impl_reverse(nb::object in_obj) {
 }
 
 // ---------------------------------------------------------------------------
+// impl_trim_common — TRIM / LTRIM / RTRIM (ASCII whitespace, bytes 0x09-0x0D + 0x20)
+// ---------------------------------------------------------------------------
+
+static inline bool is_ascii_whitespace(uint8_t c) {
+    return c == 0x20u || (c >= 0x09u && c <= 0x0Du);
+}
+
+static nb::object impl_trim_common(nb::object in_obj, bool trim_left, bool trim_right) {
+    const DrakenVector* dv = draken_vector_unwrap(in_obj.ptr());
+    if (!dv) throw nb::python_error();
+
+    if (dv->type == DRAKEN_VARBINARY)
+        throw std::invalid_argument("vector_trim: VARBINARY is not supported");
+    if (dv->type != DRAKEN_VARCHAR && dv->type != DRAKEN_NVARCHAR)
+        throw nb::type_error("vector_trim: expected VARCHAR or NVARCHAR Vector");
+
+    const uint32_t n = dv->length;
+    const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);
+    const DrakenType out_type = dv->type;
+
+    const size_t slots_sz = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
+    DrakenStringSlot* out_slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
+    if (!out_slots) throw std::bad_alloc();
+    std::memset(out_slots, 0, slots_sz);
+
+    size_t arena_cap = (sa->arena_used > 0u ? sa->arena_used : 64u);
+    uint8_t* out_arena = static_cast<uint8_t*>(draken_malloc(arena_cap));
+    if (!out_arena) { draken_free(out_slots); throw std::bad_alloc(); }
+    size_t arena_used = 0u;
+
+    uint8_t* validity = nullptr;
+    bool any_null = false;
+
+    struct Guard {
+        DrakenStringSlot** sp;
+        uint8_t**          ap;
+        uint8_t**          vp;
+        void release() { sp = nullptr; ap = nullptr; vp = nullptr; }
+        ~Guard() {
+            if (sp) draken_free(*sp);
+            if (ap) draken_free(*ap);
+            if (vp && *vp) draken_free(*vp);
+        }
+    } g{&out_slots, &out_arena, &validity};
+
+    for (uint32_t i = 0u; i < n; ++i) {
+        if (!is_valid_at(dv, i)) {
+            if (!validity) { validity = alloc_validity_all_valid(n); }
+            validity[i >> 3] &= ~static_cast<uint8_t>(1u << (i & 7u));
+            str_init_null(&out_slots[i]);
+            any_null = true;
+            continue;
+        }
+
+        const DrakenStringSlot* slot = &sa->slots[dv->selection[i]];
+        const uint32_t slen = str_length(slot);
+        const uint8_t* sdata = str_data(slot, sa->arena);
+
+        if (slen == 0u) {
+            str_init_inline(&out_slots[i], nullptr, 0u);
+            continue;
+        }
+
+        uint32_t start = 0u;
+        uint32_t end   = slen;
+
+        if (trim_left) {
+            while (start < end && is_ascii_whitespace(sdata[start])) ++start;
+        }
+        if (trim_right) {
+            while (end > start && is_ascii_whitespace(sdata[end - 1u])) --end;
+        }
+
+        const uint8_t* tdata = sdata + start;
+        const uint32_t tlen  = end - start;
+
+        if (tlen <= STR_INLINE_MAX) {
+            str_init_inline(&out_slots[i], tdata, tlen);
+        } else {
+            if (arena_used + tlen > arena_cap) {
+                size_t new_cap = arena_cap * 2u;
+                if (new_cap < arena_used + tlen) new_cap = arena_used + tlen;
+                auto* new_arena = static_cast<uint8_t*>(draken_malloc(new_cap));
+                if (!new_arena) throw std::bad_alloc();
+                if (arena_used > 0u) std::memcpy(new_arena, out_arena, arena_used);
+                draken_free(out_arena);
+                out_arena = new_arena;
+                arena_cap = new_cap;
+            }
+            const uint32_t off = static_cast<uint32_t>(arena_used);
+            std::memcpy(out_arena + off, tdata, tlen);
+            draken_build_string_slot(&out_slots[i], tdata, tlen, off);
+            arena_used += tlen;
+        }
+    }
+
+    if (!any_null && validity) { draken_free(validity); validity = nullptr; }
+
+    g.release();
+    PyObject* out = draken_vector_own_string(
+        out_slots, out_arena, arena_used, validity, n, out_type);
+    if (!out) throw nb::python_error();
+    return nb::steal<nb::object>(out);
+}
+
+// ---------------------------------------------------------------------------
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
@@ -627,5 +733,29 @@ NB_MODULE(vector_string_case, m) {
         nb::arg("input"),
         "Reverse each string.  VARCHAR/VARBINARY: byte-reversal.\n"
         "NVARCHAR: UTF-8 codepoint-aware reversal.\n"
+        "Null TVL: null input row → null output row.");
+
+    m.def("vector_trim",
+        [](nb::object input) -> nb::object {
+            return impl_trim_common(input, true, true);
+        },
+        nb::arg("input"),
+        "Remove leading and trailing ASCII whitespace from each string.\n"
+        "Null TVL: null input row → null output row.");
+
+    m.def("vector_ltrim",
+        [](nb::object input) -> nb::object {
+            return impl_trim_common(input, true, false);
+        },
+        nb::arg("input"),
+        "Remove leading ASCII whitespace from each string.\n"
+        "Null TVL: null input row → null output row.");
+
+    m.def("vector_rtrim",
+        [](nb::object input) -> nb::object {
+            return impl_trim_common(input, false, true);
+        },
+        nb::arg("input"),
+        "Remove trailing ASCII whitespace from each string.\n"
         "Null TVL: null input row → null output row.");
 }

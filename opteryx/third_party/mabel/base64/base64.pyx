@@ -10,7 +10,6 @@
 
 from libc.stdlib cimport malloc, free
 from libc.stddef cimport size_t
-from libc.stdint cimport uint8_t
 from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AsString
 
 cdef extern from "_base64.h":

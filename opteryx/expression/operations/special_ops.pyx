@@ -2,7 +2,7 @@
 
 from opteryx.third_party import yyjson
 
-from draken.interop.vector_sequence import vector_from_sequence
+import draken.draken_native as _draken_native_special
 
 
 cdef str _jsonpath_to_pointer(str jsonpath):
@@ -43,9 +43,9 @@ cpdef json_path_exists(arr, str value):
         # Plain key existence — `in` on the parsed doc is the yyjson contract.
         for i in range(n):
             result[i] = value in parser.parse(arr[i])
-        return vector_from_sequence(result)
+        return _draken_native_special.vector_from_sequence(result)
 
     json_pointer = _jsonpath_to_pointer(value)
     for i in range(n):
         result[i] = _check_json_pointer(parser, arr[i], json_pointer)
-    return vector_from_sequence(result)
+    return _draken_native_special.vector_from_sequence(result)

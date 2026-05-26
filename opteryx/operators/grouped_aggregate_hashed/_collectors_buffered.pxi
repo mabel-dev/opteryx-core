@@ -11,15 +11,18 @@
 # (default 1000). Exceeding the cap raises during accumulate(); we keep the
 # state intact so the engine can still surface a clean diagnostic.
 
-from libc.stdint cimport int64_t, uint8_t
-from libc.string cimport memcpy
+from libc.stdint cimport int64_t, uint8_t, uint32_t
+from libc.stddef cimport size_t
+from libc.string cimport memcpy, memset
 from libcpp.vector cimport vector
 
-from draken.vectors.vector cimport Vector
-from draken.vectors.integer64_vector cimport Integer64Vector
-from draken.vectors.float64_vector cimport Float64Vector
-from draken.vectors.decimal_vector cimport DecimalVector
-from draken.core.buffers cimport DrakenVector
+from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
+from draken.core.buffers cimport DrakenVector, DrakenType
+from draken.core.buffers cimport DRAKEN_INT64, DRAKEN_FLOAT64
+
+cdef extern from "core/alloc.h" nogil:
+    void* draken_malloc(size_t n) nogil
+    void  draken_free(void* p) nogil
 
 
 cdef extern from "../aggregate/_agg_kernels.hpp" namespace "opteryx::ungrouped":
@@ -82,36 +85,30 @@ cdef class MedianFloat64Collector(BaseCollector):
         const int64_t* state_indices,
         Py_ssize_t n_rows,
     ):
+        # Per-row template (D-B): one type-dispatch per morsel, typed
+        # pointers cached, pure-C inner loop. Uniform Vector access via
+        # vec.unified() — works for Dense/Constant/Dict shapes through
+        # data[selection[i]] (CLAUDE.md §11).
         cdef Vector vec = morsel.column(self.column_name)
-        cdef Integer64Vector iv
-        cdef Float64Vector fv
+        cdef DrakenVector* uv = vec.unified()
+        cdef DrakenType t = uv.type
         cdef Py_ssize_t i
-        cdef double v
-        cdef uint8_t* nulls
+        cdef uint8_t* nulls = uv.validity
         cdef int64_t* idata
         cdef double* fdata
-        cdef const uint32_t* sel
-        cdef DrakenVector* uv
+        cdef const uint32_t* sel = uv.selection
         cdef list pylist
 
-        if isinstance(vec, Integer64Vector):
-            iv = <Integer64Vector>vec
-            uv = iv.unified()
+        if t == DRAKEN_INT64:
             idata = <int64_t*>uv.data
-            sel = uv.selection
-            nulls = uv.validity
             for i in range(n_rows):
                 if nulls != NULL and not _num_bitmap_valid(nulls, i):
                     continue
                 self._append(state_indices[i], <double>idata[sel[i]])
             return
 
-        if isinstance(vec, Float64Vector):
-            fv = <Float64Vector>vec
-            uv = fv.unified()
+        if t == DRAKEN_FLOAT64:
             fdata = <double*>uv.data
-            sel = uv.selection
-            nulls = uv.validity
             for i in range(n_rows):
                 if nulls != NULL and not _num_bitmap_valid(nulls, i):
                     continue
@@ -130,12 +127,18 @@ cdef class MedianFloat64Collector(BaseCollector):
         return self.finalize_slice(0, num_groups)
 
     cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
+        # Producer pattern: draken_malloc the output buffer + validity
+        # bitmap, fill in a nogil loop, hand ownership to a Vector via
+        # from_decoded. The buffers MUST be draken_malloc'd — they are
+        # draken_free'd by the Vector on GC.
         cdef Py_ssize_t length = <Py_ssize_t>(stop - start)
-        cdef Float64Vector out
+        cdef Py_ssize_t bitmap_bytes
         cdef double* out_data
+        cdef uint8_t* validity
         cdef Py_ssize_t i
         cdef MedianState* st_ptr
         cdef size_t cap
+        cdef bint any_null = False
 
         if self._any_overflow:
             cap = 0
@@ -147,20 +150,36 @@ cdef class MedianFloat64Collector(BaseCollector):
                 "Use APPROX_PERCENTILE for larger inputs."
             )
 
-        out = Float64Vector(<size_t>length)
-        out_data = <double*>out.ptr.data
-
         if length <= 0:
-            return out
+            # Empty result: zero-length all-valid Vector.
+            return _vector_from_decoded(NULL, NULL, 0, DRAKEN_FLOAT64)
 
-        out.ptr.null_bitmap = _alloc_all_valid_bitmap(length)
+        out_data = <double*>draken_malloc(<size_t>length * sizeof(double))
+        if out_data == NULL:
+            raise MemoryError()
+
+        bitmap_bytes = (length + 7) >> 3
+        validity = <uint8_t*>draken_malloc(<size_t>bitmap_bytes)
+        if validity == NULL:
+            draken_free(out_data)
+            raise MemoryError()
+        memset(validity, 0xFF, bitmap_bytes)
 
         for i in range(length):
             st_ptr = &(self._states[0][<size_t>(start + i)])
             if st_ptr.size == 0:
                 out_data[i] = 0.0
-                _bitmap_clear(out.ptr.null_bitmap, i)
+                validity[i >> 3] &= ~(1 << (i & 7))
+                any_null = True
             else:
                 out_data[i] = st_ptr.finalize_median()
 
-        return out
+        # All-valid normalization invariant (00_data_model.md):
+        # validity==NULL means "all rows valid". Free + drop the bitmap.
+        if not any_null:
+            draken_free(validity)
+            validity = NULL
+
+        return _vector_from_decoded(
+            <void*>out_data, validity, <uint32_t>length, DRAKEN_FLOAT64
+        )

@@ -20,6 +20,9 @@ from itertools import accumulate
 from operator import itemgetter
 from typing import Optional, Tuple, List
 
+cdef extern from "opteryx/third_party/maki_nage/_distogram_core.h":
+    int64_t distogram_sum_i64(const int64_t* values, int64_t length) nogil
+
 __author__ = """Romain Picard"""
 __email__ = "romain.picard@oakbits.com"
 __version__ = "3.0.0"
@@ -49,8 +52,10 @@ cdef class Distogram:
 
     # C-level storage: pre-allocated bins array
     cdef Bin* bins_data
+    cdef int64_t* prefix_counts
     cdef int64_t bins_length
     cdef int64_t bins_capacity
+    cdef int64_t total_count
 
     # Python-visible state for API compatibility
     cdef public double min
@@ -63,6 +68,7 @@ cdef class Distogram:
     cdef double[:] _values_cache
     cdef int64_t[:] _counts_cache
     cdef bint _cache_valid
+    cdef bint _prefix_valid
 
     def __init__(self, int64_t bin_count=BIN_COUNT):
         """Creates a new Distogram object.
@@ -71,9 +77,13 @@ cdef class Distogram:
             bin_count: the number of bins to use.
         """
         self._bin_count = bin_count
-        self.bins_capacity = bin_count
-        self.bins_data = <Bin*>malloc(bin_count * sizeof(Bin))
+        # Keep one spare slot so update() can insert and then trim back to
+        # the configured bin count without dropping values.
+        self.bins_capacity = max(1, bin_count) + 1
+        self.bins_data = <Bin*>malloc(self.bins_capacity * sizeof(Bin))
+        self.prefix_counts = <int64_t*>malloc(self.bins_capacity * sizeof(int64_t))
         self.bins_length = 0
+        self.total_count = 0
 
         self.min = float('inf')
         self.max = float('-inf')
@@ -83,15 +93,19 @@ cdef class Distogram:
         self._values_cache = None
         self._counts_cache = None
         self._cache_valid = False
+        self._prefix_valid = False
 
     def __dealloc__(self):
         """Free C-level memory."""
         if self.bins_data != NULL:
             free(self.bins_data)
+        if self.prefix_counts != NULL:
+            free(self.prefix_counts)
 
     cdef void _invalidate_cache(self):
         """Mark cache as needing rebuild."""
         self._cache_valid = False
+        self._prefix_valid = False
 
     cdef void _rebuild_cache(self) nogil:
         """Rebuild memoryview caches from C bins array.
@@ -183,35 +197,42 @@ cdef class Distogram:
 
     def bulkload(self, values):
         """Load many values efficiently using histogram approximation."""
-        if len(values) == 0:
+        cdef Py_ssize_t values_len = len(values)
+        if values_len == 0:
             return
 
-        # Extract unique values and counts
+        cdef int64_t threshold = self._bin_count * 5
         cdef dict value_counts = {}
         cdef double fv
+        cdef double min_val = float('inf')
+        cdef double max_val = float('-inf')
         cdef list bin_values
         cdef list counts
+        cdef bint high_cardinality = False
 
         for v in values:
             fv = float(v)
-            value_counts[fv] = value_counts.get(fv, 0) + 1
+            if fv < min_val:
+                min_val = fv
+            if fv > max_val:
+                max_val = fv
+            if not high_cardinality:
+                value_counts[fv] = value_counts.get(fv, 0) + 1
+                if len(value_counts) > threshold:
+                    high_cardinality = True
+                    value_counts = {}
 
-        bin_values = sorted(value_counts.keys())
-        counts = [value_counts[v] for v in bin_values]
-
-        # If high cardinality, use histogram approximation
-        if len(bin_values) > (self._bin_count * 5):
-            counts_hist, bin_edges = self._histogram_native(values, self._bin_count * 5)
+        if high_cardinality:
+            counts_hist, bin_edges = self._histogram_native_bounds(values, threshold, min_val, max_val)
             bin_values = [(bin_edges[i] + bin_edges[i + 1]) / 2.0 for i in range(len(bin_edges) - 1)]
             counts = counts_hist
+        else:
+            bin_values = sorted(value_counts.keys())
+            counts = [value_counts[v] for v in bin_values]
 
         for index, count in enumerate(counts):
             if count > 0:
                 update(self, bin_values[index], count)
-
-        # Update min/max with actual data bounds
-        cdef double min_val = min(values)
-        cdef double max_val = max(values)
 
         if math.isinf(self.min):
             self.min = min_val
@@ -246,15 +267,38 @@ cdef class Distogram:
 
         return bin_counts, bin_edges
 
+    @staticmethod
+    def _histogram_native_bounds(values, int num_bins, double min_val, double max_val):
+        """Compute histogram using known bounds."""
+        cdef double bin_width = (max_val - min_val) / num_bins if num_bins > 0 else 1.0
+        cdef list bin_counts = [0] * num_bins
+        cdef list bin_edges = _linspace(min_val, max_val, num_bins)
+        cdef double fv
+        cdef int bin_idx
+
+        if num_bins <= 0:
+            return bin_counts, bin_edges
+
+        if bin_width == 0:
+            bin_counts[0] = len(values)
+            return bin_counts, bin_edges
+
+        for v in values:
+            fv = <double>v
+            if fv == max_val:
+                bin_counts[num_bins - 1] += 1
+            elif fv > min_val:
+                bin_idx = int((fv - min_val) / bin_width)
+                if 0 <= bin_idx < num_bins:
+                    bin_counts[bin_idx] += 1
+            elif fv == min_val:
+                bin_counts[0] += 1
+
+        return bin_counts, bin_edges
+
     def count(self):
         """Count total elements in distribution."""
-        cdef int total = 0
-        cdef int i
-
-        for i in range(self.bins_length):
-            total += self.bins_data[i].count
-
-        return total
+        return self.total_count
 
     @property
     def max_bin_count(self):
@@ -264,20 +308,41 @@ cdef class Distogram:
     def bin_count(self):
         return self.bins_length
 
+    @property
+    def bins(self):
+        return [(self.bins_data[i].value, self.bins_data[i].count) for i in range(self.bins_length)]
+
+
+cdef inline int64_t _count_bins(Distogram h) nogil:
+    return h.total_count
+
+
+cdef inline void _rebuild_prefix_counts(Distogram h) noexcept nogil:
+    cdef int64_t i
+    cdef int64_t running = 0
+
+    for i in range(h.bins_length):
+        h.prefix_counts[i] = running
+        running += h.bins_data[i].count
+    h._prefix_valid = True
+
 
 def load(bins: list, minimum, maximum):
     """Load distogram from serialized bins."""
-    cdef Distogram dgram = Distogram()
+    # Allocate enough space for the serialized bins and one spare slot for
+    # future updates/merges.
+    cdef Distogram dgram = Distogram(max(len(bins), BIN_COUNT))
 
     # Populate C array from bins
     for v, c in bins:
         dgram._append_bin(<double>(v), <int64_t>(c))
+        dgram.total_count += <int64_t>(c)
 
     dgram.min = <double>(minimum)
     dgram.max = <double>(maximum)
     dgram.diffs = []
 
-    for i in range(dgram.bins_length - 1):
+    for i in range(1, dgram.bins_length):
         diff = dgram.bins_data[i].value - dgram.bins_data[i - 1].value
         dgram.diffs.append(diff)
 
@@ -286,6 +351,126 @@ def load(bins: list, minimum, maximum):
     else:
         dgram.min_diff = float("inf")
 
+    return dgram
+
+
+def load_counts(counts, minimum, maximum):
+    """Load an equi-width histogram directly from per-bucket counts."""
+    cdef Py_ssize_t num_bins = len(counts)
+    cdef Py_ssize_t bin_idx
+    cdef int64_t count
+    cdef int64_t total_count = 0
+    cdef double min_f = <double>minimum
+    cdef double max_f = <double>maximum
+    cdef double span
+    cdef double center
+    cdef double previous_center = 0.0
+    cdef double diff
+    cdef double min_diff = float("inf")
+    cdef bint have_previous = False
+    cdef Distogram dgram = Distogram(max(num_bins, BIN_COUNT))
+
+    dgram.min = min_f
+    dgram.max = max_f
+    dgram.diffs = None
+    dgram.min_diff = float("inf")
+
+    if num_bins == 0:
+        return dgram
+
+    if min_f == max_f:
+        for bin_idx in range(num_bins):
+            total_count += <int64_t>counts[bin_idx]
+
+        if total_count != 0:
+            dgram._append_bin(min_f, total_count)
+            dgram.total_count = total_count
+            with nogil:
+                _rebuild_prefix_counts(dgram)
+        return dgram
+
+    span = max_f - min_f
+    for bin_idx in range(num_bins):
+        count = <int64_t>counts[bin_idx]
+        if count == 0:
+            continue
+
+        center = min_f + (bin_idx + 0.5) * span / num_bins
+        dgram._append_bin(center, count)
+        dgram.total_count += count
+
+        if have_previous:
+            diff = center - previous_center
+            if diff < min_diff:
+                min_diff = diff
+        else:
+            have_previous = True
+        previous_center = center
+
+    dgram.min_diff = min_diff
+    if dgram.bins_length != 0:
+        with nogil:
+            _rebuild_prefix_counts(dgram)
+
+    return dgram
+
+
+def load_counts_i64(const int64_t[::1] counts, double minimum, double maximum):
+    """Load an equi-width histogram from contiguous native int64 counts."""
+    cdef Py_ssize_t num_bins = counts.shape[0]
+    cdef Py_ssize_t bin_idx
+    cdef int64_t count
+    cdef int64_t total_count = 0
+    cdef double span
+    cdef double center
+    cdef double previous_center = 0.0
+    cdef double diff
+    cdef double min_diff = float("inf")
+    cdef bint have_previous = False
+    cdef Distogram dgram = Distogram(max(num_bins, BIN_COUNT))
+
+    dgram.min = minimum
+    dgram.max = maximum
+    dgram.diffs = None
+    dgram.min_diff = float("inf")
+
+    if num_bins == 0:
+        return dgram
+
+    with nogil:
+        total_count = distogram_sum_i64(&counts[0], num_bins)
+
+    if minimum == maximum:
+        if total_count != 0:
+            dgram._append_bin(minimum, total_count)
+            dgram.total_count = total_count
+            with nogil:
+                _rebuild_prefix_counts(dgram)
+        return dgram
+
+    span = maximum - minimum
+    dgram.total_count = total_count
+    with nogil:
+        for bin_idx in range(num_bins):
+            count = counts[bin_idx]
+            if count == 0:
+                continue
+
+            center = minimum + (bin_idx + 0.5) * span / num_bins
+            dgram._append_bin(center, count)
+
+            if have_previous:
+                diff = center - previous_center
+                if diff < min_diff:
+                    min_diff = diff
+            else:
+                have_previous = True
+            previous_center = center
+
+        if dgram.bins_length != 0:
+            _rebuild_prefix_counts(dgram)
+
+    dgram.min_diff = min_diff
     return dgram
 
 
@@ -334,7 +519,7 @@ def _moment(list x, list counts, double c, int n) -> float:
     return m / total if total > 0 else 0.0
 
 
-cdef void _update_diffs(Distogram h, int64_t i) nogil:
+cdef void _update_diffs(Distogram h, int64_t i) noexcept nogil:
     """Update difference array after bin modification."""
     # Note: diffs handling must happen in GIL since it's a Python list
     pass
@@ -369,29 +554,14 @@ cpdef Distogram _trim(Distogram h):
     cdef double min_gap, v1, v2, new_v, gap
 
     while h.bins_length > h._bin_count:
-        # Find the index of the smallest gap
-        if h.diffs is not None and len(h.diffs) > 0:
-            min_idx = 0
-            min_gap = h.diffs[0]
-            for i in range(1, len(h.diffs)):
-                if h.diffs[i] < min_gap:
-                    min_gap = h.diffs[i]
-                    min_idx = i
-            i = min_idx
-        elif h.diffs is not None:
-            # diffs exists but is empty
-            break
-        else:
-            # diffs not initialized - compute gaps
-            min_idx = 0
-            min_gap = float('inf')
-            for i in range(1, h.bins_length):
-                gap = h.bins_data[i].value - h.bins_data[i - 1].value
-                if gap < min_gap:
-                    min_gap = gap
-                    min_idx = i - 1
-            i = min_idx
-
+        min_idx = 0
+        min_gap = float('inf')
+        for i in range(1, h.bins_length):
+            gap = h.bins_data[i].value - h.bins_data[i - 1].value
+            if gap < min_gap:
+                min_gap = gap
+                min_idx = i - 1
+        i = min_idx
 
         v1 = h.bins_data[i].value
         f1 = h.bins_data[i].count
@@ -404,13 +574,8 @@ cpdef Distogram _trim(Distogram h):
         h.bins_data[i].value = new_v
         h.bins_data[i].count = new_f
         h._remove_bin(i + 1)
-
-        if h.diffs is not None:
-            if i < len(h.diffs):
-                h.diffs.pop(i)
-            _update_diffs(h, i)
-            if h.diffs:
-                h.min_diff = min(h.diffs)
+        h.diffs = None
+        h._prefix_valid = False
 
     return h
 
@@ -423,6 +588,7 @@ cdef inline Distogram _trim_in_place(Distogram distogram, double new_value, int6
 
     distogram.bins_data[bin_index].value = new_merged_value
     distogram.bins_data[bin_index].count = current_frequency + new_count
+    distogram.total_count += new_count
 
     _update_diffs(distogram, bin_index)
     distogram._invalidate_cache()
@@ -499,6 +665,8 @@ cpdef update(Distogram h, double value, int64_t count=1):
             fi = h.bins_data[index].count
             if fabs(vi - value) < EPSILON:
                 h.bins_data[index].count = fi + count
+                h.total_count += count
+                h._prefix_valid = False
                 # Only sync if this was the last operation
                 return h
 
@@ -514,6 +682,8 @@ cpdef update(Distogram h, double value, int64_t count=1):
         h._append_bin(value, count)
     else:
         h._insert_bin(index, value, count)
+    h.total_count += count
+    h._prefix_valid = False
 
     # Update bounds
     if math.isinf(h.min) or value < h.min:
@@ -557,7 +727,7 @@ cpdef double count_up_to(Distogram h, double value):
         return 0.0
 
     if value >= h.max:
-        return <double>h.count()
+        return <double>_count_bins(h)
 
     if value == h.min:
         return 0.0
@@ -567,6 +737,10 @@ cpdef double count_up_to(Distogram h, double value):
     vl = h.bins_data[bins_len - 1].value
     fl = h.bins_data[bins_len - 1].count
 
+    if not h._prefix_valid:
+        with nogil:
+            _rebuild_prefix_counts(h)
+
     with nogil:
         if value <= v0:  # left tail
             ratio = (value - h.min) / (v0 - h.min)
@@ -574,11 +748,7 @@ cpdef double count_up_to(Distogram h, double value):
         elif value >= vl:  # right tail
             ratio = (value - vl) / (h.max - vl)
             result = (1 + ratio) * fl / 2
-            # Sum all bins except last
-            sum_val = 0.0
-            for i in range(bins_len - 1):
-                sum_val += h.bins_data[i].count
-            result += sum_val
+            result += h.prefix_counts[bins_len - 1]
         else:
             # Binary search for bin containing value
             i = _binary_search_values(h, value)
@@ -590,11 +760,7 @@ cpdef double count_up_to(Distogram h, double value):
             mb = fi + (fj - fi) / (vj - vi) * (value - vi)
             result = (fi + mb) / 2 * (value - vi) / (vj - vi)
 
-            # Sum bins before insertion point
-            sum_val = 0.0
-            for j in range(i):
-                sum_val += h.bins_data[j].count
-            result += sum_val
+            result += h.prefix_counts[i]
             result = result + fi / 2
 
     return result
@@ -667,15 +833,15 @@ def quantile(Distogram h, double value) -> Optional[float]:
         return None
 
     cdef double total_count, q_count, v0, f0, vl, fl, fraction, result, base, mb
-    cdef int i
+    cdef double mid, running
+    cdef int64_t i
 
-    total_count = h.count()
+    total_count = _count_bins(h)
     q_count = int(total_count * value)
     v0 = h.bins_data[0].value
     f0 = h.bins_data[0].count
     vl = h.bins_data[h.bins_length - 1].value
     fl = h.bins_data[h.bins_length - 1].count
-    mids = []
 
     if q_count <= (f0 / 2):  # left values
         fraction = q_count / (f0 / 2)
@@ -688,13 +854,17 @@ def quantile(Distogram h, double value) -> Optional[float]:
 
     else:
         mb = q_count - f0 / 2
+        running = 0.0
         for i in range(h.bins_length - 1):
-            mids.append((h.bins_data[i].count + h.bins_data[i + 1].count) / 2.0)
-        i, _ = next(filter(lambda i_f: mb < i_f[1], enumerate(accumulate(mids))))
-
-        v0 = h.bins_data[i].value
-        vl = h.bins_data[i + 1].value
-        fraction = (mb - sum(mids[:i])) / mids[i]
-        result = v0 + (fraction * (vl - v0))
+            mid = (h.bins_data[i].count + h.bins_data[i + 1].count) / 2.0
+            if mb < running + mid:
+                v0 = h.bins_data[i].value
+                vl = h.bins_data[i + 1].value
+                fraction = (mb - running) / mid
+                result = v0 + (fraction * (vl - v0))
+                break
+            running += mid
+        else:
+            result = h.max
 
     return result
