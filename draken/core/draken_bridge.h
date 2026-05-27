@@ -17,6 +17,19 @@
 //   the new Vector's destructor). The caller MUST NOT free those buffers after
 //   calling these functions.
 //
+//   Allocator contract (important): any buffer that is transferred to a
+//   draken_vector_own_* function MUST be allocated with the Draken allocator
+//   (draken_malloc / draken_aligned_malloc) and will be freed with
+//   draken_free by the Vector's destructor. Passing a libc-allocated buffer
+//   (malloc / PyMem_Malloc / free) to any draken_vector_own_* function is
+//   undefined behaviour and can corrupt the process heap or cause crashes.
+//
+//   If caller code cannot allocate via draken_malloc (for example when a
+//   third-party C API or Cython typed-memoryview owns the buffer), the caller
+//   MUST copy the data into a draken_malloc'd buffer before calling the
+//   bridge (see draken/core/bitmap_ops.cpp::bool_vector_from_bits for a safe
+//   example). Do NOT rely on implicit or accidental cross-allocator frees.
+
 // USAGE: called from C++ nanobind glue (draken_native.cpp) ONLY.
 //
 // DO NOT declare these from .pyx via `cdef extern`. The pattern:

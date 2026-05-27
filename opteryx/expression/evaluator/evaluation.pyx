@@ -212,9 +212,9 @@ cdef _unary_draken(str op, centre_node, morsel):
     if op == "IsNotNull":
         return _is_null_as_boolvector(vec).not_vector()
     if op == "IsEmpty":
-        return _vector_string_is_empty(vec)
+        return _BoolVector(_vector_string_is_empty(_nb_vec_unwrap(vec)))
     if op == "IsNotEmpty":
-        return _vector_string_is_not_empty(vec)
+        return _BoolVector(_vector_string_is_not_empty(_nb_vec_unwrap(vec)))
     if op == "BitwiseNot":
         return Vector(_vector_bitwise_not(_nb_vec_unwrap(vec)))
     if op == "IsTrue" or op == "IsNotFalse" or op == "IsFalse" or op == "IsNotTrue":
@@ -241,9 +241,9 @@ cdef _unary_op_kernel(str op, vec):
     if op == "IsNotNull":
         return _is_null_as_boolvector(vec).not_vector()
     if op == "IsEmpty":
-        return _vector_string_is_empty(vec)
+        return _BoolVector(_vector_string_is_empty(_nb_vec_unwrap(vec)))
     if op == "IsNotEmpty":
-        return _vector_string_is_not_empty(vec)
+        return _BoolVector(_vector_string_is_not_empty(_nb_vec_unwrap(vec)))
     if op == "BitwiseNot":
         return Vector(_vector_bitwise_not(_nb_vec_unwrap(vec)))
     if op == "IsTrue" or op == "IsNotFalse" or op == "IsFalse" or op == "IsNotTrue":
@@ -1588,5 +1588,3 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
 # Wire the trampoline into the global function pointer so C++ worker threads
 # can call it without holding the GIL. Done once at module import time.
 opteryx_set_worker_fn(_c_bytecode_worker_trampoline)
-
-

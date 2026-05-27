@@ -885,7 +885,7 @@ cdef class MinMaxObjectCollector(BaseCollector):
                 seen[si] = 1
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from draken.interop.arrow import vector_from_sequence
+        from draken.interop.vector_sequence import vector_from_sequence
         cdef list result = []
         cdef int64_t i
         cdef int64_t limit = min(<int64_t>self._values.size(), num_groups)
@@ -896,7 +896,7 @@ cdef class MinMaxObjectCollector(BaseCollector):
                 result.append(None)
             else:
                 result.append(bytes(vec.data()[:vec.size()]).decode('utf-8'))
-        nb = vector_from_sequence(result)
+        nb = vector_from_sequence(result, dtype="VARCHAR")
         return _V(nb)
 
     cpdef BaseCollector _clone_empty(self):

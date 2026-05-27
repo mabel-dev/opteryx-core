@@ -53,12 +53,38 @@
 namespace nb = nanobind;
 
 // ---------------------------------------------------------------------------
-// Shared helpers (null / validity / unit)
+// Shared helpers (null / validity / unit / scalar extraction)
 // ---------------------------------------------------------------------------
 
 static inline bool row_is_null(const DrakenVector* dv, uint32_t i) noexcept {
     if (!dv->validity) return false;
     return !((dv->validity[i >> 3] >> (i & 7u)) & 1u);
+}
+
+// Extract scalar string from a Python sequence-like object (vector or list).
+// Returns a C string that must not be freed (borrowed).
+static const char* extract_scalar_string(nb::object seq) {
+    try {
+        nb::object first = seq[0];
+        if (PyUnicode_Check(first.ptr())) {
+            const char* s = PyUnicode_AsUTF8(first.ptr());
+            if (!s) throw nb::python_error();
+            return s;
+        } else if (PyBytes_Check(first.ptr())) {
+            const char* s = PyBytes_AS_STRING(first.ptr());
+            if (!s) throw nb::python_error();
+            return s;
+        } else {
+            // Try str() conversion
+            nb::object str_obj = nb::cast<nb::object>(nb::str(first));
+            const char* s = PyUnicode_AsUTF8(str_obj.ptr());
+            if (!s) throw nb::python_error();
+            return s;
+        }
+    } catch (const std::exception& e) {
+        PyErr_SetString(PyExc_TypeError, "Failed to extract scalar from constant vector");
+        throw nb::python_error();
+    }
 }
 
 static uint8_t* copy_validity(const DrakenVector* dv) {
@@ -562,6 +588,41 @@ static nb::object impl_date_format(nb::object v_obj, const char* fmt) {
 }
 
 // ---------------------------------------------------------------------------
+// Dispatch wrappers (constant vector unwrapping)
+// These are called from the Python dispatch layer and handle scalar extraction.
+// ---------------------------------------------------------------------------
+
+static nb::object dispatch_date_part(nb::object part_seq, nb::object arr) {
+    const char* part = extract_scalar_string(part_seq);
+    return impl_date_part(arr, part);
+}
+
+static nb::object dispatch_trunc_date(nb::object arr, nb::object part_seq) {
+    const char* unit = extract_scalar_string(part_seq);
+    return impl_date_trunc(arr, unit);
+}
+
+static nb::object dispatch_trunc_timestamp(nb::object arr, nb::object part_seq) {
+    const char* unit = extract_scalar_string(part_seq);
+    return impl_date_trunc(arr, unit);
+}
+
+static nb::object dispatch_date_diff(nb::object part_seq, nb::object start, nb::object end) {
+    const char* part = extract_scalar_string(part_seq);
+    return impl_date_diff(start, end, part);
+}
+
+static nb::object dispatch_time_diff(nb::object time1, nb::object time2) {
+    // time_diff hardcodes 'hours' as the unit
+    return impl_date_diff(time1, time2, "hours");
+}
+
+static nb::object dispatch_date_format(nb::object dates, nb::object pattern_seq) {
+    const char* fmt = extract_scalar_string(pattern_seq);
+    return impl_date_format(dates, fmt);
+}
+
+// ---------------------------------------------------------------------------
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
@@ -637,4 +698,23 @@ NB_MODULE(vector_temporal_arith, m) {
         "Time is formatted as UTC. Sub-second components are truncated. "
         "Null input rows → null output rows. "
         "Raises TypeError on non-DATE32/TIMESTAMP64 input, ValueError on invalid format.");
+
+    // Dispatch wrappers that handle constant vector unwrapping (called from Python layer).
+    m.def("date_part", &dispatch_date_part, nb::arg("part"), nb::arg("arr"),
+        "Extract datepart from vector (dispatcher for constant-wrapped part).");
+
+    m.def("trunc_date", &dispatch_trunc_date, nb::arg("arr"), nb::arg("part"),
+        "Truncate date to unit (dispatcher for constant-wrapped unit).");
+
+    m.def("trunc_timestamp", &dispatch_trunc_timestamp, nb::arg("arr"), nb::arg("part"),
+        "Truncate timestamp to unit (dispatcher for constant-wrapped unit).");
+
+    m.def("date_diff", &dispatch_date_diff, nb::arg("part"), nb::arg("start"), nb::arg("end"),
+        "Difference between timestamps (dispatcher for constant-wrapped part).");
+
+    m.def("time_diff", &dispatch_time_diff, nb::arg("time1"), nb::arg("time2"),
+        "Time difference in hours (dispatcher wrapper).");
+
+    m.def("date_format", &dispatch_date_format, nb::arg("dates"), nb::arg("pattern"),
+        "Format dates using pattern (dispatcher for constant-wrapped pattern).");
 }

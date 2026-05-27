@@ -41,12 +41,48 @@
 namespace nb = nanobind;
 
 // ---------------------------------------------------------------------------
-// Row-level helpers
+// Row-level helpers and scalar extraction
 // ---------------------------------------------------------------------------
 
 static inline bool row_is_null(const DrakenVector* dv, uint32_t i) noexcept {
     if (!dv->validity) return false;
     return !((dv->validity[i >> 3] >> (i & 7u)) & 1u);
+}
+
+// Extract scalar integer from a Python sequence-like object.
+static int64_t extract_scalar_int(nb::object seq) {
+    try {
+        nb::object first = seq[0];
+        return nb::cast<int64_t>(first);
+    } catch (const std::exception& e) {
+        PyErr_SetString(PyExc_TypeError, "Failed to extract integer scalar from constant vector");
+        throw nb::python_error();
+    }
+}
+
+// Extract scalar string from a Python sequence-like object.
+static const char* extract_scalar_string(nb::object seq) {
+    try {
+        nb::object first = seq[0];
+        if (PyUnicode_Check(first.ptr())) {
+            const char* s = PyUnicode_AsUTF8(first.ptr());
+            if (!s) throw nb::python_error();
+            return s;
+        } else if (PyBytes_Check(first.ptr())) {
+            const char* s = PyBytes_AS_STRING(first.ptr());
+            if (!s) throw nb::python_error();
+            return s;
+        } else {
+            // Try str() conversion
+            nb::object str_obj = nb::cast<nb::object>(nb::str(first));
+            const char* s = PyUnicode_AsUTF8(str_obj.ptr());
+            if (!s) throw nb::python_error();
+            return s;
+        }
+    } catch (const std::exception& e) {
+        PyErr_SetString(PyExc_TypeError, "Failed to extract string scalar from constant vector");
+        throw nb::python_error();
+    }
 }
 
 // Deep-copy the logical-row validity bitmap.  Returns nullptr when all-valid.
@@ -314,6 +350,50 @@ static nb::object impl_floor_temporal(nb::object obj, int64_t magnitude, const c
 }
 
 // ---------------------------------------------------------------------------
+// Dispatch wrappers (constant vector unwrapping)
+// These are called from the Python dispatch layer and handle scalar extraction.
+// ---------------------------------------------------------------------------
+
+static nb::object dispatch_date_floor(nb::object dates, nb::object magnitude_seq, nb::object units_seq) {
+    const int64_t magnitude = extract_scalar_int(magnitude_seq);
+    const char* units = extract_scalar_string(units_seq);
+    return impl_floor_temporal(dates, magnitude, units);
+}
+
+static nb::object dispatch_unixtime(nb::object array) {
+    return impl_unixtime(array);
+}
+
+// Pure-Python function: convert Unix timestamps to UTC datetime objects.
+// Unlike the vector functions, this operates on a Python iterable and returns a list.
+#include <ctime>
+static nb::object dispatch_from_unixtimestamp(nb::object values) {
+    nb::list result;
+    for (nb::handle v : values) {
+        try {
+            const time_t ts = nb::cast<time_t>(v);
+            // Python datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+            PyObject* dt_module = PyImport_ImportModule("datetime");
+            if (!dt_module) throw nb::python_error();
+            nb::object datetime_class = nb::steal<nb::object>(PyObject_GetAttrString(dt_module, "datetime"));
+            Py_DECREF(dt_module);
+            if (!datetime_class) throw nb::python_error();
+
+            nb::object tz_module = nb::steal<nb::object>(PyImport_ImportModule("datetime"));
+            nb::object timezone_class = nb::steal<nb::object>(PyObject_GetAttrString(tz_module.ptr(), "timezone"));
+            nb::object utc = nb::steal<nb::object>(PyObject_GetAttrString(timezone_class.ptr(), "utc"));
+
+            nb::object dt = datetime_class.attr("fromtimestamp")(nb::cast<double>(ts), utc);
+            result.append(dt);
+        } catch (const std::exception& e) {
+            PyErr_SetString(PyExc_TypeError, "Failed to convert timestamp to datetime");
+            throw nb::python_error();
+        }
+    }
+    return nb::cast<nb::object>(result);
+}
+
+// ---------------------------------------------------------------------------
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
@@ -374,4 +454,14 @@ NB_MODULE(vector_temporal_convert, m) {
         "Output type: TIMESTAMP64, same unit as input. "
         "Null rows propagate as null. Raises TypeError on non-TIMESTAMP64 input, "
         "ValueError on unsupported units or non-positive magnitude.");
+
+    // Dispatch wrappers that handle constant vector unwrapping (called from Python layer).
+    m.def("date_floor", &dispatch_date_floor, nb::arg("dates"), nb::arg("magnitude"), nb::arg("units"),
+        "Floor timestamp to unit boundary (dispatcher for constant-wrapped magnitude and units).");
+
+    m.def("unixtime", &dispatch_unixtime, nb::arg("array"),
+        "Convert timestamp or date to Unix seconds (dispatcher wrapper).");
+
+    m.def("from_unixtimestamp", &dispatch_from_unixtimestamp, nb::arg("values"),
+        "Convert iterable of Unix timestamps to list of UTC datetime objects.");
 }

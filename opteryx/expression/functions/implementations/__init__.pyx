@@ -24,9 +24,7 @@ Note: Binary operators (Plus, Minus, …) are handled separately via
 binary_operators. Aggregate functions are handled by the operators subsystem.
 """
 
-include "arithmetic.pyx"
 include "logical.pyx"
-include "temporal.pyx"
 include "text.pyx"
 include "utility.pyx"
 
@@ -36,9 +34,12 @@ include "utility.pyx"
 # `from impl.LEAF import name` (submodule access) resolve to this same
 # module — the kernel names from every leaf are in this namespace via the
 # includes above.
+#
+# Note: arithmetic and temporal are excluded from this list because they're
+# now separate Python modules (.py files) that re-export from nanobind C++.
 import sys as _sys
 _self = _sys.modules[__name__]
-for _leaf in ("arithmetic", "logical", "temporal", "text", "utility"):
+for _leaf in ("logical", "text", "utility"):
     globals()[_leaf] = _self
     _sys.modules[f"{__name__}.{_leaf}"] = _self
 del _leaf

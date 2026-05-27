@@ -61,6 +61,24 @@ static nb::object wrap(VecResult res) {
 }
 
 // ---------------------------------------------------------------------------
+// Dispatch wrappers (constant vector unwrapping for arithmetic)
+// These handle scalar extraction from Python sequences/vectors.
+// ---------------------------------------------------------------------------
+
+// Extract integer scalar from sequence-like object (vector or list).
+static int64_t extract_scalar_int(nb::object seq) {
+    try {
+        if (seq.is_none() || PyObject_Size(seq.ptr()) == 0) return 0;
+        nb::object first = seq[0];
+        if (first.is_none()) return 0;
+        return nb::cast<int64_t>(first);
+    } catch (const std::exception& e) {
+        PyErr_SetString(PyExc_TypeError, "Failed to extract integer scalar");
+        throw nb::python_error();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // NB_MODULE
 // ---------------------------------------------------------------------------
 
@@ -190,4 +208,110 @@ NB_MODULE(vector_math, m) {
         nb::arg("n"),
         "RANDOM_NORMAL(): generate n standard-normal FLOAT64 values via Box-Muller. "
         "Fixed seed (674162347314) for reproducibility across calls.");
+
+    // Dispatch wrappers that handle constant vector unwrapping (called from Python layer).
+    m.def("round2",
+        [](nb::object values, nb::object digits_seq) -> nb::object {
+            const int64_t digits = extract_scalar_int(digits_seq);
+            return wrap(draken::ops::float_round(*unwrap(values), static_cast<int>(digits)));
+        },
+        nb::arg("values"), nb::arg("digits"),
+        "ROUND(values, digits) dispatcher for constant-wrapped digits parameter.");
+
+    m.def("ceiling",
+        [](nb::object values, nb::object scales_seq) -> nb::object {
+            const int64_t scale = extract_scalar_int(scales_seq);
+            return wrap(draken::ops::float_ceil(*unwrap(values), static_cast<int>(scale)));
+        },
+        nb::arg("values"), nb::arg("scales"),
+        "CEILING(values [, scale]) dispatcher for constant-wrapped scale parameter.");
+
+    m.def("floor_dispatch",
+        [](nb::object values, nb::object scales_seq) -> nb::object {
+            const int64_t scale = extract_scalar_int(scales_seq);
+            return wrap(draken::ops::float_floor(*unwrap(values), static_cast<int>(scale)));
+        },
+        nb::arg("values"), nb::arg("scales"),
+        "FLOOR(values [, scale]) dispatcher for constant-wrapped scale parameter.");
+
+    m.def("trunc_dispatch",
+        [](nb::object values, nb::object scales_seq) -> nb::object {
+            const int64_t scale = extract_scalar_int(scales_seq);
+            return wrap(draken::ops::float_trunc(*unwrap(values), static_cast<int>(scale)));
+        },
+        nb::arg("values"), nb::arg("scales"),
+        "TRUNCATE(values [, scale]) dispatcher for constant-wrapped scale parameter.");
+
+    // Direct pass-through dispatchers (no scalar extraction needed).
+    m.def("round1",
+        [](nb::object values) -> nb::object {
+            return wrap(draken::ops::float_round(*unwrap(values)));
+        },
+        nb::arg("values"),
+        "ROUND(values) dispatcher.");
+
+    m.def("abs_value",
+        [](nb::object values) -> nb::object {
+            return wrap(draken::ops::float_abs(*unwrap(values)));
+        },
+        nb::arg("values"),
+        "ABS(values) dispatcher.");
+
+    m.def("sqrt_value",
+        [](nb::object values) -> nb::object {
+            return wrap(draken::ops::float_sqrt(*unwrap(values)));
+        },
+        nb::arg("values"),
+        "SQRT(values) dispatcher.");
+
+    m.def("sign_value",
+        [](nb::object values) -> nb::object {
+            return wrap(draken::ops::float_sign(*unwrap(values)));
+        },
+        nb::arg("values"),
+        "SIGN(values) dispatcher.");
+
+    m.def("random_number",
+        [](nb::object size_obj) -> nb::object {
+            uint32_t size = nb::cast<uint32_t>(size_obj);
+            double* dst = static_cast<double*>(draken_malloc(size * sizeof(double)));
+            if (!dst) throw std::bad_alloc();
+            for (uint32_t i = 0; i < size; ++i)
+                dst[i] = dist_uniform(rng_uniform);
+            PyObject* out = draken_vector_own_raw(dst, nullptr, size, DRAKEN_FLOAT64);
+            if (!out) { draken_free(dst); throw nb::python_error(); }
+            return nb::steal<nb::object>(out);
+        },
+        nb::arg("size"),
+        "RANDOM() dispatcher.");
+
+    m.def("random_normal",
+        [](nb::object size_obj) -> nb::object {
+            uint32_t n = nb::cast<uint32_t>(size_obj);
+            double* dst = static_cast<double*>(draken_malloc(n * sizeof(double)));
+            if (!dst) throw std::bad_alloc();
+            constexpr double TWO_PI = 6.283185307179586;
+            constexpr double EPS    = 1e-300;
+            std::uniform_real_distribution<double> dist01(0.0, 1.0);
+            const uint32_t pairs = n >> 1;
+            for (uint32_t i = 0; i < pairs; ++i) {
+                double u1, u2;
+                do { u1 = dist01(rng_normal); } while (u1 < EPS);
+                u2  = dist01(rng_normal);
+                double mag = std::sqrt(-2.0 * std::log(u1));
+                dst[2 * i]     = mag * std::cos(TWO_PI * u2);
+                dst[2 * i + 1] = mag * std::sin(TWO_PI * u2);
+            }
+            if (n & 1u) {
+                double u1, u2;
+                do { u1 = dist01(rng_normal); } while (u1 < EPS);
+                u2 = dist01(rng_normal);
+                dst[n - 1] = std::sqrt(-2.0 * std::log(u1)) * std::cos(TWO_PI * u2);
+            }
+            PyObject* out = draken_vector_own_raw(dst, nullptr, n, DRAKEN_FLOAT64);
+            if (!out) { draken_free(dst); throw nb::python_error(); }
+            return nb::steal<nb::object>(out);
+        },
+        nb::arg("size"),
+        "RANDOM_NORMAL() dispatcher.");
 }

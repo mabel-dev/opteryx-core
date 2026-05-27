@@ -394,7 +394,7 @@ def cast(arr, _type, args=(), unit=None):
                     from opteryx.compiled.nanobind.vector_casts import (
                         vector_cast_int64_to_timestamp,
                     )
-                    return vector_cast_int64_to_timestamp(arr, unit=unit)
+                    return vector_cast_int64_to_timestamp(arr._nb if hasattr(arr, "_nb") else arr, unit=unit)
                 if v_type == VectorType.TIMESTAMP:
                     return arr
                 if v_type == VectorType.DATE32:
