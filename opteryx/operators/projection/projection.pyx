@@ -29,7 +29,7 @@ from draken.core.buffers cimport DrakenVector
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.vector cimport Vector
 from opteryx.expression import NodeType
-from opteryx.expression.evaluator import evaluate_and_append_draken
+from opteryx.expression.evaluator import compile_eval_nodes, execute_and_append
 from opteryx.models import QueryProperties
 
 # BasePlanNode in scope via textual include from _operators.pyx.
@@ -48,7 +48,8 @@ cdef inline bint _is_constant_vector(Vector vec) noexcept:
 
 cdef class ProjectionNode(BasePlanNode):
     cdef public list projection
-    cdef public list evaluations
+    cdef public list _compiled_evals
+    cdef public set _literal_identities
 
     def __init__(self, properties=None, **parameters):
         """
@@ -62,9 +63,13 @@ cdef class ProjectionNode(BasePlanNode):
         for column in projection:
             self.projection.append(column.schema_column.identity)
 
-        self.evaluations = [
-            column for column in projection if column.node_type != NodeType.IDENTIFIER
-        ]
+        eval_nodes = [column for column in projection if column.node_type != NodeType.IDENTIFIER]
+        self._compiled_evals = compile_eval_nodes(eval_nodes)
+        self._literal_identities = {
+            column.schema_column.identity
+            for column in eval_nodes
+            if column.node_type == NodeType.LITERAL
+        }
 
         self.columns = parameters["projection"]
 
@@ -80,10 +85,7 @@ cdef class ProjectionNode(BasePlanNode):
 
     cdef Py_ssize_t _count_emitted_constant_literals(self, Morsel morsel) except -1:
         cdef Py_ssize_t emitted = 0
-        for statement in self.evaluations:
-            if statement.node_type != NodeType.LITERAL:
-                continue
-            identity = statement.schema_column.identity
+        for identity in self._literal_identities:
             try:
                 col = morsel.column(identity)
             except Exception:
@@ -94,7 +96,7 @@ cdef class ProjectionNode(BasePlanNode):
 
     cdef Morsel _execute_morsel_projection(self, Morsel morsel):
         cdef Py_ssize_t emitted
-        morsel = evaluate_and_append_draken(self.evaluations, morsel)
+        morsel = execute_and_append(self._compiled_evals, morsel)
         emitted = self._count_emitted_constant_literals(morsel)
         if emitted:
             self.readings["draken_constant_columns_emitted"] = \

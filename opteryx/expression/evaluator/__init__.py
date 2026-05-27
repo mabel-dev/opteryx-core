@@ -16,10 +16,29 @@ from opteryx.expression.evaluator._impl import (
     evaluate_and_append_draken,
     evaluate_draken,
     evaluate_bitmap,
+    execute_and_append,
     execute_bytecode,
     get_bytecode_worker_fn_ptr,
 )
 from opteryx.expression.evaluator._impl import _OP_CODE, _verify_node_type_constants
+
+
+def compile_eval_nodes(nodes):
+    """Compile expression nodes to (identity, CompiledBytecode) at bind time.
+
+    Applies should_evaluate filtering, _PASSTHRU exclusion, and
+    prioritize_evaluation ordering.  The result is a list of
+    (identity_str, CompiledBytecode) pairs ready for execute_and_append().
+    """
+    from opteryx.expression import should_evaluate, prioritize_evaluation
+    from opteryx.compiled.expression.compiled_expression import (
+        lower as _lower,
+        build_bytecode as _build_bc,
+    )
+
+    filtered = [n for n in nodes if n.value != "_PASSTHRU" and should_evaluate(n)]
+    ordered = list(prioritize_evaluation(filtered))
+    return [(n.schema_column.identity, _build_bc(_lower(n))) for n in ordered]
 
 # Legacy submodule aliases — every evaluator leaf .pyx is textually included
 # in _impl, so all their names live in _impl's namespace.
@@ -44,10 +63,12 @@ del _leaf
 
 __all__ = [
     "apply_bounded_function",
+    "compile_eval_nodes",
     "draken_compare",
     "evaluate_and_append_draken",
     "evaluate_bitmap",
     "evaluate_draken",
+    "execute_and_append",
     "execute_bytecode",
     "get_bytecode_worker_fn_ptr",
 ]

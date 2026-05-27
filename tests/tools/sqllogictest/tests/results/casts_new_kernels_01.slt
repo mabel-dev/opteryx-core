@@ -1,0 +1,97 @@
+# Tests for new cast kernels added in E.x:
+#   vector_cast_float64_to_int64    (FLOAT64 / FLOAT32 → INT64, truncate toward zero)
+#   vector_cast_integer_to_int64    (INT32 / INT16 / INT8 → INT64, sign-extending)
+#   vector_cast_integer_to_float64  (INT32 / INT16 / INT8 → FLOAT64, lossless widening)
+#   vector_cast_string_to_bool      (VARCHAR → BOOL, true/false/1/0/yes/no/on/off)
+
+# ---------------------------------------------------------------------------
+# FLOAT64 → INTEGER: truncate toward zero (vector_cast_float64_to_int64)
+# ---------------------------------------------------------------------------
+
+# Positive fractional values truncate down.
+query I rowsort
+SELECT CAST(mass AS INTEGER) AS v FROM $planets WHERE name = 'Earth'
+----
+5
+
+# Large positive value: no fractional part, identity-like.
+query I rowsort
+SELECT CAST(mass AS INTEGER) AS v FROM $planets WHERE name = 'Jupiter'
+----
+1898
+
+# Negative truncation toward zero: -2.9 → -2 (not -3).
+query I rowsort
+SELECT CAST(-2.9 AS INTEGER) AS v
+----
+-2
+
+# Zero: 0.0 → 0.
+query I rowsort
+SELECT CAST(0.0 AS INTEGER) AS v
+----
+0
+
+# ---------------------------------------------------------------------------
+# STRING → BOOLEAN: case-insensitive keyword recognition (vector_cast_string_to_bool)
+# ---------------------------------------------------------------------------
+
+# "true" → 1 (represented as integer in SLT output).
+query I rowsort
+SELECT CAST('true' AS BOOLEAN) AS v
+----
+1
+
+# "false" → 0.
+query I rowsort
+SELECT CAST('false' AS BOOLEAN) AS v
+----
+0
+
+# "TRUE" (upper-case) → 1.
+query I rowsort
+SELECT CAST('TRUE' AS BOOLEAN) AS v
+----
+1
+
+# "FALSE" (upper-case) → 0.
+query I rowsort
+SELECT CAST('FALSE' AS BOOLEAN) AS v
+----
+0
+
+# "1" → 1.
+query I rowsort
+SELECT CAST('1' AS BOOLEAN) AS v
+----
+1
+
+# "0" → 0.
+query I rowsort
+SELECT CAST('0' AS BOOLEAN) AS v
+----
+0
+
+# "yes" → 1.
+query I rowsort
+SELECT CAST('yes' AS BOOLEAN) AS v
+----
+1
+
+# "no" → 0.
+query I rowsort
+SELECT CAST('no' AS BOOLEAN) AS v
+----
+0
+
+# "on" → 1.
+query I rowsort
+SELECT CAST('on' AS BOOLEAN) AS v
+----
+1
+
+# "off" → 0.
+query I rowsort
+SELECT CAST('off' AS BOOLEAN) AS v
+----
+0

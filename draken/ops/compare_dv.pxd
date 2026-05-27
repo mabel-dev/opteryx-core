@@ -1,4 +1,11 @@
-# Cython declarations for draken_compare_dv (Stage B: INT64 + FLOAT64).
+# Cython declarations for draken_compare_dv (Stage B+C delivered).
+#
+# Coverage as of Stage C:
+#   INT64, FLOAT64, TIMESTAMP64 — ordinal compare on native int64/float64 storage
+#   DATE32                       — ordinal compare on int32 days-since-epoch
+#   VARCHAR, NVARCHAR, VARBINARY — german-string layout; bytewise for ordering
+#   DECIMAL                      — NOT supported (needs scale from logical-type
+#                                  descriptor, not on DrakenVector). Python fallback.
 #
 # C API documented in draken/ops/compare_dv.h. The native eval engine
 # cimports this surface for BC_COMPARE handling in the DrakenVector*

@@ -27,6 +27,12 @@ from opteryx.utils.vector_types import (
 )
 
 
+cdef inline object _unwrap_nb(object arr):
+    """Return the raw nanobind Vector from either a Cython shim (has ._nb) or a raw nanobind Vector."""
+    cdef object nb = getattr(arr, '_nb', None)
+    return nb if nb is not None else arr
+
+
 cpdef bint _is_nullish(value):
     """True if value is None or float NaN."""
     return value is None or (isinstance(value, float) and math.isnan(value))
@@ -123,17 +129,24 @@ def cast_to_double(arr, *args):
     Fallback: Python scalar or list.
     Fails on PyArrow/NumPy arrays per the architectural contract.
     """
+    from opteryx.compiled.nanobind.vector_casts import (
+        vector_cast_int64_to_float64,
+        vector_cast_bool_to_float64,
+        vector_cast_integer_to_float64,
+    )
     cdef object v_type
     if is_draken_vector_fn(arr):
         v_type = get_vector_type(arr)
         if v_type == VectorType.FLOAT64:
             return arr
         if v_type == VectorType.INT64:
-            return _draken_native_casts.vector_float64_from_sequence(
-                [float(v) if v is not None else None for v in arr.to_pylist()]
-            )
+            return vector_cast_int64_to_float64(_unwrap_nb(arr))
+        if v_type == VectorType.INTEGER:
+            return vector_cast_integer_to_float64(_unwrap_nb(arr))
+        if v_type == VectorType.BOOL:
+            return vector_cast_bool_to_float64(_unwrap_nb(arr))
         if v_type == VectorType.STRING:
-            return _draken_native_casts.vector_cast_string_to_float64(arr)
+            return _draken_native_casts.vector_cast_string_to_float64(_unwrap_nb(arr))
 
     if isinstance(arr, (list, tuple)):
         caster = OrsoTypes.DOUBLE.parse
@@ -147,11 +160,13 @@ def cast_to_double(arr, *args):
 
 def cast_to_int(arr, *args):
     """Cast `arr` to INT64."""
-    from draken.vectors.integer64_vector import from_sequence
-    from opteryx.compiled.nanobind.vector_casts import vector_cast_string_to_int as vector_cast_ascii_to_int
-    from opteryx.expression.evaluator.type_coercion import (
-        _coerce_date32,
-        _coerce_timestamp,
+    from opteryx.compiled.nanobind.vector_casts import (
+        vector_cast_string_to_int as vector_cast_ascii_to_int,
+        vector_cast_bool_to_int64,
+        vector_cast_date32_to_int64,
+        vector_cast_timestamp_to_int64,
+        vector_cast_integer_to_int64,
+        vector_cast_float64_to_int64,
     )
 
     cdef object v_type
@@ -159,16 +174,18 @@ def cast_to_int(arr, *args):
         v_type = get_vector_type(arr)
         if v_type == VectorType.INT64:
             return arr
+        if v_type == VectorType.INTEGER:
+            return vector_cast_integer_to_int64(_unwrap_nb(arr))
+        if v_type == VectorType.FLOAT64:
+            return vector_cast_float64_to_int64(_unwrap_nb(arr))
         if v_type == VectorType.STRING:
-            return vector_cast_ascii_to_int(arr)
+            return vector_cast_ascii_to_int(_unwrap_nb(arr))
+        if v_type == VectorType.BOOL:
+            return vector_cast_bool_to_int64(_unwrap_nb(arr))
         if v_type == VectorType.TIMESTAMP:
-            return from_sequence(
-                [_coerce_timestamp(v) if v is not None else None for v in arr.to_pylist()]
-            )
+            return vector_cast_timestamp_to_int64(_unwrap_nb(arr))
         if v_type == VectorType.DATE32:
-            return from_sequence(
-                [_coerce_date32(v) if v is not None else None for v in arr.to_pylist()]
-            )
+            return vector_cast_date32_to_int64(_unwrap_nb(arr))
 
     if isinstance(arr, (list, tuple)):
         caster = OrsoTypes.INTEGER.parse
@@ -204,6 +221,12 @@ cdef str _array_row_to_json(object row):
 
 def cast_to_varchar(arr, *args):
     """Cast `arr` to VARCHAR / StringVector."""
+    from opteryx.compiled.nanobind.vector_casts import (
+        vector_cast_int64_to_string,
+        vector_cast_bool_to_string,
+        vector_cast_date_to_string,
+        vector_cast_timestamp_to_string,
+    )
     cdef object v_type
     cdef object row
     if is_draken_vector_fn(arr):
@@ -211,7 +234,15 @@ def cast_to_varchar(arr, *args):
         if v_type == VectorType.STRING:
             return arr
         if v_type == VectorType.FLOAT64:
-            return _draken_native_casts.vector_cast_float64_to_string(arr)
+            return _draken_native_casts.vector_cast_float64_to_string(_unwrap_nb(arr))
+        if v_type == VectorType.INT64:
+            return vector_cast_int64_to_string(_unwrap_nb(arr))
+        if v_type == VectorType.BOOL:
+            return vector_cast_bool_to_string(_unwrap_nb(arr))
+        if v_type == VectorType.TIMESTAMP:
+            return vector_cast_timestamp_to_string(_unwrap_nb(arr))
+        if v_type == VectorType.DATE32:
+            return vector_cast_date_to_string(_unwrap_nb(arr))
         rows = arr.to_pylist()
         if v_type == VectorType.ARRAY:
             result = [_array_row_to_json(row) if row is not None else None for row in rows]
@@ -232,12 +263,23 @@ def cast_to_varchar(arr, *args):
 def cast_to_boolean(arr, *args):
     """Cast `arr` to BOOL / BoolVector."""
     from draken.vectors.bool_vector import BoolVector
+    from opteryx.compiled.nanobind.vector_casts import (
+        vector_cast_int64_to_bool,
+        vector_cast_float64_to_bool,
+        vector_cast_string_to_bool,
+    )
 
     cdef object v_type
     if is_draken_vector_fn(arr):
         v_type = get_vector_type(arr)
         if v_type == VectorType.BOOL:
             return arr
+        if v_type == VectorType.INT64:
+            return BoolVector(vector_cast_int64_to_bool(_unwrap_nb(arr)))
+        if v_type == VectorType.FLOAT64:
+            return BoolVector(vector_cast_float64_to_bool(_unwrap_nb(arr)))
+        if v_type == VectorType.STRING:
+            return BoolVector(vector_cast_string_to_bool(_unwrap_nb(arr)))
         return BoolVector.from_list(
             [bool(v) if v is not None else None for v in arr.to_pylist()]
         )
@@ -394,7 +436,7 @@ def cast(arr, _type, args=(), unit=None):
                     from opteryx.compiled.nanobind.vector_casts import (
                         vector_cast_int64_to_timestamp,
                     )
-                    return vector_cast_int64_to_timestamp(arr._nb if hasattr(arr, "_nb") else arr, unit=unit)
+                    return vector_cast_int64_to_timestamp(_unwrap_nb(arr), unit=unit)
                 if v_type == VectorType.TIMESTAMP:
                     return arr
                 if v_type == VectorType.DATE32:
@@ -427,8 +469,15 @@ def cast(arr, _type, args=(), unit=None):
             result = [caster(i, **kwargs) for i in arr]
             return _draken_native_casts.vector_fp16_from_sequence(result)
 
-        if _type == "VARCHAR" and is_draken_vector_fn(arr):
-            return cast_to_varchar(arr)
+        if is_draken_vector_fn(arr):
+            if _type in ("DOUBLE", "FLOAT"):
+                return cast_to_double(arr)
+            if _type in ("INTEGER", "BIGINT"):
+                return cast_to_int(arr)
+            if _type == "BOOLEAN":
+                return cast_to_boolean(arr)
+            if _type == "VARCHAR":
+                return cast_to_varchar(arr)
 
         result = [caster(i, **kwargs) for i in arr]
         if decimal_quantizer is not None:

@@ -28,7 +28,7 @@ from typing import Generator, Optional
 from opteryx.compiled.morsel_ops.sort import morsel_sort
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
-from opteryx.expression.evaluator import evaluate_and_append_draken
+from opteryx.expression.evaluator import compile_eval_nodes, execute_and_append
 from opteryx.models import QueryProperties
 
 # BasePlanNode in scope via textual include from _operators.pyx.
@@ -37,11 +37,14 @@ from opteryx.models import QueryProperties
 cdef class SortNode(BasePlanNode):
     cdef public list order_by
     cdef public list _morsels
+    cdef public list _compiled_evals
 
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.order_by = parameters.get("order_by", [])
         self._morsels = []
+        eval_nodes = [col for col, _ in self.order_by if col.node_type != NodeType.IDENTIFIER]
+        self._compiled_evals = compile_eval_nodes(eval_nodes)
 
     @property
     def config(self):  # pragma: no cover
@@ -68,11 +71,8 @@ cdef class SortNode(BasePlanNode):
 
         column_names = []
         ascending_flags = []
-        evaluations = []
 
         for column, ascending in self.order_by:
-            if column.node_type != NodeType.IDENTIFIER:
-                evaluations.append(column)
             try:
                 identity = column.schema_column.identity
                 column_names.append(identity)
@@ -80,11 +80,10 @@ cdef class SortNode(BasePlanNode):
                 raise ColumnNotFoundError(
                     f"`ORDER BY` must reference columns as they appear in the `SELECT` clause. {cnfe}"
                 ) from cnfe
-
             ascending_flags.append(bool(ascending))
 
-        if evaluations:
-            combined = evaluate_and_append_draken(evaluations, combined)
+        if self._compiled_evals:
+            combined = execute_and_append(self._compiled_evals, combined)
 
         perm = morsel_sort(combined, column_names, ascending_flags)
         combined.take(perm)

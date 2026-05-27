@@ -453,20 +453,26 @@ def _inner_evaluate(root: Node, table):
                 pass
 
         if literal_type == OrsoTypes.DATE:
-            if isinstance(value, datetime.date):
+            if isinstance(value, datetime.datetime):
+                value = date_to_int64_days(value.date())
+            elif isinstance(value, datetime.date):
                 value = date_to_int64_days(value)
-            elif isinstance(value, int):
-                pass
-            else:
-                value = int(value)
-            return _draken_native_expr.vector_from_constant(value, length)
-
-        if literal_type == OrsoTypes.TIMESTAMP:
-            if isinstance(value, datetime.datetime) or isinstance(value, datetime.date):
-                value = timestamp_to_int64_us(value)
             elif not isinstance(value, int):
                 value = int(value)
-            return _draken_native_expr.vector_from_constant(value, length)
+            int_vec = _draken_native_expr.vector_from_constant(value, length)
+            return _draken_native_expr.vector_reinterpret_as_date32(int_vec)
+
+        if literal_type == OrsoTypes.TIMESTAMP:
+            if isinstance(value, datetime.datetime):
+                value = timestamp_to_int64_us(value)
+            elif isinstance(value, datetime.date):
+                value = timestamp_to_int64_us(
+                    datetime.datetime(value.year, value.month, value.day)
+                )
+            elif not isinstance(value, int):
+                value = int(value)
+            int_vec = _draken_native_expr.vector_from_constant(value, length)
+            return _draken_native_expr.vector_reinterpret_as_timestamp64(int_vec)
 
         if literal_type == OrsoTypes.INTEGER:
             return _draken_native_expr.vector_from_constant(int(value), length)

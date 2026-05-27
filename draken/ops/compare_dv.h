@@ -14,7 +14,15 @@
 //
 // Caller does not free the result; `draken_frame_arena_destroy` will.
 //
-// Stage B coverage (this header): INT64, FLOAT64.
+// Coverage:
+//   INT64, TIMESTAMP64  (Stage B)
+//   FLOAT64             (Stage B)
+//   DATE32              (Stage C)
+//   VARCHAR, NVARCHAR, VARBINARY  (Stage C)
+//   DECIMAL — NOT yet supported; needs scale from logical-type descriptor
+//             (which lives on VectorOwner, not DrakenVector). Caller's
+//             Python fallback path handles it. See compare_dv.cpp comment.
+//
 // Returns NULL for any type/op combination not yet covered — caller is
 // expected to use the Python-mediated fallback path in those cases.
 //

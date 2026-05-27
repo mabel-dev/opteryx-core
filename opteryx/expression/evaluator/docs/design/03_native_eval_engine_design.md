@@ -1,6 +1,6 @@
 # 03 — Native Eval Engine Design
 
-**Status:** Phase 1 ✅ complete (2026-05-27). Phase 2 ✅ complete (2026-05-27). Phase 4 in progress — IN-list fold delivered; DrakenVector\* stack blocked on kernel interfaces (see below). Phase 3 blocked on Phase 4.
+**Status:** Phase 1 ✅ complete. Phase 2 ✅ complete. Phase 4 ✅ Stage B+C complete — `draken_compare_dv` covers INT64/FLOAT64/TIMESTAMP64/DATE32/VARCHAR/NVARCHAR/VARBINARY; `draken_arithmetic_dv` covers INT64/FLOAT64. Phase 3 ✅ incremental delivered (bind-time nb_func flag; typed _nb access; direct arity dispatch). Full Phase 3 dispatch table deferred pending DV stack.
 
 ---
 
@@ -163,25 +163,32 @@ Option C is cleaner but delays the win.
 
 ---
 
-### Phase 4 — Stack holds Python objects
+### Phase 4 — Stack holds Python objects ✅ Stage B complete (2026-05-27)
 
-**Partial delivery (2026-05-27): IN-list fold.** `BC_CMP_INLIST_INLINE = 4` added to `BCCompareFlag`. The lineariser now detects right-hand-side `NT_LITERAL` nodes whose value is a `CarcharSetWrapper`, `PerfectHashSet`, `list`, `tuple`, `set`, or `frozenset`. When found, the set is stored in `slot.literal_obj` with the `BC_CMP_INLIST_INLINE` flag set and no `BC_LOAD_LIT_SET` instruction is emitted. `BC_COMPARE` pops ONE item from the stack instead of TWO and reads the right operand directly from the instruction word. Sets can never be `DrakenVector*` and must not appear as stack operands; this fold is a hard prerequisite for the `DrakenVector*` stack.
+**IN-list fold (2026-05-27).** `BC_CMP_INLIST_INLINE = 4` added to `BCCompareFlag`. The lineariser now detects right-hand-side `NT_LITERAL` nodes whose value is a `CarcharSetWrapper`, `PerfectHashSet`, `list`, `tuple`, `set`, or `frozenset`. When found, the set is stored in `slot.literal_obj` with the `BC_CMP_INLIST_INLINE` flag set and no `BC_LOAD_LIT_SET` instruction is emitted. `BC_COMPARE` pops ONE item from the stack instead of TWO and reads the right operand directly from the instruction word. Sets can never be `DrakenVector*` and must not appear as stack operands; this fold is a hard prerequisite for the `DrakenVector*` stack.
 
-**DrakenVector\* stack — blocked on kernel interfaces.**
+**Stage B — C-level kernel fast paths wired (2026-05-27).**
 
-Replacing `cdef list stack` with `cdef DrakenVector* stack[MAX_STACK_DEPTH_C]` requires every opcode handler to produce and consume `DrakenVector*`. Today's blockers by opcode family:
+`draken_frame_arena_create/destroy/release`, `draken_compare_dv`, and `draken_arithmetic_dv` are now cimported and wired into `execute_bytecode`:
 
-| Opcode family | Status |
-|---|---|
-| BC_LOAD_COL | `Vector.unified()` returns `DrakenVector*` — feasible now |
-| BC_LOAD_LIT_BOOL / BC_LOAD_LIT_SCALAR | Needs `draken_frame_arena_*` wired into Cython; `draken_vector_from_constant` already exists |
-| BC_AND / BC_OR / BC_XOR / BC_NOT | `c_and/or/xor/not_bitmap` exist; need arena-allocated result + selection materialisation |
-| BC_COMPARE | **Blocked** — `draken_compare_int` / `draken_compare` return Python `BoolVector`. Needs a C-level `DrakenVector* draken_compare_dv(int op_code, DrakenVector*, DrakenVector*, ...)` interface. |
-| BC_BINARY_OP | **Blocked** — `call_arithmetic_op` works on Python `Vector`. Needs C-level interface. |
-| BC_UNARY_OP | **Blocked** — `_vector_bitwise_not`, `_vector_string_is_empty` are nanobind callables; no raw `DrakenVector*` output. |
-| BC_FUNCTION / BC_CAST / BC_EXTRACTION / BC_CASE | **Blocked** — all return Python objects. |
+- Arena created at `execute_bytecode` entry; destroyed in `finally` at exit.
+- **BC_COMPARE** (normal, non-inline-list path): `_DRAKEN_CMP_OP[slot.op_code]` translates to the draken_dv op code (0=EQ, 1=NE, 2=GT, 3=GE, 4=LT, 5=LE). If `dv_op >= 0`, calls `draken_compare_dv(dv_op, v_left.unified(), v_right.unified(), left_type_code, right_type_code, n_rows, arena)`. On non-NULL return: releases data/validity from arena (transfers ownership to Python), wraps as `BoolVector` via `from_decoded`, and skips the Python fallback entirely. Returns NULL → falls through to existing `draken_compare_int` / `draken_compare` path.
+- **BC_BINARY_OP** (`BOP_PLUS ≤ op_code ≤ BOP_MODULO`): calls `draken_arithmetic_dv(op_code, v_left.unified(), v_right.unified(), n_rows, arena)`. On non-NULL return: releases data/validity, wraps as `Vector` via `vec_from_decoded`. Returns NULL → falls through to `_binary_op_from_vecs`.
+- Temporal scalars in the bytecode path are already int-encoded Vectors (via `BC_LOAD_LIT_SCALAR` → `_scalar_to_draken_constant`); no pre-coercion needed before the C call. The type hint codes (`left_type_code` / `right_type_code`) are passed directly to the kernel.
+- DrakenVector struct allocated by each kernel stays arena-tracked for the frame duration; only `data` and `validity` buffers are released (to transfer ownership to Python). The struct itself is freed when the arena is destroyed at frame exit.
 
-The `draken_frame_arena_*` C API is delivered (`draken/core/frame_arena.h`) but has no `cdef extern` declaration in any Cython file yet — that is a one-liner prerequisite.
+New cimports added to `evaluation.pyx`:
+- `from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL`
+- `from draken.core.frame_arena cimport DrakenFrameArena, draken_frame_arena_create, draken_frame_arena_destroy, draken_frame_arena_release`
+- `from draken.ops.compare_dv cimport draken_compare_dv`
+- `from draken.ops.arithmetic_dv cimport draken_arithmetic_dv`
+- `from draken.vectors.vector cimport from_decoded as vec_from_decoded`
+
+- `make q`: 133/133 ✅
+
+**Stage C — compare_dv delivered (already in cpp at Stage B cut).** `draken_compare_dv` already covers DATE32, VARCHAR, NVARCHAR, VARBINARY in addition to INT64/FLOAT64/TIMESTAMP64 — the C++ implementation was ahead of the pxd documentation. The `.pxd` comment has been updated to reflect actual coverage. This means the BC_COMPARE C fast path now fires for virtually all common comparison types; the Python fallback is reached only for DECIMAL and cross-type pairs.
+
+**Stage C — arithmetic_dv open.** `draken_arithmetic_dv` still covers INT64 + FLOAT64 only. DATE arithmetic (DATE + INTERVAL, TIMESTAMP + INTERVAL) and DECIMAL arithmetic still route to the Python fallback. These are less common than comparisons; the arithmetic fast path already covers the dominant numeric workload.
 
 ---
 
@@ -197,7 +204,80 @@ The eval-PM is blocked on three C-level interfaces. This section is the formal r
 | New: `draken_frame_arena_adopt(arena, ptr)` | ✅ Delivered (needed by #2 / #3 to fold kernel results into arena scope) |
 | 2 — `draken_compare_dv` (Stage B: INT64 + FLOAT64) | ✅ Delivered (`draken/ops/compare_dv.{h,pxd,cpp}`); ops EQ/NE/GT/GE/LT/LE |
 | 3 — `draken_arithmetic_dv` (Stage B: INT64 + FLOAT64) | ✅ Delivered (`draken/ops/arithmetic_dv.{h,pxd,cpp}`); ops PLUS/MINUS/MULTIPLY/DIVIDE/MODULO |
-| Stage C — extend both to remaining types | 🔄 Open. Eval-PM surfaces specific (type × op) combos when their Phase 4 wiring exercises them. |
+| Stage C — `draken_compare_dv` extension | ✅ DATE32, TIMESTAMP64, VARCHAR / NVARCHAR / VARBINARY added. ⚠️ DECIMAL returns NULL — see §descriptor below. |
+| Stage C — `draken_arithmetic_dv` extension | ⚠️ Not extended — needs descriptor-access design (see below). DATE/TIMESTAMP arithmetic is also cross-type by nature (date+interval), needs different signature. |
+
+### Descriptor-access blocker for DECIMAL / TIMESTAMP unit / DATE arithmetic
+
+The current `draken_compare_dv` / `draken_arithmetic_dv` signatures take bare `DrakenVector*`. The logical-type descriptor (DECIMAL precision/scale, TIMESTAMP unit, INTERVAL offset_minutes) lives on `VectorOwner` — the C++ wrapper around `DrakenVector` — not on the `DrakenVector` struct itself.
+
+That descriptor is needed for:
+- **DECIMAL compare:** scales must be aligned before int64 byte comparison can give the right answer (`Decimal('1.5')` at scale=1 vs `Decimal('1.50')` at scale=2 — same value, different unscaled int64s).
+- **DECIMAL arithmetic:** `dec_add(a, sa, b, sb)` etc. take scale args explicitly.
+- **TIMESTAMP arithmetic / formatting:** unit (microseconds vs milliseconds vs seconds) affects semantics.
+- **Cross-type temporal arithmetic** (date+interval, timestamp-timestamp=interval): different output type, depends on descriptor.
+
+At the `DrakenVector*`-stack boundary the eval-PM is migrating to, this info is lost unless explicitly threaded through. Three resolution options for the eval-PM to choose:
+
+**Option α — Pass descriptor args explicitly when calling these functions.**
+
+Extend `draken_compare_dv` / `draken_arithmetic_dv` (or add `draken_compare_dv_decimal` / `draken_arithmetic_dv_decimal` siblings) with per-type descriptor args:
+
+```c
+DrakenVector* draken_arithmetic_dv_decimal(
+    int op_code,
+    DrakenVector* left,  uint8_t left_scale,
+    DrakenVector* right, uint8_t right_scale,
+    uint32_t n_rows,
+    DrakenFrameArena* arena);
+```
+
+Eval-PM's anchor list still holds the `Vector` Python wrappers (which carry `_nb`, which has access to the descriptor via `logical_type_*` properties). Extract scale/unit at dispatch-time, pass through to the function.
+
+Pros: minimal new infrastructure; reuses existing kernels; clean per-type signatures.
+Cons: eval-PM dispatch needs per-type-tag specialization in BC_COMPARE / BC_BINARY_OP handlers — `if left.type == DRAKEN_DECIMAL: extract scales; call decimal variant`. A few extra lines per type at dispatch.
+
+**Option β — Carry descriptors alongside the `DrakenVector*` stack.**
+
+Add a parallel `DrakenLogicalType*` array next to the `DrakenVector*` stack. The eval-PM's stack push/pop maintains both in lockstep. Compare/arith functions take both:
+
+```c
+DrakenVector* draken_compare_dv(
+    ..., DrakenVector* left, const DrakenLogicalType* left_lt,
+    ..., DrakenVector* right, const DrakenLogicalType* right_lt,
+    ...);
+```
+
+Pros: descriptor info always available; no per-type dispatch branching at the eval-PM level.
+Cons: every stack op carries the cost; most ops don't need it.
+
+**Option γ — Embed descriptor pointer in `DrakenVector` struct.**
+
+Change `DrakenVector` to carry `const DrakenLogicalType* logical_type` directly. ABI change; touches every Vector allocation site.
+
+Pros: descriptor flows for free with the value; no signature changes anywhere.
+Cons: ABI bump (the guard pin in `_abi_guard.cpp` covers this); touches every Vector construction site; risks reintroducing the "shape-as-type" or similar coupling we just cleaned up.
+
+**Draken-PM recommendation: Option α.** It keeps `DrakenVector` lean and ABI-stable, doesn't add cost to the common path (the int64/float64/bool stack ops don't pay for descriptors they don't use), and the eval-PM dispatch already needs per-type-tag branching at BC_COMPARE / BC_BINARY_OP. The dispatch shape is:
+
+```cython
+cdef DrakenVector* result
+if left_type == DRAKEN_DECIMAL:
+    result = draken_arithmetic_dv_decimal(op, left, left_scale, right, right_scale, n, arena)
+elif left_type == DRAKEN_TIMESTAMP64 and right_type == DRAKEN_INTERVAL:
+    result = draken_temporal_arith_dv(op, left, left_unit, right, n, arena)
+elif left_type == DRAKEN_INT64 or left_type == DRAKEN_FLOAT64:
+    result = draken_arithmetic_dv(op, left, right, n, arena)  # existing
+else:
+    result = NULL  # falls back to Python
+```
+
+If you (eval-PM) confirm Option α, I'll add:
+- `draken_compare_dv_decimal(op, left, sa, right, sb, n, arena)` — scale-aware decimal compare
+- `draken_arithmetic_dv_decimal(op, left, sa, sp, right, sb, rp, n, arena)` — scale + precision-aware
+- `draken_arithmetic_dv_temporal(op, left, left_type, left_unit, right, right_type, right_unit, n, arena)` — handles date+interval, timestamp+interval, date-date=interval, timestamp-timestamp=interval
+
+If you prefer β or γ, surface and I'll redesign. The status table above reflects current state under "no descriptor access yet" — meaning DECIMAL falls back to Python until this is resolved, and temporal arithmetic stays Python-mediated regardless.
 
 **Architect decisions answered:**
 

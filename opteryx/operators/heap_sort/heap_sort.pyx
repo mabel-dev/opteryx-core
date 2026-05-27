@@ -14,7 +14,7 @@ from collections.abc import Iterable
 from opteryx.vectors.vector_ranking import vector_exact_search_top_k
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
-from opteryx.expression.evaluator import evaluate_and_append_draken
+from opteryx.expression.evaluator import compile_eval_nodes, execute_and_append
 from opteryx.models import QueryProperties
 
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -394,6 +394,7 @@ cdef class HeapSortNode(BasePlanNode):
     cdef public object _uniform_direction
     cdef public dict _compress_cache
     cdef public list _chunk_buffer
+    cdef public list _compiled_evals
 
     _NULL_COMPRESSED = -(1 << 63)  # INT64_MIN — same sentinel used by compress_into
     _USEARCH_ENABLED = False
@@ -425,6 +426,8 @@ cdef class HeapSortNode(BasePlanNode):
 
         self._compress_cache = {}
         self._chunk_buffer = []
+        eval_nodes = [col for col, _ in self.order_by if col.node_type != NodeType.IDENTIFIER]
+        self._compiled_evals = compile_eval_nodes(eval_nodes)
 
     def _is_exact_compressible_vector(self, vector) -> bool:
         name = vector.__class__.__name__
@@ -474,21 +477,7 @@ cdef class HeapSortNode(BasePlanNode):
         return morsel.take(row_indices)
 
     cdef Morsel _ensure_order_expressions_evaluated(self, Morsel morsel):
-        # column_names returns bytes; identity is bytes — compare directly
-        existing_columns = set(morsel.column_names)
-        evaluations = []
-        for column, _ in self.order_by:
-            if column.node_type == NodeType.IDENTIFIER:
-                continue
-            identity = getattr(column.schema_column, "identity", None)
-            if identity in existing_columns:
-                continue
-            evaluations.append(column)
-
-        if not evaluations:
-            return morsel
-
-        return evaluate_and_append_draken(evaluations, morsel)
+        return execute_and_append(self._compiled_evals, morsel)
 
     def _top_n(self, morsel):
         cdef Py_ssize_t k, row_idx, i, j, heap_size = 0

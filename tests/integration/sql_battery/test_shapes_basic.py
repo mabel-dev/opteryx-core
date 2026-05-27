@@ -268,6 +268,14 @@ STATEMENTS = [
         # casting array vectors segfaulted
         ("SELECT CAST(missions AS VARCHAR) FROM testdata.astronauts", 357, 1, None),
 
+        # CAST: literal string → numeric types (exercises BOOL take fix + constant-shape cast path)
+        ("SELECT CAST('42' AS INTEGER) FROM $planets LIMIT 1", 1, 1, None),
+        ("SELECT CAST('3.14' AS DOUBLE) FROM $planets LIMIT 1", 1, 1, None),
+
+        # CAST: VARCHAR column → numeric types (round-trip via CAST(col AS VARCHAR) first)
+        ("SELECT CAST(CAST(year AS VARCHAR) AS INTEGER) FROM testdata.astronauts LIMIT 3", 3, 1, None),
+        ("SELECT CAST(CAST(space_walks_hours AS VARCHAR) AS DOUBLE) FROM testdata.astronauts LIMIT 3", 3, 1, None),
+
         # ASOF JOIN — basic shape checks
         # Self-join: every planet matches itself or nearest lower gravity (LEFT semantics = 9 rows)
         ("SELECT p.name, p2.name AS match_name FROM $planets AS p ASOF JOIN $planets AS p2 MATCH_CONDITION(p.gravity >= p2.gravity)", 9, 2, None),

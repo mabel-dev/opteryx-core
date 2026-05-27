@@ -164,3 +164,23 @@ SELECT 'test'::VARBINARY
 
 query error io failed
 SELECT CAST(CAST('test' AS VARBINARY) AS VARCHAR)
+
+# FLOAT64 → INTEGER (new kernel: vector_cast_float64_to_int64)
+query error io failed
+SELECT CAST(mass AS INTEGER) FROM $planets
+
+query error io failed
+SELECT CAST(space_walks_hours AS INTEGER) FROM testdata.astronauts
+
+# STRING → BOOLEAN (new kernel: vector_cast_string_to_bool)
+query error io failed
+SELECT CAST('YES' AS BOOLEAN)
+
+query error io failed
+SELECT CAST('no' AS BOOLEAN)
+
+query error io failed
+SELECT CAST('ON' AS BOOLEAN)
+
+query error io failed
+SELECT CAST('off' AS BOOLEAN)

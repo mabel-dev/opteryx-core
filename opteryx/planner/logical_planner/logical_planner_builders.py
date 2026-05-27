@@ -672,6 +672,47 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
     else:
         orso_type = OrsoTypes.from_name(base_type)[0]
 
+    # Temporal → VARCHAR: format as ISO string rather than calling str() on the raw int.
+    if base_type in ("VARCHAR", "BLOB"):
+        if literal_node.type == OrsoTypes.TIMESTAMP and isinstance(literal_node.value, int):
+            us = literal_node.value
+            sec, usec = divmod(us, 1_000_000)
+            if usec < 0:
+                sec -= 1
+                usec += 1_000_000
+            days64, tod = divmod(sec, 86400)
+            if tod < 0:
+                days64 -= 1
+                tod += 86400
+            z = days64 + 719468
+            era = (z if z >= 0 else z - 146096) // 146097
+            doe = z - era * 146097
+            yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+            yr = yoe + era * 400
+            doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+            mp = (5 * doy + 2) // 153
+            d = doy - (153 * mp + 2) // 5 + 1
+            m = mp + 3 if mp < 10 else mp - 9
+            y = yr + (1 if m <= 2 else 0)
+            hh, rem = divmod(tod, 3600)
+            mm, ss = divmod(rem, 60)
+            parsed_value = f"{y:04d}-{m:02d}-{d:02d} {hh:02d}:{mm:02d}:{ss:02d}.{usec:06d}+0000"
+            return Node(NodeType.LITERAL, type=orso_type, value=parsed_value, alias=alias)
+        if literal_node.type == OrsoTypes.DATE and isinstance(literal_node.value, int):
+            days = literal_node.value
+            z = days + 719468
+            era = (z if z >= 0 else z - 146096) // 146097
+            doe = z - era * 146097
+            yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+            yr = yoe + era * 400
+            doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+            mp = (5 * doy + 2) // 153
+            d = doy - (153 * mp + 2) // 5 + 1
+            m = mp + 3 if mp < 10 else mp - 9
+            y = yr + (1 if m <= 2 else 0)
+            parsed_value = f"{y:04d}-{m:02d}-{d:02d}"
+            return Node(NodeType.LITERAL, type=orso_type, value=parsed_value, alias=alias)
+
     # Attempt to parse and cast the literal value
     try:
         parsed_value = orso_type.parse(literal_node.value)

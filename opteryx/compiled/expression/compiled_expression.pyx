@@ -505,6 +505,9 @@ cdef Py_ssize_t _linearize(
         slot = bc._push_instr()
         slot.opcode = BC_FUNCTION
         slot.arity = <int>n
+        # Pre-compute nb_func flag at bind time — eliminates runtime
+        # `type(callable).__name__ == "nb_func"` string comparison per call.
+        slot.bool_value = 1 if type(callable_obj).__name__ == "nb_func" else 0
         bc._hold(callable_obj)
         slot.callable_ref = <PyObject*>callable_obj
         if n == 0:

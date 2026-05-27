@@ -99,12 +99,10 @@ def _rows_from_morsels(morsels: Iterable[Any]) -> list[list[str]]:
     for morsel in morsels:
         if morsel is None:
             continue
-        try:
-            table = morsel.to_arrow()
-        except AttributeError:
-            continue
-        for record in table.to_pylist():
-            rows.append([_format_cell(record[c]) for c in table.column_names])
+        col_names = morsel.column_names
+        columns = [morsel.column(name).to_pylist() for name in col_names]
+        for i in range(morsel.num_rows):
+            rows.append([_format_cell(col[i]) for col in columns])
     return rows
 
 

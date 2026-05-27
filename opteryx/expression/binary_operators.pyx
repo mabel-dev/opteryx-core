@@ -15,6 +15,11 @@ from opteryx.compiled.nanobind.vector_bitwise import (
     vector_bitwise_shift_left as _vector_bitwise_shift_left,
     vector_bitwise_shift_right as _vector_bitwise_shift_right,
 )
+from opteryx.compiled.nanobind.vector_json import vector_json_extract as _vector_json_extract
+from opteryx.compiled.nanobind.vector_special import (
+    vector_map_access_array as _vector_map_access_array,
+    vector_map_access_string as _vector_map_access_string,
+)
 from opteryx.exceptions import IncorrectTypeError, UnsupportedTypeError
 from opteryx.expression.evaluator.arithmetic_dispatch import call_arithmetic_op
 from opteryx.types import OrsoTypes
@@ -24,8 +29,7 @@ import draken.draken_native as _draken_native
 
 cpdef bytes _json_key_constant(key):
     """Extract key bytes from a string Vector; value is taken from logical row 0."""
-    key_type = getattr(key, "type", None)
-    if key_type is None or key_type.name not in ("VARCHAR", "NVARCHAR", "VARBINARY"):
+    if key.type.name not in ("VARCHAR", "NVARCHAR", "VARBINARY"):
         raise IncorrectTypeError("JSON extraction key must be a string Vector")
     raw_key = key[0]
     if raw_key is None:
@@ -35,36 +39,29 @@ cpdef bytes _json_key_constant(key):
 
 def ArrowOp(documents, elements):
     """JSON selector returning a VARCHAR DrakenVector. Maps to `->` SQL operator."""
-    from opteryx.compiled.nanobind.vector_json import vector_json_extract
-
     element = _json_key_constant(elements)
-    return vector_json_extract(documents, element)
+    return _vector_json_extract(documents, element)
 
 
 def LongArrowOp(documents, elements):
     """JSON selector returning text as a VARCHAR DrakenVector. SQL `->>`."""
-    from opteryx.compiled.nanobind.vector_json import vector_json_extract
-
     element = _json_key_constant(elements)
-    return vector_json_extract(documents, element)
+    return _vector_json_extract(documents, element)
 
 
 def MapAccessOp(array, key):
     """Map / iterable subscript over Draken vectors."""
-    from opteryx.compiled.nanobind.vector_special import vector_map_access_array, vector_map_access_string
-
-    key_type = getattr(key, "type", None)
-    if key_type is None or key_type.name not in ("INT64", "INT32", "INT16", "INT8"):
+    if key.type.name not in ("INT64", "INT32", "INT16", "INT8"):
         raise IncorrectTypeError("Map/iterable subscript key must be an integer Vector")
 
-    array_type = getattr(array, "type", None)
-    if array_type is not None and array_type.name in ("VARCHAR", "NVARCHAR", "VARBINARY"):
-        return vector_map_access_string(array, key)
-    if array_type is not None and array_type.name == "ARRAY":
-        return _draken_native.vector_from_sequence(vector_map_access_array(array, key))
+    cdef object array_type_name = array.type.name
+    if array_type_name in ("VARCHAR", "NVARCHAR", "VARBINARY"):
+        return _vector_map_access_string(array, key)
+    if array_type_name == "ARRAY":
+        return _draken_native.vector_from_sequence(_vector_map_access_array(array, key))
     raise IncorrectTypeError(
         f"Map access is only supported for Array/String vectors, "
-        f"not {type(array).__name__}"
+        f"not {array_type_name}"
     )
 
 

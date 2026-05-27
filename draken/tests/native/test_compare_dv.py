@@ -39,6 +39,15 @@ def test_compare_dv_smoke():
         "length_mismatch_returns_null",
         "bad_op_code_returns_null",
         "null_input_returns_null",
+        # Stage C additions:
+        "date32_eq_returns_non_null",
+        "date32_eq_result_is_bool",
+        "date32_eq_bitmap",
+        "timestamp64_lt_returns_non_null",
+        "timestamp64_lt_result_is_bool",
+        "timestamp64_lt_bitmap",
+        "varchar_smoke_skipped",
+        "decimal_returns_null_pending_descriptor",
         "destroy_no_crash",
     }
 
