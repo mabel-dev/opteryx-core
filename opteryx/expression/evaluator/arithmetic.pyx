@@ -2,6 +2,8 @@
 
 import datetime
 
+from libc.stdint cimport int16_t
+
 import draken.draken_native as _draken_native
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 from opteryx.utils.vector_types import VectorType, get_vector_type
@@ -113,29 +115,36 @@ cpdef _eval_binary_op_draken(node, morsel):
     return result
 
 
-cpdef _binary_op_from_vecs(str op, left, right, left_orso_type, right_orso_type, Py_ssize_t num_rows):
+cpdef _binary_op_from_vecs(
+    int op_code,
+    left, right,
+    int16_t left_type_code,
+    int16_t right_type_code,
+    str op_str,
+    Py_ssize_t num_rows,
+):
     """Execute a binary arithmetic op on pre-evaluated vectors.
 
     Equivalent to _eval_binary_op_draken but takes pre-evaluated vectors and
-    orso types directly — no node or morsel access. Called from the bytecode
-    executor for BC_BINARY_OP instructions.
-    """
-    from opteryx.types import OrsoTypes
+    BCTypeCode integers directly — no node or morsel access. Called from the
+    bytecode executor for BC_BINARY_OP instructions.
 
-    if get_vector_type(left) == VectorType.UNKNOWN and left_orso_type in (
-        OrsoTypes.DATE,
-        OrsoTypes.TIMESTAMP,
+    op_code: BCBinaryOpCode int (BOP_PLUS, BOP_MINUS, etc.)
+    left_type_code / right_type_code: BCTypeCode (BC_TYPE_NONE=0, DATE=1, TIMESTAMP=2)
+    op_str: still needed for call_arithmetic_op which dispatches to the kernel registry
+    """
+    if get_vector_type(left) == VectorType.UNKNOWN and (
+        left_type_code == BC_TYPE_DATE or left_type_code == BC_TYPE_TIMESTAMP
     ):
-        if left_orso_type == OrsoTypes.DATE:
+        if left_type_code == BC_TYPE_DATE:
             left = _draken_native.vector_date32_from_constant(_coerce_date32(left), num_rows)
         else:
             left = _draken_native.vector_timestamp_from_constant(_coerce_timestamp(left), num_rows)
 
-    if get_vector_type(right) == VectorType.UNKNOWN and right_orso_type in (
-        OrsoTypes.DATE,
-        OrsoTypes.TIMESTAMP,
+    if get_vector_type(right) == VectorType.UNKNOWN and (
+        right_type_code == BC_TYPE_DATE or right_type_code == BC_TYPE_TIMESTAMP
     ):
-        if right_orso_type == OrsoTypes.DATE:
+        if right_type_code == BC_TYPE_DATE:
             right = _draken_native.vector_date32_from_constant(_coerce_date32(right), num_rows)
         else:
             right = _draken_native.vector_timestamp_from_constant(_coerce_timestamp(right), num_rows)
@@ -146,18 +155,18 @@ cpdef _binary_op_from_vecs(str op, left, right, left_orso_type, right_orso_type,
     cdef bint left_is_date = left_type in (VectorType.DATE32, VectorType.TIMESTAMP)
     cdef bint right_is_date = right_type in (VectorType.DATE32, VectorType.TIMESTAMP)
 
-    if op == "Minus" and left_is_date and right_is_date:
+    if op_code == BOP_MINUS and left_is_date and right_is_date:
         return _date_minus_date_draken(left, right)
 
-    if op in ("Plus", "Minus"):
+    if op_code == BOP_PLUS or op_code == BOP_MINUS:
         left_is_interval = left_type == VectorType.INTERVAL
         right_is_interval = right_type == VectorType.INTERVAL
         if left_is_date and right_is_interval:
-            return _date_interval_op_draken(left, right, op)
+            return _date_interval_op_draken(left, right, op_str)
         if left_is_interval and right_is_date:
-            return _date_interval_op_draken(right, left, op)
+            return _date_interval_op_draken(right, left, op_str)
 
-    if op == "StringConcat":
+    if op_code == BOP_STRING_CONCAT:
         from opteryx.compiled.nanobind.vector_selection_concat import vector_concat as _vc
         _str_types = (_draken_native.VARCHAR, _draken_native.NVARCHAR)
         n = len(left) if getattr(left, "type", None) in _str_types else (
@@ -165,16 +174,14 @@ cpdef _binary_op_from_vecs(str op, left, right, left_orso_type, right_orso_type,
         )
         return _vc(_to_string_vec(left, n), _to_string_vec(right, n))
 
-    from opteryx.expression.binary_operators import BINARY_OPERATORS
-
-    if op not in BINARY_OPERATORS:
+    if op_code == BOP_UNKNOWN:
         return None
 
-    result = call_arithmetic_op(op, left, right)
+    result = call_arithmetic_op(op_str, left, right)
 
     if result is None:
         raise NotImplementedError(
-            f"Operator `{op}` has no Draken kernel for {left.__class__.__name__} and "
+            f"Operator `{op_str}` has no Draken kernel for {left.__class__.__name__} and "
             f"{right.__class__.__name__}."
         )
 

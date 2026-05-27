@@ -702,7 +702,10 @@ extensions = [
         sources=[
             "draken/draken_native.cpp",
             "draken/core/vector_alloc.cpp",
-            "draken/core/bitmap_ops.cpp",  # E.21: bitmap operations for bytecode VM
+            "draken/core/bitmap_ops.cpp",   # E.21: bitmap operations for bytecode VM
+            "draken/core/frame_arena.cpp",  # per-frame allocator for native eval engine
+            "draken/ops/compare_dv.cpp",    # arena-backed compare entry point
+            "draken/ops/arithmetic_dv.cpp", # arena-backed arithmetic entry point
             # Milestone C.1: hash op depends on simd_hash_i64 / simd_mix_hash.
             "src/cpp/simd_hash.cpp",
             "src/cpp/simd_env.cpp",

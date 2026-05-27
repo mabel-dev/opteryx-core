@@ -24,6 +24,8 @@ from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free
 from cpython.ref cimport PyObject, Py_INCREF
 from libc.string cimport memset
 
+import draken.draken_native as _draken_native
+
 
 # ---------------------------------------------------------------------------
 # NodeType integer constants — must mirror NodeType IntEnum in
@@ -59,6 +61,45 @@ cdef object _OrsoTypes_DATE = None
 cdef object _OrsoTypes_TIMESTAMP = None
 cdef type _CarcharSetWrapper_t = None
 cdef type _PerfectHashSet_t = None
+
+# Binary op string → BCBinaryOpCode. Built once at first use.
+_BOP_CODE = {
+    "Plus":          BOP_PLUS,
+    "Minus":         BOP_MINUS,
+    "Multiply":      BOP_MULTIPLY,
+    "Divide":        BOP_DIVIDE,
+    "Modulo":        BOP_MODULO,
+    "MyIntegerDivide": BOP_INT_DIVIDE,
+    "StringConcat":  BOP_STRING_CONCAT,
+    "BitwiseOr":     BOP_BITWISE_OR,
+    "BitwiseAnd":    BOP_BITWISE_AND,
+    "BitwiseXor":    BOP_BITWISE_XOR,
+    "ShiftLeft":     BOP_SHIFT_LEFT,
+    "ShiftRight":    BOP_SHIFT_RIGHT,
+}
+
+# Unary op string → BCUnaryOpCode. Built once at module load.
+_UOP_CODE = {
+    "IsNull":      UOP_IS_NULL,
+    "IsNotNull":   UOP_IS_NOT_NULL,
+    "IsEmpty":     UOP_IS_EMPTY,
+    "IsNotEmpty":  UOP_IS_NOT_EMPTY,
+    "BitwiseNot":  UOP_BITWISE_NOT,
+    "IsTrue":      UOP_IS_TRUE,
+    "IsNotFalse":  UOP_IS_NOT_FALSE,
+    "IsFalse":     UOP_IS_FALSE,
+    "IsNotTrue":   UOP_IS_NOT_TRUE,
+}
+
+
+cdef inline int16_t _orso_type_to_code(object orso_type):
+    """Convert an OrsoTypes value to a BCTypeCode integer. Returns BC_TYPE_NONE for None or non-temporal."""
+    _ensure_orso_types()
+    if orso_type is _OrsoTypes_DATE:
+        return <int16_t>BC_TYPE_DATE
+    if orso_type is _OrsoTypes_TIMESTAMP:
+        return <int16_t>BC_TYPE_TIMESTAMP
+    return <int16_t>BC_TYPE_NONE
 
 
 cdef inline dict _get_op_codes():
@@ -184,7 +225,9 @@ cdef Py_ssize_t _linearize(
     cdef object bin_left_sc, bin_right_sc, bin_left_type, bin_right_type, bin_op_str
     cdef object unary_op_str
     cdef object func_val, func_ref_obj, func_py_node, func_ref_meta, callable_obj
-    cdef object extr_op_str, extr_key
+    cdef object extr_op_str, extr_key, extr_callable, extr_key_vec
+    cdef bint right_is_inlist_literal
+    cdef object inlist_set_obj
     cdef object cast_target_type, cast_unit, cast_params, cast_kernel, cast_py_node
     cdef object src
 
@@ -296,7 +339,16 @@ cdef Py_ssize_t _linearize(
 
     # ------------------------------------------------------------------
     # NT_COMPARISON_OPERATOR — resolve op string to integer code,
-    # pre-read schema types, run temporal validation once
+    # pre-read schema types, run temporal validation once.
+    #
+    # IN-list fold (BC_CMP_INLIST_INLINE): when the right operand is an
+    # NT_LITERAL whose value is a set/list/CarcharSet we fold it directly
+    # into the BC_COMPARE instruction (slot.literal_obj) instead of
+    # emitting a separate BC_LOAD_LIT_SET instruction.  This removes the
+    # set from the execution stack entirely — sets cannot become
+    # DrakenVector* and must not appear as stack operands.
+    # Folded BC_COMPARE pops ONE item (left) and pushes one result;
+    # non-folded pops TWO items (left + right) and pushes one result.
     # ------------------------------------------------------------------
     if nt == _NT_COMPARISON_OPERATOR:
         if node.left == NULL or node.right == NULL:
@@ -314,8 +366,24 @@ cdef Py_ssize_t _linearize(
             op_str,
         )
 
+        # Detect set/list literal on the right — fold if found.
+        right_is_inlist_literal = False
+        inlist_set_obj = None
+        if node.right != NULL and node.right.node_type == _NT_LITERAL:
+            inlist_set_obj = <object>node.right.value
+            _ensure_set_types()
+            if (
+                isinstance(inlist_set_obj, _CarcharSetWrapper_t)
+                or isinstance(inlist_set_obj, _PerfectHashSet_t)
+                or isinstance(inlist_set_obj, (list, tuple, set, frozenset))
+            ):
+                right_is_inlist_literal = True
+            else:
+                inlist_set_obj = None  # scalar literal — don't fold
+
         sub_depth = _linearize(node.left, bc, depth)
-        sub_depth = _linearize(node.right, bc, sub_depth)
+        if not right_is_inlist_literal:
+            sub_depth = _linearize(node.right, bc, sub_depth)
 
         op_codes = _get_op_codes()
         op_code_val = <int>op_codes.get(op_str, 0)
@@ -326,6 +394,8 @@ cdef Py_ssize_t _linearize(
             flags |= BC_CMP_LEFT_TEMPORAL
         if right_type is _OrsoTypes_DATE or right_type is _OrsoTypes_TIMESTAMP:
             flags |= BC_CMP_RIGHT_TEMPORAL
+        if right_is_inlist_literal:
+            flags |= BC_CMP_INLIST_INLINE
 
         slot = bc._push_instr()
         slot.opcode = BC_COMPARE
@@ -333,13 +403,13 @@ cdef Py_ssize_t _linearize(
         slot.flags = flags
         bc._hold(op_str)
         slot.compare_op_str = <PyObject*>op_str
-        if left_type is not None:
-            bc._hold(left_type)
-            slot.left_orso_type = <PyObject*>left_type
-        if right_type is not None:
-            bc._hold(right_type)
-            slot.right_orso_type = <PyObject*>right_type
-        return sub_depth - 1
+        slot.left_type_code = _orso_type_to_code(left_type)
+        slot.right_type_code = _orso_type_to_code(right_type)
+        if right_is_inlist_literal:
+            bc._hold(inlist_set_obj)
+            slot.literal_obj = <PyObject*>inlist_set_obj
+            return sub_depth      # pop 1 push 1 — net 0
+        return sub_depth - 1      # pop 2 push 1 — net -1
 
     # ------------------------------------------------------------------
     # NT_BETWEEN — compile left operand, store bounds and inclusivity flags
@@ -384,14 +454,11 @@ cdef Py_ssize_t _linearize(
 
         slot = bc._push_instr()
         slot.opcode = BC_BINARY_OP
+        slot.op_code = <int>_BOP_CODE.get(bin_op_str, BOP_UNKNOWN)
         bc._hold(bin_op_str)
-        slot.compare_op_str = <PyObject*>bin_op_str
-        if bin_left_type is not None:
-            bc._hold(bin_left_type)
-            slot.left_orso_type = <PyObject*>bin_left_type
-        if bin_right_type is not None:
-            bc._hold(bin_right_type)
-            slot.right_orso_type = <PyObject*>bin_right_type
+        slot.compare_op_str = <PyObject*>bin_op_str  # still needed for call_arithmetic_op
+        slot.left_type_code = _orso_type_to_code(bin_left_type)
+        slot.right_type_code = _orso_type_to_code(bin_right_type)
         return sub_depth - 1   # pop 2, push 1
 
     # ------------------------------------------------------------------
@@ -404,8 +471,8 @@ cdef Py_ssize_t _linearize(
         sub_depth = _linearize(node.centre, bc, depth)
         slot = bc._push_instr()
         slot.opcode = BC_UNARY_OP
-        bc._hold(unary_op_str)
-        slot.compare_op_str = <PyObject*>unary_op_str
+        slot.op_code = <int>_UOP_CODE.get(unary_op_str, UOP_UNKNOWN)
+        # compare_op_str not set for BC_UNARY_OP — executor uses op_code int directly
         return sub_depth   # pop 1, push 1 — net 0
 
     # ------------------------------------------------------------------
@@ -484,8 +551,14 @@ cdef Py_ssize_t _linearize(
         return sub_depth   # pop 1, push 1 — net 0
 
     # ------------------------------------------------------------------
-    # NT_EXTRACTION_OPERATOR — compile left operand, store op and key.
-    # Key (node.right.value) is always a literal resolved at compile time.
+    # NT_EXTRACTION_OPERATOR — pre-resolve callable and pre-build key
+    # vector at bind time. Eliminates inline imports and string dispatch
+    # from the execution hot path (Phase 2b).
+    #
+    # callable_ref  ← MapAccessOp / ArrowOp / LongArrowOp
+    # literal_obj   ← pre-built constant key Vector (length=1)
+    #
+    # The executor: (<object>callable_ref)(v_left, <object>literal_obj)
     # ------------------------------------------------------------------
     if nt == _NT_EXTRACTION_OPERATOR:
         if node.left == NULL:
@@ -493,19 +566,52 @@ cdef Py_ssize_t _linearize(
         extr_op_str = <object>node.value
         extr_key = <object>node.right.value if node.right != NULL else None
 
+        if extr_op_str == "MapAccess":
+            from opteryx.expression.binary_operators import MapAccessOp
+            extr_callable = MapAccessOp
+            extr_key_vec = _draken_native.vector_from_constant(int(extr_key), 1)
+        elif extr_op_str == "Arrow":
+            from opteryx.expression.binary_operators import ArrowOp
+            extr_callable = ArrowOp
+            extr_key_vec = _draken_native.vector_from_string_sequence(
+                [extr_key if isinstance(extr_key, bytes) else extr_key.encode("utf-8")]
+            )
+        else:
+            from opteryx.expression.binary_operators import LongArrowOp
+            extr_callable = LongArrowOp
+            extr_key_vec = _draken_native.vector_from_string_sequence(
+                [extr_key if isinstance(extr_key, bytes) else extr_key.encode("utf-8")]
+            )
+
         sub_depth = _linearize(node.left, bc, depth)
         slot = bc._push_instr()
         slot.opcode = BC_EXTRACTION
-        bc._hold(extr_op_str)
-        bc._hold(extr_key)
-        slot.compare_op_str = <PyObject*>extr_op_str
-        slot.literal_obj = <PyObject*>extr_key if extr_key is not None else NULL
+        bc._hold(extr_callable)
+        bc._hold(extr_key_vec)
+        slot.callable_ref = <PyObject*>extr_callable
+        slot.literal_obj = <PyObject*>extr_key_vec
         return sub_depth   # pop 1, push 1 — net 0
 
     # ------------------------------------------------------------------
+    # NT_CASE — dedicated opcode; executor calls evaluate_case directly.
+    # Stores the Python node in source_node (borrowed ref kept alive by
+    # _held_refs). No children are linearised; evaluate_case recurses via
+    # the tree-walker, not the bytecode VM.
+    # ------------------------------------------------------------------
+    if nt == _NT_CASE:
+        src = <object>node.source_node
+        slot = bc._push_instr()
+        slot.opcode = BC_CASE
+        bc._hold(src)
+        slot.source_node = <PyObject*>src
+        depth += 1
+        if depth > bc.max_stack_depth:
+            bc.max_stack_depth = depth
+        return depth
+
+    # ------------------------------------------------------------------
     # Everything else — LEGACY: defer the whole subtree to _eval_value.
-    # The legacy path is the GIL-required slow lane that handles CASE /
-    # CAST until native opcodes cover them.
+    # BC_LEGACY should now be unreachable for all supported node types.
     # ------------------------------------------------------------------
     src = <object>node.source_node
     slot = bc._push_instr()

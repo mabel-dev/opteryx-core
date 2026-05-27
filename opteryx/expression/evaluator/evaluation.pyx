@@ -60,9 +60,13 @@ DEF NT_CAST = 45
 DEF NT_EXTRACTION_OPERATOR = 46
 DEF NT_BETWEEN = 47
 
-
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DATETIME = datetime.datetime(1970, 1, 1)
+
+# Cached OrsoTypes sentinels — used to reconstruct Python type objects from
+# BC_TYPE_DATE / BC_TYPE_TIMESTAMP int codes on the AnyOp/temporal-coercion paths.
+_OrsoTypes_DATE = _OrsoTypes.DATE
+_OrsoTypes_TIMESTAMP = _OrsoTypes.TIMESTAMP
 
 _NEGATED_OPS = {
     "NotEq": "Eq",
@@ -234,33 +238,36 @@ cdef _unary_draken(str op, centre_node, morsel):
     raise NotImplementedError(f"evaluate_draken: unsupported unary op {op!r}")
 
 
-cdef _unary_op_kernel(str op, vec):
-    """Apply a unary op to a pre-evaluated vector (bytecode executor path)."""
-    if op == "IsNull":
+cdef _unary_op_kernel(int op_code, vec):
+    """Apply a unary op to a pre-evaluated vector (bytecode executor path).
+
+    op_code is a BCUnaryOpCode integer — no Python string comparison.
+    """
+    if op_code == UOP_IS_NULL:
         return _is_null_as_boolvector(vec)
-    if op == "IsNotNull":
+    if op_code == UOP_IS_NOT_NULL:
         return _is_null_as_boolvector(vec).not_vector()
-    if op == "IsEmpty":
+    if op_code == UOP_IS_EMPTY:
         return _BoolVector(_vector_string_is_empty(_nb_vec_unwrap(vec)))
-    if op == "IsNotEmpty":
+    if op_code == UOP_IS_NOT_EMPTY:
         return _BoolVector(_vector_string_is_not_empty(_nb_vec_unwrap(vec)))
-    if op == "BitwiseNot":
+    if op_code == UOP_BITWISE_NOT:
         return Vector(_vector_bitwise_not(_nb_vec_unwrap(vec)))
-    if op == "IsTrue" or op == "IsNotFalse" or op == "IsFalse" or op == "IsNotTrue":
+    if op_code == UOP_IS_TRUE or op_code == UOP_IS_NOT_FALSE or op_code == UOP_IS_FALSE or op_code == UOP_IS_NOT_TRUE:
         bv = vec if get_vector_type(vec) == VectorType.BOOL else None
         if bv is None:
             raise TypeError(
                 f"IS TRUE/IS FALSE requires a boolean expression; got {vec.__class__.__name__!r}"
             )
-        if op == "IsTrue":
+        if op_code == UOP_IS_TRUE:
             return bv.equals(True)
-        if op == "IsNotFalse":
+        if op_code == UOP_IS_NOT_FALSE:
             return bv.not_equals(False)
-        if op == "IsFalse":
+        if op_code == UOP_IS_FALSE:
             return bv.equals(False)
-        if op == "IsNotTrue":
+        if op_code == UOP_IS_NOT_TRUE:
             return bv.not_equals(True)
-    raise NotImplementedError(f"_unary_op_kernel: unsupported unary op {op!r}")
+    raise NotImplementedError(f"_unary_op_kernel: unsupported unary op code {op_code!r}")
 
 
 cdef bint _is_temporal_type(orso_type):
@@ -309,6 +316,20 @@ DEF _HASH_DISPATCH_MIN_ROWS = 1024
 
 _TARGET_HASH_CACHE = {}
 _TARGET_HASH_CACHE_MAX = 128
+
+
+# evaluate_case — lazy import cached on first BC_CASE instruction.
+# Avoids a circular import: case_eval.pyx imports evaluate_draken from this
+# module; importing it at module level would create a load-time cycle.
+_evaluate_case_fn = None
+
+
+cdef _get_evaluate_case():
+    global _evaluate_case_fn
+    if _evaluate_case_fn is None:
+        from opteryx.expression.evaluator.case_eval import evaluate_case
+        _evaluate_case_fn = evaluate_case
+    return _evaluate_case_fn
 
 
 # Helpers shared with the legacy evaluate_and_append path in
@@ -698,9 +719,11 @@ from opteryx.compiled.expression.compiled_expression cimport (
     BC_AND,
     BC_BETWEEN,
     BC_BINARY_OP,
+    BC_CASE,
     BC_CAST,
     BC_CMP_LEFT_TEMPORAL,
     BC_CMP_RIGHT_TEMPORAL,
+    BC_CMP_INLIST_INLINE,
     BC_CNF,
     BC_COMPARE,
     BC_DNF,
@@ -717,8 +740,19 @@ from opteryx.compiled.expression.compiled_expression cimport (
     BC_XOR,
     BytecodeInstr,
     CompiledBytecode,
+    # Type codes
+    BC_TYPE_NONE, BC_TYPE_DATE, BC_TYPE_TIMESTAMP,
+    # Binary op codes
+    BOP_UNKNOWN, BOP_PLUS, BOP_MINUS, BOP_MULTIPLY, BOP_DIVIDE,
+    BOP_MODULO, BOP_INT_DIVIDE, BOP_STRING_CONCAT,
+    BOP_BITWISE_OR, BOP_BITWISE_AND, BOP_BITWISE_XOR,
+    BOP_SHIFT_LEFT, BOP_SHIFT_RIGHT,
+    # Unary op codes
+    UOP_UNKNOWN, UOP_IS_NULL, UOP_IS_NOT_NULL, UOP_IS_EMPTY,
+    UOP_IS_NOT_EMPTY, UOP_BITWISE_NOT,
+    UOP_IS_TRUE, UOP_IS_NOT_FALSE, UOP_IS_FALSE, UOP_IS_NOT_TRUE,
 )
-from libc.stdint cimport uint8_t, int8_t, uintptr_t, uint32_t
+from libc.stdint cimport uint8_t, int8_t, int16_t, uintptr_t, uint32_t
 
 from draken.core.buffers cimport DrakenVector, DRAKEN_BOOL
 from libc.stdlib cimport malloc, free
@@ -1275,13 +1309,12 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
     cdef object scalar_obj
     cdef object compare_result
     cdef object legacy_result
-    cdef object left_type
-    cdef object right_type
+    cdef int16_t left_type_code
+    cdef int16_t right_type_code
     cdef object func_args
     cdef Py_ssize_t func_base
     cdef object extr_key
-    cdef str extr_op
-    cdef object key_vec
+    cdef object inlist_right
 
     for i in range(n_instrs):
         slot = &bc.instrs[i]
@@ -1419,28 +1452,72 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
 
         # ----------------------------------------------------------
         # BC_COMPARE — typed draken_compare (cpdef)
+        #
+        # Two shapes:
+        #   Normal (flags & BC_CMP_INLIST_INLINE == 0):
+        #     pop right, pop left, compare, push result.
+        #   Inline IN-list (flags & BC_CMP_INLIST_INLINE != 0):
+        #     right operand is a set/list/CarcharSet folded into
+        #     slot.literal_obj at bind time — pop left only, push result.
         # ----------------------------------------------------------
         if opcode == BC_COMPARE:
-            sp -= 1
-            v_right = <Vector>stack[sp]
-            sp -= 1
-            v_left = <Vector>stack[sp]
             flags = slot.flags
-            left_type = <object>slot.left_orso_type if slot.left_orso_type != NULL else None
-            right_type = <object>slot.right_orso_type if slot.right_orso_type != NULL else None
-            if flags != 0:
+            left_type_code = slot.left_type_code
+            right_type_code = slot.right_type_code
+
+            if flags & BC_CMP_INLIST_INLINE:
+                # Right is an inline set literal — pops ONE item from stack.
+                sp -= 1
+                v_left = <Vector>stack[sp]
+                inlist_right = <object>slot.literal_obj
                 if (flags & BC_CMP_LEFT_TEMPORAL) and _is_scalar_value(v_left):
-                    v_left = _coerce_temporal_scalar_for_arrow(v_left, left_type)
-                if (flags & BC_CMP_RIGHT_TEMPORAL) and _is_scalar_value(v_right):
-                    v_right = _coerce_temporal_scalar_for_arrow(v_right, right_type)
-            if slot.op_code != OP_UNKNOWN:
-                compare_result = draken_compare_int(
-                    slot.op_code, v_left, v_right, left_type, right_type
-                )
+                    v_left = _coerce_temporal_scalar_for_arrow(
+                        v_left,
+                        _OrsoTypes_DATE if left_type_code == BC_TYPE_DATE else _OrsoTypes_TIMESTAMP,
+                    )
+                if slot.op_code != OP_UNKNOWN:
+                    compare_result = draken_compare_int(
+                        slot.op_code, v_left, inlist_right, left_type_code, right_type_code
+                    )
+                else:
+                    compare_result = draken_compare(
+                        <str>slot.compare_op_str, v_left, inlist_right,
+                        None if left_type_code == BC_TYPE_NONE else (
+                            _OrsoTypes_DATE if left_type_code == BC_TYPE_DATE else _OrsoTypes_TIMESTAMP
+                        ),
+                        None,
+                    )
             else:
-                compare_result = draken_compare(
-                    <str>slot.compare_op_str, v_left, v_right, left_type, right_type
-                )
+                # Normal case — pops TWO items from stack.
+                sp -= 1
+                v_right = <Vector>stack[sp]
+                sp -= 1
+                v_left = <Vector>stack[sp]
+                if flags != 0:
+                    if (flags & BC_CMP_LEFT_TEMPORAL) and _is_scalar_value(v_left):
+                        v_left = _coerce_temporal_scalar_for_arrow(
+                            v_left,
+                            _OrsoTypes_DATE if left_type_code == BC_TYPE_DATE else _OrsoTypes_TIMESTAMP,
+                        )
+                    if (flags & BC_CMP_RIGHT_TEMPORAL) and _is_scalar_value(v_right):
+                        v_right = _coerce_temporal_scalar_for_arrow(
+                            v_right,
+                            _OrsoTypes_DATE if right_type_code == BC_TYPE_DATE else _OrsoTypes_TIMESTAMP,
+                        )
+                if slot.op_code != OP_UNKNOWN:
+                    compare_result = draken_compare_int(
+                        slot.op_code, v_left, v_right, left_type_code, right_type_code
+                    )
+                else:
+                    compare_result = draken_compare(
+                        <str>slot.compare_op_str, v_left, v_right,
+                        None if left_type_code == BC_TYPE_NONE else (
+                            _OrsoTypes_DATE if left_type_code == BC_TYPE_DATE else _OrsoTypes_TIMESTAMP
+                        ),
+                        None if right_type_code == BC_TYPE_NONE else (
+                            _OrsoTypes_DATE if right_type_code == BC_TYPE_DATE else _OrsoTypes_TIMESTAMP
+                        ),
+                    )
             stack[sp] = compare_result
             sp += 1
             continue
@@ -1470,11 +1547,12 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
             v_right = <Vector>stack[sp]
             sp -= 1
             v_left = <Vector>stack[sp]
-            left_type = <object>slot.left_orso_type if slot.left_orso_type != NULL else None
-            right_type = <object>slot.right_orso_type if slot.right_orso_type != NULL else None
             legacy_result = _binary_op_from_vecs(
-                <str>slot.compare_op_str, v_left, v_right,
-                left_type, right_type, num_rows,
+                slot.op_code,
+                v_left, v_right,
+                slot.left_type_code, slot.right_type_code,
+                <str>slot.compare_op_str,
+                num_rows,
             )
             stack[sp] = legacy_result
             sp += 1
@@ -1486,7 +1564,7 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
         if opcode == BC_UNARY_OP:
             sp -= 1
             v_left = <Vector>stack[sp]
-            legacy_result = _unary_op_kernel(<str>slot.compare_op_str, v_left)
+            legacy_result = _unary_op_kernel(slot.op_code, v_left)
             stack[sp] = legacy_result
             sp += 1
             continue
@@ -1526,29 +1604,14 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
             continue
 
         # ----------------------------------------------------------
-        # BC_EXTRACTION — Arrow / LongArrow / MapAccess
+        # BC_EXTRACTION — callable and key vector pre-resolved at bind time
+        # (Phase 2b). callable_ref is MapAccessOp / ArrowOp / LongArrowOp;
+        # literal_obj is a pre-built constant key Vector (length=1).
         # ----------------------------------------------------------
         if opcode == BC_EXTRACTION:
             sp -= 1
             v_left = <Vector>stack[sp]
-            extr_key = <object>slot.literal_obj if slot.literal_obj != NULL else None
-            extr_op = <str>slot.compare_op_str
-            if extr_op == "MapAccess":
-                from opteryx.expression.binary_operators import MapAccessOp
-                key_vec = _draken_native.vector_from_constant(int(extr_key), 1)
-                legacy_result = MapAccessOp(v_left, key_vec)
-            elif extr_op == "Arrow":
-                from opteryx.expression.binary_operators import ArrowOp
-                key_vec = _draken_native.vector_from_string_sequence(
-                    [extr_key if isinstance(extr_key, bytes) else extr_key.encode("utf-8")]
-                )
-                legacy_result = ArrowOp(v_left, key_vec)
-            else:
-                from opteryx.expression.binary_operators import LongArrowOp
-                key_vec = _draken_native.vector_from_string_sequence(
-                    [extr_key if isinstance(extr_key, bytes) else extr_key.encode("utf-8")]
-                )
-                legacy_result = LongArrowOp(v_left, key_vec)
+            legacy_result = (<object>slot.callable_ref)(v_left, <object>slot.literal_obj)
             stack[sp] = legacy_result
             sp += 1
             continue
@@ -1565,7 +1628,19 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
             continue
 
         # ----------------------------------------------------------
-        # BC_LEGACY — GIL-required fallback to the tree-walker
+        # BC_CASE — CASE WHEN evaluation via evaluate_case (Phase 2a).
+        # source_node is the original Python CASE node; evaluate_case
+        # recurses through the tree-walker for conditions and results.
+        # ----------------------------------------------------------
+        if opcode == BC_CASE:
+            legacy_result = _get_evaluate_case()(<object>slot.source_node, morsel)
+            stack[sp] = legacy_result
+            sp += 1
+            continue
+
+        # ----------------------------------------------------------
+        # BC_LEGACY — GIL-required fallback to the tree-walker.
+        # Should now be unreachable for all supported node types.
         # ----------------------------------------------------------
         if opcode == BC_LEGACY:
             legacy_result = _eval_value(<object>slot.source_node, morsel)

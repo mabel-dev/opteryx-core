@@ -45,6 +45,9 @@
 #include "ops/int64_reductions.h"   // i64_sum (used by bridge round-trip test)
 #include "ops/string_gather.h"  // sg_eq_slots, str_hash_seed (for dict ingestion)
 #include "core/draken_bridge.h"     // bridge surface declarations
+#include "core/frame_arena.h"       // per-frame allocator
+#include "ops/compare_dv.h"         // arena-backed compare entry point
+#include "ops/arithmetic_dv.h"      // arena-backed arithmetic entry point
 
 namespace nb = nanobind;
 
@@ -5574,4 +5577,339 @@ NB_MODULE(draken_native, m) {
             throw nb::python_error();
         },
         "Bridge test: draken_vector_unwrap on non-Vector must raise TypeError.");
+
+    // _frame_arena_smoke_test — exercise the frame_arena lifecycle in C++ and
+    // report per-step results. Returns a dict of {step_name: bool} so the
+    // Python test can assert each independently. The void* API doesn't lend
+    // itself to Python-level testing directly; this wrapper drives it from
+    // C++ where the pointers are first-class.
+    m.def("_frame_arena_smoke_test",
+        []() -> nb::dict {
+            nb::dict r;
+
+            // 1. create → returns non-null, size == 0
+            DrakenFrameArena* a = draken_frame_arena_create();
+            r["create_returns_non_null"] = (a != nullptr);
+            r["initial_size_zero"]       = (draken_frame_arena_size(a) == 0);
+
+            // 2. alloc twice → size == 2, both pointers non-null
+            void* p1 = draken_frame_arena_alloc(a, 64);
+            void* p2 = draken_frame_arena_alloc(a, 128);
+            r["alloc1_non_null"] = (p1 != nullptr);
+            r["alloc2_non_null"] = (p2 != nullptr);
+            r["size_after_two_allocs"] = (draken_frame_arena_size(a) == 2);
+
+            // 3. write to the buffers to verify they're usable memory
+            std::memset(p1, 0xAB, 64);
+            std::memset(p2, 0xCD, 128);
+            r["buffers_writable"] =
+                (static_cast<uint8_t*>(p1)[0] == 0xAB) &&
+                (static_cast<uint8_t*>(p2)[127] == 0xCD);
+
+            // 4. release p1 → size == 1, p1 still valid (we own it now)
+            draken_frame_arena_release(a, p1);
+            r["size_after_release"] = (draken_frame_arena_size(a) == 1);
+
+            // We own p1 now; verify by writing again (would be UAF if arena
+            // had freed it on release).
+            std::memset(p1, 0xEF, 64);
+            r["released_ptr_still_writable"] =
+                (static_cast<uint8_t*>(p1)[0] == 0xEF);
+
+            // 5. release of NULL and of an untracked ptr are no-ops
+            draken_frame_arena_release(a, nullptr);
+            int sentinel;
+            draken_frame_arena_release(a, &sentinel);
+            r["size_unchanged_after_noop_releases"] =
+                (draken_frame_arena_size(a) == 1);
+
+            // 6. destroy → frees p2 (still tracked), leaves p1 alone (we own it)
+            draken_frame_arena_destroy(a);
+            // We can't directly verify p2 was freed without poking at
+            // allocator internals; we verify by destroying twice (second is
+            // a no-op when a == nullptr-equivalent), and by freeing p1
+            // ourselves to confirm the OWNS semantics.
+            draken_free(p1);                       // we own p1; this must not UAF
+            draken_frame_arena_destroy(nullptr);   // null no-op
+            r["destroy_null_is_noop"] = true;
+            r["caller_can_free_released"] = true;  // reached without crash
+
+            // 7. alloc after create-with-zero
+            DrakenFrameArena* a2 = draken_frame_arena_create();
+            void* p3 = draken_frame_arena_alloc(a2, 0);
+            // size==0 alloc behaviour: implementation-defined; we just verify
+            // it doesn't crash and is tracked if non-null.
+            r["zero_alloc_did_not_crash"] = true;
+            if (p3 != nullptr) {
+                r["zero_alloc_tracked"] = (draken_frame_arena_size(a2) == 1);
+            } else {
+                r["zero_alloc_tracked"] = true;  // OOM path is also valid
+            }
+            draken_frame_arena_destroy(a2);
+
+            // 8. adopt: ingest a draken_malloc'd buffer into the arena.
+            DrakenFrameArena* a3 = draken_frame_arena_create();
+            void* externally_alloc = draken_malloc(32);
+            draken_frame_arena_adopt(a3, externally_alloc);
+            r["adopt_increments_size"] = (draken_frame_arena_size(a3) == 1);
+            // destroy frees the adopted pointer (no need for caller to free).
+            draken_frame_arena_destroy(a3);
+            r["adopt_freed_on_destroy"] = true;  // reached without crash
+
+            // 9. adopt + release of the adopted pointer: caller owns it back.
+            DrakenFrameArena* a4 = draken_frame_arena_create();
+            void* externally_alloc2 = draken_malloc(32);
+            draken_frame_arena_adopt(a4, externally_alloc2);
+            draken_frame_arena_release(a4, externally_alloc2);
+            r["adopt_then_release_size_zero"] = (draken_frame_arena_size(a4) == 0);
+            draken_frame_arena_destroy(a4);
+            draken_free(externally_alloc2);   // caller owns; must not UAF
+            r["adopt_then_release_caller_owns"] = true;
+
+            // 10. adopt of NULL is a no-op.
+            DrakenFrameArena* a5 = draken_frame_arena_create();
+            draken_frame_arena_adopt(a5, nullptr);
+            r["adopt_null_is_noop"] = (draken_frame_arena_size(a5) == 0);
+            draken_frame_arena_destroy(a5);
+
+            return r;
+        },
+        "Frame-arena smoke test (C++-side lifecycle). Returns dict of "
+        "{step_name: passed}. Used by draken/tests/native/test_frame_arena.py.");
+
+    // _compare_dv_smoke_test — exercise draken_compare_dv end-to-end against
+    // INT64 and FLOAT64 inputs, verifying that:
+    //   * result type is DRAKEN_BOOL with correct length
+    //   * bitmap contents match expected per-row results
+    //   * unsupported types return NULL (caller's fallback signal)
+    //   * cross-type operands return NULL
+    //   * length mismatch returns NULL
+    //   * arena destroy cleans up without UAF
+    //
+    // Returns dict of {step_name: bool} for the Python test to assert on.
+    m.def("_compare_dv_smoke_test",
+        []() -> nb::dict {
+            nb::dict r;
+            DrakenFrameArena* arena = draken_frame_arena_create();
+            if (arena == nullptr) {
+                r["arena_create"] = false;
+                return r;
+            }
+            r["arena_create"] = true;
+
+            // ---- INT64 EQ ----
+            // left  = [1, 2, 3, 4]
+            // right = [1, 5, 3, 9]
+            // EQ    = [T, F, T, F]  →  bitmap = 0b0101 = 0x05
+            const uint32_t n = 4;
+            int64_t* ldata = static_cast<int64_t*>(draken_malloc(n * sizeof(int64_t)));
+            int64_t* rdata = static_cast<int64_t*>(draken_malloc(n * sizeof(int64_t)));
+            ldata[0] = 1; ldata[1] = 2; ldata[2] = 3; ldata[3] = 4;
+            rdata[0] = 1; rdata[1] = 5; rdata[2] = 3; rdata[3] = 9;
+            DrakenVector lv = draken_vector_from_dense(ldata, n, DRAKEN_INT64, nullptr);
+            DrakenVector rv = draken_vector_from_dense(rdata, n, DRAKEN_INT64, nullptr);
+
+            DrakenVector* res = draken_compare_dv(0, &lv, &rv, 0, 0, n, arena);
+            r["int64_eq_returns_non_null"] = (res != nullptr);
+            if (res != nullptr) {
+                r["int64_eq_result_is_bool"] = (res->type == DRAKEN_BOOL);
+                r["int64_eq_result_length"] = (res->length == n);
+                const uint8_t* bits = static_cast<const uint8_t*>(res->data);
+                // Bit i = (left[sel[i]] == right[sel[i]]).
+                uint8_t got = 0u;
+                for (uint32_t i = 0; i < n; ++i) {
+                    if ((bits[i >> 3] >> (i & 7)) & 1u) got |= static_cast<uint8_t>(1u << i);
+                }
+                r["int64_eq_bitmap"] = (got == 0x05u);  // 0b0101: rows 0 and 2
+            }
+            draken_free(ldata);
+            draken_free(rdata);
+
+            // ---- FLOAT64 LT ----
+            // left  = [1.0, 2.0, 3.0]
+            // right = [2.0, 2.0, 1.0]
+            // LT    = [T, F, F] → bitmap = 0b001 = 0x01
+            const uint32_t fn = 3;
+            double* fldata = static_cast<double*>(draken_malloc(fn * sizeof(double)));
+            double* frdata = static_cast<double*>(draken_malloc(fn * sizeof(double)));
+            fldata[0] = 1.0; fldata[1] = 2.0; fldata[2] = 3.0;
+            frdata[0] = 2.0; frdata[1] = 2.0; frdata[2] = 1.0;
+            DrakenVector flv = draken_vector_from_dense(fldata, fn, DRAKEN_FLOAT64, nullptr);
+            DrakenVector frv = draken_vector_from_dense(frdata, fn, DRAKEN_FLOAT64, nullptr);
+
+            DrakenVector* fres = draken_compare_dv(4, &flv, &frv, 0, 0, fn, arena);  // op 4 = LT
+            r["float64_lt_returns_non_null"] = (fres != nullptr);
+            if (fres != nullptr) {
+                r["float64_lt_result_is_bool"] = (fres->type == DRAKEN_BOOL);
+                const uint8_t* fbits = static_cast<const uint8_t*>(fres->data);
+                uint8_t fgot = 0u;
+                for (uint32_t i = 0; i < fn; ++i) {
+                    if ((fbits[i >> 3] >> (i & 7)) & 1u) fgot |= static_cast<uint8_t>(1u << i);
+                }
+                r["float64_lt_bitmap"] = (fgot == 0x01u);  // 0b001: row 0 only
+            }
+            draken_free(fldata);
+            draken_free(frdata);
+
+            // ---- Unsupported type: BOOL on either side → NULL ----
+            const uint32_t bn = 2;
+            uint8_t* bldata = static_cast<uint8_t*>(draken_malloc(8));
+            uint8_t* brdata = static_cast<uint8_t*>(draken_malloc(8));
+            std::memset(bldata, 0, 8); std::memset(brdata, 0, 8);
+            DrakenVector blv = draken_vector_from_dense(bldata, bn, DRAKEN_BOOL, nullptr);
+            DrakenVector brv = draken_vector_from_dense(brdata, bn, DRAKEN_BOOL, nullptr);
+            DrakenVector* bres = draken_compare_dv(0, &blv, &brv, 0, 0, bn, arena);
+            r["unsupported_type_returns_null"] = (bres == nullptr);
+            draken_free(bldata);
+            draken_free(brdata);
+
+            // ---- Cross-type (INT64 vs FLOAT64) → NULL ----
+            int64_t* cldata = static_cast<int64_t*>(draken_malloc(8));
+            double*  crdata = static_cast<double*>(draken_malloc(8));
+            cldata[0] = 1;
+            crdata[0] = 1.0;
+            DrakenVector clv = draken_vector_from_dense(cldata, 1, DRAKEN_INT64, nullptr);
+            DrakenVector crv = draken_vector_from_dense(crdata, 1, DRAKEN_FLOAT64, nullptr);
+            DrakenVector* cres = draken_compare_dv(0, &clv, &crv, 0, 0, 1, arena);
+            r["cross_type_returns_null"] = (cres == nullptr);
+            draken_free(cldata);
+            draken_free(crdata);
+
+            // ---- Length mismatch → NULL ----
+            int64_t* mldata = static_cast<int64_t*>(draken_malloc(16));
+            int64_t* mrdata = static_cast<int64_t*>(draken_malloc(8));
+            mldata[0] = 1; mldata[1] = 2;
+            mrdata[0] = 1;
+            DrakenVector mlv = draken_vector_from_dense(mldata, 2, DRAKEN_INT64, nullptr);
+            DrakenVector mrv = draken_vector_from_dense(mrdata, 1, DRAKEN_INT64, nullptr);
+            DrakenVector* mres = draken_compare_dv(0, &mlv, &mrv, 0, 0, 2, arena);
+            r["length_mismatch_returns_null"] = (mres == nullptr);
+            draken_free(mldata);
+            draken_free(mrdata);
+
+            // ---- Out-of-range op_code → NULL ----
+            int64_t* oldata = static_cast<int64_t*>(draken_malloc(8));
+            int64_t* ordata = static_cast<int64_t*>(draken_malloc(8));
+            oldata[0] = 1; ordata[0] = 1;
+            DrakenVector olv = draken_vector_from_dense(oldata, 1, DRAKEN_INT64, nullptr);
+            DrakenVector orv = draken_vector_from_dense(ordata, 1, DRAKEN_INT64, nullptr);
+            DrakenVector* ores = draken_compare_dv(99, &olv, &orv, 0, 0, 1, arena);
+            r["bad_op_code_returns_null"] = (ores == nullptr);
+            draken_free(oldata);
+            draken_free(ordata);
+
+            // ---- NULL inputs → NULL ----
+            DrakenVector* nres = draken_compare_dv(0, nullptr, &olv, 0, 0, 1, arena);
+            r["null_input_returns_null"] = (nres == nullptr);
+
+            // ---- Destroy frees the result vector + adopted buffers ----
+            draken_frame_arena_destroy(arena);
+            r["destroy_no_crash"] = true;
+            return r;
+        },
+        "Compare-dv smoke test (C++-side end-to-end). Returns dict of "
+        "{step_name: passed}. Used by draken/tests/native/test_compare_dv.py.");
+
+    // _arithmetic_dv_smoke_test — exercise draken_arithmetic_dv end-to-end.
+    // Mirrors the compare_dv smoke test pattern.
+    m.def("_arithmetic_dv_smoke_test",
+        []() -> nb::dict {
+            nb::dict r;
+            DrakenFrameArena* arena = draken_frame_arena_create();
+            r["arena_create"] = (arena != nullptr);
+            if (arena == nullptr) return r;
+
+            // ---- INT64 PLUS ----
+            // a = [10, 20, 30], b = [1, 2, 3], a+b = [11, 22, 33]
+            const uint32_t n = 3;
+            int64_t* ldata = static_cast<int64_t*>(draken_malloc(n * sizeof(int64_t)));
+            int64_t* rdata = static_cast<int64_t*>(draken_malloc(n * sizeof(int64_t)));
+            ldata[0] = 10; ldata[1] = 20; ldata[2] = 30;
+            rdata[0] = 1;  rdata[1] = 2;  rdata[2] = 3;
+            DrakenVector lv = draken_vector_from_dense(ldata, n, DRAKEN_INT64, nullptr);
+            DrakenVector rv = draken_vector_from_dense(rdata, n, DRAKEN_INT64, nullptr);
+
+            DrakenVector* res = draken_arithmetic_dv(1, &lv, &rv, n, arena);  // PLUS
+            r["int64_plus_returns_non_null"] = (res != nullptr);
+            if (res != nullptr) {
+                r["int64_plus_result_is_int64"] = (res->type == DRAKEN_INT64);
+                r["int64_plus_length"] = (res->length == n);
+                const int64_t* d = static_cast<const int64_t*>(res->data);
+                r["int64_plus_values"] =
+                    (d[res->selection[0]] == 11) &&
+                    (d[res->selection[1]] == 22) &&
+                    (d[res->selection[2]] == 33);
+            }
+            draken_free(ldata);
+            draken_free(rdata);
+
+            // ---- FLOAT64 MULTIPLY ----
+            // a = [1.5, 2.5], b = [2.0, 4.0], a*b = [3.0, 10.0]
+            const uint32_t fn = 2;
+            double* fldata = static_cast<double*>(draken_malloc(fn * sizeof(double)));
+            double* frdata = static_cast<double*>(draken_malloc(fn * sizeof(double)));
+            fldata[0] = 1.5; fldata[1] = 2.5;
+            frdata[0] = 2.0; frdata[1] = 4.0;
+            DrakenVector flv = draken_vector_from_dense(fldata, fn, DRAKEN_FLOAT64, nullptr);
+            DrakenVector frv = draken_vector_from_dense(frdata, fn, DRAKEN_FLOAT64, nullptr);
+
+            DrakenVector* fres = draken_arithmetic_dv(3, &flv, &frv, fn, arena);  // MULTIPLY
+            r["float64_mul_returns_non_null"] = (fres != nullptr);
+            if (fres != nullptr) {
+                r["float64_mul_result_is_float64"] = (fres->type == DRAKEN_FLOAT64);
+                const double* fd = static_cast<const double*>(fres->data);
+                r["float64_mul_values"] =
+                    (fd[fres->selection[0]] == 3.0) &&
+                    (fd[fres->selection[1]] == 10.0);
+            }
+            draken_free(fldata);
+            draken_free(frdata);
+
+            // ---- Cross-type returns NULL ----
+            int64_t* cldata = static_cast<int64_t*>(draken_malloc(8));  cldata[0] = 1;
+            double*  crdata = static_cast<double*>(draken_malloc(8));   crdata[0] = 1.0;
+            DrakenVector clv = draken_vector_from_dense(cldata, 1, DRAKEN_INT64, nullptr);
+            DrakenVector crv = draken_vector_from_dense(crdata, 1, DRAKEN_FLOAT64, nullptr);
+            DrakenVector* cres = draken_arithmetic_dv(1, &clv, &crv, 1, arena);
+            r["cross_type_returns_null"] = (cres == nullptr);
+            draken_free(cldata);
+            draken_free(crdata);
+
+            // ---- Out-of-range op_code (e.g. BOP_STRING_CONCAT=7) → NULL ----
+            int64_t* sldata = static_cast<int64_t*>(draken_malloc(8));  sldata[0] = 1;
+            int64_t* srdata = static_cast<int64_t*>(draken_malloc(8));  srdata[0] = 1;
+            DrakenVector slv = draken_vector_from_dense(sldata, 1, DRAKEN_INT64, nullptr);
+            DrakenVector srv = draken_vector_from_dense(srdata, 1, DRAKEN_INT64, nullptr);
+            DrakenVector* sres = draken_arithmetic_dv(7, &slv, &srv, 1, arena);
+            r["bad_op_returns_null"] = (sres == nullptr);
+            draken_free(sldata);
+            draken_free(srdata);
+
+            // ---- Unsupported type (BOOL) → NULL ----
+            uint8_t* bldata = static_cast<uint8_t*>(draken_malloc(8));
+            uint8_t* brdata = static_cast<uint8_t*>(draken_malloc(8));
+            std::memset(bldata, 0, 8); std::memset(brdata, 0, 8);
+            DrakenVector blv = draken_vector_from_dense(bldata, 2, DRAKEN_BOOL, nullptr);
+            DrakenVector brv = draken_vector_from_dense(brdata, 2, DRAKEN_BOOL, nullptr);
+            DrakenVector* bres = draken_arithmetic_dv(1, &blv, &brv, 2, arena);
+            r["unsupported_type_returns_null"] = (bres == nullptr);
+            draken_free(bldata);
+            draken_free(brdata);
+
+            // ---- Length mismatch → NULL ----
+            int64_t* mldata = static_cast<int64_t*>(draken_malloc(16));
+            int64_t* mrdata = static_cast<int64_t*>(draken_malloc(8));
+            mldata[0] = 1; mldata[1] = 2; mrdata[0] = 1;
+            DrakenVector mlv = draken_vector_from_dense(mldata, 2, DRAKEN_INT64, nullptr);
+            DrakenVector mrv = draken_vector_from_dense(mrdata, 1, DRAKEN_INT64, nullptr);
+            DrakenVector* mres = draken_arithmetic_dv(1, &mlv, &mrv, 2, arena);
+            r["length_mismatch_returns_null"] = (mres == nullptr);
+            draken_free(mldata);
+            draken_free(mrdata);
+
+            draken_frame_arena_destroy(arena);
+            r["destroy_no_crash"] = true;
+            return r;
+        },
+        "Arithmetic-dv smoke test. Returns {step_name: passed}.");
 }

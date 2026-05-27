@@ -9,6 +9,7 @@
 # PyObject. See CLAUDE.md §2/§3.
 
 from cpython.ref cimport PyObject
+from libc.stdint cimport int16_t
 from libcpp.vector cimport vector
 
 
@@ -47,6 +48,52 @@ cdef class CompiledExpressionHandle:
 # methods directly.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Type codes for left_type_code / right_type_code in BytecodeInstr.
+# Only temporal types need to be distinguished at execution time; all other
+# types are handled by vector-type dispatch inside the kernels.
+# ---------------------------------------------------------------------------
+cdef enum BCTypeCode:
+    BC_TYPE_NONE      = 0   # no type / not a temporal type
+    BC_TYPE_DATE      = 1   # OrsoTypes.DATE
+    BC_TYPE_TIMESTAMP = 2   # OrsoTypes.TIMESTAMP
+
+
+# ---------------------------------------------------------------------------
+# Binary operator codes for BytecodeInstr.op_code (BC_BINARY_OP instructions).
+# ---------------------------------------------------------------------------
+cdef enum BCBinaryOpCode:
+    BOP_UNKNOWN       = 0
+    BOP_PLUS          = 1
+    BOP_MINUS         = 2
+    BOP_MULTIPLY      = 3
+    BOP_DIVIDE        = 4
+    BOP_MODULO        = 5
+    BOP_INT_DIVIDE    = 6
+    BOP_STRING_CONCAT = 7
+    BOP_BITWISE_OR    = 8
+    BOP_BITWISE_AND   = 9
+    BOP_BITWISE_XOR   = 10
+    BOP_SHIFT_LEFT    = 11
+    BOP_SHIFT_RIGHT   = 12
+
+
+# ---------------------------------------------------------------------------
+# Unary operator codes for BytecodeInstr.op_code (BC_UNARY_OP instructions).
+# ---------------------------------------------------------------------------
+cdef enum BCUnaryOpCode:
+    UOP_UNKNOWN      = 0
+    UOP_IS_NULL      = 1
+    UOP_IS_NOT_NULL  = 2
+    UOP_IS_EMPTY     = 3
+    UOP_IS_NOT_EMPTY = 4
+    UOP_BITWISE_NOT  = 5
+    UOP_IS_TRUE      = 6
+    UOP_IS_NOT_FALSE = 7
+    UOP_IS_FALSE     = 8
+    UOP_IS_NOT_TRUE  = 9
+
+
 # Opcode values — keep in sync with the executor switch in evaluation.pyx.
 cdef enum BCOpcode:
     BC_LOAD_COL          = 1
@@ -66,6 +113,7 @@ cdef enum BCOpcode:
     BC_FUNCTION          = 15
     BC_EXTRACTION        = 16
     BC_CAST              = 17
+    BC_CASE              = 18
     BC_LEGACY            = 99
 
 
@@ -73,6 +121,12 @@ cdef enum BCOpcode:
 cdef enum BCCompareFlag:
     BC_CMP_LEFT_TEMPORAL  = 1
     BC_CMP_RIGHT_TEMPORAL = 2
+    # Right operand is a set/list literal folded into literal_obj at bind time.
+    # BC_COMPARE pops only ONE item from the stack (the left/column operand);
+    # the right operand (set/list/CarcharSet) is read from slot.literal_obj.
+    # This eliminates BC_LOAD_LIT_SET as a stack operand — sets can never be
+    # DrakenVector* so they must not appear on the execution stack.
+    BC_CMP_INLIST_INLINE  = 4
 
 
 ctypedef struct BytecodeInstr:
@@ -83,9 +137,9 @@ ctypedef struct BytecodeInstr:
     int bool_value           # 0/1 for BC_LOAD_LIT_BOOL
     PyObject* literal_obj    # for BC_LOAD_LIT_SCALAR / BC_LOAD_LIT_SET; lower bound for BC_BETWEEN; key for BC_EXTRACTION
     PyObject* literal_obj2   # upper bound scalar for BC_BETWEEN
-    PyObject* compare_op_str # for BC_COMPARE; op string for BC_BINARY_OP / BC_UNARY_OP / BC_EXTRACTION
-    PyObject* left_orso_type # for BC_COMPARE / BC_BINARY_OP — OrsoTypes enum or Py_None
-    PyObject* right_orso_type
+    PyObject* compare_op_str # for BC_COMPARE (AnyOp fallback); op string for BC_BINARY_OP / BC_EXTRACTION
+    int16_t left_type_code   # BCTypeCode: BC_TYPE_NONE / DATE / TIMESTAMP for BC_COMPARE / BC_BINARY_OP
+    int16_t right_type_code  # BCTypeCode: BC_TYPE_NONE / DATE / TIMESTAMP for BC_COMPARE / BC_BINARY_OP
     PyObject* column_identity # for BC_LOAD_COL — bytes
     PyObject* column_name     # for BC_LOAD_COL — bytes
     PyObject* source_node     # for BC_LEGACY — Node

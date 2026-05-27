@@ -9,6 +9,8 @@ this layer is dispatch: pick the right kernel based on the right-hand
 operand's class and the requested op string.
 """
 
+from libc.stdint cimport int16_t
+
 from opteryx.compiled.nanobind.vector_misc import vector_in_list
 from opteryx.types import OrsoTypes
 
@@ -37,15 +39,19 @@ cdef _compare_timestamp_date32_vectors(int op_code, ts_vec, d_vec):
     return ts_vec._compare_vector(d_as_ts, _DRAKEN_CMP_OP[op_code])
 
 
-cdef _int64_temporal_compare(int op_code, vec, right, temporal_type):
+cdef _int64_temporal_compare(int op_code, vec, right, int16_t temporal_type):
+    """Compare an int64-backed temporal vector against `right`.
+
+    `temporal_type` is a BCTypeCode integer (BC_TYPE_DATE=1, BC_TYPE_TIMESTAMP=2).
+    """
     cdef bint is_timestamp
     cdef bint is_date
 
     if right is None:
         return BoolVector(len(vec))
 
-    is_timestamp = temporal_type == OrsoTypes.TIMESTAMP
-    is_date = temporal_type == OrsoTypes.DATE
+    is_timestamp = temporal_type == BC_TYPE_TIMESTAMP
+    is_date = temporal_type == BC_TYPE_DATE
     if not (is_timestamp or is_date):
         raise NotImplementedError(
             f"_int64_temporal_compare: non-temporal type {temporal_type!r}"

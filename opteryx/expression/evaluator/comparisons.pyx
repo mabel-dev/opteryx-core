@@ -27,6 +27,8 @@ from opteryx.compiled.nanobind.vector_array_reduce import (
     vector_anyop_lte,
 )
 from opteryx.compiled.nanobind.vector_string_search import vector_contains
+from libc.stdint cimport int16_t
+
 from opteryx.compiled.nanobind.vector_misc import vector_in_list
 from opteryx.types import OrsoTypes
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
@@ -185,12 +187,14 @@ cdef _bool_compare(int op_code, left, right):
 # Main dispatch — int-op variant (used by bytecode executor)
 # ---------------------------------------------------------------------------
 
-cdef draken_compare_int(int op_code, left, right, left_schema_type=None, right_schema_type=None):
-    """Same as draken_compare but takes a pre-computed integer op_code.
+cdef draken_compare_int(int op_code, left, right, int16_t left_schema_type=0, int16_t right_schema_type=0):
+    """Same as draken_compare but takes pre-computed integer op_code and BCTypeCode type codes.
 
     Called by execute_bytecode() for BC_COMPARE instructions where
     slot.op_code != OP_UNKNOWN.  Skips the string→int translation and the
     AnyOp/AllOp/JSON string-dispatch chain that draken_compare() must walk.
+    left_schema_type / right_schema_type are BCTypeCode values (BC_TYPE_NONE=0,
+    BC_TYPE_DATE=1, BC_TYPE_TIMESTAMP=2) — never Python objects.
     """
     # Map negated op codes to their positive counterpart and set negate flag.
     # All "Not" variants are: NotEq=2, NotInList=8, NotLike=10, NotILike=12,
@@ -228,7 +232,7 @@ cdef draken_compare_int(int op_code, left, right, left_schema_type=None, right_s
     if vec_type == VectorType.STRING:
         result = _string_compare(op_code, left, right)
     elif vec_type in (VectorType.INT64, VectorType.INTEGER):
-        if left_schema_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP):
+        if left_schema_type == BC_TYPE_DATE or left_schema_type == BC_TYPE_TIMESTAMP:
             result = _int64_temporal_compare(op_code, left, right, left_schema_type)
         else:
             result = _int64_compare(op_code, left, right)
@@ -322,11 +326,17 @@ cpdef draken_compare(str op, left, right, left_schema_type=None, right_schema_ty
 
     vec_type = get_vector_type(left)
 
+    cdef int16_t left_tc = (
+        BC_TYPE_DATE if left_schema_type is OrsoTypes.DATE else
+        BC_TYPE_TIMESTAMP if left_schema_type is OrsoTypes.TIMESTAMP else
+        BC_TYPE_NONE
+    )
+
     if vec_type == VectorType.STRING:
         result = _string_compare(op_code, left, right)
     elif vec_type in (VectorType.INT64, VectorType.INTEGER):
-        if left_schema_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP):
-            result = _int64_temporal_compare(op_code, left, right, left_schema_type)
+        if left_tc == BC_TYPE_DATE or left_tc == BC_TYPE_TIMESTAMP:
+            result = _int64_temporal_compare(op_code, left, right, left_tc)
         else:
             result = _int64_compare(op_code, left, right)
     elif vec_type == VectorType.FLOAT64:
