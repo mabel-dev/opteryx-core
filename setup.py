@@ -706,6 +706,18 @@ extensions = [
             "draken/core/frame_arena.cpp",  # per-frame allocator for native eval engine
             "draken/ops/compare_dv.cpp",    # arena-backed compare entry point
             "draken/ops/arithmetic_dv.cpp", # arena-backed arithmetic entry point
+            # Phase 9a: C kernel ABI implementations
+            "draken/ops/kernels/error_handling.cpp",
+            "draken/ops/kernels/kernel_registry.cpp",
+            "draken/ops/kernels/cast_numeric.cpp",
+            "draken/ops/kernels/cast_string.cpp",
+            "draken/ops/kernels/cast_temporal.cpp",
+            "draken/ops/kernels/cast_dispatch.cpp",
+            "draken/ops/kernels/extraction.cpp",
+            "draken/ops/kernels/binary_op_arithmetic.cpp",
+            "draken/ops/kernels/binary_op_other.cpp",
+            "draken/ops/kernels/binary_op_temporal.cpp",
+            # Function kernels deferred to Phase 9f; they require nanobind wrappers not yet ported to extern "C"
             # Milestone C.1: hash op depends on simd_hash_i64 / simd_mix_hash.
             "src/cpp/simd_hash.cpp",
             "src/cpp/simd_env.cpp",
@@ -732,6 +744,51 @@ extensions = [
             "draken/core/vector_alloc.h",
             "draken/ops/hash.h",
             "src/cpp/simd_hash.h",
+            # Phase 9a: kernel ABI headers
+            "draken/ops/kernels/c_kernel_abi.h",
+            "draken/ops/kernels/error_handling.h",
+            "draken/ops/kernels/kernel_registry.h",
+            "draken/ops/kernels/kernel_context.h",
+            "draken/ops/kernels/cast_kernels.h",
+            "draken/ops/kernels/binary_op_kernels.h",
+            "draken/ops/kernels/extraction_kernels.h",
+            "draken/ops/kernels/function_kernels.h",
+        ],
+    ),
+    # Phase 9a: C kernel registry lookup wrapper (Cython interface for bytecode builder/executor)
+    Extension(
+        "draken.ops.kernels._kernel_registry",
+        sources=[
+            "draken/ops/kernels/_kernel_registry.pyx",
+            "draken/ops/kernels/error_handling.cpp",
+            "draken/ops/kernels/kernel_registry.cpp",
+            "draken/ops/kernels/cast_numeric.cpp",
+            "draken/ops/kernels/cast_string.cpp",
+            "draken/ops/kernels/cast_temporal.cpp",
+            "draken/ops/kernels/cast_dispatch.cpp",
+            "draken/ops/kernels/extraction.cpp",
+            "draken/ops/kernels/binary_op_arithmetic.cpp",
+            "draken/ops/kernels/binary_op_other.cpp",
+            "draken/ops/kernels/binary_op_temporal.cpp",
+            # Function kernels deferred to Phase 9f
+            "src/cpp/simd_hash.cpp",
+            "src/cpp/simd_env.cpp",
+            "src/cpp/cpu_features.cpp",
+        ],
+        include_dirs=include_dirs + [MIMALLOC_INCLUDE],
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+        extra_objects=[MIMALLOC_OBJ],
+        language="c++",
+        depends=[
+            "draken/ops/kernels/c_kernel_abi.h",
+            "draken/ops/kernels/error_handling.h",
+            "draken/ops/kernels/kernel_registry.h",
+            "draken/ops/kernels/kernel_context.h",
+            "draken/ops/kernels/cast_kernels.h",
+            "draken/ops/kernels/binary_op_kernels.h",
+            "draken/ops/kernels/extraction_kernels.h",
+            "draken/ops/kernels/function_kernels.h",
         ],
     ),
     # E.24 Cython shims — real compiled extensions providing __pyx_vtable__

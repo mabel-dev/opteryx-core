@@ -25,6 +25,7 @@ from cpython.ref cimport PyObject, Py_INCREF
 from libc.string cimport memset
 
 import draken.draken_native as _draken_native
+from opteryx.exceptions import IncorrectTypeError
 
 
 # ---------------------------------------------------------------------------
@@ -59,8 +60,19 @@ DEF _NT_BETWEEN = 47
 cdef dict _OP_CODES = None
 cdef object _OrsoTypes_DATE = None
 cdef object _OrsoTypes_TIMESTAMP = None
+cdef object _OrsoTypes_BOOLEAN = None
+cdef object _OrsoTypes_VARCHAR = None
+cdef object _OrsoTypes_ARRAY = None
+cdef object _OrsoTypes_BLOB = None
+cdef tuple _STRING_FAMILY = ()
 cdef type _CarcharSetWrapper_t = None
 cdef type _PerfectHashSet_t = None
+
+# Result-handling flag bits (read by execute_bytecode after kernel return).
+# Set at bind time; used to dispatch result wrapping without isinstance/type checks.
+BC_RESULT_NEEDS_NB_WRAP = 0x10  # result is a raw nanobind Vector → wrap in Cython shim
+BC_RESULT_WRAP_AS_BOOL  = 0x20  # wrap as BoolVector (else Vector); valid only with NEEDS_NB_WRAP
+BC_RESULT_NO_DV         = 0x40  # result has no DV* (constant / scalar / not a vector) → store NULL in dv_stack
 
 # Binary op string → BCBinaryOpCode. Built once at first use.
 _BOP_CODE = {
@@ -111,11 +123,18 @@ cdef inline dict _get_op_codes():
 
 
 cdef inline _ensure_orso_types():
-    global _OrsoTypes_DATE, _OrsoTypes_TIMESTAMP
+    global _OrsoTypes_DATE, _OrsoTypes_TIMESTAMP, _OrsoTypes_BOOLEAN
+    global _OrsoTypes_VARCHAR, _OrsoTypes_ARRAY, _OrsoTypes_BLOB
+    global _STRING_FAMILY
     if _OrsoTypes_DATE is None:
         from opteryx.types import OrsoTypes
         _OrsoTypes_DATE = OrsoTypes.DATE
         _OrsoTypes_TIMESTAMP = OrsoTypes.TIMESTAMP
+        _OrsoTypes_BOOLEAN = OrsoTypes.BOOLEAN
+        _OrsoTypes_VARCHAR = OrsoTypes.VARCHAR
+        _OrsoTypes_ARRAY = OrsoTypes.ARRAY
+        _OrsoTypes_BLOB = OrsoTypes.BLOB
+        _STRING_FAMILY = (_OrsoTypes_VARCHAR, _OrsoTypes_BLOB)
 
 
 cdef inline _ensure_set_types():
@@ -387,6 +406,10 @@ cdef Py_ssize_t _linearize(
 
         op_codes = _get_op_codes()
         op_code_val = <int>op_codes.get(op_str, 0)
+        if op_code_val == 0:
+            raise NotImplementedError(
+                f"compiled_expression: unknown comparison operator {op_str!r}"
+            )
         _ensure_orso_types()
 
         flags = 0
@@ -401,8 +424,6 @@ cdef Py_ssize_t _linearize(
         slot.opcode = BC_COMPARE
         slot.op_code = op_code_val
         slot.flags = flags
-        bc._hold(op_str)
-        slot.compare_op_str = <PyObject*>op_str
         slot.left_type_code = _orso_type_to_code(left_type)
         slot.right_type_code = _orso_type_to_code(right_type)
         if right_is_inlist_literal:
@@ -437,8 +458,8 @@ cdef Py_ssize_t _linearize(
         return sub_depth   # pop 1, push 1 — net 0
 
     # ------------------------------------------------------------------
-    # NT_BINARY_OPERATOR — compile both operands, store op string and
-    # operand types for temporal coercion at execution.
+    # NT_BINARY_OPERATOR — Phase 6: resolve kernel at bind time, store
+    # callable ref. Operand types stored for introspection/debugging.
     # ------------------------------------------------------------------
     if nt == _NT_BINARY_OPERATOR:
         if node.left == NULL or node.right == NULL:
@@ -455,10 +476,23 @@ cdef Py_ssize_t _linearize(
         slot = bc._push_instr()
         slot.opcode = BC_BINARY_OP
         slot.op_code = <int>_BOP_CODE.get(bin_op_str, BOP_UNKNOWN)
-        bc._hold(bin_op_str)
-        slot.compare_op_str = <PyObject*>bin_op_str  # still needed for call_arithmetic_op
+        if slot.op_code == BOP_UNKNOWN:
+            raise NotImplementedError(f"compiled_expression: unknown binary op {bin_op_str!r}")
+
+        # Phase 6: resolve the kernel at bind time.
+        from opteryx.expression.evaluator.arithmetic import resolve_binary_op
+        binop_kernel = resolve_binary_op(slot.op_code, bin_left_type, bin_right_type)
+        bc._hold(binop_kernel)
+        slot.callable_ref = <PyObject*>binop_kernel
+
+        # Phase 1 result-wrap pattern: kernels return nanobind Vectors.
+        slot.flags |= BC_RESULT_NEEDS_NB_WRAP
+        # Binary ops never return BOOL, so BC_RESULT_WRAP_AS_BOOL stays false.
+
+        # Keep type codes for debugging / introspection (not used in executor).
         slot.left_type_code = _orso_type_to_code(bin_left_type)
         slot.right_type_code = _orso_type_to_code(bin_right_type)
+        # Note: slot.compare_op_str no longer needed for BC_BINARY_OP, but field stays.
         return sub_depth - 1   # pop 2, push 1
 
     # ------------------------------------------------------------------
@@ -502,12 +536,24 @@ cdef Py_ssize_t _linearize(
                 raise ValueError("compiled_expression: FUNCTION parameter NULL")
             sub_depth = _linearize(node.parameters[i], bc, sub_depth)
 
+        # Pre-compute nb_func flag at bind time — eliminates runtime
+        # `type(callable).__name__ == "nb_func"` string comparison per call.
+        is_nb_callable = type(callable_obj).__name__ == "nb_func"
+
         slot = bc._push_instr()
         slot.opcode = BC_FUNCTION
         slot.arity = <int>n
-        # Pre-compute nb_func flag at bind time — eliminates runtime
-        # `type(callable).__name__ == "nb_func"` string comparison per call.
-        slot.bool_value = 1 if type(callable_obj).__name__ == "nb_func" else 0
+        slot.bool_value = 1 if is_nb_callable else 0
+
+        # Set result-wrap flags based on kernel return type (resolved at bind time).
+        # This eliminates runtime isinstance/type checks on the executor path.
+        slot.flags = 0
+        if is_nb_callable:
+            slot.flags |= BC_RESULT_NEEDS_NB_WRAP
+            _ensure_orso_types()
+            if func_ref_meta.inferred_return_type is _OrsoTypes_BOOLEAN:
+                slot.flags |= BC_RESULT_WRAP_AS_BOOL
+
         bc._hold(callable_obj)
         slot.callable_ref = <PyObject*>callable_obj
         if n == 0:
@@ -515,9 +561,9 @@ cdef Py_ssize_t _linearize(
         return sub_depth - n + 1   # pop n, push 1
 
     # ------------------------------------------------------------------
-    # NT_CAST — compile source expression, pre-resolve cast closure once.
-    # The cast() factory is called at compile time; the returned callable
-    # is stored as callable_ref and invoked per-morsel in the executor.
+    # NT_CAST — compile source expression, resolve at bind time.
+    # Phase 5: resolve_cast(source_orso, target_type, args, unit) returns a
+    # pre-specialized kernel/closure; stored as callable_ref, invoked per-morsel.
     # ------------------------------------------------------------------
     if nt == _NT_CAST:
         if node.left == NULL:
@@ -544,87 +590,196 @@ cdef Py_ssize_t _linearize(
             p.value for p in (cast_py_node.parameters or [])
         )
 
-        from opteryx.expression.casts import cast as _cast_factory
-        cast_kernel = _cast_factory(None, cast_target_type, cast_params, unit=cast_unit)
+        # Phase 5: get the source operand's type from schema_column for bind-time resolution.
+        source_orso_name = None
+        if node.left.schema_column != NULL:
+            src_sc = <object>node.left.schema_column
+            if src_sc is not None:
+                source_orso = src_sc.type
+                if source_orso is not None:
+                    # Extract the OrsoType name string (e.g., "INT64", "VARCHAR").
+                    source_orso_name = getattr(source_orso, "name", None)
+
+        from opteryx.expression.casts import resolve_cast
+        try:
+            cast_kernel = resolve_cast(source_orso_name, cast_target_type, cast_params, unit=cast_unit)
+        except (NotImplementedError, ValueError) as e:
+            raise ValueError(f"Unsupported CAST: {source_orso_name} → {cast_target_type}: {e}")
 
         slot = bc._push_instr()
         slot.opcode = BC_CAST
+        # Phase 5: determine NEEDS_NB_WRAP based on resolved kernel return type.
+        slot.flags = 0
+        _ensure_orso_types()
+
+        # Check if this is a no-op cast (source == target).
+        cast_target_orso = getattr(cast_py_node, "inferred_type", None)
+        is_noop_cast = (source_orso_name == cast_target_type or
+                        (source_orso == cast_target_orso and cast_target_orso is not None))
+
+        # Determine if the resolved kernel returns a nanobind Vector that needs wrapping.
+        # - Passthrough (no-op) casts return Cython Vectors → no wrap
+        # - cast_to_boolean returns a BoolVector (Cython) → no wrap
+        # - cast_to_varchar, cast_to_int, cast_to_double return nanobind Vectors → wrap
+        # - Native kernels (vector_cast_*) return nanobind Vectors → wrap
+        needs_nb_wrap = False
+        if not is_noop_cast and cast_target_type != "BOOLEAN":
+            # Non-trivial casts (except BOOLEAN) return nanobind Vectors.
+            needs_nb_wrap = True
+
+        if needs_nb_wrap:
+            slot.flags |= BC_RESULT_NEEDS_NB_WRAP
+
+        if cast_target_orso is _OrsoTypes_BOOLEAN:
+            slot.flags |= BC_RESULT_WRAP_AS_BOOL
+
         bc._hold(cast_kernel)
         slot.callable_ref = <PyObject*>cast_kernel
         return sub_depth   # pop 1, push 1 — net 0
 
     # ------------------------------------------------------------------
-    # NT_EXTRACTION_OPERATOR — pre-resolve callable and pre-build key
-    # vector at bind time. Eliminates inline imports and string dispatch
-    # from the execution hot path (Phase 2b).
+    # NT_EXTRACTION_OPERATOR — Phase 3: bind-time resolution
     #
-    # callable_ref  ← MapAccessOp / ArrowOp / LongArrowOp
-    # literal_obj   ← pre-built constant key Vector (length=1)
+    # Resolve (op_str, operand_type) → kernel + sub-op flag at bind time.
+    # No Python wrappers, no runtime type dispatch. The executor calls the
+    # resolved native kernel directly via the sub-op code in slot.op_code.
     #
-    # The executor: (<object>callable_ref)(v_left, <object>literal_obj)
+    # op_code stores the sub-op flag (BC_EXTR_MAP_STRING, etc.)
+    # literal_obj stores either:
+    #   - raw key bytes for JSON extraction (Arrow / LongArrow)
+    #   - length-1 INT64 key Vector for string map access
+    # bool_value stores:
+    #   - scalar int64 key for ARRAY map access (option B: store int directly)
     # ------------------------------------------------------------------
     if nt == _NT_EXTRACTION_OPERATOR:
         if node.left == NULL:
             raise ValueError("compiled_expression: EXTRACTION_OPERATOR missing left operand")
+
+        _ensure_orso_types()
         extr_op_str = <object>node.value
         extr_key = <object>node.right.value if node.right != NULL else None
 
+        # Resolve operand type from schema_column on the left operand node.
+        left_sc = <object>node.left.schema_column if node.left.schema_column != NULL else None
+        if left_sc is None:
+            raise ValueError("compiled_expression: EXTRACTION_OPERATOR left operand missing schema_column")
+        left_orso = left_sc.type
+
+        # Sub-op + kernel selection: resolve at bind time.
+        sub_op = BC_EXTR_UNKNOWN
+        extr_literal = None
+        slot_bool_val = 0
+
         if extr_op_str == "MapAccess":
-            from opteryx.expression.binary_operators import MapAccessOp
-            extr_callable = MapAccessOp
-            extr_key_vec = _draken_native.vector_from_constant(int(extr_key), 1)
+            if left_orso == _OrsoTypes_ARRAY:
+                # MapAccess on ARRAY: store scalar int64 key in bool_value (Option B).
+                # The scalar is extracted from the constant key at bind time.
+                sub_op = BC_EXTR_MAP_ARRAY
+                # Store the int64 key directly in bool_value.
+                slot_bool_val = int(extr_key)
+            elif left_orso in _STRING_FAMILY:
+                # MapAccess on string: store length-1 INT64 key Vector.
+                sub_op = BC_EXTR_MAP_STRING
+                extr_literal = _draken_native.vector_from_constant(int(extr_key), 1)
+            else:
+                raise IncorrectTypeError(
+                    f"MapAccess: operand must be ARRAY or string family; got {left_orso!r}"
+                )
         elif extr_op_str == "Arrow":
-            from opteryx.expression.binary_operators import ArrowOp
-            extr_callable = ArrowOp
-            extr_key_vec = _draken_native.vector_from_string_sequence(
-                [extr_key if isinstance(extr_key, bytes) else extr_key.encode("utf-8")]
-            )
+            if left_orso not in _STRING_FAMILY:
+                raise IncorrectTypeError(
+                    f"-> requires a string/JSON operand; got {left_orso!r}"
+                )
+            sub_op = BC_EXTR_JSON_PTR
+            # Store raw key bytes.
+            extr_literal = extr_key if isinstance(extr_key, bytes) else extr_key.encode("utf-8")
+        elif extr_op_str == "LongArrow":
+            if left_orso not in _STRING_FAMILY:
+                raise IncorrectTypeError(
+                    f"->> requires a string/JSON operand; got {left_orso!r}"
+                )
+            sub_op = BC_EXTR_JSON_KEY
+            # Store raw key bytes.
+            extr_literal = extr_key if isinstance(extr_key, bytes) else extr_key.encode("utf-8")
         else:
-            from opteryx.expression.binary_operators import LongArrowOp
-            extr_callable = LongArrowOp
-            extr_key_vec = _draken_native.vector_from_string_sequence(
-                [extr_key if isinstance(extr_key, bytes) else extr_key.encode("utf-8")]
-            )
+            raise ValueError(f"unknown EXTRACTION_OPERATOR: {extr_op_str!r}")
 
         sub_depth = _linearize(node.left, bc, depth)
         slot = bc._push_instr()
         slot.opcode = BC_EXTRACTION
-        bc._hold(extr_callable)
-        bc._hold(extr_key_vec)
-        slot.callable_ref = <PyObject*>extr_callable
-        slot.literal_obj = <PyObject*>extr_key_vec
+        slot.op_code = sub_op
+        slot.flags = BC_RESULT_NEEDS_NB_WRAP
+
+        # Store the extracted literal (bytes or Vector).
+        if extr_literal is not None:
+            bc._hold(extr_literal)
+            slot.literal_obj = <PyObject*>extr_literal
+        # For MapAccess ARRAY, the bool_value was set above.
+        if sub_op == BC_EXTR_MAP_ARRAY:
+            slot.bool_value = slot_bool_val
+
         return sub_depth   # pop 1, push 1 — net 0
 
     # ------------------------------------------------------------------
-    # NT_CASE — dedicated opcode; executor calls evaluate_case directly.
-    # Stores the Python node in source_node (borrowed ref kept alive by
-    # _held_refs). No children are linearised; evaluate_case recurses via
-    # the tree-walker, not the bytecode VM.
+    # NT_CASE — compile all WHEN conditions and THEN/ELSE results to
+    # bytecode at bind time; resolve output type and select assembly kernel
+    # at bind time; store a pre-built closure in callable_ref.
+    # At execution time BC_CASE simply calls callable_ref(morsel) — no
+    # runtime type dispatch.
     # ------------------------------------------------------------------
     if nt == _NT_CASE:
         src = <object>node.source_node
+
+        cond_bcs = [build_bytecode(lower(c)) for c in src.conditions]
+        result_bcs = [build_bytecode(lower(r)) for r in src.results]
+        else_bc = build_bytecode(lower(src.else_result)) if src.else_result is not None else None
+
+        # Phase 7: resolve output type from inferred types at bind time
+        _ensure_orso_types()
+        case_inferred_type = getattr(src, "inferred_type", None)
+
+        # Select the assembly kernel based on the inferred result type.
+        # All THEN/ELSE branches must agree on type (enforced by binder).
+        from opteryx.expression.evaluator.case_eval import build_case_fn
+
+        # Kernel type constants match the DEF values in case_eval.pyx
+        _ASSEMBLE_BOOL = 0
+        _ASSEMBLE_FIXED = 1
+        _ASSEMBLE_STRING = 2
+
+        # Determine kernel type from inferred type
+        if case_inferred_type is _OrsoTypes_BOOLEAN:
+            kernel_type = _ASSEMBLE_BOOL
+        elif case_inferred_type in (_OrsoTypes_VARCHAR, _OrsoTypes_BLOB):
+            kernel_type = _ASSEMBLE_STRING
+        elif case_inferred_type is None:
+            # Fallback when inferred_type is None: defer to runtime type dispatch.
+            # Use -1 as a sentinel to trigger runtime dispatch in build_case_fn.
+            kernel_type = -1
+        else:
+            # Fixed-width (numeric, date, timestamp, etc.)
+            kernel_type = _ASSEMBLE_FIXED
+
+        case_callable = build_case_fn(cond_bcs, result_bcs, else_bc, kernel_type)
+
         slot = bc._push_instr()
         slot.opcode = BC_CASE
-        bc._hold(src)
-        slot.source_node = <PyObject*>src
+        # CASE closure returns a nanobind Vector; set NEEDS_NB_WRAP.
+        slot.flags = BC_RESULT_NEEDS_NB_WRAP
+        if case_inferred_type is _OrsoTypes_BOOLEAN:
+            slot.flags |= BC_RESULT_WRAP_AS_BOOL
+        bc._hold(case_callable)
+        slot.callable_ref = <PyObject*>case_callable
         depth += 1
         if depth > bc.max_stack_depth:
             bc.max_stack_depth = depth
         return depth
 
     # ------------------------------------------------------------------
-    # Everything else — LEGACY: defer the whole subtree to _eval_value.
-    # BC_LEGACY should now be unreachable for all supported node types.
+    # Bind-time invariant: every supported node type has an explicit branch
+    # above. Reaching here is a planner/compiler bug.
     # ------------------------------------------------------------------
-    src = <object>node.source_node
-    slot = bc._push_instr()
-    slot.opcode = BC_LEGACY
-    bc._hold(src)
-    slot.source_node = <PyObject*>src
-    depth += 1
-    if depth > bc.max_stack_depth:
-        bc.max_stack_depth = depth
-    return depth
+    raise NotImplementedError(f"compiled_expression: unsupported node type {nt}")
 
 
 cdef _validate_temporal_at_bind(

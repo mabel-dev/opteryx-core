@@ -10,6 +10,7 @@ cdef class Morsel:
     cdef object _nb
     cdef public list _col_names
     cdef public list _columns
+    cdef public int _zero_col_num_rows
 
     # Resolve a Python list of column names (str or bytes), or None for
     # "all columns", to a freshly-malloc'd int32_t array of column indices.

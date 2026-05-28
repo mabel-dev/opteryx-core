@@ -155,7 +155,7 @@ class TestArithmeticIntegration:
 
 
 class TestArithmeticDispatchRefactoring:
-    """Validate Phase 4.4 refactoring objectives."""
+    """Validate Phase 6 refactoring objectives (bind-time resolution)."""
 
     def test_no_class_name_checks_in_arithmetic(self):
         """Verify no __class__.__name__ checks in refactored arithmetic.py."""
@@ -179,27 +179,16 @@ class TestArithmeticDispatchRefactoring:
         # Should use get_vector_type (introduced in Phase 4.4)
         assert "get_vector_type" in source
 
-    def test_uses_arithmetic_dispatch_module(self):
-        """Verify refactored code imports arithmetic_dispatch."""
-        import inspect
-
-        from opteryx.expression.evaluator import arithmetic
-
-        source = inspect.getsource(arithmetic)
-
-        # Should import call_arithmetic_op from arithmetic_dispatch
-        assert "call_arithmetic_op" in source
-
-    def test_fallback_to_binary_operations_preserved(self):
-        """Verify fallback to binary_operations is preserved (Phase 4.4)."""
+    def test_uses_resolve_binary_op_phase6(self):
+        """Verify Phase 6: resolve_binary_op is used for bind-time resolution."""
         import inspect
 
         from opteryx.expression.evaluator import arithmetic
 
         source = inspect.getsource(arithmetic._eval_binary_op_draken)
 
-        # Should still call binary_operations for arrow/numpy path
-        assert "binary_operations" in source
+        # Phase 6: Should use resolve_binary_op (not old dispatch)
+        assert "resolve_binary_op" in source
 
     def test_date_operations_use_vectortype(self):
         """Verify date operations refactored to use VectorType."""
@@ -213,27 +202,6 @@ class TestArithmeticDispatchRefactoring:
         assert "VectorType.DATE32" in source
         assert "VectorType.TIMESTAMP" in source
         assert "VectorType.INTERVAL" in source
-
-    def test_arithmetic_dispatch_module_exists(self):
-        """Verify arithmetic_dispatch module was created."""
-        from opteryx.expression.evaluator import arithmetic_dispatch
-
-        # Module should exist and have call_arithmetic_op function
-        assert hasattr(arithmetic_dispatch, "call_arithmetic_op")
-
-    def test_arithmetic_dispatch_returns_none_phase4_4(self):
-        """Verify call_arithmetic_op returns None in Phase 4.4 (delegating to binary_operations)."""
-        import pyarrow as pa
-
-        from draken.vectors import Integer64Vector
-        from opteryx.expression.evaluator.arithmetic_dispatch import call_arithmetic_op
-
-        v1 = Integer64Vector.from_arrow(pa.array([1, 2, 3]))
-        v2 = Integer64Vector.from_arrow(pa.array([4, 5, 6]))
-
-        # Phase 4.4: Should return None (no Draken kernels yet)
-        result = call_arithmetic_op("Plus", v1, v2)
-        assert result is None
 
 
 class TestArithmeticDispatchEdgeCases:

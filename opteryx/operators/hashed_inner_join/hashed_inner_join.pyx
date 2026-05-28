@@ -46,7 +46,7 @@ from draken.vectors.vector cimport NULL_HASH
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
-from opteryx.expression.evaluator import evaluate_and_append_draken
+from opteryx.expression.evaluator import compile_eval_nodes, execute_and_append
 from opteryx.models import QueryProperties
 
 # EOS sentinel available as _EOS_SENTINEL via the umbrella unit.
@@ -125,6 +125,8 @@ cdef class DrakenInnerJoinNode(JoinNode):
     cdef public bint _build_phase
     cdef public double carchar_probe_load_factor
     cdef public JoinReadings join_readings
+    cdef public list _compiled_left_evals
+    cdef public list _compiled_right_evals
 
     join_type = "inner"
 
@@ -147,6 +149,15 @@ cdef class DrakenInnerJoinNode(JoinNode):
             config.get("FEATURE_CARCHAR_PROBE_LOAD_FACTOR", 0.35)
         )
         self.join_readings = JoinReadings()
+
+        # Compile ON-clause expressions for each side at bind time.
+        # _collect_expression_nodes_for_side is structural (no runtime data needed).
+        self._compiled_left_evals = compile_eval_nodes(
+            self._collect_expression_nodes_for_side(self.left_relation_names)
+        )
+        self._compiled_right_evals = compile_eval_nodes(
+            self._collect_expression_nodes_for_side(self.right_relation_names)
+        )
 
     @staticmethod
     def supports(**parameters) -> bool:
@@ -258,12 +269,11 @@ cdef class DrakenInnerJoinNode(JoinNode):
                 self.join_readings.time_inner_join_left_combine += time.monotonic_ns() - start
                 self.left_morsels = []
 
-                left_exprs = self._collect_expression_nodes_for_side(self.left_relation_names)
-                if left_exprs and self.left_morsel.num_rows > 0:
+                if self._compiled_left_evals and self.left_morsel.num_rows > 0:
                     old_cols = set(self.left_morsel.column_names)
                     try:
-                        self.left_morsel = evaluate_and_append_draken(
-                            left_exprs, self.left_morsel
+                        self.left_morsel = execute_and_append(
+                            self._compiled_left_evals, self.left_morsel
                         )
                     except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
                         raise UnsupportedSyntaxError(
@@ -343,11 +353,10 @@ cdef class DrakenInnerJoinNode(JoinNode):
                 return
 
             right_chunk = morsel
-            right_exprs = self._collect_expression_nodes_for_side(self.right_relation_names)
-            if right_exprs and right_chunk.num_rows > 0:
+            if self._compiled_right_evals and right_chunk.num_rows > 0:
                 old_cols = set(right_chunk.column_names)
                 try:
-                    right_chunk = evaluate_and_append_draken(right_exprs, right_chunk)
+                    right_chunk = execute_and_append(self._compiled_right_evals, right_chunk)
                 except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
                     raise UnsupportedSyntaxError(
                         f"Draken inner join expression evaluation does not support this query shape: {err}"

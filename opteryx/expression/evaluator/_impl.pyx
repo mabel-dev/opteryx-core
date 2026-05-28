@@ -10,13 +10,12 @@
 """Expression evaluation engine — consolidated implementation module.
 
 Compiled into opteryx.expression.evaluator._impl.so. The leaf .pyx files
-(type_coercion / function_execution / arithmetic_dispatch / temporal_ops /
+(type_coercion / function_execution / temporal_ops /
 string_ops / json_ops / case_eval / arithmetic / comparisons / evaluation)
 are textually included below so the whole evaluator compiles to a single .so.
 
-The sibling __init__.py imports this module, re-exports its public API, and
-registers submodule aliases so legacy callers like
-`from opteryx.expression.evaluator.case_eval import evaluate_case` resolve.
+The sibling __init__.py imports this module and re-exports its public API.
+(Phase 8c: tree-walker evaluate_case deleted; only compiled path remains.)
 
 Layout note: this file used to be `__init__.pyx` and built straight to
 `__init__.cpython-XXX.so`, but Cython 3.x emits an internal
@@ -54,6 +53,21 @@ DEF OP_IN_STR           = 15
 DEF OP_NOT_IN_STR       = 16
 DEF OP_I_IN_STR         = 17
 DEF OP_NOT_I_IN_STR     = 18
+DEF OP_ANYOP_EQ         = 19
+DEF OP_ANYOP_NOT_EQ     = 20
+DEF OP_ANYOP_GT         = 21
+DEF OP_ANYOP_LT         = 22
+DEF OP_ANYOP_GT_EQ      = 23
+DEF OP_ANYOP_LT_EQ      = 24
+DEF OP_ALLOP_EQ         = 25
+DEF OP_ALLOP_NOT_EQ     = 26
+DEF OP_AT_ARROW         = 27
+DEF OP_ARRAY_CONTAINS_ALL = 28
+DEF OP_AT_QUESTION      = 29
+DEF OP_ANYOP_LIKE       = 30
+DEF OP_ANYOP_NOT_LIKE   = 31
+DEF OP_ANYOP_ILIKE      = 32
+DEF OP_ANYOP_NOT_ILIKE  = 33
 
 # Python-side mirror so dispatchers can resolve a string op once. Must stay
 # in sync with the DEFs above; if they ever diverge the verification check
@@ -64,6 +78,11 @@ _OP_CODE = {
     "Like": 9, "NotLike": 10, "ILike": 11, "NotILike": 12,
     "RLike": 13, "NotRLike": 14,
     "InStr": 15, "NotInStr": 16, "IInStr": 17, "NotIInStr": 18,
+    "AnyOpEq": 19, "AnyOpNotEq": 20, "AnyOpGt": 21, "AnyOpLt": 22,
+    "AnyOpGtEq": 23, "AnyOpLtEq": 24,
+    "AllOpEq": 25, "AllOpNotEq": 26,
+    "AtArrow": 27, "ArrayContainsAll": 28, "AtQuestion": 29,
+    "AnyOpLike": 30, "AnyOpNotLike": 31, "AnyOpILike": 32, "AnyOpNotILike": 33,
 }
 
 
@@ -79,7 +98,7 @@ _OP_CODE = {
 # our op_code. Negative entries flag "no Draken equivalent" so the caller
 # can fall back. The body of the array is set once at module load.
 # ---------------------------------------------------------------------------
-cdef int _DRAKEN_CMP_OP[19]
+cdef int _DRAKEN_CMP_OP[34]
 _DRAKEN_CMP_OP[0]  = -1  # OP_UNKNOWN
 _DRAKEN_CMP_OP[1]  =  0  # OP_EQ        → Draken Eq
 _DRAKEN_CMP_OP[2]  =  1  # OP_NOT_EQ    → Draken Ne
@@ -87,11 +106,38 @@ _DRAKEN_CMP_OP[3]  =  4  # OP_LT        → Draken Lt
 _DRAKEN_CMP_OP[4]  =  2  # OP_GT        → Draken Gt
 _DRAKEN_CMP_OP[5]  =  5  # OP_LT_EQ     → Draken Le
 _DRAKEN_CMP_OP[6]  =  3  # OP_GT_EQ     → Draken Ge
+_DRAKEN_CMP_OP[7]  = -1  # OP_IN_LIST       — own kernel
+_DRAKEN_CMP_OP[8]  = -1  # OP_NOT_IN_LIST   — own kernel
+_DRAKEN_CMP_OP[9]  = -1  # OP_LIKE          — own kernel
+_DRAKEN_CMP_OP[10] = -1  # OP_NOT_LIKE      — own kernel
+_DRAKEN_CMP_OP[11] = -1  # OP_ILIKE         — own kernel
+_DRAKEN_CMP_OP[12] = -1  # OP_NOT_ILIKE     — own kernel
+_DRAKEN_CMP_OP[13] = -1  # OP_RLIKE         — own kernel
+_DRAKEN_CMP_OP[14] = -1  # OP_NOT_RLIKE     — own kernel
+_DRAKEN_CMP_OP[15] = -1  # OP_IN_STR        — own kernel
+_DRAKEN_CMP_OP[16] = -1  # OP_NOT_IN_STR    — own kernel
+_DRAKEN_CMP_OP[17] = -1  # OP_I_IN_STR      — own kernel
+_DRAKEN_CMP_OP[18] = -1  # OP_NOT_I_IN_STR  — own kernel
+_DRAKEN_CMP_OP[19] = -1  # OP_ANYOP_EQ      — own kernel
+_DRAKEN_CMP_OP[20] = -1  # OP_ANYOP_NOT_EQ  — own kernel
+_DRAKEN_CMP_OP[21] = -1  # OP_ANYOP_GT      — own kernel
+_DRAKEN_CMP_OP[22] = -1  # OP_ANYOP_LT      — own kernel
+_DRAKEN_CMP_OP[23] = -1  # OP_ANYOP_GT_EQ   — own kernel
+_DRAKEN_CMP_OP[24] = -1  # OP_ANYOP_LT_EQ   — own kernel
+_DRAKEN_CMP_OP[25] = -1  # OP_ALLOP_EQ      — own kernel
+_DRAKEN_CMP_OP[26] = -1  # OP_ALLOP_NOT_EQ  — own kernel
+_DRAKEN_CMP_OP[27] = -1  # OP_AT_ARROW      — own kernel
+_DRAKEN_CMP_OP[28] = -1  # OP_ARRAY_CONTAINS_ALL — own kernel
+_DRAKEN_CMP_OP[29] = -1  # OP_AT_QUESTION   — own kernel
+_DRAKEN_CMP_OP[30] = -1  # OP_ANYOP_LIKE    — own kernel
+_DRAKEN_CMP_OP[31] = -1  # OP_ANYOP_NOT_LIKE — own kernel
+_DRAKEN_CMP_OP[32] = -1  # OP_ANYOP_ILIKE   — own kernel
+_DRAKEN_CMP_OP[33] = -1  # OP_ANYOP_NOT_ILIKE — own kernel
 
 # Same table but with directional ops flipped — used when we dispatch the
 # compare on the right-hand operand (e.g. Float64 < Int64 → Int64 > Float64).
 # Eq/Ne are symmetric and unchanged.
-cdef int _DRAKEN_CMP_OP_FLIPPED[19]
+cdef int _DRAKEN_CMP_OP_FLIPPED[34]
 _DRAKEN_CMP_OP_FLIPPED[0]  = -1
 _DRAKEN_CMP_OP_FLIPPED[1]  =  0   # Eq    (symmetric)
 _DRAKEN_CMP_OP_FLIPPED[2]  =  1   # Ne    (symmetric)
@@ -111,25 +157,27 @@ _DRAKEN_CMP_OP_FLIPPED[15] = -1
 _DRAKEN_CMP_OP_FLIPPED[16] = -1
 _DRAKEN_CMP_OP_FLIPPED[17] = -1
 _DRAKEN_CMP_OP_FLIPPED[18] = -1
-_DRAKEN_CMP_OP[7]  = -1  # OP_IN_LIST       — own kernel
-_DRAKEN_CMP_OP[8]  = -1  # OP_NOT_IN_LIST   — own kernel
-_DRAKEN_CMP_OP[9]  = -1  # OP_LIKE          — own kernel
-_DRAKEN_CMP_OP[10] = -1  # OP_NOT_LIKE      — own kernel
-_DRAKEN_CMP_OP[11] = -1  # OP_ILIKE         — own kernel
-_DRAKEN_CMP_OP[12] = -1  # OP_NOT_ILIKE     — own kernel
-_DRAKEN_CMP_OP[13] = -1  # OP_RLIKE         — own kernel
-_DRAKEN_CMP_OP[14] = -1  # OP_NOT_RLIKE     — own kernel
-_DRAKEN_CMP_OP[15] = -1  # OP_IN_STR        — own kernel
-_DRAKEN_CMP_OP[16] = -1  # OP_NOT_IN_STR    — own kernel
-_DRAKEN_CMP_OP[17] = -1  # OP_I_IN_STR      — own kernel
-_DRAKEN_CMP_OP[18] = -1  # OP_NOT_I_IN_STR  — own kernel
+_DRAKEN_CMP_OP_FLIPPED[19] = -1
+_DRAKEN_CMP_OP_FLIPPED[20] = -1
+_DRAKEN_CMP_OP_FLIPPED[21] = -1
+_DRAKEN_CMP_OP_FLIPPED[22] = -1
+_DRAKEN_CMP_OP_FLIPPED[23] = -1
+_DRAKEN_CMP_OP_FLIPPED[24] = -1
+_DRAKEN_CMP_OP_FLIPPED[25] = -1
+_DRAKEN_CMP_OP_FLIPPED[26] = -1
+_DRAKEN_CMP_OP_FLIPPED[27] = -1
+_DRAKEN_CMP_OP_FLIPPED[28] = -1
+_DRAKEN_CMP_OP_FLIPPED[29] = -1
+_DRAKEN_CMP_OP_FLIPPED[30] = -1
+_DRAKEN_CMP_OP_FLIPPED[31] = -1
+_DRAKEN_CMP_OP_FLIPPED[32] = -1
+_DRAKEN_CMP_OP_FLIPPED[33] = -1
 
 
 # Include order: leaves with no intra-package deps first, then leaves that
 # depend on earlier names. Within each tier the order doesn't matter.
+# Phase 6: arithmetic_dispatch.pyx deleted — dispatch now at bind time via resolve_binary_op.
 include "type_coercion.pyx"
-include "function_execution.pyx"
-include "arithmetic_dispatch.pyx"
 include "temporal_ops.pyx"
 include "string_ops.pyx"
 include "json_ops.pyx"

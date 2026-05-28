@@ -19,7 +19,9 @@ entered expressions we can optimize, and again at the end which handles where
 we've rewritten expressions at part of other optimizations which can be folded.
 """
 
-from opteryx.expression import NodeType, evaluate, get_all_nodes_of_type
+from opteryx.compiled.expression.compiled_expression import lower, build_bytecode
+from opteryx.expression import NodeType, get_all_nodes_of_type
+from opteryx.expression.evaluator import execute_bytecode
 from opteryx.managers.virtual_datasets import no_table_data
 from opteryx.models import Node, QueryTelemetry
 from opteryx.planner import build_literal_node
@@ -286,10 +288,9 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         and root.schema_column.type != OrsoTypes.INTERVAL
     ):
         table = no_table_data.read()
-        result = evaluate(root, table)[0]
-        if is_draken_vector(result):
-            extracted = result.to_pylist()[0]
-            result = extracted if extracted is not None else None
+        bc = build_bytecode(lower(root))
+        result_vector = execute_bytecode(bc, table)
+        result = result_vector.to_pylist()[0]
         telemetry.optimization_constant_fold_expression += 1
         return build_literal_node(result, root, root.schema_column.type)
 

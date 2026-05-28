@@ -3433,6 +3433,101 @@ static VectorOwner make_array_take(const VectorOwner& v,
 }
 
 // ---------------------------------------------------------------------------
+// D.13: array element subscript — vec[index] per logical row.
+//
+// For each logical row i of a DRAKEN_ARRAY vector:
+//   sublist range  = child[offsets[sel[i]] : offsets[sel[i]+1]]
+//   row_len        = end - start
+//   pos            = (index >= 0) ? index : row_len + index   (Python semantics)
+//   output[i]      = child[start + pos]   when 0 <= pos < row_len
+//                    null                  otherwise (out-of-bounds or null parent)
+//
+// The output Vector has the same element type as the child vector. Result is
+// dense (selection is identity). Validity is the merge of parent-row validity,
+// in-bounds check, and the child element's own validity at the taken position.
+// ---------------------------------------------------------------------------
+static VectorOwner make_array_map_access(const VectorOwner& v, int64_t index) {
+    if (v.vec.type != DRAKEN_ARRAY)
+        throw std::invalid_argument(
+            "vector_array_map_access: not a DRAKEN_ARRAY vector");
+    if (!v.child_owner)
+        throw std::invalid_argument(
+            "vector_array_map_access: DRAKEN_ARRAY vector has no child");
+
+    const int32_t*  offsets = static_cast<const int32_t*>(v.vec.data);
+    const uint32_t* sel     = v.vec.selection;
+    const uint32_t  n       = v.vec.length;
+
+    // Gather child indices and per-row "is in bounds and parent valid" mask.
+    // cidx[i] = 0 is a safe placeholder for null output rows (child element 0
+    // must exist if any sublist is non-empty; if child is empty, no row can be
+    // valid anyway and the take is a no-op for null rows).
+    std::vector<int32_t> cidx(n, 0);
+
+    // Always allocate the local null mask; we merge it into the result below.
+    const uint32_t bm     = (n + 7u) / 8u;
+    const uint32_t padded = ((bm + 7u) & ~7u);
+    const size_t   vbytes = padded > 0u ? padded : 8u;
+    std::vector<uint8_t> local_validity(vbytes, 0xFFu);
+    bool any_invalid = false;
+
+    for (uint32_t i = 0u; i < n; ++i) {
+        if (!row_is_valid(v.vec, i)) {
+            local_validity[i / 8u] &=
+                static_cast<uint8_t>(~(1u << (i % 8u)));
+            any_invalid = true;
+            continue;
+        }
+        const uint32_t sel_i   = sel[i];
+        const int32_t  start   = offsets[sel_i];
+        const int32_t  end     = offsets[sel_i + 1u];
+        const int32_t  row_len = end - start;
+        int64_t pos = (index >= 0)
+            ? index
+            : static_cast<int64_t>(row_len) + index;
+        if (pos < 0 || pos >= static_cast<int64_t>(row_len)) {
+            local_validity[i / 8u] &=
+                static_cast<uint8_t>(~(1u << (i % 8u)));
+            any_invalid = true;
+        } else {
+            cidx[i] = start + static_cast<int32_t>(pos);
+        }
+    }
+
+    // Empty input: skip the take, return a zero-length null vector of child type.
+    // take_child requires at least one index path; for n == 0 the result is
+    // trivially empty regardless of type.
+    VectorOwner result = take_child(*v.child_owner, cidx);
+
+    // Merge local null mask into the result's validity.
+    //
+    // After take_child, result.vec.validity reflects nulls inherited from the
+    // child at the gathered positions (e.g. a null element child[start+pos]).
+    // We need:  output_valid[i] = parent_in_bounds[i] AND child_valid_at_cidx[i].
+    //
+    // If we have no parent/OOB nulls, the child's validity is already correct.
+    // Otherwise we either AND our mask into the existing validity, or attach
+    // our mask as the new validity when the child has none.
+    if (any_invalid) {
+        if (result.vec.validity == nullptr) {
+            // Result has no validity buffer yet — allocate one from our mask.
+            uint8_t* dst = static_cast<uint8_t*>(draken_malloc(vbytes));
+            if (!dst) throw std::bad_alloc();
+            std::memcpy(dst, local_validity.data(), vbytes);
+            result.validity_buf.reset(dst);
+            result.vec.validity = dst;
+        } else {
+            // AND our mask into existing validity in place (we own the buffer).
+            uint8_t* dst = result.vec.validity;
+            for (uint32_t i = 0u; i < bm; ++i)
+                dst[i] &= local_validity[i];
+        }
+    }
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // D.13: array materialize — expand selection to dense identity copy.
 // Arrays are always stored dense in this implementation; materialize = full copy.
 // ---------------------------------------------------------------------------
@@ -5413,6 +5508,29 @@ NB_MODULE(draken_native, m) {
         "[] elements become valid empty sublists (distinct from null).\n"
         "Parent owns child; RAII destructor frees the entire nested subtree.\n"
         "Unsupported ops: hash, compare, between, in_list, sum/min/max, arithmetic.");
+
+    // -------------------------------------------------------------------------
+    // vector_array_map_access — native array-element subscript.
+    //
+    // Replaces the legacy opteryx.vector_special.vector_map_access_array kernel,
+    // which drove the Python C API row-by-row and returned a Python list. This
+    // version walks the DRAKEN_ARRAY offsets natively and produces a Vector of
+    // the child element type directly. No Python objects in the inner loop.
+    // -------------------------------------------------------------------------
+    m.def("vector_array_map_access",
+        [](nb::object vec_obj, int64_t index) -> nb::object {
+            nb::handle h(vec_obj);
+            if (!nb::isinstance<VectorOwner>(h))
+                throw nb::type_error(
+                    "vector_array_map_access: expected draken_native.Vector");
+            const VectorOwner& v = *nb::inst_ptr<VectorOwner>(h);
+            return nb::cast(make_array_map_access(v, index));
+        },
+        nb::arg("vec"), nb::arg("index"),
+        "Element subscript on a DRAKEN_ARRAY Vector: vec[index] per row.\n"
+        "Returns a dense Vector of the child element type. Negative indices\n"
+        "are Python-style (relative to each row's length). Out-of-bounds or\n"
+        "null-parent rows produce null output rows.");
 
     // -------------------------------------------------------------------------
     // E.1 bridge test helpers (not production API; prefixed _bridge_test_).

@@ -323,10 +323,6 @@ def assemble_fixed(
     elif unmatched.shape[0] > 0:
         any_null = True
 
-    if not any_null:
-        draken_free(out_validity)
-        out_validity = NULL
-
     return _vec_from_decoded(out_data, out_validity, <uint32_t>n, out_dtype)
 
 
@@ -395,10 +391,6 @@ def assemble_bool(
                 _sel_set_true_bit(out_validity, row_r)
     elif unmatched.shape[0] > 0:
         any_null = True
-
-    if not any_null:
-        draken_free(out_validity)
-        out_validity = NULL
 
     return _bool_from_decoded(out_data, out_validity, <size_t>n)
 

@@ -7,17 +7,41 @@ from libc.stdint cimport int16_t
 import draken.draken_native as _draken_native
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 from opteryx.utils.vector_types import VectorType, get_vector_type
+from opteryx.compiled.expression.compiled_expression cimport (
+    BCBinaryOpCode,
+    BC_TYPE_NONE,
+    BC_TYPE_DATE,
+    BC_TYPE_TIMESTAMP,
+    BOP_PLUS,
+    BOP_MINUS,
+    BOP_MULTIPLY,
+    BOP_DIVIDE,
+    BOP_MODULO,
+    BOP_INT_DIVIDE,
+    BOP_STRING_CONCAT,
+    BOP_BITWISE_OR,
+    BOP_BITWISE_AND,
+    BOP_BITWISE_XOR,
+    BOP_SHIFT_LEFT,
+    BOP_SHIFT_RIGHT,
+)
 
 
 cdef _to_string_vec(v, n):
-    """Ensure v is a string Vector of length n for vector_concat.
+    """Ensure v is a NANOBIND string Vector of length n for vector_concat.
 
-    For scalar inputs produces a constant-shape Vector (O(1) allocation,
-    data_length==1) via vector_varchar_from_constant.
+    For already-string vectors (Cython or nanobind), returns the unwrapped
+    nanobind handle. For scalar inputs produces a constant-shape Vector
+    (O(1) allocation, data_length==1) via vector_varchar_from_constant.
     """
     _str_types = (_draken_native.VARCHAR, _draken_native.NVARCHAR)
+    # Unwrap Cython shim → nanobind so the downstream nanobind kernels
+    # (vector_concat / draken_vector_unwrap) get the type they expect.
+    cdef object v_nb = getattr(v, "_nb", None)
+    if v_nb is not None:
+        v = v_nb
     if getattr(v, "type", None) in _str_types:
-        return v  # already a string Vector
+        return v  # already a string Vector (now guaranteed nanobind)
     # Normalize scalar to str or None.
     if isinstance(v, bytes):
         v = v.decode("utf-8")
@@ -30,159 +54,150 @@ cdef _to_string_vec(v, n):
     return _draken_native.vector_varchar_from_constant(v, n)
 
 
-cpdef _eval_binary_op_draken(node, morsel):
-    op = node.value
-    left = _eval_value(node.left, morsel)
-    right = _eval_value(node.right, morsel)
+cdef _unwrap_nb(v):
+    """Extract nanobind Vector from Cython shim or return as-is if already nanobind."""
+    nb = getattr(v, "_nb", None)
+    return nb if nb is not None else v
 
-    from opteryx.types import OrsoTypes
 
-    if get_vector_type(left) == VectorType.UNKNOWN and node.left.schema_column.type in (
-        OrsoTypes.DATE,
-        OrsoTypes.TIMESTAMP,
-    ):
-        if node.left.schema_column.type == OrsoTypes.DATE:
-            left = _draken_native.vector_date32_from_constant(_coerce_date32(left), morsel.num_rows)
-        else:
-            left = _draken_native.vector_timestamp_from_constant(_coerce_timestamp(left), morsel.num_rows)
+cdef object _build_arithmetic_closure(int op_code):
+    """Build a closure for numeric arithmetic ops (Plus/Minus/Multiply/Divide/Modulo)."""
+    cdef str method_name
+    if op_code == BOP_PLUS:
+        method_name = "add"
+    elif op_code == BOP_MINUS:
+        method_name = "sub"
+    elif op_code == BOP_MULTIPLY:
+        method_name = "mul"
+    elif op_code == BOP_DIVIDE:
+        method_name = "div"
+    elif op_code == BOP_MODULO:
+        method_name = "mod"
+    else:
+        raise ValueError(f"_build_arithmetic_closure: unexpected op_code {op_code}")
 
-    if get_vector_type(right) == VectorType.UNKNOWN and node.right.schema_column.type in (
-        OrsoTypes.DATE,
-        OrsoTypes.TIMESTAMP,
-    ):
-        if node.right.schema_column.type == OrsoTypes.DATE:
-            right = _draken_native.vector_date32_from_constant(_coerce_date32(right), morsel.num_rows)
-        else:
-            right = _draken_native.vector_timestamp_from_constant(_coerce_timestamp(right), morsel.num_rows)
+    def kernel(left, right):
+        left_nb = _unwrap_nb(left)
+        right_nb = _unwrap_nb(right)
+        method = getattr(left_nb, method_name, None)
+        if method is not None:
+            return method(right_nb)
+        method = getattr(right_nb, method_name, None)
+        if method is not None:
+            return method(left_nb)
+        return None
+    return kernel
 
-    left_type = get_vector_type(left)
-    right_type = get_vector_type(right)
 
-    cdef bint left_is_date = left_type in (VectorType.DATE32, VectorType.TIMESTAMP)
-    cdef bint right_is_date = right_type in (VectorType.DATE32, VectorType.TIMESTAMP)
+cdef object _build_string_concat_closure():
+    """Build closure for StringConcat: coerce both operands to VARCHAR, then concat."""
+    _str_types = (_draken_native.VARCHAR, _draken_native.NVARCHAR)
 
-    if op == "Minus" and left_is_date and right_is_date:
-        return _date_minus_date_draken(left, right)
-
-    if op in ("Plus", "Minus"):
-        left_is_interval = left_type == VectorType.INTERVAL
-        right_is_interval = right_type == VectorType.INTERVAL
-        if left_is_date and right_is_interval:
-            return _date_interval_op_draken(left, right, op)
-        if left_is_interval and right_is_date:
-            return _date_interval_op_draken(right, left, op)
-
-    if op == "StringConcat":
+    def kernel(left, right):
         from opteryx.compiled.nanobind.vector_selection_concat import vector_concat as _vc
-        _str_types = (_draken_native.VARCHAR, _draken_native.NVARCHAR)
+        # Determine row count from string operand or default to 1.
         n = len(left) if getattr(left, "type", None) in _str_types else (
             len(right) if getattr(right, "type", None) in _str_types else 1
         )
         return _vc(_to_string_vec(left, n), _to_string_vec(right, n))
-
-    from opteryx.expression.binary_operators import BINARY_OPERATORS
-
-    if op not in BINARY_OPERATORS:
-        return None
-
-    result = call_arithmetic_op(op, left, right)
-
-    if result is None:
-        raise NotImplementedError(
-            f"Operator `{op}` has no Draken kernel for {left.__class__.__name__} and "
-            f"{right.__class__.__name__}."
-        )
-
-    if get_vector_type(result) == VectorType.UNKNOWN and not isinstance(
-        result,
-        (
-            type(None),
-            bool,
-            int,
-            float,
-            str,
-            bytes,
-            datetime.date,
-            datetime.datetime,
-            datetime.time,
-            tuple,
-        ),
-    ):
-        raise TypeError(
-            f"Arithmetic op `{op}` returned non-Draken value type {result.__class__.__name__}."
-        )
-
-    return result
+    return kernel
 
 
-cpdef _binary_op_from_vecs(
-    int op_code,
-    left, right,
-    int16_t left_type_code,
-    int16_t right_type_code,
-    str op_str,
-    Py_ssize_t num_rows,
-):
-    """Execute a binary arithmetic op on pre-evaluated vectors.
+cdef object _build_bitwise_closure(int op_code):
+    """Build closure for bitwise ops on INTEGER operands.
 
-    Equivalent to _eval_binary_op_draken but takes pre-evaluated vectors and
-    BCTypeCode integers directly — no node or morsel access. Called from the
-    bytecode executor for BC_BINARY_OP instructions.
-
-    op_code: BCBinaryOpCode int (BOP_PLUS, BOP_MINUS, etc.)
-    left_type_code / right_type_code: BCTypeCode (BC_TYPE_NONE=0, DATE=1, TIMESTAMP=2)
-    op_str: still needed for call_arithmetic_op which dispatches to the kernel registry
+    The bare nanobind kernels (vector_bitwise_*) require nanobind Vectors —
+    they call draken_vector_unwrap which rejects Cython shims. The executor
+    passes whatever was in anchor[sp] (typically a Cython Vector), so we
+    must unwrap here, not return the bare kernel.
     """
-    if get_vector_type(left) == VectorType.UNKNOWN and (
-        left_type_code == BC_TYPE_DATE or left_type_code == BC_TYPE_TIMESTAMP
-    ):
-        if left_type_code == BC_TYPE_DATE:
-            left = _draken_native.vector_date32_from_constant(_coerce_date32(left), num_rows)
-        else:
-            left = _draken_native.vector_timestamp_from_constant(_coerce_timestamp(left), num_rows)
+    from opteryx.compiled.nanobind.vector_bitwise import (
+        vector_bitwise_or as _vector_bitwise_or,
+        vector_bitwise_and as _vector_bitwise_and,
+        vector_bitwise_xor as _vector_bitwise_xor,
+        vector_bitwise_shift_left as _vector_bitwise_shift_left,
+        vector_bitwise_shift_right as _vector_bitwise_shift_right,
+    )
 
-    if get_vector_type(right) == VectorType.UNKNOWN and (
-        right_type_code == BC_TYPE_DATE or right_type_code == BC_TYPE_TIMESTAMP
-    ):
-        if right_type_code == BC_TYPE_DATE:
-            right = _draken_native.vector_date32_from_constant(_coerce_date32(right), num_rows)
-        else:
-            right = _draken_native.vector_timestamp_from_constant(_coerce_timestamp(right), num_rows)
+    cdef object _native_kernel
+    if op_code == BOP_BITWISE_OR:
+        _native_kernel = _vector_bitwise_or
+    elif op_code == BOP_BITWISE_AND:
+        _native_kernel = _vector_bitwise_and
+    elif op_code == BOP_BITWISE_XOR:
+        _native_kernel = _vector_bitwise_xor
+    elif op_code == BOP_SHIFT_LEFT:
+        _native_kernel = _vector_bitwise_shift_left
+    elif op_code == BOP_SHIFT_RIGHT:
+        _native_kernel = _vector_bitwise_shift_right
+    else:
+        raise ValueError(f"_build_bitwise_closure: unexpected op_code {op_code}")
 
-    left_type = get_vector_type(left)
-    right_type = get_vector_type(right)
+    def kernel(left, right, _k=_native_kernel):
+        return _k(_unwrap_nb(left), _unwrap_nb(right))
+    return kernel
 
-    cdef bint left_is_date = left_type in (VectorType.DATE32, VectorType.TIMESTAMP)
-    cdef bint right_is_date = right_type in (VectorType.DATE32, VectorType.TIMESTAMP)
 
-    if op_code == BOP_MINUS and left_is_date and right_is_date:
-        return _date_minus_date_draken(left, right)
+def resolve_binary_op(int op_code, left_orso, right_orso):
+    """Bind-time resolver: return a callable for binary_op(left_vector, right_vector).
 
-    if op_code == BOP_PLUS or op_code == BOP_MINUS:
-        left_is_interval = left_type == VectorType.INTERVAL
-        right_is_interval = right_type == VectorType.INTERVAL
-        if left_is_date and right_is_interval:
-            return _date_interval_op_draken(left, right, op_str)
-        if left_is_interval and right_is_date:
-            return _date_interval_op_draken(right, left, op_str)
+    Returns a callable with signature: (left_vector, right_vector) → Draken Vector.
+    Raises NotImplementedError if (op_code, left_orso, right_orso) is unsupported.
+    """
+    from opteryx.types import OrsoTypes
+    from opteryx.utils.vector_types import VectorType
 
+    # Arithmetic ops (Plus, Minus, Multiply, Divide, Modulo, IntegerDivide)
+    if op_code in (BOP_PLUS, BOP_MINUS, BOP_MULTIPLY, BOP_DIVIDE, BOP_MODULO, BOP_INT_DIVIDE):
+        # All numeric type combinations supported — deferred type checking to kernel
+        return _build_arithmetic_closure(op_code)
+
+    # String concatenation
     if op_code == BOP_STRING_CONCAT:
-        from opteryx.compiled.nanobind.vector_selection_concat import vector_concat as _vc
-        _str_types = (_draken_native.VARCHAR, _draken_native.NVARCHAR)
-        n = len(left) if getattr(left, "type", None) in _str_types else (
-            len(right) if getattr(right, "type", None) in _str_types else 1
-        )
-        return _vc(_to_string_vec(left, n), _to_string_vec(right, n))
+        return _build_string_concat_closure()
 
-    if op_code == BOP_UNKNOWN:
-        return None
+    # Bitwise ops on INTEGER
+    if op_code in (BOP_BITWISE_OR, BOP_BITWISE_AND, BOP_BITWISE_XOR, BOP_SHIFT_LEFT, BOP_SHIFT_RIGHT):
+        # Special case: BitwiseOr on VARCHAR → IP-in-CIDR
+        if op_code == BOP_BITWISE_OR:
+            if (left_orso == OrsoTypes.VARCHAR or right_orso == OrsoTypes.VARCHAR):
+                from opteryx.compiled.nanobind.vector_misc import vector_ip_in_cidr
+                def _ip_in_cidr_kernel(left, right, _k=vector_ip_in_cidr):
+                    return _k(_unwrap_nb(left), _unwrap_nb(right))
+                return _ip_in_cidr_kernel
+        # Standard bitwise on INTEGER
+        return _build_bitwise_closure(op_code)
 
-    result = call_arithmetic_op(op_str, left, right)
+    # Date/Timestamp ± Interval
+    if op_code in (BOP_PLUS, BOP_MINUS):
+        left_is_date = left_orso in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
+        right_is_interval = right_orso == OrsoTypes.INTERVAL
+        left_is_interval = left_orso == OrsoTypes.INTERVAL
+        right_is_date = right_orso in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
 
-    if result is None:
-        raise NotImplementedError(
-            f"Operator `{op_str}` has no Draken kernel for {left.__class__.__name__} and "
-            f"{right.__class__.__name__}."
-        )
+        if (left_is_date and right_is_interval) or (left_is_interval and right_is_date):
+            def _date_interval_kernel(left, right, op_code=op_code):
+                return _date_interval_op_draken(left, right, "Plus" if op_code == BOP_PLUS else "Minus")
+            return _date_interval_kernel
 
-    return result
+        # Date - Date (Minus only)
+        if op_code == BOP_MINUS and left_is_date and right_is_date:
+            return _date_minus_date_draken
+
+        # Interval ± Interval
+        if left_orso == OrsoTypes.INTERVAL and right_orso == OrsoTypes.INTERVAL:
+            from opteryx.expression.intervals import INTERVAL_KERNELS
+            key = (left_orso, right_orso, "Plus" if op_code == BOP_PLUS else "Minus")
+            kernel = INTERVAL_KERNELS.get(key)
+            if kernel is not None:
+                # Interval kernels have signature (left, left_type, right, right_type, op_str)
+                # Wrap to match (left, right) signature
+                op_str = "Plus" if op_code == BOP_PLUS else "Minus"
+                def _interval_wrapper(left, right, kernel=kernel, op_str=op_str):
+                    return kernel(left, left_orso, right, right_orso, op_str)
+                return _interval_wrapper
+
+    raise NotImplementedError(
+        f"resolve_binary_op: no kernel for op_code={op_code}, left_orso={left_orso}, right_orso={right_orso}"
+    )
+

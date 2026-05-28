@@ -50,6 +50,49 @@ def test_incorrect_pushdown():
     first = result[0]["COUNT(*)"]
     assert first == 9, first
 
+def test_count_star_with_where_greater_than():
+    """COUNT(*) with WHERE clause should return correct count."""
+    result = execute_and_fetch_all("SELECT COUNT(*) FROM $planets WHERE id > 5")
+    first = result[0]["COUNT(*)"]
+    assert first == 4, f"Expected 4, got {first}"
+
+def test_count_star_with_where_equals():
+    """COUNT(*) with WHERE equals should return correct count."""
+    result = execute_and_fetch_all("SELECT COUNT(*) FROM $planets WHERE id = 3")
+    first = result[0]["COUNT(*)"]
+    assert first == 1, f"Expected 1, got {first}"
+
+def test_count_star_with_where_no_match():
+    """COUNT(*) with WHERE that matches no rows should return 0."""
+    result = execute_and_fetch_all("SELECT COUNT(*) FROM $planets WHERE id < 0")
+    first = result[0]["COUNT(*)"]
+    assert first == 0, f"Expected 0, got {first}"
+
+def test_count_star_with_is_null():
+    """COUNT(*) with IS NULL WHERE clause should return correct count."""
+    result = execute_and_fetch_all("SELECT COUNT(*) FROM testdata.astronauts WHERE death_date IS NULL")
+    first = result[0]["COUNT(*)"]
+    assert first == 305, f"Expected 305, got {first}"
+
+def test_count_star_with_is_not_null():
+    """COUNT(*) with IS NOT NULL WHERE clause should return correct count."""
+    result = execute_and_fetch_all("SELECT COUNT(*) FROM testdata.astronauts WHERE death_date IS NOT NULL")
+    first = result[0]["COUNT(*)"]
+    assert first == 52, f"Expected 52, got {first}"
+
+def test_count_star_is_null_plus_is_not_null():
+    """Sum of NULL and NOT NULL should equal total count."""
+    null_result = execute_and_fetch_all("SELECT COUNT(*) FROM testdata.astronauts WHERE death_date IS NULL")
+    not_null_result = execute_and_fetch_all("SELECT COUNT(*) FROM testdata.astronauts WHERE death_date IS NOT NULL")
+    total_result = execute_and_fetch_all("SELECT COUNT(*) FROM testdata.astronauts")
+
+    null_count = null_result[0]["COUNT(*)"]
+    not_null_count = not_null_result[0]["COUNT(*)"]
+    total_count = total_result[0]["COUNT(*)"]
+
+    assert null_count + not_null_count == total_count, \
+        f"NULL count ({null_count}) + NOT NULL count ({not_null_count}) != total ({total_count})"
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 

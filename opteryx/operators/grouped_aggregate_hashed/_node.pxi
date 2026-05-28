@@ -10,7 +10,8 @@ from draken.draken_native import vector_int8_from_constant
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
-from opteryx.expression.evaluator import evaluate_and_append_draken
+from opteryx.compiled.expression.compiled_expression import lower, build_bytecode
+from opteryx.expression.evaluator import execute_bytecode
 from opteryx.models import QueryProperties
 from dataclasses import dataclass
 
@@ -213,8 +214,8 @@ class GroupedAggregateHashedNode(BasePlanNode):
         eval_start = time.monotonic_ns()
         try:
             if self.evaluatable_nodes:
-                chunk = evaluate_and_append_draken(self.evaluatable_nodes, chunk)
-            chunk = evaluate_and_append_draken(self.groups, chunk)
+                chunk = self._evaluate_and_append_bytecode(self.evaluatable_nodes, chunk)
+            chunk = self._evaluate_and_append_bytecode(self.groups, chunk)
             self.readings["time_aggregate_evaluations"] += time.monotonic_ns() - eval_start
             return chunk
         except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
@@ -222,9 +223,43 @@ class GroupedAggregateHashedNode(BasePlanNode):
                 f"Grouped aggregate expression evaluation does not support this query shape: {err}"
             ) from err
 
+    def _evaluate_and_append_bytecode(self, nodes, morsel):
+        """Evaluate nodes via bytecode and append results as columns."""
+        from opteryx.expression import should_evaluate
+
+        col_names = list(morsel.column_names)
+        col_vecs = []
+        for _n in col_names:
+            if isinstance(_n, bytes):
+                col_vecs.append(morsel.column(_n))
+            else:
+                col_vecs.append(morsel.column(_n.encode()))
+
+        existing = {
+            _n.decode() if isinstance(_n, bytes) else _n for _n in col_names
+        }
+
+        for node in nodes:
+            if not should_evaluate(node):
+                continue
+            identity = node.schema_column.identity
+            if identity in existing:
+                continue
+
+            bc = build_bytecode(lower(node))
+            result_vec = execute_bytecode(bc, morsel)
+            col_names.append(identity)
+            col_vecs.append(result_vec)
+
+        if len(col_vecs) == len(morsel.column_names):
+            return morsel
+
+        from draken.morsels.morsel import Morsel as DrakenMorsel
+        return DrakenMorsel.from_vectors(col_names, col_vecs)
+
     def _apply_having_filter(self, morsel):
-        from opteryx.expression.evaluator import evaluate_draken
-        mask = evaluate_draken(self._having_condition, morsel)
+        bc = build_bytecode(lower(self._having_condition))
+        mask = execute_bytecode(bc, morsel)
         return morsel.filter_mask(mask)
 
     def _push_impl(self, morsel):

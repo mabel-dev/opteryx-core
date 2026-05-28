@@ -38,27 +38,24 @@ from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_ve
 
 
 cdef inline object _nb_vec_unwrap(object v):
-    """Unwrap Cython Vector shim → raw nanobind Vector, or return as-is."""
+    """Unwrap Cython Vector shim → raw nanobind Vector, or return as-is.
+
+    Note: This function is kept for tree-walker and other non-executor code paths.
+    Bytecode executor BC_COMPARE paths use inlined typed casts instead (Phase 1).
+    """
     nb = getattr(v, "_nb", None)
     return nb if nb is not None else v
 
 
 cdef inline object _wrap_nb_bool_result(object result):
-    """Wrap a nanobind BOOL Vector in BoolVector; pass through BoolVector unchanged."""
+    """Wrap a nanobind BOOL Vector in BoolVector; pass through BoolVector unchanged.
+
+    Note: This function is kept for tree-walker and other non-executor code paths.
+    Bytecode executor BC_COMPARE paths wrap unconditionally (Phase 1).
+    """
     if isinstance(result, BoolVector):
         return result
     return BoolVector(result)
-
-
-_NEGATED_OPS = {
-    "NotEq": "Eq",
-    "NotInList": "InList",
-    "NotLike": "Like",
-    "NotILike": "ILike",
-    "NotRLike": "RLike",
-    "NotInStr": "InStr",
-    "NotIInStr": "IInStr",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -89,13 +86,19 @@ cdef _int64_compare(int op_code, vec, right):
     named-method round-trip.
     """
     cdef int draken_op
+    cdef object vec_nb
 
     if right is None:
         return BoolVector(len(vec))
 
     if isinstance(right, (list, tuple, set, frozenset)):
         if op_code == OP_IN_LIST:
-            return _wrap_nb_bool_result(vector_in_list(_nb_vec_unwrap(vec), right))
+            # Unwrap Cython Vector shim to nanobind Vector if needed.
+            if isinstance(vec, Vector):
+                vec_nb = (<Vector>vec)._nb
+            else:
+                vec_nb = vec  # scalar
+            return BoolVector(vector_in_list(vec_nb, right))
         raise NotImplementedError(f"Integer64Vector: set op (code {op_code}) not supported")
 
     draken_op = _DRAKEN_CMP_OP[op_code]
@@ -124,13 +127,19 @@ cdef _float64_compare(int op_code, vec, right):
     """
     cdef int draken_op
     cdef int draken_op_flipped
+    cdef object vec_nb
 
     if right is None:
         return BoolVector(len(vec))
 
     if isinstance(right, (list, tuple, set, frozenset)):
         if op_code == OP_IN_LIST:
-            return _wrap_nb_bool_result(vector_in_list(_nb_vec_unwrap(vec), right))
+            # Unwrap Cython Vector shim to nanobind Vector if needed.
+            if isinstance(vec, Vector):
+                vec_nb = (<Vector>vec)._nb
+            else:
+                vec_nb = vec  # scalar
+            return BoolVector(vector_in_list(vec_nb, right))
         raise NotImplementedError(f"Float64Vector: set op (code {op_code}) not supported")
 
     draken_op = _DRAKEN_CMP_OP[op_code]
@@ -178,8 +187,14 @@ cdef _decimal_compare(int op_code, vec, right):
 
 
 cdef _bool_compare(int op_code, left, right):
+    cdef object left_nb
     if op_code == OP_IN_LIST:
-        return _wrap_nb_bool_result(vector_in_list(_nb_vec_unwrap(left), right))
+        # Unwrap Cython Vector shim to nanobind Vector if needed.
+        if isinstance(left, Vector):
+            left_nb = (<Vector>left)._nb
+        else:
+            left_nb = left  # scalar
+        return BoolVector(vector_in_list(left_nb, right))
     return left._compare_scalar(bool(right), _DRAKEN_CMP_OP[op_code])
 
 
@@ -187,7 +202,7 @@ cdef _bool_compare(int op_code, left, right):
 # Main dispatch — int-op variant (used by bytecode executor)
 # ---------------------------------------------------------------------------
 
-cdef draken_compare_int(int op_code, left, right, int16_t left_schema_type=0, int16_t right_schema_type=0):
+cpdef draken_compare_int(int op_code, left, right, int16_t left_schema_type=0, int16_t right_schema_type=0):
     """Same as draken_compare but takes pre-computed integer op_code and BCTypeCode type codes.
 
     Called by execute_bytecode() for BC_COMPARE instructions where
@@ -196,6 +211,65 @@ cdef draken_compare_int(int op_code, left, right, int16_t left_schema_type=0, in
     left_schema_type / right_schema_type are BCTypeCode values (BC_TYPE_NONE=0,
     BC_TYPE_DATE=1, BC_TYPE_TIMESTAMP=2) — never Python objects.
     """
+    cdef object left_nb, right_nb
+
+    # Direct dispatch for array/set operations before standard ops.
+    # These do not use the negation/type-dispatch machinery below.
+    if op_code == OP_ANYOP_EQ:
+        left_nb = (<Vector>left)._nb if isinstance(left, Vector) else left
+        right_nb = (<Vector>right)._nb if isinstance(right, Vector) else right
+        return BoolVector(vector_anyop_eq(literal=left_nb, column=right_nb))
+    if op_code == OP_ANYOP_NOT_EQ:
+        left_nb = (<Vector>left)._nb if isinstance(left, Vector) else left
+        right_nb = (<Vector>right)._nb if isinstance(right, Vector) else right
+        return BoolVector(vector_anyop_neq(literal=left_nb, column=right_nb))
+    if op_code == OP_ANYOP_GT:
+        left_nb = (<Vector>left)._nb if isinstance(left, Vector) else left
+        right_nb = (<Vector>right)._nb if isinstance(right, Vector) else right
+        return BoolVector(vector_anyop_gt(left_nb, right_nb))
+    if op_code == OP_ANYOP_LT:
+        left_nb = (<Vector>left)._nb if isinstance(left, Vector) else left
+        right_nb = (<Vector>right)._nb if isinstance(right, Vector) else right
+        return BoolVector(vector_anyop_lt(left_nb, right_nb))
+    if op_code == OP_ANYOP_GT_EQ:
+        left_nb = (<Vector>left)._nb if isinstance(left, Vector) else left
+        right_nb = (<Vector>right)._nb if isinstance(right, Vector) else right
+        return BoolVector(vector_anyop_gte(left_nb, right_nb))
+    if op_code == OP_ANYOP_LT_EQ:
+        left_nb = (<Vector>left)._nb if isinstance(left, Vector) else left
+        right_nb = (<Vector>right)._nb if isinstance(right, Vector) else right
+        return BoolVector(vector_anyop_lte(left_nb, right_nb))
+    if op_code == OP_ALLOP_EQ:
+        left_nb = (<Vector>left)._nb if isinstance(left, Vector) else left
+        right_nb = (<Vector>right)._nb if isinstance(right, Vector) else right
+        return BoolVector(vector_allop_eq(left_nb, right_nb))
+    if op_code == OP_ALLOP_NOT_EQ:
+        left_nb = (<Vector>left)._nb if isinstance(left, Vector) else left
+        right_nb = (<Vector>right)._nb if isinstance(right, Vector) else right
+        return BoolVector(vector_allop_neq(left_nb, right_nb))
+    if op_code == OP_AT_ARROW:
+        return _json_at_arrow(left, right)
+    if op_code == OP_ARRAY_CONTAINS_ALL:
+        return _json_array_contains_all(left, right)
+    if op_code == OP_AT_QUESTION:
+        return _json_at_question(left, right)
+    if op_code == OP_ANYOP_LIKE:
+        if get_vector_type(left) == VectorType.STRING:
+            return _string_anyop_like(left, right, ignore_case=False)
+        return vector_anyop_like(left, right)
+    if op_code == OP_ANYOP_NOT_LIKE:
+        if get_vector_type(left) == VectorType.STRING:
+            return _string_anyop_like(left, right, ignore_case=False).not_vector()
+        return vector_anyop_like(left, right, True)
+    if op_code == OP_ANYOP_ILIKE:
+        if get_vector_type(left) == VectorType.STRING:
+            return _string_anyop_like(left, right, ignore_case=True)
+        return vector_anyop_ilike(left, right)
+    if op_code == OP_ANYOP_NOT_ILIKE:
+        if get_vector_type(left) == VectorType.STRING:
+            return _string_anyop_like(left, right, ignore_case=True).not_vector()
+        return vector_anyop_ilike(left, right, True)
+
     # Map negated op codes to their positive counterpart and set negate flag.
     # All "Not" variants are: NotEq=2, NotInList=8, NotLike=10, NotILike=12,
     # NotRLike=14, NotInStr=16, NotIInStr=18.
@@ -217,7 +291,12 @@ cdef draken_compare_int(int op_code, left, right, int16_t left_schema_type=0, in
 
     if op_code == OP_IN_LIST:
         if isinstance(right, (list, tuple, set, frozenset)):
-            return _wrap_nb_bool_result(vector_in_list(_nb_vec_unwrap(left), right, negate))
+            # Unwrap Cython Vector shim to nanobind Vector if needed.
+            if isinstance(left, Vector):
+                left_nb = (<Vector>left)._nb
+            else:
+                left_nb = left  # scalar
+            return BoolVector(vector_in_list(left_nb, right, negate))
 
     if is_scalar(left) and is_draken_vector(right):
         flip_ops = {OP_GT: OP_LT, OP_LT: OP_GT, OP_GT_EQ: OP_LT_EQ, OP_LT_EQ: OP_GT_EQ}
@@ -250,109 +329,6 @@ cdef draken_compare_int(int op_code, left, right, int16_t left_schema_type=0, in
         result = _decimal_compare(op_code, left, right)
     else:
         raise NotImplementedError(f"draken_compare_int: unsupported vector type {vec_type!r}")
-
-    return result.not_vector() if negate else result
-
-
-# ---------------------------------------------------------------------------
-# Main dispatch — string-op variant (legacy / AnyOp / AllOp paths)
-# ---------------------------------------------------------------------------
-
-
-cpdef draken_compare(str op, left, right, left_schema_type=None, right_schema_type=None):
-    # Array / set operations — all are nanobind functions; unwrap shims and wrap results.
-    if op == "AnyOpEq":
-        return _wrap_nb_bool_result(vector_anyop_eq(literal=_nb_vec_unwrap(left), column=_nb_vec_unwrap(right)))
-    if op == "AnyOpNotEq":
-        return _wrap_nb_bool_result(vector_anyop_neq(literal=_nb_vec_unwrap(left), column=_nb_vec_unwrap(right)))
-    if op == "AnyOpGt":
-        return _wrap_nb_bool_result(vector_anyop_gt(_nb_vec_unwrap(left), _nb_vec_unwrap(right)))
-    if op == "AnyOpLt":
-        return _wrap_nb_bool_result(vector_anyop_lt(_nb_vec_unwrap(left), _nb_vec_unwrap(right)))
-    if op == "AnyOpGtEq":
-        return _wrap_nb_bool_result(vector_anyop_gte(_nb_vec_unwrap(left), _nb_vec_unwrap(right)))
-    if op == "AnyOpLtEq":
-        return _wrap_nb_bool_result(vector_anyop_lte(_nb_vec_unwrap(left), _nb_vec_unwrap(right)))
-    if op == "AllOpEq":
-        return _wrap_nb_bool_result(vector_allop_eq(_nb_vec_unwrap(left), _nb_vec_unwrap(right)))
-    if op == "AllOpNotEq":
-        return _wrap_nb_bool_result(vector_allop_neq(_nb_vec_unwrap(left), _nb_vec_unwrap(right)))
-    if op == "AtArrow":
-        return _json_at_arrow(left, right)
-    if op == "ArrayContainsAll":
-        return _json_array_contains_all(left, right)
-    if op == "AnyOpLike":
-        if get_vector_type(left) == VectorType.STRING:
-            return _string_anyop_like(left, right, ignore_case=False)
-        return vector_anyop_like(left, right)
-    if op == "AnyOpNotLike":
-        if get_vector_type(left) == VectorType.STRING:
-            return _string_anyop_like(left, right, ignore_case=False).not_vector()
-        return vector_anyop_like(left, right, True)
-    if op == "AnyOpILike":
-        if get_vector_type(left) == VectorType.STRING:
-            return _string_anyop_like(left, right, ignore_case=True)
-        return vector_anyop_ilike(left, right)
-    if op == "AnyOpNotILike":
-        if get_vector_type(left) == VectorType.STRING:
-            return _string_anyop_like(left, right, ignore_case=True).not_vector()
-        return vector_anyop_ilike(left, right, True)
-    if op == "AtQuestion":
-        return _json_at_question(left, right)
-
-    # --- Standard comparison operators ---
-
-    cdef bint negate = op in _NEGATED_OPS
-    if negate:
-        op = _NEGATED_OPS[op]
-
-    if op == "InList":
-        if isinstance(right, (list, tuple, set, frozenset)):
-            return _wrap_nb_bool_result(vector_in_list(_nb_vec_unwrap(left), right, negate))
-
-    if is_scalar(left) and is_draken_vector(right):
-        flip_ops = {"Gt": "Lt", "Lt": "Gt", "GtEq": "LtEq", "LtEq": "GtEq"}
-        op = flip_ops.get(op, op)
-        left, right = right, left
-
-    if right is None and not isinstance(left, (str, int, float, bytes, bool, type(None))):
-        return BoolVector(len(left))
-
-    # Translate the operator string to an integer code once. Per-type helpers
-    # below dispatch on the int (Cython folds to a C switch).
-    cdef int op_code = <int>_OP_CODE.get(op, 0)
-    if op_code == OP_UNKNOWN:
-        raise NotImplementedError(f"draken_compare: unknown operator {op!r}")
-
-    vec_type = get_vector_type(left)
-
-    cdef int16_t left_tc = (
-        BC_TYPE_DATE if left_schema_type is OrsoTypes.DATE else
-        BC_TYPE_TIMESTAMP if left_schema_type is OrsoTypes.TIMESTAMP else
-        BC_TYPE_NONE
-    )
-
-    if vec_type == VectorType.STRING:
-        result = _string_compare(op_code, left, right)
-    elif vec_type in (VectorType.INT64, VectorType.INTEGER):
-        if left_tc == BC_TYPE_DATE or left_tc == BC_TYPE_TIMESTAMP:
-            result = _int64_temporal_compare(op_code, left, right, left_tc)
-        else:
-            result = _int64_compare(op_code, left, right)
-    elif vec_type == VectorType.FLOAT64:
-        result = _float64_compare(op_code, left, right)
-    elif vec_type == VectorType.TIMESTAMP:
-        result = _timestamp_compare(op_code, left, right)
-    elif vec_type == VectorType.DATE32:
-        result = _date32_compare(op_code, left, right)
-    elif vec_type == VectorType.INTERVAL:
-        result = _interval_compare(op_code, left, right)
-    elif vec_type == VectorType.BOOL:
-        result = _bool_compare(op_code, left, right)
-    elif vec_type == VectorType.DECIMAL:
-        result = _decimal_compare(op_code, left, right)
-    else:
-        raise NotImplementedError(f"draken_compare: unsupported vector type {vec_type!r}")
 
     return result.not_vector() if negate else result
 

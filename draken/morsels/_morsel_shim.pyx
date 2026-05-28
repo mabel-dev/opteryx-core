@@ -37,6 +37,7 @@ cdef Morsel _make_morsel():
     m._nb = NbMorsel()
     m._col_names = []
     m._columns = []
+    m._zero_col_num_rows = 0
     return m
 
 
@@ -49,6 +50,7 @@ cdef class Morsel:
             self._nb = nb_morsel
         self._col_names = []
         self._columns = []
+        self._zero_col_num_rows = 0
 
     def __len__(self):
         return len(self._columns)
@@ -59,7 +61,7 @@ cdef class Morsel:
     @property
     def num_rows(self):
         if not self._columns:
-            return 0
+            return self._zero_col_num_rows
         return (<Vector>self._columns[0]).length
 
     @property
@@ -234,6 +236,9 @@ cdef class Morsel:
         """Zero all columns to 0 rows, in place."""
         cdef int n = len(self._columns)
         cdef int i
+        if n == 0:
+            self._zero_col_num_rows = 0
+            return
         for i in range(n):
             nb_empty = (<Vector>self._columns[i])._nb.take([])
             self._columns[i] = Vector(nb_empty)
@@ -243,6 +248,9 @@ cdef class Morsel:
         cdef int n = len(self._columns)
         cdef int i
         idx_list = [indices[i] for i in range(indices.shape[0])]
+        if n == 0:
+            self._zero_col_num_rows = indices.shape[0]
+            return
         for i in range(n):
             nb_taken = (<Vector>self._columns[i])._nb.take(idx_list)
             self._columns[i] = Vector(nb_taken)
@@ -302,6 +310,9 @@ cdef class Morsel:
         result._col_names = list(self._col_names)
         cdef int n = len(self._columns)
         idx_list = list(indices)
+        if n == 0:
+            result._zero_col_num_rows = len(idx_list)
+            return result
         for i in range(n):
             nb_taken = (<Vector>self._columns[i])._nb.take(idx_list)
             result._nb.append(nb_taken)
@@ -396,6 +407,7 @@ cdef class Morsel:
         result._nb = NbMorsel()
         result._col_names = []
         result._columns = []
+        result._zero_col_num_rows = 0
         for name, vec in zip(col_names, col_vecs):
             if isinstance(name, str):
                 name = name.encode("utf-8")

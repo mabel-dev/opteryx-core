@@ -14,7 +14,7 @@ from typing import List, Optional
 
 from opteryx.exceptions import ArrayWithMixedTypesError, SqlError, UnsupportedSyntaxError
 from opteryx.expression import NodeType, format_expression
-from opteryx.expression.binary_operators import binary_operations
+from opteryx.expression.evaluator.arithmetic import resolve_binary_op
 from opteryx.expression.functions import functions as _list_functions
 from opteryx.expression.functions import is_function as _is_function
 from opteryx.expression.intervals import (
@@ -24,6 +24,7 @@ from opteryx.expression.intervals import (
     MICROSECONDS_PER_SECOND,
 )
 from opteryx.expression.operator_catalog import get_operator_node_type
+from opteryx.compiled.expression.compiled_expression import _BOP_CODE
 from opteryx.models import LogicalColumn, Node
 from opteryx.operators.aggregate.helpers import aggregator_names, is_aggregator
 from opteryx.types import OrsoTypes
@@ -129,11 +130,10 @@ def _interval_to_past_timestamp(interval_value):
 def _apply_interval_scalar(base_value, base_type, interval_value, operator: str):
     """Apply an INTERVAL to a DATE or TIMESTAMP scalar.
 
-    The expression engine relies on the generic ``binary_operations`` path
-    which converts dates to plain integers.  Unfortunately the interval
-    kernels expect a PyArrow temporal array and therefore return ``null``
-    when provided with a raw integer.  That bug manifests during
-    timetravel evaluation, e.g. ``CURRENT_DATE - INTERVAL '7' DAY``;
+    The bind-time kernel resolver converts dates to plain integers.
+    Unfortunately the interval kernels expect a PyArrow temporal array and
+    therefore return ``null`` when provided with a raw integer.  That bug
+    manifests during timetravel evaluation, e.g. ``CURRENT_DATE - INTERVAL '7' DAY``;
     the arithmetic ends up producing ``None`` which is later treated as a
     failure to resolve the expression.
 
@@ -250,8 +250,14 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
         left = _as_binary_operand_array(left_value, left_type)
         right = _as_binary_operand_array(right_value, right_type)
 
+        op_code = _BOP_CODE.get(node.value, 0)
+        if op_code == 0:
+            raise UnsupportedSyntaxError(
+                f"Time-travel expression: unsupported operator '{node.value}'."
+            )
+        kernel = resolve_binary_op(op_code, left_type, right_type)
         try:
-            result = binary_operations(left, left_type, node.value, right, right_type)
+            result = kernel(left, right)
         except Exception as err:
             raise UnsupportedSyntaxError(
                 f"Unable to evaluate time-travel expression with operator '{node.value}'."

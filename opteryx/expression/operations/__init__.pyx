@@ -25,7 +25,10 @@ from opteryx.compiled.vector_ops import (
 )
 from opteryx.compiled.nanobind.vector_misc import vector_in_list
 from opteryx.compiled.nanobind.vector_string_search import vector_contains
-from opteryx.expression.evaluator.comparisons import draken_compare
+# Phase 4: draken_compare (string-keyed) deleted; use draken_compare_int with
+# bind-time-resolved op_code. The shim below stays plan-time-only.
+from opteryx.expression.evaluator.comparisons import draken_compare_int
+from opteryx.expression.evaluator._impl import _OP_CODE as _COMPARE_OP_CODE
 from opteryx.third_party import yyjson
 from opteryx.types import OrsoTypes
 from opteryx.types._datetime_conversion import (
@@ -184,7 +187,17 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
         right_arr = to_temporal_array(right_arr, right_source_type, right_target_type)
         left_type = left_target_type
         right_type = right_target_type
-        return draken_compare(operator, left_arr, right_arr, left_type, right_type)
+        # Plan-time call: resolve op-string and BCTypeCode, then dispatch to
+        # the int-keyed kernel. Hot path (BC_COMPARE) resolves at bind time.
+        _op_code = _COMPARE_OP_CODE.get(operator, 0)
+        if _op_code == 0:
+            raise NotImplementedError(
+                f"operations: unknown comparison op {operator!r}"
+            )
+        # BCTypeCode: 0=NONE, 1=DATE, 2=TIMESTAMP
+        _lc = 1 if left_type == OrsoTypes.DATE else (2 if left_type == OrsoTypes.TIMESTAMP else 0)
+        _rc = 1 if right_type == OrsoTypes.DATE else (2 if right_type == OrsoTypes.TIMESTAMP else 0)
+        return draken_compare_int(_op_code, left_arr, right_arr, _lc, _rc)
 
     # Handle interval operations
     if OrsoTypes.INTERVAL in (left_type, right_type):

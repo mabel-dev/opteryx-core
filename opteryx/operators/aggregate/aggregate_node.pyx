@@ -30,7 +30,7 @@ from libc.stdint cimport uint8_t, int64_t
 
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
-from opteryx.expression.evaluator import evaluate_and_append_draken
+from opteryx.expression.evaluator import compile_eval_nodes, execute_and_append
 from opteryx.models import QueryProperties
 from opteryx.operators.aggregate.helpers import extract_evaluations
 from opteryx.types import OrsoTypes
@@ -417,7 +417,7 @@ def _build_engine_aggregate(aggregate):
 
 cdef class UngroupedAggregateNode(BasePlanNode):
     cdef public list aggregates
-    cdef public list evaluatable_nodes
+    cdef public list _compiled_evals
     cdef public list all_identifiers
     cdef public UngroupedAggregateEngine _engine
     cdef public list _result_specs
@@ -433,11 +433,12 @@ cdef class UngroupedAggregateNode(BasePlanNode):
         BasePlanNode.__init__(self, properties=properties, **parameters)
 
         self.aggregates = list(parameters.get("aggregates", []))
-        self.evaluatable_nodes = [
+        eval_nodes = [
             node
             for node in extract_evaluations(self.aggregates)
             if node.node_type != NodeType.LITERAL
         ]
+        self._compiled_evals = compile_eval_nodes(eval_nodes)
 
         all_identifiers = [
             node.schema_column.identity
@@ -452,7 +453,7 @@ cdef class UngroupedAggregateNode(BasePlanNode):
         self._finalized = False
 
         # Hot-path early-out flags
-        self._no_eval = (len(self.evaluatable_nodes) == 0)
+        self._no_eval = (len(self._compiled_evals) == 0)
         self._all_identifiers_bytes = [
             _column_bytes(i) for i in self.all_identifiers
         ]
@@ -569,7 +570,7 @@ cdef class UngroupedAggregateNode(BasePlanNode):
             if select_state == 1:
                 morsel = morsel.select(self.all_identifiers)
             if not self._no_eval:
-                morsel = evaluate_and_append_draken(self.evaluatable_nodes, morsel)
+                morsel = execute_and_append(self._compiled_evals, morsel)
 
             self._engine.ingest(morsel)
 

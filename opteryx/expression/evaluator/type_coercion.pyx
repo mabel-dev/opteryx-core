@@ -5,36 +5,17 @@ file in this package, so every per-call saving compounds quickly.
 
 The coercion functions take a Python literal (or single-element typed
 constant vector) and return the int / bytes / etc. that downstream Draken
-kernels expect. _is_null_as_boolvector branches on vector shape to produce
-a BoolVector of "is null" flags using native Draken APIs.
+kernels expect.
 """
 
 import datetime
 import decimal
 
-from draken.vectors.bool_vector import BoolVector
-
 from draken.vectors.vector cimport Vector
-
-from opteryx.compiled.nanobind.vector_bool_ops import (
-    bool_vector_from_int8_mask,
-    bool_vector_from_inverted_null_bitmap,
-)
 
 
 cdef object _EPOCH_DATE = datetime.date(1970, 1, 1)
 cdef object _EPOCH_DATETIME = datetime.datetime(1970, 1, 1)
-
-
-cpdef object _dictionary_arrow_type(vec):
-    """Return the dictionary value-type for a Draken dictionary vector, else None."""
-    if not type(vec).__module__.startswith("draken.vectors."):
-        return None
-    return getattr(vec, "dictionary_value_type", None)
-
-
-cpdef bint _is_dictionary_encoded_vector(vec):
-    return _dictionary_arrow_type(vec) is not None
 
 
 cpdef bytes _coerce_str(value):
@@ -166,43 +147,3 @@ cpdef object _coerce_temporal_scalar_for_arrow(value, target_type):
     return value
 
 
-# Vector classes whose null layout is exposed via is_null() → int8 mask.
-# After the draken rewrite, only BoolVector retains the old typed-class surface;
-# all other vector types are unified Vector instances handled by the
-# null_bitmap() fallback path below.
-cdef tuple _FIXED_BUFFER_VECTORS = (BoolVector,)
-
-
-cpdef _is_null_as_boolvector(vec):
-    """Produce a BoolVector flagging null entries of `vec`.
-
-    Dispatch order:
-      1. DICTIONARY-encoded (old-draken compat): dispatch via is_null_boolvector /
-         is_null_with_nan / is_null if present.
-      2. BoolVector: native int8 null mask via is_null().
-      3. Unified Vector fallback: null_bitmap() returns the validity bitmap
-         (1=valid, 0=null) as bytes, or None when all rows are valid.
-    """
-    cdef Py_ssize_t n = len(vec)
-
-    if _is_dictionary_encoded_vector(vec):
-        is_null_bv = getattr(vec, "is_null_boolvector", None)
-        if is_null_bv is not None:
-            return is_null_bv()
-        is_null_nan = getattr(vec, "is_null_with_nan", None)
-        if is_null_nan is not None:
-            return BoolVector(bool_vector_from_int8_mask(is_null_nan(), n))
-        is_null = getattr(vec, "is_null", None)
-        if is_null is not None:
-            return BoolVector(bool_vector_from_int8_mask(is_null(), n))
-        return BoolVector(n)
-
-    if isinstance(vec, _FIXED_BUFFER_VECTORS):
-        return BoolVector(bool_vector_from_int8_mask(vec.is_null(), n))
-
-    nb = vec.null_bitmap()
-    if nb is not None:
-        return BoolVector(bool_vector_from_inverted_null_bitmap(nb, n))
-
-    # null_bitmap() returns None → validity is NULL → all rows valid.
-    return BoolVector(n)
