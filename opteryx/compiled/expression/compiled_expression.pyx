@@ -29,6 +29,53 @@ from opteryx.exceptions import IncorrectTypeError
 
 
 # ---------------------------------------------------------------------------
+# Phase 9b: Kernel resolution and context wrapper
+# ---------------------------------------------------------------------------
+
+cdef class _KernelContextWrapper:
+    """Wraps a C context pointer for lifetime management.
+    Ensures the context is freed when the wrapper is garbage collected."""
+    cdef public unsigned long long ctx_ptr
+
+    def __cinit__(self, unsigned long long ctx_ptr):
+        self.ctx_ptr = ctx_ptr
+
+    def __dealloc__(self):
+        if self.ctx_ptr != 0:
+            from draken.ops.kernels._kernel_registry import free_context
+            free_context(self.ctx_ptr)
+
+    def __repr__(self):
+        return f"<KernelContextWrapper {self.ctx_ptr}>"
+
+
+def _resolve_kernel_and_context(str kernel_name, context_allocator=None, context_arg=None):
+    """Resolve a kernel by name and allocate context if needed.
+
+    Returns (kernel_fn_ptr, context_wrapper_or_none).
+    Returns (None, None) if kernel not found — no exception.
+    Raises ValueError if context allocation fails (control flow, not fallback).
+    """
+    from draken.ops.kernels._kernel_registry import lookup_kernel
+
+    fn_ptr, ctx_ptr = lookup_kernel(kernel_name)
+    if fn_ptr is None:
+        return None, None
+
+    context_wrapper = None
+    if context_allocator is not None:
+        if context_arg is not None:
+            ctx_ptr = context_allocator(context_arg)
+        else:
+            ctx_ptr = context_allocator()
+        if ctx_ptr is None:
+            raise ValueError(f"Failed to allocate context for kernel '{kernel_name}'")
+        context_wrapper = _KernelContextWrapper(ctx_ptr)
+
+    return fn_ptr, context_wrapper
+
+
+# ---------------------------------------------------------------------------
 # NodeType integer constants — must mirror NodeType IntEnum in
 # opteryx/expression/__init__.py (verified at startup).
 # ---------------------------------------------------------------------------
@@ -485,6 +532,34 @@ cdef Py_ssize_t _linearize(
         bc._hold(binop_kernel)
         slot.callable_ref = <PyObject*>binop_kernel
 
+        # Phase 9b: Resolve C kernel function pointer (binary ops use dispatch kernel).
+        _binop_kernel_names = {
+            BOP_PLUS: "draken_add",
+            BOP_MINUS: "draken_subtract",
+            BOP_MULTIPLY: "draken_multiply",
+            BOP_DIVIDE: "draken_divide",
+            BOP_MODULO: "draken_modulo",
+            BOP_INT_DIVIDE: "draken_divide",  # Integer division via dispatch
+            BOP_STRING_CONCAT: "draken_string_concat",
+            BOP_BITWISE_OR: "draken_bitwise_or",
+            BOP_BITWISE_AND: "draken_bitwise_and",
+            BOP_BITWISE_XOR: "draken_bitwise_xor",
+            BOP_SHIFT_LEFT: "draken_bitwise_shift_left",
+            BOP_SHIFT_RIGHT: "draken_bitwise_shift_right",
+        }
+        kernel_name = _binop_kernel_names.get(slot.op_code)
+        if kernel_name is not None:
+            fn_ptr, ctx_wrapper = _resolve_kernel_and_context(kernel_name, None, None)
+            if fn_ptr is not None:
+                slot.kernel_fn = <void*>fn_ptr
+                if ctx_wrapper is not None:
+                    bc._hold(ctx_wrapper)
+                    slot.ctx_ptr = <void*>(<unsigned long long>ctx_wrapper.ctx_ptr)
+                slot.flags |= BC_INSTR_C_NATIVE
+            else:
+                # Fail-fast: all mapped binary ops have C kernels; a miss is a bug.
+                raise ValueError(f"Binary operator kernel '{kernel_name}' not found in registry")
+
         # Phase 1 result-wrap pattern: kernels return nanobind Vectors.
         slot.flags |= BC_RESULT_NEEDS_NB_WRAP
         # Binary ops never return BOOL, so BC_RESULT_WRAP_AS_BOOL stays false.
@@ -553,6 +628,19 @@ cdef Py_ssize_t _linearize(
             _ensure_orso_types()
             if func_ref_meta.inferred_return_type is _OrsoTypes_BOOLEAN:
                 slot.flags |= BC_RESULT_WRAP_AS_BOOL
+
+        # Phase 9b: Resolve C kernel function pointer for function calls.
+        # Function kernels (Phase 9a-fn) are under development; resolution is optional.
+        # If a C kernel exists, use it; otherwise, fall back to Python callable_ref.
+        # This is the intended behaviour while function kernels are being ported.
+        func_name = func_val.upper() if func_val else None
+        if func_name is not None:
+            fn_ptr, ctx_wrapper = _resolve_kernel_and_context(f"draken_{func_name.lower()}")
+            if fn_ptr is not None:
+                slot.kernel_fn = <void*>fn_ptr
+                # Function kernels generally don't need context structs
+                slot.flags |= BC_INSTR_C_NATIVE
+            # else: kernel not available yet (pending Phase 9a-fn); callable_ref path remains
 
         bc._hold(callable_obj)
         slot.callable_ref = <PyObject*>callable_obj
@@ -633,6 +721,78 @@ cdef Py_ssize_t _linearize(
         if cast_target_orso is _OrsoTypes_BOOLEAN:
             slot.flags |= BC_RESULT_WRAP_AS_BOOL
 
+        # Phase 9b: Resolve C kernel function pointer for cast operations.
+        # Build kernel name from source and target types.
+        # Map OrsoTypes enum names (e.g., "INTEGER", "DOUBLE") to registry type tokens (e.g., "int64", "float64").
+        _orso_to_type_name = {
+            "INTEGER": "int64",
+            "DOUBLE": "float64",
+            "VARCHAR": "string",
+            "BOOLEAN": "bool",
+            "DATE": "date32",
+            "TIMESTAMP": "timestamp",
+            "BLOB": "string",
+        }
+        # Map target types to dispatch kernels for unsupported source types.
+        _dispatch_kernels = {
+            "VARCHAR": "draken_cast_to_varchar",
+            "INTEGER": "draken_cast_to_int64",
+            "DOUBLE": "draken_cast_to_float64",
+            "BOOLEAN": "draken_cast_to_bool",
+            "DATE": "draken_cast_to_date",
+            "TIMESTAMP": "draken_cast_to_timestamp",
+            "DECIMAL": "draken_cast_to_decimal",
+            "ARRAY": "draken_cast_to_array",
+            "VECTOR": "draken_cast_to_vector",
+        }
+
+        src_type_name = _orso_to_type_name.get(source_orso_name)
+        dst_type_name = _orso_to_type_name.get(cast_target_type)
+
+        kernel_name = None
+        context_allocator = None
+        context_args = ()
+
+        # Try specific source→target kernel if both types are supported.
+        if src_type_name and dst_type_name:
+            # Check for identity cast first (source == target).
+            if source_orso_name == cast_target_type:
+                kernel_name = "draken_cast_identity"
+            else:
+                kernel_name = f"draken_cast_{src_type_name}_to_{dst_type_name}"
+
+            fn_ptr, ctx_wrapper = _resolve_kernel_and_context(kernel_name, None, None)
+            if fn_ptr is None:
+                # Fail-fast: supported type combo but kernel missing is a bug.
+                raise ValueError(
+                    f"Kernel '{kernel_name}' not found in registry for cast {source_orso_name} → {cast_target_type}. "
+                    f"This is a supported combination but kernel is missing or incorrectly named."
+                )
+        else:
+            # Unsupported source type or parameterized cast; try dispatch kernel.
+            if cast_target_type == "TIMESTAMP" and cast_unit is not None:
+                # Parameterized TIMESTAMP cast uses dispatch kernel with context.
+                from draken.ops.kernels._kernel_registry import alloc_cast_timestamp_ctx
+                unit_code = {"ns": 1, "us": 2, "ms": 3, "s": 4, "days": 5}.get(cast_unit, 0)
+                context_allocator = alloc_cast_timestamp_ctx
+                context_args = (unit_code,)
+                kernel_name = "draken_cast_to_timestamp"
+            else:
+                # Generic dispatch kernel for target type.
+                kernel_name = _dispatch_kernels.get(cast_target_type)
+
+            if kernel_name:
+                fn_ptr, ctx_wrapper = _resolve_kernel_and_context(kernel_name, context_allocator, context_args[0] if context_args else None)
+            else:
+                fn_ptr, ctx_wrapper = None, None
+
+        if fn_ptr is not None:
+            slot.kernel_fn = <void*>fn_ptr
+            if ctx_wrapper is not None:
+                bc._hold(ctx_wrapper)
+                slot.ctx_ptr = <void*>(<unsigned long long>ctx_wrapper.ctx_ptr)
+            slot.flags |= BC_INSTR_C_NATIVE
+
         bc._hold(cast_kernel)
         slot.callable_ref = <PyObject*>cast_kernel
         return sub_depth   # pop 1, push 1 — net 0
@@ -709,6 +869,33 @@ cdef Py_ssize_t _linearize(
         slot.opcode = BC_EXTRACTION
         slot.op_code = sub_op
         slot.flags = BC_RESULT_NEEDS_NB_WRAP
+
+        # Phase 9b: Resolve C kernel function pointer for extraction operations.
+        _extr_kernel_names = {
+            BC_EXTR_MAP_STRING: "draken_map_access_string",
+            BC_EXTR_MAP_ARRAY: "draken_array_map_access",
+            BC_EXTR_JSON_PTR: "draken_json_extract",
+            BC_EXTR_JSON_KEY: "draken_json_extract",
+        }
+        if sub_op in _extr_kernel_names:
+            from draken.ops.kernels._kernel_registry import alloc_extraction_ctx
+            context_allocator = alloc_extraction_ctx
+            fn_ptr, ctx_wrapper = _resolve_kernel_and_context(
+                _extr_kernel_names[sub_op],
+                context_allocator,
+                sub_op
+            )
+            if fn_ptr is None:
+                raise ValueError(
+                    f"Extraction kernel '{_extr_kernel_names[sub_op]}' not found in registry. "
+                    f"This is a supported extraction operation but kernel is missing."
+                )
+
+            slot.kernel_fn = <void*>fn_ptr
+            if ctx_wrapper is not None:
+                bc._hold(ctx_wrapper)
+                slot.ctx_ptr = <void*>(<unsigned long long>ctx_wrapper.ctx_ptr)
+            slot.flags |= BC_INSTR_C_NATIVE
 
         # Store the extracted literal (bytes or Vector).
         if extr_literal is not None:

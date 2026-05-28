@@ -48,7 +48,7 @@ from draken.draken_native import vector_array_map_access as _vector_array_map_ac
 # The execute_bytecode section at the bottom of this file repeats some of
 # these; duplicates are harmless (Cython deduplicates internally).
 # ---------------------------------------------------------------------------
-from libc.stdint cimport uint8_t, uint32_t
+from libc.stdint cimport uint8_t, uint32_t, uint64_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 from libc.stddef cimport size_t
@@ -101,6 +101,18 @@ _EPOCH_DATETIME = datetime.datetime(1970, 1, 1)
 # BC_TYPE_DATE / BC_TYPE_TIMESTAMP int codes on the AnyOp/temporal-coercion paths.
 _OrsoTypes_DATE = _OrsoTypes.DATE
 _OrsoTypes_TIMESTAMP = _OrsoTypes.TIMESTAMP
+
+# Telemetry: count C-native kernel calls for regression detection (Phase 9c).
+cdef uint64_t _c_native_kernel_call_count = 0
+
+
+def get_c_native_kernel_call_count():
+    """Return the current count of C-native kernel calls (telemetry).
+
+    This counter increments each time the executor dispatches to a C ABI kernel.
+    Used for regression detection to ensure C paths are exercised.
+    """
+    return _c_native_kernel_call_count
 
 
 def _is_scalar_value(obj):
@@ -593,6 +605,7 @@ from opteryx.compiled.expression.compiled_expression cimport (
     BC_DNF,
     BC_EXTRACTION,
     BC_FUNCTION,
+    BC_INSTR_C_NATIVE,
     BC_LOAD_COL,
     BC_LOAD_LIT_BOOL,
     BC_LOAD_LIT_SCALAR,
@@ -620,7 +633,7 @@ from opteryx.compiled.expression.compiled_expression cimport (
 )
 from libc.stdint cimport uint8_t, int8_t, int16_t, int64_t, uintptr_t, uint32_t
 
-from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL, draken_vector_from_dense
+from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL, DRAKEN_NULL, draken_vector_from_dense
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy, memset
 from libc.stddef cimport size_t
@@ -650,6 +663,31 @@ from draken.core.frame_arena cimport (
 )
 from draken.ops.compare_dv cimport draken_compare_dv
 from draken.ops.arithmetic_dv cimport draken_arithmetic_dv
+
+# Phase 9c: C kernel ABI — function-pointer signatures for binary ops, casts, extractions
+cdef extern from "ops/vec_result.h":
+    ctypedef struct VecResult:
+        void*             data
+        uint8_t*          validity
+        const uint32_t*   selection
+        bint              owns_selection
+        uint32_t          data_length
+        uint32_t          length
+        DrakenType        type
+        uint8_t           flags
+
+# Function-pointer typedefs per Decision 3 (Phase 9 design, §Post-design)
+ctypedef VecResult (*binop_fn_t)(void* ctx, const DrakenVector* left, const DrakenVector* right) nogil
+ctypedef VecResult (*cast_fn_t)(void* ctx, const DrakenVector* v) nogil
+ctypedef VecResult (*extr_fn_t)(void* ctx, const DrakenVector* v, const DrakenVector* key) nogil
+ctypedef VecResult (*func_fn_t)(void* ctx, const DrakenVector* const* args, uint32_t nargs) nogil
+ctypedef VecResult (*case_fn_t)(void* ctx, void* morsel) nogil
+
+# Error handling for kernel results
+cdef extern from "ops/kernels/error_handling.h":
+    const char* draken_get_error_message() nogil
+    void draken_error_message_clear() nogil
+    bint draken_has_error() nogil
 
 
 # ---------------------------------------------------------------------------
@@ -1293,6 +1331,9 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
     cdef uint8_t* cur_null
     cdef uint8_t* next_data
     cdef uint8_t* next_null
+    # Phase 9c: C kernel ABI dispatch
+    cdef VecResult c_result
+    cdef const char* error_msg
 
     arena = draken_frame_arena_create()
     if arena == NULL:
@@ -1723,6 +1764,17 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
 
                 if (BOP_PLUS <= slot.op_code <= BOP_MODULO
                         and dv_left_ptr != NULL and dv_right_ptr != NULL):
+                    # Executor short-circuit: detect all-null inputs (DRAKEN_NULL constant)
+                    # and return null result without calling kernel (Defect 2 fix).
+                    if (dv_left_ptr.type == DRAKEN_NULL or dv_right_ptr.type == DRAKEN_NULL):
+                        global _c_native_kernel_call_count
+                        _c_native_kernel_call_count += 1  # Count as C-native dispatch
+                        dv_result_ptr = Vector(_draken_native.vector_null_from_length(num_rows)).unified()
+                        dv_stack[sp] = dv_result_ptr
+                        anchor[sp] = None
+                        sp += 1
+                        continue
+
                     dv_result_ptr = draken_arithmetic_dv(
                         slot.op_code,
                         dv_left_ptr, dv_right_ptr,
@@ -1734,7 +1786,34 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                         sp += 1
                         continue
 
-                # Phase 6: resolve-time kernel dispatch. Fallback path for non-DV fast ops.
+                # Phase 9c: C kernel ABI dispatch (if kernel_fn is set by bind-time registry)
+                if slot.flags & BC_INSTR_C_NATIVE and slot.kernel_fn != NULL:
+                    global _c_native_kernel_call_count
+                    _c_native_kernel_call_count += 1
+                    draken_error_message_clear()
+                    c_result = (<binop_fn_t>slot.kernel_fn)(
+                        slot.ctx_ptr, dv_left_ptr, dv_right_ptr
+                    )
+                    if c_result.data == NULL:
+                        # Kernel error — fetch message and raise
+                        error_msg = draken_get_error_message()
+                        if error_msg != NULL:
+                            raise RuntimeError(f"C kernel error: {error_msg.decode('utf-8', 'replace')}")
+                        else:
+                            raise RuntimeError("C kernel returned error (no message)")
+                    # Materialize VecResult into DrakenVector* (stored in dv_store)
+                    dv_store[sp].data = c_result.data
+                    dv_store[sp].validity = c_result.validity
+                    dv_store[sp].selection = c_result.selection
+                    dv_store[sp].data_length = c_result.data_length
+                    dv_store[sp].length = c_result.length
+                    dv_store[sp].type = c_result.type
+                    dv_stack[sp] = &dv_store[sp]
+                    anchor[sp] = None
+                    sp += 1
+                    continue
+
+                # Phase 6: Python fallback path (for unsupported ops or BC_FUNCTION)
                 py_left = _slot_to_pyobj(dv_left_ptr, anchor[sp], arena)
                 py_right = _slot_to_pyobj(dv_right_ptr, anchor[sp + 1], arena)
                 legacy_result = (<object>slot.callable_ref)(py_left, py_right)

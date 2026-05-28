@@ -1,0 +1,142 @@
+#pragma once
+
+/**
+ * BC_CAST kernel ABI — Phase 9a.
+ *
+ * All cast kernels follow the Decision 3 signature:
+ *   VecResult (*)(void* ctx, const DrakenVector* vector)
+ *
+ * Context (ctx) is NULL for simple casts; non-NULL for parameterized casts
+ * (e.g., TIMESTAMP[unit], DECIMAL[p,s]). See kernel_context.h for struct definitions.
+ *
+ * Error handling: C++ exceptions are caught at the boundary. On error, return
+ * a VecResult with data == nullptr (sentinel) and set thread-local error string
+ * (same pattern as DV fast paths arena).
+ */
+
+#include "ops/vec_result.h"
+#include "core/buffers.h"
+#include "ops/kernels/kernel_context.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ============================================================================
+ * Numeric Casts (int64 ↔ float64, bool, string, etc.)
+ * ========================================================================== */
+
+VecResult draken_cast_int64_to_float64(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_int64_to_string(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_int64_to_bool(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_int64_to_timestamp(void* ctx, const DrakenVector* vector);
+
+VecResult draken_cast_bool_to_float64(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_bool_to_string(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_bool_to_int64(void* ctx, const DrakenVector* vector);
+
+VecResult draken_cast_float64_to_int64(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_float64_to_string(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_float64_to_bool(void* ctx, const DrakenVector* vector);
+
+VecResult draken_cast_string_to_int64(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_string_to_float64(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_string_to_bool(void* ctx, const DrakenVector* vector);
+
+VecResult draken_cast_integer_to_float64(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_integer_to_int64(void* ctx, const DrakenVector* vector);
+
+VecResult draken_cast_date32_to_int64(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_date32_to_timestamp(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_date32_to_string(void* ctx, const DrakenVector* vector);
+
+VecResult draken_cast_timestamp_to_int64(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_timestamp_to_date32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_timestamp_to_string(void* ctx, const DrakenVector* vector);
+
+/* ============================================================================
+ * Dispatch Helpers — C implementations of cast_to_* closures.
+ *
+ * These kernels dispatch to the appropriate native cast based on input type.
+ * They replace the Python row-loop closures in opteryx/expression/casts.pyx.
+ * ========================================================================== */
+
+/**
+ * Cast any numeric/string type to FLOAT64.
+ * Dispatches to the appropriate cast_*_to_float64 kernel based on input type.
+ * Returns FLOAT64 vector or error.
+ */
+VecResult draken_cast_to_float64(void* ctx, const DrakenVector* vector);
+
+/**
+ * Cast any numeric/string type to INT64.
+ * Dispatches to the appropriate cast_*_to_int64 kernel based on input type.
+ * Returns INT64 vector or error.
+ */
+VecResult draken_cast_to_int64(void* ctx, const DrakenVector* vector);
+
+/**
+ * Cast any numeric/string/array type to VARCHAR.
+ * Dispatches based on input type. Handles array → JSON string conversion.
+ * Returns VARCHAR (StringVector) or error.
+ */
+VecResult draken_cast_to_varchar(void* ctx, const DrakenVector* vector);
+
+/**
+ * Cast any numeric/string type to BOOL.
+ * Dispatches based on input type.
+ * Returns BOOL (BoolVector) or error.
+ */
+VecResult draken_cast_to_bool(void* ctx, const DrakenVector* vector);
+
+/**
+ * Cast any numeric/string/temporal type to DATE32.
+ * Dispatches based on input type.
+ * Returns DATE32 vector or error.
+ */
+VecResult draken_cast_to_date(void* ctx, const DrakenVector* vector);
+
+/* ============================================================================
+ * Parameterized Casts — require context struct
+ * ========================================================================== */
+
+/**
+ * Cast to DECIMAL(precision, scale).
+ * ctx → cast_decimal_ctx with precision and scale.
+ * Returns DECIMAL vector or error. (Likely row-loop in initial phase.)
+ */
+VecResult draken_cast_to_decimal(void* ctx, const DrakenVector* vector);
+
+/**
+ * Cast to ARRAY(element_type).
+ * ctx → cast_array_ctx with element_type.
+ * Returns ARRAY vector or error.
+ */
+VecResult draken_cast_to_array(void* ctx, const DrakenVector* vector);
+
+/**
+ * Cast to VECTOR (FP16 embedding).
+ * Returns VECTOR vector or error.
+ */
+VecResult draken_cast_to_vector(void* ctx, const DrakenVector* vector);
+
+/**
+ * Cast to VARCHAR(length).
+ * ctx → cast_varchar_ctx with max_length.
+ * Returns VARCHAR (StringVector) with length enforcement, or error.
+ */
+VecResult draken_cast_to_varchar_with_length(void* ctx, const DrakenVector* vector);
+
+/* ============================================================================
+ * Passthrough / Identity Cast
+ * ========================================================================== */
+
+/**
+ * No-op cast: source type == target type.
+ * Returns the input vector unchanged.
+ */
+VecResult draken_cast_identity(void* ctx, const DrakenVector* vector);
+
+#ifdef __cplusplus
+}
+#endif
