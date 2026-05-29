@@ -746,11 +746,16 @@ cdef int _execute_bytecode_prepass(
     Py_ssize_t n_slots,
     Py_ssize_t nbytes,
     list anchors,
-) except -1:
+) except? -2:
     """GIL-held pre-pass: resolve columns and malloc scratch bitmap buffers.
 
-    Returns -1 (exception) if any BC_LOAD_COL column is not a BoolVector
-    (caller must fall back to execute_bytecode).  On success returns 0.
+    Returns -1 when a BC_LOAD_COL column is not a BoolVector (caller must fall
+    back to execute_bytecode); returns 0 on success.  -1 is a *valid* return
+    value, NOT an error sentinel — the declared error sentinel is -2 with the
+    `except?` form, so Cython disambiguates a real exception (MemoryError) from
+    the -1 fall-back signal by checking PyErr_Occurred().  Using `except -1`
+    here is a bug: it makes Cython treat the legitimate -1 fall-back return as
+    a raised exception and propagate a non-existent one (SIGSEGV).
     """
     cdef Py_ssize_t j, k
     cdef BytecodeInstr* slot
@@ -1111,12 +1116,16 @@ cdef BoolVector _execute_bytecode_postpass(
     )
 
 
-cpdef BoolVector evaluate_bitmap(CompiledBytecode bc, Morsel morsel):
+cpdef object evaluate_bitmap(CompiledBytecode bc, Morsel morsel):
     """GIL-free predicate evaluation path for pure-bitmap bytecodes.
 
     Allocates scratch buffers (GIL held), runs the nogil bitmap VM, then
     wraps the result bitmap into a BoolVector. Falls back to execute_bytecode
     if any BC_LOAD_COL column is not a BoolVector at runtime.
+
+    Returns a BoolVector on the bitmap path; the fall-back path may return a
+    non-bool Vector (e.g. a bare LOAD_COL of an INT column used as a CASE
+    result), so the declared return type is the general `object`.
     """
     cdef Py_ssize_t num_rows = morsel.ptr.num_rows
     cdef Py_ssize_t nbytes = (num_rows + 7) >> 3
@@ -1148,7 +1157,14 @@ cpdef BoolVector evaluate_bitmap(CompiledBytecode bc, Morsel morsel):
             n_slots, nbytes, anchors,
         )
         if rc == -1:
-            # A BC_LOAD_COL column is not a BoolVector — fall back
+            # A BC_LOAD_COL column is not a BoolVector — fall back to the DV
+            # operand-stack path.  Column types are schema-bound and stable for
+            # the lifetime of this CompiledBytecode, so permanently clear the
+            # is_pure_bitmap flag: this both avoids infinite recursion (the
+            # fallback re-enters execute_bytecode, which would otherwise
+            # re-dispatch straight back here) and skips the now-known-futile
+            # bitmap prepass on every subsequent morsel.
+            bc.is_pure_bitmap = False
             return execute_bytecode(bc, morsel)
 
         with nogil:
@@ -1786,34 +1802,8 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                         sp += 1
                         continue
 
-                # Phase 9c: C kernel ABI dispatch (if kernel_fn is set by bind-time registry)
-                if slot.flags & BC_INSTR_C_NATIVE and slot.kernel_fn != NULL:
-                    global _c_native_kernel_call_count
-                    _c_native_kernel_call_count += 1
-                    draken_error_message_clear()
-                    c_result = (<binop_fn_t>slot.kernel_fn)(
-                        slot.ctx_ptr, dv_left_ptr, dv_right_ptr
-                    )
-                    if c_result.data == NULL:
-                        # Kernel error — fetch message and raise
-                        error_msg = draken_get_error_message()
-                        if error_msg != NULL:
-                            raise RuntimeError(f"C kernel error: {error_msg.decode('utf-8', 'replace')}")
-                        else:
-                            raise RuntimeError("C kernel returned error (no message)")
-                    # Materialize VecResult into DrakenVector* (stored in dv_store)
-                    dv_store[sp].data = c_result.data
-                    dv_store[sp].validity = c_result.validity
-                    dv_store[sp].selection = c_result.selection
-                    dv_store[sp].data_length = c_result.data_length
-                    dv_store[sp].length = c_result.length
-                    dv_store[sp].type = c_result.type
-                    dv_stack[sp] = &dv_store[sp]
-                    anchor[sp] = None
-                    sp += 1
-                    continue
-
-                # Phase 6: Python fallback path (for unsupported ops or BC_FUNCTION)
+                # Single path: Phase 6 Python kernel (pre-9c, last-correct state).
+                # CAST and EXTRACTION retain C-native dispatch; binop reverts to resolved kernel.
                 py_left = _slot_to_pyobj(dv_left_ptr, anchor[sp], arena)
                 py_right = _slot_to_pyobj(dv_right_ptr, anchor[sp + 1], arena)
                 legacy_result = (<object>slot.callable_ref)(py_left, py_right)

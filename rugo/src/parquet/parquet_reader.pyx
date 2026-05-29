@@ -207,24 +207,175 @@ cdef parquet_reader.MetadataParseOptions _build_options(
     return opts
 
 
-cdef list _schema_columns(parquet_reader.FileStats& fs):
-    """Build schema_columns list from C++ FileStats. Schema only — no row groups."""
-    cdef list out = []
-    cdef parquet_reader.SchemaField field
+cdef class SchemaColumn:
+    """Typed schema column record. Replaces the old per-column dict — the
+    attribute set is fixed, so it is carried as typed fields, not dict keys."""
+    cdef readonly str name
+    cdef readonly str physical_type
+    cdef readonly str logical_type
+    cdef readonly bint nullable
+
+    def __repr__(self):
+        return (
+            f"SchemaColumn(name={self.name!r}, physical_type={self.physical_type!r}, "
+            f"logical_type={self.logical_type!r}, nullable={self.nullable})"
+        )
+
+
+cdef class ParquetMetadata:
+    """Typed parquet schema metadata. Replaces the old
+    {'num_rows', 'schema_columns'} dict with fixed typed attributes.
+
+    schema_columns is a tuple of SchemaColumn. For column statistics use
+    fetch_column_stats(); for data use iter_row_groups_ipc()."""
+    cdef readonly long long num_rows
+    cdef readonly tuple schema_columns
+
+    def __repr__(self):
+        return (
+            f"ParquetMetadata(num_rows={self.num_rows}, "
+            f"schema_columns={self.schema_columns!r})"
+        )
+
+
+cdef class ScanRowGroup:
+    """Typed row-group scan metadata: replaces the old dict of ~40 telemetry
+    keys (__path__, __bytes_fetched__, __time_read_ranges_ns__, etc.).
+
+    Populated by parquet scan paths (pool_reader.pyx, reader.py) and consumed
+    by the operator (parquet_read.pyx) via merge_row_group_metadata. The dict
+    of {col_name: Vector} data columns is still separate; this is pure metadata."""
+    cdef readonly str path
+    cdef readonly int rg_idx
+    cdef readonly str scan_strategy
+    cdef readonly long long bytes_fetched
+    cdef readonly long long time_read_ranges_ns
+    cdef readonly long long time_decode_columns_ns
+    cdef readonly long long task_queue_wait_ns
+    cdef readonly long long task_total_ns
+    cdef readonly long long footer_fetch_ns
+    cdef readonly long long scheduler_wait_ns
+    cdef readonly long long rowgroup_completion_latency_ns
+    cdef readonly long long emit_wait_ns
+    cdef readonly long long scheduler_empty_wait_ns
+    cdef readonly long long scheduler_empty_wait_events
+    cdef readonly long long io_ring_producer_full_wait_ns
+    cdef readonly long long io_ring_producer_full_wait_events
+    cdef readonly long long io_ring_consumer_empty_wait_ns
+    cdef readonly long long io_ring_consumer_empty_wait_events
+    cdef readonly long long io_transfer_emit_wait_ns
+    cdef readonly long long io_rowgroup_slice_count
+    cdef readonly long long io_deserialize_ns
+    cdef readonly long long io_serialize_ns
+    cdef readonly long long rowgroup_peak_in_flight
+    cdef readonly long long ranges_in_flight_peak
+    cdef readonly long long active_files_peak
+    cdef readonly long long active_rowgroups_peak
+    cdef readonly long long rowgroups_in_flight_cap
+    cdef readonly long long emit_queue_depth_at_ready
+    cdef readonly long long io_ring_slot_bytes
+    cdef readonly long long io_ring_slot_count
+    cdef readonly long long io_ring_total_bytes
+    cdef readonly long long io_transfer_ready_backlog_peak
+    cdef readonly long long io_transfer_fragment_count_p50
+    cdef readonly long long io_transfer_fragment_count_p95
+    cdef readonly long long io_transfer_fragment_count_max
+    cdef readonly long long io_transfer_payload_bytes_p50
+    cdef readonly long long io_transfer_payload_bytes_p95
+    cdef readonly long long io_transfer_payload_bytes_max
+    cdef readonly long long row_groups_pruned
+    cdef readonly long long footer_bytes
+    cdef readonly long long range_request_count
+    cdef readonly long long range_bytes_requested
+    cdef readonly long long pages_decoded
+    cdef readonly long long pages_skipped
+
+    def __repr__(self):
+        return (
+            f"ScanRowGroup(path={self.path!r}, rg_idx={self.rg_idx}, "
+            f"scan_strategy={self.scan_strategy!r}, bytes_fetched={self.bytes_fetched})"
+        )
+
+
+cdef SchemaColumn _make_schema_column(parquet_reader.SchemaField& field):
+    cdef SchemaColumn col = SchemaColumn.__new__(SchemaColumn)
+    col.name = field.name.decode("utf-8")
+    col.physical_type = field.physical_type.decode("utf-8")
+    col.logical_type = field.logical_type.decode("utf-8")
+    col.nullable = field.nullable
+    return col
+
+
+cdef ParquetMetadata _make_metadata(parquet_reader.FileStats& fs):
+    """Build typed ParquetMetadata from C++ FileStats. Schema only — no row groups."""
+    cdef ParquetMetadata meta = ParquetMetadata.__new__(ParquetMetadata)
+    meta.num_rows = fs.num_rows
+    cdef list cols = []
     cdef size_t i
     for i in range(fs.schema_columns.size()):
-        field = fs.schema_columns[i]
-        out.append({
-            "name":          field.name.decode("utf-8"),
-            "physical_type": field.physical_type.decode("utf-8"),
-            "logical_type":  field.logical_type.decode("utf-8"),
-            "nullable":      bool(field.nullable),
-        })
-    return out
+        cols.append(_make_schema_column(fs.schema_columns[i]))
+    meta.schema_columns = tuple(cols)
+    return meta
+
+
+def _make_scan_row_group(str path, int rg_idx, str scan_strategy,
+                         dict telemetry):
+    """Build typed ScanRowGroup from telemetry dict. Extracts the ~40 __*__ keys
+    and populates the typed object, leaving the dict ready for column data."""
+    cdef ScanRowGroup rg = ScanRowGroup.__new__(ScanRowGroup)
+    rg.path = path
+    rg.rg_idx = rg_idx
+    rg.scan_strategy = scan_strategy
+    rg.bytes_fetched = telemetry.pop("__bytes_fetched__", 0)
+    rg.time_read_ranges_ns = telemetry.pop("__time_read_ranges_ns__", 0)
+    rg.time_decode_columns_ns = telemetry.pop("__time_decode_columns_ns__", 0)
+    rg.task_queue_wait_ns = telemetry.pop("__task_queue_wait_ns__", 0)
+    rg.task_total_ns = telemetry.pop("__task_total_ns__", 0)
+    rg.footer_fetch_ns = telemetry.pop("__footer_fetch_ns__", 0)
+    rg.scheduler_wait_ns = telemetry.pop("__scheduler_wait_ns__", 0)
+    rg.rowgroup_completion_latency_ns = telemetry.pop("__rowgroup_completion_latency_ns__", 0)
+    rg.emit_wait_ns = telemetry.pop("__emit_wait_ns__", 0)
+    rg.scheduler_empty_wait_ns = telemetry.pop("__scheduler_empty_wait_ns__", 0)
+    rg.scheduler_empty_wait_events = telemetry.pop("__scheduler_empty_wait_events__", 0)
+    rg.io_ring_producer_full_wait_ns = telemetry.pop("__io_ring_producer_full_wait_ns__", 0)
+    rg.io_ring_producer_full_wait_events = telemetry.pop("__io_ring_producer_full_wait_events__", 0)
+    rg.io_ring_consumer_empty_wait_ns = telemetry.pop("__io_ring_consumer_empty_wait_ns__", 0)
+    rg.io_ring_consumer_empty_wait_events = telemetry.pop("__io_ring_consumer_empty_wait_events__", 0)
+    rg.io_transfer_emit_wait_ns = telemetry.pop("__io_transfer_emit_wait_ns__", 0)
+    rg.io_rowgroup_slice_count = telemetry.pop("__io_rowgroup_slice_count__", 0)
+    rg.io_deserialize_ns = telemetry.pop("__io_deserialize_ns__", 0)
+    rg.io_serialize_ns = telemetry.pop("__io_serialize_ns__", 0)
+    rg.rowgroup_peak_in_flight = telemetry.pop("__rowgroup_peak_in_flight__", 0)
+    rg.ranges_in_flight_peak = telemetry.pop("__ranges_in_flight_peak__", 0)
+    rg.active_files_peak = telemetry.pop("__active_files_peak__", 0)
+    rg.active_rowgroups_peak = telemetry.pop("__active_rowgroups_peak__", 0)
+    rg.rowgroups_in_flight_cap = telemetry.pop("__rowgroups_in_flight_cap__", 0)
+    rg.emit_queue_depth_at_ready = telemetry.pop("__emit_queue_depth_at_ready__", 0)
+    rg.io_ring_slot_bytes = telemetry.pop("__io_ring_slot_bytes__", 0)
+    rg.io_ring_slot_count = telemetry.pop("__io_ring_slot_count__", 0)
+    rg.io_ring_total_bytes = telemetry.pop("__io_ring_total_bytes__", 0)
+    rg.io_transfer_ready_backlog_peak = telemetry.pop("__io_transfer_ready_backlog_peak__", 0)
+    rg.io_transfer_fragment_count_p50 = telemetry.pop("__io_transfer_fragment_count_p50__", 0)
+    rg.io_transfer_fragment_count_p95 = telemetry.pop("__io_transfer_fragment_count_p95__", 0)
+    rg.io_transfer_fragment_count_max = telemetry.pop("__io_transfer_fragment_count_max__", 0)
+    rg.io_transfer_payload_bytes_p50 = telemetry.pop("__io_transfer_payload_bytes_p50__", 0)
+    rg.io_transfer_payload_bytes_p95 = telemetry.pop("__io_transfer_payload_bytes_p95__", 0)
+    rg.io_transfer_payload_bytes_max = telemetry.pop("__io_transfer_payload_bytes_max__", 0)
+    rg.row_groups_pruned = telemetry.pop("__row_groups_pruned__", 0)
+    rg.footer_bytes = telemetry.pop("__footer_bytes__", 0)
+    rg.range_request_count = telemetry.pop("__range_request_count__", 0)
+    rg.range_bytes_requested = telemetry.pop("__range_bytes_requested__", 0)
+    rg.pages_decoded = telemetry.pop("__pages_decoded__", 0)
+    rg.pages_skipped = telemetry.pop("__pages_skipped__", 0)
+    # Pop any remaining __*__ keys to leave only column data in the dict
+    for key in list(telemetry):
+        if key.startswith("__"):
+            telemetry.pop(key, None)
+    return rg
 
 
 def read_metadata(str path):
-    """Return schema metadata for a parquet file: {num_rows, schema_columns}.
+    """Return typed ParquetMetadata for a parquet file (num_rows, schema_columns).
 
     For column statistics use fetch_column_stats().
     For data use iter_row_groups_ipc().
@@ -235,11 +386,11 @@ def read_metadata(str path):
     cdef parquet_reader.FileStats fs = parquet_reader.ReadParquetMetadataC(
         path_bytes, opts
     )
-    return {"num_rows": fs.num_rows, "schema_columns": _schema_columns(fs)}
+    return _make_metadata(fs)
 
 
 def read_metadata_from_bytes(bytes data):
-    """Return schema metadata from an in-memory bytes buffer."""
+    """Return typed ParquetMetadata from an in-memory bytes buffer."""
     cdef parquet_reader.MetadataParseOptions opts
     opts.schema_only = True
     cdef const uint8_t* buf = <const uint8_t*> data
@@ -247,11 +398,11 @@ def read_metadata_from_bytes(bytes data):
     cdef parquet_reader.FileStats fs = parquet_reader.ReadParquetMetadataFromBuffer(
         buf, size, opts
     )
-    return {"num_rows": fs.num_rows, "schema_columns": _schema_columns(fs)}
+    return _make_metadata(fs)
 
 
 def read_metadata_from_memoryview(memoryview mv):
-    """Return schema metadata from a contiguous memoryview (zero-copy)."""
+    """Return typed ParquetMetadata from a contiguous memoryview (zero-copy)."""
     if not mv.contiguous:
         raise ValueError("Memoryview must be contiguous")
     cdef parquet_reader.MetadataParseOptions opts
@@ -262,7 +413,7 @@ def read_metadata_from_memoryview(memoryview mv):
     cdef parquet_reader.FileStats fs = parquet_reader.ReadParquetMetadataFromBuffer(
         buf, size, opts
     )
-    return {"num_rows": fs.num_rows, "schema_columns": _schema_columns(fs)}
+    return _make_metadata(fs)
 
 
 def can_decode(str path):

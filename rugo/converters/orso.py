@@ -225,51 +225,43 @@ def _fallback_schema_columns(metadata: Dict[str, Any]) -> Iterable[Dict[str, Any
 
 
 def rugo_to_orso_schema(
-    rugo_metadata: Dict[str, Any], schema_name: str = "parquet_schema"
+    rugo_metadata, schema_name: str = "parquet_schema"
 ) -> RelationSchema:
     """
-    Convert rugo parquet metadata to an orso RelationSchema.
+    Convert a typed rugo ParquetMetadata to an orso RelationSchema.
 
     Args:
-        rugo_metadata: The metadata dictionary returned by rugo.parquet.read_metadata()
+        rugo_metadata: The ParquetMetadata returned by rugo.parquet_reader.read_metadata()
+                       (typed object with .num_rows and .schema_columns of SchemaColumn).
         schema_name: Name for the resulting schema (default: "parquet_schema")
 
     Returns:
         OrsoRelationSchema object
 
     Raises:
-        ValueError: If the metadata format is invalid
+        ValueError: If no columns can be derived from the metadata
     """
-    if not isinstance(rugo_metadata, dict):
-        raise ValueError("rugo_metadata must be a dictionary")
-
-    if not rugo_metadata.get("schema_columns") and not rugo_metadata.get("row_groups"):
-        raise ValueError("rugo_metadata must contain 'schema_columns' or 'row_groups'")
+    schema_columns = rugo_metadata.schema_columns
+    if not schema_columns:
+        raise ValueError("rugo_metadata must contain schema_columns")
 
     columns = []
-    for entry in _columns_from_metadata(rugo_metadata):
-        name = entry.get("name")
+    for entry in schema_columns:
+        name = entry.name
         if not name:
             continue
         if name.startswith("arrow_schema."):
             name = name[len("arrow_schema."):]
 
-        physical_type = entry.get("physical_type")
-        logical_type = entry.get("logical_type")
-        nullable = bool(entry.get("nullable", True))
+        physical_type = entry.physical_type
+        logical_type = entry.logical_type
+        nullable = bool(entry.nullable)
 
         orso_type = _map_parquet_type_to_orso(physical_type, logical_type)
 
-        # Resolve precision/scale: prefer explicit entry fields, fall back to
-        # parsing from decimal logical type string (e.g. "decimal(15,2)").
-        precision = entry.get("precision")
-        scale = entry.get("scale")
-        if precision is None or scale is None:
-            _prec, _scl = _parse_decimal_params(logical_type)
-            if precision is None:
-                precision = _prec
-            if scale is None:
-                scale = _scl
+        # precision/scale parsed from the decimal logical type string
+        # (e.g. "decimal(15,2)"); schema metadata carries no explicit fields.
+        precision, scale = _parse_decimal_params(logical_type)
 
         columns.append(
             FlatColumn(
@@ -278,23 +270,15 @@ def rugo_to_orso_schema(
                 nullable=nullable,
                 precision=precision,
                 scale=scale,
-                length=entry.get("length"),
-                element_type=entry.get("element_type"),
             )
         )
 
     if not columns:
         raise ValueError("No columns could be derived from rugo metadata")
 
-    # Create and populate the RelationSchema
     schema = RelationSchema(name=schema_name)
-
-    # Add all columns to the schema
     schema.columns.extend(columns)
-
-    # Add row count estimate if available
-    if "num_rows" in rugo_metadata:
-        schema.row_count_estimate = rugo_metadata["num_rows"]
+    schema.row_count_estimate = rugo_metadata.num_rows
 
     return schema
 

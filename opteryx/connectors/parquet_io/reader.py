@@ -412,24 +412,30 @@ def fetch_columns(
 
         time_decode_columns_ns = time.monotonic_ns() - decode_start_ns
 
-    result_dict = {col_name: results[col_name] for col_name in column_names}
-    result_dict["__bytes_fetched__"] = bytes_fetched
-    result_dict["__range_request_count__"] = range_request_count
-    result_dict["__range_bytes_requested__"] = range_bytes_requested
-    result_dict["__time_read_ranges_ns__"] = time_read_ranges_ns
-    result_dict["__time_decode_columns_ns__"] = time_decode_columns_ns
+    # Build typed metadata object; separate from column data dict.
+    from rugo.parquet_reader import _make_scan_row_group, get_telemetry  # type: ignore[import]
+
+    telemetry_dict = {
+        '__bytes_fetched__': bytes_fetched,
+        '__range_request_count__': range_request_count,
+        '__range_bytes_requested__': range_bytes_requested,
+        '__time_read_ranges_ns__': time_read_ranges_ns,
+        '__time_decode_columns_ns__': time_decode_columns_ns,
+    }
 
     if row_mask is not None:
-        from rugo.parquet_reader import get_telemetry  # type: ignore[import]
-
         _tel_after = get_telemetry()
-        result_dict["__pages_skipped__"] = (
+        telemetry_dict["__pages_skipped__"] = (
             _tel_after.get("parquet_pages_skipped", 0) - _pages_skipped_before
         )
-        result_dict["__pages_decoded__"] = (
+        telemetry_dict["__pages_decoded__"] = (
             _tel_after.get("parquet_pages_decoded", 0) - _pages_decoded_before
         )
-    return result_dict
+
+    scan_rg = _make_scan_row_group(path, rg_idx, 'range-read', telemetry_dict)
+    # result_dict is now pure {col: Vector}; clean for the operator.
+    result_dict = {col_name: results[col_name] for col_name in column_names}
+    return (scan_rg, result_dict)
 
 
 @dataclass

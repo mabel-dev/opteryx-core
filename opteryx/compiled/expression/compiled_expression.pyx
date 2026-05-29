@@ -532,34 +532,6 @@ cdef Py_ssize_t _linearize(
         bc._hold(binop_kernel)
         slot.callable_ref = <PyObject*>binop_kernel
 
-        # Phase 9b: Resolve C kernel function pointer (binary ops use dispatch kernel).
-        _binop_kernel_names = {
-            BOP_PLUS: "draken_add",
-            BOP_MINUS: "draken_subtract",
-            BOP_MULTIPLY: "draken_multiply",
-            BOP_DIVIDE: "draken_divide",
-            BOP_MODULO: "draken_modulo",
-            BOP_INT_DIVIDE: "draken_divide",  # Integer division via dispatch
-            BOP_STRING_CONCAT: "draken_string_concat",
-            BOP_BITWISE_OR: "draken_bitwise_or",
-            BOP_BITWISE_AND: "draken_bitwise_and",
-            BOP_BITWISE_XOR: "draken_bitwise_xor",
-            BOP_SHIFT_LEFT: "draken_bitwise_shift_left",
-            BOP_SHIFT_RIGHT: "draken_bitwise_shift_right",
-        }
-        kernel_name = _binop_kernel_names.get(slot.op_code)
-        if kernel_name is not None:
-            fn_ptr, ctx_wrapper = _resolve_kernel_and_context(kernel_name, None, None)
-            if fn_ptr is not None:
-                slot.kernel_fn = <void*>fn_ptr
-                if ctx_wrapper is not None:
-                    bc._hold(ctx_wrapper)
-                    slot.ctx_ptr = <void*>(<unsigned long long>ctx_wrapper.ctx_ptr)
-                slot.flags |= BC_INSTR_C_NATIVE
-            else:
-                # Fail-fast: all mapped binary ops have C kernels; a miss is a bug.
-                raise ValueError(f"Binary operator kernel '{kernel_name}' not found in registry")
-
         # Phase 1 result-wrap pattern: kernels return nanobind Vectors.
         slot.flags |= BC_RESULT_NEEDS_NB_WRAP
         # Binary ops never return BOOL, so BC_RESULT_WRAP_AS_BOOL stays false.

@@ -5,6 +5,27 @@
 > kernel resolver routes correctly; the kernel itself has a memory /
 > state-lifetime bug exposed by the test pattern.
 > `make q` does not catch it (shape-only suite).
+>
+> **UPDATE 2026-05-28 — now the top correctness priority.** Confirmed
+> still live and reproducing during the binop-restore verification. A
+> sharper, deterministic single-query repro found:
+>
+> ```sql
+> SELECT CASE WHEN id > 4 THEN NULL ELSE id END FROM $planets LIMIT 6
+>   → SIGBUS (crashes alone, first query, fresh session)
+> ```
+>
+> This is a CASE with a **NULL-producing branch and an INT (fixed-width)
+> result** — `assemble_fixed` assembling a fixed-width output that
+> contains nulls. It does not need the two-query trigger; it crashes on
+> its own. Use this as the primary repro.
+>
+> Note: the `make et` suite added by the binop-restore ticket has a
+> `TestStandingBugs::test_case_when_without_else_returns_null` test —
+> but it only covers `CASE WHEN FALSE THEN 1 END` (all-unmatched,
+> short-circuits to a null vector, works). It does **not** trigger this
+> crash. **This ticket must add the real crashing repro above to
+> `make et`** so the bug is actually guarded once fixed.
 
 ## Reproduction
 
@@ -284,12 +305,18 @@ to the uniform path.
 - Diagnosis documented in PR description: which suspect (1, 2, or
   3 above) was the actual cause, with file:line evidence.
 - The bug is fixed at root cause, not symptomatically.
-- All four repro queries return the documented correct values.
+- The 2026-05-28 primary repro returns correct values, no SIGBUS:
+  `SELECT CASE WHEN id > 4 THEN NULL ELSE id END FROM $planets LIMIT 6`
+  → `[1, 2, 3, 4, None, None]`.
+- All four original repro queries return the documented correct values.
 - The two-distinct-queries-same-session pattern no longer crashes.
-- Value-checking tests land in a suite `make q` runs.
-- All control queries unchanged.
-- `make c` clean; `make q` 100/100 with fresh build.
-- `make clickbench` non-regressing.
+- **The crash repro is added to `make et`** (the value-checked
+  expression suite created by the binop-restore ticket) — replacing /
+  augmenting the misleadingly-named `test_case_when_without_else_returns_null`
+  which tests only the trivial `WHEN FALSE` short-circuit. `make et`
+  must actually exercise a multi-row NULL-producing fixed-width CASE.
+- `make c` clean; `make q` 100/100; `make et` green with the new case;
+  `make clickbench` non-regressing.
 
 ## Side-notes to surface in PR
 

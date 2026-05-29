@@ -40,12 +40,18 @@ DrakenVector* create_float64_vector(const double* data, uint32_t length) {
     return vec;
 }
 
+// draken BOOL is bit-packed (1 bit/row), not byte-per-row. `data` is a
+// convenience array of 0/1 bytes; pack it into the real layout.
 DrakenVector* create_bool_vector(const uint8_t* data, uint32_t length) {
     auto* vec = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector)));
-    auto* vec_data = static_cast<uint8_t*>(malloc(length * sizeof(uint8_t)));
+    const size_t nbytes = length > 0 ? (length + 7u) / 8u : 1u;
+    auto* vec_data = static_cast<uint8_t*>(malloc(nbytes));
+    memset(vec_data, 0, nbytes);
     auto* selection = static_cast<uint32_t*>(malloc(length * sizeof(uint32_t)));
-    memcpy(vec_data, data, length * sizeof(uint8_t));
-    for (uint32_t i = 0; i < length; ++i) selection[i] = i;
+    for (uint32_t i = 0; i < length; ++i) {
+        if (data[i]) vec_data[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+        selection[i] = i;
+    }
     vec->data = vec_data; vec->selection = selection; vec->data_length = length;
     vec->length = length; vec->validity = nullptr; vec->type = DRAKEN_BOOL; vec->flags = 0;
     return vec;
@@ -87,7 +93,9 @@ bool vectors_equal_bool(const VecResult& result, const uint8_t* expected, uint32
     if (is_error(result) || result.length != length || result.type != DRAKEN_BOOL) return false;
     auto* result_data = static_cast<uint8_t*>(result.data);
     for (uint32_t i = 0; i < length; ++i) {
-        if ((result_data[result.selection[i]] != 0) != (expected[i] != 0)) return false;
+        const uint32_t s = result.selection[i];
+        const bool got = ((result_data[s >> 3] >> (s & 7u)) & 1u) != 0u;  // bit-packed
+        if (got != (expected[i] != 0)) return false;
     }
     return true;
 }
@@ -105,23 +113,24 @@ void test_draken_bitwise_xor() { int64_t l[] = {5}, r[] = {3}; DrakenVector* lv 
 void test_draken_bitwise_shift_left() { int64_t l[] = {1}, r[] = {1}; DrakenVector* lv = create_int64_vector(l, 1); DrakenVector* rv = create_int64_vector(r, 1); VecResult res = draken_bitwise_shift_left(nullptr, lv, rv); assert(is_error(res)); free_vector(lv); free_vector(rv); }
 void test_draken_bitwise_shift_right() { int64_t l[] = {2}, r[] = {1}; DrakenVector* lv = create_int64_vector(l, 1); DrakenVector* rv = create_int64_vector(r, 1); VecResult res = draken_bitwise_shift_right(nullptr, lv, rv); assert(is_error(res)); free_vector(lv); free_vector(rv); }
 
-void test_draken_cast_int64_to_float64() { int64_t d[] = {1, 2, 3}; DrakenVector* v = create_int64_vector(d, 3); VecResult r = draken_cast_int64_to_float64(nullptr, v); assert(is_error(r)); free_vector(v); }
-void test_draken_cast_float64_to_int64() { double d[] = {1.5, 2.7, 3.2}; DrakenVector* v = create_float64_vector(d, 3); VecResult r = draken_cast_float64_to_int64(nullptr, v); assert(is_error(r)); free_vector(v); }
-void test_draken_cast_int64_to_bool() { int64_t d[] = {0, 1, 5}; DrakenVector* v = create_int64_vector(d, 3); VecResult r = draken_cast_int64_to_bool(nullptr, v); assert(is_error(r)); free_vector(v); }
-void test_draken_cast_bool_to_int64() { uint8_t d[] = {0, 1, 1}; DrakenVector* v = create_bool_vector(d, 3); VecResult r = draken_cast_bool_to_int64(nullptr, v); assert(is_error(r)); free_vector(v); }
-void test_draken_cast_float64_to_bool() { double d[] = {0.0, 1.5, 0.0}; DrakenVector* v = create_float64_vector(d, 3); VecResult r = draken_cast_float64_to_bool(nullptr, v); assert(is_error(r)); free_vector(v); }
-void test_draken_cast_bool_to_float64() { uint8_t d[] = {0, 1, 1}; DrakenVector* v = create_bool_vector(d, 3); VecResult r = draken_cast_bool_to_float64(nullptr, v); assert(is_error(r)); free_vector(v); }
+// Phase 9c: these casts are now REAL — value-checked, not is_error.
+void test_draken_cast_int64_to_float64() { int64_t d[] = {1, 2, 3}; double e[] = {1.0, 2.0, 3.0}; DrakenVector* v = create_int64_vector(d, 3); VecResult r = draken_cast_int64_to_float64(nullptr, v); assert(!is_error(r) && vectors_equal_float64(r, e, 3)); free_vector(v); draken_free(r.data); draken_free(r.validity); }
+void test_draken_cast_float64_to_int64() { double d[] = {1.5, 2.7, 3.2}; int64_t e[] = {1, 2, 3}; DrakenVector* v = create_float64_vector(d, 3); VecResult r = draken_cast_float64_to_int64(nullptr, v); assert(!is_error(r) && vectors_equal_int64(r, e, 3)); free_vector(v); draken_free(r.data); draken_free(r.validity); }
+void test_draken_cast_int64_to_bool() { int64_t d[] = {0, 1, 5}; uint8_t e[] = {0, 1, 1}; DrakenVector* v = create_int64_vector(d, 3); VecResult r = draken_cast_int64_to_bool(nullptr, v); assert(!is_error(r) && vectors_equal_bool(r, e, 3)); free_vector(v); draken_free(r.data); draken_free(r.validity); }
+void test_draken_cast_bool_to_int64() { uint8_t d[] = {0, 1, 1}; int64_t e[] = {0, 1, 1}; DrakenVector* v = create_bool_vector(d, 3); VecResult r = draken_cast_bool_to_int64(nullptr, v); assert(!is_error(r) && vectors_equal_int64(r, e, 3)); free_vector(v); draken_free(r.data); draken_free(r.validity); }
+void test_draken_cast_float64_to_bool() { double d[] = {0.0, 1.5, 0.0}; uint8_t e[] = {0, 1, 0}; DrakenVector* v = create_float64_vector(d, 3); VecResult r = draken_cast_float64_to_bool(nullptr, v); assert(!is_error(r) && vectors_equal_bool(r, e, 3)); free_vector(v); draken_free(r.data); draken_free(r.validity); }
+void test_draken_cast_bool_to_float64() { uint8_t d[] = {0, 1, 1}; double e[] = {0.0, 1.0, 1.0}; DrakenVector* v = create_bool_vector(d, 3); VecResult r = draken_cast_bool_to_float64(nullptr, v); assert(!is_error(r) && vectors_equal_float64(r, e, 3)); free_vector(v); draken_free(r.data); draken_free(r.validity); }
 
-void test_draken_cast_to_float64() { int64_t d[] = {1, 2, 3}; DrakenVector* v = create_int64_vector(d, 3); VecResult r = draken_cast_to_float64(nullptr, v); assert(is_error(r)); free_vector(v); }
-void test_draken_cast_to_int64() { double d[] = {1.5, 2.7, 3.2}; DrakenVector* v = create_float64_vector(d, 3); VecResult r = draken_cast_to_int64(nullptr, v); assert(is_error(r)); free_vector(v); }
-void test_draken_cast_to_bool() { int64_t d[] = {0, 1, 5}; DrakenVector* v = create_int64_vector(d, 3); VecResult r = draken_cast_to_bool(nullptr, v); assert(is_error(r)); free_vector(v); }
+void test_draken_cast_to_float64() { int64_t d[] = {1, 2, 3}; double e[] = {1.0, 2.0, 3.0}; DrakenVector* v = create_int64_vector(d, 3); VecResult r = draken_cast_to_float64(nullptr, v); assert(!is_error(r) && vectors_equal_float64(r, e, 3)); free_vector(v); draken_free(r.data); draken_free(r.validity); }
+void test_draken_cast_to_int64() { double d[] = {1.5, 2.7, 3.2}; int64_t e[] = {1, 2, 3}; DrakenVector* v = create_float64_vector(d, 3); VecResult r = draken_cast_to_int64(nullptr, v); assert(!is_error(r) && vectors_equal_int64(r, e, 3)); free_vector(v); draken_free(r.data); draken_free(r.validity); }
+void test_draken_cast_to_bool() { int64_t d[] = {0, 1, 5}; uint8_t e[] = {0, 1, 1}; DrakenVector* v = create_int64_vector(d, 3); VecResult r = draken_cast_to_bool(nullptr, v); assert(!is_error(r) && vectors_equal_bool(r, e, 3)); free_vector(v); draken_free(r.data); draken_free(r.validity); }
 void test_draken_cast_identity() { double d[] = {1.5, 2.5, 3.5}; DrakenVector* v = create_float64_vector(d, 3); VecResult r = draken_cast_identity(nullptr, v); assert(!is_error(r)); free_vector(v); draken_free(r.data); }
 
-// 24 unimplemented kernels - verified callable
-void test_draken_cast_int64_to_string() { int64_t d[] = {1}; DrakenVector* v = create_int64_vector(d, 1); VecResult r = draken_cast_int64_to_string(nullptr, v); free_vector(v); }
-void test_draken_cast_int64_to_timestamp() { int64_t d[] = {1}; DrakenVector* v = create_int64_vector(d, 1); VecResult r = draken_cast_int64_to_timestamp(nullptr, v); free_vector(v); }
-void test_draken_cast_bool_to_string() { uint8_t d[] = {0}; DrakenVector* v = create_bool_vector(d, 1); VecResult r = draken_cast_bool_to_string(nullptr, v); free_vector(v); }
-void test_draken_cast_float64_to_string() { double d[] = {1.5}; DrakenVector* v = create_float64_vector(d, 1); VecResult r = draken_cast_float64_to_string(nullptr, v); free_vector(v); }
+// Phase 9c: string-output casts are now REAL — assert VARCHAR result, free block.
+void test_draken_cast_int64_to_string() { int64_t d[] = {1}; DrakenVector* v = create_int64_vector(d, 1); VecResult r = draken_cast_int64_to_string(nullptr, v); assert(!is_error(r) && r.type == DRAKEN_VARCHAR && r.length == 1); free_vector(v); draken_free(r.data); }
+void test_draken_cast_int64_to_timestamp() { int64_t d[] = {1000000}; DrakenVector* v = create_int64_vector(d, 1); VecResult r = draken_cast_int64_to_timestamp(nullptr, v); assert(!is_error(r) && r.type == DRAKEN_TIMESTAMP64 && r.ts_unit == 2); free_vector(v); draken_free(r.data); draken_free(r.validity); }
+void test_draken_cast_bool_to_string() { uint8_t d[] = {0}; DrakenVector* v = create_bool_vector(d, 1); VecResult r = draken_cast_bool_to_string(nullptr, v); assert(!is_error(r) && r.type == DRAKEN_VARCHAR && r.length == 1); free_vector(v); draken_free(r.data); }
+void test_draken_cast_float64_to_string() { double d[] = {1.5}; DrakenVector* v = create_float64_vector(d, 1); VecResult r = draken_cast_float64_to_string(nullptr, v); assert(is_error(r)); free_vector(v); }
 void test_draken_cast_string_to_int64() { DrakenVector* v = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); memset(v, 0, sizeof(DrakenVector)); v->type = DRAKEN_VARCHAR; VecResult r = draken_cast_string_to_int64(nullptr, v); free(v); }
 void test_draken_cast_string_to_float64() { DrakenVector* v = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); memset(v, 0, sizeof(DrakenVector)); v->type = DRAKEN_VARCHAR; VecResult r = draken_cast_string_to_float64(nullptr, v); free(v); }
 void test_draken_cast_string_to_bool() { DrakenVector* v = static_cast<DrakenVector*>(malloc(sizeof(DrakenVector))); memset(v, 0, sizeof(DrakenVector)); v->type = DRAKEN_VARCHAR; VecResult r = draken_cast_string_to_bool(nullptr, v); free(v); }

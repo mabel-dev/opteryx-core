@@ -288,6 +288,8 @@ cdef class Morsel:
                     result._col_names.append(n)
                     result._columns.append(self._columns[i])
                     break
+        if not result._columns:
+            result._zero_col_num_rows = self.num_rows
         return result
 
     def rename(self, new_names):
@@ -298,6 +300,8 @@ cdef class Morsel:
             result._nb.append((<Vector>self._columns[i])._nb)
             result._col_names.append(name)
             result._columns.append(self._columns[i])
+        if not result._columns:
+            result._zero_col_num_rows = self.num_rows
         return result
 
     def filter_mask(self, mask):
@@ -342,17 +346,23 @@ cdef class Morsel:
                         result._nb.append((<Vector>self._columns[i])._nb)
                         result._columns.append(self._columns[i])
                     result._col_names.append(self._col_names[i])
+            if not result._columns:
+                result._zero_col_num_rows = len(mask) if mask is not None else self.num_rows
         elif mask is not None:
             result._col_names = list(self._col_names)
             for i in range(n):
                 nb_v = (<Vector>self._columns[i])._nb.take(mask)
                 result._nb.append(nb_v)
                 result._columns.append(Vector(nb_v))
+            if not result._columns:
+                result._zero_col_num_rows = len(mask)
         else:
             result._col_names = list(self._col_names)
             for i in range(n):
                 result._nb.append((<Vector>self._columns[i])._nb)
                 result._columns.append(self._columns[i])
+            if not result._columns:
+                result._zero_col_num_rows = self._zero_col_num_rows
         return result
 
     @classmethod

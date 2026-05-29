@@ -28,7 +28,7 @@ import time
 from opteryx.compiled.structures.memory_pool cimport MemoryPool
 from opteryx.compiled.structures.column_deserializer cimport deserialize_row_group
 from opteryx.compiled.structures.footer_cache cimport ParquetFooterBytesCache
-from rugo.parquet_reader import decode_value as _decode_value_c
+from rugo.parquet_reader import decode_value as _decode_value_c, _make_scan_row_group
 from rugo.parquet_reader cimport ReadParquetMetadataFromBuffer, FileStats, RowGroupStats, ColumnStats, AggColumnStat, AggregateColumnStats
 from rugo.parquet_reader cimport EncodingToString, CompressionCodecToString
 from rugo.parquet_reader cimport ParquetFooterResult, FetchParquetFooter
@@ -172,12 +172,12 @@ cdef class CppIOPipeline:
 
         cdef dict ref_ids = {}
         cdef int64_t ref_id
-        cdef str col_name
+        cdef bytes col_name
         cdef const uint8_t* col_ptr
         cdef Py_ssize_t col_len
 
         for i in range(result.column_ipc_bytes.size()):
-            col_name = result.column_names[i].decode('utf-8')
+            col_name = result.column_names[i]   # bytes — no decode; names are bytes throughout
             # Zero-copy handoff: commit raw pointer + length directly to the
             # pool. Skips the typed-memoryview / buffer-protocol overhead and
             # runs the actual commit under nogil.
@@ -192,7 +192,7 @@ cdef class CppIOPipeline:
             if ref_id == -1:
                 return {
                     'success': False,
-                    'error': f'MemoryPool exhausted storing column {col_name}',
+                    'error': f'MemoryPool exhausted storing column {col_name!r}',
                     'path': result.path.decode('utf-8'),
                     'rg_idx': result.rg_idx,
                 }
@@ -229,12 +229,12 @@ cdef class CppIOPipeline:
 
         cdef dict ref_ids = {}
         cdef int64_t ref_id
-        cdef str col_name
+        cdef bytes col_name
         cdef const uint8_t* col_ptr
         cdef Py_ssize_t col_len
 
         for i in range(result.column_ipc_bytes.size()):
-            col_name = result.column_names[i].decode('utf-8')
+            col_name = result.column_names[i]   # bytes — no decode; names are bytes throughout
             col_len = result.column_ipc_bytes[i].size()
             if col_len == 0:
                 with nogil:
@@ -246,7 +246,7 @@ cdef class CppIOPipeline:
             if ref_id == -1:
                 return {
                     'success': False,
-                    'error': f'MemoryPool exhausted storing column {col_name}',
+                    'error': f'MemoryPool exhausted storing column {col_name!r}',
                     'path': result.path.decode('utf-8'),
                     'rg_idx': result.rg_idx,
                 }
@@ -422,7 +422,7 @@ cdef bint _rg_passes_predicates_native(RowGroupStats& rg, list predicates):
 
     for pred in predicates:
         col_name, op, value = pred
-        col_str = col_name.encode('utf-8') if isinstance(col_name, str) else col_name
+        col_str = col_name.encode('utf-8')   # predicates always carry str names from the binder
         for i in range(rg.columns.size()):
             if rg.columns[i].name != col_str:
                 continue
@@ -496,11 +496,9 @@ def iter_row_groups_ipc(
                 orig_to_cpp[path] = cpp_path
                 cpp_to_orig[cpp_path] = path
 
-    cdef CppIOPipeline pipeline = CppIOPipeline(
-        decode_workers=decode_workers,
-        queue_capacity=1024,
-        pool_size=256*1024*1024,
-    )
+    # Created after footer collection so the IPC pool can be sized from the
+    # data (see "Footer-derived pool sizing" below) rather than a fixed constant.
+    cdef CppIOPipeline pipeline = None
 
     cdef uint64_t t_phase1_ns = 0
     cdef uint64_t t_phase2_ns = 0
@@ -514,7 +512,16 @@ def iter_row_groups_ipc(
     cdef const uint8_t* footer_buf_ptr
     cdef size_t footer_buf_size
     cdef RowGroupStats* rg_ptr
+    cdef RowGroupStats* rgp
     cdef size_t rg_i
+    cdef size_t ci
+    cdef int64_t max_rg_bytes = 0
+    cdef int64_t rg_bytes
+    cdef int64_t est_rg
+    cdef int64_t dyn_pool_size
+    cdef int in_flight_limit
+    cdef int next_to_submit
+    cdef int n_items
 
     try:
         _t0 = time.monotonic_ns()
@@ -549,42 +556,96 @@ def iter_row_groups_ipc(
         if not work_items:
             return
 
-        _t0 = time.monotonic_ns()
+        # ── Footer-derived pool sizing (#2) ──────────────────────────────────
+        # Size the IPC pool from the largest projected row group rather than a
+        # fixed constant. total_uncompressed_size is the decoded-but-encoded
+        # column-chunk size; a 2x factor pads for dict-code widening (RLE → u32
+        # codes) and IPC framing. The historical 256MB stays as a floor so small
+        # reads behave exactly as before. Combined with the in-flight bound
+        # below, peak pool occupancy is in_flight_limit row groups, so memory
+        # scales with per-row-group size × concurrency — never with total file
+        # or dataset size.
+        # proj_set for prefetched-footer path (str); proj_set_bytes for C++ native path (bytes).
+        # Column names from the operator are str (schema); C++ footer returns bytes.
+        proj_set = set(column_names)
+        proj_set_bytes = {name.encode('utf-8') for name in column_names}
+        max_rg_bytes = 0
         for path, rg_idx in work_items:
-            _ts = time.monotonic_ns()
+            rg_bytes = 0
             if prefetched_footers and path in prefetched_footers:
-                # Prefetched dict path — column stats come from Python dict
-                meta = prefetched_footers[path]
-                rg_meta = meta["row_groups"][rg_idx]
-                column_stats_dicts = []
-                for col_name in column_names:
-                    for col_meta in rg_meta["columns"]:
-                        if col_meta["name"] == col_name:
-                            column_stats_dicts.append(col_meta)
-                            break
-                pipeline.submit_work(
-                    orig_to_cpp.get(path, path), rg_idx, column_names, column_stats_dicts
-                )
+                rg_meta = prefetched_footers[path]["row_groups"][rg_idx]
+                for col_meta in rg_meta["columns"]:
+                    if col_meta["name"] in proj_set:
+                        cm_sz = col_meta.get("total_uncompressed_size", 0)
+                        if cm_sz and cm_sz > 0:
+                            rg_bytes += cm_sz
             else:
-                # Native path — column stats come directly from C++ FileStats
                 path_bytes_cpp = path.encode('utf-8')
-                rg_ptr = &local_footers_native[path_bytes_cpp].row_groups[rg_idx]
-                pipeline.submit_work_native(
-                    orig_to_cpp.get(path, path), rg_idx, column_names, rg_ptr
-                )
-            t_submit_ns += time.monotonic_ns() - _ts
-        t_phase2_ns = time.monotonic_ns() - _t0
+                rgp = &local_footers_native[path_bytes_cpp].row_groups[rg_idx]
+                for ci in range(rgp.columns.size()):
+                    if rgp.columns[ci].total_uncompressed_size > 0 and \
+                            bytes(rgp.columns[ci].name) in proj_set_bytes:
+                        rg_bytes += rgp.columns[ci].total_uncompressed_size
+            if rg_bytes > max_rg_bytes:
+                max_rg_bytes = rg_bytes
 
+        in_flight_limit = decode_workers + 2
+        est_rg = max_rg_bytes * 2
+        dyn_pool_size = est_rg * in_flight_limit
+        if dyn_pool_size < 256*1024*1024:
+            dyn_pool_size = 256*1024*1024
+
+        pipeline = CppIOPipeline(
+            decode_workers=decode_workers,
+            queue_capacity=1024,
+            pool_size=dyn_pool_size,
+        )
+
+        # ── Bounded submission + consume (#1) ────────────────────────────────
+        # At most in_flight_limit row groups are submitted-but-not-yet-consumed
+        # at any instant. Each consumed row group is deserialized (which copies
+        # its columns out of the pool and releases the pool bytes) before the
+        # next is submitted, so peak pool occupancy never exceeds
+        # in_flight_limit row groups — the producer cannot outrun the consumer.
         _t0 = time.monotonic_ns()
+        n_items = len(work_items)
+        next_to_submit = 0
         results_received = 0
-        while results_received < len(work_items):
+        while results_received < n_items:
+            # Top up the in-flight window.
+            while next_to_submit < n_items and (next_to_submit - results_received) < in_flight_limit:
+                _ts = time.monotonic_ns()
+                path, rg_idx = work_items[next_to_submit]
+                if prefetched_footers and path in prefetched_footers:
+                    # Prefetched dict path — column stats come from Python dict
+                    meta = prefetched_footers[path]
+                    rg_meta = meta["row_groups"][rg_idx]
+                    column_stats_dicts = []
+                    for col_name in column_names:
+                        for col_meta in rg_meta["columns"]:
+                            if col_meta["name"] == col_name:
+                                column_stats_dicts.append(col_meta)
+                                break
+                    pipeline.submit_work(
+                        orig_to_cpp.get(path, path), rg_idx, column_names, column_stats_dicts
+                    )
+                else:
+                    # Native path — column stats come directly from C++ FileStats
+                    path_bytes_cpp = path.encode('utf-8')
+                    rg_ptr = &local_footers_native[path_bytes_cpp].row_groups[rg_idx]
+                    pipeline.submit_work_native(
+                        orig_to_cpp.get(path, path), rg_idx, column_names, rg_ptr
+                    )
+                t_submit_ns += time.monotonic_ns() - _ts
+                next_to_submit += 1
+
             _ts = time.monotonic_ns()
             result = pipeline.wait_result()
             t_get_result_ns += time.monotonic_ns() - _ts
             if result is None:
                 # Pipeline drained before all work completed — should not happen.
                 raise RuntimeError(
-                    f"Parquet pipeline drained with {len(work_items) - results_received} "
+                    f"Parquet pipeline drained with {n_items - results_received} "
                     f"result(s) missing"
                 )
 
@@ -612,38 +673,43 @@ def iter_row_groups_ipc(
                         f"path={result['path']!r} rg={result['rg_idx']}: {col_lengths}"
                     )
 
-            # Translate signed URL back to the original path for Python consumers.
-            row_group['__path__'] = cpp_to_orig.get(result['path'], result['path'])
-            row_group['__row_group__'] = result['rg_idx']
-            row_group['__parquet_scan_strategy__'] = 'cpp-pipeline'
-            row_group['__bytes_fetched__'] = result.get('bytes_fetched', 0)
-            row_group['__time_read_ranges_ns__'] = result.get('read_ns', 0)
-            row_group['__time_decode_columns_ns__'] = result.get('decode_ns', 0)
-
+            # Build typed metadata object; remove all __*__ keys from dict.
+            # Yield (ScanRowGroup, {col: Vector}) to separate metadata from data.
+            path_str = cpp_to_orig.get(result['path'], result['path'])
+            telemetry_dict = {
+                '__bytes_fetched__': result.get('bytes_fetched', 0),
+                '__time_read_ranges_ns__': result.get('read_ns', 0),
+                '__time_decode_columns_ns__': result.get('decode_ns', 0),
+            }
+            scan_rg = _make_scan_row_group(path_str, result['rg_idx'], 'cpp-pipeline', telemetry_dict)
+            # row_group is now pure {col: Vector}; clean for the operator.
             results_received += 1
-            yield row_group
+            yield (scan_rg, row_group)
         t_consume_ns = time.monotonic_ns() - _t0
 
     finally:
         import os, sys
-        if os.environ.get("OPTERYX_IO_DIAG"):
-            diag = pipeline.diagnostics()
-            sys.stderr.write(
-                "\n[io_diag] paths=%d rgs=%d  phase1=%.1fms phase2=%.1fms consume=%.1fms\n"
-                "         footer_total=%.1fms  submit_total=%.3fms\n"
-                "         wait_result_total=%.1fms\n"
-                "         queue: enqueues=%d high_watermark=%d spin_iters=%d\n"
-                % (
-                    len(set(p for p, _ in work_items)) if work_items else 0,
-                    len(work_items),
-                    t_phase1_ns / 1e6, t_phase2_ns / 1e6, t_consume_ns / 1e6,
-                    t_footer_ns / 1e6, t_submit_ns / 1e6,
-                    t_get_result_ns / 1e6,
-                    diag["enqueue_count"], diag["queue_high_watermark"],
-                    diag["spin_iterations"],
+        # pipeline is None if we returned before footer-sized creation
+        # (no work items) or failed during sizing.
+        if pipeline is not None:
+            if os.environ.get("OPTERYX_IO_DIAG"):
+                diag = pipeline.diagnostics()
+                sys.stderr.write(
+                    "\n[io_diag] paths=%d rgs=%d  phase1=%.1fms phase2=%.1fms consume=%.1fms\n"
+                    "         footer_total=%.1fms  submit_total=%.3fms\n"
+                    "         wait_result_total=%.1fms\n"
+                    "         queue: enqueues=%d high_watermark=%d spin_iters=%d\n"
+                    % (
+                        len(set(p for p, _ in work_items)) if work_items else 0,
+                        len(work_items),
+                        t_phase1_ns / 1e6, t_phase2_ns / 1e6, t_consume_ns / 1e6,
+                        t_footer_ns / 1e6, t_submit_ns / 1e6,
+                        t_get_result_ns / 1e6,
+                        diag["enqueue_count"], diag["queue_high_watermark"],
+                        diag["spin_iterations"],
+                    )
                 )
-            )
-        pipeline.close()
+            pipeline.close()
 
 
 def iter_pass2_row_groups_ipc(
@@ -731,16 +797,18 @@ def iter_pass2_row_groups_ipc(
 
             row_group = deserialize_row_group(result['ref_ids'], pipeline.pool)
 
-            # Translate signed URL back to original path for Python consumers.
-            row_group['__path__'] = cpp_to_orig.get(result['path'], result['path'])
-            row_group['__row_group__'] = result['rg_idx']
-            row_group['__parquet_scan_strategy__'] = 'cpp-pipeline-pass2'
-            row_group['__bytes_fetched__'] = result['bytes_fetched']
-            row_group['__time_read_ranges_ns__'] = result.get('read_ns', 0)
-            row_group['__time_decode_columns_ns__'] = result.get('decode_ns', 0)
-
+            # Build typed metadata object; remove all __*__ keys from dict.
+            # Yield (ScanRowGroup, {col: Vector}) to separate metadata from data.
+            path_str = cpp_to_orig.get(result['path'], result['path'])
+            telemetry_dict = {
+                '__bytes_fetched__': result['bytes_fetched'],
+                '__time_read_ranges_ns__': result.get('read_ns', 0),
+                '__time_decode_columns_ns__': result.get('decode_ns', 0),
+            }
+            scan_rg = _make_scan_row_group(path_str, result['rg_idx'], 'cpp-pipeline-pass2', telemetry_dict)
+            # row_group is now pure {col: Vector}; clean for the operator.
             results_received += 1
-            yield row_group
+            yield (scan_rg, row_group)
 
     finally:
         pipeline.close()

@@ -220,9 +220,10 @@ dn.vector_array_from_sequence(values: list[list | None])     # → ARRAY
 
 ```python
 dn.vector_from_constant(value, length: int)          # → INT64
-dn.vector_bool_from_constant(value, length)          # → BOOL
-dn.vector_string_from_constant(value, length)        # → VARCHAR
-# Also available for int8/16/32, float32/64, date, time, decimal, timestamp
+dn.vector_from_bool_constant(value, length)          # → BOOL
+dn.vector_varchar_from_constant(value, length)       # → VARCHAR
+# Also: vector_int8/16/32_from_constant, vector_float32/64_from_constant,
+#       vector_date32/time32/time64/timestamp/decimal/interval_from_constant
 ```
 
 ### Dict (deduplicated)
@@ -234,7 +235,8 @@ dn.vector_from_dict(
     nullable: list[bool] | None,
 )                                                           # → INT64
 dn.vector_from_string_dict_sequence(values: list[str | None])  # auto-dedup → VARCHAR
-# Also available for bool, int8/16/32, float32/64, date, time, decimal, timestamp
+# Also: vector_from_bool_dict, vector_int8/16/32_from_dict,
+#       vector_float32/64_from_dict, vector_date32/time32/time64/timestamp/decimal/interval_from_dict
 ```
 
 ---
@@ -256,19 +258,33 @@ len(m)           # number of columns
 ## C Extension Interop
 
 Extensions compiled in Cython or C++ that need to pass vectors across the boundary without Python
-overhead use the bridge API in `core/draken_bridge.h`:
+overhead use the bridge API in `core/draken_bridge.h`. `draken_bridge.h` is the authoritative source;
+the headline functions are:
 
 ```c
-DrakenVector  draken_vector_unwrap(PyObject* obj);
-PyObject*     draken_vector_own(DrakenVector vec);
-PyObject*     draken_vector_own_raw(void* data, const uint32_t* sel,
-                                    uint32_t data_len, uint32_t length,
-                                    uint8_t* validity, DrakenType type,
-                                    uint8_t flags);
+// Unwrap — returns a BORROWED pointer, valid only while `obj` is kept alive.
+// Raises TypeError (never segfaults) if obj is not a Vector.
+const DrakenVector* draken_vector_unwrap(PyObject* obj);
+const DrakenVector* draken_array_child_unwrap(PyObject* obj);  // child of a DRAKEN_ARRAY
+
+// Own — wrap hand-allocated (draken_malloc) buffers in a NEW Python Vector handle.
+// Ownership of data/validity transfers to the Vector (freed on GC).
+PyObject* draken_vector_own_raw(void* data, uint8_t* validity,
+                                uint32_t length, DrakenType type);
+PyObject* draken_vector_own_dict_i64(...);   // dict-encoded int64
+PyObject* draken_vector_own_string(...);     // string-family
+PyObject* draken_vector_own_array(...);      // DRAKEN_ARRAY[string]
+PyObject* draken_vector_own_timestamp(...);  // DRAKEN_TIMESTAMP64
+
+// Own a VecResult op result. draken_vector_own is C++-only; from C, use the
+// C-linkage trampoline draken_vecresult_own_c.
+PyObject* draken_vector_own(VecResult res);        // C++ only
+PyObject* draken_vecresult_own_c(VecResult res);   // C-linkage
 ```
 
-Because `draken_native` is loaded with `RTLD_GLOBAL` by `draken/__init__.py`, these symbols are
-resolved at consumer extension load time with no additional linkage step.
+Buffers handed to any `draken_vector_own_*` function must be allocated with the Draken allocator
+(`draken_malloc`). Because `draken_native` is loaded with `RTLD_GLOBAL` by `draken/__init__.py`, these
+symbols are resolved at consumer extension load time with no additional linkage step.
 
 ---
 

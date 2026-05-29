@@ -34,6 +34,7 @@ from draken.core.buffers cimport (
     DRAKEN_INT64, DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8,
     DRAKEN_FLOAT64, DRAKEN_FLOAT32,
     DRAKEN_BOOL, DRAKEN_VARCHAR, DRAKEN_NVARCHAR,
+    DRAKEN_NULL,
 )
 from draken.vectors.bool_vector cimport BoolVector, from_decoded as _bool_from_decoded
 from draken.vectors.vector cimport Vector, from_decoded as _vec_from_decoded
@@ -244,20 +245,41 @@ def assemble_fixed(
 ):
     """Scatter fixed-width branch parts into a new output Vector.
 
-    Output DrakenType is derived from the first non-None part (or else_part).
+    Output DrakenType is derived from the first non-None, non-DRAKEN_NULL part
+    (or else_part if no valid parts exist).
     Rows not covered by any branch and with no else_part become NULL.
     """
     cdef Py_ssize_t bid_py
+    cdef Py_ssize_t num_parts = len(parts)
     cdef Vector template_vec = None
+    cdef DrakenVector* candidate_uv
+    cdef dict part_vecs_dict = {}  # Keep all part vectors alive, keyed by index
 
-    for bid_py in range(len(parts)):
+    # Keep part Vector objects alive by storing them explicitly
+    for bid_py in range(num_parts):
+        if parts[bid_py] is None:
+            continue
+        part_vecs_dict[bid_py] = <Vector>parts[bid_py]
+
+    # Find first non-None, non-DRAKEN_NULL part to derive output type
+    for bid_py in range(num_parts):
         if parts[bid_py] is not None:
             template_vec = <Vector>parts[bid_py]
-            break
+            candidate_uv = template_vec.unified()
+            # Skip DRAKEN_NULL vectors (all-null, self-describing, no data buffer)
+            if candidate_uv.type != DRAKEN_NULL:
+                break
+            template_vec = None
+
+    # If no valid template in parts, try else_part
     if template_vec is None and else_part is not None:
         template_vec = <Vector>else_part
+        candidate_uv = template_vec.unified()
+        if candidate_uv.type == DRAKEN_NULL:
+            template_vec = None
+
     if template_vec is None:
-        raise TypeError("assemble_fixed: no non-None parts to derive output type")
+        raise TypeError("assemble_fixed: no non-None, non-DRAKEN_NULL parts to derive output type")
 
     cdef DrakenVector* tmpl_uv = template_vec.unified()
     cdef DrakenType out_dtype = tmpl_uv.type
@@ -276,7 +298,8 @@ def assemble_fixed(
         raise MemoryError("assemble_fixed: draken_malloc failed")
     if nbytes > 0:
         memset(out_data, 0, <size_t>nbytes)
-    memset(out_validity, 0, <size_t>vbytes)  # all invalid initially
+    if vbytes > 0:
+        memset(out_validity, 0, <size_t>vbytes)  # all invalid initially
 
     cdef bint any_null = False
     cdef DrakenVector* src_uv
@@ -285,12 +308,27 @@ def assemble_fixed(
     cdef Py_ssize_t j
     cdef int32_t[::1] rows_i
     cdef Vector vec
+    cdef Vector else_vec = None
 
-    for bid_py in range(len(parts)):
-        if parts[bid_py] is None:
+    # Keep else_part Vector alive by storing it explicitly
+    if else_part is not None:
+        else_vec = <Vector>else_part
+
+    for bid_py in range(num_parts):
+        if bid_py not in part_vecs_dict:
             continue
-        vec = <Vector>parts[bid_py]
+        # Access vector from part_vecs_dict (which we populated at the start)
+        # to ensure it stays alive
+        vec = part_vecs_dict[bid_py]
         src_uv = vec.unified()
+
+        # Cause A fix: Skip DRAKEN_NULL vectors (all-null, data==NULL).
+        # Unmatched rows (those not processed here) stay null in output.
+        if src_uv.data == NULL:
+            # DRAKEN_NULL or all-null constant: all rows in this part are NULL
+            any_null = True
+            continue
+
         rows_i = rows_per_branch[bid_py]
         for j in range(rows_i.shape[0]):
             row_r = rows_i[j]
@@ -305,22 +343,31 @@ def assemble_fixed(
                 )
                 _sel_set_true_bit(out_validity, row_r)
 
-    if else_part is not None:
-        vec = <Vector>else_part
-        src_uv = vec.unified()
-        for j in range(unmatched.shape[0]):
-            row_r = unmatched[j]
-            if not _sel_is_valid(src_uv.validity, j):
-                any_null = True
-            else:
-                dict_idx = src_uv.selection[j]
-                memcpy(
-                    <char*>out_data + row_r * itemsize,
-                    <char*>src_uv.data + dict_idx * itemsize,
-                    <size_t>itemsize,
-                )
-                _sel_set_true_bit(out_validity, row_r)
+    if else_vec is not None:
+        src_uv = else_vec.unified()
+
+        # Cause A fix: Handle DRAKEN_NULL in else_part (all-null, data==NULL).
+        # If else_part is null, unmatched rows stay null in output.
+        if src_uv.data == NULL:
+            # DRAKEN_NULL else_part: all unmatched rows are NULL
+            any_null = True
+        else:
+            # Non-null else_part: scatter values for unmatched rows
+            for j in range(unmatched.shape[0]):
+                row_r = unmatched[j]
+                if not _sel_is_valid(src_uv.validity, j):
+                    any_null = True
+                else:
+                    dict_idx = src_uv.selection[j]
+                    memcpy(
+                        <char*>out_data + row_r * itemsize,
+                        <char*>src_uv.data + dict_idx * itemsize,
+                        <size_t>itemsize,
+                    )
+                    _sel_set_true_bit(out_validity, row_r)
     elif unmatched.shape[0] > 0:
+        # Cause B fix: No else_part and there are unmatched rows.
+        # These rows become NULL (validity bits stay 0).
         any_null = True
 
     return _vec_from_decoded(out_data, out_validity, <uint32_t>n, out_dtype)

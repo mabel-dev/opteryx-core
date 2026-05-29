@@ -2016,11 +2016,24 @@ static VectorOwner vecresult_to_owner(VecResult r) {
     v.flags       = r.flags;
 
     OwnedBuffer<void>    data_buf(r.data);
-    OwnedBuffer<uint8_t> val_buf(r.validity);
+    // Phase 9c: when validity is embedded in the data block (string-family
+    // output), it is freed with the block — do NOT own it as a second buffer.
+    OwnedBuffer<uint8_t> val_buf(r.validity_embedded ? nullptr : r.validity);
     OwnedBuffer<void>    codes_buf(r.owns_selection
                                     ? const_cast<void*>(static_cast<const void*>(r.selection))
                                     : nullptr);
-    return VectorOwner(v, std::move(data_buf), std::move(val_buf), std::move(codes_buf));
+    VectorOwner owner(v, std::move(data_buf), std::move(val_buf), std::move(codes_buf));
+
+    // Phase 9c: attach the timestamp unit descriptor when the kernel set one.
+    // DrakenVector/VecResult carry no LogicalType; it lives on the VectorOwner.
+    if (r.type == DRAKEN_TIMESTAMP64 && r.ts_unit != 0xFFu) {
+        LogicalType lt;
+        lt.kind           = LogicalKind::TIMESTAMP;
+        lt.unit           = static_cast<TimestampUnit>(r.ts_unit);
+        lt.offset_minutes = 0;
+        owner.logical_type = logical_type_intern(lt);
+    }
+    return owner;
 }
 
 // ---------------------------------------------------------------------------
@@ -2467,6 +2480,15 @@ PyObject* draken_vector_own(VecResult res) {
         PyErr_SetString(PyExc_RuntimeError, e.what());
         return nullptr;
     }
+}
+
+// draken_vecresult_own_c — C-linkage trampoline over draken_vector_own.
+//
+// Phase 9c: exposes draken_vector_own with C linkage (declared in the bridge
+// header inside extern "C") so the expression executor can cimport a stable,
+// unmangled symbol across the .so boundary. Behaviour is identical.
+extern "C" PyObject* draken_vecresult_own_c(VecResult res) {
+    return draken_vector_own(res);
 }
 
 // ---------------------------------------------------------------------------

@@ -46,7 +46,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-quick test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt
+.PHONY: help lint format check test test-quick test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt et
 
 # Default target
 .DEFAULT_GOAL := help
@@ -128,6 +128,11 @@ dt: ## Run draken unit tests
 	@clear || true
 	@$(PYTEST) draken/tests/ -v --tb=short
 
+et: compile ## Run expression engine tests (value-checked gates)
+	$(call print_blue,"Running expression engine tests...")
+	@clear || true
+	@$(PYTEST) tests/test_expression_engine.py -v --tb=short
+
 kernel-parity: compile ## Build and run Phase 9a C ABI parity test
 	$(call print_blue,"Building and running C ABI parity test...")
 	@mkdir -p /tmp/opteryx-tests
@@ -143,7 +148,9 @@ kernel-parity: compile ## Build and run Phase 9a C ABI parity test
 	    -I$(CURDIR)/third_party/mabel/parvi \
 	    -I$(CURDIR)/third_party/mimalloc/include \
 	    $(CURDIR)/draken/ops/kernels/c_abi_test.cpp \
+	    $(CURDIR)/draken/core/vector_alloc.cpp \
 	    $(CURDIR)/draken/ops/kernels/error_handling.cpp \
+	    $(CURDIR)/draken/ops/kernels/result_helpers.cpp \
 	    $(CURDIR)/draken/ops/kernels/kernel_registry.cpp \
 	    $(CURDIR)/draken/ops/kernels/cast_numeric.cpp \
 	    $(CURDIR)/draken/ops/kernels/cast_string.cpp \

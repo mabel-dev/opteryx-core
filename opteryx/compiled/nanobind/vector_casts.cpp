@@ -31,7 +31,29 @@
 #include "core/vector_alloc.h"
 #include "core/draken_bridge.h"
 
+// Phase 9c: the cast compute now lives in draken kernels; these nanobind
+// entry points shim across to them (core in draken, binding calls across).
+#include "ops/kernels/cast_kernels.h"
+#include "ops/kernels/error_handling.h"
+#include "ops/kernels/kernel_context.h"
+
 namespace nb = nanobind;
+
+// Shim helper: invoke a draken cast kernel and wrap its VecResult as a Vector.
+// On the error sentinel, raise — value_error for parse failures (preserves the
+// pre-9c ValueError contract), runtime_error otherwise. The caller has already
+// type-checked the input via unwrap_*, so the only sentinels reaching here are
+// genuine kernel failures.
+static nb::object wrap_cast_result(VecResult r, bool parse_error_as_value = false) {
+    if (!r.data) {
+        const char* msg = draken_get_error_message();
+        if (parse_error_as_value) throw nb::value_error(msg);
+        throw std::runtime_error(msg);
+    }
+    PyObject* out = draken_vecresult_own_c(r);
+    if (!out) throw nb::python_error();
+    return nb::steal<nb::object>(out);
+}
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -113,6 +135,9 @@ static inline int u64_to_ascii(uint64_t value, char* buf) noexcept {
 
 static nb::object int_to_string_apply(nb::object obj, bool treat_as_unsigned) {
     const DrakenVector* dv = unwrap_int64(obj);
+    // int64 path: core lives in draken. uint64 has no draken kernel yet → below.
+    if (!treat_as_unsigned)
+        return wrap_cast_result(draken_cast_int64_to_string(nullptr, dv));
     const int64_t*  src = static_cast<const int64_t*>(dv->data);
     const uint32_t  n   = dv->length;
 
@@ -187,50 +212,9 @@ static nb::object int_to_string_apply(nb::object obj, bool treat_as_unsigned) {
 // ---------------------------------------------------------------------------
 
 static nb::object string_to_int_apply(nb::object obj) {
-    const DrakenVector*      dv = unwrap_string(obj);
-    const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);
-    const uint32_t           n  = dv->length;
-
-    const size_t data_sz = (n > 0u ? n : 1u) * sizeof(int64_t);
-    int64_t* out_data = static_cast<int64_t*>(draken_malloc(data_sz));
-    if (!out_data) throw std::bad_alloc();
-
-    struct Guard {
-        int64_t* d; uint8_t* v;
-        ~Guard() { if (d) draken_free(d); if (v) draken_free(v); }
-    } g{out_data, nullptr};
-
-    uint8_t* out_validity = copy_validity(dv);
-    g.v = out_validity;
-
-    for (uint32_t i = 0u; i < n; ++i) {
-        if (row_is_null(dv, i)) { out_data[i] = 0; continue; }
-
-        const DrakenStringSlot* slot = &sa->slots[dv->selection[i]];
-        const uint8_t*          sdata = str_data(slot, sa->arena);
-        const uint32_t          slen  = str_length(slot);
-
-        int64_t value = 0;
-        int64_t sign  = 1;
-        uint32_t k    = 0;
-
-        if (slen > 0 && sdata[0] == '-') { sign = -1; k = 1; }
-
-        for (; k < slen; ++k) {
-            const uint8_t c = sdata[k];
-            if (c < '0' || c > '9') {
-                PyErr_SetString(PyExc_ValueError, "Invalid digit in integer literal");
-                return nb::object();  // Guard frees buffers
-            }
-            value = value * 10 + (c - '0');
-        }
-        out_data[i] = sign * value;
-    }
-
-    g.d = nullptr; g.v = nullptr;
-    PyObject* out = draken_vector_own_raw(out_data, out_validity, n, DRAKEN_INT64);
-    if (!out) throw nb::python_error();
-    return nb::steal<nb::object>(out);
+    const DrakenVector* dv = unwrap_string(obj);
+    // Parse errors surface as ValueError (preserves the pre-9c contract).
+    return wrap_cast_result(draken_cast_string_to_int64(nullptr, dv), /*parse_error_as_value=*/true);
 }
 
 // ---------------------------------------------------------------------------
@@ -244,28 +228,15 @@ static nb::object string_to_int_apply(nb::object obj) {
 
 static nb::object int64_to_timestamp_apply(nb::object obj, const char* unit_str) {
     const DrakenVector* dv = unwrap_int64(obj);
-    const uint32_t      n  = dv->length;
-
-    // Materialise a dense int64 array in logical-row order.
-    const size_t data_sz = (n > 0u ? n : 1u) * sizeof(int64_t);
-    int64_t* out_data = static_cast<int64_t*>(draken_malloc(data_sz));
-    if (!out_data) throw std::bad_alloc();
-
-    struct Guard { int64_t* d; uint8_t* v;
-        ~Guard() { if (d) draken_free(d); if (v) draken_free(v); } } g{out_data, nullptr};
-
-    uint8_t* out_validity = copy_validity(dv);
-    g.v = out_validity;
-
-    const int64_t* src = static_cast<const int64_t*>(dv->data);
-    for (uint32_t i = 0u; i < n; ++i)
-        out_data[i] = src[dv->selection[i]];
-
-    g.d = nullptr; g.v = nullptr;
-    // draken_vector_own_timestamp consumes both buffers, attaches LogicalType.
-    PyObject* out = draken_vector_own_timestamp(out_data, out_validity, n, unit_str);
-    if (!out) throw nb::python_error();
-    return nb::steal<nb::object>(out);
+    // Map unit string → cast_timestamp_ctx code (1=ns,2=us,3=ms,4=s,5=days).
+    cast_timestamp_ctx ctx{2};  // default microseconds
+    if      (std::strcmp(unit_str, "ns")   == 0) ctx.unit = 1;
+    else if (std::strcmp(unit_str, "us")   == 0) ctx.unit = 2;
+    else if (std::strcmp(unit_str, "ms")   == 0) ctx.unit = 3;
+    else if (std::strcmp(unit_str, "s")    == 0) ctx.unit = 4;
+    else if (std::strcmp(unit_str, "days") == 0) ctx.unit = 5;
+    else throw nb::value_error("int64->timestamp: unit must be s/ms/us/ns/days");
+    return wrap_cast_result(draken_cast_int64_to_timestamp(&ctx, dv));
 }
 
 // ---------------------------------------------------------------------------
@@ -311,172 +282,37 @@ static const DrakenVector* unwrap_timestamp(nb::object obj) {
 // INT64 → FLOAT64: widening cast, no precision loss for |v| < 2^53.
 static nb::object int64_to_float64_apply(nb::object obj) {
     const DrakenVector* dv = unwrap_int64(obj);
-    const int64_t* src = static_cast<const int64_t*>(dv->data);
-    const uint32_t n = dv->length;
-
-    const size_t data_sz = (n > 0u ? n : 1u) * sizeof(double);
-    double* out = static_cast<double*>(draken_malloc(data_sz));
-    if (!out) throw std::bad_alloc();
-
-    struct Guard { double* d; uint8_t* v;
-        ~Guard() { if (d) draken_free(d); if (v) draken_free(v); } } g{out, nullptr};
-
-    uint8_t* out_validity = copy_validity(dv);
-    g.v = out_validity;
-
-    for (uint32_t i = 0u; i < n; ++i) {
-        if (row_is_null(dv, i)) { out[i] = 0.0; continue; }
-        out[i] = static_cast<double>(src[dv->selection[i]]);
-    }
-
-    g.d = nullptr; g.v = nullptr;
-    PyObject* result = draken_vector_own_raw(out, out_validity, n, DRAKEN_FLOAT64);
-    if (!result) throw nb::python_error();
-    return nb::steal<nb::object>(result);
+    return wrap_cast_result(draken_cast_int64_to_float64(nullptr, dv));
 }
 
 // BOOL → INT64: expand bit-packed bool (0 or 1 per row) to int64.
 static nb::object bool_to_int64_apply(nb::object obj) {
     const DrakenVector* dv = unwrap_bool(obj);
-    const uint8_t* src = static_cast<const uint8_t*>(dv->data);
-    const uint32_t n = dv->length;
-
-    const size_t data_sz = (n > 0u ? n : 1u) * sizeof(int64_t);
-    int64_t* out = static_cast<int64_t*>(draken_malloc(data_sz));
-    if (!out) throw std::bad_alloc();
-
-    struct Guard { int64_t* d; uint8_t* v;
-        ~Guard() { if (d) draken_free(d); if (v) draken_free(v); } } g{out, nullptr};
-
-    uint8_t* out_validity = copy_validity(dv);
-    g.v = out_validity;
-
-    for (uint32_t i = 0u; i < n; ++i) {
-        if (row_is_null(dv, i)) { out[i] = 0; continue; }
-        const uint32_t bit_idx = dv->selection[i];
-        out[i] = static_cast<int64_t>((src[bit_idx >> 3u] >> (bit_idx & 7u)) & 1u);
-    }
-
-    g.d = nullptr; g.v = nullptr;
-    PyObject* result = draken_vector_own_raw(out, out_validity, n, DRAKEN_INT64);
-    if (!result) throw nb::python_error();
-    return nb::steal<nb::object>(result);
+    return wrap_cast_result(draken_cast_bool_to_int64(nullptr, dv));
 }
 
 // INT64 → BOOL: 0 → false, non-zero → true.  Output is bit-packed DRAKEN_BOOL.
 static nb::object int64_to_bool_apply(nb::object obj) {
     const DrakenVector* dv = unwrap_int64(obj);
-    const int64_t* src = static_cast<const int64_t*>(dv->data);
-    const uint32_t n = dv->length;
-
-    const size_t data_sz = (n > 0u ? (n + 7u) / 8u : 1u);
-    uint8_t* out = static_cast<uint8_t*>(draken_malloc(data_sz));
-    if (!out) throw std::bad_alloc();
-    std::memset(out, 0, data_sz);
-
-    struct Guard { uint8_t* d; uint8_t* v;
-        ~Guard() { if (d) draken_free(d); if (v) draken_free(v); } } g{out, nullptr};
-
-    uint8_t* out_validity = copy_validity(dv);
-    g.v = out_validity;
-
-    for (uint32_t i = 0u; i < n; ++i) {
-        if (row_is_null(dv, i)) continue;
-        if (src[dv->selection[i]] != 0)
-            out[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
-    }
-
-    g.d = nullptr; g.v = nullptr;
-    PyObject* result = draken_vector_own_raw(out, out_validity, n, DRAKEN_BOOL);
-    if (!result) throw nb::python_error();
-    return nb::steal<nb::object>(result);
+    return wrap_cast_result(draken_cast_int64_to_bool(nullptr, dv));
 }
 
 // FLOAT64/FLOAT32 → BOOL: 0.0 → false, non-zero → true.  Output is bit-packed.
 static nb::object float64_to_bool_apply(nb::object obj) {
     const DrakenVector* dv = unwrap_float64(obj);
-    const uint32_t n = dv->length;
-
-    const size_t data_sz = (n > 0u ? (n + 7u) / 8u : 1u);
-    uint8_t* out = static_cast<uint8_t*>(draken_malloc(data_sz));
-    if (!out) throw std::bad_alloc();
-    std::memset(out, 0, data_sz);
-
-    struct Guard { uint8_t* d; uint8_t* v;
-        ~Guard() { if (d) draken_free(d); if (v) draken_free(v); } } g{out, nullptr};
-
-    uint8_t* out_validity = copy_validity(dv);
-    g.v = out_validity;
-
-    for (uint32_t i = 0u; i < n; ++i) {
-        if (row_is_null(dv, i)) continue;
-        double val;
-        if (dv->type == DRAKEN_FLOAT64)
-            val = static_cast<const double*>(dv->data)[dv->selection[i]];
-        else
-            val = static_cast<double>(static_cast<const float*>(dv->data)[dv->selection[i]]);
-        if (val != 0.0)
-            out[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
-    }
-
-    g.d = nullptr; g.v = nullptr;
-    PyObject* result = draken_vector_own_raw(out, out_validity, n, DRAKEN_BOOL);
-    if (!result) throw nb::python_error();
-    return nb::steal<nb::object>(result);
+    return wrap_cast_result(draken_cast_float64_to_bool(nullptr, dv));
 }
 
 // DATE32 → INT64: widen int32 days-since-epoch to int64.
 static nb::object date32_to_int64_apply(nb::object obj) {
     const DrakenVector* dv = unwrap_date32(obj);
-    const int32_t* src = static_cast<const int32_t*>(dv->data);
-    const uint32_t n = dv->length;
-
-    const size_t data_sz = (n > 0u ? n : 1u) * sizeof(int64_t);
-    int64_t* out = static_cast<int64_t*>(draken_malloc(data_sz));
-    if (!out) throw std::bad_alloc();
-
-    struct Guard { int64_t* d; uint8_t* v;
-        ~Guard() { if (d) draken_free(d); if (v) draken_free(v); } } g{out, nullptr};
-
-    uint8_t* out_validity = copy_validity(dv);
-    g.v = out_validity;
-
-    for (uint32_t i = 0u; i < n; ++i) {
-        if (row_is_null(dv, i)) { out[i] = 0; continue; }
-        out[i] = static_cast<int64_t>(src[dv->selection[i]]);
-    }
-
-    g.d = nullptr; g.v = nullptr;
-    PyObject* result = draken_vector_own_raw(out, out_validity, n, DRAKEN_INT64);
-    if (!result) throw nb::python_error();
-    return nb::steal<nb::object>(result);
+    return wrap_cast_result(draken_cast_date32_to_int64(nullptr, dv));
 }
 
 // TIMESTAMP64 → INT64: identity retype — microseconds-since-epoch stored as int64.
 static nb::object timestamp_to_int64_apply(nb::object obj) {
     const DrakenVector* dv = unwrap_timestamp(obj);
-    const int64_t* src = static_cast<const int64_t*>(dv->data);
-    const uint32_t n = dv->length;
-
-    const size_t data_sz = (n > 0u ? n : 1u) * sizeof(int64_t);
-    int64_t* out = static_cast<int64_t*>(draken_malloc(data_sz));
-    if (!out) throw std::bad_alloc();
-
-    struct Guard { int64_t* d; uint8_t* v;
-        ~Guard() { if (d) draken_free(d); if (v) draken_free(v); } } g{out, nullptr};
-
-    uint8_t* out_validity = copy_validity(dv);
-    g.v = out_validity;
-
-    for (uint32_t i = 0u; i < n; ++i) {
-        if (row_is_null(dv, i)) { out[i] = 0; continue; }
-        out[i] = src[dv->selection[i]];
-    }
-
-    g.d = nullptr; g.v = nullptr;
-    PyObject* result = draken_vector_own_raw(out, out_validity, n, DRAKEN_INT64);
-    if (!result) throw nb::python_error();
-    return nb::steal<nb::object>(result);
+    return wrap_cast_result(draken_cast_timestamp_to_int64(nullptr, dv));
 }
 
 // ---------------------------------------------------------------------------
@@ -486,219 +322,26 @@ static nb::object timestamp_to_int64_apply(nb::object obj) {
 // BOOL → VARCHAR: "true" or "false".  Both fit inline (≤ STR_INLINE_MAX=12).
 static nb::object bool_to_string_apply(nb::object obj) {
     const DrakenVector* dv = unwrap_bool(obj);
-    const uint8_t* src = static_cast<const uint8_t*>(dv->data);
-    const uint32_t n = dv->length;
-
-    const size_t slots_sz = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
-    DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
-    if (!slots) throw std::bad_alloc();
-    std::memset(slots, 0, slots_sz);
-
-    // "true"/"false" are always inline; allocate 1-byte arena so own_string
-    // always receives a valid non-null arena pointer.
-    uint8_t* arena = static_cast<uint8_t*>(draken_malloc(1u));
-    if (!arena) { draken_free(slots); throw std::bad_alloc(); }
-
-    struct Guard {
-        DrakenStringSlot* s; uint8_t* a; uint8_t* v;
-        ~Guard() { if (s) draken_free(s); if (a) draken_free(a); if (v) draken_free(v); }
-    } g{slots, arena, nullptr};
-
-    uint8_t* out_validity = copy_validity(dv);
-    g.v = out_validity;
-
-    static const uint8_t kTrue[]  = { 't', 'r', 'u', 'e' };
-    static const uint8_t kFalse[] = { 'f', 'a', 'l', 's', 'e' };
-
-    for (uint32_t i = 0u; i < n; ++i) {
-        if (row_is_null(dv, i)) { str_init_null(&slots[i]); continue; }
-        const uint32_t bit_idx = dv->selection[i];
-        const bool val = static_cast<bool>((src[bit_idx >> 3u] >> (bit_idx & 7u)) & 1u);
-        draken_build_string_slot(&slots[i], val ? kTrue : kFalse, val ? 4u : 5u, 0u);
-    }
-
-    g.s = nullptr; g.a = nullptr; g.v = nullptr;
-    PyObject* result = draken_vector_own_string(slots, arena, 0u, out_validity, n, DRAKEN_VARCHAR);
-    if (!result) throw nb::python_error();
-    return nb::steal<nb::object>(result);
+    return wrap_cast_result(draken_cast_bool_to_string(nullptr, dv));
 }
 
 // BOOL → FLOAT64: false → 0.0, true → 1.0.
 static nb::object bool_to_float64_apply(nb::object obj) {
     const DrakenVector* dv = unwrap_bool(obj);
-    const uint8_t* src = static_cast<const uint8_t*>(dv->data);
-    const uint32_t n = dv->length;
-
-    const size_t data_sz = (n > 0u ? n : 1u) * sizeof(double);
-    double* out = static_cast<double*>(draken_malloc(data_sz));
-    if (!out) throw std::bad_alloc();
-
-    struct Guard { double* d; uint8_t* v;
-        ~Guard() { if (d) draken_free(d); if (v) draken_free(v); } } g{out, nullptr};
-
-    uint8_t* out_validity = copy_validity(dv);
-    g.v = out_validity;
-
-    for (uint32_t i = 0u; i < n; ++i) {
-        if (row_is_null(dv, i)) { out[i] = 0.0; continue; }
-        const uint32_t bit_idx = dv->selection[i];
-        out[i] = static_cast<double>((src[bit_idx >> 3u] >> (bit_idx & 7u)) & 1u);
-    }
-
-    g.d = nullptr; g.v = nullptr;
-    PyObject* result = draken_vector_own_raw(out, out_validity, n, DRAKEN_FLOAT64);
-    if (!result) throw nb::python_error();
-    return nb::steal<nb::object>(result);
-}
-
-// Gregorian calendar: days-since-epoch (1970-01-01) → (year, month, day).
-// Howard Hinnant's algorithm: https://howardhinnant.github.io/date_algorithms.html
-static void days_to_ymd(int32_t days, int32_t& y, int32_t& m, int32_t& d) noexcept {
-    const int32_t z   = days + 719468;
-    const int32_t era = (z >= 0 ? z : z - 146096) / 146097;
-    const int32_t doe = z - era * 146097;
-    const int32_t yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
-    const int32_t yr  = yoe + era * 400;
-    const int32_t doy = doe - (365*yoe + yoe/4 - yoe/100);
-    const int32_t mp  = (5*doy + 2) / 153;
-    d = doy - (153*mp + 2)/5 + 1;
-    m = mp < 10 ? mp + 3 : mp - 9;
-    y = yr + (m <= 2 ? 1 : 0);
+    return wrap_cast_result(draken_cast_bool_to_float64(nullptr, dv));
 }
 
 // DATE32 → VARCHAR: "YYYY-MM-DD" (10 chars, always inline ≤ STR_INLINE_MAX=12).
 static nb::object date_to_string_apply(nb::object obj) {
     const DrakenVector* dv = unwrap_date32(obj);
-    const int32_t* src = static_cast<const int32_t*>(dv->data);
-    const uint32_t n = dv->length;
-
-    const size_t slots_sz = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
-    DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
-    if (!slots) throw std::bad_alloc();
-    std::memset(slots, 0, slots_sz);
-
-    uint8_t* arena = static_cast<uint8_t*>(draken_malloc(1u));
-    if (!arena) { draken_free(slots); throw std::bad_alloc(); }
-
-    struct Guard {
-        DrakenStringSlot* s; uint8_t* a; uint8_t* v;
-        ~Guard() { if (s) draken_free(s); if (a) draken_free(a); if (v) draken_free(v); }
-    } g{slots, arena, nullptr};
-
-    uint8_t* out_validity = copy_validity(dv);
-    g.v = out_validity;
-
-    uint8_t buf[10];
-    for (uint32_t i = 0u; i < n; ++i) {
-        if (row_is_null(dv, i)) { str_init_null(&slots[i]); continue; }
-        int32_t y, m, d;
-        days_to_ymd(src[dv->selection[i]], y, m, d);
-        buf[0] = static_cast<uint8_t>('0' + (y / 1000) % 10);
-        buf[1] = static_cast<uint8_t>('0' + (y / 100)  % 10);
-        buf[2] = static_cast<uint8_t>('0' + (y / 10)   % 10);
-        buf[3] = static_cast<uint8_t>('0' + y % 10);
-        buf[4] = '-';
-        buf[5] = static_cast<uint8_t>('0' + m / 10);
-        buf[6] = static_cast<uint8_t>('0' + m % 10);
-        buf[7] = '-';
-        buf[8] = static_cast<uint8_t>('0' + d / 10);
-        buf[9] = static_cast<uint8_t>('0' + d % 10);
-        draken_build_string_slot(&slots[i], buf, 10u, 0u);
-    }
-
-    g.s = nullptr; g.a = nullptr; g.v = nullptr;
-    PyObject* result = draken_vector_own_string(slots, arena, 0u, out_validity, n, DRAKEN_VARCHAR);
-    if (!result) throw nb::python_error();
-    return nb::steal<nb::object>(result);
+    return wrap_cast_result(draken_cast_date_to_string(nullptr, dv));
 }
 
 // TIMESTAMP64 → VARCHAR: "YYYY-MM-DD HH:MM:SS.ffffff+0000" (31 chars, always extern).
 // Input is int64 microseconds-since-epoch (UTC); offset is always +0000.
 static nb::object timestamp_to_string_apply(nb::object obj) {
     const DrakenVector* dv = unwrap_timestamp(obj);
-    const int64_t* src = static_cast<const int64_t*>(dv->data);
-    const uint32_t n = dv->length;
-
-    // Count non-null rows; each produces exactly 31 arena bytes.
-    uint32_t valid_count = 0u;
-    for (uint32_t i = 0u; i < n; ++i)
-        if (!row_is_null(dv, i)) ++valid_count;
-    const size_t total_arena = static_cast<size_t>(valid_count) * 31u;
-
-    const size_t slots_sz = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
-    DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(draken_malloc(slots_sz));
-    if (!slots) throw std::bad_alloc();
-    std::memset(slots, 0, slots_sz);
-
-    uint8_t* arena = static_cast<uint8_t*>(draken_malloc(total_arena > 0u ? total_arena : 1u));
-    if (!arena) { draken_free(slots); throw std::bad_alloc(); }
-
-    struct Guard {
-        DrakenStringSlot* s; uint8_t* a; uint8_t* v;
-        ~Guard() { if (s) draken_free(s); if (a) draken_free(a); if (v) draken_free(v); }
-    } g{slots, arena, nullptr};
-
-    uint8_t* out_validity = copy_validity(dv);
-    g.v = out_validity;
-
-    size_t arena_used = 0u;
-    uint8_t buf[31];
-    for (uint32_t i = 0u; i < n; ++i) {
-        if (row_is_null(dv, i)) { str_init_null(&slots[i]); continue; }
-
-        int64_t us = src[dv->selection[i]];
-        int64_t sec = us / 1000000LL;
-        int32_t usec = static_cast<int32_t>(us % 1000000LL);
-        if (usec < 0) { sec -= 1; usec += 1000000; }
-
-        int64_t days64 = sec / 86400LL;
-        int32_t tod = static_cast<int32_t>(sec % 86400LL);
-        if (tod < 0) { days64 -= 1; tod += 86400; }
-
-        int32_t y, m, d;
-        days_to_ymd(static_cast<int32_t>(days64), y, m, d);
-
-        const int32_t hh = tod / 3600;
-        const int32_t mm = (tod % 3600) / 60;
-        const int32_t ss = tod % 60;
-
-        buf[0]  = static_cast<uint8_t>('0' + (y / 1000) % 10);
-        buf[1]  = static_cast<uint8_t>('0' + (y / 100)  % 10);
-        buf[2]  = static_cast<uint8_t>('0' + (y / 10)   % 10);
-        buf[3]  = static_cast<uint8_t>('0' + y % 10);
-        buf[4]  = '-';
-        buf[5]  = static_cast<uint8_t>('0' + m / 10);
-        buf[6]  = static_cast<uint8_t>('0' + m % 10);
-        buf[7]  = '-';
-        buf[8]  = static_cast<uint8_t>('0' + d / 10);
-        buf[9]  = static_cast<uint8_t>('0' + d % 10);
-        buf[10] = ' ';
-        buf[11] = static_cast<uint8_t>('0' + hh / 10);
-        buf[12] = static_cast<uint8_t>('0' + hh % 10);
-        buf[13] = ':';
-        buf[14] = static_cast<uint8_t>('0' + mm / 10);
-        buf[15] = static_cast<uint8_t>('0' + mm % 10);
-        buf[16] = ':';
-        buf[17] = static_cast<uint8_t>('0' + ss / 10);
-        buf[18] = static_cast<uint8_t>('0' + ss % 10);
-        buf[19] = '.';
-        buf[20] = static_cast<uint8_t>('0' + (usec / 100000) % 10);
-        buf[21] = static_cast<uint8_t>('0' + (usec / 10000)  % 10);
-        buf[22] = static_cast<uint8_t>('0' + (usec / 1000)   % 10);
-        buf[23] = static_cast<uint8_t>('0' + (usec / 100)    % 10);
-        buf[24] = static_cast<uint8_t>('0' + (usec / 10)     % 10);
-        buf[25] = static_cast<uint8_t>('0' + usec % 10);
-        buf[26] = '+'; buf[27] = '0'; buf[28] = '0'; buf[29] = '0'; buf[30] = '0';
-
-        std::memcpy(arena + arena_used, buf, 31u);
-        draken_build_string_slot(&slots[i], buf, 31u, static_cast<uint32_t>(arena_used));
-        arena_used += 31u;
-    }
-
-    g.s = nullptr; g.a = nullptr; g.v = nullptr;
-    PyObject* result = draken_vector_own_string(slots, arena, arena_used, out_validity, n, DRAKEN_VARCHAR);
-    if (!result) throw nb::python_error();
-    return nb::steal<nb::object>(result);
+    return wrap_cast_result(draken_cast_timestamp_to_string(nullptr, dv));
 }
 
 // ---------------------------------------------------------------------------
@@ -781,102 +424,14 @@ static nb::object integer_to_int64_apply(nb::object obj) {
 // FLOAT64/FLOAT32 → INT64: truncate toward zero (C static_cast semantics).
 static nb::object float64_to_int64_apply(nb::object obj) {
     const DrakenVector* dv = unwrap_float64(obj);
-    const uint32_t n = dv->length;
-
-    const size_t data_sz = (n > 0u ? n : 1u) * sizeof(int64_t);
-    int64_t* out = static_cast<int64_t*>(draken_malloc(data_sz));
-    if (!out) throw std::bad_alloc();
-
-    struct Guard { int64_t* d; uint8_t* v;
-        ~Guard() { if (d) draken_free(d); if (v) draken_free(v); } } g{out, nullptr};
-
-    uint8_t* out_validity = copy_validity(dv);
-    g.v = out_validity;
-
-    for (uint32_t i = 0u; i < n; ++i) {
-        if (row_is_null(dv, i)) { out[i] = 0; continue; }
-        const uint32_t si = dv->selection[i];
-        double val;
-        if (dv->type == DRAKEN_FLOAT64)
-            val = static_cast<const double*>(dv->data)[si];
-        else
-            val = static_cast<double>(static_cast<const float*>(dv->data)[si]);
-        out[i] = static_cast<int64_t>(val);
-    }
-
-    g.d = nullptr; g.v = nullptr;
-    PyObject* result = draken_vector_own_raw(out, out_validity, n, DRAKEN_INT64);
-    if (!result) throw nb::python_error();
-    return nb::steal<nb::object>(result);
+    return wrap_cast_result(draken_cast_float64_to_int64(nullptr, dv));
 }
 
 // STRING → BOOL: "true"/"false", "1"/"0", "yes"/"no", "on"/"off" (case-insensitive).
 // Raises ValueError on unrecognized values.
 static nb::object string_to_bool_apply(nb::object obj) {
-    const DrakenVector*      dv = unwrap_string(obj);
-    const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);
-    const uint32_t n = dv->length;
-
-    const size_t data_sz = (n > 0u ? (n + 7u) / 8u : 1u);
-    uint8_t* out = static_cast<uint8_t*>(draken_malloc(data_sz));
-    if (!out) throw std::bad_alloc();
-    std::memset(out, 0, data_sz);
-
-    struct Guard { uint8_t* d; uint8_t* v;
-        ~Guard() { if (d) draken_free(d); if (v) draken_free(v); } } g{out, nullptr};
-
-    uint8_t* out_validity = copy_validity(dv);
-    g.v = out_validity;
-
-    for (uint32_t i = 0u; i < n; ++i) {
-        if (row_is_null(dv, i)) continue;
-
-        const DrakenStringSlot* slot = &sa->slots[dv->selection[i]];
-        const uint8_t* sdata = str_data(slot, sa->arena);
-        const uint32_t slen  = str_length(slot);
-
-        bool val;
-        if (slen == 4 &&
-            ((sdata[0]|32u) == 't') && ((sdata[1]|32u) == 'r') &&
-            ((sdata[2]|32u) == 'u') && ((sdata[3]|32u) == 'e')) {
-            val = true;
-        } else if (slen == 5 &&
-            ((sdata[0]|32u) == 'f') && ((sdata[1]|32u) == 'a') &&
-            ((sdata[2]|32u) == 'l') && ((sdata[3]|32u) == 's') &&
-            ((sdata[4]|32u) == 'e')) {
-            val = false;
-        } else if (slen == 1 && sdata[0] == '1') {
-            val = true;
-        } else if (slen == 1 && sdata[0] == '0') {
-            val = false;
-        } else if (slen == 3 &&
-            ((sdata[0]|32u) == 'y') && ((sdata[1]|32u) == 'e') &&
-            ((sdata[2]|32u) == 's')) {
-            val = true;
-        } else if (slen == 2 &&
-            ((sdata[0]|32u) == 'n') && ((sdata[1]|32u) == 'o')) {
-            val = false;
-        } else if (slen == 2 &&
-            ((sdata[0]|32u) == 'o') && ((sdata[1]|32u) == 'n')) {
-            val = true;
-        } else if (slen == 3 &&
-            ((sdata[0]|32u) == 'o') && ((sdata[1]|32u) == 'f') &&
-            ((sdata[2]|32u) == 'f')) {
-            val = false;
-        } else {
-            PyErr_SetString(PyExc_ValueError,
-                "Cannot cast string to BOOL: expected true/false/1/0/yes/no/on/off");
-            return nb::object();
-        }
-
-        if (val)
-            out[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
-    }
-
-    g.d = nullptr; g.v = nullptr;
-    PyObject* result = draken_vector_own_raw(out, out_validity, n, DRAKEN_BOOL);
-    if (!result) throw nb::python_error();
-    return nb::steal<nb::object>(result);
+    const DrakenVector* dv = unwrap_string(obj);
+    return wrap_cast_result(draken_cast_string_to_bool(nullptr, dv), /*parse_error_as_value=*/true);
 }
 
 // ---------------------------------------------------------------------------

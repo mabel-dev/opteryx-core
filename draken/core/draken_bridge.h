@@ -190,6 +190,24 @@ PyObject* draken_vector_own_array(
 PyObject* draken_vector_own_timestamp(
     void* data, uint8_t* validity, uint32_t length, const char* unit_str);
 
+// draken_vecresult_own_c — C-linkage trampoline over draken_vector_own.
+//
+// Phase 9c: the expression executor (Cython, compiled as C++) needs to fold a
+// kernel's VecResult back into a Python Vector handle without depending on a
+// C++-mangled symbol across the .so boundary. draken_vector_own is C++-only
+// (declared below, outside extern "C"); this alias exposes the identical
+// behaviour with C linkage so cimport resolves a stable, unmangled symbol.
+//
+// VecResult is in scope here: vec_result.h is included above (line ~49) under
+// the same #ifdef __cplusplus that guards this block.
+//
+// MOVES ownership from res, identical to draken_vector_own:
+//   res.data and res.validity are consumed (draken_free'd by new Vector on GC).
+//   If res.owns_selection is true, res.selection is also draken_free'd.
+// Returns a NEW reference to a Python Vector on success.
+// Returns NULL with a Python exception set on failure.
+PyObject* draken_vecresult_own_c(VecResult res);
+
 #ifdef __cplusplus
 }  // extern "C"
 

@@ -708,6 +708,7 @@ extensions = [
             "draken/ops/arithmetic_dv.cpp", # arena-backed arithmetic entry point
             # Phase 9a: C kernel ABI implementations
             "draken/ops/kernels/error_handling.cpp",
+            "draken/ops/kernels/result_helpers.cpp",  # Phase 9c: string VecResult builder
             "draken/ops/kernels/kernel_registry.cpp",
             "draken/ops/kernels/cast_numeric.cpp",
             "draken/ops/kernels/cast_string.cpp",
@@ -747,6 +748,7 @@ extensions = [
             # Phase 9a: kernel ABI headers
             "draken/ops/kernels/c_kernel_abi.h",
             "draken/ops/kernels/error_handling.h",
+            "draken/ops/kernels/result_helpers.h",
             "draken/ops/kernels/kernel_registry.h",
             "draken/ops/kernels/kernel_context.h",
             "draken/ops/kernels/cast_kernels.h",
@@ -761,6 +763,7 @@ extensions = [
         sources=[
             "draken/ops/kernels/_kernel_registry.pyx",
             "draken/ops/kernels/error_handling.cpp",
+            "draken/ops/kernels/result_helpers.cpp",  # Phase 9c: string VecResult builder
             "draken/ops/kernels/kernel_registry.cpp",
             "draken/ops/kernels/cast_numeric.cpp",
             "draken/ops/kernels/cast_string.cpp",
@@ -783,6 +786,7 @@ extensions = [
         depends=[
             "draken/ops/kernels/c_kernel_abi.h",
             "draken/ops/kernels/error_handling.h",
+            "draken/ops/kernels/result_helpers.h",
             "draken/ops/kernels/kernel_registry.h",
             "draken/ops/kernels/kernel_context.h",
             "draken/ops/kernels/cast_kernels.h",

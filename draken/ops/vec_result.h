@@ -14,6 +14,16 @@
 //
 // All fields must be set by the returning kernel. The caller converts this to
 // a VectorOwner immediately and does not hold VecResult beyond that point.
+//
+// Phase 9c extensions (validity_embedded, ts_unit) carry result kinds the
+// original two-buffer ownership model could not express:
+//   - String columns store their null bitmap *inside* the single data block
+//     (see draken_vector_own_string), so validity must NOT be freed as a
+//     second buffer — validity_embedded = 1 signals that.
+//   - TIMESTAMP64 needs a unit descriptor that lives on the VectorOwner's
+//     LogicalType, not on DrakenVector — ts_unit carries it across the ABI.
+// Both fields are appended and default-initialised so existing producers
+// (which set fields individually and never touch these) get safe defaults.
 
 #include <stdint.h>
 #include "core/buffers.h"
@@ -27,4 +37,10 @@ struct VecResult {
     uint32_t          length;        // logical row count
     DrakenType        type;
     uint8_t           flags;         // DRAKEN_SEL_IDENTITY / DRAKEN_SEL_PERMUTATION
+    // --- appended; default-initialised so unaware producers stay correct ---
+    uint8_t           validity_embedded = 0u;     // 1 = `validity` points INSIDE the
+                                                  // `data` block; consumer must NOT free
+                                                  // it separately (string-family output).
+    uint8_t           ts_unit          = 0xFFu;   // TimestampUnit (0..3) for TIMESTAMP64
+                                                  // output; 0xFF = no descriptor.
 };

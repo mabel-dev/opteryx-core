@@ -720,7 +720,7 @@ cpdef dict deserialize_row_group(dict ref_ids, MemoryPool pool):
     cdef vector[int64_t] refs
     cdef DecodedFixedColumn* outs
     cdef Py_ssize_t i
-    cdef str col_name
+    cdef bytes col_name
     cdef int64_t ref_id
     cdef int status
     cdef object vec

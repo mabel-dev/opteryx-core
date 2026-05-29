@@ -149,105 +149,100 @@ cdef class ScanReadings:
     # writes. This narrows the mutation surface to one class for future thread
     # safety (best-effort under concurrent writers, per the telemetry contract).
 
-    cpdef int64_t merge_row_group_metadata(self, dict row_group):
-        """Consume __*__ telemetry keys from `row_group`. Returns __bytes_fetched__.
+    cpdef int64_t merge_row_group_metadata(self, object scan_rg):
+        """Consume telemetry from typed ScanRowGroup. Returns __bytes_fetched__.
 
         bytes_fetched is reported back to the caller because it accumulates on
         BasePlanNode.bytes_in, not on ScanReadings. All other metadata fields
-        are absorbed here.
+        are absorbed here by reading attributes from the typed ScanRowGroup object.
         """
         cdef int64_t val
-        cdef int64_t bytes_fetched = row_group.pop("__bytes_fetched__", 0)
+        cdef int64_t bytes_fetched = getattr(scan_rg, 'bytes_fetched', 0)
         cdef object scan_strategy
 
-        # Additive metrics
-        self.parquet_row_groups_pruned        = row_group.pop("__row_groups_pruned__", 0)
-        self.parquet_footer_bytes            += row_group.pop("__footer_bytes__", 0)
-        self.parquet_range_request_count     += row_group.pop("__range_request_count__", 0)
-        self.parquet_range_bytes_requested   += row_group.pop("__range_bytes_requested__", 0)
-        self.time_parquet_read_ranges_ns     += row_group.pop("__time_read_ranges_ns__", 0)
-        self.time_parquet_decode_columns_ns  += row_group.pop("__time_decode_columns_ns__", 0)
-        self.time_parquet_task_queue_wait_ns += row_group.pop("__task_queue_wait_ns__", 0)
-        self.time_parquet_task_total_ns      += row_group.pop("__task_total_ns__", 0)
-        self.time_parquet_footer_fetch_ns    += row_group.pop("__footer_fetch_ns__", 0)
-        self.time_parquet_scheduler_wait_ns  += row_group.pop("__scheduler_wait_ns__", 0)
-        self.time_parquet_rowgroup_completion_ns += row_group.pop("__rowgroup_completion_latency_ns__", 0)
-        self.time_parquet_emit_wait_ns       += row_group.pop("__emit_wait_ns__", 0)
-        self.time_parquet_scheduler_empty_wait_ns += row_group.pop("__scheduler_empty_wait_ns__", 0)
-        self.parquet_scheduler_empty_wait_events  += row_group.pop("__scheduler_empty_wait_events__", 0)
-        self.io_ring_producer_full_wait_ns   += row_group.pop("__io_ring_producer_full_wait_ns__", 0)
-        self.io_ring_producer_full_wait_events += row_group.pop("__io_ring_producer_full_wait_events__", 0)
-        self.io_ring_consumer_empty_wait_ns  += row_group.pop("__io_ring_consumer_empty_wait_ns__", 0)
-        self.io_ring_consumer_empty_wait_events += row_group.pop("__io_ring_consumer_empty_wait_events__", 0)
-        self.io_transfer_emit_wait_ns        += row_group.pop("__io_transfer_emit_wait_ns__", 0)
-        self.io_rowgroup_slice_count         += row_group.pop("__io_rowgroup_slice_count__", 0)
-        self.io_deserialize_ns               += row_group.pop("__io_deserialize_ns__", 0)
-        self.io_serialize_ns                 += row_group.pop("__io_serialize_ns__", 0)
+        # Additive metrics — read from typed ScanRowGroup attributes
+        self.parquet_row_groups_pruned        = getattr(scan_rg, 'row_groups_pruned', 0)
+        self.parquet_footer_bytes            += getattr(scan_rg, 'footer_bytes', 0)
+        self.parquet_range_request_count     += getattr(scan_rg, 'range_request_count', 0)
+        self.parquet_range_bytes_requested   += getattr(scan_rg, 'range_bytes_requested', 0)
+        self.time_parquet_read_ranges_ns     += getattr(scan_rg, 'time_read_ranges_ns', 0)
+        self.time_parquet_decode_columns_ns  += getattr(scan_rg, 'time_decode_columns_ns', 0)
+        self.time_parquet_task_queue_wait_ns += getattr(scan_rg, 'task_queue_wait_ns', 0)
+        self.time_parquet_task_total_ns      += getattr(scan_rg, 'task_total_ns', 0)
+        self.time_parquet_footer_fetch_ns    += getattr(scan_rg, 'footer_fetch_ns', 0)
+        self.time_parquet_scheduler_wait_ns  += getattr(scan_rg, 'scheduler_wait_ns', 0)
+        self.time_parquet_rowgroup_completion_ns += getattr(scan_rg, 'rowgroup_completion_latency_ns', 0)
+        self.time_parquet_emit_wait_ns       += getattr(scan_rg, 'emit_wait_ns', 0)
+        self.time_parquet_scheduler_empty_wait_ns += getattr(scan_rg, 'scheduler_empty_wait_ns', 0)
+        self.parquet_scheduler_empty_wait_events  += getattr(scan_rg, 'scheduler_empty_wait_events', 0)
+        self.io_ring_producer_full_wait_ns   += getattr(scan_rg, 'io_ring_producer_full_wait_ns', 0)
+        self.io_ring_producer_full_wait_events += getattr(scan_rg, 'io_ring_producer_full_wait_events', 0)
+        self.io_ring_consumer_empty_wait_ns  += getattr(scan_rg, 'io_ring_consumer_empty_wait_ns', 0)
+        self.io_ring_consumer_empty_wait_events += getattr(scan_rg, 'io_ring_consumer_empty_wait_events', 0)
+        self.io_transfer_emit_wait_ns        += getattr(scan_rg, 'io_transfer_emit_wait_ns', 0)
+        self.io_rowgroup_slice_count         += getattr(scan_rg, 'io_rowgroup_slice_count', 0)
+        self.io_deserialize_ns               += getattr(scan_rg, 'io_deserialize_ns', 0)
+        self.io_serialize_ns                 += getattr(scan_rg, 'io_serialize_ns', 0)
 
         # Peak/max metrics
-        val = row_group.pop("__rowgroup_peak_in_flight__", 0)
+        val = getattr(scan_rg, 'rowgroup_peak_in_flight', 0)
         if val > self.parquet_rowgroup_peak_in_flight_max:
             self.parquet_rowgroup_peak_in_flight_max = val
-        val = row_group.pop("__ranges_in_flight_peak__", 0)
+        val = getattr(scan_rg, 'ranges_in_flight_peak', 0)
         if val > self.parquet_ranges_in_flight_peak:
             self.parquet_ranges_in_flight_peak = val
-        val = row_group.pop("__active_files_peak__", 0)
+        val = getattr(scan_rg, 'active_files_peak', 0)
         if val > self.parquet_active_files_peak:
             self.parquet_active_files_peak = val
-        val = row_group.pop("__active_rowgroups_peak__", 0)
+        val = getattr(scan_rg, 'active_rowgroups_peak', 0)
         if val > self.parquet_active_rowgroups_peak:
             self.parquet_active_rowgroups_peak = val
-        val = row_group.pop("__rowgroups_in_flight_cap__", 0)
+        val = getattr(scan_rg, 'rowgroups_in_flight_cap', 0)
         if val > self.parquet_rowgroups_in_flight_cap:
             self.parquet_rowgroups_in_flight_cap = val
-        val = row_group.pop("__emit_queue_depth_at_ready__", 0)
+        val = getattr(scan_rg, 'emit_queue_depth_at_ready', 0)
         if val > self.parquet_emit_queue_depth_at_ready_max:
             self.parquet_emit_queue_depth_at_ready_max = val
-        val = row_group.pop("__io_ring_slot_bytes__", 0)
+        val = getattr(scan_rg, 'io_ring_slot_bytes', 0)
         if val > self.io_ring_slot_bytes:
             self.io_ring_slot_bytes = val
-        val = row_group.pop("__io_ring_slot_count__", 0)
+        val = getattr(scan_rg, 'io_ring_slot_count', 0)
         if val > self.io_ring_slot_count:
             self.io_ring_slot_count = val
-        val = row_group.pop("__io_ring_total_bytes__", 0)
+        val = getattr(scan_rg, 'io_ring_total_bytes', 0)
         if val > self.io_ring_total_bytes:
             self.io_ring_total_bytes = val
-        val = row_group.pop("__io_transfer_ready_backlog_peak__", 0)
+        val = getattr(scan_rg, 'io_transfer_ready_backlog_peak', 0)
         if val > self.io_transfer_ready_backlog_peak:
             self.io_transfer_ready_backlog_peak = val
-        val = row_group.pop("__io_transfer_fragment_count_p50__", 0)
+        val = getattr(scan_rg, 'io_transfer_fragment_count_p50', 0)
         if val > self.io_transfer_fragment_count_p50:
             self.io_transfer_fragment_count_p50 = val
-        val = row_group.pop("__io_transfer_fragment_count_p95__", 0)
+        val = getattr(scan_rg, 'io_transfer_fragment_count_p95', 0)
         if val > self.io_transfer_fragment_count_p95:
             self.io_transfer_fragment_count_p95 = val
-        val = row_group.pop("__io_transfer_fragment_count_max__", 0)
+        val = getattr(scan_rg, 'io_transfer_fragment_count_max', 0)
         if val > self.io_transfer_fragment_count_max:
             self.io_transfer_fragment_count_max = val
-        val = row_group.pop("__io_transfer_payload_bytes_p50__", 0)
+        val = getattr(scan_rg, 'io_transfer_payload_bytes_p50', 0)
         if val > self.io_transfer_payload_bytes_p50:
             self.io_transfer_payload_bytes_p50 = val
-        val = row_group.pop("__io_transfer_payload_bytes_p95__", 0)
+        val = getattr(scan_rg, 'io_transfer_payload_bytes_p95', 0)
         if val > self.io_transfer_payload_bytes_p95:
             self.io_transfer_payload_bytes_p95 = val
-        val = row_group.pop("__io_transfer_payload_bytes_max__", 0)
+        val = getattr(scan_rg, 'io_transfer_payload_bytes_max', 0)
         if val > self.io_transfer_payload_bytes_max:
             self.io_transfer_payload_bytes_max = val
 
         # Scan strategy: set once
-        scan_strategy = row_group.pop("__parquet_scan_strategy__", None)
+        scan_strategy = getattr(scan_rg, 'scan_strategy', None)
         if scan_strategy and self.parquet_scan_strategy is None:
             self.parquet_scan_strategy = scan_strategy
 
-        # Time to first row group: keep minimum non-zero
-        val = row_group.pop("__time_to_first_rowgroup_ns__", 0)
+        # Time to first row group: keep minimum non-zero (optional field in ScanRowGroup)
+        val = getattr(scan_rg, 'time_to_first_rowgroup_ns', 0)
         if val and (self.time_to_first_rowgroup_ns == 0 or val < self.time_to_first_rowgroup_ns):
             self.time_to_first_rowgroup_ns = val
-
-        # Drain any remaining __*__ keys so downstream sees only data columns.
-        for key in list(row_group):
-            if key.startswith("__"):
-                row_group.pop(key, None)
 
         return bytes_fetched
 
@@ -361,7 +356,7 @@ cdef inline void _coerce_logical_types(
     physical type) and the IPC format carries no logical type info, so we apply
     the schema-driven coercion here. Hot-path helper: called once per row group.
     """
-    cdef str col_name
+    cdef bytes col_name   # dict keys are bytes; coercion maps are keyed by bytes
     cdef int precision
     cdef int scale
 
@@ -426,6 +421,7 @@ cdef _Pass1Result _evaluate_pass1_row_group(
     dict decimal_col_map,
     set date_col_set,
     set timestamp_col_set,
+    list pass1_column_names,
 ):
     """Pure pass-1 evaluation for a single row group.
 
@@ -446,7 +442,9 @@ cdef _Pass1Result _evaluate_pass1_row_group(
 
     _coerce_logical_types(row_group, decimal_col_map, date_col_set, timestamp_col_set)
 
-    cdef list p1_identity_names = [pass1_name_to_identity[col] for col in row_group]
+    # Positional pairing: column order in the data dict matches pass1_column_names order.
+    # C++ preserves column order; dict keys (bytes) are not used for identity lookup.
+    cdef list p1_identity_names = [pass1_name_to_identity[col] for col in pass1_column_names]
     cdef list p1_vectors = list(row_group.values())
     if not p1_identity_names:
         result.empty = True
@@ -659,16 +657,18 @@ cdef class ParquetReadNode(ReaderNode):
         self.scan_readings.record_pass1_skipped()
         self._mark_file_seen(r.path)
 
-    cdef tuple _extract_row_group_metadata(self, dict row_group):
-        """Pop (path, rg_idx) and funnel the __*__ telemetry into ScanReadings.
+    cdef tuple _extract_row_group_metadata(self, object scan_rg, dict row_group):
+        """Extract (path, rg_idx) from ScanRowGroup and funnel telemetry into ScanReadings.
 
+        Called after iter_row_groups yields (ScanRowGroup, {col: Vector}), which
+        the caller unpacks and passes both to this function.
         bytes_fetched lives on BasePlanNode.bytes_in (not ScanReadings) so we
         receive it back from the merge call and apply it here.
-        Returns (path, rg_idx); all __*__ metadata keys are consumed.
+        Returns (path, rg_idx); row_group dict is passed downstream unchanged.
         """
-        cdef object path = row_group.pop("__path__")
-        cdef object rg_idx = row_group.pop("__row_group__")
-        self.bytes_in += self.scan_readings.merge_row_group_metadata(row_group)
+        cdef object path = scan_rg.path
+        cdef object rg_idx = scan_rg.rg_idx
+        self.bytes_in += self.scan_readings.merge_row_group_metadata(scan_rg)
         return path, rg_idx
 
     def read_morsels(self):
@@ -708,17 +708,18 @@ cdef class ParquetReadNode(ReaderNode):
         # in the schema.  Used to coerce Integer64Vector → DecimalVector after IPC deserialization,
         # since the C++ pipeline serializes DECIMAL as TAG_INT64 (the physical type) and
         # the IPC format carries no logical type info.
+        # Keys are bytes — column names in the data dict are bytes (C++ parquet native).
         from opteryx.types import OrsoTypes as _OrsoTypes
         _decimal_col_map = {
-            col.name: (col.precision or 18, col.scale or 0)
+            col.name.encode('utf-8'): (col.precision or 18, col.scale or 0)
             for col in base_schema.columns
             if col.type == _OrsoTypes.DECIMAL
         }
         _date_col_set = {
-            col.name for col in base_schema.columns if col.type == _OrsoTypes.DATE
+            col.name.encode('utf-8') for col in base_schema.columns if col.type == _OrsoTypes.DATE
         }
         _timestamp_col_set = {
-            col.name for col in base_schema.columns if col.type == _OrsoTypes.TIMESTAMP
+            col.name.encode('utf-8') for col in base_schema.columns if col.type == _OrsoTypes.TIMESTAMP
         }
         predicate_root = self._compose_predicates(self.predicates or [])
 
@@ -756,8 +757,8 @@ cdef class ParquetReadNode(ReaderNode):
             _p2_cols = [c for c in base_schema.columns if c.name in _pass2_names]
             pass1_column_names = [c.name for c in _p1_cols]
             pass2_column_names = [c.name for c in _p2_cols]
-            pass1_name_to_identity = {name: _planner_name_to_identity.get(name, name.encode("utf-8")) for name in pass1_column_names}
-            pass2_name_to_identity = {name: _planner_name_to_identity.get(name, name.encode("utf-8")) for name in pass2_column_names}
+            pass1_name_to_identity = {c.name: _planner_name_to_identity.get(c.name, c.identity) for c in _p1_cols}
+            pass2_name_to_identity = {c.name: _planner_name_to_identity.get(c.name, c.identity) for c in _p2_cols}
 
         # ── Empty manifest ────────────────────────────────────────────────────
         if not self.manifest or self.manifest.get_file_count() == 0:
@@ -805,8 +806,11 @@ cdef class ParquetReadNode(ReaderNode):
         # original names, not identity aliases).
         column_names = [col.name for col in read_schema.columns]
         # Map data-file column name → query-engine identity for Morsel construction.
+        # Filter-only columns (not in self.columns) fall back to col.identity from the
+        # schema, which auto-generates as name.encode('utf-8') when no explicit identity
+        # is assigned. Projection columns use the planner's identity.
         name_to_identity = {
-            col.name: _planner_name_to_identity.get(col.name, col.name.encode("utf-8"))
+            col.name: _planner_name_to_identity.get(col.name, col.identity)
             for col in read_schema.columns
         }
 
@@ -825,7 +829,7 @@ cdef class ParquetReadNode(ReaderNode):
                 pass2_work = []   # list of (path, rg_idx, mask_bytes)
                 p1_cache = {}     # (path, rg_idx) -> p1_filtered Morsel
 
-                for row_group in iter_row_groups(
+                for _rg_tuple in iter_row_groups(
                     filesystem,
                     blob_paths,
                     pass1_column_names,
@@ -836,7 +840,8 @@ cdef class ParquetReadNode(ReaderNode):
                     query_id=query_id,
                     footer_bytes_cache=_FOOTER_CACHE,
                 ):
-                    path, rg_idx = self._extract_row_group_metadata(row_group)
+                    scan_rg, row_group = _rg_tuple
+                    path, rg_idx = self._extract_row_group_metadata(scan_rg, row_group)
 
                     result = _evaluate_pass1_row_group(
                         path,
@@ -847,6 +852,7 @@ cdef class ParquetReadNode(ReaderNode):
                         _decimal_col_map,
                         _date_col_set,
                         _timestamp_col_set,
+                        pass1_column_names,
                     )
                     if result.empty:
                         continue
@@ -859,7 +865,7 @@ cdef class ParquetReadNode(ReaderNode):
                         self._record_pass1_skip(result)
 
                 # ── Phase 2: parallel pass-2 decode via C++ pipeline ──────────────────────
-                for row_group in iter_pass2_row_groups_ipc(
+                for _rg_tuple in iter_pass2_row_groups_ipc(
                     filesystem,
                     pass2_work,
                     pass2_column_names,
@@ -868,15 +874,14 @@ cdef class ParquetReadNode(ReaderNode):
                     query_id=query_id,
                     footer_bytes_cache=_FOOTER_CACHE,
                 ):
-                    path = row_group.get('__path__')
-                    rg_idx = row_group.get('__row_group__')
+                    scan_rg, row_group = _rg_tuple
+                    path = scan_rg.path
+                    rg_idx = scan_rg.rg_idx
 
-                    p2_bytes = row_group.pop('__bytes_fetched__', 0)
+                    p2_bytes = scan_rg.bytes_fetched
                     self.scan_readings.record_pass2_decoded(p2_bytes)
                     self.bytes_in += p2_bytes
-                    # Clean up metadata keys.
-                    for _k in [k for k in row_group if k.startswith("__")]:
-                        row_group.pop(_k)
+                    # No cleanup needed — row_group now contains only {col: Vector}
 
                     # Coerce DATE/TIMESTAMP/DECIMAL in pass-2 projection columns.
                     _coerce_logical_types(row_group, _decimal_col_map, _date_col_set, _timestamp_col_set)
@@ -884,9 +889,10 @@ cdef class ParquetReadNode(ReaderNode):
                     p1_filtered, p1_identity_names = p1_cache.pop((path, rg_idx))
 
                     p1_vectors_by_identity = {n: p1_filtered.column(n) for n in p1_identity_names}
+                    # Positional pairing: pass2_column_names order matches row_group.values() order.
                     p2_vectors_by_identity = {
                         pass2_name_to_identity[col]: vec
-                        for col, vec in row_group.items()
+                        for col, vec in zip(pass2_column_names, row_group.values())
                     }
 
                     if output_identity_order:
@@ -928,7 +934,7 @@ cdef class ParquetReadNode(ReaderNode):
 
             else:
                 # ── Single-pass path: existing behaviour ─────────────────────────────────
-                for row_group in iter_row_groups(
+                for _rg_tuple in iter_row_groups(
                     filesystem,
                     blob_paths,
                     column_names,
@@ -939,11 +945,13 @@ cdef class ParquetReadNode(ReaderNode):
                     query_id=query_id,
                     footer_bytes_cache=_FOOTER_CACHE,
                 ):
-                    path, rg_idx = self._extract_row_group_metadata(row_group)
+                    scan_rg, row_group = _rg_tuple
+                    path, rg_idx = self._extract_row_group_metadata(scan_rg, row_group)
 
                     _coerce_logical_types(row_group, _decimal_col_map, _date_col_set, _timestamp_col_set)
 
-                    identity_names = [name_to_identity[col] for col in row_group]
+                    # Positional pairing: column_names order matches row_group.values() order.
+                    identity_names = [name_to_identity[col] for col in column_names]
                     vectors = list(row_group.values())
                     if not identity_names:
                         continue
