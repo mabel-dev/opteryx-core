@@ -108,6 +108,12 @@ cdef class Vector:
     def max(self):
         return self._nb.max()
 
+    def is_null_at(self, idx):
+        return self._nb.is_null_at(idx)
+
+    def compare_at(self, i, j):
+        return self._nb.compare_at(i, j)
+
     def null_bitmap(self):
         if self._dv == NULL:
             return None

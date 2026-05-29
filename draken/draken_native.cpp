@@ -43,6 +43,7 @@
 #include "ops/hash.h"               // includes decimal_arith.h transitively (E.32)
 #include "ops/int64_arithmetic.h"   // i64_neg (used by bridge round-trip test)
 #include "ops/int64_reductions.h"   // i64_sum (used by bridge round-trip test)
+#include "ops/float_ops.h"          // fp_total_lt (used by compare_at row ordering)
 #include "ops/string_gather.h"  // sg_eq_slots, str_hash_seed (for dict ingestion)
 #include "core/draken_bridge.h"     // bridge surface declarations
 #include "core/frame_arena.h"       // per-frame allocator
@@ -1621,6 +1622,84 @@ static VectorOwner make_time_dict(
 static inline bool row_is_valid(const DrakenVector& v, uint32_t i) noexcept {
     if (v.validity == nullptr) return true;
     return static_cast<bool>((v.validity[i / 8u] >> (i % 8u)) & 1u);
+}
+
+// Compare two logical rows WITHIN the same vector. Returns -1/0/1.
+// Used by ORDER BY (heap_sort) for stable ordering. Null handling is the
+// caller's responsibility (heap_sort checks is_null_at first); this
+// function compares values only and assumes both rows are non-null.
+//
+// Both rows share the same vector → same logical type, same scale (for
+// decimal), same string arena. Comparison is the natural value order,
+// with float using total-order (NaN highest) for sort stability.
+static int draken_vector_compare_at(const DrakenVector& v,
+                                    uint32_t li, uint32_t lj) {
+    const uint32_t a = v.selection[li];
+    const uint32_t b = v.selection[lj];
+
+    switch (v.type) {
+        case DRAKEN_INT8: {
+            const int8_t* d = static_cast<const int8_t*>(v.data);
+            return (d[a] < d[b]) ? -1 : (d[a] > d[b]) ? 1 : 0;
+        }
+        case DRAKEN_INT16: {
+            const int16_t* d = static_cast<const int16_t*>(v.data);
+            return (d[a] < d[b]) ? -1 : (d[a] > d[b]) ? 1 : 0;
+        }
+        case DRAKEN_INT32:
+        case DRAKEN_DATE32:
+        case DRAKEN_TIME32: {
+            const int32_t* d = static_cast<const int32_t*>(v.data);
+            return (d[a] < d[b]) ? -1 : (d[a] > d[b]) ? 1 : 0;
+        }
+        case DRAKEN_INT64:
+        case DRAKEN_DECIMAL:        // same-vector → same scale; unscaled order == value order
+        case DRAKEN_TIMESTAMP64:
+        case DRAKEN_TIME64: {
+            const int64_t* d = static_cast<const int64_t*>(v.data);
+            return (d[a] < d[b]) ? -1 : (d[a] > d[b]) ? 1 : 0;
+        }
+        case DRAKEN_FLOAT32: {
+            const float* d = static_cast<const float*>(v.data);
+            // Total order: NaN sorts highest, -0.0 == 0.0 (canonicalised at ingest).
+            if (draken::ops::fp_total_lt(d[a], d[b])) return -1;
+            if (draken::ops::fp_total_lt(d[b], d[a])) return 1;
+            return 0;
+        }
+        case DRAKEN_FLOAT64: {
+            const double* d = static_cast<const double*>(v.data);
+            if (draken::ops::fp_total_lt(d[a], d[b])) return -1;
+            if (draken::ops::fp_total_lt(d[b], d[a])) return 1;
+            return 0;
+        }
+        case DRAKEN_BOOL: {
+            const uint8_t* d = static_cast<const uint8_t*>(v.data);
+            const int va = (d[a / 8u] >> (a % 8u)) & 1u;
+            const int vb = (d[b / 8u] >> (b % 8u)) & 1u;
+            return (va < vb) ? -1 : (va > vb) ? 1 : 0;
+        }
+        case DRAKEN_VARCHAR:
+        case DRAKEN_NVARCHAR:
+        case DRAKEN_VARBINARY: {
+            const DrakenStringArena* sa =
+                static_cast<const DrakenStringArena*>(v.data);
+            const int c = str_compare(&sa->slots[a], sa->arena,
+                                      &sa->slots[b], sa->arena);
+            return (c < 0) ? -1 : (c > 0) ? 1 : 0;
+        }
+        case DRAKEN_INTERVAL: {
+            const DrakenIntervalSlot* s =
+                static_cast<const DrakenIntervalSlot*>(v.data);
+            // Total ms ordering (months normalised at the documented 30-day rate).
+            const int64_t ta = s[a].months * INTERVAL_MONTH_MS + s[a].ms;
+            const int64_t tb = s[b].months * INTERVAL_MONTH_MS + s[b].ms;
+            return (ta < tb) ? -1 : (ta > tb) ? 1 : 0;
+        }
+        default:
+            // ARRAY / VECTOR_FP16 / NULL / NON_NATIVE — no natural sort order.
+            throw std::invalid_argument(
+                "compare_at: ordering not supported for this vector type");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4134,6 +4213,29 @@ NB_MODULE(draken_native, m) {
         })
         // min(): empty or all-null → raises ValueError.
         // TIMESTAMP64: returns datetime; DATE32: returns date; TIME32/64: returns time.
+        // is_null_at(idx) — is logical row idx null? Used by ORDER BY
+        // (heap_sort) which checks nullness before comparing values.
+        .def("is_null_at", [](const VectorOwner& v, int64_t idx) -> bool {
+            if (idx < 0 || static_cast<uint32_t>(idx) >= v.vec.length)
+                throw std::out_of_range("is_null_at: index out of range");
+            // DRAKEN_NULL: every row is null by definition.
+            if (v.vec.type == DRAKEN_NULL) return true;
+            return !row_is_valid(v.vec, static_cast<uint32_t>(idx));
+        }, nb::arg("idx"),
+           "True if logical row `idx` is null. For ORDER BY / heap-sort.")
+        // compare_at(i, j) — compare two logical rows within this vector.
+        // Returns -1/0/1 (value order; float uses total-order, NaN highest).
+        // Null handling is the caller's responsibility (check is_null_at first).
+        .def("compare_at", [](const VectorOwner& v, int64_t i, int64_t j) -> int {
+            if (i < 0 || j < 0 ||
+                static_cast<uint32_t>(i) >= v.vec.length ||
+                static_cast<uint32_t>(j) >= v.vec.length)
+                throw std::out_of_range("compare_at: index out of range");
+            return draken_vector_compare_at(
+                v.vec, static_cast<uint32_t>(i), static_cast<uint32_t>(j));
+        }, nb::arg("i"), nb::arg("j"),
+           "Compare two logical rows within this vector; returns -1/0/1. "
+           "Float uses total-order (NaN highest). Caller checks is_null_at first.")
         // DECIMAL: returns decimal.Decimal preserving scale.
         .def("min", [](const VectorOwner& v) -> nb::object {
             if (v.vec.type == DRAKEN_ARRAY)
