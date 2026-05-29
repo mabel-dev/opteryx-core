@@ -440,7 +440,7 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
     if not column_names:
         raise ValueError("at least one sort column is required")
 
-    cdef Py_ssize_t n = len(morsel)
+    cdef Py_ssize_t n = morsel.num_rows
     if n == 0:
         return array("i")
 
