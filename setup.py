@@ -96,30 +96,40 @@ class build_ext(build_ext_orig):
             else:
                 print(f"Successfully compiled yyjson to {yyjson_obj}")
 
-        # Pre-compile mimalloc (single TU via src/static.c) as C11. It is linked
-        # into draken extensions only (see make_draken_extension and the
-        # _mimalloc_smoke extension). Release/secure-off for perf (-DNDEBUG, no
-        # MI_SECURE); the process-wide malloc override is left OFF (no
-        # MI_OVERRIDE / MI_MALLOC_OVERRIDE / MI_OSX_ZONE) — the rest of the
-        # engine keeps the system allocator; we call mi_* explicitly.
-        mimalloc_obj = MIMALLOC_OBJ
+        # Build mimalloc as a shared library so all extensions share one heap.
+        # Statically linking the same .o into every .so gave each extension its
+        # own mimalloc heap; cross-extension draken_malloc/draken_free pairs then
+        # triggered undefined behaviour (NON-MIMALLOC-POINTER frees).
+        # Release/secure-off for perf; process-wide malloc override stays OFF.
         mimalloc_src = "third_party/mimalloc/src/static.c"
-        if not os.path.exists(mimalloc_obj) or os.path.getmtime(mimalloc_src) > os.path.getmtime(
-            mimalloc_obj
-        ):
-            print(f"Pre-compiling {mimalloc_src} to {mimalloc_obj} using compiler: {compiler}")
+        mimalloc_lib = MIMALLOC_LIB
+        os.makedirs(os.path.dirname(mimalloc_lib), exist_ok=True)
+        needs_rebuild = not os.path.exists(mimalloc_lib) or os.path.getmtime(
+            mimalloc_src
+        ) > os.path.getmtime(mimalloc_lib)
+        if needs_rebuild:
+            print(f"Building shared mimalloc → {mimalloc_lib}")
+            if sys.platform == "darwin":
+                shared_flags = [
+                    "-dynamiclib",
+                    "-install_name",
+                    "@rpath/libmimalloc.dylib",
+                ]
+            else:
+                shared_flags = ["-shared", "-Wl,-soname,libmimalloc.so"]
             result = subprocess.run(
                 [
                     compiler,
                     "-O3",
                     "-std=c11",
                     "-DNDEBUG",
+                    "-fPIC",
                     "-Wno-unused-function",
                     f"-I{MIMALLOC_INCLUDE}",
-                    "-c",
+                    *shared_flags,
                     mimalloc_src,
                     "-o",
-                    mimalloc_obj,
+                    mimalloc_lib,
                 ],
                 check=False,
                 capture_output=True,
@@ -127,9 +137,9 @@ class build_ext(build_ext_orig):
             )
             if result.returncode != 0:
                 raise SystemExit(
-                    f"Failed to pre-compile mimalloc with {compiler}:\n{result.stderr}"
+                    f"Failed to build shared mimalloc with {compiler}:\n{result.stderr}"
                 )
-            print(f"Successfully compiled mimalloc to {mimalloc_obj}")
+            print(f"Successfully built shared mimalloc → {mimalloc_lib}")
 
         # libcurl is already built at module initialization time
         super().build_extensions()
@@ -528,11 +538,46 @@ include_dirs = [
     "third_party/mimalloc/include",  # draken/core/alloc.h requires mimalloc globally
 ]
 
-# mimalloc — allocator for draken extensions and any opteryx extension that
-# links memory_pool.cpp (column_deserializer, memory_pool).
-# The header path and pre-built single-TU object are added to those targets.
+# mimalloc — single shared library so every extension uses the same heap.
+# All extensions that previously linked MIMALLOC_OBJ are rewritten at the
+# bottom of this file to link against the shared library instead.
 MIMALLOC_INCLUDE = "third_party/mimalloc/include"
-MIMALLOC_OBJ = "build/temp.mimalloc.o"
+MIMALLOC_OBJ = "build/temp.mimalloc.o"  # kept for reference; no longer linked
+MIMALLOC_LIB_DIR = "draken"
+if sys.platform == "darwin":
+    MIMALLOC_LIB = os.path.join(MIMALLOC_LIB_DIR, "libmimalloc.dylib")
+else:
+    MIMALLOC_LIB = os.path.join(MIMALLOC_LIB_DIR, "libmimalloc.so")
+
+
+def _mimalloc_link_args(module_name: str) -> list:
+    """Return linker flags to link an extension against the shared mimalloc library.
+
+    The RPATH is set relative to the extension's own location (@loader_path on
+    macOS, $ORIGIN on Linux) so the library is found whether the package is
+    installed into site-packages or used in-place.
+    """
+    parts = module_name.split(".")
+    if parts[0] == "draken":
+        # Extension lives inside draken/ or a sub-package.
+        # depth = levels below draken/  (draken.foo → 0, draken.a.foo → 1, …)
+        depth = len(parts) - 2
+        rel = "." if depth == 0 else "/".join([".."] * depth)
+    else:
+        # opteryx, rugo, … — go up past each sub-package, then down to draken/.
+        depth = len(parts) - 1
+        rel = "/".join([".."] * depth) + "/draken"
+
+    if sys.platform == "darwin":
+        rpath_flag = f"-Wl,-rpath,@loader_path/{rel}"
+    else:
+        rpath_flag = f"-Wl,-rpath,$ORIGIN/{rel}"
+
+    return [
+        f"-L{os.path.abspath(MIMALLOC_LIB_DIR)}",
+        "-lmimalloc",
+        rpath_flag,
+    ]
 
 # Common SIMD / environment C++ sources used by multiple extensions
 COMMON_SIMD_SOURCES = [
@@ -2304,6 +2349,14 @@ extensions.append(
     )
 )
 
+# Rewrite all extensions that previously statically linked MIMALLOC_OBJ to use
+# the shared library instead.  A single loop avoids touching the 29 individual
+# Extension() definitions above and keeps the change contained here.
+for _ext in extensions:
+    if MIMALLOC_OBJ in (_ext.extra_objects or []):
+        _ext.extra_objects = [o for o in _ext.extra_objects if o != MIMALLOC_OBJ]
+        _ext.extra_link_args = list(_ext.extra_link_args or []) + _mimalloc_link_args(_ext.name)
+
 # Setup configuration
 setup(
     name=LIBRARY,
@@ -2345,7 +2398,10 @@ setup(
     rust_extensions=[]
     if _DRAKEN_BUILD
     else [RustExtension("opteryx.compute", "Cargo.toml", debug=False)],
-    package_data={"": ["*.pyx", "*.pxd", "*.h"]},
+    package_data={
+        "": ["*.pyx", "*.pxd", "*.h"],
+        "draken": ["libmimalloc.dylib", "libmimalloc.so"],
+    },
     cmdclass={"build_ext": build_ext},
     zip_safe=False,
 )
