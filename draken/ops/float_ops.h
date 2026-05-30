@@ -936,6 +936,64 @@ static inline VecResult f32_mod(const DrakenVector& a, const DrakenVector& b)   
 static inline VecResult f32_mod_scalar(const DrakenVector& a, double s)              { return float_mod_scalar<float, DRAKEN_FLOAT32>(a, s); }
 static inline VecResult f32_neg(const DrakenVector& a)                               { return float_neg<float, DRAKEN_FLOAT32>(a); }
 static inline VecResult f32_take(const DrakenVector& v, const int32_t* idx, uint32_t n) { return float_take<float, DRAKEN_FLOAT32>(v, idx, n); }
+
+static inline void fp_copy_validity_range(uint8_t* dst, const uint8_t* src,
+                                           uint32_t start, uint32_t n) noexcept {
+    if (n == 0) return;
+    const uint32_t nb = (n + 7u) >> 3;
+    if ((start & 7u) == 0) {
+        std::memcpy(dst, src + (start >> 3), nb);
+    } else {
+        const uint32_t shift = start & 7u;
+        const uint32_t byte0 = start >> 3;
+        const uint32_t last_src_byte = (start + n - 1u) >> 3;
+        for (uint32_t i = 0; i < nb; ++i) {
+            const uint8_t lo = src[byte0 + i] >> shift;
+            const uint8_t hi = (byte0 + i < last_src_byte)
+                               ? src[byte0 + i + 1] << (8u - shift) : 0u;
+            dst[i] = lo | hi;
+        }
+    }
+    if (n & 7u) dst[nb - 1] &= static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+}
+
+template<typename T, DrakenType TAG>
+static inline VecResult float_slice(const DrakenVector& v, uint32_t start, uint32_t length) {
+    const uint32_t n        = length;
+    const T*       data     = static_cast<const T*>(v.data);
+    const uint8_t* src_null = v.validity;
+
+    T* dst = fp_alloc<T>(n);
+
+    if (v.data_length == v.length) {
+        std::memcpy(dst, data + start, n * sizeof(T));
+    } else {
+        for (uint32_t i = 0; i < n; ++i)
+            dst[i] = data[v.selection[start + i]];
+    }
+
+    uint8_t* out_null = nullptr;
+    if (src_null != nullptr && n > 0u) {
+        const uint32_t nb = (n + 7u) >> 3;
+        out_null = static_cast<uint8_t*>(draken_malloc(nb));
+        if (!out_null) { draken_free(dst); throw std::bad_alloc(); }
+        fp_copy_validity_range(out_null, src_null, start, n);
+        out_null = fp_normalize_validity(out_null, n);
+    }
+
+    VecResult r;
+    r.data           = dst;
+    r.validity       = out_null;
+    r.selection      = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length    = n;
+    r.length         = n;
+    r.type           = TAG;
+    r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    return r;
+}
+
+static inline VecResult f32_slice(const DrakenVector& v, uint32_t s, uint32_t n) { return float_slice<float,  DRAKEN_FLOAT32>(v, s, n); }
 static inline VecResult f32_materialize(const DrakenVector& v)                       { return float_materialize<float, DRAKEN_FLOAT32>(v); }
 static inline VecResult f32_compress(const DrakenVector& v)                          { return float_compress<float, DRAKEN_FLOAT32>(v); }
 static inline VecResult f32_compare_scalar(const DrakenVector& v, double s, int op)  { return float_compare_scalar<float>(v, s, op); }
@@ -960,6 +1018,7 @@ static inline VecResult f64_mod(const DrakenVector& a, const DrakenVector& b)   
 static inline VecResult f64_mod_scalar(const DrakenVector& a, double s)              { return float_mod_scalar<double, DRAKEN_FLOAT64>(a, s); }
 static inline VecResult f64_neg(const DrakenVector& a)                               { return float_neg<double, DRAKEN_FLOAT64>(a); }
 static inline VecResult f64_take(const DrakenVector& v, const int32_t* idx, uint32_t n) { return float_take<double, DRAKEN_FLOAT64>(v, idx, n); }
+static inline VecResult f64_slice(const DrakenVector& v, uint32_t s, uint32_t n) { return float_slice<double, DRAKEN_FLOAT64>(v, s, n); }
 static inline VecResult f64_materialize(const DrakenVector& v)                       { return float_materialize<double, DRAKEN_FLOAT64>(v); }
 static inline VecResult f64_compress(const DrakenVector& v)                          { return float_compress<double, DRAKEN_FLOAT64>(v); }
 static inline VecResult f64_compare_scalar(const DrakenVector& v, double s, int op)  { return float_compare_scalar<double>(v, s, op); }

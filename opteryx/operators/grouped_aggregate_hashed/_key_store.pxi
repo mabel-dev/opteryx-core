@@ -23,7 +23,7 @@ from draken.core.buffers cimport DrakenStringArena, DrakenStringSlot
 from draken.core.buffers cimport str_length, str_data
 from draken.core.buffers cimport STR_INLINE_MAX
 from draken.core.buffers cimport str_init_null, str_init_inline, str_init_extern
-from draken.core.buffers cimport DRAKEN_INT64, DRAKEN_VARCHAR
+from draken.core.buffers cimport DRAKEN_INT64, DRAKEN_VARCHAR, DRAKEN_VARBINARY
 from draken.core.fixed_vector cimport alloc_fixed_buffer, free_fixed_buffer
 from draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
 from draken.vectors.bool_vector cimport BoolVector
@@ -109,10 +109,11 @@ cdef Vector _ks_consume_int64_buffer(DrakenFixedBuffer* buf) except *:
 
 
 cdef Vector _wrap_string_buffer(DrakenVarBuffer* buf) except *:
-    """Convert accumulated DrakenVarBuffer bytes to a Draken VARCHAR Vector.
+    """Convert accumulated DrakenVarBuffer bytes to a Draken VARBINARY Vector.
 
     Called once from the finalize path (reconstruct_vectors); Python list
-    conversion cost is acceptable here.
+    conversion cost is acceptable here.  Keys are raw bytes throughout —
+    no UTF-8 decode; callers that need text (NVARCHAR) must handle that separately.
     """
     cdef Py_ssize_t row_count = <Py_ssize_t>buf.length
     cdef const uint8_t* src_data = <const uint8_t*>buf.data
@@ -127,9 +128,9 @@ cdef Vector _wrap_string_buffer(DrakenVarBuffer* buf) except *:
         if src_nulls != NULL and not ((src_nulls[i >> 3] >> (i & 7)) & 1):
             result.append(None)
         else:
-            result.append((<char*>src_data)[off:off + slen].decode('utf-8'))
+            result.append((<char*>src_data)[off:off + slen])
 
-    return Vector(_draken_native.vector_from_string_sequence(result))
+    return Vector(_draken_native.vector_from_bytes_sequence(result))
 
 
 cdef inline Py_ssize_t _ks_bitmap_nbytes(Py_ssize_t length) noexcept nogil:
@@ -632,7 +633,7 @@ cdef class KeyStore:
 
         if self._n_cols == 1 and len(key_kinds) == 1:
             if key_kinds[0] == KEY_MULTI_ENCODED_STRING:
-                self._single_string_buf = alloc_var_buffer(DRAKEN_VARCHAR, 0, 0)
+                self._single_string_buf = alloc_var_buffer(DRAKEN_VARBINARY, 0, 0)
                 self._single_string_buf.offsets[0] = 0
                 self._single_string_direct = True
             else:
@@ -647,7 +648,7 @@ cdef class KeyStore:
                 if key_kinds[i] == KEY_MULTI_ENCODED_STRING:
                     self._multi_storage_kind[i] = _DISPATCH_STRING
                     self._multi_storage_slot[i] = string_slot
-                    self._multi_string_bufs.push_back(alloc_var_buffer(DRAKEN_VARCHAR, 0, 0))
+                    self._multi_string_bufs.push_back(alloc_var_buffer(DRAKEN_VARBINARY, 0, 0))
                     self._multi_string_bufs[string_slot].offsets[0] = 0
                     self._multi_string_nulls.push_back(NULL)
                     self._multi_string_rows.push_back(0)
@@ -938,7 +939,7 @@ cdef class KeyStore:
                     self._single_string_buf.length = <size_t>self._single_string_rows
                     self._single_string_buf.null_bitmap = self._single_string_nulls
                     out_vecs.append(_wrap_string_buffer(self._single_string_buf))
-                    self._single_string_buf = alloc_var_buffer(DRAKEN_VARCHAR, 0, 0)
+                    self._single_string_buf = alloc_var_buffer(DRAKEN_VARBINARY, 0, 0)
                     self._single_string_buf.offsets[0] = 0
                     self._single_string_nulls = NULL
                     self._single_string_rows = 0
@@ -990,7 +991,7 @@ cdef class KeyStore:
                     _string_buf.null_bitmap = self._multi_string_nulls[storage_slot]
                     out_vecs.append(_wrap_string_buffer(_string_buf))
 
-                    self._multi_string_bufs[storage_slot] = alloc_var_buffer(DRAKEN_VARCHAR, 0, 0)
+                    self._multi_string_bufs[storage_slot] = alloc_var_buffer(DRAKEN_VARBINARY, 0, 0)
                     self._multi_string_bufs[storage_slot].offsets[0] = 0
                     self._multi_string_nulls[storage_slot] = NULL
                     self._multi_string_rows[storage_slot] = 0

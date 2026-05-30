@@ -68,6 +68,7 @@ typedef VecResult (*UnaryArithFn)(const DrakenVector& a);
 
 // Gather ops.
 typedef VecResult (*TakeFn)(const DrakenVector&, const int32_t* indices, uint32_t n);
+typedef VecResult (*SliceFn)(const DrakenVector&, uint32_t start, uint32_t length);
 typedef VecResult (*MatFn)(const DrakenVector&);
 typedef VecResult (*CompFn)(const DrakenVector&);
 
@@ -121,9 +122,10 @@ struct TypeOps {
     // C.2 — unary
     UnaryArithFn  neg;
     // C.2 — gather / reshape
-    TakeFn take;
-    MatFn  materialize;
-    CompFn compress;
+    TakeFn  take;
+    SliceFn slice;
+    MatFn   materialize;
+    CompFn  compress;
     // C.3 — compare → DRAKEN_BOOL result
     CmpScalarFn compare_scalar;
     CmpVecFn    compare_vector;
@@ -222,6 +224,7 @@ struct OpsTable {
         entries[DRAKEN_INT64].neg        = draken::ops::i64_neg;
         // C.2 — gather
         entries[DRAKEN_INT64].take           = draken::ops::i64_take;
+        entries[DRAKEN_INT64].slice          = draken::ops::i64_slice;
         entries[DRAKEN_INT64].materialize    = draken::ops::i64_materialize;
         entries[DRAKEN_INT64].compress       = draken::ops::i64_compress;
         // C.3 — compare
@@ -248,6 +251,7 @@ struct OpsTable {
         entries[DRAKEN_INT8].mod_s         = draken::ops::i8_mod_scalar;
         entries[DRAKEN_INT8].neg           = draken::ops::i8_neg;
         entries[DRAKEN_INT8].take          = draken::ops::i8_take;
+        entries[DRAKEN_INT8].slice         = draken::ops::i8_slice;
         entries[DRAKEN_INT8].materialize   = draken::ops::i8_materialize;
         entries[DRAKEN_INT8].compress      = draken::ops::i8_compress;
         entries[DRAKEN_INT8].compare_scalar = draken::ops::i8_compare_scalar;
@@ -272,6 +276,7 @@ struct OpsTable {
         entries[DRAKEN_INT16].mod_s         = draken::ops::i16_mod_scalar;
         entries[DRAKEN_INT16].neg           = draken::ops::i16_neg;
         entries[DRAKEN_INT16].take          = draken::ops::i16_take;
+        entries[DRAKEN_INT16].slice         = draken::ops::i16_slice;
         entries[DRAKEN_INT16].materialize   = draken::ops::i16_materialize;
         entries[DRAKEN_INT16].compress      = draken::ops::i16_compress;
         entries[DRAKEN_INT16].compare_scalar = draken::ops::i16_compare_scalar;
@@ -296,6 +301,7 @@ struct OpsTable {
         entries[DRAKEN_INT32].mod_s         = draken::ops::i32_mod_scalar;
         entries[DRAKEN_INT32].neg           = draken::ops::i32_neg;
         entries[DRAKEN_INT32].take          = draken::ops::i32_take;
+        entries[DRAKEN_INT32].slice         = draken::ops::i32_slice;
         entries[DRAKEN_INT32].materialize   = draken::ops::i32_materialize;
         entries[DRAKEN_INT32].compress      = draken::ops::i32_compress;
         entries[DRAKEN_INT32].compare_scalar = draken::ops::i32_compare_scalar;
@@ -320,6 +326,7 @@ struct OpsTable {
         entries[DRAKEN_FLOAT32].float_mod_s       = draken::ops::f32_mod_scalar;
         entries[DRAKEN_FLOAT32].neg               = draken::ops::f32_neg;
         entries[DRAKEN_FLOAT32].take              = draken::ops::f32_take;
+        entries[DRAKEN_FLOAT32].slice             = draken::ops::f32_slice;
         entries[DRAKEN_FLOAT32].materialize       = draken::ops::f32_materialize;
         entries[DRAKEN_FLOAT32].compress          = draken::ops::f32_compress;
         entries[DRAKEN_FLOAT32].float_compare_scalar = draken::ops::f32_compare_scalar;
@@ -344,6 +351,7 @@ struct OpsTable {
         entries[DRAKEN_FLOAT64].float_mod_s       = draken::ops::f64_mod_scalar;
         entries[DRAKEN_FLOAT64].neg               = draken::ops::f64_neg;
         entries[DRAKEN_FLOAT64].take              = draken::ops::f64_take;
+        entries[DRAKEN_FLOAT64].slice             = draken::ops::f64_slice;
         entries[DRAKEN_FLOAT64].materialize       = draken::ops::f64_materialize;
         entries[DRAKEN_FLOAT64].compress          = draken::ops::f64_compress;
         entries[DRAKEN_FLOAT64].float_compare_scalar = draken::ops::f64_compare_scalar;
@@ -399,6 +407,7 @@ struct OpsTable {
         entries[DRAKEN_INTERVAL].sub              = draken::ops::interval_sub;
         entries[DRAKEN_INTERVAL].neg              = draken::ops::interval_neg;
         entries[DRAKEN_INTERVAL].take             = draken::ops::interval_take;
+        entries[DRAKEN_INTERVAL].slice            = draken::ops::interval_slice;
         entries[DRAKEN_INTERVAL].materialize      = draken::ops::interval_materialize;
         entries[DRAKEN_INTERVAL].compress         = draken::ops::interval_compress;
 
@@ -408,6 +417,7 @@ struct OpsTable {
         entries[DRAKEN_VARCHAR].str_compare_scalar = draken::ops::str_compare_scalar;
         // D.3 — VARCHAR: gather / reshape
         entries[DRAKEN_VARCHAR].take               = draken::ops::str_take;
+        entries[DRAKEN_VARCHAR].slice              = draken::ops::str_slice;
         entries[DRAKEN_VARCHAR].materialize        = draken::ops::str_materialize;
         entries[DRAKEN_VARCHAR].compress           = draken::ops::str_compress;
         // D.4 — VARCHAR: in_list (hash-only; §1 exception same as str eq/hash)
@@ -418,6 +428,7 @@ struct OpsTable {
         entries[DRAKEN_NVARCHAR].compare_vector     = draken::ops::str_compare_vector;
         entries[DRAKEN_NVARCHAR].str_compare_scalar = draken::ops::str_compare_scalar;
         entries[DRAKEN_NVARCHAR].take               = draken::ops::str_take;
+        entries[DRAKEN_NVARCHAR].slice              = draken::ops::str_slice;
         entries[DRAKEN_NVARCHAR].materialize        = draken::ops::str_materialize;
         entries[DRAKEN_NVARCHAR].compress           = draken::ops::str_compress;
         entries[DRAKEN_NVARCHAR].in_list            = draken::ops::str_in_list;
@@ -427,6 +438,7 @@ struct OpsTable {
         entries[DRAKEN_VARBINARY].compare_vector     = draken::ops::str_compare_vector;
         entries[DRAKEN_VARBINARY].str_compare_scalar = draken::ops::str_compare_scalar;
         entries[DRAKEN_VARBINARY].take               = draken::ops::str_take;
+        entries[DRAKEN_VARBINARY].slice              = draken::ops::str_slice;
         entries[DRAKEN_VARBINARY].materialize        = draken::ops::str_materialize;
         entries[DRAKEN_VARBINARY].compress           = draken::ops::str_compress;
         entries[DRAKEN_VARBINARY].in_list            = draken::ops::str_in_list;
@@ -556,6 +568,15 @@ static inline VecResult draken_take(
     if (idx >= OpsTable::kSize || g_ops_table().entries[idx].take == nullptr)
         throw std::invalid_argument("draken_take: unsupported type");
     return g_ops_table().entries[idx].take(v, indices, n);
+}
+
+static inline VecResult draken_slice(
+    const DrakenVector& v, uint32_t start, uint32_t length)
+{
+    const unsigned idx = static_cast<unsigned>(v.type);
+    if (idx >= OpsTable::kSize || g_ops_table().entries[idx].slice == nullptr)
+        throw std::invalid_argument("draken_slice: unsupported type");
+    return g_ops_table().entries[idx].slice(v, start, length);
 }
 
 static inline VecResult draken_materialize(const DrakenVector& v) {

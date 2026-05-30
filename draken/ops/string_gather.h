@@ -268,6 +268,89 @@ static inline VecResult str_materialize(const DrakenVector& v) {
 }
 
 // ---------------------------------------------------------------------------
+// SLICE — contiguous range [start, start+length). Same logic as take but
+// source indices are start, start+1, ..., start+length-1 — no index array.
+// ---------------------------------------------------------------------------
+static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_t n) {
+    const DrakenStringArena* sa    = static_cast<const DrakenStringArena*>(v.data);
+    const DrakenStringSlot*  src_s = sa->slots;
+    const uint8_t*           src_a = sa->arena;
+    const uint8_t*           src_v = v.validity;
+
+    // Phase 1: scan [start, start+n) to compute output arena size.
+    std::vector<uint32_t> new_off(v.data_length, UINT32_MAX);
+    size_t total_arena = 0u;
+
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t src_log = start + i;
+        if (!sg_val_row(src_v, src_log)) continue;
+        const uint32_t code = v.selection[src_log];
+        if (!str_is_inline(&src_s[code]) && new_off[code] == UINT32_MAX) {
+            new_off[code] = static_cast<uint32_t>(total_arena);
+            total_arena  += src_s[code].ext.length;
+        }
+    }
+    if (total_arena > static_cast<size_t>(UINT32_MAX))
+        throw std::overflow_error("str_slice: arena exceeds 4 GB");
+
+    // Phase 2: allocate output block.
+    StrBlock sb = sg_alloc_str_block(n, total_arena);
+    SgOwned<void> bg(sb.block);
+
+    // Phase 3: copy arena bytes for each referenced unique long slot.
+    for (uint32_t k = 0; k < v.data_length; ++k) {
+        if (!str_is_inline(&src_s[k]) && new_off[k] != UINT32_MAX &&
+            sb.arena_bytes != nullptr) {
+            std::memcpy(sb.arena_bytes + new_off[k],
+                        src_a + src_s[k].ext.arena_offset,
+                        src_s[k].ext.length);
+        }
+    }
+
+    // Phase 4: allocate validity.
+    uint8_t* out_v = nullptr;
+    SgOwned<uint8_t> vg;
+    if (src_v != nullptr && n > 0u) {
+        out_v = sg_alloc_validity(n);
+        vg.reset(out_v);
+    }
+
+    // Phase 5: fill output slots and validity.
+    bool has_nulls = false;
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t src_log = start + i;
+        if (!sg_val_row(src_v, src_log)) {
+            has_nulls = true;
+        } else {
+            const uint32_t         code = v.selection[src_log];
+            const DrakenStringSlot* src = &src_s[code];
+            if (str_is_inline(src)) {
+                sb.slots[i] = *src;
+            } else {
+                sb.slots[i].ext.length       = src->ext.length;
+                sb.slots[i].ext.prefix       = src->ext.prefix;
+                sb.slots[i].ext.hash32       = src->ext.hash32;
+                sb.slots[i].ext.arena_offset = new_off[code];
+            }
+            if (out_v != nullptr)
+                out_v[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+        }
+    }
+
+    vg.release();
+    if (!has_nulls && out_v != nullptr) {
+        draken_free(out_v);
+        out_v = nullptr;
+    } else {
+        out_v = sg_normalize_validity(out_v, n);
+    }
+
+    bg.release();
+    return sg_finalize(sb, out_v, draken_identity_sel(n), false, n, n, total_arena,
+                       static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION));
+}
+
+// ---------------------------------------------------------------------------
 // TAKE — gather logical rows by index.
 //
 // indices[i] is a logical row position in v.  Output row i = source row

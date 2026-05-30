@@ -59,6 +59,29 @@ static inline uint8_t* normalize_validity(uint8_t* validity, uint32_t n) noexcep
 }
 
 // ---------------------------------------------------------------------------
+// VALIDITY RANGE COPY — extract bits [start, start+n) from src into dst[0..n).
+// ---------------------------------------------------------------------------
+static inline void copy_validity_range(uint8_t* dst, const uint8_t* src,
+                                        uint32_t start, uint32_t n) noexcept {
+    if (n == 0) return;
+    const uint32_t nb = (n + 7u) >> 3;
+    if ((start & 7u) == 0) {
+        std::memcpy(dst, src + (start >> 3), nb);
+    } else {
+        const uint32_t shift = start & 7u;
+        const uint32_t byte0 = start >> 3;
+        const uint32_t last_src_byte = (start + n - 1u) >> 3;
+        for (uint32_t i = 0; i < nb; ++i) {
+            const uint8_t lo = src[byte0 + i] >> shift;
+            const uint8_t hi = (byte0 + i < last_src_byte)
+                               ? src[byte0 + i + 1] << (8u - shift) : 0u;
+            dst[i] = lo | hi;
+        }
+    }
+    if (n & 7u) dst[nb - 1] &= static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+}
+
+// ---------------------------------------------------------------------------
 // TAKE
 // ---------------------------------------------------------------------------
 static inline VecResult i64_take(
@@ -92,6 +115,45 @@ static inline VecResult i64_take(
     }
 
     out_null = normalize_validity(out_null, n);
+
+    VecResult r;
+    r.data           = dst;
+    r.validity       = out_null;
+    r.selection      = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length    = n;
+    r.length         = n;
+    r.type           = DRAKEN_INT64;
+    r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// SLICE — contiguous range [start, start+length). Fast memcpy for dense.
+// ---------------------------------------------------------------------------
+static inline VecResult i64_slice(const DrakenVector& v, uint32_t start, uint32_t length) {
+    const uint32_t n        = length;
+    const int64_t* data     = static_cast<const int64_t*>(v.data);
+    const uint8_t* src_null = v.validity;
+
+    int64_t* dst = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
+    if (!dst) throw std::bad_alloc();
+
+    if (v.data_length == v.length) {
+        std::memcpy(dst, data + start, n * sizeof(int64_t));
+    } else {
+        for (uint32_t i = 0; i < n; ++i)
+            dst[i] = data[v.selection[start + i]];
+    }
+
+    uint8_t* out_null = nullptr;
+    if (src_null != nullptr && n > 0u) {
+        const uint32_t nb = (n + 7u) >> 3;
+        out_null = static_cast<uint8_t*>(draken_malloc(nb));
+        if (!out_null) { draken_free(dst); throw std::bad_alloc(); }
+        copy_validity_range(out_null, src_null, start, n);
+        out_null = normalize_validity(out_null, n);
+    }
 
     VecResult r;
     r.data           = dst;

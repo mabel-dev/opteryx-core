@@ -29,7 +29,7 @@ class AggregationSpec:
 # EOS sentinel available as _EOS_SENTINEL in the same scope.
 
 
-CHUNK_SIZE = 8192
+CHUNK_SIZE = 65536
 
 
 class GroupedAggregateHashedNode(BasePlanNode):

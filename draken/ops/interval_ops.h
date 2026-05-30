@@ -484,6 +484,42 @@ static inline VecResult interval_neg(const DrakenVector& v) {
 // TAKE — gather rows by index list; result is dense DRAKEN_INTERVAL.
 // Null source row → null output row; propagates validity.
 // ---------------------------------------------------------------------------
+static inline VecResult interval_slice(const DrakenVector& v, uint32_t start, uint32_t length) {
+    const uint32_t n = length;
+    const DrakenIntervalSlot* data = static_cast<const DrakenIntervalSlot*>(v.data);
+    const uint8_t* src_null = v.validity;
+
+    const size_t data_bytes = (n > 0u ? n : 1u) * sizeof(DrakenIntervalSlot);
+    DrakenIntervalSlot* dst = static_cast<DrakenIntervalSlot*>(draken_malloc(data_bytes));
+    if (!dst) throw std::bad_alloc();
+
+    if (v.data_length == v.length) {
+        std::memcpy(dst, data + start, n * sizeof(DrakenIntervalSlot));
+    } else {
+        for (uint32_t i = 0; i < n; ++i)
+            dst[i] = data[v.selection[start + i]];
+    }
+
+    uint8_t* out_null = nullptr;
+    if (src_null != nullptr && n > 0u) {
+        const uint32_t nb = (n + 7u) >> 3;
+        out_null = static_cast<uint8_t*>(draken_malloc(nb));
+        if (!out_null) { draken_free(dst); throw std::bad_alloc(); }
+        copy_validity_range(out_null, src_null, start, n);
+    }
+
+    VecResult r;
+    r.data           = dst;
+    r.validity       = out_null;
+    r.selection      = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length    = n;
+    r.length         = n;
+    r.type           = DRAKEN_INTERVAL;
+    r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    return r;
+}
+
 static inline VecResult interval_take(
     const DrakenVector& v, const int32_t* indices, uint32_t n_indices)
 {

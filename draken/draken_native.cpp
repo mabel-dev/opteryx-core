@@ -4588,6 +4588,27 @@ NB_MODULE(draken_native, m) {
             result.logical_type = v.logical_type;
             return result;
         })
+        // slice(start, length) — contiguous subrange. No Python index list; direct
+        // memcpy for dense vectors. Equivalent to take(range(start, start+length))
+        // but without materialising an index array at any level.
+        .def("slice", [](const VectorOwner& v, uint32_t start, uint32_t length) -> VectorOwner {
+            if (v.vec.type == DRAKEN_NULL) return make_null_vector(length);
+            // Special types fall back to index-based take to avoid adding slice
+            // overloads for array/fp16/bool (uncommon in the slice call sites).
+            if (v.vec.type == DRAKEN_ARRAY || v.vec.type == DRAKEN_VECTOR_FP16 ||
+                v.vec.type == DRAKEN_BOOL) {
+                std::vector<int32_t> idx_vec(length);
+                for (uint32_t i = 0; i < length; ++i)
+                    idx_vec[i] = static_cast<int32_t>(start + i);
+                if (v.vec.type == DRAKEN_ARRAY)   return make_array_take(v, idx_vec.data(), length);
+                if (v.vec.type == DRAKEN_VECTOR_FP16) return make_fp16_take(v, idx_vec.data(), length);
+                return make_bool_take(v, idx_vec.data(), length);
+            }
+            auto result = vecresult_to_owner(draken_slice(v.vec, start, length));
+            result.vec.type     = v.vec.type;
+            result.logical_type = v.logical_type;
+            return result;
+        })
         // mask(bool_vector) — keep rows where the mask is valid AND true, gather
         // natively. The surviving-row indices are derived from the mask's bitmap
         // via the unified row_is_valid/row_bool accessors (correct for dense,
