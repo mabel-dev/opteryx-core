@@ -484,10 +484,13 @@ def resolve_cast(source_orso, target_type, args=(), unit=None):
 
     # Parametrized casts: need specialized closures.
     if _resolved_target == "TIMESTAMP" and unit is not None:
-        if source_orso == "INT64":
-            def _int64_to_timestamp_with_unit(arr):
-                return vector_cast_int64_to_timestamp(_unwrap_nb(arr), unit=unit)
-            return _int64_to_timestamp_with_unit
+        if source_orso in ("INT64", "INTEGER", "BIGINT"):
+            def _int_to_timestamp_with_unit(arr):
+                nb = _unwrap_nb(arr)
+                if is_draken_vector_fn(arr) and get_vector_type(arr) == VectorType.INTEGER:
+                    nb = vector_cast_integer_to_int64(nb)
+                return vector_cast_int64_to_timestamp(nb, unit=unit)
+            return _int_to_timestamp_with_unit
 
     if _resolved_target == "DECIMAL":
         return _build_decimal_closure(args)

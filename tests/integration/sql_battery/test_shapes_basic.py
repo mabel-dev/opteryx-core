@@ -245,7 +245,7 @@ STATEMENTS = [
         ("SELECT name FROM $planets WHERE NOT EXISTS (SELECT 1 FROM testdata.satellites WHERE testdata.satellites.planetId = $planets.id)", 2, 1, None),
 
         # REGEXP_REPLACE
-        ("SELECT COUNT(*), cve FROM (SELECT REGEXP_REPLACE(cve_id, '^CVE-([^-]+)-.*$', r'\\1') AS cve FROM testdata.nvd) GROUP BY cve;", 15, 2, None),
+        ("SELECT COUNT(*), cve FROM (SELECT REGEXP_REPLACE(cve_id, '^CVE-([^-]+)-.*$', r'\\1') AS cve FROM testdata.nvd) GROUP BY cve;", 28, 2, None),
 
         # CAST to VARCHAR — array column (list<string>) and integer column
         ("SELECT CAST(missions AS VARCHAR) FROM testdata.astronauts", 357, 1, None),

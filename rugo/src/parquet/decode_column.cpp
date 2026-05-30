@@ -640,14 +640,16 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         }
         result.rle_run_lengths.reserve(est_runs);
       } else if (dict_size > 0 && !rle_path &&
-                 (int32_dict_mode || int64_dict_mode || byte_array_dict_mode ||
+                 (int32_dict_mode || int64_dict_mode ||
                   float32_dict_mode || float64_dict_mode) &&
                  target_col->max_definition_level > 0 &&
                  result.ext_int64 == nullptr && result.ext_int32 == nullptr &&
                  result.ext_float64 == nullptr && result.ext_float32 == nullptr &&
                  row_mask == nullptr) {
-        // Nullable dict column with no caller-provided dense buffer and no row-mask:
-        // pre-allocate packed codes array (zero = null sentinel) for dict-only output.
+        // Nullable numeric dict column with no caller-provided dense buffer and no
+        // row-mask: pre-allocate packed codes array (zero = null sentinel).
+        // byte_array is excluded: mixed dict/plain chunks determine at the first
+        // PLAIN page whether to intern (dict_indices) or materialise to dense.
         // When row_mask is active the dict_codes_array would not be filtered, so
         // fall through to the dict_indices path which IS correctly compacted.
         result.dict_codes_array.assign(
@@ -1673,14 +1675,44 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             }
           }
         } else if (result.type == "byte_array") {
-          // Mixed dict/plain chunks stay dictionary-encoded by interning plain
-          // values into a synthetic unified dictionary (owning string keys).
-          if (byte_array_dict_mode && unified_dict_map.empty()) {
-            SeedDictionaryMapFromArena(
-                unified_dict_map,
-                result.string_dict_arena,
-                result.string_dict_offsets,
-                result.string_dict_lens);
+          // PLAIN fallback page: decide at the first one whether to intern or go dense.
+          //
+          // dict page -> build/extend dict vector (dict_indices + string_dict_arena).
+          // PLAIN page -> if dict_size / rows_so_far < 0.8 (≥20% saving), intern the
+          //              plain values into the unified dictionary and keep dict mode.
+          //              Otherwise materialise the already-decoded dict rows to
+          //              string_values and switch to dense for all remaining pages.
+          if (byte_array_dict_mode) {
+            const size_t dict_size_now = result.string_dict_lens.size();
+            const size_t rows_so_far   = result.dict_indices.size();
+            const bool worth_interning =
+                rows_so_far == 0 ||
+                (static_cast<double>(dict_size_now) / static_cast<double>(rows_so_far)) < 0.8;
+            if (!worth_interning) {
+              // Savings < 20%: materialise dict rows decoded so far to dense strings,
+              // clear dict state and switch to plain mode for all remaining pages.
+              result.string_values.reserve(result.dict_indices.size());
+              for (int32_t code : result.dict_indices) {
+                if (code >= 0 && code < (int32_t)result.string_dict_lens.size()) {
+                  const uint32_t off = result.string_dict_offsets[code];
+                  const int32_t  len = result.string_dict_lens[code];
+                  result.string_values.emplace_back(
+                      reinterpret_cast<const char*>(result.string_dict_arena.data()) + off,
+                      static_cast<size_t>(len));
+                }
+              }
+              result.dict_indices.clear();
+              result.string_dict_arena.clear();
+              result.string_dict_offsets.clear();
+              result.string_dict_lens.clear();
+              byte_array_dict_mode = false;
+            } else if (unified_dict_map.empty()) {
+              SeedDictionaryMapFromArena(
+                  unified_dict_map,
+                  result.string_dict_arena,
+                  result.string_dict_offsets,
+                  result.string_dict_lens);
+            }
           }
           if (page_encoding == 6) {
             std::vector<std::string> page_strs;
