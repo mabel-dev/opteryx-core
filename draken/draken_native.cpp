@@ -403,12 +403,19 @@ static VectorOwner make_varchar_constant(nb::object value_obj, uint32_t length) 
     size_t       arena_ext = 0u;  // bytes needed in arena (> 0 only if long form)
 
     if (!is_null) {
-        PyObject* pystr = value_obj.ptr();
-        if (!PyUnicode_Check(pystr))
+        PyObject* pyobj = value_obj.ptr();
+        // VARCHAR carries raw bytes. Accept str (encode to its UTF-8 bytes) or
+        // bytes (stored verbatim, NO decode — preserves non-UTF-8 key/literal data).
+        if (PyUnicode_Check(pyobj)) {
+            utf8_ptr = PyUnicode_AsUTF8AndSize(pyobj, &utf8_len);
+            if (!utf8_ptr) throw nb::python_error();
+        } else if (PyBytes_Check(pyobj)) {
+            if (PyBytes_AsStringAndSize(pyobj, const_cast<char**>(&utf8_ptr), &utf8_len) < 0)
+                throw nb::python_error();
+        } else {
             throw std::invalid_argument(
-                "vector_varchar_from_constant: value must be str or None");
-        utf8_ptr = PyUnicode_AsUTF8AndSize(pystr, &utf8_len);
-        if (!utf8_ptr) throw nb::python_error();
+                "vector_varchar_from_constant: value must be str, bytes, or None");
+        }
         if (utf8_len > STR_INLINE_MAX)
             arena_ext = static_cast<size_t>(utf8_len);
     }
@@ -466,6 +473,74 @@ static VectorOwner make_varchar_constant(nb::object value_obj, uint32_t length) 
 
     // Constant shape: one data slot broadcast over `length` rows.
     DrakenVector v = draken_vector_from_constant(sa, length, DRAKEN_VARCHAR, bitmap);
+    return VectorOwner(v, std::move(data_buf), OwnedBuffer<uint8_t>(nullptr));
+}
+
+// ---------------------------------------------------------------------------
+// E.7b — VARBINARY constant (bytes or None → constant-shape DRAKEN_VARBINARY vector).
+// Mirrors make_varchar_constant but accepts Python bytes and tags the result VARBINARY.
+// ---------------------------------------------------------------------------
+static VectorOwner make_varbinary_constant(nb::object value_obj, uint32_t length) {
+    const bool is_null = value_obj.is_none();
+
+    const char* ptr = nullptr;
+    Py_ssize_t  blen = 0;
+    size_t      arena_ext = 0u;
+
+    if (!is_null) {
+        PyObject* pybytes = value_obj.ptr();
+        if (!PyBytes_Check(pybytes))
+            throw std::invalid_argument(
+                "vector_varbinary_from_constant: value must be bytes or None");
+        ptr  = PyBytes_AS_STRING(pybytes);
+        blen = PyBytes_GET_SIZE(pybytes);
+        if (blen > STR_INLINE_MAX)
+            arena_ext = static_cast<size_t>(blen);
+    }
+
+    constexpr size_t kSlotAlign = alignof(DrakenStringSlot);
+    const size_t struct_end  = (sizeof(DrakenStringArena) + kSlotAlign - 1u) & ~(kSlotAlign - 1u);
+    const size_t slots_bytes = sizeof(DrakenStringSlot);
+    const size_t arena_start = struct_end + slots_bytes;
+    const size_t validity_start = arena_start + arena_ext;
+
+    size_t validity_bytes = 0u;
+    if (is_null) {
+        const uint32_t bm = (length + 7u) / 8u;
+        const uint32_t padded = ((bm + 7u) & ~7u);
+        validity_bytes = (padded > 0u) ? padded : 8u;
+    }
+
+    const size_t total_alloc = validity_start + validity_bytes;
+    uint8_t* block = static_cast<uint8_t*>(
+        draken_malloc(total_alloc > 0u ? total_alloc : sizeof(DrakenStringArena)));
+    if (!block) throw std::bad_alloc();
+    std::memset(block, 0, total_alloc > 0u ? total_alloc : sizeof(DrakenStringArena));
+    OwnedBuffer<void> data_buf(block);
+
+    DrakenStringArena* sa   = reinterpret_cast<DrakenStringArena*>(block);
+    DrakenStringSlot*  slot = reinterpret_cast<DrakenStringSlot*>(block + struct_end);
+    uint8_t* arena  = (arena_ext > 0u) ? (block + arena_start) : nullptr;
+    uint8_t* bitmap = is_null ? (block + validity_start) : nullptr;
+
+    sa->slots = slot; sa->arena = arena;
+    sa->length = 1u; sa->arena_used = arena_ext; sa->arena_cap = arena_ext;
+    sa->null_bitmap = nullptr; sa->owns_buffers = 0;
+    sa->type = DRAKEN_VARBINARY;
+
+    if (!is_null) {
+        const uint8_t* src  = reinterpret_cast<const uint8_t*>(ptr);
+        const uint32_t slen = static_cast<uint32_t>(blen);
+        if (slen <= STR_INLINE_MAX) {
+            str_init_inline(slot, src, slen);
+        } else {
+            std::memcpy(arena, src, slen);
+            str_init_extern(slot, src, slen,
+                            static_cast<uint32_t>(XXH3_64bits(src, slen)), 0u);
+        }
+    }
+
+    DrakenVector v = draken_vector_from_constant(sa, length, DRAKEN_VARBINARY, bitmap);
     return VectorOwner(v, std::move(data_buf), OwnedBuffer<uint8_t>(nullptr));
 }
 
@@ -2351,6 +2426,94 @@ extern "C" PyObject* draken_vector_own_string(
     }
 }
 
+// draken_arrow_varlen_to_string_block — Arrow varlen (data+offsets+nulls) →
+// German-string block + separate validity. Pure buffer work; no Python, no
+// decode, raw bytes preserved, type tag carried. See draken_bridge.h.
+extern "C" void* draken_arrow_varlen_to_string_block(
+    const uint8_t* data, const uint32_t* offsets, const uint8_t* nulls,
+    uint32_t length, DrakenType type, uint8_t** out_validity)
+{
+    *out_validity = nullptr;
+
+    // Pass 1: total extern bytes + null presence.
+    // The source buffer uses int32 offsets; a monotonicity break means the
+    // accumulated key bytes exceeded INT32_MAX (2 GB) and the offsets wrapped.
+    // Fail cleanly with an actionable error rather than reading a wrapped offset.
+    size_t total_extern = 0u;
+    bool   has_nulls = false;
+    for (uint32_t i = 0u; i < length; ++i) {
+        const bool valid = (nulls == nullptr) ||
+                           ((nulls[i >> 3] >> (i & 7u)) & 1u);
+        if (!valid) { has_nulls = true; continue; }
+        if (offsets[i + 1] < offsets[i]) {
+            PyErr_SetString(PyExc_OverflowError,
+                "draken_arrow_varlen_to_string_block: source int32 offsets overflowed "
+                "(>2 GB of string keys in one buffer); key-store offset width is the limit");
+            return nullptr;
+        }
+        const uint32_t slen = static_cast<uint32_t>(offsets[i + 1] - offsets[i]);
+        if (slen > STR_INLINE_MAX) total_extern += slen;
+    }
+    if (total_extern > static_cast<size_t>(UINT32_MAX)) {
+        PyErr_SetString(PyExc_OverflowError,
+            "draken_arrow_varlen_to_string_block: arena exceeds 4 GB");
+        return nullptr;
+    }
+
+    // Consolidated block (NO embedded validity): [DrakenStringArena | slots | arena]
+    constexpr size_t kSlotAlign = alignof(DrakenStringSlot);
+    const size_t struct_end =
+        (sizeof(DrakenStringArena) + kSlotAlign - 1u) & ~(kSlotAlign - 1u);
+    const size_t slots_bytes = (length > 0u ? length : 1u) * sizeof(DrakenStringSlot);
+    const size_t arena_start = struct_end + slots_bytes;
+    const size_t total_alloc = arena_start + total_extern;
+
+    uint8_t* block = static_cast<uint8_t*>(draken_malloc(total_alloc));
+    if (!block) return nullptr;
+    std::memset(block, 0, total_alloc);
+
+    uint8_t* bitmap = nullptr;
+    if (has_nulls) {
+        const uint32_t bm = (length + 7u) / 8u;
+        const uint32_t padded = (bm + 7u) & ~7u;
+        const size_t vbytes = padded > 0u ? padded : 8u;
+        bitmap = static_cast<uint8_t*>(draken_malloc(vbytes));
+        if (!bitmap) { draken_free(block); return nullptr; }
+        std::memset(bitmap, 0xFF, vbytes);
+    }
+
+    DrakenStringArena* sa    = reinterpret_cast<DrakenStringArena*>(block);
+    DrakenStringSlot*  slots = reinterpret_cast<DrakenStringSlot*>(block + struct_end);
+    uint8_t*           arena = (total_extern > 0u) ? (block + arena_start) : nullptr;
+
+    sa->slots = slots; sa->arena = arena; sa->length = length;
+    sa->arena_used = 0u; sa->arena_cap = total_extern;
+    sa->null_bitmap = nullptr; sa->owns_buffers = 0; sa->type = type;
+
+    for (uint32_t i = 0u; i < length; ++i) {
+        const bool valid = (nulls == nullptr) ||
+                           ((nulls[i >> 3] >> (i & 7u)) & 1u);
+        if (!valid) {
+            bitmap[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7u)));
+            continue;  // slot stays zeroed (null sentinel)
+        }
+        const uint8_t* src  = data + offsets[i];
+        const uint32_t slen = static_cast<uint32_t>(offsets[i + 1] - offsets[i]);
+        if (slen <= STR_INLINE_MAX) {
+            str_init_inline(&slots[i], src, slen);
+        } else {
+            const uint32_t off = static_cast<uint32_t>(sa->arena_used);
+            std::memcpy(arena + off, src, slen);
+            str_init_extern(&slots[i], src, slen,
+                            static_cast<uint32_t>(XXH3_64bits(src, slen)), off);
+            sa->arena_used += slen;
+        }
+    }
+
+    *out_validity = bitmap;
+    return block;
+}
+
 // draken_vector_own_string_dict — wrap a value array + caller selection in a string Vector.
 //
 // Identical consolidated-block layout to draken_vector_own_string, except the value
@@ -3846,6 +4009,21 @@ static VectorOwner make_nvarchar_from_sequence(nb::list seq) {
     return owner;
 }
 
+// Build a string-family Vector from list[bytes|None] with an explicit type tag
+// (no decode). Storage is identical across VARCHAR/NVARCHAR/VARBINARY; only the
+// type tag differs. Used where bytes data must carry a known source type
+// (e.g. MIN/MAX of a VARCHAR column preserving VARCHAR).
+static VectorOwner make_bytes_from_sequence(nb::list seq);  // defined below
+static VectorOwner make_bytes_from_sequence_typed(nb::list seq, DrakenType type) {
+    VectorOwner owner = make_bytes_from_sequence(seq);  // produces DRAKEN_VARBINARY
+    if (type != DRAKEN_VARBINARY) {
+        owner.vec.type = type;
+        if (owner.vec.data)
+            static_cast<DrakenStringArena*>(owner.vec.data)->type = type;
+    }
+    return owner;
+}
+
 // ---------------------------------------------------------------------------
 // E.7 — VARBINARY ingestion: Python list[bytes | None] → dense DRAKEN_VARBINARY vector.
 // Opaque bytes; byte-length ops; character ops throw.
@@ -3948,6 +4126,241 @@ static VectorOwner make_bytes_from_sequence(nb::list seq) {
 
     DrakenVector v = draken_vector_from_dense(sa, length, DRAKEN_VARBINARY, bitmap);
     return VectorOwner(v, std::move(data_buf), OwnedBuffer<uint8_t>(nullptr));
+}
+
+// ---------------------------------------------------------------------------
+// CONCAT — vertical concatenation of N same-type vectors into one dense vector.
+//
+// Buffer-level; no Python objects, no decode, no factory map. The result type
+// tag and logical_type are taken from the first input (combine requires a
+// uniform schema). Each input is read via the uniform data[selection[i]]
+// access so dense/dict/constant shapes all concatenate correctly.
+// ---------------------------------------------------------------------------
+
+static inline size_t concat_fixed_itemsize(DrakenType t) noexcept {
+    switch (t) {
+        case DRAKEN_INT8:                       return 1u;
+        case DRAKEN_INT16:                      return 2u;
+        case DRAKEN_INT32:
+        case DRAKEN_FLOAT32:
+        case DRAKEN_DATE32:                     return 4u;
+        case DRAKEN_INT64:
+        case DRAKEN_FLOAT64:
+        case DRAKEN_TIMESTAMP64:
+        case DRAKEN_DECIMAL:                    return 8u;
+        case DRAKEN_INTERVAL:                   return sizeof(DrakenIntervalSlot);
+        default:                                return 0u;
+    }
+}
+
+static VectorOwner concat_fixed(const std::vector<const VectorOwner*>& parts,
+                                size_t itemsize, DrakenType type,
+                                const LogicalType* lt) {
+    uint64_t total = 0u;
+    bool any_null = false;
+    for (const VectorOwner* p : parts) {
+        total += p->vec.length;
+        if (p->vec.validity != nullptr) any_null = true;
+    }
+    if (total > static_cast<uint64_t>(UINT32_MAX))
+        throw std::overflow_error("concat: total length exceeds u32");
+    const uint32_t n = static_cast<uint32_t>(total);
+
+    uint8_t* data = static_cast<uint8_t*>(draken_malloc((n > 0u ? n : 1u) * itemsize));
+    if (!data) throw std::bad_alloc();
+    OwnedBuffer<void> data_buf(data);
+
+    uint8_t* validity = nullptr;
+    OwnedBuffer<uint8_t> val_buf;
+    if (any_null) {
+        const uint32_t padded = ((((n + 7u) >> 3) + 7u) & ~7u);
+        const size_t vbytes = padded > 0u ? padded : 8u;
+        validity = static_cast<uint8_t*>(draken_malloc(vbytes));
+        if (!validity) throw std::bad_alloc();
+        val_buf.reset(validity);
+        std::memset(validity, 0xFF, vbytes);
+    }
+
+    uint32_t out = 0u;
+    for (const VectorOwner* p : parts) {
+        const DrakenVector& v = p->vec;
+        const uint8_t* src = static_cast<const uint8_t*>(v.data);
+        const uint32_t len = v.length;
+        if ((v.flags & DRAKEN_SEL_IDENTITY) && v.data_length == v.length) {
+            std::memcpy(data + static_cast<size_t>(out) * itemsize,
+                        src, static_cast<size_t>(len) * itemsize);
+        } else {
+            for (uint32_t i = 0u; i < len; ++i)
+                std::memcpy(data + static_cast<size_t>(out + i) * itemsize,
+                            src + static_cast<size_t>(v.selection[i]) * itemsize,
+                            itemsize);
+        }
+        if (validity) {
+            for (uint32_t i = 0u; i < len; ++i)
+                if (!row_is_valid(v, i))
+                    validity[(out + i) >> 3] &=
+                        static_cast<uint8_t>(~(1u << ((out + i) & 7u)));
+        }
+        out += len;
+    }
+
+    DrakenVector rv = draken_vector_from_dense(data, n, type, validity);
+    VectorOwner owner(rv, std::move(data_buf), std::move(val_buf));
+    owner.logical_type = lt;
+    return owner;
+}
+
+static VectorOwner concat_bool(const std::vector<const VectorOwner*>& parts) {
+    uint64_t total = 0u;
+    bool any_null = false;
+    for (const VectorOwner* p : parts) {
+        total += p->vec.length;
+        if (p->vec.validity != nullptr) any_null = true;
+    }
+    if (total > static_cast<uint64_t>(UINT32_MAX))
+        throw std::overflow_error("concat: total length exceeds u32");
+    const uint32_t n = static_cast<uint32_t>(total);
+
+    const uint32_t bm = (n + 7u) >> 3;
+    const uint32_t padded = ((bm + 7u) & ~7u);
+    const size_t alloc_out = padded > 0u ? padded : 8u;
+    uint8_t* data = static_cast<uint8_t*>(draken_malloc(alloc_out));
+    if (!data) throw std::bad_alloc();
+    std::memset(data, 0, alloc_out);
+    OwnedBuffer<void> data_buf(data);
+
+    uint8_t* validity = nullptr;
+    OwnedBuffer<uint8_t> val_buf;
+    if (any_null) {
+        validity = static_cast<uint8_t*>(draken_malloc(alloc_out));
+        if (!validity) throw std::bad_alloc();
+        val_buf.reset(validity);
+        std::memset(validity, 0xFF, alloc_out);
+    }
+
+    uint32_t out = 0u;
+    for (const VectorOwner* p : parts) {
+        const DrakenVector& v = p->vec;
+        const uint32_t len = v.length;
+        for (uint32_t i = 0u; i < len; ++i) {
+            if (row_is_valid(v, i)) {
+                if (row_bool(v, i))
+                    data[(out + i) >> 3] |= static_cast<uint8_t>(1u << ((out + i) & 7u));
+            } else if (validity) {
+                validity[(out + i) >> 3] &=
+                    static_cast<uint8_t>(~(1u << ((out + i) & 7u)));
+            }
+        }
+        out += len;
+    }
+
+    DrakenVector rv = draken_vector_from_dense(data, n, DRAKEN_BOOL, validity);
+    return VectorOwner(rv, std::move(data_buf), std::move(val_buf));
+}
+
+static VectorOwner concat_string(const std::vector<const VectorOwner*>& parts,
+                                 DrakenType type) {
+    uint64_t total = 0u;
+    size_t   total_extern = 0u;
+    bool     any_null = false;
+    for (const VectorOwner* p : parts) {
+        const DrakenVector& v = p->vec;
+        total += v.length;
+        if (v.validity != nullptr) any_null = true;
+        const DrakenStringArena* sa =
+            static_cast<const DrakenStringArena*>(v.data);
+        for (uint32_t i = 0u; i < v.length; ++i) {
+            if (!row_is_valid(v, i)) continue;
+            const DrakenStringSlot* s = &sa->slots[v.selection[i]];
+            if (!str_is_inline(s)) total_extern += s->ext.length;
+        }
+    }
+    if (total > static_cast<uint64_t>(UINT32_MAX))
+        throw std::overflow_error("concat: total length exceeds u32");
+    if (total_extern > static_cast<size_t>(UINT32_MAX))
+        throw std::overflow_error("concat: total arena bytes exceed 4 GB");
+    const uint32_t n = static_cast<uint32_t>(total);
+
+    constexpr size_t kSlotAlign = alignof(DrakenStringSlot);
+    const size_t struct_end =
+        (sizeof(DrakenStringArena) + kSlotAlign - 1u) & ~(kSlotAlign - 1u);
+    const size_t slots_bytes  = (n > 0u ? n : 1u) * sizeof(DrakenStringSlot);
+    const size_t arena_start  = struct_end + slots_bytes;
+    const size_t validity_start = arena_start + total_extern;
+
+    size_t validity_bytes = 0u;
+    if (any_null) {
+        const uint32_t bm = (n + 7u) / 8u;
+        const uint32_t padded = (bm + 7u) & ~7u;
+        validity_bytes = padded > 0u ? padded : 8u;
+    }
+    const size_t total_alloc = validity_start + validity_bytes;
+
+    uint8_t* block = static_cast<uint8_t*>(
+        draken_malloc(total_alloc > 0u ? total_alloc : sizeof(DrakenStringArena)));
+    if (!block) throw std::bad_alloc();
+    std::memset(block, 0, total_alloc > 0u ? total_alloc : sizeof(DrakenStringArena));
+    OwnedBuffer<void> data_buf(block);
+
+    DrakenStringArena* sa_out = reinterpret_cast<DrakenStringArena*>(block);
+    DrakenStringSlot*  slots  = reinterpret_cast<DrakenStringSlot*>(block + struct_end);
+    uint8_t* arena  = (total_extern > 0u) ? (block + arena_start) : nullptr;
+    uint8_t* bitmap = any_null ? (block + validity_start) : nullptr;
+
+    sa_out->slots = slots; sa_out->arena = arena;
+    sa_out->length = n; sa_out->arena_used = 0u; sa_out->arena_cap = total_extern;
+    sa_out->null_bitmap = nullptr; sa_out->owns_buffers = 0;
+    sa_out->type = type;
+    if (any_null) { std::memset(bitmap, 0xFF, validity_bytes); sa_out->null_bitmap = bitmap; }
+
+    uint32_t out = 0u;
+    for (const VectorOwner* p : parts) {
+        const DrakenVector& v = p->vec;
+        const DrakenStringArena* sa_in =
+            static_cast<const DrakenStringArena*>(v.data);
+        for (uint32_t i = 0u; i < v.length; ++i, ++out) {
+            if (!row_is_valid(v, i)) {
+                if (bitmap)
+                    bitmap[out >> 3] &= static_cast<uint8_t>(~(1u << (out & 7u)));
+                continue;
+            }
+            const DrakenStringSlot* src = &sa_in->slots[v.selection[i]];
+            if (str_is_inline(src)) {
+                slots[out] = *src;
+            } else {
+                const uint32_t slen = src->ext.length;
+                const uint32_t off  = static_cast<uint32_t>(sa_out->arena_used);
+                std::memcpy(arena + off, str_data(src, sa_in->arena), slen);
+                slots[out].ext.length       = slen;
+                slots[out].ext.prefix       = src->ext.prefix;
+                slots[out].ext.hash32       = src->ext.hash32;
+                slots[out].ext.arena_offset = off;
+                sa_out->arena_used += slen;
+            }
+        }
+    }
+
+    DrakenVector rv = draken_vector_from_dense(sa_out, n, type, bitmap);
+    return VectorOwner(rv, std::move(data_buf), OwnedBuffer<uint8_t>(nullptr));
+}
+
+static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts) {
+    if (parts.empty())
+        throw std::invalid_argument("concat: empty input");
+    const DrakenType type = parts[0]->vec.type;
+    const LogicalType* lt = parts[0]->logical_type;
+    for (const VectorOwner* p : parts)
+        if (p->vec.type != type)
+            throw std::invalid_argument("concat: all inputs must share one type");
+
+    if (is_varchar_family(type))
+        return concat_string(parts, type);
+    if (type == DRAKEN_BOOL)
+        return concat_bool(parts);
+    const size_t itemsize = concat_fixed_itemsize(type);
+    if (itemsize == 0u)
+        throw std::invalid_argument("concat: unsupported type");
+    return concat_fixed(parts, itemsize, type, lt);
 }
 
 // ---------------------------------------------------------------------------
@@ -5288,6 +5701,14 @@ NB_MODULE(draken_native, m) {
         "Build a constant-shape VARCHAR Vector (data_length==1, selection=zero-vector).\n"
         "value may be None (→ all-null constant).\n"
         "Raises TypeError if value is not str or None.");
+    m.def("vector_varbinary_from_constant",
+        [](nb::object value, uint32_t length) {
+            return make_varbinary_constant(value, length);
+        },
+        nb::arg("value").none(true), nb::arg("length"),
+        "Build a constant-shape VARBINARY Vector (data_length==1, selection=zero-vector).\n"
+        "value may be None (→ all-null constant).\n"
+        "Raises TypeError if value is not bytes or None.");
 
     // E.7 — NVARCHAR ingestion (opt-in UTF-8; codepoint-length ops).
     m.def("vector_from_nvarchar_sequence",
@@ -5306,6 +5727,31 @@ NB_MODULE(draken_native, m) {
         "Elements are opaque byte strings; to_pylist() returns Python bytes objects.\n"
         "LENGTH returns byte count. Character ops raise on VARBINARY.\n"
         "None elements become null rows.");
+
+    m.def("vector_string_family_from_bytes",
+        [](nb::list seq, int type_int) {
+            return make_bytes_from_sequence_typed(seq, static_cast<DrakenType>(type_int));
+        },
+        nb::arg("sequence"), nb::arg("type"),
+        "Build a string-family Vector from list[bytes | None] with an explicit type\n"
+        "tag (DRAKEN_VARCHAR / NVARCHAR / VARBINARY). Raw bytes, no decode — used to\n"
+        "carry bytes data under a known source type (e.g. MIN/MAX of VARCHAR).");
+
+    m.def("vector_concat",
+        [](nb::list vectors) -> VectorOwner {
+            const size_t n = vectors.size();
+            if (n == 0u)
+                throw std::invalid_argument("vector_concat: empty list");
+            std::vector<const VectorOwner*> parts;
+            parts.reserve(n);
+            for (size_t i = 0u; i < n; ++i)
+                parts.push_back(&nb::cast<const VectorOwner&>(vectors[i]));
+            return concat_owners(parts);
+        },
+        nb::arg("vectors"),
+        "Vertically concatenate N same-type Vectors into one dense Vector.\n"
+        "Buffer-level: no Python objects, no decode. Result type and logical_type\n"
+        "are taken from the first input. All inputs must share one type.");
 
     // D.3 — dict-encoded string ingestion.
     m.def("vector_from_string_dict_sequence",

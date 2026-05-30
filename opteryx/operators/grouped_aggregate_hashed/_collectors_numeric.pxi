@@ -827,9 +827,10 @@ cdef class MinMaxObjectCollector(BaseCollector):
     cdef vector[vector[uint8_t]] _values  # C-level string storage per group
     cdef vector[uint8_t] _seen
     cdef int8_t _direction    # +1 = MIN, -1 = MAX
+    cdef DrakenType _col_type # source column type, captured on first accumulate
 
     def __cinit__(self):
-        pass
+        self._col_type = DRAKEN_VARBINARY
 
     cdef void grow(self, int64_t new_count):
         while <int64_t>self._values.size() < new_count:
@@ -850,6 +851,9 @@ cdef class MinMaxObjectCollector(BaseCollector):
         cdef object v_obj
         cdef list col
         cdef vector[uint8_t]* cur_vec
+
+        # Preserve the source column type so finalize emits the same type.
+        self._col_type = vec.unified().type
 
         col = vec.to_pylist()
 
@@ -885,7 +889,6 @@ cdef class MinMaxObjectCollector(BaseCollector):
                 seen[si] = 1
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from draken.interop.vector_sequence import vector_from_sequence
         cdef list result = []
         cdef int64_t i
         cdef int64_t limit = min(<int64_t>self._values.size(), num_groups)
@@ -895,8 +898,9 @@ cdef class MinMaxObjectCollector(BaseCollector):
             if vec.empty():
                 result.append(None)
             else:
-                result.append(bytes(vec.data()[:vec.size()]).decode('utf-8'))
-        nb = vector_from_sequence(result, dtype="VARCHAR")
+                result.append(bytes(vec.data()[:vec.size()]))
+        # Emit with the source column's type (raw bytes, no decode).
+        nb = _draken_native.vector_string_family_from_bytes(result, <int>self._col_type)
         return _V(nb)
 
     cpdef BaseCollector _clone_empty(self):

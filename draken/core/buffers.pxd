@@ -53,7 +53,7 @@ cdef extern from "core/buffers.h":
     # Variable-width column (string/binary)
     ctypedef struct DrakenVarBuffer:
         uint8_t* data              # UTF-8 bytes
-        int32_t* offsets           # [N+1] entries
+        uint32_t* offsets          # [N+1] entries — unsigned, up to 4 GB
         uint8_t* null_bitmap       # optional
         size_t length
         DrakenType type
@@ -154,7 +154,7 @@ cdef inline DrakenVarBuffer* alloc_var_buffer(DrakenType dtype, size_t length, s
         raise MemoryError()
 
     # allocate offsets: length + 1
-    buf.offsets = <int32_t*> malloc((length + 1) * sizeof(int32_t))
+    buf.offsets = <uint32_t*> malloc((length + 1) * sizeof(uint32_t))
     if buf.offsets == NULL:
         free(buf)
         raise MemoryError()

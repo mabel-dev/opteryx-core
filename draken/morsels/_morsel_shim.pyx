@@ -2,7 +2,8 @@
 # Cython shim for draken.morsels.morsel — E.24 vtable bridge.
 
 from libc.stdint cimport int32_t, uint32_t, uint64_t
-from libc.stdlib cimport malloc, free
+from libc.stdlib cimport malloc, calloc, free
+from libc.string cimport memcpy
 
 from draken.morsels.morsel cimport Morsel
 from draken.vectors.vector cimport Vector
@@ -85,28 +86,40 @@ cdef class Morsel:
     def column_types(self):
         return [(<Vector>self._columns[i]).type for i in range(len(self._columns))]
 
-    def hash(self, col_names):
-        # Returns uint64_t[::1] row hashes for the given columns.
+    def hash(self, col_names=None, columns=None):
+        # Returns uint64_t[::1] row hashes for the given columns via the C++ path.
+        # col_names: list of column names (str or bytes), or None for all columns.
+        # columns=:  alias for col_names, accepted for call-site compatibility.
         from array import array as _array
         cdef Py_ssize_t n = self.num_rows
         if n == 0:
-            return _array('Q', [])
-        hashes = [0x9e3779b97f4a7c15] * n  # seed
-        for name in col_names:
-            if isinstance(name, str):
-                name = name.encode("utf-8")
-            vec = None
-            for i, col_name in enumerate(self._col_names):
-                if col_name == name:
-                    vec = <Vector>self._columns[i]
-                    break
-            if vec is None:
-                continue
-            col_hashes = vec._nb.hash()
-            for i in range(n):
-                # Mix: FNV-style combining
-                hashes[i] = ((hashes[i] ^ int(col_hashes[i])) * 0xbf58476d1ce4e5b9) & 0xFFFFFFFFFFFFFFFF
-        return _array('Q', hashes)
+            return _array('Q', b'')
+
+        if col_names is None:
+            col_names = columns  # may still be None → all columns
+
+        cdef int32_t n_cols = 0
+        cdef int32_t* col_indices = self._resolve_columns_to_indices(col_names, &n_cols)
+
+        # calloc zeroes the buffer — required for multi-column simd_mix_hash.
+        cdef uint64_t* buf = <uint64_t*>calloc(<size_t>n, sizeof(uint64_t))
+        if buf == NULL:
+            free(col_indices)
+            raise MemoryError()
+
+        cdef bint needs_gil
+        try:
+            needs_gil = self.c_hash(buf, col_indices, n_cols, n)
+        finally:
+            free(col_indices)
+
+        if needs_gil:
+            free(buf)
+            raise NotImplementedError("Morsel.hash: DRAKEN_ARRAY columns cannot be hashed via this path")
+
+        cdef bytes raw = (<const char*>buf)[:n * sizeof(uint64_t)]
+        free(buf)
+        return _array('Q', raw)
 
     def __str__(self):
         """Format morsel as an ASCII table for display."""
@@ -385,7 +398,17 @@ cdef class Morsel:
 
     def slice(self, Py_ssize_t offset=0, Py_ssize_t length=0, Py_ssize_t start=-1):
         cdef Py_ssize_t real_start = start if start >= 0 else offset
-        return self.take(range(real_start, real_start + length))
+        cdef Morsel result = _make_morsel()
+        result._col_names = list(self._col_names)
+        cdef int n = len(self._columns)
+        if n == 0:
+            result._zero_col_num_rows = length
+            return result
+        for i in range(n):
+            nb_sliced = (<Vector>self._columns[i])._nb.slice(<uint32_t>real_start, <uint32_t>length)
+            result._nb.append(nb_sliced)
+            result._columns.append(Vector(nb_sliced))
+        return result
 
     def copy(self, columns=None, mask=None):
         cdef Morsel result = _make_morsel()
@@ -427,43 +450,28 @@ cdef class Morsel:
 
     @classmethod
     def combine(cls, morsels):
-        """Vertical concatenation of multiple morsels with the same schema."""
+        """Vertical concatenation of multiple morsels with the same schema.
+
+        Native, buffer-level: each column's N nanobind vectors are concatenated
+        by `vector_concat` directly on the underlying buffers — no per-row Python
+        objects, no UTF-8 decode, type preserved exactly.
+        """
         if not morsels:
             return _make_morsel()
         first = <Morsel>morsels[0]
         if len(morsels) == 1:
             return first
-        from draken.draken_native import (
-            vector_from_sequence as _nb_int64,
-            vector_from_string_sequence as _nb_varchar,
-            vector_from_bool_sequence as _nb_bool,
-            vector_float64_from_sequence as _nb_float64,
-            vector_timestamp_from_sequence as _nb_timestamp,
-            vector_date32_from_sequence as _nb_date32,
-        )
-        _TYPE_FACTORIES = {
-            "INT8": _nb_int64, "INT16": _nb_int64, "INT32": _nb_int64, "INT64": _nb_int64,
-            "FLOAT32": _nb_float64, "FLOAT64": _nb_float64,
-            "BOOL": _nb_bool,
-            "VARCHAR": _nb_varchar, "NVARCHAR": _nb_varchar, "VARBINARY": _nb_varchar, "DICTIONARY": _nb_varchar,
-            "TIMESTAMP64": _nb_timestamp,
-            "DATE32": _nb_date32,
-        }
+        from draken.draken_native import vector_concat as _nb_concat
         cdef Morsel result = _make_morsel()
         result._col_names = list(first._col_names)
         cdef int ncols = len(first._columns)
+        cdef int nmorsels = len(morsels)
         for col_idx in range(ncols):
-            combined_data = []
-            for m in morsels:
-                combined_data.extend((<Vector>(<Morsel>m)._columns[col_idx])._nb.to_pylist())
-            type_name = (<Vector>first._columns[col_idx]).type.name
-            factory = _TYPE_FACTORIES.get(type_name)
-            if factory is None:
-                raise NotImplementedError(f"Morsel.combine: no factory for type {type_name!r}")
-            if type_name == "TIMESTAMP64":
-                nb_v = factory(combined_data, "us")
-            else:
-                nb_v = factory(combined_data)
+            col_parts = [
+                (<Vector>(<Morsel>morsels[mi])._columns[col_idx])._nb
+                for mi in range(nmorsels)
+            ]
+            nb_v = _nb_concat(col_parts)
             result._nb.append(nb_v)
             result._columns.append(Vector(nb_v))
         return result

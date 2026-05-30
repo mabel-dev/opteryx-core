@@ -18,6 +18,7 @@ from draken.core.buffers cimport (
     DRAKEN_FLOAT64,
     DRAKEN_VARCHAR,
     DRAKEN_NVARCHAR,
+    DRAKEN_VARBINARY,
     DRAKEN_DECIMAL,
 )
 
@@ -229,7 +230,7 @@ cpdef void resolve_deferred_collectors(
         col_name = group_columns[ki]
         vec = morsel.column(col_name)
         t = vec.unified().type
-        if t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR:
+        if t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR or t == DRAKEN_VARBINARY:
             key_kinds[ki] = KEY_MULTI_ENCODED_STRING
         else:
             key_kinds[ki] = KEY_MULTI_FIXED_INT

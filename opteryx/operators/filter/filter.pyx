@@ -124,8 +124,14 @@ cdef Vector _build_constant_vector(Vector cur, object value, Py_ssize_t length):
     if t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR:
         if not isinstance(value, (str, bytes)):
             return None
-        return Vector(_draken_native.vector_varchar_from_constant(
-            value if isinstance(value, str) else (<bytes>value).decode("utf-8"), length))
+        # VARCHAR carries raw bytes; the ctor stores str/bytes verbatim (no decode).
+        return Vector(_draken_native.vector_varchar_from_constant(value, length))
+    if t == DRAKEN_VARBINARY:
+        if not isinstance(value, (str, bytes)):
+            return None
+        if isinstance(value, str):
+            value = value.encode()
+        return Vector(_draken_native.vector_varbinary_from_constant(value, length))
     return None
 
 

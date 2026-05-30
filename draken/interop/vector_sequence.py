@@ -63,6 +63,9 @@ _DTYPE_DISPATCH = {
     # Strings
     "VARCHAR": _draken_native.vector_from_string_sequence,
     "STRING": _draken_native.vector_from_string_sequence,
+    # Bytes
+    "VARBINARY": _draken_native.vector_from_bytes_sequence,
+    "BLOB": _draken_native.vector_from_bytes_sequence,
     # Booleans
     "BOOLEAN": _draken_native.vector_from_bool_sequence,
     "BOOL": _draken_native.vector_from_bool_sequence,

@@ -1,6 +1,6 @@
 [project]
 name = "opteryx_core"
-version = "0.7.8"
+version = "notset"
 description = "Opteryx Query Engine"
 requires-python = '>=3.13'
 readme = {file = "README.md", content-type = "text/markdown"}

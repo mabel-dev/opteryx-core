@@ -226,6 +226,29 @@ PyObject* draken_vector_own_array(
 PyObject* draken_vector_own_timestamp(
     void* data, uint8_t* validity, uint32_t length, const char* unit_str);
 
+// draken_arrow_varlen_to_string_block — Arrow varlen (data + offsets + nulls) →
+// German-string storage. PURE buffer work, no Python: builds and returns a
+// draken_malloc'd consolidated arena block [DrakenStringArena | slots | arena]
+// and, via *out_validity, a SEPARATE draken_malloc'd validity bitmap (or NULL
+// when all-valid). No UTF-8 decode — raw bytes preserved; `type` tag carried.
+//
+// Both returned buffers are draken_malloc'd and intended to be handed to
+// draken_vector_own_raw (via from_decoded) which assumes ownership. The block
+// does NOT embed validity, so own_raw's separate-validity contract holds.
+//
+// Parameters:
+//   data    — contiguous value bytes; row i spans [offsets[i], offsets[i+1]).
+//   offsets — int32_t[length + 1] start offsets (Arrow convention).
+//   nulls   — 1-bit-per-row validity bitmap (bit set = valid), or NULL = all valid.
+//   length  — logical row count.
+//   type    — DRAKEN_VARCHAR, DRAKEN_NVARCHAR, or DRAKEN_VARBINARY.
+//   out_validity — receives the separate validity bitmap (NULL if all-valid).
+//
+// Returns the arena block pointer, or NULL on allocation failure.
+void* draken_arrow_varlen_to_string_block(
+    const uint8_t* data, const uint32_t* offsets, const uint8_t* nulls,
+    uint32_t length, DrakenType type, uint8_t** out_validity);
+
 // draken_vecresult_own_c — C-linkage trampoline over draken_vector_own.
 //
 // Phase 9c: the expression executor (Cython, compiled as C++) needs to fold a

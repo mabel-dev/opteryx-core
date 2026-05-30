@@ -127,9 +127,15 @@ def _typed_constant_vector(value, length: int, schema_column):
             None if is_null else float(value), length
         )
 
-    if target_type in (OrsoTypes.VARCHAR, OrsoTypes.BLOB):
-        if not is_null and isinstance(value, bytes):
-            value = value.decode("utf-8")
+    if target_type == OrsoTypes.BLOB:
+        # Explicit binary: opaque bytes, VARBINARY tag.
+        return _draken_native_expr.vector_varbinary_from_constant(
+            None if is_null else value, length
+        )
+
+    if target_type == OrsoTypes.VARCHAR:
+        # VARCHAR carries raw bytes; the constant ctor stores str/bytes verbatim
+        # (no decode), so non-UTF-8 literal data is preserved.
         return _draken_native_expr.vector_varchar_from_constant(
             None if is_null else value, length
         )

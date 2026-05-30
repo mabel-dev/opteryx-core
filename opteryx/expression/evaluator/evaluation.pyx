@@ -137,7 +137,8 @@ cdef Vector _scalar_to_draken_constant(object value, Py_ssize_t n):
     if isinstance(value, str):
         return Vector(_draken_native.vector_varchar_from_constant(value, n))
     if isinstance(value, bytes):
-        return Vector(_draken_native.vector_varchar_from_constant(value.decode("utf-8", "replace"), n))
+        # VARCHAR carries raw bytes; no decode (the constant ctor stores verbatim).
+        return Vector(_draken_native.vector_varchar_from_constant(value, n))
     if isinstance(value, _decimal_eval.Decimal):
         sign, digits, exponent = value.as_tuple()
         scale = max(0, -int(exponent))

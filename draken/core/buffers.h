@@ -81,7 +81,9 @@ typedef struct {
 
 typedef struct {
     uint8_t* data;            // UTF-8 bytes
-    int32_t* offsets;         // [N+1] entries
+    uint32_t* offsets;        // [N+1] entries — unsigned: addresses up to 4 GB
+                              // of accumulated bytes (matches the German-string
+                              // arena's own uint32 offset cap).
     uint8_t* null_bitmap;     // optional
     size_t length;
     DrakenType type;

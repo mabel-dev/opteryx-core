@@ -2038,6 +2038,17 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               if (decoded_row_mask[i]) o.push_back(result.boolean_values[i]);
             result.boolean_values = std::move(o);
           }
+
+          // Filter string_values (plain byte_array — high-cardinality columns that
+          // fell out of dictionary encoding into dense strings). Without this they
+          // slip through unfiltered, leaving the column at total_decoded length
+          // while the engine sees num_rows = K.
+          if (!result.string_values.empty()) {
+            std::vector<std::string> o; o.reserve(K);
+            for (size_t i = 0; i < std::min((size_t)result.string_values.size(), mask_len); ++i)
+              if (decoded_row_mask[i]) o.push_back(std::move(result.string_values[i]));
+            result.string_values = std::move(o);
+          }
         } else {
           // Nullable: use def_levels to map rows → value positions.
           // Values in the stream correspond only to non-null rows.
@@ -2048,6 +2059,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           const bool have_f64   = !result.float64_values.empty();
           const bool have_dict  = !result.dict_indices.empty();
           const bool have_bool  = !result.boolean_values.empty();
+          const bool have_str   = !result.string_values.empty();
 
           std::vector<int32_t> o_i32;
           std::vector<int64_t> o_i64;
@@ -2055,6 +2067,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           std::vector<double>  o_f64;
           std::vector<int32_t> o_dict;
           std::vector<uint8_t> o_bool;
+          std::vector<std::string> o_str;
 
           int32_t val_idx = 0;
           for (int32_t row_i = 0; row_i < total_decoded; ++row_i) {
@@ -2075,6 +2088,8 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                   o_dict.push_back(result.dict_indices[val_idx]);
                 if (have_bool && val_idx < (int32_t)result.boolean_values.size())
                   o_bool.push_back(result.boolean_values[val_idx]);
+                if (have_str  && val_idx < (int32_t)result.string_values.size())
+                  o_str.push_back(std::move(result.string_values[val_idx]));
               }
               ++val_idx;
             }
@@ -2085,6 +2100,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           if (have_f64)  result.float64_values = std::move(o_f64);
           if (have_dict) result.dict_indices   = std::move(o_dict);
           if (have_bool) result.boolean_values = std::move(o_bool);
+          if (have_str)  result.string_values  = std::move(o_str);
         }
 
         // Filter def_levels to selected rows (valid_bits is built from this below).

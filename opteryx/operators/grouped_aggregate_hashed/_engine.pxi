@@ -24,6 +24,7 @@ from libc.stddef cimport size_t
 from libcpp.vector cimport vector
 
 from draken.morsels.morsel cimport Morsel
+from draken.core.buffers cimport DrakenType, DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY
 
 
 cdef extern from "carchar_index.hpp" namespace "opteryx::carchar":
@@ -177,6 +178,17 @@ cdef class GroupHashEngine:
             self._collectors, morsel, self._group_columns, self._key_kinds
         )
         self._key_store = KeyStore(self._group_columns, self._key_kinds)
+        # Set the actual DrakenType for each string key column so the key store
+        # reconstructs VARCHAR as str (via vector_from_string_sequence) and
+        # VARBINARY as bytes (via vector_from_bytes_sequence).
+        cdef Py_ssize_t _ki
+        cdef DrakenType _col_type
+        cdef int _col_type_int
+        for _ki in range(<Py_ssize_t>len(self._group_columns)):
+            if self._key_kinds[_ki] == KEY_MULTI_ENCODED_STRING:
+                _col_type_int = morsel.column(self._group_columns[_ki])._nb.type.value
+                _col_type = <DrakenType>_col_type_int
+                self._key_store.set_string_col_type(_ki, _col_type)
         if self._use_parvi:
             # Small-map fast path: no heap hash table, single SIMD group.
             # Carchar is allocated lazily on overflow (see _promote_parvi_to_carchar).

@@ -23,7 +23,7 @@ from draken.core.buffers cimport DrakenStringArena, DrakenStringSlot
 from draken.core.buffers cimport str_length, str_data
 from draken.core.buffers cimport STR_INLINE_MAX
 from draken.core.buffers cimport str_init_null, str_init_inline, str_init_extern
-from draken.core.buffers cimport DRAKEN_INT64, DRAKEN_VARCHAR, DRAKEN_VARBINARY
+from draken.core.buffers cimport DRAKEN_INT64, DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY
 from draken.core.fixed_vector cimport alloc_fixed_buffer, free_fixed_buffer
 from draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
 from draken.vectors.bool_vector cimport BoolVector
@@ -32,6 +32,15 @@ from draken.vectors.vector cimport from_decoded as _ks_vector_from_decoded
 cdef extern from "core/alloc.h" nogil:
     void* draken_malloc(size_t n) nogil
     void  draken_free(void* p) nogil
+
+cdef extern from "core/draken_bridge.h":
+    # Arrow varlen (data + offsets + nulls) → draken_malloc'd German-string block
+    # plus a separate validity bitmap (via out param). Pure buffer work, no decode,
+    # raw bytes preserved, type tag carried. Both buffers are owned by the Vector
+    # built from them via from_decoded. Returns NULL on allocation failure.
+    void* draken_arrow_varlen_to_string_block(
+        const uint8_t* data, const uint32_t* offsets, const uint8_t* nulls,
+        uint32_t length, DrakenType type, uint8_t** out_validity) except NULL
 
 
 # ---------------------------------------------------------------------------
@@ -109,28 +118,18 @@ cdef Vector _ks_consume_int64_buffer(DrakenFixedBuffer* buf) except *:
 
 
 cdef Vector _wrap_string_buffer(DrakenVarBuffer* buf) except *:
-    """Convert accumulated DrakenVarBuffer bytes to a Draken VARBINARY Vector.
+    """Convert the accumulated Arrow-varlen key buffer to a Draken Vector.
 
-    Called once from the finalize path (reconstruct_vectors); Python list
-    conversion cost is acceptable here.  Keys are raw bytes throughout —
-    no UTF-8 decode; callers that need text (NVARCHAR) must handle that separately.
+    Called once from the finalize path (reconstruct_vectors). The conversion is
+    pure buffer work in C (no Python objects, no UTF-8 decode): raw key bytes go
+    into German-string storage with the buffer's own type tag preserved. The
+    block + validity are handed to from_decoded, which assumes ownership.
     """
-    cdef Py_ssize_t row_count = <Py_ssize_t>buf.length
-    cdef const uint8_t* src_data = <const uint8_t*>buf.data
-    cdef const int32_t* src_offsets = buf.offsets
-    cdef uint8_t* src_nulls = buf.null_bitmap
-    cdef list result = []
-    cdef Py_ssize_t i, off, slen
-
-    for i in range(row_count):
-        off = src_offsets[i]
-        slen = src_offsets[i + 1] - off
-        if src_nulls != NULL and not ((src_nulls[i >> 3] >> (i & 7)) & 1):
-            result.append(None)
-        else:
-            result.append((<char*>src_data)[off:off + slen])
-
-    return Vector(_draken_native.vector_from_bytes_sequence(result))
+    cdef uint8_t* validity = NULL
+    cdef void* block = draken_arrow_varlen_to_string_block(
+        <const uint8_t*>buf.data, buf.offsets, buf.null_bitmap,
+        <uint32_t>buf.length, buf.type, &validity)
+    return _ks_vector_from_decoded(block, validity, <uint32_t>buf.length, buf.type)
 
 
 cdef inline Py_ssize_t _ks_bitmap_nbytes(Py_ssize_t length) noexcept nogil:
@@ -172,14 +171,14 @@ cdef inline void _ks_ensure_string_capacity(
     Py_ssize_t required_bytes,
     Py_ssize_t* bytes_capacity_ref = NULL,
 ) except *:
-    cdef int32_t* new_offsets
+    cdef uint32_t* new_offsets
     cdef uint8_t* new_data
     cdef Py_ssize_t new_rows_cap
     cdef Py_ssize_t new_bytes_cap
 
     if required_rows > current_rows:
         new_rows_cap = _ks_growth_target(current_rows, required_rows, 8)
-        new_offsets = <int32_t*>realloc(buf.offsets, (new_rows_cap + 1) * sizeof(int32_t))
+        new_offsets = <uint32_t*>realloc(buf.offsets, (new_rows_cap + 1) * sizeof(uint32_t))
         if new_offsets == NULL:
             raise MemoryError()
         buf.offsets = new_offsets
@@ -329,7 +328,7 @@ cdef inline void _ks_append_single_string_direct(
         _ks_ensure_bitmap_capacity(null_bitmap_ref, row_idx, row_idx + 1)
         _ks_bitmap_clear(null_bitmap_ref[0], row_idx)
 
-    buf.offsets[row_idx + 1] = <int32_t>bytes_used_ref[0]
+    buf.offsets[row_idx + 1] = <uint32_t>bytes_used_ref[0]
     row_count_ref[0] = row_idx + 1
     buf.null_bitmap = null_bitmap_ref[0]
 
@@ -532,7 +531,7 @@ cdef inline void _ks_store_string_bulk_dict(
             if null_bitmap_ref[0] != NULL:
                 _ks_bitmap_set(null_bitmap_ref[0], out_row)
 
-        buf.offsets[out_row + 1] = <int32_t>bytes_used
+        buf.offsets[out_row + 1] = <uint32_t>bytes_used
 
     row_count_ref[0] = required_rows
     bytes_used_ref[0] = bytes_used
@@ -633,7 +632,7 @@ cdef class KeyStore:
 
         if self._n_cols == 1 and len(key_kinds) == 1:
             if key_kinds[0] == KEY_MULTI_ENCODED_STRING:
-                self._single_string_buf = alloc_var_buffer(DRAKEN_VARBINARY, 0, 0)
+                self._single_string_buf = alloc_var_buffer(DRAKEN_VARCHAR, 0, 0)
                 self._single_string_buf.offsets[0] = 0
                 self._single_string_direct = True
             else:
@@ -648,7 +647,7 @@ cdef class KeyStore:
                 if key_kinds[i] == KEY_MULTI_ENCODED_STRING:
                     self._multi_storage_kind[i] = _DISPATCH_STRING
                     self._multi_storage_slot[i] = string_slot
-                    self._multi_string_bufs.push_back(alloc_var_buffer(DRAKEN_VARBINARY, 0, 0))
+                    self._multi_string_bufs.push_back(alloc_var_buffer(DRAKEN_VARCHAR, 0, 0))
                     self._multi_string_bufs[string_slot].offsets[0] = 0
                     self._multi_string_nulls.push_back(NULL)
                     self._multi_string_rows.push_back(0)
@@ -661,6 +660,22 @@ cdef class KeyStore:
                     self._multi_fixed_nulls.push_back(NULL)
                     self._multi_fixed_rows.push_back(0)
                     fixed_slot += 1
+
+    def set_string_col_type(self, Py_ssize_t col_idx, DrakenType draken_type):
+        """Update the DrakenType tag on the var buffer for string key column col_idx.
+
+        Called from the factory once the actual column type (VARCHAR vs VARBINARY)
+        is known from the first morsel.  The buffer stores raw bytes regardless of
+        type; only the tag changes so _wrap_string_buffer produces the right output.
+        """
+        cdef int storage_slot
+        if self._n_cols == 1:
+            if self._single_string_buf != NULL:
+                self._single_string_buf.type = draken_type
+        else:
+            storage_slot = self._multi_storage_slot[col_idx]
+            if storage_slot < <int>self._multi_string_bufs.size():
+                self._multi_string_bufs[storage_slot].type = draken_type
 
     def __dealloc__(self):
         cdef Py_ssize_t i
@@ -939,7 +954,7 @@ cdef class KeyStore:
                     self._single_string_buf.length = <size_t>self._single_string_rows
                     self._single_string_buf.null_bitmap = self._single_string_nulls
                     out_vecs.append(_wrap_string_buffer(self._single_string_buf))
-                    self._single_string_buf = alloc_var_buffer(DRAKEN_VARBINARY, 0, 0)
+                    self._single_string_buf = alloc_var_buffer(DRAKEN_VARCHAR, 0, 0)
                     self._single_string_buf.offsets[0] = 0
                     self._single_string_nulls = NULL
                     self._single_string_rows = 0
@@ -991,7 +1006,7 @@ cdef class KeyStore:
                     _string_buf.null_bitmap = self._multi_string_nulls[storage_slot]
                     out_vecs.append(_wrap_string_buffer(_string_buf))
 
-                    self._multi_string_bufs[storage_slot] = alloc_var_buffer(DRAKEN_VARBINARY, 0, 0)
+                    self._multi_string_bufs[storage_slot] = alloc_var_buffer(DRAKEN_VARCHAR, 0, 0)
                     self._multi_string_bufs[storage_slot].offsets[0] = 0
                     self._multi_string_nulls[storage_slot] = NULL
                     self._multi_string_rows[storage_slot] = 0

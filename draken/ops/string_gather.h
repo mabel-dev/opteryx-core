@@ -278,16 +278,23 @@ static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_
     const uint8_t*           src_v = v.validity;
 
     // Phase 1: scan [start, start+n) to compute output arena size.
-    std::vector<uint32_t> new_off(v.data_length, UINT32_MAX);
+    // new_off is keyed by slot code; capacity reserved to n (at most n unique
+    // codes in a slice of n rows). Using a hash map avoids the O(data_length)
+    // allocation and initialisation of the old array approach.
+    std::unordered_map<uint32_t, uint32_t> new_off;
+    new_off.reserve(n);
+    std::vector<uint32_t> seen_codes;
+    seen_codes.reserve(n);
     size_t total_arena = 0u;
 
     for (uint32_t i = 0; i < n; ++i) {
         const uint32_t src_log = start + i;
         if (!sg_val_row(src_v, src_log)) continue;
         const uint32_t code = v.selection[src_log];
-        if (!str_is_inline(&src_s[code]) && new_off[code] == UINT32_MAX) {
+        if (!str_is_inline(&src_s[code]) && new_off.find(code) == new_off.end()) {
             new_off[code] = static_cast<uint32_t>(total_arena);
             total_arena  += src_s[code].ext.length;
+            seen_codes.push_back(code);
         }
     }
     if (total_arena > static_cast<size_t>(UINT32_MAX))
@@ -298,9 +305,10 @@ static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_
     SgOwned<void> bg(sb.block);
 
     // Phase 3: copy arena bytes for each referenced unique long slot.
-    for (uint32_t k = 0; k < v.data_length; ++k) {
-        if (!str_is_inline(&src_s[k]) && new_off[k] != UINT32_MAX &&
-            sb.arena_bytes != nullptr) {
+    // Iterates only the codes seen in Phase 1 — O(unique long codes in slice),
+    // not O(data_length).
+    if (sb.arena_bytes != nullptr) {
+        for (uint32_t k : seen_codes) {
             std::memcpy(sb.arena_bytes + new_off[k],
                         src_a + src_s[k].ext.arena_offset,
                         src_s[k].ext.length);
