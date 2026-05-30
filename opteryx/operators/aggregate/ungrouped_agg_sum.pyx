@@ -51,16 +51,7 @@ cdef class SumInt64Aggregate(UngroupedAggregate):
         # Vector.sum() cpdef returns a Python int so this stays in Python
         # space and never truncates silently.
         if self._col_type in (_VTYPE_INT64, _VTYPE_INT8, _VTYPE_INT16, _VTYPE_INT32):
-            # Use a safe Python-side sum to avoid relying on the C int64
-            # reduction (which may overflow UB under ASAN). This is slower
-            # but safe for diagnostics: materialise the vector to Python and
-            # sum skipping nulls.
-            vals = raw.to_pylist()
-            s = 0
-            for v in vals:
-                if v is not None:
-                    s += int(v)
-            self._total_py = self._total_py + s
+            self._total_py = self._total_py + (<Vector>raw).sum()
             self._seen = True
             return
 

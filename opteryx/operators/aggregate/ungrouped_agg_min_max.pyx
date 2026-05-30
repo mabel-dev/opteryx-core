@@ -336,11 +336,10 @@ cdef class MinBytesAggregate(UngroupedAggregate):
                         self._result = ptr_b[:len_b]
             return
 
-        for val_py in raw.to_pylist():
-            if val_py is not None:
-                b = val_py if isinstance(val_py, bytes) else str(val_py).encode()
-                if self._result is None or b < self._result:
-                    self._result = b
+        raise TypeError(
+            f"MinBytesAggregate: unsupported column type {self._col_type} "
+            f"for column {self.column_name!r}"
+        )
 
     cdef int64_t get_result_i64(self) noexcept:
         return 0
@@ -411,11 +410,10 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
                         self._result = ptr_b[:len_b]
             return
 
-        for val_py in raw.to_pylist():
-            if val_py is not None:
-                b = val_py if isinstance(val_py, bytes) else str(val_py).encode()
-                if self._result is None or b > self._result:
-                    self._result = b
+        raise TypeError(
+            f"MaxBytesAggregate: unsupported column type {self._col_type} "
+            f"for column {self.column_name!r}"
+        )
 
     cdef int64_t get_result_i64(self) noexcept:
         return 0

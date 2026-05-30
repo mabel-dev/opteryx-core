@@ -69,78 +69,23 @@ def _count_null_bitmap(const uint8_t* bitmap, Py_ssize_t nrows) -> int:
 
 
 def _vector_null_count(vector) -> int:
-    cdef Vector typed_vector
-    try:
-        return int(vector.null_count)
-    except Exception:
-        try:
-            typed_vector = vector
-            return _count_null_bitmap(
-                typed_vector.null_bitmap_ptr(),
-                len(typed_vector),
-            )
-        except Exception:
-            return sum(1 for value in vector.to_pylist() if value is None)
-
-
-def _vector_valid_values(vector):
-    return [value for value in vector.to_pylist() if value is not None]
+    cdef Vector typed_vector = <Vector>vector
+    return _count_null_bitmap(typed_vector.null_bitmap_ptr(), len(typed_vector))
 
 
 def _vector_sum(vector):
-    valid_count = len(vector) - _vector_null_count(vector)
-    if valid_count == 0:
-        return None
-
-    # Try to use native sum() method if available (fast path for numeric types)
-    if hasattr(vector, 'sum'):
-        try:
-            return vector.sum()
-        except (ValueError, NotImplementedError):
-            # NotImplementedError: aggregate not supported for this type
-            return None
-
-    # Fallback to Python materialization
-    values = _vector_valid_values(vector)
-    return sum(values) if values else None
+    cdef Vector typed_vector = <Vector>vector
+    return typed_vector.sum()
 
 
 def _vector_min(vector):
-    valid_count = len(vector) - _vector_null_count(vector)
-    if valid_count == 0:
-        return None
-
-    # Try to use native min() method if available
-    if hasattr(vector, 'min'):
-        try:
-            return vector.min()
-        except (ValueError, NotImplementedError):
-            # ValueError: empty or all-null column
-            # NotImplementedError: aggregate not supported for this type
-            return None
-
-    # Fallback to Python materialization
-    values = _vector_valid_values(vector)
-    return min(values) if values else None
+    cdef Vector typed_vector = <Vector>vector
+    return typed_vector.min()
 
 
 def _vector_max(vector):
-    valid_count = len(vector) - _vector_null_count(vector)
-    if valid_count == 0:
-        return None
-
-    # Try to use native max() method if available
-    if hasattr(vector, 'max'):
-        try:
-            return vector.max()
-        except (ValueError, NotImplementedError):
-            # ValueError: empty or all-null column
-            # NotImplementedError: aggregate not supported for this type
-            return None
-
-    # Fallback to Python materialization
-    values = _vector_valid_values(vector)
-    return max(values) if values else None
+    cdef Vector typed_vector = <Vector>vector
+    return typed_vector.max()
 
 
 def _parameter_identity(parameter):
