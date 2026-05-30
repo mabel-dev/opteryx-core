@@ -135,6 +135,42 @@ PyObject* draken_vector_own_string(
     uint32_t          length,
     DrakenType        type);   // DRAKEN_VARCHAR | DRAKEN_NVARCHAR | DRAKEN_VARBINARY
 
+// draken_vector_own_string_dict — wrap a value array + caller selection in a string Vector.
+//
+// Same unified DrakenVector as draken_vector_own_string; the only difference is that
+// the caller supplies a value array of `data_length` unique slots plus a `codes`
+// selection of `length` entries, instead of forcing the identity (dense) selection.
+// Access remains the uniform value_array[selection[i]] path — there is no distinct
+// "dictionary" type; data_length < length is merely an observable property of a
+// column whose source was dictionary/RLE/constant encoded.
+//
+// Parameters:
+//   slots       — DrakenStringSlot[data_length]: one slot per UNIQUE value. Populated
+//                 with draken_build_string_slot (or zeroed for an unused entry).
+//   arena       — arena bytes backing long-form slots. May be NULL when arena_len == 0.
+//   arena_len   — number of valid bytes in arena (may be 0).
+//   codes       — uint32_t[length]: per-row index into the value array (the selection).
+//   data_length — number of unique values (value-array length, K).
+//   validity    — 1-bit-per-logical-row null bitmap (Arrow convention), or NULL.
+//   length      — logical row count (N).
+//   type        — DRAKEN_VARCHAR, DRAKEN_NVARCHAR, or DRAKEN_VARBINARY.
+//
+// ALL non-NULL buffers (slots, arena, codes, validity) MUST be draken_malloc'd;
+// ownership of every one is transferred unconditionally on call entry — the caller
+// MUST NOT free them after this call, whether it succeeds or fails.
+//
+// Returns a NEW reference to a Python Vector on success.
+// Returns NULL with a Python exception set on any failure.
+PyObject* draken_vector_own_string_dict(
+    DrakenStringSlot* slots,
+    uint8_t*          arena,
+    size_t            arena_len,
+    uint32_t*         codes,
+    uint32_t          data_length,
+    uint8_t*          validity,
+    uint32_t          length,
+    DrakenType        type);   // DRAKEN_VARCHAR | DRAKEN_NVARCHAR | DRAKEN_VARBINARY
+
 // draken_vector_own_array — wrap hand-allocated buffers in a new DRAKEN_ARRAY[string] Vector.
 //
 // Constructs a DRAKEN_ARRAY whose child is a string-family Vector (VARCHAR, NVARCHAR,

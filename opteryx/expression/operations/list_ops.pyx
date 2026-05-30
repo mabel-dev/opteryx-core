@@ -23,27 +23,15 @@ cdef set _coerce_value_set(value):
     return set(value)
 
 
-cpdef in_list(arr, value, bint dict_candidate=False):
+cpdef in_list(arr, value):
     """Vectorised InList: True where `arr[i]` is in `value`."""
-    if dict_candidate:
-        fast = dictionary_fastpath(arr, "InList", value)
-        if fast is not None:
-            record_dict_fastpath_hit()
-            return fast
-        raise RuntimeError("Dictionary fastpath failed for `InList`.")
 
     cdef set values = _coerce_value_set(value)
     return _vector_in_list(arr, values)
 
 
-cpdef not_in_list(arr, value, bint dict_candidate=False):
+cpdef not_in_list(arr, value):
     """Vectorised NotInList: True where `arr[i]` is NOT in `value`."""
-    if dict_candidate:
-        fast = dictionary_fastpath(arr, "NotInList", value)
-        if fast is not None:
-            record_dict_fastpath_hit()
-            return fast
-        raise RuntimeError("Dictionary fastpath failed for `NotInList`.")
 
     cdef set values = _coerce_value_set(value)
     return _vector_in_list(arr, values, True)

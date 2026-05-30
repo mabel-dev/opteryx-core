@@ -38,12 +38,9 @@ from opteryx.types._datetime_conversion import (
     timestamp_to_int64_us,
 )
 
-# Leaf includes — order matters: telemetry has no intra-package dependencies,
-# fastpath_dictionary uses telemetry, and the operator wrappers
-# (comparisons / list_ops / string_matching) rely on the fastpath helpers.
-# array_ops and special_ops are independent and follow.
-include "fastpath_telemetry.pyx"
-include "fastpath_dictionary.pyx"
+# Leaf includes — the operator wrappers (comparisons / list_ops /
+# string_matching) route through the uniform Draken vector path. array_ops and
+# special_ops are independent and follow.
 include "comparisons.pyx"
 include "list_ops.pyx"
 include "string_matching.pyx"
@@ -74,16 +71,6 @@ _SKIP_COMPRESSION_OPS = frozenset(
         "ArrayContainsAll",
     )
 )
-
-
-def reset_dict_expr_telemetry():
-    """Reset telemetry counters."""
-    reset_fastpath_telemetry()
-
-
-def get_dict_expr_telemetry():
-    """Get telemetry snapshot."""
-    return get_fastpath_telemetry()
 
 
 def _coerce_temporal_scalar(value, source_type, target_type):
@@ -231,48 +218,32 @@ def _inner_filter_operations(arr, operator, value):
         except TypeError:
             pass
 
-    dict_candidate = has_dictionary_candidate(raw_arr)
-
-    # InStr fast path
+    # InStr — uniform substring match via the Draken vector kernel.
     if operator in ("InStr", "NotInStr", "IInStr", "NotIInStr"):
         ignore_case = operator in ("IInStr", "NotIInStr")
         negate = operator in ("NotInStr", "NotIInStr")
         raw_value = value[0] if hasattr(value, "__len__") and len(value) == 1 else value
         needle = raw_value if isinstance(raw_value, bytes) else str(raw_value).encode("utf-8")
-
-        if dict_candidate:
-            fast = dictionary_fastpath(raw_arr, operator, raw_value)
-            if fast is not None:
-                record_dict_fastpath_hit()
-                return fast
-
         result = raw_arr.contains(needle, ignore_case=ignore_case)
         return result.not_vector() if negate else result
 
-    # Dictionary-encoded fastpath
-    if dict_candidate and supports_dictionary_fastpath(operator):
-        fast = dictionary_fastpath(raw_arr, operator, value)
-        if fast is not None:
-            record_dict_fastpath_hit()
-            return fast
-
     # Dispatch by operator type — symbols are in-scope via the leaf includes.
     if operator in ("Eq", "Equal"):
-        return equal(raw_arr, value, dict_candidate=dict_candidate)
+        return equal(raw_arr, value)
     elif operator in ("NotEq", "NotEqual"):
-        return not_equal(raw_arr, value, dict_candidate=dict_candidate)
+        return not_equal(raw_arr, value)
     elif operator in ("Lt", "LessThan"):
-        return less_than(raw_arr, value, dict_candidate=dict_candidate)
+        return less_than(raw_arr, value)
     elif operator in ("Gt", "GreaterThan"):
-        return greater_than(raw_arr, value, dict_candidate=dict_candidate)
+        return greater_than(raw_arr, value)
     elif operator in ("LtEq", "LessThanOrEqual"):
-        return less_than_or_equal(raw_arr, value, dict_candidate=dict_candidate)
+        return less_than_or_equal(raw_arr, value)
     elif operator in ("GtEq", "GreaterThanOrEqual"):
-        return greater_than_or_equal(raw_arr, value, dict_candidate=dict_candidate)
+        return greater_than_or_equal(raw_arr, value)
     elif operator in ("InList",):
-        return in_list(raw_arr, value, dict_candidate=dict_candidate)
+        return in_list(raw_arr, value)
     elif operator in ("NotInList",):
-        return not_in_list(raw_arr, value, dict_candidate=dict_candidate)
+        return not_in_list(raw_arr, value)
     elif operator.startswith("Like"):
         return like_match(raw_arr, value, operator)
     elif operator.startswith("RLike"):

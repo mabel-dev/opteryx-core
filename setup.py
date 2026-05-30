@@ -96,50 +96,14 @@ class build_ext(build_ext_orig):
             else:
                 print(f"Successfully compiled yyjson to {yyjson_obj}")
 
-        # Build mimalloc as a shared library so all extensions share one heap.
-        # Statically linking the same .o into every .so gave each extension its
-        # own mimalloc heap; cross-extension draken_malloc/draken_free pairs then
-        # triggered undefined behaviour (NON-MIMALLOC-POINTER frees).
-        # Release/secure-off for perf; process-wide malloc override stays OFF.
-        mimalloc_src = "third_party/mimalloc/src/static.c"
-        mimalloc_lib = MIMALLOC_LIB
-        os.makedirs(os.path.dirname(mimalloc_lib), exist_ok=True)
-        needs_rebuild = not os.path.exists(mimalloc_lib) or os.path.getmtime(
-            mimalloc_src
-        ) > os.path.getmtime(mimalloc_lib)
-        if needs_rebuild:
-            print(f"Building shared mimalloc → {mimalloc_lib}")
-            if sys.platform == "darwin":
-                shared_flags = [
-                    "-dynamiclib",
-                    "-install_name",
-                    "@rpath/libmimalloc.dylib",
-                ]
-            else:
-                shared_flags = ["-shared", "-Wl,-soname,libmimalloc.so"]
-            result = subprocess.run(
-                [
-                    compiler,
-                    "-O3",
-                    "-std=c11",
-                    "-DNDEBUG",
-                    "-fPIC",
-                    "-Wno-unused-function",
-                    f"-I{MIMALLOC_INCLUDE}",
-                    *shared_flags,
-                    mimalloc_src,
-                    "-o",
-                    mimalloc_lib,
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                raise SystemExit(
-                    f"Failed to build shared mimalloc with {compiler}:\n{result.stderr}"
-                )
-            print(f"Successfully built shared mimalloc → {mimalloc_lib}")
+        # mimalloc removed: draken now uses the system allocator (see
+        # draken/core/alloc.h). A bundled mimalloc — whether statically linked
+        # per-module (cross-module free UB) or as a shared dylib (heap
+        # corruption when a foreign native lib such as pandas/pyarrow loads into
+        # the process) — proved unsafe to coexist with the rest of the Python
+        # process. The system allocator is a single process-wide instance shared
+        # by every extension and every foreign library, so neither failure mode
+        # exists. mimalloc may return as an opt-in, measured prod build flag.
 
         # libcurl is already built at module initialization time
         super().build_extensions()
@@ -535,49 +499,7 @@ include_dirs = [
     "third_party/moodycamel",
     "third_party/boost_math",  # E.3: vendored boost::math headers (round via 2^52 trick)
     "third_party/utf8h",  # E.26: sheredom/utf8.h single-header UTF-8 library
-    "third_party/mimalloc/include",  # draken/core/alloc.h requires mimalloc globally
 ]
-
-# mimalloc — single shared library so every extension uses the same heap.
-# All extensions that previously linked MIMALLOC_OBJ are rewritten at the
-# bottom of this file to link against the shared library instead.
-MIMALLOC_INCLUDE = "third_party/mimalloc/include"
-MIMALLOC_OBJ = "build/temp.mimalloc.o"  # kept for reference; no longer linked
-MIMALLOC_LIB_DIR = "draken"
-if sys.platform == "darwin":
-    MIMALLOC_LIB = os.path.join(MIMALLOC_LIB_DIR, "libmimalloc.dylib")
-else:
-    MIMALLOC_LIB = os.path.join(MIMALLOC_LIB_DIR, "libmimalloc.so")
-
-
-def _mimalloc_link_args(module_name: str) -> list:
-    """Return linker flags to link an extension against the shared mimalloc library.
-
-    The RPATH is set relative to the extension's own location (@loader_path on
-    macOS, $ORIGIN on Linux) so the library is found whether the package is
-    installed into site-packages or used in-place.
-    """
-    parts = module_name.split(".")
-    if parts[0] == "draken":
-        # Extension lives inside draken/ or a sub-package.
-        # depth = levels below draken/  (draken.foo → 0, draken.a.foo → 1, …)
-        depth = len(parts) - 2
-        rel = "." if depth == 0 else "/".join([".."] * depth)
-    else:
-        # opteryx, rugo, … — go up past each sub-package, then down to draken/.
-        depth = len(parts) - 1
-        rel = "/".join([".."] * depth) + "/draken"
-
-    if sys.platform == "darwin":
-        rpath_flag = f"-Wl,-rpath,@loader_path/{rel}"
-    else:
-        rpath_flag = f"-Wl,-rpath,$ORIGIN/{rel}"
-
-    return [
-        f"-L{os.path.abspath(MIMALLOC_LIB_DIR)}",
-        "-lmimalloc",
-        rpath_flag,
-    ]
 
 # Common SIMD / environment C++ sources used by multiple extensions
 COMMON_SIMD_SOURCES = [
@@ -626,10 +548,9 @@ def make_draken_extension(module_path, source_file, language="c++", depends=None
     return Extension(
         name=f"draken.{module_path}",
         sources=sources,
-        include_dirs=include_dirs + [MIMALLOC_INCLUDE],
+        include_dirs=include_dirs,
         extra_compile_args=CPP_FLAGS if language == "c++" else C_FLAGS,
         extra_link_args=LD_EXTRA if language == "c++" else [],
-        extra_objects=[MIMALLOC_OBJ],
         language=language,
         depends=depends,
     )
@@ -726,20 +647,6 @@ extensions = [
         language="c++",
         depends=["draken/core/buffers.h", "draken/core/string_slot.h"],
     ),
-    # mimalloc link/liveness smoke test (Milestone A.3). Links the vendored
-    # mimalloc into a NEW draken target and exposes run() so we can prove on the
-    # dev platform that mi_* is the live allocator (mi_version + alloc/aligned/
-    # free, no crash). mimalloc include + pre-built object are scoped here.
-    Extension(
-        "draken.core._mimalloc_smoke",
-        sources=["draken/core/_mimalloc_smoke.cpp"],
-        include_dirs=include_dirs + [MIMALLOC_INCLUDE],
-        extra_compile_args=CPP_FLAGS,
-        extra_link_args=LD_EXTRA,
-        extra_objects=[MIMALLOC_OBJ],
-        language="c++",
-        depends=["draken/core/alloc.h"],
-    ),
     # Draken nanobind binding (Milestone B.1): Vector handle + Morsel + int64 ingestion.
     # Single module; links mimalloc (all owned buffers) + nanobind + vector_alloc globals.
     Extension(
@@ -775,14 +682,12 @@ extensions = [
         + [
             "draken/core",  # quote-include "buffers.h" from within draken/
             "src/cpp",  # simd_hash.h, simd_dispatch.h, cpu_features.h
-            MIMALLOC_INCLUDE,
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
             "third_party/usearch/fp16/include",  # fp16 IEEE half-precision conversion (D.11)
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
         depends=[
             "draken/core/buffers.h",
@@ -823,10 +728,9 @@ extensions = [
             "src/cpp/simd_env.cpp",
             "src/cpp/cpu_features.cpp",
         ],
-        include_dirs=include_dirs + [MIMALLOC_INCLUDE],
+        include_dirs=include_dirs,
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
         depends=[
             "draken/ops/kernels/c_kernel_abi.h",
@@ -953,7 +857,6 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=parquet_link_args + LD_EXTRA,
-        extra_objects=[MIMALLOC_OBJ],
     ),
     Extension(
         "rugo.jsonl_reader",
@@ -969,8 +872,7 @@ extensions = [
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
-        extra_objects=(["build/temp.yyjson.o"] if os.path.exists("build/temp.yyjson.o") else [])
-        + [MIMALLOC_OBJ],
+        extra_objects=["build/temp.yyjson.o"] if os.path.exists("build/temp.yyjson.o") else [],
     ),
     Extension(
         "rugo._jsonl._jsonl_reader",
@@ -990,7 +892,6 @@ extensions = [
         include_dirs=include_dirs + ["rugo/src/_jsonl/core"],
         language="c++",
         extra_compile_args=CPP_FLAGS,
-        extra_objects=[MIMALLOC_OBJ],
     ),
     # Core compiled components
     Extension(
@@ -1193,10 +1094,9 @@ extensions = [
         ],
         # column_deserializer.pyx does `cdef extern from "ipc_deserialize.hpp"`;
         # add src/cpp to the include path so Cython can resolve the header.
-        include_dirs=include_dirs + ["src/cpp", MIMALLOC_INCLUDE],
+        include_dirs=include_dirs + ["src/cpp"],
         language="c++",
         extra_compile_args=CPP_FLAGS,
-        extra_objects=[MIMALLOC_OBJ],
     ),
     # MemoryViewStream: high-performance memoryview-backed stream (Cython)
     Extension(
@@ -1212,10 +1112,9 @@ extensions = [
             "opteryx/compiled/structures/memory_pool.pyx",
             "src/cpp/memory_pool.cpp",
         ],
-        include_dirs=include_dirs + ["src/cpp", MIMALLOC_INCLUDE],
+        include_dirs=include_dirs + ["src/cpp"],
         language="c++",
         extra_compile_args=CPP_FLAGS,
-        extra_objects=[MIMALLOC_OBJ],
     ),
     Extension(
         "opteryx.compiled.structures.lru_k",
@@ -1505,14 +1404,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -1532,14 +1429,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -1561,14 +1456,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -1604,7 +1497,6 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "opteryx/third_party/mabel/base64",  # _base64.h
             "opteryx/third_party/mabel/base85",  # _base85.h
             "third_party/nanobind",
@@ -1613,7 +1505,6 @@ extensions.append(
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -1628,14 +1519,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -1653,14 +1542,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -1678,14 +1565,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -1715,7 +1600,6 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "opteryx/third_party/mabel/base16",  # _base16.h
             "third_party/nanobind",
             "third_party/nanobind/src",
@@ -1723,7 +1607,6 @@ extensions.append(
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -1743,14 +1626,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -1772,14 +1653,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -1800,14 +1679,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -1829,14 +1706,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -1856,14 +1731,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -1883,14 +1756,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -1921,7 +1792,6 @@ extensions.append(
         ),
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/usearch/fp16/include",  # fp16_ieee_to_fp32_value (D.11)
             "third_party/nanobind",
             "third_party/nanobind/src",
@@ -1929,7 +1799,6 @@ extensions.append(
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -1952,14 +1821,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -1980,14 +1847,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -2010,7 +1875,6 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/yyjson/src",
             "third_party/nanobind",
             "third_party/nanobind/src",
@@ -2018,7 +1882,6 @@ extensions.append(
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -2037,14 +1900,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -2068,14 +1929,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -2092,14 +1951,12 @@ extensions.append(
         ],
         include_dirs=include_dirs
         + [
-            MIMALLOC_INCLUDE,
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        extra_objects=[MIMALLOC_OBJ],
         language="c++",
     )
 )
@@ -2349,14 +2206,6 @@ extensions.append(
     )
 )
 
-# Rewrite all extensions that previously statically linked MIMALLOC_OBJ to use
-# the shared library instead.  A single loop avoids touching the 29 individual
-# Extension() definitions above and keeps the change contained here.
-for _ext in extensions:
-    if MIMALLOC_OBJ in (_ext.extra_objects or []):
-        _ext.extra_objects = [o for o in _ext.extra_objects if o != MIMALLOC_OBJ]
-        _ext.extra_link_args = list(_ext.extra_link_args or []) + _mimalloc_link_args(_ext.name)
-
 # Setup configuration
 setup(
     name=LIBRARY,
@@ -2400,7 +2249,6 @@ setup(
     else [RustExtension("opteryx.compute", "Cargo.toml", debug=False)],
     package_data={
         "": ["*.pyx", "*.pxd", "*.h"],
-        "draken": ["libmimalloc.dylib", "libmimalloc.so"],
     },
     cmdclass={"build_ext": build_ext},
     zip_safe=False,

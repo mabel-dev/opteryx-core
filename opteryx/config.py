@@ -172,14 +172,6 @@ if environ.get("FEATURE_DRAKEN_DICT_EXPR_STRICT") is not None:
         stacklevel=2,
     )
 
-if environ.get("FEATURE_DRAKEN_DICT_EXPR_FASTPATH") is not None:
-    import warnings
-    warnings.warn(
-        "FEATURE_DRAKEN_DICT_EXPR_FASTPATH is retired and ignored; "
-        "dictionary expression fastpath is always enabled for dictionary candidates.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
 
 # Parquet pool reader (threaded IO worker + MemoryPool transport) configuration
 IO_POOL_SLOT_BYTES: int = int(get("IO_POOL_SLOT_BYTES", 32 * 1024 * 1024))

@@ -3,29 +3,43 @@
 // Single entry point for every transferable buffer the new draken vector model
 // owns. The per-vector RAII ownership layer (unique_ptr + stateless deleter,
 // Milestone B) frees through draken_free; everything that allocates an owned
-// buffer goes through draken_malloc / draken_aligned_malloc. One allocator,
-// called explicitly — mimalloc's process-wide malloc override is OFF (see
-// setup.py and 01_ownership.md), so draken_old and the rest of the engine keep
-// the system allocator untouched.
+// buffer goes through draken_malloc / draken_aligned_malloc.
+//
+// Allocator: the system allocator (malloc/free). draken buffers cross extension
+// boundaries (e.g. column_deserializer allocates, a draken Vector frees on GC),
+// so the allocator MUST be a single process-wide instance shared by every
+// extension. The system allocator is exactly that, and — unlike a bundled
+// mimalloc — it coexists with foreign native libraries (pandas/pyarrow/…)
+// loaded into the same process at any point. mimalloc may return later as an
+// opt-in, measured prod build behind a flag.
 #ifndef DRAKEN_CORE_ALLOC_H
 #define DRAKEN_CORE_ALLOC_H
 
-#include <mimalloc.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <execinfo.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#include <malloc/malloc.h>   // malloc_size
+#define DRAKEN_USABLE_SIZE(p) malloc_size(p)
+#elif defined(__linux__)
+#include <malloc.h>          // malloc_usable_size
+#define DRAKEN_USABLE_SIZE(p) malloc_usable_size(p)
+#else
+#define DRAKEN_USABLE_SIZE(p) ((size_t)0)
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 static inline void* draken_malloc(size_t size) {
-    void* p = mi_malloc(size);
+    void* p = malloc(size);
     const char* trace_env = getenv("OPTERYX_FREE_TRACE");
     if (trace_env && trace_env[0] && p != nullptr) {
-        size_t asize = mi_usable_size(p);
+        size_t asize = DRAKEN_USABLE_SIZE(p);
         const char* min_env = getenv("OPTERYX_FREE_TRACE_MIN");
         const char* max_env = getenv("OPTERYX_FREE_TRACE_MAX");
         size_t min_sz = 0;
@@ -45,10 +59,14 @@ static inline void* draken_malloc(size_t size) {
 }
 
 static inline void* draken_aligned_malloc(size_t size, size_t alignment) {
-    void* p = mi_malloc_aligned(size, alignment);
+    // posix_memalign requires alignment to be a power of two and a multiple of
+    // sizeof(void*); clamp small alignments up (over-alignment is harmless).
+    if (alignment < sizeof(void*)) alignment = sizeof(void*);
+    void* p = nullptr;
+    if (posix_memalign(&p, alignment, size) != 0) p = nullptr;
     const char* trace_env = getenv("OPTERYX_FREE_TRACE");
     if (trace_env && trace_env[0] && p != nullptr) {
-        size_t asize = mi_usable_size(p);
+        size_t asize = DRAKEN_USABLE_SIZE(p);
         const char* min_env = getenv("OPTERYX_FREE_TRACE_MIN");
         const char* max_env = getenv("OPTERYX_FREE_TRACE_MAX");
         size_t min_sz = 0;
@@ -74,32 +92,10 @@ static inline void draken_free(void* ptr) {
 
     /* Optional diagnostic tracing: set OPTERYX_FREE_TRACE=1 to enable.
      * Further filtering is supported via OPTERYX_FREE_TRACE_MIN / _MAX (bytes).
-     * Strict allocator validation is enabled with OPTERYX_FREE_TRACE_STRICT=1:
-     * if a pointer passed to draken_free was not allocated from mimalloc,
-     * print a backtrace and abort immediately instead of calling mi_free on a
-     * foreign pointer (which is undefined behaviour).
      */
     const char* trace_env = getenv("OPTERYX_FREE_TRACE");
-    const bool tracing = (trace_env && trace_env[0]);
-    const bool in_mi_heap = mi_is_in_heap_region(ptr);
-
-    if (tracing && !in_mi_heap) {
-        fprintf(stderr, "DRAKEN_FREE TRACE: NON-MIMALLOC POINTER ptr=%p\n", ptr);
-        void* bt[32];
-        int bt_sz = backtrace(bt, 32);
-        backtrace_symbols_fd(bt, bt_sz, STDERR_FILENO);
-        fprintf(stderr, "-- end DRAKEN_FREE TRACE --\n");
-        fflush(stderr);
-
-        const char* strict_env = getenv("OPTERYX_FREE_TRACE_STRICT");
-        if (strict_env && strict_env[0]) {
-            abort();
-        }
-    }
-
-    if (tracing && in_mi_heap) {
-        /* Gather size (mimalloc) and apply optional min/max filters. */
-        size_t asize = mi_usable_size(ptr);
+    if (trace_env && trace_env[0]) {
+        size_t asize = DRAKEN_USABLE_SIZE(ptr);
         const char* min_env = getenv("OPTERYX_FREE_TRACE_MIN");
         const char* max_env = getenv("OPTERYX_FREE_TRACE_MAX");
         size_t min_sz = 0;
@@ -117,7 +113,7 @@ static inline void draken_free(void* ptr) {
         }
     }
 
-    mi_free(ptr);
+    free(ptr);
 }
 
 #ifdef __cplusplus

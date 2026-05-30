@@ -119,6 +119,7 @@ cpdef BoolVector vector_like(
     cdef uint32_t* sel = <uint32_t*>uv.selection
     cdef uint8_t* nb_ptr = uv.validity
     cdef Py_ssize_t n = <Py_ssize_t>uv.length
+    cdef Py_ssize_t data_length = <Py_ssize_t>uv.data_length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
     cdef size_t sz = <size_t>nbytes if nbytes > 0 else 1
 
@@ -128,7 +129,7 @@ cpdef BoolVector vector_like(
 
     cdef uint8_t* out_null = NULL
     cdef uint8_t mask
-    cdef Py_ssize_t i
+    cdef Py_ssize_t i, j
     cdef DrakenStringSlot* slot
     cdef const uint8_t* sdata
     cdef uint32_t slen
@@ -155,29 +156,37 @@ cpdef BoolVector vector_like(
             mask = <uint8_t>((1 << (n & 7)) - 1)
             out_null[nbytes - 1] &= mask
 
+    # Eval phase: match each unique value once into a per-slot byte array, then
+    # scatter into the dense output via the selection. When the source was
+    # dictionary/RLE/constant encoded (data_length < length) this collapses the
+    # expensive string matching from N rows to K unique values; for a fully dense
+    # column (data_length == length) it is one extra pass over a byte array.
+    cdef uint8_t* slot_match = <uint8_t*>malloc(<size_t>(data_length if data_length > 0 else 1))
+    if slot_match == NULL:
+        draken_free(dst)
+        draken_free(out_null)
+        raise MemoryError()
+
+    for j in range(data_length):
+        slot = &arena.slots[j]
+        slen = str_length(slot)
+        sdata = str_data(slot, arena.arena)
+        slot_match[j] = <uint8_t>_sv_sql_like_match(
+            sdata, <Py_ssize_t>slen, pat_ptr, pat_len, ignore_case,
+        )
+
     if negate:
         for i in range(n):
             if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                 continue
-            slot = &arena.slots[sel[i]]
-            slen = str_length(slot)
-            sdata = str_data(slot, arena.arena)
-            if _sv_sql_like_match(
-                sdata, <Py_ssize_t>slen,
-                pat_ptr, pat_len, ignore_case,
-            ):
+            if slot_match[sel[i]]:
                 dst[i >> 3] &= ~(1 << (i & 7))
     else:
         for i in range(n):
             if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                 continue
-            slot = &arena.slots[sel[i]]
-            slen = str_length(slot)
-            sdata = str_data(slot, arena.arena)
-            if _sv_sql_like_match(
-                sdata, <Py_ssize_t>slen,
-                pat_ptr, pat_len, ignore_case,
-            ):
+            if slot_match[sel[i]]:
                 dst[i >> 3] |= (1 << (i & 7))
 
+    free(slot_match)
     return from_decoded(<void*>dst, out_null, <size_t>n)

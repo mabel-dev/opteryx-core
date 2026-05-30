@@ -7,61 +7,25 @@ don't paper over it.
 
 
 
-cpdef equal(arr, value, bint dict_candidate=False):
-    if dict_candidate:
-        fast = dictionary_fastpath(arr, "Eq", value)
-        if fast is not None:
-            record_dict_fastpath_hit()
-            return fast
-        raise RuntimeError("Dictionary fastpath failed for `Eq`.")
+cpdef equal(arr, value):
     return arr.equals(value)
 
 
-cpdef not_equal(arr, value, bint dict_candidate=False):
-    if dict_candidate:
-        fast = dictionary_fastpath(arr, "NotEq", value)
-        if fast is not None:
-            record_dict_fastpath_hit()
-            return fast
-        raise RuntimeError("Dictionary fastpath failed for `NotEq`.")
+cpdef not_equal(arr, value):
     return arr.not_equals(value)
 
 
-cpdef less_than(arr, value, bint dict_candidate=False):
-    if dict_candidate:
-        fast = dictionary_fastpath(arr, "Lt", value)
-        if fast is not None:
-            record_dict_fastpath_hit()
-            return fast
-        raise RuntimeError("Dictionary fastpath failed for `Lt`.")
+cpdef less_than(arr, value):
     return arr.less_than(value)
 
 
-cpdef greater_than(arr, value, bint dict_candidate=False):
-    if dict_candidate:
-        fast = dictionary_fastpath(arr, "Gt", value)
-        if fast is not None:
-            record_dict_fastpath_hit()
-            return fast
-        raise RuntimeError("Dictionary fastpath failed for `Gt`.")
+cpdef greater_than(arr, value):
     return arr.greater_than(value)
 
 
-cpdef less_than_or_equal(arr, value, bint dict_candidate=False):
-    if dict_candidate:
-        fast = dictionary_fastpath(arr, "LtEq", value)
-        if fast is not None:
-            record_dict_fastpath_hit()
-            return fast
-        raise RuntimeError("Dictionary fastpath failed for `LtEq`.")
+cpdef less_than_or_equal(arr, value):
     return arr.less_than_or_equals(value)
 
 
-cpdef greater_than_or_equal(arr, value, bint dict_candidate=False):
-    if dict_candidate:
-        fast = dictionary_fastpath(arr, "GtEq", value)
-        if fast is not None:
-            record_dict_fastpath_hit()
-            return fast
-        raise RuntimeError("Dictionary fastpath failed for `GtEq`.")
+cpdef greater_than_or_equal(arr, value):
     return arr.greater_than_or_equals(value)

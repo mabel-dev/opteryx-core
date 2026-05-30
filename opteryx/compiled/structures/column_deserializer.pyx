@@ -64,6 +64,10 @@ cdef extern from "core/draken_bridge.h":
     PyObject* draken_vector_own_string(
         DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
         uint8_t* validity, uint32_t length, DrakenType vec_type)
+    PyObject* draken_vector_own_string_dict(
+        DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
+        uint32_t* codes, uint32_t data_length,
+        uint8_t* validity, uint32_t length, DrakenType vec_type)
     PyObject* draken_vector_own_array(
         int32_t* parent_offsets, DrakenStringSlot* child_slots,
         uint8_t* child_arena, size_t child_arena_len,
@@ -369,15 +373,61 @@ cdef object _build_string_dict(const uint8_t* p, uint32_t num_rows,
     cdef uint32_t arena_len = offsets_buf[dict_size]   # sentinel value = total arena bytes
     cdef const uint8_t* arena_src = p                  # points into IPC buffer (not owned)
 
-    # Allocate draken_malloc'd slot array — transferred to draken_vector_own_string.
-    cdef uint8_t* slots_buf = <uint8_t*>draken_malloc(<size_t>num_rows * SLOT_BYTES)
+    # ---- Build the compact value array (K unique slots) + codes selection ----
+    # K = dict_size unique values; rows reference them through the codes selection,
+    # exactly the encoding the IPC stream carries. Materializing one slot per row
+    # would discard that compactness — downstream access is the uniform
+    # value_array[selection[i]] path either way (data_length < length is just an
+    # observable property, not a separate vector type).
+    cdef uint32_t k, row, s_off, s_off_end, slen
+    cdef uint16_t tmp16
+    cdef uint32_t tmp32
+    cdef DrakenStringSlot* slot_ptr
+    cdef uint8_t* slots_buf
+    cdef uint8_t* arena_buf
+    cdef uint8_t* validity_buf = NULL
+    cdef uint32_t* codes_buf
+    cdef size_t arena_alloc
+    cdef PyObject* raw
+
+    # Edge: no unique values (empty or all-null column). Keep this corner on the
+    # proven dense path — num_rows null slots, identity selection.
+    if dict_size == 0:
+        slots_buf = <uint8_t*>draken_malloc(<size_t>(num_rows if num_rows > 0 else 1) * SLOT_BYTES)
+        if slots_buf == NULL:
+            free(offsets_buf)
+            raise MemoryError()
+        for row in range(num_rows):
+            str_init_null(<DrakenStringSlot*>(slots_buf + <size_t>row * SLOT_BYTES))
+        free(offsets_buf)
+        if null_bitmap_len > 0:
+            validity_buf = <uint8_t*>draken_malloc(null_bitmap_len)
+            if validity_buf == NULL:
+                draken_free(slots_buf)
+                raise MemoryError()
+            memcpy(validity_buf, null_bitmap, null_bitmap_len)
+        raw = draken_vector_own_string(
+            <DrakenStringSlot*>slots_buf, NULL, 0,
+            validity_buf, num_rows, DRAKEN_VARCHAR)
+        if raw == NULL:
+            raise MemoryError("draken_vector_own_string failed")
+        return _wrap_raw_pyobj(raw)
+
+    # Value array: one slot per unique value (draken_malloc'd; transferred on call).
+    slots_buf = <uint8_t*>draken_malloc(<size_t>dict_size * SLOT_BYTES)
     if slots_buf == NULL:
         free(offsets_buf)
         raise MemoryError()
+    for k in range(dict_size):
+        slot_ptr = <DrakenStringSlot*>(slots_buf + <size_t>k * SLOT_BYTES)
+        s_off     = offsets_buf[k]
+        s_off_end = offsets_buf[k + 1]
+        slen      = s_off_end - s_off
+        draken_build_string_slot(slot_ptr, arena_src + s_off, slen, s_off)
 
-    # Allocate draken_malloc'd arena copy — transferred to draken_vector_own_string.
-    cdef size_t arena_alloc = <size_t>arena_len if arena_len > 0 else 1
-    cdef uint8_t* arena_buf = <uint8_t*>draken_malloc(arena_alloc)
+    # Arena copy backing the long-form unique slots (draken_malloc'd; transferred).
+    arena_alloc = <size_t>arena_len if arena_len > 0 else 1
+    arena_buf = <uint8_t*>draken_malloc(arena_alloc)
     if arena_buf == NULL:
         draken_free(slots_buf)
         free(offsets_buf)
@@ -385,50 +435,46 @@ cdef object _build_string_dict(const uint8_t* p, uint32_t num_rows,
     if arena_len > 0:
         memcpy(arena_buf, arena_src, arena_len)
 
-    # Allocate draken_malloc'd validity — transferred to draken_vector_own_string.
-    cdef uint8_t* validity_buf = NULL
-    if null_bitmap_len > 0:
-        validity_buf = <uint8_t*>draken_malloc(null_bitmap_len)
-        if validity_buf == NULL:
-            draken_free(arena_buf)
-            draken_free(slots_buf)
-            free(offsets_buf)
-            raise MemoryError()
-        memcpy(validity_buf, null_bitmap, null_bitmap_len)
-
-    # Build per-row slots.
-    cdef uint32_t row, code, s_off, s_off_end, slen
-    cdef uint16_t tmp16
-    cdef uint32_t tmp32
-    cdef DrakenStringSlot* slot_ptr
+    # Codes selection: one uint32 per row (draken_malloc'd; transferred on call).
+    # Null rows take code 0 — the validity bitmap masks them.
+    codes_buf = <uint32_t*>draken_malloc(<size_t>(num_rows if num_rows > 0 else 1) * sizeof(uint32_t))
+    if codes_buf == NULL:
+        draken_free(arena_buf)
+        draken_free(slots_buf)
+        free(offsets_buf)
+        raise MemoryError()
     for row in range(num_rows):
-        slot_ptr = <DrakenStringSlot*>(slots_buf + <size_t>row * SLOT_BYTES)
-        # Arrow validity: bit set = valid row.
         if null_bitmap_len > 0 and not ((null_bitmap[row >> 3] >> (row & 7)) & 1):
-            str_init_null(slot_ptr)
+            codes_buf[row] = 0
+        elif code_width == 1:
+            codes_buf[row] = <uint32_t>codes_ptr[row]
+        elif code_width == 2:
+            memcpy(&tmp16, codes_ptr + row * 2, 2)
+            codes_buf[row] = <uint32_t>tmp16
         else:
-            if code_width == 1:
-                code = <uint32_t>codes_ptr[row]
-            elif code_width == 2:
-                memcpy(&tmp16, codes_ptr + row * 2, 2)
-                code = <uint32_t>tmp16
-            else:
-                memcpy(&tmp32, codes_ptr + row * 4, 4)
-                code = tmp32
-            s_off     = offsets_buf[code]
-            s_off_end = offsets_buf[code + 1]
-            slen      = s_off_end - s_off
-            draken_build_string_slot(slot_ptr, arena_src + s_off, slen, s_off)
+            memcpy(&tmp32, codes_ptr + row * 4, 4)
+            codes_buf[row] = tmp32
 
     free(offsets_buf)
 
-    # All three draken_malloc'd buffers are transferred on call (even on failure).
-    cdef PyObject* raw = draken_vector_own_string(
+    # Validity (draken_malloc'd; transferred on call).
+    if null_bitmap_len > 0:
+        validity_buf = <uint8_t*>draken_malloc(null_bitmap_len)
+        if validity_buf == NULL:
+            draken_free(codes_buf)
+            draken_free(arena_buf)
+            draken_free(slots_buf)
+            raise MemoryError()
+        memcpy(validity_buf, null_bitmap, null_bitmap_len)
+
+    # All four draken_malloc'd buffers are transferred on call (even on failure).
+    raw = draken_vector_own_string_dict(
         <DrakenStringSlot*>slots_buf,
         arena_buf, <size_t>arena_len,
+        codes_buf, dict_size,
         validity_buf, num_rows, DRAKEN_VARCHAR)
     if raw == NULL:
-        raise MemoryError("draken_vector_own_string failed")
+        raise MemoryError("draken_vector_own_string_dict failed")
     return _wrap_raw_pyobj(raw)
 
 

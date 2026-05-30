@@ -108,6 +108,47 @@ cdef class Morsel:
                 hashes[i] = ((hashes[i] ^ int(col_hashes[i])) * 0xbf58476d1ce4e5b9) & 0xFFFFFFFFFFFFFFFF
         return _array('Q', hashes)
 
+    def __str__(self):
+        """Format morsel as an ASCII table for display."""
+        if self.num_rows == 0:
+            if self.num_columns == 0:
+                return ""
+            col_names = [name.decode('utf-8') if isinstance(name, bytes) else name
+                         for name in self._col_names]
+            return " | ".join(col_names)
+
+        col_names = [name.decode('utf-8') if isinstance(name, bytes) else name
+                     for name in self._col_names]
+        col_data = []
+        for col_idx in range(self.num_columns):
+            vec = <Vector>self._columns[col_idx]
+            try:
+                py_list = vec.to_pylist()
+                col_data.append(py_list)
+            except Exception:
+                col_data.append([None] * self.num_rows)
+
+        max_rows = min(self.num_rows, 5)
+        lines = []
+
+        if col_names:
+            lines.append(" | ".join(col_names))
+            lines.append("-" * (sum(len(n) for n in col_names) + 3 * (len(col_names) - 1)))
+
+        for row_idx in range(max_rows):
+            row = []
+            for col_idx in range(self.num_columns):
+                val = col_data[col_idx][row_idx]
+                val_str = str(val)[:30] if val is not None else "NULL"
+                row.append(val_str)
+            lines.append(" | ".join(row))
+
+        if self.num_rows > 5:
+            remaining = self.num_rows - 5
+            lines.append("... %d more rows ..." % remaining)
+
+        return "\n".join(lines) if lines else ""
+
     def _column_index_from_name(self, name):
         if isinstance(name, str):
             name = name.encode("utf-8")
@@ -305,9 +346,28 @@ cdef class Morsel:
         return result
 
     def filter_mask(self, mask):
-        # mask is a BoolVector; extract True indices then take
-        cdef list idx_list = [i for i, v in enumerate(mask.to_pylist()) if v]
-        return self.take(idx_list)
+        """Keep rows where the BoolVector `mask` is valid AND true.
+
+        Fully native: each column is gathered by the C++ `mask` kernel, which
+        derives the surviving-row indices from the mask bitmap (unified
+        row_is_valid/row_bool) and runs the typed take. No Python per-row loop,
+        no to_pylist, no boxed index list.
+        """
+        cdef Morsel result = _make_morsel()
+        result._col_names = list(self._col_names)
+        cdef int n = len(self._columns)
+        cdef object mask_nb = (<Vector>mask)._nb if isinstance(mask, Vector) else mask
+        cdef int i
+        cdef object nb_masked
+        if n == 0:
+            # No columns to gather — just carry the surviving row count.
+            result._zero_col_num_rows = mask_nb.count_true()
+            return result
+        for i in range(n):
+            nb_masked = (<Vector>self._columns[i])._nb.mask(mask_nb)
+            result._nb.append(nb_masked)
+            result._columns.append(Vector(nb_masked))
+        return result
 
     def take(self, indices):
         cdef Morsel result = _make_morsel()

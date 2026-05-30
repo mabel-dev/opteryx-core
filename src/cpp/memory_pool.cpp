@@ -15,7 +15,7 @@ MemoryPool::MemoryPool(int64_t size, std::string name, bool auto_resize, int64_t
         throw std::invalid_argument("Alignment must be a power of two");
     }
 
-    pool_ = static_cast<unsigned char*>(mi_malloc(size));
+    pool_ = static_cast<unsigned char*>(malloc(size));
     if (!pool_) {
         throw std::bad_alloc();
     }
@@ -25,7 +25,7 @@ MemoryPool::MemoryPool(int64_t size, std::string name, bool auto_resize, int64_t
 
 MemoryPool::~MemoryPool() {
     if (pool_) {
-        mi_free(pool_);
+        free(pool_);
         pool_ = nullptr;
     }
 }
@@ -142,7 +142,7 @@ void MemoryPool::compaction_no_lock() {
 }
 
 bool MemoryPool::resize_pool_no_lock(int64_t new_size) {
-    unsigned char* new_pool = static_cast<unsigned char*>(mi_realloc(pool_, new_size));
+    unsigned char* new_pool = static_cast<unsigned char*>(realloc(pool_, new_size));
     if (!new_pool) {
         return false;
     }

@@ -34,61 +34,25 @@ cpdef rlike_match(arr, value, str operator):
     return result.not_vector() if negate else result
 
 
-cpdef like(arr, value, bint dict_candidate=False):
-    if dict_candidate:
-        fast = dictionary_fastpath(arr, "Like", value)
-        if fast is not None:
-            record_dict_fastpath_hit()
-            return fast
-        raise RuntimeError("Dictionary fastpath failed for `Like`.")
+cpdef like(arr, value):
     return like_match(arr, value, "Like")
 
 
-cpdef not_like(arr, value, bint dict_candidate=False):
-    if dict_candidate:
-        fast = dictionary_fastpath(arr, "NotLike", value)
-        if fast is not None:
-            record_dict_fastpath_hit()
-            return fast
-        raise RuntimeError("Dictionary fastpath failed for `NotLike`.")
+cpdef not_like(arr, value):
     return like_match(arr, value, "NotLike")
 
 
-cpdef ilike(arr, value, bint dict_candidate=False):
-    if dict_candidate:
-        fast = dictionary_fastpath(arr, "ILike", value)
-        if fast is not None:
-            record_dict_fastpath_hit()
-            return fast
-        raise RuntimeError("Dictionary fastpath failed for `ILike`.")
+cpdef ilike(arr, value):
     return like_match(arr, value, "ILike")
 
 
-cpdef not_ilike(arr, value, bint dict_candidate=False):
-    if dict_candidate:
-        fast = dictionary_fastpath(arr, "NotILike", value)
-        if fast is not None:
-            record_dict_fastpath_hit()
-            return fast
-        raise RuntimeError("Dictionary fastpath failed for `NotILike`.")
+cpdef not_ilike(arr, value):
     return like_match(arr, value, "NotILike")
 
 
-cpdef rlike(arr, value, bint dict_candidate=False):
-    if dict_candidate:
-        fast = dictionary_fastpath(arr, "RLike", value)
-        if fast is not None:
-            record_dict_fastpath_hit()
-            return fast
-        raise RuntimeError("Dictionary fastpath failed for `RLike`.")
+cpdef rlike(arr, value):
     return rlike_match(arr, value, "RLike")
 
 
-cpdef not_rlike(arr, value, bint dict_candidate=False):
-    if dict_candidate:
-        fast = dictionary_fastpath(arr, "NotRLike", value)
-        if fast is not None:
-            record_dict_fastpath_hit()
-            return fast
-        raise RuntimeError("Dictionary fastpath failed for `NotRLike`.")
+cpdef not_rlike(arr, value):
     return rlike_match(arr, value, "NotRLike")

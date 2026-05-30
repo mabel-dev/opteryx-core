@@ -2351,6 +2351,120 @@ extern "C" PyObject* draken_vector_own_string(
     }
 }
 
+// draken_vector_own_string_dict — wrap a value array + caller selection in a string Vector.
+//
+// Identical consolidated-block layout to draken_vector_own_string, except the value
+// array holds data_length unique slots and the caller supplies a codes selection of
+// length entries; the result is built with draken_vector_from_dict instead of
+// draken_vector_from_dense. There is no separate "dictionary" type — the unified
+// value_array[selection[i]] access path is unchanged; data_length < length is just an
+// observable property. All four caller buffers (slots, arena, codes, validity) are
+// transferred unconditionally on entry. See draken_bridge.h for the full contract.
+extern "C" PyObject* draken_vector_own_string_dict(
+    DrakenStringSlot* slots,
+    uint8_t*          arena,
+    size_t            arena_len,
+    uint32_t*         codes,
+    uint32_t          data_length,
+    uint8_t*          validity,
+    uint32_t          length,
+    DrakenType        type)
+{
+    // Take ownership of all four caller buffers immediately via RAII.
+    OwnedBuffer<void>    slots_guard(static_cast<void*>(slots));
+    OwnedBuffer<void>    arena_guard(static_cast<void*>(arena));   // safe for nullptr
+    OwnedBuffer<void>    codes_guard(static_cast<void*>(codes));   // safe for nullptr
+    OwnedBuffer<uint8_t> validity_guard(validity);                 // safe for nullptr
+
+    try {
+        if (type != DRAKEN_VARCHAR && type != DRAKEN_NVARCHAR && type != DRAKEN_VARBINARY) {
+            PyErr_SetString(PyExc_ValueError,
+                "draken_vector_own_string_dict: type must be DRAKEN_VARCHAR, "
+                "DRAKEN_NVARCHAR, or DRAKEN_VARBINARY");
+            return nullptr;
+        }
+        if (arena_len > 0u && !arena) {
+            PyErr_SetString(PyExc_ValueError,
+                "draken_vector_own_string_dict: arena_len > 0 but arena is NULL");
+            return nullptr;
+        }
+        if (data_length > 0u && !slots) {
+            PyErr_SetString(PyExc_ValueError,
+                "draken_vector_own_string_dict: data_length > 0 but slots is NULL");
+            return nullptr;
+        }
+        if (length > 0u && !codes) {
+            PyErr_SetString(PyExc_ValueError,
+                "draken_vector_own_string_dict: length > 0 but codes is NULL");
+            return nullptr;
+        }
+
+        // Allocate consolidated block holding the VALUE array (data_length slots).
+        // Layout: [DrakenStringArena | DrakenStringSlot[data_length] | arena_bytes]
+        constexpr size_t kSlotAlign = alignof(DrakenStringSlot);
+        const size_t struct_end =
+            (sizeof(DrakenStringArena) + kSlotAlign - 1u) & ~(kSlotAlign - 1u);
+        const size_t slots_bytes =
+            (data_length > 0u ? (size_t)data_length : 1u) * sizeof(DrakenStringSlot);
+        const size_t arena_start = struct_end + slots_bytes;
+        const size_t total       = arena_start + arena_len;
+        const size_t alloc_size  = total > 0u ? total : sizeof(DrakenStringArena);
+
+        uint8_t* block = static_cast<uint8_t*>(draken_malloc(alloc_size));
+        if (!block) throw std::bad_alloc();
+        std::memset(block, 0, alloc_size);
+        OwnedBuffer<void> data_buf(block);
+
+        DrakenStringArena* sa     = reinterpret_cast<DrakenStringArena*>(block);
+        DrakenStringSlot*  dslots = reinterpret_cast<DrakenStringSlot*>(block + struct_end);
+        uint8_t*           darena = (arena_len > 0u) ? (block + arena_start) : nullptr;
+
+        // Copy caller's unique slots and arena bytes into the consolidated block.
+        if (data_length > 0u && slots)
+            std::memcpy(dslots, slots, (size_t)data_length * sizeof(DrakenStringSlot));
+        if (arena_len > 0u && arena)
+            std::memcpy(darena, arena, arena_len);
+
+        // Release the slots/arena guards and free the caller's originals. codes and
+        // validity are retained (freed by VectorOwner on GC, mirroring own_dict_i64).
+        draken_free(slots_guard.release());
+        draken_free(arena_guard.release());
+        uint32_t* raw_codes = static_cast<uint32_t*>(codes_guard.release());
+        uint8_t*  raw_valid = validity_guard.release();
+        OwnedBuffer<void>    codes_buf(static_cast<void*>(raw_codes));
+        OwnedBuffer<uint8_t> val_buf(raw_valid);
+
+        // Initialise DrakenStringArena. length here is the VALUE-array length (K).
+        sa->slots        = dslots;
+        sa->arena        = darena;
+        sa->length       = (size_t)data_length;
+        sa->arena_used   = arena_len;
+        sa->arena_cap    = arena_len;
+        sa->null_bitmap  = nullptr;  // validity tracked separately via VectorOwner
+        sa->owns_buffers = 0;
+        sa->type         = type;
+
+        // Build the unified vector: selection = caller codes, value array = sa.
+        DrakenVector v = draken_vector_from_dict(sa, data_length, raw_codes, length,
+                                                 type, raw_valid);
+
+        VectorOwner owner(v, std::move(data_buf), std::move(val_buf), std::move(codes_buf));
+        nb::object obj = nb::cast(std::move(owner));
+        PyObject* result = obj.ptr();
+        Py_INCREF(result);
+        return result;
+    } catch (nb::python_error& e) {
+        e.restore();
+        return nullptr;
+    } catch (std::bad_alloc&) {
+        PyErr_NoMemory();
+        return nullptr;
+    } catch (std::exception& e) {
+        PyErr_SetString(PyExc_RuntimeError, e.what());
+        return nullptr;
+    }
+}
+
 // draken_vector_own_array — wrap hand-allocated buffers in a DRAKEN_ARRAY[string] Vector.
 //
 // See draken_bridge.h for the full contract. child_type must be VARCHAR/NVARCHAR/VARBINARY.
@@ -4473,6 +4587,42 @@ NB_MODULE(draken_native, m) {
             result.vec.type     = v.vec.type;
             result.logical_type = v.logical_type;
             return result;
+        })
+        // mask(bool_vector) — keep rows where the mask is valid AND true, gather
+        // natively. The surviving-row indices are derived from the mask's bitmap
+        // via the unified row_is_valid/row_bool accessors (correct for dense,
+        // dict, and constant shapes); the gather then reuses the same typed take
+        // dispatch as .take(). No Python, no boxed index list.
+        .def("mask", [](const VectorOwner& v, const VectorOwner& m) -> VectorOwner {
+            if (m.vec.type != DRAKEN_BOOL)
+                throw std::invalid_argument("mask: expected a DRAKEN_BOOL mask vector");
+            const uint32_t mn = m.vec.length;
+            std::vector<int32_t> idx_vec;
+            idx_vec.reserve(mn);
+            for (uint32_t i = 0; i < mn; ++i) {
+                if (row_is_valid(m.vec, i) && row_bool(m.vec, i))
+                    idx_vec.push_back(static_cast<int32_t>(i));
+            }
+            const uint32_t n = static_cast<uint32_t>(idx_vec.size());
+            if (v.vec.type == DRAKEN_NULL) return make_null_vector(n);
+            if (v.vec.type == DRAKEN_ARRAY) return make_array_take(v, idx_vec.data(), n);
+            if (v.vec.type == DRAKEN_VECTOR_FP16) return make_fp16_take(v, idx_vec.data(), n);
+            if (v.vec.type == DRAKEN_BOOL) return make_bool_take(v, idx_vec.data(), n);
+            auto result = vecresult_to_owner(draken_take(v.vec, idx_vec.data(), n));
+            result.vec.type     = v.vec.type;
+            result.logical_type = v.logical_type;
+            return result;
+        })
+        // count_true() — number of rows that are valid AND true. Used to size a
+        // zero-column filtered morsel (filter on a projected-away column).
+        .def("count_true", [](const VectorOwner& m) -> int64_t {
+            if (m.vec.type != DRAKEN_BOOL)
+                throw std::invalid_argument("count_true: expected a DRAKEN_BOOL vector");
+            const uint32_t n = m.vec.length;
+            int64_t c = 0;
+            for (uint32_t i = 0; i < n; ++i)
+                if (row_is_valid(m.vec, i) && row_bool(m.vec, i)) ++c;
+            return c;
         })
         .def("materialize", [](const VectorOwner& v) -> VectorOwner {
             // D.11: null — materialize is a no-op (no encoding to expand).

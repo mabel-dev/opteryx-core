@@ -9,7 +9,7 @@
 #include <string>
 #include <stdexcept>
 #include <algorithm>
-#include "mimalloc.h"
+#include <cstdlib>   // malloc / free / realloc (system allocator; mimalloc removed)
 
 namespace opteryx {
 
