@@ -498,6 +498,109 @@ static inline void draken_hash(const DrakenVector& v, uint64_t* out, uint32_t n)
 }
 
 // ---------------------------------------------------------------------------
+// draken_hash_distinct — hash the data_length distinct VALUES of v into
+// out[0..data_length).  Ignores selection and validity: it hashes the value
+// array as if it were a dense vector of data_length rows.  Reuses the per-type
+// kernel via a dense view, so there is ONE place that hashes distinct values
+// regardless of type.  The dense view is by construction dense (data_length ==
+// length), so no recursion into a compressed fast-path occurs.
+// ---------------------------------------------------------------------------
+static inline void draken_hash_distinct(const DrakenVector& v, uint64_t* out) {
+    if (v.data_length == 0u) return;
+    DrakenVector dv = v;
+    dv.selection   = draken_identity_sel(v.data_length);
+    dv.length      = v.data_length;
+    dv.data_length = v.data_length;
+    dv.validity    = nullptr;  // distinct values carry no per-row nullness
+    dv.flags       = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    draken_hash(dv, out, v.data_length);
+}
+
+// ---------------------------------------------------------------------------
+// draken_hash_shaped — shape-preserving hash producer; the keying entry point
+// for group-by / join / distinct.
+//
+// INVARIANT: hashing preserves shape.  Null keys are baked to NULL_HASH in the
+// distinct set so they collide by default.  The hash vector is PURE: every slot
+// holds a real hash value, so its validity is always NULL (a hash is never
+// "absent").  Consumers that need per-row null semantics (join: non-matching;
+// group-by: NULL group label) read the KEY column's validity — which they hold —
+// NOT the hash vector.  Multi-column mixing is the caller's job and collapses to
+// dense.
+//
+// Returns an INT64 VecResult, self-contained (owned data/selection), validity
+// always NULL:
+//   dense (dl == n)        -> data = n hashes (NULL_HASH baked per-row by kernel),
+//                             global identity selection
+//   non-null compressed    -> data = k hashes, selection = OWNED copy of codes
+//   nullable compressed    -> data = (k+1) hashes, data[k] = NULL_HASH,
+//                             selection = OWNED codes (null rows -> k)
+// ---------------------------------------------------------------------------
+static inline VecResult draken_hash_shaped(const DrakenVector& v) {
+    VecResult r;
+    r.type             = DRAKEN_INT64;
+    r.flags            = 0u;
+    r.owns_selection   = false;
+    r.validity         = nullptr;   // a hash vector is always fully valid
+    r.validity_embedded = 0u;
+    r.ts_unit          = 0xFFu;
+    const uint32_t n   = v.length;
+
+    // Dense (and the n==0 corner): one hash per row, NULL_HASH baked by the
+    // kernel for null rows. Global identity selection.
+    if (n == 0u || draken_is_dense(&v)) {
+        uint64_t* data = static_cast<uint64_t*>(
+            draken_malloc((n > 0u ? n : 1u) * sizeof(uint64_t)));
+        if (data == nullptr) throw std::bad_alloc();
+        if (n > 0u) draken_hash(v, data, n);
+        r.data           = data;
+        r.selection      = draken_identity_sel(n);
+        r.owns_selection = false;
+        r.data_length    = n;
+        r.length         = n;
+        r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+        return r;
+    }
+
+    // Compressed: hash the k distinct values once.
+    const uint32_t k = v.data_length;
+    const bool nullable = (v.validity != nullptr);
+    const uint32_t out_k = nullable ? (k + 1u) : k;
+
+    uint64_t* data = static_cast<uint64_t*>(draken_malloc(out_k * sizeof(uint64_t)));
+    if (data == nullptr) throw std::bad_alloc();
+    draken_hash_distinct(v, data);          // fills data[0..k)
+
+    uint32_t* codes = static_cast<uint32_t*>(draken_malloc(n * sizeof(uint32_t)));
+    if (codes == nullptr) { draken_free(data); throw std::bad_alloc(); }
+
+    if (!nullable) {
+        // Non-null: codes are the source codes verbatim (owned copy).
+        std::memcpy(codes, v.selection, static_cast<size_t>(n) * sizeof(uint32_t));
+    } else {
+        // Nullable: bake a null slot at index k, remap null rows to it so they
+        // collide. The null slot's hash must match how null rows hash on the
+        // dense path — i.e. the NULL_HASH sentinel run through simd_hash_i64,
+        // not the raw sentinel (the k distinct values are mixed, so this must
+        // be too). The key's per-row null mask stays on the key column.
+        uint64_t null_seed = static_cast<uint64_t>(NULL_HASH);
+        simd_hash_i64(&null_seed, &data[k], 1u);
+        const uint8_t* val = v.validity;
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint64_t is_valid = (val[i >> 3] >> (i & 7u)) & 1u;
+            codes[i] = is_valid ? v.selection[i] : k;
+        }
+    }
+
+    r.data           = data;
+    r.selection      = codes;
+    r.owns_selection = true;
+    r.data_length    = out_k;
+    r.length         = n;
+    return r;
+}
+
+// ---------------------------------------------------------------------------
 // C.2 dispatch entry points — one indirect table lookup, then typed kernel.
 // All throw std::invalid_argument for unsupported types.
 // ---------------------------------------------------------------------------

@@ -19,12 +19,17 @@ cdef extern from "time.h":
 cdef extern from "time.h":
     clockid_t CLOCK_MONOTONIC
 
-from libc.stdint cimport int64_t, uint64_t, uint8_t
+from libc.stdint cimport int64_t, uint64_t, uint32_t, uint8_t
 from libc.stddef cimport size_t
 from libcpp.vector cimport vector
 
 from draken.morsels.morsel cimport Morsel
+from draken.vectors.vector cimport Vector
 from draken.core.buffers cimport DrakenType, DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY
+from draken.core.buffers cimport DrakenVector
+
+cdef extern from "core/buffers.h" nogil:
+    int draken_is_compressed(const DrakenVector* v)
 
 
 cdef extern from "carchar_index.hpp" namespace "opteryx::carchar":
@@ -89,6 +94,7 @@ cdef class GroupHashEngine:
     cdef int64_t _num_groups
     cdef vector[int64_t] _state_indices_buf   # reused per morsel, length == n_rows
     cdef vector[int64_t] _new_row_scratch     # indices of rows that introduced new groups
+    cdef vector[int64_t] _code_state          # compressed path: group id per code (-1 = unprobed)
     cdef list _group_columns                  # list[bytes] — init only
     cdef bint _resolved                       # True after first morsel type resolution
     cdef bint _telemetry_enabled
@@ -233,8 +239,14 @@ cdef class GroupHashEngine:
 
         if self._telemetry_enabled:
             phase_start = _now_ns()
-        # Compute group hashes for the group-by columns
-        cdef uint64_t[::1] hashes = morsel.hash(self._group_columns)
+        # Shape-preserving keying hash. Compressed (single dict/constant key) →
+        # data holds k distinct hashes addressed by per-row codes; dense/multi →
+        # data holds n hashes with identity selection. Read uniformly as
+        # khashes[codes[i]] for any shape. hv kept alive for the whole ingest.
+        cdef object hv = morsel.hash_keys(self._group_columns)
+        cdef DrakenVector* huv = (<Vector>hv).unified()
+        cdef const uint64_t* khashes = <const uint64_t*>huv.data
+        cdef const uint32_t* codes = huv.selection
         if self._telemetry_enabled:
             self._time_hash_ns += _now_ns() - phase_start
 
@@ -248,60 +260,89 @@ cdef class GroupHashEngine:
         cdef int64_t cache_vals[8]
         cdef uint8_t cache_used[8]
 
+        # Compressed fast path: probe each of the k distinct hashes ONCE (on its
+        # first-occurrence row), not once per row. Collapses the random hash-table
+        # probing from n to k. Only when carchar is the active map — parvi keeps
+        # its per-row loop (its 8-slot cache already absorbs repeats at tiny k).
+        cdef bint compressed = (not self._use_parvi) and (draken_is_compressed(huv) != 0)
+        cdef Py_ssize_t k, c
+        cdef int64_t* code_state
+        cdef bint _is_new
+
         cdef ParviResult pr
+        cdef bint _hot_is_new
         if self._telemetry_enabled:
             phase_start = _now_ns()
-        # i is shared across parvi → carchar handoff so an overflow mid-morsel
-        # resumes at the row after the one that triggered promotion.
-        i = 0
-        if self._use_parvi:
-            # Tiny direct-mapped cache for repeated hashes within this morsel.
-            # This targets very low-cardinality GROUP BY workloads (e.g. status/category).
-            for cache_slot in range(8):
-                cache_used[cache_slot] = 0
 
-            while i < n_rows:
-                h = hashes[i]
-                cache_slot = <int>(h & 7)
-                if cache_used[cache_slot] and cache_keys[cache_slot] == h:
-                    state_idx = cache_vals[cache_slot]
+        if compressed:
+            k = <Py_ssize_t>huv.data_length
+            if <Py_ssize_t>self._code_state.size() < k:
+                self._code_state.resize(k)
+            code_state = self._code_state.data()
+            for c in range(k):
+                code_state[c] = -1          # unprobed sentinel (group ids are >= 0)
+            for i in range(n_rows):
+                c = <Py_ssize_t>codes[i]
+                state_idx = code_state[c]
+                if state_idx == -1:
+                    # First occurrence of this code in the morsel → probe once.
+                    _is_new = self._index.find_or_insert_id(khashes[c], num_groups, state_idx)
+                    if _is_new:
+                        self._new_row_scratch.push_back(i)   # first occurrence row
+                        num_groups += 1
+                    code_state[c] = state_idx
+                si_buf[i] = state_idx
+        else:
+            # i is shared across parvi → carchar handoff so an overflow mid-morsel
+            # resumes at the row after the one that triggered promotion.
+            i = 0
+            if self._use_parvi:
+                # Tiny direct-mapped cache for repeated hashes within this morsel.
+                # This targets very low-cardinality GROUP BY workloads (e.g. status/category).
+                for cache_slot in range(8):
+                    cache_used[cache_slot] = 0
+
+                while i < n_rows:
+                    h = khashes[codes[i]]
+                    cache_slot = <int>(h & 7)
+                    if cache_used[cache_slot] and cache_keys[cache_slot] == h:
+                        state_idx = cache_vals[cache_slot]
+                        si_buf[i] = state_idx
+                        i += 1
+                        continue
+
+                    # Single-probe path: insert_new returns existing slot on hit,
+                    # new slot on insert, and kCapacity on overflow.
+                    pr = self._parvi.insert_new(h, num_groups)
+                    if pr.found:
+                        state_idx = num_groups
+                        self._new_row_scratch.push_back(i)
+                        num_groups += 1
+                    elif pr.slot == _PARVI_CAPACITY:
+                        state_idx = num_groups
+                        # Parvi overflow: drain into carchar and continue seamlessly.
+                        self._promote_parvi_to_carchar()
+                        self._index.insert_new(h, state_idx)
+                        self._new_row_scratch.push_back(i)
+                        num_groups += 1
+                    else:
+                        state_idx = <int64_t>pr.slot
+
+                    cache_keys[cache_slot] = h
+                    cache_vals[cache_slot] = state_idx
+                    cache_used[cache_slot] = 1
                     si_buf[i] = state_idx
                     i += 1
-                    continue
-
-                # Single-probe path: insert_new returns existing slot on hit,
-                # new slot on insert, and kCapacity on overflow.
-                pr = self._parvi.insert_new(h, num_groups)
-                if pr.found:
-                    state_idx = num_groups
-                    self._new_row_scratch.push_back(i)
-                    num_groups += 1
-                elif pr.slot == _PARVI_CAPACITY:
-                    state_idx = num_groups
-                    # Parvi overflow: drain into carchar and continue seamlessly.
-                    self._promote_parvi_to_carchar()
-                    self._index.insert_new(h, state_idx)
-                    self._new_row_scratch.push_back(i)
-                    num_groups += 1
-                else:
-                    state_idx = <int64_t>pr.slot
-
-                cache_keys[cache_slot] = h
-                cache_vals[cache_slot] = state_idx
-                cache_used[cache_slot] = 1
-                si_buf[i] = state_idx
-                i += 1
-                if not self._use_parvi:
-                    break  # promoted — finish the morsel on the carchar path
-        cdef bint _hot_is_new
-        if not self._use_parvi:
-            while i < n_rows:
-                _hot_is_new = self._index.find_or_insert_id(hashes[i], num_groups, state_idx)
-                if _hot_is_new:
-                    self._new_row_scratch.push_back(i)
-                    num_groups += 1
-                si_buf[i] = state_idx
-                i += 1
+                    if not self._use_parvi:
+                        break  # promoted — finish the morsel on the carchar path
+            if not self._use_parvi:
+                while i < n_rows:
+                    _hot_is_new = self._index.find_or_insert_id(khashes[codes[i]], num_groups, state_idx)
+                    if _hot_is_new:
+                        self._new_row_scratch.push_back(i)
+                        num_groups += 1
+                    si_buf[i] = state_idx
+                    i += 1
         if self._telemetry_enabled:
             self._time_lookup_ns += _now_ns() - phase_start
 

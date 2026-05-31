@@ -3,7 +3,7 @@
 
 from libc.stdint cimport int32_t, uint32_t, uint64_t
 from libc.stdlib cimport malloc, calloc, free
-from libc.string cimport memcpy
+from libc.string cimport memcpy, memset
 from libc.stddef cimport size_t
 
 from cpython.object cimport PyObject
@@ -11,8 +11,8 @@ from cpython.ref cimport Py_INCREF
 from libcpp.vector cimport vector
 
 from draken.morsels.morsel cimport Morsel
-from draken.vectors.vector cimport Vector
-from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_ARRAY
+from draken.vectors.vector cimport Vector, from_decoded
+from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_ARRAY, DRAKEN_INT64
 
 # C-level Py_DECREF: Cython 3 made cpython.ref.Py_DECREF take `object`, which
 # would re-INCREF; we need the raw PyObject* form for the C++ column store.
@@ -173,6 +173,60 @@ cdef class Morsel:
         cdef bytes raw = (<const char*>buf)[:n * sizeof(uint64_t)]
         free(buf)
         return _array('Q', raw)
+
+    def hash_keys(self, col_names=None):
+        """Shape-preserving keying hash — the entry point for group-by / join /
+        distinct.  Returns an INT64 Vector.
+
+        Single column: the column's shaped hash (dict→dict, dense→dense), so a
+        compressed key yields k distinct hashes the consumer probes once each.
+        Multiple columns: the per-column hashes are mixed into a dense hash
+        vector (a composite key has no shared dict structure).
+
+        Null keys are baked to NULL_HASH so they collide; per-row null semantics
+        are read from the source key columns by consumers that need them.
+        """
+        cdef Py_ssize_t n = self.num_rows
+        cdef int32_t n_cols = 0
+        cdef int32_t* col_indices = self._resolve_columns_to_indices(col_names, &n_cols)
+
+        # Single column → shape-preserving hash vector.
+        if n_cols == 1:
+            col_idx = col_indices[0]
+            free(col_indices)
+            return Vector(self._get_column(col_idx)._nb.hash_shaped())
+
+        # Multi-column → dense mixed hash. Resolve pointers (GIL held) so the
+        # mix loop runs fully nogil, then wrap the owned buffer as a Vector.
+        cdef const DrakenVector** dvs
+        try:
+            dvs = self._columns_to_pointers(col_indices, n_cols)
+        finally:
+            free(col_indices)
+
+        if n == 0:
+            draken_free(dvs)
+            return from_decoded(NULL, NULL, 0, DRAKEN_INT64)
+
+        cdef uint64_t* buf = <uint64_t*>draken_malloc(<size_t>n * sizeof(uint64_t))
+        if buf == NULL:
+            draken_free(dvs)
+            raise MemoryError()
+        memset(buf, 0, <size_t>n * sizeof(uint64_t))  # zeroed: required by simd_mix_hash
+
+        cdef bint needs_gil
+        try:
+            needs_gil = self.c_hash(buf, dvs, n_cols, n)
+        finally:
+            draken_free(dvs)
+
+        if needs_gil:
+            draken_free(buf)
+            raise NotImplementedError(
+                "Morsel.hash_keys: DRAKEN_ARRAY columns cannot be hashed via this path")
+
+        # buf is draken_malloc'd; from_decoded assumes ownership (freed on GC).
+        return from_decoded(<void*>buf, NULL, <uint32_t>n, DRAKEN_INT64)
 
     def __str__(self):
         """Format morsel as an ASCII table for display."""

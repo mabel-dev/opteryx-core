@@ -4715,6 +4715,61 @@ NB_MODULE(draken_native, m) {
             return result;
         })
         // ----------------------------------------------------------------
+        // hash_shaped — shape-preserving hash vector (the keying surface for
+        // group-by / join / distinct). Returns an INT64 Vector obeying the
+        // draken_hash_shaped invariant: compressed key → dict-shaped hash
+        // (k distinct hashes + codes); dense → n hashes. Null keys baked to
+        // NULL_HASH, source validity carried as a passenger mask. NULL/FP16
+        // key types fall back to a dense INT64 hash vector.
+        .def("hash_shaped", [](const VectorOwner& v) -> VectorOwner {
+            if (v.vec.type == DRAKEN_ARRAY)
+                throw std::invalid_argument("hash_shaped: not supported for DRAKEN_ARRAY");
+            const uint32_t n = v.vec.length;
+            if (v.vec.type != DRAKEN_NULL && v.vec.type != DRAKEN_VECTOR_FP16) {
+                return vecresult_to_owner(draken_hash_shaped(v.vec));
+            }
+            // Dense fallback for NULL / FP16: materialise n row hashes, wrap dense.
+            uint64_t* out = static_cast<uint64_t*>(
+                draken_malloc((n > 0u ? n : 1u) * sizeof(uint64_t)));
+            if (!out) throw std::bad_alloc();
+            OwnedBuffer<uint64_t> out_owned(out);
+            uint64_t scratch[1024];
+            uint32_t i = 0u;
+            if (v.vec.type == DRAKEN_NULL) {
+                while (i < n) {
+                    const uint32_t block = (n - i < 1024u) ? (n - i) : 1024u;
+                    for (uint32_t j = 0u; j < block; ++j) scratch[j] = NULL_HASH;
+                    simd_hash_i64(scratch, out + i, block);
+                    i += block;
+                }
+            } else {  // FP16
+                require_fp16_descriptor(v, "hash_shaped");
+                const uint32_t dim = v.logical_type->dimension;
+                const uint16_t* data = static_cast<const uint16_t*>(v.vec.data);
+                while (i < n) {
+                    const uint32_t block = (n - i < 1024u) ? (n - i) : 1024u;
+                    for (uint32_t j = 0u; j < block; ++j) {
+                        scratch[j] = row_is_valid(v.vec, i + j)
+                            ? fp16_row_fnv_seed(data + v.vec.selection[i + j]
+                                                     * static_cast<size_t>(dim), dim)
+                            : NULL_HASH;
+                    }
+                    simd_hash_i64(scratch, out + i, block);
+                    i += block;
+                }
+            }
+            VecResult r;
+            r.data = out_owned.release();
+            r.validity = nullptr;
+            r.selection = draken_identity_sel(n);
+            r.owns_selection = false;
+            r.data_length = n;
+            r.length = n;
+            r.type = DRAKEN_INT64;
+            r.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+            return vecresult_to_owner(r);
+        })
+        // ----------------------------------------------------------------
         // C.2 — reductions
         // sum(): empty or all-null → 0 (int) / 0.0 (float) / Decimal('0.00…') (decimal).
         // DECIMAL: accumulates unscaled int64 values then converts at the edge.

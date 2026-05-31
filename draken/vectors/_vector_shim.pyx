@@ -115,6 +115,12 @@ cdef class Vector:
     def hash(self):
         return self._nb.hash()
 
+    def hash_shaped(self):
+        # Shape-preserving keying hash: returns an INT64 Vector that mirrors this
+        # vector's shape (dict→dict, dense→dense). See draken_hash_shaped.
+        from draken.vectors.vector import Vector as _V
+        return _V(self._nb.hash_shaped())
+
     def sum(self):
         return self._nb.sum()
 
