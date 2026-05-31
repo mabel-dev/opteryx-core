@@ -507,10 +507,13 @@ class TestLayoutOps:
         assert vals == pytest.approx([1.0, 1.0, 2.0, 3.0])
 
     def test_compress_nan_dedup(self):
-        # Multiple NaN rows should compress to one dict entry.
+        # Multiple NaN rows compress to a single distinct value — that is the
+        # constant shape (data_length == 1), not dict (which is 1 < dl < length).
         v = f64([NAN, NAN, NAN])
         c = v.compress()
-        assert c.is_dict
+        assert c.is_constant
+        assert c.is_compressed
+        assert not c.is_dict
         assert c.data_length == 1
 
     def test_take_preserves_null(self):

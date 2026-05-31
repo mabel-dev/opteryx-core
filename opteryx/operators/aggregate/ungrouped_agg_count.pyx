@@ -57,7 +57,7 @@ cdef class CountAggregate(UngroupedAggregate):
         # Cached column index — list[i] on subsequent morsels, no dict hash
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-        cdef Vector raw = <Vector>typed._columns[self._col_idx]
+        cdef Vector raw = typed._get_column(self._col_idx)
 
         # Classify once; integer compare on all subsequent morsels
         if self._col_type == _VTYPE_UNKNOWN:

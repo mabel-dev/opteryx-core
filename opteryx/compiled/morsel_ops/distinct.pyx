@@ -27,7 +27,12 @@ from libc.stdint cimport int32_t, uint64_t
 from libc.stddef cimport size_t
 
 from draken.morsels.morsel cimport Morsel
+from draken.core.buffers cimport DrakenVector
 from opteryx.compiled.structures.carchar_set cimport CarcharSet, CarcharSetWrapper
+
+cdef extern from "core/alloc.h" nogil:
+    void* draken_malloc(size_t n) nogil
+    void  draken_free(void* p) nogil
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -59,6 +64,7 @@ def distinct(Morsel morsel, object seen_hashes, list columns=None):
     cdef uint64_t* hashes_ptr = NULL
     cdef int32_t* idx_buf = NULL
     cdef int32_t* col_indices = NULL
+    cdef const DrakenVector** dvs = NULL
     cdef int32_t n_cols = 0
     cdef size_t count
     cdef bint hash_requires_gil
@@ -99,9 +105,12 @@ def distinct(Morsel morsel, object seen_hashes, list columns=None):
         raise MemoryError()
 
     try:
+        # ── Resolve column pointers up front so c_hash runs fully nogil ──────
+        dvs = morsel._columns_to_pointers(col_indices, n_cols)
+
         # ── Fast path: hash + probe in one nogil block ────────────────────────
         with nogil:
-            hash_requires_gil = morsel.c_hash(hashes_ptr, col_indices, n_cols, n)
+            hash_requires_gil = morsel.c_hash(hashes_ptr, dvs, n_cols, n)
 
         if hash_requires_gil:
             # At least one column (e.g. ArrayVector) couldn't hash without GIL.
@@ -145,3 +154,4 @@ def distinct(Morsel morsel, object seen_hashes, list columns=None):
         free(col_indices)
         free(hashes_ptr)
         free(idx_buf)
+        draken_free(dvs)

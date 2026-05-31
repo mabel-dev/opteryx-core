@@ -36,7 +36,7 @@ cdef class CountDistinctAggregate(UngroupedAggregate):
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-        cdef Vector raw = <Vector>typed._columns[self._col_idx]
+        cdef Vector raw = typed._get_column(self._col_idx)
 
         cdef CarcharSetWrapper the_set = self._set
 

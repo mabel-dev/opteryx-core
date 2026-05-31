@@ -160,27 +160,59 @@ static void serialize_rle_float_as_float64(std::vector<uint8_t>& out,
     }
 }
 
-static void serialize_rle_string_as_plain(std::vector<uint8_t>& out,
-                                          const DecodedColumn& col) {
-    // Expand RLE strings to plain length-prefixed string list (tag=7).
-    write_u8(out, 7);  // TAG_STR_PLAIN
-    write_u32(out, static_cast<uint32_t>(col.num_rows));
+static void serialize_rle_string_as_dict(std::vector<uint8_t>& out,
+                                         const DecodedColumn& col) {
+    // Preserve RLE-encoded strings as TAG_STR_DICT (6): runs are the dict
+    // entries, per-row codes index the run.  This keeps data_length == num_runs
+    // << num_rows through the pipeline — never expand compressed data.
+    const size_t n_runs = col.rle_run_lengths.size();
+    const uint32_t dict_size = static_cast<uint32_t>(n_runs);
+    const uint32_t num_rows  = static_cast<uint32_t>(col.num_rows);
+
+    write_u8(out, 6);  // TAG_STR_DICT
+    write_u32(out, num_rows);
     write_null_bitmap(out, col);  // empty: rle path is non-nullable
 
-    write_u32(out, static_cast<uint32_t>(col.num_rows));  // num_strings
-    const size_t n_runs = col.rle_run_lengths.size();
-    for (size_t r = 0; r < n_runs; ++r) {
-        const uint32_t off  = col.rle_str_offsets[r];
-        const int32_t  slen = col.rle_str_lens[r];
-        const int32_t  cnt  = col.rle_run_lengths[r];
+    uint8_t cw = code_width_for(dict_size);
+    write_u32(out, dict_size);
+    write_u8(out, cw);
+
+    uint32_t codes_len = num_rows * cw;
+    write_u32(out, codes_len);
+
+    // Per-row codes: every row in run r gets code r.
+    size_t pos = out.size();
+    out.resize(pos + codes_len);
+    uint8_t* dst = out.data() + pos;
+    uint32_t row = 0;
+    for (uint32_t r = 0; r < dict_size; ++r) {
+        const int32_t cnt = col.rle_run_lengths[r];
         for (int32_t j = 0; j < cnt; ++j) {
-            write_u32(out, static_cast<uint32_t>(slen));
-            if (slen > 0) {
-                write_bytes(out, col.rle_str_arena.data() + off,
-                            static_cast<size_t>(slen));
+            if (cw == 1) {
+                dst[row] = static_cast<uint8_t>(r);
+            } else if (cw == 2) {
+                uint16_t v = static_cast<uint16_t>(r);
+                std::memcpy(dst + row * 2, &v, 2);
+            } else {
+                std::memcpy(dst + row * 4, &r, 4);
             }
+            ++row;
         }
     }
+
+    // Sentinel-terminated offsets: dict_size+1 int32_t values.
+    write_u32(out, dict_size + 1);
+    for (uint32_t r = 0; r < dict_size; ++r) {
+        int32_t tmp = static_cast<int32_t>(col.rle_str_offsets[r]);
+        write_bytes(out, &tmp, 4);
+    }
+    {
+        int32_t sentinel = static_cast<int32_t>(col.rle_str_arena.size());
+        write_bytes(out, &sentinel, 4);
+    }
+
+    // Arena
+    write_bytes(out, col.rle_str_arena.data(), col.rle_str_arena.size());
 }
 
 // ── per-type serializers ────────────────────────────────────────────────────
@@ -567,7 +599,8 @@ static void serialize_decoded_column(const DecodedColumn& col,
     } else if (t == "string" || t == "byte_array") {
         if (!col.rle_str_lens.empty()) {
             // RLE path: non-nullable dict-encoded byte_array column.
-            serialize_rle_string_as_plain(out, col);
+            // Preserve as dict — runs are the entries, per-row codes index them.
+            serialize_rle_string_as_dict(out, col);
         } else if ((!col.dict_indices.empty() || !col.dict_codes_array.empty()) &&
             !col.string_dict_lens.empty()) {
             serialize_string_dict(out, col);

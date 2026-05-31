@@ -154,6 +154,29 @@ typedef struct {
 #define DRAKEN_SEL_PERMUTATION  (1u << 1)  // bijection, data_length == length
 // bits 2..7 reserved for future layout hints
 
+// Shape predicates — canonical tests for the encoding shapes.
+// Use these instead of open-coding data_length comparisons at call sites.
+//
+// Partition by data_length vs length:
+//   is_dense      data_length == length   — every row its own value
+//   is_compressed data_length <  length   — value array smaller than row count;
+//                                            per-unique-value work is possible
+// Within compressed:
+//   is_constant   data_length == 1        — one value broadcast to all rows
+//   is_dict       1 < data_length < length — true dictionary with repeats
+static inline int draken_is_dense(const DrakenVector* v) {
+    return v->data_length == v->length;
+}
+static inline int draken_is_compressed(const DrakenVector* v) {
+    return v->data_length < v->length;
+}
+static inline int draken_is_constant(const DrakenVector* v) {
+    return v->data_length == 1;
+}
+static inline int draken_is_dict(const DrakenVector* v) {
+    return v->data_length > 1 && v->data_length < v->length;
+}
+
 // =============================================================================
 // ABI guard — frozen layout (CLAUDE.md §11, 09_delivery.md risk #1).
 // sizeof alone won't catch a field reorder, and a renumbered enum is as fatal

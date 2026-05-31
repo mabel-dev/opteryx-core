@@ -21,6 +21,7 @@
 // No shape discrimination — uniform access; works for dict shape automatically.
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
@@ -59,23 +60,67 @@ static inline uint64_t str_hash_seed(const DrakenStringSlot* s,
 static inline void hash_string(const DrakenVector& v, uint64_t* out, uint32_t n) {
     if (n == 0) return;
 
-    const DrakenStringArena* sa    = static_cast<const DrakenStringArena*>(v.data);
-    const DrakenStringSlot*  slots = sa->slots;
+    const DrakenStringArena* sa       = static_cast<const DrakenStringArena*>(v.data);
+    const DrakenStringSlot*  slots    = sa->slots;
     const uint8_t*           validity = v.validity;
+    const uint32_t           nd       = v.data_length;
 
+    // Compressed-shape specialization (dict or constant): pre-compute one hash
+    // per distinct slot then scatter via selection. Avoids calling XXH3_64bits
+    // once per logical row for repeated codes — the dominant cost for string
+    // GROUP BY on dict-encoded Parquet columns. A constant column has one value
+    // to hash, so it takes this path too.
+    // Morsels are bounded at 64K rows so nd <= 64K and the allocation is at
+    // most 512KB. Falls through to the dense path on allocation failure.
+    if (draken_is_compressed(&v)) {
+        uint64_t* slot_hashes = static_cast<uint64_t*>(std::malloc(nd * sizeof(uint64_t)));
+        if (slot_hashes != nullptr) {
+            // Phase 1: one hash per distinct slot (nulls are per-logical-row,
+            // not per-slot; handled in the scatter loop below).
+            for (uint32_t k = 0; k < nd; ++k) {
+                slot_hashes[k] = str_hash_seed(&slots[k], sa->arena);
+            }
+
+            // Phase 2: scatter into 1024-wide chunks, substitute NULL_HASH for
+            // null rows, then mix. Output is byte-identical to the dense path.
+            uint64_t scratch[1024];
+            uint32_t i = 0;
+            while (i < n) {
+                const uint32_t block = (n - i < 1024u) ? (n - i) : 1024u;
+                if (validity != nullptr) {
+                    for (uint32_t j = 0; j < block; ++j) {
+                        const uint32_t logical = i + j;
+                        const uint64_t is_valid =
+                            (validity[logical >> 3] >> (logical & 7)) & 1u;
+                        scratch[j] = is_valid
+                            ? slot_hashes[v.selection[logical]]
+                            : (uint64_t)NULL_HASH;
+                    }
+                } else {
+                    for (uint32_t j = 0; j < block; ++j) {
+                        scratch[j] = slot_hashes[v.selection[i + j]];
+                    }
+                }
+                simd_hash_i64(scratch, out + i, block);
+                i += block;
+            }
+            std::free(slot_hashes);
+            return;
+        }
+        // malloc failed: fall through to dense path
+    }
+
+    // Dense path (data_length == length) or malloc fallback: hash each logical
+    // row independently via the arena.
     uint64_t scratch[1024];
     uint32_t i = 0;
-
     while (i < n) {
         const uint32_t block = (n - i < 1024u) ? (n - i) : 1024u;
-
         if (validity != nullptr) {
             for (uint32_t j = 0; j < block; ++j) {
                 const uint32_t logical = i + j;
                 const uint64_t is_valid =
                     (validity[logical >> 3] >> (logical & 7)) & 1u;
-                // Null path: substitute NULL_HASH directly (no slot access).
-                // Valid path: exact slot seed for short; full-content hash for long.
                 scratch[j] = is_valid
                     ? str_hash_seed(&slots[v.selection[logical]], sa->arena)
                     : (uint64_t)NULL_HASH;
@@ -85,7 +130,6 @@ static inline void hash_string(const DrakenVector& v, uint64_t* out, uint32_t n)
                 scratch[j] = str_hash_seed(&slots[v.selection[i + j]], sa->arena);
             }
         }
-
         simd_hash_i64(scratch, out + i, block);
         i += block;
     }

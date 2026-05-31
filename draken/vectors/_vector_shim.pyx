@@ -41,6 +41,22 @@ cdef class Vector:
     def data_length(self):
         return self._nb.data_length
 
+    @property
+    def is_dense(self):
+        return self._nb.data_length == self._nb.length
+
+    @property
+    def is_compressed(self):
+        return self._nb.data_length < self._nb.length
+
+    @property
+    def is_constant(self):
+        return self._nb.data_length == 1
+
+    @property
+    def is_dict(self):
+        return 1 < self._nb.data_length < self._nb.length
+
     def __len__(self):
         return self._nb.length
 

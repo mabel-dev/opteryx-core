@@ -464,7 +464,7 @@ class Session(DataFrame):
         self,
         operation: str,
         params: Optional[Iterable] = None,
-        max_size: int = 10_000,
+        max_size: int = 65_536,
         visibility_filters: Optional[Dict[str, Any]] = None,
     ):
         """Execute a SQL operation and stream Draken Morsels.

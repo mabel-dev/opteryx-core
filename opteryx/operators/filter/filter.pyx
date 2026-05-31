@@ -106,7 +106,7 @@ cdef Vector _build_constant_vector(Vector cur, object value, Py_ssize_t length):
 
     Wraps the nanobind result in a Cython-shim Vector so callers that
     declare `cdef Vector new_vec` and downstream code that does
-    `<Vector>morsel._columns[idx]` see a consistent type.
+    `morsel._get_column(idx)` see a consistent type.
     """
     cdef DrakenType t = cur.unified().type
     if t == DRAKEN_BOOL:
@@ -153,13 +153,13 @@ cdef void _apply_constant_replacements(Morsel morsel, list replacements) except 
         if py_idx is None:
             continue
         idx = <Py_ssize_t>py_idx
-        cur = <Vector>morsel._columns[idx]
+        cur = morsel._get_column(idx)
         if cur is None:
             continue
         new_vec = _build_constant_vector(cur, value, length)
         if new_vec is None:
             continue
-        morsel._columns[idx] = new_vec
+        morsel._set_column(idx, new_vec)
 
 
 cdef class FilterNode(BasePlanNode):

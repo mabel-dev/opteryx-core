@@ -5563,12 +5563,22 @@ NB_MODULE(draken_native, m) {
             return nb::cast(take_child(*v.child_owner, all_idx));
         }, "Child Vector of a DRAKEN_ARRAY vector as a new independently-owned Vector. Raises for non-array vectors.")
         // ----------------------------------------------------------------
-        // is_dict / is_constant / is_dense — layout introspection for tests only.
+        // Shape predicates — canonical via draken_is_* in buffers.h.
+        //   is_dense      data_length == length
+        //   is_compressed data_length <  length   (== is_dict || is_constant)
+        //   is_constant   data_length == 1
+        //   is_dict       1 < data_length < length
+        .def_prop_ro("is_dense", [](const VectorOwner& v) {
+            return draken_is_dense(&v.vec) != 0;
+        })
+        .def_prop_ro("is_compressed", [](const VectorOwner& v) {
+            return draken_is_compressed(&v.vec) != 0;
+        })
         .def_prop_ro("is_dict", [](const VectorOwner& v) {
-            return v.vec.data_length < v.vec.length;
+            return draken_is_dict(&v.vec) != 0;
         })
         .def_prop_ro("is_constant", [](const VectorOwner& v) {
-            return v.vec.data_length == 1 && v.vec.length > 1;
+            return draken_is_constant(&v.vec) != 0;
         })
         .def_prop_ro("data_length", [](const VectorOwner& v) {
             return v.vec.data_length;

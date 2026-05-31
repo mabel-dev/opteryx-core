@@ -89,7 +89,7 @@ cdef class CountDistinctCollector(BaseCollector):
         # Resolve column index on first call
         if self._col_idx < 0:
             self._col_idx = m._column_index_from_name(self.column_name)
-        raw = <Vector>m._columns[self._col_idx]
+        raw = m._get_column(self._col_idx)
 
         # Generic path: hash into scratch buffer, scatter non-null hashes.
         if n_rows > self._scratch_capacity:

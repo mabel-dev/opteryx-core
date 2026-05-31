@@ -37,10 +37,10 @@ cdef class SumInt64Aggregate(UngroupedAggregate):
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-        if self._col_idx < 0 or self._col_idx >= len(typed._columns):
+        if self._col_idx < 0 or self._col_idx >= typed._num_columns():
             return
 
-        cdef Vector raw = <Vector>typed._columns[self._col_idx]
+        cdef Vector raw = typed._get_column(self._col_idx)
         if raw is None:
             return
 
@@ -106,10 +106,10 @@ cdef class SumFloat64Aggregate(UngroupedAggregate):
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-        if self._col_idx < 0 or self._col_idx >= len(typed._columns):
+        if self._col_idx < 0 or self._col_idx >= typed._num_columns():
             return
 
-        cdef Vector raw = <Vector>typed._columns[self._col_idx]
+        cdef Vector raw = typed._get_column(self._col_idx)
         if raw is None:
             return
 

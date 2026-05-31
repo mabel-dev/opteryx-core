@@ -35,10 +35,10 @@ cdef class MinInt64Aggregate(UngroupedAggregate):
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-        if self._col_idx < 0 or self._col_idx >= len(typed._columns):
+        if self._col_idx < 0 or self._col_idx >= typed._num_columns():
             return
 
-        cdef Vector raw = <Vector>typed._columns[self._col_idx]
+        cdef Vector raw = typed._get_column(self._col_idx)
         if raw is None:
             return
 
@@ -106,10 +106,10 @@ cdef class MaxInt64Aggregate(UngroupedAggregate):
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-        if self._col_idx < 0 or self._col_idx >= len(typed._columns):
+        if self._col_idx < 0 or self._col_idx >= typed._num_columns():
             return
 
-        cdef Vector raw = <Vector>typed._columns[self._col_idx]
+        cdef Vector raw = typed._get_column(self._col_idx)
         if raw is None:
             return
 
@@ -176,10 +176,10 @@ cdef class MinFloat64Aggregate(UngroupedAggregate):
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-        if self._col_idx < 0 or self._col_idx >= len(typed._columns):
+        if self._col_idx < 0 or self._col_idx >= typed._num_columns():
             return
 
-        cdef Vector raw = <Vector>typed._columns[self._col_idx]
+        cdef Vector raw = typed._get_column(self._col_idx)
         if raw is None:
             return
 
@@ -240,10 +240,10 @@ cdef class MaxFloat64Aggregate(UngroupedAggregate):
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-        if self._col_idx < 0 or self._col_idx >= len(typed._columns):
+        if self._col_idx < 0 or self._col_idx >= typed._num_columns():
             return
 
-        cdef Vector raw = <Vector>typed._columns[self._col_idx]
+        cdef Vector raw = typed._get_column(self._col_idx)
         if raw is None:
             return
 
@@ -301,7 +301,7 @@ cdef class MinBytesAggregate(UngroupedAggregate):
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-        cdef Vector raw = <Vector>typed._columns[self._col_idx]
+        cdef Vector raw = typed._get_column(self._col_idx)
 
         if self._col_type == _VTYPE_UNKNOWN:
             self._col_type = _classify_vector(raw)
@@ -375,7 +375,7 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
 
         if self._col_idx < 0:
             self._col_idx = typed._column_index_from_name(self.column_name)
-        cdef Vector raw = <Vector>typed._columns[self._col_idx]
+        cdef Vector raw = typed._get_column(self._col_idx)
 
         if self._col_type == _VTYPE_UNKNOWN:
             self._col_type = _classify_vector(raw)
