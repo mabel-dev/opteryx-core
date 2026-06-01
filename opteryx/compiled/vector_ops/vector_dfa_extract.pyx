@@ -202,6 +202,13 @@ cdef extern from "core/draken_bridge.h":
     object draken_vector_own_string(
         DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
         uint8_t* validity, uint32_t length, DrakenType type)
+    object draken_vector_own_string_dict(
+        DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
+        uint32_t* codes, uint32_t data_length,
+        uint8_t* validity, uint32_t length, DrakenType type)
+
+cdef extern from "core/buffers.h" nogil:
+    int draken_is_compressed(const DrakenVector* v)
 
 
 cdef enum DfaOpType:
@@ -859,6 +866,126 @@ cdef inline bint _execute_procedure(
     return False
 
 
+cdef object _vector_dfa_extract_compressed(
+    DrakenVector* uv,
+    DrakenStringArena* src_arena,
+    DfaProcedure* proc,
+):
+    """Shape-preserving DFA execution for compressed (dict/constant) input.
+
+    The DFA is a pure function of the input bytes, so a value that appears in
+    `data_length` unique slots is executed once per UNIQUE value instead of
+    once per logical row. The result preserves the input's encoding: the same
+    `selection` codes are reused, so the output stays compressed and downstream
+    operators see the cheaper encoding via the uniform data[selection[i]] path.
+
+    Validity is per-logical-row and independent of value identity, so it is
+    copied through unchanged; a value referenced only by null rows is still
+    executed (harmless — its result is never selected).
+    """
+    cdef uint32_t* sel = <uint32_t*>uv.selection
+    cdef uint8_t* nulls = uv.validity
+    cdef Py_ssize_t n = <Py_ssize_t>uv.length
+    cdef Py_ssize_t k = <Py_ssize_t>uv.data_length
+    cdef Py_ssize_t j
+    cdef const char* out_ptr = NULL
+    cdef Py_ssize_t out_len = 0
+    cdef Py_ssize_t total_bytes = 0
+    cdef Py_ssize_t row_len = 0
+    cdef const char* row_ptr = NULL
+    cdef Py_ssize_t null_bytes = 0
+    cdef DrakenStringSlot* slot
+    cdef const uint8_t* sdata
+    cdef uint32_t slen
+
+    # First pass: cache (ptr, len) per UNIQUE value (k entries, not n).
+    # cap_lens[j] >= 0 → DFA matched; length of capture.
+    # cap_lens[j] < 0  → no match; passthrough; actual length = -cap_lens[j] - 1.
+    cdef const char** cap_ptrs = <const char**>malloc(<size_t>k * sizeof(const char*))
+    cdef int32_t* cap_lens = <int32_t*>malloc(<size_t>k * sizeof(int32_t))
+
+    if cap_ptrs == NULL or cap_lens == NULL:
+        free(cap_ptrs)
+        free(cap_lens)
+        raise MemoryError("vector_dfa_extract: cache allocation failed")
+
+    for j in range(k):
+        slot = &src_arena.slots[j]
+        slen = str_length(slot)
+        sdata = str_data(slot, src_arena.arena)
+        row_ptr = <const char*>sdata
+        row_len = <Py_ssize_t>slen
+
+        if _execute_procedure(row_ptr, row_len, proc, &out_ptr, &out_len):
+            cap_ptrs[j] = out_ptr
+            cap_lens[j] = <int32_t>out_len
+            total_bytes += out_len
+        else:
+            cap_ptrs[j] = row_ptr
+            cap_lens[j] = <int32_t>(-row_len - 1)
+            total_bytes += row_len
+
+    # Allocate value-array slots (k), arena, codes (n), and validity (n).
+    cdef size_t slots_sz = <size_t>k * sizeof(DrakenStringSlot) if k > 0 else sizeof(DrakenStringSlot)
+    cdef size_t arena_sz = <size_t>total_bytes if total_bytes > 0 else 1
+    cdef DrakenStringSlot* out_slots = <DrakenStringSlot*>draken_malloc(slots_sz)
+    cdef uint8_t* out_arena = <uint8_t*>draken_malloc(arena_sz)
+    cdef uint32_t* out_codes = <uint32_t*>draken_malloc(<size_t>n * sizeof(uint32_t) if n > 0 else sizeof(uint32_t))
+    cdef uint8_t* out_null = NULL
+
+    if out_slots == NULL or out_arena == NULL or out_codes == NULL:
+        free(cap_ptrs)
+        free(cap_lens)
+        draken_free(out_slots)
+        draken_free(out_arena)
+        draken_free(out_codes)
+        raise MemoryError("vector_dfa_extract: output allocation failed")
+
+    memcpy(out_codes, sel, <size_t>n * sizeof(uint32_t))
+
+    if nulls != NULL:
+        null_bytes = (n + 7) >> 3
+        out_null = <uint8_t*>draken_malloc(<size_t>null_bytes if null_bytes > 0 else 1)
+        if out_null == NULL:
+            free(cap_ptrs)
+            free(cap_lens)
+            draken_free(out_slots)
+            draken_free(out_arena)
+            draken_free(out_codes)
+            raise MemoryError("vector_dfa_extract: validity allocation failed")
+        memcpy(out_null, nulls, <size_t>null_bytes)
+
+    # Second pass: fill the value-array slots and arena (k entries).
+    cdef const char* cached_ptr
+    cdef int32_t cached_len
+    cdef uint32_t copy_len
+    cdef size_t arena_used = 0
+
+    for j in range(k):
+        cached_ptr = cap_ptrs[j]
+        cached_len = cap_lens[j]
+
+        if cached_len >= 0:
+            copy_len = <uint32_t>cached_len
+        else:
+            copy_len = <uint32_t>(-cached_len - 1)
+
+        if copy_len > <uint32_t>STR_INLINE_MAX:
+            memcpy(out_arena + arena_used, cached_ptr, <size_t>copy_len)
+            draken_build_string_slot(&out_slots[j], <const uint8_t*>cached_ptr, copy_len, <uint32_t>arena_used)
+            arena_used += <size_t>copy_len
+        else:
+            draken_build_string_slot(&out_slots[j], <const uint8_t*>cached_ptr, copy_len, 0)
+
+    free(cap_ptrs)
+    free(cap_lens)
+
+    return draken_vector_own_string_dict(
+        out_slots, out_arena, arena_used, out_codes, <uint32_t>k,
+        out_null, <uint32_t>n, DRAKEN_VARCHAR,
+    )
+
+
 cpdef object vector_dfa_extract(
     Vector data,
     Vector compiled_program,
@@ -878,6 +1005,10 @@ cpdef object vector_dfa_extract(
 
     cdef DrakenVector* uv = data.unified()
     cdef DrakenStringArena* src_arena = <DrakenStringArena*>uv.data
+
+    if draken_is_compressed(uv):
+        return _vector_dfa_extract_compressed(uv, src_arena, &proc)
+
     cdef uint32_t* sel = <uint32_t*>uv.selection
     cdef uint8_t* nulls = uv.validity
     cdef Py_ssize_t n = <Py_ssize_t>uv.length

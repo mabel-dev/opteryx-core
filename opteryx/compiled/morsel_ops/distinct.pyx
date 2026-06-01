@@ -22,7 +22,7 @@ support nogil hashing via c_hash_into(). No Python fallback is permitted.
 """
 
 from libc.stdlib cimport malloc, free
-from libc.string cimport memset, memcpy
+from libc.string cimport memset
 from libc.stdint cimport int32_t, uint64_t
 from libc.stddef cimport size_t
 
@@ -68,7 +68,6 @@ def distinct(Morsel morsel, object seen_hashes, list columns=None):
     cdef int32_t n_cols = 0
     cdef size_t count
     cdef bint hash_requires_gil
-    cdef uint64_t[::1] py_hashes
     cdef bint is_parvi
     cdef CarcharSetWrapper carchar_set
     cdef CarcharSet* cs
@@ -108,19 +107,16 @@ def distinct(Morsel morsel, object seen_hashes, list columns=None):
         # ── Resolve column pointers up front so c_hash runs fully nogil ──────
         dvs = morsel._columns_to_pointers(col_indices, n_cols)
 
-        # ── Fast path: hash + probe in one nogil block ────────────────────────
+        # ── Hash + probe in one nogil block ───────────────────────────────────
         with nogil:
             hash_requires_gil = morsel.c_hash(hashes_ptr, dvs, n_cols, n)
 
         if hash_requires_gil:
-            # At least one column (e.g. ArrayVector) couldn't hash without GIL.
-            # Re-zero and redo via the Python hash() path, then continue nogil.
-            memset(hashes_ptr, 0, <size_t>n * sizeof(uint64_t))
-            if columns is None:
-                py_hashes = morsel.hash()
-            else:
-                py_hashes = morsel.hash(columns=columns)
-            memcpy(hashes_ptr, &py_hashes[0], <size_t>n * sizeof(uint64_t))
+            # A column type (e.g. ArrayVector) cannot be row-hashed nogil. Fail
+            # loudly rather than degrading to a per-row Python hash path.
+            raise TypeError(
+                "DISTINCT: one or more key columns have a type that cannot be "
+                "hashed (array/null/fp16)")
 
         # Call mark_new_indices on the appropriate set type
         if is_parvi:

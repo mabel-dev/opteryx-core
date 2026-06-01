@@ -61,7 +61,11 @@ cdef extern from "parvi.hpp" namespace "opteryx::parvi":
 
 
 cdef double _CARCHAR_LOAD_FACTOR = 0.70
-cdef size_t _INITIAL_INDEX_CAPACITY = 256
+# Holds 0.70 * 4096 = 2867 groups before the first resize — covers the common
+# medium-cardinality GROUP BY cohort with zero resizes at ~70KB init cost,
+# without taxing tiny or huge aggregations. (Swept empirically; the real fix for
+# high-cardinality is NDV-based reserve(), which a constant cannot provide.)
+cdef size_t _INITIAL_INDEX_CAPACITY = 4096
 cdef size_t _PARVI_CAPACITY = 16  # must match opteryx::parvi::kCapacity
 
 

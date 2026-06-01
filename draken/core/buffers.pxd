@@ -89,6 +89,8 @@ cdef extern from "core/string_slot.h":
     void     str_init_inline(DrakenStringSlot* s, const uint8_t* src, uint32_t length) nogil
     void     str_init_extern(DrakenStringSlot* s, const uint8_t* src,
                             uint32_t length, uint32_t hash32, uint32_t arena_offset) nogil
+    void     str_clone_with_offset(DrakenStringSlot* dst, const DrakenStringSlot* src,
+                                   uint32_t new_arena_offset) nogil
 
 cdef extern from "core/buffers.h":
 

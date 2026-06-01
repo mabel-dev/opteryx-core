@@ -51,7 +51,7 @@ import time
 
 from libc.stdint cimport int32_t
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
-from draken.vectors.vector cimport Vector
+from draken.vectors.vector cimport Vector, mix_hash, NULL_HASH
 
 from opteryx.models import QueryProperties
 
@@ -160,11 +160,13 @@ cdef CarcharSetWrapper _rebuild_carchar_from_phash(PerfectHashSet phs):
     """Reconstruct a hash-based CarcharSetWrapper from an existing PerfectHashSet.
 
     Called only when the probe side turns out to have a column encoding the
-    PerfectHashSet path can't handle (e.g. nullable or non-dense). Iterates
-    the bit-array and hashes each stored value via Draken's scalar hash machinery.
+    PerfectHashSet path can't handle (e.g. nullable or non-dense). Iterates the
+    bit-array and inserts the int64 row-hash of each stored value directly —
+    mix_hash(0, v) is identically the int64 hash kernel's output for value v
+    (the same equivalence the probe path produces), so no per-value constant
+    vector or Python hash() round-trip is needed.
     """
     cdef CarcharSetWrapper result = CarcharSetWrapper(<size_t>phs._range * 2 + 8)
-    cdef uint64_t[::1] hash_buf
     cdef Py_ssize_t w, bit
     cdef uint64_t word, mask
     cdef int64_t slot, val
@@ -177,9 +179,7 @@ cdef CarcharSetWrapper _rebuild_carchar_from_phash(PerfectHashSet phs):
             if word & mask:
                 slot = <int64_t>w * 64 + <int64_t>bit
                 val = phs._min_val + slot
-                scalar_vec = _draken_native.vector_from_constant(val, 1)
-                hash_buf = (<Vector>scalar_vec).hash()
-                result.insert(hash_buf[0])
+                result.insert(mix_hash(0, <uint64_t>val))
     return result
 
 

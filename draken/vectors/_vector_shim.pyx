@@ -6,6 +6,12 @@ from cpython.object cimport PyObject
 from libc.stdint cimport int32_t, uint8_t, uint32_t, uint64_t
 
 from draken.core.buffers cimport DrakenVector, DrakenType
+from draken.core.buffers cimport DRAKEN_ARRAY, DRAKEN_NULL, DRAKEN_VECTOR_FP16
+
+# Native row-hash kernel (header-only static inline in ops/hash.h). Used by
+# c_hash_single to fill a caller buffer with zero Python object creation.
+cdef extern from "ops/hash.h" nogil:
+    void draken_hash(const DrakenVector& v, uint64_t* out, uint32_t n)
 
 cdef extern from "core/draken_bridge.h":
     const DrakenVector* draken_vector_unwrap(PyObject* obj)
@@ -196,11 +202,17 @@ cdef class Vector:
         return self._dv.validity
 
     cdef bint c_hash_single(self, uint64_t* out, int32_t n) except -1 nogil:
-        cdef Py_ssize_t i
-        with gil:
-            hashes = self._nb.hash()
-            for i in range(n):
-                out[i] = <uint64_t>hashes[i]
+        # Hash directly into the caller buffer via the C++ kernel — fully nogil,
+        # zero Python object creation. Unsupported key types (array/null/fp16)
+        # fail loudly rather than degrading to a per-row Python hash path.
+        cdef DrakenVector* dv = <DrakenVector*>self._dv
+        if (dv.type == DRAKEN_ARRAY or dv.type == DRAKEN_NULL
+                or dv.type == DRAKEN_VECTOR_FP16):
+            with gil:
+                raise TypeError(
+                    "c_hash_single: unsupported key vector type %d "
+                    "(array/null/fp16 cannot be row-hashed)" % <int>dv.type)
+        draken_hash(dv[0], out, <uint32_t>n)
         return 0
 
     @property

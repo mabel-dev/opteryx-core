@@ -106,6 +106,24 @@ static inline const uint8_t* str_data(const DrakenStringSlot* s, const uint8_t* 
     return str_is_inline(s) ? s->inl.data : (arena_base + s->ext.arena_offset);
 }
 
+// Clone a slot verbatim, rebasing only the arena offset for long slots.
+//
+// Copies all 16 bytes (length, and for long slots prefix + hash32) so the
+// destination preserves the source's precomputed prefix and hash32 — NO rehash.
+// For long slots the caller has already copied the payload bytes into its own
+// arena at `new_arena_offset`; this points the slot there. For inline slots the
+// bytes live in the slot itself, so `new_arena_offset` is ignored.
+//
+// Use when re-homing a slot from one arena to another (e.g. accumulating group
+// keys) without recomputing the hash or re-deriving the prefix.
+static inline void str_clone_with_offset(DrakenStringSlot* dst,
+                                         const DrakenStringSlot* src,
+                                         uint32_t new_arena_offset) {
+    *dst = *src;
+    if (!str_is_inline(src))
+        dst->ext.arena_offset = new_arena_offset;
+}
+
 // Prefix as a big-endian uint32_t suitable for lex comparison: prefix_a < prefix_b
 // ↔ first-4-bytes(a) < first-4-bytes(b) lexicographically. Works for both forms.
 static inline uint32_t str_prefix4(const DrakenStringSlot* s) {

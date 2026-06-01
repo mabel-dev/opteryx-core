@@ -396,7 +396,14 @@ static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_
 //
 // indices[i] is a logical row position in v.  Output row i = source row
 // indices[i].  Null source row → null output row.
-// Compact arena: one copy per unique referenced long source slot (by code).
+//
+// Dict-preserving path (k <= n): copies the full k-slot data block and builds
+// an owned codes array (out_codes[i] = v.selection[indices[i]]).  Keeps
+// data_length = k so compressed-fast-path consumers (group-by, join) see the
+// repeated-value structure even after a filter/gather.
+//
+// Compact path (k > n): builds exactly n output slots from the referenced
+// source slots; same as the original implementation.
 // ---------------------------------------------------------------------------
 static inline VecResult str_take(const DrakenVector& v,
                                   const int32_t*      indices,
@@ -405,52 +412,86 @@ static inline VecResult str_take(const DrakenVector& v,
     const DrakenStringSlot*  src_s = sa->slots;
     const uint8_t*           src_a = sa->arena;
     const uint8_t*           src_v = v.validity;
+    const uint32_t           k     = v.data_length;
 
+    if (k <= n) {
+        // ── Dict-preserving path ─────────────────────────────────────────
+        StrBlock sb = sg_alloc_str_block(k > 0u ? k : 1u, sa->arena_used);
+        SgOwned<void> bg(sb.block);
+        std::memcpy(sb.slots, src_s, (k > 0u ? k : 1u) * sizeof(DrakenStringSlot));
+        if (sa->arena_used > 0u && sb.arena_bytes != nullptr)
+            std::memcpy(sb.arena_bytes, sa->arena, sa->arena_used);
+
+        SgOwned<void> cg(draken_malloc((n > 0u ? n : 1u) * sizeof(uint32_t)));
+        if (!cg) throw std::bad_alloc();
+        uint32_t* out_codes = static_cast<uint32_t*>(cg.get());
+
+        uint8_t* out_v = nullptr;
+        SgOwned<uint8_t> vg;
+        bool has_nulls = false;
+        if (src_v != nullptr && n > 0u) { out_v = sg_alloc_validity(n); vg.reset(out_v); }
+
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint32_t src_log = static_cast<uint32_t>(indices[i]);
+            if (!sg_val_row(src_v, src_log)) {
+                out_codes[i] = 0u;
+                has_nulls = true;
+            } else {
+                out_codes[i] = v.selection[src_log];
+                if (out_v != nullptr)
+                    out_v[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+            }
+        }
+
+        vg.release();
+        if (!has_nulls && out_v != nullptr) { draken_free(out_v); out_v = nullptr; }
+        else out_v = sg_normalize_validity(out_v, n);
+
+        bg.release();
+        cg.release();
+        return sg_finalize(sb, out_v, out_codes, true, k, n, sa->arena_used, 0u);
+    }
+
+    // ── Compact path (k > n) ────────────────────────────────────────────
     // Phase 1: scan indices to compute arena layout.
-    // new_off[k] = output arena offset for source slot k (UINT32_MAX = unassigned).
-    std::vector<uint32_t> new_off(v.data_length, UINT32_MAX);
+    std::unordered_map<uint32_t, uint32_t> new_off;
+    new_off.reserve(n);
+    std::vector<uint32_t> seen_codes;
+    seen_codes.reserve(n);
     size_t total_arena = 0u;
 
     for (uint32_t i = 0; i < n; ++i) {
         const uint32_t src_log = static_cast<uint32_t>(indices[i]);
         if (!sg_val_row(src_v, src_log)) continue;
         const uint32_t code = v.selection[src_log];
-        if (!str_is_inline(&src_s[code]) && new_off[code] == UINT32_MAX) {
+        if (!str_is_inline(&src_s[code]) && new_off.find(code) == new_off.end()) {
             new_off[code] = static_cast<uint32_t>(total_arena);
             total_arena  += src_s[code].ext.length;
+            seen_codes.push_back(code);
         }
     }
     if (total_arena > static_cast<size_t>(UINT32_MAX))
         throw std::overflow_error("str_take: arena exceeds 4 GB");
 
-    // Phase 2: allocate output block.
     StrBlock sb = sg_alloc_str_block(n, total_arena);
     SgOwned<void> bg(sb.block);
 
-    // Phase 3: copy arena bytes for each referenced unique long slot.
-    for (uint32_t k = 0; k < v.data_length; ++k) {
-        if (!str_is_inline(&src_s[k]) && new_off[k] != UINT32_MAX &&
-            sb.arena_bytes != nullptr) {
-            std::memcpy(sb.arena_bytes + new_off[k],
-                        src_a + src_s[k].ext.arena_offset,
-                        src_s[k].ext.length);
-        }
+    if (sb.arena_bytes != nullptr) {
+        for (uint32_t code : seen_codes)
+            std::memcpy(sb.arena_bytes + new_off[code],
+                        src_a + src_s[code].ext.arena_offset,
+                        src_s[code].ext.length);
     }
 
-    // Phase 4: allocate validity if source has nulls (may throw — bg fires).
     uint8_t* out_v = nullptr;
     SgOwned<uint8_t> vg;
-    if (src_v != nullptr && n > 0) {
-        out_v = sg_alloc_validity(n);  // zeroed = all null initially
-        vg.reset(out_v);
-    }
+    if (src_v != nullptr && n > 0) { out_v = sg_alloc_validity(n); vg.reset(out_v); }
 
-    // Phase 5: fill output slots and validity.
     bool has_nulls = false;
     for (uint32_t i = 0; i < n; ++i) {
         const uint32_t src_log = static_cast<uint32_t>(indices[i]);
         if (!sg_val_row(src_v, src_log)) {
-            has_nulls = true;  // slot stays zero (null)
+            has_nulls = true;
         } else {
             const uint32_t         code = v.selection[src_log];
             const DrakenStringSlot* src = &src_s[code];
@@ -467,14 +508,9 @@ static inline VecResult str_take(const DrakenVector& v,
         }
     }
 
-    // Normalize: if no nulls appeared, release and nullify.
     vg.release();
-    if (!has_nulls && out_v != nullptr) {
-        draken_free(out_v);
-        out_v = nullptr;
-    } else {
-        out_v = sg_normalize_validity(out_v, n);
-    }
+    if (!has_nulls && out_v != nullptr) { draken_free(out_v); out_v = nullptr; }
+    else out_v = sg_normalize_validity(out_v, n);
 
     bg.release();
     return sg_finalize(sb, out_v, draken_identity_sel(n), false, n, n, total_arena,
