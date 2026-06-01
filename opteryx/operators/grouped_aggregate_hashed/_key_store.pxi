@@ -449,6 +449,10 @@ cdef inline void _ks_store_fixed_bulk_dict(
     dict_data points to the raw int64_t values of the DrakenVector.data buffer.
     For float64, caller passes the float bits reinterpreted as int64.
     codes is uv.selection — never NULL; works for dense, constant, and dict layouts.
+
+    Single-pass: bitmap is lazily allocated on the first null encountered.
+    _ks_alloc_all_valid_bitmap initialises all bits to 1, so rows stored before
+    the first null are automatically marked valid without a back-fill pass.
     """
     cdef Py_ssize_t start_row = row_count_ref[0]
     cdef Py_ssize_t ri
@@ -456,15 +460,8 @@ cdef inline void _ks_store_fixed_bulk_dict(
     cdef Py_ssize_t out_row
     cdef uint32_t code
     cdef int64_t* dst
-    cdef bint needs_null_bitmap = False
 
-    for ri in range(n_new):
-        row_idx = row_indices[ri]
-        if row_nulls != NULL and not ((row_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
-            needs_null_bitmap = True
-            break
-
-    _ks_reserve_fixed_direct(buf, null_bitmap_ref, start_row, n_new, needs_null_bitmap)
+    _ks_ensure_fixed_capacity(buf, start_row, start_row + n_new)
 
     dst = <int64_t*>buf.data
     for ri in range(n_new):
@@ -472,8 +469,11 @@ cdef inline void _ks_store_fixed_bulk_dict(
         out_row = start_row + ri
         if row_nulls != NULL and not ((row_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
             dst[out_row] = 0
-            if null_bitmap_ref[0] != NULL:
-                _ks_bitmap_clear(null_bitmap_ref[0], out_row)
+            if null_bitmap_ref[0] == NULL:
+                # First null seen — lazily allocate bitmap with all prior rows
+                # marked valid (alloc_all_valid_bitmap sets all bits to 1).
+                _ks_ensure_bitmap_capacity(null_bitmap_ref, start_row, start_row + n_new)
+            _ks_bitmap_clear(null_bitmap_ref[0], out_row)
         else:
             code = codes[row_idx]
             dst[out_row] = dict_data[code]

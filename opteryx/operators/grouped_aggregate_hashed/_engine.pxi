@@ -96,7 +96,7 @@ cdef class GroupHashEngine:
     cdef list _collectors           # list[BaseCollector] — not accessed inside the loop
     cdef list _key_kinds            # list[int] — resolved on first morsel
     cdef int64_t _num_groups
-    cdef vector[int64_t] _state_indices_buf   # reused per morsel, length == n_rows
+    cdef vector[uint32_t] _state_indices_buf   # reused per morsel, length == n_rows
     cdef vector[int64_t] _new_row_scratch     # indices of rows that introduced new groups
     cdef vector[int64_t] _code_state          # compressed path: group id per code (-1 = unprobed)
     cdef list _group_columns                  # list[bytes] — init only
@@ -179,7 +179,7 @@ cdef class GroupHashEngine:
         self._use_parvi = False
         self._promoted_from_parvi = True
 
-    cdef void _resolve_on_first_morsel(self, object morsel):
+    cdef void _resolve_on_first_morsel(self, Morsel morsel):
         """Called once on first non-empty morsel to fix collector types and key kinds."""
         cdef long long start_ns
         if self._telemetry_enabled:
@@ -210,7 +210,7 @@ cdef class GroupHashEngine:
         if self._telemetry_enabled:
             self._time_resolve_ns += _now_ns() - start_ns
 
-    cpdef void ingest(self, object morsel):
+    cpdef void ingest(self, Morsel morsel):
         """Route one input Morsel to the appropriate ingest path."""
         cdef Py_ssize_t n_rows = morsel.num_rows
         if n_rows == 0:
@@ -219,7 +219,7 @@ cdef class GroupHashEngine:
             self._resolve_on_first_morsel(morsel)
         self._do_ingest(morsel)
 
-    cdef void _do_ingest(self, object morsel) except *:
+    cdef void _do_ingest(self, Morsel morsel) except *:
         """
         Process one input Morsel directly into the global hash table.
         No Python in the inner loop.
@@ -254,7 +254,7 @@ cdef class GroupHashEngine:
         if self._telemetry_enabled:
             self._time_hash_ns += _now_ns() - phase_start
 
-        cdef int64_t* si_buf = self._state_indices_buf.data()
+        cdef uint32_t* si_buf = self._state_indices_buf.data()
         cdef int64_t state_idx
         cdef Py_ssize_t i
         cdef int64_t num_groups = self._num_groups
@@ -295,7 +295,7 @@ cdef class GroupHashEngine:
                         self._new_row_scratch.push_back(i)   # first occurrence row
                         num_groups += 1
                     code_state[c] = state_idx
-                si_buf[i] = state_idx
+                si_buf[i] = <uint32_t>state_idx
         else:
             # i is shared across parvi → carchar handoff so an overflow mid-morsel
             # resumes at the row after the one that triggered promotion.
@@ -311,7 +311,7 @@ cdef class GroupHashEngine:
                     cache_slot = <int>(h & 7)
                     if cache_used[cache_slot] and cache_keys[cache_slot] == h:
                         state_idx = cache_vals[cache_slot]
-                        si_buf[i] = state_idx
+                        si_buf[i] = <uint32_t>state_idx
                         i += 1
                         continue
 
@@ -335,7 +335,7 @@ cdef class GroupHashEngine:
                     cache_keys[cache_slot] = h
                     cache_vals[cache_slot] = state_idx
                     cache_used[cache_slot] = 1
-                    si_buf[i] = state_idx
+                    si_buf[i] = <uint32_t>state_idx
                     i += 1
                     if not self._use_parvi:
                         break  # promoted — finish the morsel on the carchar path
@@ -345,7 +345,7 @@ cdef class GroupHashEngine:
                     if _hot_is_new:
                         self._new_row_scratch.push_back(i)
                         num_groups += 1
-                    si_buf[i] = state_idx
+                    si_buf[i] = <uint32_t>state_idx
                     i += 1
         if self._telemetry_enabled:
             self._time_lookup_ns += _now_ns() - phase_start

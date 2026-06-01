@@ -18,7 +18,14 @@ from draken.core.buffers cimport DrakenFixedBuffer, DrakenVector, DrakenType
 from draken.core.buffers cimport DRAKEN_INT64
 from draken.core.buffers cimport DRAKEN_FLOAT64
 from draken.core.buffers cimport DRAKEN_DECIMAL
+from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY
 from draken.core.buffers cimport draken_vector_from_dense
+from draken.core.buffers cimport (
+    DrakenStringArena, DrakenStringSlot,
+    str_length, str_is_inline, str_prefix4, str_data,
+    str_clone_with_offset, str_init_null, str_compare,
+    STR_INLINE_MAX,
+)
 from draken.core.fixed_vector cimport alloc_fixed_buffer
 from draken.core.fixed_vector cimport free_fixed_buffer
 from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
@@ -237,14 +244,15 @@ cdef class CountStarCollector(BaseCollector):
 
     cdef void accumulate(
         self,
-        object morsel,
-        const int64_t* state_indices,
+        Morsel morsel,
+        const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
         cdef int64_t* counts = <int64_t*>self._counts.data
         cdef Py_ssize_t i
-        for i in range(n_rows):
-            counts[state_indices[i]] += 1
+        with nogil:
+            for i in range(n_rows):
+                counts[state_indices[i]] += 1
 
     cpdef Vector finalize(self, int64_t num_groups):
         return self.finalize_slice(0, num_groups)
@@ -295,19 +303,20 @@ cdef class CountValueCollector(BaseCollector):
 
     cdef void accumulate(
         self,
-        object morsel,
-        const int64_t* state_indices,
+        Morsel morsel,
+        const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Vector vec = morsel.column(self.column_name)
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector vec = morsel._get_column(self._col_idx)
         cdef int64_t* counts = <int64_t*>self._counts.data
         cdef Py_ssize_t i
-        cdef uint8_t* nulls
-
-        nulls = vec.null_bitmap_ptr()
-        for i in range(n_rows):
-            if _num_bitmap_valid(nulls, i):
-                counts[state_indices[i]] += 1
+        cdef uint8_t* nulls = vec.unified().validity
+        with nogil:
+            for i in range(n_rows):
+                if _num_bitmap_valid(nulls, i):
+                    counts[state_indices[i]] += 1
 
     cpdef Vector finalize(self, int64_t num_groups):
         return self.finalize_slice(0, num_groups)
@@ -364,11 +373,13 @@ cdef class SumInt64Collector(BaseCollector):
 
     cdef void accumulate(
         self,
-        object morsel,
-        const int64_t* state_indices,
+        Morsel morsel,
+        const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Vector vec = morsel.column(self.column_name)
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector vec = morsel._get_column(self._col_idx)
         cdef int64_t* sums = <int64_t*>self._sums.data
         cdef uint8_t* seen = self._seen
         cdef int64_t* data
@@ -382,11 +393,12 @@ cdef class SumInt64Collector(BaseCollector):
         data = <int64_t*>uv.data
         sel = uv.selection
         nulls = uv.validity
-        for i in range(n_rows):
-            if _num_bitmap_valid(nulls, i):
-                si = state_indices[i]
-                sums[si] += data[sel[i]]
-                _bitmap_set(seen, si)
+        with nogil:
+            for i in range(n_rows):
+                if _num_bitmap_valid(nulls, i):
+                    si = state_indices[i]
+                    sums[si] += data[sel[i]]
+                    _bitmap_set(seen, si)
 
     cpdef Vector finalize(self, int64_t num_groups):
         cdef long long start_ns = _now_ns()
@@ -478,11 +490,13 @@ cdef class SumFloat64Collector(BaseCollector):
 
     cdef void accumulate(
         self,
-        object morsel,
-        const int64_t* state_indices,
+        Morsel morsel,
+        const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Vector vec = morsel.column(self.column_name)
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector vec = morsel._get_column(self._col_idx)
         cdef double* sums = <double*>self._sums.data
         cdef uint8_t* seen = self._seen
         cdef double* data
@@ -496,11 +510,12 @@ cdef class SumFloat64Collector(BaseCollector):
         data = <double*>uv.data
         sel = uv.selection
         nulls = uv.validity
-        for i in range(n_rows):
-            if _num_bitmap_valid(nulls, i):
-                si = state_indices[i]
-                sums[si] += data[sel[i]]
-                _bitmap_set(seen, si)
+        with nogil:
+            for i in range(n_rows):
+                if _num_bitmap_valid(nulls, i):
+                    si = state_indices[i]
+                    sums[si] += data[sel[i]]
+                    _bitmap_set(seen, si)
 
     cpdef Vector finalize(self, int64_t num_groups):
         cdef DrakenFixedBuffer* out = self._sums
@@ -596,11 +611,13 @@ cdef class MinMaxInt64Collector(BaseCollector):
 
     cdef void accumulate(
         self,
-        object morsel,
-        const int64_t* state_indices,
+        Morsel morsel,
+        const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Vector vec = morsel.column(self.column_name)
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector vec = morsel._get_column(self._col_idx)
         cdef int64_t* values = <int64_t*>self._values.data
         cdef uint8_t* seen = self._seen
         cdef int64_t* data
@@ -614,22 +631,24 @@ cdef class MinMaxInt64Collector(BaseCollector):
         data = <int64_t*>uv.data
         sel = uv.selection
         nulls = uv.validity
-        if self._direction == 1:   # MIN
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    v = data[sel[i]]
-                    if not _num_bitmap_valid(seen, si) or v < values[si]:
-                        values[si] = v
-                    _bitmap_set(seen, si)
-        else:                      # MAX
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    v = data[sel[i]]
-                    if not _num_bitmap_valid(seen, si) or v > values[si]:
-                        values[si] = v
-                    _bitmap_set(seen, si)
+        cdef int8_t direction = self._direction
+        with nogil:
+            if direction == 1:   # MIN
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        si = state_indices[i]
+                        v = data[sel[i]]
+                        if not _num_bitmap_valid(seen, si) or v < values[si]:
+                            values[si] = v
+                        _bitmap_set(seen, si)
+            else:                # MAX
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        si = state_indices[i]
+                        v = data[sel[i]]
+                        if not _num_bitmap_valid(seen, si) or v > values[si]:
+                            values[si] = v
+                        _bitmap_set(seen, si)
 
     cpdef Vector finalize(self, int64_t num_groups):
         cdef DrakenFixedBuffer* out = self._values
@@ -727,11 +746,13 @@ cdef class MinMaxFloat64Collector(BaseCollector):
 
     cdef void accumulate(
         self,
-        object morsel,
-        const int64_t* state_indices,
+        Morsel morsel,
+        const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Vector vec = morsel.column(self.column_name)
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector vec = morsel._get_column(self._col_idx)
         cdef double* values = <double*>self._values.data
         cdef uint8_t* seen = self._seen
         cdef double* data
@@ -746,22 +767,24 @@ cdef class MinMaxFloat64Collector(BaseCollector):
         data = <double*>uv.data
         sel = uv.selection
         nulls = uv.validity
-        if self._direction == 1:   # MIN
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    v = data[sel[i]]
-                    if not _num_bitmap_valid(seen, si) or v < values[si]:
-                        values[si] = v
-                    _bitmap_set(seen, si)
-        else:                      # MAX
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    v = data[sel[i]]
-                    if not _num_bitmap_valid(seen, si) or v > values[si]:
-                        values[si] = v
-                    _bitmap_set(seen, si)
+        cdef int8_t direction = self._direction
+        with nogil:
+            if direction == 1:   # MIN
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        si = state_indices[i]
+                        v = data[sel[i]]
+                        if not _num_bitmap_valid(seen, si) or v < values[si]:
+                            values[si] = v
+                        _bitmap_set(seen, si)
+            else:                # MAX
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        si = state_indices[i]
+                        v = data[sel[i]]
+                        if not _num_bitmap_valid(seen, si) or v > values[si]:
+                            values[si] = v
+                        _bitmap_set(seen, si)
 
     cpdef Vector finalize(self, int64_t num_groups):
         cdef DrakenFixedBuffer* out = self._values
@@ -839,11 +862,13 @@ cdef class MinMaxObjectCollector(BaseCollector):
 
     cdef void accumulate(
         self,
-        object morsel,
-        const int64_t* state_indices,
+        Morsel morsel,
+        const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Vector vec = morsel.column(self.column_name)
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector vec = morsel._get_column(self._col_idx)
         cdef uint8_t* seen = self._seen.data()
         cdef Py_ssize_t i
         cdef int64_t si
@@ -919,6 +944,207 @@ cdef class MinMaxObjectCollector(BaseCollector):
 
 
 # ---------------------------------------------------------------------------
+# MIN/MAX for VARCHAR / NVARCHAR / VARBINARY
+#
+# State: one DrakenStringSlot per group + a shared arena for long payloads.
+# Accumulate: zero Python objects, zero to_pylist() calls.
+#
+# Comparison fast-path:
+#   Short strings (len ≤ 12): fully inline, two 64-bit compares, no arena.
+#   Long  strings (len  > 12): str_prefix4() gives big-endian uint32 of first
+#   4 bytes — uint32 comparison gives lexicographic order directly. Arena read
+#   (memcmp) only when length AND prefix match, i.e. strings agree on ≥4 chars.
+# ---------------------------------------------------------------------------
+
+cdef class MinMaxVarcharCollector(BaseCollector):
+    cdef DrakenStringSlot* _slots   # one slot per group; draken_malloc'd
+    cdef uint8_t*   _arena          # long-string payload arena; draken_malloc'd
+    cdef uint8_t*   _seen           # 1 byte per group: 0 = not yet set
+    cdef size_t     _capacity       # allocated group count
+    cdef size_t     _arena_cap      # bytes allocated in _arena
+    cdef size_t     _arena_used     # bytes written in _arena
+    cdef int8_t     _direction      # +1 = MIN, -1 = MAX
+    cdef DrakenType _col_type       # source type; preserved for finalize
+
+    _SLOT_BYTES = sizeof(DrakenStringSlot)  # 16
+
+    def __cinit__(self):
+        self._slots = NULL
+        self._arena = NULL
+        self._seen  = NULL
+        self._capacity   = 0
+        self._arena_cap  = 0
+        self._arena_used = 0
+        self._col_type   = DRAKEN_VARCHAR
+
+    def __dealloc__(self):
+        if self._slots != NULL:
+            draken_free(self._slots)
+            self._slots = NULL
+        if self._arena != NULL:
+            draken_free(self._arena)
+            self._arena = NULL
+        if self._seen != NULL:
+            free(self._seen)
+            self._seen = NULL
+
+    cdef void grow(self, int64_t new_count):
+        cdef size_t nc = <size_t>new_count
+        cdef size_t target, i
+        cdef void* p
+        if nc <= self._capacity:
+            return
+        target = _grow_target(self._capacity, new_count)
+        # Grow slot array
+        p = draken_malloc(target * sizeof(DrakenStringSlot))
+        if self._slots != NULL:
+            memcpy(p, self._slots, self._capacity * sizeof(DrakenStringSlot))
+            draken_free(self._slots)
+        self._slots = <DrakenStringSlot*>p
+        # Zero-init new slots (str_init_null semantics: length=0, all bytes zero)
+        memset(self._slots + self._capacity, 0,
+               (target - self._capacity) * sizeof(DrakenStringSlot))
+        # Grow seen array
+        p = malloc(target)
+        if self._seen != NULL:
+            memcpy(p, self._seen, self._capacity)
+            free(self._seen)
+        self._seen = <uint8_t*>p
+        memset(self._seen + self._capacity, 0, target - self._capacity)
+        self._capacity = target
+
+    cdef inline void _ensure_arena(self, size_t need) noexcept nogil:
+        cdef size_t new_cap
+        cdef void* p
+        if self._arena_used + need <= self._arena_cap:
+            return
+        new_cap = self._arena_cap * 2 if self._arena_cap > 0 else 65536
+        while new_cap < self._arena_used + need:
+            new_cap *= 2
+        p = draken_malloc(new_cap)
+        if self._arena != NULL:
+            memcpy(p, self._arena, self._arena_used)
+            draken_free(self._arena)
+        self._arena = <uint8_t*>p
+        self._arena_cap = new_cap
+
+    cdef inline void _copy_slot(
+        self,
+        size_t si,
+        const DrakenStringSlot* src,
+        const uint8_t* src_arena,
+    ) noexcept nogil:
+        """Copy src slot into group si, appending to arena if needed."""
+        cdef uint32_t slen = str_length(src)
+        cdef uint32_t new_off
+        if slen <= <uint32_t>STR_INLINE_MAX:
+            str_clone_with_offset(&self._slots[si], src, 0)
+        else:
+            self._ensure_arena(<size_t>slen)
+            new_off = <uint32_t>self._arena_used
+            memcpy(self._arena + new_off, src_arena + (<uint32_t*>src)[3], slen)
+            self._arena_used += slen
+            str_clone_with_offset(&self._slots[si], src, new_off)
+
+    cdef void accumulate(
+        self,
+        Morsel morsel,
+        const uint32_t* state_indices,
+        Py_ssize_t n_rows,
+    ):
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector vec = morsel._get_column(self._col_idx)
+        cdef DrakenVector* uv = vec.unified()
+        self._col_type = uv.type
+        cdef DrakenStringArena* garena = <DrakenStringArena*>uv.data
+        cdef DrakenStringSlot* src_slots = garena.slots
+        cdef uint8_t* src_arena = garena.arena
+        cdef const uint32_t* sel = uv.selection
+        cdef uint8_t* nulls = uv.validity
+        cdef DrakenStringSlot* grp_slot
+        cdef const DrakenStringSlot* src_slot
+        cdef uint32_t src_p4, grp_p4
+        cdef uint8_t* seen = self._seen
+        cdef Py_ssize_t i
+        cdef size_t si
+        cdef int cmp
+        cdef int8_t direction = self._direction
+
+        with nogil:
+            if direction == 1:  # MIN
+                for i in range(n_rows):
+                    if nulls != NULL and not _num_bitmap_valid(nulls, i):
+                        continue
+                    si = <size_t>state_indices[i]
+                    src_slot = &src_slots[sel[i]]
+                    if not seen[si]:
+                        self._copy_slot(si, src_slot, src_arena)
+                        seen[si] = 1
+                        continue
+                    grp_slot = &self._slots[si]
+                    src_p4 = str_prefix4(src_slot)
+                    grp_p4 = str_prefix4(grp_slot)
+                    if src_p4 < grp_p4:
+                        self._copy_slot(si, src_slot, src_arena)
+                    elif src_p4 == grp_p4:
+                        cmp = str_compare(src_slot, src_arena, grp_slot, self._arena)
+                        if cmp < 0:
+                            self._copy_slot(si, src_slot, src_arena)
+            else:               # MAX
+                for i in range(n_rows):
+                    if nulls != NULL and not _num_bitmap_valid(nulls, i):
+                        continue
+                    si = <size_t>state_indices[i]
+                    src_slot = &src_slots[sel[i]]
+                    if not seen[si]:
+                        self._copy_slot(si, src_slot, src_arena)
+                        seen[si] = 1
+                        continue
+                    grp_slot = &self._slots[si]
+                    src_p4 = str_prefix4(src_slot)
+                    grp_p4 = str_prefix4(grp_slot)
+                    if src_p4 > grp_p4:
+                        self._copy_slot(si, src_slot, src_arena)
+                    elif src_p4 == grp_p4:
+                        cmp = str_compare(src_slot, src_arena, grp_slot, self._arena)
+                        if cmp > 0:
+                            self._copy_slot(si, src_slot, src_arena)
+
+    cpdef Vector finalize(self, int64_t num_groups):
+        cdef list result = []
+        cdef size_t i
+        cdef uint8_t* seen = self._seen
+        cdef DrakenStringSlot* slot
+        cdef const uint8_t* payload
+        cdef uint32_t slen
+        for i in range(<size_t>num_groups):
+            if not seen[i]:
+                result.append(None)
+            else:
+                slot = &self._slots[i]
+                slen = str_length(slot)
+                payload = str_data(slot, self._arena)
+                result.append(bytes(payload[:slen]))
+        nb = _draken_native.vector_string_family_from_bytes(result, <int>self._col_type)
+        return _V(nb)
+
+    cpdef BaseCollector _clone_empty(self):
+        cdef MinMaxVarcharCollector c = MinMaxVarcharCollector()
+        c.column_name = self.column_name
+        c.result_name = self.result_name
+        c._direction  = self._direction
+        return c
+
+    cpdef BaseCollector _clone_as_merge(self):
+        cdef MinMaxVarcharCollector c = MinMaxVarcharCollector()
+        c.column_name = self.result_name
+        c.result_name = self.result_name
+        c._direction  = self._direction
+        return c
+
+
+# ---------------------------------------------------------------------------
 # AVG — always works in float64
 # ---------------------------------------------------------------------------
 
@@ -950,13 +1176,15 @@ cdef class AvgCollector(BaseCollector):
 
     cdef void accumulate(
         self,
-        object morsel,
-        const int64_t* state_indices,
+        Morsel morsel,
+        const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
         # Per-row template: one type-dispatch per morsel, typed pointers
         # cached from vec.unified(), pure-C inner loop.
-        cdef Vector raw = morsel.column(self.column_name)
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector raw = morsel._get_column(self._col_idx)
         cdef DrakenVector* uv = raw.unified()
         cdef DrakenType t = uv.type
         cdef double* sums = <double*>self._sums.data
@@ -970,29 +1198,37 @@ cdef class AvgCollector(BaseCollector):
         cdef double dec_factor
         cdef const uint32_t* sel = uv.selection
 
+        # Hoist the DECIMAL scale access (Python attr) before releasing the GIL.
+        if t == DRAKEN_DECIMAL:
+            dec_factor = 10.0 ** (-raw._nb.logical_type_scale)
+        else:
+            dec_factor = 0.0  # unused; satisfies the typed variable
+
         if t == DRAKEN_INT64:
             i64 = <int64_t*>uv.data
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    sums[si] += i64[sel[i]]
-                    counts[si] += 1
+            with nogil:
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        si = state_indices[i]
+                        sums[si] += i64[sel[i]]
+                        counts[si] += 1
         elif t == DRAKEN_DECIMAL:
-            dec_factor = 10.0 ** (-raw._nb.logical_type_scale)
             dec_data = <int64_t*>uv.data
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    sums[si] += <double>dec_data[sel[i]] * dec_factor
-                    counts[si] += 1
+            with nogil:
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        si = state_indices[i]
+                        sums[si] += <double>dec_data[sel[i]] * dec_factor
+                        counts[si] += 1
         else:
             # Default to FLOAT64 (also handles other numerics via reinterpret).
             f64 = <double*>uv.data
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    sums[si] += f64[sel[i]]
-                    counts[si] += 1
+            with nogil:
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        si = state_indices[i]
+                        sums[si] += f64[sel[i]]
+                        counts[si] += 1
 
     cpdef Vector finalize(self, int64_t num_groups):
         cdef DrakenFixedBuffer* out = self._sums
@@ -1077,11 +1313,13 @@ cdef class SumDecimalCollector(BaseCollector):
 
     cdef void accumulate(
         self,
-        object morsel,
-        const int64_t* state_indices,
+        Morsel morsel,
+        const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Vector vec = morsel.column(self.column_name)
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector vec = morsel._get_column(self._col_idx)
         cdef double* sums = <double*>self._sums.data
         cdef uint8_t* seen = self._seen
         cdef int64_t* data
@@ -1096,11 +1334,12 @@ cdef class SumDecimalCollector(BaseCollector):
         data = <int64_t*>uv.data
         sel = uv.selection
         nulls = uv.validity
-        for i in range(n_rows):
-            if _num_bitmap_valid(nulls, i):
-                si = state_indices[i]
-                sums[si] += <double>data[sel[i]] * factor
-                _bitmap_set(seen, si)
+        with nogil:
+            for i in range(n_rows):
+                if _num_bitmap_valid(nulls, i):
+                    si = state_indices[i]
+                    sums[si] += <double>data[sel[i]] * factor
+                    _bitmap_set(seen, si)
 
     cpdef Vector finalize(self, int64_t num_groups):
         cdef DrakenFixedBuffer* out = self._sums
@@ -1189,11 +1428,13 @@ cdef class MinMaxDecimalCollector(BaseCollector):
 
     cdef void accumulate(
         self,
-        object morsel,
-        const int64_t* state_indices,
+        Morsel morsel,
+        const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef Vector vec = morsel.column(self.column_name)
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector vec = morsel._get_column(self._col_idx)
         cdef int64_t* values = <int64_t*>self._values.data
         cdef uint8_t* seen = self._seen
         cdef int64_t* data
@@ -1207,22 +1448,24 @@ cdef class MinMaxDecimalCollector(BaseCollector):
         data = <int64_t*>uv.data
         sel = uv.selection
         nulls = uv.validity
-        if self._direction == 1:   # MIN
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    v = data[sel[i]]
-                    if not _num_bitmap_valid(seen, si) or v < values[si]:
-                        values[si] = v
-                    _bitmap_set(seen, si)
-        else:                      # MAX
-            for i in range(n_rows):
-                if _num_bitmap_valid(nulls, i):
-                    si = state_indices[i]
-                    v = data[sel[i]]
-                    if not _num_bitmap_valid(seen, si) or v > values[si]:
-                        values[si] = v
-                    _bitmap_set(seen, si)
+        cdef int8_t direction = self._direction
+        with nogil:
+            if direction == 1:   # MIN
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        si = state_indices[i]
+                        v = data[sel[i]]
+                        if not _num_bitmap_valid(seen, si) or v < values[si]:
+                            values[si] = v
+                        _bitmap_set(seen, si)
+            else:                # MAX
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        si = state_indices[i]
+                        v = data[sel[i]]
+                        if not _num_bitmap_valid(seen, si) or v > values[si]:
+                            values[si] = v
+                        _bitmap_set(seen, si)
 
     cpdef Vector finalize(self, int64_t num_groups):
         """Apply scale factor and return Float64Vector."""

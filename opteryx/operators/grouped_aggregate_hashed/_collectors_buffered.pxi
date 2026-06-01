@@ -81,15 +81,17 @@ cdef class MedianFloat64Collector(BaseCollector):
 
     cdef void accumulate(
         self,
-        object morsel,
-        const int64_t* state_indices,
+        Morsel morsel,
+        const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
         # Per-row template (D-B): one type-dispatch per morsel, typed
         # pointers cached, pure-C inner loop. Uniform Vector access via
         # vec.unified() — works for Dense/Constant/Dict shapes through
         # data[selection[i]] (CLAUDE.md §11).
-        cdef Vector vec = morsel.column(self.column_name)
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector vec = morsel._get_column(self._col_idx)
         cdef DrakenVector* uv = vec.unified()
         cdef DrakenType t = uv.type
         cdef Py_ssize_t i

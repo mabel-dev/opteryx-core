@@ -169,6 +169,9 @@ cpdef void resolve_deferred_collectors(
                 typed_c = MinMaxDecimalCollector()
                 (<MinMaxDecimalCollector>typed_c)._direction = 1
                 (<MinMaxDecimalCollector>typed_c)._factor = 10.0 ** (-vec._nb.logical_type_scale)
+            elif t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR or t == DRAKEN_VARBINARY:
+                typed_c = MinMaxVarcharCollector()
+                (<MinMaxVarcharCollector>typed_c)._direction = 1
             else:
                 typed_c = MinMaxObjectCollector()
                 (<MinMaxObjectCollector>typed_c)._direction = 1
@@ -189,6 +192,9 @@ cpdef void resolve_deferred_collectors(
                 typed_c = MinMaxDecimalCollector()
                 (<MinMaxDecimalCollector>typed_c)._direction = -1
                 (<MinMaxDecimalCollector>typed_c)._factor = 10.0 ** (-vec._nb.logical_type_scale)
+            elif t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR or t == DRAKEN_VARBINARY:
+                typed_c = MinMaxVarcharCollector()
+                (<MinMaxVarcharCollector>typed_c)._direction = -1
             else:
                 typed_c = MinMaxObjectCollector()
                 (<MinMaxObjectCollector>typed_c)._direction = -1

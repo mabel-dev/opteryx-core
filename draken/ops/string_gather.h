@@ -278,6 +278,63 @@ static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_
     const uint8_t*           src_v = v.validity;
     const uint32_t           k     = v.data_length;
 
+    // ── Dense fast-path ───────────────────────────────────────────────────────
+    // For dense vectors (draken_is_dense: data_length == length, every row its
+    // own slot) the compact path below would use an unordered_map to deduplicate
+    // arena offsets — but every code in the window is unique so the map provides
+    // zero benefit.  Instead, copy exactly the n slots in [start, start+n) with
+    // a single sequential scan and rebase long-string arena offsets inline.
+    if (draken_is_dense(&v)) {
+        size_t total_arena = 0u;
+        for (uint32_t i = 0; i < n; ++i) {
+            const DrakenStringSlot* s = &src_s[start + i];
+            if (!str_is_inline(s) && sg_val_row(src_v, start + i))
+                total_arena += s->ext.length;
+        }
+        if (total_arena > static_cast<size_t>(UINT32_MAX))
+            throw std::overflow_error("str_slice(dense): arena exceeds 4 GB");
+
+        StrBlock sb = sg_alloc_str_block(n, total_arena);
+        SgOwned<void> bg(sb.block);
+
+        uint8_t* out_v = nullptr;
+        SgOwned<uint8_t> vg;
+        if (src_v != nullptr && n > 0u) { out_v = sg_alloc_validity(n); vg.reset(out_v); }
+
+        bool has_nulls = false;
+        size_t arena_pos = 0u;
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint32_t src_log = start + i;
+            if (!sg_val_row(src_v, src_log)) {
+                has_nulls = true;
+                str_init_null(&sb.slots[i]);
+            } else {
+                const DrakenStringSlot* src = &src_s[src_log];
+                if (str_is_inline(src)) {
+                    sb.slots[i] = *src;
+                } else {
+                    std::memcpy(sb.arena_bytes + arena_pos,
+                                src_a + src->ext.arena_offset,
+                                src->ext.length);
+                    str_clone_with_offset(&sb.slots[i], src,
+                                          static_cast<uint32_t>(arena_pos));
+                    arena_pos += src->ext.length;
+                }
+                if (out_v != nullptr)
+                    out_v[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+            }
+        }
+
+        vg.release();
+        if (!has_nulls && out_v != nullptr) { draken_free(out_v); out_v = nullptr; }
+        else out_v = sg_normalize_validity(out_v, n);
+
+        bg.release();
+        return sg_finalize(sb, out_v, draken_identity_sel(n), false, n, n,
+                           static_cast<uint32_t>(total_arena),
+                           static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION));
+    }
+
     // When k <= n the source is dict-encoded with fewer distinct values than
     // rows in the slice.  Copy the full k-slot data block as-is and walk the
     // selection array into an owned codes buffer.  data_length stays k,

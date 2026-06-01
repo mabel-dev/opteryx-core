@@ -6,9 +6,10 @@
 # All subclasses must hold ONLY C++ state (typed vectors, C pointers).
 # grow() and accumulate() are cdef — called from Cython only.
 
-from libc.stdint cimport int64_t
+from libc.stdint cimport int64_t, uint32_t
 
 from draken.vectors.vector cimport Vector
+from draken.morsels.morsel cimport Morsel
 
 
 cdef class BaseCollector:
@@ -31,6 +32,7 @@ cdef class BaseCollector:
     cdef public bytes result_name    # output column alias
     cdef public bint telemetry_enabled
     cdef public long long time_finalize_ns
+    cdef Py_ssize_t _col_idx         # cached column index; -1 = unresolved
 
     cdef void grow(self, int64_t new_count):
         """Resize internal state to hold new_count groups."""
@@ -46,8 +48,8 @@ cdef class BaseCollector:
 
     cdef void accumulate(
         self,
-        object morsel,
-        const int64_t* state_indices,
+        Morsel morsel,
+        const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
         """

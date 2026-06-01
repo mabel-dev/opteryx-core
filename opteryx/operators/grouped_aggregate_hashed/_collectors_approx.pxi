@@ -9,7 +9,7 @@
 # whose type is unknown at compile time.
 
 from libc.stddef cimport size_t
-from libc.stdint cimport int64_t, uint64_t, uint8_t
+from libc.stdint cimport int64_t, uint32_t, uint64_t, uint8_t
 from libcpp.vector cimport vector
 
 # Hoist the shim Vector import to module level to avoid hot-path inline imports (E.30a)
@@ -62,11 +62,13 @@ cdef class ApproxCountDistinctCollector(BaseCollector):
 
     cdef void accumulate(
         self,
-        object morsel,
-        const int64_t* state_indices,
+        Morsel morsel,
+        const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
         # Hash the column in one shot, then dispatch per row
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
         cdef uint64_t[::1] hashes = morsel.hash([self.column_name])
         cdef HllppSketch** sketches = self._sketches.data()
         cdef Py_ssize_t i
@@ -107,13 +109,15 @@ cdef class ApproxPercentileCollector(BaseCollector):
 
     cdef void accumulate(
         self,
-        object morsel,
-        const int64_t* state_indices,
+        Morsel morsel,
+        const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
         # Per-row template: type-dispatch once per morsel via the unified
         # DrakenVector, typed pointers cached for the inner loop.
-        cdef Vector raw = morsel.column(self.column_name)
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector raw = morsel._get_column(self._col_idx)
         cdef DrakenVector* uv = raw.unified()
         cdef DrakenType t = uv.type
         cdef uint8_t* nulls = uv.validity
@@ -173,11 +177,13 @@ cdef class ArrayAggCollector(BaseCollector):
 
     cdef void accumulate(
         self,
-        object morsel,
-        const int64_t* state_indices,
+        Morsel morsel,
+        const uint32_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef list col = morsel.column(self.column_name).to_pylist()
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef list col = morsel._get_column(self._col_idx).to_pylist()
         cdef list groups = self._per_group
         cdef Py_ssize_t i
         for i in range(n_rows):
