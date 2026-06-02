@@ -186,9 +186,21 @@ static inline int str_equals(const DrakenStringSlot* a, const uint8_t* arena_a,
 }
 
 // Lexicographic compare returning <0 / 0 / >0.
-// Goes through str_data so it is always correct for both inline and long forms.
+//
+// German-string fast path: compare the big-endian, zero-padded 4-byte prefix
+// first (str_prefix4 handles both inline and long forms). Any difference within
+// the first 4 bytes decides the order with a single register compare — no arena
+// pointer chase, no memcmp — which is the common case when ordering or
+// range-comparing high-cardinality string columns. The prefix is zero-padded so
+// pa != pb is always the correct lexicographic order (a shorter string that is a
+// prefix of another compares 0x00 < real-byte at the divergence point). Equal
+// prefixes fall through to the full byte compare, which remains authoritative.
 static inline int str_compare(const DrakenStringSlot* a, const uint8_t* arena_a,
                               const DrakenStringSlot* b, const uint8_t* arena_b) {
+    const uint32_t pa4 = str_prefix4(a);
+    const uint32_t pb4 = str_prefix4(b);
+    if (pa4 != pb4) return pa4 < pb4 ? -1 : 1;
+
     const uint32_t la = a->inl.length, lb = b->inl.length;
     const uint32_t mn = la < lb ? la : lb;
     const uint8_t* pa = str_data(a, arena_a);

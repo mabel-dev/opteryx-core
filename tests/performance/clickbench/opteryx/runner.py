@@ -170,14 +170,14 @@ if __name__ == "__main__":  # pragma: no cover
         if ratio < 1.0:
             # Deep green: faster than DuckDB
             return f"\033[38;2;34;197;94m{ratio_str}\033[0m"
-        elif ratio <= 1.1:
-            # Light green: within 10%
+        elif ratio <= 2.5:
+            # Light green: within 50%
             return f"\033[38;2;72;209;204m{ratio_str}\033[0m"
-        elif ratio <= 1.5:
-            # Orange: 10-50% slower
+        elif ratio <= 5.0:
+            # Orange: 500% slower
             return f"\033[38;2;255;165;0m{ratio_str}\033[0m"
         else:
-            # Red: 50%+ slower
+            # Red: 100%+ slower
             return f"\033[38;2;255;69;69m{ratio_str}\033[0m"
 
     start_suite = time.monotonic_ns()

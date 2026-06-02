@@ -26,11 +26,19 @@ from opteryx.vectors.vector_types import node_is_vector_query_expression
 # BasePlanNode in scope via textual include from _operators.pyx.
 
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
-from libc.stdint cimport int32_t, int64_t, uint64_t
+from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint32_t, uint64_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy
 
 from draken.vectors.vector cimport Vector
+from draken.core.buffers cimport (
+    DrakenVector, DrakenStringArena, DrakenStringSlot, DrakenType,
+    str_prefix4, str_compare,
+    DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY,
+    DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64, DRAKEN_DECIMAL,
+    DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_DATE32, DRAKEN_TIMESTAMP64,
+    DRAKEN_TIME32, DRAKEN_TIME64, DRAKEN_BOOL,
+)
 
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -379,6 +387,172 @@ cdef void _sift_down_single_vector(
         pos = worst
 
 
+# ── German-string single-key top-N (prefix normalized key) ──────────────────
+# Sort string columns on an int64 key built straight from the slot's big-endian
+# 4-byte prefix (str_prefix4 — already in the slot, no byte re-extraction, no
+# to_pylist). The top-k heap compares those int64 keys (register compare, dense
+# array, no slot loads); only on a prefix-key TIE does it fall back to a full
+# str_compare. So high-prefix-entropy columns (SearchPhrase) fly, and low-entropy
+# ones (URL → all "http") degrade gracefully to str_compare — never wrong.
+
+cdef inline void _build_string_prefix_keys(DrakenVector* dv, int64_t* out) noexcept nogil:
+    # out[i] = signed-int64 key whose order == lexicographic order of the first
+    # 4 bytes. prefix4 is big-endian (unsigned-lex); flip the sign bit so signed
+    # int64 compare matches. Null rows get a don't-care key (handled via validity).
+    cdef DrakenStringArena* sa = <DrakenStringArena*>dv.data
+    cdef const uint32_t* sel = dv.selection
+    cdef DrakenStringSlot* slots = sa.slots
+    cdef uint32_t n = dv.length
+    cdef uint32_t i
+    cdef uint64_t u
+    for i in range(n):
+        u = (<uint64_t>str_prefix4(&slots[sel[i]])) << 32
+        out[i] = <int64_t>(u ^ <uint64_t>0x8000000000000000ULL)
+
+
+cdef inline bint _row_is_null(DrakenVector* dv, Py_ssize_t i) noexcept nogil:
+    if dv.validity == NULL:
+        return False
+    return ((dv.validity[i >> 3] >> (i & 7)) & 1) == 0
+
+
+cdef inline int _cmp_string_keyed(
+    int64_t* keys, DrakenStringSlot* slots, const uint8_t* arena, const uint32_t* sel,
+    Py_ssize_t a, Py_ssize_t b, bint descending
+) noexcept nogil:
+    """ASC lexicographic comparison via the prefix key, str_compare on key-tie;
+    negated for descending. Same -1/0/1 convention as _compare_single_vector."""
+    cdef int c
+    cdef int64_t ka = keys[a]
+    cdef int64_t kb = keys[b]
+    if ka != kb:
+        c = -1 if ka < kb else 1
+    else:
+        c = str_compare(&slots[sel[a]], arena, &slots[sel[b]], arena)
+    return -c if descending else c
+
+
+cdef void _sift_up_string_keyed(
+    int32_t* buf, Py_ssize_t pos, int64_t* keys, DrakenStringSlot* slots,
+    const uint8_t* arena, const uint32_t* sel, bint descending
+) noexcept nogil:
+    cdef Py_ssize_t parent
+    cdef int32_t tmp
+    while pos > 0:
+        parent = (pos - 1) >> 1
+        if _cmp_string_keyed(keys, slots, arena, sel, buf[pos], buf[parent], descending) > 0:
+            tmp = buf[pos]; buf[pos] = buf[parent]; buf[parent] = tmp
+            pos = parent
+        else:
+            break
+
+
+cdef void _sift_down_string_keyed(
+    int32_t* buf, Py_ssize_t pos, Py_ssize_t size, int64_t* keys, DrakenStringSlot* slots,
+    const uint8_t* arena, const uint32_t* sel, bint descending
+) noexcept nogil:
+    cdef Py_ssize_t left, right, worst
+    cdef int32_t tmp
+    while True:
+        left = (pos << 1) + 1
+        right = left + 1
+        worst = pos
+        if left < size and _cmp_string_keyed(keys, slots, arena, sel, buf[left], buf[worst], descending) > 0:
+            worst = left
+        if right < size and _cmp_string_keyed(keys, slots, arena, sel, buf[right], buf[worst], descending) > 0:
+            worst = right
+        if worst == pos:
+            break
+        tmp = buf[pos]; buf[pos] = buf[worst]; buf[worst] = tmp
+        pos = worst
+
+
+# ── Numeric single-key top-N (NO compress — sort on the raw field values) ────
+# Numeric values are already order-comparable, so there is no key to build:
+# read data[selection[i]] in its native width and compare in-register. No
+# to_pylist, no int64 key array, no transform pass. Matches draken_vector_
+# compare_at exactly (signed int order for integer family; NaN-highest, -0==+0
+# total order for floats).
+
+cdef inline int64_t _num_read_i64(void* data, DrakenType t, uint32_t idx) noexcept nogil:
+    if t == DRAKEN_INT64 or t == DRAKEN_TIMESTAMP64 or t == DRAKEN_TIME64 or t == DRAKEN_DECIMAL:
+        return (<int64_t*>data)[idx]
+    elif t == DRAKEN_INT32 or t == DRAKEN_DATE32 or t == DRAKEN_TIME32:
+        return <int64_t>(<int32_t*>data)[idx]
+    elif t == DRAKEN_INT16:
+        return <int64_t>(<int16_t*>data)[idx]
+    elif t == DRAKEN_INT8:
+        return <int64_t>(<int8_t*>data)[idx]
+    else:  # DRAKEN_BOOL
+        return <int64_t>((<uint8_t*>data)[idx] & 1)
+
+
+cdef inline double _num_read_f64(void* data, DrakenType t, uint32_t idx) noexcept nogil:
+    if t == DRAKEN_FLOAT64:
+        return (<double*>data)[idx]
+    else:  # DRAKEN_FLOAT32
+        return <double>(<float*>data)[idx]
+
+
+cdef inline int _num_cmp_f64(double a, double b) noexcept nogil:
+    # Total order matching draken: NaN == NaN and sorts highest; -0.0 == +0.0.
+    if a != a:
+        return 0 if b != b else 1
+    if b != b:
+        return -1
+    return -1 if a < b else (1 if a > b else 0)
+
+
+cdef inline int _cmp_num(
+    void* data, DrakenType t, bint is_float, const uint32_t* sel,
+    Py_ssize_t a, Py_ssize_t b, bint descending
+) noexcept nogil:
+    cdef int c
+    cdef int64_t ia, ib
+    if is_float:
+        c = _num_cmp_f64(_num_read_f64(data, t, sel[a]), _num_read_f64(data, t, sel[b]))
+    else:
+        ia = _num_read_i64(data, t, sel[a])
+        ib = _num_read_i64(data, t, sel[b])
+        c = -1 if ia < ib else (1 if ia > ib else 0)
+    return -c if descending else c
+
+
+cdef void _sift_up_num(
+    int32_t* buf, Py_ssize_t pos, void* data, DrakenType t, bint is_float,
+    const uint32_t* sel, bint descending
+) noexcept nogil:
+    cdef Py_ssize_t parent
+    cdef int32_t tmp
+    while pos > 0:
+        parent = (pos - 1) >> 1
+        if _cmp_num(data, t, is_float, sel, buf[pos], buf[parent], descending) > 0:
+            tmp = buf[pos]; buf[pos] = buf[parent]; buf[parent] = tmp
+            pos = parent
+        else:
+            break
+
+
+cdef void _sift_down_num(
+    int32_t* buf, Py_ssize_t pos, Py_ssize_t size, void* data, DrakenType t, bint is_float,
+    const uint32_t* sel, bint descending
+) noexcept nogil:
+    cdef Py_ssize_t left, right, worst
+    cdef int32_t tmp
+    while True:
+        left = (pos << 1) + 1
+        right = left + 1
+        worst = pos
+        if left < size and _cmp_num(data, t, is_float, sel, buf[left], buf[worst], descending) > 0:
+            worst = left
+        if right < size and _cmp_num(data, t, is_float, sel, buf[right], buf[worst], descending) > 0:
+            worst = right
+        if worst == pos:
+            break
+        tmp = buf[pos]; buf[pos] = buf[worst]; buf[worst] = tmp
+        pos = worst
+
+
 # ── Node ──────────────────────────────────────────────────────────────────────
 
 _EXACT_COMPRESS_VECTOR_TYPES = frozenset({
@@ -541,11 +715,144 @@ cdef class HeapSortNode(BasePlanNode):
         descending = _is_descending(direction)
         vector = morsel.column(column_name)
 
+        # German-string prefix-keyed fast path (string columns only; returns None otherwise).
+        string_path = self._top_n_single_key_string(morsel, vector, descending, k)
+        if string_path is not None:
+            return string_path
+
+        # Numeric direct-value fast path (no compress; returns None for non-numeric).
+        numeric_path = self._top_n_single_key_numeric(morsel, vector, descending, k)
+        if numeric_path is not None:
+            return numeric_path
+
         fast_path = self._top_n_single_key_compressed(morsel, vector, descending, k)
         if fast_path is not None:
             return fast_path
 
         return self._top_n_single_key_vector(morsel, vector, descending, k)
+
+    cdef Morsel _top_n_single_key_numeric(self, Morsel morsel, Vector vector, bint descending, Py_ssize_t k):
+        cdef DrakenVector* dv = vector.unified()
+        cdef DrakenType t = dv.type
+        cdef bint is_float = (t == DRAKEN_FLOAT32 or t == DRAKEN_FLOAT64)
+        cdef bint is_int = (
+            t == DRAKEN_INT8 or t == DRAKEN_INT16 or t == DRAKEN_INT32 or t == DRAKEN_INT64
+            or t == DRAKEN_DECIMAL or t == DRAKEN_DATE32 or t == DRAKEN_TIMESTAMP64
+            or t == DRAKEN_TIME32 or t == DRAKEN_TIME64 or t == DRAKEN_BOOL
+        )
+        if not (is_float or is_int):
+            return None
+        cdef Py_ssize_t n = morsel.num_rows
+        if n == 0 or k <= 0:
+            return None
+
+        cdef void* data = dv.data
+        cdef const uint32_t* sel = dv.selection
+
+        cdef int32_t* heap_buf = <int32_t*>PyMem_Malloc(k * sizeof(int32_t))
+        if heap_buf == NULL:
+            raise MemoryError()
+
+        cdef Py_ssize_t heap_size = 0, i, j, count
+        cdef int32_t pivot_idx
+        cdef int[::1] rv
+        try:
+            with nogil:
+                for i in range(n):
+                    if _row_is_null(dv, i):
+                        continue
+                    if heap_size < k:
+                        heap_buf[heap_size] = <int32_t>i
+                        heap_size += 1
+                        _sift_up_num(heap_buf, heap_size - 1, data, t, is_float, sel, descending)
+                    elif _cmp_num(data, t, is_float, sel, heap_buf[0], i, descending) < 0:
+                        heap_buf[0] = <int32_t>i
+                        _sift_down_num(heap_buf, 0, heap_size, data, t, is_float, sel, descending)
+
+                for i in range(1, heap_size):
+                    pivot_idx = heap_buf[i]
+                    j = i
+                    while j > 0 and _cmp_num(data, t, is_float, sel, heap_buf[j - 1], pivot_idx, descending) > 0:
+                        heap_buf[j] = heap_buf[j - 1]
+                        j -= 1
+                    heap_buf[j] = pivot_idx
+
+            result = array("i", b"\x00" * (k * 4))
+            rv = result
+            memcpy(&rv[0], heap_buf, heap_size * sizeof(int32_t))
+            count = heap_size
+            if count < k:
+                for i in range(n):
+                    if count >= k:
+                        break
+                    if _row_is_null(dv, i):
+                        rv[count] = <int32_t>i
+                        count += 1
+            return self._materialize_rows(morsel, result[:count] if count < k else result)
+        finally:
+            PyMem_Free(heap_buf)
+
+    cdef Morsel _top_n_single_key_string(self, Morsel morsel, Vector vector, bint descending, Py_ssize_t k):
+        cdef DrakenVector* dv = vector.unified()
+        if not (dv.type == DRAKEN_VARCHAR or dv.type == DRAKEN_NVARCHAR or dv.type == DRAKEN_VARBINARY):
+            return None
+        cdef Py_ssize_t n = morsel.num_rows
+        if n == 0 or k <= 0:
+            return None
+
+        cdef DrakenStringArena* sa = <DrakenStringArena*>dv.data
+        cdef DrakenStringSlot* slots = sa.slots
+        cdef const uint8_t* arena = sa.arena
+        cdef const uint32_t* sel = dv.selection
+
+        cdef int64_t* keys = <int64_t*>PyMem_Malloc(n * sizeof(int64_t))
+        cdef int32_t* heap_buf = <int32_t*>PyMem_Malloc(k * sizeof(int32_t))
+        if keys == NULL or heap_buf == NULL:
+            PyMem_Free(keys)
+            PyMem_Free(heap_buf)
+            raise MemoryError()
+
+        cdef Py_ssize_t heap_size = 0, i, j, count
+        cdef int32_t pivot_idx
+        cdef int[::1] rv
+        try:
+            with nogil:
+                _build_string_prefix_keys(dv, keys)
+                for i in range(n):
+                    if _row_is_null(dv, i):
+                        continue
+                    if heap_size < k:
+                        heap_buf[heap_size] = <int32_t>i
+                        heap_size += 1
+                        _sift_up_string_keyed(heap_buf, heap_size - 1, keys, slots, arena, sel, descending)
+                    elif _cmp_string_keyed(keys, slots, arena, sel, heap_buf[0], i, descending) < 0:
+                        heap_buf[0] = <int32_t>i
+                        _sift_down_string_keyed(heap_buf, 0, heap_size, keys, slots, arena, sel, descending)
+
+                # Insertion-sort the heap into fully ordered output.
+                for i in range(1, heap_size):
+                    pivot_idx = heap_buf[i]
+                    j = i
+                    while j > 0 and _cmp_string_keyed(keys, slots, arena, sel, heap_buf[j - 1], pivot_idx, descending) > 0:
+                        heap_buf[j] = heap_buf[j - 1]
+                        j -= 1
+                    heap_buf[j] = pivot_idx
+
+            result = array("i", b"\x00" * (k * 4))
+            rv = result
+            memcpy(&rv[0], heap_buf, heap_size * sizeof(int32_t))
+            count = heap_size
+            if count < k:
+                for i in range(n):
+                    if count >= k:
+                        break
+                    if _row_is_null(dv, i):
+                        rv[count] = <int32_t>i
+                        count += 1
+            return self._materialize_rows(morsel, result[:count] if count < k else result)
+        finally:
+            PyMem_Free(keys)
+            PyMem_Free(heap_buf)
 
     cdef Morsel _top_n_single_key_vector(self, Morsel morsel, Vector vector, bint descending, Py_ssize_t k):
         """Top-k on single column using native vector comparators only. No Python fallback."""
