@@ -355,6 +355,24 @@ class TestContains:
         assert (pylist(vss.vector_contains(sv(data),      needle("world"))) ==
                 pylist(vss.vector_contains(sv_dict(data), needle("world"))))
 
+    def test_dict_encoded_compressed_fastpath(self):
+        # Many repeats of few distinct values: input is compressed
+        # (data_length < length) so the all-valid compressed fast path fires.
+        # Result must match dense for the same logical values, and the result
+        # itself stays compressed (reuses the input codes).
+        data = (["alpha", "beta google", "gamma", "beta google"] * 64)
+        dv = sv_dict(data)
+        assert dv.is_compressed, "fixture must be dict-compressed to exercise the fast path"
+        res = vss.vector_contains(dv, needle("google"))
+        assert pylist(res) == pylist(vss.vector_contains(sv(data), needle("google")))
+        assert res.is_compressed, "compressed input should yield a compressed bool result"
+
+    def test_dict_encoded_with_nulls_matches_dense(self):
+        # Nullable dict input must take the dense path (gate) and still be correct.
+        data = ["hello world", None, "world", "hello world", None]
+        assert (pylist(vss.vector_contains(sv(data),      needle("world"))) ==
+                pylist(vss.vector_contains(sv_dict(data), needle("world"))))
+
     def test_result_type_is_bool(self):
         v = sv(["x"])
         assert vss.vector_contains(v, needle("x")).type == dn.DrakenType.BOOL

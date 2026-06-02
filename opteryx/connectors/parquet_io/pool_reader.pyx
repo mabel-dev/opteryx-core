@@ -716,7 +716,7 @@ def iter_pass2_row_groups_ipc(
     filesystem,
     work_items,
     column_names,
-    decode_workers=4,
+    decode_workers=None,
     file_sizes=None,
     connector=None,
     query_id=None,
@@ -737,6 +737,13 @@ def iter_pass2_row_groups_ipc(
     """
     if not work_items:
         return
+
+    # Pass-2 decode is CPU-bound (decompress + materialize), so size the worker
+    # pool to the host: use all but two cores, with a floor of two. Mirrors the
+    # thread_pool_manager convention (os.cpu_count() or 4) with a floor of 2.
+    if decode_workers is None:
+        import os
+        decode_workers = max(2, (os.cpu_count() or 4) - 2)
 
     # Planning-time URL signer: converts gs:// paths to signed HTTPS URLs.
     sign_url = getattr(filesystem, "rewrite_to_signed_url", None)

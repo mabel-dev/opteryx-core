@@ -1221,6 +1221,10 @@ cdef inline uint8_t* _ensure_dense_bitmap(
     """
     cdef uint8_t fill
     cdef uint8_t* out
+    cdef const uint32_t* sel
+    cdef const uint8_t* src
+    cdef uint32_t code
+    cdef uint32_t r
     if dv.data_length == dv.length:
         return <uint8_t*>dv.data
     if dv.data_length == 1:
@@ -1232,11 +1236,21 @@ cdef inline uint8_t* _ensure_dense_bitmap(
         if num_rows & 7:
             out[nbytes - 1] = fill & <uint8_t>((1u << (num_rows & 7u)) - 1u)
         return out
-    raise NotImplementedError(
-        f"boolean combinator: DRAKEN_BOOL vector with "
-        f"data_length={dv.data_length} != length={dv.length} and != 1 "
-        f"is not a supported encoding (CLAUDE.md §1 — no silent fallback)."
-    )
+    # Dict-compressed (1 < data_length < length): scatter the per-code data bits
+    # into a dense per-logical-row bitmap via the uniform data[selection[i]] path
+    # (same expansion as the pure-bitmap BC_LOAD_COL). Per-row validity is read
+    # separately by the combinator from dv.validity, so only data is expanded.
+    sel = dv.selection
+    src = <const uint8_t*>dv.data
+    out = <uint8_t*>draken_frame_arena_alloc(arena, <size_t>nbytes)
+    if out == NULL:
+        raise MemoryError("_ensure_dense_bitmap: arena alloc failed (dict)")
+    memset(out, 0, <size_t>nbytes)
+    for r in range(num_rows):
+        code = sel[r]
+        if (src[code >> 3] >> (code & 7u)) & 1u:
+            out[r >> 3] |= <uint8_t>(1u << (r & 7u))
+    return out
 
 
 cdef object _slot_to_pyobj(DrakenVector* dv, object anc, DrakenFrameArena* arena):

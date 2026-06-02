@@ -83,6 +83,25 @@ static inline VecResult _ss_make_result(uint8_t* bits, uint8_t* validity,
 }
 
 // ---------------------------------------------------------------------------
+// All-valid test — true when the input carries no nulls (validity == nullptr,
+// the normalized all-valid form, OR a bitmap with every logical bit set). The
+// cpp-pipeline often attaches an all-ones validity bitmap rather than nullptr,
+// so the cheap pointer check alone misses the common all-valid case. O(n/8).
+// ---------------------------------------------------------------------------
+static inline bool _ss_all_valid(const uint8_t* validity, uint32_t n) noexcept {
+    if (validity == nullptr) return true;
+    const uint32_t full = n >> 3;                 // whole bytes
+    for (uint32_t b = 0; b < full; ++b)
+        if (validity[b] != 0xFFu) return false;
+    const uint32_t rem = n & 7u;                  // trailing bits
+    if (rem != 0u) {
+        const uint8_t mask = static_cast<uint8_t>((1u << rem) - 1u);
+        if ((validity[full] & mask) != mask) return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Byte-level match primitives (all handle ndl_len==0 → true).
 // ---------------------------------------------------------------------------
 
@@ -246,15 +265,14 @@ static inline VecResult str_contains(
     const uint32_t*          sel      = v.selection;
     const uint8_t*           src_null = v.validity;
 
-    uint8_t* dst = cmp_alloc_bool_buf(n);
-    uint8_t* out_null = nullptr;
-    if (src_null) {
-        try { out_null = cmp_copy_validity(src_null, n); }
-        catch (...) { draken_free(dst); throw; }
-    }
-
+    // Empty needle matches every non-null row (encoding-independent).
     if (ndl_len == 0) {
-        // Empty needle matches every non-null row.
+        uint8_t* dst = cmp_alloc_bool_buf(n);
+        uint8_t* out_null = nullptr;
+        if (src_null) {
+            try { out_null = cmp_copy_validity(src_null, n); }
+            catch (...) { draken_free(dst); throw; }
+        }
         for (uint32_t i = 0; i < n; ++i) {
             if (src_null && !((src_null[i >> 3] >> (i & 7u)) & 1u)) continue;
             dst[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
@@ -263,9 +281,65 @@ static inline VecResult str_contains(
     }
 
     VolnitskyTable* tbl = volnitsky_alloc();
-    if (!tbl) { draken_free(dst); draken_free(out_null); throw std::bad_alloc(); }
+    if (!tbl) throw std::bad_alloc();
     volnitsky_build(tbl, needle, ndl_len);
 
+    // Compressed-shape fast path (dict / constant), all-valid input only.
+    // Probe each DISTINCT slot once — not once per logical row — then return a
+    // COMPRESSED bool vector that reuses the input's codes (copied: vectors own
+    // their selection). The mask/take consumer reads data[selection[i]] via
+    // row_bool, so the compressed result filters identically to the dense one.
+    //
+    // Gated on _ss_all_valid: a compressed bool's per-slot data bit cannot carry
+    // a per-row null (a null row may share its slot with matching non-null rows,
+    // so the bit is not clearable per row). Restricting to genuinely all-valid
+    // input makes the result provably identical to the dense path with no
+    // dependency on downstream validity handling; nullable inputs take the dense
+    // path below. Falls through to dense on allocation failure.
+    if (draken_is_compressed(&v) && _ss_all_valid(src_null, n)) {
+        const uint32_t nd = v.data_length;
+        uint8_t*  slot_bits = nullptr;
+        uint32_t* codes     = nullptr;
+        try {
+            slot_bits = cmp_alloc_bool_buf(nd);   // zero-init, throws std::bad_alloc on OOM
+            codes     = static_cast<uint32_t*>(
+                            draken_malloc(static_cast<size_t>(n) * sizeof(uint32_t)));
+        } catch (...) {
+            draken_free(slot_bits);
+            volnitsky_free(tbl);
+            throw;
+        }
+        if (codes != nullptr) {
+            for (uint32_t k = 0; k < nd; ++k) {
+                const DrakenStringSlot* slot = &sa->slots[k];
+                if (volnitsky_contains_cs(str_data(slot, sa->arena), str_length(slot),
+                                          needle, ndl_len, tbl))
+                    slot_bits[k >> 3u] |= static_cast<uint8_t>(1u << (k & 7u));
+            }
+            memcpy(codes, sel, static_cast<size_t>(n) * sizeof(uint32_t));
+            volnitsky_free(tbl);
+
+            VecResult r;
+            r.data           = slot_bits;
+            r.validity       = nullptr;        // all-valid (gated)
+            r.selection      = codes;
+            r.owns_selection = true;
+            r.data_length    = nd;
+            r.length         = n;
+            r.type           = DRAKEN_BOOL;
+            r.flags          = 0u;             // codes: neither identity nor permutation
+            return r;
+        }
+        draken_free(slot_bits);                // codes alloc returned null → dense fallback
+    }
+
+    // Dense path: data_length == length, nullable input, or alloc fallback.
+    uint8_t* dst = cmp_alloc_bool_buf(n);
+    uint8_t* out_null = nullptr;
+    if (src_null) {
+        try { out_null = cmp_copy_validity(src_null, n); }
+        catch (...) { draken_free(dst); volnitsky_free(tbl); throw; }
+    }
     for (uint32_t i = 0; i < n; ++i) {
         if (src_null && !((src_null[i >> 3] >> (i & 7u)) & 1u)) continue;
         const DrakenStringSlot* slot = &sa->slots[sel[i]];
