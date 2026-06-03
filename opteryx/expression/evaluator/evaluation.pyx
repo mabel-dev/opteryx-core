@@ -635,6 +635,7 @@ from opteryx.compiled.expression.compiled_expression cimport (
 from libc.stdint cimport uint8_t, int8_t, int16_t, int64_t, uintptr_t, uint32_t
 
 from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL, DRAKEN_NULL, draken_vector_from_dense
+from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy, memset
 from libc.stddef cimport size_t
@@ -1793,8 +1794,21 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                 sp -= 1
                 dv_left_ptr = dv_stack[sp]
 
+                # `/` (BOP_DIVIDE) is TRUE division: when either operand is an
+                # integer, skip the native (truncating) path and fall through to
+                # the resolved kernel, which promotes integers to FLOAT64 so
+                # int / int yields a float. Float / float stays on the fast path.
                 if (BOP_PLUS <= slot.op_code <= BOP_MODULO
-                        and dv_left_ptr != NULL and dv_right_ptr != NULL):
+                        and dv_left_ptr != NULL and dv_right_ptr != NULL
+                        and not (slot.op_code == BOP_DIVIDE
+                                 and (dv_left_ptr.type == DRAKEN_INT8
+                                      or dv_left_ptr.type == DRAKEN_INT16
+                                      or dv_left_ptr.type == DRAKEN_INT32
+                                      or dv_left_ptr.type == DRAKEN_INT64
+                                      or dv_right_ptr.type == DRAKEN_INT8
+                                      or dv_right_ptr.type == DRAKEN_INT16
+                                      or dv_right_ptr.type == DRAKEN_INT32
+                                      or dv_right_ptr.type == DRAKEN_INT64))):
                     # Executor short-circuit: detect all-null inputs (DRAKEN_NULL constant)
                     # and return null result without calling kernel (Defect 2 fix).
                     if (dv_left_ptr.type == DRAKEN_NULL or dv_right_ptr.type == DRAKEN_NULL):

@@ -32,6 +32,7 @@
 #include "core/vector_alloc.h"
 #include "ops/vec_result.h"
 #include "ops/int64_arithmetic.h"   // combine_validity, copy_validity, alloc_i64
+#include "ops/int64_compare.h"      // cmp_alloc_bool_buf, cmp_copy_validity, cmp_and_validity
 
 namespace draken { namespace ops {
 
@@ -342,6 +343,120 @@ static inline VecResult dec_neg(const DrakenVector& a) {
         dst[i] = -v;
     }
     return make_decimal_result(dst, copy_validity(a.validity, n), n);
+}
+
+// ---------------------------------------------------------------------------
+// COMPARE: scale-aware magnitude comparison (the previously-deferred "pt2"
+// work). Operands may have different scales — they are aligned to the common
+// scale = max(sa, sb) in int128 by cross-scaling, then compared. This is exact
+// for every scale pair and never requires the literal to be storable at the
+// column scale (so `l_discount > 0.055` against a scale-2 column compares
+// magnitudes correctly rather than rejecting the literal).
+//
+// An INT64 operand is a scale-0 decimal: the caller passes scale 0 and its
+// raw int64 data, which these kernels read identically to a decimal payload.
+//
+// Result is a bit-packed DRAKEN_BOOL VecResult (LSB-first), dense-identity
+// selection — matching int64_compare.h's contract and null semantics
+// (null input row → result bit 0, validity bit 0).
+//
+// op codes: 0=eq 1=ne 2=gt 3=ge 4=lt 5=le
+// ---------------------------------------------------------------------------
+static inline bool dec_cmp_apply(int op, __int128 a, __int128 b) noexcept {
+    switch (op) {
+        case 0: return a == b;
+        case 1: return a != b;
+        case 2: return a >  b;
+        case 3: return a >= b;
+        case 4: return a <  b;
+        default: return a <= b;  // 5 = le
+    }
+}
+
+// 10^e as int128, for e in [0, 38]. e is bounded by the scale difference
+// (≤ 18), so this never overflows int128 here.
+static inline __int128 dec_pow10_i128(int e) noexcept {
+    __int128 p = 1;
+    for (int k = 0; k < e; ++k) p *= 10;
+    return p;
+}
+
+static inline VecResult dec_compare_scalar(
+    const DrakenVector& a, uint8_t sa,
+    __int128 b_unscaled, uint8_t sb, int op)
+{
+    const uint32_t n        = a.length;
+    const int64_t* ad       = static_cast<const int64_t*>(a.data);
+    const uint8_t* src_null = a.validity;
+
+    uint8_t* dst = cmp_alloc_bool_buf(n);  // zero-initialised
+    uint8_t* out_null = nullptr;
+    if (src_null != nullptr) {
+        try { out_null = cmp_copy_validity(src_null, n); }
+        catch (...) { draken_free(dst); throw; }
+    }
+
+    const int cs = (sa >= sb) ? (int)sa : (int)sb;
+    const __int128 fa = dec_pow10_i128(cs - (int)sa);
+    const __int128 b_aligned = b_unscaled * dec_pow10_i128(cs - (int)sb);
+
+    for (uint32_t i = 0; i < n; ++i) {
+        // Null row → leave result bit 0 (out_null already marks it null).
+        if (src_null != nullptr && !((src_null[i >> 3] >> (i & 7)) & 1u))
+            continue;
+        const __int128 av = (__int128)ad[a.selection[i]] * fa;
+        if (dec_cmp_apply(op, av, b_aligned))
+            dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    }
+
+    VecResult r;
+    r.data           = dst;
+    r.validity       = out_null;
+    r.selection      = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length    = n;
+    r.length         = n;
+    r.type           = DRAKEN_BOOL;
+    r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    return r;
+}
+
+static inline VecResult dec_compare_vector(
+    const DrakenVector& a, uint8_t sa,
+    const DrakenVector& b, uint8_t sb, int op)
+{
+    if (a.length != b.length)
+        throw std::invalid_argument("dec_compare_vector: length mismatch");
+    const uint32_t n  = a.length;
+    const int64_t* ad = static_cast<const int64_t*>(a.data);
+    const int64_t* bd = static_cast<const int64_t*>(b.data);
+
+    uint8_t* dst      = cmp_alloc_bool_buf(n);
+    uint8_t* out_null = cmp_and_validity(a.validity, b.validity, n);
+
+    const int cs = (sa >= sb) ? (int)sa : (int)sb;
+    const __int128 fa = dec_pow10_i128(cs - (int)sa);
+    const __int128 fb = dec_pow10_i128(cs - (int)sb);
+
+    for (uint32_t i = 0; i < n; ++i) {
+        if (out_null != nullptr && !((out_null[i >> 3] >> (i & 7)) & 1u))
+            continue;
+        const __int128 av = (__int128)ad[a.selection[i]] * fa;
+        const __int128 bv = (__int128)bd[b.selection[i]] * fb;
+        if (dec_cmp_apply(op, av, bv))
+            dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    }
+
+    VecResult r;
+    r.data           = dst;
+    r.validity       = out_null;
+    r.selection      = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length    = n;
+    r.length         = n;
+    r.type           = DRAKEN_BOOL;
+    r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    return r;
 }
 
 }} // namespace draken::ops

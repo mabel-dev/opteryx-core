@@ -501,7 +501,14 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             _ref.query_column = _win_alias
             _projection[_i] = _ref
 
-    _aggregates = get_all_nodes_of_type(_projection, select_nodes=(NodeType.AGGREGATOR,))
+    # Collect aggregates in projection (SELECT) order. get_all_nodes_of_type uses a
+    # LIFO stack, so passing the whole projection list scrambles cross-column order;
+    # for the ungrouped Aggregate operator that order leaks straight to the output
+    # columns. Walking each projection column in turn preserves left-to-right order
+    # (the binder dedups by identity afterwards).
+    _aggregates = []
+    for _proj_col in _projection:
+        _aggregates.extend(get_all_nodes_of_type(_proj_col, select_nodes=(NodeType.AGGREGATOR,)))
     _aggregates, _projection = decompose_aggregates(_aggregates, _projection)
     _groups = logical_planner_builders.build(ast_branch["Select"].get("group_by"))[0]
 

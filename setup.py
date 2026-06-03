@@ -444,6 +444,18 @@ if OPTERYX_ENABLE_LTO and not is_win():
     # ensure linker uses LTO as well
     LD_EXTRA.append("-flto")
 
+# AddressSanitizer (opt-in, dev only). Build the C/C++ extensions with ASAN to
+# diagnose heap memory-safety bugs (overflow/use-after-free). draken_malloc uses
+# system malloc, so ASAN instruments draken buffers. Run with the ASAN runtime
+# preloaded (macOS: DYLD_INSERT_LIBRARIES=<clang asan dylib>) and
+# ASAN_OPTIONS=detect_leaks=0. Never enabled for wheels.
+OPTERYX_ENABLE_ASAN = os.environ.get("OPTERYX_ENABLE_ASAN", "0").lower() in ("1", "true", "yes")
+if OPTERYX_ENABLE_ASAN and not is_win():
+    _asan_flags = ["-fsanitize=address", "-fno-omit-frame-pointer", "-g"]
+    CPP_FLAGS.extend(_asan_flags)
+    C_FLAGS.extend(_asan_flags)
+    LD_EXTRA.append("-fsanitize=address")
+
 # MSVC LTO linker flag when requested
 if is_win() and OPTERYX_ENABLE_LTO:
     # '/LTCG' enables link-time code generation on MSVC

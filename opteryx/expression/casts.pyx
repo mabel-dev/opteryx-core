@@ -373,9 +373,18 @@ def _cast_result_to_draken(result, resolved_type, args=()):
         int_vec = _draken_native_casts.vector_from_sequence(int_vals)
         return _draken_native_casts.vector_reinterpret_as_timestamp64(int_vec)
     if resolved_type == "DECIMAL":
-        # Infer scale from args if available; default to 6 precision 38 if not.
-        precision = int(_to_int_arg(args[0])) if len(args) >= 1 else 38
+        # Infer scale from args if available; default to scale 6 if not.
+        precision = int(_to_int_arg(args[0])) if len(args) >= 1 else 18
         scale = int(_to_int_arg(args[1])) if len(args) >= 2 else 6
+        # Opteryx decimals are int64-backed (max 18 significant digits); the
+        # arithmetic kernels likewise cap result precision at 18. Honour a
+        # larger declared precision (e.g. DECIMAL(32,2)) as the engine maximum
+        # rather than rejecting it — values that genuinely exceed 18 digits
+        # still raise via the native overflow/precision check.
+        if precision > 18:
+            precision = 18
+        if scale > precision:
+            scale = precision
         return _draken_native_casts.vector_decimal_from_sequence(result, precision, scale)
     if resolved_type == "INTERVAL":
         return _draken_native_casts.vector_interval_from_sequence(result)

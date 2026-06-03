@@ -61,8 +61,20 @@ cdef _unwrap_nb(v):
 
 
 cdef object _build_arithmetic_closure(int op_code):
-    """Build a closure for numeric arithmetic ops (Plus/Minus/Multiply/Divide/Modulo)."""
+    """Build a closure for numeric arithmetic ops.
+
+    Type promotion (matching the binder's declared result types and SQL semantics):
+      * Divide ("/") is TRUE division — integer operands are promoted to FLOAT64
+        so int / int yields a float (e.g. 7 / 2 = 3.5), not truncated.
+      * MyIntegerDivide ("DIV") is the integer variant — operands are left as-is so
+        int DIV int truncates toward zero (the old "/" behaviour, preserved).
+      * Mixed int × float (any op) promotes the integer side to FLOAT64 so cross-type
+        arithmetic (7.0 / 2, 7 + 2.0, …) works instead of erroring.
+    DECIMAL operands are left untouched — the native kernel intercepts and handles
+    decimal arithmetic with proper scale before this promotion would apply.
+    """
     cdef str method_name
+    cdef bint is_true_divide = False
     if op_code == BOP_PLUS:
         method_name = "add"
     elif op_code == BOP_MINUS:
@@ -71,14 +83,55 @@ cdef object _build_arithmetic_closure(int op_code):
         method_name = "mul"
     elif op_code == BOP_DIVIDE:
         method_name = "div"
+        is_true_divide = True
     elif op_code == BOP_MODULO:
         method_name = "mod"
+    elif op_code == BOP_INT_DIVIDE:
+        # MyIntegerDivide / "DIV" — integer (truncating) division: native `div`
+        # on integer operands already truncates toward zero; no float promotion.
+        method_name = "div"
     else:
         raise ValueError(f"_build_arithmetic_closure: unexpected op_code {op_code}")
+
+    _int_types = (
+        _draken_native.INT8, _draken_native.INT16, _draken_native.INT32, _draken_native.INT64,
+    )
+    _float_types = (_draken_native.FLOAT32, _draken_native.FLOAT64)
 
     def kernel(left, right):
         left_nb = _unwrap_nb(left)
         right_nb = _unwrap_nb(right)
+        lt = getattr(left_nb, "type", None)
+        rt = getattr(right_nb, "type", None)
+
+        # DECIMAL has its own kernel dispatch (dec_div / decimal_*). Promoting an
+        # int operand to FLOAT64 here would route DECIMAL × FLOAT64 into dec_div,
+        # which rejects non-decimal operands. Leave decimal pairings untouched.
+        _has_decimal = (lt == _draken_native.DECIMAL or rt == _draken_native.DECIMAL)
+
+        # TRUE division: promote integer operands to FLOAT64 (int / int -> float).
+        if is_true_divide and not _has_decimal:
+            if lt in _int_types:
+                _cast = getattr(left_nb, "to_float64", None)
+                if _cast is not None:
+                    left_nb = _cast()
+                    lt = _draken_native.FLOAT64
+            if rt in _int_types:
+                _cast = getattr(right_nb, "to_float64", None)
+                if _cast is not None:
+                    right_nb = _cast()
+                    rt = _draken_native.FLOAT64
+
+        # Cross-type int × float: promote the integer side to FLOAT64.
+        if not _has_decimal and lt in _int_types and rt in _float_types:
+            _cast = getattr(left_nb, "to_float64", None)
+            if _cast is not None:
+                left_nb = _cast()
+        elif rt in _int_types and lt in _float_types:
+            _cast = getattr(right_nb, "to_float64", None)
+            if _cast is not None:
+                right_nb = _cast()
+
         method = getattr(left_nb, method_name, None)
         if method is not None:
             return method(right_nb)

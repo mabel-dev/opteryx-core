@@ -3019,6 +3019,71 @@ static VectorOwner make_float64_from_string_vector(const VectorOwner& src) {
     return VectorOwner(v, std::move(data_buf), std::move(validity_buf));
 }
 
+// Convert a numeric Vector (DECIMAL / INT64 / FLOAT32 / FLOAT64) to a dense
+// FLOAT64 Vector. DECIMAL values are divided by 10^scale to recover the real
+// value. Null rows are preserved. Used by DECIMAL-vs-FLOAT64 comparison and by
+// explicit float casts.
+static VectorOwner make_float64_from_numeric_vector(const VectorOwner& src) {
+    const DrakenType t = src.vec.type;
+    if (t != DRAKEN_DECIMAL && t != DRAKEN_INT64 &&
+        t != DRAKEN_FLOAT64 && t != DRAKEN_FLOAT32)
+        throw std::invalid_argument(
+            "to_float64: expected DECIMAL, INT64, FLOAT32 or FLOAT64 Vector");
+
+    const uint32_t n = src.vec.length;
+    const size_t data_bytes = (n > 0u ? n : 1u) * sizeof(double);
+    double* out = static_cast<double*>(draken_malloc(data_bytes));
+    if (!out) throw std::bad_alloc();
+    OwnedBuffer<void> data_buf(out);
+
+    double scale_div = 1.0;
+    if (t == DRAKEN_DECIMAL) {
+        if (!src.logical_type)
+            throw std::invalid_argument("to_float64: DECIMAL requires a logical-type descriptor");
+        scale_div = static_cast<double>(draken::ops::kDecPow10[src.logical_type->scale]);
+    }
+
+    const int64_t* idata = (t == DRAKEN_DECIMAL || t == DRAKEN_INT64)
+        ? static_cast<const int64_t*>(src.vec.data) : nullptr;
+    const double*  fdata = (t == DRAKEN_FLOAT64) ? static_cast<const double*>(src.vec.data) : nullptr;
+    const float*   sdata = (t == DRAKEN_FLOAT32) ? static_cast<const float*>(src.vec.data) : nullptr;
+
+    bool has_nulls = false;
+    std::vector<uint8_t> valid(n, 1u);
+    for (uint32_t i = 0u; i < n; ++i) {
+        if (!row_is_valid(src.vec, i)) {
+            out[i] = 0.0; valid[i] = 0u; has_nulls = true; continue;
+        }
+        const uint32_t s = src.vec.selection[i];
+        if (t == DRAKEN_DECIMAL)
+            out[i] = static_cast<double>(idata[s]) / scale_div;
+        else if (t == DRAKEN_INT64)
+            out[i] = static_cast<double>(idata[s]);
+        else if (t == DRAKEN_FLOAT64)
+            out[i] = fdata[s];
+        else  // FLOAT32
+            out[i] = static_cast<double>(sdata[s]);
+    }
+
+    OwnedBuffer<uint8_t> validity_buf;
+    uint8_t* validity = nullptr;
+    if (has_nulls) {
+        const uint32_t bm = (n + 7u) / 8u;
+        const uint32_t padded = (bm + 7u) & ~7u;
+        const size_t vbytes = padded > 0u ? padded : 8u;
+        validity = static_cast<uint8_t*>(draken_malloc(vbytes));
+        if (!validity) throw std::bad_alloc();
+        validity_buf.reset(validity);
+        std::memset(validity, 0xFF, vbytes);
+        for (uint32_t i = 0u; i < n; ++i)
+            if (!valid[i])
+                validity[i / 8u] &= static_cast<uint8_t>(~(1u << (i % 8u)));
+    }
+
+    DrakenVector v = draken_vector_from_dense(out, n, DRAKEN_FLOAT64, validity);
+    return VectorOwner(v, std::move(data_buf), std::move(validity_buf));
+}
+
 static inline size_t ryu_format_double(char* buf, double d, uint32_t precision) {
     if (!std::isfinite(d)) {
         if (std::isnan(d)) {
@@ -3239,6 +3304,73 @@ static int64_t decimal_to_unscaled(PyObject* d, uint8_t precision, uint8_t scale
             "decimal: value exceeds declared precision");
 
     return static_cast<int64_t>(val);
+}
+
+// Convert a Python numeric scalar (Decimal / int / float) to its OWN
+// (unscaled, scale) int128 representation — used for scale-aware decimal
+// comparison, which (unlike storage) does not require the literal to be
+// representable at the column's scale. A float is routed through str() so
+// `0.05` becomes Decimal('0.05') (scale 2) rather than its binary expansion.
+static void py_scalar_to_unscaled_scale(PyObject* obj, __int128& unscaled, uint8_t& scale) {
+    PyObject* dec_type = get_decimal_type();
+
+    // Materialise a Decimal we can introspect with as_tuple().
+    PyObject* d = nullptr;
+    if (PyObject_IsInstance(obj, dec_type) == 1) {
+        Py_INCREF(obj);
+        d = obj;
+    } else if (PyFloat_Check(obj)) {
+        PyObject* s = PyObject_Str(obj);          // shortest round-trip repr
+        if (!s) throw nb::python_error();
+        d = PyObject_CallOneArg(dec_type, s);
+        Py_DECREF(s);
+        if (!d) throw nb::python_error();
+    } else {
+        d = PyObject_CallOneArg(dec_type, obj);   // int (or anything Decimal accepts)
+        if (!d) throw nb::python_error();
+    }
+
+    // Reject NaN / Inf before reading the digit tuple.
+    PyObject* fin = PyObject_CallMethod(d, "is_finite", nullptr);
+    if (!fin) { Py_DECREF(d); throw nb::python_error(); }
+    const bool finite = (PyObject_IsTrue(fin) == 1);
+    Py_DECREF(fin);
+    if (!finite) {
+        Py_DECREF(d);
+        throw std::invalid_argument("decimal compare: NaN and Inf are not comparable");
+    }
+
+    // as_tuple() → (sign, (digit, digit, ...), exponent)
+    PyObject* t = PyObject_CallMethod(d, "as_tuple", nullptr);
+    Py_DECREF(d);
+    if (!t) throw nb::python_error();
+    PyObject* sign_o   = PyTuple_GetItem(t, 0);   // borrowed
+    PyObject* digits_o = PyTuple_GetItem(t, 1);   // borrowed
+    PyObject* exp_o    = PyTuple_GetItem(t, 2);   // borrowed
+    if (!sign_o || !digits_o || !exp_o) { Py_DECREF(t); throw nb::python_error(); }
+
+    __int128 mag = 0;
+    const Py_ssize_t ndig = PyTuple_Size(digits_o);
+    for (Py_ssize_t i = 0; i < ndig; ++i) {
+        const long dig = PyLong_AsLong(PyTuple_GetItem(digits_o, i));
+        mag = mag * 10 + (__int128)dig;
+    }
+    const long sign = PyLong_AsLong(sign_o);
+    const long exp  = PyLong_AsLong(exp_o);
+    Py_DECREF(t);
+
+    if (sign != 0) mag = -mag;
+
+    if (exp >= 0) {
+        // Integer-valued at a coarser-than-unit scale (e.g. 1E+2): fold the
+        // exponent into the magnitude and treat as scale 0.
+        for (long k = 0; k < exp; ++k) mag *= 10;
+        unscaled = mag;
+        scale    = 0;
+    } else {
+        unscaled = mag;
+        scale    = static_cast<uint8_t>(-exp);
+    }
 }
 
 // Convert int64 unscaled value + scale → Python decimal.Decimal preserving scale.
@@ -4376,13 +4508,34 @@ static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts) {
 //   5. Interns and attaches the result LogicalType to the returned VectorOwner.
 // ---------------------------------------------------------------------------
 
+// Resolve an arithmetic operand to (scale, precision) for the decimal kernels.
+// DECIMAL uses its logical-type descriptor. DRAKEN_INT64 is treated as a
+// scale-0 decimal — integer N is exactly DECIMAL(N) with scale 0, and an
+// INT64 vector is laid out identically to a scale-0 decimal (int64 unscaled
+// values), so the kernels read it correctly with scale=0. This is how the
+// "promote scalar to DECIMAL first" intent is satisfied for integer literals
+// (e.g. TPC-H `1 - l_discount`). Other types are unsupported here.
+static inline void decimal_operand_scale_prec(
+    const VectorOwner& v, const char* op, uint8_t& scale, uint8_t& prec) {
+    if (v.vec.type == DRAKEN_DECIMAL) {
+        if (!v.logical_type)
+            throw std::invalid_argument(
+                std::string(op) + ": missing logical-type descriptor");
+        scale = v.logical_type->scale;
+        prec  = v.logical_type->precision;
+    } else if (v.vec.type == DRAKEN_INT64) {
+        scale = 0;
+        prec  = 18;
+    } else {
+        throw std::invalid_argument(
+            std::string(op) + ": operands must be DRAKEN_DECIMAL or DRAKEN_INT64");
+    }
+}
+
 static VectorOwner decimal_add_dispatch(const VectorOwner& a, const VectorOwner& b) {
-    if (a.vec.type != DRAKEN_DECIMAL || b.vec.type != DRAKEN_DECIMAL)
-        throw std::invalid_argument("dec_add: both operands must be DRAKEN_DECIMAL");
-    if (!a.logical_type || !b.logical_type)
-        throw std::invalid_argument("dec_add: missing logical-type descriptor");
-    const uint8_t sa = a.logical_type->scale,  pa = a.logical_type->precision;
-    const uint8_t sb = b.logical_type->scale,  pb = b.logical_type->precision;
+    uint8_t sa, pa, sb, pb;
+    decimal_operand_scale_prec(a, "dec_add", sa, pa);
+    decimal_operand_scale_prec(b, "dec_add", sb, pb);
     // result_scale = max(sa, sb)
     // result_prec  = max(pa-sa, pb-sb) + max(sa,sb) + 1, capped at 18
     const uint8_t rs = (sa >= sb) ? sa : sb;
@@ -4398,12 +4551,9 @@ static VectorOwner decimal_add_dispatch(const VectorOwner& a, const VectorOwner&
 }
 
 static VectorOwner decimal_sub_dispatch(const VectorOwner& a, const VectorOwner& b) {
-    if (a.vec.type != DRAKEN_DECIMAL || b.vec.type != DRAKEN_DECIMAL)
-        throw std::invalid_argument("dec_sub: both operands must be DRAKEN_DECIMAL");
-    if (!a.logical_type || !b.logical_type)
-        throw std::invalid_argument("dec_sub: missing logical-type descriptor");
-    const uint8_t sa = a.logical_type->scale,  pa = a.logical_type->precision;
-    const uint8_t sb = b.logical_type->scale,  pb = b.logical_type->precision;
+    uint8_t sa, pa, sb, pb;
+    decimal_operand_scale_prec(a, "dec_sub", sa, pa);
+    decimal_operand_scale_prec(b, "dec_sub", sb, pb);
     const uint8_t rs = (sa >= sb) ? sa : sb;
     const int int_a = (int)pa - (int)sa, int_b = (int)pb - (int)sb;
     const int rp_raw = (int_a >= int_b ? int_a : int_b) + (int)rs + 1;
@@ -4417,12 +4567,9 @@ static VectorOwner decimal_sub_dispatch(const VectorOwner& a, const VectorOwner&
 }
 
 static VectorOwner decimal_mul_dispatch(const VectorOwner& a, const VectorOwner& b) {
-    if (a.vec.type != DRAKEN_DECIMAL || b.vec.type != DRAKEN_DECIMAL)
-        throw std::invalid_argument("dec_mul: both operands must be DRAKEN_DECIMAL");
-    if (!a.logical_type || !b.logical_type)
-        throw std::invalid_argument("dec_mul: missing logical-type descriptor");
-    const uint8_t sa = a.logical_type->scale,  pa = a.logical_type->precision;
-    const uint8_t sb = b.logical_type->scale,  pb = b.logical_type->precision;
+    uint8_t sa, pa, sb, pb;
+    decimal_operand_scale_prec(a, "dec_mul", sa, pa);
+    decimal_operand_scale_prec(b, "dec_mul", sb, pb);
     // result_scale = sa + sb (kernel raises if > 18)
     // result_prec  = pa + pb, capped at 18
     const int rs_raw = (int)sa + (int)sb;
@@ -4438,12 +4585,9 @@ static VectorOwner decimal_mul_dispatch(const VectorOwner& a, const VectorOwner&
 }
 
 static VectorOwner decimal_div_dispatch(const VectorOwner& a, const VectorOwner& b) {
-    if (a.vec.type != DRAKEN_DECIMAL || b.vec.type != DRAKEN_DECIMAL)
-        throw std::invalid_argument("dec_div: both operands must be DRAKEN_DECIMAL");
-    if (!a.logical_type || !b.logical_type)
-        throw std::invalid_argument("dec_div: missing logical-type descriptor");
-    const uint8_t sa = a.logical_type->scale,  pa = a.logical_type->precision;
-    const uint8_t sb = b.logical_type->scale;
+    uint8_t sa, pa, sb, pb;
+    decimal_operand_scale_prec(a, "dec_div", sa, pa);
+    decimal_operand_scale_prec(b, "dec_div", sb, pb);
     // result_scale = max(sa + 6, 6), capped at 18
     const int rs_raw = ((int)sa + 6 >= 6) ? (int)sa + 6 : 6;
     const uint8_t rs = (rs_raw <= 18) ? (uint8_t)rs_raw : 18u;
@@ -4459,17 +4603,15 @@ static VectorOwner decimal_div_dispatch(const VectorOwner& a, const VectorOwner&
 }
 
 static VectorOwner decimal_mod_dispatch(const VectorOwner& a, const VectorOwner& b) {
-    if (a.vec.type != DRAKEN_DECIMAL || b.vec.type != DRAKEN_DECIMAL)
-        throw std::invalid_argument("dec_mod: both operands must be DRAKEN_DECIMAL");
-    if (!a.logical_type || !b.logical_type)
-        throw std::invalid_argument("dec_mod: missing logical-type descriptor");
-    const uint8_t sa = a.logical_type->scale,  pa = a.logical_type->precision;
-    const uint8_t sb = b.logical_type->scale;
+    uint8_t sa, pa, sb, pb;
+    decimal_operand_scale_prec(a, "dec_mod", sa, pa);
+    decimal_operand_scale_prec(b, "dec_mod", sb, pb);
     // result_scale = sa, result_prec = pa
     VecResult vr = draken::ops::dec_mod(a.vec, sa, b.vec, sb);
     VectorOwner owner = vecresult_to_owner(vr);
     owner.vec.type = DRAKEN_DECIMAL;
-    owner.logical_type = a.logical_type;  // same scale/prec as dividend
+    LogicalType lt{}; lt.kind = LogicalKind::DECIMAL; lt.precision = pa; lt.scale = sa;
+    owner.logical_type = logical_type_intern(lt);  // same scale/prec as dividend
     return owner;
 }
 
@@ -4974,6 +5116,25 @@ NB_MODULE(draken_native, m) {
             }
             return vecresult_to_owner(draken_neg(v.vec));
         })
+        // to_float64: numeric Vector (DECIMAL/INT64/FLOAT32/FLOAT64) → FLOAT64.
+        // DECIMAL is divided by 10^scale to recover the real value.
+        .def("to_float64", [](const VectorOwner& v) -> VectorOwner {
+            return make_float64_from_numeric_vector(v);
+        }, "Convert a numeric Vector to a dense FLOAT64 Vector (null-preserving).")
+        // set_decimal_descriptor: attach a DECIMAL (precision, scale) logical-type
+        // descriptor in place. Used when a DECIMAL-typed buffer is assembled from
+        // raw int64 storage (e.g. CASE WHEN result scatter) and the scale/precision
+        // must be carried from the source vectors.
+        .def("set_decimal_descriptor", [](VectorOwner& v, int precision, int scale) {
+            if (v.vec.type != DRAKEN_DECIMAL)
+                throw std::invalid_argument("set_decimal_descriptor: not a DECIMAL vector");
+            LogicalType lt{};
+            lt.kind = LogicalKind::DECIMAL;
+            lt.precision = static_cast<uint8_t>(precision);
+            lt.scale     = static_cast<uint8_t>(scale);
+            v.logical_type = logical_type_intern(lt);
+        }, nb::arg("precision"), nb::arg("scale"),
+            "Attach a DECIMAL (precision, scale) descriptor to this Vector in place.")
         // ----------------------------------------------------------------
         // D.5 — bool logical ops (Kleene 3VL) + reductions.
         //
@@ -5167,9 +5328,13 @@ NB_MODULE(draken_native, m) {
                     "compare_scalar: ordering not supported for VECTOR_FP16");
             if (v.vec.type == DRAKEN_DECIMAL) {
                 require_decimal_descriptor(v, "compare_scalar");
-                const int64_t unscaled = decimal_to_unscaled(
-                    scalar.ptr(), v.logical_type->precision, v.logical_type->scale);
-                return vecresult_to_owner(draken_compare_scalar(v.vec, unscaled, op));
+                // Scale-aware: convert the literal at its OWN scale and let the
+                // kernel align magnitudes in int128. Unlike storage, comparison
+                // does not require the literal to be exact at the column scale.
+                __int128 b_unscaled; uint8_t sb;
+                py_scalar_to_unscaled_scale(scalar.ptr(), b_unscaled, sb);
+                return vecresult_to_owner(draken::ops::dec_compare_scalar(
+                    v.vec, v.logical_type->scale, b_unscaled, sb, op));
             }
             if (v.vec.type == DRAKEN_TIMESTAMP64) {
                 if (!v.logical_type)
@@ -5185,7 +5350,14 @@ NB_MODULE(draken_native, m) {
                 return vecresult_to_owner(draken_compare_scalar(v.vec, ts, op));
             }
             if (v.vec.type == DRAKEN_DATE32) {
-                const int64_t days = static_cast<int64_t>(py_date_to_days(scalar.ptr()));
+                // Accept either a Python int (already-coerced days-since-epoch,
+                // as produced by _coerce_date32) or a datetime.date — mirroring
+                // the TIMESTAMP64 branch above.
+                int64_t days;
+                if (PyLong_Check(scalar.ptr()))
+                    days = nb::cast<int64_t>(scalar);
+                else
+                    days = static_cast<int64_t>(py_date_to_days(scalar.ptr()));
                 return vecresult_to_owner(draken_compare_scalar(v.vec, days, op));
             }
             if (v.vec.type == DRAKEN_TIME32 || v.vec.type == DRAKEN_TIME64) {
@@ -5255,17 +5427,35 @@ NB_MODULE(draken_native, m) {
             // store different magnitudes; silently mis-comparing them produces wrong
             // answers.  Scale alignment (requires int128 rescale) is deferred to pt2.
             if (a.type == DRAKEN_DECIMAL || b.type == DRAKEN_DECIMAL) {
-                if (a.type != DRAKEN_DECIMAL || b.type != DRAKEN_DECIMAL)
+                // Scale-aware comparison: operands may differ in scale, and an
+                // INT64 operand is a scale-0 decimal (int64 payload read as-is).
+                // Magnitudes are aligned in int128 by dec_compare_vector.
+                uint8_t sa, sb;
+                if (a.type == DRAKEN_DECIMAL) {
+                    if (!self.logical_type)
+                        throw std::invalid_argument(
+                            "compare_vector: DECIMAL requires a logical-type descriptor");
+                    sa = self.logical_type->scale;
+                } else if (a.type == DRAKEN_INT64) {
+                    sa = 0;
+                } else {
                     throw std::invalid_argument(
-                        "compare_vector: cannot compare DECIMAL with a different type");
-                if (!self.logical_type || !other.logical_type)
+                        "compare_vector: cannot compare DECIMAL with this type "
+                        "(only DECIMAL or INT64)");
+                }
+                if (b.type == DRAKEN_DECIMAL) {
+                    if (!other.logical_type)
+                        throw std::invalid_argument(
+                            "compare_vector: DECIMAL requires a logical-type descriptor");
+                    sb = other.logical_type->scale;
+                } else if (b.type == DRAKEN_INT64) {
+                    sb = 0;
+                } else {
                     throw std::invalid_argument(
-                        "compare_vector: DECIMAL requires a logical-type descriptor");
-                if (self.logical_type->scale != other.logical_type->scale)
-                    throw std::invalid_argument(
-                        "compare_vector: cross-scale decimal comparison is not supported; "
-                        "align scales before comparing");
-                return vecresult_to_owner(draken_compare_vector(a, b, op));
+                        "compare_vector: cannot compare DECIMAL with this type "
+                        "(only DECIMAL or INT64)");
+                }
+                return vecresult_to_owner(draken::ops::dec_compare_vector(a, sa, b, sb, op));
             }
             // TIMESTAMP64: cross-unit comparison is a hard error — different units
             // store different magnitudes; silently mis-comparing them produces wrong
@@ -5356,8 +5546,14 @@ NB_MODULE(draken_native, m) {
                         draken_between(v.vec, lo_i, hi_i, lo_inclusive, hi_inclusive));
                 }
                 if (v.vec.type == DRAKEN_DATE32) {
-                    const int64_t lo_i = static_cast<int64_t>(py_date_to_days(lo.ptr()));
-                    const int64_t hi_i = static_cast<int64_t>(py_date_to_days(hi.ptr()));
+                    // Accept Python ints (already-coerced days-since-epoch, as
+                    // produced by _coerce_date32) or datetime.date bounds.
+                    const int64_t lo_i = PyLong_Check(lo.ptr())
+                        ? nb::cast<int64_t>(lo)
+                        : static_cast<int64_t>(py_date_to_days(lo.ptr()));
+                    const int64_t hi_i = PyLong_Check(hi.ptr())
+                        ? nb::cast<int64_t>(hi)
+                        : static_cast<int64_t>(py_date_to_days(hi.ptr()));
                     return vecresult_to_owner(
                         draken_between(v.vec, lo_i, hi_i, lo_inclusive, hi_inclusive));
                 }

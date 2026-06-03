@@ -169,17 +169,28 @@ cdef _decimal_compare(int op_code, vec, right):
             return vec.in_list(right)
         raise NotImplementedError(f"DecimalVector InList: expected a set/list, got {type(right)!r}")
 
-    cdef int decimal_op = _DECIMAL_CMP_OP[op_code]
+    # Standard Draken op convention (Eq0 Ne1 Gt2 Ge3 Lt4 Le5) — matches the
+    # scale-aware dec_compare_* kernels. (_DECIMAL_CMP_OP is the legacy kernel's
+    # convention and is not used here.)
+    cdef int decimal_op = _DRAKEN_CMP_OP[op_code]
 
-    if get_vector_type(right) == VectorType.DECIMAL:
+    cdef object right_type = get_vector_type(right)
+
+    # DECIMAL vs DECIMAL or DECIMAL vs INT64 vector: scale-aware native compare
+    # (the native kernel aligns scales and treats INT64 as a scale-0 decimal).
+    if right_type == VectorType.DECIMAL or right_type == VectorType.INT64:
         return vec._compare_vector(right, decimal_op)
 
-    if get_vector_type(right) == VectorType.FLOAT64:
+    # DECIMAL vs FLOAT64 vector: the literal is a double, so compare in the
+    # float64 domain (convert the decimal column to float64 first).
+    if right_type == VectorType.FLOAT64:
         vec_float = vec.to_float64_vector()
         return _float64_compare(op_code, vec_float, right)
 
+    # DECIMAL vs Python scalar: native compare_scalar is scale-aware and
+    # converts the literal at its own scale.
     if is_scalar(right):
-        return vec._compare_scalar(decimal_op, vec._coerce_scalar(right))
+        return vec._compare_scalar(right, decimal_op)
 
     raise NotImplementedError(
         f"DecimalVector comparison for op (code {op_code}) with right={type(right)!r} not implemented"
@@ -345,7 +356,7 @@ cpdef draken_between(col, lower, upper, bint lower_inclusive, bint upper_inclusi
     if vec_type == VectorType.DATE32:
         return col.between(_coerce_date32(lower), _coerce_date32(upper), lower_inclusive, upper_inclusive)
     if vec_type == VectorType.DECIMAL:
-        lo_op = "GtEq" if lower_inclusive else "Gt"
-        hi_op = "LtEq" if upper_inclusive else "Lt"
+        lo_op = OP_GT_EQ if lower_inclusive else OP_GT
+        hi_op = OP_LT_EQ if upper_inclusive else OP_LT
         return _decimal_compare(lo_op, col, lower).and_vector(_decimal_compare(hi_op, col, upper))
     raise NotImplementedError(f"draken_between: unsupported vector type {vec_type!r}")

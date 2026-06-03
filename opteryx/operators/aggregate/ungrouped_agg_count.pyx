@@ -69,10 +69,6 @@ cdef class CountAggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_INT64:
             uv = (<Vector>raw).unified()
-            if uv.data_length == 1 and uv.length > 1:  # constant
-                if uv.validity == NULL:  # not null constant
-                    self._count += nrows
-                return
             if uv.validity == NULL:
                 self._count += nrows
                 return
@@ -81,19 +77,11 @@ cdef class CountAggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_STRING:
             uv = (<Vector>raw).unified()
-            if uv.data_length == 1 and uv.length > 1:  # constant
-                if uv.validity == NULL:  # not null constant
-                    self._count += nrows
-                return
             self._count += <int64_t>nrows - _count_nulls(uv.validity, nrows)
             return
 
         if self._col_type == _VTYPE_FLOAT64:
             uv = (<Vector>raw).unified()
-            if uv.data_length == 1 and uv.length > 1:  # constant
-                if uv.validity == NULL:
-                    self._count += nrows
-                return
             if uv.validity == NULL:
                 self._count += nrows
                 return
@@ -102,10 +90,6 @@ cdef class CountAggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_INT8:
             uv = (<Vector>raw).unified()
-            if uv.data_length == 1 and uv.length > 1:  # constant
-                if uv.validity == NULL:
-                    self._count += nrows
-                return
             if uv.validity == NULL:
                 self._count += nrows
                 return
@@ -114,10 +98,6 @@ cdef class CountAggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_INT16:
             uv = (<Vector>raw).unified()
-            if uv.data_length == 1 and uv.length > 1:  # constant
-                if uv.validity == NULL:
-                    self._count += nrows
-                return
             if uv.validity == NULL:
                 self._count += nrows
                 return
@@ -126,10 +106,6 @@ cdef class CountAggregate(UngroupedAggregate):
 
         if self._col_type == _VTYPE_INT32:
             uv = (<Vector>raw).unified()
-            if uv.data_length == 1 and uv.length > 1:  # constant
-                if uv.validity == NULL:
-                    self._count += nrows
-                return
             if uv.validity == NULL:
                 self._count += nrows
                 return

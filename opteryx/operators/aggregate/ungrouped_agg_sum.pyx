@@ -11,6 +11,62 @@
 # included by ungrouped_agg.pyx — do not compile standalone
 
 
+cdef extern from *:
+    # 128-bit accumulator: an integer column's per-morsel sum can exceed int64
+    # (e.g. a large-magnitude id column), so the int64 reduction kernel wraps.
+    # Accumulating in __int128 over the uniform data[selection[i]] access is exact
+    # and is correct on dict-encoded morsels (where to_float64_vector().sum() is
+    # not). The final cast to double matches AVG's double semantics.
+    ctypedef long long _int128_t "__int128"
+
+
+cdef inline bint _uagg_row_valid(const uint8_t* validity, uint32_t i) noexcept nogil:
+    if validity == NULL:
+        return True
+    return ((validity[i >> 3] >> (i & 7)) & 1) != 0
+
+
+cdef double _exact_int_sum_as_double(DrakenVector* dv) noexcept nogil:
+    """Exact integer SUM (128-bit accumulator) over data[selection[i]], as double.
+
+    Handles INT8/16/32/64 via native width. NULL rows (per-logical-row validity)
+    contribute 0. Used by AVG so the sum neither wraps (int64 kernel) nor goes
+    through the dict-buggy float-conversion path.
+    """
+    cdef uint32_t n = dv.length
+    cdef const uint32_t* sel = dv.selection
+    cdef const uint8_t* validity = dv.validity
+    cdef _int128_t total = 0
+    cdef uint32_t i
+    cdef DrakenType t = dv.type
+    cdef const int64_t* d64
+    cdef const int32_t* d32
+    cdef const int16_t* d16
+    cdef const int8_t*  d8
+
+    if t == DRAKEN_INT64:
+        d64 = <const int64_t*>dv.data
+        for i in range(n):
+            if _uagg_row_valid(validity, i):
+                total += <_int128_t>d64[sel[i]]
+    elif t == DRAKEN_INT32:
+        d32 = <const int32_t*>dv.data
+        for i in range(n):
+            if _uagg_row_valid(validity, i):
+                total += <_int128_t>d32[sel[i]]
+    elif t == DRAKEN_INT16:
+        d16 = <const int16_t*>dv.data
+        for i in range(n):
+            if _uagg_row_valid(validity, i):
+                total += <_int128_t>d16[sel[i]]
+    elif t == DRAKEN_INT8:
+        d8 = <const int8_t*>dv.data
+        for i in range(n):
+            if _uagg_row_valid(validity, i):
+                total += <_int128_t>d8[sel[i]]
+    return <double>total
+
+
 cdef class SumInt64Aggregate(UngroupedAggregate):
     # Use a Python big-int accumulator to avoid C int64 overflow during
     # diagnostic / ASAN runs. This is intentionally conservative: we'll
@@ -120,20 +176,19 @@ cdef class SumFloat64Aggregate(UngroupedAggregate):
             self._total += (<Vector>raw).sum()
             self._seen = True
             return
-        if self._col_type == _VTYPE_INT64:
-            self._total += <double>((<Vector>raw).sum())
+        if self._col_type in (_VTYPE_INT64, _VTYPE_INT8, _VTYPE_INT16, _VTYPE_INT32):
+            # Exact 128-bit integer sum (as double): the int64 reduction kernel
+            # wraps when a morsel's sum exceeds int64, and to_float64_vector().sum()
+            # is wrong on dict-encoded morsels. _exact_int_sum_as_double reads the
+            # uniform data[selection[i]] in a 128-bit accumulator — correct for both.
+            self._total += _exact_int_sum_as_double((<Vector>raw).unified())
             self._seen = True
             return
-        if self._col_type == _VTYPE_INT8:
-            self._total += <double>((<Vector>raw).sum())
-            self._seen = True
-            return
-        if self._col_type == _VTYPE_INT16:
-            self._total += <double>((<Vector>raw).sum())
-            self._seen = True
-            return
-        if self._col_type == _VTYPE_INT32:
-            self._total += <double>((<Vector>raw).sum())
+        if self._col_type == _VTYPE_DECIMAL:
+            # SUM(DECIMAL) is routed here by the planner (_is_float_type treats
+            # DECIMAL as float). Convert to float64 (value = unscaled / 10^scale)
+            # and accumulate in the double total.
+            self._total += (<Vector>raw).to_float64_vector().sum()
             self._seen = True
             return
 

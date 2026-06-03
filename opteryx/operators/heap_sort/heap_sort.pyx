@@ -553,6 +553,88 @@ cdef void _sift_down_num(
         pos = worst
 
 
+# ── Multi-key top-N (native per-column compare, short-circuit; NO compare_at) ─
+# One comparator that reads each ORDER BY column's native value in nogil and
+# short-circuits on the first discriminating column — numeric via _num_*, string
+# via the prefix key + str_compare tiebreak. Replaces the per-column compare_at
+# (Python-boundary) calls in _compare_rows_vectors. Null ordering matches
+# _compare_rows_vectors exactly: nulls sort last, direction-independent.
+
+cdef struct ColMeta:
+    DrakenVector*      dv
+    DrakenType         dtype
+    int                kind        # 0 = int-family, 1 = float, 2 = string
+    bint               desc
+    int64_t*           pkeys       # string prefix keys (kind==2) else NULL
+    DrakenStringSlot*  slots       # kind==2
+    const uint8_t*     arena       # kind==2
+    const uint32_t*    sel
+    void*              data        # numeric data ptr (kind 0/1)
+
+
+cdef inline int _cmp_multi(ColMeta* cols, Py_ssize_t ncols, Py_ssize_t a, Py_ssize_t b) noexcept nogil:
+    cdef Py_ssize_t c
+    cdef ColMeta* m
+    cdef int cc
+    cdef bint ln, rn
+    cdef int64_t ia, ib, ka, kb
+    for c in range(ncols):
+        m = &cols[c]
+        ln = _row_is_null(m.dv, a)
+        rn = _row_is_null(m.dv, b)
+        if ln and rn:
+            continue
+        if ln:
+            return 1          # null sorts last (direction-independent)
+        if rn:
+            return -1
+        if m.kind == 2:
+            ka = m.pkeys[a]; kb = m.pkeys[b]
+            if ka != kb:
+                cc = -1 if ka < kb else 1
+            else:
+                cc = str_compare(&m.slots[m.sel[a]], m.arena, &m.slots[m.sel[b]], m.arena)
+        elif m.kind == 1:
+            cc = _num_cmp_f64(_num_read_f64(m.data, m.dtype, m.sel[a]),
+                              _num_read_f64(m.data, m.dtype, m.sel[b]))
+        else:
+            ia = _num_read_i64(m.data, m.dtype, m.sel[a])
+            ib = _num_read_i64(m.data, m.dtype, m.sel[b])
+            cc = -1 if ia < ib else (1 if ia > ib else 0)
+        if cc != 0:
+            return -cc if m.desc else cc
+    return 0
+
+
+cdef void _sift_up_multi(int32_t* buf, Py_ssize_t pos, ColMeta* cols, Py_ssize_t ncols) noexcept nogil:
+    cdef Py_ssize_t parent
+    cdef int32_t tmp
+    while pos > 0:
+        parent = (pos - 1) >> 1
+        if _cmp_multi(cols, ncols, buf[pos], buf[parent]) > 0:
+            tmp = buf[pos]; buf[pos] = buf[parent]; buf[parent] = tmp
+            pos = parent
+        else:
+            break
+
+
+cdef void _sift_down_multi(int32_t* buf, Py_ssize_t pos, Py_ssize_t size, ColMeta* cols, Py_ssize_t ncols) noexcept nogil:
+    cdef Py_ssize_t left, right, worst
+    cdef int32_t tmp
+    while True:
+        left = (pos << 1) + 1
+        right = left + 1
+        worst = pos
+        if left < size and _cmp_multi(cols, ncols, buf[left], buf[worst]) > 0:
+            worst = left
+        if right < size and _cmp_multi(cols, ncols, buf[right], buf[worst]) > 0:
+            worst = right
+        if worst == pos:
+            break
+        tmp = buf[pos]; buf[pos] = buf[worst]; buf[worst] = tmp
+        pos = worst
+
+
 # ── Node ──────────────────────────────────────────────────────────────────────
 
 _EXACT_COMPRESS_VECTOR_TYPES = frozenset({
@@ -672,6 +754,12 @@ cdef class HeapSortNode(BasePlanNode):
         if len(self.mapped_order) == 1:
             return self._top_n_single_key(morsel, k)
 
+        # Native multi-column comparator (no compare_at); returns None if any key
+        # column is an unsupported type, falling back to the paths below.
+        keyed = self._top_n_multi_key_keyed(morsel, k)
+        if keyed is not None:
+            return keyed
+
         if self._uniform_direction is not None:
             return self._top_n_multi_key_uniform(morsel, k, descending=<bint>self._uniform_direction)
 
@@ -706,6 +794,92 @@ cdef class HeapSortNode(BasePlanNode):
         finally:
             PyMem_Free(heap_buf)
         return self._materialize_rows(morsel, top_indices)
+
+    cdef Morsel _top_n_multi_key_keyed(self, Morsel morsel, Py_ssize_t k):
+        cdef Py_ssize_t ncols = len(self.mapped_order)
+        cdef Py_ssize_t n = morsel.num_rows
+        cdef Py_ssize_t c, i, j, heap_size = 0
+        cdef int32_t pivot_idx
+        cdef int[::1] rv
+        cdef DrakenVector* dv
+        cdef DrakenType t
+        cdef Vector vec
+        cdef DrakenStringArena* sa
+        cdef bint supported = True
+        cdef ColMeta* cols = <ColMeta*>PyMem_Malloc(ncols * sizeof(ColMeta))
+        cdef int32_t* heap_buf = NULL
+        if cols == NULL:
+            raise MemoryError()
+        for c in range(ncols):
+            cols[c].pkeys = NULL
+
+        vectors = [morsel.column(col) for col, _ in self.mapped_order]
+        try:
+            for c in range(ncols):
+                vec = vectors[c]
+                dv = vec.unified()
+                t = dv.type
+                cols[c].dv = dv
+                cols[c].dtype = t
+                cols[c].desc = _is_descending(self.mapped_order[c][1])
+                cols[c].sel = dv.selection
+                if t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR or t == DRAKEN_VARBINARY:
+                    cols[c].kind = 2
+                    sa = <DrakenStringArena*>dv.data
+                    cols[c].slots = sa.slots
+                    cols[c].arena = sa.arena
+                    cols[c].data = NULL
+                    cols[c].pkeys = <int64_t*>PyMem_Malloc(n * sizeof(int64_t))
+                    if cols[c].pkeys == NULL:
+                        raise MemoryError()
+                    _build_string_prefix_keys(dv, cols[c].pkeys)
+                elif t == DRAKEN_FLOAT32 or t == DRAKEN_FLOAT64:
+                    cols[c].kind = 1
+                    cols[c].data = dv.data
+                elif (t == DRAKEN_INT8 or t == DRAKEN_INT16 or t == DRAKEN_INT32 or t == DRAKEN_INT64
+                      or t == DRAKEN_DECIMAL or t == DRAKEN_DATE32 or t == DRAKEN_TIMESTAMP64
+                      or t == DRAKEN_TIME32 or t == DRAKEN_TIME64 or t == DRAKEN_BOOL):
+                    cols[c].kind = 0
+                    cols[c].data = dv.data
+                else:
+                    supported = False
+                    break
+
+            if not supported:
+                return None
+
+            heap_buf = <int32_t*>PyMem_Malloc(k * sizeof(int32_t))
+            if heap_buf == NULL:
+                raise MemoryError()
+
+            with nogil:
+                for i in range(n):
+                    if heap_size < k:
+                        heap_buf[heap_size] = <int32_t>i
+                        heap_size += 1
+                        _sift_up_multi(heap_buf, heap_size - 1, cols, ncols)
+                    elif _cmp_multi(cols, ncols, i, heap_buf[0]) < 0:
+                        heap_buf[0] = <int32_t>i
+                        _sift_down_multi(heap_buf, 0, heap_size, cols, ncols)
+
+                for i in range(1, heap_size):
+                    pivot_idx = heap_buf[i]
+                    j = i
+                    while j > 0 and _cmp_multi(cols, ncols, heap_buf[j - 1], pivot_idx) > 0:
+                        heap_buf[j] = heap_buf[j - 1]
+                        j -= 1
+                    heap_buf[j] = pivot_idx
+
+            top_indices = array("i", b"\x00" * (heap_size * 4))
+            rv = top_indices
+            memcpy(&rv[0], heap_buf, heap_size * sizeof(int32_t))
+            return self._materialize_rows(morsel, top_indices)
+        finally:
+            for c in range(ncols):
+                if cols[c].pkeys != NULL:
+                    PyMem_Free(cols[c].pkeys)
+            PyMem_Free(cols)
+            PyMem_Free(heap_buf)
 
     cdef Morsel _top_n_single_key(self, Morsel morsel, Py_ssize_t k):
         cdef bint descending
@@ -765,7 +939,7 @@ cdef class HeapSortNode(BasePlanNode):
                         heap_buf[heap_size] = <int32_t>i
                         heap_size += 1
                         _sift_up_num(heap_buf, heap_size - 1, data, t, is_float, sel, descending)
-                    elif _cmp_num(data, t, is_float, sel, heap_buf[0], i, descending) < 0:
+                    elif _cmp_num(data, t, is_float, sel, i, heap_buf[0], descending) < 0:
                         heap_buf[0] = <int32_t>i
                         _sift_down_num(heap_buf, 0, heap_size, data, t, is_float, sel, descending)
 
@@ -825,7 +999,7 @@ cdef class HeapSortNode(BasePlanNode):
                         heap_buf[heap_size] = <int32_t>i
                         heap_size += 1
                         _sift_up_string_keyed(heap_buf, heap_size - 1, keys, slots, arena, sel, descending)
-                    elif _cmp_string_keyed(keys, slots, arena, sel, heap_buf[0], i, descending) < 0:
+                    elif _cmp_string_keyed(keys, slots, arena, sel, i, heap_buf[0], descending) < 0:
                         heap_buf[0] = <int32_t>i
                         _sift_down_string_keyed(heap_buf, 0, heap_size, keys, slots, arena, sel, descending)
 
@@ -873,7 +1047,7 @@ cdef class HeapSortNode(BasePlanNode):
                     heap_buf[heap_size] = <int32_t>i
                     heap_size += 1
                     _sift_up_single_vector(heap_buf, heap_size - 1, vector, descending)
-                elif _compare_single_vector(heap_buf[0], i, vector, descending) < 0:
+                elif _compare_single_vector(i, heap_buf[0], vector, descending) < 0:
                     heap_buf[0] = <int32_t>i
                     _sift_down_single_vector(heap_buf, 0, heap_size, vector, descending)
 

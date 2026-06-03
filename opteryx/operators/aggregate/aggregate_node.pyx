@@ -306,10 +306,10 @@ def _build_engine_aggregate(aggregate):
             return [], None, _make_literal_state(aggregate)
         sum_alias = _column_bytes(f"__avg_sum_{output_name.decode('utf-8', 'ignore')}")
         count_alias = _column_bytes(f"__avg_count_{output_name.decode('utf-8', 'ignore')}")
-        if _is_float_type(parameter_type):
-            sum_agg = SumFloat64Aggregate(parameter_name, sum_alias)
-        else:
-            sum_agg = SumInt64Aggregate(parameter_name, sum_alias)
+        # AVG always accumulates its sum in double (matching DuckDB). For integer
+        # columns this also avoids the int64 sum kernel wrapping on large-magnitude
+        # columns (e.g. AVG(UserID)); SumInt64's per-morsel reduction overflows.
+        sum_agg = SumFloat64Aggregate(parameter_name, sum_alias)
         count_agg = CountAggregate(parameter_name, count_alias)
         return [sum_agg, count_agg], ("avg", sum_alias, count_alias, output_name), None
 

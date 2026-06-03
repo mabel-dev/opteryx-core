@@ -73,6 +73,10 @@ cdef class Vector:
         from draken.vectors.vector import Vector as _V
         return _V(self._nb.take(list(indices)))
 
+    def to_float64_vector(self):
+        from draken.vectors.vector import Vector as _V
+        return _V(self._nb.to_float64())
+
     def _compare_scalar(self, value, int op):
         from draken.vectors.bool_vector import BoolVector
         return BoolVector(self._nb.compare_scalar(value, op))

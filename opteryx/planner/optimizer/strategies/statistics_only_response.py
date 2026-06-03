@@ -305,6 +305,28 @@ def extract_all_column_aliases(logical_plan) -> list:
     return aliases
 
 
+def extract_alias_by_identity(logical_plan) -> dict:
+    """Map each Exit column's schema identity → its output alias.
+
+    Used to align aliases to aggregates by identity rather than by position:
+    the Exit node's column order need not match aggregate_node.aggregates order.
+    """
+    exit_node = find_exit_node(logical_plan)
+    if not exit_node or not getattr(exit_node, "columns", None):
+        return {}
+
+    mapping = {}
+    for column in exit_node.columns:
+        identity = getattr(getattr(column, "schema_column", None), "identity", None)
+        if identity is None:
+            continue
+        if getattr(column, "alias", None):
+            mapping[identity] = column.alias
+        elif getattr(column, "source_column", None):
+            mapping[identity] = column.source_column
+    return mapping
+
+
 def get_count_from_manifest(manifest) -> int:
     """
     Get total row count from manifest statistics.
@@ -509,11 +531,15 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         if not agg_metadata:
             return plan
 
-        # Extract aliases for all aggregates
-        column_aliases = extract_all_column_aliases(plan)
-        if len(column_aliases) != len(agg_metadata):
-            # Fallback to default naming if alias extraction fails
-            column_aliases = [f"agg_{i}" for i in range(len(agg_metadata))]
+        # Extract aliases for all aggregates, ALIGNED to agg_metadata by schema
+        # identity. The Exit node's column order is NOT guaranteed to match
+        # aggregate_node.aggregates order, so positional pairing silently mislabels
+        # results when more than one aggregate is present (e.g. MIN(a), MAX(b)).
+        alias_by_identity = extract_alias_by_identity(plan)
+        column_aliases = []
+        for idx, (agg_func, column_name, agg_node) in enumerate(agg_metadata):
+            agg_id = getattr(getattr(agg_node, "schema_column", None), "identity", None)
+            column_aliases.append(alias_by_identity.get(agg_id, f"agg_{idx}"))
 
         # Build literal nodes for each aggregate, collecting values
         literals = []
@@ -621,6 +647,32 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         except Exception:
             # conservative: on unexpected errors, bail out and keep plan unchanged
             return plan
+
+        # Order the literal columns to match the Exit node's column order. The
+        # executor takes the rewritten Project's column order as the output order,
+        # but aggregate_node.aggregates is not guaranteed to be in projection
+        # order — without this, multi-aggregate results come out permuted
+        # (e.g. MIN(a), MAX(b) returned swapped).
+        literal_by_identity = {
+            getattr(getattr(lit, "schema_column", None), "identity", None): lit
+            for lit in literals
+        }
+        ordered_literals = []
+        matched_ids = set()
+        for col in getattr(exit_node, "columns", None) or []:
+            ident = getattr(getattr(col, "schema_column", None), "identity", None)
+            lit = literal_by_identity.get(ident)
+            if lit is not None and ident not in matched_ids:
+                ordered_literals.append(lit)
+                matched_ids.add(ident)
+        # Append any literals not matched to an Exit column (defensive; should be
+        # none for a statistics-only query whose Exit columns are the aggregates).
+        for lit in literals:
+            ident = getattr(getattr(lit, "schema_column", None), "identity", None)
+            if ident not in matched_ids:
+                ordered_literals.append(lit)
+        if len(ordered_literals) == len(literals):
+            literals = ordered_literals
 
         # Rewrite aggregate node into a Project with the literal columns
         aggregate_node.node_type = LogicalPlanStepType.Project

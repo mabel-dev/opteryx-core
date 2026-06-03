@@ -67,6 +67,71 @@ def _right_columns_used_above(plan: LogicalPlan, join_nid: str, right_relations:
     return False
 
 
+# Node types that pass rows through without increasing their multiplicity, so
+# uniqueness established below them is preserved as we walk down toward the source.
+_UNIQUENESS_PRESERVING = {
+    LogicalPlanStepType.Subquery,
+    LogicalPlanStepType.Project,
+    LogicalPlanStepType.Filter,
+    LogicalPlanStepType.Order,
+    LogicalPlanStepType.HeapSort,
+    LogicalPlanStepType.Limit,
+    LogicalPlanStepType.CTE,
+    LogicalPlanStepType.Exit,
+}
+
+
+def _subtree_covers_relations(plan: LogicalPlan, nid: str, relations: set) -> bool:
+    """True if any node in the subtree rooted at nid is sourced from `relations`."""
+    queue = [nid]
+    seen = set()
+    while queue:
+        cur = queue.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        node = plan[cur]
+        if getattr(node, "alias", None) in relations or getattr(node, "relation", None) in relations:
+            return True
+        queue.extend(src for src, _, _ in plan.ingoing_edges(cur))
+    return False
+
+
+def _right_is_provably_unique(plan: LogicalPlan, join_nid: str, right_relations: set) -> bool:
+    """Conservatively decide whether the right input yields at most one row per join key.
+
+    INNER → LEFT SEMI is only sound when each left row matches at most one right
+    row (otherwise the inner join multiplies left rows but the semi-join collapses
+    them, corrupting COUNT/SUM). That holds when the right side is unique on the
+    join key. The only proof we trust without alias-resolved key matching is a
+    `Distinct` below the right input (full-row uniqueness ⇒ unique on any subset),
+    reached through row-count-preserving nodes. Anything else (GROUP BY whose key
+    we cannot reliably match, a base scan, a join) is treated as not-provable.
+    """
+    # Identify the right child subtree of the join.
+    right_child = None
+    for src, _, _ in plan.ingoing_edges(join_nid):
+        if _subtree_covers_relations(plan, src, right_relations):
+            right_child = src
+            break
+    if right_child is None:
+        return False
+
+    # Walk down through uniqueness-preserving nodes looking for a Distinct.
+    cur = right_child
+    while True:
+        node = plan[cur]
+        if node.node_type == LogicalPlanStepType.Distinct:
+            return True
+        if node.node_type not in _UNIQUENESS_PRESERVING:
+            return False
+        children = list(plan.ingoing_edges(cur))
+        if len(children) != 1:
+            # A passthrough should have exactly one input; bail out conservatively.
+            return False
+        cur = children[0][0]
+
+
 class JoinEliminationStrategy(OptimizationStrategy):
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if not context.optimized_plan:
@@ -89,6 +154,12 @@ class JoinEliminationStrategy(OptimizationStrategy):
                 continue
 
             if _right_columns_used_above(plan, join_nid, right_relations):
+                continue
+
+            # Only sound when the right side has unique join keys; otherwise the
+            # semi-join drops the extra matches an inner join would emit, changing
+            # row counts (and thus COUNT/SUM above the join).
+            if not _right_is_provably_unique(plan, join_nid, right_relations):
                 continue
 
             plan[join_nid].type = "left semi"

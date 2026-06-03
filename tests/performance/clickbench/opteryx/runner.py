@@ -170,10 +170,10 @@ if __name__ == "__main__":  # pragma: no cover
         if ratio < 1.0:
             # Deep green: faster than DuckDB
             return f"\033[38;2;34;197;94m{ratio_str}\033[0m"
-        elif ratio <= 2.5:
+        elif ratio <= 5.0:
             # Light green: within 50%
             return f"\033[38;2;72;209;204m{ratio_str}\033[0m"
-        elif ratio <= 5.0:
+        elif ratio <= 15.0:
             # Orange: 500% slower
             return f"\033[38;2;255;165;0m{ratio_str}\033[0m"
         else:

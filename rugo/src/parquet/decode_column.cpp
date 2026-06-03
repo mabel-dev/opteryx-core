@@ -1379,6 +1379,32 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         // PLAIN or DELTA encoding
         int32_t page_encoding = page_header.encoding;
 
+        // Place a page's worth of dict codes (one per present value, in order)
+        // into the active code representation.  When dict_codes_array is in use
+        // (nullable numeric dict columns), codes must be written at their DENSE
+        // row position (def-level aware) exactly like the dict-page scatter —
+        // NOT appended to dict_indices.  Appending to dict_indices here while the
+        // serializer prefers the (then-incomplete) dict_codes_array silently
+        // dropped PLAIN-fallback rows in mixed dict+PLAIN chunks.
+        const int32_t _pd_max_def = target_col->max_definition_level;
+        const int32_t _pd_row_off  = total_collected;
+        auto place_plain_dict_codes = [&](const std::vector<int32_t>& codes) {
+          if (!result.dict_codes_array.empty()) {
+            int32_t pc = 0;
+            for (int32_t i = 0; i < page_values && i < (int32_t)def_levels.size(); ++i) {
+              if (def_levels[i] == _pd_max_def) {
+                if (pc >= (int32_t)codes.size()) break;
+                WritePackedCode(result.dict_codes_array.data(),
+                                (size_t)(_pd_row_off + i), codes[pc++],
+                                result.code_width);
+              }
+            }
+          } else {
+            result.dict_indices.insert(result.dict_indices.end(),
+                                       codes.begin(), codes.end());
+          }
+        };
+
         // ── Mixed-encoding transition ──────────────────────────────────────
         // When a column starts with dict-encoded pages and then switches to
         // PLAIN/DELTA pages mid-chunk, the rle_path has already accumulated
@@ -1511,25 +1537,23 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             if (int32_dict_map.empty()) {
               SeedPrimitiveDictionaryMap(int32_dict_map, result.dict_int32_values);
             }
+            std::vector<int32_t> _pd_codes;
+            _pd_codes.reserve(present_count);
             if (page_encoding == 4) {
               std::vector<int32_t> page_ints;
               int32_t decoded =
                   DecodeDeltaBinaryPacked(data_ptr, data_size, present_count, page_ints);
               if (decoded != present_count) return result;
-              result.dict_indices.reserve(result.dict_indices.size() + page_ints.size());
-              for (int32_t value : page_ints) {
-                int32_t code = InternPrimitiveToDictionary(value, int32_dict_map, result.dict_int32_values);
-                result.dict_indices.push_back(code);
-              }
+              for (int32_t value : page_ints)
+                _pd_codes.push_back(InternPrimitiveToDictionary(value, int32_dict_map, result.dict_int32_values));
             } else {
-              result.dict_indices.reserve(result.dict_indices.size() + present_count);
               for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
                 int32_t value = ReadLE32(data_ptr);
                 data_ptr += 4;
-                int32_t code = InternPrimitiveToDictionary(value, int32_dict_map, result.dict_int32_values);
-                result.dict_indices.push_back(code);
+                _pd_codes.push_back(InternPrimitiveToDictionary(value, int32_dict_map, result.dict_int32_values));
               }
             }
+            place_plain_dict_codes(_pd_codes);
           } else if (result.ext_int32) {
             if (page_encoding == 4) {
               std::vector<int32_t> page_ints;
@@ -1579,35 +1603,31 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             if (int64_dict_map.empty()) {
               SeedPrimitiveDictionaryMap(int64_dict_map, result.dict_int64_values);
             }
+            std::vector<int32_t> _pd_codes;
+            _pd_codes.reserve(present_count);
             if (page_encoding == 4) {
               std::vector<int64_t> page_ints;
               int32_t decoded =
                   DecodeDeltaBinaryPacked(data_ptr, data_size, present_count, page_ints);
               if (decoded != present_count) return result;
-              result.dict_indices.reserve(result.dict_indices.size() + page_ints.size());
-              for (int64_t value : page_ints) {
-                int32_t code = InternPrimitiveToDictionary(value, int64_dict_map, result.dict_int64_values);
-                result.dict_indices.push_back(code);
-              }
+              for (int64_t value : page_ints)
+                _pd_codes.push_back(InternPrimitiveToDictionary(value, int64_dict_map, result.dict_int64_values));
             } else if (flba_byte_width > 0) {
-              result.dict_indices.reserve(result.dict_indices.size() + present_count);
               for (int32_t i = 0;
                    i < present_count && data_ptr + flba_byte_width <= data_end;
                    i++) {
                 int64_t value = ReadBESignExt(data_ptr, flba_byte_width);
                 data_ptr += flba_byte_width;
-                int32_t code = InternPrimitiveToDictionary(value, int64_dict_map, result.dict_int64_values);
-                result.dict_indices.push_back(code);
+                _pd_codes.push_back(InternPrimitiveToDictionary(value, int64_dict_map, result.dict_int64_values));
               }
             } else {
-              result.dict_indices.reserve(result.dict_indices.size() + present_count);
               for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
                 int64_t value = ReadLE64(data_ptr);
                 data_ptr += 8;
-                int32_t code = InternPrimitiveToDictionary(value, int64_dict_map, result.dict_int64_values);
-                result.dict_indices.push_back(code);
+                _pd_codes.push_back(InternPrimitiveToDictionary(value, int64_dict_map, result.dict_int64_values));
               }
             }
+            place_plain_dict_codes(_pd_codes);
           } else if (result.ext_int64) {
             if (page_encoding == 4) {
               std::vector<int64_t> page_ints;
@@ -1783,7 +1803,8 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                 float32_dict_map.emplace(Float32Bits(result.dict_float32_values[i]), static_cast<int32_t>(i));
               }
             }
-            result.dict_indices.reserve(result.dict_indices.size() + present_count);
+            std::vector<int32_t> _pd_codes;
+            _pd_codes.reserve(present_count);
             for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
               float value = ReadFloat32(data_ptr);
               data_ptr += 4;
@@ -1797,8 +1818,9 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               } else {
                 code = it->second;
               }
-              result.dict_indices.push_back(code);
+              _pd_codes.push_back(code);
             }
+            place_plain_dict_codes(_pd_codes);
           } else if (result.ext_float32) {
             int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 4));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -1833,7 +1855,8 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                 float64_dict_map.emplace(Float64Bits(result.dict_float64_values[i]), static_cast<int32_t>(i));
               }
             }
-            result.dict_indices.reserve(result.dict_indices.size() + present_count);
+            std::vector<int32_t> _pd_codes;
+            _pd_codes.reserve(present_count);
             for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
               double value = ReadFloat64(data_ptr);
               data_ptr += 8;
@@ -1847,8 +1870,9 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               } else {
                 code = it->second;
               }
-              result.dict_indices.push_back(code);
+              _pd_codes.push_back(code);
             }
+            place_plain_dict_codes(_pd_codes);
           } else if (result.ext_float64) {
             int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 8));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__

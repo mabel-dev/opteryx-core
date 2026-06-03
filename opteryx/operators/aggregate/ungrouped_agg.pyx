@@ -20,7 +20,7 @@ from draken.core.buffers cimport (
     DrakenConstantStringPayload, DrakenVector,
     DrakenStringArena, DrakenStringSlot, str_length, str_data,
     DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64,
-    DRAKEN_FLOAT64, DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DrakenType,
+    DRAKEN_FLOAT64, DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_DECIMAL, DrakenType,
 )
 cdef extern from "_agg_kernels.hpp" namespace "opteryx::ungrouped":
     int compare_bytes(const char* a, size_t la, const char* b, size_t lb) noexcept
@@ -75,6 +75,7 @@ cdef int _VTYPE_INT32   = 4
 cdef int _VTYPE_FLOAT64 = 5
 cdef int _VTYPE_STRING   = 6
 cdef int _VTYPE_GENERIC  = 7
+cdef int _VTYPE_DECIMAL  = 8
 
 cdef inline int _classify_vector(Vector v) noexcept:
     cdef DrakenType t = v.unified().type
@@ -88,6 +89,8 @@ cdef inline int _classify_vector(Vector v) noexcept:
         return _VTYPE_INT32
     if t == DRAKEN_FLOAT64:
         return _VTYPE_FLOAT64
+    if t == DRAKEN_DECIMAL:
+        return _VTYPE_DECIMAL
     if t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR:
         return _VTYPE_STRING
     return _VTYPE_GENERIC

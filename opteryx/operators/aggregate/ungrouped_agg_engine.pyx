@@ -165,7 +165,13 @@ cdef class UngroupedAggregateEngine:
             if agg.alias in internal:
                 continue
             names.append(agg.alias)
-            vectors.append(vector_from_sequence([agg.get_result()]))
+            # Dispatch the builder by the aggregate's result type — the default
+            # path builds INT64 and errors on a float (e.g. SUM(DECIMAL)/SUM(DOUBLE)
+            # without GROUP BY, which routes through SumFloat64Aggregate).
+            if agg.result_type == AGG_RESULT_F64:
+                vectors.append(vector_from_sequence([agg.get_result()], dtype="DOUBLE"))
+            else:
+                vectors.append(vector_from_sequence([agg.get_result()]))
 
         # AVG output columns, in registration order
         for i in range(self._n_avgs):

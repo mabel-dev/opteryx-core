@@ -34,6 +34,16 @@ cdef class BaseCollector:
     cdef public long long time_finalize_ns
     cdef Py_ssize_t _col_idx         # cached column index; -1 = unresolved
 
+    def __cinit__(self, *args, **kwargs):
+        # -1 = unresolved. Cython zero-initialises Py_ssize_t to 0, which would
+        # silently resolve every collector to column 0 (the first group key) and
+        # skip the name lookup in accumulate (guarded by `if self._col_idx < 0`),
+        # so SUM/AVG/MIN/MAX read the wrong column. Cython runs this base
+        # __cinit__ for every subclass (with the constructor args, hence *args),
+        # so all collectors start unresolved and bind their real source column on
+        # first accumulate.
+        self._col_idx = -1
+
     cdef void grow(self, int64_t new_count):
         """Resize internal state to hold new_count groups."""
         pass

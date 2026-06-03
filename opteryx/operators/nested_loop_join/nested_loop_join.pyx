@@ -62,8 +62,12 @@ cdef class _HashIndexHolder:
             self._ptr = NULL
 
 
-cdef BoolVector _bits_to_bool_vector(uint8_t[::1] bits, Py_ssize_t n):
-    """Convert bit-packed uint8 memoryview to BoolVector (Draken-native, no Arrow)."""
+cdef object _bits_to_bool_vector(uint8_t[::1] bits, Py_ssize_t n):
+    """Convert bit-packed uint8 memoryview to a Draken-native BOOL Vector (no Arrow).
+
+    bool_vector_from_bits returns a draken_native.Vector (BOOL-typed), not the
+    BoolVector shim — return it as object so no spurious conversion is forced.
+    """
     if bits is None:
         return None
     return bool_vector_from_bits(&bits[0], NULL, n)

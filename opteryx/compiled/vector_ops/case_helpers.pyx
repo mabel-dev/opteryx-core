@@ -34,7 +34,7 @@ from draken.core.buffers cimport (
     DRAKEN_INT64, DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8,
     DRAKEN_FLOAT64, DRAKEN_FLOAT32,
     DRAKEN_BOOL, DRAKEN_VARCHAR, DRAKEN_NVARCHAR,
-    DRAKEN_NULL,
+    DRAKEN_NULL, DRAKEN_DECIMAL,
 )
 from draken.vectors.bool_vector cimport BoolVector, from_decoded as _bool_from_decoded
 from draken.vectors.vector cimport Vector, from_decoded as _vec_from_decoded
@@ -370,7 +370,16 @@ def assemble_fixed(
         # These rows become NULL (validity bits stay 0).
         any_null = True
 
-    return _vec_from_decoded(out_data, out_validity, <uint32_t>n, out_dtype)
+    cdef Vector out_vec = _vec_from_decoded(out_data, out_validity, <uint32_t>n, out_dtype)
+    # DECIMAL is int64-backed; the scatter above copies raw storage but not the
+    # scale/precision descriptor. Carry it from the template so downstream ops
+    # (sum, to_float64, grouped collectors) can read scale.
+    if out_dtype == DRAKEN_DECIMAL:
+        out_vec._nb.set_decimal_descriptor(
+            template_vec._nb.logical_type_precision,
+            template_vec._nb.logical_type_scale,
+        )
+    return out_vec
 
 
 # ---------------------------------------------------------------------------

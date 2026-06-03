@@ -16,6 +16,7 @@ cdef int _VTYPE_INTEGER
 cdef int _VTYPE_FLOAT64
 cdef int _VTYPE_STRING
 cdef int _VTYPE_GENERIC
+cdef int _VTYPE_DECIMAL
 
 
 cdef class UngroupedAggregate:
