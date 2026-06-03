@@ -443,6 +443,17 @@ struct OpsTable {
         entries[DRAKEN_VARBINARY].compress           = draken::ops::str_compress;
         entries[DRAKEN_VARBINARY].in_list            = draken::ops::str_in_list;
 
+        // VARIANT — German-string storage (JSON text); shares the string kernels so
+        // VARIANT vectors flow through take/slice/materialize/compress/hash/joins.
+        entries[DRAKEN_VARIANT].hash               = draken::ops::hash_string;
+        entries[DRAKEN_VARIANT].compare_vector     = draken::ops::str_compare_vector;
+        entries[DRAKEN_VARIANT].str_compare_scalar = draken::ops::str_compare_scalar;
+        entries[DRAKEN_VARIANT].take               = draken::ops::str_take;
+        entries[DRAKEN_VARIANT].slice              = draken::ops::str_slice;
+        entries[DRAKEN_VARIANT].materialize        = draken::ops::str_materialize;
+        entries[DRAKEN_VARIANT].compress           = draken::ops::str_compress;
+        entries[DRAKEN_VARIANT].in_list            = draken::ops::str_in_list;
+
         // E.2 — INT8 bitwise
         entries[DRAKEN_INT8].bitwise_and = draken::ops::i8_bitwise_and;
         entries[DRAKEN_INT8].bitwise_or  = draken::ops::i8_bitwise_or;

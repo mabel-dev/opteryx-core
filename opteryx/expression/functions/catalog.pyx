@@ -274,7 +274,7 @@ class FunctionCatalog:
             if type_family == "boolean":
                 return 0.0 if node_type == OrsoTypes.BOOLEAN else _INF
             if type_family == "string":
-                if node_type == OrsoTypes.VARCHAR:
+                if node_type == OrsoTypes.VARCHAR or node_type == OrsoTypes.NVARCHAR:
                     return 0.0
                 return 1.0 if node_type == OrsoTypes.BLOB else _INF
             if type_family == "temporal":

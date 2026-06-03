@@ -59,6 +59,7 @@ typedef enum {
     // 62: reserved — permanently retired by E.30c (was DRAKEN_CONSTANT,   a shape-as-type violation; see CLAUDE.md §11)
     DRAKEN_NVARCHAR       = 63,  // opt-in UTF-8; codepoint-length ops; Unicode-aware ops (future)
     DRAKEN_VARBINARY      = 64,  // opaque bytes; byte-length ops; character ops throw
+    DRAKEN_VARIANT        = 65,  // polymorphic JSON value; German-string storage holds JSON text; renders to Python as str
 
     // Complex types: 80–99
     DRAKEN_ARRAY          = 80,

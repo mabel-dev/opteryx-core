@@ -181,7 +181,9 @@ cdef inline _ensure_orso_types():
         _OrsoTypes_VARCHAR = OrsoTypes.VARCHAR
         _OrsoTypes_ARRAY = OrsoTypes.ARRAY
         _OrsoTypes_BLOB = OrsoTypes.BLOB
-        _STRING_FAMILY = (_OrsoTypes_VARCHAR, _OrsoTypes_BLOB)
+        # Types valid as the LEFT operand of an extraction operator (-> ->> [i]).
+        # Includes VARIANT so JSON access chains (a -> b ->> c) with no user cast.
+        _STRING_FAMILY = (_OrsoTypes_VARCHAR, OrsoTypes.NVARCHAR, _OrsoTypes_BLOB, OrsoTypes.VARIANT)
 
 
 cdef inline _ensure_set_types():
@@ -632,7 +634,8 @@ cdef Py_ssize_t _linearize(
 
         cast_py_node = <object>node.source_node
         cast_target_type = cast_py_node.value
-        if cast_target_type.startswith("TRY_"):
+        cast_is_try = cast_target_type.startswith("TRY_")
+        if cast_is_try:
             cast_target_type = cast_target_type[4:]
 
         cast_unit = None
@@ -662,7 +665,7 @@ cdef Py_ssize_t _linearize(
 
         from opteryx.expression.casts import resolve_cast
         try:
-            cast_kernel = resolve_cast(source_orso_name, cast_target_type, cast_params, unit=cast_unit)
+            cast_kernel = resolve_cast(source_orso_name, cast_target_type, cast_params, unit=cast_unit, safe=cast_is_try)
         except (NotImplementedError, ValueError) as e:
             raise ValueError(f"Unsupported CAST: {source_orso_name} → {cast_target_type}: {e}")
 

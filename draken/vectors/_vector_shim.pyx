@@ -174,7 +174,10 @@ cdef class Vector:
     def compress(self):
         # sort.pyx expects int64_t[::1] memoryview — sortable int64 keys.
         # For E.24 shim: convert to int64 sort keys via to_pylist().
+        # Keys only need to be order-preserving (monotonic), not the exact
+        # stored representation — so temporal values map to an epoch int.
         import struct
+        import datetime as _dt
         from array import array as _array
         vals = self._nb.to_pylist()
         type_name = self._nb.type.name
@@ -195,6 +198,13 @@ cdef class Vector:
                     keys.append(-0x8000000000000000)
                 elif isinstance(v, bool):
                     keys.append(1 if v else 0)
+                elif isinstance(v, _dt.datetime):
+                    # microseconds since epoch — monotonic, fits int64
+                    keys.append(int(v.timestamp() * 1_000_000))
+                elif isinstance(v, _dt.date):
+                    keys.append(v.toordinal())
+                elif isinstance(v, _dt.timedelta):
+                    keys.append(int(v.total_seconds() * 1_000_000))
                 else:
                     keys.append(int(v))
         return _array('q', keys)

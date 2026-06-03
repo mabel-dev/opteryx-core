@@ -86,7 +86,9 @@ cdef class SortNode(BasePlanNode):
             combined = execute_and_append(self._compiled_evals, combined)
 
         perm = morsel_sort(combined, column_names, ascending_flags)
-        combined.take(perm)
+        # take() returns a NEW reordered morsel; it does not mutate in place.
+        # The result must be reassigned or the sort permutation is silently lost.
+        combined = combined.take(perm)
 
         self._emit_cdef(combined)
         self._emit_cdef(_EOS_SENTINEL)

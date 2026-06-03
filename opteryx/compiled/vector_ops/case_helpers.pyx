@@ -35,6 +35,7 @@ from draken.core.buffers cimport (
     DRAKEN_FLOAT64, DRAKEN_FLOAT32,
     DRAKEN_BOOL, DRAKEN_VARCHAR, DRAKEN_NVARCHAR,
     DRAKEN_NULL, DRAKEN_DECIMAL,
+    DRAKEN_TIMESTAMP64, DRAKEN_TIME64, DRAKEN_DATE32, DRAKEN_TIME32,
 )
 from draken.vectors.bool_vector cimport BoolVector, from_decoded as _bool_from_decoded
 from draken.vectors.vector cimport Vector, from_decoded as _vec_from_decoded
@@ -67,10 +68,17 @@ cdef inline void _sel_set_true_bit(uint8_t* bitmap, int32_t row_r) noexcept nogi
 
 
 cdef inline Py_ssize_t _draken_itemsize(DrakenType t) noexcept nogil:
-    """Fixed byte-width per element for numeric DrakenTypes."""
-    if t == DRAKEN_INT64 or t == DRAKEN_FLOAT64:
+    """Fixed byte-width per element for fixed-width DrakenTypes.
+
+    DECIMAL is int64-backed (8); the 8-byte temporal types and 4-byte
+    DATE32/TIME32 must be listed too — a CASE result of any of these is sized and
+    scattered by this width, and a wrong width undersizes the buffer (heap
+    overflow when read at the true element width).
+    """
+    if (t == DRAKEN_INT64 or t == DRAKEN_FLOAT64 or t == DRAKEN_DECIMAL
+            or t == DRAKEN_TIMESTAMP64 or t == DRAKEN_TIME64):
         return 8
-    if t == DRAKEN_INT32 or t == DRAKEN_FLOAT32:
+    if t == DRAKEN_INT32 or t == DRAKEN_FLOAT32 or t == DRAKEN_DATE32 or t == DRAKEN_TIME32:
         return 4
     if t == DRAKEN_INT16:
         return 2

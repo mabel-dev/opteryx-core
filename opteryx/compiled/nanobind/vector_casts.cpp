@@ -30,6 +30,14 @@
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "core/draken_bridge.h"
+#include "utf8.h"
+
+// Builds a consolidated string VecResult from dense slots + arena + validity,
+// taking ownership of the three draken_malloc'd buffers (defined in
+// draken/ops/kernels/result_helpers.cpp; no public header).
+extern "C" VecResult vecresult_from_string_buffers(
+    DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
+    uint8_t* validity, uint32_t length, DrakenType type);
 
 // Phase 9c: the cast compute now lives in draken kernels; these nanobind
 // entry points shim across to them (core in draken, binding calls across).
@@ -92,6 +100,79 @@ static const DrakenVector* unwrap_string(nb::object obj) {
         dv->type != DRAKEN_VARBINARY)
         throw nb::type_error("expected a string-family Vector (VARCHAR/NVARCHAR/VARBINARY)");
     return dv;
+}
+
+// ---------------------------------------------------------------------------
+// string-family → NVARCHAR: validate UTF-8 per row, re-tag.
+//
+// The VARCHAR/NVARCHAR/VARBINARY storage layout is identical (German-string
+// slots + byte arena); only the type tag and op semantics differ. So this is a
+// validate-then-retag, not a re-encode: each row's bytes are checked with the
+// vendored utf8h validator, the slot array is gathered dense via the unified
+// selection, and the arena is copied verbatim (slot offsets stay valid).
+//
+//   safe=false (plain CAST):  raise on the first non-UTF-8 row.
+//   safe=true  (TRY_CAST):    mark non-UTF-8 rows NULL.
+// ---------------------------------------------------------------------------
+static nb::object string_to_nvarchar_apply(nb::object obj, bool safe) {
+    const DrakenVector* dv = unwrap_string(obj);
+    const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(dv->data);
+    const uint32_t* sel = dv->selection;
+    const uint32_t  n   = dv->length;
+
+    DrakenStringSlot* out_slots = static_cast<DrakenStringSlot*>(
+        draken_malloc((n > 0u ? n : 1u) * sizeof(DrakenStringSlot)));
+    if (!out_slots) throw std::bad_alloc();
+
+    const size_t arena_len = sa ? sa->arena_used : 0u;
+    uint8_t* out_arena = nullptr;
+    if (arena_len > 0u) {
+        out_arena = static_cast<uint8_t*>(draken_malloc(arena_len));
+        if (!out_arena) { draken_free(out_slots); throw std::bad_alloc(); }
+        std::memcpy(out_arena, sa->arena, arena_len);
+    }
+
+    // Validity: start from a copy of the input's (per logical row). In safe mode
+    // we may need to clear bits, so materialise an all-valid bitmap if absent.
+    uint8_t* out_validity = copy_validity(dv);
+    if (safe && !out_validity && n > 0u) {
+        const uint32_t bm     = (n + 7u) >> 3;
+        const uint32_t padded = (bm + 7u) & ~7u;
+        out_validity = static_cast<uint8_t*>(draken_malloc(padded > 0u ? padded : 8u));
+        if (!out_validity) { draken_free(out_slots); draken_free(out_arena); throw std::bad_alloc(); }
+        const uint32_t full = n >> 3;
+        std::memset(out_validity, 0, padded > 0u ? padded : 8u);
+        std::memset(out_validity, 0xFF, full);
+        if (n & 7u) out_validity[full] = static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+    }
+
+    for (uint32_t i = 0; i < n; ++i) {
+        if (row_is_null(dv, i)) {
+            str_init_null(&out_slots[i]);
+            continue;
+        }
+        const DrakenStringSlot* src = &sa->slots[sel[i]];
+        const uint32_t len = str_length(src);
+        const uint8_t* bytes = str_data(src, sa->arena);
+        const bool valid_utf8 =
+            (len == 0u) ||
+            (utf8nvalid(reinterpret_cast<const utf8_int8_t*>(bytes), len) == nullptr);
+        if (valid_utf8) {
+            out_slots[i] = *src;  // verbatim; offset valid against the copied arena
+        } else if (safe) {
+            out_validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7u)));
+            str_init_null(&out_slots[i]);
+        } else {
+            draken_free(out_slots);
+            draken_free(out_arena);
+            draken_free(out_validity);
+            throw nb::value_error("CAST to NVARCHAR: input is not valid UTF-8");
+        }
+    }
+
+    VecResult r = vecresult_from_string_buffers(
+        out_slots, out_arena, arena_len, out_validity, n, DRAKEN_NVARCHAR);
+    return wrap_cast_result(r);
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +616,13 @@ NB_MODULE(vector_casts, m) {
         [](nb::object v) -> nb::object { return timestamp_to_string_apply(v); },
         nb::arg("v"),
         "CAST(v AS VARCHAR): TIMESTAMP64 → 'YYYY-MM-DD HH:MM:SS.ffffff+0000'. Null rows propagate.");
+
+    m.def("vector_cast_string_to_nvarchar",
+        [](nb::object v, bool safe) -> nb::object { return string_to_nvarchar_apply(v, safe); },
+        nb::arg("v"), nb::arg("safe") = false,
+        "CAST(v AS NVARCHAR): validate UTF-8 per row and re-tag a string-family\n"
+        "Vector as NVARCHAR (storage shared). safe=false raises on invalid UTF-8;\n"
+        "safe=true (TRY_CAST) marks invalid rows NULL. Null rows propagate.");
 
     // Priority 3 — narrow integer widening and float↔int.
     m.def("vector_cast_integer_to_float64",

@@ -20,6 +20,7 @@ from draken.core.buffers cimport (
     DRAKEN_NVARCHAR,
     DRAKEN_VARBINARY,
     DRAKEN_DECIMAL,
+    DRAKEN_TIMESTAMP64,
 )
 
 
@@ -238,5 +239,15 @@ cpdef void resolve_deferred_collectors(
         t = vec.unified().type
         if t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR or t == DRAKEN_VARBINARY:
             key_kinds[ki] = KEY_MULTI_ENCODED_STRING
+        elif t == DRAKEN_TIMESTAMP64:
+            # 8-byte timestamp stores cleanly in the int64 key buffer; the unit
+            # is captured by the engine and reapplied at reconstruct so the group
+            # key emerges as TIMESTAMP, not raw int64 epoch.
+            key_kinds[ki] = KEY_MULTI_FIXED_TIMESTAMP64
+        elif t == DRAKEN_FLOAT64:
+            # 8-byte double stores cleanly as raw bits in the int64 key buffer;
+            # reconstruct re-tags the column FLOAT64 so the key emerges as a
+            # double, not the raw IEEE-754 bits surfaced as a giant integer.
+            key_kinds[ki] = KEY_MULTI_FIXED_FLOAT64
         else:
             key_kinds[ki] = KEY_MULTI_FIXED_INT

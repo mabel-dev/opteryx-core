@@ -152,8 +152,8 @@ def left_join(
     cdef int32_t l
     cdef BoolVector mask
 
-    n_left = len(left_morsel)
-    n_right = len(right_morsel)
+    n_left = left_morsel.num_rows
+    n_right = right_morsel.num_rows
 
     # Bloom filter pre-filter on right side
     if filter_index is not None:
@@ -161,7 +161,7 @@ def left_join(
         if bit_results is not None:
             mask = bool_vector_from_bits(&bit_results[0], NULL, n_right)
             right_morsel = right_morsel.filter_mask(mask)
-            n_right = len(right_morsel)
+            n_right = right_morsel.num_rows
 
         if n_right == 0:
             # Right side empty: all left rows unmatched, yield with null right
@@ -268,8 +268,8 @@ def right_join(
     cdef CarcharJoinIndexWrapper left_hash_table
     cdef BoolVector mask
 
-    n_left = len(left_morsel)
-    n_right = len(right_morsel)
+    n_left = left_morsel.num_rows
+    n_right = right_morsel.num_rows
 
     # Bloom filter pre-filter on left side
     if filter_index is not None:
@@ -277,7 +277,7 @@ def right_join(
         if bit_results is not None:
             mask = bool_vector_from_bits(&bit_results[0], NULL, n_left)
             left_morsel = left_morsel.filter_mask(mask)
-            n_left = len(left_morsel)
+            n_left = left_morsel.num_rows
 
         if n_left == 0:
             # Left side empty: all right rows unmatched, yield with null left
@@ -383,8 +383,8 @@ def full_join(
     cdef int32_t r
     cdef CarcharJoinIndexWrapper right_hash_table
 
-    n_left = len(left_morsel)
-    n_right = len(right_morsel)
+    n_left = left_morsel.num_rows
+    n_right = right_morsel.num_rows
 
     matched_right = _JoinFlags(n_right)
     right_hash_table = _build_probe_hash_map(right_morsel, right_columns)
@@ -515,7 +515,7 @@ cdef class OuterJoinNode(JoinNode):
             if self.join_type == "left outer":
                 start = time.monotonic_ns()
                 self.left_hash = _build_side_hash_map(self._left_morsel, self.left_columns)
-                if len(self._left_morsel) < 16_000_001:
+                if self._left_morsel.num_rows < 16_000_001:
                     start = time.monotonic_ns()
                     self.filter_index = create_bloom_filter_morsel(self._left_morsel, self.left_columns)
                     self.readings["time_build_bloom_filter"] += time.monotonic_ns() - start
@@ -537,12 +537,12 @@ cdef class OuterJoinNode(JoinNode):
                 right_morsel = Morsel.combine(self.right_morsels)
                 self.right_morsels = []
                 if pass_filter_index is not None:
-                    orig_rows = len(right_morsel)
+                    orig_rows = right_morsel.num_rows
                     bit_results = bloom_filter_check_morsel(self.filter_index, right_morsel, self.right_columns)
                     if bit_results is not None:
                         mask = bool_vector_from_bits(&bit_results[0], NULL, orig_rows)
                         right_morsel = right_morsel.filter_mask(mask)
-                        eliminated_rows = orig_rows - len(right_morsel)
+                        eliminated_rows = orig_rows - right_morsel.num_rows
                         self.readings["rows_eliminated_by_bloom_filter"] += eliminated_rows
                         global BLOOM_FASTPATH_COUNTER
                         BLOOM_FASTPATH_COUNTER += 1

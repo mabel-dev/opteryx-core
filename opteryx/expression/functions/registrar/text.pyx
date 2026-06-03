@@ -47,6 +47,7 @@ from opteryx.compiled.nanobind.vector_string_search import (
 )
 from opteryx.compiled.nanobind.vector_accessors import (
     vector_length,
+    vector_octet_length,
     vector_string_length,
 )
 import draken.draken_native as _draken_native_text_reg
@@ -125,6 +126,29 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                         engine="draken",
                         id="default",
                         callable_ref=vector_length,
+                        cost_us_per_million=221.0,
+                    ),
+                ),
+            ),
+        ),
+        FunctionDefinition(
+            name="OCTET_LENGTH",
+            aliases=("BYTE_LENGTH",),
+            category="text",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Return the number of bytes in a string, regardless of string type.",
+            documentation=None,
+            overloads=(
+                FunctionOverload(
+                    id="OCTET_LENGTH_string",
+                    parameters=(_string,),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
+                    kernel=KernelSpec(
+                        engine="draken",
+                        id="default",
+                        callable_ref=vector_octet_length,
                         cost_us_per_million=221.0,
                     ),
                 ),

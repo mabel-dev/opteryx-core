@@ -33,6 +33,7 @@ cdef extern from "core/buffers.h":
         DRAKEN_VARCHAR
         DRAKEN_NVARCHAR
         DRAKEN_VARBINARY
+        DRAKEN_VARIANT
         DRAKEN_ARRAY
         DRAKEN_NON_NATIVE
         DRAKEN_NULL

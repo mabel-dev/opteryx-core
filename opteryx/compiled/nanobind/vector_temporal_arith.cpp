@@ -62,24 +62,27 @@ static inline bool row_is_null(const DrakenVector* dv, uint32_t i) noexcept {
 }
 
 // Extract scalar string from a Python sequence-like object (vector or list).
-// Returns a C string that must not be freed (borrowed).
-static const char* extract_scalar_string(nb::object seq) {
+// Returns an OWNING std::string: the source is `seq[0]`, a temporary Python
+// object whose UTF-8 buffer is freed when it goes out of scope — returning a
+// borrowed `const char*` into it is a use-after-free. Callers keep the
+// std::string alive and pass `.c_str()`.
+static std::string extract_scalar_string(nb::object seq) {
     try {
         nb::object first = seq[0];
         if (PyUnicode_Check(first.ptr())) {
             const char* s = PyUnicode_AsUTF8(first.ptr());
             if (!s) throw nb::python_error();
-            return s;
+            return std::string(s);
         } else if (PyBytes_Check(first.ptr())) {
             const char* s = PyBytes_AS_STRING(first.ptr());
             if (!s) throw nb::python_error();
-            return s;
+            return std::string(s);
         } else {
             // Try str() conversion
             nb::object str_obj = nb::cast<nb::object>(nb::str(first));
             const char* s = PyUnicode_AsUTF8(str_obj.ptr());
             if (!s) throw nb::python_error();
-            return s;
+            return std::string(s);
         }
     } catch (const std::exception& e) {
         PyErr_SetString(PyExc_TypeError, "Failed to extract scalar from constant vector");
@@ -593,23 +596,23 @@ static nb::object impl_date_format(nb::object v_obj, const char* fmt) {
 // ---------------------------------------------------------------------------
 
 static nb::object dispatch_date_part(nb::object part_seq, nb::object arr) {
-    const char* part = extract_scalar_string(part_seq);
-    return impl_date_part(arr, part);
+    const std::string part = extract_scalar_string(part_seq);
+    return impl_date_part(arr, part.c_str());
 }
 
 static nb::object dispatch_trunc_date(nb::object arr, nb::object part_seq) {
-    const char* unit = extract_scalar_string(part_seq);
-    return impl_date_trunc(arr, unit);
+    const std::string unit = extract_scalar_string(part_seq);
+    return impl_date_trunc(arr, unit.c_str());
 }
 
 static nb::object dispatch_trunc_timestamp(nb::object arr, nb::object part_seq) {
-    const char* unit = extract_scalar_string(part_seq);
-    return impl_date_trunc(arr, unit);
+    const std::string unit = extract_scalar_string(part_seq);
+    return impl_date_trunc(arr, unit.c_str());
 }
 
 static nb::object dispatch_date_diff(nb::object part_seq, nb::object start, nb::object end) {
-    const char* part = extract_scalar_string(part_seq);
-    return impl_date_diff(start, end, part);
+    const std::string part = extract_scalar_string(part_seq);
+    return impl_date_diff(start, end, part.c_str());
 }
 
 static nb::object dispatch_time_diff(nb::object time1, nb::object time2) {
@@ -618,8 +621,8 @@ static nb::object dispatch_time_diff(nb::object time1, nb::object time2) {
 }
 
 static nb::object dispatch_date_format(nb::object dates, nb::object pattern_seq) {
-    const char* fmt = extract_scalar_string(pattern_seq);
-    return impl_date_format(dates, fmt);
+    const std::string fmt = extract_scalar_string(pattern_seq);
+    return impl_date_format(dates, fmt.c_str());
 }
 
 // ---------------------------------------------------------------------------

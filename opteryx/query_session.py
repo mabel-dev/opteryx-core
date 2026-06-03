@@ -490,6 +490,8 @@ class Session(DataFrame):
             50: OrsoTypes.BOOLEAN,  # BOOL
             60: OrsoTypes.VARCHAR,  # STRING
             61: OrsoTypes.VARCHAR,  # DICTIONARY
+            63: OrsoTypes.NVARCHAR,  # NVARCHAR (UTF-8)
+            65: OrsoTypes.VARIANT,  # VARIANT (polymorphic JSON)
             80: OrsoTypes.ARRAY,  # ARRAY
         }
 

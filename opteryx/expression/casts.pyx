@@ -260,6 +260,29 @@ def cast_to_varchar(arr, *args):
     raise TypeError(f"Unsupported type for cast_to_varchar: {type(arr).__name__}")
 
 
+def cast_to_nvarchar(arr, bint safe=False):
+    """Cast `arr` to NVARCHAR — validate UTF-8 and re-tag as the Unicode string type.
+
+    Non-string sources are stringified first (via cast_to_varchar), then their
+    bytes are validated as UTF-8. `safe=True` (TRY_CAST) maps invalid rows to
+    NULL; otherwise invalid UTF-8 raises.
+    """
+    from opteryx.compiled.nanobind.vector_casts import vector_cast_string_to_nvarchar
+
+    cdef object v_type
+    cdef object string_vec
+    if is_draken_vector_fn(arr):
+        v_type = get_vector_type(arr)
+        if v_type == VectorType.STRING:
+            return vector_cast_string_to_nvarchar(_unwrap_nb(arr), safe)
+        string_vec = cast_to_varchar(arr)
+        return vector_cast_string_to_nvarchar(_unwrap_nb(string_vec), safe)
+
+    # Python list / scalar: build a VARCHAR vector first, then validate + re-tag.
+    string_vec = cast_to_varchar(arr)
+    return vector_cast_string_to_nvarchar(_unwrap_nb(string_vec), safe)
+
+
 def cast_to_boolean(arr, *args):
     """Cast `arr` to BOOL / BoolVector."""
     from draken.vectors.bool_vector import BoolVector
@@ -393,7 +416,7 @@ def _cast_result_to_draken(result, resolved_type, args=()):
     )
 
 
-def resolve_cast(source_orso, target_type, args=(), unit=None):
+def resolve_cast(source_orso, target_type, args=(), unit=None, bint safe=False):
     """Bind-time resolver: return a callable for casting source_orso → target_type.
 
     Called once per CAST node at bind time. The returned callable takes a single
@@ -435,6 +458,11 @@ def resolve_cast(source_orso, target_type, args=(), unit=None):
     # Passthrough: no-op casts (source == target)
     if source_orso == _resolved_target:
         return lambda arr: arr
+
+    # NVARCHAR target: validate UTF-8 and re-tag (any source is stringified first).
+    # `safe` carries TRY_CAST semantics (invalid UTF-8 → NULL instead of raising).
+    if _resolved_target == "NVARCHAR":
+        return lambda arr: cast_to_nvarchar(arr, safe)
 
     # Direct kernel map for specific type pairs.
     # Uses canonical OrsoType names (INTEGER, DOUBLE, VARCHAR, etc.)

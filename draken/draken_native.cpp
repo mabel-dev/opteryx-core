@@ -2343,10 +2343,11 @@ extern "C" PyObject* draken_vector_own_string(
     OwnedBuffer<uint8_t> validity_guard(validity);                // safe for nullptr
 
     try {
-        if (type != DRAKEN_VARCHAR && type != DRAKEN_NVARCHAR && type != DRAKEN_VARBINARY) {
+        if (type != DRAKEN_VARCHAR && type != DRAKEN_NVARCHAR &&
+            type != DRAKEN_VARBINARY && type != DRAKEN_VARIANT) {
             PyErr_SetString(PyExc_ValueError,
                 "draken_vector_own_string: type must be DRAKEN_VARCHAR, "
-                "DRAKEN_NVARCHAR, or DRAKEN_VARBINARY");
+                "DRAKEN_NVARCHAR, DRAKEN_VARBINARY, or DRAKEN_VARIANT");
             return nullptr;
         }
         if (arena_len > 0u && !arena) {
@@ -4647,6 +4648,7 @@ NB_MODULE(draken_native, m) {
         .value("VARCHAR",      DRAKEN_VARCHAR)
         .value("NVARCHAR",     DRAKEN_NVARCHAR)
         .value("VARBINARY",    DRAKEN_VARBINARY)
+        .value("VARIANT",      DRAKEN_VARIANT)
         .value("ARRAY",        DRAKEN_ARRAY)
         .value("NON_NATIVE",   DRAKEN_NON_NATIVE)
         .value("NULL",         DRAKEN_NULL)
@@ -4710,6 +4712,7 @@ NB_MODULE(draken_native, m) {
             if (v.vec.type == DRAKEN_BOOL)     return nb::cast(row_bool(v.vec, idx));
             if (v.vec.type == DRAKEN_VARCHAR)   return row_string(v.vec, idx);
             if (v.vec.type == DRAKEN_NVARCHAR)  return row_string(v.vec, idx);
+            if (v.vec.type == DRAKEN_VARIANT)   return row_string(v.vec, idx);
             if (v.vec.type == DRAKEN_VARBINARY) return row_bytes(v.vec, idx);
             if (is_float_type(v.vec.type))      return nb::cast(row_float(v.vec, idx));
             return nb::cast(row_narrow_int(v.vec, idx));
@@ -4766,7 +4769,7 @@ NB_MODULE(draken_native, m) {
             const bool is_time     = (v.vec.type == DRAKEN_TIME32 || v.vec.type == DRAKEN_TIME64);
             const bool is_decimal  = (v.vec.type == DRAKEN_DECIMAL);
             const bool is_bool     = (v.vec.type == DRAKEN_BOOL);
-            const bool is_varchar  = (v.vec.type == DRAKEN_VARCHAR || v.vec.type == DRAKEN_NVARCHAR);
+            const bool is_varchar  = (v.vec.type == DRAKEN_VARCHAR || v.vec.type == DRAKEN_NVARCHAR || v.vec.type == DRAKEN_VARIANT);
             const bool is_binary   = (v.vec.type == DRAKEN_VARBINARY);
             const bool is_float    = is_float_type(v.vec.type);
             const bool is_time64   = (v.vec.type == DRAKEN_TIME64);

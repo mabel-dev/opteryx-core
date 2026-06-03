@@ -286,6 +286,11 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         len(identifiers) == 0
         and len(aggregators) == 0
         and root.schema_column.type != OrsoTypes.INTERVAL
+        # NVARCHAR / VARIANT cannot be represented as a folded scalar literal yet
+        # (literal materialisation produces a VARCHAR constant), so folding would
+        # drop the type. Leave the runtime expression in place to preserve it.
+        and root.schema_column.type != OrsoTypes.NVARCHAR
+        and root.schema_column.type != OrsoTypes.VARIANT
     ):
         table = no_table_data.read()
         bc = build_bytecode(lower(root))

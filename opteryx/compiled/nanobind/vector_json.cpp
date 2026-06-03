@@ -96,8 +96,13 @@ static nb::object impl_extract(
     const char* nav_arg,   // RFC 6901 pointer (mode 0) or raw key (mode 1)
     size_t      nav_len,
     int         mode,
+    bool        text_mode, // false: `->` → VARIANT (JSON text); true: `->>` → NVARCHAR text
     const char* fn_name)
 {
+    // `->`  (text_mode=false): emit the value as JSON text, tagged VARIANT.
+    // `->>` (text_mode=true):  emit text — JSON strings unquoted (raw UTF-8),
+    //                          other values serialized; tagged NVARCHAR.
+    const DrakenType out_type = text_mode ? DRAKEN_NVARCHAR : DRAKEN_VARIANT;
     const DrakenVector* dv = unwrap_str_vec(docs_obj, fn_name);
     const DrakenStringArena* sa =
         static_cast<const DrakenStringArena*>(dv->data);
@@ -181,19 +186,30 @@ static nb::object impl_extract(
             continue;
         }
 
-        // Serialise the extracted value to JSON text.
-        size_t out_len = 0u;
-        char*  out_str = yyjson_val_write(val, 0u, &out_len);
-        if (!out_str) {
-            draken_free(slots);
-            sg.released = true;
-            if (validity) draken_free(validity);
-            throw std::runtime_error(
-                std::string(fn_name) + ": yyjson_val_write failed at row " +
-                std::to_string(i));
+        // Produce the output bytes. `->>` on a JSON string yields the raw
+        // (unquoted, unescaped) UTF-8 content; everything else — and all of
+        // `->` — is serialized as JSON text. The bytes are copied into the slot
+        // below within this iteration, before the parsed doc is freed.
+        const char* out_str = nullptr;
+        size_t      out_len = 0u;
+        char*       malloced = nullptr;   // set only when we serialized
+        if (text_mode && yyjson_is_str(val)) {
+            out_str = yyjson_get_str(val);
+            out_len = yyjson_get_len(val);
+        } else {
+            malloced = yyjson_val_write(val, 0u, &out_len);
+            if (!malloced) {
+                draken_free(slots);
+                sg.released = true;
+                if (validity) draken_free(validity);
+                throw std::runtime_error(
+                    std::string(fn_name) + ": yyjson_val_write failed at row " +
+                    std::to_string(i));
+            }
+            out_str = malloced;
         }
 
-        // Build the output slot.
+        // Build the output slot (copies the bytes into our own storage).
         if (out_len <= STR_INLINE_MAX) {
             str_init_inline(&slots[i],
                 reinterpret_cast<const uint8_t*>(out_str),
@@ -211,7 +227,7 @@ static nb::object impl_extract(
                 off);
         }
 
-        std::free(out_str);   // yyjson_val_write uses libc malloc
+        if (malloced) std::free(malloced);   // yyjson_val_write uses libc malloc
     }
 
     // Discard unused validity bitmap.
@@ -234,7 +250,7 @@ static nb::object impl_extract(
     sg.released = true;  // ownership now transfers to draken_vector_own_string
 
     PyObject* out = draken_vector_own_string(
-        slots, final_arena, arena_size, validity, n, DRAKEN_VARCHAR);
+        slots, final_arena, arena_size, validity, n, out_type);
     if (!out) throw nb::python_error();
     return nb::steal<nb::object>(out);
 }
@@ -243,7 +259,7 @@ static nb::object impl_extract(
 // vector_json_extract — full JSONPath / JSON Pointer
 // ---------------------------------------------------------------------------
 
-static nb::object impl_json_extract(nb::object docs, nb::bytes path_bytes) {
+static nb::object impl_json_extract(nb::object docs, nb::bytes path_bytes, bool text_mode) {
     const char* raw = path_bytes.c_str();
     const size_t raw_len = path_bytes.size();
 
@@ -251,7 +267,8 @@ static nb::object impl_json_extract(nb::object docs, nb::bytes path_bytes) {
     std::string json_ptr = draken::ops::dotpath_to_jsonptr(raw, raw_len);
 
     return impl_extract(docs, json_ptr.c_str(), json_ptr.size(),
-                        0 /* PtrGet */, "vector_json_extract");
+                        0 /* PtrGet */, text_mode,
+                        text_mode ? "vector_json_extract_text" : "vector_json_extract");
 }
 
 // ---------------------------------------------------------------------------
@@ -260,7 +277,7 @@ static nb::object impl_json_extract(nb::object docs, nb::bytes path_bytes) {
 
 static nb::object impl_map_access(nb::object docs, nb::bytes key_bytes) {
     return impl_extract(docs, key_bytes.c_str(), key_bytes.size(),
-                        1 /* ObjGet */, "vector_map_access");
+                        1 /* ObjGet */, false /* VARIANT */, "vector_map_access");
 }
 
 // ---------------------------------------------------------------------------
@@ -271,14 +288,24 @@ NB_MODULE(vector_json, m) {
 
     m.def("vector_json_extract",
         [](nb::object docs, nb::bytes path) -> nb::object {
-            return impl_json_extract(docs, path);
+            return impl_json_extract(docs, path, /*text_mode=*/false);
         },
         nb::arg("docs"), nb::arg("path"),
-        "Extract a field from each JSON document in a VARCHAR vector.\n"
+        "`->`: extract a field from each JSON document, as a JSON value.\n"
         "path: bytes — dot-notation (\"$.a.b[0]\"), JSON Pointer (\"/a/b/0\"),\n"
         "      or bare top-level key (\"name\").\n"
-        "Path is parsed once before the row loop.\n"
-        "Output: DRAKEN_VARCHAR (JSON-text of extracted value).\n"
+        "Output: DRAKEN_VARIANT (JSON-text of extracted value).\n"
+        "Null TVL: null input row / missing key / JSON null → null output.\n"
+        "Invalid JSON → RuntimeError (fail fast).");
+
+    m.def("vector_json_extract_text",
+        [](nb::object docs, nb::bytes path) -> nb::object {
+            return impl_json_extract(docs, path, /*text_mode=*/true);
+        },
+        nb::arg("docs"), nb::arg("path"),
+        "`->>`: extract a field as TEXT. JSON strings are returned unquoted\n"
+        "(raw UTF-8); other values (number/bool/object/array) are serialized to\n"
+        "their JSON text. Output: DRAKEN_NVARCHAR.\n"
         "Null TVL: null input row / missing key / JSON null → null output.\n"
         "Invalid JSON → RuntimeError (fail fast).");
 

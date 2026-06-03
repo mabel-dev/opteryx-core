@@ -12,7 +12,7 @@
 #                           No legacy codec storage or decode path remains.
 
 from libc.string cimport memset, memcpy
-from libc.stdint cimport int32_t, int64_t, uint8_t, uint32_t
+from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint32_t
 from libc.stdlib cimport realloc, free
 from libc.stddef cimport size_t
 
@@ -25,7 +25,21 @@ from draken.core.buffers cimport DrakenStringArena, DrakenStringSlot
 from draken.core.buffers cimport str_length, str_data, str_is_inline, str_clone_with_offset
 from draken.core.buffers cimport STR_INLINE_MAX
 from draken.core.buffers cimport str_init_null, str_init_inline, str_init_extern
-from draken.core.buffers cimport DRAKEN_INT64, DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY
+from draken.core.buffers cimport DRAKEN_INT64, DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_TIMESTAMP64, DRAKEN_FLOAT64
+from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_FLOAT32, DRAKEN_DATE32, DRAKEN_TIME32
+
+
+# Byte width of a fixed-width DrakenType's payload. Group keys are stored in an
+# int64 buffer; narrow values must be read at their true width and widened, NOT
+# read at int64 stride (that over-reads past the source buffer — heap overflow).
+cdef inline int _ks_fixed_itemsize(DrakenType t) noexcept nogil:
+    if t == DRAKEN_INT8:
+        return 1
+    if t == DRAKEN_INT16:
+        return 2
+    if t == DRAKEN_INT32 or t == DRAKEN_FLOAT32 or t == DRAKEN_DATE32 or t == DRAKEN_TIME32:
+        return 4
+    return 8   # INT64, FLOAT64, TIME64, TIMESTAMP64, DECIMAL, etc.
 from draken.core.fixed_vector cimport alloc_fixed_buffer, free_fixed_buffer
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.vector cimport Vector
@@ -49,6 +63,12 @@ cdef extern from "core/draken_bridge.h":
         DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
         uint8_t* validity, uint32_t length, DrakenType vec_type)
 
+    # Wrap a draken_malloc'd int64 buffer as a DRAKEN_TIMESTAMP64 Vector with the
+    # given unit ("s"/"ms"/"us"/"ns"). Ownership of data + validity transfers on
+    # call. Returns a NEW reference to a Python Vector, or NULL on failure.
+    PyObject* draken_vector_own_timestamp(
+        void* data, uint8_t* validity, uint32_t length, const char* unit_str)
+
 
 # ---------------------------------------------------------------------------
 # Key kind constants
@@ -59,6 +79,7 @@ cdef int KEY_MULTI_FIXED_TIME32 = 3
 cdef int KEY_MULTI_FIXED_TIME64 = 4
 cdef int KEY_MULTI_FIXED_TIMESTAMP64 = 5
 cdef int KEY_MULTI_ENCODED_STRING = 6
+cdef int KEY_MULTI_FIXED_FLOAT64 = 7
 
 # ---------------------------------------------------------------------------
 # Dispatch codes for multi-column store_new_rows (replaces isinstance in loop)
@@ -85,11 +106,16 @@ cdef inline bint _ks_bitmap_is_valid(uint8_t* bitmap, Py_ssize_t index) noexcept
 # Buffer wrapping helpers
 # ---------------------------------------------------------------------------
 
-cdef Vector _ks_consume_int64_buffer(DrakenFixedBuffer* buf) except *:
-    """Copy a libc-malloc'd int64 DrakenFixedBuffer into a fresh
-    draken_malloc'd Vector and free the source. Used in the finalize
-    path (reconstruct_vectors) where the collector hands the buffer off
-    and immediately swaps in a fresh one.
+cdef Vector _ks_consume_fixed8_buffer(DrakenFixedBuffer* buf, DrakenType out_type) except *:
+    """Copy a libc-malloc'd 8-byte-slot DrakenFixedBuffer into a fresh
+    draken_malloc'd Vector tagged `out_type` and free the source. Used in the
+    finalize path (reconstruct_vectors) where the collector hands the buffer
+    off and immediately swaps in a fresh one.
+
+    Storage is always 8-byte slots; `out_type` only reinterprets the bits at
+    the Vector surface. INT64 keys emerge as INT64; FLOAT64 keys are stored as
+    raw double bits in the same int64 buffer and re-tagged FLOAT64 here so they
+    surface as doubles, not giant integers.
 
     Cross-allocator copy is required: collector state uses libc malloc
     (alloc_fixed_buffer); Vectors require draken_malloc (mimalloc).
@@ -102,7 +128,7 @@ cdef Vector _ks_consume_int64_buffer(DrakenFixedBuffer* buf) except *:
 
     if length <= 0:
         free_fixed_buffer(buf, True)
-        return _ks_vector_from_decoded(NULL, NULL, 0, DRAKEN_INT64)
+        return _ks_vector_from_decoded(NULL, NULL, 0, out_type)
 
     nbytes = <size_t>length * sizeof(int64_t)
     out_data = <int64_t*>draken_malloc(nbytes)
@@ -121,7 +147,54 @@ cdef Vector _ks_consume_int64_buffer(DrakenFixedBuffer* buf) except *:
         memcpy(validity, buf.null_bitmap, bitmap_bytes)
 
     free_fixed_buffer(buf, True)
-    return _ks_vector_from_decoded(<void*>out_data, validity, <uint32_t>length, DRAKEN_INT64)
+    return _ks_vector_from_decoded(<void*>out_data, validity, <uint32_t>length, out_type)
+
+
+cdef Vector _ks_own_timestamp_buffer(void* data, uint8_t* validity,
+                                     uint32_t length, bytes unit) except *:
+    """Wrap a draken_malloc'd int64 buffer (raw timestamp values, in `unit`)
+    as a DRAKEN_TIMESTAMP64 Vector. Ownership of data + validity transfers to
+    the Vector (own_timestamp frees them on failure)."""
+    cdef PyObject* raw = draken_vector_own_timestamp(data, validity, length, <const char*>unit)
+    if raw == NULL:
+        raise MemoryError("draken_vector_own_timestamp failed")
+    cdef Vector result = <Vector>(<object>raw)   # Cython incref → 2
+    _ks_decref(raw)                              # balance the NEW ref → 1
+    return result
+
+
+cdef Vector _ks_consume_timestamp_buffer(DrakenFixedBuffer* buf, bytes unit) except *:
+    """Like _ks_consume_fixed8_buffer, but emits a DRAKEN_TIMESTAMP64 Vector
+    tagged with `unit`. Copies the libc-malloc'd buffer into draken_malloc'd
+    storage (cross-allocator), frees the source, and transfers ownership."""
+    cdef Py_ssize_t length = <Py_ssize_t>buf.length
+    cdef size_t nbytes
+    cdef int64_t* out_data
+    cdef uint8_t* validity = NULL
+    cdef Py_ssize_t bitmap_bytes
+
+    if length <= 0:
+        free_fixed_buffer(buf, True)
+        return _ks_own_timestamp_buffer(NULL, NULL, 0, unit)
+
+    nbytes = <size_t>length * sizeof(int64_t)
+    out_data = <int64_t*>draken_malloc(nbytes)
+    if out_data == NULL:
+        free_fixed_buffer(buf, True)
+        raise MemoryError()
+    memcpy(out_data, buf.data, nbytes)
+
+    if buf.null_bitmap != NULL:
+        bitmap_bytes = (length + 7) >> 3
+        validity = <uint8_t*>draken_malloc(<size_t>bitmap_bytes)
+        if validity == NULL:
+            draken_free(out_data)
+            free_fixed_buffer(buf, True)
+            raise MemoryError()
+        memcpy(validity, buf.null_bitmap, bitmap_bytes)
+
+    free_fixed_buffer(buf, True)
+    return _ks_own_timestamp_buffer(<void*>out_data, validity, <uint32_t>length, unit)
 
 
 # ---------------------------------------------------------------------------
@@ -441,13 +514,18 @@ cdef inline void _ks_store_fixed_bulk_dict(
     const int64_t* row_indices,
     Py_ssize_t n_new,
     uint8_t* row_nulls,
-    const int64_t* dict_data,
+    const void* dict_data,
     const uint32_t* codes,
+    int src_itemsize,
 ) except *:
-    """Store int64/float64 keys via unified selection: data[selection[i]].
+    """Store fixed-width keys via unified selection: data[selection[i]].
 
-    dict_data points to the raw int64_t values of the DrakenVector.data buffer.
-    For float64, caller passes the float bits reinterpreted as int64.
+    dict_data points at the raw DrakenVector.data buffer; `src_itemsize` is the
+    source element width in bytes (1/2/4/8). Narrow values are read at their true
+    width and widened (sign-extended) into the int64 key buffer — reading at
+    int64 stride would over-read past the source buffer (heap overflow) and
+    corrupt the key value. For 8-byte sources (INT64/FLOAT64/TIMESTAMP64/…) the
+    int64 read is the existing raw-bits behaviour.
     codes is uv.selection — never NULL; works for dense, constant, and dict layouts.
 
     Single-pass: bitmap is lazily allocated on the first null encountered.
@@ -460,6 +538,10 @@ cdef inline void _ks_store_fixed_bulk_dict(
     cdef Py_ssize_t out_row
     cdef uint32_t code
     cdef int64_t* dst
+    cdef const int64_t* d8 = <const int64_t*>dict_data
+    cdef const int32_t* d4 = <const int32_t*>dict_data
+    cdef const int16_t* d2 = <const int16_t*>dict_data
+    cdef const int8_t*  d1 = <const int8_t*>dict_data
 
     _ks_ensure_fixed_capacity(buf, start_row, start_row + n_new)
 
@@ -476,7 +558,15 @@ cdef inline void _ks_store_fixed_bulk_dict(
             _ks_bitmap_clear(null_bitmap_ref[0], out_row)
         else:
             code = codes[row_idx]
-            dst[out_row] = dict_data[code]
+            # Width-dispatch (loop-invariant branch — predicted, effectively free).
+            if src_itemsize == 8:
+                dst[out_row] = d8[code]
+            elif src_itemsize == 4:
+                dst[out_row] = <int64_t>d4[code]
+            elif src_itemsize == 2:
+                dst[out_row] = <int64_t>d2[code]
+            else:
+                dst[out_row] = <int64_t>d1[code]
             if null_bitmap_ref[0] != NULL:
                 _ks_bitmap_set(null_bitmap_ref[0], out_row)
 
@@ -560,6 +650,7 @@ cdef class KeyStore:
     cdef list _group_columns          # list[bytes|str] — read at init only
     cdef vector[int64_t] _key_kinds   # KEY_MULTI_FIXED_* or KEY_MULTI_ENCODED_STRING per column
     cdef Py_ssize_t _n_cols
+    cdef list _ts_units               # per-column timestamp unit (bytes) or None; set post-init
 
     cdef DrakenFixedBuffer* _single_fixed_buf
     cdef uint8_t* _single_fixed_nulls
@@ -580,6 +671,7 @@ cdef class KeyStore:
     def __cinit__(self, list group_columns, list key_kinds):
         self._group_columns = group_columns
         self._n_cols = len(group_columns)
+        self._ts_units = [None] * self._n_cols
         self._single_fixed_buf = NULL
         self._single_fixed_nulls = NULL
         self._single_fixed_rows = 0
@@ -639,6 +731,14 @@ cdef class KeyStore:
             if storage_slot < <int>self._multi_gs.size():
                 self._multi_gs[storage_slot].type = draken_type
 
+    def set_timestamp_col_unit(self, Py_ssize_t col_idx, object unit):
+        """Record the timestamp unit ("s"/"ms"/"us"/"ns") for a TIMESTAMP64 key
+        column. Storage is identical to int64; the unit is reapplied at
+        reconstruct so the group key emerges as TIMESTAMP, not raw epoch int."""
+        if isinstance(unit, str):
+            unit = unit.encode("utf-8")
+        self._ts_units[col_idx] = unit
+
     def __dealloc__(self):
         cdef Py_ssize_t i
 
@@ -690,6 +790,7 @@ cdef class KeyStore:
 
         # Multi-column pre-computed dispatch
         cdef vector[int]    col_dispatch
+        cdef vector[int]    col_itemsizes
         cdef vector[size_t] col_null_ptrs
         cdef vector[size_t] col_dense_ptrs
         cdef vector[size_t] col_arena_ptrs
@@ -729,8 +830,9 @@ cdef class KeyStore:
                         row_indices,
                         n_new,
                         uv.validity,
-                        <const int64_t*>uv.data,
+                        <const void*>uv.data,
                         uv.selection,
+                        _ks_fixed_itemsize(uv.type),
                     )
                 else:
                     raise RuntimeError("single fixed key codec path removed")
@@ -751,7 +853,9 @@ cdef class KeyStore:
                     raise RuntimeError("single fixed key codec path removed")
 
             else:
-                # Float64 and other fixed-width types — store raw bits as int64
+                # Float64 and other fixed-width types — store raw bits as int64,
+                # read at the source's true width (4-byte FLOAT32/DATE32/TIME32
+                # must not be read at int64 stride).
                 if self._single_fixed_direct:
                     _ks_store_fixed_bulk_dict(
                         self._single_fixed_buf,
@@ -760,8 +864,9 @@ cdef class KeyStore:
                         row_indices,
                         n_new,
                         uv.validity,
-                        <const int64_t*>uv.data,
+                        <const void*>uv.data,
                         uv.selection,
+                        _ks_fixed_itemsize(uv.type),
                     )
                 else:
                     raise RuntimeError("single fixed key codec path removed")
@@ -777,6 +882,7 @@ cdef class KeyStore:
             # This runs once per morsel and eliminates isinstance() from the
             # inner row loop, replacing it with cheap integer comparisons.
             col_dispatch.resize(self._n_cols)
+            col_itemsizes.resize(self._n_cols, 8)
             col_null_ptrs.resize(self._n_cols, 0)
             col_dense_ptrs.resize(self._n_cols, 0)
             col_arena_ptrs.resize(self._n_cols, 0)
@@ -795,6 +901,7 @@ cdef class KeyStore:
 
                 elif uv.type == DRAKEN_INT64 or uv.type == DRAKEN_INT32 or uv.type == DRAKEN_INT16 or uv.type == DRAKEN_INT8:
                     col_dispatch[col_idx]       = _DISPATCH_INT64
+                    col_itemsizes[col_idx]      = _ks_fixed_itemsize(uv.type)
                     col_null_ptrs[col_idx]      = <size_t>uv.validity
                     col_dense_ptrs[col_idx]     = <size_t>uv.data
                     col_dict_code_ptrs[col_idx] = <size_t>uv.selection
@@ -808,8 +915,10 @@ cdef class KeyStore:
                     col_dict_code_ptrs[col_idx] = <size_t>uv.selection
 
                 else:
-                    # Float64 and other fixed-width types — stored as raw int64 bits
+                    # Float64 and other fixed-width types — stored as raw bits,
+                    # read at the source's true width.
                     col_dispatch[col_idx]       = _DISPATCH_FLOAT64
+                    col_itemsizes[col_idx]      = _ks_fixed_itemsize(uv.type)
                     col_null_ptrs[col_idx]      = <size_t>uv.validity
                     col_dense_ptrs[col_idx]     = <size_t>uv.data
                     col_dict_code_ptrs[col_idx] = <size_t>uv.selection
@@ -836,8 +945,9 @@ cdef class KeyStore:
                             row_indices,
                             n_new,
                             <uint8_t*>col_null_ptrs[col_idx],
-                            <const int64_t*>col_dense_ptrs[col_idx],
+                            <const void*>col_dense_ptrs[col_idx],
                             <const uint32_t*>col_dict_code_ptrs[col_idx],
+                            col_itemsizes[col_idx],
                         )
                     elif disp == _DISPATCH_BOOL:
                         _ks_store_multi_bool_bulk(
@@ -924,7 +1034,13 @@ cdef class KeyStore:
                     _fixed_buf.null_bitmap = self._single_fixed_nulls
                     free_fixed_buffer(_fixed_buf, True)
                     self._single_fixed_buf = NULL
-                    fixed_iv = _from_decoded(new_data, new_validity, fixed_length, DRAKEN_INT64)
+                    if key_kind == KEY_MULTI_FIXED_TIMESTAMP64 and self._ts_units[0] is not None:
+                        fixed_iv = _ks_own_timestamp_buffer(
+                            new_data, new_validity, fixed_length, self._ts_units[0])
+                    elif key_kind == KEY_MULTI_FIXED_FLOAT64:
+                        fixed_iv = _from_decoded(new_data, new_validity, fixed_length, DRAKEN_FLOAT64)
+                    else:
+                        fixed_iv = _from_decoded(new_data, new_validity, fixed_length, DRAKEN_INT64)
                     out_vecs.append(fixed_iv)
 
                     self._single_fixed_buf = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
@@ -949,10 +1065,18 @@ cdef class KeyStore:
                     _fixed_buf.length = <size_t>self._multi_fixed_rows[storage_slot]
                     _fixed_buf.null_bitmap = self._multi_fixed_nulls[storage_slot]
 
-                    # _ks_consume_int64_buffer copies + frees _fixed_buf and
+                    # _ks_consume_fixed8_buffer copies + frees _fixed_buf and
                     # returns ownership transferred to a fresh draken_malloc'd
-                    # Vector. Allocate a fresh slot buffer below.
-                    out_vecs.append(_ks_consume_int64_buffer(_fixed_buf))
+                    # Vector. TIMESTAMP64 keys reapply their captured unit so the
+                    # column emerges as TIMESTAMP, not raw epoch int64. FLOAT64
+                    # keys are re-tagged FLOAT64 so the raw double bits surface as
+                    # doubles, not giant integers.
+                    if self._key_kinds[col_idx] == KEY_MULTI_FIXED_TIMESTAMP64 and self._ts_units[col_idx] is not None:
+                        out_vecs.append(_ks_consume_timestamp_buffer(_fixed_buf, self._ts_units[col_idx]))
+                    elif self._key_kinds[col_idx] == KEY_MULTI_FIXED_FLOAT64:
+                        out_vecs.append(_ks_consume_fixed8_buffer(_fixed_buf, DRAKEN_FLOAT64))
+                    else:
+                        out_vecs.append(_ks_consume_fixed8_buffer(_fixed_buf, DRAKEN_INT64))
 
                     self._multi_fixed_bufs[storage_slot] = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
                     self._multi_fixed_nulls[storage_slot] = NULL

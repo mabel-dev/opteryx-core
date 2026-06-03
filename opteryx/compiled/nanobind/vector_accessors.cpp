@@ -7,6 +7,8 @@
 //   vector_string_length     — per-row length → INT64:
 //                              VARCHAR/VARBINARY: byte length
 //                              NVARCHAR: UTF-8 codepoint count
+//   vector_octet_length      — per-row byte length → INT64 (always bytes,
+//                              regardless of string type)
 //   vector_string_is_empty   — per-row empty check (string family → BOOL; null propagates)
 //   vector_string_is_not_empty — inverse (string family → BOOL; null propagates)
 //   vector_length            — per-row array element count (ARRAY → INT64)
@@ -78,7 +80,7 @@ static inline uint32_t count_utf8_codepoints(const uint8_t* bytes, uint32_t nbyt
     return n;
 }
 
-static nb::object impl_vector_string_length(nb::object v) {
+static nb::object impl_vector_string_length(nb::object v, bool force_bytes) {
     const DrakenVector* dv = unwrap(v);
     const bool is_varchar_family =
         dv->type == DRAKEN_VARCHAR  ||
@@ -94,7 +96,9 @@ static nb::object impl_vector_string_length(nb::object v) {
     const uint32_t* sel      = dv->selection;
     const uint8_t*  validity = dv->validity;
     const uint32_t  n        = dv->length;
-    const bool      nvarchar = (dv->type == DRAKEN_NVARCHAR);
+    // OCTET_LENGTH forces byte counting; LENGTH/CHAR_LENGTH counts UTF-8
+    // codepoints only for the Unicode type (NVARCHAR), bytes otherwise.
+    const bool      nvarchar = (!force_bytes) && (dv->type == DRAKEN_NVARCHAR);
 
     int64_t* result = static_cast<int64_t*>(
         draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
@@ -218,10 +222,16 @@ static nb::object impl_vector_length(nb::object v) {
 NB_MODULE(vector_accessors, m) {
 
     m.def("vector_string_length",
-        [](nb::object v) -> nb::object { return impl_vector_string_length(v); },
+        [](nb::object v) -> nb::object { return impl_vector_string_length(v, false); },
         nb::arg("v"),
         "LENGTH(v): per-row length → INT64. null input → null output (SQL 3VL).\n"
         "VARCHAR/VARBINARY: byte length. NVARCHAR: UTF-8 codepoint count.");
+
+    m.def("vector_octet_length",
+        [](nb::object v) -> nb::object { return impl_vector_string_length(v, true); },
+        nb::arg("v"),
+        "OCTET_LENGTH(v): per-row BYTE length → INT64, regardless of string\n"
+        "type. null input → null output (SQL 3VL).");
 
     m.def("vector_string_is_empty",
         [](nb::object v) -> nb::object { return impl_string_emptiness(v, true); },

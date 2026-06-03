@@ -40,6 +40,7 @@ import draken.draken_native as _draken_native
 from opteryx.compiled.nanobind.vector_bool_ops import vector_uint64_eq_scalar as _vector_uint64_eq_scalar
 from opteryx.compiled.nanobind.vector_special import vector_map_access_string as _vector_map_access_string
 from opteryx.compiled.nanobind.vector_json import vector_json_extract as _vector_json_extract
+from opteryx.compiled.nanobind.vector_json import vector_json_extract_text as _vector_json_extract_text
 from draken.draken_native import vector_array_map_access as _vector_array_map_access
 
 # ---------------------------------------------------------------------------
@@ -1968,9 +1969,11 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                 elif slot.op_code == BC_EXTR_MAP_ARRAY:
                     legacy_result = _vector_array_map_access(py_left_nb, <int64_t>slot.bool_value)
                 elif slot.op_code == BC_EXTR_JSON_PTR:
+                    # `->` → VARIANT (JSON value)
                     legacy_result = _vector_json_extract(py_left_nb, <object>slot.literal_obj)
                 elif slot.op_code == BC_EXTR_JSON_KEY:
-                    legacy_result = _vector_json_extract(py_left_nb, <object>slot.literal_obj)
+                    # `->>` → NVARCHAR (text; JSON strings unquoted)
+                    legacy_result = _vector_json_extract_text(py_left_nb, <object>slot.literal_obj)
                 else:
                     raise NotImplementedError(f"BC_EXTRACTION: unknown sub-op {slot.op_code}")
 

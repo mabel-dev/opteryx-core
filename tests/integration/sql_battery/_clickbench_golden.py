@@ -72,7 +72,13 @@ def _cell(value):
         if not math.isfinite(f):
             return ["n", str(f)]
         return ["n", float(f"{f:.10g}")]
-    if isinstance(value, (datetime.datetime, datetime.date)):
+    if isinstance(value, datetime.datetime):
+        # Canonicalise to UTC-naive: Opteryx tags timestamps UTC-aware
+        # (...+00:00) while DuckDB returns naive datetimes for the same instant.
+        if value.tzinfo is not None:
+            value = value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        return ["t", value.isoformat()]
+    if isinstance(value, datetime.date):
         return ["t", value.isoformat()]
     if isinstance(value, (bytes, bytearray)):
         return ["s", bytes(value).decode("utf-8", "replace")]

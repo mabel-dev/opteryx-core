@@ -44,6 +44,7 @@ class OrsoTypes(Enum):
     INTEGER = "INTEGER"
     DOUBLE = "DOUBLE"
     VARCHAR = "VARCHAR"
+    NVARCHAR = "NVARCHAR"
     BLOB = "BLOB"
 
     # Temporal types
@@ -58,6 +59,10 @@ class OrsoTypes(Enum):
     STRUCT = "STRUCT"
     VECTOR = "VECTOR"
     JSONB = "JSONB"
+    # Polymorphic JSON value (result of `->`); concrete type resolved at runtime.
+    # Backed by JSON-text storage; exposes to Python as str. Extraction-only —
+    # most other operations raise and require the user to extract/cast.
+    VARIANT = "VARIANT"
 
     @property
     def python_type(self) -> Type:
@@ -236,6 +241,7 @@ _TYPE_TO_PYTHON: Dict[OrsoTypes, Type] = {
     OrsoTypes.INTEGER: int,
     OrsoTypes.DOUBLE: float,
     OrsoTypes.VARCHAR: str,
+    OrsoTypes.NVARCHAR: str,
     OrsoTypes.BLOB: bytes,
     OrsoTypes.DATE: datetime.date,
     OrsoTypes.TIME: datetime.time,
@@ -246,6 +252,7 @@ _TYPE_TO_PYTHON: Dict[OrsoTypes, Type] = {
     OrsoTypes.STRUCT: dict,
     OrsoTypes.VECTOR: list,
     OrsoTypes.JSONB: dict,
+    OrsoTypes.VARIANT: str,
 }
 
 # Reverse mapping: Python type -> OrsoType
@@ -278,7 +285,7 @@ ORSO_TO_PYTHON_MAP: Dict[OrsoTypes, Type] = _TYPE_TO_PYTHON.copy()
 _NUMERIC_TYPES = {OrsoTypes.INTEGER, OrsoTypes.DOUBLE, OrsoTypes.DECIMAL}
 _TEMPORAL_TYPES = {OrsoTypes.DATE, OrsoTypes.TIME, OrsoTypes.TIMESTAMP, OrsoTypes.INTERVAL}
 _COMPLEX_TYPES = {OrsoTypes.ARRAY, OrsoTypes.STRUCT, OrsoTypes.JSONB, OrsoTypes.VECTOR}
-_STRING_TYPES = {OrsoTypes.VARCHAR, OrsoTypes.BLOB}
+_STRING_TYPES = {OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, OrsoTypes.BLOB}
 _LARGE_OBJECT_TYPES = {OrsoTypes.BLOB, OrsoTypes.JSONB, OrsoTypes.ARRAY, OrsoTypes.STRUCT, OrsoTypes.VECTOR}
 # fmt: on
 
@@ -412,6 +419,8 @@ _PARSERS: Dict[OrsoTypes, Callable[[Any], Any]] = {
     OrsoTypes.DOUBLE: _parse_double,
     OrsoTypes.DECIMAL: _parse_decimal,
     OrsoTypes.VARCHAR: _parse_varchar,
+    OrsoTypes.NVARCHAR: _parse_varchar,
+    OrsoTypes.VARIANT: _parse_varchar,
     OrsoTypes.BLOB: _parse_blob,
     OrsoTypes.DATE: _parse_date,
     OrsoTypes.TIME: _parse_time,

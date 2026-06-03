@@ -505,8 +505,11 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
     if kind in {"TryCast", "SafeCast"}:
         normalized_type = "TRY_" + normalized_type
 
-    # Handle literal value casting at compile time
-    if source_expr.node_type == NodeType.LITERAL:
+    # Handle literal value casting at compile time.
+    # NVARCHAR is routed through the runtime CAST node instead, so literals go
+    # through the same UTF-8-validating kernel and materialise as a true
+    # DRAKEN_NVARCHAR vector (constant-folding would yield a VARCHAR constant).
+    if source_expr.node_type == NodeType.LITERAL and normalized_type.replace("TRY_", "") != "NVARCHAR":
         return _cast_literal_value(source_expr, normalized_type, kind, alias)
 
     # For non-literals, return a CAST node that will be evaluated at runtime
@@ -575,6 +578,12 @@ def _normalize_cast_type(data_type: str) -> str:
     ):
         return upper_type
 
+    # NVARCHAR must be matched before the "varchar" substring rule below
+    # (since "varchar" is a substring of "nvarchar"), or it would collapse to
+    # VARCHAR and the UTF-8/Unicode string type would be unreachable from SQL.
+    if "nvarchar" in lower_type:
+        return "NVARCHAR"
+
     # Map of substring patterns to normalized types
     type_mappings = {
         "timestamp": "TIMESTAMP",
@@ -601,7 +610,7 @@ def _normalize_cast_type(data_type: str) -> str:
 
     # Handle unsupported type aliases with helpful error messages
     type_suggestions = {
-        ("STRING", "CHAR", "TEXT", "NVARCHAR"): "VARCHAR",
+        ("STRING", "CHAR", "TEXT"): "VARCHAR",
         ("FLOAT", "NUMERIC", "REAL"): "DOUBLE",
         ("INT", "SMALLINT", "TINYINT", "BIGINT", "BYTE"): "INTEGER",
         ("BOOL", "BIT"): "BOOLEAN",

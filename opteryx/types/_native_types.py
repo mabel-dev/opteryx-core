@@ -59,6 +59,7 @@ def _build_native_type_map() -> Dict[str, str]:
         OrsoTypes.INTEGER.value: TYPE_INT32,
         OrsoTypes.DOUBLE.value: TYPE_FLOAT64,
         OrsoTypes.VARCHAR.value: TYPE_OBJECT,
+        OrsoTypes.NVARCHAR.value: TYPE_OBJECT,
         OrsoTypes.BLOB.value: TYPE_OBJECT,
         OrsoTypes.DATE.value: TYPE_OBJECT,
         OrsoTypes.TIME.value: TYPE_OBJECT,
@@ -69,6 +70,7 @@ def _build_native_type_map() -> Dict[str, str]:
         OrsoTypes.STRUCT.value: TYPE_OBJECT,
         OrsoTypes.VECTOR.value: TYPE_OBJECT,
         OrsoTypes.JSONB.value: TYPE_OBJECT,
+        OrsoTypes.VARIANT.value: TYPE_OBJECT,
     }
 
 
