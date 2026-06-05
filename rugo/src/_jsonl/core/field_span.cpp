@@ -4,8 +4,12 @@
 #include "value_parser.hpp"
 #include <algorithm>
 #include <map>
-#include <unordered_map>
+#include <cstring>
 #include <cctype>
+#include <utility>
+#include <thread>
+#include <future>
+#include "BS_thread_pool.hpp"
 
 namespace rugo::_jsonl {
 
@@ -83,140 +87,249 @@ void OrdinalPredictor::disable_key(const std::string& key) {
     }
 }
 
-// Interpreter implementation
+// Apply projection/predicates to the document map and move surviving records into
+// result.all_records. Shared by the markers and fused interpret entry points; the
+// caller sets result.bytes_consumed.
+static void finalize_records(
+    InterpreterResult& result,
+    RecordSet& all_records,
+    const uint8_t* buffer_data,
+    const ParseContext& context) {
+
+    // Fast path: no projection and no predicates — build_map already produced the final
+    // arena (empties dropped, no filtering), so move it wholesale.
+    if (context.predicates.empty() && context.projected_columns.empty()) {
+        result.num_records_passed = all_records.num_records();
+        result.all_records = std::move(all_records);
+        return;
+    }
+
+    // General path: predicates were already applied inline by build_map (failing rows never
+    // reach here); we re-resolve defensively and project to the requested column ORDER,
+    // dropping predicate-only columns. Records hold only the wanted subset (few fields), so
+    // the per-field scan is tiny. Output is built into a fresh flat arena.
+    struct Col { const char* name; uint32_t len; uint8_t first; };
+    auto make_cols = [](const auto& names) {
+        std::vector<Col> v; v.reserve(names.size());
+        for (const auto& n : names)
+            v.push_back({n.data(), static_cast<uint32_t>(n.size()), n.empty() ? uint8_t(0) : uint8_t(n[0])});
+        return v;
+    };
+    std::vector<Col> pcols; pcols.reserve(context.predicates.size());
+    for (const auto& p : context.predicates)
+        pcols.push_back({p.column.data(), static_cast<uint32_t>(p.column.size()),
+                         p.column.empty() ? uint8_t(0) : uint8_t(p.column[0])});
+    std::vector<Col> jcols = make_cols(context.projected_columns);
+
+    auto find = [&](const RecordView& rec, const Col& c) -> const FieldSpan* {
+        for (const auto& f : rec)
+            if (f.key_width == c.len && buffer_data[f.key_start] == c.first &&
+                std::memcmp(buffer_data + f.key_start, c.name, c.len) == 0)
+                return &f;
+        return nullptr;
+    };
+
+    RecordSet& out = result.all_records;
+    out.offsets.clear();
+    out.offsets.push_back(0);
+    out.spans.reserve(all_records.spans.size());
+    const size_t nrec = all_records.num_records();
+    for (size_t r = 0; r < nrec; ++r) {
+        const RecordView rec = all_records[r];
+
+        bool passes = true;
+        for (size_t i = 0; i < context.predicates.size(); ++i) {
+            const FieldSpan* f = find(rec, pcols[i]);
+            if (f == nullptr || !evaluate_predicate(buffer_data, *f, context.predicates[i])) {
+                passes = false;
+                break;
+            }
+        }
+        if (!passes) continue;
+
+        const uint32_t start = static_cast<uint32_t>(out.spans.size());
+        if (context.projected_columns.empty()) {
+            for (const auto& f : rec) out.spans.push_back(f);  // predicates only — keep all cols
+        } else {
+            for (size_t i = 0; i < context.projected_columns.size(); ++i) {
+                const FieldSpan* f = find(rec, jcols[i]);
+                if (f != nullptr) out.spans.push_back(*f);
+            }
+        }
+        if (out.spans.size() > start) {
+            out.offsets.push_back(static_cast<uint32_t>(out.spans.size()));
+            ++result.num_records_passed;
+        }
+    }
+}
+
+// Markers-based entry: build_map over a pre-materialised marker array.
 InterpreterResult interpret_jsonl(
     const uint8_t* buffer_data,
     size_t buffer_length,
     const std::vector<MarkerPosition>& markers,
     const ParseContext& context,
-    OrdinalPredictor& predictor) {
+    OrdinalPredictor& /*predictor*/) {
 
     InterpreterResult result;
+    if (buffer_length == 0) { result.bytes_consumed = 0; return result; }
 
-    if (buffer_length == 0) {
-        result.bytes_consumed = 0;
-        return result;
-    }
-
-
-    // Fast hash-based field lookup to avoid string extraction
-    // Pre-compute hash of each predicate/projection column name once
-    auto hash_span = [](const uint8_t* data, size_t len) -> uint64_t {
-        uint64_t h = 0xcbf29ce484222325ULL;
-        for (size_t i = 0; i < len; ++i) {
-            h ^= data[i];
-            h *= 0x100000001b3ULL;
-        }
-        return h;
-    };
-
-    // Build lookup maps: hash -> (ordinal, predicate_index)
-    std::unordered_map<uint64_t, int> pred_hash_to_idx;
-    std::unordered_map<uint64_t, int> proj_hash_to_idx;
-
-    for (size_t i = 0; i < context.predicates.size(); ++i) {
-        auto col_data = reinterpret_cast<const uint8_t*>(context.predicates[i].column.data());
-        auto col_len = context.predicates[i].column.size();
-        uint64_t h = hash_span(col_data, col_len);
-        if (pred_hash_to_idx.find(h) == pred_hash_to_idx.end()) {
-            pred_hash_to_idx[h] = i;
-        }
-    }
-
-    for (size_t i = 0; i < context.projected_columns.size(); ++i) {
-        auto col_data = reinterpret_cast<const uint8_t*>(context.projected_columns[i].data());
-        auto col_len = context.projected_columns[i].size();
-        uint64_t h = hash_span(col_data, col_len);
-        if (proj_hash_to_idx.find(h) == proj_hash_to_idx.end()) {
-            proj_hash_to_idx[h] = i;
-        }
-    }
-
-    // Build document map from markers (linear pass)
-    auto all_records = build_map(buffer_data, buffer_length, markers);
-    result.all_records.reserve(all_records.size());
-
-    for (const auto& all_fields : all_records) {
-
-        if (all_fields.empty()) {
-            continue;  // Skip empty records
-        }
-
-        // Build field lookup using hashes: O(n_fields) scan with O(1) hash lookups
-        std::unordered_map<int, const FieldSpan*> fields_by_pred_idx;
-        std::unordered_map<int, const FieldSpan*> fields_by_proj_idx;
-
-        for (const auto& field : all_fields) {
-            uint64_t field_hash = hash_span(buffer_data + field.key_start, field.key_width);
-
-            // O(1) lookup in predicate hash map
-            auto pred_it = pred_hash_to_idx.find(field_hash);
-            if (pred_it != pred_hash_to_idx.end()) {
-                fields_by_pred_idx[pred_it->second] = &field;
-            }
-
-            // O(1) lookup in projection hash map
-            auto proj_it = proj_hash_to_idx.find(field_hash);
-            if (proj_it != proj_hash_to_idx.end()) {
-                fields_by_proj_idx[proj_it->second] = &field;
-            }
-        }
-
-        // Apply predicates: filter records that don't match
-        bool passes_predicates = true;
+    // Minimal-extent projection: when columns/predicates are named, build the map for ONLY
+    // the projected ∪ predicate columns (exact bytes, no hashing) and stop scanning each
+    // record once they are found. With nothing named, build the full data-blind map.
+    // Predicate filtering and final column ordering happen afterwards in finalize_records.
+    std::vector<WantedColumn> wanted_cols;
+    MapProjection projbundle;
+    const MapProjection* proj_ptr = nullptr;
+    if (!context.projected_columns.empty() || !context.predicates.empty()) {
+        auto find_col = [&](const char* n, size_t l) -> int {
+            for (size_t k = 0; k < wanted_cols.size(); ++k)
+                if (wanted_cols[k].len == l && std::memcmp(wanted_cols[k].name, n, l) == 0)
+                    return static_cast<int>(k);
+            return -1;
+        };
+        for (const auto& c : context.projected_columns)
+            if (find_col(c.data(), c.size()) < 0)
+                wanted_cols.push_back({c.data(), static_cast<uint32_t>(c.size()),
+                                       c.empty() ? uint8_t(0) : uint8_t(c[0]), -1});
+        // A predicate column joins the wanted set (reusing an existing projected entry)
+        // and carries its predicate index for inline evaluation.
         for (size_t i = 0; i < context.predicates.size(); ++i) {
-            auto it = fields_by_pred_idx.find(i);
-            if (it == fields_by_pred_idx.end()) {
-                passes_predicates = false;
-                break;
-            }
-
-            if (!evaluate_predicate(buffer_data, *it->second, context.predicates[i])) {
-                passes_predicates = false;
-                break;
-            }
+            const std::string& pc = context.predicates[i].column;
+            int k = find_col(pc.data(), pc.size());
+            if (k >= 0) { if (wanted_cols[k].pred_idx < 0) wanted_cols[k].pred_idx = static_cast<int>(i); }
+            else wanted_cols.push_back({pc.data(), static_cast<uint32_t>(pc.size()),
+                                        pc.empty() ? uint8_t(0) : uint8_t(pc[0]), static_cast<int>(i)});
         }
 
-        if (!passes_predicates) {
-            continue;  // Skip records that don't match predicates
-        }
-
-        // Apply projection: extract only requested columns
-        std::vector<FieldSpan> projected_fields;
-
-        if (context.projected_columns.empty()) {
-            // No projection: include all fields
-            projected_fields = all_fields;
-        } else {
-            // Projection: include only requested columns in order
-            for (size_t i = 0; i < context.projected_columns.size(); ++i) {
-                auto it = fields_by_proj_idx.find(i);
-                if (it != fields_by_proj_idx.end()) {
-                    projected_fields.push_back(*it->second);
-                }
-                // If column not in record, skip (will be filled as NULL in Phase 6)
+        // Wide-projection guard. The minimal-extent projection runs an O(num_wanted)
+        // memcmp-gate on every key of every record, so its cost scales as
+        // num_wanted × fields_per_row. For a pure projection that covers a large fraction
+        // of a wide row, the full data-blind map (one pass, no per-key gate) is cheaper —
+        // let finalize_records do the projection afterwards. The guard does NOT apply when
+        // there are predicates: a predicate short-circuits failing rows inline (record_dead
+        // → skip the tail), so the gate only runs to completion on rows that pass — the
+        // N×M blow-up never materialises and inline pushdown is the bigger win. Field count
+        // is estimated from the first record's COLON markers (interior/nested/string colons
+        // only inflate it, biasing conservatively toward keeping the projection).
+        bool wide_projection = false;
+        if (context.predicates.empty()) {
+            size_t first_record_fields = 0;
+            for (const auto& m : markers) {
+                if (m.marker_type == static_cast<uint8_t>(MarkerType::NEWLINE)) break;
+                if (m.marker_type == static_cast<uint8_t>(MarkerType::COLON)) ++first_record_fields;
             }
+            wide_projection =
+                first_record_fields > 0 && wanted_cols.size() * 2 > first_record_fields;
         }
 
-        if (!projected_fields.empty()) {
-            result.all_records.push_back(projected_fields);
-            result.num_records_passed++;
+        if (!wide_projection) {
+            projbundle.columns    = &wanted_cols;
+            projbundle.num_wanted = wanted_cols.size();
+            projbundle.predicates = &context.predicates;
+            proj_ptr = &projbundle;
         }
     }
 
-    // Bytes consumed: find the position after the last newline marker
+    auto all_records = build_map(buffer_data, buffer_length, markers, proj_ptr);
+
+    // bytes_consumed = byte after the last newline (backward scan — newline near the end).
     result.bytes_consumed = 0;
-    for (const auto& marker : markers) {
-        if (marker.marker_type == static_cast<uint8_t>(MarkerType::NEWLINE)) {
-            result.bytes_consumed = marker.position + 1;
+    for (size_t i = markers.size(); i-- > 0; ) {
+        if (markers[i].marker_type == static_cast<uint8_t>(MarkerType::NEWLINE)) {
+            result.bytes_consumed = markers[i].position + 1;
+            break;
         }
     }
-    // If no newlines, we consumed up to the end of the last complete record
-    // (build_map only returns complete records)
-    if (result.bytes_consumed == 0 && !all_records.empty()) {
-        result.bytes_consumed = buffer_length;
+    if (result.bytes_consumed == 0 && all_records.num_records() > 0) result.bytes_consumed = buffer_length;
+
+    finalize_records(result, all_records, buffer_data, context);
+    return result;
+}
+
+// Multithreaded entry: split the buffer into newline-aligned ranges and run
+// scan + interpret on each in parallel, then merge the per-range records in order.
+// All threads share the one read-only buffer; FieldSpan positions are absolute, so
+// the merged records reference that single buffer (no per-chunk copies). max_threads
+// == 0 means "use hardware_concurrency".
+InterpreterResult interpret_jsonl_threaded(
+    const uint8_t* buffer_data,
+    size_t buffer_length,
+    const ParseContext& context,
+    OrdinalPredictor& predictor,
+    size_t max_threads) {
+
+    InterpreterResult result;
+    if (buffer_length == 0) { result.bytes_consumed = 0; return result; }
+
+    size_t hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 1;
+    size_t nt = std::min(hw, max_threads ? max_threads : hw);
+
+    // Don't over-split: aim for at least a few MB of work per thread so the
+    // per-task overhead and the serial merge don't dominate.
+    const size_t MIN_CHUNK = static_cast<size_t>(4) << 20;  // 4 MB
+    size_t max_chunks = std::max<size_t>(1, buffer_length / MIN_CHUNK);
+    nt = std::min(nt, max_chunks);
+
+    if (nt <= 1) {
+        // Small input — single-threaded scan + interpret.
+        auto markers = scan_structural_markers(buffer_data, buffer_length);
+        return interpret_jsonl(buffer_data, buffer_length, markers, context, predictor);
     }
 
+    // Newline-aligned ranges. Each range ends just after a newline, so every range
+    // holds complete records and the next range starts at a record boundary.
+    std::vector<std::pair<size_t, size_t>> ranges;
+    ranges.reserve(nt);
+    size_t start = 0;
+    for (size_t i = 1; i < nt && start < buffer_length; ++i) {
+        size_t target = buffer_length * i / nt;
+        if (target <= start) continue;
+        size_t p = target;
+        while (p < buffer_length && buffer_data[p] != '\n') ++p;
+        if (p >= buffer_length) break;  // no more newlines; last range takes the rest
+        ranges.push_back({start, p + 1});
+        start = p + 1;
+    }
+    if (start < buffer_length) ranges.push_back({start, buffer_length});
+
+    const size_t nc = ranges.size();
+    std::vector<InterpreterResult> partial(nc);
+
+    {
+        BS::thread_pool<> pool(nt);
+        std::vector<std::future<void>> futs;
+        futs.reserve(nc);
+        for (size_t c = 0; c < nc; ++c) {
+            futs.push_back(pool.submit_task([&, c]() {
+                const size_t s = ranges[c].first;
+                const size_t e = ranges[c].second;
+                // Scan this range with ABSOLUTE positions into the shared buffer.
+                std::vector<MarkerPosition> markers;
+                markers.reserve((e - s) / 3);
+                const uint8_t* lut = structural_lut();
+                scan_structural(buffer_data + s, e - s, [&](uint32_t pos, uint8_t ch) {
+                    markers.push_back(MarkerPosition(static_cast<uint32_t>(pos + s),
+                                                     static_cast<MarkerType>(lut[ch] - 1)));
+                });
+                OrdinalPredictor local_pred;  // interpret does not use it; keep thread-local
+                partial[c] = interpret_jsonl(buffer_data, buffer_length, markers, context, local_pred);
+            }));
+        }
+        for (auto& f : futs) f.get();
+    }
+
+    // Merge in chunk order: concatenate each range's flat arena (offsets rebased).
+    size_t total_spans = 0, total_recs = 0;
+    for (const auto& p : partial) { total_spans += p.all_records.spans.size(); total_recs += p.all_records.num_records(); }
+    result.all_records.spans.reserve(total_spans);
+    result.all_records.offsets.reserve(total_recs + 1);
+    for (auto& p : partial) {
+        result.all_records.append(p.all_records);
+        result.num_records_passed += p.num_records_passed;
+    }
+    result.bytes_consumed = buffer_length;
     return result;
 }
 

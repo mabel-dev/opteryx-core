@@ -211,3 +211,52 @@ cdef class SumFloat64Aggregate(UngroupedAggregate):
 
     cpdef object get_result(self):
         return self._total if self._seen else None
+
+
+cdef class SumDecimalAggregate(UngroupedAggregate):
+    # Exact decimal SUM. Vector.sum() returns a Python Decimal for DECIMAL/DECIMAL128
+    # columns (preserving scale), so we accumulate Decimals — never converting to
+    # float64. Result is DECIMAL; emitted via AGG_RESULT_OBJECT + the Decimal-aware
+    # path in the engine (_decimal_result_vector), which builds a real DECIMAL vector.
+    cdef object _total_dec
+    cdef bint   _seen
+
+    def __cinit__(self, bytes column_name, bytes alias):
+        self.column_name = column_name
+        self.alias       = alias
+        self.result_type = AGG_RESULT_OBJECT
+        self._total_dec  = None
+        self._seen       = False
+
+    cdef void apply(self, Morsel morsel) except *:
+        cdef Morsel typed = <Morsel>morsel
+        if typed.num_rows == 0:
+            return
+        if self._col_idx < 0:
+            self._col_idx = typed._column_index_from_name(self.column_name)
+        if self._col_idx < 0 or self._col_idx >= typed._num_columns():
+            return
+        cdef Vector raw = typed._get_column(self._col_idx)
+        if raw is None:
+            return
+        cdef object s = (<Vector>raw).sum()   # Decimal for DECIMAL / DECIMAL128
+        if self._total_dec is None:
+            self._total_dec = s
+        else:
+            self._total_dec = self._total_dec + s
+        self._seen = True
+
+    cdef int64_t get_result_i64(self) noexcept:
+        return 0
+
+    cdef double get_result_f64(self) noexcept:
+        return 0.0
+
+    cdef void get_result_bytes(self, const char** out_ptr, size_t* out_len) noexcept:
+        out_ptr[0] = NULL; out_len[0] = 0
+
+    cdef bint is_null(self) noexcept:
+        return not self._seen
+
+    cpdef object get_result(self):
+        return self._total_dec if self._seen else None

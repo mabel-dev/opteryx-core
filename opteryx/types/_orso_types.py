@@ -26,6 +26,7 @@ __all__ = [
     "PYTHON_TO_ORSO_MAP",
     "ORSO_TO_PYTHON_MAP",
     "find_compatible_type",
+    "orso_to_column_type",
 ]
 
 
@@ -481,3 +482,87 @@ def find_compatible_type(types: list) -> OrsoTypes:
 
     # Default fallback: VARCHAR can represent anything
     return OrsoTypes.VARCHAR
+
+
+def orso_to_column_type(
+    orso_type: "OrsoTypes",
+    precision: int = None,
+    scale: int = None,
+    element_type: "OrsoTypes" = None,
+):
+    """MIGRATION BRIDGE (TEMPORARY) — map a legacy OrsoTypes (+ side-car params) to a
+    unified ColumnType.
+
+    EXIT PLAN (see plan "Exit Plan for Bridges & Shims"): this function exists ONLY for
+    the OrsoTypes → ColumnType migration. It is deleted in Phase 6 together with
+    OrsoTypes, once `FlatColumn.type` is itself a `ColumnType` and `grep orso_to_column_type`
+    returns zero call sites. It is a pure projection of legacy data — it must NEVER
+    fabricate type information to avoid a failure. Where the legacy system genuinely
+    lacks the information (e.g. a DECIMAL with no precision), this FAILS LOUDLY so the
+    gap is fixed at the source, not hidden.
+
+    Faithful mappings (not guesses — these reflect what the legacy data actually is):
+      INTEGER -> INT64   (legacy INTEGER was always 64-bit)
+      DOUBLE  -> FLOAT64
+      BLOB    -> VARBINARY (BLOB is dropped)
+      JSONB   -> NVARCHAR  (alias today)
+      STRUCT  -> NVARCHAR  (engine stringifies structs to JSON text; not a real type)
+      VARIANT -> VARIANT   (first-class JSON value)
+    TIME/TIMESTAMP default to microseconds because that IS the engine's storage unit.
+    """
+    from opteryx.types import logical_type as _lt
+
+    t = orso_type
+    if t == OrsoTypes.BOOLEAN:
+        return _lt.BOOLEAN
+    if t == OrsoTypes.INTEGER:
+        return _lt.INT64
+    if t == OrsoTypes.DOUBLE:
+        return _lt.FLOAT64
+    if t == OrsoTypes.VARCHAR:
+        return _lt.VARCHAR
+    if t == OrsoTypes.NVARCHAR:
+        return _lt.NVARCHAR
+    if t == OrsoTypes.BLOB:
+        return _lt.VARBINARY
+    if t == OrsoTypes.DATE:
+        return _lt.DATE
+    if t == OrsoTypes.TIME:
+        return _lt.TIME()
+    if t == OrsoTypes.TIMESTAMP:
+        return _lt.TIMESTAMP()
+    if t == OrsoTypes.INTERVAL:
+        return _lt.INTERVAL
+    if t == OrsoTypes.DECIMAL:
+        # No fabrication: a DECIMAL with no precision/scale is an UNKNOWN type, not a
+        # default. The legacy system loses decimal precision in places (e.g. operator_map
+        # returns bare DECIMAL) — that gap must be fixed by compute_result_logical_type /
+        # connector inference, not papered over here. Fail loud.
+        if precision is None or scale is None:
+            raise NotImplementedError(
+                "legacy DECIMAL column has no precision/scale — refusing to fabricate a "
+                "default. Fix the source (result-type derivation or connector inference) "
+                "so the precision/scale is known."
+            )
+        if not (1 <= precision <= 18) or not (0 <= scale <= precision):
+            raise ValueError(f"invalid DECIMAL(precision={precision}, scale={scale})")
+        return _lt.DECIMAL(precision, scale)
+    if t == OrsoTypes.JSONB:
+        return _lt.NVARCHAR
+    if t == OrsoTypes.STRUCT:
+        return _lt.NVARCHAR
+    if t == OrsoTypes.VARIANT:
+        return _lt.VARIANT
+    if t == OrsoTypes.NULL:
+        return _lt.NULL
+    if t == OrsoTypes.ARRAY:
+        raise NotImplementedError(
+            "ARRAY ColumnType representation is deferred (Draken carries the array child "
+            "structurally; no logical element field yet)"
+        )
+    if t == OrsoTypes.VECTOR:
+        raise NotImplementedError(
+            "VECTOR requires a dimension; legacy OrsoTypes.VECTOR carries none — needs a "
+            "dimension source before it can map to a ColumnType"
+        )
+    raise NotImplementedError(f"no ColumnType mapping for {t!r}")

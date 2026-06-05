@@ -47,8 +47,11 @@ def _aggregate_return_type(node: Node) -> Optional[OrsoTypes]:
     if name == "ARRAY_AGG":
         return OrsoTypes.ARRAY
     if name in _AGGREGATE_RESULT_PASSTHROUGH or name == "AVG":
-        # Pass through the input column's type. AVG of a DECIMAL stays DECIMAL;
-        # AVG of an INTEGER becomes DOUBLE (standard SQL behaviour).
+        # SUM/MIN/MAX/ANY_VALUE pass through the input column's type. AVG is a ratio,
+        # not a value drawn from the data, so it returns DOUBLE for both INTEGER and
+        # DECIMAL inputs (matches DuckDB and the runtime: the AVG collector divides as
+        # double). Typing AVG(DECIMAL) as DOUBLE keeps the binder honest with the
+        # runtime — an earlier DECIMAL passthrough was a latent lie.
         if node.parameters:
             param = node.parameters[0]
             param_type = None
@@ -58,7 +61,7 @@ def _aggregate_return_type(node: Node) -> Optional[OrsoTypes]:
                 param_type = param.schema_column.type
             if param_type in (None, 0, OrsoTypes._MISSING_TYPE, OrsoTypes.NULL):
                 return None
-            if name == "AVG" and param_type == OrsoTypes.INTEGER:
+            if name == "AVG" and param_type in (OrsoTypes.INTEGER, OrsoTypes.DECIMAL):
                 return OrsoTypes.DOUBLE
             return param_type
     return None

@@ -82,6 +82,35 @@ static inline VecResult make_decimal_result(
     return r;
 }
 
+// ---------------------------------------------------------------------------
+// int128-backed DECIMAL (DRAKEN_DECIMAL128) — the "correct-but-scalar" tier for
+// logical DECIMAL with p > 18 (doc 06). Physical `data` is __int128 unscaled.
+// ---------------------------------------------------------------------------
+
+// Allocate an int128 buffer of n elements (16 B/elem) via the draken allocator.
+static inline __int128* alloc_i128(uint32_t n) {
+    if (n == 0) n = 1;  // always non-null pointer
+    __int128* p = static_cast<__int128*>(draken_malloc(n * sizeof(__int128)));
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+
+// Build a dense-identity VecResult with type DRAKEN_DECIMAL128.
+static inline VecResult make_decimal128_result(
+    __int128* data, uint8_t* validity, uint32_t n)
+{
+    VecResult r;
+    r.data           = data;
+    r.validity       = validity;
+    r.selection      = draken_identity_sel(n);
+    r.owns_selection = false;
+    r.data_length    = n;
+    r.length         = n;
+    r.type           = DRAKEN_DECIMAL128;
+    r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    return r;
+}
+
 // Safely multiply v by 10, writing result to out. Returns false on int128 overflow.
 static inline bool i128_mul10(__int128 v, __int128& out) {
     // INT128_MAX ≈ 1.7e38; overflow when |v| > INT128_MAX / 10 ≈ 1.7e37.
@@ -198,6 +227,126 @@ static inline VecResult dec_sub(
         dst[i] = static_cast<int64_t>(rv);
     }
     return make_decimal_result(dst, combine_validity(a.validity, b.validity, n), n);
+}
+
+// ---------------------------------------------------------------------------
+// DECIMAL128 ADD / SUB — int128-backed operands and result (DRAKEN_DECIMAL128).
+// result_scale = max(sa, sb); lower-scale operand aligned by *10^delta. Unlike the
+// int64 path there is no fits-i64 truncation — the result stays int128; only a
+// genuine int128 overflow (two ~10^38 operands) raises.
+// ---------------------------------------------------------------------------
+static inline VecResult dec128_add(
+    const DrakenVector& a, uint8_t sa,
+    const DrakenVector& b, uint8_t sb)
+{
+    if (a.length != b.length)
+        throw std::invalid_argument("dec128_add: length mismatch");
+    const uint32_t n = a.length;
+    const __int128* ad = static_cast<const __int128*>(a.data);
+    const __int128* bd = static_cast<const __int128*>(b.data);
+    __int128* dst = alloc_i128(n);
+
+    const int delta_a = (sa < sb) ? (int)sb - sa : 0;
+    const int delta_b = (sb < sa) ? (int)sa - sb : 0;
+
+    for (uint32_t i = 0; i < n; ++i) {
+        __int128 av, bv;
+        if (!i128_scale(ad[a.selection[i]], delta_a, av))
+            throw std::overflow_error("dec128_add: operand overflows int128 during scale alignment");
+        if (!i128_scale(bd[b.selection[i]], delta_b, bv))
+            throw std::overflow_error("dec128_add: operand overflows int128 during scale alignment");
+        const __int128 rv = av + bv;
+        // signed add overflow: operands same sign, result differs.
+        if (((av ^ rv) & (bv ^ rv)) < 0)
+            throw std::overflow_error("dec128_add: result overflows int128 (DECIMAL128) storage");
+        dst[i] = rv;
+    }
+    return make_decimal128_result(dst, combine_validity(a.validity, b.validity, n), n);
+}
+
+static inline VecResult dec128_sub(
+    const DrakenVector& a, uint8_t sa,
+    const DrakenVector& b, uint8_t sb)
+{
+    if (a.length != b.length)
+        throw std::invalid_argument("dec128_sub: length mismatch");
+    const uint32_t n = a.length;
+    const __int128* ad = static_cast<const __int128*>(a.data);
+    const __int128* bd = static_cast<const __int128*>(b.data);
+    __int128* dst = alloc_i128(n);
+
+    const int delta_a = (sa < sb) ? (int)sb - sa : 0;
+    const int delta_b = (sb < sa) ? (int)sa - sb : 0;
+
+    for (uint32_t i = 0; i < n; ++i) {
+        __int128 av, bv;
+        if (!i128_scale(ad[a.selection[i]], delta_a, av))
+            throw std::overflow_error("dec128_sub: operand overflows int128 during scale alignment");
+        if (!i128_scale(bd[b.selection[i]], delta_b, bv))
+            throw std::overflow_error("dec128_sub: operand overflows int128 during scale alignment");
+        const __int128 rv = av - bv;
+        // signed sub overflow: operands differ in sign, result differs from minuend.
+        if (((av ^ bv) & (av ^ rv)) < 0)
+            throw std::overflow_error("dec128_sub: result overflows int128 (DECIMAL128) storage");
+        dst[i] = rv;
+    }
+    return make_decimal128_result(dst, combine_validity(a.validity, b.validity, n), n);
+}
+
+// 128×128 → 256 unsigned multiply (schoolbook over 64-bit limbs): the product is
+// hi·2^128 + lo. There is no native __int256, so the wide intermediate is carried in
+// two unsigned __int128 limbs. Used by dec128_mul to detect overflow before narrowing
+// the result back to int128 storage.
+static inline void umul128_256(unsigned __int128 a, unsigned __int128 b,
+                               unsigned __int128& hi, unsigned __int128& lo) {
+    const uint64_t a0 = (uint64_t)a, a1 = (uint64_t)(a >> 64);
+    const uint64_t b0 = (uint64_t)b, b1 = (uint64_t)(b >> 64);
+    const unsigned __int128 p00 = (unsigned __int128)a0 * b0;
+    const unsigned __int128 p01 = (unsigned __int128)a0 * b1;
+    const unsigned __int128 p10 = (unsigned __int128)a1 * b0;
+    const unsigned __int128 p11 = (unsigned __int128)a1 * b1;
+    const unsigned __int128 mid = p01 + p10;
+    const uint64_t mid_carry = (mid < p01) ? 1u : 0u;          // u128 add carry-out (bit 128)
+    const unsigned __int128 lo_part = p00 + (mid << 64);
+    const uint64_t lo_carry = (lo_part < p00) ? 1u : 0u;
+    lo = lo_part;
+    hi = p11 + (mid >> 64) + ((unsigned __int128)mid_carry << 64) + lo_carry;
+}
+
+// ---------------------------------------------------------------------------
+// DECIMAL128 MUL: result_scale = sa + sb (raises if > 38). The full 128×128
+// product is computed in a 256-bit intermediate; the result must fit signed int128
+// (|result| < 2^127), else raises — no silent truncation.
+// ---------------------------------------------------------------------------
+static inline VecResult dec128_mul(
+    const DrakenVector& a, uint8_t sa,
+    const DrakenVector& b, uint8_t sb)
+{
+    if (a.length != b.length)
+        throw std::invalid_argument("dec128_mul: length mismatch");
+    if ((int)sa + (int)sb > 38)
+        throw std::overflow_error(
+            "dec128_mul: result scale (sa+sb) would exceed 38; use lower-scale operands");
+    const uint32_t n = a.length;
+    const __int128* ad = static_cast<const __int128*>(a.data);
+    const __int128* bd = static_cast<const __int128*>(b.data);
+    __int128* dst = alloc_i128(n);
+
+    for (uint32_t i = 0; i < n; ++i) {
+        const __int128 av = ad[a.selection[i]];
+        const __int128 bv = bd[b.selection[i]];
+        const bool neg = (av < 0) ^ (bv < 0);
+        // |operand| < 10^38 < 2^127, so negation never hits INT128_MIN.
+        const unsigned __int128 ua = (av < 0) ? (unsigned __int128)(-av) : (unsigned __int128)av;
+        const unsigned __int128 ub = (bv < 0) ? (unsigned __int128)(-bv) : (unsigned __int128)bv;
+        unsigned __int128 hi, lo;
+        umul128_256(ua, ub, hi, lo);
+        // Result fits signed int128 iff the high limb is zero and lo's top bit is clear.
+        if (hi != 0 || (lo >> 127) != 0)
+            throw std::overflow_error("dec128_mul: result overflows int128 (DECIMAL128) storage");
+        dst[i] = neg ? -static_cast<__int128>(lo) : static_cast<__int128>(lo);
+    }
+    return make_decimal128_result(dst, combine_validity(a.validity, b.validity, n), n);
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +530,138 @@ static inline __int128 dec_pow10_i128(int e) noexcept {
     return p;
 }
 
+// ---------------------------------------------------------------------------
+// DECIMAL128 DIV / MOD — int128-backed operands and result (DRAKEN_DECIMAL128).
+// These live below dec_pow10_i128 because they use it (and umul128_256 above).
+// ---------------------------------------------------------------------------
+
+// Unsigned 256-bit (hi:lo) divided by 128-bit divisor d, via restoring binary
+// long division (256 iterations — the "correct-but-scalar" tier; there is no
+// native 256/128 divide). Writes the quotient's low 128 bits to quo and the
+// remainder (< d) to rem. Returns false if the true quotient needs more than
+// 128 bits (overflow). REQUIRES d != 0 and d < 2^127 — guaranteed for DECIMAL128
+// unscaled values (|v| < 10^38 < 2^127), which keeps the running remainder below
+// 2^128 after each `(rem << 1) | bit` step.
+static inline bool udivmod_256_by_128(
+    unsigned __int128 hi, unsigned __int128 lo, unsigned __int128 d,
+    unsigned __int128& quo, unsigned __int128& rem) {
+    unsigned __int128 q = 0;
+    unsigned __int128 r = 0;
+    bool overflow = false;
+    for (int i = 255; i >= 0; --i) {
+        const unsigned bit = (i >= 128)
+            ? (unsigned)((hi >> (i - 128)) & 1)
+            : (unsigned)((lo >> i) & 1);
+        r = (r << 1) | bit;          // r < d < 2^127 ⟹ (r<<1)|bit < 2^128, fits u128
+        if (r >= d) {
+            r -= d;
+            if (i >= 128) overflow = true;                 // quotient bit ≥ 128
+            else q |= ((unsigned __int128)1 << i);
+        }
+    }
+    quo = q;
+    rem = r;
+    return !overflow;
+}
+
+// DIV: result_scale passed in by caller (max(sa+6,6) capped at 38).
+//   result_unscaled = round(|a| * 10^e / |b|), e = sb - sa + result_scale.
+// The numerator |a|·10^e can need up to 256 bits, carried via umul128_256, then
+// reduced by the 256/128 divide above. Half-even rounding. Raises on div-by-zero,
+// on e outside [0,38] (numerator scaling would need >38 extra digits — beyond the
+// 256-bit intermediate; an honest scalar-tier limit, not a silent truncation), and
+// on int128 result overflow.
+static inline VecResult dec128_div(
+    const DrakenVector& a, uint8_t sa,
+    const DrakenVector& b, uint8_t sb,
+    uint8_t result_scale)
+{
+    if (a.length != b.length)
+        throw std::invalid_argument("dec128_div: length mismatch");
+    const uint32_t n = a.length;
+    const __int128* ad = static_cast<const __int128*>(a.data);
+    const __int128* bd = static_cast<const __int128*>(b.data);
+    __int128* dst = alloc_i128(n);
+
+    const int e = (int)sb - (int)sa + (int)result_scale;
+    if (e < 0 || e > 38)
+        throw std::overflow_error(
+            "dec128_div: numerator scale exponent out of range (>38 digits); "
+            "operand scales too extreme for the int128 divide");
+    const unsigned __int128 pe = (unsigned __int128)dec_pow10_i128(e);  // fits int128 (e≤38)
+
+    for (uint32_t i = 0; i < n; ++i) {
+        const bool a_null = a.validity && !((a.validity[i >> 3] >> (i & 7)) & 1u);
+        const bool b_null = b.validity && !((b.validity[i >> 3] >> (i & 7)) & 1u);
+        if (a_null || b_null) { dst[i] = 0; continue; }
+
+        const __int128 av = ad[a.selection[i]];
+        const __int128 bv = bd[b.selection[i]];
+        if (bv == 0)
+            throw std::domain_error("dec128_div: division by zero");
+
+        const bool neg = (av < 0) ^ (bv < 0);
+        // |operand| < 10^38 < 2^127, so negation never hits INT128_MIN.
+        const unsigned __int128 ua = (av < 0) ? (unsigned __int128)(-av) : (unsigned __int128)av;
+        const unsigned __int128 ub = (bv < 0) ? (unsigned __int128)(-bv) : (unsigned __int128)bv;
+
+        unsigned __int128 hi, lo;
+        umul128_256(ua, pe, hi, lo);                 // numerator = |a| * 10^e (256-bit)
+
+        unsigned __int128 q, r;
+        if (!udivmod_256_by_128(hi, lo, ub, q, r))
+            throw std::overflow_error("dec128_div: result overflows int128 (DECIMAL128) storage");
+
+        // half-even rounding: r < |b| < 2^127 ⟹ 2*r < 2^128 fits u128.
+        const unsigned __int128 two_r = r << 1;
+        if (two_r > ub || (two_r == ub && (q & 1) != 0))
+            q += 1;
+
+        if ((q >> 127) != 0)                         // must fit signed int128
+            throw std::overflow_error("dec128_div: result overflows int128 (DECIMAL128) storage");
+        dst[i] = neg ? -static_cast<__int128>(q) : static_cast<__int128>(q);
+    }
+    return make_decimal128_result(dst, combine_validity(a.validity, b.validity, n), n);
+}
+
+// MOD: result_scale = sa. b aligned to scale sa (C truncation semantics), then
+// `a % b_aligned`. Native int128 modulo — the result fits int128 (|r| < |b_aligned|),
+// so no 256-bit intermediate is needed. Raises on mod-by-zero or int128 overflow
+// during b's scale alignment.
+static inline VecResult dec128_mod(
+    const DrakenVector& a, uint8_t sa,
+    const DrakenVector& b, uint8_t sb)
+{
+    if (a.length != b.length)
+        throw std::invalid_argument("dec128_mod: length mismatch");
+    const uint32_t n = a.length;
+    const __int128* ad = static_cast<const __int128*>(a.data);
+    const __int128* bd = static_cast<const __int128*>(b.data);
+    __int128* dst = alloc_i128(n);
+
+    for (uint32_t i = 0; i < n; ++i) {
+        const bool a_null = a.validity && !((a.validity[i >> 3] >> (i & 7)) & 1u);
+        const bool b_null = b.validity && !((b.validity[i >> 3] >> (i & 7)) & 1u);
+        if (a_null || b_null) { dst[i] = 0; continue; }
+
+        const __int128 bv = bd[b.selection[i]];
+        __int128 b_aligned;
+        if (sa >= sb) {
+            if (!i128_scale(bv, (int)sa - (int)sb, b_aligned))
+                throw std::overflow_error(
+                    "dec128_mod: b operand overflows int128 during scale alignment");
+        } else {
+            const int delta = (int)sb - (int)sa;
+            const __int128 div = dec_pow10_i128(delta <= 38 ? delta : 38);
+            b_aligned = bv / div;
+        }
+        if (b_aligned == 0)
+            throw std::domain_error("dec128_mod: modulus is zero after scale alignment");
+        dst[i] = ad[a.selection[i]] % b_aligned;     // sign of dividend (a)
+    }
+    return make_decimal128_result(dst, combine_validity(a.validity, b.validity, n), n);
+}
+
 static inline VecResult dec_compare_scalar(
     const DrakenVector& a, uint8_t sa,
     __int128 b_unscaled, uint8_t sb, int op)
@@ -456,6 +737,90 @@ static inline VecResult dec_compare_vector(
     r.length         = n;
     r.type           = DRAKEN_BOOL;
     r.flags          = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// DECIMAL128 comparison — int128 operands, scale-aware and EXACT for every scale
+// pair via a 256-bit cross-scaled magnitude compare (no overflow, no runtime throw).
+// Compares a·10^da vs b·10^db where da/db bring both to the common scale.
+// ---------------------------------------------------------------------------
+static inline int dec128_three_way_scaled(
+    __int128 a, int da, __int128 b, int db) noexcept {
+    if (a == 0 && b == 0) return 0;
+    const bool an = a < 0, bn = b < 0;
+    if (an != bn) return an ? -1 : 1;  // negative < non-negative
+    const unsigned __int128 ua = an ? (unsigned __int128)(-a) : (unsigned __int128)a;
+    const unsigned __int128 ub = bn ? (unsigned __int128)(-b) : (unsigned __int128)b;
+    unsigned __int128 hiA, loA, hiB, loB;
+    umul128_256(ua, (unsigned __int128)dec_pow10_i128(da), hiA, loA);
+    umul128_256(ub, (unsigned __int128)dec_pow10_i128(db), hiB, loB);
+    const int mag = (hiA != hiB) ? (hiA < hiB ? -1 : 1)
+                  : (loA != loB) ? (loA < loB ? -1 : 1) : 0;
+    return an ? -mag : mag;  // both negative: larger magnitude ⇒ smaller value
+}
+
+static inline bool dec128_cmp_apply3(int op, int cmp) noexcept {
+    switch (op) {
+        case 0: return cmp == 0;
+        case 1: return cmp != 0;
+        case 2: return cmp >  0;
+        case 3: return cmp >= 0;
+        case 4: return cmp <  0;
+        default: return cmp <= 0;  // 5 = le
+    }
+}
+
+static inline VecResult dec128_compare_scalar(
+    const DrakenVector& a, uint8_t sa,
+    __int128 b_unscaled, uint8_t sb, int op)
+{
+    const uint32_t n        = a.length;
+    const __int128* ad      = static_cast<const __int128*>(a.data);
+    const uint8_t* src_null = a.validity;
+    uint8_t* dst = cmp_alloc_bool_buf(n);
+    uint8_t* out_null = nullptr;
+    if (src_null != nullptr) {
+        try { out_null = cmp_copy_validity(src_null, n); }
+        catch (...) { draken_free(dst); throw; }
+    }
+    const int cs = (sa >= sb) ? (int)sa : (int)sb;
+    const int da = cs - (int)sa, db = cs - (int)sb;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (src_null != nullptr && !((src_null[i >> 3] >> (i & 7)) & 1u)) continue;
+        if (dec128_cmp_apply3(op, dec128_three_way_scaled(ad[a.selection[i]], da, b_unscaled, db)))
+            dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    }
+    VecResult r;
+    r.data = dst; r.validity = out_null; r.selection = draken_identity_sel(n);
+    r.owns_selection = false; r.data_length = n; r.length = n; r.type = DRAKEN_BOOL;
+    r.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
+    return r;
+}
+
+static inline VecResult dec128_compare_vector(
+    const DrakenVector& a, uint8_t sa,
+    const DrakenVector& b, uint8_t sb, int op)
+{
+    if (a.length != b.length)
+        throw std::invalid_argument("dec128_compare_vector: length mismatch");
+    const uint32_t n   = a.length;
+    const __int128* ad = static_cast<const __int128*>(a.data);
+    const __int128* bd = static_cast<const __int128*>(b.data);
+    uint8_t* dst      = cmp_alloc_bool_buf(n);
+    uint8_t* out_null = cmp_and_validity(a.validity, b.validity, n);
+    const int cs = (sa >= sb) ? (int)sa : (int)sb;
+    const int da = cs - (int)sa, db = cs - (int)sb;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (out_null != nullptr && !((out_null[i >> 3] >> (i & 7)) & 1u)) continue;
+        if (dec128_cmp_apply3(op, dec128_three_way_scaled(
+                ad[a.selection[i]], da, bd[b.selection[i]], db)))
+            dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    }
+    VecResult r;
+    r.data = dst; r.validity = out_null; r.selection = draken_identity_sel(n);
+    r.owns_selection = false; r.data_length = n; r.length = n; r.type = DRAKEN_BOOL;
+    r.flags = static_cast<uint8_t>(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION);
     return r;
 }
 

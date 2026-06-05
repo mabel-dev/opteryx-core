@@ -27,97 +27,15 @@ class ListColumnError(ValueError):
     """Raised when a column's decoded length doesn't match the row group row count."""
 
 
-def _logical_timestamp_unit(logical_type: str) -> str:
-    """
-    Extract timestamp unit from footer logical type text.
-
-    Examples:
-      'timestamp[ms,UTC]' -> 'ms'
-      'timestamp[us]'     -> 'us'
-      'timestamp'         -> 'us' (safe default)
-    """
-    logical_lower = logical_type.lower()
-    if not logical_lower.startswith("timestamp"):
-        return "us"
-
-    lb = logical_lower.find("[")
-    rb = logical_lower.find("]", lb + 1) if lb >= 0 else -1
-    if lb >= 0 and rb > lb + 1:
-        token = logical_lower[lb + 1 : rb].split(",", 1)[0].strip()
-        if token in ("s", "ms", "us", "ns"):
-            return token
-    return "us"
-
-
-def _coerce_decimal_vector(decoded: Any, col_stats: dict) -> Any:
-    """
-    Ensure parquet logical DECIMAL columns materialise as DecimalVector.
-
-    The rugo decoder emits Integer64Vector for DECIMAL columns (INT64 physical type).
-    This helper converts those to DecimalVector at the parquet → vector boundary,
-    preserving precision and scale from the logical type annotation.
-    """
-    logical_type = str(col_stats.get("logical_type", "") or "").lower()
-    if not logical_type or not logical_type.startswith("decimal"):
-        return decoded
-
-    cls_name = decoded.__class__.__name__
-    if cls_name != "Integer64Vector":
-        return decoded
-
-    # Parse "decimal(precision,scale)" from logical type string
-    # e.g. "decimal(15,2)" → precision=15, scale=2
-    precision = 18
-    scale = 0
-    inner_start = logical_type.find("(")
-    inner_end = logical_type.find(")", inner_start + 1) if inner_start >= 0 else -1
-    if inner_start >= 0 and inner_end > inner_start:
-        parts = logical_type[inner_start + 1 : inner_end].split(",")
-        try:
-            precision = int(parts[0].strip())
-        except (ValueError, IndexError):
-            pass
-        try:
-            scale = int(parts[1].strip())
-        except (ValueError, IndexError):
-            pass
-
-    from draken.vectors.decimal_vector import from_int64_vector as _int64_to_decimal
-
-    return _int64_to_decimal(decoded, precision, scale)
-
-
-def _coerce_temporal_vector(decoded: Any, col_stats: dict) -> Any:
-    """
-    Ensure parquet logical temporal columns materialize as temporal vectors.
-
-    The rugo decoder currently emits Integer64Vector for date32/timestamp columns.
-    This helper normalizes those to Date32Vector/TimestampVector at the parquet
-    -> vector boundary.
-    """
-    logical_type = str(col_stats.get("logical_type", "") or "").lower()
-    if not logical_type:
-        return decoded
-
-    cls_name = decoded.__class__.__name__
-    if cls_name != "Integer64Vector":
-        return decoded
-
-    if not (logical_type.startswith("date32") or logical_type.startswith("timestamp")):
-        return decoded
-
-    from draken.vectors.date32_vector import from_int64_vector as int64_to_date32
-    from draken.vectors.timestamp_vector import (
-        from_int64_vector as int64_to_timestamp,
-    )
-
-    if logical_type.startswith("date32"):
-        return int64_to_date32(decoded)
-
-    unit = _logical_timestamp_unit(logical_type)
-    return int64_to_timestamp(decoded, unit)
-
-
+# NOTE (type-system migration, 2026-06-03): the former `_logical_timestamp_unit`,
+# `_coerce_decimal_vector` and `_coerce_temporal_vector` helpers were removed here.
+# They were dead no-ops from the pre-unified-vector era: each guarded on
+# `decoded.__class__.__name__ == "Integer64Vector"`, but the unified rebuild deleted
+# the per-type vector classes (the only class now is `Vector`), so that guard could
+# never pass — and the bodies imported `draken.vectors.{decimal,date32,timestamp}_vector`
+# modules that no longer exist (a latent ImportError had the guard ever passed). Rugo
+# now emits correctly-typed unified vectors directly (verified: a Parquet DECIMAL column
+# materialises as DRAKEN_DECIMAL with the right scale; a date column as DRAKEN_DATE32).
 def _trace_enabled() -> bool:
     return bool(_cfg.OPTERYX_TRACE)
 
@@ -351,9 +269,6 @@ def fetch_columns(
                     f"(codec={_col_stats.get('compression_codec')}, "
                     f"encodings={_col_stats.get('encodings')})"
                 )
-            decoded = _coerce_temporal_vector(decoded, _col_stats)
-            decoded = _coerce_decimal_vector(decoded, _col_stats)
-
             if _trace_enabled():
                 _trace_decode_completed(
                     file_id=path,

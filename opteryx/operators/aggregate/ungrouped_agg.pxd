@@ -48,6 +48,10 @@ cdef class SumFloat64Aggregate(UngroupedAggregate):
     cdef double _total
     cdef bint   _seen
 
+cdef class SumDecimalAggregate(UngroupedAggregate):
+    cdef object _total_dec
+    cdef bint   _seen
+
 cdef class MinInt64Aggregate(UngroupedAggregate):
     cdef int64_t _result
     cdef bint    _seen
@@ -62,6 +66,14 @@ cdef class MinFloat64Aggregate(UngroupedAggregate):
 
 cdef class MaxFloat64Aggregate(UngroupedAggregate):
     cdef double _result
+    cdef bint   _seen
+
+cdef class MinDecimalAggregate(UngroupedAggregate):
+    cdef object _result
+    cdef bint   _seen
+
+cdef class MaxDecimalAggregate(UngroupedAggregate):
+    cdef object _result
     cdef bint   _seen
 
 cdef class MinBytesAggregate(UngroupedAggregate):

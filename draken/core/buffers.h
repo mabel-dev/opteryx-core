@@ -70,6 +70,12 @@ typedef enum {
     // D.11 — new types (added at the end; do NOT renumber anything above)
     DRAKEN_NULL           = 101,  // Self-describing null: type==NULL ⟹ every row null; no data, no validity.
     DRAKEN_VECTOR_FP16    = 102,  // fp16 embedding vector; dimension via mandatory logical descriptor.
+
+    // Decimal "do both" (doc 06): DRAKEN_DECIMAL (5) is the int64-backed fast path
+    // (logical DECIMAL p≤18); DRAKEN_DECIMAL128 is the int128-backed correct-but-scalar
+    // tier (logical DECIMAL p≤38). Physical `data` is a 16-byte __int128 unscaled value;
+    // scale/precision live in the mandatory logical descriptor. No native SIMD for int128.
+    DRAKEN_DECIMAL128     = 103,
 } DrakenType;
 
 typedef struct {

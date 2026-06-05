@@ -1,12 +1,23 @@
+#include <Python.h>  // must precede any draken header that uses PyObject
+
 #include "column_builder.hpp"
 #include "fast_parsers.hpp"
 
 #include <algorithm>
 #include <cstring>
+#include <thread>
+#include <future>
 
-// LIVE: extract_column() — extracts one column as raw strings (StringColumnResult)
-// DEAD: ColumnResult, merge_column(), type parsing functions — legacy implementation
-// See ARCHITECTURE.md for current pipeline
+// Producer surface (definitions resolved at load via RTLD_GLOBAL from draken_native.so):
+#include "draken_bridge.h"  // draken_vector_own_string
+#include "string_slot.h"    // DrakenStringSlot, draken_build_string_slot, str_init_null
+#include "alloc.h"          // draken_malloc
+#include "buffers.h"        // DrakenType, DRAKEN_VARCHAR
+#include "BS_thread_pool.hpp"
+
+// extract_column() pulls one column out as raw-byte slices (StringColumnResult);
+// build_typed_vector / build_varchar_vector materialise owned Draken vectors, and
+// merge_string_column stitches a column across chunks. See ARCHITECTURE.md.
 
 namespace rugo::_jsonl {
 
@@ -25,7 +36,7 @@ static inline bool key_matches(
 
 static ColumnType infer_numeric_type(
     const uint8_t*                            buffer,
-    const std::vector<std::vector<FieldSpan>>& records,
+    const RecordSet&                          records,
     const char*                               col_ptr,
     size_t                                    col_len)
 {
@@ -58,9 +69,10 @@ static ColumnType infer_numeric_type(
 
 StringColumnResult extract_column(
     const uint8_t*                            buffer,
-    const std::vector<std::vector<FieldSpan>>& records,
+    const RecordSet&                          records,
     const std::string&                         column_name,
-    OrdinalPredictor&                         predictor)
+    OrdinalPredictor&                         predictor,
+    bool                                       copy_bytes)
 {
     const size_t num_rows = records.size();
     const size_t col_len  = column_name.size();
@@ -121,12 +133,15 @@ StringColumnResult extract_column(
                 // Match! Extract value
                 if (is_null(buffer, f.value_start, f.value_start + f.value_width - 1)) {
                     result.null_bitmap[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
-                } else {
+                } else if (copy_bytes) {
                     result.offsets[row] = static_cast<uint32_t>(result.data.size());
                     result.lengths[row] = f.value_width;
                     result.data.insert(result.data.end(),
                                       buffer + f.value_start,
                                       buffer + f.value_start + f.value_width);
+                } else {
+                    result.offsets[row] = f.value_start;  // index into the original buffer
+                    result.lengths[row] = f.value_width;
                 }
                 found = true;
             }
@@ -144,12 +159,15 @@ StringColumnResult extract_column(
 
                     if (is_null(buffer, f.value_start, f.value_start + f.value_width - 1)) {
                         result.null_bitmap[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
-                    } else {
+                    } else if (copy_bytes) {
                         result.offsets[row] = static_cast<uint32_t>(result.data.size());
                         result.lengths[row] = f.value_width;
                         result.data.insert(result.data.end(),
                                           buffer + f.value_start,
                                           buffer + f.value_start + f.value_width);
+                    } else {
+                        result.offsets[row] = f.value_start;  // index into the original buffer
+                        result.lengths[row] = f.value_width;
                     }
                     found = true;
                     break;
@@ -166,54 +184,258 @@ StringColumnResult extract_column(
     return result;
 }
 
-void merge_column(ColumnResult& dest, ColumnResult& src) {
-    if (src.num_rows == 0)
-        return;
+namespace {
+// Copy scr's validity bitmap into a draken_malloc'd, SIMD-padded buffer (Arrow:
+// bit set = valid), tail bits past n masked. Returns nullptr when every row is
+// valid (normalization invariant — lets consumer fast-paths skip null handling).
+static uint8_t* own_validity_from_scr(StringColumnResult& scr, uint32_t n) {
+    if (n == 0 || scr.null_bitmap.empty()) return nullptr;
+    const size_t nb = (static_cast<size_t>(n) + 7) >> 3;
 
-    if (dest.num_rows == 0) {
-        dest = src;
-        return;
+    bool has_nulls = false;
+    for (size_t b = 0; b < nb; ++b) {
+        uint8_t valid_mask = 0xFF;
+        if (b == nb - 1 && (n & 7)) valid_mask = static_cast<uint8_t>((1u << (n & 7)) - 1);
+        if ((scr.null_bitmap[b] & valid_mask) != valid_mask) { has_nulls = true; break; }
+    }
+    if (!has_nulls) return nullptr;
+
+    const uint32_t padded = ((static_cast<uint32_t>(nb) + 7u) & ~7u);
+    const size_t alloc = padded ? padded : 8u;
+    uint8_t* v = static_cast<uint8_t*>(draken_malloc(alloc));
+    std::memset(v, 0xFF, alloc);
+    std::memcpy(v, scr.null_bitmap.data(), nb);
+    if (n & 7) v[nb - 1] &= static_cast<uint8_t>((1u << (n & 7)) - 1);  // mask tail
+    return v;
+}
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// build_varchar_vector — StringColumnResult → owned Draken VARCHAR Vector.
+//
+// Single C++ pass; no Python objects touch the data. Slots and arena are sized
+// from the extracted bytes, populated as German-string slots, and handed to
+// draken_vector_own_string which assumes ownership of all three buffers.
+// ---------------------------------------------------------------------------
+// Parse a column into VARCHAR string buffers (slots + arena + validity). No Python —
+// safe off the GIL. Wrapped into a Vector later by wrap_column().
+static ParsedColumn parse_varchar_column(const uint8_t* base, StringColumnResult& scr) {
+    const uint32_t n = static_cast<uint32_t>(scr.num_rows);
+    const bool has_nulls = !scr.null_bitmap.empty();
+    const uint8_t* src = base;  // slices live at base + offsets[i]
+
+    // Pass 1: size the arena — long-form slots (> STR_INLINE_MAX) only, valid rows only.
+    size_t arena_size = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (has_nulls && !((scr.null_bitmap[i >> 3] >> (i & 7)) & 1)) continue;
+        if (scr.lengths[i] > STR_INLINE_MAX) arena_size += scr.lengths[i];
     }
 
-    // Type promotion
-    if (dest.col_type == ColumnType::Null && src.col_type != ColumnType::Null) {
-        dest.col_type = src.col_type;
-        size_t prev = dest.num_rows;
-        switch (dest.col_type) {
-        case ColumnType::Int64:
-        case ColumnType::Float64:
-            dest.data.resize(prev * 8, 0);
-            break;
-        case ColumnType::Bool:
-            dest.data.resize(prev, 0);
-            break;
-        case ColumnType::String:
-            dest.str_offsets.resize(prev, 0);
-            dest.str_lengths.resize(prev, 0);
-            break;
-        default: break;
+    DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
+        draken_malloc(static_cast<size_t>(n) * sizeof(DrakenStringSlot)));
+    uint8_t* arena = arena_size
+        ? static_cast<uint8_t*>(draken_malloc(arena_size))
+        : nullptr;
+
+    // Pass 2: populate slots (and arena for long strings).
+    uint32_t arena_offset = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (has_nulls && !((scr.null_bitmap[i >> 3] >> (i & 7)) & 1)) {
+            str_init_null(&slots[i]);
+            continue;
+        }
+        const uint32_t off = scr.offsets[i];
+        const uint32_t len = scr.lengths[i];
+        const uint8_t* bytes = len ? src + off : reinterpret_cast<const uint8_t*>("");
+        if (len > STR_INLINE_MAX) {
+            std::memcpy(arena + arena_offset, bytes, len);
+            draken_build_string_slot(&slots[i], bytes, len, arena_offset);
+            arena_offset += len;
+        } else {
+            draken_build_string_slot(&slots[i], bytes, len, 0);
         }
     }
 
-    // Append data
-    dest.null_bitmap.insert(dest.null_bitmap.end(),
-                            src.null_bitmap.begin(), src.null_bitmap.end());
+    ParsedColumn pc;
+    pc.is_string = true;
+    pc.type      = DRAKEN_VARCHAR;
+    pc.length    = n;
+    pc.slots     = slots;
+    pc.arena     = arena;
+    pc.arena_len = arena_size;
+    pc.validity  = own_validity_from_scr(scr, n);  // SIMD-padded, NULL when all-valid
+    return pc;
+}
 
-    if (dest.col_type == ColumnType::Int64 || dest.col_type == ColumnType::Float64) {
-        dest.data.insert(dest.data.end(), src.data.begin(), src.data.end());
-    } else if (dest.col_type == ColumnType::Bool) {
-        dest.data.insert(dest.data.end(), src.data.begin(), src.data.end());
-    } else if (dest.col_type == ColumnType::String) {
-        uint32_t offset_base = static_cast<uint32_t>(dest.str_data.size());
-        for (size_t i = 0; i < src.num_rows; ++i) {
-            dest.str_offsets.push_back(src.str_offsets[i] + offset_base);
-            dest.str_lengths.push_back(src.str_lengths[i]);
-        }
-        dest.str_data.insert(dest.str_data.end(),
-                             src.str_data.begin(), src.str_data.end());
+PyObject* build_varchar_vector(const uint8_t* base, StringColumnResult& scr) {
+    ParsedColumn pc = parse_varchar_column(base, scr);
+    return wrap_column(pc);
+}
+
+namespace {
+
+static inline bool row_valid(const StringColumnResult& scr, uint32_t i) {
+    return (scr.null_bitmap[i >> 3] >> (i & 7)) & 1u;
+}
+
+// Parse every valid slice (at base + offsets[i]) as int64 into data[i] (0 for nulls).
+// False on first miss.
+static bool try_fill_int64(const uint8_t* base, StringColumnResult& scr, uint32_t n, int64_t* data) {
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!row_valid(scr, i)) { data[i] = 0; continue; }
+        const uint32_t off = scr.offsets[i], len = scr.lengths[i];
+        if (len == 0 || !fast_parse_int64(base, off, off + len - 1, data[i])) return false;
+    }
+    return true;
+}
+
+static bool try_fill_float64(const uint8_t* base, StringColumnResult& scr, uint32_t n, double* data) {
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!row_valid(scr, i)) { data[i] = 0.0; continue; }
+        const uint32_t off = scr.offsets[i], len = scr.lengths[i];
+        if (len == 0 || !fast_parse_float64(base, off, off + len - 1, data[i])) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// parse_typed_column — extracted column → owned typed buffers, with fallback.
+// No Python — safe off the GIL. Wrapped into a Vector by wrap_column().
+// ---------------------------------------------------------------------------
+static ParsedColumn parse_typed_column(const uint8_t* base, StringColumnResult& scr) {
+    const uint32_t n = static_cast<uint32_t>(scr.num_rows);
+
+    // String / all-null columns: nothing to parse.
+    if (scr.inferred_type == ColumnType::String ||
+        scr.inferred_type == ColumnType::Null || n == 0) {
+        return parse_varchar_column(base, scr);
     }
 
-    dest.num_rows += src.num_rows;
+    if (scr.inferred_type == ColumnType::Bool) {
+        const uint32_t bm = (n + 7u) >> 3;
+        const uint32_t padded = ((bm + 7u) & ~7u);
+        const size_t alloc = padded ? padded : 8u;
+        uint8_t* data = static_cast<uint8_t*>(draken_malloc(alloc));  // bit-packed
+        std::memset(data, 0, alloc);
+        bool ok = true;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!row_valid(scr, i)) continue;  // bit stays 0
+            const uint32_t off = scr.offsets[i], len = scr.lengths[i];
+            bool b;
+            if (len == 0 || !parse_bool(base, off, off + len - 1, b)) { ok = false; break; }
+            if (b) data[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
+        if (ok) {
+            ParsedColumn pc; pc.type = DRAKEN_BOOL; pc.length = n;
+            pc.data = data; pc.validity = own_validity_from_scr(scr, n);
+            return pc;
+        }
+        draken_free(data);
+        return parse_varchar_column(base, scr);
+    }
+
+    // Numeric: speculate int64, widen to float64, else fall back to VARCHAR.
+    {
+        int64_t* data = static_cast<int64_t*>(draken_malloc(static_cast<size_t>(n) * sizeof(int64_t)));
+        if (try_fill_int64(base, scr, n, data)) {
+            ParsedColumn pc; pc.type = DRAKEN_INT64; pc.length = n;
+            pc.data = data; pc.validity = own_validity_from_scr(scr, n);
+            return pc;
+        }
+        draken_free(data);
+    }
+    {
+        double* data = static_cast<double*>(draken_malloc(static_cast<size_t>(n) * sizeof(double)));
+        if (try_fill_float64(base, scr, n, data)) {
+            ParsedColumn pc; pc.type = DRAKEN_FLOAT64; pc.length = n;
+            pc.data = data; pc.validity = own_validity_from_scr(scr, n);
+            return pc;
+        }
+        draken_free(data);
+    }
+    return parse_varchar_column(base, scr);
+}
+
+PyObject* build_typed_vector(const uint8_t* base, StringColumnResult& scr) {
+    ParsedColumn pc = parse_typed_column(base, scr);
+    return wrap_column(pc);
+}
+
+// Wrap parsed buffers into an owned Draken Vector (creates a Python object — GIL).
+PyObject* wrap_column(ParsedColumn& pc) {
+    if (pc.is_string)
+        return draken_vector_own_string(pc.slots, pc.arena, pc.arena_len,
+                                        pc.validity, pc.length, pc.type);
+    return draken_vector_own_raw(pc.data, pc.validity, pc.length, pc.type);
+}
+
+// Parse all named columns in parallel — one task per column. Pure C++, no Python;
+// the caller wraps each ParsedColumn under the GIL.
+std::vector<ParsedColumn> parse_all_columns(
+    const uint8_t*                             buffer,
+    const RecordSet&                          records,
+    const std::vector<std::string>&            column_names,
+    size_t                                     max_threads) {
+
+    const size_t ncols = column_names.size();
+    std::vector<ParsedColumn> out(ncols);
+    if (ncols == 0) return out;
+
+    size_t hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 1;
+    size_t nt = std::min(std::min(hw, max_threads ? max_threads : hw), ncols);
+
+    auto do_one = [&](size_t c) {
+        OrdinalPredictor pred;  // thread-local; per-column, no sharing
+        StringColumnResult scr = extract_column(buffer, records, column_names[c], pred, false);
+        out[c] = parse_typed_column(buffer, scr);
+    };
+
+    if (nt <= 1) {
+        for (size_t c = 0; c < ncols; ++c) do_one(c);
+        return out;
+    }
+
+    BS::thread_pool<> pool(nt);
+    std::vector<std::future<void>> futs;
+    futs.reserve(ncols);
+    for (size_t c = 0; c < ncols; ++c)
+        futs.push_back(pool.submit_task([&, c]() { do_one(c); }));
+    for (auto& f : futs) f.get();
+    return out;
+}
+
+void merge_string_column(StringColumnResult& dest, StringColumnResult& src) {
+    if (src.num_rows == 0) return;
+    if (dest.num_rows == 0) dest.inferred_type = src.inferred_type;
+
+    const uint32_t base   = static_cast<uint32_t>(dest.data.size());
+    const size_t   dest_n = dest.num_rows;
+    const size_t   total_n = dest_n + src.num_rows;
+
+    // String bytes: append, rebasing each row's offset; lengths append as-is.
+    dest.data.insert(dest.data.end(), src.data.begin(), src.data.end());
+    dest.offsets.reserve(total_n);
+    dest.lengths.reserve(total_n);
+    for (size_t i = 0; i < src.num_rows; ++i) {
+        dest.offsets.push_back(src.offsets[i] + base);
+        dest.lengths.push_back(src.lengths[i]);
+    }
+
+    // Null bitmap: bit-append src rows starting at bit dest_n (boundary not byte-aligned).
+    const size_t new_bytes = (total_n + 7) >> 3;
+    dest.null_bitmap.resize(new_bytes, 0xFF);  // appended rows default valid
+    const bool src_has_bitmap = !src.null_bitmap.empty();
+    for (size_t i = 0; i < src.num_rows; ++i) {
+        const size_t d = dest_n + i;
+        const bool valid = src_has_bitmap ? ((src.null_bitmap[i >> 3] >> (i & 7)) & 1u) : true;
+        if (valid) dest.null_bitmap[d >> 3] |=  static_cast<uint8_t>(1u << (d & 7));
+        else       dest.null_bitmap[d >> 3] &= static_cast<uint8_t>(~(1u << (d & 7)));
+    }
+
+    dest.num_rows = total_n;
 }
 
 }  // namespace rugo::_jsonl

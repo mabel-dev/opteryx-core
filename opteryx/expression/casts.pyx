@@ -396,18 +396,20 @@ def _cast_result_to_draken(result, resolved_type, args=()):
         int_vec = _draken_native_casts.vector_from_sequence(int_vals)
         return _draken_native_casts.vector_reinterpret_as_timestamp64(int_vec)
     if resolved_type == "DECIMAL":
-        # Infer scale from args if available; default to scale 6 if not.
+        # Infer precision/scale from args; default to DECIMAL(18, 6) (Decision F).
         precision = int(_to_int_arg(args[0])) if len(args) >= 1 else 18
         scale = int(_to_int_arg(args[1])) if len(args) >= 2 else 6
-        # Opteryx decimals are int64-backed (max 18 significant digits); the
-        # arithmetic kernels likewise cap result precision at 18. Honour a
-        # larger declared precision (e.g. DECIMAL(32,2)) as the engine maximum
-        # rather than rejecting it — values that genuinely exceed 18 digits
-        # still raise via the native overflow/precision check.
-        if precision > 18:
-            precision = 18
+        # 38 significant digits is the int128 (DECIMAL128) maximum. Honour a larger
+        # declared precision as the engine maximum rather than rejecting it; values
+        # that genuinely exceed 38 digits still raise via the native check.
+        if precision > 38:
+            precision = 38
         if scale > precision:
             scale = precision
+        # p ≤ 18 → int64-backed DECIMAL (fast tier); 19 ≤ p ≤ 38 → int128-backed
+        # DECIMAL128 (the correct-but-scalar tier, doc 06).
+        if precision > 18:
+            return _draken_native_casts.vector_decimal128_from_sequence(result, precision, scale)
         return _draken_native_casts.vector_decimal_from_sequence(result, precision, scale)
     if resolved_type == "INTERVAL":
         return _draken_native_casts.vector_interval_from_sequence(result)
@@ -566,7 +568,9 @@ def resolve_cast(source_orso, target_type, args=(), unit=None, bint safe=False):
 
 def _build_decimal_closure(args):
     """Build a closure for CAST to DECIMAL(precision, scale)."""
-    precision = int(_to_int_arg(args[0])) if len(args) >= 1 else 38
+    # Only `scale` is needed here (for quantization); the precision/scale used for the
+    # actual native construction are re-read (and capped at 18) inside
+    # _cast_result_to_draken. Bare DECIMAL → scale 6 (Decision F: DECIMAL(18,6)).
     scale = int(_to_int_arg(args[1])) if len(args) >= 2 else 6
 
     def _decimal_cast(arr):

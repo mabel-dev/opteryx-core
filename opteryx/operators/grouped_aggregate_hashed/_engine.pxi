@@ -208,6 +208,13 @@ cdef class GroupHashEngine:
                 # store can reconstruct the group key as TIMESTAMP, not int64.
                 self._key_store.set_timestamp_col_unit(
                     _ki, morsel.column(self._group_columns[_ki])._nb.logical_type_unit)
+            elif self._key_kinds[_ki] == KEY_MULTI_FIXED_DECIMAL128:
+                # Capture (precision, scale) so the key store reconstructs the group
+                # key as DECIMAL128(p, s), not a raw int128.
+                self._key_store.set_decimal_col_descriptor(
+                    _ki,
+                    morsel.column(self._group_columns[_ki])._nb.logical_type_precision,
+                    morsel.column(self._group_columns[_ki])._nb.logical_type_scale)
         if self._use_parvi:
             # Small-map fast path: no heap hash table, single SIMD group.
             # Carchar is allocated lazily on overflow (see _promote_parvi_to_carchar).

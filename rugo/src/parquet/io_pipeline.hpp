@@ -235,7 +235,20 @@ class ParquetIOPipeline {
                 }
 
                 std::vector<uint8_t> ipc_bytes;
-                rugo::serialize_decoded_column(decoded, ipc_bytes);
+                // Parse precision/scale from the logical_type string (e.g. "decimal(15,2)")
+                // for DECIMAL128 columns. ColumnStats carries no separate fields; parse inline.
+                uint8_t dec_precision = 38, dec_scale = 0;
+                if (!decoded.int128_values.empty()) {
+                    const std::string& lt = col_stats.logical_type;
+                    size_t lp = lt.find('(');
+                    size_t cm = lt.find(',', lp);
+                    size_t rp = lt.find(')', cm);
+                    if (lp != std::string::npos && cm != std::string::npos && rp != std::string::npos) {
+                        dec_precision = static_cast<uint8_t>(std::stoi(lt.substr(lp + 1, cm - lp - 1)));
+                        dec_scale     = static_cast<uint8_t>(std::stoi(lt.substr(cm + 1, rp - cm - 1)));
+                    }
+                }
+                rugo::serialize_decoded_column(decoded, ipc_bytes, dec_precision, dec_scale);
                 result.column_ipc_bytes.push_back(std::move(ipc_bytes));
             }
         } catch (const std::exception& e) {

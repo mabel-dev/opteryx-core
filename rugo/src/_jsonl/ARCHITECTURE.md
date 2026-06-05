@@ -1,75 +1,81 @@
 # JSONL Reader Architecture
 
-## Live Pipeline
+A multithreaded, pushdown-aware JSONL reader that emits typed Draken vectors. The whole
+file is read once into a shared read-only buffer; scan, document-mapping and column build
+all run in parallel over byte ranges of that one buffer with no per-range copies.
+
+## Pipeline
 
 ```
 read_jsonl() [_jsonl_reader.pyx]
-  ↓
-JsonlReader::next_chunk() [jsonl_reader.cpp]
-  ├─ read_next_chunk_from_source()  — loads 64MB chunks from file
-  └─ process_buffer()
-     ├─ scan_structural_markers() [structural_scan.cpp] ← NEON single-pass (2300 MB/s)
-     ├─ interpret_jsonl() [interpreter.cpp] ← builds FieldSpans from markers (1700 MB/s)
-     └─ Returns: buffer + FieldSpans
+  ├─ default (use_threads=True): read whole file into one bytes buffer
+  │     ↓
+  │  interpret_jsonl_threaded() [field_span.cpp]   ← splits buffer into newline-aligned
+  │     │                                             ranges, runs each on a BS::thread_pool
+  │     └─ per range: scan_structural_markers() [structural_scan.cpp]  (NEON, ~3500 MB/s)
+  │                   interpret_jsonl()           [field_span.cpp]
+  │                     ├─ build_map()            [interpreter.cpp]  ← markers → FieldSpans
+  │                     └─ finalize_records()                        ← projection + predicate
+  │        … then merge per-range records in order →
+  │
+  └─ fallback (use_threads=False): JsonlReader::next_chunk() [jsonl_reader.cpp]
+        reads 64MB chunks; process_buffer() truncates to the last newline so a record
+        straddling a chunk boundary is carried, not double-counted.
   ↓
 _build_vectors_from_chunks() [_jsonl_reader.pyx]
-  └─ For each column:
-     ├─ extract_column() [column_builder.cpp] ← extracts raw bytes as StringColumnResult
-     └─ _string_vector_from_result() ← builds StringVector (slow per-row loop ✗)
+  └─ single chunk (common): parse_all_columns() [column_builder.cpp]
+        one thread-pool task per column (nogil): extract_column() → parse_typed_column()
+        → ParsedColumn (draken_malloc buffers, NO Python)
+     then wrap_column() per column under the GIL → owns the buffers in a Draken Vector
+        via draken_vector_own_raw / draken_vector_own_string.
   ↓
-Returns StringVectors
+Returns typed Draken Vectors (INT64 / FLOAT64 / BOOL / VARCHAR, real nulls)
 ```
 
-## Live Code Files
+## Pushdown (the structural edge over a row parser)
 
-| File | Purpose | Status |
-|------|---------|--------|
-| `structural_scan.cpp` | NEON marker scanning | ✓ Optimized (2300 MB/s) |
-| `interpreter.cpp` | Build FieldSpans from markers | ✓ Fast (1700 MB/s) |
-| `field_span.cpp` | Predicate filtering | ✓ Live |
-| `jsonl_reader.cpp` | Chunk reading, buffering | ✓ Live |
-| `column_builder.cpp` | Extract columns as strings | ✓ Live (but StringVectors only) |
-| `_jsonl_reader.pyx` | Python API | ✓ Live |
+When `columns` / `predicates` are given, `build_map` builds the document map for **only the
+projected ∪ predicate columns**:
 
-## Dead Code
+- **Column matching is exact-byte, not hashed.** `MapBuilder` compares each key against the
+  (few) wanted columns by length + first byte + `memcmp`. Measured faster than XXH3 +
+  set-lookup *and* exact — no collision risk.
+- **Projection skip.** Once a record's wanted columns are all found, the rest of the record
+  is skipped to the next newline.
+- **Inline filter.** A predicate column is evaluated the instant its value is emitted; on
+  failure the record is dropped and skipped *there* — failing rows never reach their later
+  columns. `finalize_records` remains the authoritative pass (handles rows missing the
+  predicate column, and multiple predicates per column, e.g. `id > 10 AND id < 40`).
+- **Materialisation is survivor-only**: only rows that pass the filter are typed-parsed.
 
-Functions that are compiled but **never called**:
-- `parse_int64()` — Type parsing (was for old implementation)
-- `parse_float64()` — Type parsing (was for old implementation)  
-- `parse_bool()` — Type parsing (was for old implementation)
-- `extract_string()` — String extraction (was for old implementation)
-- `fast_parse_int64()` — Fast parsing (was for old implementation)
-- `fast_parse_float64()` — Fast parsing (was for old implementation)
-- `ColumnResult` struct — Typed column results (replaced by StringColumnResult)
-- `merge_column()` — Chunk merging (marked as "Legacy", never called)
+## Typed value reader
 
-**Note**: These are safe to ignore—they're not in the hot path. The real bottleneck is `_string_vector_from_result()` which does per-row Python iteration on StringVectors instead of direct type conversion.
+`parse_typed_column` speculates int64 → widens to float64 → falls back to VARCHAR; bool tries
+true/false → VARCHAR. The type prediction is never load-bearing (a parse miss falls back).
+Float parsing uses the vendored `fast_float` (bounded; `strtod` is banned — it over-reads the
+separator-less slice buffer). Single-chunk reads parse directly from the file buffer (no copy).
 
-## Performance Breakdown (TPCH Lineitem, 148 MB)
+## Performance (116 MB, 1.5M rows, 5 cols; vs PyArrow `read_json` multithreaded)
 
-| Stage | Time | Speed | Notes |
-|-------|------|-------|-------|
-| Structural scan | 57 ms | **2500-3200 MB/s** | ✓ NEON unrolled 32-byte blocks |
-| Document mapping | 88 ms | 1700 MB/s | ✓ Single-pass state machine |
-| Vector construction | **1500+ ms** | **0.1 MB/s** | ✗ **BLOCKER** (per-row Python loop) |
-| **Total** | **1650+ ms** | **90 MB/s** | 99% of time in vector construction |
+| query | ours | PyArrow |
+|-------|------|---------|
+| `SELECT *` | ~67 ms | ~53 ms |
+| `SELECT one_col` | ~33 ms | 53 ms (must read all) |
+| `SELECT col WHERE id<150k` (10% pass) | ~15 ms | 53 ms |
+| `SELECT col WHERE id<15k` (1% pass) | ~7 ms | 53 ms |
 
-### Scan Optimization: 32-byte Unroll
-- Pre-load all 9 marker comparands to avoid repeated `vdupq_n_u8` calls
-- Process 2 × 16-byte blocks per iteration
-- Reduces setup overhead, amortizes nibble mask extraction cost
-- Result: **+10-40% speedup** (2300 → 2500-3200 MB/s)
+`SELECT *` is bulk-bound (PyArrow's strength); the analytical shapes — project + filter — are
+1.2–5×+ faster, and the win grows with selectivity and table width.
 
-## Next Optimization
+## Files
 
-The bottleneck is **type parsing/conversion** at 0.1 MB/s. Current code:
-1. ✓ Extracts values as raw strings (fast)
-2. ✗ Builds StringVector row-by-row in Python loop (slow)
-3. Not implemented: Direct parsing to Int64Vector/Float64Vector/BoolVector
-
-**Solution**: Implement `_build_typed_vectors_from_spans()` that:
-- Takes FieldSpans + inferred schema
-- Parses directly to typed vectors in a single C++ loop (no Python iteration)
-- Bypasses StringVector intermediate
-
-Expected speedup: **10-100x** (dependent on type diversity in data).
+| File | Purpose |
+|------|---------|
+| `structural_scan.{hpp,cpp}` | NEON marker scan; templated `scan_structural<Emit>` |
+| `interpreter.{hpp,cpp}` | `build_map` / `MapBuilder` state machine + pushdown |
+| `field_span.{hpp,cpp}` | `interpret_jsonl`, `finalize_records`, `interpret_jsonl_threaded` |
+| `value_parser.{hpp,cpp}` | predicate evaluation; `parse_*` delegate to `fast_parse_*` |
+| `fast_parsers.hpp` | bounded int/float parsers (`fast_float`) |
+| `column_builder.{hpp,cpp}` | extract + parse columns; `parse_all_columns` (parallel), `wrap_column` |
+| `jsonl_reader.{hpp,cpp}` | sequential 64MB chunk reader (fallback path) |
+| `_jsonl_reader.pyx` | Python API; orchestration only (no per-row Python) |

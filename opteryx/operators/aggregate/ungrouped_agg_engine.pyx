@@ -171,7 +171,13 @@ cdef class UngroupedAggregateEngine:
             if agg.result_type == AGG_RESULT_F64:
                 vectors.append(vector_from_sequence([agg.get_result()], dtype="DOUBLE"))
             else:
-                vectors.append(vector_from_sequence([agg.get_result()]))
+                value = agg.get_result()
+                # DECIMAL results must build a real DECIMAL vector — the generic int64
+                # builder truncates a Decimal to int (see _decimal_result_vector).
+                if type(value).__name__ == "Decimal":
+                    vectors.append(_decimal_result_vector(value))
+                else:
+                    vectors.append(vector_from_sequence([value]))
 
         # AVG output columns, in registration order
         for i in range(self._n_avgs):
@@ -181,7 +187,11 @@ cdef class UngroupedAggregateEngine:
             if s is None or c is None or c == 0:
                 value = None
             else:
-                value = s / c
+                # s is an exact Decimal (DECIMAL columns) or a double (INTEGER/FLOAT).
+                # float(s) realizes the exact sum as a double, then the division is in
+                # double — AVG is DOUBLE. float(float) is identity, so non-decimal AVG
+                # is unchanged.
+                value = float(s) / c
             names.append(afin.output_alias)
             # AVG always produces a float result (or None). Dispatch through the
             # float64 constructor explicitly — the int64-default path errors on

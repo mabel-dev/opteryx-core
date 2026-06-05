@@ -14,14 +14,13 @@ from libc.string cimport memset, memcpy
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.map cimport map as cmap
+from libcpp.utility cimport move
 
 # Typed-vector cimports removed as part of E.31 migration (same gap registry as E.28):
 #   E.28-gap-1: Integer64Vector dense constructor + ptr.data write access
 #   E.28-gap-2: Float64Vector dense constructor + ptr.data write access
 #   E.28-gap-3: StringVectorBuilder (constructors, append_bytes, append_null, finish)
 #   E.31-gap-1: BoolVector dense constructor + ptr.data write access
-from draken.vectors.vector cimport Vector
-from draken.morsels.morsel cimport Morsel
 
 
 cdef extern from "core/parse_context.hpp" namespace "rugo::_jsonl":
@@ -55,9 +54,19 @@ cdef extern from "core/markers.hpp" namespace "rugo::_jsonl":
         uint8_t marker_type
 
 
+cdef extern from "core/interpreter.hpp" namespace "rugo::_jsonl":
+    # Flat-arena document map. Opaque to Cython: spans/offsets stay in C++; the only
+    # introspection the edge needs (first record's keys for column-name discovery) goes
+    # through first_record_keys().
+    cppclass RecordSet:
+        size_t num_records()
+
+    vector[string] first_record_keys(const RecordSet& rs, const uint8_t* buffer) nogil
+
+
 cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
     struct InterpreterResult:
-        vector[vector[FieldSpan]] all_records
+        RecordSet all_records
         size_t num_records_passed
         uint32_t bytes_consumed
 
@@ -72,14 +81,14 @@ cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
         OrdinalPredictor& predictor
     ) nogil
 
-    InterpreterResult interpret_jsonl_parallel(
+    InterpreterResult interpret_jsonl_threaded(
         const uint8_t* buffer_data,
         size_t buffer_length,
-        const vector[MarkerPosition]& markers,
         const ParseContext& context,
         OrdinalPredictor& predictor,
-        size_t min_rows_per_thread
+        size_t max_threads
     ) nogil
+
 
 
 cdef extern from "core/structural_scan.hpp" namespace "rugo::_jsonl":
@@ -94,7 +103,7 @@ cdef extern from "core/jsonl_reader.hpp" namespace "rugo::_jsonl":
         bint success
         string error_message
         vector[string] column_names
-        vector[vector[FieldSpan]] records
+        RecordSet records
         vector[uint8_t] buffer_data
         cmap[string, string] inferred_schema
         size_t num_records
@@ -116,18 +125,6 @@ cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
         String  = 3
         Null    = 4
 
-    struct ColumnResult:
-        ColumnType col_type
-        size_t num_rows
-        vector[uint8_t] data
-        vector[uint8_t] null_bitmap
-        vector[uint8_t]  str_data
-        vector[uint32_t] str_offsets
-        vector[uint32_t] str_lengths
-        uint8_t* data_ptr()
-        uint8_t* bitmap_ptr()
-        uint8_t* str_ptr()
-
     struct StringColumnResult:
         ColumnType inferred_type
         size_t num_rows
@@ -142,11 +139,29 @@ cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
 
     StringColumnResult extract_column(
         const uint8_t* buffer,
-        const vector[vector[FieldSpan]]& records,
+        const RecordSet& records,
         const string& column_name,
-        OrdinalPredictor& predictor
+        OrdinalPredictor& predictor,
+        bint copy_bytes
     )
-    void merge_column(ColumnResult& dest, ColumnResult& src)
+
+    # Returns a NEW reference to a Draken Vector; the C++ side owns the Python edge.
+    # `base` is the buffer slices are read from (scr.data_ptr() in copy mode, or the
+    # original chunk buffer in no-copy mode).
+    object build_varchar_vector(const uint8_t* base, StringColumnResult& scr)
+    object build_typed_vector(const uint8_t* base, StringColumnResult& scr)
+    void merge_string_column(StringColumnResult& dest, StringColumnResult& src)
+
+    # Parsed column buffers (no Python); produced in parallel off the GIL, then wrapped.
+    cppclass ParsedColumn:
+        pass
+    vector[ParsedColumn] parse_all_columns(
+        const uint8_t* buffer,
+        const RecordSet& records,
+        const vector[string]& column_names,
+        size_t max_threads
+    ) nogil
+    object wrap_column(ParsedColumn& pc)
 
 
 import os
@@ -162,8 +177,7 @@ def read_jsonl(
     parse_arrays=True,
     parse_objects=True,
     fail_on_error=True,
-    use_threads=True,
-    min_rows_per_thread=2048
+    use_threads=True
 ):
     """
     Read JSONL data into Draken vectors with projection and predicate pushdown.
@@ -187,7 +201,7 @@ def read_jsonl(
     cdef ReadResult chunk_result
     cdef vector[string] column_names_cpp
     cdef list chunk_buffers = []
-    cdef vector[vector[vector[FieldSpan]]] chunk_records
+    cdef vector[RecordSet] chunk_records
     cdef size_t total_rows = 0
     cdef cmap[string, string] schema_cpp
     cdef const uint8_t* buf_data
@@ -199,7 +213,6 @@ def read_jsonl(
     cdef string col_name_cpp
     cdef vector[FieldSpan] first_record_cpp
     cdef FieldSpan field
-    cdef size_t min_rows
     cdef dict result = {
         'success': False,
         'column_names': [],
@@ -242,39 +255,27 @@ def read_jsonl(
             if len(threaded_data) > 0:
                 buf_data = <const uint8_t*>threaded_data
                 buf_len = len(threaded_data)
-                min_rows = <size_t>min_rows_per_thread
-
-                # Scan for markers once
+                # Parallel scan + document map: the buffer is split into newline-aligned
+                # ranges processed across a thread pool, then merged in order. (Per range
+                # it still does SIMD-scan -> markers -> state machine; fusing those two
+                # into one pass measured ~25% slower, so they stay decoupled.)
                 with nogil:
-                    markers = scan_structural_markers(buf_data, buf_len)
-
-                # Process in parallel
-                with nogil:
-                    interp_result = interpret_jsonl_parallel(
-                        buf_data,
-                        buf_len,
-                        markers,
-                        context,
-                        predictor,
-                        min_rows
+                    interp_result = interpret_jsonl_threaded(
+                        buf_data, buf_len, context, predictor, 0
                     )
 
                 # Store result as single "chunk" if successful
-                if interp_result.all_records.size() > 0:
-                    chunk_buffers.append(threaded_data)
-                    chunk_records.push_back(interp_result.all_records)
-                    total_rows = interp_result.num_records_passed
-
-                    # Extract column names from first record (no projection = all columns)
+                if interp_result.all_records.num_records() > 0:
+                    # Read column names from the first record BEFORE moving the
+                    # records out (no projection = all columns).
                     if column_names_cpp.empty():
-                        first_record_cpp = interp_result.all_records[0]
-                        for field in first_record_cpp:
-                            col_name_cpp = string(
-                                <const char*>(buf_data + field.key_start),
-                                <size_t>field.key_width
-                            )
-                            column_names_cpp.push_back(col_name_cpp)
+                        column_names_cpp = first_record_keys(interp_result.all_records, buf_data)
 
+                    chunk_buffers.append(threaded_data)
+                    total_rows = interp_result.num_records_passed
+                    # Move (not copy) the record structure — tens of millions of
+                    # FieldSpans + their per-record vectors — into the chunk store.
+                    chunk_records.push_back(move(interp_result.all_records))
                     threaded_succeeded = True
 
         # Fall back to sequential if threaded path failed or wasn't requested
@@ -303,10 +304,10 @@ def read_jsonl(
                         for col in chunk_result.column_names:
                             column_names_cpp.push_back(col)
 
-                    # Keep buffer as bytes (owns the memory) and records as C++ object
+                    # Keep buffer as bytes (owns the memory); move the records in.
                     chunk_buffers.append(bytes(chunk_result.buffer_data))
-                    chunk_records.push_back(chunk_result.records)
                     total_rows += chunk_result.num_records
+                    chunk_records.push_back(move(chunk_result.records))
 
                     if chunk_result.inferred_schema.size() > 0:
                         for key, value in chunk_result.inferred_schema:
@@ -372,16 +373,8 @@ def benchmark_document_map(
         interp_result = interpret_jsonl(buf_data, buf_len, markers, context, predictor)
     interp_ms = (time.perf_counter() - interp_start) * 1000
 
-    # Convert first record to Python for inspection
-    sample_map = []
-    if interp_result.all_records.size() > 0:
-        first_record = interp_result.all_records[0]
-        for field in first_record:
-            sample_map.append({
-                'key': (field.key_start, field.key_width),
-                'value': (field.value_start, field.value_width),
-                'type': field.type,
-            })
+    # First record's keys (column names) for inspection.
+    sample_keys = [k.decode('utf-8') for k in first_record_keys(interp_result.all_records, buf_data)]
 
     return {
         'num_records': interp_result.num_records_passed,
@@ -389,7 +382,7 @@ def benchmark_document_map(
         'interpret_ms': interp_ms,
         'total_ms': scan_ms + interp_ms,
         'buffer_size_mb': len(data) / 1024 / 1024,
-        'sample_map': sample_map,
+        'sample_keys': sample_keys,
     }
 
 
@@ -461,7 +454,6 @@ def read_jsonl_raw(
             reader = new JsonlReader(<const uint8_t*><bytes>data_bytes, len(data_bytes), context)
 
         # Read all chunks, accumulate row count
-        first_record = None
         while True:
             chunk_result = reader.next_chunk()
 
@@ -475,10 +467,6 @@ def read_jsonl_raw(
 
                 total_rows += chunk_result.num_records
                 total_bytes += chunk_result.buffer_data.size()
-
-                # Capture first record as sample
-                if first_record is None and len(chunk_result.records) > 0:
-                    first_record = chunk_result.records[0]
 
             if reader.is_eof():
                 break
@@ -512,7 +500,7 @@ cdef uint8_t _parse_op(str op):
 
 cdef list _build_vectors_from_chunks(
     list chunk_buffers,
-    vector[vector[vector[FieldSpan]]]& chunk_records,
+    vector[RecordSet]& chunk_records,
     vector[string]& column_names,
     size_t total_rows
 ):
@@ -522,49 +510,48 @@ cdef list _build_vectors_from_chunks(
     """
     cdef list vectors = []
     cdef StringColumnResult chunk_col
+    cdef StringColumnResult merged
     cdef bytes buf_bytes
     cdef const uint8_t* buf_ptr
     cdef string col_name_cpp
-    cdef size_t i
+    cdef size_t ci, pi
+    cdef size_t n_chunks = chunk_records.size()
     cdef OrdinalPredictor predictor
+    cdef vector[ParsedColumn] parsed
 
-    for col_name_cpp in column_names:
-        # Extract first chunk to get type hint
-        if len(chunk_buffers) == 0:
-            continue
+    if n_chunks == 0 or len(chunk_buffers) == 0:
+        return vectors
 
+    if n_chunks == 1:
+        # Common case: whole file fit in one chunk. Parse every column in parallel off
+        # the GIL (no-copy — spans index straight into the buffer), then wrap each into
+        # a Vector under the GIL (cheap, O(columns)).
         buf_bytes = <bytes>chunk_buffers[0]
         buf_ptr = <const uint8_t*>buf_bytes
-        chunk_col = extract_column(
-            buf_ptr,
-            chunk_records[0],
-            col_name_cpp,
-            predictor
-        )
+        with nogil:
+            parsed = parse_all_columns(buf_ptr, chunk_records[0], column_names, 0)
+        for pi in range(parsed.size()):
+            vec = wrap_column(parsed[pi])
+            if vec is not None:
+                vectors.append(vec)
+        return vectors
 
-        # Build StringVector from extracted data
-        vec = _string_vector_from_result(chunk_col)
-
-        # Cast to inferred type and add to vectors
+    # Multi-chunk (>64MB file): the merged column outlives the individual chunk buffers,
+    # so extract WITH a copy and concatenate; build from merged.data (serial).
+    for col_name_cpp in column_names:
+        for ci in range(n_chunks):
+            buf_bytes = <bytes>chunk_buffers[ci]
+            buf_ptr = <const uint8_t*>buf_bytes
+            chunk_col = extract_column(buf_ptr, chunk_records[ci], col_name_cpp, predictor, True)
+            if ci == 0:
+                merged = chunk_col
+            else:
+                merge_string_column(merged, chunk_col)
+        vec = build_typed_vector(merged.data_ptr(), merged)
         if vec is not None:
             vectors.append(vec)
 
     return vectors
-
-
-cdef Vector _string_vector_from_result(StringColumnResult& scr):
-    raise NotImplementedError(
-        "rugo migration gap: StringVectorBuilder has no new-draken equivalent; "
-        "tracked as E.28-gap-3."
-    )
-
-
-cdef Vector _draken_from_column_result(ColumnResult& cr):
-    raise NotImplementedError(
-        "rugo migration gap: Integer64Vector / Float64Vector / BoolVector dense constructors "
-        "and StringVectorBuilder have no new-draken equivalents; "
-        "tracked as E.28-gap-1, E.28-gap-2, E.31-gap-1, E.28-gap-3."
-    )
 
 
 def get_jsonl_schema(data, sample_size=5):

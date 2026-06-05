@@ -43,6 +43,17 @@ inline int64_t ReadBESignExt(const uint8_t* p, int width) {
   return v;
 }
 
+// Big-endian two's-complement signed integer of `width` bytes (9..16) into
+// __int128. The first byte is sign-extended. Used to widen FIXED_LEN_BYTE_ARRAY
+// DECIMAL values with precision > 18 into the int128-backed DECIMAL128 tier.
+inline __int128 ReadBESignExt128(const uint8_t* p, int width) {
+  __int128 v = static_cast<__int128>(static_cast<int8_t>(p[0]));
+  for (int i = 1; i < width; ++i) {
+    v = (v << 8) | static_cast<__int128>(p[i]);
+  }
+  return v;
+}
+
 inline void WritePackedCode(uint8_t* codes_array, size_t row_index,
                             int32_t code, uint8_t code_width) {
   switch (code_width) {
@@ -386,18 +397,34 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     result.max_rep_level = target_col->max_repetition_level;
     result.max_def_level = target_col->max_definition_level;
 
-    // FIXED_LEN_BYTE_ARRAY DECIMAL with width <= 8 bytes is decoded as int64
-    // (sign-extended big-endian). For all downstream branches we present this
-    // as int64; flba_byte_width > 0 selects the BE-stride read path.
+    // FIXED_LEN_BYTE_ARRAY DECIMAL is decoded big-endian sign-extended:
+    //   width <= 8  → int64   (DECIMAL,  precision <= 18)
+    //   width 9..16 → int128  (DECIMAL128, precision > 18) — type "int128"
+    // flba_byte_width > 0 selects the BE-stride read path; flba_int128 picks the tier.
     int flba_byte_width = 0;
+    bool flba_int128 = false;
     if (target_col->physical_type == "fixed_len_byte_array") {
-      if (target_col->type_length <= 0 || target_col->type_length > 8 ||
+      if (target_col->type_length <= 0 || target_col->type_length > 16 ||
           target_col->logical_type.rfind("decimal", 0) != 0) {
         // Caller should have been gated by CanDecode; defensive bail.
         return result;
       }
       flba_byte_width = target_col->type_length;
-      result.type = "int64";
+      if (flba_byte_width > 8) {
+        flba_int128 = true;
+        result.type = "int128";
+      } else {
+        result.type = "int64";
+      }
+    }
+
+    // DECIMAL128 (FLBA width 9..16) is only supported for PLAIN-encoded data today.
+    // A dictionary page would feed the int64 dict path (silent truncation) or an
+    // unhandled int128 dict path — fail loud instead. (Width<=8 dict decimals are
+    // unaffected.) The plain int128 path is handled in the serial decode below.
+    if (flba_int128 && target_col->dictionary_page_offset >= 0 &&
+        (uint64_t)target_col->dictionary_page_offset < file_size) {
+      return result;  // success stays false → "Decode failed" (honest rejection)
     }
 
     // -----------------------------------------------------------------
@@ -1693,6 +1720,24 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               }
 #endif
             }
+          }
+        } else if (result.type == "int128") {
+          // PLAIN FLBA width 9..16 → int128 (DECIMAL128). Dict pages are rejected at
+          // setup and there is no ext_int128 buffer, so only the dense path applies;
+          // values are appended compactly (present rows) exactly like the int64 dense
+          // FLBA path — the shared null-expansion step scatters them by def-level.
+          if (flba_byte_width > 0) {
+            int32_t safe_count = std::min(
+                present_count,
+                (int32_t)((data_end - data_ptr) / flba_byte_width));
+            size_t old_sz = result.int128_values.size();
+            result.int128_values.resize(old_sz + safe_count);
+            __int128* dst = result.int128_values.data() + old_sz;
+            for (int32_t i = 0; i < safe_count; i++) {
+              dst[i] = ReadBESignExt128(data_ptr + i * flba_byte_width,
+                                        flba_byte_width);
+            }
+            data_ptr += safe_count * flba_byte_width;
           }
         } else if (result.type == "byte_array") {
           // PLAIN fallback page: decide at the first one whether to intern or go dense.

@@ -3,8 +3,10 @@
 
 #include <vector>
 #include <cstdint>
+#include <cstddef>
 #include "markers.hpp"
 #include "parse_context.hpp"
+#include "interpreter.hpp"   // RecordSet
 
 namespace rugo::_jsonl {
 
@@ -34,9 +36,10 @@ private:
 
 // Result of interpreting a buffer
 struct InterpreterResult {
-    // FieldSpans for all complete records: [record_idx][field_idx]
-    // field_idx is in the order of projected_columns in ParseContext
-    std::vector<std::vector<FieldSpan>> all_records;
+    // Flat-arena document map: all surviving records' fields, contiguous, with per-record
+    // offsets. Field order within a record is file order (the projected subset when a
+    // projection is applied).
+    RecordSet all_records;
 
     // Bytes consumed from the buffer
     size_t bytes_consumed = 0;
@@ -58,15 +61,16 @@ InterpreterResult interpret_jsonl(
     OrdinalPredictor& predictor  // Updated in-place
 );
 
-// Parallel variant: uses BS::thread_pool to process chunks in parallel
-// min_rows_per_thread: minimum rows per thread (default 2048)
-InterpreterResult interpret_jsonl_parallel(
+
+// Multithreaded scan + interpret: splits the buffer into newline-aligned ranges,
+// processes each on a thread pool, and merges the records in order. max_threads == 0
+// uses hardware_concurrency. No intermediate copies — all ranges share one buffer.
+InterpreterResult interpret_jsonl_threaded(
     const uint8_t* buffer_data,
     size_t buffer_length,
-    const std::vector<MarkerPosition>& markers,
     const ParseContext& context,
     OrdinalPredictor& predictor,
-    size_t min_rows_per_thread = 2048
+    size_t max_threads = 0
 );
 
 }  // namespace rugo::_jsonl

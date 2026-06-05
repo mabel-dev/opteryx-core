@@ -2,14 +2,10 @@ import gc
 from typing import Any, Generator
 
 from opteryx import config
-from opteryx.config import features
 from opteryx.exceptions import InvalidInternalStateError
 
 from .serial_engine import ResultType
 from .serial_engine import execute as serial_execute
-
-ENABLE_FREE_THREADING = features.enable_free_threading
-
 
 def _with_optional_gc_disabled(
     results: Generator[Any, None, None],
@@ -48,7 +44,6 @@ def execute(plan, telemetry):
     # Label the join legs to ensure left/right ordering
     plan.label_join_legs()
 
-    # Use parallel engine if free-threading is available, otherwise use serial
     results, result_type = serial_execute(plan, telemetry=telemetry)
 
     if result_type == ResultType.TABULAR:

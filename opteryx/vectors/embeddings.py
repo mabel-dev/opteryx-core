@@ -11,6 +11,7 @@ from pathlib import Path
 from draken.vectors.vector import Vector as VectorVector
 
 from opteryx.exceptions import InvalidConfigurationError
+from opteryx.exceptions import MissingDependencyError
 from opteryx.third_party.cyan4973.xxhash import hash_bytes
 from opteryx.vectors import vector_math
 
@@ -343,7 +344,7 @@ class _MiniLMNativeEmbeddingProvider:
         from opteryx.compiled.nanobind import minilm_native
 
         model_dir = (
-            Path(__file__).resolve().parent.parent / "third_party" / "models" / "all-MiniLM-L6-v2"
+            Path(__file__).resolve().parent.parent.parent / "third_party" / "models" / "all-MiniLM-L6-v2"
         )
         model_path = model_dir / "model.onnx"
         vocab_path = model_dir / "vocab.txt"
@@ -408,7 +409,7 @@ def _load_default_embedding_provider():
         return _default_embedding_provider
 
     model_dir = (
-        Path(__file__).resolve().parent.parent / "third_party" / "models" / "all-MiniLM-L6-v2"
+        Path(__file__).resolve().parent.parent.parent / "third_party" / "models" / "all-MiniLM-L6-v2"
     )
     if not (model_dir / "model.onnx").exists() or not (model_dir / "vocab.txt").exists():
         return None
@@ -682,15 +683,30 @@ def _embedding_cache_put(text: str, dimensions: int, row_data: bytes) -> None:
         _embedding_cache.popitem(last=False)
 
 
+def _raise_embeddings_unavailable() -> None:
+    """Fail loud when the optional embeddings capability is absent.
+
+    EMBED and the text overloads of COSINE_SIMILARITY/COSINE_DISTANCE depend on an
+    embedding provider, shipped as the optional `opteryx-embeddings` package (kept out of
+    the zero-dependency core). There is no silent fallback — instruct the user how to
+    enable it.
+    """
+    raise MissingDependencyError(
+        "opteryx-embeddings",
+        hint=(
+            "EMBED and text-based COSINE_SIMILARITY/COSINE_DISTANCE require the optional "
+            "embeddings capability, which is not installed.\n"
+            "Install it with:  pip install opteryx-embeddings\n"
+            "or register your own provider via opteryx.register_embedding_provider(...)."
+        ),
+    )
+
+
 def embed_text_matrix(texts: list[str]) -> VectorVector:
     """Embed `texts` into a fp16 VectorVector of length len(texts) × dimensions."""
     provider = get_embedding_provider()
     if provider is None:
-        raise InvalidConfigurationError(
-            config_item="embedding_provider",
-            provided_value="unset",
-            valid_value_description="configured via opteryx.register_embedding_provider(...).",
-        )
+        _raise_embeddings_unavailable()
 
     if not texts:
         dims = _provider_dimensions(provider) or 0

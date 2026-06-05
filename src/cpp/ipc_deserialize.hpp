@@ -40,16 +40,18 @@ enum IpcTag : uint8_t {
     kTagFloat32Dict = 9,
     kTagFloat64Dict = 10,
     kTagArray       = 11,  // list columns; Cython handles via _build_array_vector
+    kTagInt128      = 12,  // DECIMAL128 (FLBA width 9..16, precision > 18)
 };
 
 // IpcKind describes the Vector shape produced for the caller.
 // Int32 widens to Int64 here because the destination buffer is already a
 // contiguous int64 array.
 enum class IpcKind : uint8_t {
-    Int64   = 1,
-    Float32 = 2,
-    Float64 = 3,
-    Bool    = 4,
+    Int64    = 1,
+    Float32  = 2,
+    Float64  = 3,
+    Bool     = 4,
+    Int128   = 5,   // DECIMAL128: data is __int128 positional buffer after scatter
 };
 
 // Status codes returned via DecodedFixedColumn::status. Zero is success.
@@ -67,10 +69,17 @@ enum DeserializeStatus : int {
 struct DecodedFixedColumn {
     IpcKind  kind;
     uint32_t num_rows;
-    void*    data;         // malloc'd primary buffer (int64*, double*, float*, uint8_t*)
-    uint8_t* null_bitmap;  // malloc'd null bitmap, or nullptr if non-nullable
-    int      status;       // kStatusOk on success; see DeserializeStatus otherwise
+    void*    data;          // malloc'd primary buffer (int64*, double*, float*, uint8_t*)
+    uint32_t data_len;      // bytes in the compact data buffer (K * element_size, K <= num_rows)
+                            // data_len < num_rows*element_size iff there are nulls and the
+                            // stream is compact (Parquet omits null rows from the value stream).
+                            // _wrap_decoded_fixed scatters compact → positional at the Draken
+                            // boundary so the Vector always holds num_rows positional slots.
+    uint8_t* null_bitmap;   // malloc'd null bitmap, or nullptr if non-nullable
+    int      status;        // kStatusOk on success; see DeserializeStatus otherwise
     uint8_t  tag;           // raw IPC tag byte; useful for kStatusNotHandled dispatch
+    uint8_t  decimal_precision; // DECIMAL128 only (kind==Int128); precision 1..38
+    uint8_t  decimal_scale;     // DECIMAL128 only (kind==Int128); scale 0..precision
 };
 
 // Deserialise a single fixed-width column from an already-latched buffer.

@@ -901,6 +901,23 @@ extensions = [
             "src/cpp/simd_search.cpp",
             "draken/core/vector_alloc.cpp",
         ],
+        # Headers in `depends` so editing one forces the extension to recompile.
+        # (Without this, header-only changes leave stale .o files behind.)
+        depends=[
+            "rugo/src/_jsonl/core/markers.hpp",
+            "rugo/src/_jsonl/core/parse_context.hpp",
+            "rugo/src/_jsonl/core/structural_scan.hpp",
+            "rugo/src/_jsonl/core/interpreter.hpp",
+            "rugo/src/_jsonl/core/value_parser.hpp",
+            "rugo/src/_jsonl/core/field_span.hpp",
+            "rugo/src/_jsonl/core/jsonl_reader.hpp",
+            "rugo/src/_jsonl/core/column_builder.hpp",
+            "rugo/src/_jsonl/core/fast_parsers.hpp",
+            "draken/core/draken_bridge.h",
+            "draken/core/string_slot.h",
+            "draken/core/alloc.h",
+            "draken/core/buffers.h",
+        ],
         include_dirs=include_dirs + ["rugo/src/_jsonl/core"],
         language="c++",
         extra_compile_args=CPP_FLAGS,
@@ -2100,11 +2117,11 @@ extensions.append(
 def _select_onnxruntime_sdk():
     if is_mac() and arch == "aarch64":
         root = "third_party/onnxruntime/onnxruntime-osx-arm64-1.22.0"
-        rpath = "@loader_path/../../third_party/onnxruntime/onnxruntime-osx-arm64-1.22.0/lib"
+        rpath = "@loader_path/../../../third_party/onnxruntime/onnxruntime-osx-arm64-1.22.0/lib"
         return root, rpath
     if is_linux() and arch == "x86_64":
         root = "third_party/onnxruntime/onnxruntime-linux-x64-1.22.0"
-        rpath = r"$ORIGIN/../../third_party/onnxruntime/onnxruntime-linux-x64-1.22.0/lib"
+        rpath = r"$ORIGIN/../../../third_party/onnxruntime/onnxruntime-linux-x64-1.22.0/lib"
         return root, rpath
     return None, None
 

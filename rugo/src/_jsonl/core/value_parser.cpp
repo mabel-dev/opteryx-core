@@ -1,55 +1,24 @@
 #include "value_parser.hpp"
+#include "fast_parsers.hpp"
 #include <cstring>
-#include <cstdlib>
 #include <cmath>
 
 namespace rugo::_jsonl {
 
-// LIVE: is_null(), evaluate_predicate() — used for predicate filtering
-// DEAD: parse_int64, parse_float64, parse_bool, extract_string — legacy type parsing
-// Current pipeline extracts columns as raw strings (StringVector), no type conversion yet.
-// See ARCHITECTURE.md for roadmap on implementing direct typed vector conversion.
+// LIVE: is_null(), evaluate_predicate() — predicate pushdown.
+// LIVE: parse_int64 / parse_float64 / parse_bool / extract_string — used by
+//   evaluate_predicate; parse_bool also by the typed column builder.
+// The numeric parsers delegate to the bounded fast_parse_* (fast_float-backed).
+// No stdlib strtod/strtoll here: strtod has no end bound and over-reads past the
+// value on separator-less buffers, and is locale-sensitive. fast_float is the
+// vendored parser for this job.
 
 bool parse_int64(const uint8_t* buffer, uint32_t start, uint32_t end, int64_t& out) {
-    if (start > end) {
-        return false;
-    }
-
-    const char* str = reinterpret_cast<const char*>(buffer + start);
-    size_t len = end - start + 1;
-
-    // Use strtoll for parsing
-    char* endptr;
-    long long value = std::strtoll(str, &endptr, 10);
-
-    // Check if entire string was consumed
-    if (endptr == str || (endptr - str) != static_cast<int>(len)) {
-        return false;
-    }
-
-    out = value;
-    return true;
+    return fast_parse_int64(buffer, start, end, out);
 }
 
 bool parse_float64(const uint8_t* buffer, uint32_t start, uint32_t end, double& out) {
-    if (start > end) {
-        return false;
-    }
-
-    const char* str = reinterpret_cast<const char*>(buffer + start);
-    size_t len = end - start + 1;
-
-    // Use strtod for parsing
-    char* endptr;
-    double value = std::strtod(str, &endptr);
-
-    // Check if entire string was consumed
-    if (endptr == str || (endptr - str) != static_cast<int>(len)) {
-        return false;
-    }
-
-    out = value;
-    return true;
+    return fast_parse_float64(buffer, start, end, out);
 }
 
 bool parse_bool(const uint8_t* buffer, uint32_t start, uint32_t end, bool& out) {
@@ -83,6 +52,32 @@ bool is_null(const uint8_t* buffer, uint32_t start, uint32_t end) {
     size_t len = end - start + 1;
     return (len == 4 && std::strncmp(reinterpret_cast<const char*>(buffer + start), "null", 4) == 0);
 }
+
+namespace {
+// op codes: 0 EQ, 1 NE, 2 LT, 3 LE, 4 GT, 5 GE
+inline bool apply_op_i64(uint8_t op, int64_t a, int64_t b) {
+    switch (op) {
+        case 0: return a == b;
+        case 1: return a != b;
+        case 2: return a <  b;
+        case 3: return a <= b;
+        case 4: return a >  b;
+        case 5: return a >= b;
+    }
+    return false;
+}
+inline bool apply_op_f64(uint8_t op, double a, double b) {
+    switch (op) {
+        case 0: return std::fabs(a - b) <  1e-9;
+        case 1: return std::fabs(a - b) >= 1e-9;
+        case 2: return a <  b;
+        case 3: return a <= b;
+        case 4: return a >  b;
+        case 5: return a >= b;
+    }
+    return false;
+}
+}  // namespace
 
 bool evaluate_predicate(
     const uint8_t* buffer,
@@ -119,51 +114,34 @@ bool evaluate_predicate(
         );
     }
 
-    // Parse field value based on type
-    if (value_span.type == static_cast<uint8_t>(ValueType::Integer)) {
+    // Numeric field. The structural pass tags every number as Integer from its
+    // first byte; a value like "3.5" only reveals itself as a float on parse. So
+    // try int64 first, and compare in the float domain whenever either the field
+    // or the predicate is fractional (avoids truncating "3.5" to 3).
+    if (value_span.type == static_cast<uint8_t>(ValueType::Integer) ||
+        value_span.type == static_cast<uint8_t>(ValueType::Double)) {
+
+        if (!pred_parsed_int && !pred_parsed_float) {
+            return false;  // predicate value is not numeric — no ordering against a number
+        }
+
+        const uint32_t fend = value_span.value_start + value_span.value_width - 1;
         int64_t val_int;
-        if (!parse_int64(buffer, value_span.value_start, value_span.value_start + value_span.value_width - 1, val_int)) {
-            return false;
+        const bool field_is_int = parse_int64(buffer, value_span.value_start, fend, val_int);
+
+        if (field_is_int && pred_parsed_int) {
+            return apply_op_i64(pred.op, val_int, pred_int);  // exact integer comparison
         }
 
-        int64_t cmp_val = pred_parsed_int ? pred_int : static_cast<int64_t>(pred_float);
-
-        switch (pred.op) {
-            case 0:  // EQ
-                return val_int == cmp_val;
-            case 1:  // NE
-                return val_int != cmp_val;
-            case 2:  // LT
-                return val_int < cmp_val;
-            case 3:  // LE
-                return val_int <= cmp_val;
-            case 4:  // GT
-                return val_int > cmp_val;
-            case 5:  // GE
-                return val_int >= cmp_val;
-        }
-    } else if (value_span.type == static_cast<uint8_t>(ValueType::Double)) {
         double val_float;
-        if (!parse_float64(buffer, value_span.value_start, value_span.value_start + value_span.value_width - 1, val_float)) {
-            return false;
+        if (field_is_int) {
+            val_float = static_cast<double>(val_int);
+        } else if (!parse_float64(buffer, value_span.value_start, fend, val_float)) {
+            return false;  // field is neither int nor float
         }
+        const double cmp_val = pred_parsed_float ? pred_float : static_cast<double>(pred_int);
+        return apply_op_f64(pred.op, val_float, cmp_val);
 
-        double cmp_val = pred_parsed_float ? pred_float : static_cast<double>(pred_int);
-
-        switch (pred.op) {
-            case 0:
-                return std::fabs(val_float - cmp_val) < 1e-9;
-            case 1:
-                return std::fabs(val_float - cmp_val) >= 1e-9;
-            case 2:
-                return val_float < cmp_val;
-            case 3:
-                return val_float <= cmp_val;
-            case 4:
-                return val_float > cmp_val;
-            case 5:
-                return val_float >= cmp_val;
-        }
     } else if (value_span.type == static_cast<uint8_t>(ValueType::String)) {
         std::string val_str = extract_string(buffer, value_span.value_start, value_span.value_start + value_span.value_width - 1);
 

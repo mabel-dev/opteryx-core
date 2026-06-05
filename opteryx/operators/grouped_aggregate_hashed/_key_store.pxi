@@ -27,6 +27,7 @@ from draken.core.buffers cimport STR_INLINE_MAX
 from draken.core.buffers cimport str_init_null, str_init_inline, str_init_extern
 from draken.core.buffers cimport DRAKEN_INT64, DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_TIMESTAMP64, DRAKEN_FLOAT64
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_FLOAT32, DRAKEN_DATE32, DRAKEN_TIME32
+from draken.core.buffers cimport DRAKEN_DECIMAL128
 
 
 # Byte width of a fixed-width DrakenType's payload. Group keys are stored in an
@@ -39,6 +40,8 @@ cdef inline int _ks_fixed_itemsize(DrakenType t) noexcept nogil:
         return 2
     if t == DRAKEN_INT32 or t == DRAKEN_FLOAT32 or t == DRAKEN_DATE32 or t == DRAKEN_TIME32:
         return 4
+    if t == DRAKEN_DECIMAL128:
+        return 16   # int128-backed decimal
     return 8   # INT64, FLOAT64, TIME64, TIMESTAMP64, DECIMAL, etc.
 from draken.core.fixed_vector cimport alloc_fixed_buffer, free_fixed_buffer
 from draken.vectors.bool_vector cimport BoolVector
@@ -48,6 +51,12 @@ from draken.vectors.vector cimport from_decoded as _ks_vector_from_decoded
 cdef extern from "core/alloc.h" nogil:
     void* draken_malloc(size_t n) nogil
     void  draken_free(void* p) nogil
+
+# int128 type for DECIMAL128 (16-byte) key storage. Emits C `__int128`; Cython's
+# 8-byte type model is irrelevant here — we only memcpy 16-byte slots and never use
+# sizeof(int128_t).
+cdef extern from *:
+    ctypedef signed long long int128_t "__int128"
 
 # C-level Py_DECREF to balance the NEW reference draken_vector_own_string returns.
 cdef extern from *:
@@ -80,6 +89,7 @@ cdef int KEY_MULTI_FIXED_TIME64 = 4
 cdef int KEY_MULTI_FIXED_TIMESTAMP64 = 5
 cdef int KEY_MULTI_ENCODED_STRING = 6
 cdef int KEY_MULTI_FIXED_FLOAT64 = 7
+cdef int KEY_MULTI_FIXED_DECIMAL128 = 8   # int128-backed decimal (16-byte slots)
 
 # ---------------------------------------------------------------------------
 # Dispatch codes for multi-column store_new_rows (replaces isinstance in loop)
@@ -88,6 +98,7 @@ cdef int _DISPATCH_INT64        = 0
 cdef int _DISPATCH_BOOL         = 1
 cdef int _DISPATCH_FLOAT64      = 2
 cdef int _DISPATCH_STRING       = 3
+cdef int _DISPATCH_INT128       = 4   # DECIMAL128 (16-byte fixed slot)
 
 
 
@@ -148,6 +159,40 @@ cdef Vector _ks_consume_fixed8_buffer(DrakenFixedBuffer* buf, DrakenType out_typ
 
     free_fixed_buffer(buf, True)
     return _ks_vector_from_decoded(<void*>out_data, validity, <uint32_t>length, out_type)
+
+
+cdef Vector _ks_consume_fixed128_buffer(DrakenFixedBuffer* buf) except *:
+    """Copy a libc-malloc'd 16-byte-slot DrakenFixedBuffer into a fresh
+    draken_malloc'd DRAKEN_DECIMAL128 Vector and free the source. The caller must
+    attach the (precision, scale) descriptor afterward."""
+    cdef Py_ssize_t length = <Py_ssize_t>buf.length
+    cdef size_t nbytes
+    cdef int128_t* out_data
+    cdef uint8_t* validity = NULL
+    cdef Py_ssize_t bitmap_bytes
+
+    if length <= 0:
+        free_fixed_buffer(buf, True)
+        return _ks_vector_from_decoded(NULL, NULL, 0, DRAKEN_DECIMAL128)
+
+    nbytes = <size_t>length * 16
+    out_data = <int128_t*>draken_malloc(nbytes)
+    if out_data == NULL:
+        free_fixed_buffer(buf, True)
+        raise MemoryError()
+    memcpy(out_data, buf.data, nbytes)
+
+    if buf.null_bitmap != NULL:
+        bitmap_bytes = (length + 7) >> 3
+        validity = <uint8_t*>draken_malloc(<size_t>bitmap_bytes)
+        if validity == NULL:
+            draken_free(out_data)
+            free_fixed_buffer(buf, True)
+            raise MemoryError()
+        memcpy(validity, buf.null_bitmap, bitmap_bytes)
+
+    free_fixed_buffer(buf, True)
+    return _ks_vector_from_decoded(<void*>out_data, validity, <uint32_t>length, DRAKEN_DECIMAL128)
 
 
 cdef Vector _ks_own_timestamp_buffer(void* data, uint8_t* validity,
@@ -574,6 +619,50 @@ cdef inline void _ks_store_fixed_bulk_dict(
     buf.null_bitmap = null_bitmap_ref[0]
 
 
+cdef inline void _ks_store_fixed128_bulk_dict(
+    DrakenFixedBuffer* buf,
+    uint8_t** null_bitmap_ref,
+    Py_ssize_t* row_count_ref,
+    const int64_t* row_indices,
+    Py_ssize_t n_new,
+    uint8_t* row_nulls,
+    const void* dict_data,
+    const uint32_t* codes,
+) except *:
+    """16-byte (int128 / DECIMAL128) sibling of _ks_store_fixed_bulk_dict.
+
+    Stores raw 16-byte values via unified selection: data[selection[i]]. The buffer
+    slots are 16 bytes (allocated DRAKEN_DECIMAL128 itemsize 16). Null rows write 0.
+    """
+    cdef Py_ssize_t start_row = row_count_ref[0]
+    cdef Py_ssize_t ri
+    cdef Py_ssize_t row_idx
+    cdef Py_ssize_t out_row
+    cdef uint32_t code
+    cdef int128_t* dst
+    cdef const int128_t* src = <const int128_t*>dict_data
+
+    _ks_ensure_fixed_capacity(buf, start_row, start_row + n_new)
+
+    dst = <int128_t*>buf.data
+    for ri in range(n_new):
+        row_idx = row_indices[ri]
+        out_row = start_row + ri
+        if row_nulls != NULL and not ((row_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
+            dst[out_row] = 0
+            if null_bitmap_ref[0] == NULL:
+                _ks_ensure_bitmap_capacity(null_bitmap_ref, start_row, start_row + n_new)
+            _ks_bitmap_clear(null_bitmap_ref[0], out_row)
+        else:
+            code = codes[row_idx]
+            dst[out_row] = src[code]
+            if null_bitmap_ref[0] != NULL:
+                _ks_bitmap_set(null_bitmap_ref[0], out_row)
+
+    row_count_ref[0] = start_row + n_new
+    buf.null_bitmap = null_bitmap_ref[0]
+
+
 cdef inline void _ks_gs_store_bulk_dict(
     GsAccum* a,
     const int64_t* row_indices,
@@ -651,6 +740,7 @@ cdef class KeyStore:
     cdef vector[int64_t] _key_kinds   # KEY_MULTI_FIXED_* or KEY_MULTI_ENCODED_STRING per column
     cdef Py_ssize_t _n_cols
     cdef list _ts_units               # per-column timestamp unit (bytes) or None; set post-init
+    cdef list _dec_descriptors        # per-column (precision, scale) tuple or None; DECIMAL128 keys
 
     cdef DrakenFixedBuffer* _single_fixed_buf
     cdef uint8_t* _single_fixed_nulls
@@ -672,6 +762,7 @@ cdef class KeyStore:
         self._group_columns = group_columns
         self._n_cols = len(group_columns)
         self._ts_units = [None] * self._n_cols
+        self._dec_descriptors = [None] * self._n_cols
         self._single_fixed_buf = NULL
         self._single_fixed_nulls = NULL
         self._single_fixed_rows = 0
@@ -692,6 +783,10 @@ cdef class KeyStore:
             if key_kinds[0] == KEY_MULTI_ENCODED_STRING:
                 gs_accum_init(&self._single_gs, DRAKEN_VARCHAR)
                 self._single_string_direct = True
+            elif key_kinds[0] == KEY_MULTI_FIXED_DECIMAL128:
+                # 16-byte slots for the int128-backed decimal key.
+                self._single_fixed_buf = alloc_fixed_buffer(DRAKEN_DECIMAL128, 0, 16)
+                self._single_fixed_direct = True
             else:
                 self._single_fixed_buf = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
                 self._single_fixed_direct = True
@@ -707,6 +802,13 @@ cdef class KeyStore:
                     gs_accum_init(&_ga, DRAKEN_VARCHAR)
                     self._multi_gs.push_back(_ga)
                     string_slot += 1
+                elif key_kinds[i] == KEY_MULTI_FIXED_DECIMAL128:
+                    self._multi_storage_kind[i] = _DISPATCH_INT128
+                    self._multi_storage_slot[i] = fixed_slot
+                    self._multi_fixed_bufs.push_back(alloc_fixed_buffer(DRAKEN_DECIMAL128, 0, 16))
+                    self._multi_fixed_nulls.push_back(NULL)
+                    self._multi_fixed_rows.push_back(0)
+                    fixed_slot += 1
                 else:
                     self._multi_storage_kind[i] = _DISPATCH_INT64
                     self._multi_storage_slot[i] = fixed_slot
@@ -738,6 +840,12 @@ cdef class KeyStore:
         if isinstance(unit, str):
             unit = unit.encode("utf-8")
         self._ts_units[col_idx] = unit
+
+    def set_decimal_col_descriptor(self, Py_ssize_t col_idx, int precision, int scale):
+        """Record the (precision, scale) for a DECIMAL128 key column. Storage is the
+        raw int128 unscaled value; the descriptor is reapplied at reconstruct so the
+        group key emerges as DECIMAL128(p, s), not a raw int128."""
+        self._dec_descriptors[col_idx] = (precision, scale)
 
     def __dealloc__(self):
         cdef Py_ssize_t i
@@ -837,6 +945,23 @@ cdef class KeyStore:
                 else:
                     raise RuntimeError("single fixed key codec path removed")
 
+            elif uv.type == DRAKEN_DECIMAL128:
+                # 16-byte int128 key — needs the wide store (the 8-byte path would
+                # truncate and mis-read the source at the wrong stride).
+                if self._single_fixed_direct:
+                    _ks_store_fixed128_bulk_dict(
+                        self._single_fixed_buf,
+                        &self._single_fixed_nulls,
+                        &self._single_fixed_rows,
+                        row_indices,
+                        n_new,
+                        uv.validity,
+                        <const void*>uv.data,
+                        uv.selection,
+                    )
+                else:
+                    raise RuntimeError("single fixed key codec path removed")
+
             elif uv.type == DRAKEN_BOOL:
                 if self._single_fixed_direct:
                     _ks_store_single_fixed_bulk_bool(
@@ -906,6 +1031,13 @@ cdef class KeyStore:
                     col_dense_ptrs[col_idx]     = <size_t>uv.data
                     col_dict_code_ptrs[col_idx] = <size_t>uv.selection
 
+                elif uv.type == DRAKEN_DECIMAL128:
+                    col_dispatch[col_idx]       = _DISPATCH_INT128
+                    col_itemsizes[col_idx]      = 16
+                    col_null_ptrs[col_idx]      = <size_t>uv.validity
+                    col_dense_ptrs[col_idx]     = <size_t>uv.data
+                    col_dict_code_ptrs[col_idx] = <size_t>uv.selection
+
                 elif uv.type == DRAKEN_BOOL:
                     bv = <BoolVector>vec
                     uv = bv.unified()
@@ -948,6 +1080,17 @@ cdef class KeyStore:
                             <const void*>col_dense_ptrs[col_idx],
                             <const uint32_t*>col_dict_code_ptrs[col_idx],
                             col_itemsizes[col_idx],
+                        )
+                    elif disp == _DISPATCH_INT128:
+                        _ks_store_fixed128_bulk_dict(
+                            self._multi_fixed_bufs[storage_slot],
+                            &self._multi_fixed_nulls[storage_slot],
+                            &self._multi_fixed_rows[storage_slot],
+                            row_indices,
+                            n_new,
+                            <uint8_t*>col_null_ptrs[col_idx],
+                            <const void*>col_dense_ptrs[col_idx],
+                            <const uint32_t*>col_dict_code_ptrs[col_idx],
                         )
                     elif disp == _DISPATCH_BOOL:
                         _ks_store_multi_bool_bulk(
@@ -1016,7 +1159,8 @@ cdef class KeyStore:
                 if self._single_fixed_direct:
                     _fixed_buf = self._single_fixed_buf
                     fixed_length = <uint32_t>self._single_fixed_rows
-                    nbytes = <Py_ssize_t>fixed_length * 8
+                    # 16-byte slots for DECIMAL128, else 8-byte.
+                    nbytes = <Py_ssize_t>fixed_length * (16 if key_kind == KEY_MULTI_FIXED_DECIMAL128 else 8)
                     new_data = draken_malloc(<size_t>nbytes) if nbytes > 0 else NULL
                     if nbytes > 0 and new_data == NULL:
                         raise MemoryError()
@@ -1039,11 +1183,19 @@ cdef class KeyStore:
                             new_data, new_validity, fixed_length, self._ts_units[0])
                     elif key_kind == KEY_MULTI_FIXED_FLOAT64:
                         fixed_iv = _from_decoded(new_data, new_validity, fixed_length, DRAKEN_FLOAT64)
+                    elif key_kind == KEY_MULTI_FIXED_DECIMAL128:
+                        fixed_iv = _from_decoded(new_data, new_validity, fixed_length, DRAKEN_DECIMAL128)
+                        if fixed_length > 0 and self._dec_descriptors[0] is not None:
+                            fixed_iv._nb.set_decimal_descriptor(
+                                self._dec_descriptors[0][0], self._dec_descriptors[0][1])
                     else:
                         fixed_iv = _from_decoded(new_data, new_validity, fixed_length, DRAKEN_INT64)
                     out_vecs.append(fixed_iv)
 
-                    self._single_fixed_buf = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+                    if key_kind == KEY_MULTI_FIXED_DECIMAL128:
+                        self._single_fixed_buf = alloc_fixed_buffer(DRAKEN_DECIMAL128, 0, 16)
+                    else:
+                        self._single_fixed_buf = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
                     self._single_fixed_nulls = NULL
                     self._single_fixed_rows = 0
                 else:
@@ -1075,10 +1227,19 @@ cdef class KeyStore:
                         out_vecs.append(_ks_consume_timestamp_buffer(_fixed_buf, self._ts_units[col_idx]))
                     elif self._key_kinds[col_idx] == KEY_MULTI_FIXED_FLOAT64:
                         out_vecs.append(_ks_consume_fixed8_buffer(_fixed_buf, DRAKEN_FLOAT64))
+                    elif self._key_kinds[col_idx] == KEY_MULTI_FIXED_DECIMAL128:
+                        fixed_iv = _ks_consume_fixed128_buffer(_fixed_buf)
+                        if self._multi_fixed_rows[storage_slot] > 0 and self._dec_descriptors[col_idx] is not None:
+                            fixed_iv._nb.set_decimal_descriptor(
+                                self._dec_descriptors[col_idx][0], self._dec_descriptors[col_idx][1])
+                        out_vecs.append(fixed_iv)
                     else:
                         out_vecs.append(_ks_consume_fixed8_buffer(_fixed_buf, DRAKEN_INT64))
 
-                    self._multi_fixed_bufs[storage_slot] = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+                    if self._key_kinds[col_idx] == KEY_MULTI_FIXED_DECIMAL128:
+                        self._multi_fixed_bufs[storage_slot] = alloc_fixed_buffer(DRAKEN_DECIMAL128, 0, 16)
+                    else:
+                        self._multi_fixed_bufs[storage_slot] = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
                     self._multi_fixed_nulls[storage_slot] = NULL
                     self._multi_fixed_rows[storage_slot] = 0
             return

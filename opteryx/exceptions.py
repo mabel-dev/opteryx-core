@@ -56,9 +56,12 @@ from typing import Any, Optional, Union
 
 # ======================== Begin Codebase Errors ========================
 class MissingDependencyError(Exception):  # pragma: no cover
-    def __init__(self, dependency: str):
+    def __init__(self, dependency: str, hint: str = None):
         self.dependency = dependency
-        message = f"No module named '{dependency}' can be found, please install or include in requirements.txt/pyproject.toml."
+        if hint:
+            message = hint
+        else:
+            message = f"No module named '{dependency}' can be found, please install or include in requirements.txt/pyproject.toml."
         super().__init__(message)
 
 

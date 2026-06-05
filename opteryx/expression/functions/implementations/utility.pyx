@@ -292,12 +292,15 @@ def embed(arr):
     from opteryx.vectors import vector_math
     from opteryx.vectors.embeddings import (
         _provider_dimensions,
+        _raise_embeddings_unavailable,
         get_embedding_provider,
     )
 
     n = len(arr)
     provider = get_embedding_provider()
-    dims = _provider_dimensions(provider) if provider is not None else 0
+    if provider is None:
+        _raise_embeddings_unavailable()
+    dims = _provider_dimensions(provider)
 
     texts = []
     row_positions = []

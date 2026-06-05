@@ -67,7 +67,7 @@ Scope explicitly **excluded** from this document:
 - Planner changes beyond what the scheduler contract requires.
 - Replacing the morsel abstraction.
 
-## 1. Current state (as of 2026-05-24)
+## 1. Current state (as of 2026-06-04)
 
 ### 1.1 Pipeline shape
 Push pipeline, compiled at plan time:
@@ -82,6 +82,13 @@ Push pipeline, compiled at plan time:
   drains the terminal `ExitNode`'s pending queue. One thread.
 - `drive_scan` — Cython function in `_operators.pyx` that walks one scan
   iterator.
+- **Removed 2026-06-04:** the `FEATURE_ENABLE_FREE_THREADING` flag and the
+  dead `ENABLE_FREE_THREADING` branch in `managers/execution/__init__.py`.
+  It was the remnant of an abandoned free-threaded-Python experiment with no
+  live consumer. The parallelism target is **native (C++) threads under a
+  released GIL**, not Python free-threading — do not reintroduce a
+  Python-threading toggle. There is exactly one engine (`serial_engine`)
+  today.
 
 ### 1.2 Operator catalog
 `opteryx/operators/catalog.py` already declares `ParallelStrategy`
@@ -91,13 +98,23 @@ execution time.** This is good news: the contract surface exists, it just is
 not wired.
 
 ### 1.3 Cython-ness of operators
-Mixed. Survey (counts approximate, to be re-taken at Phase 0):
-- `_operators.pyx` (umbrella, foundation classes) — 757 lines, typed.
+Mixed. Survey (counts approximate, re-taken 2026-06-04):
+- `_operators.pyx` (umbrella, foundation classes) — 720 lines, typed.
 - `filter/filter.pyx` — typed.
 - `hashed_inner_join/hashed_inner_join.pyx` — 845 lines, typed.
 - `aggregate/` — multiple `.pyx` per aggregation kernel, typed.
 - Several operators (`explain`, `set_variable`, `show_*`, DDL/DML, view/table
   management) are off the push pipeline by design and stay Python.
+
+**Phase 0a progress (per `03_pm_log.md`, 2026-06-04):** the operator
+collector family (`_collectors_*.pxi`), `_factory.pxi`, and `_key_store.pxi`
+have migrated to uniform `Vector` + `DrakenType` dispatch; the typed-Vector
+cimport sweep is largely done. `make q` has risen from 0 to **121/133
+(~91%)**. The remaining failures are genuine operator-rewrite gaps (notably
+the DISTINCT family, blocked on draken-side `Morsel` hash helpers — **D-G**)
+plus a **~50% intermittent crash rate** under separate investigation
+(`04_ticket_crash_investigation.md`). Phase 0a is **not** closed until that
+crash is root-caused and fixed.
 
 A full audit of which operators have `object` parameters, Python attribute
 writes per morsel, or Python helper calls inside `_push_impl` is **Phase 0
@@ -181,6 +198,37 @@ gated.
   worker for build**; partitioned build is intra-operator parallelism, out of
   scope.
 
+> ## UNRESOLVED — the base-class telemetry counters break "shared-stateless" (BLOCKING)
+>
+> The first bullet says stateless operators are safe to run as **one shared
+> instance** across N threads "if their state is read-only after
+> construction." The operator's *own* state may be read-only — but the
+> **base class is not.** `BasePlanNode.push` (`_operators.pyx:260-273`)
+> mutates `records_in`, `bytes_in`, `calls`, `execution_time`, and
+> `_morsel_index` on `self` for *every* morsel; `_emit_cdef` (`:296-297`)
+> mutates `records_out` / `bytes_out`. A single Filter shared across N workers
+> therefore races on six counters regardless of how clean `_push_impl` is.
+> §3.2 already states telemetry rollups "live on `PipelineContext`" — but in
+> the code they live per-instance on `BasePlanNode`. Closing that gap is a
+> **correctness prerequisite for shared-stateless, and it is not currently a
+> Phase 1 task.**
+>
+> Options:
+> - **A. Move per-morsel counters off the instance** into per-worker scratch,
+>   summed into `PipelineContext` at segment end. Matches §3.2 as written,
+>   keeps the hot path lock-free, costs a small per-worker struct. One change
+>   in the base-class `push`/`_emit_cdef`; every operator inherits the fix.
+> - **B. Make the counters C `atomic`.** Smallest diff, but a contended
+>   atomic add per morsel per operator is exactly the cache-line bouncing the
+>   design avoids elsewhere.
+> - **C. One instance per worker even for stateless ops.** Simplest
+>   correctness, but defeats the cache/code sharing that motivated
+>   shared-stateless in §5.2.
+>
+> Recommendation pending architect: **A**, added as an explicit Phase 1
+> base-class task (it unblocks every shared-stateless operator). Decide before
+> Phase 3 — the first phase that actually shares an instance across threads.
+
 ### 3.4 Lifecycle
 1. **Construct** — at plan compile time, on the planner thread. Allowed to
    touch Python freely.
@@ -229,7 +277,10 @@ Confirmed breakers (v1):
 - **Distinct (hashed).** Same shape as group-by.
 - **Set operations (UNION/INTERSECT/EXCEPT) where dedup is required.**
 - **Window functions over a frame that requires the full partition.** (v1
-  may not support these in parallel mode; see §9.2.)
+  may not support these in parallel mode; see §9.2.) *Note: no window-function
+  operator appears in the §7 catalog — confirm whether windows exist in the
+  engine yet; if not, this entry is aspirational and should not gate the
+  design.*
 
 **Non-breakers** (streaming):
 - Filter, Projection, Limit (with short-circuit), CrossJoin probe,
@@ -269,6 +320,34 @@ Confirmed breakers (v1):
 - The scan layer is the *source* of tasks: each scan worker reads one morsel,
   enqueues a task for the chain head, and pulls the next morsel.
 
+> ## UNRESOLVED — is a task a *pipeline segment* or a *single operator*? (BLOCKING)
+>
+> The prose above ("whatever the operator emits becomes one or more new tasks
+> for its downstream") describes a **per-operator task-queue**: each `emit`
+> enqueues work for the next operator. The engine as built does the opposite.
+> `_emit_cdef` (`_operators.pyx:298`) calls `self._downstream.push(morsel)`
+> *inline and synchronously* — one morsel recurses through the entire
+> operator chain on a single thread, all the way to the breaker, with no
+> queue between operators. That is the **inline-segment** model, and it is
+> what morsel-driven parallelism (Hyper) actually does: a worker runs a whole
+> pipeline to completion.
+>
+> Options:
+> - **A. Inline-segment** — a task = one source morsel run through one
+>   pipeline segment to its breaker. Matches the current `emit` mechanism,
+>   matches the cited literature, lowest overhead. In-flight memory is bounded
+>   by worker count, not by inter-stage queues. The scheduler schedules
+>   *segment entries* (source morsels), not per-operator tasks; the emit path
+>   is essentially unchanged.
+> - **B. Per-operator task** — every `emit` enqueues a downstream task (what
+>   §5.1's prose currently implies). More flexible scheduling, far higher
+>   overhead, and requires rewriting `_emit_cdef` to enqueue instead of call.
+>   No benefit identified that A does not already give.
+>
+> Recommendation pending architect: **A.** This is not a tuning choice — it
+> defines what the scheduler *is*. §5.3 (backpressure) depends directly on
+> it. Decide before Phase 2; the §5.1 prose must then be rewritten to match.
+
 ### 5.2 Operator multiplicity
 Three patterns, picked per operator from the catalog:
 
@@ -289,6 +368,14 @@ from the IO layer) until the queue drains below the low-water mark.
 This is **the** lever that prevents a fast scan + slow aggregate from OOMing.
 It must be present from v1. Suggested defaults: queue depth 4× worker count,
 high-water = depth, low-water = depth/2. Tune empirically.
+
+> **Depends on §5.1.** The inter-stage queue described here only exists in the
+> per-operator-task model (option B). Under inline-segment (option A,
+> recommended), there are no inter-stage queues: in-flight memory is bounded
+> by `worker_count × segment_working_set`, because each worker holds exactly
+> one morsel as it walks its segment. Backpressure then reduces to *limiting
+> how many source morsels are in flight* — the size of the scan-side ready
+> pool. Re-resolve this section once §5.1 is closed.
 
 ### 5.4 Termination
 `PipelineContext` becomes the broadcast channel. `terminate()` sets a flag
@@ -357,11 +444,17 @@ Coalescing reduces per-morsel overhead downstream but adds a copy.
 >   target).** Adds a coalescing stage with its own buffer; non-trivial
 >   memory ownership.
 > - **C. Push selection vectors instead of materialising filter output.** The
->   filter emits an unchanged morsel + a selection bitmap; downstream ops
->   read through it. This is the draken-native model (selection vectors
->   already exist on every vector). Most elegant; requires every operator to
->   handle non-identity selection vectors correctly, which §1.4 already
->   mandates.
+>   filter emits an unchanged morsel whose vectors carry a narrowed
+>   `selection` — uint32 *indices*, not a bitmap (per §11 and
+>   `draken/core/buffers.h`); downstream ops read through `data[selection[i]]`.
+>   This is the draken-native model (selection is never NULL on any vector).
+>   Most elegant in principle, but two costs are understated: **(i) where the
+>   selection collapses is unspecified** — a breaker (hash build, sort) must
+>   eventually materialise, and *which* operator owns that gather, and when,
+>   is an open design point; **(ii) it interacts with all three encoding
+>   shapes** (dense/constant/dict), so the per-operator audit must prove
+>   selection-vector *correctness* for every shape, not just
+>   `nogil`-cleanness. A larger lift than "most elegant" implies.
 >
 > Recommendation pending architect: **C** — it composes with what draken
 > already is. Cost: every operator audit must confirm selection-vector
@@ -464,9 +557,12 @@ Goal: get `make q` off zero so the rest of the work is observable.
     uniform `Vector` in `nogil` Cython, including decimal scale.
     Eval-PM's `arithmetic.pyx` is not a worked example for this
     (different shape — per-morsel dispatch vs per-row inner loop).
-- **Gate:** `make q` at 119/133 (89%) post-cascade; full closure of
-  compile-blocker list in `02_pm_briefing.md` §3.3 still pending. The 14
-  remaining failures are real operator-rewrite gaps, not import noise.
+- **Gate:** `make q` at **121/133 (~91%)** as of 2026-06-04; full closure of
+  the compile-blocker list in `02_pm_briefing.md` §3.3 still pending. The 12
+  remaining failures are real operator-rewrite gaps (DISTINCT family blocked
+  on draken-side **D-G**), not import noise. **Phase 0a does not close while
+  the ~50% intermittent crash (`04_ticket_crash_investigation.md`) stands** —
+  a scheduler built on a crashing substrate cannot be measured.
 
 ### Phase 0b — Audit & instrument (no behaviour change)
 Goal: know exactly which operators meet the §3 contract today and which
@@ -580,10 +676,30 @@ is lifted.
 | 6 | Per-session pool starves under concurrent queries                    | Defer fair scheduling to v2; document the limit; offer per-query pool flag as escape hatch |
 | 7 | Coalescing decision (§6 UNRESOLVED) made wrong way → wasted lift     | Resolve before Phase 1 — operator audits depend on it |
 | 8 | `_push_impl` `nogil` decision (§3.1 UNRESOLVED) made wrong way       | Resolve before Phase 1 — every operator lift depends on it |
+| 9 | ~50% intermittent crash in the *current serial* engine masks all parallel measurement; building the scheduler on it is building on sand | Phase 0a gate — crash MUST be root-caused before Phase 2; tracked in `04_ticket_crash_investigation.md` |
+| 10 | "Shared-stateless" races on base-class telemetry counters (§3.3 UNRESOLVED) — torn reads / wrong counts the moment an instance is shared across threads | Resolve §3.3; counter migration is an explicit Phase 1 *base-class* task, not per-operator |
+| 11 | Scheduler built to the per-operator-task model (§5.1) when the engine is inline-segment — wasted rewrite of the emit path and unnecessary inter-stage queues | Resolve §5.1 before Phase 2; default to inline-segment (matches code + literature) |
 
 ## 12. Open questions for architect review (consolidated)
 
-The UNRESOLVED blocks above, listed here for ease of review:
+The UNRESOLVED blocks above, listed here for ease of review.
+
+**Tier 1 — blocking correctness of the plan itself** (added 2026-06-04 after a
+code-currency review; resolve these first — they are not preferences, they are
+mismatches between the spec and the engine as built):
+
+- **A. §5.1** — Is a scheduler task a *pipeline segment* or a *single
+  operator*? The engine's `emit` is inline/synchronous, so the prose's
+  per-operator-task model contradicts both the code and the cited literature.
+  (recommendation: inline-segment.) Determines what the scheduler *is*; §5.3
+  depends on it.
+- **B. §3.3** — The base-class telemetry counters (`records_in`, `calls`,
+  `execution_time`, …) are mutated per-morsel on the shared instance, so
+  "shared-stateless" races today. Counter migration must become an explicit
+  Phase 1 base-class task. (recommendation: per-worker scratch → rollup on
+  `PipelineContext`.)
+
+**Tier 2 — design forks** (unchanged from the original spec):
 
 1. **§3.1** — Plain `cdef`, `cdef nogil`, or `with nogil:` block for
    `_push_impl`? (recommendation: `nogil` signature.)

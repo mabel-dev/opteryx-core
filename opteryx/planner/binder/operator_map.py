@@ -4,6 +4,7 @@ from opteryx.exceptions import IncorrectTypeError, UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression.operator_catalog import is_known_operator
 from opteryx.types import OrsoTypes
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.utils.sql import convert_camel_to_sql_case
 
 
@@ -81,8 +82,11 @@ OPERATOR_MAP: Dict[Tuple[OrsoTypes, OrsoTypes, str], OperatorMapType] = {
     (OrsoTypes.DATE, OrsoTypes.TIMESTAMP, "Minus"): OperatorMapType(OrsoTypes.INTERVAL, None, 100.0),
     (OrsoTypes.DECIMAL, OrsoTypes.ARRAY, "InList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.DECIMAL, OrsoTypes.ARRAY, "NotInList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "Plus"): OperatorMapType(OrsoTypes.INTEGER, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "Minus"): OperatorMapType(OrsoTypes.INTEGER, None, 100.0),
+    # DECIMAL +/- DECIMAL is DECIMAL (the runtime add/sub kernels produce DECIMAL);
+    # the old INTEGER result was a plain type error, inconsistent with Multiply/Divide
+    # below and with the runtime.
+    (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "Plus"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
+    (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "Minus"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
     (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
@@ -152,10 +156,15 @@ OPERATOR_MAP: Dict[Tuple[OrsoTypes, OrsoTypes, str], OperatorMapType] = {
     (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Divide"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Multiply"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Plus"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Minus"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
+    # INTEGER op DECIMAL is symmetric with DECIMAL op INTEGER (lines above) and the
+    # runtime decimal kernels treat the int operand as a decimal — so the result is
+    # DECIMAL, not DOUBLE. The old DOUBLE entries desynced the binder from the runtime
+    # (an ungrouped MAX/MIN/SUM over such an expression routes by bind-time type and
+    # then meets a DECIMAL vector — q15's `1 - l_discount`).
+    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Divide"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
+    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Multiply"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
+    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Plus"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
+    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Minus"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
     (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
@@ -385,6 +394,63 @@ for _, _, _operator_name in OPERATOR_MAP:
         raise UnsupportedSyntaxError(f"Operator map contains unknown operator '{_operator_name}'.")
 
 
+# ---------------------------------------------------------------------------
+# Decision B: operator dispatch keys on LogicalCategory, not OrsoTypes.
+#
+# Rather than hand-convert 348 dict-literal keys (a Python dict literal silently
+# deduplicates collapsed keys — e.g. STRUCT/JSONB → NVARCHAR — which would drop
+# entries unnoticed), the category-keyed map is DERIVED from OPERATOR_MAP with an
+# explicit collision guard. Verified: the collapse produces ZERO conflicting results.
+#
+# EXIT PLAN (see "Exit Plan for Bridges & Shims"): OPERATOR_MAP (OrsoTypes-keyed)
+# remains the human-edited source during migration; once operands are ColumnType
+# everywhere and OrsoTypes is being deleted, the source map is re-authored directly on
+# LogicalCategory and this derivation removed.
+# ---------------------------------------------------------------------------
+_ORSO_TO_CATEGORY: Dict[OrsoTypes, LogicalCategory] = {
+    OrsoTypes.BOOLEAN: LogicalCategory.BOOLEAN,
+    OrsoTypes.INTEGER: LogicalCategory.INTEGER,
+    OrsoTypes.DOUBLE: LogicalCategory.FLOAT,
+    OrsoTypes.DECIMAL: LogicalCategory.DECIMAL,
+    OrsoTypes.VARCHAR: LogicalCategory.VARCHAR,
+    OrsoTypes.NVARCHAR: LogicalCategory.NVARCHAR,
+    OrsoTypes.BLOB: LogicalCategory.VARBINARY,
+    OrsoTypes.DATE: LogicalCategory.DATE,
+    OrsoTypes.TIME: LogicalCategory.TIME,
+    OrsoTypes.TIMESTAMP: LogicalCategory.TIMESTAMP,
+    OrsoTypes.INTERVAL: LogicalCategory.INTERVAL,
+    OrsoTypes.ARRAY: LogicalCategory.ARRAY,
+    OrsoTypes.VECTOR: LogicalCategory.VECTOR,
+    OrsoTypes.VARIANT: LogicalCategory.VARIANT,
+    OrsoTypes.NULL: LogicalCategory.NULL,
+    OrsoTypes.STRUCT: LogicalCategory.NVARCHAR,  # collapse (Decision: STRUCT → JSON text)
+    OrsoTypes.JSONB: LogicalCategory.NVARCHAR,   # collapse (Decision: JSONB alias NVARCHAR)
+}
+
+_CATEGORY_OPERATOR_MAP: Dict[Tuple[LogicalCategory, LogicalCategory, str], OperatorMapType] = {}
+for (_lt, _rt, _op), _val in OPERATOR_MAP.items():
+    _lc = _ORSO_TO_CATEGORY.get(_lt)
+    _rc = _ORSO_TO_CATEGORY.get(_rt)
+    if _lc is None or _rc is None:
+        continue  # _MISSING_TYPE etc. — never a real operand at lookup time
+    _key = (_lc, _rc, _op)
+    _existing = _CATEGORY_OPERATOR_MAP.get(_key)
+    if _existing is not None and (
+        _existing.result_type != _val.result_type
+        or _existing.operation_function != _val.operation_function
+    ):
+        raise ValueError(
+            f"operator-map category collapse conflict at {_key}: "
+            f"{_existing.result_type} vs {_val.result_type} — resolve before relabeling"
+        )
+    _CATEGORY_OPERATOR_MAP[_key] = _val
+
+
+def _category_of(orso_type) -> Optional[LogicalCategory]:
+    """Operand OrsoTypes → dispatch LogicalCategory (migration-time projection)."""
+    return _ORSO_TO_CATEGORY.get(orso_type)
+
+
 def _is_internal_operator(operator: str) -> bool:
     return operator.startswith(("AnyOp", "AllOp")) or operator in {
         "InSubQuery",
@@ -454,7 +520,12 @@ def determine_type(node) -> OrsoTypes:
     if right_type in (0, OrsoTypes._MISSING_TYPE, OrsoTypes.NULL):
         return OrsoTypes._MISSING_TYPE
 
-    result = OPERATOR_MAP.get((left_type, right_type, operator))
+    # Dispatch on LogicalCategory (Decision B): width-collapsed, JSON-family-aware.
+    left_category = _category_of(left_type)
+    right_category = _category_of(right_type)
+    result = None
+    if left_category is not None and right_category is not None:
+        result = _CATEGORY_OPERATOR_MAP.get((left_category, right_category, operator))
 
     if result is None:
         from opteryx.expression import format_expression

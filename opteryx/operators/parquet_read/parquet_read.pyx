@@ -704,16 +704,17 @@ cdef class ParquetReadNode(ReaderNode):
             if col.schema_column.name in _planner_name_to_identity
         ]
 
-        # Build DECIMAL column map: col_name → (precision, scale) for any DECIMAL column
-        # in the schema.  Used to coerce Integer64Vector → DecimalVector after IPC deserialization,
-        # since the C++ pipeline serializes DECIMAL as TAG_INT64 (the physical type) and
-        # the IPC format carries no logical type info.
+        # Build DECIMAL column map: col_name → (precision, scale) for DECIMAL columns
+        # with precision <= 18 (int64-backed). These arrive as TAG_INT64 and need a
+        # coerce (reinterpret + descriptor). DECIMAL128 columns (precision > 18) arrive
+        # as TAG_INT128 and are already correctly typed with their descriptor attached
+        # by _wrap_decoded_fixed — skip them here or the reinterpret would corrupt them.
         # Keys are bytes — column names in the data dict are bytes (C++ parquet native).
         from opteryx.types import OrsoTypes as _OrsoTypes
         _decimal_col_map = {
             col.name.encode('utf-8'): (col.precision or 18, col.scale or 0)
             for col in base_schema.columns
-            if col.type == _OrsoTypes.DECIMAL
+            if col.type == _OrsoTypes.DECIMAL and (col.precision or 18) <= 18
         }
         _date_col_set = {
             col.name.encode('utf-8') for col in base_schema.columns if col.type == _OrsoTypes.DATE

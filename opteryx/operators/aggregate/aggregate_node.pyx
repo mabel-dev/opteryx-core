@@ -112,6 +112,13 @@ def _is_float_type(type_value) -> bool:
     return value in ("DOUBLE", "FLOAT", "DECIMAL")
 
 
+def _is_decimal_type(type_value) -> bool:
+    if type_value is None:
+        return False
+    value = getattr(type_value, "value", type_value)
+    return value == "DECIMAL"
+
+
 def _is_string_type(type_value) -> bool:
     if type_value is None:
         return False
@@ -297,6 +304,10 @@ def _build_engine_aggregate(aggregate):
     if aggregate_type == "SUM":
         if parameter_name is None:
             return [], None, _make_literal_state(aggregate)
+        # SUM(DECIMAL) stays DECIMAL (exact) — must precede _is_float_type (which also
+        # matches DECIMAL and would route to the lossy float accumulator).
+        if _is_decimal_type(parameter_type):
+            return [SumDecimalAggregate(parameter_name, output_name)], None, None
         if _is_float_type(parameter_type):
             return [SumFloat64Aggregate(parameter_name, output_name)], None, None
         return [SumInt64Aggregate(parameter_name, output_name)], None, None
@@ -306,10 +317,16 @@ def _build_engine_aggregate(aggregate):
             return [], None, _make_literal_state(aggregate)
         sum_alias = _column_bytes(f"__avg_sum_{output_name.decode('utf-8', 'ignore')}")
         count_alias = _column_bytes(f"__avg_count_{output_name.decode('utf-8', 'ignore')}")
-        # AVG always accumulates its sum in double (matching DuckDB). For integer
-        # columns this also avoids the int64 sum kernel wrapping on large-magnitude
-        # columns (e.g. AVG(UserID)); SumInt64's per-morsel reduction overflows.
-        sum_agg = SumFloat64Aggregate(parameter_name, sum_alias)
+        # AVG returns DOUBLE (a ratio, matching DuckDB and the binder's AVG type).
+        # DECIMAL columns accumulate the sum EXACTLY (SumDecimalAggregate) and the
+        # finalizer divides that exact sum in double — the old all-float path summed
+        # `(double)unscaled * 10^-scale` per row, losing precision before the divide.
+        # INTEGER/FLOAT columns keep the double-sum accumulator: it avoids the int64
+        # sum kernel wrapping on large-magnitude columns (e.g. AVG(UserID)).
+        if _is_decimal_type(parameter_type):
+            sum_agg = SumDecimalAggregate(parameter_name, sum_alias)
+        else:
+            sum_agg = SumFloat64Aggregate(parameter_name, sum_alias)
         count_agg = CountAggregate(parameter_name, count_alias)
         return [sum_agg, count_agg], ("avg", sum_alias, count_alias, output_name), None
 
@@ -318,6 +335,10 @@ def _build_engine_aggregate(aggregate):
             return [], None, _make_literal_state(aggregate)
         if _is_string_type(parameter_type):
             return [MinBytesAggregate(parameter_name, output_name)], None, None
+        # MIN(DECIMAL) stays DECIMAL (exact) — must precede _is_float_type (which also
+        # matches DECIMAL and would route to the lossy float comparison/passthrough).
+        if _is_decimal_type(parameter_type):
+            return [MinDecimalAggregate(parameter_name, output_name)], None, None
         if _is_float_type(parameter_type):
             return [MinFloat64Aggregate(parameter_name, output_name)], None, None
         return [MinInt64Aggregate(parameter_name, output_name)], None, None
@@ -327,6 +348,9 @@ def _build_engine_aggregate(aggregate):
             return [], None, _make_literal_state(aggregate)
         if _is_string_type(parameter_type):
             return [MaxBytesAggregate(parameter_name, output_name)], None, None
+        # MAX(DECIMAL) stays DECIMAL (exact) — must precede _is_float_type.
+        if _is_decimal_type(parameter_type):
+            return [MaxDecimalAggregate(parameter_name, output_name)], None, None
         if _is_float_type(parameter_type):
             return [MaxFloat64Aggregate(parameter_name, output_name)], None, None
         return [MaxInt64Aggregate(parameter_name, output_name)], None, None

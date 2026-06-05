@@ -18,6 +18,7 @@ from draken.core.buffers cimport DrakenFixedBuffer, DrakenVector, DrakenType
 from draken.core.buffers cimport DRAKEN_INT64
 from draken.core.buffers cimport DRAKEN_FLOAT64
 from draken.core.buffers cimport DRAKEN_DECIMAL
+from draken.core.buffers cimport DRAKEN_DECIMAL128
 from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY
 from draken.core.buffers cimport draken_vector_from_dense
 from draken.core.buffers cimport (
@@ -36,6 +37,14 @@ from draken.vectors.vector import Vector as _V
 cdef extern from "core/alloc.h" nogil:
     void* draken_malloc(size_t n) nogil
     void  draken_free(void* p) nogil
+
+# int128 type for the DECIMAL128 grouped collectors. Cython has no native 128-bit
+# integer; this ctypedef emits C `__int128` (clang and gcc both support it). Cython's
+# own type model treats it as an 8-byte integer, so we never rely on sizeof(int128_t)
+# — the int128 buffers are sized with the literal 16. Pointer indexing and +/</> on
+# int128_t* emit correct 16-byte C __int128 ops.
+cdef extern from *:
+    ctypedef signed long long int128_t "__int128"
 
 
 cdef inline bint _num_bitmap_valid(uint8_t* bm, Py_ssize_t i) noexcept nogil:
@@ -1192,18 +1201,14 @@ cdef class AvgCollector(BaseCollector):
         cdef Py_ssize_t i
         cdef int64_t si
         cdef int64_t* i64
-        cdef int64_t* dec_data
         cdef double* f64
         cdef uint8_t* nulls = uv.validity
-        cdef double dec_factor
         cdef const uint32_t* sel = uv.selection
 
-        # Hoist the DECIMAL scale access (Python attr) before releasing the GIL.
-        if t == DRAKEN_DECIMAL:
-            dec_factor = 10.0 ** (-raw._nb.logical_type_scale)
-        else:
-            dec_factor = 0.0  # unused; satisfies the typed variable
-
+        # DECIMAL columns are routed to AvgDecimalCollector (exact int64 sum) by the
+        # deferred resolver, so they never reach here. INT64 accumulates in double
+        # (overflow-safe for large-magnitude columns like AVG(UserID)); everything
+        # else reinterprets as FLOAT64.
         if t == DRAKEN_INT64:
             i64 = <int64_t*>uv.data
             with nogil:
@@ -1211,14 +1216,6 @@ cdef class AvgCollector(BaseCollector):
                     if _num_bitmap_valid(nulls, i):
                         si = state_indices[i]
                         sums[si] += i64[sel[i]]
-                        counts[si] += 1
-        elif t == DRAKEN_DECIMAL:
-            dec_data = <int64_t*>uv.data
-            with nogil:
-                for i in range(n_rows):
-                    if _num_bitmap_valid(nulls, i):
-                        si = state_indices[i]
-                        sums[si] += <double>dec_data[sel[i]] * dec_factor
                         counts[si] += 1
         else:
             # Default to FLOAT64 (also handles other numerics via reinterpret).
@@ -1270,6 +1267,102 @@ cdef class AvgCollector(BaseCollector):
         return _slice_float64_buffer(out, start, stop)
 
 
+cdef class AvgDecimalCollector(BaseCollector):
+    """AVG for DECIMAL columns.
+
+    Accumulates the RAW UNSCALED int64 sum EXACTLY per group, then produces a
+    FLOAT64 average `sum / 10^scale / count` (AVG is a ratio → DOUBLE, matching
+    DuckDB and the binder's AVG type). The generic AvgCollector summed
+    `(double)unscaled * 10^-scale` per row, losing precision before the divide
+    (the same float-accumulation error that hurt SUM). int64 accumulation matches
+    SumDecimalCollector's overflow profile; int128 accumulation is the future step.
+    """
+    cdef DrakenFixedBuffer* _sums      # int64 raw unscaled sums
+    cdef DrakenFixedBuffer* _counts    # int64 counts
+    cdef int64_t _capacity
+    cdef int _scale                    # column scale, set via factory resolve
+
+    def __cinit__(self):
+        self._sums = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+        self._counts = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+        self._capacity = 0
+        self._scale = 0
+
+    def __dealloc__(self):
+        if self._sums != NULL:
+            free_fixed_buffer(self._sums, True)
+            self._sums = NULL
+        if self._counts != NULL:
+            free_fixed_buffer(self._counts, True)
+            self._counts = NULL
+
+    cdef void grow(self, int64_t new_count):
+        cdef int64_t target
+        if new_count > self._capacity:
+            target = _grow_target(self._capacity, new_count)
+            _grow_fixed_buffer(self._sums, self._capacity, target)
+            _grow_fixed_buffer(self._counts, self._capacity, target)
+            self._capacity = target
+
+    cdef void accumulate(
+        self,
+        Morsel morsel,
+        const uint32_t* state_indices,
+        Py_ssize_t n_rows,
+    ):
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector raw = morsel._get_column(self._col_idx)
+        cdef DrakenVector* uv = raw.unified()
+        cdef int64_t* sums = <int64_t*>self._sums.data
+        cdef int64_t* counts = <int64_t*>self._counts.data
+        cdef int64_t* data = <int64_t*>uv.data
+        cdef const uint32_t* sel = uv.selection
+        cdef uint8_t* nulls = uv.validity
+        cdef Py_ssize_t i
+        cdef int64_t si
+        with nogil:
+            for i in range(n_rows):
+                if _num_bitmap_valid(nulls, i):
+                    si = state_indices[i]
+                    sums[si] += data[sel[i]]   # raw unscaled — exact
+                    counts[si] += 1
+
+    cdef DrakenFixedBuffer* _build_averages(self, int64_t count) except NULL:
+        """Produce a FLOAT64 buffer of `sum / 10^scale / count` for [0, count)."""
+        cdef DrakenFixedBuffer* sums = self._sums
+        cdef DrakenFixedBuffer* counts = self._counts
+        cdef int64_t* sums_data = <int64_t*>sums.data
+        cdef int64_t* counts_data = <int64_t*>counts.data
+        cdef DrakenFixedBuffer* out = alloc_fixed_buffer(DRAKEN_FLOAT64, <size_t>count, 8)
+        cdef double* out_data = <double*>out.data
+        cdef double divisor = 10.0 ** self._scale
+        cdef Py_ssize_t i
+        out.length = <size_t>count
+        for i in range(count):
+            if counts_data[i] > 0:
+                out_data[i] = (<double>sums_data[i]) / divisor / (<double>counts_data[i])
+            else:
+                _ensure_validity_bitmap(out)
+                _bitmap_clear(out.null_bitmap, i)
+        return out
+
+    cpdef Vector finalize(self, int64_t num_groups):
+        cdef DrakenFixedBuffer* out = self._build_averages(num_groups)
+        free_fixed_buffer(self._sums, True)
+        free_fixed_buffer(self._counts, True)
+        self._sums = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+        self._counts = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+        self._capacity = 0
+        return _consume_float64_buffer(out)
+
+    cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
+        cdef DrakenFixedBuffer* out = self._build_averages(self._capacity)
+        cdef Vector result = _slice_float64_buffer(out, start, stop)
+        free_fixed_buffer(out, True)
+        return result
+
+
 # ---------------------------------------------------------------------------
 # Decimal collectors — SumDecimalCollector and MinMaxDecimalCollector
 # Accumulate unscaled int64 values, apply scale factor at finalize time.
@@ -1279,21 +1372,25 @@ cdef class SumDecimalCollector(BaseCollector):
     """
     SUM collector for DecimalVector columns.
 
-    Accumulates unscaled int64 sums in a float64 buffer (to avoid int64 overflow
-    on large datasets). The scale factor (10^-scale) is applied once on first
-    accumulate, converting unscaled int64 to actual decimal value before summing.
-    Finalize returns a Float64Vector.
+    Accumulates the RAW UNSCALED int64 values EXACTLY per group (no float
+    conversion — the old float64 path lost precision: q01/q05/q09), then finalizes
+    to a DECIMAL vector at the column's scale via a DECIMAL-typed materialize +
+    `set_decimal_descriptor`. int64 accumulation matches SumInt64Collector's overflow
+    characteristics; int128 grouped accumulation (for sums exceeding int64) is a
+    future step, mirroring the deferred ungrouped DECIMAL128 promotion.
     """
     cdef DrakenFixedBuffer* _sums
     cdef uint8_t* _seen
     cdef int64_t _capacity
-    cdef double _factor   # 10 ^ (-scale), set from DecimalVector on first accumulate
+    cdef int _scale       # column scale, set from DecimalVector on first resolve
+    cdef int _precision   # result precision (int64-decimal max = 18)
 
     def __cinit__(self):
-        self._sums = alloc_fixed_buffer(DRAKEN_FLOAT64, 0, 8)
+        self._sums = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
         self._seen = NULL
         self._capacity = 0
-        self._factor = 1.0
+        self._scale = 0
+        self._precision = 18
 
     def __dealloc__(self):
         if self._sums != NULL:
@@ -1320,14 +1417,13 @@ cdef class SumDecimalCollector(BaseCollector):
         if self._col_idx < 0:
             self._col_idx = morsel._column_index_from_name(self.column_name)
         cdef Vector vec = morsel._get_column(self._col_idx)
-        cdef double* sums = <double*>self._sums.data
+        cdef int64_t* sums = <int64_t*>self._sums.data
         cdef uint8_t* seen = self._seen
         cdef int64_t* data
         cdef const uint32_t* sel
         cdef uint8_t* nulls
         cdef Py_ssize_t i
         cdef int64_t si
-        cdef double factor = self._factor
         cdef DrakenVector* uv
 
         uv = vec.unified()
@@ -1338,7 +1434,7 @@ cdef class SumDecimalCollector(BaseCollector):
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
-                    sums[si] += <double>data[sel[i]] * factor
+                    sums[si] += data[sel[i]]   # raw unscaled — exact
                     _bitmap_set(seen, si)
 
     cpdef Vector finalize(self, int64_t num_groups):
@@ -1354,14 +1450,22 @@ cdef class SumDecimalCollector(BaseCollector):
                     seen = NULL
                     break
 
-        self._sums = alloc_fixed_buffer(DRAKEN_FLOAT64, 0, 8)
+        self._sums = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
         self._seen = NULL
         self._capacity = 0
 
+        # Materialize the int64 sums as a DECIMAL-typed Vector and attach the
+        # (precision, scale) descriptor; _materialize_fixed_buffer copies (does not
+        # consume), so the source buffer is freed afterwards.
+        cdef Vector dec_vec = _materialize_fixed_buffer(
+            out, 0, num_groups, DRAKEN_DECIMAL, sizeof(int64_t)
+        )
+        free_fixed_buffer(out, True)
         if seen != NULL:
             free(seen)
-
-        return _consume_float64_buffer(out)
+        if num_groups > 0:
+            dec_vec._nb.set_decimal_descriptor(self._precision, self._scale)
+        return dec_vec
 
     cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
         cdef DrakenFixedBuffer* out = self._sums
@@ -1394,13 +1498,15 @@ cdef class MinMaxDecimalCollector(BaseCollector):
     cdef uint8_t* _seen
     cdef int64_t _capacity
     cdef int8_t _direction    # +1 = MIN, -1 = MAX
-    cdef double _factor       # 10 ^ (-scale), set from DecimalVector on first accumulate
+    cdef int _scale           # column scale, set from DecimalVector via factory
+    cdef int _precision       # column precision (MIN/MAX keep the column's p)
 
     def __cinit__(self):
         self._values = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
         self._seen = NULL
         self._capacity = 0
-        self._factor = 1.0
+        self._scale = 0
+        self._precision = 18
 
     def __dealloc__(self):
         if self._values != NULL:
@@ -1468,57 +1574,309 @@ cdef class MinMaxDecimalCollector(BaseCollector):
                         _bitmap_set(seen, si)
 
     cpdef Vector finalize(self, int64_t num_groups):
-        """Apply scale factor and return Float64Vector."""
+        """Emit the exact unscaled int64 min/max as a DECIMAL vector (was lossy float)."""
         cdef DrakenFixedBuffer* src = self._values
         cdef uint8_t* seen = self._seen
-        cdef DrakenFixedBuffer* out
-        cdef int64_t* src_data
-        cdef double* out_data
-        cdef double factor = self._factor
         cdef Py_ssize_t i
 
-        out = alloc_fixed_buffer(DRAKEN_FLOAT64, <size_t>num_groups, 8)
-        src_data = <int64_t*>src.data
-        out_data = <double*>out.data
+        src.length = <size_t>num_groups
+        if seen != NULL:
+            for i in range(num_groups):
+                if not _num_bitmap_valid(seen, i):
+                    src.null_bitmap = seen   # attach so materialize copies validity
+                    break
 
-        for i in range(num_groups):
-            out_data[i] = <double>src_data[i] * factor
+        cdef Vector dec_vec = _materialize_fixed_buffer(
+            src, 0, num_groups, DRAKEN_DECIMAL, sizeof(int64_t)
+        )
+        src.null_bitmap = NULL  # detach; _values is freed (with no bitmap) in __dealloc__
+        if seen != NULL:
+            free(seen)
+        self._seen = NULL
+        self._capacity = 0
+        if num_groups > 0:
+            dec_vec._nb.set_decimal_descriptor(self._precision, self._scale)
+        return dec_vec
 
+    cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
+        """Emit a DECIMAL slice (was lossy float). _materialize copies src.null_bitmap."""
+        cdef DrakenFixedBuffer* src = self._values
+        cdef int64_t length = stop - start
+        cdef Vector dec_vec = _materialize_fixed_buffer(
+            src, start, stop, DRAKEN_DECIMAL, sizeof(int64_t)
+        )
+        if length > 0:
+            dec_vec._nb.set_decimal_descriptor(self._precision, self._scale)
+        return dec_vec
+
+
+# ---------------------------------------------------------------------------
+# DECIMAL128 (int128) grouped collectors — the 16-byte siblings of the DECIMAL
+# collectors above. Accumulate raw unscaled int128 values per group; finalize to a
+# DECIMAL128 vector (SUM/MIN/MAX) or FLOAT64 (AVG). Like the int64 collectors, the
+# sum accumulators do not check for int128 overflow (astronomically unlikely for real
+# data; matches SumDecimalCollector's posture).
+# ---------------------------------------------------------------------------
+
+cdef class SumDecimal128Collector(BaseCollector):
+    cdef DrakenFixedBuffer* _sums    # int128 raw unscaled sums (16-byte slots)
+    cdef uint8_t* _seen
+    cdef int64_t _capacity
+    cdef int _scale
+    cdef int _precision
+
+    def __cinit__(self):
+        self._sums = alloc_fixed_buffer(DRAKEN_DECIMAL128, 0, 16)
+        self._seen = NULL
+        self._capacity = 0
+        self._scale = 0
+        self._precision = 38
+
+    def __dealloc__(self):
+        if self._sums != NULL:
+            free_fixed_buffer(self._sums, True)
+            self._sums = NULL
+        if self._seen != NULL:
+            free(self._seen)
+            self._seen = NULL
+
+    cdef void grow(self, int64_t new_count):
+        cdef int64_t target
+        if new_count > self._capacity:
+            target = _grow_target(self._capacity, new_count)
+            _grow_fixed_buffer(self._sums, self._capacity, target)
+            _grow_bitmap(&self._seen, self._capacity, target, False)
+            self._capacity = target
+
+    cdef void accumulate(self, Morsel morsel, const uint32_t* state_indices, Py_ssize_t n_rows):
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector vec = morsel._get_column(self._col_idx)
+        cdef DrakenVector* uv = vec.unified()
+        cdef int128_t* sums = <int128_t*>self._sums.data
+        cdef uint8_t* seen = self._seen
+        cdef int128_t* data = <int128_t*>uv.data
+        cdef const uint32_t* sel = uv.selection
+        cdef uint8_t* nulls = uv.validity
+        cdef Py_ssize_t i
+        cdef int64_t si
+        with nogil:
+            for i in range(n_rows):
+                if _num_bitmap_valid(nulls, i):
+                    si = state_indices[i]
+                    sums[si] += data[sel[i]]   # raw unscaled int128 — exact
+                    _bitmap_set(seen, si)
+
+    cpdef Vector finalize(self, int64_t num_groups):
+        cdef DrakenFixedBuffer* out = self._sums
+        cdef uint8_t* seen = self._seen
+        cdef Py_ssize_t i
+        out.length = <size_t>num_groups
         if seen != NULL:
             for i in range(num_groups):
                 if not _num_bitmap_valid(seen, i):
                     out.null_bitmap = seen
                     seen = NULL
                     break
+        self._sums = alloc_fixed_buffer(DRAKEN_DECIMAL128, 0, 16)
+        self._seen = NULL
+        self._capacity = 0
+        cdef Vector dec_vec = _materialize_fixed_buffer(out, 0, num_groups, DRAKEN_DECIMAL128, 16)
+        out.null_bitmap = NULL
+        free_fixed_buffer(out, True)
+        if seen != NULL:
+            free(seen)
+        if num_groups > 0:
+            dec_vec._nb.set_decimal_descriptor(self._precision, self._scale)
+        return dec_vec
 
+    cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
+        cdef DrakenFixedBuffer* out = self._sums
+        cdef uint8_t* seen = self._seen
+        cdef int64_t length = stop - start
+        cdef Py_ssize_t i
+        out.length = <size_t>self._capacity
+        if out.null_bitmap == NULL and seen != NULL:
+            for i in range(self._capacity):
+                if not _num_bitmap_valid(seen, i):
+                    out.null_bitmap = seen
+                    seen = NULL
+                    self._seen = NULL
+                    break
+        cdef Vector dec_vec = _materialize_fixed_buffer(out, start, stop, DRAKEN_DECIMAL128, 16)
+        if length > 0:
+            dec_vec._nb.set_decimal_descriptor(self._precision, self._scale)
+        return dec_vec
+
+
+cdef class MinMaxDecimal128Collector(BaseCollector):
+    cdef DrakenFixedBuffer* _values   # int128 unscaled min/max (16-byte slots)
+    cdef uint8_t* _seen
+    cdef int64_t _capacity
+    cdef int8_t _direction    # +1 = MIN, -1 = MAX
+    cdef int _scale
+    cdef int _precision
+
+    def __cinit__(self):
+        self._values = alloc_fixed_buffer(DRAKEN_DECIMAL128, 0, 16)
+        self._seen = NULL
+        self._capacity = 0
+        self._scale = 0
+        self._precision = 38
+
+    def __dealloc__(self):
+        if self._values != NULL:
+            free_fixed_buffer(self._values, True)
+            self._values = NULL
+        if self._seen != NULL:
+            free(self._seen)
+            self._seen = NULL
+
+    cdef void grow(self, int64_t new_count):
+        # No sentinel fill: the _seen bitmap guards first-touch, and untouched slots
+        # are masked null at finalize (so any garbage value is never observed).
+        cdef int64_t target
+        if new_count > self._capacity:
+            target = _grow_target(self._capacity, new_count)
+            _grow_fixed_buffer(self._values, self._capacity, target)
+            _grow_bitmap(&self._seen, self._capacity, target, False)
+            self._capacity = target
+
+    cdef void accumulate(self, Morsel morsel, const uint32_t* state_indices, Py_ssize_t n_rows):
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector vec = morsel._get_column(self._col_idx)
+        cdef DrakenVector* uv = vec.unified()
+        cdef int128_t* values = <int128_t*>self._values.data
+        cdef uint8_t* seen = self._seen
+        cdef int128_t* data = <int128_t*>uv.data
+        cdef const uint32_t* sel = uv.selection
+        cdef uint8_t* nulls = uv.validity
+        cdef Py_ssize_t i
+        cdef int64_t si
+        cdef int128_t v
+        cdef int8_t direction = self._direction
+        with nogil:
+            if direction == 1:   # MIN
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        si = state_indices[i]
+                        v = data[sel[i]]
+                        if not _num_bitmap_valid(seen, si) or v < values[si]:
+                            values[si] = v
+                        _bitmap_set(seen, si)
+            else:                # MAX
+                for i in range(n_rows):
+                    if _num_bitmap_valid(nulls, i):
+                        si = state_indices[i]
+                        v = data[sel[i]]
+                        if not _num_bitmap_valid(seen, si) or v > values[si]:
+                            values[si] = v
+                        _bitmap_set(seen, si)
+
+    cpdef Vector finalize(self, int64_t num_groups):
+        cdef DrakenFixedBuffer* src = self._values
+        cdef uint8_t* seen = self._seen
+        cdef Py_ssize_t i
+        src.length = <size_t>num_groups
+        if seen != NULL:
+            for i in range(num_groups):
+                if not _num_bitmap_valid(seen, i):
+                    src.null_bitmap = seen
+                    break
+        cdef Vector dec_vec = _materialize_fixed_buffer(src, 0, num_groups, DRAKEN_DECIMAL128, 16)
+        src.null_bitmap = NULL
         if seen != NULL:
             free(seen)
         self._seen = NULL
         self._capacity = 0
+        if num_groups > 0:
+            dec_vec._nb.set_decimal_descriptor(self._precision, self._scale)
+        return dec_vec
 
+    cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
+        cdef DrakenFixedBuffer* src = self._values
+        cdef int64_t length = stop - start
+        cdef Vector dec_vec = _materialize_fixed_buffer(src, start, stop, DRAKEN_DECIMAL128, 16)
+        if length > 0:
+            dec_vec._nb.set_decimal_descriptor(self._precision, self._scale)
+        return dec_vec
+
+
+cdef class AvgDecimal128Collector(BaseCollector):
+    cdef DrakenFixedBuffer* _sums      # int128 raw unscaled sums (16-byte slots)
+    cdef DrakenFixedBuffer* _counts    # int64 counts
+    cdef int64_t _capacity
+    cdef int _scale
+
+    def __cinit__(self):
+        self._sums = alloc_fixed_buffer(DRAKEN_DECIMAL128, 0, 16)
+        self._counts = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+        self._capacity = 0
+        self._scale = 0
+
+    def __dealloc__(self):
+        if self._sums != NULL:
+            free_fixed_buffer(self._sums, True)
+            self._sums = NULL
+        if self._counts != NULL:
+            free_fixed_buffer(self._counts, True)
+            self._counts = NULL
+
+    cdef void grow(self, int64_t new_count):
+        cdef int64_t target
+        if new_count > self._capacity:
+            target = _grow_target(self._capacity, new_count)
+            _grow_fixed_buffer(self._sums, self._capacity, target)
+            _grow_fixed_buffer(self._counts, self._capacity, target)
+            self._capacity = target
+
+    cdef void accumulate(self, Morsel morsel, const uint32_t* state_indices, Py_ssize_t n_rows):
+        if self._col_idx < 0:
+            self._col_idx = morsel._column_index_from_name(self.column_name)
+        cdef Vector vec = morsel._get_column(self._col_idx)
+        cdef DrakenVector* uv = vec.unified()
+        cdef int128_t* sums = <int128_t*>self._sums.data
+        cdef int64_t* counts = <int64_t*>self._counts.data
+        cdef int128_t* data = <int128_t*>uv.data
+        cdef const uint32_t* sel = uv.selection
+        cdef uint8_t* nulls = uv.validity
+        cdef Py_ssize_t i
+        cdef int64_t si
+        with nogil:
+            for i in range(n_rows):
+                if _num_bitmap_valid(nulls, i):
+                    si = state_indices[i]
+                    sums[si] += data[sel[i]]
+                    counts[si] += 1
+
+    cdef DrakenFixedBuffer* _build_averages(self, int64_t count) except NULL:
+        cdef int128_t* sums_data = <int128_t*>self._sums.data
+        cdef int64_t* counts_data = <int64_t*>self._counts.data
+        cdef DrakenFixedBuffer* out = alloc_fixed_buffer(DRAKEN_FLOAT64, <size_t>count, 8)
+        cdef double* out_data = <double*>out.data
+        cdef double divisor = 10.0 ** self._scale
+        cdef Py_ssize_t i
+        out.length = <size_t>count
+        for i in range(count):
+            if counts_data[i] > 0:
+                out_data[i] = (<double>sums_data[i]) / divisor / (<double>counts_data[i])
+            else:
+                _ensure_validity_bitmap(out)
+                _bitmap_clear(out.null_bitmap, i)
+        return out
+
+    cpdef Vector finalize(self, int64_t num_groups):
+        cdef DrakenFixedBuffer* out = self._build_averages(num_groups)
+        free_fixed_buffer(self._sums, True)
+        free_fixed_buffer(self._counts, True)
+        self._sums = alloc_fixed_buffer(DRAKEN_DECIMAL128, 0, 16)
+        self._counts = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+        self._capacity = 0
         return _consume_float64_buffer(out)
 
     cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
-        """Apply scale factor and return slice as Float64Vector."""
-        cdef DrakenFixedBuffer* src = self._values
-        cdef Py_ssize_t length = <Py_ssize_t>(stop - start)
-        cdef DrakenFixedBuffer* out
-        cdef int64_t* src_data
-        cdef double* out_data
-        cdef double factor = self._factor
-        cdef Py_ssize_t i
-
-        out = alloc_fixed_buffer(DRAKEN_FLOAT64, <size_t>length, 8)
-        src_data = <int64_t*>src.data
-        out_data = <double*>out.data
-
-        for i in range(length):
-            out_data[i] = <double>src_data[start + i] * factor
-
-        if src.null_bitmap != NULL:
-            out.null_bitmap = _alloc_all_valid_bitmap(length)
-            for i in range(length):
-                if not _num_bitmap_valid(src.null_bitmap, start + i):
-                    _bitmap_clear(out.null_bitmap, i)
-
-        return _consume_float64_buffer(out)
+        cdef DrakenFixedBuffer* out = self._build_averages(self._capacity)
+        cdef Vector result = _slice_float64_buffer(out, start, stop)
+        free_fixed_buffer(out, True)
+        return result

@@ -1,9 +1,9 @@
 #include "interpreter.hpp"
 #include "field_span.hpp"
-#include <cstring>
-#include <cctype>
-#include <algorithm>
+#include "value_parser.hpp"   // evaluate_predicate (inline filter pushdown)
 #include <array>
+#include <cstring>
+#include <utility>
 
 namespace rugo::_jsonl {
 
@@ -77,7 +77,8 @@ enum class Action : uint8_t {
     END_STRING_VAL           = 5,   // closing quote of a string value
     END_UNQUOTED_VAL         = 6,   // comma / } ending an unquoted value
     END_UNQUOTED_VAL_NEWLINE = 7,   // newline ending an unquoted value + finish record
-    PUSH_RECORD              = 8    // }
+    PUSH_RECORD              = 8,   // }
+    SET_COLON                = 9    // remember ':' position — anchors the unquoted slice
 };
 
 struct Transition {
@@ -114,17 +115,21 @@ constexpr std::array<std::array<Transition, 13>, 8> build_transition_table() {
     t[2][int(K::QUOTE)]  = { S::EXPECT_COLON,      A::END_KEY };
 
     // State 3: EXPECT_COLON
-    t[3][int(K::COLON)]  = { S::EXPECT_VALUE,       A::NONE };
+    t[3][int(K::COLON)]  = { S::EXPECT_VALUE,       A::SET_COLON };
 
     // State 4: EXPECT_VALUE
-    t[4][int(K::QUOTE)]  = { S::IN_STRING_VALUE,    A::START_VALUE };
-    t[4][int(K::LBRACE)] = { S::IN_UNQUOTED_VALUE,  A::START_VALUE };
-    t[4][int(K::MINUS)]   = { S::IN_UNQUOTED_VALUE, A::START_VALUE };
-    t[4][int(K::DIGIT)]   = { S::IN_UNQUOTED_VALUE, A::START_VALUE };
-    t[4][int(K::T)]       = { S::IN_UNQUOTED_VALUE, A::START_VALUE };
-    t[4][int(K::F)]       = { S::IN_UNQUOTED_VALUE, A::START_VALUE };
-    t[4][int(K::N)]       = { S::IN_UNQUOTED_VALUE, A::START_VALUE };
-    t[4][int(K::OTHER)]   = { S::IN_UNQUOTED_VALUE, A::START_VALUE }; // catches '[' and anything else
+    // A scalar value (number / true / false / null) produces NO structural marker
+    // of its own — the scanner is content-blind. So the value's presence is only
+    // visible as the slice between the ':' (remembered via SET_COLON) and the next
+    // ',' / '}' / '\n'. Those terminators therefore close an unquoted value here.
+    // Strings, objects and arrays DO start with a marker ('"' / '{' / '[') and take
+    // the marker-driven paths below.
+    t[4][int(K::QUOTE)]   = { S::IN_STRING_VALUE,   A::START_VALUE };
+    t[4][int(K::LBRACE)]  = { S::IN_UNQUOTED_VALUE, A::START_VALUE };
+    t[4][int(K::OTHER)]   = { S::IN_UNQUOTED_VALUE, A::START_VALUE }; // '[' (array) and anything else
+    t[4][int(K::COMMA)]   = { S::EXPECT_KEY_QUOTE,    A::END_UNQUOTED_VAL };
+    t[4][int(K::RBRACE)]  = { S::EXPECT_SEPARATOR,    A::END_UNQUOTED_VAL };
+    t[4][int(K::NEWLINE)] = { S::EXPECT_RECORD_START, A::END_UNQUOTED_VAL_NEWLINE };
 
     // State 5: IN_STRING_VALUE
     t[5][int(K::QUOTE)]   = { S::EXPECT_SEPARATOR,  A::END_STRING_VAL };
@@ -149,123 +154,242 @@ inline bool is_ws(uint8_t c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
+// Bound a container value whose opening '[' or '{' is at `start`. Walks raw bytes
+// tracking string state and backslash escapes so interior commas, brackets and braces
+// — including those inside quoted strings — do not close it early. Returns the index of
+// the matching closing bracket/brace, or `limit - 1` if the container never closes.
+inline uint32_t scan_container(const uint8_t* buf, uint32_t start, uint32_t limit) {
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (uint32_t p = start; p < limit; ++p) {
+        const uint8_t c = buf[p];
+        if (in_string) {
+            if (escaped)          escaped = false;
+            else if (c == '\\')   escaped = true;
+            else if (c == '"')    in_string = false;
+        } else if (c == '"') {
+            in_string = true;
+        } else if (c == '[' || c == '{') {
+            ++depth;
+        } else if (c == ']' || c == '}') {
+            if (--depth == 0) return p;
+        }
+    }
+    return limit - 1;
+}
+
+// Coarse value-type tag from the first non-whitespace byte of the slice.
+// The structural pass only assigns this hint; the value reader does the real
+// parse (and validates / falls back). " is handled on its own marker path.
+inline ValueType classify_first(uint8_t c) {
+    switch (c) {
+        case '"': return ValueType::String;
+        case '{': return ValueType::Object;
+        case '[': return ValueType::Array;
+        case 't':
+        case 'f': return ValueType::Boolean;
+        case 'n': return ValueType::Null;
+        default:  return ValueType::Integer;  // digit, '-', or unexpected
+    }
+}
+
 } // anonymous namespace
 
-std::vector<std::vector<FieldSpan>> build_map(
-    const uint8_t* buffer,
-    size_t buffer_length,
-    const std::vector<MarkerPosition>& markers) {
-
-    std::vector<std::vector<FieldSpan>> records;
-    std::vector<FieldSpan> current_record;
-    // Heuristic pre‑allocation
-    records.reserve(markers.size() / 20 + 1);
-    current_record.reserve(16);
-
+// Document-map builder. Value shape is coarse and read only from the structural
+// delimiter; key identity is never hashed. With a projection it materialises only the
+// wanted fields and stops scanning each record once all are found (minimal extent);
+// without one it emits every field (data-blind full map). Feed one structural byte at a
+// time via step(); container values are bounded by the driver loop before they reach
+// step() (see build_map).
+namespace {
+struct MapBuilder {
+    RecordSet rs;
+    const uint8_t* buffer;
     State state = State::EXPECT_RECORD_START;
     uint32_t key_start = 0, key_end = 0, key_width = 0;
     uint32_t value_start = 0, value_end = 0, value_width = 0;
+    uint32_t colon_pos = 0;  // position of the ':' for the value currently expected
     ValueType value_type = ValueType::Unknown;
     uint32_t ordinal = 0;
 
-    for (const auto& m : markers) {
-        uint8_t ch = buffer[m.position];
+    // Projection + predicate pushdown (nullptr => emit everything). `cur_wanted`/
+    // `cur_pred_idx` are set per key by END_KEY; `found` counts matched wanted columns in
+    // the record; `skip_rest` is raised once all are in hand; `record_dead` is raised when
+    // an inline predicate fails so the driver can discard the record and skip its tail.
+    const MapProjection* proj = nullptr;
+    size_t num_wanted = 0;
+    size_t found = 0;
+    int cur_pred_idx = -1;
+    bool cur_wanted = true;
+    bool skip_rest = false;
+    bool record_dead = false;
+
+    MapBuilder(const uint8_t* buf, const MapProjection* p)
+        : buffer(buf), proj(p), num_wanted(p ? p->num_wanted : 0) {
+        rs.offsets.push_back(0);
+    }
+
+    // First span index of the in-progress record. Invariant: at each record start,
+    // rs.spans.size() == record_start() (every record either banks or discards, restoring it).
+    inline uint32_t record_start() const { return rs.offsets.back(); }
+
+    // Append the staged value as a field iff it is wanted, evaluating an inline predicate
+    // on it; always advance the ordinal so emitted spans keep their true object position.
+    // Returns true when the driver should stop the record (predicate failed, or last wanted
+    // column found).
+    inline bool commit_field() {
+        bool stop = false;
+        if (cur_wanted) {
+            rs.spans.emplace_back(key_start, key_width, value_start, value_width, value_type, ordinal);
+            if (cur_pred_idx >= 0 &&
+                !evaluate_predicate(buffer, rs.spans.back(), (*proj->predicates)[cur_pred_idx])) {
+                record_dead = true;
+                stop = true;
+            } else if (proj && ++found >= num_wanted) {
+                stop = true;
+            }
+        }
+        ++ordinal;
+        return stop;
+    }
+
+    // Unquoted scalar slice (number / true / false / null), ws-trimmed; coarse type
+    // from the first byte.
+    inline bool emit_unquoted(uint32_t pos) {
+        value_start = colon_pos + 1;
+        while (value_start < pos && is_ws(buffer[value_start])) ++value_start;
+        value_end = pos - 1;
+        while (value_end > value_start && is_ws(buffer[value_end])) --value_end;
+        value_width = value_end - value_start + 1;
+        value_type = classify_first(buffer[value_start]);
+        return commit_field();
+    }
+
+    // Container value ['['/'{' .. matching close]; bounds computed by the driver loop.
+    inline bool emit_container(uint32_t start, uint32_t close, ValueType t) {
+        value_start = start;
+        value_end = close;
+        value_width = close - start + 1;
+        value_type = t;
+        return commit_field();
+    }
+
+    // Close the in-progress record. Bank: record its end offset (dropping empty records,
+    // matching prior finalize semantics). Discard: drop its partial spans (predicate failed).
+    inline void bank_record() {
+        if (rs.spans.size() > record_start())
+            rs.offsets.push_back(static_cast<uint32_t>(rs.spans.size()));
+    }
+    inline void discard_record() { rs.spans.resize(record_start()); }
+
+    inline void step(uint32_t pos, uint8_t ch) {
         CharClass cls = char_class_table[ch];
-
-        // Transition
         const Transition& tr = transition_table[static_cast<int>(state)][static_cast<int>(cls)];
-        Action action = tr.action;
-
-        // --- execute action ---
-        switch (action) {
+        switch (tr.action) {
         case Action::START_RECORD:
-            ordinal = 0;
-            current_record.clear();
-            break;
-
+            ordinal = 0; found = 0; record_dead = false; break;
+        case Action::SET_COLON:
+            colon_pos = pos; break;
         case Action::START_KEY:
-            key_start = m.position + 1; // first char after opening quote
-            break;
-
+            key_start = pos + 1; break;
         case Action::END_KEY:
-            key_end = m.position - 1;   // last char before closing quote
-            key_width = key_end - key_start + 1;
-            break;
-
-        case Action::START_VALUE: {
-            // Determine value type and start
-            value_start = m.position;
-            switch (ch) {
-            case '"': value_type = ValueType::String;   break;
-            case '{': value_type = ValueType::Object;   break;
-            case '[': value_type = ValueType::Array;    break;
-            case 't': case 'f': value_type = ValueType::Boolean; break;
-            case 'n': value_type = ValueType::Null;     break;
-            default:  value_type = ValueType::Integer;  break; // minus / digit / unexpected
+            key_end = pos - 1; key_width = key_end - key_start + 1;
+            if (proj) {
+                // Exact match against the wanted set — length + first-byte reject, then
+                // memcmp. No hashing.
+                cur_wanted = false; cur_pred_idx = -1;
+                const uint8_t first = buffer[key_start];
+                for (const WantedColumn& w : *proj->columns) {
+                    if (key_width == w.len && first == w.first &&
+                        std::memcmp(buffer + key_start, w.name, w.len) == 0) {
+                        cur_wanted = true; cur_pred_idx = w.pred_idx; break;
+                    }
+                }
             }
             break;
-        }
+        case Action::START_VALUE:
+            // Strings skip the opening quote (END_STRING_VAL stops before the closing one).
+            value_start = pos + (ch == '"' ? 1u : 0u);
+            value_type = (ch == '"') ? ValueType::String : ValueType::Integer;
+            break;
         case Action::END_STRING_VAL:
-            value_end = m.position - 1; // before closing quote
+            value_end = pos - 1;
             value_width = value_end - value_start + 1;
-            current_record.emplace_back(key_start, key_width,
-                                        value_start, value_width,
-                                        value_type, ordinal);
-            ++ordinal;
+            if (commit_field()) skip_rest = true;
             break;
-
-        case Action::END_UNQUOTED_VAL: {
-            value_end = m.position - 1; // char before comma / }
-            // Fast path: no trailing whitespace
-            if (value_end > value_start && is_ws(buffer[value_end])) {
-                while (value_end > value_start && is_ws(buffer[value_end])) {
-                    --value_end;
-                }
-            }
-            value_width = value_end - value_start + 1;
-            current_record.emplace_back(key_start, key_width,
-                                        value_start, value_width,
-                                        value_type, ordinal);
-            ++ordinal;
+        case Action::END_UNQUOTED_VAL:
+            if (emit_unquoted(pos)) skip_rest = true;
             break;
-        }
-        case Action::END_UNQUOTED_VAL_NEWLINE: {
-            // Newline ends the value and the record
-            value_end = m.position - 1; // char before newline
-            if (value_end > value_start && is_ws(buffer[value_end])) {
-                while (value_end > value_start && is_ws(buffer[value_end])) {
-                    --value_end;
-                }
-            }
-            value_width = value_end - value_start + 1;
-            current_record.emplace_back(key_start, key_width,
-                                        value_start, value_width,
-                                        value_type, ordinal);
-            ++ordinal;
-            // now push the completed record
-            records.push_back(std::move(current_record));
-            current_record.clear();
+        case Action::END_UNQUOTED_VAL_NEWLINE:
+            emit_unquoted(pos);  // record ends at the newline; bank/discard here (no driver skip)
+            if (record_dead) { discard_record(); record_dead = false; }
+            else bank_record();
             break;
-        }
         case Action::PUSH_RECORD:
-            records.push_back(std::move(current_record));
-            current_record.clear();
+            bank_record();
             break;
-
         case Action::NONE:
         default:
             break;
         }
-
         state = tr.next_state;
     }
 
-    // Handle incomplete final record
-    if (!current_record.empty()) {
-        records.push_back(std::move(current_record));
+    inline void finish(bool emit_trailing) {
+        if (emit_trailing && rs.spans.size() > record_start()) bank_record();
     }
+};
+}  // namespace
 
-    return records;
+RecordSet build_map(
+    const uint8_t* buffer,
+    size_t buffer_length,
+    const std::vector<MarkerPosition>& markers,
+    const MapProjection* proj) {
+    MapBuilder b(buffer, proj);
+    b.rs.offsets.reserve(markers.size() / 20 + 2);
+    b.rs.spans.reserve(markers.size() / 3 + 1);
+    const size_t M = markers.size();
+    const uint8_t NL = static_cast<uint8_t>(MarkerType::NEWLINE);
+    for (size_t i = 0; i < M; ++i) {
+        const uint32_t pos = markers[i].position;
+        const uint8_t ch = buffer[pos];
+        // A value-position '[' or '{' opens a container. Bound it with a string- and
+        // escape-aware byte scan (interior commas/brackets must not truncate it), emit
+        // the whole slice, then skip every marker the container swallowed.
+        if ((ch == '[' || ch == '{') && b.state == State::EXPECT_VALUE) {
+            const uint32_t close = scan_container(buffer, pos, static_cast<uint32_t>(buffer_length));
+            if (b.emit_container(pos, close, ch == '[' ? ValueType::Array : ValueType::Object))
+                b.skip_rest = true;
+            b.state = State::EXPECT_SEPARATOR;
+            while (i + 1 < M && markers[i + 1].position <= close) ++i;
+        } else {
+            b.step(pos, ch);
+        }
+        // Minimal extent: an inline predicate failed (discard the record) OR all wanted
+        // columns are found (bank it) — either way jump to the record's newline, skipping
+        // the tail entirely so failing/satisfied rows never materialise their later fields.
+        if (b.skip_rest) {
+            b.skip_rest = false;
+            if (b.record_dead) { b.discard_record(); b.record_dead = false; }
+            else b.bank_record();
+            b.state = State::EXPECT_RECORD_START;
+            while (i + 1 < M && markers[i + 1].marker_type != NL) ++i;
+        }
+    }
+    b.finish(true);
+    return std::move(b.rs);
+}
+
+std::vector<std::string> first_record_keys(const RecordSet& rs, const uint8_t* buffer) {
+    std::vector<std::string> keys;
+    if (rs.num_records() == 0) return keys;
+    const RecordView rec = rs[0];
+    keys.reserve(rec.size());
+    for (const FieldSpan& f : rec)
+        keys.emplace_back(reinterpret_cast<const char*>(buffer + f.key_start), f.key_width);
+    return keys;
 }
 
 // -----------------------------------------------------------------------------
@@ -295,19 +419,6 @@ uint32_t RecordInterpreter::skip_whitespace(const uint8_t*, uint32_t, uint32_t) 
 
 std::string RecordInterpreter::extract_key(const uint8_t*, uint32_t, uint32_t) {
     return "";
-}
-
-// Parallel document mapping (delegates to sequential for now)
-InterpreterResult interpret_jsonl_parallel(
-    const uint8_t* buffer_data,
-    size_t buffer_length,
-    const std::vector<MarkerPosition>& markers,
-    const ParseContext& context,
-    OrdinalPredictor& predictor,
-    size_t min_rows_per_thread) {
-    // For now, just call sequential version
-    // TODO: Implement actual parallelization with BS::thread_pool
-    return interpret_jsonl(buffer_data, buffer_length, markers, context, predictor);
 }
 
 } // namespace rugo::_jsonl

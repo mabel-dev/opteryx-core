@@ -75,6 +75,7 @@ static bool copy_contig(const uint8_t* p, const uint8_t* end,
         if (out.data == nullptr) { out.status = kStatusOom; return false; }
         std::memcpy(out.data, p, data_len);
     }
+    out.data_len = data_len;
     return true;
 }
 
@@ -104,6 +105,8 @@ static bool widen_int32_to_int64(const uint8_t* p, const uint8_t* end,
             dst[i] = static_cast<int64_t>(scratch);
         }
     }
+    // Report widened byte count so _wrap_decoded_fixed knows the present-value count.
+    out.data_len = static_cast<uint32_t>(dst_bytes);
     return true;
 }
 
@@ -115,9 +118,12 @@ void deserialize_fixed_column(const uint8_t* data, int64_t length, DecodedFixedC
     out.kind = IpcKind::Int64;
     out.num_rows = 0;
     out.data = nullptr;
+    out.data_len = 0;
     out.null_bitmap = nullptr;
     out.status = kStatusOk;
     out.tag = 0;
+    out.decimal_precision = 0;
+    out.decimal_scale = 0;
 
     if (data == nullptr || length <= 0) {
         out.status = kStatusTruncated;
@@ -182,6 +188,19 @@ void deserialize_fixed_column(const uint8_t* data, int64_t length, DecodedFixedC
             out.kind = IpcKind::Bool;
             break;
 
+        case kTagInt128: {
+            // TAG_INT128 wire: precision(1) scale(1) data_len(4) [compact_int128_values]
+            // data is a compact K-value payload (K <= num_rows); scatter to positional
+            // happens in _wrap_decoded_fixed on the Cython side.
+            if (!bounds_ok(p, end, 2)) { out.status = kStatusTruncated; return; }
+            out.decimal_precision = *p++;
+            out.decimal_scale     = *p++;
+            if (!copy_contig(p, end, out)) return;
+            if (!copy_nulls(null_bitmap, null_bitmap_len, out)) return;
+            out.kind = IpcKind::Int128;
+            break;
+        }
+
         case kTagStrDict:
         case kTagStrPlain:
         case kTagInt64Dict:
@@ -212,9 +231,12 @@ void deserialize_row_group_fixed(
         out[i].kind = IpcKind::Int64;
         out[i].num_rows = 0;
         out[i].data = nullptr;
+        out[i].data_len = 0;
         out[i].null_bitmap = nullptr;
         out[i].status = kStatusOk;
         out[i].tag = 0;
+        out[i].decimal_precision = 0;
+        out[i].decimal_scale = 0;
 
         ReadResult r{nullptr, 0};
         try {

@@ -509,7 +509,14 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
     # NVARCHAR is routed through the runtime CAST node instead, so literals go
     # through the same UTF-8-validating kernel and materialise as a true
     # DRAKEN_NVARCHAR vector (constant-folding would yield a VARCHAR constant).
-    if source_expr.node_type == NodeType.LITERAL and normalized_type.replace("TRY_", "") != "NVARCHAR":
+    # DECIMAL is likewise routed through the runtime CAST node: the literal-fold path
+    # (_cast_literal_value) ignores the precision/scale parameters, so folding
+    # CAST(<lit> AS DECIMAL(p,s)) would silently drop (p,s) and skip quantization.
+    # The runtime CAST node carries `parameters=[precision, scale]` and threads them
+    # through _build_decimal_closure (bare DECIMAL → DECIMAL(18,6), Decision F).
+    if source_expr.node_type == NodeType.LITERAL and normalized_type.replace(
+        "TRY_", ""
+    ) not in ("NVARCHAR", "DECIMAL"):
         return _cast_literal_value(source_expr, normalized_type, kind, alias)
 
     # For non-literals, return a CAST node that will be evaluated at runtime

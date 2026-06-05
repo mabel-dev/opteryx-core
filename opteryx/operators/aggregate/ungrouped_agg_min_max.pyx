@@ -432,3 +432,105 @@ cdef class MaxBytesAggregate(UngroupedAggregate):
 
     cpdef object get_result(self):
         return self._result
+
+
+# ---------------------------------------------------------------------------
+# MinDecimalAggregate / MaxDecimalAggregate — exact decimal MIN/MAX.
+# Vector.min()/max() return a Python Decimal for DECIMAL/DECIMAL128 columns
+# (preserving scale); we track the running min/max Decimal across morsels and
+# emit a DECIMAL vector (AGG_RESULT_OBJECT → _decimal_result_vector in the engine).
+# The float aggregates lost precision (Decimal → C double).
+# ---------------------------------------------------------------------------
+
+cdef class MinDecimalAggregate(UngroupedAggregate):
+    cdef object _result   # Decimal or None
+    cdef bint   _seen
+
+    def __cinit__(self, bytes column_name, bytes alias):
+        self.column_name = column_name
+        self.alias       = alias
+        self.result_type = AGG_RESULT_OBJECT
+        self._result     = None
+        self._seen       = False
+
+    cdef void apply(self, Morsel morsel) except *:
+        cdef Morsel typed = <Morsel>morsel
+        if typed.num_rows == 0:
+            return
+        if self._col_idx < 0:
+            self._col_idx = typed._column_index_from_name(self.column_name)
+        if self._col_idx < 0 or self._col_idx >= typed._num_columns():
+            return
+        cdef Vector raw = typed._get_column(self._col_idx)
+        if raw is None:
+            return
+        cdef object v
+        try:
+            v = (<Vector>raw).min()   # Decimal; raises on all-null morsel
+        except ValueError:
+            return
+        if self._result is None or v < self._result:
+            self._result = v
+        self._seen = True
+
+    cdef int64_t get_result_i64(self) noexcept:
+        return 0
+
+    cdef double get_result_f64(self) noexcept:
+        return 0.0
+
+    cdef void get_result_bytes(self, const char** out_ptr, size_t* out_len) noexcept:
+        out_ptr[0] = NULL; out_len[0] = 0
+
+    cdef bint is_null(self) noexcept:
+        return not self._seen
+
+    cpdef object get_result(self):
+        return self._result if self._seen else None
+
+
+cdef class MaxDecimalAggregate(UngroupedAggregate):
+    cdef object _result   # Decimal or None
+    cdef bint   _seen
+
+    def __cinit__(self, bytes column_name, bytes alias):
+        self.column_name = column_name
+        self.alias       = alias
+        self.result_type = AGG_RESULT_OBJECT
+        self._result     = None
+        self._seen       = False
+
+    cdef void apply(self, Morsel morsel) except *:
+        cdef Morsel typed = <Morsel>morsel
+        if typed.num_rows == 0:
+            return
+        if self._col_idx < 0:
+            self._col_idx = typed._column_index_from_name(self.column_name)
+        if self._col_idx < 0 or self._col_idx >= typed._num_columns():
+            return
+        cdef Vector raw = typed._get_column(self._col_idx)
+        if raw is None:
+            return
+        cdef object v
+        try:
+            v = (<Vector>raw).max()   # Decimal; raises on all-null morsel
+        except ValueError:
+            return
+        if self._result is None or v > self._result:
+            self._result = v
+        self._seen = True
+
+    cdef int64_t get_result_i64(self) noexcept:
+        return 0
+
+    cdef double get_result_f64(self) noexcept:
+        return 0.0
+
+    cdef void get_result_bytes(self, const char** out_ptr, size_t* out_len) noexcept:
+        out_ptr[0] = NULL; out_len[0] = 0
+
+    cdef bint is_null(self) noexcept:
+        return not self._seen
+
+    cpdef object get_result(self):
+        return self._result if self._seen else None

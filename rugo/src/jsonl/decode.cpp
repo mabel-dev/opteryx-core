@@ -572,14 +572,12 @@ static inline int64_t FastParseInt(const char* str, size_t len) {
     return negative ? -value : value;
 }
 
-// Fast double parsing using fast_float library (2-4x faster than std::stod)
+// Fast double parsing using the vendored fast_float library (no stdlib strtod/stod).
+// fast_float is a complete parser for JSON numbers; on a parse error it leaves the
+// output unchanged, so result stays 0.0 (no exception, no per-value std::string alloc).
 static inline double FastParseDouble(const char* str, size_t len) {
     double result = 0.0;
-    auto answer = fast_float::from_chars(str, str + len, result);
-    if (answer.ec != std::errc()) {
-        // Fallback to stod on error
-        return std::stod(std::string(str, len));
-    }
+    fast_float::from_chars(str, str + len, result);
     return result;
 }
 

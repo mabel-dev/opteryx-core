@@ -279,12 +279,14 @@ static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_
     const uint32_t           k     = v.data_length;
 
     // ── Dense fast-path ───────────────────────────────────────────────────────
-    // For dense vectors (draken_is_dense: data_length == length, every row its
-    // own slot) the compact path below would use an unordered_map to deduplicate
-    // arena offsets — but every code in the window is unique so the map provides
-    // zero benefit.  Instead, copy exactly the n slots in [start, start+n) with
-    // a single sequential scan and rebase long-string arena offsets inline.
-    if (draken_is_dense(&v)) {
+    // Reads physical slots src_s[start + i] directly, so it is valid ONLY when the
+    // selection is the identity permutation (selection[i] == i).  draken_is_dense
+    // (data_length == length) is NOT sufficient: a PERMUTATION (e.g. the result of
+    // str_take after a sort) also has data_length == length but selection[i] != i —
+    // taking this path would read rows in physical order and silently drop the sort.
+    // Require the IDENTITY flag; permutations fall through to the selection-honouring
+    // k<=n / k>n paths below.  (Per buffers.h: IDENTITY ⟹ PERMUTATION ⟹ dense.)
+    if (draken_is_dense(&v) && (v.flags & DRAKEN_SEL_IDENTITY)) {
         size_t total_arena = 0u;
         for (uint32_t i = 0; i < n; ++i) {
             const DrakenStringSlot* s = &src_s[start + i];

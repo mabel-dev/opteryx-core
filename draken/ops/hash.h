@@ -34,6 +34,7 @@
 #include "ops/int64_reductions.h" // i64_sum, i64_min, i64_max
 #include "ops/int64_arithmetic.h" // i64_add, i64_sub, …
 #include "ops/int64_gather.h"     // i64_take, i64_materialize, i64_compress
+#include "ops/int128_gather.h"    // i128_take, i128_slice, i128_materialize, i128_compress (DECIMAL128)
 #include "ops/int64_compare.h"    // i64_compare_scalar, i64_compare_vector
 #include "ops/int64_predicates.h" // i64_between, i64_in_list + CarcharSet
 #include "ops/fixed_int_ops.h"    // int8/16/32 kernels (D.6)
@@ -191,13 +192,48 @@ static inline void hash_int64(const DrakenVector& v, uint64_t* out, uint32_t n) 
     }
 }
 
+// DECIMAL128 (int128) row hash. CROSS-TIER CONSISTENT with hash_int64: a value that
+// fits int64 hashes via seed = its low 64 bits (identical to the int64-decimal of the
+// same value), so a DECIMAL128 key collides with a DECIMAL64 key of equal value in
+// mixed-tier group-by / joins. Wider values mix both 64-bit halves. Null → NULL_HASH.
+static inline void hash_decimal128(const DrakenVector& v, uint64_t* out, uint32_t n) {
+    if (n == 0) return;
+
+    const __int128* data    = static_cast<const __int128*>(v.data);
+    const uint8_t* validity = v.validity;
+    uint64_t scratch[1024];
+
+    uint32_t i = 0;
+    while (i < n) {
+        const uint32_t block = (n - i < 1024u) ? (n - i) : 1024u;
+        for (uint32_t j = 0; j < block; ++j) {
+            if (validity != nullptr &&
+                !((validity[(i + j) >> 3] >> ((i + j) & 7)) & 1u)) {
+                scratch[j] = NULL_HASH;
+            } else {
+                const __int128 x  = data[v.selection[i + j]];
+                const uint64_t lo = static_cast<uint64_t>(x);
+                const uint64_t hi = static_cast<uint64_t>(x >> 64);
+                scratch[j] = (hi == static_cast<uint64_t>(static_cast<int64_t>(lo) >> 63))
+                    ? lo
+                    : (lo ^ (hi * 0x9E3779B97F4A7C15ULL));
+            }
+        }
+        simd_hash_i64(scratch, out + i, block);
+        i += block;
+    }
+}
+
 // ---------------------------------------------------------------------------
-// OpsTable: flat array[101] of TypeOps, indexed by DrakenType enum value.
-// DRAKEN_NON_NATIVE == 100 is the highest tag → 101 entries cover all types.
+// OpsTable: flat array[104] of TypeOps, indexed by DrakenType enum value.
+// The D.11 tail extends past DRAKEN_NON_NATIVE (100): NULL=101, VECTOR_FP16=102,
+// DECIMAL128=103. 104 entries cover all tags. NULL / VECTOR_FP16 are handled at the
+// nanobind boundary and keep zero (null) slots here; DECIMAL128 fills only the
+// gather slots (its arithmetic/hash/reduction/compare are boundary-intercepted too).
 // Unfilled entries are zero-initialized (null function pointers).
 // ---------------------------------------------------------------------------
 struct OpsTable {
-    static constexpr unsigned kSize = 101u;
+    static constexpr unsigned kSize = 104u;
     TypeOps entries[kSize];
 
     OpsTable() noexcept {
@@ -376,6 +412,19 @@ struct OpsTable {
         entries[DRAKEN_DECIMAL].div_s = nullptr;
         entries[DRAKEN_DECIMAL].mod_s = nullptr;
         entries[DRAKEN_DECIMAL].neg   = nullptr;
+
+        // DECIMAL128 (int128, 16-byte): only the GATHER ops dispatch through OpsTable
+        // (slice/take/materialize/compress). Arithmetic, hash, reductions, and compare
+        // are all intercepted at the nanobind boundary BEFORE OpsTable (decimal_arith.h
+        // kernels), so those slots stay null. These four are itemsize-specific (16-byte),
+        // so they can't reuse the int64 slots the way DRAKEN_DECIMAL does.
+        entries[DRAKEN_DECIMAL128].take        = draken::ops::i128_take;
+        entries[DRAKEN_DECIMAL128].slice       = draken::ops::i128_slice;
+        entries[DRAKEN_DECIMAL128].materialize = draken::ops::i128_materialize;
+        entries[DRAKEN_DECIMAL128].compress    = draken::ops::i128_compress;
+        // hash slot: needed by the multi-column key-hash path (c_hash → draken_hash)
+        // and group-by/join keying. Cross-tier consistent with the int64 hash.
+        entries[DRAKEN_DECIMAL128].hash        = hash_decimal128;
 
         // D.8 — TIMESTAMP64: physical dispatch reuses INT64 kernels.
         // Hot path dispatches on DRAKEN_TIMESTAMP64 and never reads the logical

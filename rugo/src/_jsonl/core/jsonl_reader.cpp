@@ -2,6 +2,7 @@
 #include "structural_scan.hpp"
 #include <cstdio>
 #include <stdexcept>
+#include <utility>
 
 namespace rugo::_jsonl {
 
@@ -111,10 +112,29 @@ ReadResult JsonlReader::process_buffer() {
         read_buffer.size()
     );
 
-    // Step 2: Interpret buffer with projection/predicates
+    // Determine how much of the buffer holds COMPLETE records. A record is complete
+    // only when terminated by a newline; on a non-final chunk the bytes after the last
+    // newline are a partial record straddling the 64MB boundary. They must be carried
+    // to the next chunk, NOT parsed/counted here — otherwise that record is counted
+    // twice (once as a partial here, once when completed in the next chunk). On the
+    // final chunk (eof) the trailing newline-less record IS complete, so process all.
+    size_t process_len = read_buffer.size();
+    if (!eof) {
+        for (size_t i = markers.size(); i-- > 0; ) {
+            if (markers[i].marker_type == static_cast<uint8_t>(MarkerType::NEWLINE)) {
+                process_len = markers[i].position + 1;
+                markers.resize(i + 1);  // drop markers belonging to the carried tail
+                break;
+            }
+        }
+        // No newline in a non-final chunk => one record spans the whole buffer; process
+        // it anyway to make progress (the >chunk-size-record edge keeps prior behaviour).
+    }
+
+    // Step 2: Interpret only the complete-record prefix.
     InterpreterResult interp_result = interpret_jsonl(
         read_buffer.data(),
-        read_buffer.size(),
+        process_len,
         markers,
         context,
         predictor
@@ -125,8 +145,8 @@ ReadResult JsonlReader::process_buffer() {
         result.column_names = context.projected_columns;
     } else {
         // Extract unique column names from first record
-        if (!interp_result.all_records.empty()) {
-            const auto& first_record = interp_result.all_records[0];
+        if (interp_result.all_records.num_records() > 0) {
+            const RecordView first_record = interp_result.all_records[0];
             for (const auto& field : first_record) {
                 std::string key_name(
                     reinterpret_cast<const char*>(read_buffer.data() + field.key_start),
@@ -137,17 +157,15 @@ ReadResult JsonlReader::process_buffer() {
         }
     }
 
-    // Step 4: Copy records and buffer data
-    result.records = interp_result.all_records;
+    // Step 4: Records + the parsed prefix of the buffer (FieldSpans index into it).
+    // interp_result is local — move the record structure out instead of copying it.
     result.num_records = interp_result.num_records_passed;
-    result.buffer_data = read_buffer;
+    result.records = std::move(interp_result.all_records);
+    result.buffer_data.assign(read_buffer.begin(), read_buffer.begin() + process_len);
 
-    // Step 5: Track unconsumed bytes for next chunk
-    if (interp_result.bytes_consumed < read_buffer.size()) {
-        unconsumed_bytes.assign(
-            read_buffer.begin() + interp_result.bytes_consumed,
-            read_buffer.end()
-        );
+    // Step 5: Carry the un-parsed tail (the partial boundary record) to the next chunk.
+    if (process_len < read_buffer.size()) {
+        unconsumed_bytes.assign(read_buffer.begin() + process_len, read_buffer.end());
     } else {
         unconsumed_bytes.clear();
     }

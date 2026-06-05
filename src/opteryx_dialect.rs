@@ -33,9 +33,12 @@ impl Dialect for OpteryxDialect {
             || ('\u{0080}'..='\u{ffff}').contains(&ch)
     }
 
-    // [#2376] Opteryx identifiers can contain `-`
+    // Unquoted identifiers do NOT contain `-`: a bare `-` is always the subtraction
+    // operator, so `a-b` / `1-x` parse as arithmetic (standard SQL). Hyphenated names
+    // (e.g. blob-store paths like `my-bucket`) must be backtick-quoted, which bypasses
+    // this rule via `is_delimited_identifier_start`. (Reverts [#2376].)
     fn is_identifier_part(&self, ch: char) -> bool {
-        self.is_identifier_start(ch) || ch.is_ascii_digit() || ch == '-'
+        self.is_identifier_start(ch) || ch.is_ascii_digit()
     }
 
     fn is_delimited_identifier_start(&self, ch: char) -> bool {

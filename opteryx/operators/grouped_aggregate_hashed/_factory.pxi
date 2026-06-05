@@ -20,6 +20,7 @@ from draken.core.buffers cimport (
     DRAKEN_NVARCHAR,
     DRAKEN_VARBINARY,
     DRAKEN_DECIMAL,
+    DRAKEN_DECIMAL128,
     DRAKEN_TIMESTAMP64,
 )
 
@@ -47,6 +48,11 @@ cdef class _DeferredMaxCollector(BaseCollector):
 
 cdef class _DeferredAnyValueCollector(BaseCollector):
     """Resolves to AnyValueInt64/Float64/ObjectCollector on first accumulate."""
+    pass
+
+
+cdef class _DeferredAvgCollector(BaseCollector):
+    """Resolves to AvgCollector (int/float) or AvgDecimalCollector on first accumulate."""
     pass
 
 
@@ -96,7 +102,7 @@ cpdef tuple create_collectors(list aggregation_specs, list group_columns):
         elif fn in ("max",):
             c = _DeferredMaxCollector()
         elif fn in ("avg", "mean"):
-            c = AvgCollector()
+            c = _DeferredAvgCollector()
         elif fn == "count_distinct":
             c = CountDistinctCollector()
         elif fn == "any_value":
@@ -143,6 +149,17 @@ cpdef void resolve_deferred_collectors(
     for i in range(len(collectors)):
         c = <BaseCollector>collectors[i]
 
+        # SUM/MIN/MAX/AVG over a DECIMAL128 input are handled below (int128 collectors).
+        # ANY_VALUE / MEDIAN over DECIMAL128 are not yet wired (they would read raw
+        # int64/float → garbage), so fail loud for those two.
+        if isinstance(c, (_DeferredAnyValueCollector, _DeferredMedianCollector)):
+            vec = morsel.column(c.column_name)
+            if vec.unified().type == DRAKEN_DECIMAL128:
+                raise NotImplementedError(
+                    "ANY_VALUE / MEDIAN over a DECIMAL128 (precision > 18) input is "
+                    "not yet supported; CAST to DECIMAL(18, s) or DOUBLE."
+                )
+
         if isinstance(c, _DeferredSumCollector):
             vec = morsel.column(c.column_name)
             t = vec.unified().type
@@ -150,7 +167,11 @@ cpdef void resolve_deferred_collectors(
                 typed_c = SumInt64Collector()
             elif t == DRAKEN_DECIMAL:
                 typed_c = SumDecimalCollector()
-                (<SumDecimalCollector>typed_c)._factor = 10.0 ** (-vec._nb.logical_type_scale)
+                (<SumDecimalCollector>typed_c)._scale = vec._nb.logical_type_scale
+            elif t == DRAKEN_DECIMAL128:
+                typed_c = SumDecimal128Collector()
+                (<SumDecimal128Collector>typed_c)._scale = vec._nb.logical_type_scale
+                (<SumDecimal128Collector>typed_c)._precision = vec._nb.logical_type_precision
             else:
                 typed_c = SumFloat64Collector()
             typed_c.column_name = c.column_name
@@ -169,7 +190,13 @@ cpdef void resolve_deferred_collectors(
             elif t == DRAKEN_DECIMAL:
                 typed_c = MinMaxDecimalCollector()
                 (<MinMaxDecimalCollector>typed_c)._direction = 1
-                (<MinMaxDecimalCollector>typed_c)._factor = 10.0 ** (-vec._nb.logical_type_scale)
+                (<MinMaxDecimalCollector>typed_c)._scale = vec._nb.logical_type_scale
+                (<MinMaxDecimalCollector>typed_c)._precision = vec._nb.logical_type_precision
+            elif t == DRAKEN_DECIMAL128:
+                typed_c = MinMaxDecimal128Collector()
+                (<MinMaxDecimal128Collector>typed_c)._direction = 1
+                (<MinMaxDecimal128Collector>typed_c)._scale = vec._nb.logical_type_scale
+                (<MinMaxDecimal128Collector>typed_c)._precision = vec._nb.logical_type_precision
             elif t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR or t == DRAKEN_VARBINARY:
                 typed_c = MinMaxVarcharCollector()
                 (<MinMaxVarcharCollector>typed_c)._direction = 1
@@ -192,7 +219,13 @@ cpdef void resolve_deferred_collectors(
             elif t == DRAKEN_DECIMAL:
                 typed_c = MinMaxDecimalCollector()
                 (<MinMaxDecimalCollector>typed_c)._direction = -1
-                (<MinMaxDecimalCollector>typed_c)._factor = 10.0 ** (-vec._nb.logical_type_scale)
+                (<MinMaxDecimalCollector>typed_c)._scale = vec._nb.logical_type_scale
+                (<MinMaxDecimalCollector>typed_c)._precision = vec._nb.logical_type_precision
+            elif t == DRAKEN_DECIMAL128:
+                typed_c = MinMaxDecimal128Collector()
+                (<MinMaxDecimal128Collector>typed_c)._direction = -1
+                (<MinMaxDecimal128Collector>typed_c)._scale = vec._nb.logical_type_scale
+                (<MinMaxDecimal128Collector>typed_c)._precision = vec._nb.logical_type_precision
             elif t == DRAKEN_VARCHAR or t == DRAKEN_NVARCHAR or t == DRAKEN_VARBINARY:
                 typed_c = MinMaxVarcharCollector()
                 (<MinMaxVarcharCollector>typed_c)._direction = -1
@@ -212,6 +245,23 @@ cpdef void resolve_deferred_collectors(
                 typed_c = AnyValueFloat64Collector()
             else:
                 typed_c = AnyValueObjectCollector()
+            typed_c.column_name = c.column_name
+            typed_c.result_name = c.result_name
+            collectors[i] = typed_c
+
+        elif isinstance(c, _DeferredAvgCollector):
+            vec = morsel.column(c.column_name)
+            t = vec.unified().type
+            if t == DRAKEN_DECIMAL:
+                # Exact int64 sum, double divide (AVG is DOUBLE). The generic
+                # AvgCollector's decimal path lost precision (per-row float sum).
+                typed_c = AvgDecimalCollector()
+                (<AvgDecimalCollector>typed_c)._scale = vec._nb.logical_type_scale
+            elif t == DRAKEN_DECIMAL128:
+                typed_c = AvgDecimal128Collector()
+                (<AvgDecimal128Collector>typed_c)._scale = vec._nb.logical_type_scale
+            else:
+                typed_c = AvgCollector()
             typed_c.column_name = c.column_name
             typed_c.result_name = c.result_name
             collectors[i] = typed_c
@@ -249,5 +299,12 @@ cpdef void resolve_deferred_collectors(
             # reconstruct re-tags the column FLOAT64 so the key emerges as a
             # double, not the raw IEEE-754 bits surfaced as a giant integer.
             key_kinds[ki] = KEY_MULTI_FIXED_FLOAT64
+        elif t == DRAKEN_DECIMAL128:
+            # 16-byte int128 decimal key. The key store holds the raw int128 unscaled
+            # value in 16-byte slots and reapplies the (precision, scale) descriptor at
+            # reconstruct (set below). Grouping is hash-only and hash_shaped is
+            # cross-tier-consistent, so a DECIMAL128 key collides correctly with the
+            # int64-decimal of the same value.
+            key_kinds[ki] = KEY_MULTI_FIXED_DECIMAL128
         else:
             key_kinds[ki] = KEY_MULTI_FIXED_INT

@@ -145,6 +145,29 @@ class FlatColumn:
             names.extend(self.aliases)
         return names
 
+    @property
+    def column_type(self):
+        """Unified ColumnType for this column (TEMPORARY migration bridge).
+
+        A pure PROJECTION of the legacy `type` (+ side-car `precision`/`scale`/
+        `element_type`) into a `ColumnType` — derived, not a second source of truth, so
+        it cannot drift from `.type`. It does NOT fabricate: if the legacy data lacks
+        the information (e.g. a DECIMAL with no precision), it FAILS rather than guess.
+
+        EXIT PLAN (see plan "Exit Plan for Bridges & Shims"): readers migrate from
+        `.type` onto `.column_type`; in Phase 6 `FlatColumn.type` becomes a `ColumnType`
+        directly and this property is removed (or aliased to `.type`) along with the
+        `orso_to_column_type` bridge and OrsoTypes itself.
+        """
+        from opteryx.types._orso_types import orso_to_column_type
+
+        return orso_to_column_type(
+            self.type,
+            precision=self.precision,
+            scale=self.scale,
+            element_type=self.element_type,
+        )
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert column to dictionary for serialization."""
         return {

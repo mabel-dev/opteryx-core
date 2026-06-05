@@ -19,8 +19,8 @@ struct ReadResult {
     // Column names (in order of ParseContext.projected_columns)
     std::vector<std::string> column_names;
 
-    // FieldSpans for each record: [record_idx][field_idx]
-    std::vector<std::vector<FieldSpan>> records;
+    // Flat-arena document map for this chunk's records.
+    RecordSet records;
 
     // Raw buffer data (needed for FieldSpan offset resolution)
     std::vector<uint8_t> buffer_data;

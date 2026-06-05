@@ -101,6 +101,10 @@ def get_vector_type(obj) -> VectorType:
             "INTERVAL": VectorType.INTERVAL,
             "ARRAY": VectorType.ARRAY,
             "DECIMAL": VectorType.DECIMAL,
+            # DECIMAL128 (int128 tier) dispatches as a decimal — the scale-aware
+            # compare/arithmetic kernels intercept the physical tier at the native
+            # boundary, so the evaluator treats both tiers uniformly.
+            "DECIMAL128": VectorType.DECIMAL,
         }
         return _DRAKEN_TYPE_MAP.get(type_name, VectorType.UNKNOWN)
 

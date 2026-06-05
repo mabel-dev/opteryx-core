@@ -9,6 +9,8 @@ struct DecodedColumn {
   std::vector<uint8_t> valid_bits;       // Arrow-style validity bitmap: 1=valid, 0=null; empty=all-valid
   std::vector<int32_t> int32_values;
   std::vector<int64_t> int64_values;
+  std::vector<__int128> int128_values;   // FIXED_LEN_BYTE_ARRAY DECIMAL with width 9..16
+                                         //   (precision > 18 → DECIMAL128). type == "int128".
   std::vector<std::string> string_values; // For byte_array: either flat values (dict_indices empty)
                                            //   or the compact dictionary (dict_indices non-empty)
   std::vector<int32_t> dict_indices;      // non-empty → string_values is the dict; per-row indices

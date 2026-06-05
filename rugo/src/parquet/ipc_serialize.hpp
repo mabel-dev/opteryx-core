@@ -358,6 +358,24 @@ static void serialize_float64(std::vector<uint8_t>& out, const DecodedColumn& co
     write_bytes(out, col.float64_values.data(), data_len);
 }
 
+// TAG 12: int128 (DECIMAL128, FLBA width 9..16).
+// Wire format: tag(1) num_rows(4) null_bitmap_len(4) [null_bitmap] precision(1) scale(1)
+//              data_len(4) [int128_values] — the compact payload stores K present values
+//              (same convention as TAG_INT64); the deserialiser scatters to positional.
+// precision and scale are carried so the deserialiser can attach the LogicalType directly,
+// without a schema-driven coerce pass (DECIMAL128 vectors cannot be reinterpreted from i64).
+static void serialize_int128(std::vector<uint8_t>& out, const DecodedColumn& col,
+                              uint8_t precision, uint8_t scale) {
+    write_u8(out, 12);   // TAG_INT128
+    write_u32(out, static_cast<uint32_t>(col.num_rows));
+    write_null_bitmap(out, col);
+    write_u8(out, precision);
+    write_u8(out, scale);
+    uint32_t data_len = static_cast<uint32_t>(col.int128_values.size()) * 16;
+    write_u32(out, data_len);
+    write_bytes(out, col.int128_values.data(), data_len);
+}
+
 static void serialize_bool(std::vector<uint8_t>& out, const DecodedColumn& col) {
     write_u8(out, 5);
     write_u32(out, static_cast<uint32_t>(col.num_rows));
@@ -575,7 +593,9 @@ static void serialize_list_column(std::vector<uint8_t>& out, const DecodedColumn
  * Called from C++ worker threads — no GIL, no Python, no allocator contention.
  */
 static void serialize_decoded_column(const DecodedColumn& col,
-                                     std::vector<uint8_t>& out) {
+                                     std::vector<uint8_t>& out,
+                                     uint8_t decimal_precision = 38,
+                                     uint8_t decimal_scale = 0) {
     out.clear();
 
     // List columns (rep_levels present) take precedence over the flat byte_array path.
@@ -586,7 +606,9 @@ static void serialize_decoded_column(const DecodedColumn& col,
 
     const std::string& t = col.type;
 
-    if (t == "int64") {
+    if (t == "int128") {
+        serialize_int128(out, col, decimal_precision, decimal_scale);
+    } else if (t == "int64") {
         serialize_int64(out, col);
     } else if (t == "int32") {
         serialize_int32(out, col);

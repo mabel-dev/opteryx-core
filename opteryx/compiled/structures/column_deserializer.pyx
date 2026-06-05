@@ -32,14 +32,14 @@ are treated as fully valid.
 from libc.stdint cimport uint8_t, uint16_t, int32_t, int64_t, uint32_t, uint64_t
 from libc.stddef cimport size_t
 from libc.stdlib cimport malloc, free
-from libc.string cimport memcpy
+from libc.string cimport memcpy, memset
 from libcpp.vector cimport vector
 from cpython.object cimport PyObject
 
 from opteryx.compiled.structures.memory_pool cimport MemoryPool, ReadResult, CppMemoryPool
 
 from draken.core.buffers cimport DrakenVector, DrakenType
-from draken.core.buffers cimport DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_BOOL, DRAKEN_VARCHAR
+from draken.core.buffers cimport DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64, DRAKEN_BOOL, DRAKEN_VARCHAR, DRAKEN_DECIMAL128
 from draken.vectors.vector cimport Vector, from_decoded as _vector_from_decoded
 from draken.vectors.vector cimport dict_int64_from_decoded as _dict_i64_from_decoded
 
@@ -81,14 +81,18 @@ cdef extern from "ipc_deserialize.hpp" namespace "opteryx":
         IpcKind_Float32 "opteryx::IpcKind::Float32"
         IpcKind_Float64 "opteryx::IpcKind::Float64"
         IpcKind_Bool    "opteryx::IpcKind::Bool"
+        IpcKind_Int128  "opteryx::IpcKind::Int128"
 
     cdef struct DecodedFixedColumn:
         IpcKind  kind
         uint32_t num_rows
         void*    data
+        uint32_t data_len   # compact payload bytes (K * element_size, K <= num_rows)
         uint8_t* null_bitmap
         int      status
         uint8_t  tag
+        uint8_t  decimal_precision   # DECIMAL128 only
+        uint8_t  decimal_scale       # DECIMAL128 only
 
     void deserialize_fixed_column(const uint8_t* data, int64_t length,
                                   DecodedFixedColumn& out) nogil
@@ -157,25 +161,85 @@ cdef inline Vector _wrap_raw_pyobj(PyObject* raw):
 cdef inline Vector _wrap_decoded_fixed(DecodedFixedColumn& dc):
     """Transfer ownership of draken_malloc'd buffers in dc into a new Vector.
 
-    dc.data and dc.null_bitmap are draken_malloc'd by ipc_deserialize.cpp.
-    _vector_from_decoded transfers their ownership on success.
-    On failure the MemoryError propagates to the caller; the buffers are leaked
-    (acceptable — OOM path, system is already distressed).
+    Parquet omits null rows from the value stream, so dc.data may be a COMPACT
+    buffer of K present values (K <= num_rows). The Draken model requires a
+    POSITIONAL buffer of num_rows slots (row i at slot i), with null slots holding
+    zero. When dc.null_bitmap is set and data_len < num_rows * element_size we
+    scatter the compact values to their row positions here, at the Draken boundary.
+    Bool columns use bit-packed data where the byte count doesn't map 1:1 to rows —
+    they skip the scatter (their null bitmap already governs access).
     """
     cdef DrakenType dtype
+    cdef uint32_t elem_size
+    cdef bint is_decimal128 = False
+    cdef Vector v128s
+    cdef Vector vout
     if dc.kind == IpcKind_Int64:
         dtype = DRAKEN_INT64
+        elem_size = 8
     elif dc.kind == IpcKind_Float64:
         dtype = DRAKEN_FLOAT64
+        elem_size = 8
     elif dc.kind == IpcKind_Float32:
         dtype = DRAKEN_FLOAT32
+        elem_size = 4
     elif dc.kind == IpcKind_Bool:
         dtype = DRAKEN_BOOL
+        elem_size = 0   # bit-packed; skip scatter
+    elif dc.kind == IpcKind_Int128:
+        # DECIMAL128: 16-byte __int128 per slot. Scatter (compact→positional) handled
+        # below. After building the vector we attach the (precision, scale) descriptor
+        # so it emerges as a properly-typed DRAKEN_DECIMAL128 with a LogicalType.
+        dtype = DRAKEN_DECIMAL128
+        elem_size = 16
+        is_decimal128 = True
     else:
         draken_free(dc.data)
         draken_free(dc.null_bitmap)
         raise ValueError(f"Unexpected IpcKind from C++ deserialiser: {<int>dc.kind}")
-    return _vector_from_decoded(dc.data, dc.null_bitmap, dc.num_rows, dtype)
+
+    # Scatter compact → positional when the buffer is shorter than num_rows * elem_size.
+    # This happens for nullable plain-encoded columns (Parquet stores K < N values).
+    cdef uint32_t full_bytes = dc.num_rows * elem_size
+    cdef void*    pos_data
+    cdef uint8_t* src
+    cdef uint8_t* dst
+    cdef uint32_t row_i
+    cdef uint32_t compact_i
+    cdef uint8_t  bit
+
+    if (elem_size > 0
+            and dc.null_bitmap != NULL
+            and dc.data_len < full_bytes
+            and dc.num_rows > 0):
+        # Allocate a full num_rows * elem_size positional buffer, zero-filled.
+        pos_data = draken_malloc(<size_t>full_bytes)
+        if pos_data == NULL:
+            draken_free(dc.data)
+            draken_free(dc.null_bitmap)
+            raise MemoryError()
+        memset(<uint8_t*>pos_data, 0, <size_t>full_bytes)
+        # Scatter: walk every row, copy the next compact value when the row is valid.
+        src = <uint8_t*>dc.data
+        dst = <uint8_t*>pos_data
+        compact_i = 0
+        for row_i in range(dc.num_rows):
+            bit = (dc.null_bitmap[row_i >> 3] >> (row_i & 7)) & 1
+            if bit:
+                memcpy(dst + row_i * elem_size,
+                       src + compact_i * elem_size,
+                       elem_size)
+                compact_i += 1
+        draken_free(dc.data)
+        v128s = _vector_from_decoded(pos_data, dc.null_bitmap, dc.num_rows, dtype)
+        if is_decimal128 and dc.num_rows > 0:
+            v128s._nb.set_decimal_descriptor(dc.decimal_precision, dc.decimal_scale)
+        return v128s
+
+    vout = _vector_from_decoded(dc.data, dc.null_bitmap, dc.num_rows, dtype)
+    if is_decimal128 and dc.num_rows > 0:
+        vout._nb.set_decimal_descriptor(dc.decimal_precision, dc.decimal_scale)
+    return vout
 
 
 # ─── Numeric dict builders ────────────────────────────────────────────────────

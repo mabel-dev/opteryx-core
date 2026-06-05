@@ -144,6 +144,9 @@ cdef Vector _scalar_to_draken_constant(object value, Py_ssize_t n):
         sign, digits, exponent = value.as_tuple()
         scale = max(0, -int(exponent))
         precision = max(len(digits), scale + 1)
+        # p ≤ 18 → int64-backed DECIMAL; 19 ≤ p ≤ 38 → int128-backed DECIMAL128.
+        if precision > 18:
+            return Vector(_draken_native.vector_decimal128_from_constant(value, n, precision, scale))
         return Vector(_draken_native.vector_decimal_from_constant(value, n, precision, scale))
     if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
         ordinal = (value - _EPOCH_DATE).days

@@ -64,6 +64,35 @@ cdef int AGG_RESULT_BYTES  = 2
 cdef int AGG_RESULT_OBJECT = 3
 
 
+# Build a DECIMAL result Vector from a single Python Decimal, deriving the exact
+# (precision, scale) from the value itself (SUM/MIN/MAX preserve the column scale).
+# int64-backed for precision ≤ 18, else int128-backed (DECIMAL128). Used by the
+# decimal aggregate result-emission path — the generic int64 builder truncates a
+# Decimal to int.
+def _decimal_result_vector(object value):
+    from decimal import Decimal as _Decimal
+    from draken.draken_native import (
+        vector_decimal_from_sequence as _vdfs,
+        vector_decimal128_from_sequence as _vd128fs,
+    )
+    if value is None or not isinstance(value, _Decimal):
+        # defensive: shouldn't happen on the decimal path
+        from draken.interop.vector_sequence import vector_from_sequence as _vfs
+        return _vfs([value])
+    _t = value.as_tuple()
+    cdef int scale = (-_t[2]) if _t[2] < 0 else 0
+    cdef int precision = len(_t[1])
+    if precision < scale + 1:
+        precision = scale + 1
+    if precision < 1:
+        precision = 1
+    if precision <= 18:
+        return _vdfs([value], precision, scale)
+    if precision > 38:
+        precision = 38
+    return _vd128fs([value], precision, scale)
+
+
 # ---------------------------------------------------------------------------
 # Vector type tags — classified once per aggregate, cached as int
 # ---------------------------------------------------------------------------
