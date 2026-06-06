@@ -31,7 +31,8 @@ from opteryx.exceptions import SqlError
 from opteryx.expression import NodeType
 from opteryx.models import QueryProperties
 from opteryx.utils import series
-from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.logical_type import LogicalCategory, ColumnType
+from opteryx.types import logical_type as _lt
 from opteryx.types import PYTHON_TO_SQL_MAP
 from draken.interop.vector_sequence import vector_from_sequence
 
@@ -45,7 +46,7 @@ def _column_metadata(columns):
 
     for column in columns:
         column_names.append(column.schema_column.identity)
-        column_types.append(column.schema_column.type)
+        column_types.append(column.schema_column.category)
 
     return column_names, column_types
 
@@ -70,12 +71,12 @@ def _resolve_column_dtype(dtype, values):
     VALUES/GENERATE_SERIES carry a real ``LogicalCategory`` member, which passes
     through unchanged. The UNNEST-literal binder path leaves the column type
     as the integer sentinel ``0`` (unknown), and GENERATE_SERIES may leave it
-    as ``LogicalCategory._MISSING_TYPE``; for those, infer the element type from the
+    as ``None`` (unknown type); for those, infer the element type from the
     first non-null value so non-integer literals build a correctly typed
     vector instead of defaulting to INT64 and mis-casting. An empty/all-null
     sequence yields ``None`` (INT64 all-null column).
     """
-    if dtype is not None and dtype != 0 and dtype is not LogicalCategory._MISSING_TYPE:
+    if dtype is not None:
         return dtype
     for value in values:
         if value is not None:
@@ -108,13 +109,14 @@ def _restore_temporal_series_args(args):
     restored_args = []
 
     for arg in args:
-        if arg.type == LogicalCategory.DATE and isinstance(arg.value, Integral):
+        _arg_cat = arg.type.category if isinstance(arg.type, ColumnType) else arg.type
+        if _arg_cat == LogicalCategory.DATE and isinstance(arg.value, Integral):
             restored = copy.copy(arg)
             restored.value = _EPOCH_DATE + datetime.timedelta(days=int(arg.value))
             restored_args.append(restored)
             continue
 
-        if arg.type == LogicalCategory.TIMESTAMP and isinstance(arg.value, Integral):
+        if _arg_cat == LogicalCategory.TIMESTAMP and isinstance(arg.value, Integral):
             restored = copy.copy(arg)
             restored.value = _EPOCH_DT + datetime.timedelta(microseconds=int(arg.value))
             restored_args.append(restored)

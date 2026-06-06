@@ -262,6 +262,13 @@ InterpreterResult interpret_jsonl_threaded(
     InterpreterResult result;
     if (buffer_length == 0) { result.bytes_consumed = 0; return result; }
 
+    // Adaptive masking: the masked scan drops in-string structurals (fewer FSM steps) but
+    // costs ~1.4× scan, so it only nets out at high in-string density (stringified-JSON-ish
+    // fields). Sample the head once and decide; correctness is identical either way (the FSM
+    // handles escapes when unmasked; unescaping at extract is independent of this choice).
+    const size_t sample = std::min<size_t>(buffer_length, static_cast<size_t>(256) << 10);
+    const bool use_masked = sample_instring_density(buffer_data, sample) >= 0.40;
+
     size_t hw = std::thread::hardware_concurrency();
     if (hw == 0) hw = 1;
     size_t nt = std::min(hw, max_threads ? max_threads : hw);
@@ -274,7 +281,7 @@ InterpreterResult interpret_jsonl_threaded(
 
     if (nt <= 1) {
         // Small input — single-threaded scan + interpret.
-        auto markers = scan_structural_markers(buffer_data, buffer_length);
+        auto markers = scan_structural_markers(buffer_data, buffer_length, use_masked);
         return interpret_jsonl(buffer_data, buffer_length, markers, context, predictor);
     }
 
@@ -309,10 +316,12 @@ InterpreterResult interpret_jsonl_threaded(
                 std::vector<MarkerPosition> markers;
                 markers.reserve((e - s) / 3);
                 const uint8_t* lut = structural_lut();
-                scan_structural(buffer_data + s, e - s, [&](uint32_t pos, uint8_t ch) {
+                auto emit = [&](uint32_t pos, uint8_t ch) {
                     markers.push_back(MarkerPosition(static_cast<uint32_t>(pos + s),
                                                      static_cast<MarkerType>(lut[ch] - 1)));
-                });
+                };
+                if (use_masked) scan_structural_masked(buffer_data + s, e - s, emit);
+                else            scan_structural(buffer_data + s, e - s, emit);
                 OrdinalPredictor local_pred;  // interpret does not use it; keep thread-local
                 partial[c] = interpret_jsonl(buffer_data, buffer_length, markers, context, local_pred);
             }));

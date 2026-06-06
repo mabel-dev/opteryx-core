@@ -22,20 +22,18 @@ NUMERIC_VECTOR_ELEMENT_TYPES = frozenset(
 
 def resolve_node_type(node) -> tuple[Optional[LogicalCategory], Optional[LogicalCategory]]:
     """Return the logical type and element type carried by a node."""
+    from opteryx.types.logical_type import ColumnType
+
     schema_column = getattr(node, "schema_column", None)
 
-    if schema_column is not None and getattr(schema_column, "type", None) not in (
-        None,
-        LogicalCategory._MISSING_TYPE,
-    ):
-        node_type = getattr(schema_column, "type", None)
+    if schema_column is not None and getattr(schema_column, "category", None) is not None:
+        node_type = getattr(schema_column, "category", None)
     else:
-        node_type = getattr(node, "type", None)
+        _raw_type = getattr(node, "type", None)
+        # Phase 2: node.type is ColumnType; extract category for LogicalCategory callers.
+        node_type = _raw_type.category if isinstance(_raw_type, ColumnType) else _raw_type
 
-    if schema_column is not None and getattr(schema_column, "element_type", None) not in (
-        None,
-        LogicalCategory._MISSING_TYPE,
-    ):
+    if schema_column is not None and getattr(schema_column, "element_type", None) is not None:
         element_type = getattr(schema_column, "element_type", None)
     else:
         element_type = getattr(node, "element_type", None)
@@ -62,7 +60,10 @@ def node_is_literal_numeric_vector(node) -> bool:
 
     if node is None or node.node_type != NodeType.LITERAL:
         return False
-    if getattr(node, "type", None) == LogicalCategory.VECTOR:
+    from opteryx.types.logical_type import ColumnType as _ColumnType
+    _ntype = getattr(node, "type", None)
+    _ncat = _ntype.category if isinstance(_ntype, _ColumnType) else _ntype
+    if _ncat == LogicalCategory.VECTOR:
         return True
     value = getattr(node, "value", None)
 

@@ -22,7 +22,6 @@ from opteryx.exceptions import NotSupportedError
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.types.logical_type import LogicalCategory
-from opteryx.types.logical_type import LogicalCategory
 from opteryx.utils import single_item_cache
 
 
@@ -60,7 +59,7 @@ class PredicatePushable:
         # Boolean-returning functions are their own predicate — push without further analysis
         if (
             operator.condition.node_type == NodeType.FUNCTION
-            and getattr(getattr(operator.condition, "schema_column", None), "type", None)
+            and getattr(getattr(operator.condition, "schema_column", None), "category", None)
             == LogicalCategory.BOOLEAN
         ):
             return True
@@ -134,7 +133,7 @@ class PredicatePushable:
 
             from opteryx.types.logical_type import TIMESTAMP, VARBINARY
 
-            if root.right.schema_column.type == LogicalCategory.DATE:
+            if root.right.schema_column.category == LogicalCategory.DATE:
                 date_val = root.right.value
                 if getattr(date_val, "item", None) is not None:
                     date_val = date_val.item()
@@ -144,11 +143,11 @@ class PredicatePushable:
                 raise NotSupportedError()
             if root.right.node_type != NodeType.LITERAL:
                 raise NotSupportedError()
-            if root.left.schema_column.type == LogicalCategory.VARCHAR:
+            if root.left.schema_column.category == LogicalCategory.VARCHAR:
                 root.left.schema_column.column_type = VARBINARY
-            if root.right.schema_column.type == LogicalCategory.VARCHAR:
+            if root.right.schema_column.category == LogicalCategory.VARCHAR:
                 root.right.schema_column.column_type = VARBINARY
-            if root.right.schema_column.type != root.left.schema_column.type:
+            if root.right.schema_column.category != root.left.schema_column.category:
                 raise NotSupportedError()
             return (
                 root.left.value,

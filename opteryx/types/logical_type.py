@@ -67,10 +67,11 @@ class LogicalCategory(Enum):
     a separate enum: DOUBLE≡FLOAT, BLOB≡VARBINARY, STRUCT/JSONB≡NVARCHAR. Values are
     the canonical string name (so `.value` round-trips through serialization and
     `from_name`).
-    """
 
-    # Sentinel for missing/unknown types (binder bootstrap).
-    _MISSING_TYPE = "_MISSING_TYPE"
+    Unknown/unresolved types are represented by Python `None`, not by a sentinel
+    enum member. Any code that needs to check for an unknown type should use
+    `x is None` rather than comparing against a sentinel.
+    """
 
     NULL = "NULL"
     BOOLEAN = "BOOLEAN"
@@ -470,28 +471,79 @@ _STRING_TYPES = {LogicalCategory.VARCHAR, LogicalCategory.NVARCHAR, LogicalCateg
 _LARGE_OBJECT_TYPES = {LogicalCategory.VARBINARY, LogicalCategory.ARRAY, LogicalCategory.NVARCHAR, LogicalCategory.VECTOR}
 
 
-def find_compatible_type(types: list) -> LogicalCategory:
-    """Find a type that can represent all types in the list (promotion rules)."""
-    if not types:
-        return LogicalCategory.NULL
-    non_null = [t for t in types if t != LogicalCategory.NULL]
+def find_compatible_type(types: list) -> Optional["ColumnType"]:
+    """Find a ColumnType that can represent all types in the list (promotion rules).
+
+    Accepts: list of ColumnType | LogicalCategory | None values.
+    Returns: ColumnType | None (None when types is empty or all-null/unknown).
+    """
+    # Normalize each item to a LogicalCategory for dispatch logic.
+    def _to_lc(t):
+        if t is None:
+            return None
+        if isinstance(t, LogicalCategory):
+            return t
+        try:
+            return t.category  # ColumnType
+        except Exception:
+            return None
+
+    lc_types = [_to_lc(t) for t in types]
+    non_null = [t for t in lc_types if t is not None and t != LogicalCategory.NULL]
+
     if not non_null:
-        return LogicalCategory.NULL
+        return None
+
     if len(set(non_null)) == 1:
-        return non_null[0]
-    if all(t in _NUMERIC_TYPES or t == LogicalCategory.BOOLEAN for t in non_null):
+        result_lc = non_null[0]
+    elif all(t in _NUMERIC_TYPES or t == LogicalCategory.BOOLEAN for t in non_null):
         if LogicalCategory.DECIMAL in non_null:
-            return LogicalCategory.DECIMAL
-        if LogicalCategory.FLOAT in non_null:
-            return LogicalCategory.FLOAT
-        if LogicalCategory.INTEGER in non_null:
-            return LogicalCategory.INTEGER
-        return LogicalCategory.BOOLEAN
-    if any(t in _TEMPORAL_TYPES for t in non_null):
-        return LogicalCategory.VARCHAR
-    if any(t in _COMPLEX_TYPES for t in non_null):
-        return LogicalCategory.NVARCHAR
-    return LogicalCategory.VARCHAR
+            result_lc = LogicalCategory.DECIMAL
+        elif LogicalCategory.FLOAT in non_null:
+            result_lc = LogicalCategory.FLOAT
+        elif LogicalCategory.INTEGER in non_null:
+            result_lc = LogicalCategory.INTEGER
+        else:
+            result_lc = LogicalCategory.BOOLEAN
+    elif any(t in _TEMPORAL_TYPES for t in non_null):
+        result_lc = LogicalCategory.VARCHAR
+    elif any(t in _COMPLEX_TYPES for t in non_null):
+        result_lc = LogicalCategory.NVARCHAR
+    else:
+        result_lc = LogicalCategory.VARCHAR
+
+    # Convert LogicalCategory result to canonical ColumnType.
+    _LC_TO_CT = {
+        LogicalCategory.BOOLEAN: BOOLEAN,
+        LogicalCategory.INTEGER: INT64,
+        LogicalCategory.FLOAT: FLOAT64,
+        LogicalCategory.DECIMAL: None,  # handled below
+        LogicalCategory.DATE: DATE,
+        LogicalCategory.INTERVAL: INTERVAL,
+        LogicalCategory.VARCHAR: VARCHAR,
+        LogicalCategory.NVARCHAR: NVARCHAR,
+        LogicalCategory.VARBINARY: VARBINARY,
+        LogicalCategory.VARIANT: VARIANT,
+        LogicalCategory.NULL: NULL,
+    }
+    ct = _LC_TO_CT.get(result_lc)
+    if ct is not None:
+        return ct
+    if result_lc == LogicalCategory.DECIMAL:
+        # Try to extract actual p/s from ColumnType inputs; fall back to wide default.
+        from opteryx.types.type_unification import compute_result_logical_type
+        ct_inputs = [t for t in types if isinstance(t, ColumnType) and t.category in (LogicalCategory.DECIMAL, LogicalCategory.INTEGER)]
+        if len(ct_inputs) >= 2:
+            try:
+                return compute_result_logical_type(ct_inputs[0], ct_inputs[1], "Plus", LogicalCategory.DECIMAL)
+            except Exception:
+                pass
+        return DECIMAL(38, 18)
+    if result_lc == LogicalCategory.TIMESTAMP:
+        return TIMESTAMP()
+    if result_lc == LogicalCategory.TIME:
+        return TIME()
+    return None
 
 
 def sql_to_column_type(sql_type, precision=None, scale=None, element_type=None):

@@ -131,10 +131,10 @@ inline uint64_t _mask_find_escaped(uint64_t backslash, uint64_t* prev) {
 // escape/in-string state across 64-byte words; safe to start mid-buffer at a record boundary
 // (callers split on newlines, which are never inside a string).
 //
-// SHELVED, NOT THE DEFAULT. Benchmarks showed masking costs ~1.4× scan and only nets out
-// above ~40% in-string density (e.g. stringified-JSON fields); below that the fixed scan
-// overhead loses to the unmasked scan + the FSM's ~free escaped-quote handling. Retained for
-// an adaptive high-density path (gate on sampled in-string density, like the read prefilter).
+// ADAPTIVE, NOT THE DEFAULT. Masking costs ~1.4× scan and only nets out above ~40% in-string
+// density (e.g. stringified-JSON fields); below that the unmasked scan + the FSM's ~free
+// escaped-quote handling wins. interpret_jsonl_threaded samples in-string density on the head
+// (sample_instring_density) and selects this path only above the threshold.
 template <class Emit>
 inline void scan_structural_masked(const uint8_t* data, size_t length, Emit&& emit) {
     const uint8_t* lut = structural_lut();
@@ -187,12 +187,38 @@ inline void scan_structural_masked(const uint8_t* data, size_t length, Emit&& em
     }
 }
 
-// SIMD-assisted scan that materialises all marker positions into a vector.
-// Prefer scan_structural() + a callback when you can avoid materialising.
+// Estimate the fraction of structural markers that masking would drop (those inside string
+// values: in-string commas/colons/brackets, backslashes, escaped quotes — not delimiter
+// quotes). A cheap scalar pass over a sample; the caller switches to the masked scan only
+// when this is high enough that the build savings beat masking's ~1.4× scan cost (~0.40).
+inline double sample_instring_density(const uint8_t* data, size_t len) {
+    const uint8_t* lut = structural_lut();
+    size_t total = 0, dropped = 0;
+    bool in_s = false, esc = false;
+    for (size_t i = 0; i < len; ++i) {
+        const uint8_t c = data[i];
+        const bool is_marker = lut[c] != 0;
+        if (in_s) {
+            if (esc)         { esc = false; if (is_marker) { ++total; ++dropped; } }
+            else if (c == '\\') { esc = true; ++total; ++dropped; }            // backslash: dropped
+            else if (c == '"')  { in_s = false; ++total; }                     // close delimiter: kept
+            else if (is_marker) { ++total; ++dropped; }                        // in-string structural: dropped
+        } else {
+            if (c == '"')    { in_s = true; ++total; }                         // open delimiter: kept
+            else if (is_marker) { ++total; }                                   // structural: kept
+        }
+    }
+    return total ? static_cast<double>(dropped) / static_cast<double>(total) : 0.0;
+}
+
+// SIMD-assisted scan that materialises all marker positions into a vector. When `masked`,
+// uses scan_structural_masked (in-string structurals dropped); otherwise the plain scan.
+// Prefer scan_structural()/scan_structural_masked() + a callback when you can avoid
+// materialising.
 std::vector<MarkerPosition> scan_structural_markers(
     const uint8_t* data,
     size_t length,
-    bool use_simd = true
+    bool masked = false
 );
 
 }  // namespace rugo::_jsonl

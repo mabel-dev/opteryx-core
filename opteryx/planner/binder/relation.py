@@ -73,18 +73,22 @@ def _types_compatible(src, tgt) -> bool:
     """Permitted source→target type relationships for INSERT.
 
     Strict: exact match, NULL into anything, or INTEGER → DOUBLE widening.
-    Unresolved literal types (_MISSING_TYPE) are permitted at bind time —
+    Unresolved literal types (None) are permitted at bind time —
     runtime catches real mismatches.
     """
-    from opteryx.types.logical_type import LogicalCategory
+    from opteryx.types.logical_type import LogicalCategory, ColumnType
 
-    if src == tgt:
+    # Normalize ColumnType → LogicalCategory for comparison.
+    src_lc = src.category if isinstance(src, ColumnType) else src
+    tgt_lc = tgt.category if isinstance(tgt, ColumnType) else tgt
+
+    if src_lc == tgt_lc:
         return True
-    if src == LogicalCategory.NULL:
+    if src_lc == LogicalCategory.NULL:
         return True
-    if src == LogicalCategory._MISSING_TYPE:
+    if src_lc is None:
         return True
-    if src == LogicalCategory.INTEGER and tgt == LogicalCategory.DOUBLE:
+    if src_lc == LogicalCategory.INTEGER and tgt_lc == LogicalCategory.DOUBLE:
         return True
     return False
 
@@ -166,14 +170,14 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
                 target_name = f"{target_name}_{seen_names[target_name]}"
             else:
                 seen_names[target_name] = 0
-            if sc.type == LogicalCategory._MISSING_TYPE or sc.type == LogicalCategory.NULL:
+            if sc.category is None or sc.category == LogicalCategory.NULL:
                 raise UnsupportedSyntaxError(
                     f"CTAS column '{target_name}' has unresolved type; "
                     "specify the SELECT's column types explicitly"
                 )
             flat = SchemaColumn(
                 name=target_name,
-                type=sc.type,
+                type=sc.category,
                 nullable=getattr(sc, "nullable", True),
             )
             target_columns.append(flat)
@@ -224,7 +228,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
                 "visit_insert: source feeder has no bound columns"
             )
         source_column_count = len(feeder.columns)
-        source_types = [c.schema_column.type for c in feeder.columns]
+        source_types = [c.schema_column.category for c in feeder.columns]
 
     # ---- 2. Target column order (schema order, or explicit list order) ----
     explicit_columns = getattr(node, "explicit_columns", None)
@@ -255,10 +259,10 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
 
     for src_idx, target_col in enumerate(target_columns_in_order):
         src_type = source_types[src_idx]
-        if not _types_compatible(src_type, target_col.type):
+        if not _types_compatible(src_type, target_col.category):
             raise UnsupportedSyntaxError(
                 f"INSERT type mismatch on column '{target_col.name}': "
-                f"source {src_type} is not compatible with target {target_col.type}"
+                f"source {src_type} is not compatible with target {target_col.category}"
             )
 
     # ---- 4. Build column mapping (source idx → target schema idx) ----

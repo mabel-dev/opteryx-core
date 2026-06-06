@@ -25,7 +25,7 @@ OMT = NamedTuple(
 
 
 class OperatorMapType(NamedTuple):
-    result_type: OT
+    result_type: Optional[OT]
     operation_function: Optional[Callable] = None
     cost_estimate: float = 100.0
 
@@ -36,7 +36,7 @@ OMT = OperatorMapType
 OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.ARRAY       , LC.ARRAY       , 'ArrayContainsAll'        ): OMT(OT.BOOLEAN, None, 100.0),
     (LC.ARRAY       , LC.ARRAY       , 'AtArrow'                 ): OMT(OT.BOOLEAN, None, 100.0),
-    (LC.ARRAY       , LC.INTEGER     , 'MapAccess'               ): OMT(OT._MISSING_TYPE, None, 100.0),
+    (LC.ARRAY       , LC.INTEGER     , 'MapAccess'               ): OMT(None, None, 100.0),
     (LC.BOOLEAN     , LC.ARRAY       , 'InList'                  ): OMT(OT.BOOLEAN, None, 100.0),
     (LC.BOOLEAN     , LC.ARRAY       , 'NotInList'               ): OMT(OT.BOOLEAN, None, 100.0),
     (LC.BOOLEAN     , LC.BOOLEAN     , 'And'                     ): OMT(OT.BOOLEAN, None, 100.0),
@@ -404,8 +404,15 @@ def _is_internal_operator(operator: str) -> bool:
     }
 
 
-def determine_type(node) -> OT:
-    # initial version, needs to be improved
+def determine_type(node):
+    """Return the ColumnType for the expression rooted at *node*, or None when unknown."""
+    from opteryx.types.logical_type import (
+        BOOLEAN, INT64, FLOAT64, DATE, INTERVAL, VARCHAR, NVARCHAR,
+        VARBINARY, VARIANT, NULL, TIMESTAMP, TIME, ARRAY, DECIMAL,
+        ColumnType,
+    )
+    from opteryx.types.type_unification import _CANONICAL_BY_CATEGORY, compute_result_logical_type
+
     if node.node_type in (
         NodeType.UNARY_OPERATOR,
         NodeType.AND,
@@ -418,89 +425,124 @@ def determine_type(node) -> OT:
             "IsFalse",
             "IsNotTrue",
             "IsNotFalse",
-        ) and node.centre.schema_column.type not in (OT.BOOLEAN, OT._MISSING_TYPE, 0):
+        ) and node.centre.schema_column.category not in (OT.BOOLEAN, None):
             raise IncorrectTypeError(
-                f"Expected a BOOLEAN value for {convert_camel_to_sql_case(node.value)}, but received {node.centre.schema_column.type}."
+                f"Expected a BOOLEAN value for {convert_camel_to_sql_case(node.value)}, but received {node.centre.schema_column.category}."
             )
         if node.value == "BitwiseNot":
-            operand_type = node.centre.schema_column.type
-            if operand_type not in (OT.INTEGER, OT._MISSING_TYPE, 0):
+            operand_type = node.centre.schema_column.category
+            if operand_type not in (OT.INTEGER, None):
                 raise IncorrectTypeError(
                     f"Expected an INTEGER value for bitwise NOT (~), but received {operand_type}."
                 )
-            return OT.INTEGER
-        return OT.BOOLEAN
+            return INT64
+        return BOOLEAN
     if node.node_type == NodeType.NESTED:
         return determine_type(node.centre)
     if node.node_type == NodeType.WILDCARD:
-        return OT._MISSING_TYPE
+        return None
     if node.node_type == NodeType.EXPRESSION_LIST:
-        if node.parameters[-1].type is not None:
-            return node.parameters[-1].type
-        return OT._MISSING_TYPE
+        return node.parameters[-1].type  # ColumnType | None
     if node.node_type == NodeType.LITERAL:
-        return node.type
+        return node.type  # ColumnType
 
     if node.value in ("NotInSubQuery", "InSubQuery"):
-        return OT.BOOLEAN
+        return BOOLEAN
 
     if node.schema_column:
-        return node.schema_column.type
+        return node.schema_column.column_type  # ColumnType | None
 
-    if node.left.node_type == NodeType.LITERAL:
-        left_type = node.left.type
-    elif node.left.schema_column:
-        left_type = node.left.schema_column.type
+    # Get left/right ColumnTypes
+    left_ct = None
+    right_ct = None
+    if node.left is not None:
+        if node.left.node_type == NodeType.LITERAL:
+            left_ct = node.left.type
+        elif node.left.schema_column:
+            left_ct = node.left.schema_column.column_type
 
-    if node.right.node_type == NodeType.LITERAL:
-        right_type = node.right.type
-    elif node.right.schema_column:
-        right_type = node.right.schema_column.type
+    if node.right is not None:
+        if node.right.node_type == NodeType.LITERAL:
+            right_ct = node.right.type
+        elif node.right.schema_column:
+            right_ct = node.right.schema_column.column_type
+
+    # Extract LogicalCategory for operator map lookup
+    left_lc = left_ct.category if left_ct is not None else None
+    right_lc = right_ct.category if right_ct is not None else None
 
     operator = node.value
     if not is_known_operator(operator) and not _is_internal_operator(operator):
         raise UnsupportedSyntaxError(f"Unsupported operator \'{operator}\'.")
 
-    if left_type in (0, OT._MISSING_TYPE, OT.NULL):
-        return OT._MISSING_TYPE
-    if right_type in (0, OT._MISSING_TYPE, OT.NULL):
-        return OT._MISSING_TYPE
+    if left_lc is None or left_lc == OT.NULL:
+        return None
+    if right_lc is None or right_lc == OT.NULL:
+        return None
 
-    # Dispatch on LogicalCategory (Decision B) via the module-level _SQL_TO_LC table.
-    left_category = _SQL_TO_LC.get(left_type)
-    right_category = _SQL_TO_LC.get(right_type)
-    result = None
-    if left_category is not None and right_category is not None:
-        result = OPERATOR_MAP.get((left_category, right_category, operator))
+    # MapAccess special case: ARRAY<T>[index] → T
+    if (
+        operator == "MapAccess"
+        and left_lc in (OT.ARRAY, OT.VECTOR)
+        and right_lc == OT.INTEGER
+    ):
+        sc = node.left.schema_column
+        if sc is not None and sc.column_type is not None and sc.column_type.element is not None:
+            return sc.column_type.element  # already ColumnType
+        if left_lc == OT.VECTOR:
+            return FLOAT64
+        return None
+
+    # Dispatch on LogicalCategory via the operator map
+    left_category = _SQL_TO_LC.get(left_lc, left_lc)
+    right_category = _SQL_TO_LC.get(right_lc, right_lc)
+    result = OPERATOR_MAP.get((left_category, right_category, operator))
 
     if result is None:
         from opteryx.expression import format_expression
 
         raise IncorrectTypeError(
-            f"Unable to perform `{format_expression(node)}` because the values are not acceptable types for this operation. {left_type} and {right_type} were provided, you may need to cast one or both values to acceptable types."
+            f"Unable to perform `{format_expression(node)}` because the values are not acceptable types for this operation. {left_lc} and {right_lc} were provided, you may need to cast one or both values to acceptable types."
         )
 
-    if (
-        operator == "MapAccess"
-        and left_type in (OT.ARRAY, OT.VECTOR)
-        and right_type == OT.INTEGER
-    ):
-        # ARRAY<T>[INTEGER] resolves to T when we know the element type.
-        element_type = None
-        sc = node.left.schema_column
-        if sc is not None and sc.column_type is not None and sc.column_type.element is not None:
-            from opteryx.types.logical_type import column_type_to_sql
-            element_type = column_type_to_sql(sc.column_type.element).get("type")
-        if left_type == OT.VECTOR:
-            return (
-                element_type
-                if element_type not in (None, 0, OT._MISSING_TYPE, OT.NULL)
-                else OT.DOUBLE
-            )
-        return (
-            element_type
-            if element_type not in (None, 0, OT._MISSING_TYPE, OT.NULL)
-            else OT._MISSING_TYPE
-        )
+    result_lc = result.result_type  # LogicalCategory | None
+    if result_lc is None:
+        return None
 
-    return result.result_type
+    # Convert result LogicalCategory → ColumnType
+    # For parameterized/width-dependent types, use compute_result_logical_type
+    if result_lc == OT.DECIMAL and left_ct is not None and right_ct is not None:
+        try:
+            return compute_result_logical_type(left_ct, right_ct, operator, OT.DECIMAL)
+        except Exception:
+            return DECIMAL(38, 18)
+    if result_lc == OT.INTEGER and left_ct is not None and right_ct is not None:
+        try:
+            return compute_result_logical_type(left_ct, right_ct, operator, OT.INTEGER)
+        except Exception:
+            return INT64
+    if result_lc in (OT.FLOAT, OT.DOUBLE) and left_ct is not None and right_ct is not None:
+        try:
+            return compute_result_logical_type(left_ct, right_ct, operator, OT.FLOAT)
+        except Exception:
+            return FLOAT64
+    if result_lc == OT.TIMESTAMP:
+        if left_ct is not None and right_ct is not None:
+            try:
+                return compute_result_logical_type(left_ct, right_ct, operator, OT.TIMESTAMP)
+            except Exception:
+                pass
+        return TIMESTAMP()
+
+    # Non-parameterized: canonical instances
+    canonical = _CANONICAL_BY_CATEGORY.get(result_lc)
+    if canonical is not None:
+        return canonical
+    # Additional mappings
+    if result_lc == OT.INTEGER:
+        return INT64
+    if result_lc in (OT.FLOAT, OT.DOUBLE):
+        return FLOAT64
+    if result_lc == OT.TIME:
+        return TIME()
+    return None

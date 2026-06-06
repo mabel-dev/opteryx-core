@@ -362,7 +362,7 @@ class FunctionCatalog:
         def _node_type(node) -> Optional[LogicalCategory]:
             sc = getattr(node, "schema_column", None)
             if sc is not None:
-                return sc.type
+                return sc.category
             return getattr(node, "type", None)
 
         return_spec = selected.return_spec

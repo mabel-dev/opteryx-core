@@ -438,8 +438,8 @@ cdef class JoinNode(BasePlanNode):
             right_rel = right.source
             left_identity = left.schema_column.identity
             right_identity = right.schema_column.identity
-            left_type = left.schema_column.type
-            right_type = right.schema_column.type
+            left_type = left.schema_column.category
+            right_type = right.schema_column.category
             if left_rel in self.left_relation_names and right_rel in self.right_relation_names:
                 left_column, right_column = left_identity, right_identity
             elif left_rel in self.right_relation_names and right_rel in self.left_relation_names:
@@ -461,7 +461,7 @@ cdef class JoinNode(BasePlanNode):
             })
 
     def _apply_join_key_casts(self, morsel, *, is_left: bool):
-        from opteryx.types.logical_type import LogicalCategory
+        from opteryx.types.logical_type import LogicalCategory, ColumnType
         if morsel is None or morsel is _EOS_SENTINEL:
             return morsel
         self._build_join_key_cast_plan()
@@ -478,10 +478,12 @@ cdef class JoinNode(BasePlanNode):
                 continue
             idx = names.index(column_name)
             target_type = cast_rule["target_type"]
-            if target_type == LogicalCategory.DOUBLE:
+            # Phase 2: target_type is ColumnType; compare via .category
+            target_cat = target_type.category if isinstance(target_type, ColumnType) else target_type
+            if target_cat == LogicalCategory.DOUBLE:
                 vectors[idx] = cast_to_double(vectors[idx])
                 changed = True
-            elif target_type == LogicalCategory.INTEGER:
+            elif target_cat == LogicalCategory.INTEGER:
                 vectors[idx] = cast_to_int(vectors[idx])
                 changed = True
             if changed:

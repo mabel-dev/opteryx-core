@@ -24,14 +24,12 @@ def visit_filter(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     # bitwise arithmetic) are not valid WHERE conditions without an explicit comparison.
     _condition_sc = getattr(node.condition, "schema_column", None)
     _condition_type = (
-        _condition_sc.type if _condition_sc is not None else getattr(node.condition, "type", None)
+        _condition_sc.category if _condition_sc is not None else getattr(node.condition, "type", None)
     )
     if _condition_type not in (
         None,
-        0,
         LogicalCategory.BOOLEAN,
         LogicalCategory.NULL,
-        LogicalCategory._MISSING_TYPE,
     ):
         from opteryx.expression import format_expression
 

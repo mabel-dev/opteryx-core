@@ -922,6 +922,33 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
+    Extension(
+        "rugo._csv._csv_reader",
+        sources=[
+            "rugo/src/_csv/_csv_reader.pyx",
+            "rugo/src/_csv/core/csv_scan.cpp",
+            "rugo/src/_csv/core/csv_row_map.cpp",
+            "rugo/src/_csv/core/csv_column_builder.cpp",
+            "draken/core/vector_alloc.cpp",
+        ],
+        depends=[
+            "rugo/src/_csv/core/csv_parse_context.hpp",
+            "rugo/src/_csv/core/csv_scan.hpp",
+            "rugo/src/_csv/core/csv_row_map.hpp",
+            "rugo/src/_csv/core/csv_column_builder.hpp",
+            "rugo/src/_jsonl/core/fast_parsers.hpp",
+            "draken/core/draken_bridge.h",
+            "draken/core/string_slot.h",
+            "draken/core/alloc.h",
+            "draken/core/buffers.h",
+        ],
+        include_dirs=include_dirs + [
+            "rugo/src/_csv/core",
+            "rugo/src/_jsonl/core",   # fast_parsers.hpp
+        ],
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
     # Core compiled components
     Extension(
         "opteryx.compiled.functions.strings",

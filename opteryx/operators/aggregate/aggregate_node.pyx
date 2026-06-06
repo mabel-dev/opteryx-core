@@ -102,7 +102,7 @@ def _parameter_type(parameter):
     schema_column = getattr(parameter, "schema_column", None)
     if schema_column is None:
         return None
-    return getattr(schema_column, "type", None)
+    return getattr(schema_column, "category", None)
 
 
 def _is_float_type(type_value) -> bool:

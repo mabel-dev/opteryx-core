@@ -13,7 +13,8 @@ from opteryx.exceptions import (
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.logical_type import LogicalCategory, ColumnType
+from opteryx.types import logical_type as _lt
 from opteryx.types.schema import SchemaColumn, RelationSchema
 from opteryx.utils import random_string
 
@@ -30,32 +31,24 @@ def visit_function_dataset(
             for i, column in enumerate(node.columns):
                 if len(node.values[0]) >= i:
                     value = node.values[0][i]
-                    types[column] = value.type
-                    if value.type in (LogicalCategory.ARRAY, LogicalCategory.VECTOR):
-                        element_type = getattr(value, "element_type", None)
-                        if element_type in (None, LogicalCategory._MISSING_TYPE):
+                    types[column] = value.type  # ColumnType
+                    # Phase 2: element is embedded in ARRAY/VECTOR ColumnType.
+                    _val_cat = value.type.category if isinstance(value.type, ColumnType) else value.type
+                    if _val_cat in (LogicalCategory.ARRAY, LogicalCategory.VECTOR):
+                        _elem = value.type.element if isinstance(value.type, ColumnType) else None
+                        if _elem is None:
                             schema_column = getattr(value, "schema_column", None)
-                            element_type = (
-                                getattr(schema_column, "element_type", None)
-                                if schema_column is not None
-                                else None
-                            )
-                        element_types[column] = element_type
-        # D-4 Phase 2: build each SchemaColumn via from_column_type when possible.
-        # Falls back to the legacy path for columns whose inferred type the bridge
-        # can't yet map (e.g. VECTOR).
-        from opteryx.types.logical_type import sql_to_column_type as _otoct
+                            if schema_column is not None and isinstance(getattr(schema_column, "column_type", None), ColumnType):
+                                _elem = schema_column.column_type.element
+                        element_types[column] = _elem
+        # Phase 2: build each SchemaColumn via from_column_type using ColumnType directly.
         def _build_value_column(column):
-            ot = types.get(column, LogicalCategory.NULL)
-            et = element_types.get(column)
-            try:
-                ct = _otoct(ot, element_type=et)
+            ct = types.get(column)  # ColumnType or None
+            if isinstance(ct, ColumnType):
                 return SchemaColumn.from_column_type(name=column, column_type=ct)
-            except Exception:
-                # Bridge can't map this type (VECTOR with no dimension, etc.).
-                # Fall back to bare construction; precision/scale/element_type
-                # remain as InitVar params so no sidecar drift occurs.
-                return SchemaColumn(name=column, type=ot)
+            # Fallback: unknown type → NULL
+            from opteryx.types import logical_type as _lt2
+            return SchemaColumn.from_column_type(name=column, column_type=_lt2.NULL)
         columns = [
             LogicalColumn(
                 node_type=NodeType.IDENTIFIER,
@@ -81,7 +74,7 @@ def visit_function_dataset(
                 node_type=NodeType.IDENTIFIER,
                 source_column=node.unnest_target,
                 source=relation_name,
-                schema_column=SchemaColumn(name=node.unnest_target, type=0),
+                schema_column=SchemaColumn(name=node.unnest_target, type=None),
             )
         ]
         schema = RelationSchema(name=relation_name, columns=[c.schema_column for c in columns])
@@ -92,30 +85,37 @@ def visit_function_dataset(
         node.columns = columns
         node.schema = schema
     elif node.function == "GENERATE_SERIES":
-        element_type = LogicalCategory._MISSING_TYPE
+        element_type = None
         first_arg = node.args[0]
         if first_arg.node_type == NodeType.NESTED:
             first_arg = first_arg.centre
-        if first_arg.type.is_numeric():
-            types = {n.type for n in node.args}
-            if len(types) == 1:
-                element_type = list(types)[0]
-            elif types == {LogicalCategory.INTEGER, LogicalCategory.DOUBLE}:
-                element_type = LogicalCategory.DOUBLE
+        # Phase 2: first_arg.type is ColumnType; compare via .category
+        first_arg_cat = first_arg.type.category if isinstance(first_arg.type, ColumnType) else first_arg.type
+        if first_arg_cat is not None and first_arg_cat.is_numeric():
+            arg_cts = {n.type for n in node.args}
+            arg_cats = {t.category if isinstance(t, ColumnType) else t for t in arg_cts}
+            if len(arg_cts) == 1:
+                element_type = list(arg_cts)[0]  # ColumnType
+            elif arg_cats == {LogicalCategory.INTEGER, LogicalCategory.DOUBLE}:
+                element_type = _lt.FLOAT64
             else:
                 raise InvalidFunctionParameterError(
                     "GENERATE_SERIES for numbers takes 1 (stop), 2 (start, stop) or 3 (start, stop, interval) parameters."
                 )
-        if first_arg.type.is_temporal():
-            element_type = LogicalCategory.TIMESTAMP
+        if first_arg_cat is not None and first_arg_cat.is_temporal():
+            element_type = _lt.TIMESTAMP()
 
         node.relation_name = node.alias
+        if isinstance(element_type, ColumnType):
+            _gs_schema_col = SchemaColumn.from_column_type(name=node.alias, column_type=element_type)
+        else:
+            _gs_schema_col = SchemaColumn(name=node.alias, type=element_type)
         columns = [
             LogicalColumn(
                 node_type=NodeType.IDENTIFIER,
                 source_column=node.alias,
                 source=node.relation_name,
-                schema_column=SchemaColumn(name=node.alias, type=element_type),
+                schema_column=_gs_schema_col,
             )
         ]
         schema = RelationSchema(

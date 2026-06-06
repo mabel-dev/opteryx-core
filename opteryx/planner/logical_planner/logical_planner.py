@@ -20,7 +20,8 @@ from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import logical_planner_builders
 from opteryx.planner.logical_planner.logical_planner_rewriter import decompose_aggregates
 from opteryx.third_party.travers import Graph
-from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.logical_type import LogicalCategory, ColumnType
+from opteryx.types import logical_type as _plt
 from opteryx.utils import dnf, random_string
 from opteryx.vectors.vector_types import (
     get_vector_source_identifier,
@@ -204,7 +205,7 @@ def extract_variable(clause):
 def extract_simple_filter(filters, identifier: str = "Name"):
     if "Like" in filters:
         left = Node(NodeType.IDENTIFIER, value=identifier)
-        right = Node(NodeType.LITERAL, type=LogicalCategory.VARCHAR, value=filters["Like"])
+        right = Node(NodeType.LITERAL, type=_plt.VARCHAR, value=filters["Like"])
         root = Node(
             NodeType.COMPARISON_OPERATOR,
             value="ILike",  # we're case insensitive for SHOW filters
@@ -603,7 +604,8 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         rewritten = []
         for expr, ascending in _order_by:
             if expr.node_type == NodeType.LITERAL:
-                if expr.type != LogicalCategory.INTEGER:
+                _expr_cat = expr.type.category if isinstance(expr.type, ColumnType) else expr.type
+                if _expr_cat != LogicalCategory.INTEGER:
                     raise UnsupportedSyntaxError("Cannot ORDER BY constant values")
                 position = int(expr.value)
                 if position < 1 or position > len(_projection):

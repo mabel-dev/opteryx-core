@@ -157,10 +157,10 @@ def _coalesce_return_type(arg_nodes) -> LogicalCategory:
     from opteryx.types import find_compatible_type
 
     types = [
-        n.schema_column.type
+        n.schema_column.category
         for n in arg_nodes
         if getattr(n, "schema_column", None) is not None
-        and n.schema_column.type not in (LogicalCategory.NULL, 0, LogicalCategory._MISSING_TYPE)
+        and n.schema_column.category not in (LogicalCategory.NULL, None)
     ]
     return find_compatible_type(types) or LogicalCategory.NULL
 

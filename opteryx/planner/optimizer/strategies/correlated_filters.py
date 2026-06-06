@@ -32,7 +32,7 @@ def _write_filters(left_column, right_column):
     new_filters = []
     highest_literal = _literal_node_from_statistics(
         left_column.schema_column.highest_value,
-        left_column.schema_column.type,
+        left_column.schema_column.category,
     )
     if highest_literal is not None:
         a_side = right_column
@@ -49,7 +49,7 @@ def _write_filters(left_column, right_column):
 
     lowest_literal = _literal_node_from_statistics(
         left_column.schema_column.lowest_value,
-        left_column.schema_column.type,
+        left_column.schema_column.category,
     )
     if lowest_literal is not None:
         a_side = right_column

@@ -38,6 +38,7 @@ struct StringColumnResult {
     std::vector<uint32_t> offsets;    // start position of each row in data
     std::vector<uint32_t> lengths;    // length of each row's value
     std::vector<uint8_t>  null_bitmap; // null marker: bit=1 (valid), bit=0 (null)
+    bool data_owned = false;          // offsets index into `data` (copy/unescape), not the buffer
 
     uint8_t*  data_ptr()   { return data.empty() ? nullptr : data.data(); }
     uint32_t* offset_ptr() { return offsets.empty() ? nullptr : offsets.data(); }
@@ -52,12 +53,17 @@ struct StringColumnResult {
 //   copy_bytes = false : no copy — offsets index into the original `buffer`, and the
 //                        builder must be given that same buffer as its `base`. Saves a
 //                        full copy of the column's bytes (the single-chunk fast path).
+// may_have_escapes: when true AND the column is a string, values are JSON-unescaped into
+// result.data (forcing copy mode; result.data_owned is set). Gate it on a cheap buffer-wide
+// '\' check so escape-free data keeps the zero-copy fast path. Check result.data_owned to
+// pick the builder's base (result.data_ptr() vs the original buffer).
 StringColumnResult extract_column(
     const uint8_t*                            buffer,
     const RecordSet& records,
     const std::string&                         column_name,
     OrdinalPredictor&                         predictor,
-    bool                                       copy_bytes = true
+    bool                                       copy_bytes = true,
+    bool                                       may_have_escapes = false
 );
 
 // Build an owned Draken VARCHAR Vector from an extracted column. Slice bytes are read
@@ -97,7 +103,8 @@ std::vector<ParsedColumn> parse_all_columns(
     const uint8_t*                             buffer,
     const RecordSet& records,
     const std::vector<std::string>&            column_names,
-    size_t                                     max_threads
+    size_t                                     max_threads,
+    bool                                       may_have_escapes = false
 );
 
 // Wrap a ParsedColumn into an owned Draken Vector. Creates a Python object — call under

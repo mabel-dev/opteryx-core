@@ -29,7 +29,7 @@ from opteryx.expression.formatter import ExpressionColumn
 from opteryx.models import Node
 from opteryx.planner.binder.common import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
-from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.logical_type import LogicalCategory, ColumnType, BOOLEAN as _CT_BOOLEAN
 from opteryx.types.logical_type import LogicalCategory as LC
 from opteryx.utils import random_string
 
@@ -163,13 +163,13 @@ def _try_normalize_cast_predicate(condition: Node):
     if col_sc is None or cast_sc is None:
         return None
 
-    c_scale = _COL_SCALE_US.get(col_sc.type)
+    c_scale = _COL_SCALE_US.get(col_sc.category)
     l_scale = _LITERAL_SCALE_US.get(cast_node.value)
     if l_scale is None:
         return None
     # An INTEGER column being cast to a temporal type is a type assertion — the integer
     # stores values in the cast target's units already (e.g. EventDate::DATE stores days).
-    if c_scale is None and col_sc.type == LogicalCategory.INTEGER:
+    if c_scale is None and col_sc.category == LogicalCategory.INTEGER:
         c_scale = l_scale
     if c_scale is None or l_scale < c_scale:
         return None  # unknown column type or literal is finer-grained than column
@@ -253,7 +253,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             ) or (
                 node.condition.node_type == NodeType.FUNCTION
                 and len(identifiers) >= 1
-                and getattr(getattr(node.condition, "schema_column", None), "type", None)
+                and getattr(getattr(node.condition, "schema_column", None), "category", None)
                 == LogicalCategory.BOOLEAN
             )
 
@@ -684,9 +684,9 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             if normalized is not None:
                 norm_types = set()
                 if normalized.left.schema_column:
-                    norm_types.add(normalized.left.schema_column.type)
+                    norm_types.add(normalized.left.schema_column.category)
                 if normalized.right.schema_column:
-                    norm_types.add(normalized.right.schema_column.type)
+                    norm_types.add(normalized.right.schema_column.category)
                 norm_predicate = Node(node_type=predicate.node_type)
                 norm_predicate.condition = normalized
                 norm_predicate.relations = predicate.relations
@@ -699,10 +699,10 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             types = set()
             if predicate.condition.node_type == NodeType.UNARY_OPERATOR:
                 if predicate.condition.centre and predicate.condition.centre.schema_column:
-                    types.add(predicate.condition.centre.schema_column.type)
+                    types.add(predicate.condition.centre.schema_column.category)
             else:
                 if predicate.condition.left and predicate.condition.left.schema_column:
-                    types.add(predicate.condition.left.schema_column.type)
+                    types.add(predicate.condition.left.schema_column.category)
                 # For InList/NotInList the right side is always an ARRAY literal; its type
                 # is an implementation detail of the IN operator, not a column type the
                 # connector needs to handle. Including it causes can_push to spuriously
@@ -710,7 +710,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 # pass-1 and breaking two-pass late-materialization for downstream filters.
                 if predicate.condition.right and predicate.condition.right.schema_column:
                     if predicate.condition.value not in ("InList", "NotInList"):
-                        types.add(predicate.condition.right.schema_column.type)
+                        types.add(predicate.condition.right.schema_column.category)
             if node.connector.supports_predicate_pushdown and node.connector.can_push(
                 predicate, types
             ):
@@ -819,7 +819,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 and literal_candidate
                 and literal_candidate.node_type == NodeType.LITERAL
                 and (
-                    literal_candidate.type == LogicalCategory.BOOLEAN
+                    (literal_candidate.type == _CT_BOOLEAN or (isinstance(literal_candidate.type, ColumnType) and literal_candidate.type.category == LogicalCategory.BOOLEAN))
                     or str(literal_candidate.type).upper() == "BOOLEAN"
                 )
             ):
@@ -861,9 +861,9 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 if negate:
                     new_condition = Node(NodeType.NOT, centre=expression)
                     expr_name = f"NOT {format_expression(expression)}"
-                    new_condition.schema_column = ExpressionColumn(
+                    new_condition.schema_column = ExpressionColumn.from_column_type(
                         name=expr_name,
-                        type=LogicalCategory.BOOLEAN,
+                        column_type=_CT_BOOLEAN,
                         expression=expr_name,
                     )
                 else:

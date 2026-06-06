@@ -64,8 +64,8 @@ def get_mismatched_condition_column_types(
             "AtArrow",
         ) or node.value.startswith(("AllOp", "AnyOp")):
             return None  # Some ops are meant to have different types
-        left_type = node.left.schema_column.type if node.left.schema_column else None
-        right_type = node.right.schema_column.type if node.right.schema_column else None
+        left_type = node.left.schema_column.category if node.left.schema_column else None
+        right_type = node.right.schema_column.category if node.right.schema_column else None
 
         if left_type and right_type and left_type != right_type:
             if (
@@ -83,7 +83,7 @@ def get_mismatched_condition_column_types(
                 or (left_type.is_temporal() and right_type.is_numeric())
                 or (left_type.is_large_object() and right_type.is_large_object())
                 or (left_type.is_string() and right_type.is_string())
-                or (left_type == 0 or right_type == 0)
+                or (left_type is None or right_type is None)
             ):
                 return None
             if left_type == LogicalCategory.NULL or right_type == LogicalCategory.NULL:

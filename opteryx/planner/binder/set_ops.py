@@ -9,7 +9,8 @@ from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.binder import merge_schemas
 from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.types.logical_type import LogicalCategory, find_compatible_type
+from opteryx.types.logical_type import LogicalCategory, ColumnType, find_compatible_type
+from opteryx.types import logical_type as _lt
 from opteryx.types.schema import ConstantColumn, SchemaColumn, RelationSchema
 
 
@@ -90,11 +91,11 @@ def _validate_set_operation_types(
     node: Node,
     context: BindingContext,
     operation_name: str = "SET OPERATION",
-) -> List[LogicalCategory]:
+) -> list:
     """Validate and find compatible types for columns in set operations.
 
     For each column position across left and right relations, find a compatible type.
-    Returns list of coerced types in column order.
+    Returns list of coerced ColumnTypes in column order (None where type is unresolvable).
     """
     left_columns = _columns_for_side(self, node, node.left_relation_names, context)
     right_columns = _columns_for_side(self, node, node.right_relation_names, context)
@@ -106,7 +107,7 @@ def _validate_set_operation_types(
 
     coerced_types = []
     for left_col, right_col in zip(left_columns, right_columns):
-        coerced_type = find_compatible_type([left_col.type, right_col.type])
+        coerced_type = find_compatible_type([left_col.category, right_col.category])
         coerced_types.append(coerced_type)
 
     return coerced_types
@@ -204,25 +205,20 @@ def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
 
     # this is the column which is being unnested
     if node.unnest_column.node_type == NodeType.LITERAL:
-        # D-4 Phase 2: construct the ConstantColumn with its type up front (the
-        # side-cars are gone; the array element rides on column_type). The prior
-        # `ConstantColumn(name=...)`-then-mutate pattern relied on side-car writes.
-        lit_type = node.unnest_column.type
-        lit_elem = node.unnest_column.element_type
-        from opteryx.types.logical_type import sql_to_column_type
-        try:
-            _ct = sql_to_column_type(lit_type, element_type=lit_elem)
-            schema_column = ConstantColumn.from_column_type(
-                name=node.unnest_alias,
-                column_type=_ct,
-                value=node.unnest_column.value,
-            )
-        except Exception:
-            schema_column = ConstantColumn(
-                name=node.unnest_alias,
-                type=lit_type,
-                value=node.unnest_column.value,
-            )
+        # Phase 2: node.unnest_column.type is ARRAY(element) ColumnType.
+        # UNNEST produces the element type as the output column.
+        arr_ct = node.unnest_column.type
+        if isinstance(arr_ct, ColumnType) and arr_ct.element is not None:
+            elem_ct = arr_ct.element
+        elif isinstance(arr_ct, ColumnType):
+            elem_ct = _lt.VARIANT
+        else:
+            elem_ct = _lt.VARIANT
+        schema_column = ConstantColumn.from_column_type(
+            name=node.unnest_alias,
+            column_type=elem_ct,
+            value=node.unnest_column.value,
+        )
         node.unnest_target = LogicalColumn(
             alias=node.unnest_alias,
             node_type=NodeType.IDENTIFIER,
@@ -241,8 +237,8 @@ def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         node.columns += [node.unnest_column]
 
         # we can only UNNEST an ARRAY type column, we need to find it before we know its type
-        if node.unnest_column.schema_column.type not in (
-            0,
+        if node.unnest_column.schema_column.category not in (
+            None,
             LogicalCategory.ARRAY,
             LogicalCategory.VECTOR,
             LogicalCategory.NULL,
@@ -250,22 +246,24 @@ def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
             from opteryx.exceptions import IncorrectTypeError
 
             raise IncorrectTypeError(
-                f"CROSS JOIN UNNEST requires an ARRAY or VECTOR type column, not {node.unnest_column.schema_column.type}."
+                f"CROSS JOIN UNNEST requires an ARRAY or VECTOR type column, not {node.unnest_column.schema_column.category}."
             )
 
-        # this is the column that is being created
-        # D-4 Phase 2: resolve the UNNEST element type from the unified column_type
-        # (carries the ARRAY child as `column_type.element`). VECTOR unnests to
-        # DOUBLE. Falls back to the legacy sidecar when the bridge couldn't map it.
-        element_type = LogicalCategory.VARCHAR
+        # Phase 2: resolve UNNEST element type from column_type (ARRAY carries element).
+        # VECTOR unnests to FLOAT64. Unknown arrays produce VARCHAR.
         unnest_sc = node.unnest_column.schema_column
-        if unnest_sc and unnest_sc.type == LogicalCategory.VECTOR:
-            element_type = LogicalCategory.DOUBLE
-        elif unnest_sc is not None and unnest_sc.column_type is not None and unnest_sc.column_type.element is not None:
-            from opteryx.types.logical_type import column_type_to_sql
-            element_type = column_type_to_sql(unnest_sc.column_type.element).get("type") or element_type
+        if unnest_sc and unnest_sc.category == LogicalCategory.VECTOR:
+            elem_ct_unnest = _lt.FLOAT64
+        elif (
+            unnest_sc is not None
+            and unnest_sc.column_type is not None
+            and unnest_sc.column_type.element is not None
+        ):
+            elem_ct_unnest = unnest_sc.column_type.element
+        else:
+            elem_ct_unnest = _lt.VARCHAR
 
-        schema_column = SchemaColumn(name=node.unnest_alias, type=element_type)
+        schema_column = SchemaColumn.from_column_type(name=node.unnest_alias, column_type=elem_ct_unnest)
         node.unnest_target = LogicalColumn(
             alias=node.unnest_alias,
             node_type=NodeType.IDENTIFIER,

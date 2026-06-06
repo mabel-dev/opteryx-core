@@ -425,8 +425,8 @@ cdef Py_ssize_t _linearize(
         # Read schema types from children BEFORE linearising them.
         left_sc = <object>node.left.schema_column
         right_sc = <object>node.right.schema_column
-        left_type = getattr(left_sc, "type", None) if left_sc is not None else None
-        right_type = getattr(right_sc, "type", None) if right_sc is not None else None
+        left_type = getattr(left_sc, "category", None) if left_sc is not None else None
+        right_type = getattr(right_sc, "category", None) if right_sc is not None else None
         op_str = <object>node.value
         _validate_temporal_at_bind(
             node.left.node_type, left_type,
@@ -515,8 +515,8 @@ cdef Py_ssize_t _linearize(
             raise ValueError("compiled_expression: BINARY_OPERATOR missing operand")
         bin_left_sc = <object>node.left.schema_column if node.left.schema_column != NULL else None
         bin_right_sc = <object>node.right.schema_column if node.right.schema_column != NULL else None
-        bin_left_type = getattr(bin_left_sc, "type", None) if bin_left_sc is not None else None
-        bin_right_type = getattr(bin_right_sc, "type", None) if bin_right_sc is not None else None
+        bin_left_type = getattr(bin_left_sc, "category", None) if bin_left_sc is not None else None
+        bin_right_type = getattr(bin_right_sc, "category", None) if bin_right_sc is not None else None
         bin_op_str = <object>node.value
 
         sub_depth = _linearize(node.left, bc, depth)
@@ -658,7 +658,7 @@ cdef Py_ssize_t _linearize(
         if node.left.schema_column != NULL:
             src_sc = <object>node.left.schema_column
             if src_sc is not None:
-                source_sql = src_sc.type
+                source_sql = src_sc.category
                 if source_sql is not None:
                     # Extract the LogicalCategory name string (e.g., "INT64", "VARCHAR").
                     source_sql_name = getattr(source_sql, "name", None)
@@ -798,7 +798,7 @@ cdef Py_ssize_t _linearize(
         left_sc = <object>node.left.schema_column if node.left.schema_column != NULL else None
         if left_sc is None:
             raise ValueError("compiled_expression: EXTRACTION_OPERATOR left operand missing schema_column")
-        left_sql = left_sc.type
+        left_sql = left_sc.category
 
         # Sub-op + kernel selection: resolve at bind time.
         sub_op = BC_EXTR_UNKNOWN

@@ -186,11 +186,11 @@ cdef class DrakenInnerJoinNode(JoinNode):
             left = comparison.left
             right = comparison.right
             if left.source in left_relation_names and right.source in right_relation_names:
-                left_type = left.schema_column.type
-                right_type = right.schema_column.type
+                left_type = left.schema_column.category
+                right_type = right.schema_column.category
             elif left.source in right_relation_names and right.source in left_relation_names:
-                left_type = right.schema_column.type
-                right_type = left.schema_column.type
+                left_type = right.schema_column.category
+                right_type = left.schema_column.category
             else:
                 return False
 

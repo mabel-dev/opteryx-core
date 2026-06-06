@@ -27,7 +27,13 @@ from opteryx.expression.operator_catalog import get_operator_node_type
 from opteryx.compiled.expression.compiled_expression import _BOP_CODE
 from opteryx.models import LogicalColumn, Node
 from opteryx.operators.aggregate.helpers import aggregator_names, is_aggregator
-from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.logical_type import (
+    LogicalCategory, ColumnType,
+    BOOLEAN as _CT_BOOLEAN, INT64 as _CT_INT64, FLOAT64 as _CT_FLOAT64,
+    DATE as _CT_DATE, INTERVAL as _CT_INTERVAL, VARCHAR as _CT_VARCHAR,
+    VARBINARY as _CT_VARBINARY, NULL as _CT_NULL, ARRAY as _CT_ARRAY,
+    TIMESTAMP as _CT_TIMESTAMP, VARIANT as _CT_VARIANT,
+)
 from opteryx.utils import dates, suggest_alternative
 from opteryx.utils.vector_types import VectorType, get_vector_type
 
@@ -116,7 +122,7 @@ def _type_from_value(value):
         return LogicalCategory.VARCHAR
     if isinstance(value, tuple) and len(value) == 2:
         return LogicalCategory.INTERVAL
-    return LogicalCategory._MISSING_TYPE
+    return None
 
 
 def _interval_to_past_timestamp(interval_value):
@@ -161,9 +167,11 @@ def _apply_interval_scalar(base_value, base_type, interval_value, operator: str)
 
 def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = False):
     if node.node_type == NodeType.LITERAL:
-        if node.type == LogicalCategory.INTERVAL and apply_interval_literal_to_now:
+        # Phase 2: node.type is ColumnType; normalize to LogicalCategory for internal arithmetic.
+        _node_lc = node.type.category if isinstance(node.type, ColumnType) else node.type
+        if _node_lc == LogicalCategory.INTERVAL and apply_interval_literal_to_now:
             return _interval_to_past_timestamp(node.value), LogicalCategory.TIMESTAMP
-        return node.value, node.type
+        return node.value, _node_lc
 
     if node.node_type == NodeType.NESTED:
         return _evaluate_timetravel_expression(node.centre, apply_interval_literal_to_now)
@@ -365,21 +373,24 @@ def all_op(branch, alias: Optional[List[str]] = None, key=None):
 
 
 def array(branch, alias: Optional[List[str]] = None, key=None):
+    from opteryx.types import logical_type as _lt
     value_nodes = [build(elem) for elem in branch["elem"]]
     value_list = [v.value for v in value_nodes]
-    element_type = {v.type for v in value_nodes}
-    if len(element_type) > 1:
+    element_ct_set = {v.type for v in value_nodes}
+    if len(element_ct_set) > 1:
         raise ArrayWithMixedTypesError("Literal ARRAY has values with mixed types.")
-    element_type = element_type.pop() if len(element_type) == 1 else LogicalCategory.VARCHAR
-    literal_type = LogicalCategory.ARRAY
-    if element_type in (LogicalCategory.INTEGER, LogicalCategory.DOUBLE, LogicalCategory.DECIMAL):
-        literal_type = LogicalCategory.VECTOR
-        element_type = LogicalCategory.DOUBLE
+    # element_ct is ColumnType (Phase 2); extract its category for numeric check.
+    element_ct = element_ct_set.pop() if len(element_ct_set) == 1 else _CT_VARCHAR
+    elem_cat = element_ct.category if isinstance(element_ct, ColumnType) else element_ct
+    if elem_cat in (LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL):
+        # Numeric arrays become ARRAY<FLOAT64>; dimension unknown at parse time.
+        element_ct = _CT_FLOAT64
+    literal_type = _CT_ARRAY(element_ct)
 
     return Node(
         node_type=NodeType.LITERAL,
         type=literal_type,
-        element_type=element_type,
+        element_type=None,  # element embedded in type
         value=value_list,
     )
 
@@ -637,9 +648,12 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
     from opteryx.expression.casts import parse_timestamp_value
     from opteryx.types._datetime_conversion import date_to_int64_days, timestamp_to_int64_us
 
+    # Phase 2: literal_node.type is ColumnType; normalize to LogicalCategory for comparisons.
+    _node_cat = literal_node.type.category if isinstance(literal_node.type, ColumnType) else literal_node.type
+
     # NULL values remain NULL regardless of target type
-    if literal_node.type == LogicalCategory.NULL:
-        return Node(NodeType.LITERAL, type=LogicalCategory.NULL, alias=alias)
+    if _node_cat == LogicalCategory.NULL:
+        return Node(NodeType.LITERAL, type=_CT_NULL, alias=alias)
 
     # Strip TRY_ prefix for type lookup
     base_type = target_type.replace("TRY_", "")
@@ -664,17 +678,17 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
 
     # Special case: VARBINARY maps to BLOB in Sql types
     if base_type == "VARBINARY":
-        sql_type = LogicalCategory.BLOB
-    elif base_type == "DATE" and literal_node.type in (LogicalCategory.INTEGER, LogicalCategory.DATE):
+        sql_type = _CT_VARBINARY
+    elif base_type == "DATE" and _node_cat in (LogicalCategory.INTEGER, LogicalCategory.DATE):
         value = date_to_int64_days(_EPOCH_DATE + datetime.timedelta(days=int(literal_node.value)))
-        return Node(NodeType.LITERAL, type=LogicalCategory.DATE, value=value, alias=alias)
+        return Node(NodeType.LITERAL, type=_CT_DATE, value=value, alias=alias)
     # Special case: INTEGER to TIMESTAMP conversion
     elif base_type == "TIMESTAMP" and (
-        literal_node.type in (LogicalCategory.INTEGER, LogicalCategory.DATE)
+        _node_cat in (LogicalCategory.INTEGER, LogicalCategory.DATE)
         or isinstance(literal_node.value, int)
     ):
         # Require explicit unit for INTEGER to TIMESTAMP conversion
-        if literal_node.type == LogicalCategory.INTEGER and unit is None:
+        if _node_cat == LogicalCategory.INTEGER and unit is None:
             raise UnsupportedSyntaxError(
                 "Ambiguous cast: INTEGER → TIMESTAMP requires a unit. "
                 "Use `expr::TIMESTAMP[ms]`, `expr::TIMESTAMP[s]`, or `expr::TIMESTAMP[us]`."
@@ -684,20 +698,20 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
         # If unit was specified, use it; otherwise use default behavior for dates
         if unit:
             value = timestamp_to_int64_us(parse_timestamp_value(int_value, unit=unit))
-        elif literal_node.type == LogicalCategory.DATE or abs(int_value) < 100_000:
+        elif _node_cat == LogicalCategory.DATE or abs(int_value) < 100_000:
             value = timestamp_to_int64_us(
                 (_EPOCH_DT + datetime.timedelta(days=int_value)).replace(tzinfo=None)
             )
         else:
             value = timestamp_to_int64_us(parse_timestamp_value(int_value))
-        return Node(NodeType.LITERAL, type=LogicalCategory.TIMESTAMP, value=value, alias=alias)
+        return Node(NodeType.LITERAL, type=_CT_TIMESTAMP(), value=value, alias=alias)
     else:
         from opteryx.types.logical_type import parse_column_type
-        sql_type = parse_column_type(base_type).category
+        sql_type = parse_column_type(base_type)  # ColumnType
 
     # Temporal → VARCHAR: format as ISO string rather than calling str() on the raw int.
     if base_type in ("VARCHAR", "BLOB"):
-        if literal_node.type == LogicalCategory.TIMESTAMP and isinstance(literal_node.value, int):
+        if _node_cat == LogicalCategory.TIMESTAMP and isinstance(literal_node.value, int):
             us = literal_node.value
             sec, usec = divmod(us, 1_000_000)
             if usec < 0:
@@ -721,7 +735,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
             mm, ss = divmod(rem, 60)
             parsed_value = f"{y:04d}-{m:02d}-{d:02d} {hh:02d}:{mm:02d}:{ss:02d}.{usec:06d}+0000"
             return Node(NodeType.LITERAL, type=sql_type, value=parsed_value, alias=alias)
-        if literal_node.type == LogicalCategory.DATE and isinstance(literal_node.value, int):
+        if _node_cat == LogicalCategory.DATE and isinstance(literal_node.value, int):
             days = literal_node.value
             z = days + 719468
             era = (z if z >= 0 else z - 146096) // 146097
@@ -739,7 +753,8 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
     # Attempt to parse and cast the literal value
     try:
         from opteryx.types.value_parsing import parse_value
-        parsed_value = parse_value(sql_type, literal_node.value)
+        _sql_type_lc = sql_type.category if isinstance(sql_type, ColumnType) else sql_type
+        parsed_value = parse_value(_sql_type_lc, literal_node.value)
         if isinstance(parsed_value, datetime.datetime):
             parsed_value = timestamp_to_int64_us(parsed_value)
         elif isinstance(parsed_value, datetime.date):
@@ -748,7 +763,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
     except Exception as e:
         # For TRY_CAST/SAFE_CAST, return NULL on failure
         if kind in {"TryCast", "SafeCast"}:
-            return Node(NodeType.LITERAL, type=LogicalCategory.NULL, alias=alias)
+            return Node(NodeType.LITERAL, type=_CT_NULL, alias=alias)
         # For regular CAST, raise an error
         raise SqlError(f"Error casting value '{literal_node.value}' to type '{base_type}': {e}")
 
@@ -824,7 +839,7 @@ def extract(branch, alias: Optional[List[str]] = None, key=None):
     datepart_value = branch["field"]
     if isinstance(datepart_value, dict):
         datepart_value = list(datepart_value)[0]
-    datepart = Node(NodeType.LITERAL, type=LogicalCategory.VARCHAR, value=datepart_value)
+    datepart = Node(NodeType.LITERAL, type=_CT_VARCHAR, value=datepart_value)
     identifier = build(branch["expr"])
 
     return Node(
@@ -951,7 +966,7 @@ def hex_literal(branch, alias: Optional[List[str]] = None, key=None):
     value = int(branch, 16)
     return Node(
         NodeType.LITERAL,
-        type=LogicalCategory.INTEGER,
+        type=_CT_INT64,
         value=value,
         #    alias=alias or f"0x{branch}"
     )
@@ -974,16 +989,16 @@ def identifier(branch, alias: Optional[List[str]] = None, key=None):
 def in_list(branch, alias: Optional[List[str]] = None, key=None):
     left_node = build(branch["expr"])
     value_nodes = [build(v) for v in branch["list"]]
-    element_type = {v.type for v in value_nodes}
-    if len(element_type) > 1:
+    element_ct_set = {v.type for v in value_nodes}
+    if len(element_ct_set) > 1:
         raise ArrayWithMixedTypesError("Array in IN condition has values with mixed types.")
-    element_type = element_type.pop()
+    element_ct = element_ct_set.pop() if element_ct_set else _CT_VARIANT
     operator = "NotInList" if branch["negated"] else "InList"
     right_node = Node(
         node_type=NodeType.LITERAL,
-        type=LogicalCategory.ARRAY,
+        type=_CT_ARRAY(element_ct),
         value=[v.value for v in value_nodes],
-        element_type=element_type,
+        element_type=None,  # element embedded in type
     )
     return Node(
         node_type=NodeType.COMPARISON_OPERATOR,
@@ -1041,7 +1056,8 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
             "Subscript values must be integer literals, use `->` to access JSON fields."
         )
 
-    if key_node.type != LogicalCategory.INTEGER:
+    _key_cat = key_node.type.category if isinstance(key_node.type, ColumnType) else key_node.type
+    if _key_cat != LogicalCategory.INTEGER:
         raise IncorrectTypeError(
             "Subscript values must be integer literals, use `->` to access JSON fields."
         )
@@ -1068,7 +1084,7 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
 
 def literal_boolean(branch, alias: Optional[List[str]] = None, key=None):
     """create node for a literal boolean branch"""
-    return Node(NodeType.LITERAL, type=LogicalCategory.BOOLEAN, value=branch, alias=alias)
+    return Node(NodeType.LITERAL, type=_CT_BOOLEAN, value=branch, alias=alias)
 
 
 def literal_interval(branch, alias: Optional[List[str]] = None, key=None):
@@ -1115,12 +1131,12 @@ def literal_interval(branch, alias: Optional[List[str]] = None, key=None):
 
     interval = (month, microseconds)
 
-    return Node(NodeType.LITERAL, type=LogicalCategory.INTERVAL, value=interval, alias=alias)
+    return Node(NodeType.LITERAL, type=_CT_INTERVAL, value=interval, alias=alias)
 
 
 def literal_null(branch=None, alias: Optional[List[str]] = None, key=None):
     """create node for a literal null branch"""
-    return Node(NodeType.LITERAL, type=LogicalCategory.NULL, alias=alias)
+    return Node(NodeType.LITERAL, type=_CT_NULL, alias=alias)
 
 
 def literal_number(branch, alias: Optional[List[str]] = None, key=None):
@@ -1133,7 +1149,7 @@ def literal_number(branch, alias: Optional[List[str]] = None, key=None):
         value = int(value)
         return Node(
             NodeType.LITERAL,
-            type=LogicalCategory.INTEGER,
+            type=_CT_INT64,
             value=value,
             alias=alias,
         )
@@ -1142,7 +1158,7 @@ def literal_number(branch, alias: Optional[List[str]] = None, key=None):
         value = float(value)
         return Node(
             NodeType.LITERAL,
-            type=LogicalCategory.DOUBLE,
+            type=_CT_FLOAT64,
             value=value,
             alias=alias,
         )
@@ -1150,7 +1166,7 @@ def literal_number(branch, alias: Optional[List[str]] = None, key=None):
 
 def literal_string(branch, alias: Optional[List[str]] = None, key=None):
     """create node for a string branch"""
-    return Node(NodeType.LITERAL, type=LogicalCategory.VARCHAR, value=branch, alias=alias)
+    return Node(NodeType.LITERAL, type=_CT_VARCHAR, value=branch, alias=alias)
 
 
 def match_against(branch, alias: Optional[List[str]] = None, key=None):
@@ -1189,9 +1205,10 @@ def pattern_match(branch, alias: Optional[List[str]] = None, key=None):
             )
         if right.node_type == NodeType.NESTED:
             right = right.centre
-        if right.type != LogicalCategory.ARRAY:
+        _right_cat = right.type.category if isinstance(right.type, ColumnType) else right.type
+        if _right_cat != LogicalCategory.ARRAY:
             right.value = (right.value,)
-            right.type = LogicalCategory.ARRAY
+            right.type = _CT_ARRAY(right.type if isinstance(right.type, ColumnType) else _CT_VARCHAR)
     return Node(
         NodeType.COMPARISON_OPERATOR,
         value=key,
@@ -1220,7 +1237,7 @@ def qualified_wildcard(branch, alias: Optional[List[str]] = None, key=None):
 
 
 def substring(branch, alias: Optional[List[str]] = None, key=None):
-    node_node = Node(NodeType.LITERAL, type=LogicalCategory.NULL, value=None)
+    node_node = Node(NodeType.LITERAL, type=_CT_NULL, value=None)
     string = build(branch["expr"])
     substring_from = build(branch["substring_from"]) or node_node
     substring_for = build(branch["substring_for"]) or node_node

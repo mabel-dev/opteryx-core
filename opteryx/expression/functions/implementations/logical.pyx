@@ -91,18 +91,18 @@ def null_if(col1, col2):
     def _first_non_null_type(lst):
         for item in lst:
             if item is not None:
-                return PYTHON_TO_SQL_MAP.get(type(item), LogicalCategory._MISSING_TYPE)
+                return PYTHON_TO_SQL_MAP.get(type(item))
         return LogicalCategory.NULL
 
     col1_type = _first_non_null_type(col1_list)
     col2_type = _first_non_null_type(col2_list)
 
-    if col1_type not in (LogicalCategory.NULL, LogicalCategory._MISSING_TYPE) and col2_type not in (
+    if col1_type not in (LogicalCategory.NULL, None) and col2_type not in (
         LogicalCategory.NULL,
-        LogicalCategory._MISSING_TYPE,
+        None,
     ):
         compatible = find_compatible_type([col1_type, col2_type])
-        if compatible is None or compatible == LogicalCategory._MISSING_TYPE:
+        if compatible is None:
             raise IncompatibleTypesError(
                 left_type=col1_type,
                 right_type=col2_type,

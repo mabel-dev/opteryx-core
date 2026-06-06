@@ -450,7 +450,7 @@ class Session(DataFrame):
             description.append(
                 (
                     column.name,
-                    column.type,
+                    column.category,
                     None,
                     None,
                     None,

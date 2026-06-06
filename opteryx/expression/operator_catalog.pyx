@@ -99,8 +99,6 @@ def get_operator_signatures(operator):
         if operator_name != operator:
             continue
         result_type = metadata.result_type
-        if result_type == LogicalCategory._MISSING_TYPE:
-            result_type = None
         exported_signatures.append(
             OperatorSignatureDefinition(
                 left_type=left_type,

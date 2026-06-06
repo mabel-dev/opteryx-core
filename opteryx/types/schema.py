@@ -122,14 +122,15 @@ class SchemaColumn:
                 self.column_type = None
 
     @property
-    def type(self):
-        """Derived LogicalCategory tag for backward-compat reads while callsites migrate.
-        Delete once all .type reads on SchemaColumn are gone."""
-        from opteryx.types.logical_type import column_type_to_sql
+    def category(self):
+        """Operator-dispatch category projection of `column_type` (the one type carrier).
+
+        Returns `None` when no `column_type` is resolved yet. This is a pure projection
+        of `column_type` — not a parallel type.
+        """
         if self.column_type is None:
-            return 0  # _MISSING_TYPE sentinel used by binder bootstrap
-        legacy = column_type_to_sql(self.column_type)
-        return legacy.get("type", 0)
+            return None
+        return self.column_type.category
 
     @classmethod
     def from_column_type(cls, name, column_type, **kwargs):
@@ -163,7 +164,7 @@ class SchemaColumn:
         D-4 Phase 2: the type is carried by `column_type` (single source of truth),
         so we reconstruct via `from_column_type` rather than copying deleted
         side-cars. Falls back to the bare `type` for columns the bridge couldn't
-        map (column_type is None — e.g. _MISSING_TYPE).
+        map (column_type is None — unknown/unresolved type).
         """
         common = dict(
             identity=self.identity,
@@ -294,6 +295,16 @@ class FunctionColumn(SchemaColumn):
         """Convert to a SchemaColumn, stripping function metadata."""
         return self._to_plain_flatcolumn()
 
+
+# `type` is an InitVar constructor param; dataclasses leaves a `type = None` class
+# attribute behind. Delete it so a stale `column.type` READ fails loud (AttributeError)
+# instead of silently returning None — there is no `.type` on a SchemaColumn, only
+# `.category` (the projection) and `.column_type` (the carrier). Construction via
+# `type=` still works (the InitVar default is baked into __init__).
+for _cls in (SchemaColumn, ConstantColumn, FunctionColumn):
+    if "type" in _cls.__dict__:
+        delattr(_cls, "type")
+del _cls
 
 
 @dataclasses.dataclass

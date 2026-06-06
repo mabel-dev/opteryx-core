@@ -109,7 +109,7 @@ def _typed_constant_vector(value, length: int, schema_column):
     if schema_column is None or length < 0:
         return None
 
-    target_type = getattr(schema_column, "type", None)
+    target_type = getattr(schema_column, "category", None)
     is_null = value is None
 
     if target_type == LogicalCategory.BOOLEAN:

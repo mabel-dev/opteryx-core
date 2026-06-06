@@ -44,26 +44,38 @@ from typing import Any, Dict, Generator, Iterable, Optional, Union
 from opteryx.expression import NodeType
 from opteryx.expression.intervals import normalize_interval_value
 from opteryx.models import Node
-from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.logical_type import (
+    LogicalCategory, ColumnType,
+    BOOLEAN, INT64, FLOAT32, FLOAT64, DATE, INTERVAL, VARCHAR, NVARCHAR,
+    VARBINARY, VARIANT, NULL, ARRAY, TIMESTAMP, TIME, DECIMAL,
+)
 from opteryx.types.schema import ConstantColumn
 
 
-def _infer_collection_literal(value: Any) -> tuple[LogicalCategory, Optional[LogicalCategory]]:
+def _infer_collection_literal(value: Any):
+    """Return (ColumnType_for_collection, None) for a list/tuple literal.
+
+    The element type is embedded in the ARRAY ColumnType; no separate sidecar.
+    Returns (ARRAY(VARIANT), None) for heterogeneous or unknown-element lists.
+    """
     if not isinstance(value, (list, tuple)) or not value:
-        return LogicalCategory.ARRAY, None
+        return ARRAY(VARIANT), None
 
     element_types = {build_literal_node(item).type for item in value if item is not None}
     if len(element_types) != 1:
-        return LogicalCategory.ARRAY, None
+        return ARRAY(VARIANT), None
 
-    element_type = element_types.pop()
-    if element_type in (LogicalCategory.INTEGER, LogicalCategory.DOUBLE, LogicalCategory.DECIMAL):
-        return LogicalCategory.VECTOR, LogicalCategory.DOUBLE
-    return LogicalCategory.ARRAY, element_type
+    element_ct = element_types.pop()
+    if element_ct is None:
+        return ARRAY(VARIANT), None
+    # Numeric homogeneous array → treat as ARRAY<FLOAT64> at binder time
+    if element_ct.category in (LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL):
+        return ARRAY(FLOAT64), None
+    return ARRAY(element_ct), None
 
 
 def build_literal_node(
-    value: Any, root: Optional[Node] = None, suggested_type: Optional[LogicalCategory] = None
+    value: Any, root: Optional[Node] = None, suggested_type=None
 ):
     """
     Build a literal node with the appropriate type based on the value.
@@ -88,42 +100,52 @@ def build_literal_node(
     if root is None:
         root = Node(
             NodeType.LITERAL,
-            schema_column=ConstantColumn(name=str(value), type=LogicalCategory._MISSING_TYPE),
+            schema_column=ConstantColumn(name=str(value), type=None),
         )
 
     if value is None:
         # Matching None has complications
         root.value = None
         root.node_type = NodeType.LITERAL
-        root.type = LogicalCategory.NULL
+        root.type = NULL
+        root.element_type = None
         root.left = None
         root.right = None
+        if root.schema_column is not None:
+            root.schema_column.column_type = NULL
         return root
 
-    collection_type = None
-    element_type = None
-    if suggested_type in (LogicalCategory._MISSING_TYPE, 0, None):
-        collection_type, element_type = _infer_collection_literal(value)
+    collection_ct = None
+    if suggested_type is None:
+        collection_ct, _ = _infer_collection_literal(value)
 
-    # Define a mapping of types to LogicalCategory
+    # Define a mapping of Python types to canonical ColumnType instances.
     type_mapping = {
-        bool: LogicalCategory.BOOLEAN,
-        str: LogicalCategory.VARCHAR,
-        bytes: LogicalCategory.BLOB,
-        int: LogicalCategory.INTEGER,
-        float: LogicalCategory.DOUBLE,
-        datetime.datetime: LogicalCategory.TIMESTAMP,
-        datetime.time: LogicalCategory.TIME,
-        datetime.date: LogicalCategory.DATE,
-        decimal.Decimal: LogicalCategory.DECIMAL,
-        list: collection_type or LogicalCategory.ARRAY,
-        tuple: collection_type or LogicalCategory.ARRAY,
+        bool: BOOLEAN,
+        str: VARCHAR,
+        bytes: VARBINARY,
+        int: INT64,
+        float: FLOAT64,
+        datetime.datetime: TIMESTAMP(),
+        datetime.time: TIME(),
+        datetime.date: DATE,
+        decimal.Decimal: DECIMAL(18, 6),
+        list: collection_ct or ARRAY(VARIANT),
+        tuple: collection_ct or ARRAY(VARIANT),
     }
 
     value_type = type(value)
+    # Accept suggested_type as ColumnType or LogicalCategory (bridge during Phase 2→3 migration).
+    if suggested_type is not None and not isinstance(suggested_type, ColumnType):
+        from opteryx.types.logical_type import sql_to_column_type
+        try:
+            suggested_type = sql_to_column_type(suggested_type)
+        except Exception:
+            suggested_type = None
+
     # Determine the type from the value using the mapping
-    if value_type in type_mapping or suggested_type not in (LogicalCategory._MISSING_TYPE, 0, None):
-        if suggested_type == LogicalCategory.INTERVAL:
+    if value_type in type_mapping or suggested_type is not None:
+        if suggested_type is not None and suggested_type == INTERVAL:
             value = normalize_interval_value(value)
         if isinstance(value, datetime.datetime):
             from opteryx.types._datetime_conversion import timestamp_to_int64_us
@@ -133,24 +155,12 @@ def build_literal_node(
             value = date_to_int64_days(value)
         root.value = value
         root.node_type = NodeType.LITERAL
-        root.type = (
-            suggested_type
-            if suggested_type not in (LogicalCategory._MISSING_TYPE, 0, None)
-            else type_mapping[value_type]
-        )
-        root.element_type = element_type  # Node (AST) attribute — read by binder
+        root.type = suggested_type if suggested_type is not None else type_mapping[value_type]
+        root.element_type = None  # element now embedded in root.type for ARRAY
         root.left = None
         root.right = None
-        # Post-construction mutation of the literal's schema_column. D-4 Phase 2:
-        # the side-cars are gone, so rebuild the authoritative `column_type` to
-        # reflect the new (type, element_type) instead of writing a dead sidecar.
-        from opteryx.types.logical_type import sql_to_column_type
-        try:
-            root.schema_column.column_type = sql_to_column_type(
-                root.type, element_type=element_type
-            )
-        except Exception:
-            root.schema_column.column_type = None
+        if root.schema_column is not None:
+            root.schema_column.column_type = root.type
 
     # DEBUG:log (f"Unable to create literal node for {value}, of type {value_type}")
     return root

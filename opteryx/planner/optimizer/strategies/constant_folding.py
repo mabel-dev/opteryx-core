@@ -28,6 +28,7 @@ from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.logical_type import LogicalCategory as LC
+from opteryx.types.logical_type import BOOLEAN
 from opteryx.utils.vector_types import is_draken_vector
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
@@ -171,7 +172,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
             ):
                 # column LIKE '%' is True
                 node = Node(node_type=NodeType.UNARY_OPERATOR)
-                node.type = LogicalCategory.BOOLEAN
+                node.type = BOOLEAN
                 node.value = "IsNotNull"
                 node.schema_column = root.schema_column
                 node.centre = root.left
@@ -192,7 +193,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         if root.node_type == NodeType.OR:
             if (
                 root.left.node_type == NodeType.LITERAL
-                and root.left.type == LogicalCategory.BOOLEAN
+                and root.left.type == BOOLEAN
                 and root.left.value
             ):
                 # True OR anything is True (including NULL)
@@ -201,7 +202,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 return node
             if (
                 root.right.node_type == NodeType.LITERAL
-                and root.right.type == LogicalCategory.BOOLEAN
+                and root.right.type == BOOLEAN
                 and root.right.value
             ):
                 # anything OR True is True (including NULL)
@@ -210,7 +211,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 return node
             if (
                 root.left.node_type == NodeType.LITERAL
-                and root.left.type == LogicalCategory.BOOLEAN
+                and root.left.type == BOOLEAN
                 and not root.left.value
             ):
                 # False OR anything is anything (except NULL)
@@ -219,7 +220,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 return node
             if (
                 root.right.node_type == NodeType.LITERAL
-                and root.right.type == LogicalCategory.BOOLEAN
+                and root.right.type == BOOLEAN
                 and not root.right.value
             ):
                 # anything OR False is anything (except NULL)
@@ -230,7 +231,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         elif root.node_type == NodeType.AND:
             if (
                 root.left.node_type == NodeType.LITERAL
-                and root.left.type == LogicalCategory.BOOLEAN
+                and root.left.type == BOOLEAN
                 and not root.left.value
             ):
                 # False AND anything is False (including NULL)
@@ -239,7 +240,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 return node
             if (
                 root.right.node_type == NodeType.LITERAL
-                and root.right.type == LogicalCategory.BOOLEAN
+                and root.right.type == BOOLEAN
                 and not root.right.value
             ):
                 # anything AND False is False (including NULL)
@@ -248,7 +249,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 return node
             if (
                 root.left.node_type == NodeType.LITERAL
-                and root.left.type == LogicalCategory.BOOLEAN
+                and root.left.type == BOOLEAN
                 and root.left.value
             ):
                 # True AND anything is anything (except NULL)
@@ -257,12 +258,12 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 return node
             if (
                 root.right.node_type == NodeType.LITERAL
-                and root.right.type == LogicalCategory.BOOLEAN
+                and root.right.type == BOOLEAN
                 and root.right.value
             ):
                 # anything AND True is anything (except NULL)
                 node = _build_passthru_node(root, root.left, telemetry)
-                node.type = LogicalCategory.BOOLEAN
+                node.type = BOOLEAN
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
 
@@ -300,7 +301,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         result_vector = execute_bytecode(bc, table)
         result = result_vector.to_pylist()[0]
         telemetry.optimization_constant_fold_expression += 1
-        return build_literal_node(result, root, root.schema_column.type)
+        return build_literal_node(result, root, root.schema_column.category)
 
     return root
 

@@ -152,7 +152,8 @@ cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
         const RecordSet& records,
         const string& column_name,
         OrdinalPredictor& predictor,
-        bint copy_bytes
+        bint copy_bytes,
+        bint may_have_escapes
     )
 
     # Returns a NEW reference to a Draken Vector; the C++ side owns the Python edge.
@@ -169,7 +170,8 @@ cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
         const uint8_t* buffer,
         const RecordSet& records,
         const vector[string]& column_names,
-        size_t max_threads
+        size_t max_threads,
+        bint may_have_escapes
     ) nogil
     object wrap_column(ParsedColumn& pc)
 
@@ -588,6 +590,7 @@ cdef list _build_vectors_from_chunks(
     cdef size_t n_chunks = chunk_records.size()
     cdef OrdinalPredictor predictor
     cdef vector[ParsedColumn] parsed
+    cdef bint may_esc
 
     if n_chunks == 0 or len(chunk_buffers) == 0:
         return vectors
@@ -598,8 +601,9 @@ cdef list _build_vectors_from_chunks(
         # a Vector under the GIL (cheap, O(columns)).
         buf_bytes = <bytes>chunk_buffers[0]
         buf_ptr = <const uint8_t*>buf_bytes
+        may_esc = b'\\' in buf_bytes   # cheap buffer-wide gate: only then unescape strings
         with nogil:
-            parsed = parse_all_columns(buf_ptr, chunk_records[0], column_names, 0)
+            parsed = parse_all_columns(buf_ptr, chunk_records[0], column_names, 0, may_esc)
         for pi in range(parsed.size()):
             vec = wrap_column(parsed[pi])
             if vec is not None:
@@ -612,7 +616,8 @@ cdef list _build_vectors_from_chunks(
         for ci in range(n_chunks):
             buf_bytes = <bytes>chunk_buffers[ci]
             buf_ptr = <const uint8_t*>buf_bytes
-            chunk_col = extract_column(buf_ptr, chunk_records[ci], col_name_cpp, predictor, True)
+            may_esc = b'\\' in buf_bytes
+            chunk_col = extract_column(buf_ptr, chunk_records[ci], col_name_cpp, predictor, True, may_esc)
             if ci == 0:
                 merged = chunk_col
             else:

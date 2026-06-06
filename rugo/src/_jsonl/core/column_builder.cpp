@@ -34,6 +34,85 @@ static inline bool key_matches(
            std::memcmp(buf + key_start, name, name_len) == 0;
 }
 
+// Parse exactly 4 hex digits at p into *out. Returns false on any non-hex byte.
+static inline bool parse_hex4(const uint8_t* p, uint32_t* out) noexcept {
+    uint32_t v = 0;
+    for (int k = 0; k < 4; ++k) {
+        const uint8_t c = p[k];
+        uint32_t d;
+        if (c >= '0' && c <= '9')      d = c - '0';
+        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+        else return false;
+        v = (v << 4) | d;
+    }
+    *out = v;
+    return true;
+}
+
+// Append codepoint cp as UTF-8 to out (1–4 bytes). Lenient on lone surrogates (WTF-8).
+static inline void append_utf8(uint32_t cp, std::vector<uint8_t>& out) {
+    if (cp <= 0x7F) {
+        out.push_back(static_cast<uint8_t>(cp));
+    } else if (cp <= 0x7FF) {
+        out.push_back(static_cast<uint8_t>(0xC0 | (cp >> 6)));
+        out.push_back(static_cast<uint8_t>(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0xFFFF) {
+        out.push_back(static_cast<uint8_t>(0xE0 | (cp >> 12)));
+        out.push_back(static_cast<uint8_t>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<uint8_t>(0x80 | (cp & 0x3F)));
+    } else {
+        out.push_back(static_cast<uint8_t>(0xF0 | (cp >> 18)));
+        out.push_back(static_cast<uint8_t>(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back(static_cast<uint8_t>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<uint8_t>(0x80 | (cp & 0x3F)));
+    }
+}
+
+// Append the JSON-unescaped form of src[0..len) to `out`: handles \" \\ \/ \b \f \n \r \t
+// and \uXXXX (with surrogate pairs -> UTF-8). Bulk-copies runs without backslashes, and is
+// lenient on malformed escapes (copies the byte literally). The unescaped form is never
+// longer than the input, so callers can size on `len`.
+static void json_unescape(const uint8_t* src, uint32_t len, std::vector<uint8_t>& out) {
+    uint32_t i = 0;
+    while (i < len) {
+        // Bulk-copy the run up to the next backslash.
+        uint32_t run = i;
+        while (run < len && src[run] != '\\') ++run;
+        if (run > i) { out.insert(out.end(), src + i, src + run); i = run; }
+        if (i >= len) break;
+        // src[i] == '\\'
+        if (i + 1 >= len) { out.push_back('\\'); ++i; break; }  // trailing backslash
+        const uint8_t e = src[i + 1];
+        switch (e) {
+            case '"':  out.push_back('"');  i += 2; break;
+            case '\\': out.push_back('\\'); i += 2; break;
+            case '/':  out.push_back('/');  i += 2; break;
+            case 'b':  out.push_back(0x08); i += 2; break;
+            case 'f':  out.push_back(0x0C); i += 2; break;
+            case 'n':  out.push_back(0x0A); i += 2; break;
+            case 'r':  out.push_back(0x0D); i += 2; break;
+            case 't':  out.push_back(0x09); i += 2; break;
+            case 'u': {
+                uint32_t cp;
+                if (i + 6 > len || !parse_hex4(src + i + 2, &cp)) { out.push_back('\\'); ++i; break; }
+                i += 6;
+                if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 <= len &&
+                    src[i] == '\\' && src[i + 1] == 'u') {
+                    uint32_t lo;
+                    if (parse_hex4(src + i + 2, &lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
+                        cp = 0x10000u + ((cp - 0xD800u) << 10) + (lo - 0xDC00u);
+                        i += 6;
+                    }
+                }
+                append_utf8(cp, out);
+                break;
+            }
+            default: out.push_back(e); i += 2; break;  // unknown escape -> literal char
+        }
+    }
+}
+
 static ColumnType infer_numeric_type(
     const uint8_t*                            buffer,
     const RecordSet&                          records,
@@ -72,7 +151,8 @@ StringColumnResult extract_column(
     const RecordSet&                          records,
     const std::string&                         column_name,
     OrdinalPredictor&                         predictor,
-    bool                                       copy_bytes)
+    bool                                       copy_bytes,
+    bool                                       may_have_escapes)
 {
     const size_t num_rows = records.size();
     const size_t col_len  = column_name.size();
@@ -112,10 +192,38 @@ StringColumnResult extract_column(
     }
     infer_done:
 
+    // Unescape only string columns, and only when the buffer actually contains a backslash
+    // (escape-free data keeps the zero-copy fast path). Unescaping copies into result.data,
+    // so it forces copy mode; flag it so the consumer reads slices from data, not the buffer.
+    const bool do_unescape = may_have_escapes && (result.inferred_type == ColumnType::String);
+    result.data_owned = copy_bytes || do_unescape;
+
     // Preallocate estimated string data (rough estimate)
-    result.data.reserve(num_rows * 16);
+    if (result.data_owned) result.data.reserve(num_rows * 16);
     result.offsets.resize(num_rows);
     result.lengths.resize(num_rows);
+
+    // Emit one value: NULL marks the bitmap; otherwise copy+unescape (do_unescape), copy
+    // (copy_bytes), or reference the original buffer (zero-copy).
+    auto emit_value = [&](const FieldSpan& f, size_t row) {
+        const uint32_t vend = f.value_start + f.value_width - 1;
+        if (is_null(buffer, f.value_start, vend)) {
+            result.null_bitmap[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
+        } else if (do_unescape) {
+            const uint32_t start = static_cast<uint32_t>(result.data.size());
+            json_unescape(buffer + f.value_start, f.value_width, result.data);
+            result.offsets[row] = start;
+            result.lengths[row] = static_cast<uint32_t>(result.data.size() - start);
+        } else if (copy_bytes) {
+            result.offsets[row] = static_cast<uint32_t>(result.data.size());
+            result.lengths[row] = f.value_width;
+            result.data.insert(result.data.end(),
+                               buffer + f.value_start, buffer + f.value_start + f.value_width);
+        } else {
+            result.offsets[row] = f.value_start;  // index into the original buffer
+            result.lengths[row] = f.value_width;
+        }
+    };
 
     // Get ordinal prediction candidates for this column
     auto candidates = predictor.get_candidates(column_name);
@@ -130,19 +238,7 @@ StringColumnResult extract_column(
             const auto& f = record[last_seen];
             if (f.key_width == col_len &&
                 std::memcmp(buffer + f.key_start, column_name.data(), col_len) == 0) {
-                // Match! Extract value
-                if (is_null(buffer, f.value_start, f.value_start + f.value_width - 1)) {
-                    result.null_bitmap[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
-                } else if (copy_bytes) {
-                    result.offsets[row] = static_cast<uint32_t>(result.data.size());
-                    result.lengths[row] = f.value_width;
-                    result.data.insert(result.data.end(),
-                                      buffer + f.value_start,
-                                      buffer + f.value_start + f.value_width);
-                } else {
-                    result.offsets[row] = f.value_start;  // index into the original buffer
-                    result.lengths[row] = f.value_width;
-                }
+                emit_value(f, row);
                 found = true;
             }
         }
@@ -153,22 +249,9 @@ StringColumnResult extract_column(
                 const auto& f = record[i];
                 if (f.key_width == col_len &&
                     std::memcmp(buffer + f.key_start, column_name.data(), col_len) == 0) {
-                    // Match! Update prediction and extract value
                     last_seen = static_cast<uint16_t>(i);
                     predictor.update_history(column_name, last_seen);
-
-                    if (is_null(buffer, f.value_start, f.value_start + f.value_width - 1)) {
-                        result.null_bitmap[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
-                    } else if (copy_bytes) {
-                        result.offsets[row] = static_cast<uint32_t>(result.data.size());
-                        result.lengths[row] = f.value_width;
-                        result.data.insert(result.data.end(),
-                                          buffer + f.value_start,
-                                          buffer + f.value_start + f.value_width);
-                    } else {
-                        result.offsets[row] = f.value_start;  // index into the original buffer
-                        result.lengths[row] = f.value_width;
-                    }
+                    emit_value(f, row);
                     found = true;
                     break;
                 }
@@ -377,7 +460,8 @@ std::vector<ParsedColumn> parse_all_columns(
     const uint8_t*                             buffer,
     const RecordSet&                          records,
     const std::vector<std::string>&            column_names,
-    size_t                                     max_threads) {
+    size_t                                     max_threads,
+    bool                                       may_have_escapes) {
 
     const size_t ncols = column_names.size();
     std::vector<ParsedColumn> out(ncols);
@@ -389,8 +473,12 @@ std::vector<ParsedColumn> parse_all_columns(
 
     auto do_one = [&](size_t c) {
         OrdinalPredictor pred;  // thread-local; per-column, no sharing
-        StringColumnResult scr = extract_column(buffer, records, column_names[c], pred, false);
-        out[c] = parse_typed_column(buffer, scr);
+        StringColumnResult scr = extract_column(buffer, records, column_names[c], pred,
+                                                /*copy_bytes=*/false, may_have_escapes);
+        // Unescaped (or copied) columns own their bytes in scr.data; zero-copy columns
+        // reference the original buffer.
+        const uint8_t* base = scr.data_owned ? scr.data_ptr() : buffer;
+        out[c] = parse_typed_column(base, scr);
     };
 
     if (nt <= 1) {

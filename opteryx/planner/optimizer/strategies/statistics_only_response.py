@@ -142,7 +142,7 @@ def is_simple_aggregate(aggregate_node) -> bool:
             expr = aggregate.parameters[0]
             if not hasattr(expr, "schema_column") or expr.schema_column is None:
                 return False
-            col_type = getattr(expr.schema_column, "type", None)
+            col_type = getattr(expr.schema_column, "category", None)
             if col_type is None:
                 return False
             # DATE, INTEGER and TIMESTAMP types preserve exact values in BRIN bounds
@@ -564,7 +564,7 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
                 if result_value is None:
                     return plan
                 # Preserve the column type (INTEGER or TIMESTAMP)
-                agg_col_type = agg_node.parameters[0].schema_column.type
+                agg_col_type = agg_node.parameters[0].schema_column.category
                 result_type = agg_col_type
             else:
                 # Unsupported aggregate type

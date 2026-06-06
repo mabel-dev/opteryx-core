@@ -49,7 +49,7 @@ from opteryx.models import Node, QueryTelemetry
 from opteryx.planner import build_literal_node
 from opteryx.planner.binder.operator_map import determine_type
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
-from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.logical_type import LogicalCategory, ColumnType
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import ConstantColumn
 from opteryx.utils.dates import add_single_unit, parse_iso, truncate_single
@@ -74,7 +74,12 @@ def rewrite_in_to_eq(predicate):
     """
     predicate.value = IN_REWRITES[predicate.value]
     predicate.right.value = tuple(predicate.right.value)[0]
-    predicate.right.type = predicate.right.element_type or LogicalCategory.VARCHAR
+    # Phase 2: element is embedded in ARRAY ColumnType; sidecar element_type is gone.
+    _arr_ct = predicate.right.type
+    if isinstance(_arr_ct, ColumnType) and _arr_ct.element is not None:
+        predicate.right.type = _arr_ct.element
+    else:
+        predicate.right.type = _lt.VARCHAR
     predicate.right.element_type = None
     return predicate
 
@@ -176,7 +181,7 @@ def rewrite_ored_like_to_regex(predicate, telemetry):
             for node in like_data["nodes"][1:]:
                 node.value = False
                 node.node_type = NodeType.LITERAL
-                node.type = LogicalCategory.BOOLEAN
+                node.type = _lt.BOOLEAN
 
     return predicate
 
@@ -222,30 +227,17 @@ def rewrite_ored_any_eq_to_contains(predicate, telemetry):
             new_node = data["nodes"][0]
 
             new_node.left.value = list(set(data["values"]))
-            new_node.left.element_type = new_node.left.type
-            new_node.left.type = LogicalCategory.ARRAY
-            # D-4 Phase 2: construct via the unified column_type path. Build an
-            # ARRAY<element> ColumnType where element comes from the original type
-            # (now stashed into element_type above).
-            from opteryx.types.logical_type import sql_to_column_type as _otoct
-            from opteryx.types import logical_type as _lt
-            try:
-                _elem_ct = _otoct(new_node.left.element_type)
-                _arr_ct = _lt.ARRAY(_elem_ct)
-                new_node.left.schema_column = ConstantColumn.from_column_type(
-                    name=new_node.left.name,
-                    column_type=_arr_ct,
-                    value=new_node.left.value,
-                )
-            except Exception:
-                # Bridge can't map this element type (e.g. VECTOR) — fall back to
-                # the legacy constructor so we don't lose the rewrite.
-                new_node.left.schema_column = ConstantColumn(
-                    name=new_node.left.name,
-                    type=LogicalCategory.ARRAY,
-                    element_type=new_node.left.element_type,
-                    value=new_node.left.value,
-                )
+            # Phase 2: build ARRAY ColumnType directly from old element type.
+            _old_elem_ct = new_node.left.type  # ColumnType of element
+            _arr_ct_1 = _lt.ARRAY(_old_elem_ct) if isinstance(_old_elem_ct, ColumnType) else _lt.ARRAY(_lt.VARIANT)
+            new_node.left.type = _arr_ct_1
+            new_node.left.element_type = None  # element embedded in type
+            # Phase 2: use the already-computed _arr_ct_1 for schema_column.
+            new_node.left.schema_column = ConstantColumn.from_column_type(
+                name=new_node.left.name,
+                column_type=_arr_ct_1,
+                value=new_node.left.value,
+            )
 
             new_node.value = "AtArrow"
             new_node.node_type = NodeType.COMPARISON_OPERATOR
@@ -256,7 +248,7 @@ def rewrite_ored_any_eq_to_contains(predicate, telemetry):
             # Disable the remaining OR nodes
             for node in data["nodes"][1:]:
                 node.node_type = NodeType.LITERAL
-                node.type = LogicalCategory.BOOLEAN
+                node.type = _lt.BOOLEAN
                 node.value = False
 
     return predicate
@@ -309,28 +301,20 @@ def rewrite_ored_eq_to_inlist(predicate, telemetry):
             new_node = eq_data["nodes"][0]
             new_node.value = "InList"
             new_node.right.value = list(set(eq_data["values"]))
-            new_node.right.element_type = new_node.right.type
-            new_node.right.type = LogicalCategory.ARRAY
-            # D-4 Phase 2: column_type construction for ARRAY ConstantColumn.
-            try:
-                _elem_ct = _otoct(new_node.right.element_type)
-                _arr_ct = _lt.ARRAY(_elem_ct)
-                new_node.right.schema_column = ConstantColumn.from_column_type(
-                    name=new_node.right.name,
-                    column_type=_arr_ct,
-                    value=new_node.right.value,
-                )
-            except Exception:
-                new_node.right.schema_column = ConstantColumn(
-                    name=new_node.right.name,
-                    type=LogicalCategory.ARRAY,
-                    element_type=new_node.right.element_type,
-                    value=new_node.right.value,
-                )
+            # Phase 2: build ARRAY ColumnType from old element type.
+            _old_elem_ct_2 = new_node.right.type
+            _arr_ct_2 = _lt.ARRAY(_old_elem_ct_2) if isinstance(_old_elem_ct_2, ColumnType) else _lt.ARRAY(_lt.VARIANT)
+            new_node.right.type = _arr_ct_2
+            new_node.right.element_type = None
+            new_node.right.schema_column = ConstantColumn.from_column_type(
+                name=new_node.right.name,
+                column_type=_arr_ct_2,
+                value=new_node.right.value,
+            )
             for node in eq_data["nodes"][1:]:
                 node.value = False
                 node.node_type = NodeType.LITERAL
-                node.type = LogicalCategory.BOOLEAN
+                node.type = _lt.BOOLEAN
 
     return predicate
 
@@ -370,7 +354,7 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry):
     for data in groups.values():
         if len(data["values"]) > 1:
             node = data["node"]
-            left_type = getattr(getattr(node.left, "schema_column", None), "type", None)
+            left_type = getattr(getattr(node.left, "schema_column", None), "category", None)
             _COERCE = {
                 LogicalCategory.DOUBLE: float,
                 LogicalCategory.INTEGER: int,
@@ -385,24 +369,16 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry):
             node.right.value = [
                 None if v is None else coerce(v) for v in values
             ]
-            node.right.element_type = node.right.type
-            node.right.type = LogicalCategory.ARRAY
-            # D-4 Phase 2: column_type construction for ARRAY ConstantColumn.
-            try:
-                _elem_ct = _otoct(node.right.element_type)
-                _arr_ct = _lt.ARRAY(_elem_ct)
-                node.right.schema_column = ConstantColumn.from_column_type(
-                    name=node.right.name,
-                    column_type=_arr_ct,
-                    value=node.right.value,
-                )
-            except Exception:
-                node.right.schema_column = ConstantColumn(
-                    name=node.right.name,
-                    type=LogicalCategory.ARRAY,
-                    element_type=node.right.element_type,
-                    value=node.right.value,
-                )
+            # Phase 2: build ARRAY ColumnType from old element type.
+            _old_elem_ct_3 = node.right.type
+            _arr_ct_3 = _lt.ARRAY(_old_elem_ct_3) if isinstance(_old_elem_ct_3, ColumnType) else _lt.ARRAY(_lt.VARIANT)
+            node.right.type = _arr_ct_3
+            node.right.element_type = None
+            node.right.schema_column = ConstantColumn.from_column_type(
+                name=node.right.name,
+                column_type=_arr_ct_3,
+                value=node.right.value,
+            )
             new_params.append(node)
             telemetry.optimization_predicate_rewriter_eqs_to_list = (
                 getattr(telemetry, "optimization_predicate_rewriter_eqs_to_list", 0) + 1
@@ -501,7 +477,7 @@ def rewrite_string_empty_compare(predicate, telemetry):
             ident = literal = None
 
         if ident is not None:
-            col_type = getattr(getattr(ident, "schema_column", None), "type", None)
+            col_type = getattr(getattr(ident, "schema_column", None), "category", None)
             val = literal.value
             if (
                 col_type in {LogicalCategory.VARCHAR, LogicalCategory.BLOB}
@@ -538,7 +514,7 @@ def rewrite_string_empty_compare(predicate, telemetry):
     inner = func_node.parameters[0]
     if inner.node_type != NodeType.IDENTIFIER:
         return predicate
-    col_type = getattr(getattr(inner, "schema_column", None), "type", None)
+    col_type = getattr(getattr(inner, "schema_column", None), "category", None)
     if col_type not in {LogicalCategory.VARCHAR, LogicalCategory.BLOB}:
         return predicate
 
@@ -628,7 +604,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
     column_type = LogicalCategory.VARCHAR
     column_ct = _lt.VARCHAR  # unified ColumnType for the schema_column
     if column_node.schema_column:
-        column_type = column_node.schema_column.type
+        column_type = column_node.schema_column.category
         column_ct = column_node.schema_column.column_type or _lt.VARCHAR
 
     # Helper function to create a literal timestamp node with the column's type
@@ -646,7 +622,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
         if not is_aligned:
             # Non-aligned equality is always false
             predicate.node_type = NodeType.LITERAL
-            predicate.type = LogicalCategory.BOOLEAN
+            predicate.type = _lt.BOOLEAN
             predicate.value = False
             return predicate
 
@@ -853,7 +829,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
         if rewritten is not predicate:
             return rewritten
 
-    if predicate.right.type == LogicalCategory.VARCHAR:
+    if predicate.right.type == _lt.VARCHAR:
         if predicate.value in {"Like", "ILike", "NotLike", "NotILike"}:
             if "%%" in predicate.right.value:
                 telemetry.optimization_predicate_rewriter_remove_adjacent_wildcards += 1
@@ -929,7 +905,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
     if predicate.node_type in {NodeType.FUNCTION, NodeType.NOT}:
         return predicate
 
-    if predicate.right.type == LogicalCategory.BLOB:
+    if predicate.right.type == _lt.VARBINARY:
         if predicate.value in {"Like", "ILike", "NotLike", "NotILike"}:
             if b"%%" in predicate.right.value:
                 telemetry.optimization_predicate_rewriter_remove_adjacent_wildcards += 1

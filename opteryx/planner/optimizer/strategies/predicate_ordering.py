@@ -25,7 +25,8 @@ from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.cost_estimation import PredicateStats, order_predicates as _order_predicates
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
-from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.logical_type import LogicalCategory, ColumnType
+from opteryx.types import logical_type as _lt
 from opteryx.types.schema import ConstantColumn
 from opteryx.utils import random_string
 
@@ -52,8 +53,7 @@ BASIC_COMPARISON_COSTS = {
     LogicalCategory.TIME: 10.00,  # expensive
     LogicalCategory.VARCHAR: 0.231,  # varies based on length, this is 50 chars
     LogicalCategory.NULL: 10.00,  # for completeness
-    getattr(LogicalCategory, "_MISSING_TYPE", 0): 10.00,  # for completeness
-    0: 10.00,  # for completeness
+    None: 10.00,  # unknown type — treat as expensive
 }
 
 # Operation-specific costs (override type-based costs)
@@ -114,7 +114,7 @@ def _base_cost(condition):
     col_type = getattr(col, "schema_column", None)
     if col_type is None:
         return 10.0
-    return BASIC_COMPARISON_COSTS.get(col_type.type, 10.0)
+    return BASIC_COMPARISON_COSTS.get(col_type.category, 10.0)
 
 
 def _catalog_function_cost(node) -> float:
@@ -227,26 +227,16 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
             # (use a set to dedupe; order doesn't matter)
             values_set = set(data["values"])
             new_node.left.value = values_set
-            new_node.left.element_type = new_node.left.type
-            new_node.left.type = LogicalCategory.ARRAY
-            # D-4 Phase 2: column_type construction for ARRAY ConstantColumn.
-            from opteryx.types.logical_type import sql_to_column_type as _otoct
-            from opteryx.types import logical_type as _lt
-            try:
-                _elem_ct = _otoct(new_node.left.element_type)
-                _arr_ct = _lt.ARRAY(_elem_ct)
-                new_node.left.schema_column = ConstantColumn.from_column_type(
-                    name=new_node.left.name,
-                    column_type=_arr_ct,
-                    value=new_node.left.value,
-                )
-            except Exception:
-                new_node.left.schema_column = ConstantColumn(
-                    name=new_node.left.name,
-                    type=LogicalCategory.ARRAY,
-                    element_type=new_node.left.element_type,
-                    value=new_node.left.value,
-                )
+            # Phase 2: build ARRAY ColumnType directly from old element type.
+            _old_elem_ct_po = new_node.left.type
+            _arr_ct_po = _lt.ARRAY(_old_elem_ct_po) if isinstance(_old_elem_ct_po, ColumnType) else _lt.ARRAY(_lt.VARIANT)
+            new_node.left.type = _arr_ct_po
+            new_node.left.element_type = None
+            new_node.left.schema_column = ConstantColumn.from_column_type(
+                name=new_node.left.name,
+                column_type=_arr_ct_po,
+                value=new_node.left.value,
+            )
 
             # Turn node into: column @>> ARRAY[...]
             new_node.value = "ArrayContainsAll"  # your @>> operator
@@ -259,7 +249,7 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
             # Neutralize the remaining AND'ed ANYOPEQ nodes to TRUE
             for node in data["nodes"][1:]:
                 node.node_type = NodeType.LITERAL
-                node.type = LogicalCategory.BOOLEAN
+                node.type = _lt.BOOLEAN
                 node.value = True
 
     return predicate

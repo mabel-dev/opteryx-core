@@ -121,14 +121,9 @@ def _map_parquet_type_to_sql(
             return PARQUET_LOGICAL_COMPLEX_PREFIXES["timestamp"]
 
         if logical_lower.startswith(("array", "decimal")):
+            from opteryx.types.logical_type import parse_column_type
             normalized_logical = _normalize_sql_type_aliases(logical_lower)
-            _type, _length, _precision, _scale, _element_type = LogicalCategory.from_name(
-                normalized_logical
-            )
-            # Note: _type is an immutable enum, so we cannot set attributes on it
-            # The metadata (_length, _precision, _scale, _element_type) will be extracted
-            # from the parquet entry itself in the calling code
-            return _type
+            return parse_column_type(normalized_logical).category
 
     # Fall back to physical type mapping
     physical_lower = parquet_type.lower() if parquet_type else ""
@@ -337,9 +332,9 @@ def _map_jsonl_type_to_sql(jsonl_type: str) -> str:
         else:
             normalized = jt
 
+        from opteryx.types.logical_type import parse_column_type
         try:
-            _type, _length, _precision, _scale, _element_type = LogicalCategory.from_name(normalized)
-            return _type
+            return parse_column_type(normalized).category
         except ValueError:
             return LogicalCategory.BLOB
 

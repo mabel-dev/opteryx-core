@@ -223,7 +223,7 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             raise IncompatibleTypesError(**mismatches)
 
         if any(
-            com.left.schema_column.type == LogicalCategory.DECIMAL and com.value not in ("Eq", "NotEq")
+            com.left.schema_column.category == LogicalCategory.DECIMAL and com.value not in ("Eq", "NotEq")
             for com in comparisons
         ):
             raise UnsupportedSyntaxError(

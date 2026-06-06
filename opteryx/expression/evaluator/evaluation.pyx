@@ -221,8 +221,8 @@ cdef _validate_temporal_comparison(left_node, right_node, op):
     """
     left_sc = getattr(left_node, "schema_column", None)
     right_sc = getattr(right_node, "schema_column", None)
-    left_type = getattr(left_sc, "type", None) if left_sc is not None else None
-    right_type = getattr(right_sc, "type", None) if right_sc is not None else None
+    left_type = getattr(left_sc, "category", None) if left_sc is not None else None
+    right_type = getattr(right_sc, "category", None) if right_sc is not None else None
 
     cdef bint left_is_temporal = _is_temporal_type(left_type)
     cdef bint right_is_temporal = _is_temporal_type(right_type)
