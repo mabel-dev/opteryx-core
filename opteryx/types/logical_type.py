@@ -92,28 +92,6 @@ class LogicalCategory(Enum):
     ARRAY = "ARRAY"
     VECTOR = "VECTOR"
 
-    @property
-    def python_type(self) -> Type:
-        return _TYPE_TO_PYTHON.get(self, object)
-
-    @property
-    def native_type(self) -> str:
-        from opteryx.types._native_types import get_native_type
-
-        return get_native_type(self.value)
-
-    def parse(self, value: Any) -> Any:
-        """Coerce a value to this type's canonical Python representation."""
-        if value is None:
-            return None
-        parser = _PARSERS.get(self)
-        if parser is None:
-            return value
-        try:
-            return parser(value)
-        except (ValueError, TypeError, AttributeError):
-            return value
-
     def is_numeric(self) -> bool:
         return self in _NUMERIC_TYPES
 
@@ -128,48 +106,6 @@ class LogicalCategory(Enum):
 
     def is_string(self) -> bool:
         return self in _STRING_TYPES
-
-    @classmethod
-    def from_name(cls, name: str) -> Tuple["LogicalCategory", None, Optional[int], Optional[int], "Optional[LogicalCategory]"]:
-        """Parse a SQL type name to (type, None, precision, scale, element_type).
-
-        Tuple-shaped for the historical call contract; precision/scale set for
-        parameterized DECIMAL(p,s), element_type set for ARRAY<inner>.
-        """
-        upper = name.strip().upper()
-        _aliases = {
-            "INT": "INTEGER", "INT32": "INTEGER", "INT64": "INTEGER", "BIGINT": "INTEGER",
-            "FLOAT32": "FLOAT", "FLOAT64": "FLOAT",
-            "STRING": "VARCHAR", "TEXT": "VARCHAR", "BOOL": "BOOLEAN", "BYTES": "BLOB",
-        }
-
-        if "(" in upper:
-            base = upper[: upper.index("(")].strip()
-            params = upper[upper.index("(") + 1 : upper.rindex(")")].strip()
-            parts = [p.strip() for p in params.split(",")]
-            precision = int(parts[0]) if parts and parts[0].isdigit() else None
-            scale = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
-            base = _aliases.get(base, base)
-            try:
-                return (cls[base], None, precision, scale, None)
-            except KeyError:
-                raise ValueError(f"Unknown type: {name}")
-
-        if "<" in upper:
-            outer, rest = upper.split("<", 1)
-            outer = outer.strip()
-            inner = rest.rstrip(">").strip()
-            outer_type = cls[outer] if outer in cls.__members__ else cls.ARRAY
-            inner_key = _aliases.get(inner, inner)
-            element_type = cls[inner_key] if inner_key in cls.__members__ else None
-            return (outer_type, None, None, None, element_type)
-
-        key = _aliases.get(upper, upper)
-        try:
-            return (cls[key], None, None, None, None)
-        except KeyError:
-            raise ValueError(f"Unknown type: {name}")
-
 
 # Physical type -> dispatch category. Integer/float widths collapse here.
 _CATEGORY_OF: dict = {
@@ -420,6 +356,17 @@ def ARRAY(element_type: ColumnType) -> ColumnType:
 # dedicated parse branches (they carry parameters).
 _NAME_TO_PHYSICAL: dict = {name: phys for phys, name in _NAME_OF.items()}
 
+# SQL-spelling aliases -> canonical ColumnType. The single place SQL type names
+# (incl. legacy/alias spellings) resolve to a type — this is what `from_name` did.
+_SQL_NAME_ALIASES: dict = {
+    "INTEGER": INT64, "INT": INT64, "BIGINT": INT64,
+    "DOUBLE": FLOAT64, "FLOAT": FLOAT64,
+    "STRING": VARCHAR, "TEXT": VARCHAR,
+    "BOOL": BOOLEAN,
+    "BYTES": VARBINARY, "BLOB": VARBINARY,
+    "STRUCT": NVARCHAR, "JSONB": NVARCHAR,
+}
+
 
 def serialize_column_type(ct) -> Optional[str]:
     """Canonical string for a ColumnType (None -> None)."""
@@ -459,6 +406,10 @@ def parse_column_type(s: Optional[str]) -> Optional[ColumnType]:
         return TIMESTAMP()
     if upper == "TIME":
         return TIME()
+
+    alias = _SQL_NAME_ALIASES.get(upper)
+    if alias is not None:
+        return alias
 
     phys = _NAME_TO_PHYSICAL.get(upper)
     if phys is not None:
@@ -517,124 +468,6 @@ _TEMPORAL_TYPES = {LogicalCategory.DATE, LogicalCategory.TIME, LogicalCategory.T
 _COMPLEX_TYPES = {LogicalCategory.ARRAY, LogicalCategory.VECTOR, LogicalCategory.NVARCHAR}
 _STRING_TYPES = {LogicalCategory.VARCHAR, LogicalCategory.NVARCHAR, LogicalCategory.VARBINARY}
 _LARGE_OBJECT_TYPES = {LogicalCategory.VARBINARY, LogicalCategory.ARRAY, LogicalCategory.NVARCHAR, LogicalCategory.VECTOR}
-
-
-def _parse_boolean(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.lower() in ("true", "1", "yes", "on")
-    return bool(value)
-
-
-def _parse_integer(value):
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    if isinstance(value, str):
-        return int(value.strip())
-    return int(value)
-
-
-def _parse_double(value):
-    if isinstance(value, float):
-        return value
-    if isinstance(value, int) and not isinstance(value, bool):
-        return float(value)
-    if isinstance(value, str):
-        return float(value.strip())
-    return float(value)
-
-
-def _parse_decimal(value):
-    if isinstance(value, decimal.Decimal):
-        return value
-    if isinstance(value, (int, float)):
-        return decimal.Decimal(str(value))
-    if isinstance(value, str):
-        return decimal.Decimal(value.strip())
-    return decimal.Decimal(value)
-
-
-def _parse_varchar(value):
-    if isinstance(value, str):
-        return value
-    if isinstance(value, bytes):
-        return value.decode("utf-8")
-    return str(value)
-
-
-def _parse_blob(value):
-    if isinstance(value, bytes):
-        return value
-    if isinstance(value, str):
-        return value.encode("utf-8")
-    if isinstance(value, (bytearray, memoryview)):
-        return bytes(value)
-    return bytes(value)
-
-
-def _parse_date(value):
-    if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
-        return value
-    if isinstance(value, datetime.datetime):
-        return value.date()
-    if isinstance(value, str):
-        parts = value.strip().split("-")
-        if len(parts) == 3:
-            return datetime.date(int(parts[0]), int(parts[1]), int(parts[2]))
-    raise ValueError(f"Cannot parse {value} as date")
-
-
-def _parse_time(value):
-    if isinstance(value, datetime.time):
-        return value
-    if isinstance(value, str):
-        parts = value.strip().split(":")
-        if len(parts) >= 2:
-            return datetime.time(int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0)
-    raise ValueError(f"Cannot parse {value} as time")
-
-
-def _parse_timestamp(value):
-    if isinstance(value, datetime.datetime):
-        return value
-    if isinstance(value, datetime.date):
-        return datetime.datetime.combine(value, datetime.time())
-    if isinstance(value, str):
-        value_str = value.strip().replace("T", " ")
-        try:
-            if "." in value_str:
-                return datetime.datetime.strptime(value_str, "%Y-%m-%d %H:%M:%S.%f")
-            return datetime.datetime.strptime(value_str, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            return datetime.datetime.strptime(value_str.split(" ")[0], "%Y-%m-%d")
-    raise ValueError(f"Cannot parse {value} as timestamp")
-
-
-def _parse_interval(value):
-    if isinstance(value, datetime.timedelta):
-        return value
-    if isinstance(value, (int, float)):
-        return datetime.timedelta(seconds=value)
-    raise ValueError(f"Cannot parse {value} as interval")
-
-
-_PARSERS: Dict[LogicalCategory, Callable] = {
-    LogicalCategory.BOOLEAN: _parse_boolean,
-    LogicalCategory.INTEGER: _parse_integer,
-    LogicalCategory.FLOAT: _parse_double,
-    LogicalCategory.DECIMAL: _parse_decimal,
-    LogicalCategory.VARCHAR: _parse_varchar,
-    LogicalCategory.NVARCHAR: _parse_varchar,
-    LogicalCategory.VARIANT: _parse_varchar,
-    LogicalCategory.VARBINARY: _parse_blob,
-    LogicalCategory.DATE: _parse_date,
-    LogicalCategory.TIME: _parse_time,
-    LogicalCategory.TIMESTAMP: _parse_timestamp,
-    LogicalCategory.INTERVAL: _parse_interval,
-}
 
 
 def find_compatible_type(types: list) -> LogicalCategory:

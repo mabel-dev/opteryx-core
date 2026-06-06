@@ -24,6 +24,7 @@ from opteryx.planner.binder.join_helpers import get_mismatched_condition_column_
 from opteryx.planner.binder.operator_map import determine_type
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types import logical_type as _lt
+from opteryx.types.value_parsing import parse_value
 from opteryx.types.schema import ConstantColumn, SchemaColumn, FunctionColumn, RelationSchema
 
 
@@ -449,7 +450,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                             and param.value is not None
                             and param.value != set()
                         ):
-                            param.value = result_type.parse(param.value)
+                            param.value = parse_value(result_type, param.value)
                             param.type = result_type  # Node AST attribute
                             if param.schema_column is not None:
                                 from opteryx.types.logical_type import sql_to_column_type as _otoct2
@@ -518,7 +519,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
             if result_type not in (LogicalCategory._MISSING_TYPE, LogicalCategory.NULL, 0):
                 for branch in branch_nodes:
                     if branch.node_type == NodeType.LITERAL and branch.value is not None:
-                        branch.value = result_type.parse(branch.value)
+                        branch.value = parse_value(result_type, branch.value)
                         branch.type = result_type  # Node AST attribute
                         if branch.schema_column is not None:
                             from opteryx.types.logical_type import sql_to_column_type as _otoct3

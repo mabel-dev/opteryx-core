@@ -224,6 +224,7 @@ struct MapBuilder {
     bool cur_wanted = true;
     bool skip_rest = false;
     bool record_dead = false;
+    uint32_t escaped_until = 0xFFFFFFFFu;  // byte escaped by a preceding '\' in a key/string
 
     MapBuilder(const uint8_t* buf, const MapProjection* p)
         : buffer(buf), proj(p), num_wanted(p ? p->num_wanted : 0) {
@@ -284,11 +285,19 @@ struct MapBuilder {
     inline void discard_record() { rs.spans.resize(record_start()); }
 
     inline void step(uint32_t pos, uint8_t ch) {
+        // Escape handling inside keys/string values: a '\' makes the next byte literal, so an
+        // escaped quote (\") or backslash (\\) is content, not a delimiter. (~free; the
+        // alternative — masking escapes out of the scan — costs ~1.4× scan for no net win
+        // below ~40% in-string density. See scan_structural_masked.)
+        if (state == State::IN_KEY || state == State::IN_STRING_VALUE) {
+            if (pos == escaped_until) { escaped_until = 0xFFFFFFFFu; return; }  // escaped content
+            if (ch == '\\') { escaped_until = pos + 1; return; }               // escapes next byte
+        }
         CharClass cls = char_class_table[ch];
         const Transition& tr = transition_table[static_cast<int>(state)][static_cast<int>(cls)];
         switch (tr.action) {
         case Action::START_RECORD:
-            ordinal = 0; found = 0; record_dead = false; break;
+            ordinal = 0; found = 0; record_dead = false; escaped_until = 0xFFFFFFFFu; break;
         case Action::SET_COLON:
             colon_pos = pos; break;
         case Action::START_KEY:
@@ -390,89 +399,6 @@ std::vector<std::string> first_record_keys(const RecordSet& rs, const uint8_t* b
     for (const FieldSpan& f : rec)
         keys.emplace_back(reinterpret_cast<const char*>(buffer + f.key_start), f.key_width);
     return keys;
-}
-
-// SPIKE: same data-blind FSM as the no-projection build_map, but driven by iterating set
-// bits of a structural bitmap rather than walking a marker vector.
-RecordSet build_map_bitmap(
-    const uint8_t* buffer,
-    size_t buffer_length,
-    const std::vector<uint64_t>& bitmap) {
-    RecordSet rs;
-    rs.spans.reserve(buffer_length / 8 + 1);
-    rs.offsets.reserve(buffer_length / 64 + 2);
-    rs.offsets.push_back(0);
-
-    State state = State::EXPECT_RECORD_START;
-    uint32_t key_start = 0, key_width = 0;
-    uint32_t value_start = 0, value_width = 0, colon_pos = 0, ordinal = 0;
-    ValueType vt = ValueType::Unknown;
-
-    auto commit = [&]() {
-        rs.spans.emplace_back(key_start, key_width, value_start, value_width, vt, ordinal);
-        ++ordinal;
-    };
-    auto end_record = [&]() {
-        rs.offsets.push_back(static_cast<uint32_t>(rs.spans.size()));
-        ordinal = 0;
-    };
-    auto emit_unquoted = [&](uint32_t pos) {
-        value_start = colon_pos + 1;
-        while (value_start < pos && is_ws(buffer[value_start])) ++value_start;
-        uint32_t ve = pos - 1;
-        while (ve > value_start && is_ws(buffer[ve])) --ve;
-        value_width = ve - value_start + 1;
-        vt = classify_first(buffer[value_start]);
-        commit();
-    };
-
-    const size_t nwords = bitmap.size();
-    uint32_t skip_until = 0;  // structural bits with pos <= skip_until were swallowed by a container
-    for (size_t w = 0; w < nwords; ++w) {
-        uint64_t word = bitmap[w];
-        const uint32_t base = static_cast<uint32_t>(w << 6);
-        while (word) {
-            const uint32_t pos = base + static_cast<uint32_t>(__builtin_ctzll(word));
-            word &= word - 1;  // clear lowest set bit
-            if (skip_until && pos <= skip_until) continue;
-
-            const uint8_t ch = buffer[pos];
-            if ((ch == '[' || ch == '{') && state == State::EXPECT_VALUE) {
-                const uint32_t close = scan_container(buffer, pos, static_cast<uint32_t>(buffer_length));
-                value_start = pos; value_width = close - pos + 1;
-                vt = ch == '[' ? ValueType::Array : ValueType::Object;
-                commit();
-                state = State::EXPECT_SEPARATOR;
-                skip_until = close;
-                continue;
-            }
-            const CharClass cls = char_class_table[ch];
-            const Transition& tr = transition_table[static_cast<int>(state)][static_cast<int>(cls)];
-            switch (tr.action) {
-            case Action::START_RECORD: ordinal = 0; break;
-            case Action::SET_COLON:    colon_pos = pos; break;
-            case Action::START_KEY:    key_start = pos + 1; break;
-            case Action::END_KEY:      key_width = (pos - 1) - key_start + 1; break;
-            case Action::START_VALUE:
-                value_start = pos + (ch == '"' ? 1u : 0u);
-                vt = (ch == '"') ? ValueType::String : ValueType::Integer;
-                break;
-            case Action::END_STRING_VAL:
-                value_width = (pos - 1) - value_start + 1; commit(); break;
-            case Action::END_UNQUOTED_VAL:
-                emit_unquoted(pos); break;
-            case Action::END_UNQUOTED_VAL_NEWLINE:
-                emit_unquoted(pos); end_record(); break;
-            case Action::PUSH_RECORD:
-                end_record(); break;
-            case Action::NONE:
-            default: break;
-            }
-            state = tr.next_state;
-        }
-    }
-    if (rs.spans.size() > rs.offsets.back()) end_record();
-    return rs;
 }
 
 // -----------------------------------------------------------------------------

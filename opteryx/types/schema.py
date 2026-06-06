@@ -242,41 +242,21 @@ class SchemaColumn:
             column_type = parse_column_type(ct_str)
             return cls.from_column_type(name=data.pop("name"), column_type=column_type, **data)
 
-        # v1 fallback: legacy type/precision/scale/element_type quartet.
-        # Reconstruct via from_column_type using the bridge.
-        from opteryx.types.logical_type import sql_to_column_type
+        # v1 fallback: legacy "type" string (e.g. "DECIMAL(10,2)", "ARRAY<VARCHAR>").
+        # parse_column_type handles the parameterized/element forms directly.
+        from opteryx.types.logical_type import parse_column_type
 
         raw_type = data.pop("type", None)
-        precision = data.pop("precision", None)
-        scale = data.pop("scale", None)
-        length = data.pop("length", None)
-        element_type_raw = data.pop("element_type", None)
+        data.pop("precision", None)
+        data.pop("scale", None)
+        data.pop("length", None)
+        data.pop("element_type", None)
 
-        from opteryx.types.logical_type import LogicalCategory as _LogicalCategory
         if isinstance(raw_type, str):
-            type_obj, _, p_parsed, s_parsed, et_parsed = _LogicalCategory.from_name(raw_type)
-            if precision is None:
-                precision = p_parsed
-            if scale is None:
-                scale = s_parsed
-            if element_type_raw is None:
-                element_type_raw = et_parsed
-        else:
-            type_obj = raw_type or _LogicalCategory.NULL
-
-        if isinstance(element_type_raw, str):
-            element_type_raw, _, _, _, _ = _LogicalCategory.from_name(element_type_raw)
-
-        try:
-            column_type = sql_to_column_type(
-                type_obj,
-                precision=precision,
-                scale=scale,
-                element_type=element_type_raw,
-            )
+            column_type = parse_column_type(raw_type)
             return cls.from_column_type(name=data.pop("name"), column_type=column_type, **data)
-        except Exception:
-            return cls(name=data.pop("name"), type=type_obj, **data)
+        # already a type object, or unknown — pass through
+        return cls.from_column_type(name=data.pop("name"), column_type=raw_type, **data)
 
 
 @dataclasses.dataclass

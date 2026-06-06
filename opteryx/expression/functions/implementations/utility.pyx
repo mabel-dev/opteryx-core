@@ -417,10 +417,11 @@ def array_contains_all(arr, val):
 
 def array_cast(array, element_type):
     from opteryx.types.logical_type import LogicalCategory
+    from opteryx.types.value_parsing import parser_for
 
     array = array.tolist()
     result = [None] * len(array)
-    parser = LogicalCategory[element_type[0]].parse
+    parser = parser_for(LogicalCategory[element_type[0]])
     for i, row in enumerate(array):
         row_res = []
         if row is not None:
@@ -436,9 +437,10 @@ def array_cast_safe(array, element_type):
     from contextlib import suppress
 
     from opteryx.types.logical_type import LogicalCategory
+    from opteryx.types.value_parsing import parser_for
 
     result = [None] * len(array)
-    parser = LogicalCategory[element_type[0]].parse
+    parser = parser_for(LogicalCategory[element_type[0]])
     for i, row in enumerate(array):
         row_res = []
         with suppress(Exception):

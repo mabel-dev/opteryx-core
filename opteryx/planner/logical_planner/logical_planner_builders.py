@@ -692,7 +692,8 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
             value = timestamp_to_int64_us(parse_timestamp_value(int_value))
         return Node(NodeType.LITERAL, type=LogicalCategory.TIMESTAMP, value=value, alias=alias)
     else:
-        sql_type = LogicalCategory.from_name(base_type)[0]
+        from opteryx.types.logical_type import parse_column_type
+        sql_type = parse_column_type(base_type).category
 
     # Temporal → VARCHAR: format as ISO string rather than calling str() on the raw int.
     if base_type in ("VARCHAR", "BLOB"):
@@ -737,7 +738,8 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
 
     # Attempt to parse and cast the literal value
     try:
-        parsed_value = sql_type.parse(literal_node.value)
+        from opteryx.types.value_parsing import parse_value
+        parsed_value = parse_value(sql_type, literal_node.value)
         if isinstance(parsed_value, datetime.datetime):
             parsed_value = timestamp_to_int64_us(parsed_value)
         elif isinstance(parsed_value, datetime.date):

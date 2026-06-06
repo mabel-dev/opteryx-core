@@ -123,8 +123,9 @@ class OpteryxTable(Diachronic, PredicatePushable):
         if candidate is None:
             return default
 
+        from opteryx.types.logical_type import parse_column_type
         try:
-            return LogicalCategory.from_name(str(candidate))[0]
+            return parse_column_type(str(candidate)).category
         except (TypeError, ValueError):
             return default
 

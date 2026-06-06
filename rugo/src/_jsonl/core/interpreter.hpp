@@ -92,16 +92,6 @@ RecordSet build_map(
 // the Cython edge, so RecordSet's internals stay opaque to Cython).
 std::vector<std::string> first_record_keys(const RecordSet& rs, const uint8_t* buffer);
 
-// SPIKE: data-blind document-map build driven by a structural bitmap (set bit => structural
-// byte) instead of a marker vector. Iterates set bits (ctz + blsr); identical FSM and output
-// to the no-projection build_map. Measures whether the compact bitmap index beats the
-// ~8-bytes-per-marker vector on the memory-bound scan+build path.
-RecordSet build_map_bitmap(
-    const uint8_t* buffer,
-    size_t buffer_length,
-    const std::vector<uint64_t>& bitmap
-);
-
 // Helper for interpreting a single JSON record (deprecated, use build_map)
 class RecordInterpreter {
 public:

@@ -63,12 +63,6 @@ cdef extern from "core/interpreter.hpp" namespace "rugo::_jsonl":
 
     vector[string] first_record_keys(const RecordSet& rs, const uint8_t* buffer) nogil
 
-    RecordSet build_map_bitmap(
-        const uint8_t* buffer,
-        size_t buffer_length,
-        const vector[uint64_t]& bitmap
-    ) nogil
-
 
 cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
     struct InterpreterResult:
@@ -103,10 +97,6 @@ cdef extern from "core/structural_scan.hpp" namespace "rugo::_jsonl":
         size_t length
     ) nogil
 
-    vector[uint64_t] scan_structural_bitmap(
-        const uint8_t* buffer,
-        size_t length
-    ) nogil
 
 
 cdef extern from "core/jsonl_reader.hpp" namespace "rugo::_jsonl":
@@ -187,6 +177,57 @@ cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
 import os
 
 
+cdef bytes _maybe_prefilter(bytes buf, predicates):
+    """Gated Volnitsky raw prefilter for a single selective string-equality predicate.
+    Returns a candidate sub-buffer (surviving lines) when it applies, else the original
+    buffer unchanged. SOUND: the needle is the quoted value, which a matching record always
+    contains regardless of whitespace; the predicate is re-applied downstream so false
+    positives are verified away. Self-disabling on non-string, short, or non-selective cases."""
+    cdef PrefilterResult r
+    cdef PrefilterResult sr
+    cdef const uint8_t* ndl_ptr
+    cdef const uint8_t* sample_ptr
+    cdef const uint8_t* buf_ptr
+
+    if not predicates or len(predicates) != 1:
+        return buf
+    col, op, val = predicates[0]
+    if op != "==":
+        return buf
+
+    # Probe the first record: only prefilter when `col` is stored as a quoted (string)
+    # value. A bare numeric/bool value isn't quoted, so a quoted needle would false-negative.
+    nl = buf.find(b"\n")
+    first = buf[:nl] if nl >= 0 else buf
+    key = b'"' + col.encode("utf-8") + b'":'
+    ki = first.find(key)
+    if ki < 0:
+        return buf                      # key absent / non-compact formatting -> skip (safe)
+    if first[ki + len(key):ki + len(key) + 1] != b'"':
+        return buf                      # bare value -> skip (numeric hazard)
+
+    needle = b'"' + str(val).encode("utf-8") + b'"'
+    if len(needle) < 8:                 # short/low-entropy value -> skip won't pay off
+        return buf
+
+    ndl_ptr = <const uint8_t*>needle
+
+    # Selectivity sample on the first ~1MB: if the needle already hits >30% of sampled rows,
+    # there's little to skip -> run the normal path instead of paying for a full prefilter.
+    sample = buf[:1_000_000]
+    sample_ptr = <const uint8_t*>sample
+    sr = volnitsky_prefilter(sample_ptr, len(sample), ndl_ptr, len(needle))
+    sample_lines = sample.count(b"\n")
+    if sample_lines > 0 and sr.matched_records * 10 > sample_lines * 3:
+        return buf
+
+    buf_ptr = <const uint8_t*>buf
+    r = volnitsky_prefilter(buf_ptr, len(buf), ndl_ptr, len(needle))
+    if r.candidates.size() == 0:
+        return b""                      # no candidates -> empty buffer -> 0 rows
+    return (<char*>r.candidates.data())[:r.candidates.size()]
+
+
 def read_jsonl(
     data,
     columns=None,
@@ -197,7 +238,8 @@ def read_jsonl(
     parse_arrays=True,
     parse_objects=True,
     fail_on_error=True,
-    use_threads=True
+    use_threads=True,
+    use_prefilter=True
 ):
     """
     Read JSONL data into Draken vectors with projection and predicate pushdown.
@@ -271,6 +313,14 @@ def read_jsonl(
                 threaded_data = data
             else:
                 threaded_data = bytes(data)
+
+            # Sparser-style raw prefilter: for a selective string-equality predicate, drop
+            # records that cannot contain the value before any structural parsing. Sound by
+            # construction (value-anchored needle), self-disabling on short/non-selective
+            # filters; the predicate is still applied downstream, so false positives are
+            # verified away.
+            if use_prefilter and len(threaded_data) > 0:
+                threaded_data = _maybe_prefilter(threaded_data, predicates)
 
             if len(threaded_data) > 0:
                 buf_data = <const uint8_t*>threaded_data
@@ -403,64 +453,6 @@ def benchmark_document_map(
         'total_ms': scan_ms + interp_ms,
         'buffer_size_mb': len(data) / 1024 / 1024,
         'sample_keys': sample_keys,
-    }
-
-
-def benchmark_bitmap(data: bytes):
-    """SPIKE: time the bitmap structural index (scan_structural_bitmap + build_map_bitmap),
-    data-blind, to compare against benchmark_document_map's marker-vector scan + build."""
-    import time
-
-    cdef:
-        const uint8_t* buf_data = <const uint8_t*><bytes>data
-        size_t buf_len = len(data)
-        vector[uint64_t] bm
-        RecordSet rs
-
-    scan_start = time.perf_counter()
-    with nogil:
-        bm = scan_structural_bitmap(buf_data, buf_len)
-    scan_ms = (time.perf_counter() - scan_start) * 1000
-
-    build_start = time.perf_counter()
-    with nogil:
-        rs = build_map_bitmap(buf_data, buf_len, bm)
-    build_ms = (time.perf_counter() - build_start) * 1000
-
-    return {
-        'num_records': rs.num_records(),
-        'scan_ms': scan_ms,
-        'build_ms': build_ms,
-        'total_ms': scan_ms + build_ms,
-    }
-
-
-def benchmark_prefilter(data: bytes, needle: bytes):
-    """SPIKE: Volnitsky raw prefilter for string-eq. Returns prefilter time, match counts,
-    and the candidate sub-buffer (surviving lines) for end-to-end timing in Python."""
-    import time
-
-    cdef:
-        const uint8_t* buf = <const uint8_t*><bytes>data
-        size_t blen = len(data)
-        const uint8_t* ndl = <const uint8_t*><bytes>needle
-        size_t nlen = len(needle)
-        PrefilterResult r
-
-    t0 = time.perf_counter()
-    with nogil:
-        r = volnitsky_prefilter(buf, blen, ndl, nlen)
-    pf_ms = (time.perf_counter() - t0) * 1000
-
-    cdef bytes cand = b""
-    if r.candidates.size() > 0:
-        cand = (<char*>r.candidates.data())[:r.candidates.size()]
-
-    return {
-        'prefilter_ms': pf_ms,
-        'total': r.total_records,
-        'matched': r.matched_records,
-        'candidates': cand,
     }
 
 

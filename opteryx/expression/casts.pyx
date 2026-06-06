@@ -19,6 +19,7 @@ import math
 import draken.draken_native as _draken_native_casts
 
 from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.value_parsing import parse_value, parser_for
 from opteryx.types._datetime_conversion import timestamp_to_int64_us
 from opteryx.utils.vector_types import (
     VectorType,
@@ -85,7 +86,7 @@ cpdef parse_timestamp_value(value, unit=None):
             seconds, tz=datetime.timezone.utc
         ).replace(tzinfo=None)
 
-    return LogicalCategory.TIMESTAMP.parse(value)
+    return parse_value(LogicalCategory.TIMESTAMP, value)
 
 
 def _parse_array_value(value, element_type, bint safe_cast=False):
@@ -110,15 +111,15 @@ def _parse_array_value(value, element_type, bint safe_cast=False):
         stripped = value.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
             if safe_cast:
-                return safe(LogicalCategory.ARRAY.parse, value, element_type=element_type)
-            return LogicalCategory.ARRAY.parse(value, element_type=element_type)
+                return safe(parser_for(LogicalCategory.ARRAY), value)
+            return parse_value(LogicalCategory.ARRAY, value)
         value = [value]
     elif isinstance(value, (list, tuple, set, frozenset)):
         value = list(value)
     else:
         value = [value]
 
-    caster = LogicalCategory[element_type.name].parse
+    caster = parser_for(LogicalCategory[element_type.name])
     return [caster(item) if item is not None else None for item in value]
 
 
@@ -149,11 +150,11 @@ def cast_to_double(arr, *args):
             return _draken_native_casts.vector_cast_string_to_float64(_unwrap_nb(arr))
 
     if isinstance(arr, (list, tuple)):
-        caster = LogicalCategory.DOUBLE.parse
+        caster = parser_for(LogicalCategory.DOUBLE)
         return [caster(i) if i is not None else None for i in arr]
 
     if isinstance(arr, (int, float)):
-        return LogicalCategory.DOUBLE.parse(arr)
+        return parse_value(LogicalCategory.DOUBLE, arr)
 
     raise TypeError(f"Unsupported type for cast_to_double: {type(arr).__name__}")
 
@@ -188,7 +189,7 @@ def cast_to_int(arr, *args):
             return vector_cast_date32_to_int64(_unwrap_nb(arr))
 
     if isinstance(arr, (list, tuple)):
-        caster = LogicalCategory.INTEGER.parse
+        caster = parser_for(LogicalCategory.INTEGER)
         return [caster(i) if i is not None else None for i in arr]
 
     if isinstance(arr, int):
@@ -327,11 +328,11 @@ def cast_to_date(arr, *args):
         v_type = get_vector_type(arr)
         if v_type == VectorType.DATE32:
             return arr
-        caster = LogicalCategory.DATE.parse
+        caster = parser_for(LogicalCategory.DATE)
         return [caster(v) if v is not None else None for v in arr.to_pylist()]
 
     if isinstance(arr, (list, tuple)):
-        caster = LogicalCategory.DATE.parse
+        caster = parser_for(LogicalCategory.DATE)
         return [caster(v) if v is not None else None for v in arr]
 
     if isinstance(arr, datetime.date):
@@ -574,7 +575,7 @@ def _build_decimal_closure(args):
     scale = int(_to_int_arg(args[1])) if len(args) >= 2 else 6
 
     def _decimal_cast(arr):
-        caster = LogicalCategory.DECIMAL.parse
+        caster = parser_for(LogicalCategory.DECIMAL)
         result = [caster(i) if i is not None else None for i in arr]
 
         # Quantize to the specified scale.
@@ -604,7 +605,7 @@ def _build_array_cast(arr, element_type):
 
 def _build_vector_cast(arr):
     """Build a closure for CAST to VECTOR (FP16 quantization)."""
-    caster = LogicalCategory.VECTOR.parse
+    caster = parser_for(LogicalCategory.VECTOR)
     result = [caster(i) for i in arr]
     return _draken_native_casts.vector_fp16_from_sequence(result)
 
@@ -619,11 +620,11 @@ def _build_varchar_cast_with_length(arr, length_arg):
 def _build_residual_cast(target_type, args):
     """Build a closure for residual (unspecialized) casts via row-loop.
 
-    These casts fall through to LogicalCategory[target_type].parse and are
+    These casts fall through to parser_for(LogicalCategory[target_type]) and are
     flagged in the PR as candidates for native kernel implementation.
     """
     resolved_type = "BLOB" if target_type == "VARBINARY" else target_type
-    caster = LogicalCategory[resolved_type].parse
+    caster = parser_for(LogicalCategory[resolved_type])
 
     def _residual_cast(arr):
         # Row-loop: each value is parsed individually.
@@ -655,7 +656,7 @@ def try_cast(target_type):
     """
     def _try_cast_fn(arr):
         """Cast each element in arr, returning None on parse failures."""
-        caster = LogicalCategory[target_type].parse
+        caster = parser_for(LogicalCategory[target_type])
         result = []
         for item in arr:
             try:

@@ -65,10 +65,12 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
 
     def _array_literal_return_type(arg_nodes):
         """ARRAY(expr, type_name): return ARRAY<type_name>."""
+        from opteryx.types.logical_type import parse_column_type
         type_name = getattr(arg_nodes[1], "value", None) if len(arg_nodes) > 1 else None
         if type_name:
-            result_type, _, _, _, element_type = LogicalCategory.from_name(f"ARRAY<{type_name}>")
-            return (result_type, element_type)
+            ct = parse_column_type(f"ARRAY<{type_name}>")
+            element_type = ct.element.category if ct.element is not None else LogicalCategory.NULL
+            return (ct.category, element_type)
         return (LogicalCategory.ARRAY, LogicalCategory.NULL)
 
     _variadic_any = (

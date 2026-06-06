@@ -31,6 +31,7 @@ from opteryx.expression.evaluator.comparisons import draken_compare_int
 from opteryx.expression.evaluator._impl import _OP_CODE as _COMPARE_OP_CODE
 from opteryx.third_party import yyjson
 from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.value_parsing import parse_value
 from opteryx.types._datetime_conversion import (
     date_to_int64_days,
     int64_days_to_date,
@@ -85,7 +86,7 @@ def _coerce_temporal_scalar(value, source_type, target_type):
             if source_type == LogicalCategory.TIMESTAMP:
                 return date_to_int64_days(int64_us_to_datetime(value).date())
             return date_to_int64_days(int64_days_to_date(value))
-        return date_to_int64_days(LogicalCategory.DATE.parse(value))
+        return date_to_int64_days(parse_value(LogicalCategory.DATE, value))
 
     if target_type == LogicalCategory.TIMESTAMP:
         if isinstance(value, datetime.datetime):
@@ -98,7 +99,7 @@ def _coerce_temporal_scalar(value, source_type, target_type):
             if source_type == LogicalCategory.DATE:
                 return timestamp_to_int64_us(int64_days_to_date(value))
             return value
-        return timestamp_to_int64_us(LogicalCategory.TIMESTAMP.parse(value))
+        return timestamp_to_int64_us(parse_value(LogicalCategory.TIMESTAMP, value))
 
     return value
 
