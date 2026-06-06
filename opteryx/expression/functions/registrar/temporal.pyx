@@ -1,7 +1,7 @@
 from opteryx.expression.functions import ParameterSpec
 
 # Use package-level helper to construct concise FunctionDefinition entries.
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 
 
 def get_builtin_temporal_functions() -> list:
@@ -18,7 +18,7 @@ def get_builtin_temporal_functions() -> list:
         _make(
             "TIME_BUCKET",
             date_functions.date_floor,
-            SqlType.TIMESTAMP,
+            LogicalCategory.TIMESTAMP,
             (
                 ParameterSpec(name="magnitude", type_family="numeric"),
                 ParameterSpec(name="units", type_family="string", constant_only=True),
@@ -30,7 +30,7 @@ def get_builtin_temporal_functions() -> list:
         _make(
             "DATEDIFF",
             date_functions.date_diff,
-            SqlType.INTEGER,
+            LogicalCategory.INTEGER,
             (_part, _date, ParameterSpec(name="end", type_family="temporal")),
             aliases=("DATE_DIFF",),
             cost=0.88,
@@ -39,7 +39,7 @@ def get_builtin_temporal_functions() -> list:
         _make(
             "TIMEDIFF",
             date_functions.time_diff,
-            SqlType.INTEGER,
+            LogicalCategory.INTEGER,
             (
                 ParameterSpec(name="time1", type_family="temporal"),
                 ParameterSpec(name="time2", type_family="temporal"),
@@ -51,7 +51,7 @@ def get_builtin_temporal_functions() -> list:
         _make(
             "DATE_FORMAT",
             date_functions.date_format,
-            SqlType.VARCHAR,
+            LogicalCategory.VARCHAR,
             (_date, ParameterSpec(name="pattern", type_family="string", constant_only=True)),
             cost=0.85,
             summary="Format date/timestamp as string.",
@@ -59,7 +59,7 @@ def get_builtin_temporal_functions() -> list:
         _make(
             "FROM_UNIXTIME",
             date_functions.from_unixtimestamp,
-            SqlType.TIMESTAMP,
+            LogicalCategory.TIMESTAMP,
             (ParameterSpec(name="ts", type_family="numeric"),),
             cost=3.17,
             summary="Convert Unix timestamp to TIMESTAMP.",
@@ -67,7 +67,7 @@ def get_builtin_temporal_functions() -> list:
         _make(
             "UNIXTIME",
             date_functions.unixtime,
-            SqlType.INTEGER,
+            LogicalCategory.INTEGER,
             (_date,),
             aliases=("TO_UNIXTIME",),
             cost=8.84,

@@ -44,8 +44,8 @@ from opteryx.managers.billing import BillingEventType, write_billing_event
 from opteryx.models import ExecutionContext, QueryTelemetry
 from opteryx.models.dataframe import DataFrame
 from opteryx.tracing import record_event
-from opteryx.types import SqlType
-from opteryx.types.schema import FlatColumn, RelationSchema
+from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.schema import SchemaColumn, RelationSchema
 from opteryx.utils import sql
 
 _CAMEL_SPLIT_RE = re.compile(r"[A-Z][a-z]*|[0-9]+")
@@ -495,7 +495,7 @@ class Session(DataFrame):
             for name, dtype in zip(morsel.column_names, morsel.column_types):
                 col_name = name.decode("utf-8") if isinstance(name, bytes) else name
                 ct = _DRAKEN_TO_LT.get(dtype, _lt.VARCHAR)
-                columns.append(FlatColumn.from_column_type(name=col_name, column_type=ct))
+                columns.append(SchemaColumn.from_column_type(name=col_name, column_type=ct))
             return RelationSchema(name="table", columns=columns)
 
         self._ensure_open()

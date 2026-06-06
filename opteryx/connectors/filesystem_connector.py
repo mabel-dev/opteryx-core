@@ -19,7 +19,7 @@ from opteryx.exceptions import (
     UnsupportedSyntaxError,
 )
 from opteryx.tracing import record_event
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import RelationSchema
 
 OS_SEP = os.sep
@@ -71,13 +71,13 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
     }
 
     PUSHABLE_TYPES = {
-        SqlType.BLOB,
-        SqlType.BOOLEAN,
-        SqlType.DOUBLE,
-        SqlType.INTEGER,
-        SqlType.VARCHAR,
-        SqlType.TIMESTAMP,
-        SqlType.DATE,
+        LogicalCategory.BLOB,
+        LogicalCategory.BOOLEAN,
+        LogicalCategory.DOUBLE,
+        LogicalCategory.INTEGER,
+        LogicalCategory.VARCHAR,
+        LogicalCategory.TIMESTAMP,
+        LogicalCategory.DATE,
     }
 
     def __init__(self, dataset: str, filesystem, storage_type: str, **kwargs):

@@ -29,7 +29,7 @@ from opteryx.exceptions import (
 )
 from opteryx.expression.operations import filter_operations
 from opteryx.models import LogicalColumn, Node
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.types._datetime_conversion import date_to_int64_days, timestamp_to_int64_us
 from opteryx.utils import random_string
 
@@ -112,35 +112,35 @@ def _typed_constant_vector(value, length: int, schema_column):
     target_type = getattr(schema_column, "type", None)
     is_null = value is None
 
-    if target_type == SqlType.BOOLEAN:
+    if target_type == LogicalCategory.BOOLEAN:
         from draken.vectors.bool_vector import BoolVector
 
         return BoolVector.from_constant(False if is_null else value, length, is_null=is_null)
 
-    if target_type == SqlType.INTEGER:
+    if target_type == LogicalCategory.INTEGER:
         return _draken_native_expr.vector_int32_from_constant(
             None if is_null else int(value), length
         )
 
-    if target_type == SqlType.DOUBLE:
+    if target_type == LogicalCategory.DOUBLE:
         return _draken_native_expr.vector_float64_from_constant(
             None if is_null else float(value), length
         )
 
-    if target_type == SqlType.BLOB:
+    if target_type == LogicalCategory.BLOB:
         # Explicit binary: opaque bytes, VARBINARY tag.
         return _draken_native_expr.vector_varbinary_from_constant(
             None if is_null else value, length
         )
 
-    if target_type == SqlType.VARCHAR:
+    if target_type == LogicalCategory.VARCHAR:
         # VARCHAR carries raw bytes; the constant ctor stores str/bytes verbatim
         # (no decode), so non-UTF-8 literal data is preserved.
         return _draken_native_expr.vector_varchar_from_constant(
             None if is_null else value, length
         )
 
-    if target_type == SqlType.DATE:
+    if target_type == LogicalCategory.DATE:
         if not is_null:
             if isinstance(value, datetime.datetime):
                 value = value.date()
@@ -153,7 +153,7 @@ def _typed_constant_vector(value, length: int, schema_column):
             None if is_null else value, length
         )
 
-    if target_type == SqlType.TIMESTAMP:
+    if target_type == LogicalCategory.TIMESTAMP:
         if not is_null:
             if isinstance(value, datetime.datetime):
                 pass  # already correct type
@@ -166,7 +166,7 @@ def _typed_constant_vector(value, length: int, schema_column):
             None if is_null else value, length
         )
 
-    if target_type == SqlType.TIME:
+    if target_type == LogicalCategory.TIME:
         if not is_null:
             if isinstance(value, datetime.time):
                 value = (
@@ -181,7 +181,7 @@ def _typed_constant_vector(value, length: int, schema_column):
             None if is_null else int(value), length
         )
 
-    if target_type == SqlType.DECIMAL:
+    if target_type == LogicalCategory.DECIMAL:
         return _draken_native_expr.vector_decimal_from_constant(
             None if is_null else value, length
         )

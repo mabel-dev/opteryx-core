@@ -96,6 +96,15 @@ std::vector<MarkerPosition> scan_structural_markers(
     bool use_simd = true
 );
 
+// SPIKE (Mison-style structural index): produce a 1-bit-per-byte structural bitmap instead
+// of a position vector — set bit i => byte i is structural. ~8 bytes/marker becomes 1
+// bit/byte, a far smaller, bandwidth-cheaper index. Word w (uint64) covers bytes [w*64,
+// w*64+64). Drive the document map by iterating set bits (ctz + blsr).
+std::vector<uint64_t> scan_structural_bitmap(
+    const uint8_t* data,
+    size_t length
+);
+
 }  // namespace rugo::_jsonl
 
 #endif  // _JSONL_STRUCTURAL_SCAN_HPP_

@@ -21,7 +21,7 @@ from typing import Dict
 from opteryx.exceptions import NotSupportedError
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.utils import single_item_cache
 
@@ -54,14 +54,14 @@ class PredicatePushable:
         "NotLike": "NOT LIKE",
     }
 
-    PUSHABLE_TYPES: set = {t for t in SqlType}
+    PUSHABLE_TYPES: set = {t for t in LogicalCategory}
 
     def can_push(self, operator: Node, types: set = None) -> bool:
         # Boolean-returning functions are their own predicate — push without further analysis
         if (
             operator.condition.node_type == NodeType.FUNCTION
             and getattr(getattr(operator.condition, "schema_column", None), "type", None)
-            == SqlType.BOOLEAN
+            == LogicalCategory.BOOLEAN
         ):
             return True
         # we can only push simple expressions
@@ -134,7 +134,7 @@ class PredicatePushable:
 
             from opteryx.types.logical_type import TIMESTAMP, VARBINARY
 
-            if root.right.schema_column.type == SqlType.DATE:
+            if root.right.schema_column.type == LogicalCategory.DATE:
                 date_val = root.right.value
                 if getattr(date_val, "item", None) is not None:
                     date_val = date_val.item()
@@ -144,9 +144,9 @@ class PredicatePushable:
                 raise NotSupportedError()
             if root.right.node_type != NodeType.LITERAL:
                 raise NotSupportedError()
-            if root.left.schema_column.type == SqlType.VARCHAR:
+            if root.left.schema_column.type == LogicalCategory.VARCHAR:
                 root.left.schema_column.column_type = VARBINARY
-            if root.right.schema_column.type == SqlType.VARCHAR:
+            if root.right.schema_column.type == LogicalCategory.VARCHAR:
                 root.right.schema_column.column_type = VARBINARY
             if root.right.schema_column.type != root.left.schema_column.type:
                 raise NotSupportedError()

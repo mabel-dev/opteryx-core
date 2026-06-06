@@ -86,23 +86,23 @@ def null_if(col1, col2):
     n = len(col1_list)
 
     # Validate type compatibility on first non-null pair
-    from opteryx.types import PYTHON_TO_SQL_MAP, SqlType, find_compatible_type
+    from opteryx.types import PYTHON_TO_SQL_MAP, LogicalCategory, find_compatible_type
 
     def _first_non_null_type(lst):
         for item in lst:
             if item is not None:
-                return PYTHON_TO_SQL_MAP.get(type(item), SqlType._MISSING_TYPE)
-        return SqlType.NULL
+                return PYTHON_TO_SQL_MAP.get(type(item), LogicalCategory._MISSING_TYPE)
+        return LogicalCategory.NULL
 
     col1_type = _first_non_null_type(col1_list)
     col2_type = _first_non_null_type(col2_list)
 
-    if col1_type not in (SqlType.NULL, SqlType._MISSING_TYPE) and col2_type not in (
-        SqlType.NULL,
-        SqlType._MISSING_TYPE,
+    if col1_type not in (LogicalCategory.NULL, LogicalCategory._MISSING_TYPE) and col2_type not in (
+        LogicalCategory.NULL,
+        LogicalCategory._MISSING_TYPE,
     ):
         compatible = find_compatible_type([col1_type, col2_type])
-        if compatible is None or compatible == SqlType._MISSING_TYPE:
+        if compatible is None or compatible == LogicalCategory._MISSING_TYPE:
             raise IncompatibleTypesError(
                 left_type=col1_type,
                 right_type=col2_type,

@@ -30,7 +30,7 @@ from opteryx.expression.functions import (
     ParameterSpec,
     ReturnSpec,
 )
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 
 
 # Kernel decorators for common iteration patterns
@@ -100,8 +100,8 @@ def _make(
     shorthand (ret, ...) form used for zero-arg/constant definitions.
 
     Usage examples:
-      _make("FOO", callable_ref, SqlType.VARCHAR, (ParameterSpec(...),), cost=2.0)
-      _make("NOW", SqlType.TIMESTAMP, summary="Current timestamp.")
+      _make("FOO", callable_ref, LogicalCategory.VARCHAR, (ParameterSpec(...),), cost=2.0)
+      _make("NOW", LogicalCategory.TIMESTAMP, summary="Current timestamp.")
     """
     # Distinguish calling form: callable_or_ret is a callable -> full form,
     # otherwise it's the return-type shorthand.
@@ -152,7 +152,7 @@ def _make(
     )
 
 
-def _coalesce_return_type(arg_nodes) -> SqlType:
+def _coalesce_return_type(arg_nodes) -> LogicalCategory:
     """Return the first non-null compatible type across all args."""
     from opteryx.types import find_compatible_type
 
@@ -160,22 +160,22 @@ def _coalesce_return_type(arg_nodes) -> SqlType:
         n.schema_column.type
         for n in arg_nodes
         if getattr(n, "schema_column", None) is not None
-        and n.schema_column.type not in (SqlType.NULL, 0, SqlType._MISSING_TYPE)
+        and n.schema_column.type not in (LogicalCategory.NULL, 0, LogicalCategory._MISSING_TYPE)
     ]
-    return find_compatible_type(types) or SqlType.NULL
+    return find_compatible_type(types) or LogicalCategory.NULL
 
 
-def _datepart_return_type(arg_nodes) -> SqlType:
+def _datepart_return_type(arg_nodes) -> LogicalCategory:
     """EXTRACT/DATEPART return type depends on the part name literal."""
     part_val = getattr(arg_nodes[0], "value", None) if arg_nodes else None
     if part_val is None:
-        return SqlType.INTEGER
+        return LogicalCategory.INTEGER
     part = str(part_val).lower()
     if part in ("epoch", "julian"):
-        return SqlType.DOUBLE
+        return LogicalCategory.DOUBLE
     if part == "date":
-        return SqlType.DATE
-    return SqlType.INTEGER
+        return LogicalCategory.DATE
+    return LogicalCategory.INTEGER
 
 
 # ---------------------------------------------------------------------------

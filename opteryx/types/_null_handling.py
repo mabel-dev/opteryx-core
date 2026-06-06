@@ -206,8 +206,8 @@ def is_null_vector(vector: Any) -> bool:
 
     Examples:
         >>> from draken.interop.vector_sequence import vector_from_sequence
-        >>> from opteryx.types import SqlType
-        >>> v = vector_from_sequence([1, None, 3], dtype=SqlType.INTEGER)
+        >>> from opteryx.types.logical_type import LogicalCategory
+        >>> v = vector_from_sequence([1, None, 3], dtype=LogicalCategory.INTEGER)
         >>> is_null_vector(v)
         True
     """
@@ -235,8 +235,8 @@ def null_count_vector(vector: Any) -> int:
 
     Examples:
         >>> from draken.interop.vector_sequence import vector_from_sequence
-        >>> from opteryx.types import SqlType
-        >>> v = vector_from_sequence([1, None, 3, None], dtype=SqlType.INTEGER)
+        >>> from opteryx.types.logical_type import LogicalCategory
+        >>> v = vector_from_sequence([1, None, 3, None], dtype=LogicalCategory.INTEGER)
         >>> null_count_vector(v)
         2
     """

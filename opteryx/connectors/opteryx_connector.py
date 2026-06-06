@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable
 from opteryx.exceptions import DatasetNotFoundError, DatasetReadError
 from opteryx.models import FileEntry, Manifest
-from opteryx.types import SqlType
-from opteryx.types.schema import FlatColumn, RelationSchema
+from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.schema import SchemaColumn, RelationSchema
 
 
 class OpteryxTable(Diachronic, PredicatePushable):
@@ -109,9 +109,9 @@ class OpteryxTable(Diachronic, PredicatePushable):
 
     @staticmethod
     def _normalize_type(
-        raw_type: Any, default: Optional[SqlType] = SqlType.VARCHAR
-    ) -> Optional[SqlType]:
-        if isinstance(raw_type, SqlType):
+        raw_type: Any, default: Optional[LogicalCategory] = LogicalCategory.VARCHAR
+    ) -> Optional[LogicalCategory]:
+        if isinstance(raw_type, LogicalCategory):
             return raw_type
 
         candidate = raw_type
@@ -124,7 +124,7 @@ class OpteryxTable(Diachronic, PredicatePushable):
             return default
 
         try:
-            return SqlType.from_name(str(candidate))[0]
+            return LogicalCategory.from_name(str(candidate))[0]
         except (TypeError, ValueError):
             return default
 
@@ -139,7 +139,7 @@ class OpteryxTable(Diachronic, PredicatePushable):
 
         columns = []
         for column in getattr(schema, "columns", []) or []:
-            if isinstance(column, FlatColumn):
+            if isinstance(column, SchemaColumn):
                 normalized = column
             else:
                 name = getattr(column, "name", None)
@@ -158,9 +158,9 @@ class OpteryxTable(Diachronic, PredicatePushable):
                 # D-4 Phase 2: build via from_column_type (single authoritative
                 # type carrier). Resolve the remote schema's type + params via the
                 # bridge, with a legacy fallback for types the bridge can't map.
-                from opteryx.types.sql_type import sql_to_column_type as _otoct
+                from opteryx.types.logical_type import sql_to_column_type as _otoct
                 from opteryx.types import logical_type as _lt
-                _ot = cls._normalize_type(raw_type, default=SqlType.VARCHAR)
+                _ot = cls._normalize_type(raw_type, default=LogicalCategory.VARCHAR)
                 _et = (cls._normalize_type(raw_element_type, default=None)
                        if raw_element_type is not None else None)
                 _p = getattr(column, "precision", None)
@@ -168,14 +168,14 @@ class OpteryxTable(Diachronic, PredicatePushable):
                 try:
                     # Use the bridge: handles DECIMAL(p,s) and ARRAY<elem>.
                     _ct = _otoct(_ot, precision=_p, scale=_s, element_type=_et)
-                    normalized = FlatColumn.from_column_type(
+                    normalized = SchemaColumn.from_column_type(
                         name=name,
                         column_type=_ct,
                         nullable=getattr(column, "nullable", True),
                     )
                 except Exception:
                     # Unmappable type (VECTOR with no dimension, etc.) — fall back.
-                    normalized = FlatColumn(
+                    normalized = SchemaColumn(
                         name=name,
                         type=_ot,
                         nullable=getattr(column, "nullable", True),

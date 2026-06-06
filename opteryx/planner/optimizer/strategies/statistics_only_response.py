@@ -26,7 +26,7 @@ and complex types lose precision in BRIN bounds and cannot be answered.
 from opteryx.expression import NodeType
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 
 # Strategy-style Optimization Class
 from .optimization_strategy import (
@@ -146,7 +146,7 @@ def is_simple_aggregate(aggregate_node) -> bool:
             if col_type is None:
                 return False
             # DATE, INTEGER and TIMESTAMP types preserve exact values in BRIN bounds
-            if col_type not in (SqlType.DATE, SqlType.INTEGER, SqlType.TIMESTAMP):
+            if col_type not in (LogicalCategory.DATE, LogicalCategory.INTEGER, LogicalCategory.TIMESTAMP):
                 return False
             continue
 
@@ -556,7 +556,7 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
                     result_value = total_rows - null_count
                 else:
                     result_value = total_rows
-                result_type = SqlType.INTEGER
+                result_type = LogicalCategory.INTEGER
             elif agg_func in ("MIN", "MAX"):
                 if not column_name:
                     return plan

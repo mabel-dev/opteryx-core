@@ -3,14 +3,14 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 
 
 @dataclass(frozen=True)
 class OperatorSignatureDefinition:
-    left_type: SqlType
-    right_type: SqlType
-    result_type: Optional[SqlType]
+    left_type: LogicalCategory
+    right_type: LogicalCategory
+    result_type: Optional[LogicalCategory]
     cost_estimate: float = 100.0
 
 
@@ -99,7 +99,7 @@ def get_operator_signatures(operator):
         if operator_name != operator:
             continue
         result_type = metadata.result_type
-        if result_type == SqlType._MISSING_TYPE:
+        if result_type == LogicalCategory._MISSING_TYPE:
             result_type = None
         exported_signatures.append(
             OperatorSignatureDefinition(
@@ -139,9 +139,9 @@ OPERATOR_DEFINITIONS = {
         friendly_name="Logical XOR",
         signatures=(
             OperatorSignatureDefinition(
-                left_type=SqlType.BOOLEAN,
-                right_type=SqlType.BOOLEAN,
-                result_type=SqlType.BOOLEAN,
+                left_type=LogicalCategory.BOOLEAN,
+                right_type=LogicalCategory.BOOLEAN,
+                result_type=LogicalCategory.BOOLEAN,
             ),
         ),
     ),

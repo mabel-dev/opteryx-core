@@ -33,7 +33,7 @@ from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.evaluator import compile_eval_nodes, execute_and_append
 from opteryx.models import QueryProperties
 from opteryx.operators.aggregate.helpers import extract_evaluations
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 
 # BasePlanNode in scope via textual include from _operators.pyx (umbrella unit).
 # EOS sentinel available as _EOS_SENTINEL in the same scope.

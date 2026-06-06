@@ -20,7 +20,7 @@ from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import logical_planner_builders
 from opteryx.planner.logical_planner.logical_planner_rewriter import decompose_aggregates
 from opteryx.third_party.travers import Graph
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.utils import dnf, random_string
 from opteryx.vectors.vector_types import (
     get_vector_source_identifier,
@@ -204,7 +204,7 @@ def extract_variable(clause):
 def extract_simple_filter(filters, identifier: str = "Name"):
     if "Like" in filters:
         left = Node(NodeType.IDENTIFIER, value=identifier)
-        right = Node(NodeType.LITERAL, type=SqlType.VARCHAR, value=filters["Like"])
+        right = Node(NodeType.LITERAL, type=LogicalCategory.VARCHAR, value=filters["Like"])
         root = Node(
             NodeType.COMPARISON_OPERATOR,
             value="ILike",  # we're case insensitive for SHOW filters
@@ -603,7 +603,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         rewritten = []
         for expr, ascending in _order_by:
             if expr.node_type == NodeType.LITERAL:
-                if expr.type != SqlType.INTEGER:
+                if expr.type != LogicalCategory.INTEGER:
                     raise UnsupportedSyntaxError("Cannot ORDER BY constant values")
                 position = int(expr.value)
                 if position < 1 or position > len(_projection):
@@ -625,8 +625,8 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     ):
         for column in _projection:
             if column.node_type == NodeType.LITERAL and column.type in (
-                SqlType.ARRAY,
-                SqlType.VECTOR,
+                LogicalCategory.ARRAY,
+                LogicalCategory.VECTOR,
             ):
                 if ast_branch["Select"].get("distinct"):
                     raise UnsupportedSyntaxError(
@@ -1476,9 +1476,9 @@ def plan_create_table(statement, **kwargs):
         ...
     )
 
-    Maps sqloxide column types to SqlType and constructs a RelationSchema.
+    Maps sqloxide column types to LogicalCategory and constructs a RelationSchema.
     """
-    from opteryx.types.schema import FlatColumn, RelationSchema
+    from opteryx.types.schema import SchemaColumn, RelationSchema
 
     root_node = "CreateTable"
     plan = LogicalPlan()
@@ -1519,7 +1519,7 @@ def plan_create_table(statement, **kwargs):
     if not column_defs:
         raise UnsupportedSyntaxError("CREATE TABLE requires at least one column")
 
-    # Type mapping from sqloxide to SqlType
+    # Type mapping from sqloxide to LogicalCategory
     type_mapping = {
         "BigInt": "INTEGER",
         "Int": "INTEGER",
@@ -1563,9 +1563,9 @@ def plan_create_table(statement, **kwargs):
                 f"unsupported column type in CREATE TABLE: {type_key}"
             )
 
-        # Map to SqlType
+        # Map to LogicalCategory
         sql_type_str = type_mapping[type_key]
-        sql_type = SqlType[sql_type_str]
+        sql_type = LogicalCategory[sql_type_str]
 
         # Check for NOT NULL constraint
         col_nullable = True
@@ -1576,8 +1576,8 @@ def plan_create_table(statement, **kwargs):
                     col_nullable = False
                     break
 
-        # Create FlatColumn
-        flat_col = FlatColumn(name=col_name, type=sql_type, nullable=col_nullable)
+        # Create SchemaColumn
+        flat_col = SchemaColumn(name=col_name, type=sql_type, nullable=col_nullable)
         columns.append(flat_col)
 
     create_table_node.columns = columns

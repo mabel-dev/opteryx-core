@@ -30,7 +30,7 @@ from draken.vectors.vector cimport Vector
 
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, QueryProperties
-from opteryx.types.schema import FlatColumn
+from opteryx.types.schema import SchemaColumn
 
 # EOS sentinel available as _EOS_SENTINEL via the umbrella unit.
 
@@ -175,7 +175,7 @@ def _cross_join_unnest_column(
     *,
     morsel: Morsel = None,
     source: LogicalColumn = None,
-    target_column: FlatColumn = None,
+    target_column: SchemaColumn = None,
     conditions: Set = None,
     distinct: bool = False,
     single_column: bool = False,
@@ -232,7 +232,7 @@ def _cross_join_unnest_column(
 
 
 def _cross_join_unnest_literal(
-    morsel: Morsel, source: Tuple, target_column: FlatColumn
+    morsel: Morsel, source: Tuple, target_column: SchemaColumn
 ) -> Generator[Morsel, None, None]:
     """
     Perform a cross join with a literal (constant) unnest array (Draken-native, no PyArrow).

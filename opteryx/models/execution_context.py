@@ -7,7 +7,7 @@ import datetime
 from dataclasses import dataclass, field
 from typing import Iterable, List
 
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.variables import SystemVariables, SystemVariablesContainer, VariableOwner, Visibility
 
 
@@ -53,7 +53,7 @@ class ExecutionContext:
         # The initializer is a function rather than an empty constructor so we init here
         object.__setattr__(self, "variables", SystemVariables.snapshot(VariableOwner.USER))
         self.variables._variables["user_memberships"] = (
-            SqlType.ARRAY,
+            LogicalCategory.ARRAY,
             list(self.memberships or []),
             VariableOwner.SERVER,
             Visibility.UNRESTRICTED,

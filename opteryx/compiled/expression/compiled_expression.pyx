@@ -105,12 +105,12 @@ DEF _NT_BETWEEN = 47
 # ---------------------------------------------------------------------------
 
 cdef dict _OP_CODES = None
-cdef object _SqlType_DATE = None
-cdef object _SqlType_TIMESTAMP = None
-cdef object _SqlType_BOOLEAN = None
-cdef object _SqlType_VARCHAR = None
-cdef object _SqlType_ARRAY = None
-cdef object _SqlType_BLOB = None
+cdef object _LogicalCategory_DATE = None
+cdef object _LogicalCategory_TIMESTAMP = None
+cdef object _LogicalCategory_BOOLEAN = None
+cdef object _LogicalCategory_VARCHAR = None
+cdef object _LogicalCategory_ARRAY = None
+cdef object _LogicalCategory_BLOB = None
 cdef tuple _STRING_FAMILY = ()
 cdef type _CarcharSetWrapper_t = None
 cdef type _PerfectHashSet_t = None
@@ -152,11 +152,11 @@ _UOP_CODE = {
 
 
 cdef inline int16_t _sql_type_to_code(object sql_type):
-    """Convert an SqlType value to a BCTypeCode integer. Returns BC_TYPE_NONE for None or non-temporal."""
+    """Convert an LogicalCategory value to a BCTypeCode integer. Returns BC_TYPE_NONE for None or non-temporal."""
     _ensure_sql_types()
-    if sql_type is _SqlType_DATE:
+    if sql_type is _LogicalCategory_DATE:
         return <int16_t>BC_TYPE_DATE
-    if sql_type is _SqlType_TIMESTAMP:
+    if sql_type is _LogicalCategory_TIMESTAMP:
         return <int16_t>BC_TYPE_TIMESTAMP
     return <int16_t>BC_TYPE_NONE
 
@@ -170,20 +170,20 @@ cdef inline dict _get_op_codes():
 
 
 cdef inline _ensure_sql_types():
-    global _SqlType_DATE, _SqlType_TIMESTAMP, _SqlType_BOOLEAN
-    global _SqlType_VARCHAR, _SqlType_ARRAY, _SqlType_BLOB
+    global _LogicalCategory_DATE, _LogicalCategory_TIMESTAMP, _LogicalCategory_BOOLEAN
+    global _LogicalCategory_VARCHAR, _LogicalCategory_ARRAY, _LogicalCategory_BLOB
     global _STRING_FAMILY
-    if _SqlType_DATE is None:
-        from opteryx.types import SqlType
-        _SqlType_DATE = SqlType.DATE
-        _SqlType_TIMESTAMP = SqlType.TIMESTAMP
-        _SqlType_BOOLEAN = SqlType.BOOLEAN
-        _SqlType_VARCHAR = SqlType.VARCHAR
-        _SqlType_ARRAY = SqlType.ARRAY
-        _SqlType_BLOB = SqlType.BLOB
+    if _LogicalCategory_DATE is None:
+        from opteryx.types.logical_type import LogicalCategory
+        _LogicalCategory_DATE = LogicalCategory.DATE
+        _LogicalCategory_TIMESTAMP = LogicalCategory.TIMESTAMP
+        _LogicalCategory_BOOLEAN = LogicalCategory.BOOLEAN
+        _LogicalCategory_VARCHAR = LogicalCategory.VARCHAR
+        _LogicalCategory_ARRAY = LogicalCategory.ARRAY
+        _LogicalCategory_BLOB = LogicalCategory.BLOB
         # Types valid as the LEFT operand of an extraction operator (-> ->> [i]).
         # Includes VARIANT so JSON access chains (a -> b ->> c) with no user cast.
-        _STRING_FAMILY = (_SqlType_VARCHAR, SqlType.NVARCHAR, _SqlType_BLOB, SqlType.VARIANT)
+        _STRING_FAMILY = (_LogicalCategory_VARCHAR, LogicalCategory.NVARCHAR, _LogicalCategory_BLOB, LogicalCategory.VARIANT)
 
 
 cdef inline _ensure_set_types():
@@ -462,9 +462,9 @@ cdef Py_ssize_t _linearize(
         _ensure_sql_types()
 
         flags = 0
-        if left_type is _SqlType_DATE or left_type is _SqlType_TIMESTAMP:
+        if left_type is _LogicalCategory_DATE or left_type is _LogicalCategory_TIMESTAMP:
             flags |= BC_CMP_LEFT_TEMPORAL
-        if right_type is _SqlType_DATE or right_type is _SqlType_TIMESTAMP:
+        if right_type is _LogicalCategory_DATE or right_type is _LogicalCategory_TIMESTAMP:
             flags |= BC_CMP_RIGHT_TEMPORAL
         if right_is_inlist_literal:
             flags |= BC_CMP_INLIST_INLINE
@@ -600,7 +600,7 @@ cdef Py_ssize_t _linearize(
         if is_nb_callable:
             slot.flags |= BC_RESULT_NEEDS_NB_WRAP
             _ensure_sql_types()
-            if func_ref_meta.inferred_return_type is _SqlType_BOOLEAN:
+            if func_ref_meta.inferred_return_type is _LogicalCategory_BOOLEAN:
                 slot.flags |= BC_RESULT_WRAP_AS_BOOL
 
         # Phase 9b: Resolve C kernel function pointer for function calls.
@@ -660,7 +660,7 @@ cdef Py_ssize_t _linearize(
             if src_sc is not None:
                 source_sql = src_sc.type
                 if source_sql is not None:
-                    # Extract the SqlType name string (e.g., "INT64", "VARCHAR").
+                    # Extract the LogicalCategory name string (e.g., "INT64", "VARCHAR").
                     source_sql_name = getattr(source_sql, "name", None)
 
         from opteryx.expression.casts import resolve_cast
@@ -693,12 +693,12 @@ cdef Py_ssize_t _linearize(
         if needs_nb_wrap:
             slot.flags |= BC_RESULT_NEEDS_NB_WRAP
 
-        if cast_target_sql is _SqlType_BOOLEAN:
+        if cast_target_sql is _LogicalCategory_BOOLEAN:
             slot.flags |= BC_RESULT_WRAP_AS_BOOL
 
         # Phase 9b: Resolve C kernel function pointer for cast operations.
         # Build kernel name from source and target types.
-        # Map SqlType enum names (e.g., "INTEGER", "DOUBLE") to registry type tokens (e.g., "int64", "float64").
+        # Map LogicalCategory enum names (e.g., "INTEGER", "DOUBLE") to registry type tokens (e.g., "int64", "float64").
         _sql_to_type_name = {
             "INTEGER": "int64",
             "DOUBLE": "float64",
@@ -806,7 +806,7 @@ cdef Py_ssize_t _linearize(
         slot_bool_val = 0
 
         if extr_op_str == "MapAccess":
-            if left_sql == _SqlType_ARRAY:
+            if left_sql == _LogicalCategory_ARRAY:
                 # MapAccess on ARRAY: store scalar int64 key in bool_value (Option B).
                 # The scalar is extracted from the constant key at bind time.
                 sub_op = BC_EXTR_MAP_ARRAY
@@ -910,9 +910,9 @@ cdef Py_ssize_t _linearize(
         _ASSEMBLE_STRING = 2
 
         # Determine kernel type from inferred type
-        if case_inferred_type is _SqlType_BOOLEAN:
+        if case_inferred_type is _LogicalCategory_BOOLEAN:
             kernel_type = _ASSEMBLE_BOOL
-        elif case_inferred_type in (_SqlType_VARCHAR, _SqlType_BLOB):
+        elif case_inferred_type in (_LogicalCategory_VARCHAR, _LogicalCategory_BLOB):
             kernel_type = _ASSEMBLE_STRING
         elif case_inferred_type is None:
             # Fallback when inferred_type is None: defer to runtime type dispatch.
@@ -928,7 +928,7 @@ cdef Py_ssize_t _linearize(
         slot.opcode = BC_CASE
         # CASE closure returns a nanobind Vector; set NEEDS_NB_WRAP.
         slot.flags = BC_RESULT_NEEDS_NB_WRAP
-        if case_inferred_type is _SqlType_BOOLEAN:
+        if case_inferred_type is _LogicalCategory_BOOLEAN:
             slot.flags |= BC_RESULT_WRAP_AS_BOOL
         bc._hold(case_callable)
         slot.callable_ref = <PyObject*>case_callable
@@ -951,8 +951,8 @@ cdef _validate_temporal_at_bind(
     has an un-cast literal on one side. Runs once per COMPARISON node.
     """
     _ensure_sql_types()
-    cdef bint left_is_temporal = (left_type is _SqlType_DATE) or (left_type is _SqlType_TIMESTAMP)
-    cdef bint right_is_temporal = (right_type is _SqlType_DATE) or (right_type is _SqlType_TIMESTAMP)
+    cdef bint left_is_temporal = (left_type is _LogicalCategory_DATE) or (left_type is _LogicalCategory_TIMESTAMP)
+    cdef bint right_is_temporal = (right_type is _LogicalCategory_DATE) or (right_type is _LogicalCategory_TIMESTAMP)
 
     if not (left_is_temporal or right_is_temporal):
         return

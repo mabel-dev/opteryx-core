@@ -197,7 +197,7 @@ def resolve_binary_op(int op_code, left_sql, right_sql):
     Returns a callable with signature: (left_vector, right_vector) → Draken Vector.
     Raises NotImplementedError if (op_code, left_sql, right_sql) is unsupported.
     """
-    from opteryx.types import SqlType
+    from opteryx.types.logical_type import LogicalCategory
     from opteryx.utils.vector_types import VectorType
 
     # Arithmetic ops (Plus, Minus, Multiply, Divide, Modulo, IntegerDivide)
@@ -213,7 +213,7 @@ def resolve_binary_op(int op_code, left_sql, right_sql):
     if op_code in (BOP_BITWISE_OR, BOP_BITWISE_AND, BOP_BITWISE_XOR, BOP_SHIFT_LEFT, BOP_SHIFT_RIGHT):
         # Special case: BitwiseOr on VARCHAR → IP-in-CIDR
         if op_code == BOP_BITWISE_OR:
-            if (left_sql == SqlType.VARCHAR or right_sql == SqlType.VARCHAR):
+            if (left_sql == LogicalCategory.VARCHAR or right_sql == LogicalCategory.VARCHAR):
                 from opteryx.compiled.nanobind.vector_misc import vector_ip_in_cidr
                 def _ip_in_cidr_kernel(left, right, _k=vector_ip_in_cidr):
                     return _k(_unwrap_nb(left), _unwrap_nb(right))
@@ -223,10 +223,10 @@ def resolve_binary_op(int op_code, left_sql, right_sql):
 
     # Date/Timestamp ± Interval
     if op_code in (BOP_PLUS, BOP_MINUS):
-        left_is_date = left_sql in (SqlType.DATE, SqlType.TIMESTAMP)
-        right_is_interval = right_sql == SqlType.INTERVAL
-        left_is_interval = left_sql == SqlType.INTERVAL
-        right_is_date = right_sql in (SqlType.DATE, SqlType.TIMESTAMP)
+        left_is_date = left_sql in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP)
+        right_is_interval = right_sql == LogicalCategory.INTERVAL
+        left_is_interval = left_sql == LogicalCategory.INTERVAL
+        right_is_date = right_sql in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP)
 
         if (left_is_date and right_is_interval) or (left_is_interval and right_is_date):
             def _date_interval_kernel(left, right, op_code=op_code):
@@ -238,7 +238,7 @@ def resolve_binary_op(int op_code, left_sql, right_sql):
             return _date_minus_date_draken
 
         # Interval ± Interval
-        if left_sql == SqlType.INTERVAL and right_sql == SqlType.INTERVAL:
+        if left_sql == LogicalCategory.INTERVAL and right_sql == LogicalCategory.INTERVAL:
             from opteryx.expression.intervals import INTERVAL_KERNELS
             key = (left_sql, right_sql, "Plus" if op_code == BOP_PLUS else "Minus")
             kernel = INTERVAL_KERNELS.get(key)

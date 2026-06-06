@@ -7,9 +7,9 @@ Only implements the methods actually used by Opteryx (not a full DataFrame repla
 
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import FlatColumn, RelationSchema
+from opteryx.types.schema import SchemaColumn, RelationSchema
 
 __all__ = ["DataFrame"]
 
@@ -51,7 +51,7 @@ class DataFrame:
             self._schema = schema
         elif isinstance(schema, (list, tuple)):
             # Convert list of column names to RelationSchema
-            columns = [FlatColumn.from_column_type(name=str(col), column_type=_lt.VARCHAR) for col in schema]
+            columns = [SchemaColumn.from_column_type(name=str(col), column_type=_lt.VARCHAR) for col in schema]
             self._schema = RelationSchema(name="table", columns=columns)
         else:
             self._schema = schema

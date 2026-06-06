@@ -28,7 +28,7 @@ from opteryx.compiled.nanobind.vector_accessors import (
     vector_string_is_not_empty as _vector_string_is_not_empty,
 )
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError, IncompatibleTypesError
-from opteryx.types import SqlType as _SqlType
+from opteryx.types.logical_type import LogicalCategory as _LogicalCategory
 from opteryx.types._datetime_conversion import timestamp_to_int64_us as _ts_to_us
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 
@@ -98,10 +98,10 @@ DEF _BV_IS_NOT_FALSE = 3
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DATETIME = datetime.datetime(1970, 1, 1)
 
-# Cached SqlType sentinels — used to reconstruct Python type objects from
+# Cached LogicalCategory sentinels — used to reconstruct Python type objects from
 # BC_TYPE_DATE / BC_TYPE_TIMESTAMP int codes on the AnyOp/temporal-coercion paths.
-_SqlType_DATE = _SqlType.DATE
-_SqlType_TIMESTAMP = _SqlType.TIMESTAMP
+_LogicalCategory_DATE = _LogicalCategory.DATE
+_LogicalCategory_TIMESTAMP = _LogicalCategory.TIMESTAMP
 
 # Telemetry: count C-native kernel calls for regression detection (Phase 9c).
 cdef uint64_t _c_native_kernel_call_count = 0
@@ -206,10 +206,10 @@ cdef _unary_op_kernel(int op_code, vec):
 
 
 cdef bint _is_temporal_type(sql_type):
-    """Check if an SqlType is DATE or TIMESTAMP."""
+    """Check if an LogicalCategory is DATE or TIMESTAMP."""
     if sql_type is None:
         return False
-    return sql_type == _SqlType.DATE or sql_type == _SqlType.TIMESTAMP
+    return sql_type == _LogicalCategory.DATE or sql_type == _LogicalCategory.TIMESTAMP
 
 
 cdef _validate_temporal_comparison(left_node, right_node, op):
@@ -1715,7 +1715,7 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                     if (flags & BC_CMP_LEFT_TEMPORAL) and _is_scalar_value(py_left):
                         py_left = _coerce_temporal_scalar_for_arrow(
                             py_left,
-                            _SqlType_DATE if left_type_code == BC_TYPE_DATE else _SqlType_TIMESTAMP,
+                            _LogicalCategory_DATE if left_type_code == BC_TYPE_DATE else _LogicalCategory_TIMESTAMP,
                         )
                     compare_result = draken_compare_int(
                         slot.op_code, py_left, inlist_right, left_type_code, right_type_code
@@ -1752,12 +1752,12 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                         if (flags & BC_CMP_LEFT_TEMPORAL) and _is_scalar_value(py_left):
                             py_left = _coerce_temporal_scalar_for_arrow(
                                 py_left,
-                                _SqlType_DATE if left_type_code == BC_TYPE_DATE else _SqlType_TIMESTAMP,
+                                _LogicalCategory_DATE if left_type_code == BC_TYPE_DATE else _LogicalCategory_TIMESTAMP,
                             )
                         if (flags & BC_CMP_RIGHT_TEMPORAL) and _is_scalar_value(py_right):
                             py_right = _coerce_temporal_scalar_for_arrow(
                                 py_right,
-                                _SqlType_DATE if right_type_code == BC_TYPE_DATE else _SqlType_TIMESTAMP,
+                                _LogicalCategory_DATE if right_type_code == BC_TYPE_DATE else _LogicalCategory_TIMESTAMP,
                             )
                     compare_result = draken_compare_int(
                         slot.op_code, py_left, py_right, left_type_code, right_type_code

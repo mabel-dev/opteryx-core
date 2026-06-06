@@ -25,7 +25,7 @@ from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.cost_estimation import PredicateStats, order_predicates as _order_predicates
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import ConstantColumn
 from opteryx.utils import random_string
 
@@ -38,21 +38,21 @@ from .optimization_strategy import (
 # Approximate of the time in seconds (3sf) to compare 1 million records
 # These are the core comparisons, Eq, NotEq, Gt, GtEq, Lt, LtEq
 BASIC_COMPARISON_COSTS = {
-    SqlType.ARRAY: 10.00,  # expensive
-    SqlType.BLOB: 0.058,  # varies based on length, this is 50 bytes
-    SqlType.JSONB: 10.00,  # JSONB (treat as expensive)
-    SqlType.BOOLEAN: 0.003,
-    SqlType.DATE: 0.008,
-    SqlType.DECIMAL: 1.533,
-    SqlType.DOUBLE: 0.002,
-    SqlType.INTEGER: 0.001,
-    SqlType.INTERVAL: 10.00,  # expensive
-    SqlType.STRUCT: 10.00,  # expensive
-    SqlType.TIMESTAMP: 0.008,
-    SqlType.TIME: 10.00,  # expensive
-    SqlType.VARCHAR: 0.231,  # varies based on length, this is 50 chars
-    SqlType.NULL: 10.00,  # for completeness
-    getattr(SqlType, "_MISSING_TYPE", 0): 10.00,  # for completeness
+    LogicalCategory.ARRAY: 10.00,  # expensive
+    LogicalCategory.BLOB: 0.058,  # varies based on length, this is 50 bytes
+    LogicalCategory.JSONB: 10.00,  # JSONB (treat as expensive)
+    LogicalCategory.BOOLEAN: 0.003,
+    LogicalCategory.DATE: 0.008,
+    LogicalCategory.DECIMAL: 1.533,
+    LogicalCategory.DOUBLE: 0.002,
+    LogicalCategory.INTEGER: 0.001,
+    LogicalCategory.INTERVAL: 10.00,  # expensive
+    LogicalCategory.STRUCT: 10.00,  # expensive
+    LogicalCategory.TIMESTAMP: 0.008,
+    LogicalCategory.TIME: 10.00,  # expensive
+    LogicalCategory.VARCHAR: 0.231,  # varies based on length, this is 50 chars
+    LogicalCategory.NULL: 10.00,  # for completeness
+    getattr(LogicalCategory, "_MISSING_TYPE", 0): 10.00,  # for completeness
     0: 10.00,  # for completeness
 }
 
@@ -228,9 +228,9 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
             values_set = set(data["values"])
             new_node.left.value = values_set
             new_node.left.element_type = new_node.left.type
-            new_node.left.type = SqlType.ARRAY
+            new_node.left.type = LogicalCategory.ARRAY
             # D-4 Phase 2: column_type construction for ARRAY ConstantColumn.
-            from opteryx.types.sql_type import sql_to_column_type as _otoct
+            from opteryx.types.logical_type import sql_to_column_type as _otoct
             from opteryx.types import logical_type as _lt
             try:
                 _elem_ct = _otoct(new_node.left.element_type)
@@ -243,7 +243,7 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
             except Exception:
                 new_node.left.schema_column = ConstantColumn(
                     name=new_node.left.name,
-                    type=SqlType.ARRAY,
+                    type=LogicalCategory.ARRAY,
                     element_type=new_node.left.element_type,
                     value=new_node.left.value,
                 )
@@ -259,7 +259,7 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
             # Neutralize the remaining AND'ed ANYOPEQ nodes to TRUE
             for node in data["nodes"][1:]:
                 node.node_type = NodeType.LITERAL
-                node.type = SqlType.BOOLEAN
+                node.type = LogicalCategory.BOOLEAN
                 node.value = True
 
     return predicate

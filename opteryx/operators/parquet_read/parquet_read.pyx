@@ -48,7 +48,7 @@ from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.models import QueryProperties
 from opteryx.utils import random_string
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 
 # Hoisted out of the per-row-group hot path. Previously these imports happened
 # 3× per row group via `from ... import ...` inside the loop body.
@@ -723,7 +723,7 @@ cdef class ParquetReadNode(ReaderNode):
                 _decimal_col_map[col.name.encode('utf-8')] = (
                     ct.logical.precision, ct.logical.scale
                 )
-        # D-4 Phase 2: dispatch on LogicalCategory rather than the legacy SqlType
+        # D-4 Phase 2: dispatch on LogicalCategory rather than the legacy LogicalCategory
         # value. column_type may be None for cases the bridge can't yet map; those
         # columns harmlessly drop out of the coerce set.
         _date_col_set = {

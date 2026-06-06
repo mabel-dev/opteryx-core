@@ -8,7 +8,7 @@
 # cython: optimize.use_switch=True
 # cython: optimize.unpack_method_calls=True
 
-from libc.stdint cimport uint8_t, int64_t, uint32_t
+from libc.stdint cimport uint8_t, int64_t, uint32_t, uint64_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset, memcpy
 from libcpp.string cimport string
@@ -63,6 +63,12 @@ cdef extern from "core/interpreter.hpp" namespace "rugo::_jsonl":
 
     vector[string] first_record_keys(const RecordSet& rs, const uint8_t* buffer) nogil
 
+    RecordSet build_map_bitmap(
+        const uint8_t* buffer,
+        size_t buffer_length,
+        const vector[uint64_t]& bitmap
+    ) nogil
+
 
 cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
     struct InterpreterResult:
@@ -97,8 +103,22 @@ cdef extern from "core/structural_scan.hpp" namespace "rugo::_jsonl":
         size_t length
     ) nogil
 
+    vector[uint64_t] scan_structural_bitmap(
+        const uint8_t* buffer,
+        size_t length
+    ) nogil
+
 
 cdef extern from "core/jsonl_reader.hpp" namespace "rugo::_jsonl":
+    struct PrefilterResult:
+        vector[uint8_t] candidates
+        size_t total_records
+        size_t matched_records
+    PrefilterResult volnitsky_prefilter(
+        const uint8_t* buffer, size_t length,
+        const uint8_t* needle, size_t needle_len
+    ) nogil
+
     struct ReadResult:
         bint success
         string error_message
@@ -383,6 +403,64 @@ def benchmark_document_map(
         'total_ms': scan_ms + interp_ms,
         'buffer_size_mb': len(data) / 1024 / 1024,
         'sample_keys': sample_keys,
+    }
+
+
+def benchmark_bitmap(data: bytes):
+    """SPIKE: time the bitmap structural index (scan_structural_bitmap + build_map_bitmap),
+    data-blind, to compare against benchmark_document_map's marker-vector scan + build."""
+    import time
+
+    cdef:
+        const uint8_t* buf_data = <const uint8_t*><bytes>data
+        size_t buf_len = len(data)
+        vector[uint64_t] bm
+        RecordSet rs
+
+    scan_start = time.perf_counter()
+    with nogil:
+        bm = scan_structural_bitmap(buf_data, buf_len)
+    scan_ms = (time.perf_counter() - scan_start) * 1000
+
+    build_start = time.perf_counter()
+    with nogil:
+        rs = build_map_bitmap(buf_data, buf_len, bm)
+    build_ms = (time.perf_counter() - build_start) * 1000
+
+    return {
+        'num_records': rs.num_records(),
+        'scan_ms': scan_ms,
+        'build_ms': build_ms,
+        'total_ms': scan_ms + build_ms,
+    }
+
+
+def benchmark_prefilter(data: bytes, needle: bytes):
+    """SPIKE: Volnitsky raw prefilter for string-eq. Returns prefilter time, match counts,
+    and the candidate sub-buffer (surviving lines) for end-to-end timing in Python."""
+    import time
+
+    cdef:
+        const uint8_t* buf = <const uint8_t*><bytes>data
+        size_t blen = len(data)
+        const uint8_t* ndl = <const uint8_t*><bytes>needle
+        size_t nlen = len(needle)
+        PrefilterResult r
+
+    t0 = time.perf_counter()
+    with nogil:
+        r = volnitsky_prefilter(buf, blen, ndl, nlen)
+    pf_ms = (time.perf_counter() - t0) * 1000
+
+    cdef bytes cand = b""
+    if r.candidates.size() > 0:
+        cand = (<char*>r.candidates.data())[:r.candidates.size()]
+
+    return {
+        'prefilter_ms': pf_ms,
+        'total': r.total_records,
+        'matched': r.matched_records,
+        'candidates': cand,
     }
 
 

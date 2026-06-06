@@ -5,7 +5,7 @@ kernels, and metadata."""
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Literal, Optional, Tuple
 
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.vectors.vector_types import is_numeric_vector_type, resolve_node_type
 
 Node = Any  # AST node type (duck-typed; no import to avoid circular deps)
@@ -29,7 +29,7 @@ class ResolvedArg:
     """Result of resolving one argument node during binding."""
 
     node: Node
-    inferred_type: SqlType
+    inferred_type: LogicalCategory
     coercion_cost: float = 0.0
 
 
@@ -37,7 +37,7 @@ class ResolvedArg:
 class FunctionResolutionContext:
     """Runtime environment for type resolution and overload matching."""
 
-    schema: Dict[str, SqlType]  # available column types
+    schema: Dict[str, LogicalCategory]  # available column types
     bound_args: Dict[int, ResolvedArg]  # previously bound arguments
 
 
@@ -46,10 +46,10 @@ class ReturnSpec:
     """Specification for a function's return type."""
 
     mode: Literal["fixed", "same_as_arg", "resolver"]
-    fixed_type: Optional[SqlType] = None
+    fixed_type: Optional[LogicalCategory] = None
     arg_index: Optional[int] = None
-    # resolver receives the bound arg nodes and returns SqlType.
-    # May return (SqlType, SqlType) tuple for typed arrays: (array_type, element_type).
+    # resolver receives the bound arg nodes and returns LogicalCategory.
+    # May return (LogicalCategory, LogicalCategory) tuple for typed arrays: (array_type, element_type).
     resolver: Optional[Callable[[list], Any]] = None
 
 
@@ -145,8 +145,8 @@ class ResolvedFunction:
     function_definition: FunctionDefinition
     selected_overload: FunctionOverload
     resolved_args: Dict[int, ResolvedArg]  # per-argument resolution with inferred types
-    inferred_return_type: SqlType
-    inferred_element_type: Optional[SqlType] = None  # set for ARRAY<X> return types
+    inferred_return_type: LogicalCategory
+    inferred_element_type: Optional[LogicalCategory] = None  # set for ARRAY<X> return types
 
 
 class FunctionCatalog:
@@ -251,8 +251,8 @@ class FunctionCatalog:
         # TODO Phase 2+: use resolved arg types from context for precise scoring.
         _INF = float("inf")
 
-        def _is_numeric_type(type_: Optional[SqlType]) -> bool:
-            return isinstance(type_, SqlType) and type_.is_numeric()
+        def _is_numeric_type(type_: Optional[LogicalCategory]) -> bool:
+            return isinstance(type_, LogicalCategory) and type_.is_numeric()
 
         def _score_parameter(node, type_family: str) -> float:
             if type_family == "any":
@@ -260,29 +260,29 @@ class FunctionCatalog:
 
             node_type, element_type = resolve_node_type(node)
             # NULL literals should be compatible with any type (they yield NULL at runtime).
-            if node_type is None or node_type == SqlType.NULL:
+            if node_type is None or node_type == LogicalCategory.NULL:
                 return 0.0
 
             if type_family == "array":
-                return 0.0 if node_type == SqlType.ARRAY else _INF
+                return 0.0 if node_type == LogicalCategory.ARRAY else _INF
             if type_family == "numeric":
                 return 0.0 if _is_numeric_type(node_type) else _INF
             if type_family == "integer":
-                if node_type == SqlType.INTEGER:
+                if node_type == LogicalCategory.INTEGER:
                     return 0.0
                 return 1.0 if _is_numeric_type(node_type) else _INF
             if type_family == "boolean":
-                return 0.0 if node_type == SqlType.BOOLEAN else _INF
+                return 0.0 if node_type == LogicalCategory.BOOLEAN else _INF
             if type_family == "string":
-                if node_type == SqlType.VARCHAR or node_type == SqlType.NVARCHAR:
+                if node_type == LogicalCategory.VARCHAR or node_type == LogicalCategory.NVARCHAR:
                     return 0.0
-                return 1.0 if node_type == SqlType.BLOB else _INF
+                return 1.0 if node_type == LogicalCategory.BLOB else _INF
             if type_family == "temporal":
-                return 0.0 if isinstance(node_type, SqlType) and node_type.is_temporal() else _INF
+                return 0.0 if isinstance(node_type, LogicalCategory) and node_type.is_temporal() else _INF
             if type_family == "date":
-                return 0.0 if node_type == SqlType.DATE else _INF
+                return 0.0 if node_type == LogicalCategory.DATE else _INF
             if type_family == "timestamp":
-                return 0.0 if node_type == SqlType.TIMESTAMP else _INF
+                return 0.0 if node_type == LogicalCategory.TIMESTAMP else _INF
             if type_family == "numeric_vector":
                 return 0.0 if is_numeric_vector_type(node_type, element_type) else _INF
 
@@ -359,7 +359,7 @@ class FunctionCatalog:
         # 5. Infer return type from ReturnSpec.
         # For each arg node, prefer schema_column.type (set by binder after recursive bind)
         # over node.type (set at parse time; may be None for identifiers until bound).
-        def _node_type(node) -> Optional[SqlType]:
+        def _node_type(node) -> Optional[LogicalCategory]:
             sc = getattr(node, "schema_column", None)
             if sc is not None:
                 return sc.type
@@ -371,7 +371,7 @@ class FunctionCatalog:
             for i, node in enumerate(arg_nodes)
         }
 
-        inferred_element_type: Optional[SqlType] = None
+        inferred_element_type: Optional[LogicalCategory] = None
         if return_spec.mode == "fixed":
             inferred_type = return_spec.fixed_type
         elif return_spec.mode == "same_as_arg":

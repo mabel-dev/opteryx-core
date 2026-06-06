@@ -4,7 +4,7 @@ Internal Opteryx schema system - the Draken-native engine.
 This module provides schema definitions for Opteryx, eliminating the external
 external dependency, specialized for Opteryx's actual use cases.
 
-Opteryx only uses: RelationSchema, FlatColumn, ConstantColumn
+Opteryx only uses: RelationSchema, SchemaColumn, ConstantColumn
 Advanced features (DictionaryColumn, SparseColumn, RLEColumn, FunctionColumn)
 are deferred to Phase 9 if needed.
 
@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 
 __all__ = [
-    "FlatColumn",
+    "SchemaColumn",
     "ConstantColumn",
     "FunctionColumn",
     "RelationSchema",
@@ -49,14 +49,14 @@ class ColumnDisposition:
 
 
 @dataclasses.dataclass
-class FlatColumn:
+class SchemaColumn:
     """Column definition with metadata.
 
     Opteryx column definition.
 
     Attributes:
         name: Column name (required)
-        type: SqlType for this column (required)
+        type: LogicalCategory for this column (required)
         identity: Unique identifier for this column (default: auto-generated from name)
         nullable: Whether NULL values are allowed (default: True)
         default: Default value if not provided (default: None)
@@ -79,7 +79,7 @@ class FlatColumn:
 
     name: str
     # `type` is a transient constructor parameter for backward-compat — callers that
-    # haven't migrated to from_column_type yet can still pass type=SqlType.X.
+    # haven't migrated to from_column_type yet can still pass type=LogicalCategory.X.
     # The value is forwarded to the bridge in __post_init__ to derive column_type.
     # Once all callers use from_column_type, this InitVar can be removed.
     type: dataclasses.InitVar[Optional[Any]] = None
@@ -92,14 +92,14 @@ class FlatColumn:
     highest_value: Optional[Any] = None
     lowest_value: Optional[Any] = None
     null_count: Optional[int] = None
-    fields: Optional[List[FlatColumn]] = None
+    fields: Optional[List[SchemaColumn]] = None
     expectations: Optional[Any] = None  # Deferred to Phase 9
     origin: Optional[List[str]] = None  # Deferred to Phase 9
     # column_type is the authoritative unified type carrier (physical DrakenType +
     # optional LogicalType descriptor + optional ARRAY element). Computed once in
     # __post_init__ from the InitVar parameters. `init=False` keeps it out of the
     # positional signature; it is the only stored type field besides `type` (the
-    # legacy SqlType tag, retained until the wider SqlType removal). Deepcopy
+    # legacy LogicalCategory tag, retained until the wider LogicalCategory removal). Deepcopy
     # is safe — LogicalType has __deepcopy__ wired on the nanobind side.
     column_type: Optional[Any] = dataclasses.field(default=None, init=False, repr=False, compare=False)
 
@@ -116,16 +116,16 @@ class FlatColumn:
         # If a legacy type= was passed and column_type wasn't injected yet, derive it.
         if self.column_type is None and type is not None and type != 0:
             try:
-                from opteryx.types.sql_type import sql_to_column_type
+                from opteryx.types.logical_type import sql_to_column_type
                 self.column_type = sql_to_column_type(type)
             except Exception:
                 self.column_type = None
 
     @property
     def type(self):
-        """Derived SqlType tag for backward-compat reads while callsites migrate.
-        Delete once all .type reads on FlatColumn are gone."""
-        from opteryx.types.sql_type import column_type_to_sql
+        """Derived LogicalCategory tag for backward-compat reads while callsites migrate.
+        Delete once all .type reads on SchemaColumn are gone."""
+        from opteryx.types.logical_type import column_type_to_sql
         if self.column_type is None:
             return 0  # _MISSING_TYPE sentinel used by binder bootstrap
         legacy = column_type_to_sql(self.column_type)
@@ -133,7 +133,7 @@ class FlatColumn:
 
     @classmethod
     def from_column_type(cls, name, column_type, **kwargs):
-        """Construct a FlatColumn (or subclass) with `column_type` as the type carrier.
+        """Construct a SchemaColumn (or subclass) with `column_type` as the type carrier.
 
         D-4 Phase 2: the authoritative construction path. Satisfies the DECIMAL
         invariant by threading precision/scale from the ColumnType's LogicalType
@@ -157,8 +157,8 @@ class FlatColumn:
             return f"{self.name}:{ct}"
         return self.name
 
-    def _to_plain_flatcolumn(self) -> "FlatColumn":
-        """Build a plain FlatColumn mirroring this column's type + metadata.
+    def _to_plain_flatcolumn(self) -> "SchemaColumn":
+        """Build a plain SchemaColumn mirroring this column's type + metadata.
 
         D-4 Phase 2: the type is carried by `column_type` (single source of truth),
         so we reconstruct via `from_column_type` rather than copying deleted
@@ -174,18 +174,18 @@ class FlatColumn:
             aliases=self.aliases,
             origin=self.origin,
         )
-        return FlatColumn.from_column_type(
+        return SchemaColumn.from_column_type(
             name=self.name, column_type=self.column_type, **common
         )
 
-    def to_flatcolumn(self) -> "FlatColumn":
-        """Convert to a FlatColumn (returns self when already a plain FlatColumn)."""
-        if type(self) is FlatColumn:
+    def to_schema_column(self) -> "SchemaColumn":
+        """Convert to a SchemaColumn (returns self when already a plain SchemaColumn)."""
+        if type(self) is SchemaColumn:
             return self
         return self._to_plain_flatcolumn()
 
     def __repr__(self) -> str:
-        return f"FlatColumn(name={self.name!r}, column_type={self.column_type}, nullable={self.nullable})"
+        return f"SchemaColumn(name={self.name!r}, column_type={self.column_type}, nullable={self.nullable})"
 
     @property
     def all_names(self) -> List[str]:
@@ -215,7 +215,7 @@ class FlatColumn:
         return {
             "_v": self._SCHEMA_VERSION,
             "name": self.name,
-            # Canonical column_type string is authoritative; `type` (bare SqlType
+            # Canonical column_type string is authoritative; `type` (bare LogicalCategory
             # name) is kept for the rare column_type==None case and human readability.
             "column_type": serialize_column_type(self.column_type),
             "type": self.type.value,
@@ -228,8 +228,8 @@ class FlatColumn:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> FlatColumn:
-        """Create FlatColumn from a serialized dict (v2 with v1 fallback)."""
+    def from_dict(cls, data: Dict[str, Any]) -> SchemaColumn:
+        """Create SchemaColumn from a serialized dict (v2 with v1 fallback)."""
         data = data.copy()
         data.pop("_v", None)
         ct_str = data.pop("column_type", None)
@@ -244,7 +244,7 @@ class FlatColumn:
 
         # v1 fallback: legacy type/precision/scale/element_type quartet.
         # Reconstruct via from_column_type using the bridge.
-        from opteryx.types.sql_type import sql_to_column_type
+        from opteryx.types.logical_type import sql_to_column_type
 
         raw_type = data.pop("type", None)
         precision = data.pop("precision", None)
@@ -252,9 +252,9 @@ class FlatColumn:
         length = data.pop("length", None)
         element_type_raw = data.pop("element_type", None)
 
-        from opteryx.types.sql_type import SqlType as _SqlType
+        from opteryx.types.logical_type import LogicalCategory as _LogicalCategory
         if isinstance(raw_type, str):
-            type_obj, _, p_parsed, s_parsed, et_parsed = _SqlType.from_name(raw_type)
+            type_obj, _, p_parsed, s_parsed, et_parsed = _LogicalCategory.from_name(raw_type)
             if precision is None:
                 precision = p_parsed
             if scale is None:
@@ -262,10 +262,10 @@ class FlatColumn:
             if element_type_raw is None:
                 element_type_raw = et_parsed
         else:
-            type_obj = raw_type or _SqlType.NULL
+            type_obj = raw_type or _LogicalCategory.NULL
 
         if isinstance(element_type_raw, str):
-            element_type_raw, _, _, _, _ = _SqlType.from_name(element_type_raw)
+            element_type_raw, _, _, _, _ = _LogicalCategory.from_name(element_type_raw)
 
         try:
             column_type = sql_to_column_type(
@@ -280,11 +280,11 @@ class FlatColumn:
 
 
 @dataclasses.dataclass
-class ConstantColumn(FlatColumn):
+class ConstantColumn(SchemaColumn):
     """Column with a constant value.
 
     Used for constant expressions (e.g., SELECT 42 AS constant_col).
-    Inherits from FlatColumn with additional constant value semantics.
+    Inherits from SchemaColumn with additional constant value semantics.
     """
 
     value: Any = None
@@ -293,25 +293,25 @@ class ConstantColumn(FlatColumn):
         """String representation: name = value."""
         return f"{self.name}={self.value}"
 
-    def to_flatcolumn(self) -> FlatColumn:
-        """Convert to a FlatColumn, stripping constant value."""
+    def to_schema_column(self) -> SchemaColumn:
+        """Convert to a SchemaColumn, stripping constant value."""
         return self._to_plain_flatcolumn()
 
 
 @dataclasses.dataclass
-class FunctionColumn(FlatColumn):
+class FunctionColumn(SchemaColumn):
     """Column defined by a function/expression.
 
     Used for computed columns (e.g., SELECT col1 + col2 AS sum_col).
-    Inherits from FlatColumn with additional function expression semantics.
+    Inherits from SchemaColumn with additional function expression semantics.
     """
 
     def __str__(self) -> str:
         """String representation: name (computed)."""
         return f"{self.name}(computed)"
 
-    def to_flatcolumn(self) -> FlatColumn:
-        """Convert to a FlatColumn, stripping function metadata."""
+    def to_schema_column(self) -> SchemaColumn:
+        """Convert to a SchemaColumn, stripping function metadata."""
         return self._to_plain_flatcolumn()
 
 
@@ -324,7 +324,7 @@ class RelationSchema:
 
     Attributes:
         name: Schema/table name (required)
-        columns: List of FlatColumn definitions (required)
+        columns: List of SchemaColumn definitions (required)
         aliases: Alternative names for this schema (default: [])
         primary_key: Name of primary key column (default: None)
         row_count_metric: Actual row count if known (default: None)
@@ -334,7 +334,7 @@ class RelationSchema:
     """
 
     name: str
-    columns: List[FlatColumn] = dataclasses.field(default_factory=list)
+    columns: List[SchemaColumn] = dataclasses.field(default_factory=list)
     aliases: List[str] = dataclasses.field(default_factory=list)
     primary_key: Optional[str] = None
     row_count_metric: Optional[int] = None
@@ -369,7 +369,7 @@ class RelationSchema:
         """Get number of columns."""
         return len(self.columns)
 
-    def column(self, name: str, case_insensitive: bool = False) -> Optional[FlatColumn]:
+    def column(self, name: str, case_insensitive: bool = False) -> Optional[SchemaColumn]:
         """Find column by name (including aliases).
 
         Args:
@@ -377,7 +377,7 @@ class RelationSchema:
             case_insensitive: If True, perform case-insensitive comparison
 
         Returns:
-            FlatColumn if found, None otherwise
+            SchemaColumn if found, None otherwise
         """
         if case_insensitive:
             name_lower = name.lower()
@@ -394,18 +394,18 @@ class RelationSchema:
                     return col
         return None
 
-    def find_column(self, name: str, case_insensitive: bool = False) -> Optional[FlatColumn]:
+    def find_column(self, name: str, case_insensitive: bool = False) -> Optional[SchemaColumn]:
         """Alias for column() for API compatibility."""
         return self.column(name, case_insensitive=case_insensitive)
 
-    def pop_column(self, name: str) -> Optional[FlatColumn]:
+    def pop_column(self, name: str) -> Optional[SchemaColumn]:
         """Remove and return column by name.
 
         Args:
             name: Column name to remove
 
         Returns:
-            Removed FlatColumn if found, None otherwise
+            Removed SchemaColumn if found, None otherwise
         """
         for i, col in enumerate(self.columns):
             if col.name == name:
@@ -429,10 +429,10 @@ class RelationSchema:
     def from_dict(cls, data: Dict[str, Any]) -> RelationSchema:
         """Create RelationSchema from dictionary."""
         data = data.copy()
-        # Convert column dicts to FlatColumn objects
+        # Convert column dicts to SchemaColumn objects
         if "columns" in data:
             data["columns"] = [
-                FlatColumn.from_dict(col) if isinstance(col, dict) else col
+                SchemaColumn.from_dict(col) if isinstance(col, dict) else col
                 for col in data["columns"]
             ]
         return cls(**data)

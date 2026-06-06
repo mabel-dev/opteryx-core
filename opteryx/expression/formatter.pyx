@@ -6,13 +6,13 @@ Not on the per-row hot path — called once per shown expression.
 
 from dataclasses import dataclass
 
-from opteryx.types import SqlType
-from opteryx.types.schema import FlatColumn
+from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.schema import SchemaColumn
 from opteryx.utils import random_string
 
 
 @dataclass
-class ExpressionColumn(FlatColumn):
+class ExpressionColumn(SchemaColumn):
     expression: object = None
 
 
@@ -67,15 +67,15 @@ def format_expression(root, qualify=False):
     # LITERALS
     if node_type == NodeType.LITERAL:
         literal_type = root.type
-        if literal_type == SqlType.VARCHAR:
+        if literal_type == LogicalCategory.VARCHAR:
             return "'" + root.value.replace("'", "'") + "'"
-        if literal_type == SqlType.TIMESTAMP:
+        if literal_type == LogicalCategory.TIMESTAMP:
             return "'" + str(root.value) + "'"
-        if literal_type == SqlType.INTERVAL:
+        if literal_type == LogicalCategory.INTERVAL:
             return _format_interval(root.value)
-        if literal_type == SqlType.NULL:
+        if literal_type == LogicalCategory.NULL:
             return "null"
-        if literal_type == SqlType.ARRAY:
+        if literal_type == LogicalCategory.ARRAY:
             display = getattr(root, "display_values", None)
             if display is not None:
                 shown = display[:3]

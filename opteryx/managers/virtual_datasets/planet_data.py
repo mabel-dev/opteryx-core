@@ -27,9 +27,9 @@ import decimal
 
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import FlatColumn, RelationSchema
+from opteryx.types.schema import SchemaColumn, RelationSchema
 from opteryx.utils import single_item_cache
 
 __all__ = ("read", "schema")
@@ -46,26 +46,26 @@ def read(at_date=None, variables=None) -> Morsel:
     ]
     # Prepare the data as a list of Draken Vectors.
     vectors = [
-        vector_from_sequence([1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=SqlType.INTEGER),
-        vector_from_sequence(["Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune", "Pluto"], dtype=SqlType.VARCHAR),
-        vector_from_sequence([0.33, 4.87, 5.97, 0.642, 1898, 568, 86.8, 102, 0.0146], dtype=SqlType.DOUBLE),
-        vector_from_sequence([4879, 12104, 12756, 6792, 142984, 120536, 51118, 49528, 2370], dtype=SqlType.INTEGER),
-        vector_from_sequence([5427, 5243, 5514, 3933, 1326, 687, 1271, 1638, 2095], dtype=SqlType.INTEGER),
-        vector_from_sequence(list(map(decimal.Decimal, ("3.7", "8.9", "9.8", "3.7", "23.1", "9", "8.7", "11", "0.7"))), dtype=SqlType.DECIMAL),
-        vector_from_sequence([4.3, 10.4, 11.2, 5, 59.5, 35.5, 21.3, 23.5, 1.3], dtype=SqlType.DOUBLE),
-        vector_from_sequence([1407.6, -5832.5, 23.9, 24.6, 9.9, 10.7, -17.2, 16.1, -153.3], dtype=SqlType.DOUBLE),
-        vector_from_sequence([4222.6, 2802, 24, 24.7, 9.9, 10.7, 17.2, 16.1, 153.3], dtype=SqlType.DOUBLE),
-        vector_from_sequence([57.9, 108.2, 149.6, 227.9, 778.6, 1433.5, 2872.5, 4495.1, 5906.4], dtype=SqlType.DOUBLE),
-        vector_from_sequence([46, 107.5, 147.1, 206.6, 740.5, 1352.6, 2741.3, 4444.5, 4436.8], dtype=SqlType.DOUBLE),
-        vector_from_sequence([69.8, 108.9, 152.1, 249.2, 816.6, 1514.5, 3003.6, 4545.7, 7375.9], dtype=SqlType.DOUBLE),
-        vector_from_sequence([88, 224.7, 365.2, 687, 4331, 10747, 30589, 59800, 90560], dtype=SqlType.DOUBLE),
-        vector_from_sequence([47.4, 35, 29.8, 24.1, 13.1, 9.7, 6.8, 5.4, 4.7], dtype=SqlType.DOUBLE),
-        vector_from_sequence([7, 3.4, 0, 1.9, 1.3, 2.5, 0.8, 1.8, 17.2], dtype=SqlType.DOUBLE),
-        vector_from_sequence([0.205, 0.007, 0.017, 0.094, 0.049, 0.057, 0.046, 0.011, 0.244], dtype=SqlType.DOUBLE),
-        vector_from_sequence([0.03, 177.4, 23.4, 25.2, 3.1, 26.7, 97.8, 28.3, 122.5], dtype=SqlType.DOUBLE),
-        vector_from_sequence([167, 464, 15, -63, -108, -139, -197, -201, -225], dtype=SqlType.INTEGER),
-        vector_from_sequence([0, 92, 1, 0.001, None, None, None, None, 0.00001], dtype=SqlType.DOUBLE),
-        vector_from_sequence([0, 0, 1, 2, 79, 82, 27, 14, 5], dtype=SqlType.INTEGER),
+        vector_from_sequence([1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=LogicalCategory.INTEGER),
+        vector_from_sequence(["Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune", "Pluto"], dtype=LogicalCategory.VARCHAR),
+        vector_from_sequence([0.33, 4.87, 5.97, 0.642, 1898, 568, 86.8, 102, 0.0146], dtype=LogicalCategory.DOUBLE),
+        vector_from_sequence([4879, 12104, 12756, 6792, 142984, 120536, 51118, 49528, 2370], dtype=LogicalCategory.INTEGER),
+        vector_from_sequence([5427, 5243, 5514, 3933, 1326, 687, 1271, 1638, 2095], dtype=LogicalCategory.INTEGER),
+        vector_from_sequence(list(map(decimal.Decimal, ("3.7", "8.9", "9.8", "3.7", "23.1", "9", "8.7", "11", "0.7"))), dtype=LogicalCategory.DECIMAL),
+        vector_from_sequence([4.3, 10.4, 11.2, 5, 59.5, 35.5, 21.3, 23.5, 1.3], dtype=LogicalCategory.DOUBLE),
+        vector_from_sequence([1407.6, -5832.5, 23.9, 24.6, 9.9, 10.7, -17.2, 16.1, -153.3], dtype=LogicalCategory.DOUBLE),
+        vector_from_sequence([4222.6, 2802, 24, 24.7, 9.9, 10.7, 17.2, 16.1, 153.3], dtype=LogicalCategory.DOUBLE),
+        vector_from_sequence([57.9, 108.2, 149.6, 227.9, 778.6, 1433.5, 2872.5, 4495.1, 5906.4], dtype=LogicalCategory.DOUBLE),
+        vector_from_sequence([46, 107.5, 147.1, 206.6, 740.5, 1352.6, 2741.3, 4444.5, 4436.8], dtype=LogicalCategory.DOUBLE),
+        vector_from_sequence([69.8, 108.9, 152.1, 249.2, 816.6, 1514.5, 3003.6, 4545.7, 7375.9], dtype=LogicalCategory.DOUBLE),
+        vector_from_sequence([88, 224.7, 365.2, 687, 4331, 10747, 30589, 59800, 90560], dtype=LogicalCategory.DOUBLE),
+        vector_from_sequence([47.4, 35, 29.8, 24.1, 13.1, 9.7, 6.8, 5.4, 4.7], dtype=LogicalCategory.DOUBLE),
+        vector_from_sequence([7, 3.4, 0, 1.9, 1.3, 2.5, 0.8, 1.8, 17.2], dtype=LogicalCategory.DOUBLE),
+        vector_from_sequence([0.205, 0.007, 0.017, 0.094, 0.049, 0.057, 0.046, 0.011, 0.244], dtype=LogicalCategory.DOUBLE),
+        vector_from_sequence([0.03, 177.4, 23.4, 25.2, 3.1, 26.7, 97.8, 28.3, 122.5], dtype=LogicalCategory.DOUBLE),
+        vector_from_sequence([167, 464, 15, -63, -108, -139, -197, -201, -225], dtype=LogicalCategory.INTEGER),
+        vector_from_sequence([0, 92, 1, 0.001, None, None, None, None, 0.00001], dtype=LogicalCategory.DOUBLE),
+        vector_from_sequence([0, 0, 1, 2, 79, 82, 27, 14, 5], dtype=LogicalCategory.INTEGER),
     ]
     full_morsel = Morsel.from_vectors(column_names, vectors)
 
@@ -88,7 +88,7 @@ def read(at_date=None, variables=None) -> Morsel:
 
 def schema():
     # fmt:off
-    fc = FlatColumn.from_column_type
+    fc = SchemaColumn.from_column_type
     return RelationSchema(
         name="$planets",
         columns=[

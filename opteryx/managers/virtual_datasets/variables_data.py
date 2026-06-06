@@ -11,9 +11,9 @@ It is the system variables collection.
 
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import FlatColumn, RelationSchema
+from opteryx.types.schema import SchemaColumn, RelationSchema
 
 __all__ = ("read", "schema")
 
@@ -22,11 +22,11 @@ def read(at_date=None, variables=None):
     if not variables:
         # Empty result with expected schema
         vectors = [
-            vector_from_sequence([], dtype=SqlType.VARCHAR),
-            vector_from_sequence([], dtype=SqlType.VARCHAR),
-            vector_from_sequence([], dtype=SqlType.VARCHAR),
-            vector_from_sequence([], dtype=SqlType.VARCHAR),
-            vector_from_sequence([], dtype=SqlType.VARCHAR),
+            vector_from_sequence([], dtype=LogicalCategory.VARCHAR),
+            vector_from_sequence([], dtype=LogicalCategory.VARCHAR),
+            vector_from_sequence([], dtype=LogicalCategory.VARCHAR),
+            vector_from_sequence([], dtype=LogicalCategory.VARCHAR),
+            vector_from_sequence([], dtype=LogicalCategory.VARCHAR),
         ]
         return Morsel.from_vectors(["name", "value", "type", "owner", "visibility"], vectors)
 
@@ -49,11 +49,11 @@ def read(at_date=None, variables=None):
         visibilities.append(variable_visibility.name)
 
     vectors = [
-        vector_from_sequence(names, dtype=SqlType.VARCHAR),
-        vector_from_sequence(values, dtype=SqlType.VARCHAR),
-        vector_from_sequence(types, dtype=SqlType.VARCHAR),
-        vector_from_sequence(owners, dtype=SqlType.VARCHAR),
-        vector_from_sequence(visibilities, dtype=SqlType.VARCHAR),
+        vector_from_sequence(names, dtype=LogicalCategory.VARCHAR),
+        vector_from_sequence(values, dtype=LogicalCategory.VARCHAR),
+        vector_from_sequence(types, dtype=LogicalCategory.VARCHAR),
+        vector_from_sequence(owners, dtype=LogicalCategory.VARCHAR),
+        vector_from_sequence(visibilities, dtype=LogicalCategory.VARCHAR),
     ]
     return Morsel.from_vectors(["name", "value", "type", "owner", "visibility"], vectors)
 
@@ -63,11 +63,11 @@ def schema():
     return  RelationSchema(
         name="$variables",
         columns=[
-            FlatColumn.from_column_type(name="name", column_type=_lt.VARCHAR),
-            FlatColumn.from_column_type(name="value", column_type=_lt.VARCHAR),
-            FlatColumn.from_column_type(name="type", column_type=_lt.VARCHAR),
-            FlatColumn.from_column_type(name="owner", column_type=_lt.VARCHAR),
-            FlatColumn.from_column_type(name="visibility", column_type=_lt.VARCHAR),
+            SchemaColumn.from_column_type(name="name", column_type=_lt.VARCHAR),
+            SchemaColumn.from_column_type(name="value", column_type=_lt.VARCHAR),
+            SchemaColumn.from_column_type(name="type", column_type=_lt.VARCHAR),
+            SchemaColumn.from_column_type(name="owner", column_type=_lt.VARCHAR),
+            SchemaColumn.from_column_type(name="visibility", column_type=_lt.VARCHAR),
         ],
     )
     # fmt:on

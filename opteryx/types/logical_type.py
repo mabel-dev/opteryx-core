@@ -26,9 +26,11 @@ Still-open items are NOT guessed; they raise `NotImplementedError`:
 
 from __future__ import annotations
 
+import datetime
+import decimal
 from dataclasses import dataclass
-from enum import IntEnum
-from typing import Optional
+from enum import Enum
+from typing import Any, Callable, Dict, Optional, Tuple, Type
 
 from draken.draken_native import DrakenType
 from draken.draken_native import LogicalKind
@@ -38,6 +40,11 @@ from draken.draken_native import TimestampUnit
 __all__ = [
     "LogicalCategory",
     "ColumnType",
+    "find_compatible_type",
+    "PYTHON_TO_SQL_MAP",
+    "SQL_TO_PYTHON_MAP",
+    "sql_to_column_type",
+    "column_type_to_sql",
     # canonical instances
     "INT8", "INT16", "INT32", "INT64",
     "FLOAT32", "FLOAT64",
@@ -49,34 +56,119 @@ __all__ = [
 ]
 
 
-class LogicalCategory(IntEnum):
-    """Operator-dispatch key (Decision B). A coarsening of the column type used by the
-    binder's operator map and result-type derivation — integer widths collapse to
-    INTEGER, float widths to FLOAT. Derived from the physical type via `_CATEGORY_OF`.
+class LogicalCategory(Enum):
+    """The Opteryx SQL type vocabulary AND the operator-dispatch key (Decision B).
 
-    NOT a type system: a projection of the (physical, logical) pair for binder-time
-    dispatch. Kernel-time dispatch uses the physical `DrakenType` directly.
+    The single flat type enum carried on expression `Node.type`, returned by
+    `determine_type`, and keyed in the operator map. Integer widths collapse to
+    INTEGER, float widths to FLOAT (the actual physical width lives on `ColumnType`).
+
+    Legacy SQL spellings are kept as aliases so existing call sites resolve without
+    a separate enum: DOUBLE≡FLOAT, BLOB≡VARBINARY, STRUCT/JSONB≡NVARCHAR. Values are
+    the canonical string name (so `.value` round-trips through serialization and
+    `from_name`).
     """
 
-    NULL = 0
-    BOOLEAN = 1
-    INTEGER = 2
-    FLOAT = 3
-    DECIMAL = 4
-    DATE = 5
-    TIME = 6
-    TIMESTAMP = 7
-    INTERVAL = 8
-    VARCHAR = 9
-    NVARCHAR = 10
-    VARBINARY = 11
-    VARIANT = 12     # first-class JSON value (DRAKEN_VARIANT), navigable via -> / ->>
-    ARRAY = 13
-    VECTOR = 14
-    # No JSONB / STRUCT categories:
-    #   JSONB  is an alias for NVARCHAR today (intentions to do more later; some legacy
-    #          spots still treat it as VARBINARY/BLOB — clean up on contact).
-    #   STRUCT is not supported — the engine stringifies structs to JSON text (NVARCHAR).
+    # Sentinel for missing/unknown types (binder bootstrap).
+    _MISSING_TYPE = "_MISSING_TYPE"
+
+    NULL = "NULL"
+    BOOLEAN = "BOOLEAN"
+    INTEGER = "INTEGER"
+    FLOAT = "FLOAT"
+    DOUBLE = "FLOAT"        # legacy alias of FLOAT
+    DECIMAL = "DECIMAL"
+    DATE = "DATE"
+    TIME = "TIME"
+    TIMESTAMP = "TIMESTAMP"
+    INTERVAL = "INTERVAL"
+    VARCHAR = "VARCHAR"
+    NVARCHAR = "NVARCHAR"
+    VARBINARY = "VARBINARY"
+    BLOB = "VARBINARY"     # legacy alias of VARBINARY
+    STRUCT = "NVARCHAR"    # collapse: engine stringifies structs to JSON text
+    JSONB = "NVARCHAR"     # collapse: JSONB alias of NVARCHAR
+    VARIANT = "VARIANT"    # first-class JSON value (DRAKEN_VARIANT), navigable via -> / ->>
+    ARRAY = "ARRAY"
+    VECTOR = "VECTOR"
+
+    @property
+    def python_type(self) -> Type:
+        return _TYPE_TO_PYTHON.get(self, object)
+
+    @property
+    def native_type(self) -> str:
+        from opteryx.types._native_types import get_native_type
+
+        return get_native_type(self.value)
+
+    def parse(self, value: Any) -> Any:
+        """Coerce a value to this type's canonical Python representation."""
+        if value is None:
+            return None
+        parser = _PARSERS.get(self)
+        if parser is None:
+            return value
+        try:
+            return parser(value)
+        except (ValueError, TypeError, AttributeError):
+            return value
+
+    def is_numeric(self) -> bool:
+        return self in _NUMERIC_TYPES
+
+    def is_temporal(self) -> bool:
+        return self in _TEMPORAL_TYPES
+
+    def is_complex(self) -> bool:
+        return self in _COMPLEX_TYPES
+
+    def is_large_object(self) -> bool:
+        return self in _LARGE_OBJECT_TYPES
+
+    def is_string(self) -> bool:
+        return self in _STRING_TYPES
+
+    @classmethod
+    def from_name(cls, name: str) -> Tuple["LogicalCategory", None, Optional[int], Optional[int], "Optional[LogicalCategory]"]:
+        """Parse a SQL type name to (type, None, precision, scale, element_type).
+
+        Tuple-shaped for the historical call contract; precision/scale set for
+        parameterized DECIMAL(p,s), element_type set for ARRAY<inner>.
+        """
+        upper = name.strip().upper()
+        _aliases = {
+            "INT": "INTEGER", "INT32": "INTEGER", "INT64": "INTEGER", "BIGINT": "INTEGER",
+            "FLOAT32": "FLOAT", "FLOAT64": "FLOAT",
+            "STRING": "VARCHAR", "TEXT": "VARCHAR", "BOOL": "BOOLEAN", "BYTES": "BLOB",
+        }
+
+        if "(" in upper:
+            base = upper[: upper.index("(")].strip()
+            params = upper[upper.index("(") + 1 : upper.rindex(")")].strip()
+            parts = [p.strip() for p in params.split(",")]
+            precision = int(parts[0]) if parts and parts[0].isdigit() else None
+            scale = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+            base = _aliases.get(base, base)
+            try:
+                return (cls[base], None, precision, scale, None)
+            except KeyError:
+                raise ValueError(f"Unknown type: {name}")
+
+        if "<" in upper:
+            outer, rest = upper.split("<", 1)
+            outer = outer.strip()
+            inner = rest.rstrip(">").strip()
+            outer_type = cls[outer] if outer in cls.__members__ else cls.ARRAY
+            inner_key = _aliases.get(inner, inner)
+            element_type = cls[inner_key] if inner_key in cls.__members__ else None
+            return (outer_type, None, None, None, element_type)
+
+        key = _aliases.get(upper, upper)
+        try:
+            return (cls[key], None, None, None, None)
+        except KeyError:
+            raise ValueError(f"Unknown type: {name}")
 
 
 # Physical type -> dispatch category. Integer/float widths collapse here.
@@ -312,13 +404,13 @@ def ARRAY(element_type: ColumnType) -> ColumnType:
 
 # ---------------------------------------------------------------------------
 # Canonical (de)serialization — the authoritative wire/persistence form of a
-# ColumnType. Used by FlatColumn.to_dict()/from_dict() (D-4 Phase 2 "full break":
+# ColumnType. Used by SchemaColumn.to_dict()/from_dict() (D-4 Phase 2 "full break":
 # the schema JSON now carries a single `column_type` string instead of the
 # legacy type/precision/scale/element_type quartet).
 #
 # The string IS `str(ColumnType)` — DECIMAL(p, s) / ARRAY<elem> / VECTOR(n) /
 # TIMESTAMP / TIME / the _NAME_OF plain names. `parse_column_type` is the exact
-# inverse; it is keyed on those display names directly (NOT on SqlType.from_name,
+# inverse; it is keyed on those display names directly (NOT on LogicalCategory.from_name,
 # which lacks VARBINARY and would lose the physical tier). DECIMAL(p, s) with
 # p>18 round-trips to the DECIMAL128 tier because `DECIMAL()` chooses the tier.
 # ---------------------------------------------------------------------------
@@ -374,3 +466,259 @@ def parse_column_type(s: Optional[str]) -> Optional[ColumnType]:
     raise ValueError(f"parse_column_type: unknown type {s!r}")
 
 
+
+# ---------------------------------------------------------------------------
+# SQL-type behaviours (absorbed from the former flat SQL type enum).
+# These back the LogicalCategory methods above and the find_compatible_type /
+# python-map module API. There is no separate SQL type enum any more.
+# ---------------------------------------------------------------------------
+
+_TYPE_TO_PYTHON: Dict[LogicalCategory, Type] = {
+    LogicalCategory.NULL: type(None),
+    LogicalCategory.BOOLEAN: bool,
+    LogicalCategory.INTEGER: int,
+    LogicalCategory.FLOAT: float,
+    LogicalCategory.VARCHAR: str,
+    LogicalCategory.NVARCHAR: str,
+    LogicalCategory.VARBINARY: bytes,
+    LogicalCategory.DATE: datetime.date,
+    LogicalCategory.TIME: datetime.time,
+    LogicalCategory.TIMESTAMP: datetime.datetime,
+    LogicalCategory.INTERVAL: datetime.timedelta,
+    LogicalCategory.DECIMAL: decimal.Decimal,
+    LogicalCategory.ARRAY: list,
+    LogicalCategory.VECTOR: list,
+    LogicalCategory.VARIANT: str,
+}
+
+PYTHON_TO_SQL_MAP: Dict[Type, LogicalCategory] = {
+    type(None): LogicalCategory.NULL,
+    bool: LogicalCategory.BOOLEAN,
+    int: LogicalCategory.INTEGER,
+    float: LogicalCategory.FLOAT,
+    str: LogicalCategory.VARCHAR,
+    bytes: LogicalCategory.VARBINARY,
+    bytearray: LogicalCategory.VARBINARY,
+    memoryview: LogicalCategory.VARBINARY,
+    datetime.date: LogicalCategory.DATE,
+    datetime.time: LogicalCategory.TIME,
+    datetime.datetime: LogicalCategory.TIMESTAMP,
+    datetime.timedelta: LogicalCategory.INTERVAL,
+    decimal.Decimal: LogicalCategory.DECIMAL,
+    list: LogicalCategory.ARRAY,
+    tuple: LogicalCategory.ARRAY,
+    dict: LogicalCategory.NVARCHAR,
+    set: LogicalCategory.ARRAY,
+}
+SQL_TO_PYTHON_MAP: Dict[LogicalCategory, Type] = dict(_TYPE_TO_PYTHON)
+
+_NUMERIC_TYPES = {LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL}
+_TEMPORAL_TYPES = {LogicalCategory.DATE, LogicalCategory.TIME, LogicalCategory.TIMESTAMP, LogicalCategory.INTERVAL}
+_COMPLEX_TYPES = {LogicalCategory.ARRAY, LogicalCategory.VECTOR, LogicalCategory.NVARCHAR}
+_STRING_TYPES = {LogicalCategory.VARCHAR, LogicalCategory.NVARCHAR, LogicalCategory.VARBINARY}
+_LARGE_OBJECT_TYPES = {LogicalCategory.VARBINARY, LogicalCategory.ARRAY, LogicalCategory.NVARCHAR, LogicalCategory.VECTOR}
+
+
+def _parse_boolean(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ("true", "1", "yes", "on")
+    return bool(value)
+
+
+def _parse_integer(value):
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        return int(value.strip())
+    return int(value)
+
+
+def _parse_double(value):
+    if isinstance(value, float):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str):
+        return float(value.strip())
+    return float(value)
+
+
+def _parse_decimal(value):
+    if isinstance(value, decimal.Decimal):
+        return value
+    if isinstance(value, (int, float)):
+        return decimal.Decimal(str(value))
+    if isinstance(value, str):
+        return decimal.Decimal(value.strip())
+    return decimal.Decimal(value)
+
+
+def _parse_varchar(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+def _parse_blob(value):
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    if isinstance(value, (bytearray, memoryview)):
+        return bytes(value)
+    return bytes(value)
+
+
+def _parse_date(value):
+    if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+        return value
+    if isinstance(value, datetime.datetime):
+        return value.date()
+    if isinstance(value, str):
+        parts = value.strip().split("-")
+        if len(parts) == 3:
+            return datetime.date(int(parts[0]), int(parts[1]), int(parts[2]))
+    raise ValueError(f"Cannot parse {value} as date")
+
+
+def _parse_time(value):
+    if isinstance(value, datetime.time):
+        return value
+    if isinstance(value, str):
+        parts = value.strip().split(":")
+        if len(parts) >= 2:
+            return datetime.time(int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0)
+    raise ValueError(f"Cannot parse {value} as time")
+
+
+def _parse_timestamp(value):
+    if isinstance(value, datetime.datetime):
+        return value
+    if isinstance(value, datetime.date):
+        return datetime.datetime.combine(value, datetime.time())
+    if isinstance(value, str):
+        value_str = value.strip().replace("T", " ")
+        try:
+            if "." in value_str:
+                return datetime.datetime.strptime(value_str, "%Y-%m-%d %H:%M:%S.%f")
+            return datetime.datetime.strptime(value_str, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return datetime.datetime.strptime(value_str.split(" ")[0], "%Y-%m-%d")
+    raise ValueError(f"Cannot parse {value} as timestamp")
+
+
+def _parse_interval(value):
+    if isinstance(value, datetime.timedelta):
+        return value
+    if isinstance(value, (int, float)):
+        return datetime.timedelta(seconds=value)
+    raise ValueError(f"Cannot parse {value} as interval")
+
+
+_PARSERS: Dict[LogicalCategory, Callable] = {
+    LogicalCategory.BOOLEAN: _parse_boolean,
+    LogicalCategory.INTEGER: _parse_integer,
+    LogicalCategory.FLOAT: _parse_double,
+    LogicalCategory.DECIMAL: _parse_decimal,
+    LogicalCategory.VARCHAR: _parse_varchar,
+    LogicalCategory.NVARCHAR: _parse_varchar,
+    LogicalCategory.VARIANT: _parse_varchar,
+    LogicalCategory.VARBINARY: _parse_blob,
+    LogicalCategory.DATE: _parse_date,
+    LogicalCategory.TIME: _parse_time,
+    LogicalCategory.TIMESTAMP: _parse_timestamp,
+    LogicalCategory.INTERVAL: _parse_interval,
+}
+
+
+def find_compatible_type(types: list) -> LogicalCategory:
+    """Find a type that can represent all types in the list (promotion rules)."""
+    if not types:
+        return LogicalCategory.NULL
+    non_null = [t for t in types if t != LogicalCategory.NULL]
+    if not non_null:
+        return LogicalCategory.NULL
+    if len(set(non_null)) == 1:
+        return non_null[0]
+    if all(t in _NUMERIC_TYPES or t == LogicalCategory.BOOLEAN for t in non_null):
+        if LogicalCategory.DECIMAL in non_null:
+            return LogicalCategory.DECIMAL
+        if LogicalCategory.FLOAT in non_null:
+            return LogicalCategory.FLOAT
+        if LogicalCategory.INTEGER in non_null:
+            return LogicalCategory.INTEGER
+        return LogicalCategory.BOOLEAN
+    if any(t in _TEMPORAL_TYPES for t in non_null):
+        return LogicalCategory.VARCHAR
+    if any(t in _COMPLEX_TYPES for t in non_null):
+        return LogicalCategory.NVARCHAR
+    return LogicalCategory.VARCHAR
+
+
+def sql_to_column_type(sql_type, precision=None, scale=None, element_type=None):
+    """Map a LogicalCategory (+ optional params) to a unified ColumnType.
+
+    Fail-loud on a bare DECIMAL (no precision/scale): the gap must be fixed at the
+    source (result derivation / connector inference), never fabricated here.
+    """
+    t = sql_type
+    if t == LogicalCategory.BOOLEAN:
+        return BOOLEAN
+    if t == LogicalCategory.INTEGER:
+        return INT64
+    if t == LogicalCategory.FLOAT:
+        return FLOAT64
+    if t == LogicalCategory.VARCHAR:
+        return VARCHAR
+    if t == LogicalCategory.NVARCHAR:
+        return NVARCHAR
+    if t == LogicalCategory.VARBINARY:
+        return VARBINARY
+    if t == LogicalCategory.DATE:
+        return DATE
+    if t == LogicalCategory.TIME:
+        return TIME()
+    if t == LogicalCategory.TIMESTAMP:
+        return TIMESTAMP()
+    if t == LogicalCategory.INTERVAL:
+        return INTERVAL
+    if t == LogicalCategory.DECIMAL:
+        if precision is None or scale is None:
+            raise NotImplementedError(
+                "DECIMAL with no precision/scale — refusing to fabricate a default. "
+                "Fix the source (result derivation or connector inference)."
+            )
+        if not (1 <= precision <= 38) or not (0 <= scale <= precision):
+            raise ValueError(f"invalid DECIMAL(precision={precision}, scale={scale})")
+        return DECIMAL(precision, scale)
+    if t == LogicalCategory.VARIANT:
+        return VARIANT
+    if t == LogicalCategory.NULL:
+        return NULL
+    if t == LogicalCategory.ARRAY:
+        elem_ct = VARCHAR if element_type is None else sql_to_column_type(element_type, precision, scale, None)
+        return ARRAY(elem_ct)
+    if t == LogicalCategory.VECTOR:
+        raise NotImplementedError("VECTOR requires a dimension; none carried by the category")
+    raise NotImplementedError(f"no ColumnType mapping for {t!r}")
+
+
+def column_type_to_sql(column_type) -> dict:
+    """Inverse: derive {type, precision, scale, element_type} from a ColumnType."""
+    if column_type is None:
+        return {}
+    out = {}
+    cat = column_type.category
+    out["type"] = cat
+    if cat == LogicalCategory.DECIMAL:
+        out["precision"] = column_type.logical.precision
+        out["scale"] = column_type.logical.scale
+    elif cat == LogicalCategory.ARRAY and column_type.element is not None:
+        out["element_type"] = column_type_to_sql(column_type.element).get("type")
+    return out

@@ -7,7 +7,7 @@ IntervalVector kernels.
 """
 
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.utils.vector_types import VectorType, get_vector_type
 
 
@@ -53,7 +53,7 @@ cpdef _as_interval_vector(values):
 cpdef _date_plus_interval(left, left_type, right, right_type, str operator):
     """date/timestamp ⊕ interval (operands may be in either order)."""
     cdef int signum = 1 if operator == "Plus" else -1
-    if left_type == SqlType.INTERVAL:
+    if left_type == LogicalCategory.INTERVAL:
         left, right = right, left
 
     interval_vector = _as_interval_vector(right)
@@ -95,20 +95,20 @@ cpdef _interval_interval_op(left, left_type, right, right_type, str operator):
 
 
 INTERVAL_KERNELS = {
-    (SqlType.INTERVAL, SqlType.INTERVAL, "Plus"): _interval_interval_op,
-    (SqlType.INTERVAL, SqlType.INTERVAL, "Minus"): _interval_interval_op,
-    (SqlType.INTERVAL, SqlType.INTERVAL, "Eq"): _interval_interval_op,
-    (SqlType.INTERVAL, SqlType.INTERVAL, "NotEq"): _interval_interval_op,
-    (SqlType.INTERVAL, SqlType.INTERVAL, "Gt"): _interval_interval_op,
-    (SqlType.INTERVAL, SqlType.INTERVAL, "GtEq"): _interval_interval_op,
-    (SqlType.INTERVAL, SqlType.INTERVAL, "Lt"): _interval_interval_op,
-    (SqlType.INTERVAL, SqlType.INTERVAL, "LtEq"): _interval_interval_op,
-    (SqlType.INTERVAL, SqlType.TIMESTAMP, "Plus"): _date_plus_interval,
-    (SqlType.INTERVAL, SqlType.TIMESTAMP, "Minus"): _date_plus_interval,
-    (SqlType.INTERVAL, SqlType.DATE, "Plus"): _date_plus_interval,
-    (SqlType.INTERVAL, SqlType.DATE, "Minus"): _date_plus_interval,
-    (SqlType.TIMESTAMP, SqlType.INTERVAL, "Plus"): _date_plus_interval,
-    (SqlType.TIMESTAMP, SqlType.INTERVAL, "Minus"): _date_plus_interval,
-    (SqlType.DATE, SqlType.INTERVAL, "Plus"): _date_plus_interval,
-    (SqlType.DATE, SqlType.INTERVAL, "Minus"): _date_plus_interval,
+    (LogicalCategory.INTERVAL, LogicalCategory.INTERVAL, "Plus"): _interval_interval_op,
+    (LogicalCategory.INTERVAL, LogicalCategory.INTERVAL, "Minus"): _interval_interval_op,
+    (LogicalCategory.INTERVAL, LogicalCategory.INTERVAL, "Eq"): _interval_interval_op,
+    (LogicalCategory.INTERVAL, LogicalCategory.INTERVAL, "NotEq"): _interval_interval_op,
+    (LogicalCategory.INTERVAL, LogicalCategory.INTERVAL, "Gt"): _interval_interval_op,
+    (LogicalCategory.INTERVAL, LogicalCategory.INTERVAL, "GtEq"): _interval_interval_op,
+    (LogicalCategory.INTERVAL, LogicalCategory.INTERVAL, "Lt"): _interval_interval_op,
+    (LogicalCategory.INTERVAL, LogicalCategory.INTERVAL, "LtEq"): _interval_interval_op,
+    (LogicalCategory.INTERVAL, LogicalCategory.TIMESTAMP, "Plus"): _date_plus_interval,
+    (LogicalCategory.INTERVAL, LogicalCategory.TIMESTAMP, "Minus"): _date_plus_interval,
+    (LogicalCategory.INTERVAL, LogicalCategory.DATE, "Plus"): _date_plus_interval,
+    (LogicalCategory.INTERVAL, LogicalCategory.DATE, "Minus"): _date_plus_interval,
+    (LogicalCategory.TIMESTAMP, LogicalCategory.INTERVAL, "Plus"): _date_plus_interval,
+    (LogicalCategory.TIMESTAMP, LogicalCategory.INTERVAL, "Minus"): _date_plus_interval,
+    (LogicalCategory.DATE, LogicalCategory.INTERVAL, "Plus"): _date_plus_interval,
+    (LogicalCategory.DATE, LogicalCategory.INTERVAL, "Minus"): _date_plus_interval,
 }

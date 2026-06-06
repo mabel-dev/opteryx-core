@@ -12,7 +12,7 @@ operand's class and the requested op string.
 from libc.stdint cimport int16_t
 
 from opteryx.compiled.nanobind.vector_misc import vector_in_list
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 
 from draken.vectors.bool_vector import BoolVector
 from draken.vectors.vector import Vector as _TemporalVector

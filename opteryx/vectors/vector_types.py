@@ -9,24 +9,24 @@ from __future__ import annotations
 
 from typing import Optional
 
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 
 NUMERIC_VECTOR_ELEMENT_TYPES = frozenset(
     {
-        SqlType.INTEGER,
-        SqlType.DOUBLE,
-        SqlType.DECIMAL,
+        LogicalCategory.INTEGER,
+        LogicalCategory.DOUBLE,
+        LogicalCategory.DECIMAL,
     }
 )
 
 
-def resolve_node_type(node) -> tuple[Optional[SqlType], Optional[SqlType]]:
+def resolve_node_type(node) -> tuple[Optional[LogicalCategory], Optional[LogicalCategory]]:
     """Return the logical type and element type carried by a node."""
     schema_column = getattr(node, "schema_column", None)
 
     if schema_column is not None and getattr(schema_column, "type", None) not in (
         None,
-        SqlType._MISSING_TYPE,
+        LogicalCategory._MISSING_TYPE,
     ):
         node_type = getattr(schema_column, "type", None)
     else:
@@ -34,7 +34,7 @@ def resolve_node_type(node) -> tuple[Optional[SqlType], Optional[SqlType]]:
 
     if schema_column is not None and getattr(schema_column, "element_type", None) not in (
         None,
-        SqlType._MISSING_TYPE,
+        LogicalCategory._MISSING_TYPE,
     ):
         element_type = getattr(schema_column, "element_type", None)
     else:
@@ -44,11 +44,11 @@ def resolve_node_type(node) -> tuple[Optional[SqlType], Optional[SqlType]]:
 
 
 def is_numeric_vector_type(
-    value_type: Optional[SqlType], element_type: Optional[SqlType]
+    value_type: Optional[LogicalCategory], element_type: Optional[LogicalCategory]
 ) -> bool:
     """True when the type pair represents a VECTOR."""
     del element_type
-    return value_type == SqlType.VECTOR
+    return value_type == LogicalCategory.VECTOR
 
 
 def node_is_numeric_vector(node) -> bool:
@@ -62,7 +62,7 @@ def node_is_literal_numeric_vector(node) -> bool:
 
     if node is None or node.node_type != NodeType.LITERAL:
         return False
-    if getattr(node, "type", None) == SqlType.VECTOR:
+    if getattr(node, "type", None) == LogicalCategory.VECTOR:
         return True
     value = getattr(node, "value", None)
 
@@ -104,7 +104,7 @@ def node_is_constant_embed_call(node) -> bool:
     if argument.node_type != NodeType.LITERAL:
         return False
     arg_type, _ = resolve_node_type(argument)
-    return arg_type in (SqlType.VARCHAR, SqlType.BLOB) or isinstance(
+    return arg_type in (LogicalCategory.VARCHAR, LogicalCategory.BLOB) or isinstance(
         getattr(argument, "value", None), (str, bytes, bytearray)
     )
 

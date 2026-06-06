@@ -5,8 +5,8 @@ Convert rugo parquet metadata schemas to RelationSchema format.
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
-from opteryx.types import SqlType
-from opteryx.types.schema import FlatColumn, RelationSchema
+from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.schema import SchemaColumn, RelationSchema
 
 SQL_TYPE_ALIASES = {
     "float": "double",
@@ -24,52 +24,52 @@ SQL_TYPE_ALIASES = {
 }
 
 PARQUET_LOGICAL_TYPE_MAP = {
-    "string": SqlType.VARCHAR,
-    "utf8": SqlType.VARCHAR,
-    "varchar": SqlType.VARCHAR,
-    "date": SqlType.DATE,
-    "date32[day]": SqlType.DATE,
-    "json": SqlType.JSONB,
-    "jsonb": SqlType.JSONB,
-    "struct": SqlType.JSONB,
-    "boolean": SqlType.BOOLEAN,
-    "binary": SqlType.BLOB,
-    "byte_array": SqlType.BLOB,
-    "fixed_len_byte_array": SqlType.BLOB,
-    "uint_8": SqlType.INTEGER,
-    "uint_16": SqlType.INTEGER,
-    "uint_32": SqlType.INTEGER,
-    "uint_64": SqlType.INTEGER,
+    "string": LogicalCategory.VARCHAR,
+    "utf8": LogicalCategory.VARCHAR,
+    "varchar": LogicalCategory.VARCHAR,
+    "date": LogicalCategory.DATE,
+    "date32[day]": LogicalCategory.DATE,
+    "json": LogicalCategory.JSONB,
+    "jsonb": LogicalCategory.JSONB,
+    "struct": LogicalCategory.JSONB,
+    "boolean": LogicalCategory.BOOLEAN,
+    "binary": LogicalCategory.BLOB,
+    "byte_array": LogicalCategory.BLOB,
+    "fixed_len_byte_array": LogicalCategory.BLOB,
+    "uint_8": LogicalCategory.INTEGER,
+    "uint_16": LogicalCategory.INTEGER,
+    "uint_32": LogicalCategory.INTEGER,
+    "uint_64": LogicalCategory.INTEGER,
 }
 
 PARQUET_LOGICAL_COMPLEX_PREFIXES = {
-    "array": SqlType.ARRAY,
-    "decimal": SqlType.DECIMAL,
-    "time": SqlType.TIME,
-    "timestamp": SqlType.TIMESTAMP,
+    "array": LogicalCategory.ARRAY,
+    "decimal": LogicalCategory.DECIMAL,
+    "time": LogicalCategory.TIME,
+    "timestamp": LogicalCategory.TIMESTAMP,
 }
 
 PARQUET_PHYSICAL_TYPE_MAP = {
-    "int8": SqlType.INTEGER,
-    "int16": SqlType.INTEGER,
-    "int32": SqlType.INTEGER,
-    "int64": SqlType.INTEGER,
-    "float": SqlType.DOUBLE,
-    "float32": SqlType.DOUBLE,
-    "float64": SqlType.DOUBLE,
-    "double": SqlType.DOUBLE,
-    "byte_array": SqlType.BLOB,
-    "fixed_len_byte_array": SqlType.BLOB,
-    "boolean": SqlType.BOOLEAN,
+    "int8": LogicalCategory.INTEGER,
+    "int16": LogicalCategory.INTEGER,
+    "int32": LogicalCategory.INTEGER,
+    "int64": LogicalCategory.INTEGER,
+    "float": LogicalCategory.DOUBLE,
+    "float32": LogicalCategory.DOUBLE,
+    "float64": LogicalCategory.DOUBLE,
+    "double": LogicalCategory.DOUBLE,
+    "byte_array": LogicalCategory.BLOB,
+    "fixed_len_byte_array": LogicalCategory.BLOB,
+    "boolean": LogicalCategory.BOOLEAN,
 }
 
 JSONL_TYPE_MAP = {
-    "int64": SqlType.INTEGER,
-    "double": SqlType.DOUBLE,
-    "bytes": SqlType.BLOB,
-    "boolean": SqlType.BOOLEAN,
-    "null": SqlType.BLOB,  # Default null to varchar
-    "object": SqlType.JSONB,
+    "int64": LogicalCategory.INTEGER,
+    "double": LogicalCategory.DOUBLE,
+    "bytes": LogicalCategory.BLOB,
+    "boolean": LogicalCategory.BOOLEAN,
+    "null": LogicalCategory.BLOB,  # Default null to varchar
+    "object": LogicalCategory.JSONB,
 }
 
 JSONL_ARRAY_INNER_TYPE_ALIASES = {
@@ -122,7 +122,7 @@ def _map_parquet_type_to_sql(
 
         if logical_lower.startswith(("array", "decimal")):
             normalized_logical = _normalize_sql_type_aliases(logical_lower)
-            _type, _length, _precision, _scale, _element_type = SqlType.from_name(
+            _type, _length, _precision, _scale, _element_type = LogicalCategory.from_name(
                 normalized_logical
             )
             # Note: _type is an immutable enum, so we cannot set attributes on it
@@ -137,7 +137,7 @@ def _map_parquet_type_to_sql(
         return PARQUET_PHYSICAL_TYPE_MAP[physical_lower]
 
     # Default to VARCHAR for unknown types
-    return SqlType.VARCHAR
+    return LogicalCategory.VARCHAR
 
 
 def _columns_from_metadata(metadata: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
@@ -232,7 +232,7 @@ def rugo_to_relation_schema(
 
     Args:
         rugo_metadata: The ParquetMetadata returned by rugo.parquet_reader.read_metadata()
-                       (typed object with .num_rows and .schema_columns of SchemaColumn).
+                       (typed object with .num_rows and .schema_columns of parquet SchemaColumn fields).
         schema_name: Name for the resulting schema (default: "parquet_schema")
 
     Returns:
@@ -265,12 +265,12 @@ def rugo_to_relation_schema(
 
         # D-4 Phase 2: construct via from_column_type for DECIMAL (carries p,s in
         # the unified column_type); plain types go through the regular constructor.
-        if sql_type == SqlType.DECIMAL and precision is not None and scale is not None:
+        if sql_type == LogicalCategory.DECIMAL and precision is not None and scale is not None:
             from opteryx.types import logical_type as _lt
             _ct = _lt.DECIMAL(precision, scale)
-            columns.append(FlatColumn.from_column_type(name=name, column_type=_ct, nullable=nullable))
+            columns.append(SchemaColumn.from_column_type(name=name, column_type=_ct, nullable=nullable))
         else:
-            columns.append(FlatColumn(name=name, type=sql_type, nullable=nullable))
+            columns.append(SchemaColumn(name=name, type=sql_type, nullable=nullable))
 
     if not columns:
         raise ValueError("No columns could be derived from rugo metadata")
@@ -326,9 +326,9 @@ def _map_jsonl_type_to_sql(jsonl_type: str) -> str:
     if jt in JSONL_TYPE_MAP:
         return JSONL_TYPE_MAP[jt]
 
-    # array or array<elem> -> use SqlType.from_name to parse element type
+    # array or array<elem> -> use LogicalCategory.from_name to parse element type
     if jt.startswith("array"):
-        # Normalize inner element type names so SqlType.from_name accepts them
+        # Normalize inner element type names so LogicalCategory.from_name accepts them
         # supports forms like 'array<int64>' produced by get_jsonl_schema
         if jt.startswith("array<") and jt.endswith(">"):
             inner = jt[jt.find("<") + 1 : -1].strip()
@@ -338,12 +338,12 @@ def _map_jsonl_type_to_sql(jsonl_type: str) -> str:
             normalized = jt
 
         try:
-            _type, _length, _precision, _scale, _element_type = SqlType.from_name(normalized)
+            _type, _length, _precision, _scale, _element_type = LogicalCategory.from_name(normalized)
             return _type
         except ValueError:
-            return SqlType.BLOB
+            return LogicalCategory.BLOB
 
-    return SqlType.BLOB
+    return LogicalCategory.BLOB
 
 
 def jsonl_to_sql_schema(
@@ -378,7 +378,7 @@ def jsonl_to_sql_schema(
         nullable = bool(entry.get("nullable", True))
 
         sql_type = _map_jsonl_type_to_sql(jsonl_type)
-        columns.append(FlatColumn(name=name, type=sql_type, nullable=nullable))
+        columns.append(SchemaColumn(name=name, type=sql_type, nullable=nullable))
 
     if not columns:
         raise ValueError("No columns could be derived from jsonl schema")

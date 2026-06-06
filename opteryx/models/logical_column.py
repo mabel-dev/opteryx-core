@@ -73,7 +73,7 @@ class LogicalColumn:
             source=self.source,
             alias=self.alias,
             schema_column=(
-                None if self.schema_column is None else self.schema_column.to_flatcolumn()
+                None if self.schema_column is None else self.schema_column.to_schema_column()
             ),
         )
 

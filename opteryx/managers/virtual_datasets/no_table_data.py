@@ -14,9 +14,9 @@ It actually is a table, with one row and one column.
 
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import FlatColumn, RelationSchema
+from opteryx.types.schema import SchemaColumn, RelationSchema
 
 __all__ = ("read", "schema")
 
@@ -25,11 +25,11 @@ def read(at_date=None, variables=None) -> Morsel:
     # Create a Morsel containing one column and one row.
     _ = variables
 
-    vectors = [vector_from_sequence([0], dtype=SqlType.INTEGER)]
+    vectors = [vector_from_sequence([0], dtype=LogicalCategory.INTEGER)]
     return Morsel.from_vectors(["$column"], vectors)
 
 
 def schema():
     # fmt:off
-    return RelationSchema(name="$no_table", columns=[FlatColumn.from_column_type(name="$column", column_type=_lt.INT64)])
+    return RelationSchema(name="$no_table", columns=[SchemaColumn.from_column_type(name="$column", column_type=_lt.INT64)])
     # fmt:on

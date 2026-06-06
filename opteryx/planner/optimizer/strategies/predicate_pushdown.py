@@ -29,7 +29,7 @@ from opteryx.expression.formatter import ExpressionColumn
 from opteryx.models import Node
 from opteryx.planner.binder.common import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.logical_type import LogicalCategory as LC
 from opteryx.utils import random_string
 
@@ -55,10 +55,10 @@ _LITERAL_SCALE_US: dict = {
     "_TIMESTAMP_US":   1,
 }
 
-# Microseconds per column-unit for SqlType that can appear as a CAST target.
+# Microseconds per column-unit for LogicalCategory that can appear as a CAST target.
 _COL_SCALE_US: dict = {
-    SqlType.DATE:      86_400_000_000,  # stores int32 days
-    SqlType.TIMESTAMP: 1,               # stores int64 µs
+    LogicalCategory.DATE:      86_400_000_000,  # stores int32 days
+    LogicalCategory.TIMESTAMP: 1,               # stores int64 µs
 }
 
 # When l_scale > c_scale (the CAST truncates via floor division), LtEq and Gt
@@ -169,7 +169,7 @@ def _try_normalize_cast_predicate(condition: Node):
         return None
     # An INTEGER column being cast to a temporal type is a type assertion — the integer
     # stores values in the cast target's units already (e.g. EventDate::DATE stores days).
-    if c_scale is None and col_sc.type == SqlType.INTEGER:
+    if c_scale is None and col_sc.type == LogicalCategory.INTEGER:
         c_scale = l_scale
     if c_scale is None or l_scale < c_scale:
         return None  # unknown column type or literal is finer-grained than column
@@ -254,7 +254,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 node.condition.node_type == NodeType.FUNCTION
                 and len(identifiers) >= 1
                 and getattr(getattr(node.condition, "schema_column", None), "type", None)
-                == SqlType.BOOLEAN
+                == LogicalCategory.BOOLEAN
             )
 
             is_having_predicate = bool(has_agg)
@@ -819,7 +819,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 and literal_candidate
                 and literal_candidate.node_type == NodeType.LITERAL
                 and (
-                    literal_candidate.type == SqlType.BOOLEAN
+                    literal_candidate.type == LogicalCategory.BOOLEAN
                     or str(literal_candidate.type).upper() == "BOOLEAN"
                 )
             ):
@@ -863,7 +863,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     expr_name = f"NOT {format_expression(expression)}"
                     new_condition.schema_column = ExpressionColumn(
                         name=expr_name,
-                        type=SqlType.BOOLEAN,
+                        type=LogicalCategory.BOOLEAN,
                         expression=expr_name,
                     )
                 else:

@@ -3,19 +3,19 @@ from typing import Callable, Dict, NamedTuple, Optional, Tuple
 from opteryx.exceptions import IncorrectTypeError, UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression.operator_catalog import is_known_operator
-from opteryx.types import SqlType as OT
+from opteryx.types.logical_type import LogicalCategory as OT
 from opteryx.types.logical_type import LogicalCategory as LC
 from opteryx.utils.sql import convert_camel_to_sql_case
 
 # Phase 3: OPERATOR_MAP is now authored directly on LogicalCategory (LC) keys.
 # Integer widths collapse to LC.INTEGER, floats to LC.FLOAT, JSONB/STRUCT to
-# LC.NVARCHAR — the map carries 330 entries (vs the SqlType-keyed 348 that had
+# LC.NVARCHAR — the map carries 330 entries (vs the LogicalCategory-keyed 348 that had
 # 18 duplicate-collapse entries). The derivation step (old _CATEGORY_OPERATOR_MAP)
 # is deleted; this IS the map. The human-authorable source is now stable since
 # logical categories don't change with Draken enum churn.
 #
-# result_type field: still SqlType (Phase 4 will migrate to LogicalCategory
-# when determine_type's callers are migrated off SqlType).
+# result_type field: still LogicalCategory (Phase 4 will migrate to LogicalCategory
+# when determine_type's callers are migrated off LogicalCategory).
 
 # Shorten the verbose aliases in this file
 OMT = NamedTuple(
@@ -372,8 +372,8 @@ for _, _, _operator_name in OPERATOR_MAP:
         raise UnsupportedSyntaxError(f"Operator map contains unknown operator \'{_operator_name}\'.")
 
 
-# Static SqlType → LogicalCategory projection for operator-map dispatch.
-# This is the only surviving use of SqlType in this file — once determine_type's
+# Static LogicalCategory → LogicalCategory projection for operator-map dispatch.
+# This is the only surviving use of LogicalCategory in this file — once determine_type's
 # callers are migrated to pass column_type.category directly, this table can be
 # removed (Phase 4).
 _SQL_TO_LC: Dict[OT, LC] = {
@@ -489,7 +489,7 @@ def determine_type(node) -> OT:
         element_type = None
         sc = node.left.schema_column
         if sc is not None and sc.column_type is not None and sc.column_type.element is not None:
-            from opteryx.types.sql_type import column_type_to_sql
+            from opteryx.types.logical_type import column_type_to_sql
             element_type = column_type_to_sql(sc.column_type.element).get("type")
         if left_type == OT.VECTOR:
             return (

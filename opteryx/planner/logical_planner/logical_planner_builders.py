@@ -27,7 +27,7 @@ from opteryx.expression.operator_catalog import get_operator_node_type
 from opteryx.compiled.expression.compiled_expression import _BOP_CODE
 from opteryx.models import LogicalColumn, Node
 from opteryx.operators.aggregate.helpers import aggregator_names, is_aggregator
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.utils import dates, suggest_alternative
 from opteryx.utils.vector_types import VectorType, get_vector_type
 
@@ -41,13 +41,13 @@ _EPOCH_DT = datetime.datetime(1970, 1, 1)
 def _evaluate_fixed_temporal_function(function_name: str):
     now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
     if function_name in ("NOW", "CURRENT_TIMESTAMP", "UTC_TIMESTAMP"):
-        return now, SqlType.TIMESTAMP
+        return now, LogicalCategory.TIMESTAMP
     if function_name in ("CURRENT_DATE", "TODAY"):
-        return now.date(), SqlType.DATE
+        return now.date(), LogicalCategory.DATE
     if function_name == "YESTERDAY":
-        return (now - datetime.timedelta(days=1)).date(), SqlType.DATE
+        return (now - datetime.timedelta(days=1)).date(), LogicalCategory.DATE
     if function_name == "CURRENT_TIME":
-        return now.time(), SqlType.TIME
+        return now.time(), LogicalCategory.TIME
     return None, None
 
 
@@ -64,16 +64,16 @@ def _extract_single_scalar(value):
 
 
 def _as_binary_operand_array(value, value_type):
-    if value_type == SqlType.INTERVAL:
+    if value_type == LogicalCategory.INTERVAL:
         return [value]
-    if value_type == SqlType.TIMESTAMP:
+    if value_type == LogicalCategory.TIMESTAMP:
         timestamp = dates.parse_iso(value)
         if timestamp is None:
             raise UnsupportedSyntaxError(
                 "Unable to parse timestamp value in time-travel expression."
             )
         return [int((timestamp - _EPOCH_DT).total_seconds() * 1_000_000)]
-    if value_type == SqlType.DATE:
+    if value_type == LogicalCategory.DATE:
         dt = dates.parse_iso(value)
         if dt is None:
             raise UnsupportedSyntaxError("Unable to parse date value in time-travel expression.")
@@ -82,12 +82,12 @@ def _as_binary_operand_array(value, value_type):
 
 
 def _as_function_parameter_array(value, value_type):
-    if value_type == SqlType.TIMESTAMP:
+    if value_type == LogicalCategory.TIMESTAMP:
         dt = dates.parse_iso(value)
         if dt is None:
             raise UnsupportedSyntaxError("Unable to parse temporal function argument.")
         return [int((dt - _EPOCH_DT).total_seconds() * 1_000_000)]
-    if value_type == SqlType.DATE:
+    if value_type == LogicalCategory.DATE:
         dt = dates.parse_iso(value)
         if dt is None:
             raise UnsupportedSyntaxError("Unable to parse temporal function argument.")
@@ -97,26 +97,26 @@ def _as_function_parameter_array(value, value_type):
 
 def _type_from_value(value):
     if value is None:
-        return SqlType.NULL
+        return LogicalCategory.NULL
     if isinstance(value, bool):
-        return SqlType.BOOLEAN
+        return LogicalCategory.BOOLEAN
     if isinstance(value, datetime.datetime):
-        return SqlType.TIMESTAMP
+        return LogicalCategory.TIMESTAMP
     if isinstance(value, datetime.time):
-        return SqlType.TIME
+        return LogicalCategory.TIME
     if isinstance(value, datetime.date):
-        return SqlType.DATE
+        return LogicalCategory.DATE
     if isinstance(value, int):
-        return SqlType.INTEGER
+        return LogicalCategory.INTEGER
     if isinstance(value, float):
-        return SqlType.DOUBLE
+        return LogicalCategory.DOUBLE
     if isinstance(value, (bytes, bytearray)):
-        return SqlType.BLOB
+        return LogicalCategory.BLOB
     if isinstance(value, str):
-        return SqlType.VARCHAR
+        return LogicalCategory.VARCHAR
     if isinstance(value, tuple) and len(value) == 2:
-        return SqlType.INTERVAL
-    return SqlType._MISSING_TYPE
+        return LogicalCategory.INTERVAL
+    return LogicalCategory._MISSING_TYPE
 
 
 def _interval_to_past_timestamp(interval_value):
@@ -161,8 +161,8 @@ def _apply_interval_scalar(base_value, base_type, interval_value, operator: str)
 
 def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = False):
     if node.node_type == NodeType.LITERAL:
-        if node.type == SqlType.INTERVAL and apply_interval_literal_to_now:
-            return _interval_to_past_timestamp(node.value), SqlType.TIMESTAMP
+        if node.type == LogicalCategory.INTERVAL and apply_interval_literal_to_now:
+            return _interval_to_past_timestamp(node.value), LogicalCategory.TIMESTAMP
         return node.value, node.type
 
     if node.node_type == NodeType.NESTED:
@@ -186,14 +186,14 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
             trunc_value, trunc_value_type = scalar_parameters[0]
             unit_value, unit_type = scalar_parameters[1]
             if (
-                trunc_value_type in (SqlType.DATE, SqlType.TIMESTAMP)
-                and unit_type == SqlType.VARCHAR
+                trunc_value_type in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP)
+                and unit_type == LogicalCategory.VARCHAR
             ):
                 if isinstance(trunc_value, datetime.date) and not isinstance(
                     trunc_value, datetime.datetime
                 ):
                     trunc_value = datetime.datetime.combine(trunc_value, datetime.time.min)
-                return dates.truncate_single(trunc_value, unit_value.lower()), SqlType.TIMESTAMP
+                return dates.truncate_single(trunc_value, unit_value.lower()), LogicalCategory.TIMESTAMP
 
         try:
             from opteryx.expression.functions import FunctionResolutionContext
@@ -230,21 +230,21 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
         # using Python's datetime helpers.
         if node.value in ("Plus", "Minus"):
             if (
-                left_type in (SqlType.DATE, SqlType.TIMESTAMP)
-                and right_type == SqlType.INTERVAL
+                left_type in (LogicalCategory.DATE, LogicalCategory.TIMESTAMP)
+                and right_type == LogicalCategory.INTERVAL
             ):
                 return (
                     _apply_interval_scalar(left_value, left_type, right_value, node.value),
-                    SqlType.TIMESTAMP,
+                    LogicalCategory.TIMESTAMP,
                 )
-            if left_type == SqlType.INTERVAL and right_type in (
-                SqlType.DATE,
-                SqlType.TIMESTAMP,
+            if left_type == LogicalCategory.INTERVAL and right_type in (
+                LogicalCategory.DATE,
+                LogicalCategory.TIMESTAMP,
             ):
                 # interval +/- date is effectively the same as date +/- interval
                 return (
                     _apply_interval_scalar(right_value, right_type, left_value, node.value),
-                    SqlType.TIMESTAMP,
+                    LogicalCategory.TIMESTAMP,
                 )
 
         left = _as_binary_operand_array(left_value, left_type)
@@ -370,11 +370,11 @@ def array(branch, alias: Optional[List[str]] = None, key=None):
     element_type = {v.type for v in value_nodes}
     if len(element_type) > 1:
         raise ArrayWithMixedTypesError("Literal ARRAY has values with mixed types.")
-    element_type = element_type.pop() if len(element_type) == 1 else SqlType.VARCHAR
-    literal_type = SqlType.ARRAY
-    if element_type in (SqlType.INTEGER, SqlType.DOUBLE, SqlType.DECIMAL):
-        literal_type = SqlType.VECTOR
-        element_type = SqlType.DOUBLE
+    element_type = element_type.pop() if len(element_type) == 1 else LogicalCategory.VARCHAR
+    literal_type = LogicalCategory.ARRAY
+    if element_type in (LogicalCategory.INTEGER, LogicalCategory.DOUBLE, LogicalCategory.DECIMAL):
+        literal_type = LogicalCategory.VECTOR
+        element_type = LogicalCategory.DOUBLE
 
     return Node(
         node_type=NodeType.LITERAL,
@@ -638,8 +638,8 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
     from opteryx.types._datetime_conversion import date_to_int64_days, timestamp_to_int64_us
 
     # NULL values remain NULL regardless of target type
-    if literal_node.type == SqlType.NULL:
-        return Node(NodeType.LITERAL, type=SqlType.NULL, alias=alias)
+    if literal_node.type == LogicalCategory.NULL:
+        return Node(NodeType.LITERAL, type=LogicalCategory.NULL, alias=alias)
 
     # Strip TRY_ prefix for type lookup
     base_type = target_type.replace("TRY_", "")
@@ -664,17 +664,17 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
 
     # Special case: VARBINARY maps to BLOB in Sql types
     if base_type == "VARBINARY":
-        sql_type = SqlType.BLOB
-    elif base_type == "DATE" and literal_node.type in (SqlType.INTEGER, SqlType.DATE):
+        sql_type = LogicalCategory.BLOB
+    elif base_type == "DATE" and literal_node.type in (LogicalCategory.INTEGER, LogicalCategory.DATE):
         value = date_to_int64_days(_EPOCH_DATE + datetime.timedelta(days=int(literal_node.value)))
-        return Node(NodeType.LITERAL, type=SqlType.DATE, value=value, alias=alias)
+        return Node(NodeType.LITERAL, type=LogicalCategory.DATE, value=value, alias=alias)
     # Special case: INTEGER to TIMESTAMP conversion
     elif base_type == "TIMESTAMP" and (
-        literal_node.type in (SqlType.INTEGER, SqlType.DATE)
+        literal_node.type in (LogicalCategory.INTEGER, LogicalCategory.DATE)
         or isinstance(literal_node.value, int)
     ):
         # Require explicit unit for INTEGER to TIMESTAMP conversion
-        if literal_node.type == SqlType.INTEGER and unit is None:
+        if literal_node.type == LogicalCategory.INTEGER and unit is None:
             raise UnsupportedSyntaxError(
                 "Ambiguous cast: INTEGER → TIMESTAMP requires a unit. "
                 "Use `expr::TIMESTAMP[ms]`, `expr::TIMESTAMP[s]`, or `expr::TIMESTAMP[us]`."
@@ -684,19 +684,19 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
         # If unit was specified, use it; otherwise use default behavior for dates
         if unit:
             value = timestamp_to_int64_us(parse_timestamp_value(int_value, unit=unit))
-        elif literal_node.type == SqlType.DATE or abs(int_value) < 100_000:
+        elif literal_node.type == LogicalCategory.DATE or abs(int_value) < 100_000:
             value = timestamp_to_int64_us(
                 (_EPOCH_DT + datetime.timedelta(days=int_value)).replace(tzinfo=None)
             )
         else:
             value = timestamp_to_int64_us(parse_timestamp_value(int_value))
-        return Node(NodeType.LITERAL, type=SqlType.TIMESTAMP, value=value, alias=alias)
+        return Node(NodeType.LITERAL, type=LogicalCategory.TIMESTAMP, value=value, alias=alias)
     else:
-        sql_type = SqlType.from_name(base_type)[0]
+        sql_type = LogicalCategory.from_name(base_type)[0]
 
     # Temporal → VARCHAR: format as ISO string rather than calling str() on the raw int.
     if base_type in ("VARCHAR", "BLOB"):
-        if literal_node.type == SqlType.TIMESTAMP and isinstance(literal_node.value, int):
+        if literal_node.type == LogicalCategory.TIMESTAMP and isinstance(literal_node.value, int):
             us = literal_node.value
             sec, usec = divmod(us, 1_000_000)
             if usec < 0:
@@ -720,7 +720,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
             mm, ss = divmod(rem, 60)
             parsed_value = f"{y:04d}-{m:02d}-{d:02d} {hh:02d}:{mm:02d}:{ss:02d}.{usec:06d}+0000"
             return Node(NodeType.LITERAL, type=sql_type, value=parsed_value, alias=alias)
-        if literal_node.type == SqlType.DATE and isinstance(literal_node.value, int):
+        if literal_node.type == LogicalCategory.DATE and isinstance(literal_node.value, int):
             days = literal_node.value
             z = days + 719468
             era = (z if z >= 0 else z - 146096) // 146097
@@ -746,7 +746,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
     except Exception as e:
         # For TRY_CAST/SAFE_CAST, return NULL on failure
         if kind in {"TryCast", "SafeCast"}:
-            return Node(NodeType.LITERAL, type=SqlType.NULL, alias=alias)
+            return Node(NodeType.LITERAL, type=LogicalCategory.NULL, alias=alias)
         # For regular CAST, raise an error
         raise SqlError(f"Error casting value '{literal_node.value}' to type '{base_type}': {e}")
 
@@ -822,7 +822,7 @@ def extract(branch, alias: Optional[List[str]] = None, key=None):
     datepart_value = branch["field"]
     if isinstance(datepart_value, dict):
         datepart_value = list(datepart_value)[0]
-    datepart = Node(NodeType.LITERAL, type=SqlType.VARCHAR, value=datepart_value)
+    datepart = Node(NodeType.LITERAL, type=LogicalCategory.VARCHAR, value=datepart_value)
     identifier = build(branch["expr"])
 
     return Node(
@@ -949,7 +949,7 @@ def hex_literal(branch, alias: Optional[List[str]] = None, key=None):
     value = int(branch, 16)
     return Node(
         NodeType.LITERAL,
-        type=SqlType.INTEGER,
+        type=LogicalCategory.INTEGER,
         value=value,
         #    alias=alias or f"0x{branch}"
     )
@@ -979,7 +979,7 @@ def in_list(branch, alias: Optional[List[str]] = None, key=None):
     operator = "NotInList" if branch["negated"] else "InList"
     right_node = Node(
         node_type=NodeType.LITERAL,
-        type=SqlType.ARRAY,
+        type=LogicalCategory.ARRAY,
         value=[v.value for v in value_nodes],
         element_type=element_type,
     )
@@ -1039,7 +1039,7 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
             "Subscript values must be integer literals, use `->` to access JSON fields."
         )
 
-    if key_node.type != SqlType.INTEGER:
+    if key_node.type != LogicalCategory.INTEGER:
         raise IncorrectTypeError(
             "Subscript values must be integer literals, use `->` to access JSON fields."
         )
@@ -1066,7 +1066,7 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
 
 def literal_boolean(branch, alias: Optional[List[str]] = None, key=None):
     """create node for a literal boolean branch"""
-    return Node(NodeType.LITERAL, type=SqlType.BOOLEAN, value=branch, alias=alias)
+    return Node(NodeType.LITERAL, type=LogicalCategory.BOOLEAN, value=branch, alias=alias)
 
 
 def literal_interval(branch, alias: Optional[List[str]] = None, key=None):
@@ -1113,12 +1113,12 @@ def literal_interval(branch, alias: Optional[List[str]] = None, key=None):
 
     interval = (month, microseconds)
 
-    return Node(NodeType.LITERAL, type=SqlType.INTERVAL, value=interval, alias=alias)
+    return Node(NodeType.LITERAL, type=LogicalCategory.INTERVAL, value=interval, alias=alias)
 
 
 def literal_null(branch=None, alias: Optional[List[str]] = None, key=None):
     """create node for a literal null branch"""
-    return Node(NodeType.LITERAL, type=SqlType.NULL, alias=alias)
+    return Node(NodeType.LITERAL, type=LogicalCategory.NULL, alias=alias)
 
 
 def literal_number(branch, alias: Optional[List[str]] = None, key=None):
@@ -1131,7 +1131,7 @@ def literal_number(branch, alias: Optional[List[str]] = None, key=None):
         value = int(value)
         return Node(
             NodeType.LITERAL,
-            type=SqlType.INTEGER,
+            type=LogicalCategory.INTEGER,
             value=value,
             alias=alias,
         )
@@ -1140,7 +1140,7 @@ def literal_number(branch, alias: Optional[List[str]] = None, key=None):
         value = float(value)
         return Node(
             NodeType.LITERAL,
-            type=SqlType.DOUBLE,
+            type=LogicalCategory.DOUBLE,
             value=value,
             alias=alias,
         )
@@ -1148,7 +1148,7 @@ def literal_number(branch, alias: Optional[List[str]] = None, key=None):
 
 def literal_string(branch, alias: Optional[List[str]] = None, key=None):
     """create node for a string branch"""
-    return Node(NodeType.LITERAL, type=SqlType.VARCHAR, value=branch, alias=alias)
+    return Node(NodeType.LITERAL, type=LogicalCategory.VARCHAR, value=branch, alias=alias)
 
 
 def match_against(branch, alias: Optional[List[str]] = None, key=None):
@@ -1187,9 +1187,9 @@ def pattern_match(branch, alias: Optional[List[str]] = None, key=None):
             )
         if right.node_type == NodeType.NESTED:
             right = right.centre
-        if right.type != SqlType.ARRAY:
+        if right.type != LogicalCategory.ARRAY:
             right.value = (right.value,)
-            right.type = SqlType.ARRAY
+            right.type = LogicalCategory.ARRAY
     return Node(
         NodeType.COMPARISON_OPERATOR,
         value=key,
@@ -1218,7 +1218,7 @@ def qualified_wildcard(branch, alias: Optional[List[str]] = None, key=None):
 
 
 def substring(branch, alias: Optional[List[str]] = None, key=None):
-    node_node = Node(NodeType.LITERAL, type=SqlType.NULL, value=None)
+    node_node = Node(NodeType.LITERAL, type=LogicalCategory.NULL, value=None)
     string = build(branch["expr"])
     substring_from = build(branch["substring_from"]) or node_node
     substring_for = build(branch["substring_for"]) or node_node
@@ -1264,10 +1264,10 @@ def tuple_literal(branch, alias: Optional[List[str]] = None, key=None):
     element_type = None
     if len(node_types) == 1:
         element_type = node_types.pop()
-    literal_type = SqlType.ARRAY
-    if element_type in (SqlType.INTEGER, SqlType.DOUBLE, SqlType.DECIMAL):
-        literal_type = SqlType.VECTOR
-        element_type = SqlType.DOUBLE
+    literal_type = LogicalCategory.ARRAY
+    if element_type in (LogicalCategory.INTEGER, LogicalCategory.DOUBLE, LogicalCategory.DECIMAL):
+        literal_type = LogicalCategory.VECTOR
+        element_type = LogicalCategory.DOUBLE
 
     if values and isinstance(values[0], dict):
         values = [build(val["Identifier"]).value for val in values]

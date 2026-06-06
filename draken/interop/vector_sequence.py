@@ -10,10 +10,10 @@ appropriate typed constructor in `draken.draken_native`.
   is correct).
 - a `str` naming the logical type (e.g. `"INTEGER"`, `"VARCHAR"`,
   `"DOUBLE"`).
-- any object exposing a `.name` attribute (e.g. an `SqlType` enum
+- any object exposing a `.name` attribute (e.g. an `LogicalCategory` enum
   member). The `.name` is read as a string; this lets opteryx-side
-  callers pass `SqlType.VARCHAR` without draken importing
-  `SqlType`.
+  callers pass `LogicalCategory.VARCHAR` without draken importing
+  `LogicalCategory`.
 
 The dispatch table maps type-name strings to nanobind constructors. It
 is the canonical surface for "Python list → Vector" — direct callers of
@@ -88,7 +88,7 @@ def _resolve_dtype_name(dtype):
         return None
     if isinstance(dtype, str):
         return dtype.upper()
-    # Enum-like with .name attribute (e.g. SqlType member).
+    # Enum-like with .name attribute (e.g. LogicalCategory member).
     name = getattr(dtype, "name", None)
     if name is None:
         raise TypeError(
@@ -109,7 +109,7 @@ def vector_from_sequence(values, dtype=None):
         type depends on `dtype`; see `draken.draken_native` typed
         constructors for the per-type contract (e.g. `Decimal` for
         DECIMAL, `datetime.date` for DATE).
-    dtype : None | str | object with .name (e.g. SqlType member)
+    dtype : None | str | object with .name (e.g. LogicalCategory member)
         Logical type. `None` defaults to INT64.
 
     Returns

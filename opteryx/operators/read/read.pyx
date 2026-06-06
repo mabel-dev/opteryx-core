@@ -33,18 +33,18 @@ from typing import Generator
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryProperties
 from opteryx.types.schema import RelationSchema
-from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 
 # EOS sentinel in scope as _EOS_SENTINEL via the umbrella unit.
 
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
 
-# Null vector factory: maps SqlType → draken_native constructor for null constants.
+# Null vector factory: maps LogicalCategory → draken_native constructor for null constants.
 # Built once at module import. All constructors accept (value=None, length).
 cdef dict _NULL_CONSTRUCTORS = {}
 
 def _build_null_constructors():
-    """Build null vector constructor table: SqlType → callable(n) → Vector."""
+    """Build null vector constructor table: LogicalCategory → callable(n) → Vector."""
     from draken.draken_native import (
         vector_from_constant,
         vector_float64_from_constant,
@@ -73,7 +73,7 @@ def _build_null_constructors():
     ]
     out = {}
     for name, ctor in table:
-        member = getattr(SqlType, name, None)
+        member = getattr(LogicalCategory, name, None)
         if member is not None:
             out[member] = ctor
     return out

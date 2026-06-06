@@ -9,8 +9,8 @@ from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.binder import merge_schemas
 from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.types import SqlType, find_compatible_type
-from opteryx.types.schema import ConstantColumn, FlatColumn, RelationSchema
+from opteryx.types.logical_type import LogicalCategory, find_compatible_type
+from opteryx.types.schema import ConstantColumn, SchemaColumn, RelationSchema
 
 
 def visit_set(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
@@ -90,7 +90,7 @@ def _validate_set_operation_types(
     node: Node,
     context: BindingContext,
     operation_name: str = "SET OPERATION",
-) -> List[SqlType]:
+) -> List[LogicalCategory]:
     """Validate and find compatible types for columns in set operations.
 
     For each column position across left and right relations, find a compatible type.
@@ -209,7 +209,7 @@ def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         # `ConstantColumn(name=...)`-then-mutate pattern relied on side-car writes.
         lit_type = node.unnest_column.type
         lit_elem = node.unnest_column.element_type
-        from opteryx.types.sql_type import sql_to_column_type
+        from opteryx.types.logical_type import sql_to_column_type
         try:
             _ct = sql_to_column_type(lit_type, element_type=lit_elem)
             schema_column = ConstantColumn.from_column_type(
@@ -243,9 +243,9 @@ def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         # we can only UNNEST an ARRAY type column, we need to find it before we know its type
         if node.unnest_column.schema_column.type not in (
             0,
-            SqlType.ARRAY,
-            SqlType.VECTOR,
-            SqlType.NULL,
+            LogicalCategory.ARRAY,
+            LogicalCategory.VECTOR,
+            LogicalCategory.NULL,
         ):
             from opteryx.exceptions import IncorrectTypeError
 
@@ -257,15 +257,15 @@ def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         # D-4 Phase 2: resolve the UNNEST element type from the unified column_type
         # (carries the ARRAY child as `column_type.element`). VECTOR unnests to
         # DOUBLE. Falls back to the legacy sidecar when the bridge couldn't map it.
-        element_type = SqlType.VARCHAR
+        element_type = LogicalCategory.VARCHAR
         unnest_sc = node.unnest_column.schema_column
-        if unnest_sc and unnest_sc.type == SqlType.VECTOR:
-            element_type = SqlType.DOUBLE
+        if unnest_sc and unnest_sc.type == LogicalCategory.VECTOR:
+            element_type = LogicalCategory.DOUBLE
         elif unnest_sc is not None and unnest_sc.column_type is not None and unnest_sc.column_type.element is not None:
-            from opteryx.types.sql_type import column_type_to_sql
+            from opteryx.types.logical_type import column_type_to_sql
             element_type = column_type_to_sql(unnest_sc.column_type.element).get("type") or element_type
 
-        schema_column = FlatColumn(name=node.unnest_alias, type=element_type)
+        schema_column = SchemaColumn(name=node.unnest_alias, type=element_type)
         node.unnest_target = LogicalColumn(
             alias=node.unnest_alias,
             node_type=NodeType.IDENTIFIER,

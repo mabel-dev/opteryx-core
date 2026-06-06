@@ -76,15 +76,15 @@ def _types_compatible(src, tgt) -> bool:
     Unresolved literal types (_MISSING_TYPE) are permitted at bind time —
     runtime catches real mismatches.
     """
-    from opteryx.types import SqlType
+    from opteryx.types.logical_type import LogicalCategory
 
     if src == tgt:
         return True
-    if src == SqlType.NULL:
+    if src == LogicalCategory.NULL:
         return True
-    if src == SqlType._MISSING_TYPE:
+    if src == LogicalCategory._MISSING_TYPE:
         return True
-    if src == SqlType.INTEGER and tgt == SqlType.DOUBLE:
+    if src == LogicalCategory.INTEGER and tgt == LogicalCategory.DOUBLE:
         return True
     return False
 
@@ -111,8 +111,8 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     from opteryx.models import LogicalColumn
     from opteryx.types.schema import RelationSchema
 
-    from opteryx.types import SqlType
-    from opteryx.types.schema import FlatColumn
+    from opteryx.types.logical_type import LogicalCategory
+    from opteryx.types.schema import SchemaColumn
 
     node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
     if not isinstance(node.connector, Writable):
@@ -166,12 +166,12 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
                 target_name = f"{target_name}_{seen_names[target_name]}"
             else:
                 seen_names[target_name] = 0
-            if sc.type == SqlType._MISSING_TYPE or sc.type == SqlType.NULL:
+            if sc.type == LogicalCategory._MISSING_TYPE or sc.type == LogicalCategory.NULL:
                 raise UnsupportedSyntaxError(
                     f"CTAS column '{target_name}' has unresolved type; "
                     "specify the SELECT's column types explicitly"
                 )
-            flat = FlatColumn(
+            flat = SchemaColumn(
                 name=target_name,
                 type=sc.type,
                 nullable=getattr(sc, "nullable", True),
@@ -194,7 +194,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     # Read schema from dataset.json.
     relation_dir = node.connector._relation_dir(node.relation_name)
     descriptor = node.connector._read_dataset_json(relation_dir)
-    target_schema = descriptor.schema  # RelationSchema with FlatColumn list
+    target_schema = descriptor.schema  # RelationSchema with SchemaColumn list
 
     node.target_schema = target_schema
     node.columns = []  # binder convention; INSERT produces no output columns

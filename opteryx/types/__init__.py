@@ -3,11 +3,11 @@ Opteryx types module.
 
 This module provides:
 - Internal scalar type system (replacing numpy/pyarrow type checks)
-- SqlType type vocabulary (Draken-native engine)
+- LogicalCategory type vocabulary (Draken-native engine)
 - Null handling primitives
 - Type conversion utilities
 - Type coercion helpers
-- Bidirectional Python ↔ SqlType mapping
+- Bidirectional Python ↔ type mapping
 """
 
 from opteryx.types._null_handling import (
@@ -22,10 +22,10 @@ from opteryx.types._null_handling import (
     nulls_to_default,
     remove_nulls,
 )
-from opteryx.types.sql_type import (
+from opteryx.types.logical_type import (
     SQL_TO_PYTHON_MAP,
     PYTHON_TO_SQL_MAP,
-    SqlType,
+    LogicalCategory,
     find_compatible_type,
 )
 from opteryx.types._scalar_types import (
@@ -49,8 +49,8 @@ __all__ = [
     "is_null_scalar",
     "extract_python_scalar",
     "unwrap_scalar",
-    # SqlType type vocabulary
-    "SqlType",
+    # type vocabulary
+    "LogicalCategory",
     "PYTHON_TO_SQL_MAP",
     "SQL_TO_PYTHON_MAP",
     "find_compatible_type",
