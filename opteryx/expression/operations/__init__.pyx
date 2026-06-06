@@ -30,7 +30,7 @@ from opteryx.compiled.nanobind.vector_string_search import vector_contains
 from opteryx.expression.evaluator.comparisons import draken_compare_int
 from opteryx.expression.evaluator._impl import _OP_CODE as _COMPARE_OP_CODE
 from opteryx.third_party import yyjson
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 from opteryx.types._datetime_conversion import (
     date_to_int64_days,
     int64_days_to_date,
@@ -76,18 +76,18 @@ _SKIP_COMPRESSION_OPS = frozenset(
 def _coerce_temporal_scalar(value, source_type, target_type):
     """Normalize temporal scalars to the backing Python type for `target_type`."""
 
-    if target_type == OrsoTypes.DATE:
+    if target_type == SqlType.DATE:
         if isinstance(value, datetime.datetime):
             value = value.date()
         if isinstance(value, datetime.date):
             return date_to_int64_days(value)
         if isinstance(value, int):
-            if source_type == OrsoTypes.TIMESTAMP:
+            if source_type == SqlType.TIMESTAMP:
                 return date_to_int64_days(int64_us_to_datetime(value).date())
             return date_to_int64_days(int64_days_to_date(value))
-        return date_to_int64_days(OrsoTypes.DATE.parse(value))
+        return date_to_int64_days(SqlType.DATE.parse(value))
 
-    if target_type == OrsoTypes.TIMESTAMP:
+    if target_type == SqlType.TIMESTAMP:
         if isinstance(value, datetime.datetime):
             if value.tzinfo is not None:
                 value = value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
@@ -95,10 +95,10 @@ def _coerce_temporal_scalar(value, source_type, target_type):
         if isinstance(value, datetime.date):
             return timestamp_to_int64_us(value)
         if isinstance(value, int):
-            if source_type == OrsoTypes.DATE:
+            if source_type == SqlType.DATE:
                 return timestamp_to_int64_us(int64_days_to_date(value))
             return value
-        return timestamp_to_int64_us(OrsoTypes.TIMESTAMP.parse(value))
+        return timestamp_to_int64_us(SqlType.TIMESTAMP.parse(value))
 
     return value
 
@@ -116,9 +116,9 @@ def to_temporal_array(values, source_type, target_type):
     ]
 
     source_vec = _draken_native.vector_from_sequence(coerced)
-    if target_type == OrsoTypes.DATE:
+    if target_type == SqlType.DATE:
         return _draken_native.vector_reinterpret_as_date32(source_vec)
-    if target_type == OrsoTypes.TIMESTAMP:
+    if target_type == SqlType.TIMESTAMP:
         return _draken_native.vector_reinterpret_as_timestamp64(source_vec)
     return source_vec
 
@@ -135,26 +135,26 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
         return BoolVector.from_scalar(None, 0)
 
     # Type coercion: DECIMAL + INTEGER
-    if left_type == OrsoTypes.DECIMAL and right_type == OrsoTypes.INTEGER:
-        right_type = OrsoTypes.DOUBLE
-    elif right_type == OrsoTypes.DECIMAL and left_type == OrsoTypes.INTEGER:
-        left_type = OrsoTypes.DOUBLE
+    if left_type == SqlType.DECIMAL and right_type == SqlType.INTEGER:
+        right_type = SqlType.DOUBLE
+    elif right_type == SqlType.DECIMAL and left_type == SqlType.INTEGER:
+        left_type = SqlType.DOUBLE
 
     # Temporal type coercions — reject INT vs temporal comparisons.
-    temporal_types = {OrsoTypes.DATE, OrsoTypes.TIMESTAMP}
+    temporal_types = {SqlType.DATE, SqlType.TIMESTAMP}
     if (
-        OrsoTypes.INTEGER in (left_type, right_type)
+        SqlType.INTEGER in (left_type, right_type)
         or left_type in temporal_types
         or right_type in temporal_types
     ):
-        if left_type == OrsoTypes.INTEGER and right_type in temporal_types:
+        if left_type == SqlType.INTEGER and right_type in temporal_types:
             raise IncompatibleTypesError(
                 message="Ambiguous comparison: INTEGER = TIMESTAMP/DATE. "
                 "Provide a TIMESTAMP or DATE column instead. "
                 "To convert an INTEGER to TIMESTAMP, use an explicit cast with a unit: "
                 "`::TIMESTAMP[ms]`, `::TIMESTAMP[s]`, or `::TIMESTAMP[us]`."
             )
-        if right_type == OrsoTypes.INTEGER and left_type in temporal_types:
+        if right_type == SqlType.INTEGER and left_type in temporal_types:
             raise IncompatibleTypesError(
                 message="Ambiguous comparison: TIMESTAMP/DATE = INTEGER. "
                 "Provide a TIMESTAMP or DATE column instead. "
@@ -168,7 +168,7 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
         right_target_type = right_type
 
         if {left_type, right_type} == temporal_types:
-            left_target_type = right_target_type = OrsoTypes.TIMESTAMP
+            left_target_type = right_target_type = SqlType.TIMESTAMP
 
         left_arr = to_temporal_array(left_arr, left_source_type, left_target_type)
         right_arr = to_temporal_array(right_arr, right_source_type, right_target_type)
@@ -182,12 +182,12 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
                 f"operations: unknown comparison op {operator!r}"
             )
         # BCTypeCode: 0=NONE, 1=DATE, 2=TIMESTAMP
-        _lc = 1 if left_type == OrsoTypes.DATE else (2 if left_type == OrsoTypes.TIMESTAMP else 0)
-        _rc = 1 if right_type == OrsoTypes.DATE else (2 if right_type == OrsoTypes.TIMESTAMP else 0)
+        _lc = 1 if left_type == SqlType.DATE else (2 if left_type == SqlType.TIMESTAMP else 0)
+        _rc = 1 if right_type == SqlType.DATE else (2 if right_type == SqlType.TIMESTAMP else 0)
         return draken_compare_int(_op_code, left_arr, right_arr, _lc, _rc)
 
     # Handle interval operations
-    if OrsoTypes.INTERVAL in (left_type, right_type):
+    if SqlType.INTERVAL in (left_type, right_type):
         from opteryx.expression.intervals import INTERVAL_KERNELS
 
         function = INTERVAL_KERNELS.get((left_type, right_type, operator))

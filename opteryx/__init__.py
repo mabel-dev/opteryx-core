@@ -68,7 +68,7 @@ if _env_path.exists():
 
 
 if OPTERYX_DEBUG:  # pragma: no cover
-    from opteryx.debugging import OpteryxOrsoImportFinder
+    from opteryx.debugging import OpteryxImportFinder
 
 from opteryx.connectors import register_workspace
 from opteryx.connectors import set_default_connector

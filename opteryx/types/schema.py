@@ -1,8 +1,8 @@
 """
-Internal Opteryx schema system - inlined and specialized from orso.schema.
+Internal Opteryx schema system - the Draken-native engine.
 
 This module provides schema definitions for Opteryx, eliminating the external
-orso dependency while specializing for Opteryx's actual use cases.
+external dependency, specialized for Opteryx's actual use cases.
 
 Opteryx only uses: RelationSchema, FlatColumn, ConstantColumn
 Advanced features (DictionaryColumn, SparseColumn, RLEColumn, FunctionColumn)
@@ -20,7 +20,6 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Dict, List, Optional
 
-from opteryx.types import OrsoTypes
 
 __all__ = [
     "FlatColumn",
@@ -32,7 +31,7 @@ __all__ = [
 
 
 class ColumnDisposition:
-    """Column disposition flags (simplified from orso).
+    """Column disposition flags (simplified).
 
     Indicates special treatment for columns:
     - INTERNAL: system-generated column (e.g., __index__)
@@ -53,11 +52,11 @@ class ColumnDisposition:
 class FlatColumn:
     """Column definition with metadata.
 
-    Replaces orso.schema.FlatColumn with Opteryx specialization.
+    Opteryx column definition.
 
     Attributes:
         name: Column name (required)
-        type: OrsoType for this column (required)
+        type: SqlType for this column (required)
         identity: Unique identifier for this column (default: auto-generated from name)
         nullable: Whether NULL values are allowed (default: True)
         default: Default value if not provided (default: None)
@@ -79,26 +78,33 @@ class FlatColumn:
     """
 
     name: str
-    type: OrsoTypes
+    # `type` is a transient constructor parameter for backward-compat — callers that
+    # haven't migrated to from_column_type yet can still pass type=SqlType.X.
+    # The value is forwarded to the bridge in __post_init__ to derive column_type.
+    # Once all callers use from_column_type, this InitVar can be removed.
+    type: dataclasses.InitVar[Optional[Any]] = None
     nullable: bool = True
     identity: Optional[bytes] = None
     default: Optional[Any] = None
     description: Optional[str] = None
     disposition: Optional[str] = None
     aliases: Optional[List[str]] = dataclasses.field(default_factory=lambda: None)
-    element_type: Optional[OrsoTypes] = None
-    precision: Optional[int] = None
-    scale: Optional[int] = None
-    length: Optional[int] = None
     highest_value: Optional[Any] = None
     lowest_value: Optional[Any] = None
     null_count: Optional[int] = None
     fields: Optional[List[FlatColumn]] = None
     expectations: Optional[Any] = None  # Deferred to Phase 9
     origin: Optional[List[str]] = None  # Deferred to Phase 9
+    # column_type is the authoritative unified type carrier (physical DrakenType +
+    # optional LogicalType descriptor + optional ARRAY element). Computed once in
+    # __post_init__ from the InitVar parameters. `init=False` keeps it out of the
+    # positional signature; it is the only stored type field besides `type` (the
+    # legacy SqlType tag, retained until the wider SqlType removal). Deepcopy
+    # is safe — LogicalType has __deepcopy__ wired on the nanobind side.
+    column_type: Optional[Any] = dataclasses.field(default=None, init=False, repr=False, compare=False)
 
-    def __post_init__(self):
-        """Auto-generate identity from name if not provided; ensure identity is bytes."""
+    def __post_init__(self, type):
+        """Normalize identity. Derive column_type from legacy type= InitVar if given."""
         if self.identity is None:
             raw = self.name
         else:
@@ -107,35 +113,79 @@ class FlatColumn:
             self.identity = raw.encode("utf-8")
         else:
             self.identity = raw
+        # If a legacy type= was passed and column_type wasn't injected yet, derive it.
+        if self.column_type is None and type is not None and type != 0:
+            try:
+                from opteryx.types.sql_type import sql_to_column_type
+                self.column_type = sql_to_column_type(type)
+            except Exception:
+                self.column_type = None
+
+    @property
+    def type(self):
+        """Derived SqlType tag for backward-compat reads while callsites migrate.
+        Delete once all .type reads on FlatColumn are gone."""
+        from opteryx.types.sql_type import column_type_to_sql
+        if self.column_type is None:
+            return 0  # _MISSING_TYPE sentinel used by binder bootstrap
+        legacy = column_type_to_sql(self.column_type)
+        return legacy.get("type", 0)
+
+    @classmethod
+    def from_column_type(cls, name, column_type, **kwargs):
+        """Construct a FlatColumn (or subclass) with `column_type` as the type carrier.
+
+        D-4 Phase 2: the authoritative construction path. Satisfies the DECIMAL
+        invariant by threading precision/scale from the ColumnType's LogicalType
+        descriptor into the InitVar params — no caller needs to unpack them manually.
+        After construction, `column_type` is injected directly, superseding whatever
+        `__post_init__` derived (they agree; the injection is a no-op correctness
+        guarantee, not a double-computation).
+        """
+        # Strip legacy kwargs — the type field is gone.
+        for removed in ("type", "precision", "scale", "length", "element_type"):
+            kwargs.pop(removed, None)
+        kwargs["name"] = name
+        instance = cls(**kwargs)
+        instance.column_type = column_type
+        return instance
 
     def __str__(self) -> str:
-        """String representation: name:type."""
-        return f"{self.name}:{self.type.value}"
+        """String representation: name."""
+        ct = self.column_type
+        if ct is not None:
+            return f"{self.name}:{ct}"
+        return self.name
 
-    def to_flatcolumn(self) -> "FlatColumn":
-        """Convert to a FlatColumn (returns self for FlatColumn)."""
-        if isinstance(self, FlatColumn):
-            return self
-        # For subclasses, create a new FlatColumn with the same properties
-        return FlatColumn(
-            name=self.name,
-            type=self.type,
+    def _to_plain_flatcolumn(self) -> "FlatColumn":
+        """Build a plain FlatColumn mirroring this column's type + metadata.
+
+        D-4 Phase 2: the type is carried by `column_type` (single source of truth),
+        so we reconstruct via `from_column_type` rather than copying deleted
+        side-cars. Falls back to the bare `type` for columns the bridge couldn't
+        map (column_type is None — e.g. _MISSING_TYPE).
+        """
+        common = dict(
             identity=self.identity,
             nullable=self.nullable,
             default=self.default,
             description=self.description,
             disposition=self.disposition,
             aliases=self.aliases,
-            element_type=self.element_type,
-            precision=self.precision,
-            scale=self.scale,
-            length=self.length,
             origin=self.origin,
         )
+        return FlatColumn.from_column_type(
+            name=self.name, column_type=self.column_type, **common
+        )
+
+    def to_flatcolumn(self) -> "FlatColumn":
+        """Convert to a FlatColumn (returns self when already a plain FlatColumn)."""
+        if type(self) is FlatColumn:
+            return self
+        return self._to_plain_flatcolumn()
 
     def __repr__(self) -> str:
-        """Detailed representation."""
-        return f"FlatColumn(name={self.name!r}, type={self.type.value}, nullable={self.nullable})"
+        return f"FlatColumn(name={self.name!r}, column_type={self.column_type}, nullable={self.nullable})"
 
     @property
     def all_names(self) -> List[str]:
@@ -145,33 +195,29 @@ class FlatColumn:
             names.extend(self.aliases)
         return names
 
-    @property
-    def column_type(self):
-        """Unified ColumnType for this column (TEMPORARY migration bridge).
+    # D-4 Phase 2: column_type is a stored field (see the dataclass declaration
+    # above and the __post_init__ resolution). The former @property has been
+    # replaced — per-access recomputation is gone; new readers should rely on
+    # this single field. LogicalType has __deepcopy__ wired on the nanobind side
+    # so schema deepcopies (binder's merge_schemas) work cleanly.
 
-        A pure PROJECTION of the legacy `type` (+ side-car `precision`/`scale`/
-        `element_type`) into a `ColumnType` — derived, not a second source of truth, so
-        it cannot drift from `.type`. It does NOT fabricate: if the legacy data lacks
-        the information (e.g. a DECIMAL with no precision), it FAILS rather than guess.
-
-        EXIT PLAN (see plan "Exit Plan for Bridges & Shims"): readers migrate from
-        `.type` onto `.column_type`; in Phase 6 `FlatColumn.type` becomes a `ColumnType`
-        directly and this property is removed (or aliased to `.type`) along with the
-        `orso_to_column_type` bridge and OrsoTypes itself.
-        """
-        from opteryx.types._orso_types import orso_to_column_type
-
-        return orso_to_column_type(
-            self.type,
-            precision=self.precision,
-            scale=self.scale,
-            element_type=self.element_type,
-        )
+    # Schema-JSON format version. v2 (D-4 Phase 2 "full break"): the type is carried
+    # by a single canonical `column_type` string (e.g. "DECIMAL(15, 2)",
+    # "ARRAY<VARCHAR>") instead of the legacy type/precision/scale/element_type
+    # quartet. `from_dict` still reads the v1 quartet for backward compatibility
+    # with already-persisted schemas (the side-cars are valid InitVar params).
+    _SCHEMA_VERSION = 2
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert column to dictionary for serialization."""
+        """Convert column to dictionary for serialization (v2 format)."""
+        from opteryx.types.logical_type import serialize_column_type
+
         return {
+            "_v": self._SCHEMA_VERSION,
             "name": self.name,
+            # Canonical column_type string is authoritative; `type` (bare SqlType
+            # name) is kept for the rare column_type==None case and human readability.
+            "column_type": serialize_column_type(self.column_type),
             "type": self.type.value,
             "identity": self.identity.decode("utf-8") if isinstance(self.identity, bytes) else self.identity,
             "nullable": self.nullable,
@@ -179,27 +225,58 @@ class FlatColumn:
             "description": self.description,
             "disposition": self.disposition,
             "aliases": self.aliases,
-            "element_type": self.element_type.value if self.element_type else None,
-            "precision": self.precision,
-            "scale": self.scale,
-            "length": self.length,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> FlatColumn:
-        """Create FlatColumn from dictionary."""
+        """Create FlatColumn from a serialized dict (v2 with v1 fallback)."""
         data = data.copy()
-        # Convert type string to OrsoTypes if needed
-        if isinstance(data.get("type"), str):
-            type_obj, _, _, _, element_type = OrsoTypes.from_name(data["type"])
-            data["type"] = type_obj
-            if element_type and "element_type" not in data:
-                data["element_type"] = element_type
-        # Convert element_type string to OrsoTypes if needed
-        if isinstance(data.get("element_type"), str):
-            element_obj, _, _, _, _ = OrsoTypes.from_name(data["element_type"])
-            data["element_type"] = element_obj
-        return cls(**data)
+        data.pop("_v", None)
+        ct_str = data.pop("column_type", None)
+
+        # v2: reconstruct from the canonical column_type string.
+        if ct_str is not None:
+            from opteryx.types.logical_type import parse_column_type
+
+            data.pop("type", None)  # column_type supersedes the bare type tag
+            column_type = parse_column_type(ct_str)
+            return cls.from_column_type(name=data.pop("name"), column_type=column_type, **data)
+
+        # v1 fallback: legacy type/precision/scale/element_type quartet.
+        # Reconstruct via from_column_type using the bridge.
+        from opteryx.types.sql_type import sql_to_column_type
+
+        raw_type = data.pop("type", None)
+        precision = data.pop("precision", None)
+        scale = data.pop("scale", None)
+        length = data.pop("length", None)
+        element_type_raw = data.pop("element_type", None)
+
+        from opteryx.types.sql_type import SqlType as _SqlType
+        if isinstance(raw_type, str):
+            type_obj, _, p_parsed, s_parsed, et_parsed = _SqlType.from_name(raw_type)
+            if precision is None:
+                precision = p_parsed
+            if scale is None:
+                scale = s_parsed
+            if element_type_raw is None:
+                element_type_raw = et_parsed
+        else:
+            type_obj = raw_type or _SqlType.NULL
+
+        if isinstance(element_type_raw, str):
+            element_type_raw, _, _, _, _ = _SqlType.from_name(element_type_raw)
+
+        try:
+            column_type = sql_to_column_type(
+                type_obj,
+                precision=precision,
+                scale=scale,
+                element_type=element_type_raw,
+            )
+            return cls.from_column_type(name=data.pop("name"), column_type=column_type, **data)
+        except Exception:
+            return cls(name=data.pop("name"), type=type_obj, **data)
 
 
 @dataclasses.dataclass
@@ -218,20 +295,7 @@ class ConstantColumn(FlatColumn):
 
     def to_flatcolumn(self) -> FlatColumn:
         """Convert to a FlatColumn, stripping constant value."""
-        return FlatColumn(
-            name=self.name,
-            type=self.type,
-            identity=self.identity,
-            nullable=self.nullable,
-            default=self.default,
-            description=self.description,
-            disposition=self.disposition,
-            aliases=self.aliases,
-            element_type=self.element_type,
-            precision=self.precision,
-            scale=self.scale,
-            length=self.length,
-        )
+        return self._to_plain_flatcolumn()
 
 
 @dataclasses.dataclass
@@ -248,27 +312,15 @@ class FunctionColumn(FlatColumn):
 
     def to_flatcolumn(self) -> FlatColumn:
         """Convert to a FlatColumn, stripping function metadata."""
-        return FlatColumn(
-            name=self.name,
-            type=self.type,
-            identity=self.identity,
-            nullable=self.nullable,
-            default=self.default,
-            description=self.description,
-            disposition=self.disposition,
-            aliases=self.aliases,
-            element_type=self.element_type,
-            precision=self.precision,
-            scale=self.scale,
-            length=self.length,
-        )
+        return self._to_plain_flatcolumn()
+
 
 
 @dataclasses.dataclass
 class RelationSchema:
     """Table/relation schema definition.
 
-    Replaces orso.schema.RelationSchema with Opteryx specialization.
+    Opteryx relation schema.
 
     Attributes:
         name: Schema/table name (required)
@@ -343,7 +395,7 @@ class RelationSchema:
         return None
 
     def find_column(self, name: str, case_insensitive: bool = False) -> Optional[FlatColumn]:
-        """Alias for column() for orso compatibility."""
+        """Alias for column() for API compatibility."""
         return self.column(name, case_insensitive=case_insensitive)
 
     def pop_column(self, name: str) -> Optional[FlatColumn]:

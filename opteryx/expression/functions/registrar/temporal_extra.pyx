@@ -8,7 +8,7 @@ from opteryx.expression.functions import (
     ParameterSpec,
     ReturnSpec,
 )
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 
 
 def get_builtin_temporal_extra_functions() -> List[FunctionDefinition]:

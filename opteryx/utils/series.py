@@ -5,7 +5,7 @@
 
 
 from opteryx.exceptions import InvalidFunctionParameterError, SqlError
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 from opteryx.utils import dates
 
 
@@ -23,7 +23,7 @@ def generate_series(*args):
         return numeric_range(*arg_vals)
 
     # if the params are timestamps, we create time intervals
-    if args[0].type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP):
+    if args[0].type in (SqlType.DATE, SqlType.TIMESTAMP):
         if arg_len != 3:  # pragma: no cover
             raise SqlError("generate_series for dates needs start, end, and interval parameters")
         return dates.date_range(*arg_vals)

@@ -24,7 +24,7 @@ into joins.
 
 from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 from opteryx.vectors.vector_types import (
     get_vector_source_identifier,
     node_is_numeric_vector,

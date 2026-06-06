@@ -18,7 +18,7 @@ import math
 
 import draken.draken_native as _draken_native_casts
 
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 from opteryx.types._datetime_conversion import timestamp_to_int64_us
 from opteryx.utils.vector_types import (
     VectorType,
@@ -85,7 +85,7 @@ cpdef parse_timestamp_value(value, unit=None):
             seconds, tz=datetime.timezone.utc
         ).replace(tzinfo=None)
 
-    return OrsoTypes.TIMESTAMP.parse(value)
+    return SqlType.TIMESTAMP.parse(value)
 
 
 def _parse_array_value(value, element_type, bint safe_cast=False):
@@ -110,15 +110,15 @@ def _parse_array_value(value, element_type, bint safe_cast=False):
         stripped = value.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
             if safe_cast:
-                return safe(OrsoTypes.ARRAY.parse, value, element_type=element_type)
-            return OrsoTypes.ARRAY.parse(value, element_type=element_type)
+                return safe(SqlType.ARRAY.parse, value, element_type=element_type)
+            return SqlType.ARRAY.parse(value, element_type=element_type)
         value = [value]
     elif isinstance(value, (list, tuple, set, frozenset)):
         value = list(value)
     else:
         value = [value]
 
-    caster = OrsoTypes[element_type.name].parse
+    caster = SqlType[element_type.name].parse
     return [caster(item) if item is not None else None for item in value]
 
 
@@ -149,11 +149,11 @@ def cast_to_double(arr, *args):
             return _draken_native_casts.vector_cast_string_to_float64(_unwrap_nb(arr))
 
     if isinstance(arr, (list, tuple)):
-        caster = OrsoTypes.DOUBLE.parse
+        caster = SqlType.DOUBLE.parse
         return [caster(i) if i is not None else None for i in arr]
 
     if isinstance(arr, (int, float)):
-        return OrsoTypes.DOUBLE.parse(arr)
+        return SqlType.DOUBLE.parse(arr)
 
     raise TypeError(f"Unsupported type for cast_to_double: {type(arr).__name__}")
 
@@ -188,7 +188,7 @@ def cast_to_int(arr, *args):
             return vector_cast_date32_to_int64(_unwrap_nb(arr))
 
     if isinstance(arr, (list, tuple)):
-        caster = OrsoTypes.INTEGER.parse
+        caster = SqlType.INTEGER.parse
         return [caster(i) if i is not None else None for i in arr]
 
     if isinstance(arr, int):
@@ -327,11 +327,11 @@ def cast_to_date(arr, *args):
         v_type = get_vector_type(arr)
         if v_type == VectorType.DATE32:
             return arr
-        caster = OrsoTypes.DATE.parse
+        caster = SqlType.DATE.parse
         return [caster(v) if v is not None else None for v in arr.to_pylist()]
 
     if isinstance(arr, (list, tuple)):
-        caster = OrsoTypes.DATE.parse
+        caster = SqlType.DATE.parse
         return [caster(v) if v is not None else None for v in arr]
 
     if isinstance(arr, datetime.date):
@@ -367,7 +367,7 @@ def _to_int_arg(a):
 def _cast_result_to_draken(result, resolved_type, args=()):
     """Dispatch a Python list `result` to the appropriate Draken vector constructor.
 
-    `resolved_type` is an OrsoTypes name string (e.g. "INTEGER", "DOUBLE").
+    `resolved_type` is an SqlType name string (e.g. "INTEGER", "DOUBLE").
     `args` is the original CAST argument tuple (used for DECIMAL precision/scale).
     Raises TypeError for unrecognised types — fail fast.
     """
@@ -418,8 +418,8 @@ def _cast_result_to_draken(result, resolved_type, args=()):
     )
 
 
-def resolve_cast(source_orso, target_type, args=(), unit=None, bint safe=False):
-    """Bind-time resolver: return a callable for casting source_orso → target_type.
+def resolve_cast(source_sql, target_type, args=(), unit=None, bint safe=False):
+    """Bind-time resolver: return a callable for casting source_sql → target_type.
 
     Called once per CAST node at bind time. The returned callable takes a single
     argument (the vector to cast) and returns the cast result as a Draken vector.
@@ -458,7 +458,7 @@ def resolve_cast(source_orso, target_type, args=(), unit=None, bint safe=False):
     _resolved_target = "BLOB" if target_type == "VARBINARY" else target_type
 
     # Passthrough: no-op casts (source == target)
-    if source_orso == _resolved_target:
+    if source_sql == _resolved_target:
         return lambda arr: arr
 
     # NVARCHAR target: validate UTF-8 and re-tag (any source is stringified first).
@@ -467,9 +467,9 @@ def resolve_cast(source_orso, target_type, args=(), unit=None, bint safe=False):
         return lambda arr: cast_to_nvarchar(arr, safe)
 
     # Direct kernel map for specific type pairs.
-    # Uses canonical OrsoType names (INTEGER, DOUBLE, VARCHAR, etc.)
+    # Uses canonical SqlType names (INTEGER, DOUBLE, VARCHAR, etc.)
     # For INTEGER → numeric, we use dispatch helpers that handle both INT64 and INT8/16/32.
-    if source_orso == "INTEGER":
+    if source_sql == "INTEGER":
         if _resolved_target in ("DOUBLE", "FLOAT", "FLOAT64", "FLOAT32"):
             # INTEGER → DOUBLE: dispatch helper that calls cast_to_double internally
             return cast_to_double
@@ -480,7 +480,7 @@ def resolve_cast(source_orso, target_type, args=(), unit=None, bint safe=False):
         if _resolved_target in ("VARCHAR", "BLOB", "VARBINARY"):
             return cast_to_varchar
 
-    if source_orso == "DOUBLE" or source_orso in ("FLOAT64", "FLOAT32", "FLOAT"):
+    if source_sql == "DOUBLE" or source_sql in ("FLOAT64", "FLOAT32", "FLOAT"):
         if _resolved_target in ("INTEGER", "BIGINT", "INT64", "INT32", "INT16", "INT8"):
             return cast_to_int
         if _resolved_target == "BOOLEAN":
@@ -488,7 +488,7 @@ def resolve_cast(source_orso, target_type, args=(), unit=None, bint safe=False):
         if _resolved_target in ("VARCHAR", "BLOB", "VARBINARY"):
             return cast_to_varchar
 
-    if source_orso == "BOOLEAN":
+    if source_sql == "BOOLEAN":
         if _resolved_target in ("DOUBLE", "FLOAT", "FLOAT64", "FLOAT32"):
             return cast_to_double
         if _resolved_target in ("INTEGER", "BIGINT", "INT64", "INT32", "INT16", "INT8"):
@@ -496,7 +496,7 @@ def resolve_cast(source_orso, target_type, args=(), unit=None, bint safe=False):
         if _resolved_target in ("VARCHAR", "BLOB", "VARBINARY"):
             return cast_to_varchar
 
-    if source_orso in ("VARCHAR", "STRING", "BLOB"):
+    if source_sql in ("VARCHAR", "STRING", "BLOB"):
         if _resolved_target in ("DOUBLE", "FLOAT", "FLOAT64", "FLOAT32"):
             return cast_to_double
         if _resolved_target in ("INTEGER", "BIGINT", "INT64", "INT32", "INT16", "INT8"):
@@ -505,7 +505,7 @@ def resolve_cast(source_orso, target_type, args=(), unit=None, bint safe=False):
             return cast_to_boolean
 
     # DATE/TIMESTAMP conversions
-    if source_orso in ("DATE", "DATE32"):
+    if source_sql in ("DATE", "DATE32"):
         if _resolved_target == "TIMESTAMP":
             return lambda arr: vector_date32_to_timestamp(arr)
         if _resolved_target in ("INTEGER", "BIGINT", "INT64", "INT32", "INT16", "INT8"):
@@ -513,7 +513,7 @@ def resolve_cast(source_orso, target_type, args=(), unit=None, bint safe=False):
         if _resolved_target in ("VARCHAR", "BLOB", "VARBINARY"):
             return cast_to_varchar
 
-    if source_orso == "TIMESTAMP":
+    if source_sql == "TIMESTAMP":
         if _resolved_target in ("DATE", "DATE32"):
             return lambda arr: vector_timestamp_to_date32(arr)
         if _resolved_target in ("INTEGER", "BIGINT", "INT64", "INT32", "INT16", "INT8"):
@@ -523,7 +523,7 @@ def resolve_cast(source_orso, target_type, args=(), unit=None, bint safe=False):
 
     # Parametrized casts: need specialized closures.
     if _resolved_target == "TIMESTAMP" and unit is not None:
-        if source_orso in ("INT64", "INTEGER", "BIGINT"):
+        if source_sql in ("INT64", "INTEGER", "BIGINT"):
             def _int_to_timestamp_with_unit(arr):
                 nb = _unwrap_nb(arr)
                 if is_draken_vector_fn(arr) and get_vector_type(arr) == VectorType.INTEGER:
@@ -574,7 +574,7 @@ def _build_decimal_closure(args):
     scale = int(_to_int_arg(args[1])) if len(args) >= 2 else 6
 
     def _decimal_cast(arr):
-        caster = OrsoTypes.DECIMAL.parse
+        caster = SqlType.DECIMAL.parse
         result = [caster(i) if i is not None else None for i in arr]
 
         # Quantize to the specified scale.
@@ -604,7 +604,7 @@ def _build_array_cast(arr, element_type):
 
 def _build_vector_cast(arr):
     """Build a closure for CAST to VECTOR (FP16 quantization)."""
-    caster = OrsoTypes.VECTOR.parse
+    caster = SqlType.VECTOR.parse
     result = [caster(i) for i in arr]
     return _draken_native_casts.vector_fp16_from_sequence(result)
 
@@ -619,11 +619,11 @@ def _build_varchar_cast_with_length(arr, length_arg):
 def _build_residual_cast(target_type, args):
     """Build a closure for residual (unspecialized) casts via row-loop.
 
-    These casts fall through to OrsoTypes[target_type].parse and are
+    These casts fall through to SqlType[target_type].parse and are
     flagged in the PR as candidates for native kernel implementation.
     """
     resolved_type = "BLOB" if target_type == "VARBINARY" else target_type
-    caster = OrsoTypes[resolved_type].parse
+    caster = SqlType[resolved_type].parse
 
     def _residual_cast(arr):
         # Row-loop: each value is parsed individually.
@@ -640,10 +640,10 @@ def cast(arr, _type, args=(), unit=None):
     At bind time, resolve_cast should be used directly.
     At runtime (constant folding), this invokes the resolver and applies the result.
     """
-    # For compatibility, fall back to the old behavior if source_orso can't be determined.
+    # For compatibility, fall back to the old behavior if source_sql can't be determined.
     # This handles constant-folding and other plan-time evaluations.
-    source_orso = None  # Not available in legacy path; resolver uses fallbacks.
-    kernel = resolve_cast(source_orso, _type, args, unit)
+    source_sql = None  # Not available in legacy path; resolver uses fallbacks.
+    kernel = resolve_cast(source_sql, _type, args, unit)
     return kernel
 
 
@@ -655,7 +655,7 @@ def try_cast(target_type):
     """
     def _try_cast_fn(arr):
         """Cast each element in arr, returning None on parse failures."""
-        caster = OrsoTypes[target_type].parse
+        caster = SqlType[target_type].parse
         result = []
         for item in arr:
             try:

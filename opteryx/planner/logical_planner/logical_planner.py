@@ -20,7 +20,7 @@ from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import logical_planner_builders
 from opteryx.planner.logical_planner.logical_planner_rewriter import decompose_aggregates
 from opteryx.third_party.travers import Graph
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 from opteryx.utils import dnf, random_string
 from opteryx.vectors.vector_types import (
     get_vector_source_identifier,
@@ -204,7 +204,7 @@ def extract_variable(clause):
 def extract_simple_filter(filters, identifier: str = "Name"):
     if "Like" in filters:
         left = Node(NodeType.IDENTIFIER, value=identifier)
-        right = Node(NodeType.LITERAL, type=OrsoTypes.VARCHAR, value=filters["Like"])
+        right = Node(NodeType.LITERAL, type=SqlType.VARCHAR, value=filters["Like"])
         root = Node(
             NodeType.COMPARISON_OPERATOR,
             value="ILike",  # we're case insensitive for SHOW filters
@@ -603,7 +603,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         rewritten = []
         for expr, ascending in _order_by:
             if expr.node_type == NodeType.LITERAL:
-                if expr.type != OrsoTypes.INTEGER:
+                if expr.type != SqlType.INTEGER:
                     raise UnsupportedSyntaxError("Cannot ORDER BY constant values")
                 position = int(expr.value)
                 if position < 1 or position > len(_projection):
@@ -625,8 +625,8 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     ):
         for column in _projection:
             if column.node_type == NodeType.LITERAL and column.type in (
-                OrsoTypes.ARRAY,
-                OrsoTypes.VECTOR,
+                SqlType.ARRAY,
+                SqlType.VECTOR,
             ):
                 if ast_branch["Select"].get("distinct"):
                     raise UnsupportedSyntaxError(
@@ -958,7 +958,7 @@ def create_node_relation(relation: dict):
                     col["name"]["value"] for col in subquery["alias"]["columns"]
                 )
                 values_step.values = [
-                    tuple(logical_planner_builders.build(value) for value in row)
+                    tuple(logical_planner_builders.build(value) for value in row["content"])
                     for row in subquery["subquery"]["body"]["Values"]["rows"]
                 ]
                 step_id = random_string()
@@ -1476,7 +1476,7 @@ def plan_create_table(statement, **kwargs):
         ...
     )
 
-    Maps sqloxide column types to OrsoTypes and constructs a RelationSchema.
+    Maps sqloxide column types to SqlType and constructs a RelationSchema.
     """
     from opteryx.types.schema import FlatColumn, RelationSchema
 
@@ -1519,7 +1519,7 @@ def plan_create_table(statement, **kwargs):
     if not column_defs:
         raise UnsupportedSyntaxError("CREATE TABLE requires at least one column")
 
-    # Type mapping from sqloxide to OrsoTypes
+    # Type mapping from sqloxide to SqlType
     type_mapping = {
         "BigInt": "INTEGER",
         "Int": "INTEGER",
@@ -1563,9 +1563,9 @@ def plan_create_table(statement, **kwargs):
                 f"unsupported column type in CREATE TABLE: {type_key}"
             )
 
-        # Map to OrsoTypes
-        orso_type_str = type_mapping[type_key]
-        orso_type = OrsoTypes[orso_type_str]
+        # Map to SqlType
+        sql_type_str = type_mapping[type_key]
+        sql_type = SqlType[sql_type_str]
 
         # Check for NOT NULL constraint
         col_nullable = True
@@ -1577,7 +1577,7 @@ def plan_create_table(statement, **kwargs):
                     break
 
         # Create FlatColumn
-        flat_col = FlatColumn(name=col_name, type=orso_type, nullable=col_nullable)
+        flat_col = FlatColumn(name=col_name, type=sql_type, nullable=col_nullable)
         columns.append(flat_col)
 
     create_table_node.columns = columns
@@ -1661,7 +1661,7 @@ def plan_insert(statement, **kwargs):
         )
         values_step.alias = f"$insert_values-{random_string(6)}"
         values_step.values = [
-            tuple(logical_planner_builders.build(value) for value in row)
+            tuple(logical_planner_builders.build(value) for value in row["content"])
             for row in body["Values"]["rows"]
         ]
         # Generate placeholder column names. These will be replaced by visit_insert

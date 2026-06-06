@@ -121,9 +121,9 @@ cpdef tuple _coerce_interval(value):
 cpdef object _coerce_temporal_scalar_for_arrow(value, target_type):
     # Imported lazily for the same circular-import reason as _coerce_timestamp.
     from opteryx.expression.casts import parse_timestamp_value
-    from opteryx.types import OrsoTypes
+    from opteryx.types import SqlType
 
-    if target_type == OrsoTypes.DATE:
+    if target_type == SqlType.DATE:
         if isinstance(value, datetime.datetime):
             return value.date()
         if isinstance(value, datetime.date):
@@ -133,7 +133,7 @@ cpdef object _coerce_temporal_scalar_for_arrow(value, target_type):
         return parse_timestamp_value(value).date()
 
     cdef long long ivalue
-    if target_type == OrsoTypes.TIMESTAMP:
+    if target_type == SqlType.TIMESTAMP:
         if isinstance(value, int):
             ivalue = value
             # Suspiciously-small "timestamp" that's actually days-since-epoch

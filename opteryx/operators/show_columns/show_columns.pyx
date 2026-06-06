@@ -23,7 +23,7 @@ Gives information about a dataset's columns
 
 from typing import Generator, Optional
 from opteryx.models import QueryProperties
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 from draken.interop.vector_sequence import vector_from_sequence
 
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
@@ -38,14 +38,15 @@ def _simple_collector(schema):
     nullables = []
     aliases = []
 
+    # D-4 Phase 2: display via the unified column_type (carries precision/scale
+    # inside the LogicalType, and the ARRAY element). The side-cars no longer
+    # exist; for the rare column_type==None case fall back to the bare type name.
     for column in schema.columns:
-        type_label = str(column.type)
-        if column.length is not None:
-            type_label += f"[{column.length}]"
-        if column.scale is not None and column.precision is not None:
-            type_label += f"({column.precision},{column.scale})"
-        if column.element_type is not None and str(column.type) == "ARRAY":
-            type_label += f"<{column.element_type}>"
+        ct = column.column_type
+        if ct is not None:
+            type_label = str(ct)
+        else:
+            type_label = str(column.type)
 
         names.append(column.name)
         types.append(type_label)
@@ -53,10 +54,10 @@ def _simple_collector(schema):
         aliases.append(column.aliases)
 
     vectors = [
-        vector_from_sequence(names, dtype=OrsoTypes.VARCHAR),
-        vector_from_sequence(types, dtype=OrsoTypes.VARCHAR),
-        vector_from_sequence(nullables, dtype=OrsoTypes.BOOLEAN),
-        vector_from_sequence(aliases, dtype=OrsoTypes.VARCHAR),
+        vector_from_sequence(names, dtype=SqlType.VARCHAR),
+        vector_from_sequence(types, dtype=SqlType.VARCHAR),
+        vector_from_sequence(nullables, dtype=SqlType.BOOLEAN),
+        vector_from_sequence(aliases, dtype=SqlType.VARCHAR),
     ]
 
     return Morsel.from_vectors(["name", "type", "nullable", "aliases"], vectors)

@@ -48,7 +48,7 @@ from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.models import QueryProperties
 from opteryx.utils import random_string
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 
 # Hoisted out of the per-row-group hot path. Previously these imports happened
 # 3× per row group via `from ... import ...` inside the loop body.
@@ -710,17 +710,29 @@ cdef class ParquetReadNode(ReaderNode):
         # as TAG_INT128 and are already correctly typed with their descriptor attached
         # by _wrap_decoded_fixed — skip them here or the reinterpret would corrupt them.
         # Keys are bytes — column names in the data dict are bytes (C++ parquet native).
-        from opteryx.types import OrsoTypes as _OrsoTypes
-        _decimal_col_map = {
-            col.name.encode('utf-8'): (col.precision or 18, col.scale or 0)
-            for col in base_schema.columns
-            if col.type == _OrsoTypes.DECIMAL and (col.precision or 18) <= 18
-        }
+        # D-4 Phase 2: read (precision, scale) from the unified column_type rather
+        # than the legacy side-cars. column_type carries a Draken LogicalType whose
+        # precision/scale fields are authoritative for parameterized types.
+        from opteryx.types.logical_type import LogicalCategory as _LC
+        _decimal_col_map = {}
+        for col in base_schema.columns:
+            ct = col.column_type
+            if ct is None or ct.category != _LC.DECIMAL or ct.logical is None:
+                continue
+            if ct.logical.precision <= 18:
+                _decimal_col_map[col.name.encode('utf-8')] = (
+                    ct.logical.precision, ct.logical.scale
+                )
+        # D-4 Phase 2: dispatch on LogicalCategory rather than the legacy SqlType
+        # value. column_type may be None for cases the bridge can't yet map; those
+        # columns harmlessly drop out of the coerce set.
         _date_col_set = {
-            col.name.encode('utf-8') for col in base_schema.columns if col.type == _OrsoTypes.DATE
+            col.name.encode('utf-8') for col in base_schema.columns
+            if col.column_type is not None and col.column_type.category == _LC.DATE
         }
         _timestamp_col_set = {
-            col.name.encode('utf-8') for col in base_schema.columns if col.type == _OrsoTypes.TIMESTAMP
+            col.name.encode('utf-8') for col in base_schema.columns
+            if col.column_type is not None and col.column_type.category == _LC.TIMESTAMP
         }
         predicate_root = self._compose_predicates(self.predicates or [])
 

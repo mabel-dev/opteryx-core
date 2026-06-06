@@ -10,7 +10,7 @@ from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
 from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 
 
 def visit_filter(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
@@ -29,9 +29,9 @@ def visit_filter(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     if _condition_type not in (
         None,
         0,
-        OrsoTypes.BOOLEAN,
-        OrsoTypes.NULL,
-        OrsoTypes._MISSING_TYPE,
+        SqlType.BOOLEAN,
+        SqlType.NULL,
+        SqlType._MISSING_TYPE,
     ):
         from opteryx.expression import format_expression
 

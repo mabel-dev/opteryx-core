@@ -21,7 +21,8 @@ from typing import Dict
 from opteryx.exceptions import NotSupportedError
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.utils import single_item_cache
 
 
@@ -53,14 +54,14 @@ class PredicatePushable:
         "NotLike": "NOT LIKE",
     }
 
-    PUSHABLE_TYPES: set = {t for t in OrsoTypes}
+    PUSHABLE_TYPES: set = {t for t in SqlType}
 
     def can_push(self, operator: Node, types: set = None) -> bool:
         # Boolean-returning functions are their own predicate — push without further analysis
         if (
             operator.condition.node_type == NodeType.FUNCTION
             and getattr(getattr(operator.condition, "schema_column", None), "type", None)
-            == OrsoTypes.BOOLEAN
+            == SqlType.BOOLEAN
         ):
             return True
         # we can only push simple expressions
@@ -131,20 +132,22 @@ class PredicatePushable:
                 }
                 op = INVERT_OP.get(op, op)
 
-            if root.right.schema_column.type == OrsoTypes.DATE:
+            from opteryx.types.logical_type import TIMESTAMP, VARBINARY
+
+            if root.right.schema_column.type == SqlType.DATE:
                 date_val = root.right.value
-                if hasattr(date_val, "item"):
+                if getattr(date_val, "item", None) is not None:
                     date_val = date_val.item()
                 root.right.value = datetime.datetime.combine(date_val, datetime.time.min)
-                root.right.schema_column.type = OrsoTypes.TIMESTAMP
+                root.right.schema_column.column_type = TIMESTAMP()
             if root.left.node_type != NodeType.IDENTIFIER:
                 raise NotSupportedError()
             if root.right.node_type != NodeType.LITERAL:
                 raise NotSupportedError()
-            if root.left.schema_column.type == OrsoTypes.VARCHAR:
-                root.left.schema_column.type = OrsoTypes.BLOB
-            if root.right.schema_column.type == OrsoTypes.VARCHAR:
-                root.right.schema_column.type = OrsoTypes.BLOB
+            if root.left.schema_column.type == SqlType.VARCHAR:
+                root.left.schema_column.column_type = VARBINARY
+            if root.right.schema_column.type == SqlType.VARCHAR:
+                root.right.schema_column.column_type = VARBINARY
             if root.right.schema_column.type != root.left.schema_column.type:
                 raise NotSupportedError()
             return (

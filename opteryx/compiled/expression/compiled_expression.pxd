@@ -55,8 +55,8 @@ cdef class CompiledExpressionHandle:
 # ---------------------------------------------------------------------------
 cdef enum BCTypeCode:
     BC_TYPE_NONE      = 0   # no type / not a temporal type
-    BC_TYPE_DATE      = 1   # OrsoTypes.DATE
-    BC_TYPE_TIMESTAMP = 2   # OrsoTypes.TIMESTAMP
+    BC_TYPE_DATE      = 1   # SqlType.DATE
+    BC_TYPE_TIMESTAMP = 2   # SqlType.TIMESTAMP
 
 
 # ---------------------------------------------------------------------------

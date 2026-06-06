@@ -191,13 +191,13 @@ cdef object _build_bitwise_closure(int op_code):
     return kernel
 
 
-def resolve_binary_op(int op_code, left_orso, right_orso):
+def resolve_binary_op(int op_code, left_sql, right_sql):
     """Bind-time resolver: return a callable for binary_op(left_vector, right_vector).
 
     Returns a callable with signature: (left_vector, right_vector) → Draken Vector.
-    Raises NotImplementedError if (op_code, left_orso, right_orso) is unsupported.
+    Raises NotImplementedError if (op_code, left_sql, right_sql) is unsupported.
     """
-    from opteryx.types import OrsoTypes
+    from opteryx.types import SqlType
     from opteryx.utils.vector_types import VectorType
 
     # Arithmetic ops (Plus, Minus, Multiply, Divide, Modulo, IntegerDivide)
@@ -213,7 +213,7 @@ def resolve_binary_op(int op_code, left_orso, right_orso):
     if op_code in (BOP_BITWISE_OR, BOP_BITWISE_AND, BOP_BITWISE_XOR, BOP_SHIFT_LEFT, BOP_SHIFT_RIGHT):
         # Special case: BitwiseOr on VARCHAR → IP-in-CIDR
         if op_code == BOP_BITWISE_OR:
-            if (left_orso == OrsoTypes.VARCHAR or right_orso == OrsoTypes.VARCHAR):
+            if (left_sql == SqlType.VARCHAR or right_sql == SqlType.VARCHAR):
                 from opteryx.compiled.nanobind.vector_misc import vector_ip_in_cidr
                 def _ip_in_cidr_kernel(left, right, _k=vector_ip_in_cidr):
                     return _k(_unwrap_nb(left), _unwrap_nb(right))
@@ -223,10 +223,10 @@ def resolve_binary_op(int op_code, left_orso, right_orso):
 
     # Date/Timestamp ± Interval
     if op_code in (BOP_PLUS, BOP_MINUS):
-        left_is_date = left_orso in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
-        right_is_interval = right_orso == OrsoTypes.INTERVAL
-        left_is_interval = left_orso == OrsoTypes.INTERVAL
-        right_is_date = right_orso in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
+        left_is_date = left_sql in (SqlType.DATE, SqlType.TIMESTAMP)
+        right_is_interval = right_sql == SqlType.INTERVAL
+        left_is_interval = left_sql == SqlType.INTERVAL
+        right_is_date = right_sql in (SqlType.DATE, SqlType.TIMESTAMP)
 
         if (left_is_date and right_is_interval) or (left_is_interval and right_is_date):
             def _date_interval_kernel(left, right, op_code=op_code):
@@ -238,19 +238,19 @@ def resolve_binary_op(int op_code, left_orso, right_orso):
             return _date_minus_date_draken
 
         # Interval ± Interval
-        if left_orso == OrsoTypes.INTERVAL and right_orso == OrsoTypes.INTERVAL:
+        if left_sql == SqlType.INTERVAL and right_sql == SqlType.INTERVAL:
             from opteryx.expression.intervals import INTERVAL_KERNELS
-            key = (left_orso, right_orso, "Plus" if op_code == BOP_PLUS else "Minus")
+            key = (left_sql, right_sql, "Plus" if op_code == BOP_PLUS else "Minus")
             kernel = INTERVAL_KERNELS.get(key)
             if kernel is not None:
                 # Interval kernels have signature (left, left_type, right, right_type, op_str)
                 # Wrap to match (left, right) signature
                 op_str = "Plus" if op_code == BOP_PLUS else "Minus"
                 def _interval_wrapper(left, right, kernel=kernel, op_str=op_str):
-                    return kernel(left, left_orso, right, right_orso, op_str)
+                    return kernel(left, left_sql, right, right_sql, op_str)
                 return _interval_wrapper
 
     raise NotImplementedError(
-        f"resolve_binary_op: no kernel for op_code={op_code}, left_orso={left_orso}, right_orso={right_orso}"
+        f"resolve_binary_op: no kernel for op_code={op_code}, left_sql={left_sql}, right_sql={right_sql}"
     )
 

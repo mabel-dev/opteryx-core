@@ -44,26 +44,26 @@ from typing import Any, Dict, Generator, Iterable, Optional, Union
 from opteryx.expression import NodeType
 from opteryx.expression.intervals import normalize_interval_value
 from opteryx.models import Node
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 from opteryx.types.schema import ConstantColumn
 
 
-def _infer_collection_literal(value: Any) -> tuple[OrsoTypes, Optional[OrsoTypes]]:
+def _infer_collection_literal(value: Any) -> tuple[SqlType, Optional[SqlType]]:
     if not isinstance(value, (list, tuple)) or not value:
-        return OrsoTypes.ARRAY, None
+        return SqlType.ARRAY, None
 
     element_types = {build_literal_node(item).type for item in value if item is not None}
     if len(element_types) != 1:
-        return OrsoTypes.ARRAY, None
+        return SqlType.ARRAY, None
 
     element_type = element_types.pop()
-    if element_type in (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, OrsoTypes.DECIMAL):
-        return OrsoTypes.VECTOR, OrsoTypes.DOUBLE
-    return OrsoTypes.ARRAY, element_type
+    if element_type in (SqlType.INTEGER, SqlType.DOUBLE, SqlType.DECIMAL):
+        return SqlType.VECTOR, SqlType.DOUBLE
+    return SqlType.ARRAY, element_type
 
 
 def build_literal_node(
-    value: Any, root: Optional[Node] = None, suggested_type: Optional[OrsoTypes] = None
+    value: Any, root: Optional[Node] = None, suggested_type: Optional[SqlType] = None
 ):
     """
     Build a literal node with the appropriate type based on the value.
@@ -88,42 +88,42 @@ def build_literal_node(
     if root is None:
         root = Node(
             NodeType.LITERAL,
-            schema_column=ConstantColumn(name=str(value), type=OrsoTypes._MISSING_TYPE),
+            schema_column=ConstantColumn(name=str(value), type=SqlType._MISSING_TYPE),
         )
 
     if value is None:
         # Matching None has complications
         root.value = None
         root.node_type = NodeType.LITERAL
-        root.type = OrsoTypes.NULL
+        root.type = SqlType.NULL
         root.left = None
         root.right = None
         return root
 
     collection_type = None
     element_type = None
-    if suggested_type in (OrsoTypes._MISSING_TYPE, 0, None):
+    if suggested_type in (SqlType._MISSING_TYPE, 0, None):
         collection_type, element_type = _infer_collection_literal(value)
 
-    # Define a mapping of types to OrsoTypes
+    # Define a mapping of types to SqlType
     type_mapping = {
-        bool: OrsoTypes.BOOLEAN,
-        str: OrsoTypes.VARCHAR,
-        bytes: OrsoTypes.BLOB,
-        int: OrsoTypes.INTEGER,
-        float: OrsoTypes.DOUBLE,
-        datetime.datetime: OrsoTypes.TIMESTAMP,
-        datetime.time: OrsoTypes.TIME,
-        datetime.date: OrsoTypes.DATE,
-        decimal.Decimal: OrsoTypes.DECIMAL,
-        list: collection_type or OrsoTypes.ARRAY,
-        tuple: collection_type or OrsoTypes.ARRAY,
+        bool: SqlType.BOOLEAN,
+        str: SqlType.VARCHAR,
+        bytes: SqlType.BLOB,
+        int: SqlType.INTEGER,
+        float: SqlType.DOUBLE,
+        datetime.datetime: SqlType.TIMESTAMP,
+        datetime.time: SqlType.TIME,
+        datetime.date: SqlType.DATE,
+        decimal.Decimal: SqlType.DECIMAL,
+        list: collection_type or SqlType.ARRAY,
+        tuple: collection_type or SqlType.ARRAY,
     }
 
     value_type = type(value)
     # Determine the type from the value using the mapping
-    if value_type in type_mapping or suggested_type not in (OrsoTypes._MISSING_TYPE, 0, None):
-        if suggested_type == OrsoTypes.INTERVAL:
+    if value_type in type_mapping or suggested_type not in (SqlType._MISSING_TYPE, 0, None):
+        if suggested_type == SqlType.INTERVAL:
             value = normalize_interval_value(value)
         if isinstance(value, datetime.datetime):
             from opteryx.types._datetime_conversion import timestamp_to_int64_us
@@ -135,14 +135,22 @@ def build_literal_node(
         root.node_type = NodeType.LITERAL
         root.type = (
             suggested_type
-            if suggested_type not in (OrsoTypes._MISSING_TYPE, 0, None)
+            if suggested_type not in (SqlType._MISSING_TYPE, 0, None)
             else type_mapping[value_type]
         )
-        root.element_type = element_type
+        root.element_type = element_type  # Node (AST) attribute — read by binder
         root.left = None
         root.right = None
-        root.schema_column.type = root.type
-        root.schema_column.element_type = element_type
+        # Post-construction mutation of the literal's schema_column. D-4 Phase 2:
+        # the side-cars are gone, so rebuild the authoritative `column_type` to
+        # reflect the new (type, element_type) instead of writing a dead sidecar.
+        from opteryx.types.sql_type import sql_to_column_type
+        try:
+            root.schema_column.column_type = sql_to_column_type(
+                root.type, element_type=element_type
+            )
+        except Exception:
+            root.schema_column.column_type = None
 
     # DEBUG:log (f"Unable to create literal node for {value}, of type {value_type}")
     return root

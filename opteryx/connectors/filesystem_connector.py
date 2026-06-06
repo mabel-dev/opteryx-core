@@ -19,7 +19,7 @@ from opteryx.exceptions import (
     UnsupportedSyntaxError,
 )
 from opteryx.tracing import record_event
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 from opteryx.types.schema import RelationSchema
 
 OS_SEP = os.sep
@@ -71,13 +71,13 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
     }
 
     PUSHABLE_TYPES = {
-        OrsoTypes.BLOB,
-        OrsoTypes.BOOLEAN,
-        OrsoTypes.DOUBLE,
-        OrsoTypes.INTEGER,
-        OrsoTypes.VARCHAR,
-        OrsoTypes.TIMESTAMP,
-        OrsoTypes.DATE,
+        SqlType.BLOB,
+        SqlType.BOOLEAN,
+        SqlType.DOUBLE,
+        SqlType.INTEGER,
+        SqlType.VARCHAR,
+        SqlType.TIMESTAMP,
+        SqlType.DATE,
     }
 
     def __init__(self, dataset: str, filesystem, storage_type: str, **kwargs):
@@ -149,8 +149,8 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
 
         # Schema-only read using rugo metadata extraction
         try:
-            from rugo.converters.orso import (
-                rugo_to_orso_schema,  # type: ignore[import]
+            from rugo.converters.sql_schema import (
+                rugo_to_relation_schema,  # type: ignore[import]
             )
             from rugo.parquet_reader import (
                 read_metadata_from_memoryview,  # type: ignore[import]
@@ -167,7 +167,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             try:
                 mv = stream.memoryview
                 rugo_metadata = read_metadata_from_memoryview(mv)
-                schema = rugo_to_orso_schema(rugo_metadata, schema_name=blob_name)
+                schema = rugo_to_relation_schema(rugo_metadata, schema_name=blob_name)
                 return schema
             finally:
                 stream.close()

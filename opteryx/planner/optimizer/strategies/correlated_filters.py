@@ -18,7 +18,7 @@ from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 from opteryx.utils import random_string
 
 from .optimization_strategy import (
@@ -152,9 +152,9 @@ def _literal_node_from_statistics(stat_value, column_type):
     if stat_value is None:
         return None
     literal_value = stat_value
-    if column_type == OrsoTypes.VARCHAR:
+    if column_type == SqlType.VARCHAR:
         literal_value = _decode_string_prefix(stat_value)
-    elif column_type == OrsoTypes.BLOB:
+    elif column_type == SqlType.BLOB:
         literal_value = _decode_string_prefix(stat_value, as_bytes=True)
     return build_literal_node(literal_value, suggested_type=column_type)
 

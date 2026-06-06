@@ -49,7 +49,8 @@ from opteryx.models import Node, QueryTelemetry
 from opteryx.planner import build_literal_node
 from opteryx.planner.binder.operator_map import determine_type
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
+from opteryx.types import logical_type as _lt
 from opteryx.types.schema import ConstantColumn
 from opteryx.utils.dates import add_single_unit, parse_iso, truncate_single
 from opteryx.utils.sql import sql_like_to_regex
@@ -73,7 +74,7 @@ def rewrite_in_to_eq(predicate):
     """
     predicate.value = IN_REWRITES[predicate.value]
     predicate.right.value = tuple(predicate.right.value)[0]
-    predicate.right.type = predicate.right.element_type or OrsoTypes.VARCHAR
+    predicate.right.type = predicate.right.element_type or SqlType.VARCHAR
     predicate.right.element_type = None
     return predicate
 
@@ -100,8 +101,8 @@ def reorder_interval_calc(predicate):
             right=interval,
         )
         binary_op_column_name = format_expression(new_binary_op, True)
-        new_binary_op.schema_column = ExpressionColumn(
-            name=binary_op_column_name, type=OrsoTypes.TIMESTAMP
+        new_binary_op.schema_column = ExpressionColumn.from_column_type(
+            name=binary_op_column_name, column_type=_lt.TIMESTAMP()
         )
 
         # Create a new comparison operator node for date > date
@@ -110,8 +111,8 @@ def reorder_interval_calc(predicate):
         predicate.left = date_end
 
         predicate_column_name = format_expression(predicate, True)
-        predicate.schema_column = ExpressionColumn(
-            name=predicate_column_name, type=OrsoTypes.BOOLEAN
+        predicate.schema_column = ExpressionColumn.from_column_type(
+            name=predicate_column_name, column_type=_lt.BOOLEAN
         )
 
         return predicate
@@ -175,7 +176,7 @@ def rewrite_ored_like_to_regex(predicate, telemetry):
             for node in like_data["nodes"][1:]:
                 node.value = False
                 node.node_type = NodeType.LITERAL
-                node.type = OrsoTypes.BOOLEAN
+                node.type = SqlType.BOOLEAN
 
     return predicate
 
@@ -222,13 +223,29 @@ def rewrite_ored_any_eq_to_contains(predicate, telemetry):
 
             new_node.left.value = list(set(data["values"]))
             new_node.left.element_type = new_node.left.type
-            new_node.left.type = OrsoTypes.ARRAY
-            new_node.left.schema_column = ConstantColumn(
-                name=new_node.left.name,
-                type=OrsoTypes.ARRAY,
-                element_type=new_node.left.element_type,
-                value=new_node.left.value,
-            )
+            new_node.left.type = SqlType.ARRAY
+            # D-4 Phase 2: construct via the unified column_type path. Build an
+            # ARRAY<element> ColumnType where element comes from the original type
+            # (now stashed into element_type above).
+            from opteryx.types.sql_type import sql_to_column_type as _otoct
+            from opteryx.types import logical_type as _lt
+            try:
+                _elem_ct = _otoct(new_node.left.element_type)
+                _arr_ct = _lt.ARRAY(_elem_ct)
+                new_node.left.schema_column = ConstantColumn.from_column_type(
+                    name=new_node.left.name,
+                    column_type=_arr_ct,
+                    value=new_node.left.value,
+                )
+            except Exception:
+                # Bridge can't map this element type (e.g. VECTOR) — fall back to
+                # the legacy constructor so we don't lose the rewrite.
+                new_node.left.schema_column = ConstantColumn(
+                    name=new_node.left.name,
+                    type=SqlType.ARRAY,
+                    element_type=new_node.left.element_type,
+                    value=new_node.left.value,
+                )
 
             new_node.value = "AtArrow"
             new_node.node_type = NodeType.COMPARISON_OPERATOR
@@ -239,7 +256,7 @@ def rewrite_ored_any_eq_to_contains(predicate, telemetry):
             # Disable the remaining OR nodes
             for node in data["nodes"][1:]:
                 node.node_type = NodeType.LITERAL
-                node.type = OrsoTypes.BOOLEAN
+                node.type = SqlType.BOOLEAN
                 node.value = False
 
     return predicate
@@ -293,17 +310,27 @@ def rewrite_ored_eq_to_inlist(predicate, telemetry):
             new_node.value = "InList"
             new_node.right.value = list(set(eq_data["values"]))
             new_node.right.element_type = new_node.right.type
-            new_node.right.type = OrsoTypes.ARRAY
-            new_node.right.schema_column = ConstantColumn(
-                name=new_node.right.name,
-                type=OrsoTypes.ARRAY,
-                element_type=new_node.right.element_type,
-                value=new_node.right.value,
-            )
+            new_node.right.type = SqlType.ARRAY
+            # D-4 Phase 2: column_type construction for ARRAY ConstantColumn.
+            try:
+                _elem_ct = _otoct(new_node.right.element_type)
+                _arr_ct = _lt.ARRAY(_elem_ct)
+                new_node.right.schema_column = ConstantColumn.from_column_type(
+                    name=new_node.right.name,
+                    column_type=_arr_ct,
+                    value=new_node.right.value,
+                )
+            except Exception:
+                new_node.right.schema_column = ConstantColumn(
+                    name=new_node.right.name,
+                    type=SqlType.ARRAY,
+                    element_type=new_node.right.element_type,
+                    value=new_node.right.value,
+                )
             for node in eq_data["nodes"][1:]:
                 node.value = False
                 node.node_type = NodeType.LITERAL
-                node.type = OrsoTypes.BOOLEAN
+                node.type = SqlType.BOOLEAN
 
     return predicate
 
@@ -345,11 +372,11 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry):
             node = data["node"]
             left_type = getattr(getattr(node.left, "schema_column", None), "type", None)
             _COERCE = {
-                OrsoTypes.DOUBLE: float,
-                OrsoTypes.INTEGER: int,
-                OrsoTypes.BOOLEAN: bool,
-                OrsoTypes.VARCHAR: lambda v: v.encode("utf-8") if isinstance(v, str) else v,
-                OrsoTypes.BLOB: lambda v: v if isinstance(v, bytes) else str(v).encode("utf-8"),
+                SqlType.DOUBLE: float,
+                SqlType.INTEGER: int,
+                SqlType.BOOLEAN: bool,
+                SqlType.VARCHAR: lambda v: v.encode("utf-8") if isinstance(v, str) else v,
+                SqlType.BLOB: lambda v: v if isinstance(v, bytes) else str(v).encode("utf-8"),
             }
             coerce = _COERCE.get(left_type, lambda v: v)
             values = sorted(str(v) for v in set(data["values"]))
@@ -359,13 +386,23 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry):
                 None if v is None else coerce(v) for v in values
             ]
             node.right.element_type = node.right.type
-            node.right.type = OrsoTypes.ARRAY
-            node.right.schema_column = ConstantColumn(
-                name=node.right.name,
-                type=OrsoTypes.ARRAY,
-                element_type=node.right.element_type,
-                value=node.right.value,
-            )
+            node.right.type = SqlType.ARRAY
+            # D-4 Phase 2: column_type construction for ARRAY ConstantColumn.
+            try:
+                _elem_ct = _otoct(node.right.element_type)
+                _arr_ct = _lt.ARRAY(_elem_ct)
+                node.right.schema_column = ConstantColumn.from_column_type(
+                    name=node.right.name,
+                    column_type=_arr_ct,
+                    value=node.right.value,
+                )
+            except Exception:
+                node.right.schema_column = ConstantColumn(
+                    name=node.right.name,
+                    type=SqlType.ARRAY,
+                    element_type=node.right.element_type,
+                    value=node.right.value,
+                )
             new_params.append(node)
             telemetry.optimization_predicate_rewriter_eqs_to_list = (
                 getattr(telemetry, "optimization_predicate_rewriter_eqs_to_list", 0) + 1
@@ -417,9 +454,9 @@ def _build_emptiness_node(ident, op_name):
         value=op_name,
         centre=ident,
     )
-    new_node.schema_column = ExpressionColumn(
+    new_node.schema_column = ExpressionColumn.from_column_type(
         name=format_expression(new_node, True),
-        type=OrsoTypes.BOOLEAN,
+        column_type=_lt.BOOLEAN,
     )
     return new_node
 
@@ -467,7 +504,7 @@ def rewrite_string_empty_compare(predicate, telemetry):
             col_type = getattr(getattr(ident, "schema_column", None), "type", None)
             val = literal.value
             if (
-                col_type in {OrsoTypes.VARCHAR, OrsoTypes.BLOB}
+                col_type in {SqlType.VARCHAR, SqlType.BLOB}
                 and val is not None
                 and val in ("", b"")
             ):
@@ -502,7 +539,7 @@ def rewrite_string_empty_compare(predicate, telemetry):
     if inner.node_type != NodeType.IDENTIFIER:
         return predicate
     col_type = getattr(getattr(inner, "schema_column", None), "type", None)
-    if col_type not in {OrsoTypes.VARCHAR, OrsoTypes.BLOB}:
+    if col_type not in {SqlType.VARCHAR, SqlType.BLOB}:
         return predicate
 
     val = literal.value
@@ -588,19 +625,20 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
     telemetry.optimization_predicate_rewriter_date_trunc_to_range += 1
 
     # Get the column's actual type to match the literal type
-    column_type = OrsoTypes.VARCHAR
-    if hasattr(column_node, "schema_column") and column_node.schema_column:
+    column_type = SqlType.VARCHAR
+    column_ct = _lt.VARCHAR  # unified ColumnType for the schema_column
+    if column_node.schema_column:
         column_type = column_node.schema_column.type
+        column_ct = column_node.schema_column.column_type or _lt.VARCHAR
 
-    # Helper function to create a literal timestamp node with VARCHAR type
-    # (ISO format strings work fine for timestamp comparisons)
+    # Helper function to create a literal timestamp node with the column's type
     def make_timestamp_literal(dt):
         lit = Node(
             node_type=NodeType.LITERAL,
             value=dt,
             type=column_type,
         )
-        lit.schema_column = ExpressionColumn(name="", type=column_type)
+        lit.schema_column = ExpressionColumn.from_column_type(name="", column_type=column_ct)
         return lit
 
     # Rewrite based on operator and alignment
@@ -608,7 +646,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
         if not is_aligned:
             # Non-aligned equality is always false
             predicate.node_type = NodeType.LITERAL
-            predicate.type = OrsoTypes.BOOLEAN
+            predicate.type = SqlType.BOOLEAN
             predicate.value = False
             return predicate
 
@@ -621,7 +659,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
             value="GtEq",
             left=column_node,
             right=floor_literal,
-            schema_column=ExpressionColumn(name="", type=OrsoTypes.BOOLEAN),
+            schema_column=ExpressionColumn.from_column_type(name="", column_type=_lt.BOOLEAN),
         )
 
         lt_pred = Node(
@@ -629,7 +667,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
             value="Lt",
             left=column_node,
             right=next_literal,
-            schema_column=ExpressionColumn(name="", type=OrsoTypes.BOOLEAN),
+            schema_column=ExpressionColumn.from_column_type(name="", column_type=_lt.BOOLEAN),
         )
 
         # Create AND node
@@ -670,7 +708,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
             value="Lt",
             left=column_node,
             right=make_timestamp_literal(floor_val),
-            schema_column=ExpressionColumn(name="", type=OrsoTypes.BOOLEAN),
+            schema_column=ExpressionColumn.from_column_type(name="", column_type=_lt.BOOLEAN),
         )
 
         gte_pred = Node(
@@ -678,7 +716,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
             value="GtEq",
             left=column_node,
             right=make_timestamp_literal(next_floor),
-            schema_column=ExpressionColumn(name="", type=OrsoTypes.BOOLEAN),
+            schema_column=ExpressionColumn.from_column_type(name="", column_type=_lt.BOOLEAN),
         )
 
         predicate.node_type = NodeType.OR
@@ -815,7 +853,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
         if rewritten is not predicate:
             return rewritten
 
-    if predicate.right.type == OrsoTypes.VARCHAR:
+    if predicate.right.type == SqlType.VARCHAR:
         if predicate.value in {"Like", "ILike", "NotLike", "NotILike"}:
             if "%%" in predicate.right.value:
                 telemetry.optimization_predicate_rewriter_remove_adjacent_wildcards += 1
@@ -891,7 +929,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
     if predicate.node_type in {NodeType.FUNCTION, NodeType.NOT}:
         return predicate
 
-    if predicate.right.type == OrsoTypes.BLOB:
+    if predicate.right.type == SqlType.BLOB:
         if predicate.value in {"Like", "ILike", "NotLike", "NotILike"}:
             if b"%%" in predicate.right.value:
                 telemetry.optimization_predicate_rewriter_remove_adjacent_wildcards += 1
@@ -989,8 +1027,8 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
         and predicate.left.node_type == NodeType.BINARY_OPERATOR
     ):
         if (
-            determine_type(predicate.left) == OrsoTypes.INTERVAL
-            and determine_type(predicate.right) == OrsoTypes.INTERVAL
+            determine_type(predicate.left) == SqlType.INTERVAL
+            and determine_type(predicate.right) == SqlType.INTERVAL
         ):
             telemetry.optimization_predicate_rewriter_date_ += 1
             predicate = dispatcher["reorder_interval_calc"](predicate)
@@ -1009,7 +1047,11 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
             raise ValueError(f"Unable to resolve rewritten function '{function.value}'")
         function.function_ref = resolved
         if getattr(function, "schema_column", None) is not None and resolved.inferred_return_type:
-            function.schema_column.type = resolved.inferred_return_type
+            from opteryx.types.sql_type import sql_to_column_type
+            try:
+                function.schema_column.column_type = sql_to_column_type(resolved.inferred_return_type)
+            except Exception:
+                pass
 
     def _normalise_dfa_replacement(value):
         if isinstance(value, bytes):
@@ -1060,7 +1102,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
             build_literal_node(
                 compiled_program,
                 root=function.parameters[1],
-                suggested_type=OrsoTypes.BLOB,
+                suggested_type=SqlType.BLOB,
             ),
         ]
         _rebind_function_ref()
@@ -1094,7 +1136,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
                 value="StringConcat",
                 left=left_node,
                 right=param,
-                schema_column=ExpressionColumn(name="", type=OrsoTypes.VARCHAR),
+                schema_column=ExpressionColumn.from_column_type(name="", column_type=_lt.VARCHAR),
             )
         left_node.alias = function.alias
         left_node.schema_column = function.schema_column
@@ -1110,14 +1152,14 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
                 value="StringConcat",
                 left=left_node,
                 right=separator,
-                schema_column=ExpressionColumn(name="", type=OrsoTypes.VARCHAR),
+                schema_column=ExpressionColumn.from_column_type(name="", column_type=_lt.VARCHAR),
             )
             left_node = Node(
                 node_type=NodeType.BINARY_OPERATOR,
                 value="StringConcat",
                 left=separator_node,
                 right=param,
-                schema_column=ExpressionColumn(name="", type=OrsoTypes.VARCHAR),
+                schema_column=ExpressionColumn.from_column_type(name="", column_type=_lt.VARCHAR),
             )
         left_node.alias = function.alias
         left_node.schema_column = function.schema_column

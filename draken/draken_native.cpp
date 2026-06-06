@@ -5040,7 +5040,19 @@ NB_MODULE(draken_native, m) {
             }
             r += ")";
             return r;
-        });
+        })
+        // copy/deepcopy support: LogicalType is a value-equal, hashable, immutable
+        // descriptor (the C++ side interns them via logical_type_intern). copy/deepcopy
+        // can correctly return self — there is no aliasing hazard. Required so that
+        // FlatColumn instances (which may carry a ColumnType with a LogicalType) can
+        // be deepcopied (the binder's merge_schemas does this per schema). Without it
+        // copy.deepcopy raises `TypeError: cannot pickle 'LogicalType' object`.
+        .def("__copy__",
+             [](const LogicalType& self) -> LogicalType { return self; })
+        .def("__deepcopy__",
+             [](const LogicalType& self, nb::handle /*memo*/) -> LogicalType {
+                 return self;
+             });
 
     // Vector: Python handle around VectorOwner. Destructor triggers RAII free.
     // Boxing (to Python objects) happens only in __getitem__ and to_pylist — nowhere else.

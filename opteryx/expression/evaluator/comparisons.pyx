@@ -30,7 +30,7 @@ from opteryx.compiled.nanobind.vector_string_search import vector_contains
 from libc.stdint cimport int16_t
 
 from opteryx.compiled.nanobind.vector_misc import vector_in_list
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 # Note: _json_at_arrow, _json_array_contains_all, _json_at_question,
 # _coerce_date32, _coerce_float, _coerce_int64, _coerce_timestamp are textually

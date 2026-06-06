@@ -75,43 +75,51 @@ def _decimal_ps(ct: ColumnType):
 
 
 def _make_decimal(precision: int, scale: int) -> ColumnType:
-    """Build a DECIMAL result, choosing physical tier and applying SQL Server overflow policy.
+    """Build a DECIMAL result, choosing physical tier and clamping precision at 38.
 
-    p ≤ 38: use lt.DECIMAL(p, s) which selects int64 (p≤18) or int128 DECIMAL128 (p≤38).
-    p > 38: reduce scale to fit (SQL Server style, floor 6); if integral part still won't
-    fit in 38 digits, RAISE — no wider tier exists.  Never silently truncate.
+    Matches the runtime's posture (`draken_native.cpp` `decimal_*_dispatch`):
+    cap precision at 38, cap scale at min(scale, 38). Actual int128 value overflow
+    raises per-value at execute time (the runtime checks); the binder doesn't
+    pre-raise on a *declared* precision exceeding 38, because real values rarely
+    fill the declared headroom.
+
+    Tier selection: p ≤ 18 → DECIMAL (int64); 19 ≤ p ≤ 38 → DECIMAL128 (int128).
     """
-    if precision <= _DECIMAL_MAX_PRECISION:
-        # lt.DECIMAL chooses the physical tier: DECIMAL (int64) or DECIMAL128 (int128)
-        return lt.DECIMAL(precision, scale)
-    # Over 38 — attempt scale reduction (SQL Server convention)
-    integral = precision - scale
-    if integral >= _DECIMAL_MAX_PRECISION:
-        raise OverflowError(
-            f"DECIMAL result integer part ({integral} digits) exceeds max precision "
-            f"({_DECIMAL_MAX_PRECISION}); no wider backing available"
-        )
-    reduced_scale = _DECIMAL_MAX_PRECISION - integral
-    if reduced_scale < _DECIMAL_MIN_SCALE:
-        raise OverflowError(
-            f"DECIMAL result cannot fit in precision {_DECIMAL_MAX_PRECISION} while "
-            f"keeping min scale {_DECIMAL_MIN_SCALE}"
-        )
-    return lt.DECIMAL(_DECIMAL_MAX_PRECISION, reduced_scale)
+    if precision > _DECIMAL_MAX_PRECISION:
+        precision = _DECIMAL_MAX_PRECISION
+    if scale > precision:
+        scale = precision
+    if scale < 0:
+        scale = 0
+    # lt.DECIMAL chooses the physical tier: DECIMAL (int64) or DECIMAL128 (int128)
+    return lt.DECIMAL(precision, scale)
 
 
 def _decimal_result(left: ColumnType, right: ColumnType, op: str) -> ColumnType:
+    """Derive DECIMAL result (precision, scale) for a binary op.
+
+    MATCHES THE RUNTIME (draken_native.cpp `decimal_*_dispatch`):
+      Plus/Minus: scale = max(s1,s2);  precision = max(s1,s2) + max(p1-s1, p2-s2) + 1
+      Multiply:   scale = s1+s2;       precision = p1 + p2          (NB: no `+1`)
+      Divide:     scale = max(s1+6,6); precision = p1 + 6           (NB: pa+6 cap)
+
+    The binder MUST agree with what the runtime actually computes. Decision E's
+    earlier formulas (mul p1+p2+1, divide scale s1+p2+1) and "reduce-scale-then-raise"
+    policy were written before the runtime shipped; reconciling here keeps a single
+    source of truth and avoids regressing TPC-H q09 (nested decimal arithmetic whose
+    runtime-derived precision the binder would have raised on).
+    """
     p1, s1 = _decimal_ps(left)
     p2, s2 = _decimal_ps(right)
     if op in ("Plus", "Minus"):
         scale = max(s1, s2)
         precision = max(s1, s2) + max(p1 - s1, p2 - s2) + 1
     elif op == "Multiply":
-        precision = p1 + p2 + 1
+        precision = p1 + p2
         scale = s1 + s2
     elif op == "Divide":
-        scale = max(_DECIMAL_MIN_SCALE, s1 + p2 + 1)
-        precision = p1 - s1 + s2 + scale
+        scale = max(s1 + _DECIMAL_MIN_SCALE, _DECIMAL_MIN_SCALE)
+        precision = p1 + _DECIMAL_MIN_SCALE
     else:
         raise NotImplementedError(f"no DECIMAL result rule for operator {op!r}")
     return _make_decimal(precision, scale)

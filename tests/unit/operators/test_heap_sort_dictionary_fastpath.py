@@ -46,7 +46,13 @@ def _run_sort(table, order_by):
 
 
 def _identifier(name, value_type=OrsoTypes.VECTOR, element_type=None):
-    column = FlatColumn(name=name, type=value_type, element_type=element_type)
+    from opteryx.types._orso_types import orso_to_column_type
+    from opteryx.types import logical_type as _lt
+    try:
+        ct = orso_to_column_type(value_type, element_type=element_type)
+        column = FlatColumn.from_column_type(name=name, column_type=ct)
+    except Exception:
+        column = FlatColumn(name=name, type=value_type)
     column.identity = name
     return Node(NodeType.IDENTIFIER, schema_column=column)
 

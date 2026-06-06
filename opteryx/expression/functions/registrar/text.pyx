@@ -59,7 +59,7 @@ from opteryx.expression.functions import (
     ParameterSpec,
     ReturnSpec,
 )
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 
 
 def get_builtin_text_functions() -> List[FunctionDefinition]:
@@ -78,7 +78,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "UPPER",
             vector_uppercase,
-            OrsoTypes.VARCHAR,
+            SqlType.VARCHAR,
             (_str,),
             aliases=("UCASE",),
             category="text",
@@ -89,7 +89,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "LOWER",
             vector_lowercase,
-            OrsoTypes.VARCHAR,
+            SqlType.VARCHAR,
             (_str,),
             aliases=("LCASE",),
             category="text",
@@ -110,7 +110,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                 FunctionOverload(
                     id="LENGTH_string",
                     parameters=(_string,),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.INTEGER),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -121,7 +121,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                 FunctionOverload(
                     id="LENGTH_array",
                     parameters=(ParameterSpec(name="arr", type_family="array"),),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.INTEGER),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -144,7 +144,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                 FunctionOverload(
                     id="OCTET_LENGTH_string",
                     parameters=(_string,),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.INTEGER),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -157,7 +157,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "INITCAP",
             vector_initcap,
-            OrsoTypes.VARCHAR,
+            SqlType.VARCHAR,
             (_string,),
             aliases=("TITLE",),
             category="text",
@@ -168,7 +168,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "REVERSE",
             vector_reverse,
-            OrsoTypes.VARCHAR,
+            SqlType.VARCHAR,
             (_string,),
             category="text",
             engine="draken",
@@ -178,7 +178,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "SOUNDEX",
             vector_soundex,
-            OrsoTypes.VARCHAR,
+            SqlType.VARCHAR,
             (_string,),
             category="text",
             engine="draken",
@@ -202,7 +202,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="str2", type_family="any"),
                         ParameterSpec(name="strs", type_family="any", variadic=True, optional=True),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.VARCHAR),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -229,7 +229,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                         _string,
                         ParameterSpec(name="from_pos", type_family="integer"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.VARCHAR),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -246,7 +246,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="from_pos", type_family="integer"),
                         ParameterSpec(name="count", type_family="integer"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.VARCHAR),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -259,7 +259,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "LEFT",
             vector_string_slice_left,
-            OrsoTypes.VARCHAR,
+            SqlType.VARCHAR,
             (
                 _string,
                 ParameterSpec(name="length", type_family="integer"),
@@ -271,7 +271,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "RIGHT",
             vector_string_slice_right,
-            OrsoTypes.VARCHAR,
+            SqlType.VARCHAR,
             (
                 _string,
                 ParameterSpec(name="length", type_family="integer"),
@@ -283,7 +283,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "_STARTS_WITH",
             vector_starts_with,
-            OrsoTypes.BOOLEAN,
+            SqlType.BOOLEAN,
             (
                 ParameterSpec(name="haystack", type_family="string"),
                 ParameterSpec(name="needle", type_family="string", constant_only=True),
@@ -295,7 +295,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "_CI_STARTS_WITH",
             vector_ci_starts_with,
-            OrsoTypes.BOOLEAN,
+            SqlType.BOOLEAN,
             (
                 ParameterSpec(name="haystack", type_family="string"),
                 ParameterSpec(name="needle", type_family="string", constant_only=True),
@@ -307,7 +307,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "_ENDS_WITH",
             vector_ends_with,
-            OrsoTypes.BOOLEAN,
+            SqlType.BOOLEAN,
             (
                 ParameterSpec(name="haystack", type_family="string"),
                 ParameterSpec(name="needle", type_family="string", constant_only=True),
@@ -319,7 +319,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "_CI_ENDS_WITH",
             vector_ci_ends_with,
-            OrsoTypes.BOOLEAN,
+            SqlType.BOOLEAN,
             (
                 ParameterSpec(name="haystack", type_family="string"),
                 ParameterSpec(name="needle", type_family="string", constant_only=True),
@@ -353,9 +353,9 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
     )
     _search = ParameterSpec(name="search", type_family="string")
 
-    def _trim_return_type(arg_nodes) -> OrsoTypes:
+    def _trim_return_type(arg_nodes) -> SqlType:
         """TRIM/LTRIM/RTRIM always return VARCHAR."""
-        return OrsoTypes.VARCHAR
+        return SqlType.VARCHAR
 
     def _concat_ws_kernel(sep, *args):
         """Concatenate with separator, skipping nulls."""
@@ -381,7 +381,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="str1", type_family="any"),
                         ParameterSpec(name="strs", type_family="any", variadic=True, optional=True),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.VARCHAR),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -408,7 +408,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                         _string,
                         ParameterSpec(name="delimiter", type_family="string"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.ARRAY),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.ARRAY),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -423,7 +423,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="delimiter", type_family="string"),
                         ParameterSpec(name="limit", type_family="integer"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.ARRAY),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.ARRAY),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -449,7 +449,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="sub", type_family="string"),
                         _string,
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.INTEGER),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -462,7 +462,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
         _make(
             "REPLACE",
             vector_replace,
-            OrsoTypes.VARCHAR,
+            SqlType.VARCHAR,
             (
                 _string,
                 _search,
@@ -489,7 +489,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                         _pattern,
                         _replacement,
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.VARCHAR),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -516,7 +516,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                         _string,
                         _compiled_program,
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.VARCHAR),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -599,7 +599,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
         _make(
             "LEVENSHTEIN",
             vector_levenshtein,
-            OrsoTypes.INTEGER,
+            SqlType.INTEGER,
             (
                 _string,
                 ParameterSpec(name="str2", type_family="string"),
@@ -626,7 +626,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="width", type_family="integer"),
                         ParameterSpec(name="fill", type_family="string"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.VARCHAR),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -653,7 +653,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="width", type_family="integer"),
                         ParameterSpec(name="fill", type_family="string"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.VARCHAR),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -676,7 +676,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                 FunctionOverload(
                     id="TO_CHAR_1",
                     parameters=(ParameterSpec(name="num", type_family="integer"),),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.VARCHAR),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -699,7 +699,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                 FunctionOverload(
                     id="TO_ASCII_1",
                     parameters=(_string,),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.INTEGER),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -725,7 +725,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                         _string,
                         ParameterSpec(name="query", type_family="string"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.BOOLEAN),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.BOOLEAN),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",

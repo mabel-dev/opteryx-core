@@ -26,7 +26,8 @@ from opteryx.managers.virtual_datasets import no_table_data
 from opteryx.models import Node, QueryTelemetry
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
+from opteryx.types.logical_type import LogicalCategory as LC
 from opteryx.utils.vector_types import is_draken_vector
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
@@ -170,7 +171,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
             ):
                 # column LIKE '%' is True
                 node = Node(node_type=NodeType.UNARY_OPERATOR)
-                node.type = OrsoTypes.BOOLEAN
+                node.type = SqlType.BOOLEAN
                 node.value = "IsNotNull"
                 node.schema_column = root.schema_column
                 node.centre = root.left
@@ -191,7 +192,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         if root.node_type == NodeType.OR:
             if (
                 root.left.node_type == NodeType.LITERAL
-                and root.left.type == OrsoTypes.BOOLEAN
+                and root.left.type == SqlType.BOOLEAN
                 and root.left.value
             ):
                 # True OR anything is True (including NULL)
@@ -200,7 +201,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 return node
             if (
                 root.right.node_type == NodeType.LITERAL
-                and root.right.type == OrsoTypes.BOOLEAN
+                and root.right.type == SqlType.BOOLEAN
                 and root.right.value
             ):
                 # anything OR True is True (including NULL)
@@ -209,7 +210,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 return node
             if (
                 root.left.node_type == NodeType.LITERAL
-                and root.left.type == OrsoTypes.BOOLEAN
+                and root.left.type == SqlType.BOOLEAN
                 and not root.left.value
             ):
                 # False OR anything is anything (except NULL)
@@ -218,7 +219,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 return node
             if (
                 root.right.node_type == NodeType.LITERAL
-                and root.right.type == OrsoTypes.BOOLEAN
+                and root.right.type == SqlType.BOOLEAN
                 and not root.right.value
             ):
                 # anything OR False is anything (except NULL)
@@ -229,7 +230,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         elif root.node_type == NodeType.AND:
             if (
                 root.left.node_type == NodeType.LITERAL
-                and root.left.type == OrsoTypes.BOOLEAN
+                and root.left.type == SqlType.BOOLEAN
                 and not root.left.value
             ):
                 # False AND anything is False (including NULL)
@@ -238,7 +239,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 return node
             if (
                 root.right.node_type == NodeType.LITERAL
-                and root.right.type == OrsoTypes.BOOLEAN
+                and root.right.type == SqlType.BOOLEAN
                 and not root.right.value
             ):
                 # anything AND False is False (including NULL)
@@ -247,7 +248,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 return node
             if (
                 root.left.node_type == NodeType.LITERAL
-                and root.left.type == OrsoTypes.BOOLEAN
+                and root.left.type == SqlType.BOOLEAN
                 and root.left.value
             ):
                 # True AND anything is anything (except NULL)
@@ -256,12 +257,12 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 return node
             if (
                 root.right.node_type == NodeType.LITERAL
-                and root.right.type == OrsoTypes.BOOLEAN
+                and root.right.type == SqlType.BOOLEAN
                 and root.right.value
             ):
                 # anything AND True is anything (except NULL)
                 node = _build_passthru_node(root, root.left, telemetry)
-                node.type = OrsoTypes.BOOLEAN
+                node.type = SqlType.BOOLEAN
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
 
@@ -282,15 +283,17 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         for i, param in enumerate(root.parameters):
             root.parameters[i] = fold_constants(param, telemetry)
 
+    _root_ct = getattr(root.schema_column, "column_type", None) if root.schema_column is not None else None
+    _root_cat = _root_ct.category if _root_ct is not None else None
     if (
         len(identifiers) == 0
         and len(aggregators) == 0
-        and root.schema_column.type != OrsoTypes.INTERVAL
+        and _root_cat != LC.INTERVAL
         # NVARCHAR / VARIANT cannot be represented as a folded scalar literal yet
         # (literal materialisation produces a VARCHAR constant), so folding would
         # drop the type. Leave the runtime expression in place to preserve it.
-        and root.schema_column.type != OrsoTypes.NVARCHAR
-        and root.schema_column.type != OrsoTypes.VARIANT
+        and _root_cat != LC.NVARCHAR
+        and _root_cat != LC.VARIANT
     ):
         table = no_table_data.read()
         bc = build_bytecode(lower(root))

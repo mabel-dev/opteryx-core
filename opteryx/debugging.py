@@ -4,9 +4,9 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Opteryx and Orso Import Customization
+Opteryx Import Customization
 -------------------------------------
-This module provides custom import mechanics for modules within Opteryx and Orso projects.
+This module provides custom import mechanics for modules within Opteryx.
 In production, Python's import system will see the original source code without comments.
 In a development environment, specific comments like '# DEBUG:' are transformed into
 print statements, providing additional debugging information.
@@ -21,13 +21,13 @@ import importlib.util
 import sys
 
 
-class OpteryxOrsoImportFinder(importlib.abc.MetaPathFinder):
+class OpteryxImportFinder(importlib.abc.MetaPathFinder):
     """
-    Custom Import Finder that looks for modules starting with 'opteryx' or 'Orso'.
+    Custom Import Finder that looks for modules starting with 'opteryx'.
     """
 
     def find_spec(self, fullname, path: str, target=None):
-        if not (fullname.startswith("opteryx") or fullname.startswith("Orso")):
+        if not fullname.startswith("opteryx"):
             return None
 
         sys.meta_path.remove(self)
@@ -38,12 +38,12 @@ class OpteryxOrsoImportFinder(importlib.abc.MetaPathFinder):
             return None
 
         if spec.loader and isinstance(spec.loader, importlib.abc.SourceLoader):
-            spec.loader = OpteryxOrsoImportLoader(spec.loader)
+            spec.loader = OpteryxImportLoader(spec.loader)
 
         return spec
 
 
-class OpteryxOrsoImportLoader(importlib.abc.SourceLoader):
+class OpteryxImportLoader(importlib.abc.SourceLoader):
     """
     Custom Import Loader to process Python source code before it's actually imported.
     """
@@ -89,4 +89,4 @@ class OpteryxOrsoImportLoader(importlib.abc.SourceLoader):
 
 # Register the custom MetaPathFinder
 print(f"{datetime.datetime.now()} [LOADER] Loading Opteryx in DEBUG mode.")
-sys.meta_path.insert(0, OpteryxOrsoImportFinder())
+sys.meta_path.insert(0, OpteryxImportFinder())

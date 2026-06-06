@@ -1,13 +1,14 @@
 """
-Internal Opteryx DataFrame class - minimal replacement for orso.DataFrame.
+Internal Opteryx DataFrame class - minimal replacement for sql.DataFrame.
 
-This provides the interface that Session depends on without requiring the orso package.
+This provides the interface that Session depends on without requiring the sql package.
 Only implements the methods actually used by Opteryx (not a full DataFrame replacement).
 """
 
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
+from opteryx.types import logical_type as _lt
 from opteryx.types.schema import FlatColumn, RelationSchema
 
 __all__ = ["DataFrame"]
@@ -16,7 +17,7 @@ __all__ = ["DataFrame"]
 class DataFrame:
     """Minimal DataFrame implementation for Opteryx Session compatibility.
 
-    Replaces orso.DataFrame with a lightweight in-memory table representation.
+    Replaces sql.DataFrame with a lightweight in-memory table representation.
     Only implements methods actually used by the query execution pipeline.
 
     This class is:
@@ -34,7 +35,7 @@ class DataFrame:
         """Initialize a DataFrame.
 
         Args:
-            dictionaries: Optional list of dicts (not used; for orso compatibility)
+            dictionaries: Optional list of dicts (not used; for API compatibility)
             rows: List of tuples representing rows
             schema: RelationSchema or list of column names
         """
@@ -50,7 +51,7 @@ class DataFrame:
             self._schema = schema
         elif isinstance(schema, (list, tuple)):
             # Convert list of column names to RelationSchema
-            columns = [FlatColumn(name=str(col), type=OrsoTypes.VARCHAR) for col in schema]
+            columns = [FlatColumn.from_column_type(name=str(col), column_type=_lt.VARCHAR) for col in schema]
             self._schema = RelationSchema(name="table", columns=columns)
         else:
             self._schema = schema
@@ -76,7 +77,7 @@ class DataFrame:
             description.append(
                 (
                     col.name,  # name
-                    None,  # type_code (orso doesn't use this)
+                    None,  # type_code (sql doesn't use this)
                     None,  # display_size
                     None,  # internal_size
                     None,  # precision

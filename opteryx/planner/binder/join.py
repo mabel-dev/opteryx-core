@@ -15,7 +15,7 @@ from opteryx.planner.binder.join_helpers import (
     extract_join_fields,
     get_mismatched_condition_column_types,
 )
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 from opteryx.types.schema import RelationSchema
 from opteryx.utils import random_string
 
@@ -223,7 +223,7 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             raise IncompatibleTypesError(**mismatches)
 
         if any(
-            com.left.schema_column.type == OrsoTypes.DECIMAL and com.value not in ("Eq", "NotEq")
+            com.left.schema_column.type == SqlType.DECIMAL and com.value not in ("Eq", "NotEq")
             for com in comparisons
         ):
             raise UnsupportedSyntaxError(

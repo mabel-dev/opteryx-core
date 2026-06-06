@@ -406,8 +406,8 @@ cdef class JoinNode(BasePlanNode):
 
     @staticmethod
     def _join_numeric_target_type(left_type, right_type):
-        from opteryx.types import OrsoTypes, find_compatible_type
-        numeric_types = (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, OrsoTypes.DECIMAL)
+        from opteryx.types import SqlType, find_compatible_type
+        numeric_types = (SqlType.INTEGER, SqlType.DOUBLE, SqlType.DECIMAL)
         if left_type not in numeric_types or right_type not in numeric_types:
             return None
         if left_type == right_type:
@@ -461,7 +461,7 @@ cdef class JoinNode(BasePlanNode):
             })
 
     def _apply_join_key_casts(self, morsel, *, is_left: bool):
-        from opteryx.types import OrsoTypes
+        from opteryx.types import SqlType
         if morsel is None or morsel is _EOS_SENTINEL:
             return morsel
         self._build_join_key_cast_plan()
@@ -478,10 +478,10 @@ cdef class JoinNode(BasePlanNode):
                 continue
             idx = names.index(column_name)
             target_type = cast_rule["target_type"]
-            if target_type == OrsoTypes.DOUBLE:
+            if target_type == SqlType.DOUBLE:
                 vectors[idx] = cast_to_double(vectors[idx])
                 changed = True
-            elif target_type == OrsoTypes.INTEGER:
+            elif target_type == SqlType.INTEGER:
                 vectors[idx] = cast_to_int(vectors[idx])
                 changed = True
             if changed:

@@ -22,7 +22,8 @@ from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.join_helpers import get_mismatched_condition_column_types
 from opteryx.planner.binder.operator_map import determine_type
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
+from opteryx.types import logical_type as _lt
 from opteryx.types.schema import ConstantColumn, FlatColumn, FunctionColumn, RelationSchema
 
 
@@ -37,15 +38,61 @@ _AGGREGATE_RESULT_PASSTHROUGH = frozenset({"SUM", "MIN", "MAX", "ANY_VALUE"})
 _AGGREGATE_RESULT_DOUBLE = frozenset({"APPROX_PERCENTILE"})
 
 
-def _aggregate_return_type(node: Node) -> Optional[OrsoTypes]:
+def _operand_column_type(operand):
+    """Build a ColumnType for a binary-op operand, or None if it can't be expressed.
+
+    Used by D-2 (`compute_result_logical_type`) at the binder. Returns None when the
+    operand isn't a numeric type the result-derivation rules know how to handle —
+    the caller then skips parameter derivation (the SqlType-only result stands).
+
+    D-4 Phase 2: when the operand has a bound schema_column, its `column_type` is
+    the authoritative unified type — use it directly (it carries the LogicalType
+    descriptor for DECIMAL, etc.). LITERAL operands without a bound schema_column
+    fall through to the SqlType path.
+    """
+    from opteryx.types import logical_type as lt
+    from opteryx.types.logical_type import ColumnType, LogicalCategory
+    from draken.draken_native import DrakenType
+
+    # Prefer the bound schema_column's column_type (single source of truth).
+    sc = getattr(operand, "schema_column", None)
+    if sc is not None and sc.column_type is not None:
+        ct = sc.column_type
+        cat = ct.category
+        if cat == LogicalCategory.DECIMAL:
+            return ct
+        if cat == LogicalCategory.INTEGER:
+            # INTEGER operands are treated as scale-0 decimals by the runtime's
+            # decimal_operand_scale_prec — represent as DRAKEN_INT64 ColumnType.
+            return ct
+        # Other categories aren't handled by _decimal_result; return None.
+        return None
+
+    # LITERAL fallback: operand carries .type/.precision/.scale directly.
+    if operand.node_type == NodeType.LITERAL:
+        op_type = getattr(operand, "type", None)
+        if op_type == SqlType.DECIMAL:
+            op_p = getattr(operand, "precision", None)
+            op_s = getattr(operand, "scale", None)
+            p = op_p if op_p is not None else 18
+            s = op_s if op_s is not None else 6
+            if s > p:
+                s = p
+            return lt.DECIMAL(p, s)
+        if op_type == SqlType.INTEGER:
+            return ColumnType(DrakenType.INT64)
+    return None
+
+
+def _aggregate_return_type(node: Node) -> Optional[SqlType]:
     """Best-effort result-type inference for aggregate functions."""
     name = node.value
     if name in _AGGREGATE_RESULT_INTEGER:
-        return OrsoTypes.INTEGER
+        return SqlType.INTEGER
     if name in _AGGREGATE_RESULT_DOUBLE:
-        return OrsoTypes.DOUBLE
+        return SqlType.DOUBLE
     if name == "ARRAY_AGG":
-        return OrsoTypes.ARRAY
+        return SqlType.ARRAY
     if name in _AGGREGATE_RESULT_PASSTHROUGH or name == "AVG":
         # SUM/MIN/MAX/ANY_VALUE pass through the input column's type. AVG is a ratio,
         # not a value drawn from the data, so it returns DOUBLE for both INTEGER and
@@ -59,10 +106,10 @@ def _aggregate_return_type(node: Node) -> Optional[OrsoTypes]:
                 param_type = getattr(param, "type", None)
             elif getattr(param, "schema_column", None) is not None:
                 param_type = param.schema_column.type
-            if param_type in (None, 0, OrsoTypes._MISSING_TYPE, OrsoTypes.NULL):
+            if param_type in (None, 0, SqlType._MISSING_TYPE, SqlType.NULL):
                 return None
-            if name == "AVG" and param_type in (OrsoTypes.INTEGER, OrsoTypes.DECIMAL):
-                return OrsoTypes.DOUBLE
+            if name == "AVG" and param_type in (SqlType.INTEGER, SqlType.DECIMAL):
+                return SqlType.DOUBLE
             return param_type
     return None
 
@@ -383,16 +430,16 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                     # downstream comparisons type-check correctly.
                     result_type = _aggregate_return_type(node)
                     if result_type is None:
-                        result_type = OrsoTypes.NULL
+                        result_type = SqlType.NULL
                 else:
-                    result_type = OrsoTypes.NULL  # unknown function; type resolved at runtime
+                    result_type = SqlType.NULL  # unknown function; type resolved at runtime
 
                 # Literal coercion: binder's job — mutate AST nodes to match the resolved type.
                 # This is NOT type inference; it's making literals consistent with the
                 # surrounding expression's type after the catalog has declared the return type.
                 if node.value in ("COALESCE", "IFNULL", "IFNOTNULL") and result_type not in (
-                    OrsoTypes._MISSING_TYPE,
-                    OrsoTypes.NULL,
+                    SqlType._MISSING_TYPE,
+                    SqlType.NULL,
                     0,
                 ):
                     parameters = []
@@ -403,19 +450,48 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                             and param.value != set()
                         ):
                             param.value = result_type.parse(param.value)
-                            param.type = result_type
-                            param.schema_column.type = result_type
+                            param.type = result_type  # Node AST attribute
+                            if param.schema_column is not None:
+                                from opteryx.types.sql_type import sql_to_column_type as _otoct2
+                                try:
+                                    param.schema_column.column_type = _otoct2(result_type)
+                                except Exception:
+                                    pass
                         parameters.append(param)
                     node.parameters = parameters
 
-                schema_column = FunctionColumn(
-                    name=column_name,
-                    type=result_type,
-                    element_type=element_type,
-                    aliases=aliases,
-                    precision=precision,
-                    scale=scale,
-                )
+                # D-4 Phase 2: construct via column_type when buildable. DECIMAL
+                # functions have explicit (precision, scale); ARRAY result has
+                # element_type. Everything else maps via the bridge. Falls back to
+                # legacy construction for cases the bridge can't yet handle
+                # (VECTOR with no known dimension, etc.).
+                from opteryx.types import logical_type as _lt
+                from opteryx.types.sql_type import sql_to_column_type as _otoct
+                _ct = None
+                try:
+                    if result_type == SqlType.DECIMAL:
+                        _ct = _lt.DECIMAL(precision, scale)
+                    elif result_type == SqlType.ARRAY:
+                        _elem_ct = _otoct(element_type) if element_type else _lt.VARIANT
+                        _ct = _lt.ARRAY(_elem_ct)
+                    else:
+                        _ct = _otoct(result_type)
+                except Exception:
+                    _ct = None
+                if _ct is not None:
+                    schema_column = FunctionColumn.from_column_type(
+                        name=column_name,
+                        column_type=_ct,
+                        aliases=aliases,
+                    )
+                else:
+                    # _ct is None — bridge can't map this type (VECTOR without
+                    # dimension, etc.). Fall back to bare type tag only.
+                    schema_column = FunctionColumn(
+                        name=column_name,
+                        type=result_type,
+                        aliases=aliases,
+                    )
             schemas["$derived"].columns.append(schema_column)
             node.derived_from = []
             node.schema_column = schema_column
@@ -423,29 +499,45 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
 
         elif node_type == NodeType.CASE:
             aliases = [node.alias] if node.alias else []
-            # Resolve result type: first non-NULL type from results + else_result
-            result_type = OrsoTypes.NULL
+            # Resolve result type: first non-NULL type from results + else_result.
+            # D-4 Phase 2: inherit the full ColumnType from the first matching
+            # branch — carries precision/scale/element_type uniformly instead of
+            # unpacking sidecars.
+            result_type = SqlType.NULL
+            result_ct = None
             branch_nodes = list(node.results or [])
             if node.else_result is not None:
                 branch_nodes.append(node.else_result)
             for branch in branch_nodes:
                 sc = getattr(branch, "schema_column", None)
-                if sc is not None and sc.type not in (OrsoTypes.NULL, 0, OrsoTypes._MISSING_TYPE):
+                if sc is not None and sc.type not in (SqlType.NULL, 0, SqlType._MISSING_TYPE):
                     result_type = sc.type
+                    result_ct = sc.column_type
                     break
             # Coerce LITERAL branches to the resolved result type
-            if result_type not in (OrsoTypes._MISSING_TYPE, OrsoTypes.NULL, 0):
+            if result_type not in (SqlType._MISSING_TYPE, SqlType.NULL, 0):
                 for branch in branch_nodes:
                     if branch.node_type == NodeType.LITERAL and branch.value is not None:
                         branch.value = result_type.parse(branch.value)
-                        branch.type = result_type
+                        branch.type = result_type  # Node AST attribute
                         if branch.schema_column is not None:
-                            branch.schema_column.type = result_type
-            schema_column = FunctionColumn(
-                name=column_name,
-                type=result_type,
-                aliases=aliases,
-            )
+                            from opteryx.types.sql_type import sql_to_column_type as _otoct3
+                            try:
+                                branch.schema_column.column_type = _otoct3(result_type)
+                            except Exception:
+                                pass
+            if result_ct is not None:
+                schema_column = FunctionColumn.from_column_type(
+                    name=column_name,
+                    column_type=result_ct,
+                    aliases=aliases,
+                )
+            else:
+                schema_column = FunctionColumn(
+                    name=column_name,
+                    type=result_type,
+                    aliases=aliases,
+                )
             schemas["$derived"].columns.append(schema_column)
             node.derived_from = []
             node.schema_column = schema_column
@@ -459,7 +551,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
             # Define aliases for the schema column
             aliases = [node.alias] if node.alias else []
 
-            # Map type name to OrsoType
+            # Map type name to SqlType
             target_type_name = node.value.upper()
             # Strip TRY_ prefix for safe casts — the prefix is kept in node.value for the evaluator
             if target_type_name.startswith("TRY_"):
@@ -486,15 +578,15 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                         "`CAST(expr AS TIMESTAMP[ms])`, `CAST(expr AS TIMESTAMP[s])`, `CAST(expr AS TIMESTAMP[us])`, or `CAST(expr AS TIMESTAMP[d])`."
                     )
 
-            # VARBINARY is not a canonical OrsoType — map to BLOB
+            # VARBINARY is not a canonical SqlType — map to BLOB
             if target_type_name == "VARBINARY":
                 target_type_name = "BLOB"
-            result_type = OrsoTypes[target_type_name]
+            result_type = SqlType[target_type_name]
 
             # Validate TIMESTAMP casts from INTEGER — require explicit unit
             if target_type_name == "TIMESTAMP" and node.left:
                 source_type = determine_type(node.left)
-                if source_type == OrsoTypes.INTEGER:
+                if source_type == SqlType.INTEGER:
                     if unit is None:
                         raise IncompatibleTypesError(
                             message="Ambiguous cast: INTEGER → TIMESTAMP requires a unit. "
@@ -505,19 +597,21 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
             precision = 38
             scale = 21
 
-            # Handle type-specific parameters
-            if target_type_name == "DECIMAL" and len(node.parameters) > 1:
-                # CAST(expr AS DECIMAL(precision, scale))
-                precision = (
-                    int(node.parameters[1].value)
-                    if node.parameters[1].node_type == NodeType.LITERAL
-                    else 38
-                )
-                scale = (
-                    int(node.parameters[2].value)
-                    if len(node.parameters) > 2 and node.parameters[2].node_type == NodeType.LITERAL
-                    else 21
-                )
+            # Handle type-specific parameters.
+            # CAST(expr AS DECIMAL(precision, scale)): `node.parameters` carries the
+            # TYPE's parenthesized arguments only — parameters[0]=precision,
+            # parameters[1]=scale (the cast expression is in node.left/centre, NOT
+            # parameters[0]). A prior off-by-one read parameters[1]/[2], so
+            # `DECIMAL(32, 2)` resolved to a corrupt (precision=2, scale=21) — which
+            # was silently dropped (column_type=None) until the D-4 invariant made it
+            # fail loud. The runtime cast reads the params independently, so this only
+            # corrects the schema-column metadata.
+            if target_type_name == "DECIMAL" and len(node.parameters) >= 1:
+                if node.parameters[0].node_type == NodeType.LITERAL:
+                    precision = int(node.parameters[0].value)
+                scale = 0
+                if len(node.parameters) > 1 and node.parameters[1].node_type == NodeType.LITERAL:
+                    scale = int(node.parameters[1].value)
 
             if (
                 target_type_name == "ARRAY"
@@ -527,18 +621,40 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                 # CAST(expr AS ARRAY(element_type)) - extract the element type
                 element_param = node.parameters[0]
                 if element_param.node_type == NodeType.LITERAL and element_param.value is not None:
-                    element_type = OrsoTypes[str(element_param.value).upper()]
+                    element_type = SqlType[str(element_param.value).upper()]
                 else:
-                    element_type = OrsoTypes.VARIANT
+                    element_type = SqlType.VARIANT
 
-            schema_column = FunctionColumn(
-                name=column_name,
-                type=result_type,
-                element_type=element_type,
-                aliases=aliases,
-                precision=precision,
-                scale=scale,
-            )
+            # D-4 Phase 2: construct via the unified column_type when we can build
+            # one cleanly. The CAST target is fully known here (result_type +
+            # explicit precision/scale for DECIMAL, element_type for ARRAY), so the
+            # column_type round-trip is exact. Falls back to legacy construction
+            # for cases the bridge can't yet map (VECTOR with no dimension etc.).
+            from opteryx.types import logical_type as _lt
+            from opteryx.types.sql_type import sql_to_column_type as _otoct
+            _ct = None
+            try:
+                if target_type_name == "DECIMAL":
+                    _ct = _lt.DECIMAL(precision, scale)
+                elif target_type_name == "ARRAY":
+                    _elem_ct = _otoct(element_type) if element_type else _lt.VARIANT
+                    _ct = _lt.ARRAY(_elem_ct)
+                else:
+                    _ct = _otoct(result_type)
+            except Exception:
+                _ct = None
+            if _ct is not None:
+                schema_column = FunctionColumn.from_column_type(
+                    name=column_name,
+                    column_type=_ct,
+                    aliases=aliases,
+                )
+            else:
+                schema_column = FunctionColumn(
+                    name=column_name,
+                    type=result_type,
+                    aliases=aliases,
+                )
             schema_column.identity = column_name.encode("utf-8") if isinstance(column_name, str) else column_name
             schemas["$derived"].columns.append(schema_column)
             node.derived_from = []
@@ -575,14 +691,14 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                             raise IncompatibleTypesError(
                                 message=f"LIKE patterns must be strings, got {type(pat).__name__}."
                             )
-            schema_column = ExpressionColumn(name=column_name, type=OrsoTypes.BOOLEAN)
+            schema_column = ExpressionColumn.from_column_type(name=column_name, column_type=_lt.BOOLEAN)
             node.schema_column = schema_column
             schemas["$derived"].columns.append(schema_column)
         else:
             if node.value in ("InList", "NotInList") and isinstance(
                 getattr(node.right, "value", None), list
             ):
-                from opteryx.types import OrsoTypes as _OT
+                from opteryx.types import SqlType as _OT
 
                 left_type = getattr(getattr(node.left, "schema_column", None), "type", None)
                 _COERCE = {
@@ -602,12 +718,53 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
             if mismatches:
                 raise IncompatibleTypesError(**mismatches)
 
-            schema_column = ExpressionColumn(
-                name=column_name,
-                aliases=[node.alias] if node.alias else [],
-                type=determine_type(node),
-                expression=node.value,
-            )
+            result_type = determine_type(node)
+            # D-2: when the result is DECIMAL, also derive (precision, scale).
+            # determine_type() returns just the SqlType; the parameters come from
+            # compute_result_logical_type() applied to the operand ColumnTypes. We
+            # only attempt this for binary arithmetic ops on numeric operands —
+            # other DECIMAL-typed results (e.g. BOOLEAN comparisons return BOOLEAN
+            # so they don't even land here) don't need parameter derivation.
+            #
+            # D-4 Phase 2 writer migration: when we have a derived `result_ct`
+            # (DECIMAL arithmetic / NESTED inherit), construct the ExpressionColumn
+            # via `from_column_type` — no sidecar unpacking needed. Falls back to
+            # legacy construction for cases where we couldn't derive a ColumnType.
+            result_ct_final = None
+            if (result_type == SqlType.DECIMAL
+                    and node.value in ("Plus", "Minus", "Multiply", "Divide")
+                    and getattr(node, "left", None) is not None
+                    and getattr(node, "right", None) is not None):
+                left_ct = _operand_column_type(node.left)
+                right_ct = _operand_column_type(node.right)
+                if left_ct is not None and right_ct is not None:
+                    from opteryx.types.type_unification import compute_result_logical_type
+                    from opteryx.types.logical_type import LogicalCategory
+                    result_ct_final = compute_result_logical_type(
+                        left_ct, right_ct, node.value, LogicalCategory.DECIMAL
+                    )
+            elif result_type == SqlType.DECIMAL and node_type == NodeType.NESTED:
+                # NESTED is a parenthesised expression wrapping `node.centre`.
+                # Inherit the centre's column_type directly (single source of truth).
+                centre = getattr(node, "centre", None)
+                centre_sc = getattr(centre, "schema_column", None) if centre else None
+                if centre_sc is not None and centre_sc.column_type is not None:
+                    result_ct_final = centre_sc.column_type
+
+            if result_ct_final is not None:
+                schema_column = ExpressionColumn.from_column_type(
+                    name=column_name,
+                    column_type=result_ct_final,
+                    aliases=[node.alias] if node.alias else [],
+                    expression=node.value,
+                )
+            else:
+                schema_column = ExpressionColumn(
+                    name=column_name,
+                    aliases=[node.alias] if node.alias else [],
+                    type=result_type,
+                    expression=node.value,
+                )
             schemas["$derived"].columns.append(schema_column)
             node.schema_column = schema_column
             node.query_column = node.alias or column_name

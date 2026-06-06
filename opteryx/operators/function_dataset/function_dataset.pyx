@@ -31,7 +31,9 @@ from opteryx.exceptions import SqlError
 from opteryx.expression import NodeType
 from opteryx.models import QueryProperties
 from opteryx.utils import series
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
+from opteryx.types import PYTHON_TO_SQL_MAP
+from draken.interop.vector_sequence import vector_from_sequence
 
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DT = datetime.datetime(1970, 1, 1)
@@ -62,15 +64,32 @@ def _as_list(values):
     return list(values)
 
 
+def _resolve_column_dtype(dtype, values):
+    """Resolve the logical type to hand the producer dispatcher.
+
+    VALUES/GENERATE_SERIES carry a real ``SqlType`` member, which passes
+    through unchanged. The UNNEST-literal binder path leaves the column type
+    as the integer sentinel ``0`` (unknown), and GENERATE_SERIES may leave it
+    as ``SqlType._MISSING_TYPE``; for those, infer the element type from the
+    first non-null value so non-integer literals build a correctly typed
+    vector instead of defaulting to INT64 and mis-casting. An empty/all-null
+    sequence yields ``None`` (INT64 all-null column).
+    """
+    if dtype is not None and dtype != 0 and dtype is not SqlType._MISSING_TYPE:
+        return dtype
+    for value in values:
+        if value is not None:
+            return PYTHON_TO_SQL_MAP.get(type(value))
+    return None
+
+
 def _build_morsel_from_columns(column_names, column_types, column_values):
     vectors = []
     for index, _ in enumerate(column_names):
-        dtype = column_types[index] if index < len(column_types) else None
+        raw_dtype = column_types[index] if index < len(column_types) else None
         values = column_values[index] if index < len(column_values) else []
-        if dtype is None:
-            vectors.append(_draken_native.vector_from_sequence(values))
-        else:
-            vectors.append(_draken_native.vector_from_sequence(values, dtype=dtype))
+        dtype = _resolve_column_dtype(raw_dtype, values)
+        vectors.append(vector_from_sequence(values, dtype=dtype))
     return Morsel.from_vectors(column_names, vectors)
 
 
@@ -89,13 +108,13 @@ def _restore_temporal_series_args(args):
     restored_args = []
 
     for arg in args:
-        if arg.type == OrsoTypes.DATE and isinstance(arg.value, Integral):
+        if arg.type == SqlType.DATE and isinstance(arg.value, Integral):
             restored = copy.copy(arg)
             restored.value = _EPOCH_DATE + datetime.timedelta(days=int(arg.value))
             restored_args.append(restored)
             continue
 
-        if arg.type == OrsoTypes.TIMESTAMP and isinstance(arg.value, Integral):
+        if arg.type == SqlType.TIMESTAMP and isinstance(arg.value, Integral):
             restored = copy.copy(arg)
             restored.value = _EPOCH_DT + datetime.timedelta(microseconds=int(arg.value))
             restored_args.append(restored)

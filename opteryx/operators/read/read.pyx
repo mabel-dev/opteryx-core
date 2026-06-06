@@ -33,18 +33,18 @@ from typing import Generator
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryProperties
 from opteryx.types.schema import RelationSchema
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 
 # EOS sentinel in scope as _EOS_SENTINEL via the umbrella unit.
 
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
 
-# Null vector factory: maps OrsoType → draken_native constructor for null constants.
+# Null vector factory: maps SqlType → draken_native constructor for null constants.
 # Built once at module import. All constructors accept (value=None, length).
 cdef dict _NULL_CONSTRUCTORS = {}
 
 def _build_null_constructors():
-    """Build null vector constructor table: OrsoType → callable(n) → Vector."""
+    """Build null vector constructor table: SqlType → callable(n) → Vector."""
     from draken.draken_native import (
         vector_from_constant,
         vector_float64_from_constant,
@@ -73,7 +73,7 @@ def _build_null_constructors():
     ]
     out = {}
     for name, ctor in table:
-        member = getattr(OrsoTypes, name, None)
+        member = getattr(SqlType, name, None)
         if member is not None:
             out[member] = ctor
     return out
@@ -249,12 +249,12 @@ cdef class ReaderNode(BasePlanNode):
                 "Use ParquetReadNode for external table scans."
             )
 
-        orso_schema = self.schema
-        orso_schema_cols = []
-        for col in orso_schema.columns:
+        relation_schema = self.schema
+        relation_schema_cols = []
+        for col in relation_schema.columns:
             if col.identity in [c.schema_column.identity for c in self.columns]:
-                orso_schema_cols.append(col)
-        orso_schema.columns = orso_schema_cols
+                relation_schema_cols.append(col)
+        relation_schema.columns = relation_schema_cols
         start_clock = time.monotonic_ns()
         reader = self.connector.read_dataset(
             columns=self.columns,
@@ -271,7 +271,7 @@ cdef class ReaderNode(BasePlanNode):
             else:
                 records_to_read -= raw.num_rows
 
-            result_morsel = normalize_morsel(orso_schema, raw)
+            result_morsel = normalize_morsel(relation_schema, raw)
 
             self.telemetry.time_reading_blobs += time.monotonic_ns() - start_clock
             self.telemetry.blobs_read += 1
@@ -287,4 +287,4 @@ cdef class ReaderNode(BasePlanNode):
         if result_morsel:
             self.telemetry.columns_read += result_morsel.num_columns
         else:
-            self.telemetry.columns_read += len(orso_schema.columns)
+            self.telemetry.columns_read += len(relation_schema.columns)

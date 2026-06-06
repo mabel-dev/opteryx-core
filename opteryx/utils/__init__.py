@@ -9,7 +9,7 @@ from typing import Iterable, Optional
 
 from opteryx.compiled.functions.strings import count_instances
 from opteryx.third_party.mbleven import compare
-from opteryx.utils._orso_utils import (
+from opteryx.utils._sql_utils import (
     lru_cache_with_expiry,
     random_int,
     random_string,

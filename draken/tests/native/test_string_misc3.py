@@ -50,7 +50,7 @@ def make(lst):
     return dn.vector_from_string_sequence(lst)
 
 
-class TestVectorSoundex:
+class TestVectsqlundex:
     # --- Classic algorithm fixtures ---
 
     def test_robert(self):

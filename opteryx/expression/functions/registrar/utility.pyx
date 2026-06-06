@@ -10,7 +10,7 @@ from opteryx.expression.functions import (
 )
 
 # Use package-level helper to construct concise FunctionDefinition entries.
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 
 
 def get_builtin_utility_functions() -> List[FunctionDefinition]:
@@ -51,18 +51,25 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
     _least_kernel = _isingle(_nanmin)
     _sort_kernel = _sort_factory(_sort)
 
-    def _element_type_return(arg_nodes) -> OrsoTypes:
-        """Return the element type of the first arg (for GREATEST/LEAST/SORT)."""
+    def _element_type_return(arg_nodes) -> SqlType:
+        """Return the element type of the first arg (for GREATEST/LEAST/SORT).
+
+        D-4 Phase 2: the array element comes from the unified column_type
+        (`column_type.element`), reverse-bridged to SqlType. NULL when unknown.
+        """
         sc = getattr(arg_nodes[0], "schema_column", None)
-        return sc.element_type if sc is not None else OrsoTypes.NULL
+        if sc is None or sc.column_type is None or sc.column_type.element is None:
+            return SqlType.NULL
+        from opteryx.types.sql_type import column_type_to_sql
+        return column_type_to_sql(sc.column_type.element).get("type") or SqlType.NULL
 
     def _array_literal_return_type(arg_nodes):
         """ARRAY(expr, type_name): return ARRAY<type_name>."""
         type_name = getattr(arg_nodes[1], "value", None) if len(arg_nodes) > 1 else None
         if type_name:
-            result_type, _, _, _, element_type = OrsoTypes.from_name(f"ARRAY<{type_name}>")
+            result_type, _, _, _, element_type = SqlType.from_name(f"ARRAY<{type_name}>")
             return (result_type, element_type)
-        return (OrsoTypes.ARRAY, OrsoTypes.NULL)
+        return (SqlType.ARRAY, SqlType.NULL)
 
     _variadic_any = (
         ParameterSpec(name="arg0", type_family="any"),
@@ -246,13 +253,13 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
     _any = ParameterSpec(name="val", type_family="any")
 
     def _embed_return_type(_arg_nodes):
-        return OrsoTypes.VECTOR
+        return SqlType.VECTOR
 
     return [
         _make(
             "ARRAY_CONTAINS",
             other_functions.array_contains,
-            OrsoTypes.BOOLEAN,
+            SqlType.BOOLEAN,
             (_arr, _item),
             null_policy="passthru",
             summary="Test if array contains item.",
@@ -261,7 +268,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         _make(
             "ARRAY_CONTAINS_ANY",
             other_functions.array_contains_any,
-            OrsoTypes.BOOLEAN,
+            SqlType.BOOLEAN,
             (_arr, _set),
             null_policy="passthru",
             summary="Test if array contains any item from set.",
@@ -270,7 +277,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         _make(
             "ARRAY_CONTAINS_ALL",
             other_functions.array_contains_all,
-            OrsoTypes.BOOLEAN,
+            SqlType.BOOLEAN,
             (_arr, _set),
             null_policy="passthru",
             summary="Test if array contains all items from set.",
@@ -279,7 +286,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         _make(
             "JSONB_OBJECT_KEYS",
             other_functions.jsonb_object_keys,
-            OrsoTypes.ARRAY,
+            SqlType.ARRAY,
             (ParameterSpec(name="json", type_family="any"),),
             cost=590.21,
             summary="Extract keys from JSON object.",
@@ -287,7 +294,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         _make(
             "HUMANIZE",
             other_functions.humanize,
-            OrsoTypes.VARCHAR,
+            SqlType.VARCHAR,
             (ParameterSpec(name="val", type_family="any"),),
             cost=775947.17,
             summary="Format number in human-readable form.",
@@ -332,7 +339,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="arr", type_family="numeric_vector"),
                         ParameterSpec(name="vec", type_family="numeric_vector"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.DOUBLE),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -347,7 +354,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="arr", type_family="string"),
                         ParameterSpec(name="vec", type_family="string"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.DOUBLE),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -374,7 +381,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="arr", type_family="numeric_vector"),
                         ParameterSpec(name="vec", type_family="numeric_vector"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.DOUBLE),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -389,7 +396,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="arr", type_family="string"),
                         ParameterSpec(name="vec", type_family="string"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=SqlType.DOUBLE),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",

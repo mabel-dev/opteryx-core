@@ -6,7 +6,7 @@ Not on the per-row hot path — called once per shown expression.
 
 from dataclasses import dataclass
 
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 from opteryx.types.schema import FlatColumn
 from opteryx.utils import random_string
 
@@ -67,15 +67,15 @@ def format_expression(root, qualify=False):
     # LITERALS
     if node_type == NodeType.LITERAL:
         literal_type = root.type
-        if literal_type == OrsoTypes.VARCHAR:
+        if literal_type == SqlType.VARCHAR:
             return "'" + root.value.replace("'", "'") + "'"
-        if literal_type == OrsoTypes.TIMESTAMP:
+        if literal_type == SqlType.TIMESTAMP:
             return "'" + str(root.value) + "'"
-        if literal_type == OrsoTypes.INTERVAL:
+        if literal_type == SqlType.INTERVAL:
             return _format_interval(root.value)
-        if literal_type == OrsoTypes.NULL:
+        if literal_type == SqlType.NULL:
             return "null"
-        if literal_type == OrsoTypes.ARRAY:
+        if literal_type == SqlType.ARRAY:
             display = getattr(root, "display_values", None)
             if display is not None:
                 shown = display[:3]

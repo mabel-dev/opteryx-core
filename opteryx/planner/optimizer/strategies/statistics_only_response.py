@@ -26,7 +26,7 @@ and complex types lose precision in BRIN bounds and cannot be answered.
 from opteryx.expression import NodeType
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 
 # Strategy-style Optimization Class
 from .optimization_strategy import (
@@ -146,7 +146,7 @@ def is_simple_aggregate(aggregate_node) -> bool:
             if col_type is None:
                 return False
             # DATE, INTEGER and TIMESTAMP types preserve exact values in BRIN bounds
-            if col_type not in (OrsoTypes.DATE, OrsoTypes.INTEGER, OrsoTypes.TIMESTAMP):
+            if col_type not in (SqlType.DATE, SqlType.INTEGER, SqlType.TIMESTAMP):
                 return False
             continue
 
@@ -556,7 +556,7 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
                     result_value = total_rows - null_count
                 else:
                     result_value = total_rows
-                result_type = OrsoTypes.INTEGER
+                result_type = SqlType.INTEGER
             elif agg_func in ("MIN", "MAX"):
                 if not column_name:
                     return plan
@@ -581,7 +581,8 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
             agg_schema = agg_node.schema_column
             if agg_schema is not None and literal.schema_column is not None:
                 literal.schema_column.identity = agg_schema.identity
-                literal.schema_column.type = agg_schema.type or literal.schema_column.type
+                if agg_schema.column_type is not None:
+                    literal.schema_column.column_type = agg_schema.column_type
 
             literals.append(literal)
 

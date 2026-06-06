@@ -3,452 +3,398 @@ from typing import Callable, Dict, NamedTuple, Optional, Tuple
 from opteryx.exceptions import IncorrectTypeError, UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression.operator_catalog import is_known_operator
-from opteryx.types import OrsoTypes
-from opteryx.types.logical_type import LogicalCategory
+from opteryx.types import SqlType as OT
+from opteryx.types.logical_type import LogicalCategory as LC
 from opteryx.utils.sql import convert_camel_to_sql_case
+
+# Phase 3: OPERATOR_MAP is now authored directly on LogicalCategory (LC) keys.
+# Integer widths collapse to LC.INTEGER, floats to LC.FLOAT, JSONB/STRUCT to
+# LC.NVARCHAR — the map carries 330 entries (vs the SqlType-keyed 348 that had
+# 18 duplicate-collapse entries). The derivation step (old _CATEGORY_OPERATOR_MAP)
+# is deleted; this IS the map. The human-authorable source is now stable since
+# logical categories don't change with Draken enum churn.
+#
+# result_type field: still SqlType (Phase 4 will migrate to LogicalCategory
+# when determine_type's callers are migrated off SqlType).
+
+# Shorten the verbose aliases in this file
+OMT = NamedTuple(
+    "OperatorMapType",
+    [("result_type", OT), ("operation_function", Optional[Callable]), ("cost_estimate", float)],
+)
 
 
 class OperatorMapType(NamedTuple):
-    result_type: OrsoTypes
+    result_type: OT
     operation_function: Optional[Callable] = None
     cost_estimate: float = 100.0
 
 
-# fmt: off
-OPERATOR_MAP: Dict[Tuple[OrsoTypes, OrsoTypes, str], OperatorMapType] = {
-    (OrsoTypes.ARRAY, OrsoTypes.ARRAY, "AtArrow"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.ARRAY, OrsoTypes.ARRAY, "ArrayContainsAll"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.ARRAY, OrsoTypes.INTEGER, "MapAccess"): OperatorMapType(OrsoTypes._MISSING_TYPE, None, 100.0),
-    (OrsoTypes.VECTOR, OrsoTypes.INTEGER, "MapAccess"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "Like"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "NotLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "ILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "NotILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "RLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "NotRLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "BitwiseOr"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "StringConcat"): OperatorMapType(OrsoTypes.BLOB, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.BLOB, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.BLOB, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.BLOB, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.BLOB, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.BLOB, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.BLOB, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.BLOB, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.BLOB, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.BLOB, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.BLOB, "Like"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.BLOB, "NotLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.BLOB, "ILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.BLOB, "NotILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.BLOB, "RLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.BLOB, "NotRLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.BLOB, "StringConcat"): OperatorMapType(OrsoTypes.BLOB, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.INTEGER, "MapAccess"): OperatorMapType(OrsoTypes.BLOB, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.ARRAY, "InList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.ARRAY, "NotInList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BOOLEAN, OrsoTypes.ARRAY, "InList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BOOLEAN, OrsoTypes.ARRAY, "NotInList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BOOLEAN, OrsoTypes.BOOLEAN, "Or"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BOOLEAN, OrsoTypes.BOOLEAN, "And"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BOOLEAN, OrsoTypes.BOOLEAN, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BOOLEAN, OrsoTypes.BOOLEAN, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.ARRAY, "InList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.ARRAY, "NotInList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.DATE, "Minus"): OperatorMapType(OrsoTypes.INTERVAL, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.DATE, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.DATE, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.DATE, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.DATE, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.DATE, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.DATE, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.INTERVAL, "Minus"): OperatorMapType(OrsoTypes.TIMESTAMP, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.INTERVAL, "Plus"): OperatorMapType(OrsoTypes.TIMESTAMP, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.TIMESTAMP, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.TIMESTAMP, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.TIMESTAMP, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.TIMESTAMP, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.TIMESTAMP, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.TIMESTAMP, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DATE, OrsoTypes.TIMESTAMP, "Minus"): OperatorMapType(OrsoTypes.INTERVAL, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.ARRAY, "InList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.ARRAY, "NotInList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    # DECIMAL +/- DECIMAL is DECIMAL (the runtime add/sub kernels produce DECIMAL);
-    # the old INTEGER result was a plain type error, inconsistent with Multiply/Divide
-    # below and with the runtime.
-    (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "Plus"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "Minus"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "Divide"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DECIMAL, "Multiply"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DOUBLE, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DOUBLE, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DOUBLE, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DOUBLE, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DOUBLE, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DOUBLE, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DOUBLE, "Plus"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DOUBLE, "Minus"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DOUBLE, "Multiply"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.DOUBLE, "Divide"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.INTEGER, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.INTEGER, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.INTEGER, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.INTEGER, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.INTEGER, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.INTEGER, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.INTEGER, "Plus"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.INTEGER, "Minus"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.INTEGER, "Multiply"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
-    (OrsoTypes.DECIMAL, OrsoTypes.INTEGER, "Divide"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.ARRAY, "InList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.ARRAY, "NotInList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DECIMAL, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DECIMAL, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DECIMAL, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DECIMAL, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DECIMAL, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DECIMAL, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DECIMAL, "Plus"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DECIMAL, "Minus"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DECIMAL, "Multiply"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DECIMAL, "Divide"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DOUBLE, "Plus"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DOUBLE, "Minus"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DOUBLE, "Divide"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DOUBLE, "Multiply"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DOUBLE, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DOUBLE, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DOUBLE, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DOUBLE, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DOUBLE, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.DOUBLE, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.INTEGER, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.INTEGER, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.INTEGER, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.INTEGER, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.INTEGER, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.INTEGER, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.INTEGER, "Divide"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.INTEGER, "Multiply"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.INTEGER, "Plus"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.INTEGER, "Minus"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.DOUBLE, OrsoTypes.INTEGER, "Modulo"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.ARRAY, "InList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.ARRAY, "NotInList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    # INTEGER op DECIMAL is symmetric with DECIMAL op INTEGER (lines above) and the
-    # runtime decimal kernels treat the int operand as a decimal — so the result is
-    # DECIMAL, not DOUBLE. The old DOUBLE entries desynced the binder from the runtime
-    # (an ungrouped MAX/MIN/SUM over such an expression routes by bind-time type and
-    # then meets a DECIMAL vector — q15's `1 - l_discount`).
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Divide"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Multiply"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Plus"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Minus"): OperatorMapType(OrsoTypes.DECIMAL, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, "Divide"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, "Multiply"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, "Plus"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, "Minus"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "Plus"): OperatorMapType(OrsoTypes.INTEGER, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "Minus"): OperatorMapType(OrsoTypes.INTEGER, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "Divide"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "Multiply"): OperatorMapType(OrsoTypes.INTEGER, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "Modulo"): OperatorMapType(OrsoTypes.INTEGER, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "MyIntegerDivide"): OperatorMapType(OrsoTypes.INTEGER, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "BitwiseOr"): OperatorMapType(OrsoTypes.INTEGER, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "BitwiseAnd"): OperatorMapType(OrsoTypes.INTEGER, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "BitwiseXor"): OperatorMapType(OrsoTypes.INTEGER, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "ShiftLeft"): OperatorMapType(OrsoTypes.INTEGER, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.INTEGER, "ShiftRight"): OperatorMapType(OrsoTypes.INTEGER, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTEGER, OrsoTypes.DECIMAL, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Plus"): OperatorMapType(OrsoTypes.INTERVAL, None, 100.0),
-    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Minus"): OperatorMapType(OrsoTypes.INTERVAL, None, 100.0),
-    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.INTERVAL, OrsoTypes.TIMESTAMP, "Plus"): OperatorMapType(OrsoTypes.TIMESTAMP, None, 100.0),
-    (OrsoTypes.INTERVAL, OrsoTypes.TIMESTAMP, "Minus"): OperatorMapType(OrsoTypes.TIMESTAMP, None, 100.0),
-    (OrsoTypes.INTERVAL, OrsoTypes.DATE, "Plus"): OperatorMapType(OrsoTypes.TIMESTAMP, None, 100.0),
-    (OrsoTypes.INTERVAL, OrsoTypes.DATE, "Minus"): OperatorMapType(OrsoTypes.TIMESTAMP, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.ARRAY, "InList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.ARRAY, "NotInList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "Like"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "NotLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "ILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "NotILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "RLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "NotRLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "BitwiseOr"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "StringConcat"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "Like"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "NotLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "ILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "NotILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "RLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "NotRLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "BitwiseOr"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "StringConcat"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "Like"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "NotLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "ILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "NotILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "RLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "NotRLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "BitwiseOr"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "StringConcat"): OperatorMapType(OrsoTypes.BLOB, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "Like"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "NotLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "ILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "NotILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "RLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "NotRLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "BitwiseOr"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "StringConcat"): OperatorMapType(OrsoTypes.BLOB, None, 100.0),
-    # MapAccess (string[i]) preserves the operand's string type (matches the
-    # NVARCHAR StringConcat decision).
-    (OrsoTypes.NVARCHAR, OrsoTypes.INTEGER, "MapAccess"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    # VARIANT (result of `->`) is extraction-only: it chains through the JSON
-    # accessors with no user cast; every other operator falls through to the
-    # map-miss "not supported / cast required" error.
-    (OrsoTypes.VARIANT, OrsoTypes.VARCHAR, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.VARIANT, OrsoTypes.VARCHAR, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.VARIANT, OrsoTypes.VARCHAR, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARIANT, OrsoTypes.NVARCHAR, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.VARIANT, OrsoTypes.NVARCHAR, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.VARIANT, OrsoTypes.NVARCHAR, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARIANT, OrsoTypes.INTEGER, "MapAccess"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    # JSON / path operators — NVARCHAR accepted as document or key wherever
-    # VARCHAR is (JSON is UTF-8 by spec). Result types mirror VARCHAR exactly.
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.VARCHAR, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.NVARCHAR, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.NVARCHAR, OrsoTypes.BLOB, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.BLOB, OrsoTypes.NVARCHAR, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.JSONB, OrsoTypes.NVARCHAR, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.JSONB, OrsoTypes.NVARCHAR, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.JSONB, OrsoTypes.NVARCHAR, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.STRUCT, OrsoTypes.NVARCHAR, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.STRUCT, OrsoTypes.NVARCHAR, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.STRUCT, OrsoTypes.NVARCHAR, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.STRUCT, OrsoTypes.VARCHAR, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.STRUCT, OrsoTypes.VARCHAR, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.STRUCT, OrsoTypes.VARCHAR, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.STRUCT, OrsoTypes.BLOB, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.STRUCT, OrsoTypes.BLOB, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.STRUCT, OrsoTypes.BLOB, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.ARRAY, "InList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.ARRAY, "NotInList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.DATE, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.DATE, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.DATE, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.DATE, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.DATE, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.DATE, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.DATE, "Minus"): OperatorMapType(OrsoTypes.INTERVAL, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.INTERVAL, "Minus"): OperatorMapType(OrsoTypes.TIMESTAMP, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.INTERVAL, "Plus"): OperatorMapType(OrsoTypes.TIMESTAMP, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.TIMESTAMP, "Minus"): OperatorMapType(OrsoTypes.INTERVAL, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.TIMESTAMP, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.TIMESTAMP, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.TIMESTAMP, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.TIMESTAMP, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.TIMESTAMP, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.TIMESTAMP, OrsoTypes.TIMESTAMP, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.ARRAY, "InList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.ARRAY, "NotInList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "Like"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "NotLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "ILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "NotILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "RLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "NotRLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "BitwiseOr"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "StringConcat"): OperatorMapType(OrsoTypes.BLOB, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "Like"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "NotLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "ILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "NotILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "RLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "NotRLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "BitwiseOr"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.NVARCHAR, "StringConcat"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "GtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "Lt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "LtEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "Like"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "NotLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "ILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "NotILike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "RLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "NotRLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "BitwiseOr"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "StringConcat"): OperatorMapType(OrsoTypes.VARCHAR, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.INTEGER, "MapAccess"): OperatorMapType(OrsoTypes.VARCHAR, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.JSONB, OrsoTypes.BLOB, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.JSONB, OrsoTypes.BLOB, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.JSONB, OrsoTypes.BLOB, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
-    (OrsoTypes.JSONB, OrsoTypes.VARCHAR, "Arrow"): OperatorMapType(OrsoTypes.VARIANT, None, 100.0),
-    (OrsoTypes.JSONB, OrsoTypes.VARCHAR, "LongArrow"): OperatorMapType(OrsoTypes.NVARCHAR, None, 100.0),
-    (OrsoTypes.JSONB, OrsoTypes.VARCHAR, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
+OMT = OperatorMapType
 
+# fmt: off
+OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
+    (LC.ARRAY       , LC.ARRAY       , 'ArrayContainsAll'        ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.ARRAY       , LC.ARRAY       , 'AtArrow'                 ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.ARRAY       , LC.INTEGER     , 'MapAccess'               ): OMT(OT._MISSING_TYPE, None, 100.0),
+    (LC.BOOLEAN     , LC.ARRAY       , 'InList'                  ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.BOOLEAN     , LC.ARRAY       , 'NotInList'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.BOOLEAN     , LC.BOOLEAN     , 'And'                     ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.BOOLEAN     , LC.BOOLEAN     , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.BOOLEAN     , LC.BOOLEAN     , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.BOOLEAN     , LC.BOOLEAN     , 'Or'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DATE        , LC.ARRAY       , 'InList'                  ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DATE        , LC.ARRAY       , 'NotInList'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DATE        , LC.DATE        , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DATE        , LC.DATE        , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DATE        , LC.DATE        , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DATE        , LC.DATE        , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DATE        , LC.DATE        , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DATE        , LC.DATE        , 'Minus'                   ): OMT(OT.INTERVAL, None, 100.0),
+    (LC.DATE        , LC.DATE        , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DATE        , LC.INTERVAL    , 'Minus'                   ): OMT(OT.TIMESTAMP, None, 100.0),
+    (LC.DATE        , LC.INTERVAL    , 'Plus'                    ): OMT(OT.TIMESTAMP, None, 100.0),
+    (LC.DATE        , LC.TIMESTAMP   , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DATE        , LC.TIMESTAMP   , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DATE        , LC.TIMESTAMP   , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DATE        , LC.TIMESTAMP   , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DATE        , LC.TIMESTAMP   , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DATE        , LC.TIMESTAMP   , 'Minus'                   ): OMT(OT.INTERVAL, None, 100.0),
+    (LC.DATE        , LC.TIMESTAMP   , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.ARRAY       , 'InList'                  ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.ARRAY       , 'NotInList'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.DECIMAL     , 'Divide'                  ): OMT(OT.DECIMAL, None, 100.0),
+    (LC.DECIMAL     , LC.DECIMAL     , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.DECIMAL     , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.DECIMAL     , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.DECIMAL     , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.DECIMAL     , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.DECIMAL     , 'Minus'                   ): OMT(OT.DECIMAL, None, 100.0),
+    (LC.DECIMAL     , LC.DECIMAL     , 'Multiply'                ): OMT(OT.DECIMAL, None, 100.0),
+    (LC.DECIMAL     , LC.DECIMAL     , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.DECIMAL     , 'Plus'                    ): OMT(OT.DECIMAL, None, 100.0),
+    (LC.DECIMAL     , LC.FLOAT       , 'Divide'                  ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.DECIMAL     , LC.FLOAT       , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.FLOAT       , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.FLOAT       , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.FLOAT       , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.FLOAT       , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.FLOAT       , 'Minus'                   ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.DECIMAL     , LC.FLOAT       , 'Multiply'                ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.DECIMAL     , LC.FLOAT       , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.FLOAT       , 'Plus'                    ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.DECIMAL     , LC.INTEGER     , 'Divide'                  ): OMT(OT.DECIMAL, None, 100.0),
+    (LC.DECIMAL     , LC.INTEGER     , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.INTEGER     , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.INTEGER     , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.INTEGER     , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.INTEGER     , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.INTEGER     , 'Minus'                   ): OMT(OT.DECIMAL, None, 100.0),
+    (LC.DECIMAL     , LC.INTEGER     , 'Multiply'                ): OMT(OT.DECIMAL, None, 100.0),
+    (LC.DECIMAL     , LC.INTEGER     , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.DECIMAL     , LC.INTEGER     , 'Plus'                    ): OMT(OT.DECIMAL, None, 100.0),
+    (LC.FLOAT       , LC.ARRAY       , 'InList'                  ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.ARRAY       , 'NotInList'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.DECIMAL     , 'Divide'                  ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.FLOAT       , LC.DECIMAL     , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.DECIMAL     , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.DECIMAL     , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.DECIMAL     , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.DECIMAL     , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.DECIMAL     , 'Minus'                   ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.FLOAT       , LC.DECIMAL     , 'Multiply'                ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.FLOAT       , LC.DECIMAL     , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.DECIMAL     , 'Plus'                    ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.FLOAT       , LC.FLOAT       , 'Divide'                  ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.FLOAT       , LC.FLOAT       , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.FLOAT       , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.FLOAT       , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.FLOAT       , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.FLOAT       , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.FLOAT       , 'Minus'                   ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.FLOAT       , LC.FLOAT       , 'Multiply'                ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.FLOAT       , LC.FLOAT       , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.FLOAT       , 'Plus'                    ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.FLOAT       , LC.INTEGER     , 'Divide'                  ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.FLOAT       , LC.INTEGER     , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.INTEGER     , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.INTEGER     , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.INTEGER     , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.INTEGER     , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.INTEGER     , 'Minus'                   ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.FLOAT       , LC.INTEGER     , 'Modulo'                  ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.FLOAT       , LC.INTEGER     , 'Multiply'                ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.FLOAT       , LC.INTEGER     , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.FLOAT       , LC.INTEGER     , 'Plus'                    ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.INTEGER     , LC.ARRAY       , 'InList'                  ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.ARRAY       , 'NotInList'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.DECIMAL     , 'Divide'                  ): OMT(OT.DECIMAL, None, 100.0),
+    (LC.INTEGER     , LC.DECIMAL     , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.DECIMAL     , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.DECIMAL     , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.DECIMAL     , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.DECIMAL     , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.DECIMAL     , 'Minus'                   ): OMT(OT.DECIMAL, None, 100.0),
+    (LC.INTEGER     , LC.DECIMAL     , 'Multiply'                ): OMT(OT.DECIMAL, None, 100.0),
+    (LC.INTEGER     , LC.DECIMAL     , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.DECIMAL     , 'Plus'                    ): OMT(OT.DECIMAL, None, 100.0),
+    (LC.INTEGER     , LC.FLOAT       , 'Divide'                  ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.INTEGER     , LC.FLOAT       , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.FLOAT       , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.FLOAT       , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.FLOAT       , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.FLOAT       , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.FLOAT       , 'Minus'                   ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.INTEGER     , LC.FLOAT       , 'Multiply'                ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.INTEGER     , LC.FLOAT       , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.FLOAT       , 'Plus'                    ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'BitwiseAnd'              ): OMT(OT.INTEGER, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'BitwiseOr'               ): OMT(OT.INTEGER, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'BitwiseXor'              ): OMT(OT.INTEGER, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'Divide'                  ): OMT(OT.DOUBLE, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'Minus'                   ): OMT(OT.INTEGER, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'Modulo'                  ): OMT(OT.INTEGER, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'Multiply'                ): OMT(OT.INTEGER, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'MyIntegerDivide'         ): OMT(OT.INTEGER, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'Plus'                    ): OMT(OT.INTEGER, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'ShiftLeft'               ): OMT(OT.INTEGER, None, 100.0),
+    (LC.INTEGER     , LC.INTEGER     , 'ShiftRight'              ): OMT(OT.INTEGER, None, 100.0),
+    (LC.INTERVAL    , LC.DATE        , 'Minus'                   ): OMT(OT.TIMESTAMP, None, 100.0),
+    (LC.INTERVAL    , LC.DATE        , 'Plus'                    ): OMT(OT.TIMESTAMP, None, 100.0),
+    (LC.INTERVAL    , LC.INTERVAL    , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTERVAL    , LC.INTERVAL    , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTERVAL    , LC.INTERVAL    , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTERVAL    , LC.INTERVAL    , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTERVAL    , LC.INTERVAL    , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTERVAL    , LC.INTERVAL    , 'Minus'                   ): OMT(OT.INTERVAL, None, 100.0),
+    (LC.INTERVAL    , LC.INTERVAL    , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.INTERVAL    , LC.INTERVAL    , 'Plus'                    ): OMT(OT.INTERVAL, None, 100.0),
+    (LC.INTERVAL    , LC.TIMESTAMP   , 'Minus'                   ): OMT(OT.TIMESTAMP, None, 100.0),
+    (LC.INTERVAL    , LC.TIMESTAMP   , 'Plus'                    ): OMT(OT.TIMESTAMP, None, 100.0),
+    (LC.NVARCHAR    , LC.ARRAY       , 'InList'                  ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.ARRAY       , 'NotInList'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.INTEGER     , 'MapAccess'               ): OMT(OT.NVARCHAR, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'Arrow'                   ): OMT(OT.VARIANT, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'AtQuestion'              ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'BitwiseOr'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'ILike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'Like'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'LongArrow'               ): OMT(OT.NVARCHAR, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'NotILike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'NotLike'                 ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'NotRLike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'RLike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.NVARCHAR    , 'StringConcat'            ): OMT(OT.NVARCHAR, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'Arrow'                   ): OMT(OT.VARIANT, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'AtQuestion'              ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'BitwiseOr'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'ILike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'Like'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'LongArrow'               ): OMT(OT.NVARCHAR, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'NotILike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'NotLike'                 ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'NotRLike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'RLike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARBINARY   , 'StringConcat'            ): OMT(OT.BLOB, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'Arrow'                   ): OMT(OT.VARIANT, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'AtQuestion'              ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'BitwiseOr'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'ILike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'Like'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'LongArrow'               ): OMT(OT.NVARCHAR, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'NotILike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'NotLike'                 ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'NotRLike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'RLike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.NVARCHAR    , LC.VARCHAR     , 'StringConcat'            ): OMT(OT.NVARCHAR, None, 100.0),
+    (LC.TIMESTAMP   , LC.ARRAY       , 'InList'                  ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.TIMESTAMP   , LC.ARRAY       , 'NotInList'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.TIMESTAMP   , LC.DATE        , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.TIMESTAMP   , LC.DATE        , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.TIMESTAMP   , LC.DATE        , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.TIMESTAMP   , LC.DATE        , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.TIMESTAMP   , LC.DATE        , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.TIMESTAMP   , LC.DATE        , 'Minus'                   ): OMT(OT.INTERVAL, None, 100.0),
+    (LC.TIMESTAMP   , LC.DATE        , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.TIMESTAMP   , LC.INTERVAL    , 'Minus'                   ): OMT(OT.TIMESTAMP, None, 100.0),
+    (LC.TIMESTAMP   , LC.INTERVAL    , 'Plus'                    ): OMT(OT.TIMESTAMP, None, 100.0),
+    (LC.TIMESTAMP   , LC.TIMESTAMP   , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.TIMESTAMP   , LC.TIMESTAMP   , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.TIMESTAMP   , LC.TIMESTAMP   , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.TIMESTAMP   , LC.TIMESTAMP   , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.TIMESTAMP   , LC.TIMESTAMP   , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.TIMESTAMP   , LC.TIMESTAMP   , 'Minus'                   ): OMT(OT.INTERVAL, None, 100.0),
+    (LC.TIMESTAMP   , LC.TIMESTAMP   , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.ARRAY       , 'InList'                  ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.ARRAY       , 'NotInList'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.INTEGER     , 'MapAccess'               ): OMT(OT.BLOB, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'Arrow'                   ): OMT(OT.VARIANT, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'AtQuestion'              ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'BitwiseOr'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'ILike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'Like'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'LongArrow'               ): OMT(OT.NVARCHAR, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'NotILike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'NotLike'                 ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'NotRLike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'RLike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.NVARCHAR    , 'StringConcat'            ): OMT(OT.BLOB, None, 100.0),
+    (LC.VARBINARY   , LC.VARBINARY   , 'Arrow'                   ): OMT(OT.VARIANT, None, 100.0),
+    (LC.VARBINARY   , LC.VARBINARY   , 'AtQuestion'              ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARBINARY   , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARBINARY   , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARBINARY   , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARBINARY   , 'ILike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARBINARY   , 'Like'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARBINARY   , 'LongArrow'               ): OMT(OT.NVARCHAR, None, 100.0),
+    (LC.VARBINARY   , LC.VARBINARY   , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARBINARY   , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARBINARY   , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARBINARY   , 'NotILike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARBINARY   , 'NotLike'                 ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARBINARY   , 'NotRLike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARBINARY   , 'RLike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARBINARY   , 'StringConcat'            ): OMT(OT.BLOB, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'Arrow'                   ): OMT(OT.VARIANT, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'AtQuestion'              ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'BitwiseOr'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'ILike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'Like'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'LongArrow'               ): OMT(OT.NVARCHAR, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'NotILike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'NotLike'                 ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'NotRLike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'RLike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARBINARY   , LC.VARCHAR     , 'StringConcat'            ): OMT(OT.BLOB, None, 100.0),
+    (LC.VARCHAR     , LC.ARRAY       , 'InList'                  ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.ARRAY       , 'NotInList'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.INTEGER     , 'MapAccess'               ): OMT(OT.VARCHAR, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'Arrow'                   ): OMT(OT.VARIANT, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'AtQuestion'              ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'BitwiseOr'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'ILike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'Like'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'LongArrow'               ): OMT(OT.NVARCHAR, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'NotILike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'NotLike'                 ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'NotRLike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'RLike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.NVARCHAR    , 'StringConcat'            ): OMT(OT.NVARCHAR, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'Arrow'                   ): OMT(OT.VARIANT, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'AtQuestion'              ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'BitwiseOr'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'ILike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'Like'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'LongArrow'               ): OMT(OT.NVARCHAR, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'NotILike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'NotLike'                 ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'NotRLike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'RLike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARBINARY   , 'StringConcat'            ): OMT(OT.BLOB, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'Arrow'                   ): OMT(OT.VARIANT, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'AtQuestion'              ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'BitwiseOr'               ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'Eq'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'Gt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'GtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'ILike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'Like'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'LongArrow'               ): OMT(OT.NVARCHAR, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'Lt'                      ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'LtEq'                    ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'NotEq'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'NotILike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'NotLike'                 ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'NotRLike'                ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'RLike'                   ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARCHAR     , LC.VARCHAR     , 'StringConcat'            ): OMT(OT.VARCHAR, None, 100.0),
+    (LC.VARIANT     , LC.INTEGER     , 'MapAccess'               ): OMT(OT.VARIANT, None, 100.0),
+    (LC.VARIANT     , LC.NVARCHAR    , 'Arrow'                   ): OMT(OT.VARIANT, None, 100.0),
+    (LC.VARIANT     , LC.NVARCHAR    , 'AtQuestion'              ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARIANT     , LC.NVARCHAR    , 'LongArrow'               ): OMT(OT.NVARCHAR, None, 100.0),
+    (LC.VARIANT     , LC.VARCHAR     , 'Arrow'                   ): OMT(OT.VARIANT, None, 100.0),
+    (LC.VARIANT     , LC.VARCHAR     , 'AtQuestion'              ): OMT(OT.BOOLEAN, None, 100.0),
+    (LC.VARIANT     , LC.VARCHAR     , 'LongArrow'               ): OMT(OT.NVARCHAR, None, 100.0),
+    (LC.VECTOR      , LC.INTEGER     , 'MapAccess'               ): OMT(OT.DOUBLE, None, 100.0),
 }
-# fmt:on
+# fmt: on
 
 for _, _, _operator_name in OPERATOR_MAP:
     if not is_known_operator(_operator_name):
-        raise UnsupportedSyntaxError(f"Operator map contains unknown operator '{_operator_name}'.")
+        raise UnsupportedSyntaxError(f"Operator map contains unknown operator \'{_operator_name}\'.")
 
 
-# ---------------------------------------------------------------------------
-# Decision B: operator dispatch keys on LogicalCategory, not OrsoTypes.
-#
-# Rather than hand-convert 348 dict-literal keys (a Python dict literal silently
-# deduplicates collapsed keys — e.g. STRUCT/JSONB → NVARCHAR — which would drop
-# entries unnoticed), the category-keyed map is DERIVED from OPERATOR_MAP with an
-# explicit collision guard. Verified: the collapse produces ZERO conflicting results.
-#
-# EXIT PLAN (see "Exit Plan for Bridges & Shims"): OPERATOR_MAP (OrsoTypes-keyed)
-# remains the human-edited source during migration; once operands are ColumnType
-# everywhere and OrsoTypes is being deleted, the source map is re-authored directly on
-# LogicalCategory and this derivation removed.
-# ---------------------------------------------------------------------------
-_ORSO_TO_CATEGORY: Dict[OrsoTypes, LogicalCategory] = {
-    OrsoTypes.BOOLEAN: LogicalCategory.BOOLEAN,
-    OrsoTypes.INTEGER: LogicalCategory.INTEGER,
-    OrsoTypes.DOUBLE: LogicalCategory.FLOAT,
-    OrsoTypes.DECIMAL: LogicalCategory.DECIMAL,
-    OrsoTypes.VARCHAR: LogicalCategory.VARCHAR,
-    OrsoTypes.NVARCHAR: LogicalCategory.NVARCHAR,
-    OrsoTypes.BLOB: LogicalCategory.VARBINARY,
-    OrsoTypes.DATE: LogicalCategory.DATE,
-    OrsoTypes.TIME: LogicalCategory.TIME,
-    OrsoTypes.TIMESTAMP: LogicalCategory.TIMESTAMP,
-    OrsoTypes.INTERVAL: LogicalCategory.INTERVAL,
-    OrsoTypes.ARRAY: LogicalCategory.ARRAY,
-    OrsoTypes.VECTOR: LogicalCategory.VECTOR,
-    OrsoTypes.VARIANT: LogicalCategory.VARIANT,
-    OrsoTypes.NULL: LogicalCategory.NULL,
-    OrsoTypes.STRUCT: LogicalCategory.NVARCHAR,  # collapse (Decision: STRUCT → JSON text)
-    OrsoTypes.JSONB: LogicalCategory.NVARCHAR,   # collapse (Decision: JSONB alias NVARCHAR)
+# Static SqlType → LogicalCategory projection for operator-map dispatch.
+# This is the only surviving use of SqlType in this file — once determine_type's
+# callers are migrated to pass column_type.category directly, this table can be
+# removed (Phase 4).
+_SQL_TO_LC: Dict[OT, LC] = {
+    OT.BOOLEAN: LC.BOOLEAN,
+    OT.INTEGER: LC.INTEGER,
+    OT.DOUBLE: LC.FLOAT,
+    OT.DECIMAL: LC.DECIMAL,
+    OT.VARCHAR: LC.VARCHAR,
+    OT.NVARCHAR: LC.NVARCHAR,
+    OT.BLOB: LC.VARBINARY,
+    OT.DATE: LC.DATE,
+    OT.TIME: LC.TIME,
+    OT.TIMESTAMP: LC.TIMESTAMP,
+    OT.INTERVAL: LC.INTERVAL,
+    OT.ARRAY: LC.ARRAY,
+    OT.VECTOR: LC.VECTOR,
+    OT.VARIANT: LC.VARIANT,
+    OT.NULL: LC.NULL,
+    OT.STRUCT: LC.NVARCHAR,  # STRUCT → JSON text
+    OT.JSONB: LC.NVARCHAR,   # JSONB alias NVARCHAR
 }
-
-_CATEGORY_OPERATOR_MAP: Dict[Tuple[LogicalCategory, LogicalCategory, str], OperatorMapType] = {}
-for (_lt, _rt, _op), _val in OPERATOR_MAP.items():
-    _lc = _ORSO_TO_CATEGORY.get(_lt)
-    _rc = _ORSO_TO_CATEGORY.get(_rt)
-    if _lc is None or _rc is None:
-        continue  # _MISSING_TYPE etc. — never a real operand at lookup time
-    _key = (_lc, _rc, _op)
-    _existing = _CATEGORY_OPERATOR_MAP.get(_key)
-    if _existing is not None and (
-        _existing.result_type != _val.result_type
-        or _existing.operation_function != _val.operation_function
-    ):
-        raise ValueError(
-            f"operator-map category collapse conflict at {_key}: "
-            f"{_existing.result_type} vs {_val.result_type} — resolve before relabeling"
-        )
-    _CATEGORY_OPERATOR_MAP[_key] = _val
-
-
-def _category_of(orso_type) -> Optional[LogicalCategory]:
-    """Operand OrsoTypes → dispatch LogicalCategory (migration-time projection)."""
-    return _ORSO_TO_CATEGORY.get(orso_type)
 
 
 def _is_internal_operator(operator: str) -> bool:
@@ -458,7 +404,7 @@ def _is_internal_operator(operator: str) -> bool:
     }
 
 
-def determine_type(node) -> OrsoTypes:
+def determine_type(node) -> OT:
     # initial version, needs to be improved
     if node.node_type in (
         NodeType.UNARY_OPERATOR,
@@ -472,31 +418,31 @@ def determine_type(node) -> OrsoTypes:
             "IsFalse",
             "IsNotTrue",
             "IsNotFalse",
-        ) and node.centre.schema_column.type not in (OrsoTypes.BOOLEAN, OrsoTypes._MISSING_TYPE, 0):
+        ) and node.centre.schema_column.type not in (OT.BOOLEAN, OT._MISSING_TYPE, 0):
             raise IncorrectTypeError(
                 f"Expected a BOOLEAN value for {convert_camel_to_sql_case(node.value)}, but received {node.centre.schema_column.type}."
             )
         if node.value == "BitwiseNot":
             operand_type = node.centre.schema_column.type
-            if operand_type not in (OrsoTypes.INTEGER, OrsoTypes._MISSING_TYPE, 0):
+            if operand_type not in (OT.INTEGER, OT._MISSING_TYPE, 0):
                 raise IncorrectTypeError(
                     f"Expected an INTEGER value for bitwise NOT (~), but received {operand_type}."
                 )
-            return OrsoTypes.INTEGER
-        return OrsoTypes.BOOLEAN
+            return OT.INTEGER
+        return OT.BOOLEAN
     if node.node_type == NodeType.NESTED:
         return determine_type(node.centre)
     if node.node_type == NodeType.WILDCARD:
-        return OrsoTypes._MISSING_TYPE
+        return OT._MISSING_TYPE
     if node.node_type == NodeType.EXPRESSION_LIST:
         if node.parameters[-1].type is not None:
             return node.parameters[-1].type
-        return OrsoTypes._MISSING_TYPE  # we can work this out
+        return OT._MISSING_TYPE
     if node.node_type == NodeType.LITERAL:
         return node.type
 
     if node.value in ("NotInSubQuery", "InSubQuery"):
-        return OrsoTypes.BOOLEAN
+        return OT.BOOLEAN
 
     if node.schema_column:
         return node.schema_column.type
@@ -513,19 +459,19 @@ def determine_type(node) -> OrsoTypes:
 
     operator = node.value
     if not is_known_operator(operator) and not _is_internal_operator(operator):
-        raise UnsupportedSyntaxError(f"Unsupported operator '{operator}'.")
+        raise UnsupportedSyntaxError(f"Unsupported operator \'{operator}\'.")
 
-    if left_type in (0, OrsoTypes._MISSING_TYPE, OrsoTypes.NULL):
-        return OrsoTypes._MISSING_TYPE
-    if right_type in (0, OrsoTypes._MISSING_TYPE, OrsoTypes.NULL):
-        return OrsoTypes._MISSING_TYPE
+    if left_type in (0, OT._MISSING_TYPE, OT.NULL):
+        return OT._MISSING_TYPE
+    if right_type in (0, OT._MISSING_TYPE, OT.NULL):
+        return OT._MISSING_TYPE
 
-    # Dispatch on LogicalCategory (Decision B): width-collapsed, JSON-family-aware.
-    left_category = _category_of(left_type)
-    right_category = _category_of(right_type)
+    # Dispatch on LogicalCategory (Decision B) via the module-level _SQL_TO_LC table.
+    left_category = _SQL_TO_LC.get(left_type)
+    right_category = _SQL_TO_LC.get(right_type)
     result = None
     if left_category is not None and right_category is not None:
-        result = _CATEGORY_OPERATOR_MAP.get((left_category, right_category, operator))
+        result = OPERATOR_MAP.get((left_category, right_category, operator))
 
     if result is None:
         from opteryx.expression import format_expression
@@ -536,23 +482,25 @@ def determine_type(node) -> OrsoTypes:
 
     if (
         operator == "MapAccess"
-        and left_type in (OrsoTypes.ARRAY, OrsoTypes.VECTOR)
-        and right_type == OrsoTypes.INTEGER
+        and left_type in (OT.ARRAY, OT.VECTOR)
+        and right_type == OT.INTEGER
     ):
         # ARRAY<T>[INTEGER] resolves to T when we know the element type.
         element_type = None
-        if node.left.schema_column is not None:
-            element_type = node.left.schema_column.element_type
-        if left_type == OrsoTypes.VECTOR:
+        sc = node.left.schema_column
+        if sc is not None and sc.column_type is not None and sc.column_type.element is not None:
+            from opteryx.types.sql_type import column_type_to_sql
+            element_type = column_type_to_sql(sc.column_type.element).get("type")
+        if left_type == OT.VECTOR:
             return (
                 element_type
-                if element_type not in (None, 0, OrsoTypes._MISSING_TYPE, OrsoTypes.NULL)
-                else OrsoTypes.DOUBLE
+                if element_type not in (None, 0, OT._MISSING_TYPE, OT.NULL)
+                else OT.DOUBLE
             )
         return (
             element_type
-            if element_type not in (None, 0, OrsoTypes._MISSING_TYPE, OrsoTypes.NULL)
-            else OrsoTypes._MISSING_TYPE
+            if element_type not in (None, 0, OT._MISSING_TYPE, OT.NULL)
+            else OT._MISSING_TYPE
         )
 
     return result.result_type

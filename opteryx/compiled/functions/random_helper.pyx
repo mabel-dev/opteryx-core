@@ -17,7 +17,7 @@ from opteryx.third_party.pcg.pcg cimport oneseq_xsh_rs_32_16, static_arbitrary_s
 cdef oneseq_xsh_rs_32_16 _util_rng
 _util_rng.seed(static_arbitrary_seed())
 
-# default charset (same as _orso_utils)
+# default charset (same as _sql_utils)
 cdef bytes DEFAULT_CHARSET = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 def random_string_c(int length, charset=None):

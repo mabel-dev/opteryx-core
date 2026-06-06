@@ -32,7 +32,7 @@ from opteryx.exceptions import InvalidInternalStateError
 from opteryx.managers.execution.pipeline_compiler import compile_pipeline
 from opteryx.models import PhysicalPlan, QueryTelemetry
 from opteryx.operators._operators import drive_scan
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 
 
 def execute(
@@ -161,13 +161,13 @@ def explain(plan: PhysicalPlan, analyze: bool, _format: str) -> Generator[Morsel
             ["identity", "bytes_in", "bytes_out"],
             [
                 vector_from_sequence(
-                    [row["identity"] for row in explained], dtype=OrsoTypes.VARCHAR
+                    [row["identity"] for row in explained], dtype=SqlType.VARCHAR
                 ),
                 vector_from_sequence(
-                    [row.get("bytes_in", 0) for row in explained], dtype=OrsoTypes.INTEGER
+                    [row.get("bytes_in", 0) for row in explained], dtype=SqlType.INTEGER
                 ),
                 vector_from_sequence(
-                    [row.get("bytes_out", 0) for row in explained], dtype=OrsoTypes.INTEGER
+                    [row.get("bytes_out", 0) for row in explained], dtype=SqlType.INTEGER
                 ),
             ],
         )
@@ -176,7 +176,7 @@ def explain(plan: PhysicalPlan, analyze: bool, _format: str) -> Generator[Morsel
 
         mermaid_plan = mermaid.plan_to_mermaid(plan, explained)
         table = Morsel.from_vectors(
-            ["plan"], [vector_from_sequence([mermaid_plan], dtype=OrsoTypes.VARCHAR)]
+            ["plan"], [vector_from_sequence([mermaid_plan], dtype=SqlType.VARCHAR)]
         )
 
     yield table

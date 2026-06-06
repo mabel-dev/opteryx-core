@@ -23,7 +23,12 @@ def _literal(value_type, value):
 
 
 def _identifier(value_type, *, element_type=None):
-    column = FlatColumn(name="col", type=value_type, element_type=element_type)
+    from opteryx.types._orso_types import orso_to_column_type
+    try:
+        ct = orso_to_column_type(value_type, element_type=element_type)
+        column = FlatColumn.from_column_type(name="col", column_type=ct)
+    except Exception:
+        column = FlatColumn(name="col", type=value_type)
     column.identity = "col"
     return Node(NodeType.IDENTIFIER, schema_column=column)
 

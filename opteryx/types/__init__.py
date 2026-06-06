@@ -3,11 +3,11 @@ Opteryx types module.
 
 This module provides:
 - Internal scalar type system (replacing numpy/pyarrow type checks)
-- Inlined OrsoTypes type system (replacing orso.types dependency)
+- SqlType type vocabulary (Draken-native engine)
 - Null handling primitives
 - Type conversion utilities
 - Type coercion helpers
-- Bidirectional type mapping (Python ↔ Orso)
+- Bidirectional Python ↔ SqlType mapping
 """
 
 from opteryx.types._null_handling import (
@@ -22,10 +22,10 @@ from opteryx.types._null_handling import (
     nulls_to_default,
     remove_nulls,
 )
-from opteryx.types._orso_types import (
-    ORSO_TO_PYTHON_MAP,
-    PYTHON_TO_ORSO_MAP,
-    OrsoTypes,
+from opteryx.types.sql_type import (
+    SQL_TO_PYTHON_MAP,
+    PYTHON_TO_SQL_MAP,
+    SqlType,
     find_compatible_type,
 )
 from opteryx.types._scalar_types import (
@@ -49,10 +49,10 @@ __all__ = [
     "is_null_scalar",
     "extract_python_scalar",
     "unwrap_scalar",
-    # OrsoTypes type system (inlined from orso)
-    "OrsoTypes",
-    "PYTHON_TO_ORSO_MAP",
-    "ORSO_TO_PYTHON_MAP",
+    # SqlType type vocabulary
+    "SqlType",
+    "PYTHON_TO_SQL_MAP",
+    "SQL_TO_PYTHON_MAP",
     "find_compatible_type",
     # Null handling primitives (Step 3)
     "is_null",

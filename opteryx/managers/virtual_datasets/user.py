@@ -12,7 +12,8 @@ It is the user attributes collection.
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
 from opteryx.exceptions import VariableNotFoundError
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
+from opteryx.types import logical_type as _lt
 from opteryx.types.schema import FlatColumn, RelationSchema
 
 __all__ = ("read", "schema")
@@ -37,9 +38,9 @@ def read(at_date=None, variables=None):
     # Build Draken vectors directly
     memberships_list = list(memberships)
     vectors = [
-        vector_from_sequence(["membership"] * len(memberships_list), dtype=OrsoTypes.VARCHAR),
-        vector_from_sequence([str(value) for value in memberships_list], dtype=OrsoTypes.VARCHAR),
-        vector_from_sequence(["VARCHAR"] * len(memberships_list), dtype=OrsoTypes.VARCHAR),
+        vector_from_sequence(["membership"] * len(memberships_list), dtype=SqlType.VARCHAR),
+        vector_from_sequence([str(value) for value in memberships_list], dtype=SqlType.VARCHAR),
+        vector_from_sequence(["VARCHAR"] * len(memberships_list), dtype=SqlType.VARCHAR),
     ]
 
     return Morsel.from_vectors(["attribute", "value", "type"], vectors)
@@ -50,9 +51,9 @@ def schema():
     return  RelationSchema(
         name="$user",
         columns=[
-            FlatColumn(name="attribute", type=OrsoTypes.VARCHAR),
-            FlatColumn(name="value", type=OrsoTypes.VARCHAR),
-            FlatColumn(name="type", type=OrsoTypes.VARCHAR)
+            FlatColumn.from_column_type(name="attribute", column_type=_lt.VARCHAR),
+            FlatColumn.from_column_type(name="value", column_type=_lt.VARCHAR),
+            FlatColumn.from_column_type(name="type", column_type=_lt.VARCHAR)
         ],
     )
     # fmt:on

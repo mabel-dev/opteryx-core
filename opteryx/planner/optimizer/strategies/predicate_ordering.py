@@ -25,7 +25,7 @@ from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.cost_estimation import PredicateStats, order_predicates as _order_predicates
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 from opteryx.types.schema import ConstantColumn
 from opteryx.utils import random_string
 
@@ -38,21 +38,21 @@ from .optimization_strategy import (
 # Approximate of the time in seconds (3sf) to compare 1 million records
 # These are the core comparisons, Eq, NotEq, Gt, GtEq, Lt, LtEq
 BASIC_COMPARISON_COSTS = {
-    OrsoTypes.ARRAY: 10.00,  # expensive
-    OrsoTypes.BLOB: 0.058,  # varies based on length, this is 50 bytes
-    OrsoTypes.JSONB: 10.00,  # JSONB (treat as expensive)
-    OrsoTypes.BOOLEAN: 0.003,
-    OrsoTypes.DATE: 0.008,
-    OrsoTypes.DECIMAL: 1.533,
-    OrsoTypes.DOUBLE: 0.002,
-    OrsoTypes.INTEGER: 0.001,
-    OrsoTypes.INTERVAL: 10.00,  # expensive
-    OrsoTypes.STRUCT: 10.00,  # expensive
-    OrsoTypes.TIMESTAMP: 0.008,
-    OrsoTypes.TIME: 10.00,  # expensive
-    OrsoTypes.VARCHAR: 0.231,  # varies based on length, this is 50 chars
-    OrsoTypes.NULL: 10.00,  # for completeness
-    getattr(OrsoTypes, "_MISSING_TYPE", 0): 10.00,  # for completeness
+    SqlType.ARRAY: 10.00,  # expensive
+    SqlType.BLOB: 0.058,  # varies based on length, this is 50 bytes
+    SqlType.JSONB: 10.00,  # JSONB (treat as expensive)
+    SqlType.BOOLEAN: 0.003,
+    SqlType.DATE: 0.008,
+    SqlType.DECIMAL: 1.533,
+    SqlType.DOUBLE: 0.002,
+    SqlType.INTEGER: 0.001,
+    SqlType.INTERVAL: 10.00,  # expensive
+    SqlType.STRUCT: 10.00,  # expensive
+    SqlType.TIMESTAMP: 0.008,
+    SqlType.TIME: 10.00,  # expensive
+    SqlType.VARCHAR: 0.231,  # varies based on length, this is 50 chars
+    SqlType.NULL: 10.00,  # for completeness
+    getattr(SqlType, "_MISSING_TYPE", 0): 10.00,  # for completeness
     0: 10.00,  # for completeness
 }
 
@@ -228,13 +228,25 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
             values_set = set(data["values"])
             new_node.left.value = values_set
             new_node.left.element_type = new_node.left.type
-            new_node.left.type = OrsoTypes.ARRAY
-            new_node.left.schema_column = ConstantColumn(
-                name=new_node.left.name,
-                type=OrsoTypes.ARRAY,
-                element_type=new_node.left.element_type,
-                value=new_node.left.value,
-            )
+            new_node.left.type = SqlType.ARRAY
+            # D-4 Phase 2: column_type construction for ARRAY ConstantColumn.
+            from opteryx.types.sql_type import sql_to_column_type as _otoct
+            from opteryx.types import logical_type as _lt
+            try:
+                _elem_ct = _otoct(new_node.left.element_type)
+                _arr_ct = _lt.ARRAY(_elem_ct)
+                new_node.left.schema_column = ConstantColumn.from_column_type(
+                    name=new_node.left.name,
+                    column_type=_arr_ct,
+                    value=new_node.left.value,
+                )
+            except Exception:
+                new_node.left.schema_column = ConstantColumn(
+                    name=new_node.left.name,
+                    type=SqlType.ARRAY,
+                    element_type=new_node.left.element_type,
+                    value=new_node.left.value,
+                )
 
             # Turn node into: column @>> ARRAY[...]
             new_node.value = "ArrayContainsAll"  # your @>> operator
@@ -247,7 +259,7 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
             # Neutralize the remaining AND'ed ANYOPEQ nodes to TRUE
             for node in data["nodes"][1:]:
                 node.node_type = NodeType.LITERAL
-                node.type = OrsoTypes.BOOLEAN
+                node.type = SqlType.BOOLEAN
                 node.value = True
 
     return predicate

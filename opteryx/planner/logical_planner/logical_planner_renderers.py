@@ -130,7 +130,10 @@ def render_function_dataset(node: LogicalPlanNode) -> str:
     if node.function == "GENERATE_SERIES":
         return f"GENERATE SERIES ({', '.join(format_expression(arg) for arg in node.args)}){alias}"
     if node.function == "VALUES":
-        return f"VALUES (({', '.join(c.value for c in node.columns)}) x {len(node.values)} AS {node.alias})"
+        # Pre-bind, node.columns are plain name strings; post-bind they are
+        # LogicalColumn objects exposing the name via `.value`.
+        column_names = ", ".join(c if isinstance(c, str) else c.value for c in node.columns)
+        return f"VALUES (({column_names}) x {len(node.values)} AS {node.alias})"
     if node.function == "UNNEST":
         return f"UNNEST ({', '.join(format_expression(arg) for arg in node.args)}{alias})"
     return node.function

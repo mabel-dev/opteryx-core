@@ -15,20 +15,20 @@ from typing import List, Set, Tuple
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, Node
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 
 
 def _is_numeric_join_coercible(left_type, right_type) -> bool:
     """Return True when join-side implicit numeric coercion is safe."""
-    if left_type in (OrsoTypes.BOOLEAN, OrsoTypes.NULL) or right_type in (
-        OrsoTypes.BOOLEAN,
-        OrsoTypes.NULL,
+    if left_type in (SqlType.BOOLEAN, SqlType.NULL) or right_type in (
+        SqlType.BOOLEAN,
+        SqlType.NULL,
     ):
         return False
-    return left_type in (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, OrsoTypes.DECIMAL) and right_type in (
-        OrsoTypes.INTEGER,
-        OrsoTypes.DOUBLE,
-        OrsoTypes.DECIMAL,
+    return left_type in (SqlType.INTEGER, SqlType.DOUBLE, SqlType.DECIMAL) and right_type in (
+        SqlType.INTEGER,
+        SqlType.DOUBLE,
+        SqlType.DECIMAL,
     )
 
 
@@ -86,7 +86,7 @@ def get_mismatched_condition_column_types(
                 or (left_type == 0 or right_type == 0)
             ):
                 return None
-            if left_type == OrsoTypes.NULL or right_type == OrsoTypes.NULL:
+            if left_type == SqlType.NULL or right_type == SqlType.NULL:
                 return None  # None comparisons are allowed
             if (
                 node.left.node_type == NodeType.COMPARISON_OPERATOR

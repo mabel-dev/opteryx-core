@@ -76,15 +76,15 @@ def _types_compatible(src, tgt) -> bool:
     Unresolved literal types (_MISSING_TYPE) are permitted at bind time —
     runtime catches real mismatches.
     """
-    from opteryx.types import OrsoTypes
+    from opteryx.types import SqlType
 
     if src == tgt:
         return True
-    if src == OrsoTypes.NULL:
+    if src == SqlType.NULL:
         return True
-    if src == OrsoTypes._MISSING_TYPE:
+    if src == SqlType._MISSING_TYPE:
         return True
-    if src == OrsoTypes.INTEGER and tgt == OrsoTypes.DOUBLE:
+    if src == SqlType.INTEGER and tgt == SqlType.DOUBLE:
         return True
     return False
 
@@ -111,7 +111,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     from opteryx.models import LogicalColumn
     from opteryx.types.schema import RelationSchema
 
-    from opteryx.types import OrsoTypes
+    from opteryx.types import SqlType
     from opteryx.types.schema import FlatColumn
 
     node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
@@ -166,7 +166,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
                 target_name = f"{target_name}_{seen_names[target_name]}"
             else:
                 seen_names[target_name] = 0
-            if sc.type == OrsoTypes._MISSING_TYPE or sc.type == OrsoTypes.NULL:
+            if sc.type == SqlType._MISSING_TYPE or sc.type == SqlType.NULL:
                 raise UnsupportedSyntaxError(
                     f"CTAS column '{target_name}' has unresolved type; "
                     "specify the SELECT's column types explicitly"

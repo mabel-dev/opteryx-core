@@ -416,11 +416,11 @@ def array_contains_all(arr, val):
 
 
 def array_cast(array, element_type):
-    from opteryx.types import OrsoTypes
+    from opteryx.types import SqlType
 
     array = array.tolist()
     result = [None] * len(array)
-    parser = OrsoTypes[element_type[0]].parse
+    parser = SqlType[element_type[0]].parse
     for i, row in enumerate(array):
         row_res = []
         if row is not None:
@@ -435,10 +435,10 @@ def array_cast(array, element_type):
 def array_cast_safe(array, element_type):
     from contextlib import suppress
 
-    from opteryx.types import OrsoTypes
+    from opteryx.types import SqlType
 
     result = [None] * len(array)
-    parser = OrsoTypes[element_type[0]].parse
+    parser = SqlType[element_type[0]].parse
     for i, row in enumerate(array):
         row_res = []
         with suppress(Exception):

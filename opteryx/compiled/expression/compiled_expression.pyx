@@ -105,12 +105,12 @@ DEF _NT_BETWEEN = 47
 # ---------------------------------------------------------------------------
 
 cdef dict _OP_CODES = None
-cdef object _OrsoTypes_DATE = None
-cdef object _OrsoTypes_TIMESTAMP = None
-cdef object _OrsoTypes_BOOLEAN = None
-cdef object _OrsoTypes_VARCHAR = None
-cdef object _OrsoTypes_ARRAY = None
-cdef object _OrsoTypes_BLOB = None
+cdef object _SqlType_DATE = None
+cdef object _SqlType_TIMESTAMP = None
+cdef object _SqlType_BOOLEAN = None
+cdef object _SqlType_VARCHAR = None
+cdef object _SqlType_ARRAY = None
+cdef object _SqlType_BLOB = None
 cdef tuple _STRING_FAMILY = ()
 cdef type _CarcharSetWrapper_t = None
 cdef type _PerfectHashSet_t = None
@@ -151,12 +151,12 @@ _UOP_CODE = {
 }
 
 
-cdef inline int16_t _orso_type_to_code(object orso_type):
-    """Convert an OrsoTypes value to a BCTypeCode integer. Returns BC_TYPE_NONE for None or non-temporal."""
-    _ensure_orso_types()
-    if orso_type is _OrsoTypes_DATE:
+cdef inline int16_t _sql_type_to_code(object sql_type):
+    """Convert an SqlType value to a BCTypeCode integer. Returns BC_TYPE_NONE for None or non-temporal."""
+    _ensure_sql_types()
+    if sql_type is _SqlType_DATE:
         return <int16_t>BC_TYPE_DATE
-    if orso_type is _OrsoTypes_TIMESTAMP:
+    if sql_type is _SqlType_TIMESTAMP:
         return <int16_t>BC_TYPE_TIMESTAMP
     return <int16_t>BC_TYPE_NONE
 
@@ -169,21 +169,21 @@ cdef inline dict _get_op_codes():
     return _OP_CODES
 
 
-cdef inline _ensure_orso_types():
-    global _OrsoTypes_DATE, _OrsoTypes_TIMESTAMP, _OrsoTypes_BOOLEAN
-    global _OrsoTypes_VARCHAR, _OrsoTypes_ARRAY, _OrsoTypes_BLOB
+cdef inline _ensure_sql_types():
+    global _SqlType_DATE, _SqlType_TIMESTAMP, _SqlType_BOOLEAN
+    global _SqlType_VARCHAR, _SqlType_ARRAY, _SqlType_BLOB
     global _STRING_FAMILY
-    if _OrsoTypes_DATE is None:
-        from opteryx.types import OrsoTypes
-        _OrsoTypes_DATE = OrsoTypes.DATE
-        _OrsoTypes_TIMESTAMP = OrsoTypes.TIMESTAMP
-        _OrsoTypes_BOOLEAN = OrsoTypes.BOOLEAN
-        _OrsoTypes_VARCHAR = OrsoTypes.VARCHAR
-        _OrsoTypes_ARRAY = OrsoTypes.ARRAY
-        _OrsoTypes_BLOB = OrsoTypes.BLOB
+    if _SqlType_DATE is None:
+        from opteryx.types import SqlType
+        _SqlType_DATE = SqlType.DATE
+        _SqlType_TIMESTAMP = SqlType.TIMESTAMP
+        _SqlType_BOOLEAN = SqlType.BOOLEAN
+        _SqlType_VARCHAR = SqlType.VARCHAR
+        _SqlType_ARRAY = SqlType.ARRAY
+        _SqlType_BLOB = SqlType.BLOB
         # Types valid as the LEFT operand of an extraction operator (-> ->> [i]).
         # Includes VARIANT so JSON access chains (a -> b ->> c) with no user cast.
-        _STRING_FAMILY = (_OrsoTypes_VARCHAR, OrsoTypes.NVARCHAR, _OrsoTypes_BLOB, OrsoTypes.VARIANT)
+        _STRING_FAMILY = (_SqlType_VARCHAR, SqlType.NVARCHAR, _SqlType_BLOB, SqlType.VARIANT)
 
 
 cdef inline _ensure_set_types():
@@ -459,12 +459,12 @@ cdef Py_ssize_t _linearize(
             raise NotImplementedError(
                 f"compiled_expression: unknown comparison operator {op_str!r}"
             )
-        _ensure_orso_types()
+        _ensure_sql_types()
 
         flags = 0
-        if left_type is _OrsoTypes_DATE or left_type is _OrsoTypes_TIMESTAMP:
+        if left_type is _SqlType_DATE or left_type is _SqlType_TIMESTAMP:
             flags |= BC_CMP_LEFT_TEMPORAL
-        if right_type is _OrsoTypes_DATE or right_type is _OrsoTypes_TIMESTAMP:
+        if right_type is _SqlType_DATE or right_type is _SqlType_TIMESTAMP:
             flags |= BC_CMP_RIGHT_TEMPORAL
         if right_is_inlist_literal:
             flags |= BC_CMP_INLIST_INLINE
@@ -473,8 +473,8 @@ cdef Py_ssize_t _linearize(
         slot.opcode = BC_COMPARE
         slot.op_code = op_code_val
         slot.flags = flags
-        slot.left_type_code = _orso_type_to_code(left_type)
-        slot.right_type_code = _orso_type_to_code(right_type)
+        slot.left_type_code = _sql_type_to_code(left_type)
+        slot.right_type_code = _sql_type_to_code(right_type)
         if right_is_inlist_literal:
             bc._hold(inlist_set_obj)
             slot.literal_obj = <PyObject*>inlist_set_obj
@@ -539,8 +539,8 @@ cdef Py_ssize_t _linearize(
         # Binary ops never return BOOL, so BC_RESULT_WRAP_AS_BOOL stays false.
 
         # Keep type codes for debugging / introspection (not used in executor).
-        slot.left_type_code = _orso_type_to_code(bin_left_type)
-        slot.right_type_code = _orso_type_to_code(bin_right_type)
+        slot.left_type_code = _sql_type_to_code(bin_left_type)
+        slot.right_type_code = _sql_type_to_code(bin_right_type)
         # Note: slot.compare_op_str no longer needed for BC_BINARY_OP, but field stays.
         return sub_depth - 1   # pop 2, push 1
 
@@ -599,8 +599,8 @@ cdef Py_ssize_t _linearize(
         slot.flags = 0
         if is_nb_callable:
             slot.flags |= BC_RESULT_NEEDS_NB_WRAP
-            _ensure_orso_types()
-            if func_ref_meta.inferred_return_type is _OrsoTypes_BOOLEAN:
+            _ensure_sql_types()
+            if func_ref_meta.inferred_return_type is _SqlType_BOOLEAN:
                 slot.flags |= BC_RESULT_WRAP_AS_BOOL
 
         # Phase 9b: Resolve C kernel function pointer for function calls.
@@ -624,7 +624,7 @@ cdef Py_ssize_t _linearize(
 
     # ------------------------------------------------------------------
     # NT_CAST — compile source expression, resolve at bind time.
-    # Phase 5: resolve_cast(source_orso, target_type, args, unit) returns a
+    # Phase 5: resolve_cast(source_sql, target_type, args, unit) returns a
     # pre-specialized kernel/closure; stored as callable_ref, invoked per-morsel.
     # ------------------------------------------------------------------
     if nt == _NT_CAST:
@@ -654,31 +654,31 @@ cdef Py_ssize_t _linearize(
         )
 
         # Phase 5: get the source operand's type from schema_column for bind-time resolution.
-        source_orso_name = None
+        source_sql_name = None
         if node.left.schema_column != NULL:
             src_sc = <object>node.left.schema_column
             if src_sc is not None:
-                source_orso = src_sc.type
-                if source_orso is not None:
-                    # Extract the OrsoType name string (e.g., "INT64", "VARCHAR").
-                    source_orso_name = getattr(source_orso, "name", None)
+                source_sql = src_sc.type
+                if source_sql is not None:
+                    # Extract the SqlType name string (e.g., "INT64", "VARCHAR").
+                    source_sql_name = getattr(source_sql, "name", None)
 
         from opteryx.expression.casts import resolve_cast
         try:
-            cast_kernel = resolve_cast(source_orso_name, cast_target_type, cast_params, unit=cast_unit, safe=cast_is_try)
+            cast_kernel = resolve_cast(source_sql_name, cast_target_type, cast_params, unit=cast_unit, safe=cast_is_try)
         except (NotImplementedError, ValueError) as e:
-            raise ValueError(f"Unsupported CAST: {source_orso_name} → {cast_target_type}: {e}")
+            raise ValueError(f"Unsupported CAST: {source_sql_name} → {cast_target_type}: {e}")
 
         slot = bc._push_instr()
         slot.opcode = BC_CAST
         # Phase 5: determine NEEDS_NB_WRAP based on resolved kernel return type.
         slot.flags = 0
-        _ensure_orso_types()
+        _ensure_sql_types()
 
         # Check if this is a no-op cast (source == target).
-        cast_target_orso = getattr(cast_py_node, "inferred_type", None)
-        is_noop_cast = (source_orso_name == cast_target_type or
-                        (source_orso == cast_target_orso and cast_target_orso is not None))
+        cast_target_sql = getattr(cast_py_node, "inferred_type", None)
+        is_noop_cast = (source_sql_name == cast_target_type or
+                        (source_sql == cast_target_sql and cast_target_sql is not None))
 
         # Determine if the resolved kernel returns a nanobind Vector that needs wrapping.
         # - Passthrough (no-op) casts return Cython Vectors → no wrap
@@ -693,13 +693,13 @@ cdef Py_ssize_t _linearize(
         if needs_nb_wrap:
             slot.flags |= BC_RESULT_NEEDS_NB_WRAP
 
-        if cast_target_orso is _OrsoTypes_BOOLEAN:
+        if cast_target_sql is _SqlType_BOOLEAN:
             slot.flags |= BC_RESULT_WRAP_AS_BOOL
 
         # Phase 9b: Resolve C kernel function pointer for cast operations.
         # Build kernel name from source and target types.
-        # Map OrsoTypes enum names (e.g., "INTEGER", "DOUBLE") to registry type tokens (e.g., "int64", "float64").
-        _orso_to_type_name = {
+        # Map SqlType enum names (e.g., "INTEGER", "DOUBLE") to registry type tokens (e.g., "int64", "float64").
+        _sql_to_type_name = {
             "INTEGER": "int64",
             "DOUBLE": "float64",
             "VARCHAR": "string",
@@ -721,8 +721,8 @@ cdef Py_ssize_t _linearize(
             "VECTOR": "draken_cast_to_vector",
         }
 
-        src_type_name = _orso_to_type_name.get(source_orso_name)
-        dst_type_name = _orso_to_type_name.get(cast_target_type)
+        src_type_name = _sql_to_type_name.get(source_sql_name)
+        dst_type_name = _sql_to_type_name.get(cast_target_type)
 
         kernel_name = None
         context_allocator = None
@@ -731,7 +731,7 @@ cdef Py_ssize_t _linearize(
         # Try specific source→target kernel if both types are supported.
         if src_type_name and dst_type_name:
             # Check for identity cast first (source == target).
-            if source_orso_name == cast_target_type:
+            if source_sql_name == cast_target_type:
                 kernel_name = "draken_cast_identity"
             else:
                 kernel_name = f"draken_cast_{src_type_name}_to_{dst_type_name}"
@@ -740,7 +740,7 @@ cdef Py_ssize_t _linearize(
             if fn_ptr is None:
                 # Fail-fast: supported type combo but kernel missing is a bug.
                 raise ValueError(
-                    f"Kernel '{kernel_name}' not found in registry for cast {source_orso_name} → {cast_target_type}. "
+                    f"Kernel '{kernel_name}' not found in registry for cast {source_sql_name} → {cast_target_type}. "
                     f"This is a supported combination but kernel is missing or incorrectly named."
                 )
         else:
@@ -790,7 +790,7 @@ cdef Py_ssize_t _linearize(
         if node.left == NULL:
             raise ValueError("compiled_expression: EXTRACTION_OPERATOR missing left operand")
 
-        _ensure_orso_types()
+        _ensure_sql_types()
         extr_op_str = <object>node.value
         extr_key = <object>node.right.value if node.right != NULL else None
 
@@ -798,7 +798,7 @@ cdef Py_ssize_t _linearize(
         left_sc = <object>node.left.schema_column if node.left.schema_column != NULL else None
         if left_sc is None:
             raise ValueError("compiled_expression: EXTRACTION_OPERATOR left operand missing schema_column")
-        left_orso = left_sc.type
+        left_sql = left_sc.type
 
         # Sub-op + kernel selection: resolve at bind time.
         sub_op = BC_EXTR_UNKNOWN
@@ -806,32 +806,32 @@ cdef Py_ssize_t _linearize(
         slot_bool_val = 0
 
         if extr_op_str == "MapAccess":
-            if left_orso == _OrsoTypes_ARRAY:
+            if left_sql == _SqlType_ARRAY:
                 # MapAccess on ARRAY: store scalar int64 key in bool_value (Option B).
                 # The scalar is extracted from the constant key at bind time.
                 sub_op = BC_EXTR_MAP_ARRAY
                 # Store the int64 key directly in bool_value.
                 slot_bool_val = int(extr_key)
-            elif left_orso in _STRING_FAMILY:
+            elif left_sql in _STRING_FAMILY:
                 # MapAccess on string: store length-1 INT64 key Vector.
                 sub_op = BC_EXTR_MAP_STRING
                 extr_literal = _draken_native.vector_from_constant(int(extr_key), 1)
             else:
                 raise IncorrectTypeError(
-                    f"MapAccess: operand must be ARRAY or string family; got {left_orso!r}"
+                    f"MapAccess: operand must be ARRAY or string family; got {left_sql!r}"
                 )
         elif extr_op_str == "Arrow":
-            if left_orso not in _STRING_FAMILY:
+            if left_sql not in _STRING_FAMILY:
                 raise IncorrectTypeError(
-                    f"-> requires a string/JSON operand; got {left_orso!r}"
+                    f"-> requires a string/JSON operand; got {left_sql!r}"
                 )
             sub_op = BC_EXTR_JSON_PTR
             # Store raw key bytes.
             extr_literal = extr_key if isinstance(extr_key, bytes) else extr_key.encode("utf-8")
         elif extr_op_str == "LongArrow":
-            if left_orso not in _STRING_FAMILY:
+            if left_sql not in _STRING_FAMILY:
                 raise IncorrectTypeError(
-                    f"->> requires a string/JSON operand; got {left_orso!r}"
+                    f"->> requires a string/JSON operand; got {left_sql!r}"
                 )
             sub_op = BC_EXTR_JSON_KEY
             # Store raw key bytes.
@@ -897,7 +897,7 @@ cdef Py_ssize_t _linearize(
         else_bc = build_bytecode(lower(src.else_result)) if src.else_result is not None else None
 
         # Phase 7: resolve output type from inferred types at bind time
-        _ensure_orso_types()
+        _ensure_sql_types()
         case_inferred_type = getattr(src, "inferred_type", None)
 
         # Select the assembly kernel based on the inferred result type.
@@ -910,9 +910,9 @@ cdef Py_ssize_t _linearize(
         _ASSEMBLE_STRING = 2
 
         # Determine kernel type from inferred type
-        if case_inferred_type is _OrsoTypes_BOOLEAN:
+        if case_inferred_type is _SqlType_BOOLEAN:
             kernel_type = _ASSEMBLE_BOOL
-        elif case_inferred_type in (_OrsoTypes_VARCHAR, _OrsoTypes_BLOB):
+        elif case_inferred_type in (_SqlType_VARCHAR, _SqlType_BLOB):
             kernel_type = _ASSEMBLE_STRING
         elif case_inferred_type is None:
             # Fallback when inferred_type is None: defer to runtime type dispatch.
@@ -928,7 +928,7 @@ cdef Py_ssize_t _linearize(
         slot.opcode = BC_CASE
         # CASE closure returns a nanobind Vector; set NEEDS_NB_WRAP.
         slot.flags = BC_RESULT_NEEDS_NB_WRAP
-        if case_inferred_type is _OrsoTypes_BOOLEAN:
+        if case_inferred_type is _SqlType_BOOLEAN:
             slot.flags |= BC_RESULT_WRAP_AS_BOOL
         bc._hold(case_callable)
         slot.callable_ref = <PyObject*>case_callable
@@ -950,9 +950,9 @@ cdef _validate_temporal_at_bind(
     """Raise IncompatibleTypesError at bind time if a temporal comparison
     has an un-cast literal on one side. Runs once per COMPARISON node.
     """
-    _ensure_orso_types()
-    cdef bint left_is_temporal = (left_type is _OrsoTypes_DATE) or (left_type is _OrsoTypes_TIMESTAMP)
-    cdef bint right_is_temporal = (right_type is _OrsoTypes_DATE) or (right_type is _OrsoTypes_TIMESTAMP)
+    _ensure_sql_types()
+    cdef bint left_is_temporal = (left_type is _SqlType_DATE) or (left_type is _SqlType_TIMESTAMP)
+    cdef bint right_is_temporal = (right_type is _SqlType_DATE) or (right_type is _SqlType_TIMESTAMP)
 
     if not (left_is_temporal or right_is_temporal):
         return

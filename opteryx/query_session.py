@@ -44,7 +44,7 @@ from opteryx.managers.billing import BillingEventType, write_billing_event
 from opteryx.models import ExecutionContext, QueryTelemetry
 from opteryx.models.dataframe import DataFrame
 from opteryx.tracing import record_event
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 from opteryx.types.schema import FlatColumn, RelationSchema
 from opteryx.utils import sql
 
@@ -477,31 +477,25 @@ class Session(DataFrame):
         """
         from draken.morsels.morsel import Morsel
 
-        _DRAKEN_TO_ORSO = {
-            1: OrsoTypes.INTEGER,  # INT8
-            2: OrsoTypes.INTEGER,  # INT16
-            3: OrsoTypes.INTEGER,  # INT32
-            4: OrsoTypes.INTEGER,  # INT64
-            20: OrsoTypes.DOUBLE,  # FLOAT32
-            21: OrsoTypes.DOUBLE,  # FLOAT64
-            30: OrsoTypes.DATE,  # DATE32
-            40: OrsoTypes.TIMESTAMP,  # TIMESTAMP64
-            43: OrsoTypes.INTERVAL,  # INTERVAL
-            50: OrsoTypes.BOOLEAN,  # BOOL
-            60: OrsoTypes.VARCHAR,  # STRING
-            61: OrsoTypes.VARCHAR,  # DICTIONARY
-            63: OrsoTypes.NVARCHAR,  # NVARCHAR (UTF-8)
-            65: OrsoTypes.VARIANT,  # VARIANT (polymorphic JSON)
-            80: OrsoTypes.ARRAY,  # ARRAY
+        from opteryx.types import logical_type as _lt
+        from draken.draken_native import DrakenType as _DT
+        _DRAKEN_TO_LT = {
+            _DT.INT8: _lt.INT8, _DT.INT16: _lt.INT16,
+            _DT.INT32: _lt.INT32, _DT.INT64: _lt.INT64,
+            _DT.FLOAT32: _lt.FLOAT32, _DT.FLOAT64: _lt.FLOAT64,
+            _DT.DATE32: _lt.DATE, _DT.TIMESTAMP64: _lt.TIMESTAMP(),
+            _DT.INTERVAL: _lt.INTERVAL, _DT.BOOL: _lt.BOOLEAN,
+            _DT.VARCHAR: _lt.VARCHAR, _DT.NVARCHAR: _lt.NVARCHAR,
+            _DT.VARIANT: _lt.VARIANT, _DT.ARRAY: _lt.ARRAY(_lt.VARIANT),
+            _DT.VARBINARY: _lt.VARBINARY, _DT.NULL: _lt.NULL,
         }
 
         def _schema_from_morsel(morsel: Morsel):
             columns = []
             for name, dtype in zip(morsel.column_names, morsel.column_types):
-                dtype_int = dtype.value
-                orso_type = _DRAKEN_TO_ORSO.get(dtype_int, OrsoTypes.VARCHAR)
                 col_name = name.decode("utf-8") if isinstance(name, bytes) else name
-                columns.append(FlatColumn(name=col_name, type=orso_type))
+                ct = _DRAKEN_TO_LT.get(dtype, _lt.VARCHAR)
+                columns.append(FlatColumn.from_column_type(name=col_name, column_type=ct))
             return RelationSchema(name="table", columns=columns)
 
         self._ensure_open()

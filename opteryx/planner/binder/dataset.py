@@ -13,7 +13,7 @@ from opteryx.exceptions import (
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 from opteryx.types.schema import FlatColumn, RelationSchema
 from opteryx.utils import random_string
 
@@ -31,9 +31,9 @@ def visit_function_dataset(
                 if len(node.values[0]) >= i:
                     value = node.values[0][i]
                     types[column] = value.type
-                    if value.type in (OrsoTypes.ARRAY, OrsoTypes.VECTOR):
+                    if value.type in (SqlType.ARRAY, SqlType.VECTOR):
                         element_type = getattr(value, "element_type", None)
-                        if element_type in (None, OrsoTypes._MISSING_TYPE):
+                        if element_type in (None, SqlType._MISSING_TYPE):
                             schema_column = getattr(value, "schema_column", None)
                             element_type = (
                                 getattr(schema_column, "element_type", None)
@@ -41,16 +41,27 @@ def visit_function_dataset(
                                 else None
                             )
                         element_types[column] = element_type
+        # D-4 Phase 2: build each FlatColumn via from_column_type when possible.
+        # Falls back to the legacy path for columns whose inferred type the bridge
+        # can't yet map (e.g. VECTOR).
+        from opteryx.types.sql_type import sql_to_column_type as _otoct
+        def _build_value_column(column):
+            ot = types.get(column, SqlType.NULL)
+            et = element_types.get(column)
+            try:
+                ct = _otoct(ot, element_type=et)
+                return FlatColumn.from_column_type(name=column, column_type=ct)
+            except Exception:
+                # Bridge can't map this type (VECTOR with no dimension, etc.).
+                # Fall back to bare construction; precision/scale/element_type
+                # remain as InitVar params so no sidecar drift occurs.
+                return FlatColumn(name=column, type=ot)
         columns = [
             LogicalColumn(
                 node_type=NodeType.IDENTIFIER,
                 source_column=column,
                 source=relation_name,
-                schema_column=FlatColumn(
-                    name=column,
-                    type=types.get(column, OrsoTypes.NULL),
-                    element_type=element_types.get(column),
-                ),
+                schema_column=_build_value_column(column),
             )
             for column in node.columns
         ]
@@ -81,7 +92,7 @@ def visit_function_dataset(
         node.columns = columns
         node.schema = schema
     elif node.function == "GENERATE_SERIES":
-        element_type = OrsoTypes._MISSING_TYPE
+        element_type = SqlType._MISSING_TYPE
         first_arg = node.args[0]
         if first_arg.node_type == NodeType.NESTED:
             first_arg = first_arg.centre
@@ -89,14 +100,14 @@ def visit_function_dataset(
             types = {n.type for n in node.args}
             if len(types) == 1:
                 element_type = list(types)[0]
-            elif types == {OrsoTypes.INTEGER, OrsoTypes.DOUBLE}:
-                element_type = OrsoTypes.DOUBLE
+            elif types == {SqlType.INTEGER, SqlType.DOUBLE}:
+                element_type = SqlType.DOUBLE
             else:
                 raise InvalidFunctionParameterError(
                     "GENERATE_SERIES for numbers takes 1 (stop), 2 (start, stop) or 3 (start, stop, interval) parameters."
                 )
         if first_arg.type.is_temporal():
-            element_type = OrsoTypes.TIMESTAMP
+            element_type = SqlType.TIMESTAMP
 
         node.relation_name = node.alias
         columns = [

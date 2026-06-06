@@ -25,7 +25,7 @@ from opteryx.expression.functions.implementations.utility import (
 )
 
 # Local helpers provided by registrar package
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 
 
 def get_builtin_logical_functions() -> List[FunctionDefinition]:

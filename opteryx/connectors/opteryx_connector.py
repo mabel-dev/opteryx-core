@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable
 from opteryx.exceptions import DatasetNotFoundError, DatasetReadError
 from opteryx.models import FileEntry, Manifest
-from opteryx.types import OrsoTypes
+from opteryx.types import SqlType
 from opteryx.types.schema import FlatColumn, RelationSchema
 
 
@@ -109,9 +109,9 @@ class OpteryxTable(Diachronic, PredicatePushable):
 
     @staticmethod
     def _normalize_type(
-        raw_type: Any, default: Optional[OrsoTypes] = OrsoTypes.VARCHAR
-    ) -> Optional[OrsoTypes]:
-        if isinstance(raw_type, OrsoTypes):
+        raw_type: Any, default: Optional[SqlType] = SqlType.VARCHAR
+    ) -> Optional[SqlType]:
+        if isinstance(raw_type, SqlType):
             return raw_type
 
         candidate = raw_type
@@ -124,7 +124,7 @@ class OpteryxTable(Diachronic, PredicatePushable):
             return default
 
         try:
-            return OrsoTypes.from_name(str(candidate))[0]
+            return SqlType.from_name(str(candidate))[0]
         except (TypeError, ValueError):
             return default
 
@@ -155,16 +155,31 @@ class OpteryxTable(Diachronic, PredicatePushable):
                 if raw_element_type is None and isinstance(column, dict):
                     raw_element_type = column.get("element_type") or column.get("element-type")
 
-                normalized = FlatColumn(
-                    name=name,
-                    type=cls._normalize_type(raw_type, default=OrsoTypes.VARCHAR),
-                    element_type=cls._normalize_type(raw_element_type, default=None)
-                    if raw_element_type is not None
-                    else None,
-                    nullable=getattr(column, "nullable", True),
-                    precision=getattr(column, "precision", None),
-                    scale=getattr(column, "scale", None),
-                )
+                # D-4 Phase 2: build via from_column_type (single authoritative
+                # type carrier). Resolve the remote schema's type + params via the
+                # bridge, with a legacy fallback for types the bridge can't map.
+                from opteryx.types.sql_type import sql_to_column_type as _otoct
+                from opteryx.types import logical_type as _lt
+                _ot = cls._normalize_type(raw_type, default=SqlType.VARCHAR)
+                _et = (cls._normalize_type(raw_element_type, default=None)
+                       if raw_element_type is not None else None)
+                _p = getattr(column, "precision", None)
+                _s = getattr(column, "scale", None)
+                try:
+                    # Use the bridge: handles DECIMAL(p,s) and ARRAY<elem>.
+                    _ct = _otoct(_ot, precision=_p, scale=_s, element_type=_et)
+                    normalized = FlatColumn.from_column_type(
+                        name=name,
+                        column_type=_ct,
+                        nullable=getattr(column, "nullable", True),
+                    )
+                except Exception:
+                    # Unmappable type (VECTOR with no dimension, etc.) — fall back.
+                    normalized = FlatColumn(
+                        name=name,
+                        type=_ot,
+                        nullable=getattr(column, "nullable", True),
+                    )
 
             columns.append(normalized)
 
