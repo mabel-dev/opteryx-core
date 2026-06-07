@@ -43,6 +43,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>

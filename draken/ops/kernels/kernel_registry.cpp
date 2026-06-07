@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <map>
 #include <functional>
+#include <string>
 
 // ---------------------------------------------------------------------------
 // Forward declarations of C kernel functions (Phase 9a)

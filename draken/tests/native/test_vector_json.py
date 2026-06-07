@@ -60,6 +60,7 @@ vector_map_access   = _json.vector_map_access
 import draken.draken_native as dn
 
 DRAKEN_VARCHAR = dn.DrakenType.VARCHAR
+DRAKEN_VARIANT = dn.DrakenType.VARIANT
 
 
 # ---------------------------------------------------------------------------
@@ -179,10 +180,10 @@ class TestJsonExtractDotPath:
         assert read(result, 1) == "2"
         assert read(result, 2) is None   # missing key → null
 
-    def test_output_type_is_varchar(self):
+    def test_output_type_is_variant(self):
         docs = make(['{"a":1}'])
         result = vector_json_extract(docs, b"$.a")
-        assert result.type == DRAKEN_VARCHAR
+        assert result.type == DRAKEN_VARIANT
 
     def test_non_vector_input_raises_typeerror(self):
         with pytest.raises(TypeError):
@@ -268,10 +269,10 @@ class TestMapAccess:
         assert read(result, 2) is None
         assert read(result, 3) == '"c"'
 
-    def test_output_type_is_varchar(self):
+    def test_output_type_is_variant(self):
         docs = make(['{"a":1}'])
         result = vector_map_access(docs, b"a")
-        assert result.type == DRAKEN_VARCHAR
+        assert result.type == DRAKEN_VARIANT
 
     def test_non_vector_input_raises_typeerror(self):
         with pytest.raises(TypeError):

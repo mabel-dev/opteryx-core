@@ -54,15 +54,17 @@ static inline bool is_valid_at(const DrakenVector* dv, uint32_t i) noexcept {
     return ((dv->validity[i >> 3] >> (i & 7u)) & 1u) != 0u;
 }
 
-// Unwrap a VARCHAR-family DrakenVector.  Raises TypeError on non-Vector or
-// non-string type.
+// Unwrap a VARCHAR-family or VARIANT DrakenVector.  Raises TypeError on non-Vector or
+// non-string type.  VARIANT is accepted because vector_json_extract returns VARIANT,
+// making it composable: json_extract(json_extract(x, '$.a'), '$.b').
 static const DrakenVector* unwrap_str_vec(nb::object obj, const char* fn) {
     const DrakenVector* dv = draken_vector_unwrap(obj.ptr());
     if (!dv) throw nb::python_error();
     const bool ok =
         dv->type == DRAKEN_VARCHAR   ||
         dv->type == DRAKEN_NVARCHAR  ||
-        dv->type == DRAKEN_VARBINARY;
+        dv->type == DRAKEN_VARBINARY ||
+        dv->type == DRAKEN_VARIANT;
     if (!ok)
         throw nb::type_error(
             (std::string(fn) + ": expected a VARCHAR/NVARCHAR/VARBINARY DrakenVector").c_str());
@@ -316,7 +318,7 @@ NB_MODULE(vector_json, m) {
         nb::arg("docs"), nb::arg("key"),
         "Top-level object key access on each JSON document in a VARCHAR vector.\n"
         "key: bytes — simple field name (no path syntax).\n"
-        "Output: DRAKEN_VARCHAR (JSON-text of extracted value).\n"
+        "Output: DRAKEN_VARIANT (JSON-text of extracted value).\n"
         "Null TVL: null input row / missing key / JSON null → null output.\n"
         "Invalid JSON → RuntimeError (fail fast).");
 }

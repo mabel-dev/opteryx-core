@@ -107,14 +107,14 @@ class TestDecimalAdd:
         r = a.add(b)
         assert pylist(r) == [None, None]
 
-    def test_overflow_raises(self):
-        # Scale alignment causes int64 overflow:
-        # a = DECIMAL(18,0) with value 10^17, b = DECIMAL(10,2) with 0.01
-        # result_scale = max(0,2) = 2; a_scaled = 10^17 * 100 = 10^19 > INT64_MAX (~9.22e18)
+    def test_large_value_promotes_to_decimal128(self):
+        # Result precision > 18 → auto-promotes to DECIMAL128; no overflow.
+        # a = DECIMAL(18,0) with 10^17, b = DECIMAL(10,2) with 0.01 → result = 100000000000000000.01
         a = dec([Decimal('100000000000000000')], precision=18, scale=0)
         b = dec([Decimal('0.01')], precision=10, scale=2)
-        with pytest.raises((OverflowError, Exception)):
-            pylist(a.add(b))
+        r = a.add(b)
+        assert r.type == dn.DrakenType.DECIMAL128
+        assert pylist(r) == [Decimal('100000000000000000.01')]
 
     def test_negative_values(self):
         a = dec([Decimal('-1.50')])
@@ -186,14 +186,14 @@ class TestDecimalSub:
         r = a.sub(b)
         assert pylist(r) == [None, None]
 
-    def test_overflow_raises(self):
-        # Scale alignment causes int64 overflow:
-        # a = DECIMAL(18,0) with -10^17, b = DECIMAL(10,2) with 0.01
-        # result_scale = 2; a_scaled = -10^17 * 100 = -10^19 < INT64_MIN (~-9.22e18)
+    def test_large_value_promotes_to_decimal128(self):
+        # Result precision > 18 → auto-promotes to DECIMAL128; no overflow.
+        # a = DECIMAL(18,0) with -10^17, b = DECIMAL(10,2) with 0.01 → result = -100000000000000000.01
         a = dec([Decimal('-100000000000000000')], precision=18, scale=0)
         b = dec([Decimal('0.01')], precision=10, scale=2)
-        with pytest.raises((OverflowError, Exception)):
-            pylist(a.sub(b))
+        r = a.sub(b)
+        assert r.type == dn.DrakenType.DECIMAL128
+        assert pylist(r) == [Decimal('-100000000000000000.01')]
 
     def test_result_type_is_decimal(self):
         a = dec([Decimal('3.00')])
@@ -268,26 +268,31 @@ class TestDecimalMul:
         r = a.mul(b)
         assert pylist(r) == [None, None]
 
-    def test_overflow_raises(self):
-        # Large values: mul result overflows int64
+    def test_large_value_promotes_to_decimal128(self):
+        # Result precision > 18 → auto-promotes to DECIMAL128; no overflow.
         a = dec([Decimal('999999999.99')], precision=11, scale=2)
         b = dec([Decimal('999999999.99')], precision=11, scale=2)
-        # result_scale would be 4; 99999999999 * 99999999999 = ~1e22 >> INT64_MAX
-        with pytest.raises((OverflowError, Exception)):
-            pylist(a.mul(b))
+        r = a.mul(b)
+        assert r.type == dn.DrakenType.DECIMAL128
 
     def test_scale_overflow_raises(self):
-        # sa + sb > 18 raises before any row processing.
-        # Use DECIMAL(18, 10) * DECIMAL(18, 9) → sa+sb = 19 > 18.
-        # Values chosen to fit in each vector's precision.
-        a = dec([Decimal('0.0000000001')], precision=18, scale=10)
-        b = dec([Decimal('0.000000001')], precision=18, scale=9)
+        # sa + sb > 38 raises in the DECIMAL128 tier.
+        # Use DECIMAL128(38,20) * DECIMAL128(38,19) → sa+sb = 39 > 38.
+        a = dn.vector_decimal128_from_sequence([Decimal('1E-20')], precision=38, scale=20)
+        b = dn.vector_decimal128_from_sequence([Decimal('1E-19')], precision=38, scale=19)
         with pytest.raises((OverflowError, Exception)):
             a.mul(b)
 
-    def test_result_type_is_decimal(self):
+    def test_result_type_is_decimal128_for_default_precision(self):
+        # Default precision=10: rp_raw = 10+10 = 20 > 18 → promotes to DECIMAL128.
         a = dec([Decimal('2.00')], scale=2)
         b = dec([Decimal('3.00')], scale=2)
+        assert a.mul(b).type == dn.DrakenType.DECIMAL128
+
+    def test_result_type_is_decimal_for_low_precision(self):
+        # precision=4: rp_raw = 4+4 = 8 ≤ 18 → stays DECIMAL (int64).
+        a = dec([Decimal('2.00')], precision=4, scale=2)
+        b = dec([Decimal('3.00')], precision=4, scale=2)
         assert a.mul(b).type == dn.DrakenType.DECIMAL
 
 
@@ -540,11 +545,12 @@ class TestDecimalArithGuards:
         with pytest.raises((TypeError, Exception)):
             a.add(1)
 
-    def test_decimal_plus_int64_raises(self):
+    def test_decimal_plus_int64_works(self):
+        # INT64 is accepted as a scale-0 decimal operand: 1.00 + 1 = 2.00.
         a = dec([Decimal('1.00')])
         b = dn.vector_from_sequence([1])
-        with pytest.raises(Exception):
-            a.add(b)
+        r = a.add(b)
+        assert pylist(r) == [Decimal('2.00')]
 
     def test_decimal_missing_descriptor_raises(self):
         # This can't normally occur via public API (factory always interns descriptor)

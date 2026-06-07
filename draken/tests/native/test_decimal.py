@@ -346,17 +346,17 @@ class TestCompare:
         result = pylist(a.compare_vector(b, EQ))
         assert result == [True, None, True]
 
-    def test_compare_vector_cross_scale_throws(self):
+    def test_compare_vector_cross_scale_works(self):
+        # Cross-scale comparison is scale-aware: values are aligned in int128.
         a = dec([Decimal('1.00')], scale=2)
         b = dec([Decimal('1.0000')], precision=10, scale=4)
-        with pytest.raises(Exception, match="cross-scale"):
-            a.compare_vector(b, EQ)
+        assert pylist(a.compare_vector(b, EQ)) == [True]
 
-    def test_compare_vector_cross_type_throws(self):
+    def test_compare_vector_cross_type_int64_as_scale0(self):
+        # INT64 is treated as scale-0 decimal: 1 == 1.00 after alignment.
         a = dec([Decimal('1.00')])
         b = dn.vector_from_sequence([1])
-        with pytest.raises(Exception):
-            a.compare_vector(b, EQ)
+        assert pylist(a.compare_vector(b, EQ)) == [True]
 
 
 # ===========================================================================
@@ -539,14 +539,14 @@ class TestProperties:
         result = pylist(v)
         assert result == vals
 
-    def test_cross_scale_throw_property(self):
-        # Any two DECIMAL vectors with different scales must throw on compare_vector
+    def test_cross_scale_compare_property(self):
+        # Cross-scale comparison is scale-aware: 1.00 (scale=2) == 1.0000 (scale=4), etc.
         scales = [(2, 4), (0, 1), (3, 5)]
         for s1, s2 in scales:
-            a = dec([Decimal('1.00')], scale=s1)
-            # Build a compatible value for scale s2
-            val_s2 = Decimal('1') / (Decimal('10') ** s2)
-            val_s2 = val_s2.quantize(Decimal('0.' + '0' * s2))
-            b = dec([val_s2], precision=10, scale=s2)
-            with pytest.raises(Exception):
-                a.compare_vector(b, EQ)
+            quant_s1 = Decimal('0.' + '0' * s1) if s1 > 0 else Decimal('1')
+            quant_s2 = Decimal('0.' + '0' * s2) if s2 > 0 else Decimal('1')
+            val = Decimal('1').quantize(quant_s1)
+            a = dec([val], scale=s1)
+            b = dec([Decimal('1').quantize(quant_s2)], precision=10, scale=s2)
+            result = pylist(a.compare_vector(b, EQ))
+            assert result == [True], f"scales ({s1},{s2}): expected True"
