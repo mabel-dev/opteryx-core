@@ -104,10 +104,28 @@ cdef object _build_arithmetic_closure(int op_code):
         lt = getattr(left_nb, "type", None)
         rt = getattr(right_nb, "type", None)
 
-        # DECIMAL has its own kernel dispatch (dec_div / decimal_*). Promoting an
-        # int operand to FLOAT64 here would route DECIMAL × FLOAT64 into dec_div,
-        # which rejects non-decimal operands. Leave decimal pairings untouched.
-        _has_decimal = (lt == _draken_native.DECIMAL or rt == _draken_native.DECIMAL)
+        # DECIMAL/DECIMAL128 has its own kernel dispatch (dec_mul / decimal_*).
+        # NOTE: _draken_native.DECIMAL is LogicalKind.DECIMAL (overwritten by
+        # export_values); use DrakenType.DECIMAL explicitly to match vec.type.
+        _has_decimal = (lt in (_draken_native.DrakenType.DECIMAL, _draken_native.DrakenType.DECIMAL128)
+                        or rt in (_draken_native.DrakenType.DECIMAL, _draken_native.DrakenType.DECIMAL128))
+
+        # DECIMAL × FLOAT: the decimal kernel rejects float operands. The operator
+        # map says the result is FLOAT64, so promote the decimal side to float64
+        # and let standard float arithmetic handle it.
+        if _has_decimal:
+            if lt in _float_types:
+                _cast = getattr(right_nb, "to_float64", None)
+                if _cast is not None:
+                    right_nb = _cast()
+                    rt = _draken_native.FLOAT64
+                    _has_decimal = False
+            elif rt in _float_types:
+                _cast = getattr(left_nb, "to_float64", None)
+                if _cast is not None:
+                    left_nb = _cast()
+                    lt = _draken_native.FLOAT64
+                    _has_decimal = False
 
         # TRUE division: promote integer operands to FLOAT64 (int / int -> float).
         if is_true_divide and not _has_decimal:

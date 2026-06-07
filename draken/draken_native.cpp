@@ -1734,6 +1734,10 @@ static int draken_vector_compare_at(const DrakenVector& v,
             const int64_t* d = static_cast<const int64_t*>(v.data);
             return (d[a] < d[b]) ? -1 : (d[a] > d[b]) ? 1 : 0;
         }
+        case DRAKEN_DECIMAL128: {   // same-vector → same scale; unscaled int128 order == value order
+            const __int128* d = static_cast<const __int128*>(v.data);
+            return (d[a] < d[b]) ? -1 : (d[a] > d[b]) ? 1 : 0;
+        }
         case DRAKEN_FLOAT32: {
             const float* d = static_cast<const float*>(v.data);
             // Total order: NaN sorts highest, -0.0 == 0.0 (canonicalised at ingest).
@@ -3032,10 +3036,10 @@ static VectorOwner make_float64_from_string_vector(const VectorOwner& src) {
 // explicit float casts.
 static VectorOwner make_float64_from_numeric_vector(const VectorOwner& src) {
     const DrakenType t = src.vec.type;
-    if (t != DRAKEN_DECIMAL && t != DRAKEN_INT64 &&
+    if (t != DRAKEN_DECIMAL && t != DRAKEN_DECIMAL128 && t != DRAKEN_INT64 &&
         t != DRAKEN_FLOAT64 && t != DRAKEN_FLOAT32)
         throw std::invalid_argument(
-            "to_float64: expected DECIMAL, INT64, FLOAT32 or FLOAT64 Vector");
+            "to_float64: expected DECIMAL, DECIMAL128, INT64, FLOAT32 or FLOAT64 Vector");
 
     const uint32_t n = src.vec.length;
     const size_t data_bytes = (n > 0u ? n : 1u) * sizeof(double);
@@ -3044,16 +3048,18 @@ static VectorOwner make_float64_from_numeric_vector(const VectorOwner& src) {
     OwnedBuffer<void> data_buf(out);
 
     double scale_div = 1.0;
-    if (t == DRAKEN_DECIMAL) {
+    if (t == DRAKEN_DECIMAL || t == DRAKEN_DECIMAL128) {
         if (!src.logical_type)
             throw std::invalid_argument("to_float64: DECIMAL requires a logical-type descriptor");
         scale_div = static_cast<double>(draken::ops::kDecPow10[src.logical_type->scale]);
     }
 
-    const int64_t* idata = (t == DRAKEN_DECIMAL || t == DRAKEN_INT64)
+    const int64_t*  idata = (t == DRAKEN_DECIMAL || t == DRAKEN_INT64)
         ? static_cast<const int64_t*>(src.vec.data) : nullptr;
-    const double*  fdata = (t == DRAKEN_FLOAT64) ? static_cast<const double*>(src.vec.data) : nullptr;
-    const float*   sdata = (t == DRAKEN_FLOAT32) ? static_cast<const float*>(src.vec.data) : nullptr;
+    const __int128* i128data = (t == DRAKEN_DECIMAL128)
+        ? static_cast<const __int128*>(src.vec.data) : nullptr;
+    const double*   fdata = (t == DRAKEN_FLOAT64) ? static_cast<const double*>(src.vec.data) : nullptr;
+    const float*    sdata = (t == DRAKEN_FLOAT32) ? static_cast<const float*>(src.vec.data) : nullptr;
 
     bool has_nulls = false;
     std::vector<uint8_t> valid(n, 1u);
@@ -3064,6 +3070,8 @@ static VectorOwner make_float64_from_numeric_vector(const VectorOwner& src) {
         const uint32_t s = src.vec.selection[i];
         if (t == DRAKEN_DECIMAL)
             out[i] = static_cast<double>(idata[s]) / scale_div;
+        else if (t == DRAKEN_DECIMAL128)
+            out[i] = static_cast<double>(i128data[s]) / scale_div;
         else if (t == DRAKEN_INT64)
             out[i] = static_cast<double>(idata[s]);
         else if (t == DRAKEN_FLOAT64)

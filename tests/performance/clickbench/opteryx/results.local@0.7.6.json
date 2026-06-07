@@ -59,8 +59,6 @@ Q42/41          65.44ms        65.15ms              -     65.30ms       65.15ms 
 Q43/42          63.37ms        63.34ms              -     63.35ms       63.34ms       63.37ms  [5.76x]
 --- ✅ done
 
-COMPLETE (95.05 seconds)
-  41 passed (100%)
-  0 failed
-
-COMPLETE (122.88 seconds)
+COMPLETE (95.05 seconds) <- best ever
+COMPLETE (122.88 seconds) <- best post draken rewrite
+COMPLETE (132.83 seconds) <- best post type unification

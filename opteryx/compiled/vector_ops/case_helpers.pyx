@@ -34,7 +34,7 @@ from draken.core.buffers cimport (
     DRAKEN_INT64, DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8,
     DRAKEN_FLOAT64, DRAKEN_FLOAT32,
     DRAKEN_BOOL, DRAKEN_VARCHAR, DRAKEN_NVARCHAR,
-    DRAKEN_NULL, DRAKEN_DECIMAL,
+    DRAKEN_NULL, DRAKEN_DECIMAL, DRAKEN_DECIMAL128,
     DRAKEN_TIMESTAMP64, DRAKEN_TIME64, DRAKEN_DATE32, DRAKEN_TIME32,
 )
 from draken.vectors.bool_vector cimport BoolVector, from_decoded as _bool_from_decoded
@@ -75,6 +75,8 @@ cdef inline Py_ssize_t _draken_itemsize(DrakenType t) noexcept nogil:
     scattered by this width, and a wrong width undersizes the buffer (heap
     overflow when read at the true element width).
     """
+    if t == DRAKEN_DECIMAL128:
+        return 16  # __int128 storage
     if (t == DRAKEN_INT64 or t == DRAKEN_FLOAT64 or t == DRAKEN_DECIMAL
             or t == DRAKEN_TIMESTAMP64 or t == DRAKEN_TIME64):
         return 8
@@ -382,7 +384,7 @@ def assemble_fixed(
     # DECIMAL is int64-backed; the scatter above copies raw storage but not the
     # scale/precision descriptor. Carry it from the template so downstream ops
     # (sum, to_float64, grouped collectors) can read scale.
-    if out_dtype == DRAKEN_DECIMAL:
+    if out_dtype == DRAKEN_DECIMAL or out_dtype == DRAKEN_DECIMAL128:
         out_vec._nb.set_decimal_descriptor(
             template_vec._nb.logical_type_precision,
             template_vec._nb.logical_type_scale,

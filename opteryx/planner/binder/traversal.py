@@ -61,7 +61,12 @@ def traverse(
     # Recursively visit children
     children = graph.ingoing_edges(node)
 
-    if children:
+    if len(children) == 1:
+        # Linear plan (no branching): pass context directly — no copies needed.
+        # The child updates context.schemas and context.relations in-place, which
+        # is exactly what the parent needs. Avoids expensive deepcopy of schema.
+        graph, context = traverse(self, graph, children[0][0], context)
+    elif children:
         exit_context = context.copy()
         for child in children:
             # Each peer gets the exact copy of the context so they don't affect each other
