@@ -31,10 +31,34 @@ from opteryx.exceptions import SqlError
 from opteryx.expression import NodeType
 from opteryx.models import QueryProperties
 from opteryx.utils import series
+import draken.draken_native as _draken_native
 from opteryx.types.logical_type import LogicalCategory, ColumnType
 from opteryx.types import logical_type as _lt
-from opteryx.types import PYTHON_TO_SQL_MAP
 from draken.interop.vector_sequence import vector_from_sequence
+
+# Python type → DrakenType for vector_from_sequence dtype inference.
+# Replaces PYTHON_TO_SQL_MAP (which returns LogicalCategory) on this path.
+import datetime as _dt
+import decimal as _decimal
+_PYTHON_TO_DRAKEN = {
+    type(None): _draken_native.DrakenType.NULL,
+    bool: _draken_native.DrakenType.BOOL,
+    int: _draken_native.DrakenType.INT64,
+    float: _draken_native.DrakenType.FLOAT64,
+    str: _draken_native.DrakenType.VARCHAR,
+    bytes: _draken_native.DrakenType.VARBINARY,
+    bytearray: _draken_native.DrakenType.VARBINARY,
+    memoryview: _draken_native.DrakenType.VARBINARY,
+    _dt.date: _draken_native.DrakenType.DATE32,
+    _dt.time: _draken_native.DrakenType.TIME64,
+    _dt.datetime: _draken_native.DrakenType.TIMESTAMP64,
+    _dt.timedelta: _draken_native.DrakenType.INTERVAL,
+    _decimal.Decimal: _draken_native.DrakenType.DECIMAL,
+    list: _draken_native.DrakenType.ARRAY,
+    tuple: _draken_native.DrakenType.ARRAY,
+    dict: _draken_native.DrakenType.NVARCHAR,
+    set: _draken_native.DrakenType.ARRAY,
+}
 
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DT = datetime.datetime(1970, 1, 1)
@@ -46,7 +70,8 @@ def _column_metadata(columns):
 
     for column in columns:
         column_names.append(column.schema_column.identity)
-        column_types.append(column.schema_column.category)
+        ct = column.schema_column.column_type
+        column_types.append(ct.physical if ct is not None else None)
 
     return column_names, column_types
 
@@ -66,21 +91,19 @@ def _as_list(values):
 
 
 def _resolve_column_dtype(dtype, values):
-    """Resolve the logical type to hand the producer dispatcher.
+    """Resolve the DrakenType to hand to vector_from_sequence.
 
-    VALUES/GENERATE_SERIES carry a real ``LogicalCategory`` member, which passes
-    through unchanged. The UNNEST-literal binder path leaves the column type
-    as the integer sentinel ``0`` (unknown), and GENERATE_SERIES may leave it
-    as ``None`` (unknown type); for those, infer the element type from the
-    first non-null value so non-integer literals build a correctly typed
-    vector instead of defaulting to INT64 and mis-casting. An empty/all-null
-    sequence yields ``None`` (INT64 all-null column).
+    _column_metadata produces DrakenType (via column_type.physical) or None.
+    For None (unknown type), infer the element type from the first non-null
+    value so non-integer literals build a correctly typed vector instead of
+    defaulting to INT64 and mis-casting. An empty/all-null sequence yields
+    None (INT64 all-null column).
     """
     if dtype is not None:
         return dtype
     for value in values:
         if value is not None:
-            return PYTHON_TO_SQL_MAP.get(type(value))
+            return _PYTHON_TO_DRAKEN.get(type(value))
     return None
 
 

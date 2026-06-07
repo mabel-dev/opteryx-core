@@ -23,7 +23,6 @@ Gives information about a dataset's columns
 
 from typing import Generator, Optional
 from opteryx.models import QueryProperties
-from opteryx.types.logical_type import LogicalCategory
 from draken.interop.vector_sequence import vector_from_sequence
 
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
@@ -54,10 +53,10 @@ def _simple_collector(schema):
         aliases.append(column.aliases)
 
     vectors = [
-        vector_from_sequence(names, dtype=LogicalCategory.VARCHAR),
-        vector_from_sequence(types, dtype=LogicalCategory.VARCHAR),
-        vector_from_sequence(nullables, dtype=LogicalCategory.BOOLEAN),
-        vector_from_sequence(aliases, dtype=LogicalCategory.VARCHAR),
+        vector_from_sequence(names, dtype=_draken_native.DrakenType.VARCHAR),
+        vector_from_sequence(types, dtype=_draken_native.DrakenType.VARCHAR),
+        vector_from_sequence(nullables, dtype=_draken_native.DrakenType.BOOL),
+        vector_from_sequence(aliases, dtype=_draken_native.DrakenType.VARCHAR),
     ]
 
     return Morsel.from_vectors(["name", "type", "nullable", "aliases"], vectors)

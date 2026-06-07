@@ -22,7 +22,6 @@ This is a SQL Query Execution Plan Node.
 from typing import Generator, Optional
 from opteryx.exceptions import DatasetNotFoundError, UnsupportedSyntaxError
 from opteryx.models import QueryProperties
-from opteryx.types.logical_type import LogicalCategory
 
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
 
@@ -51,8 +50,8 @@ class ShowCreateNode(BasePlanNode):
                 print("SHOW CREATE VIEW", self.object_name)
                 view_sql = view_as_sql(self.object_name)
                 vectors = [
-                    vector_from_sequence([self.object_name], dtype=LogicalCategory.VARCHAR),
-                    vector_from_sequence([view_sql], dtype=LogicalCategory.VARCHAR),
+                    vector_from_sequence([self.object_name], dtype=_draken_native.DrakenType.VARCHAR),
+                    vector_from_sequence([view_sql], dtype=_draken_native.DrakenType.VARCHAR),
                 ]
                 morsel = Morsel.from_vectors([self.object_name, "create_statement"], vectors)
                 yield morsel

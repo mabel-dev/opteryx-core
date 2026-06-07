@@ -23,7 +23,6 @@ from typing import Generator
 
 from opteryx.exceptions import SqlError
 from opteryx.models import QueryProperties
-from opteryx.types.logical_type import LogicalCategory
 
 # EOS sentinel in scope as _EOS_SENTINEL via the umbrella unit.
 
@@ -52,8 +51,8 @@ class ShowValueNode(ReaderNode):
 
     def execute(self, morsel):
         vectors = [
-            vector_from_sequence([self.key], dtype=LogicalCategory.VARCHAR),
-            vector_from_sequence([str(self.value)], dtype=LogicalCategory.VARCHAR),
+            vector_from_sequence([self.key], dtype=_draken_native.DrakenType.VARCHAR),
+            vector_from_sequence([str(self.value)], dtype=_draken_native.DrakenType.VARCHAR),
         ]
         morsel = Morsel.from_vectors(["name", "value"], vectors)
         yield morsel

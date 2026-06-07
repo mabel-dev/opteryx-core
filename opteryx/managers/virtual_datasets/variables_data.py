@@ -9,9 +9,9 @@ This is a virtual dataset which is calculated at access time.
 It is the system variables collection.
 """
 
+from draken.draken_native import DrakenType
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
-from opteryx.types.logical_type import LogicalCategory
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import SchemaColumn, RelationSchema
 
@@ -22,11 +22,11 @@ def read(at_date=None, variables=None):
     if not variables:
         # Empty result with expected schema
         vectors = [
-            vector_from_sequence([], dtype=LogicalCategory.VARCHAR),
-            vector_from_sequence([], dtype=LogicalCategory.VARCHAR),
-            vector_from_sequence([], dtype=LogicalCategory.VARCHAR),
-            vector_from_sequence([], dtype=LogicalCategory.VARCHAR),
-            vector_from_sequence([], dtype=LogicalCategory.VARCHAR),
+            vector_from_sequence([], dtype=DrakenType.VARCHAR),
+            vector_from_sequence([], dtype=DrakenType.VARCHAR),
+            vector_from_sequence([], dtype=DrakenType.VARCHAR),
+            vector_from_sequence([], dtype=DrakenType.VARCHAR),
+            vector_from_sequence([], dtype=DrakenType.VARCHAR),
         ]
         return Morsel.from_vectors(["name", "value", "type", "owner", "visibility"], vectors)
 
@@ -49,11 +49,11 @@ def read(at_date=None, variables=None):
         visibilities.append(variable_visibility.name)
 
     vectors = [
-        vector_from_sequence(names, dtype=LogicalCategory.VARCHAR),
-        vector_from_sequence(values, dtype=LogicalCategory.VARCHAR),
-        vector_from_sequence(types, dtype=LogicalCategory.VARCHAR),
-        vector_from_sequence(owners, dtype=LogicalCategory.VARCHAR),
-        vector_from_sequence(visibilities, dtype=LogicalCategory.VARCHAR),
+        vector_from_sequence(names, dtype=DrakenType.VARCHAR),
+        vector_from_sequence(values, dtype=DrakenType.VARCHAR),
+        vector_from_sequence(types, dtype=DrakenType.VARCHAR),
+        vector_from_sequence(owners, dtype=DrakenType.VARCHAR),
+        vector_from_sequence(visibilities, dtype=DrakenType.VARCHAR),
     ]
     return Morsel.from_vectors(["name", "value", "type", "owner", "visibility"], vectors)
 

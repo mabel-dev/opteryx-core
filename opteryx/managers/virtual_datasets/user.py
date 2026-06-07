@@ -9,10 +9,10 @@ This is a virtual dataset which is calculated at access time.
 It is the user attributes collection.
 """
 
+from draken.draken_native import DrakenType
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
 from opteryx.exceptions import VariableNotFoundError
-from opteryx.types.logical_type import LogicalCategory
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import SchemaColumn, RelationSchema
 
@@ -49,9 +49,9 @@ def read(at_date=None, variables=None):
         values.append(str(m))
 
     vectors = [
-        vector_from_sequence(attributes, dtype=LogicalCategory.VARCHAR),
-        vector_from_sequence(values, dtype=LogicalCategory.VARCHAR),
-        vector_from_sequence(["VARCHAR"] * len(attributes), dtype=LogicalCategory.VARCHAR),
+        vector_from_sequence(attributes, dtype=DrakenType.VARCHAR),
+        vector_from_sequence(values, dtype=DrakenType.VARCHAR),
+        vector_from_sequence(["VARCHAR"] * len(attributes), dtype=DrakenType.VARCHAR),
     ]
 
     return Morsel.from_vectors(["attribute", "value", "type"], vectors)

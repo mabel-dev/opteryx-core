@@ -169,7 +169,7 @@ cdef class UngroupedAggregateEngine:
             # path builds INT64 and errors on a float (e.g. SUM(DECIMAL)/SUM(DOUBLE)
             # without GROUP BY, which routes through SumFloat64Aggregate).
             if agg.result_type == AGG_RESULT_F64:
-                vectors.append(vector_from_sequence([agg.get_result()], dtype="DOUBLE"))
+                vectors.append(vector_from_sequence([agg.get_result()], dtype=_draken_native.DrakenType.FLOAT64))
             else:
                 value = agg.get_result()
                 # DECIMAL results must build a real DECIMAL vector — the generic int64
@@ -196,7 +196,7 @@ cdef class UngroupedAggregateEngine:
             # AVG always produces a float result (or None). Dispatch through the
             # float64 constructor explicitly — the int64-default path errors on
             # the float value.
-            vectors.append(vector_from_sequence([value], dtype="DOUBLE"))
+            vectors.append(vector_from_sequence([value], dtype=_draken_native.DrakenType.FLOAT64))
 
         return Morsel.from_vectors(names, vectors)
 

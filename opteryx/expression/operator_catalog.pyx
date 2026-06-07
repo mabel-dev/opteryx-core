@@ -1,17 +1,6 @@
 """Curated operator metadata layered onto generated operator exports."""
 
 from dataclasses import dataclass
-from typing import Optional
-
-from opteryx.types.logical_type import LogicalCategory
-
-
-@dataclass(frozen=True)
-class OperatorSignatureDefinition:
-    left_type: LogicalCategory
-    right_type: LogicalCategory
-    result_type: Optional[LogicalCategory]
-    cost_estimate: float = 100.0
 
 
 @dataclass(frozen=True)
@@ -24,7 +13,6 @@ class OperatorDefinition:
     friendly_name: str | None = None
     sql_symbol: str | None = None
     notes: str | None = None
-    signatures: tuple[OperatorSignatureDefinition, ...] = ()
 
 
 cpdef str default_operator_friendly_name(str operator):
@@ -87,30 +75,6 @@ def get_operator_node_type(operator):
     return None
 
 
-def get_operator_signatures(operator):
-    definition = get_operator_definition(operator)
-    if definition is None:
-        return ()
-
-    from opteryx.planner.binder.operator_map import OPERATOR_MAP
-
-    exported_signatures = []
-    for (left_type, right_type, operator_name), metadata in OPERATOR_MAP.items():
-        if operator_name != operator:
-            continue
-        result_type = metadata.result_type
-        exported_signatures.append(
-            OperatorSignatureDefinition(
-                left_type=left_type,
-                right_type=right_type,
-                result_type=result_type,
-                cost_estimate=metadata.cost_estimate,
-            )
-        )
-
-    return tuple(exported_signatures) + definition.signatures
-
-
 OPERATOR_DEFINITIONS = {
     "And": OperatorDefinition(
         summary="Logical conjunction.",
@@ -135,13 +99,6 @@ OPERATOR_DEFINITIONS = {
         category="logical",
         node_kind="logical",
         friendly_name="Logical XOR",
-        signatures=(
-            OperatorSignatureDefinition(
-                left_type=LogicalCategory.BOOLEAN,
-                right_type=LogicalCategory.BOOLEAN,
-                result_type=LogicalCategory.BOOLEAN,
-            ),
-        ),
     ),
     "Eq": OperatorDefinition(
         summary="Equality comparison.",

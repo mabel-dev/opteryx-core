@@ -10,10 +10,9 @@ appropriate typed constructor in `draken.draken_native`.
   is correct).
 - a `str` naming the logical type (e.g. `"INTEGER"`, `"VARCHAR"`,
   `"DOUBLE"`).
-- any object exposing a `.name` attribute (e.g. an `LogicalCategory` enum
-  member). The `.name` is read as a string; this lets opteryx-side
-  callers pass `LogicalCategory.VARCHAR` without draken importing
-  `LogicalCategory`.
+- any object exposing a `.name` attribute (e.g. a `DrakenType` enum
+  member). The `.name` is read as a string; the canonical caller form
+  is `DrakenType.VARCHAR` from `draken.draken_native`.
 
 The dispatch table maps type-name strings to nanobind constructors. It
 is the canonical surface for "Python list → Vector" — direct callers of
@@ -77,6 +76,8 @@ _DTYPE_DISPATCH = {
     "TIME": _draken_native.vector_time32_from_sequence,
     "TIME32": _draken_native.vector_time32_from_sequence,
     "INTERVAL": _draken_native.vector_interval_from_sequence,
+    # Unicode strings
+    "NVARCHAR": _draken_native.vector_from_nvarchar_sequence,
     # Containers
     "ARRAY": _draken_native.vector_array_from_sequence,
 }
@@ -88,7 +89,7 @@ def _resolve_dtype_name(dtype):
         return None
     if isinstance(dtype, str):
         return dtype.upper()
-    # Enum-like with .name attribute (e.g. LogicalCategory member).
+    # Enum-like with .name attribute (e.g. DrakenType member).
     name = getattr(dtype, "name", None)
     if name is None:
         raise TypeError(
@@ -109,8 +110,9 @@ def vector_from_sequence(values, dtype=None):
         type depends on `dtype`; see `draken.draken_native` typed
         constructors for the per-type contract (e.g. `Decimal` for
         DECIMAL, `datetime.date` for DATE).
-    dtype : None | str | object with .name (e.g. LogicalCategory member)
-        Logical type. `None` defaults to INT64.
+    dtype : None | str | DrakenType
+        Physical type. `None` defaults to INT64. Pass a `DrakenType` enum
+        member (from `draken.draken_native`) or a type-name string.
 
     Returns
     -------
