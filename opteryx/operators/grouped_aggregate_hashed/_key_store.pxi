@@ -118,81 +118,46 @@ cdef inline bint _ks_bitmap_is_valid(uint8_t* bitmap, Py_ssize_t index) noexcept
 # ---------------------------------------------------------------------------
 
 cdef Vector _ks_consume_fixed8_buffer(DrakenFixedBuffer* buf, DrakenType out_type) except *:
-    """Copy a libc-malloc'd 8-byte-slot DrakenFixedBuffer into a fresh
-    draken_malloc'd Vector tagged `out_type` and free the source. Used in the
-    finalize path (reconstruct_vectors) where the collector hands the buffer
-    off and immediately swaps in a fresh one.
-
-    Storage is always 8-byte slots; `out_type` only reinterprets the bits at
-    the Vector surface. INT64 keys emerge as INT64; FLOAT64 keys are stored as
-    raw double bits in the same int64 buffer and re-tagged FLOAT64 here so they
-    surface as doubles, not giant integers.
-
-    Cross-allocator copy is required: collector state uses libc malloc
-    (alloc_fixed_buffer); Vectors require draken_malloc (mimalloc).
+    """Transfer a libc-malloc'd 8-byte-slot DrakenFixedBuffer into a Vector tagged
+    `out_type`, stealing ownership of data + validity without copying.
+    draken_malloc == malloc (alloc.h), so the Vector's draken_free is safe on these buffers.
+    Storage is always 8-byte slots; `out_type` only reinterprets the bits at the Vector surface.
     """
     cdef Py_ssize_t length = <Py_ssize_t>buf.length
-    cdef size_t nbytes
-    cdef int64_t* out_data
-    cdef uint8_t* validity = NULL
-    cdef Py_ssize_t bitmap_bytes
+    cdef void* data_ptr
+    cdef uint8_t* validity
 
     if length <= 0:
         free_fixed_buffer(buf, True)
         return _ks_vector_from_decoded(NULL, NULL, 0, out_type)
 
-    nbytes = <size_t>length * sizeof(int64_t)
-    out_data = <int64_t*>draken_malloc(nbytes)
-    if out_data == NULL:
-        free_fixed_buffer(buf, True)
-        raise MemoryError()
-    memcpy(out_data, buf.data, nbytes)
-
-    if buf.null_bitmap != NULL:
-        bitmap_bytes = (length + 7) >> 3
-        validity = <uint8_t*>draken_malloc(<size_t>bitmap_bytes)
-        if validity == NULL:
-            draken_free(out_data)
-            free_fixed_buffer(buf, True)
-            raise MemoryError()
-        memcpy(validity, buf.null_bitmap, bitmap_bytes)
-
+    data_ptr = buf.data
+    validity = buf.null_bitmap
+    buf.data = NULL
+    buf.null_bitmap = NULL
     free_fixed_buffer(buf, True)
-    return _ks_vector_from_decoded(<void*>out_data, validity, <uint32_t>length, out_type)
+    return _ks_vector_from_decoded(data_ptr, validity, <uint32_t>length, out_type)
 
 
 cdef Vector _ks_consume_fixed128_buffer(DrakenFixedBuffer* buf) except *:
-    """Copy a libc-malloc'd 16-byte-slot DrakenFixedBuffer into a fresh
-    draken_malloc'd DRAKEN_DECIMAL128 Vector and free the source. The caller must
-    attach the (precision, scale) descriptor afterward."""
+    """Transfer a libc-malloc'd 16-byte-slot DrakenFixedBuffer into a DRAKEN_DECIMAL128
+    Vector, stealing ownership of data + validity without copying.
+    draken_malloc == malloc (alloc.h), so the Vector's draken_free is safe on these buffers.
+    The caller must attach the (precision, scale) descriptor afterward."""
     cdef Py_ssize_t length = <Py_ssize_t>buf.length
-    cdef size_t nbytes
-    cdef int128_t* out_data
-    cdef uint8_t* validity = NULL
-    cdef Py_ssize_t bitmap_bytes
+    cdef void* data_ptr
+    cdef uint8_t* validity
 
     if length <= 0:
         free_fixed_buffer(buf, True)
         return _ks_vector_from_decoded(NULL, NULL, 0, DRAKEN_DECIMAL128)
 
-    nbytes = <size_t>length * 16
-    out_data = <int128_t*>draken_malloc(nbytes)
-    if out_data == NULL:
-        free_fixed_buffer(buf, True)
-        raise MemoryError()
-    memcpy(out_data, buf.data, nbytes)
-
-    if buf.null_bitmap != NULL:
-        bitmap_bytes = (length + 7) >> 3
-        validity = <uint8_t*>draken_malloc(<size_t>bitmap_bytes)
-        if validity == NULL:
-            draken_free(out_data)
-            free_fixed_buffer(buf, True)
-            raise MemoryError()
-        memcpy(validity, buf.null_bitmap, bitmap_bytes)
-
+    data_ptr = buf.data
+    validity = buf.null_bitmap
+    buf.data = NULL
+    buf.null_bitmap = NULL
     free_fixed_buffer(buf, True)
-    return _ks_vector_from_decoded(<void*>out_data, validity, <uint32_t>length, DRAKEN_DECIMAL128)
+    return _ks_vector_from_decoded(data_ptr, validity, <uint32_t>length, DRAKEN_DECIMAL128)
 
 
 cdef Vector _ks_own_timestamp_buffer(void* data, uint8_t* validity,
@@ -209,37 +174,24 @@ cdef Vector _ks_own_timestamp_buffer(void* data, uint8_t* validity,
 
 
 cdef Vector _ks_consume_timestamp_buffer(DrakenFixedBuffer* buf, bytes unit) except *:
-    """Like _ks_consume_fixed8_buffer, but emits a DRAKEN_TIMESTAMP64 Vector
-    tagged with `unit`. Copies the libc-malloc'd buffer into draken_malloc'd
-    storage (cross-allocator), frees the source, and transfers ownership."""
+    """Transfer a libc-malloc'd int64 DrakenFixedBuffer into a DRAKEN_TIMESTAMP64 Vector
+    tagged with `unit`, stealing ownership of data + validity without copying.
+    draken_malloc == malloc (alloc.h), so the Vector's draken_free is safe on these buffers.
+    """
     cdef Py_ssize_t length = <Py_ssize_t>buf.length
-    cdef size_t nbytes
-    cdef int64_t* out_data
-    cdef uint8_t* validity = NULL
-    cdef Py_ssize_t bitmap_bytes
+    cdef void* data_ptr
+    cdef uint8_t* validity
 
     if length <= 0:
         free_fixed_buffer(buf, True)
         return _ks_own_timestamp_buffer(NULL, NULL, 0, unit)
 
-    nbytes = <size_t>length * sizeof(int64_t)
-    out_data = <int64_t*>draken_malloc(nbytes)
-    if out_data == NULL:
-        free_fixed_buffer(buf, True)
-        raise MemoryError()
-    memcpy(out_data, buf.data, nbytes)
-
-    if buf.null_bitmap != NULL:
-        bitmap_bytes = (length + 7) >> 3
-        validity = <uint8_t*>draken_malloc(<size_t>bitmap_bytes)
-        if validity == NULL:
-            draken_free(out_data)
-            free_fixed_buffer(buf, True)
-            raise MemoryError()
-        memcpy(validity, buf.null_bitmap, bitmap_bytes)
-
+    data_ptr = buf.data
+    validity = buf.null_bitmap
+    buf.data = NULL
+    buf.null_bitmap = NULL
     free_fixed_buffer(buf, True)
-    return _ks_own_timestamp_buffer(<void*>out_data, validity, <uint32_t>length, unit)
+    return _ks_own_timestamp_buffer(data_ptr, validity, <uint32_t>length, unit)
 
 
 # ---------------------------------------------------------------------------
@@ -1137,7 +1089,6 @@ cdef class KeyStore:
         cdef object col_name
         cdef DrakenFixedBuffer* _fixed_buf
         cdef uint32_t fixed_length
-        cdef Py_ssize_t nbytes, vbytes
         cdef void* new_data
         cdef uint8_t* new_validity
         cdef Vector fixed_iv
@@ -1159,23 +1110,12 @@ cdef class KeyStore:
                 if self._single_fixed_direct:
                     _fixed_buf = self._single_fixed_buf
                     fixed_length = <uint32_t>self._single_fixed_rows
-                    # 16-byte slots for DECIMAL128, else 8-byte.
-                    nbytes = <Py_ssize_t>fixed_length * (16 if key_kind == KEY_MULTI_FIXED_DECIMAL128 else 8)
-                    new_data = draken_malloc(<size_t>nbytes) if nbytes > 0 else NULL
-                    if nbytes > 0 and new_data == NULL:
-                        raise MemoryError()
-                    if nbytes > 0:
-                        memcpy(new_data, _fixed_buf.data, <size_t>nbytes)
-                    new_validity = NULL
-                    if self._single_fixed_nulls != NULL:
-                        vbytes = _ks_bitmap_nbytes(<Py_ssize_t>fixed_length)
-                        if vbytes > 0:
-                            new_validity = <uint8_t*>draken_malloc(<size_t>vbytes)
-                            if new_validity == NULL:
-                                draken_free(new_data)
-                                raise MemoryError()
-                            memcpy(new_validity, self._single_fixed_nulls, <size_t>vbytes)
-                    _fixed_buf.null_bitmap = self._single_fixed_nulls
+                    # Steal data + validity; draken_malloc == malloc so draken_free is safe.
+                    new_data = _fixed_buf.data if fixed_length > 0 else NULL
+                    new_validity = self._single_fixed_nulls
+                    if fixed_length > 0:
+                        _fixed_buf.data = NULL
+                    _fixed_buf.null_bitmap = NULL
                     free_fixed_buffer(_fixed_buf, True)
                     self._single_fixed_buf = NULL
                     if key_kind == KEY_MULTI_FIXED_TIMESTAMP64 and self._ts_units[0] is not None:
